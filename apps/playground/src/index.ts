@@ -2,6 +2,7 @@ import 'dotenv/config';
 import {
   Flint,
   AnthropicProvider,
+  OllamaProvider,
   type AiObserver,
   type ProviderAdapter,
   type Tool,
@@ -13,14 +14,30 @@ import { MockProvider } from './mock-provider.js';
  * (workspace dependency). Demonstrates the three things an app actually does:
  * streaming, tool calling, and memory-backed multi-turn chat — all through
  * Flint, with the provider swappable underneath.
+ *
+ * Provider is chosen by env, and NOTHING below the selection changes:
+ *   OLLAMA_MODEL=llama3.1   → local Ollama (no Anthropic, no cloud)
+ *   ANTHROPIC_API_KEY=...   → Anthropic
+ *   (neither)               → in-app mock, offline
  */
 
 const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-const live = Boolean(apiKey);
+const ollamaModel = process.env.OLLAMA_MODEL?.trim();
 
-const provider: ProviderAdapter = live
-  ? new AnthropicProvider({ apiKey: apiKey! })
-  : new MockProvider();
+let provider: ProviderAdapter;
+let defaultModel: string;
+if (ollamaModel) {
+  provider = new OllamaProvider({
+    ...(process.env.OLLAMA_HOST ? { baseURL: process.env.OLLAMA_HOST } : {}),
+  });
+  defaultModel = ollamaModel;
+} else if (apiKey) {
+  provider = new AnthropicProvider({ apiKey });
+  defaultModel = 'claude-sonnet-4-6';
+} else {
+  provider = new MockProvider();
+  defaultModel = 'mock-model';
+}
 
 // The default observer is a no-op; here we wire a tiny console observer to show
 // that ALL observability flows through the injected seam (Flint never logs).
@@ -31,7 +48,7 @@ const observer: AiObserver = {
 
 const flint = new Flint({
   provider,
-  defaultModel: live ? 'claude-sonnet-4-6' : 'mock-model',
+  defaultModel,
   observer,
   maxConcurrent: 4,
 });
@@ -60,7 +77,7 @@ async function turn(message: string, tools?: Tool[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log(`Flint playground — provider: ${provider.name}${live ? ' (live)' : ' (offline mock)'}`);
+  console.log(`Flint playground — provider: ${provider.name}, model: ${defaultModel}`);
   const caps = flint.getCapabilities();
   console.log(`Capabilities: tools=${caps.toolCalling}, streaming=${caps.streaming}, ctx=${caps.maxContextTokens}`);
 

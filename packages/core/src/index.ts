@@ -100,3 +100,5 @@ export type { AssistantTurn } from './core/encoding.js';
 // --- providers --------------------------------------------------------------
 export { AnthropicProvider } from './provider/anthropic/index.js';
 export type { AnthropicProviderOptions } from './provider/anthropic/index.js';
+export { OllamaProvider } from './provider/ollama/index.js';
+export type { OllamaProviderOptions } from './provider/ollama/index.js';

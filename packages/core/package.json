@@ -1,6 +1,6 @@
 {
   "name": "@flint/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One swappable, provider-agnostic AI layer.",
   "license": "UNLICENSED",
   "private": false,

@@ -184,10 +184,31 @@ dated/canonical model string — no `-latest` aliases in production.
 
 ### Ollama (Phase 2)
 
-Planned. Will implement the same `ProviderAdapter` against the local HTTP API,
-reporting honest, lower capability tiers (most local models are
-`toolCalling: 'prompted'`). The contract suite (below) is what proves parity for
-the features a local model actually supports.
+Local models over Ollama's HTTP API — no Anthropic, no cloud. Same
+`ProviderAdapter`, so swapping is a one-line config change:
+
+```ts
+import { Flint, OllamaProvider } from '@flint/core';
+
+const flint = new Flint({
+  provider: new OllamaProvider({ baseURL: 'http://localhost:11434' }), // the default
+  defaultModel: 'llama3.1',
+});
+```
+
+Capabilities are reported **honestly** and lower than Anthropic's: local models
+are `toolCalling: 'prompted'`, `structuredOutput: 'prompted' | 'unreliable'`,
+with smaller context windows. Tool calling is handled by an adapter-owned
+prompt protocol with JSON parse-and-repair (the model is asked to emit
+`{"tool_call": {"name": ..., "arguments": ...}}`), so it works even on models
+with no native tool API. The contract suite runs against Ollama to prove this.
+
+Prereqs: a running Ollama (`ollama serve`) with the model pulled
+(`ollama pull llama3.1`). Try it through the playground:
+
+```bash
+OLLAMA_MODEL=llama3.1 pnpm --filter playground start
+```
 
 ## Versioning & release policy
 

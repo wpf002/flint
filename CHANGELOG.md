@@ -3,6 +3,33 @@
 All notable changes to `@flint/core`. Under `0.x`, breaking changes are allowed
 but are called out explicitly here.
 
+## 0.2.0 — Phase 2: Ollama provider
+
+Local models, no Anthropic, no cloud. Adds a second provider behind the same
+`ProviderAdapter` — flipping `provider:` in `FlintConfig` is the only change an
+app makes.
+
+### Added
+
+- **`OllamaProvider`** — talks to Ollama's local HTTP API (`/api/chat`, NDJSON
+  streaming). Injectable `fetch` for offline testing.
+- **Honest capability tiers** — local models report `toolCalling: 'prompted'`,
+  `structuredOutput: 'prompted' | 'unreliable'`, and smaller context windows.
+  No false parity with Anthropic.
+- **Prompted tool-calling protocol** — the adapter owns the prompt contract and
+  a tolerant JSON parser/repair (code fences, surrounding prose, trailing
+  commas, single quotes). Proven by the contract suite.
+- **Ollama contract tests** — the same contracts as Anthropic, run offline
+  against the real adapter with a faked `fetch`.
+- Playground selects provider by env (`OLLAMA_MODEL` / `ANTHROPIC_API_KEY` /
+  mock) with no other code change — the swap, demonstrated.
+
+### Notes
+
+- During a tool-eligible turn, the prompted regime buffers instead of streaming
+  token-by-token (the text might *be* the tool-call JSON). Plain-text turns
+  stream live.
+
 ## 0.1.0 — Phase 1
 
 Initial release. Provider-agnostic AI layer with the Anthropic adapter.
