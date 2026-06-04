@@ -7,3 +7,6 @@ dist/
 coverage/
 .DS_Store
 *.tsbuildinfo
+.verdaccio/storage/
+.verdaccio/htpasswd
+*.tgz

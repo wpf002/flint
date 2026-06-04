@@ -27,6 +27,28 @@ pnpm add @flint/core@~0.1.0
 Flint is distributed as tagged semver releases from a private registry — never as
 a git branch. Pin a tight range (`~0.1.0`) during active development.
 
+### Consuming from the local registry
+
+Phase 1 publishes to a self-hosted [Verdaccio](https://verdaccio.org/) registry
+(spec §9). To consume `@flint/core` from another app on your machine:
+
+1. **Start the registry** (from this repo, keep it running while you install):
+   ```bash
+   pnpm registry:start          # serves http://localhost:4873
+   ```
+2. **Point your app's `@flint` scope at it** — add to your app's `.npmrc`:
+   ```
+   @flint:registry=http://localhost:4873/
+   ```
+3. **Install and pin:**
+   ```bash
+   pnpm add @flint/core@~0.1.0
+   ```
+
+The registry only needs to be running at **install** time — once `@flint/core`
+is in your app's `node_modules`, your app runs without it. To publish an
+iteration (`0.1.1`, …), bump the version and run `pnpm publish:local`.
+
 ## Quick start
 
 ```ts
@@ -197,6 +219,10 @@ pnpm test           # vitest (offline, cassette-backed)
 pnpm test:contracts # the cross-provider contract suite
 pnpm typecheck
 pnpm --filter playground start  # end-to-end consumption demo (offline mock if no key)
+
+# local private registry (Verdaccio)
+pnpm registry:start   # serve @flint/core on http://localhost:4873
+pnpm publish:local    # build + publish the current version to it
 ```
 
 ## License

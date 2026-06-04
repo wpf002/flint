@@ -3,9 +3,11 @@
 All notable changes to `@flint/core`. Under `0.x`, breaking changes are allowed
 but are called out explicitly here.
 
-## 0.1.0 — Phase 1 (unreleased)
+## 0.1.0 — Phase 1
 
 Initial release. Provider-agnostic AI layer with the Anthropic adapter.
+Published to the self-hosted Verdaccio registry (`pnpm publish:local`); verified
+installable as `@flint/core@~0.1.0` from a clean-room consumer.
 
 ### Added
 

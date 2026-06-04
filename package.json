@@ -6,9 +6,12 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:contracts": "pnpm --filter @flint/core test:contracts",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "registry:start": "verdaccio --config .verdaccio/config.yaml --listen 4873",
+    "publish:local": "pnpm --filter @flint/core publish --registry http://localhost:4873 --no-git-checks"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "verdaccio": "^5.32.0"
   }
 }
