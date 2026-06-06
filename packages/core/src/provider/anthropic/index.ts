@@ -1,9 +1,12 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import type {
   ProviderAdapter,
   GenerateArgs,
   GenerateResult,
 } from '../adapter.js';
+
+/** Lazily-resolved SDK module type — the package is an optional peer dep. */
+type AnthropicModule = typeof import('@anthropic-ai/sdk');
 import type { Message } from '../../types/message.js';
 import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
@@ -36,24 +39,48 @@ const DEFAULT_MAX_TOKENS = 4096;
  */
 export class AnthropicProvider implements ProviderAdapter {
   readonly name = 'anthropic';
-  private readonly client: Anthropic;
+  private readonly opts: AnthropicProviderOptions;
   private readonly defaultMaxTokens: number;
+  private sdk?: AnthropicModule;
+  private clientInstance?: Anthropic;
 
   constructor(opts: AnthropicProviderOptions) {
-    if (opts.client) {
-      this.client = opts.client;
-    } else {
-      if (!opts.apiKey) {
+    if (!opts.client && !opts.apiKey) {
+      throw new Error(
+        'AnthropicProvider requires an apiKey or a client (Flint never reads process.env).',
+      );
+    }
+    this.opts = opts;
+    this.defaultMaxTokens = opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS;
+  }
+
+  /**
+   * Resolve the SDK module + client on first use. The Anthropic SDK is an
+   * OPTIONAL peer dependency, so it is imported here (dynamically) rather than
+   * at module load — a local-only (Ollama) app never triggers this and never
+   * needs the package installed.
+   */
+  private async ready(): Promise<{ sdk: AnthropicModule; client: Anthropic }> {
+    if (!this.sdk) {
+      try {
+        this.sdk = await import('@anthropic-ai/sdk');
+      } catch (err) {
         throw new Error(
-          'AnthropicProvider requires an apiKey or a client (Flint never reads process.env).',
+          "AnthropicProvider needs the optional peer dependency '@anthropic-ai/sdk'. " +
+            'Install it: `pnpm add @anthropic-ai/sdk`. ' +
+            `(import failed: ${err instanceof Error ? err.message : String(err)})`,
         );
       }
-      this.client = new Anthropic({
-        apiKey: opts.apiKey,
-        ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
-      });
     }
-    this.defaultMaxTokens = opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS;
+    if (!this.clientInstance) {
+      this.clientInstance =
+        this.opts.client ??
+        new this.sdk.default({
+          apiKey: this.opts.apiKey!,
+          ...(this.opts.baseURL ? { baseURL: this.opts.baseURL } : {}),
+        });
+    }
+    return { sdk: this.sdk, client: this.clientInstance };
   }
 
   getCapabilities(model: string): ModelCapabilities {
@@ -69,8 +96,11 @@ export class AnthropicProvider implements ProviderAdapter {
   async generate(args: GenerateArgs): Promise<GenerateResult> {
     const { system, messages } = mapMessages(args.messages, args.system);
     const tools = mapTools(args.tools);
+    let sdk: AnthropicModule | undefined;
     try {
-      const resp = await this.client.messages.create(
+      const ready = await this.ready();
+      sdk = ready.sdk;
+      const resp = await ready.client.messages.create(
         {
           model: args.model,
           max_tokens: args.maxTokens ?? this.defaultMaxTokens,
@@ -108,13 +138,14 @@ export class AnthropicProvider implements ProviderAdapter {
 
       return { message, usage, reason };
     } catch (err) {
-      throw new FlintError(toAiError(err));
+      throw new FlintError(toAiError(err, sdk));
     }
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
     const { system, messages } = mapMessages(args.messages, args.system);
     const tools = mapTools(args.tools);
+    let sdk: AnthropicModule | undefined;
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -127,7 +158,9 @@ export class AnthropicProvider implements ProviderAdapter {
     >();
 
     try {
-      const stream = this.client.messages.stream(
+      const ready = await this.ready();
+      sdk = ready.sdk;
+      const stream = ready.client.messages.stream(
         {
           model: args.model,
           max_tokens: args.maxTokens ?? this.defaultMaxTokens,
@@ -195,7 +228,7 @@ export class AnthropicProvider implements ProviderAdapter {
     } catch (err) {
       // ALWAYS terminate with an error event (never just stop). Invariant for
       // the streaming contract: exactly one terminal `done` or `error`.
-      yield { type: 'error', error: toAiError(err) };
+      yield { type: 'error', error: toAiError(err, sdk) };
     }
   }
 }

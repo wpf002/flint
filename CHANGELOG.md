@@ -3,6 +3,28 @@
 All notable changes to `@flint/core`. Under `0.x`, breaking changes are allowed
 but are called out explicitly here.
 
+## 0.3.0 — Anthropic becomes optional
+
+Flint can now run with **zero Anthropic** at the dependency level — the payoff
+of the provider-agnostic design.
+
+### Changed (breaking under 0.x)
+
+- `@anthropic-ai/sdk` moved from a hard `dependency` to an **optional
+  `peerDependency`**. A local-only (Ollama) app installs `@flint/core` and never
+  pulls in Anthropic. Apps that use `AnthropicProvider` now install the SDK
+  themselves: `pnpm add @anthropic-ai/sdk`.
+- `AnthropicProvider` loads the SDK **lazily** (dynamic `import()` on first use),
+  so merely importing `@flint/core` — or using `OllamaProvider` — never resolves
+  the Anthropic package. If the SDK is missing when you do use Anthropic, you get
+  a clear error telling you to install it.
+
+### Verified
+
+- Clean-room install of `@flint/core@~0.3.0` with NO `@anthropic-ai/sdk` present:
+  imports fine, runs a full turn through a non-Anthropic provider, and
+  `AnthropicProvider` fails gracefully with an install hint.
+
 ## 0.2.0 — Phase 2: Ollama provider
 
 Local models, no Anthropic, no cloud. Adds a second provider behind the same

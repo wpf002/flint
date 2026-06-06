@@ -182,6 +182,14 @@ calling, native structured output, full streaming. Default model
 `claude-sonnet-4-6`; opt into `claude-opus-4-8` for complex work. Always pin the
 dated/canonical model string — no `-latest` aliases in production.
 
+> **`@anthropic-ai/sdk` is an optional peer dependency** (since 0.3.0). If you
+> use `AnthropicProvider`, install it in your app:
+> ```bash
+> pnpm add @anthropic-ai/sdk
+> ```
+> A local-only (Ollama) app skips this entirely — `@flint/core` loads the
+> Anthropic SDK lazily and never pulls it in unless you use the provider.
+
 ### Ollama (Phase 2)
 
 Local models over Ollama's HTTP API — no Anthropic, no cloud. Same
@@ -209,6 +217,10 @@ Prereqs: a running Ollama (`ollama serve`) with the model pulled
 ```bash
 OLLAMA_MODEL=llama3.1 pnpm --filter playground start
 ```
+
+The path from here to a model that is distinctively yours (prompting + retrieval
+first, LoRA fine-tune only if needed) is written up in
+[docs/PHASE3.md](docs/PHASE3.md).
 
 ## Versioning & release policy
 
