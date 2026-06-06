@@ -7,7 +7,7 @@ import {
   type ProviderAdapter,
   type Tool,
 } from '@flint/core';
-import { Persona, InMemoryRetriever, STARTER_STYLE_GUIDE } from '@flint/persona';
+import { Persona, InMemoryRetriever, FLINT_STYLE_GUIDE, FLINT_VOICE_EXEMPLARS } from '@flint/persona';
 import { MockProvider } from './mock-provider.js';
 
 /**
@@ -108,21 +108,19 @@ async function main(): Promise<void> {
  * Ollama later, unchanged).
  */
 async function personaDemo(): Promise<void> {
-  console.log('\n--- Persona demo (your AI identity) ---');
-  const retriever = new InMemoryRetriever([
-    { id: '1', text: 'I sign off emails with "Onward, Will" — never "Best regards".' },
-    { id: '2', text: 'Weekend notes: repotted the tomatoes, they need more sun.' },
-  ]);
+  console.log('\n--- Flint (your AI identity) ---');
+  // The canonical Flint voice, seeded with voice exemplars. Add your own
+  // writing over time with `flint.learn([...])`.
   const me = new Persona(flint, {
-    name: 'Will',
-    styleGuide: STARTER_STYLE_GUIDE.replace(/<NAME>/g, 'Will'),
-    retriever,
+    name: 'Flint',
+    styleGuide: FLINT_STYLE_GUIDE,
+    retriever: new InMemoryRetriever(FLINT_VOICE_EXEMPLARS),
     retrieveK: 2,
   });
 
-  const out = await me.generate({ prompt: 'Draft a one-line email sign-off for me.' });
-  console.log(`${me.name}'s AI: ${out.text}`);
-  console.log('(style guide + your relevant writing were injected as the system prompt)');
+  const out = await me.generate({ prompt: 'Should I use Kafka or SQS for a small app?' });
+  console.log(`${me.name}: ${out.text}`);
+  console.log(`(Flint identity injected: ${FLINT_STYLE_GUIDE.length} char style guide + retrieved voice exemplars)`);
 }
 
 main().catch((err) => {
