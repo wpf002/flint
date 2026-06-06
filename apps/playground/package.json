@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@flint/core": "workspace:*"
+    "@flint/core": "workspace:*",
+    "@flint/persona": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -7,6 +7,7 @@ import {
   type ProviderAdapter,
   type Tool,
 } from '@flint/core';
+import { Persona, InMemoryRetriever, STARTER_STYLE_GUIDE } from '@flint/persona';
 import { MockProvider } from './mock-provider.js';
 
 /**
@@ -96,6 +97,32 @@ async function main(): Promise<void> {
       `), ${history.length} messages in history.`,
   );
   console.log('Cross-package consumption verified ✅');
+
+  await personaDemo();
+}
+
+/**
+ * "Your AI" — same Flint underneath, but wrapped in a Persona that injects a
+ * style guide + retrieved samples of your writing as the system prompt. This is
+ * the identity your apps import; it's provider-agnostic (Anthropic now, local
+ * Ollama later, unchanged).
+ */
+async function personaDemo(): Promise<void> {
+  console.log('\n--- Persona demo (your AI identity) ---');
+  const retriever = new InMemoryRetriever([
+    { id: '1', text: 'I sign off emails with "Onward, Will" — never "Best regards".' },
+    { id: '2', text: 'Weekend notes: repotted the tomatoes, they need more sun.' },
+  ]);
+  const me = new Persona(flint, {
+    name: 'Will',
+    styleGuide: STARTER_STYLE_GUIDE.replace(/<NAME>/g, 'Will'),
+    retriever,
+    retrieveK: 2,
+  });
+
+  const out = await me.generate({ prompt: 'Draft a one-line email sign-off for me.' });
+  console.log(`${me.name}'s AI: ${out.text}`);
+  console.log('(style guide + your relevant writing were injected as the system prompt)');
 }
 
 main().catch((err) => {
