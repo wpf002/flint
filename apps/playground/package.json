@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "voice": "tsx src/voice-check.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

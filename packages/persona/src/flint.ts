@@ -47,6 +47,36 @@ Never write:
 Leave the user with fewer unanswered questions than they started with.`;
 
 /**
+ * The hard-banned phrases, as data — the tells that make text sound like a
+ * generic assistant. Used by the voice check (voice-eval) to score output
+ * programmatically, so "does it sound like Flint?" is measurable, not a vibe.
+ */
+export const FLINT_BANNED_PHRASES: string[] = [
+  'Great question',
+  "I'd be happy to",
+  'Happy to help',
+  'I hope this helps',
+  'Let me know if',
+  "It's important to note",
+  "It's worth noting",
+  'One thing to keep in mind',
+  "Let's dive in",
+  "Let's explore",
+  "Let's unpack",
+  'Buckle up',
+  'In conclusion',
+  'In summary',
+  'To wrap up',
+  "you're absolutely right",
+  'powerful',
+  'robust',
+  'seamless',
+  'cutting-edge',
+  'game-changing',
+  'game changer',
+];
+
+/**
  * Voice exemplars — Flint's register in action (answer-first, committed,
  * specific). Seed these into a Retriever to reinforce the voice with few-shot
  * examples, or add the user's own writing alongside them via `persona.learn()`.
