@@ -16,13 +16,19 @@ specifically still falls short, proven with numbers.
 
 ### Step 0 — Prerequisites (need you / your machine)
 
-- [ ] Install Ollama (`ollama serve`) and pull a base model
-      (`ollama pull llama3.1` or `qwen2.5`).
-- [ ] Verify live: `OLLAMA_MODEL=llama3.1 pnpm --filter playground start`.
-      (The adapter is proven by the offline contract suite but has not yet hit a
-      real Ollama — this is the one outstanding verification.)
+- [x] Install Ollama + pull a base model. DONE — running locally; `llama3.1` 8B
+      and `qwen2.5:14b` pulled.
+- [x] Verify live against a real Ollama. DONE:
+      - Voice: `pnpm --filter playground voice` — llama3.1 95%, **qwen2.5:14b 100%**
+        (matches the Anthropic baseline on the automated check).
+      - Tools: `pnpm --filter playground tools` — **PASS** on qwen2.5:14b; the
+        prompted tool protocol + JSON repair drove the loop end to end.
+      - **Recommended local model: `qwen2.5:14b`** (fits 24 GB RAM, strongest
+        voice + tool result of the two).
 - [ ] Assemble an eval set: 10–30 held-out examples of the voice/output you
-      want, that the model will NOT be trained on. This is how we measure.
+      want, that the model will NOT be trained on. The automated voice check has
+      hit its ceiling (it can't tell qwen from Claude); real qualitative eval is
+      how we measure from here.
 
 ### Step 1 — Maximize prompting + retrieval (no training)
 

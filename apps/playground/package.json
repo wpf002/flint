@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "voice": "tsx src/voice-check.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tools": "tsx src/tool-check.ts"
   },
   "dependencies": {
     "@flint/core": "workspace:*",
