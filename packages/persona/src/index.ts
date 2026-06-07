@@ -12,4 +12,8 @@ export { STARTER_STYLE_GUIDE } from './style-guide.js';
 export { FLINT_STYLE_GUIDE, FLINT_VOICE_EXEMPLARS, FLINT_BANNED_PHRASES } from './flint.js';
 export { checkVoice } from './voice-eval.js';
 export type { VoiceScore, VoiceViolation, VoiceCheckOptions } from './voice-eval.js';
+export { InMemoryLessonStore } from './lessons.js';
+export type { Lesson, DraftLesson, LessonStore, LessonCategory } from './lessons.js';
+export { reflect } from './reflect.js';
+export type { ReflectInput, ReflectResult } from './reflect.js';
 export type { PersonaConfig, Retriever, WritingSample } from './types.js';

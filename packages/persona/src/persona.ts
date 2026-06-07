@@ -77,9 +77,14 @@ export class Persona {
     await this.config.retriever.add(samples);
   }
 
-  /** Assemble the system prompt: style guide + retrieved writing samples. */
+  /**
+   * Assemble the system prompt: style guide + retrieved writing samples +
+   * accumulated lessons. The lessons section is how the persona evolves — what
+   * nightly reflection learns shows up here on every subsequent call.
+   */
   private async buildSystem(query: string): Promise<string> {
     let system = this.config.styleGuide;
+
     if (this.config.retriever) {
       const k = this.config.retrieveK ?? 3;
       const samples = await this.config.retriever.retrieve(query, k);
@@ -90,6 +95,17 @@ export class Persona {
           `---\n${block}\n---`;
       }
     }
+
+    if (this.config.lessonStore) {
+      const k = this.config.lessonsK ?? 8;
+      const lessons = await this.config.lessonStore.recent(k);
+      if (lessons.length > 0) {
+        const block = lessons.map((l) => `- (${l.category}) ${l.text}`).join('\n');
+        system +=
+          `\n\nWhat you've learned from past sessions — apply these:\n${block}`;
+      }
+    }
+
     return system;
   }
 }

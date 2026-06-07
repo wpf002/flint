@@ -1,3 +1,5 @@
+import type { LessonStore } from './lessons.js';
+
 /** A piece of the user's own writing — the raw material for "your voice". */
 export interface WritingSample {
   id: string;
@@ -29,4 +31,12 @@ export interface PersonaConfig {
   retriever?: Retriever;
   /** How many writing samples to pull into context per call. Default 3. */
   retrieveK?: number;
+  /**
+   * Optional self-evolution memory. When set, the persona injects recent lessons
+   * (from nightly reflection) into the system prompt, so behavior compounds over
+   * time. See reflect().
+   */
+  lessonStore?: LessonStore;
+  /** How many recent lessons to inject per call. Default 8. */
+  lessonsK?: number;
 }
