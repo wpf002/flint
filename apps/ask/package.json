@@ -1,0 +1,21 @@
+{
+  "name": "ask",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "ask": "src/index.ts" },
+  "scripts": {
+    "ask": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@flint/core": "workspace:*",
+    "@flint/persona": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "dotenv": "^16.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -243,6 +243,18 @@ first, LoRA fine-tune only if needed) is written up in
    ([packages/core/test/contracts](packages/core/test/contracts)). Every gap is
    either fixed in the adapter or documented in the capability model.
 
+## Apps
+
+- **`apps/ask`** — a real consumer CLI: your personal Flint, running locally with
+  **durable** file-backed memory + lessons (`~/.flint/`). Proves the full vision —
+  voice, tools, and nightly self-evolution — end to end, no cloud.
+  ```bash
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask "your question"
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask reflect   # distill nightly lessons
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask lessons   # what Flint has learned
+  ```
+- **`apps/playground`** — in-repo demos (`start` / `voice` / `tools` / `eval` / `reflect`).
+
 ## Development
 
 ```bash
