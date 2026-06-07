@@ -46,6 +46,83 @@ export interface LessonStore {
   all(): Promise<Lesson[]>;
   /** The most recent `n` lessons, newest first. */
   recent(n: number): Promise<Lesson[]>;
+  /** Replace the entire set (used by consolidate to curate duplicates). */
+  replace(lessons: Lesson[]): Promise<void>;
+}
+
+const VALID_CATEGORIES: ReadonlySet<LessonCategory> = new Set([
+  'correction',
+  'preference',
+  'fact',
+  'mistake',
+  'insight',
+]);
+
+/**
+ * Tolerantly parse a model's JSON output into lesson drafts. Shared by reflect()
+ * and consolidate(); handles code fences, surrounding prose, trailing commas,
+ * and single quotes. Returns [] on anything unparseable.
+ */
+export function parseLessonDrafts(text: string, sourceConversationId?: string): DraftLesson[] {
+  const raw = findJsonArray(stripFences(text));
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    try {
+      parsed = JSON.parse(raw.replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"'));
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const drafts: DraftLesson[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const lessonText = rec.text;
+    if (typeof lessonText !== 'string' || lessonText.trim().length === 0) continue;
+    const cat: LessonCategory =
+      typeof rec.category === 'string' && VALID_CATEGORIES.has(rec.category as LessonCategory)
+        ? (rec.category as LessonCategory)
+        : 'insight';
+    drafts.push({
+      category: cat,
+      text: lessonText.trim(),
+      ...(sourceConversationId ? { sourceConversationId } : {}),
+    });
+  }
+  return drafts;
+}
+
+function stripFences(text: string): string {
+  return text.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+}
+
+function findJsonArray(text: string): string | null {
+  const start = text.indexOf('[');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '[') depth++;
+    else if (ch === ']') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 export class InMemoryLessonStore implements LessonStore {
@@ -86,6 +163,11 @@ export class InMemoryLessonStore implements LessonStore {
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, n)
       .map(clone);
+  }
+
+  async replace(lessons: Lesson[]): Promise<void> {
+    this.lessons.length = 0;
+    this.lessons.push(...lessons.map(clone));
   }
 
   get size(): number {

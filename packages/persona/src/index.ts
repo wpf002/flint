@@ -16,4 +16,6 @@ export { InMemoryLessonStore } from './lessons.js';
 export type { Lesson, DraftLesson, LessonStore, LessonCategory } from './lessons.js';
 export { reflect } from './reflect.js';
 export type { ReflectInput, ReflectResult } from './reflect.js';
+export { consolidate } from './consolidate.js';
+export type { ConsolidateInput, ConsolidateResult } from './consolidate.js';
 export type { PersonaConfig, Retriever, WritingSample } from './types.js';

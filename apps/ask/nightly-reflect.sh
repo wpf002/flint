@@ -44,4 +44,5 @@ if ! curl -sS -m 3 http://localhost:11434/api/version >/dev/null 2>&1; then
 fi
 
 node "$BUNDLE" reflect >> "$LOG" 2>&1
+node "$BUNDLE" consolidate >> "$LOG" 2>&1
 echo "=== done $(date) ===" >> "$LOG"

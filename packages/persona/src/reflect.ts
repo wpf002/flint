@@ -1,5 +1,5 @@
 import type { Flint, CallOptions } from '@flint/core';
-import type { DraftLesson, Lesson, LessonCategory, LessonStore } from './lessons.js';
+import { parseLessonDrafts, type DraftLesson, type Lesson, type LessonStore } from './lessons.js';
 
 /**
  * The nightly reflection protocol — how Flint grows on his own. It reads a
@@ -11,14 +11,6 @@ import type { DraftLesson, Lesson, LessonCategory, LessonStore } from './lessons
  * Schedule it nightly with cron/launchd (the OS's job); this is the unit of work
  * it runs.
  */
-
-const VALID: ReadonlySet<LessonCategory> = new Set([
-  'correction',
-  'preference',
-  'fact',
-  'mistake',
-  'insight',
-]);
 
 const REFLECTION_SYSTEM = `You are a reflection process for a personal AI named Flint. You are given a transcript of past interactions with the user. Extract DURABLE lessons that should change how Flint behaves in the future.
 
@@ -71,71 +63,7 @@ export async function reflect(input: ReflectInput): Promise<ReflectResult> {
     input.options,
   );
 
-  const proposed = parseLessons(text, input.conversationId);
+  const proposed = parseLessonDrafts(text, input.conversationId);
   const learned = await input.lessonStore.add(proposed, input.now);
   return { learned, proposed };
-}
-
-/** Tolerant extraction of the lessons JSON array from model output. */
-function parseLessons(text: string, conversationId?: string): DraftLesson[] {
-  const raw = findJsonArray(stripFences(text));
-  if (!raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    try {
-      parsed = JSON.parse(raw.replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"'));
-    } catch {
-      return [];
-    }
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  const drafts: DraftLesson[] = [];
-  for (const item of parsed) {
-    if (!item || typeof item !== 'object') continue;
-    const rec = item as Record<string, unknown>;
-    const category = rec.category;
-    const lessonText = rec.text;
-    if (typeof lessonText !== 'string' || lessonText.trim().length === 0) continue;
-    const cat: LessonCategory =
-      typeof category === 'string' && VALID.has(category as LessonCategory)
-        ? (category as LessonCategory)
-        : 'insight';
-    drafts.push({
-      category: cat,
-      text: lessonText.trim(),
-      ...(conversationId ? { sourceConversationId: conversationId } : {}),
-    });
-  }
-  return drafts;
-}
-
-function stripFences(text: string): string {
-  return text.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-}
-
-function findJsonArray(text: string): string | null {
-  const start = text.indexOf('[');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i]!;
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === '[') depth++;
-    else if (ch === ']') {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
 }

@@ -175,6 +175,11 @@ export class FileLessonStore implements LessonStore {
       .map((l) => structuredClone(l));
   }
 
+  async replace(lessons: Lesson[]): Promise<void> {
+    this.data.lessons = lessons.map((l) => structuredClone(l));
+    this.save();
+  }
+
   private save(): void {
     saveJson(this.path, this.data);
   }

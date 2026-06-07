@@ -6,6 +6,7 @@ import {
   Persona,
   InMemoryRetriever,
   reflect,
+  consolidate,
   FLINT_STYLE_GUIDE,
   FLINT_VOICE_EXEMPLARS,
 } from '@flint/persona';
@@ -89,6 +90,18 @@ async function cmdReflect(): Promise<void> {
   for (const l of learned) console.log(`  • (${l.category}) ${l.text}`);
 }
 
+async function cmdConsolidate(): Promise<void> {
+  const { flint, lessonStore } = buildFlint();
+  process.stderr.write('consolidating lessons...\n');
+  const res = await consolidate({ flint, lessonStore, now: Date.now() });
+  if (!res.changed) {
+    console.log(`No consolidation needed (${res.before} lesson(s)).`);
+    return;
+  }
+  console.log(`Consolidated ${res.before} → ${res.after} lesson(s):`);
+  for (const l of res.lessons) console.log(`  • (${l.category}) ${l.text}`);
+}
+
 async function cmdLessons(): Promise<void> {
   const { lessonStore } = buildFlint();
   const all = await lessonStore.all();
@@ -104,10 +117,11 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask reflect | ask lessons');
+    console.log('ask "<question>" | ask reflect | ask consolidate | ask lessons');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
+  if (cmd === 'consolidate') return cmdConsolidate();
   if (cmd === 'lessons') return cmdLessons();
 
   // Anything else is treated as the message (so `ask "..."` just works).
