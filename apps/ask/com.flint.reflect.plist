@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Flint nightly reflection (macOS LaunchAgent).
+
+  Install (one command): apps/ask/install-nightly.sh
+  Run once now (test):   launchctl kickstart -k gui/$(id -u)/com.flint.reflect
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.flint.reflect.plist
+    rm ~/Library/LaunchAgents/com.flint.reflect.plist
+
+  NOTE: points at ~/.flint (NOT the repo). macOS TCC blocks launchd from reading
+  ~/Documents, so the job runs a self-contained bundle deployed to ~/.flint.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.flint.reflect</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/willfoti/.flint/nightly-reflect.sh</string>
+  </array>
+
+  <!-- Run nightly at 03:00. If the Mac is asleep, runs at next wake. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/willfoti/.flint/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/willfoti/.flint/launchd.err.log</string>
+</dict>
+</plist>

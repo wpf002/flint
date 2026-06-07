@@ -253,6 +253,9 @@ first, LoRA fine-tune only if needed) is written up in
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask reflect   # distill nightly lessons
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask lessons   # what Flint has learned
   ```
+  Automate the nightly reflection (macOS launchd): `apps/ask/install-nightly.sh`
+  bundles `ask` to `~/.flint/` (outside `~/Documents`, which TCC blocks for
+  background agents) and installs a 03:00 LaunchAgent. Re-run after code changes.
 - **`apps/playground`** — in-repo demos (`start` / `voice` / `tools` / `eval` / `reflect`).
 
 ## Development
