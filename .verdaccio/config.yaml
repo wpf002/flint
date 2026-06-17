@@ -19,6 +19,11 @@ packages:
     publish: $all
     unpublish: $all
 
+  '@prophet/*':
+    access: $all
+    publish: $all
+    unpublish: $all
+
   '@*/*':
     access: $all
     publish: $authenticated
