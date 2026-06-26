@@ -1,0 +1,12 @@
+# Railway config for the hosted Flint service (apps/server).
+# Build context is the repo root so the Dockerfile can see the whole workspace.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "apps/server/Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
