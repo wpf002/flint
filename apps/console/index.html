@@ -191,7 +191,7 @@ function send(speakBack){
   var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
   if(!TOKEN){openSettings();return;}
   addMsg('You','you').textContent=msg;
-  var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb&&window.speechSynthesis)window.speechSynthesis.cancel();document.getElementById('think').textContent='responding';setTalk(1);
+  var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb)stopSpeech();document.getElementById('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:'console',message:msg})})
   .then(function(res){
     if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
@@ -223,7 +223,16 @@ function pickVoice(){
   return null;
 }
 if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_flintVoice=null;pickVoice();};
-function speakOut(t){try{if(!t||!t.trim())return;var u=new SpeechSynthesisUtterance(t.replace(/[*_`#>\[\]]/g,'').trim());var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;window.speechSynthesis.speak(u);}catch(e){}}
+// Speech output: prefer the server's neural voice (human); fall back to the
+// local browser voice. Sentences are chained so they always play in order.
+var _ttsChain=Promise.resolve(),_ttsGen=0,_ttsAudio=null;
+function stopSpeech(){_ttsGen++;_ttsChain=Promise.resolve();try{if(_ttsAudio){_ttsAudio.pause();_ttsAudio=null;}}catch(e){}try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(e){}}
+function _localSpeak(clean){return new Promise(function(res){try{var u=new SpeechSynthesisUtterance(clean);var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;u.onend=u.onerror=function(){res();};window.speechSynthesis.speak(u);}catch(e){res();}});}
+function _neuralSpeak(clean,gen){return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean})})
+  .then(function(r){if(!r.ok)throw new Error('no-tts');return r.blob();})
+  .then(function(b){return new Promise(function(res){if(gen!==_ttsGen){res();return;}var url=URL.createObjectURL(b);var a=new Audio(url);_ttsAudio=a;a.onended=a.onerror=function(){URL.revokeObjectURL(url);if(_ttsAudio===a)_ttsAudio=null;res();};a.play().catch(function(){res();});});});}
+function speakOut(t){if(!t||!t.trim())return;var clean=t.replace(/[*_`#>\[\]]/g,'').trim();if(!clean)return;var gen=_ttsGen;
+  _ttsChain=_ttsChain.then(function(){if(gen!==_ttsGen)return;return _neuralSpeak(clean,gen).catch(function(){if(gen===_ttsGen)return _localSpeak(clean);});});}
 function toggleMic(){
   var btn=document.getElementById('micbtn');
   if(mediaRec&&mediaRec.state==='recording'){mediaRec.stop();return;}

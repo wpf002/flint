@@ -27,6 +27,22 @@ async function transcribeAudio(buf: Buffer): Promise<string> {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/** Neural text-to-speech for a human voice (OpenAI). Falls back to the browser's
+ *  local voice client-side when no key is set. */
+const TTS_MODEL = process.env.FLINT_TTS_MODEL?.trim() || 'tts-1';
+const TTS_VOICE = process.env.FLINT_TTS_VOICE?.trim() || 'onyx';
+async function synthesizeSpeech(text: string): Promise<Buffer | null> {
+  const key = process.env.OPENAI_API_KEY?.trim();
+  if (!key) return null;
+  const r = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: TTS_MODEL, voice: TTS_VOICE, input: text.slice(0, 4000), response_format: 'mp3' }),
+  });
+  if (!r.ok) throw new Error(`tts HTTP ${r.status}`);
+  return Buffer.from(await r.arrayBuffer());
+}
 import {
   Flint,
   AnthropicProvider,
@@ -311,6 +327,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     } catch (e) {
       return json(res, 500, { error: `transcription failed: ${String(e)}` });
     }
+  }
+
+  // Voice output: neural TTS → mp3. 503 (no key) tells the client to use its
+  // local browser voice instead.
+  if (req.method === 'POST' && url === '/speak') {
+    const body = await readJson(req);
+    const text = String(body.text ?? '').trim();
+    if (!text) return json(res, 400, { error: 'text required' });
+    try {
+      const audio = await synthesizeSpeech(text);
+      if (!audio) return json(res, 503, { error: 'no tts key' });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': audio.length });
+      res.end(audio);
+    } catch (e) {
+      return json(res, 502, { error: `tts failed: ${String(e)}` });
+    }
+    return;
   }
 
   if (req.method === 'POST' && url === '/generate') {
