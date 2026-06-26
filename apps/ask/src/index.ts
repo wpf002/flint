@@ -7,6 +7,8 @@ import { Flint, AnthropicProvider, OllamaProvider, ActionLogObserver, type Provi
 import {
   Persona,
   InMemoryRetriever,
+  SemanticRetriever,
+  OllamaEmbedder,
   reflect,
   consolidate,
   FLINT_STYLE_GUIDE,
@@ -63,13 +65,34 @@ function buildFlint() {
     }
   });
   const flint = new Flint({ provider, defaultModel: model, memory, observer });
+  return { flint, lessonStore, model, providerName: provider.name };
+}
+
+/**
+ * Voice retrieval. Set FLINT_EMBED_MODEL (e.g. nomic-embed-text, pulled in
+ * Ollama) for meaning-based semantic retrieval; otherwise keyword fallback.
+ */
+async function buildRetriever() {
+  const embedModel = process.env.FLINT_EMBED_MODEL?.trim();
+  if (embedModel) {
+    const sem = new SemanticRetriever(
+      new OllamaEmbedder({ model: embedModel, baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' }),
+    );
+    await sem.add(FLINT_VOICE_EXEMPLARS);
+    return sem;
+  }
+  return new InMemoryRetriever(FLINT_VOICE_EXEMPLARS);
+}
+
+async function buildPersona(): Promise<{ persona: Persona; flint: ReturnType<typeof buildFlint>['flint']; lessonStore: ReturnType<typeof buildFlint>['lessonStore'] }> {
+  const { flint, lessonStore } = buildFlint();
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
-    retriever: new InMemoryRetriever(FLINT_VOICE_EXEMPLARS),
+    retriever: await buildRetriever(),
     lessonStore,
   });
-  return { flint, persona, lessonStore, model, providerName: provider.name };
+  return { persona, flint, lessonStore };
 }
 
 /** MCP servers (your apps as tools) from ~/.flint/mcp.json, if present. */
@@ -116,7 +139,7 @@ function makeApprover(): Approver {
 }
 
 async function cmdChat(message: string): Promise<void> {
-  const { persona } = buildFlint();
+  const { persona } = await buildPersona();
 
   // Connect any configured MCP servers (your apps) and expose their tools.
   const specs = loadMcpSpecs();

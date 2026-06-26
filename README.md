@@ -252,7 +252,11 @@ first, LoRA fine-tune only if needed) is written up in
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask "your question"
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask reflect   # distill nightly lessons
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask lessons   # what Flint has learned
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask log       # audited trace of the last run
   ```
+  **Semantic memory (opt-in):** `ollama pull nomic-embed-text`, then set
+  `FLINT_EMBED_MODEL=nomic-embed-text` to retrieve your writing/voice by meaning
+  (embeddings + cosine) instead of keyword. Falls back to keyword if unset.
   Automate the nightly reflection (macOS launchd): `apps/ask/install-nightly.sh`
   bundles `ask` to `~/.flint/` (outside `~/Documents`, which TCC blocks for
   background agents) and installs a 03:00 LaunchAgent. Re-run after code changes.

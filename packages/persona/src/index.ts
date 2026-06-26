@@ -8,6 +8,9 @@
 export { Persona } from './persona.js';
 export type { PersonaChatInput, PersonaGenerateInput } from './persona.js';
 export { InMemoryRetriever } from './retriever.js';
+export { SemanticRetriever } from './semantic-retriever.js';
+export { OllamaEmbedder, cosineSimilarity } from './embedder.js';
+export type { Embedder, OllamaEmbedderOptions } from './embedder.js';
 export { STARTER_STYLE_GUIDE } from './style-guide.js';
 export { FLINT_STYLE_GUIDE, FLINT_VOICE_EXEMPLARS, FLINT_BANNED_PHRASES } from './flint.js';
 export { checkVoice } from './voice-eval.js';
