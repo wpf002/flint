@@ -57,6 +57,16 @@
   #settings .row{display:flex;gap:8px;margin-top:18px;}
   #settings button{flex:1;background:var(--gold);color:#000;border:none;border-radius:7px;padding:9px;cursor:pointer;letter-spacing:.1em;font-weight:600;}
   #settings button.ghost{background:transparent;color:var(--mut);border:1px solid #222;}
+  .log .row{cursor:pointer;border-radius:6px;padding:3px 5px;margin:0 -5px;align-items:center;}
+  .log .row:hover{background:#140f06;}
+  .log .row .cv{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;font-size:11px;}
+  #convo{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:10;}
+  #convo .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:24px;width:min(640px,90vw);max-height:80vh;overflow:auto;}
+  #convo h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:8px;text-transform:uppercase;}
+  #convo .lbl{font-size:10px;color:var(--mut);letter-spacing:.14em;text-transform:uppercase;margin-top:12px;}
+  #convo .q{color:var(--ink);font-size:13px;margin:5px 0 4px;white-space:pre-wrap;line-height:1.5;}
+  #convo .ans{color:var(--gold-hi);font-size:13px;white-space:pre-wrap;line-height:1.55;margin-top:5px;}
+  #convo button{margin-top:20px;background:var(--gold);color:#000;border:none;border-radius:7px;padding:9px 18px;cursor:pointer;letter-spacing:.1em;font-weight:600;}
 </style>
 </head>
 <body>
@@ -88,6 +98,13 @@
   <div class="row"><button onclick="saveSettings()">Save</button><button class="ghost" onclick="closeSettings()">Cancel</button></div>
 </div></div>
 
+<div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
+  <h4>Conversation</h4>
+  <div class="lbl">You</div><div class="q" id="cv-q"></div>
+  <div class="lbl">Flint</div><div class="ans" id="cv-a"></div>
+  <button onclick="closeConvo()">Close</button>
+</div></div>
+
 <script>
 /* ---------- config ---------- */
 // Same-origin by default (the app is served BY Flint), and the token is injected
@@ -110,17 +127,30 @@ function refresh(){
   }).catch(function(){document.getElementById('status').textContent='offline — click FLINT to connect';});
   pollLog();
 }
+var CONVOS=[];
+function esc(s){return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function pollLog(){
   if(!TOKEN)return;
-  fetch(BASE+'/actions',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-    if(!d)return;var log=document.getElementById('log');var rows=(d.actions||[]).slice(-14).reverse();log.innerHTML='';
+  fetch(BASE+'/conversations',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(!d)return;CONVOS=d.conversations||[];
+    var log=document.getElementById('log');var rows=CONVOS.slice(-16).reverse();log.innerHTML='';
+    if(!rows.length){log.innerHTML='<div class="row" style="cursor:default"><span class="a">·</span><span class="cv">no conversations yet</span></div>';return;}
     rows.forEach(function(e){
-      if(e.type==='tool_call')log.innerHTML+='<div class="row"><span class="a">→</span><span>'+e.tool+'</span></div>';
-      else if(e.type==='tool_result'){var held=e.result&&e.result.approved===false;log.innerHTML+='<div class="row"><span class="a '+(held?'hold':'back')+'">'+(held?'⚠':'←')+'</span><span>'+(held?'queued':e.tool)+'</span><span class="t">'+(e.durationMs||0)+'ms</span></div>';}
-      else if(e.type==='response')log.innerHTML+='<div class="row"><span class="a">✓</span><span>'+e.reason+'</span></div>';
+      var q=(e.question||'').replace(/\s+/g,' ').trim();
+      var dt=new Date(e.ts);var hh=('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
+      var div=document.createElement('div');div.className='row';
+      div.innerHTML='<span class="a">✓</span><span>Complete</span><span class="cv">'+esc(q)+'</span><span class="t">'+hh+'</span>';
+      div.onclick=function(){openConvo(e.id);};
+      log.appendChild(div);
     });
   }).catch(function(){});
 }
+function openConvo(id){var c=null;for(var i=0;i<CONVOS.length;i++){if(CONVOS[i].id===id)c=CONVOS[i];}
+  if(!c)return;
+  document.getElementById('cv-q').textContent=c.question;
+  document.getElementById('cv-a').textContent=c.answer||'(no text captured)';
+  document.getElementById('convo').style.display='flex';}
+function closeConvo(){document.getElementById('convo').style.display='none';}
 setInterval(pollLog,4000);
 
 /* ---------- chat (SSE) ---------- */

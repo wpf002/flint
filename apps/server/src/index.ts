@@ -101,8 +101,17 @@ async function main(): Promise<void> {
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
   const servers = registry?.connectedServers() ?? [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog, servers }));
+  const convos: Convo[] = [];
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog, servers, convos }));
   server.listen(PORT, () => console.error(`Flint listening on :${PORT} (provider=${provider.name}, model=${model})`));
+}
+
+/** One completed exchange — what the Action Log shows, click-to-read the full text. */
+interface Convo {
+  id: number;
+  ts: number;
+  question: string;
+  answer: string;
 }
 
 interface Ctx {
@@ -112,6 +121,13 @@ interface Ctx {
   tools: Tool[];
   actionLog: ActionLogObserver;
   servers: string[];
+  convos: Convo[];
+}
+
+/** Record a finished exchange (bounded ring buffer). */
+function recordConvo(convos: Convo[], question: string, answer: string): void {
+  convos.push({ id: convos.length + 1, ts: Date.now(), question, answer: answer.trim() });
+  if (convos.length > 500) convos.splice(0, convos.length - 500);
 }
 
 /** The Flint console (the black-and-gold Jarvis UI). $CONSOLE_PATH overrides the
@@ -209,6 +225,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, { actions: ctx.actionLog.actions().slice(-200) });
   }
 
+  // Conversation history — the Action Log reads this; each entry is a full
+  // question/answer the user can click to re-read.
+  if (req.method === 'GET' && url.startsWith('/conversations')) {
+    return json(res, 200, { conversations: ctx.convos.slice(-100) });
+  }
+
   if (req.method === 'POST' && url === '/generate') {
     const body = await readJson(req);
     const prompt = String(body.prompt ?? '');
@@ -217,6 +239,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       prompt,
       ...(ctx.tools.length ? { tools: ctx.tools } : {}),
     });
+    recordConvo(ctx.convos, prompt, out.text);
     return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason });
   }
 
@@ -233,13 +256,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     });
     const ac = new AbortController();
     res.on('close', () => ac.abort());
+    let answer = '';
     try {
       for await (const ev of ctx.persona.chat(
         { conversationId, message, ...(ctx.tools.length ? { tools: ctx.tools } : {}) },
         { signal: ac.signal },
       )) {
+        if (ev.type === 'text') answer += ev.delta;
         res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
+      if (answer.trim()) recordConvo(ctx.convos, message, answer);
     } catch (err) {
       res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
     }
