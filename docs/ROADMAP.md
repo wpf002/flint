@@ -15,7 +15,7 @@ are the wall — not budgeted.
 | **3** | Memory / context | ◐ strong — durable `FileMemoryStore` + `LessonStore`, and **semantic retrieval** (`SemanticRetriever` + local `OllamaEmbedder`, meaning-based) verified live. Remaining: the durable pgvector backend (same `Retriever` interface; parked with Railway) |
 | **4** | Voice / presence | ✅ built (local) — `ask voice`: whisper.cpp STT + macOS `say` TTS + `sox` mic capture. Full STT→Flint→TTS chain verified end to end (via a generated clip); live mic loop ready for the user to test. All local, no cloud |
 | **5** | Proactive | ✅ deterministic cases done — nightly reflection (03:00), morning brief (07:00), and a **watch-trigger framework** (`ask watch`, `~/.flint/triggers.json`): code-evaluated threshold alerts over live tool data, no LLM in the firing decision. Open-ended "notice what I didn't ask" stays out of scope (honest ceiling) |
-| **6** | Computer-use (gated) | ☐ not started |
+| **6** | Computer-use (gated) | ◐ mechanism built — `computer-use-server.ts`: screenshot + cursor read (safe), move/click/type/key (GATED — denied without approval, verified). Opt-in only. Live use needs USER: Screen Recording + Accessibility permissions, a vision model for autonomy, and per-action approval. Supervised by design |
 
 Bonus, off the original spec: `@flint/persona` (voice identity) and
 self-evolution (`reflect` + `consolidate`) — overlap Phases 3 and 5.

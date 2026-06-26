@@ -114,6 +114,15 @@ Verified end to end: Flint (local qwen2.5:14b) fused BOTH apps in one answer —
 with live data, no cloud. Point `ask` at multiple servers in `~/.flint/mcp.json`
 and their tools aggregate into one set.
 
+[connectors/computer-use-server.ts](connectors/computer-use-server.ts) is the
+**Phase 6, gated** connector — drive apps with no API by controlling the screen.
+`screenshot` + `cursor_position` are safe reads; `move`/`click`/`type_text`/`key`
+are non-readonly ⇒ **gated** (denied without per-action approval — verified). It
+is OPT-IN (not in the default config) and supervised by design. Live use needs:
+macOS **Screen Recording** + **Accessibility** permissions, `cliclick`, an
+approver that approves, and a **vision model** for any autonomy (the text model
+can't see a screenshot). Never point it at anything destructive unattended.
+
 ## Status
 
 - Transports: **stdio** (spawn a server) and any pre-built `Transport`
