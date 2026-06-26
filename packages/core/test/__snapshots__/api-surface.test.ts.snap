@@ -2,6 +2,7 @@
 
 exports[`public API surface > matches the committed snapshot 1`] = `
 [
+  "ActionLogObserver",
   "AiErrorKind",
   "AiErrorSchema",
   "AnthropicProvider",
@@ -21,6 +22,7 @@ exports[`public API surface > matches the committed snapshot 1`] = `
   "ToolDefinitionSchema",
   "TurnSchema",
   "TurnStatus",
+  "combineObservers",
   "decodeAssistantTurn",
   "decodeToolCalls",
   "decodeToolResult",
@@ -28,6 +30,7 @@ exports[`public API surface > matches the committed snapshot 1`] = `
   "makeAiError",
   "noopObserver",
   "parseMessage",
+  "type ActionEntry",
   "type AiError",
   "type AiObserver",
   "type AnthropicProviderOptions",
@@ -62,6 +65,7 @@ exports[`public API surface > matches the committed snapshot 1`] = `
   "type ToolDefinition",
   "type ToolHandler",
   "type ToolResult",
+  "type ToolResultEvent",
   "type Turn",
 ]
 `;

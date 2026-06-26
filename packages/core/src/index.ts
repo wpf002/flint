@@ -75,8 +75,11 @@ export type {
   ResponseEvent,
   ErrorEvent,
   ToolCallEvent,
+  ToolResultEvent,
   DebugEvent,
 } from './observability/observer.js';
+export { ActionLogObserver, combineObservers } from './observability/action-log.js';
+export type { ActionEntry } from './observability/action-log.js';
 
 // --- memory -----------------------------------------------------------------
 export { InMemoryStore } from './memory/in-memory.js';

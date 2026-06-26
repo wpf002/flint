@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { Flint, AnthropicProvider, OllamaProvider, type ProviderAdapter } from '@flint/core';
+import { Flint, AnthropicProvider, OllamaProvider, ActionLogObserver, type ProviderAdapter } from '@flint/core';
 import {
   Persona,
   InMemoryRetriever,
@@ -53,7 +53,16 @@ function buildFlint() {
   const memory = new FileMemoryStore(join(DATA_DIR, 'memory.json'));
   const lessonStore = new FileLessonStore(join(DATA_DIR, 'lessons.json'));
   const { provider, model } = buildProvider();
-  const flint = new Flint({ provider, defaultModel: model, memory });
+  // Audit log: append every request/tool-call/result/error to ~/.flint/actions.jsonl.
+  const actionsPath = join(DATA_DIR, 'actions.jsonl');
+  const observer = new ActionLogObserver((e) => {
+    try {
+      appendFileSync(actionsPath, JSON.stringify(e) + '\n');
+    } catch {
+      /* never let logging break a turn */
+    }
+  });
+  const flint = new Flint({ provider, defaultModel: model, memory, observer });
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
@@ -173,6 +182,41 @@ async function cmdConsolidate(): Promise<void> {
   for (const l of res.lessons) console.log(`  • (${l.category}) ${l.text}`);
 }
 
+/** Show the auditable action trace of the most recent run. */
+async function cmdLog(): Promise<void> {
+  const path = join(DATA_DIR, 'actions.jsonl');
+  if (!existsSync(path)) {
+    console.log('No actions logged yet.');
+    return;
+  }
+  const entries = readFileSync(path, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  const lastReq = [...entries].reverse().find((e) => e.type === 'request')?.requestId;
+  const run = entries.filter((e) => e.requestId === lastReq);
+  if (run.length === 0) {
+    console.log('No actions logged yet.');
+    return;
+  }
+  console.log(`Last run (${String(lastReq)}):`);
+  for (const e of run) {
+    if (e.type === 'tool_call') {
+      const flag = e.idempotent ? '' : ' [side-effecting]';
+      console.log(`  → ${String(e.tool)}(${JSON.stringify(e.args)})${flag}`);
+    } else if (e.type === 'tool_result') {
+      const r = JSON.stringify(e.result);
+      console.log(`  ← ${String(e.tool)} ${e.isError ? 'ERROR' : 'ok'} (${String(e.durationMs)}ms): ${r.length > 120 ? r.slice(0, 120) + '…' : r}`);
+    } else if (e.type === 'response') {
+      const u = e.usage as { input: number; output: number };
+      console.log(`  ✓ done: ${String(e.reason)} (in ${u.input} / out ${u.output} tok)`);
+    } else if (e.type === 'error') {
+      console.log(`  ✗ error: ${(e.error as { kind: string }).kind}`);
+    }
+  }
+}
+
 async function cmdLessons(): Promise<void> {
   const { lessonStore } = buildFlint();
   const all = await lessonStore.all();
@@ -188,12 +232,13 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask reflect | ask consolidate | ask lessons');
+    console.log('ask "<question>" | ask reflect | ask consolidate | ask lessons | ask log');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
   if (cmd === 'consolidate') return cmdConsolidate();
   if (cmd === 'lessons') return cmdLessons();
+  if (cmd === 'log') return cmdLog();
 
   // Anything else is treated as the message (so `ask "..."` just works).
   const message = cmd === 'chat' ? rest.join(' ') : [cmd, ...rest].join(' ');

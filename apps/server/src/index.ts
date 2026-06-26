@@ -5,6 +5,7 @@ import {
   AnthropicProvider,
   OllamaProvider,
   InMemoryStore,
+  ActionLogObserver,
   type ProviderAdapter,
   type Tool,
 } from '@flint/core';
@@ -79,7 +80,9 @@ function loadMcpSpecs(): McpServerSpec[] {
 
 async function main(): Promise<void> {
   const { provider, model } = buildProvider();
-  const flint = new Flint({ provider, defaultModel: model, memory: new InMemoryStore() });
+  // Auditable action log (bounded ring buffer), exposed at GET /actions.
+  const actionLog = new ActionLogObserver(undefined, 2000);
+  const flint = new Flint({ provider, defaultModel: model, memory: new InMemoryStore(), observer: actionLog });
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
@@ -95,7 +98,7 @@ async function main(): Promise<void> {
   const tools: Tool[] = registry?.tools() ?? [];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools }));
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog }));
   server.listen(PORT, () => console.error(`Flint listening on :${PORT} (provider=${provider.name}, model=${model})`));
 }
 
@@ -104,6 +107,7 @@ interface Ctx {
   provider: ProviderAdapter;
   model: string;
   tools: Tool[];
+  actionLog: ActionLogObserver;
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
@@ -121,6 +125,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // Auth for everything else.
   if (req.headers.authorization !== `Bearer ${TOKEN}`) {
     return json(res, 401, { error: 'unauthorized' });
+  }
+
+  if (req.method === 'GET' && url.startsWith('/actions')) {
+    return json(res, 200, { actions: ctx.actionLog.actions().slice(-200) });
   }
 
   if (req.method === 'POST' && url === '/generate') {

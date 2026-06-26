@@ -136,7 +136,21 @@ export async function* runToolLoop(
     // ...execute each tool, honoring the idempotency rule, and feed results back.
     try {
       for (const call of streamed.toolCalls) {
-        const result = await executeTool(params, call);
+        const startedAt = now();
+        let result;
+        try {
+          result = await executeTool(params, call);
+        } catch (toolErr) {
+          emitToolResult(
+            params,
+            call,
+            { error: toolErr instanceof Error ? toolErr.message : String(toolErr) },
+            true,
+            now() - startedAt,
+          );
+          throw toolErr;
+        }
+        emitToolResult(params, call, result.result, result.isError ?? false, now() - startedAt);
         sink.responseMessages.push(encodeToolResult(newId('msg'), result, now()));
       }
     } catch (err) {
@@ -314,6 +328,27 @@ function emitToolCallRequested(params: ToolLoopParams, call: ToolCall): void {
     context: params.observe.context,
     call,
     idempotent: def?.idempotent ?? false,
+  });
+}
+
+function emitToolResult(
+  params: ToolLoopParams,
+  call: ToolCall,
+  result: unknown,
+  isError: boolean,
+  durationMs: number,
+): void {
+  params.observer.onToolResult?.({
+    requestId: params.observe.requestId,
+    provider: params.observe.provider,
+    model: params.model,
+    timestamp: now(),
+    context: params.observe.context,
+    toolCallId: call.id,
+    toolName: call.toolName,
+    result,
+    isError,
+    durationMs,
   });
 }
 

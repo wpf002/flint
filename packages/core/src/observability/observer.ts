@@ -41,6 +41,20 @@ export interface ToolCallEvent extends ObserverEventBase {
 }
 
 /**
+ * The OUTCOME of a tool call — emitted after the handler runs (success or
+ * failure). Together with `onToolCall` this gives the full call→result lineage
+ * an audit log needs (auditability rail).
+ */
+export interface ToolResultEvent extends ObserverEventBase {
+  toolCallId: string;
+  toolName: string;
+  /** The handler's return value (or an error payload on failure). */
+  result: unknown;
+  isError: boolean;
+  durationMs: number;
+}
+
+/**
  * Raw, UNFILTERED provider payloads — only emitted when a call sets
  * `debug: true`. This is the escape hatch that lets an app developer see
  * exactly what Flint sent to and got from the provider.
@@ -61,6 +75,7 @@ export interface AiObserver {
   onResponse?(event: ResponseEvent): void;
   onError?(event: ErrorEvent): void;
   onToolCall?(event: ToolCallEvent): void;
+  onToolResult?(event: ToolResultEvent): void;
   onDebug?(event: DebugEvent): void;
 }
 
