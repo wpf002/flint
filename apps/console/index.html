@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
 <title>Flint</title>
+<!-- Installable app (iPhone home screen / Mac dock) -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Flint" />
+<meta name="theme-color" content="#050505" />
 <style>
   :root{--bg:#050505;--gold:#d4af37;--gold-hi:#f3dd8e;--orange:#ffb14a;--ink:#e8e3d2;--mut:#8d7c54;--line:#19150f;}
   *{box-sizing:border-box;margin:0;font-family:"SF Mono",ui-monospace,Menlo,monospace;}
@@ -82,8 +90,10 @@
 
 <script>
 /* ---------- config ---------- */
+// Same-origin by default (the app is served BY Flint), and the token is injected
+// by the server so the app opens already authenticated — no URL, no sign-in.
 var BASE = localStorage.getItem('flint_url') || '';
-var TOKEN = localStorage.getItem('flint_token') || '';
+var TOKEN = localStorage.getItem('flint_token') || (window.__FLINT_TOKEN__ || '');
 function openSettings(){document.getElementById('s-url').value=BASE;document.getElementById('s-token').value=TOKEN;document.getElementById('settings').style.display='flex';}
 function closeSettings(){document.getElementById('settings').style.display='none';}
 function saveSettings(){BASE=document.getElementById('s-url').value.trim().replace(/\/$/,'');TOKEN=document.getElementById('s-token').value.trim();

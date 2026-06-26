@@ -121,6 +121,17 @@ const CONSOLE_PATH =
   process.env.CONSOLE_PATH?.trim() ||
   join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console', 'index.html');
 
+/** App icons / manifest live here ($ASSETS_DIR for the bundled server). */
+const ASSETS_DIR =
+  process.env.ASSETS_DIR?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console', 'app-assets');
+
+const PNG_ASSETS: Record<string, true> = {
+  '/icon-192.png': true,
+  '/icon-512.png': true,
+  '/apple-touch-icon.png': true,
+};
+
 async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
   const url = req.url ?? '/';
 
@@ -134,11 +145,48 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return;
   }
 
-  // Serve the console UI (open — it's just the shell; the API still needs auth).
+  // Serve the console UI. We inject the bearer token so the installed app (Mac
+  // dock / iPhone home screen) opens already authenticated — no URL, no sign-in.
+  // This is safe because Flint is only reachable over the private tailnet.
   if (req.method === 'GET' && (url === '/' || url.startsWith('/console'))) {
     if (!existsSync(CONSOLE_PATH)) return json(res, 404, { error: 'console not built' });
+    const html = readFileSync(CONSOLE_PATH, 'utf8').replace(
+      '</head>',
+      `<script>window.__FLINT_TOKEN__=${JSON.stringify(TOKEN)}</script></head>`,
+    );
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(readFileSync(CONSOLE_PATH, 'utf8'));
+    res.end(html);
+    return;
+  }
+
+  // PWA manifest — makes the console installable as an app.
+  if (req.method === 'GET' && url === '/manifest.webmanifest') {
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json' });
+    res.end(
+      JSON.stringify({
+        name: 'Flint',
+        short_name: 'Flint',
+        start_url: '/',
+        scope: '/',
+        display: 'standalone',
+        orientation: 'portrait',
+        background_color: '#050505',
+        theme_color: '#050505',
+        icons: [
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+        ],
+      }),
+    );
+    return;
+  }
+
+  // App icons.
+  if (req.method === 'GET' && PNG_ASSETS[url]) {
+    const p = join(ASSETS_DIR, url);
+    if (!existsSync(p)) return json(res, 404, { error: 'asset missing' });
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+    res.end(readFileSync(p));
     return;
   }
 
