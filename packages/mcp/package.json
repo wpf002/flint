@@ -1,0 +1,40 @@
+{
+  "name": "@flint/mcp",
+  "version": "0.1.0",
+  "description": "MCP tool substrate for Flint — connect MCP servers, expose their tools to the Flint tool loop with a safety gate.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "pnpm build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@flint/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@flint/core": "workspace:*",
+    "@types/node": "^20",
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0",
+    "zod": "^3.23.0"
+  }
+}
