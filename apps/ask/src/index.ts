@@ -98,9 +98,9 @@ async function buildPersona(): Promise<{ persona: Persona; flint: ReturnType<typ
   return { persona, flint, lessonStore };
 }
 
-/** MCP servers (your apps as tools) from ~/.flint/mcp.json, if present. */
+/** MCP servers (your apps as tools) from $MCP_CONFIG or ~/.flint/mcp.json. */
 function loadMcpSpecs(): McpServerSpec[] {
-  const path = join(DATA_DIR, 'mcp.json');
+  const path = process.env.MCP_CONFIG?.trim() || join(DATA_DIR, 'mcp.json');
   if (!existsSync(path)) return [];
   try {
     const cfg = JSON.parse(readFileSync(path, 'utf8')) as {
