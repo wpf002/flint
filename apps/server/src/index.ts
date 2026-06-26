@@ -114,8 +114,12 @@ interface Ctx {
   servers: string[];
 }
 
-/** The Flint console (the black-and-gold Jarvis UI). */
-const CONSOLE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console', 'index.html');
+/** The Flint console (the black-and-gold Jarvis UI). $CONSOLE_PATH overrides the
+ *  repo-relative default so a bundled server (e.g. ~/.flint/server.mjs) can still
+ *  find it. */
+const CONSOLE_PATH =
+  process.env.CONSOLE_PATH?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console', 'index.html');
 
 async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
   const url = req.url ?? '/';
