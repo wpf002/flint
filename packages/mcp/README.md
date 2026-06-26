@@ -123,6 +123,24 @@ macOS **Screen Recording** + **Accessibility** permissions, `cliclick`, an
 approver that approves, and a **vision model** for any autonomy (the text model
 can't see a screenshot). Never point it at anything destructive unattended.
 
+## Wiring an existing MCP server (e.g. Trident)
+
+Apps that already expose their own MCP server need no connector — point Flint
+straight at them. **Trident** ships one (`packages/mcp-server`) that gives Flint
+calendar/email/drive + web/perplexity search + file tools in one shot:
+
+```json
+{ "name": "trident", "command": "node",
+  "args": ["/Users/you/Documents/GitHub/trident/packages/mcp-server/dist/index.js"] }
+```
+
+Two notes: (1) those tools need Trident's own `.env` keys (Anthropic/OpenAI/
+Perplexity/Tavily + Google OAuth) to return live data; (2) Trident doesn't
+annotate its tools read-only, so Flint treats them as **gated** — they prompt for
+approval interactively, or get whitelisted in `~/.flint/autonomy.json` for
+autonomous runs. Run Trident's MCP server **locally only** (its HTTP surface has
+known security debt — see Roadmap v2 Phase 12).
+
 ## Status
 
 - Transports: **stdio** (spawn a server) and any pre-built `Transport`
