@@ -120,7 +120,11 @@ async function main(): Promise<void> {
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
   const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog, servers, convos }));
-  server.listen(PORT, () => console.error(`Flint listening on :${PORT} (provider=${provider.name}, model=${model})`));
+  // Bind loopback only: the device app reaches it via localhost and remote
+  // devices reach it through Tailscale (which proxies to localhost). Nothing on
+  // the LAN can hit it directly — the only door in is the private tailnet.
+  const HOST = process.env.BIND_HOST?.trim() || '127.0.0.1';
+  server.listen(PORT, HOST, () => console.error(`Flint listening on ${HOST}:${PORT} (provider=${provider.name}, model=${model})`));
 }
 
 /** One completed exchange — what the Action Log shows, click-to-read the full text. */
