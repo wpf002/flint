@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@flint/core": "workspace:*",
+    "@flint/mcp": "workspace:*",
     "@flint/persona": "workspace:*"
   },
   "devDependencies": {

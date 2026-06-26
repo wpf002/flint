@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { Flint, AnthropicProvider, OllamaProvider, type ProviderAdapter } from '@flint/core';
 import {
   Persona,
@@ -10,6 +12,7 @@ import {
   FLINT_STYLE_GUIDE,
   FLINT_VOICE_EXEMPLARS,
 } from '@flint/persona';
+import { McpRegistry, type McpServerSpec, type Approver } from '@flint/mcp';
 import { FileMemoryStore, FileLessonStore } from './stores.js';
 
 /**
@@ -33,8 +36,11 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
   const ollama = process.env.OLLAMA_MODEL?.trim();
   const key = process.env.ANTHROPIC_API_KEY?.trim();
   if (ollama) {
+    // Default to 127.0.0.1 (not 'localhost') — Node's fetch can resolve
+    // localhost to IPv6 ::1 while Ollama binds IPv4, which surfaces as
+    // "fetch failed". The explicit IPv4 host avoids it.
     return {
-      provider: new OllamaProvider(process.env.OLLAMA_HOST ? { baseURL: process.env.OLLAMA_HOST } : {}),
+      provider: new OllamaProvider({ baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' }),
       model: ollama,
     };
   }
@@ -57,14 +63,79 @@ function buildFlint() {
   return { flint, persona, lessonStore, model, providerName: provider.name };
 }
 
+/** MCP servers (your apps as tools) from ~/.flint/mcp.json, if present. */
+function loadMcpSpecs(): McpServerSpec[] {
+  const path = join(DATA_DIR, 'mcp.json');
+  if (!existsSync(path)) return [];
+  try {
+    const cfg = JSON.parse(readFileSync(path, 'utf8')) as {
+      servers?: Array<{ name: string; command: string; args?: string[]; cwd?: string; env?: Record<string, string> }>;
+    };
+    return (cfg.servers ?? []).map((s) => ({
+      name: s.name,
+      transport: 'stdio' as const,
+      command: s.command,
+      ...(s.args ? { args: s.args } : {}),
+      ...(s.cwd ? { cwd: s.cwd } : {}),
+      ...(s.env ? { env: s.env } : {}),
+    }));
+  } catch (err) {
+    process.stderr.write(`[mcp] failed to read mcp.json: ${String(err)}\n`);
+    return [];
+  }
+}
+
+/**
+ * The approval gate for guarded (side-effecting) tools. Default: ask in the
+ * terminal. FLINT_APPROVE=all approves everything (trusted/non-interactive);
+ * FLINT_APPROVE=none denies everything.
+ */
+function makeApprover(): Approver {
+  const mode = (process.env.FLINT_APPROVE ?? 'ask').toLowerCase();
+  if (mode === 'all') return () => true;
+  if (mode === 'none') return () => false;
+  return (req) =>
+    new Promise<boolean>((resolve) => {
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      const args = JSON.stringify(req.args);
+      const flag = req.destructive ? ' [DESTRUCTIVE]' : '';
+      rl.question(`\n⚠ Flint wants to run ${req.server}.${req.tool}(${args})${flag}. Approve? [y/N] `, (ans) => {
+        rl.close();
+        resolve(/^y(es)?$/i.test(ans.trim()));
+      });
+    });
+}
+
 async function cmdChat(message: string): Promise<void> {
   const { persona } = buildFlint();
-  process.stdout.write('Flint: ');
-  for await (const ev of persona.chat({ conversationId: CONVERSATION, message })) {
-    if (ev.type === 'text') process.stdout.write(ev.delta);
-    if (ev.type === 'error') process.stderr.write(`\n[error: ${ev.error.kind} — ${ev.error.message}]`);
+
+  // Connect any configured MCP servers (your apps) and expose their tools.
+  const specs = loadMcpSpecs();
+  let registry: McpRegistry | undefined;
+  if (specs.length > 0) {
+    registry = await McpRegistry.connect(specs, {
+      approver: makeApprover(),
+      onError: (server, err) => process.stderr.write(`[mcp] ${server} failed: ${String(err)}\n`),
+    });
+    const names = registry.connectedServers();
+    if (names.length > 0) process.stderr.write(`[mcp] connected: ${names.join(', ')}\n`);
   }
-  process.stdout.write('\n');
+  const tools = registry?.tools() ?? [];
+
+  try {
+    process.stdout.write('Flint: ');
+    for await (const ev of persona.chat({
+      conversationId: CONVERSATION,
+      message,
+      ...(tools.length > 0 ? { tools } : {}),
+    })) {
+      if (ev.type === 'text') process.stdout.write(ev.delta);
+      if (ev.type === 'error') process.stderr.write(`\n[error: ${ev.error.kind} — ${ev.error.message}]`);
+    }
+    process.stdout.write('\n');
+  } finally {
+    await registry?.close();
+  }
 }
 
 async function cmdReflect(): Promise<void> {

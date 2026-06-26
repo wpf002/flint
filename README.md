@@ -256,6 +256,14 @@ first, LoRA fine-tune only if needed) is written up in
   Automate the nightly reflection (macOS launchd): `apps/ask/install-nightly.sh`
   bundles `ask` to `~/.flint/` (outside `~/Documents`, which TCC blocks for
   background agents) and installs a 03:00 LaunchAgent. Re-run after code changes.
+
+  **MCP tools (Phase 1):** drop a `~/.flint/mcp.json` listing your apps' MCP
+  servers and `ask` exposes their tools to Flint, gated by the safety rail
+  (read-only runs freely; side-effecting prompts for approval — `FLINT_APPROVE=all`
+  to auto-approve, `none` to deny). Format:
+  ```json
+  { "servers": [ { "name": "demo", "command": "tsx", "args": ["path/to/server.ts"] } ] }
+  ```
 - **`apps/playground`** — in-repo demos (`start` / `voice` / `tools` / `eval` / `reflect`).
 
 ## Development
