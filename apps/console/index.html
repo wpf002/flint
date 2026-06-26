@@ -104,10 +104,7 @@
   <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
   <div class="seg">Action Log</div>
   <div class="log" id="log"></div>
-  <div class="seg">Connection</div>
-  <label>Server URL</label><input id="s-url" placeholder="leave blank for this device" />
-  <label>Token</label><input id="s-token" type="password" placeholder="bearer token" />
-  <div class="row"><button onclick="saveSettings()">Save</button><button class="ghost" onclick="closeSettings()">Close</button></div>
+  <div class="row"><button onclick="closeSettings()">Close</button></div>
 </div></div>
 
 <div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
@@ -123,10 +120,8 @@
 // by the server so the app opens already authenticated — no URL, no sign-in.
 var BASE = localStorage.getItem('flint_url') || '';
 var TOKEN = localStorage.getItem('flint_token') || (window.__FLINT_TOKEN__ || '');
-function openSettings(){document.getElementById('s-url').value=BASE;document.getElementById('s-token').value=TOKEN;document.getElementById('settings').style.display='flex';}
+function openSettings(){document.getElementById('settings').style.display='flex';}
 function closeSettings(){document.getElementById('settings').style.display='none';}
-function saveSettings(){BASE=document.getElementById('s-url').value.trim().replace(/\/$/,'');TOKEN=document.getElementById('s-token').value.trim();
-  localStorage.setItem('flint_url',BASE);localStorage.setItem('flint_token',TOKEN);closeSettings();refresh();}
 function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
 
 /* ---------- live data ---------- */
@@ -159,10 +154,9 @@ function pollLog(){
     var log=document.getElementById('log');var rows=CONVOS.slice(-100).reverse();log.innerHTML='';
     if(!rows.length){log.innerHTML='<div class="row" style="cursor:default"><span class="a">·</span><span class="cv">No conversations yet</span></div>';return;}
     rows.forEach(function(e){
-      var q=(e.question||'').replace(/\s+/g,' ').trim();
       var dt=new Date(e.ts);var hh=('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
       var div=document.createElement('div');div.className='row';
-      div.innerHTML='<span class="a">✓</span><span>Complete</span><span class="cv">'+esc(q)+'</span><span class="t">'+hh+'</span>';
+      div.innerHTML='<span class="a">✓</span><span>Complete</span><span class="t" style="margin-left:auto">'+hh+'</span>';
       div.onclick=function(){openConvo(e.id);};
       log.appendChild(div);
     });
