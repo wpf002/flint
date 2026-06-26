@@ -85,6 +85,23 @@ await server.connect(new StdioServerTransport());
 **Annotate honestly** — `readOnlyHint`/`destructiveHint` are what the safety gate
 trusts. A write tool that lies about being read-only defeats the checkpoint.
 
+## Connectors
+
+[connectors/prophet-server.ts](connectors/prophet-server.ts) is a real,
+read-only wrap of the **Prophet** app — it reads Prophet's on-disk model
+metadata and MLflow benchmark runs and exposes `list_models`, `model_details`,
+and `best_runs`. It imports/modifies nothing in Prophet; it only reads its files
+(`PROPHET_DIR`, default `~/Documents/GitHub/prophet`). Use it as the template for
+wrapping a file/data-backed app:
+
+```json
+{ "servers": [ { "name": "prophet", "command": "tsx",
+  "args": ["packages/mcp/connectors/prophet-server.ts"] } ] }
+```
+
+Verified end to end: Flint (local qwen2.5:14b) answered "which models are in
+production and which has the best MASE?" with live Prophet data, no cloud.
+
 ## Status
 
 - Transports: **stdio** (spawn a server) and any pre-built `Transport`
