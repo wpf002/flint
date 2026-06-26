@@ -14,6 +14,8 @@
  */
 export { McpRegistry } from './registry.js';
 export { connectServer } from './client.js';
+export { policyApprover } from './policy.js';
+export type { AutonomyPolicy } from './policy.js';
 export type { ConnectedServer } from './client.js';
 export type {
   McpServerSpec,

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Flint overnight autonomous task (macOS LaunchAgent). Installed by
+  apps/ask/install-nightly.sh. Runs ~/.flint/overnight-task.txt under the
+  autonomy policy (~/.flint/autonomy.json). Points at ~/.flint (NOT the repo).
+
+  Run once now: launchctl kickstart -k gui/$(id -u)/com.flint.agent
+  Uninstall:    launchctl unload -w ~/Library/LaunchAgents/com.flint.agent.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.flint.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/willfoti/.flint/overnight-agent.sh</string>
+  </array>
+
+  <!-- 02:00 daily. If asleep, runs at next wake. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/willfoti/.flint/launchd-agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/willfoti/.flint/launchd-agent.err.log</string>
+</dict>
+</plist>

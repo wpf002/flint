@@ -17,7 +17,7 @@ import {
   FLINT_VOICE_EXEMPLARS,
   type Trigger,
 } from '@flint/persona';
-import { McpRegistry, type McpServerSpec, type Approver } from '@flint/mcp';
+import { McpRegistry, policyApprover, type McpServerSpec, type Approver, type AutonomyPolicy } from '@flint/mcp';
 import { FileMemoryStore, FileLessonStore } from './stores.js';
 
 /**
@@ -358,6 +358,94 @@ async function cmdVoice(fileArg?: string): Promise<void> {
   }
 }
 
+/**
+ * Autonomous run (overnight). Executes a task UNATTENDED under an autonomy
+ * policy: reads + whitelisted reversible tools run on their own; everything else
+ * is refused and queued for review. Writes ~/.flint/overnight-report.md (did /
+ * queued / summary). Schedulable via launchd. Task from arg or
+ * ~/.flint/overnight-task.txt.
+ */
+async function cmdAgent(taskArg?: string): Promise<void> {
+  const taskPath = join(DATA_DIR, 'overnight-task.txt');
+  const task = (taskArg ?? (existsSync(taskPath) ? readFileSync(taskPath, 'utf8') : '')).trim();
+  if (!task) {
+    console.log('No task. Usage: ask agent "<task>"  (or put it in ~/.flint/overnight-task.txt)');
+    return;
+  }
+  const policyPath = join(DATA_DIR, 'autonomy.json');
+  const policy: AutonomyPolicy = existsSync(policyPath)
+    ? (JSON.parse(readFileSync(policyPath, 'utf8')) as AutonomyPolicy)
+    : { allow: [] };
+
+  const { persona } = await buildPersona();
+  const specs = loadMcpSpecs();
+  const registry = specs.length > 0
+    ? await McpRegistry.connect(specs, {
+        approver: policyApprover(policy), // unattended: policy decides, not a human
+        onError: (server, err) => process.stderr.write(`[mcp] ${server} failed: ${String(err)}\n`),
+      })
+    : undefined;
+  const tools = registry?.tools() ?? [];
+
+  const preamble =
+    `You are running autonomously with no human present. Task:\n${task}\n\n` +
+    `Use your tools. Read-only and pre-authorized actions run on their own; any ` +
+    `action that isn't permitted will be refused — note those for review. End with ` +
+    `a short summary of what you did and what still needs my approval.`;
+
+  let output = '';
+  try {
+    for await (const ev of persona.chat({
+      conversationId: 'agent',
+      message: preamble,
+      ...(tools.length > 0 ? { tools } : {}),
+    })) {
+      if (ev.type === 'text') {
+        process.stdout.write(ev.delta);
+        output += ev.delta;
+      }
+      if (ev.type === 'error') process.stderr.write(`\n[error: ${ev.error.kind}]`);
+    }
+  } finally {
+    await registry?.close();
+  }
+  process.stdout.write('\n');
+
+  const report = buildAgentReport(task, output);
+  writeFileSync(join(DATA_DIR, 'overnight-report.md'), report);
+  console.log('\nReport → ~/.flint/overnight-report.md');
+}
+
+/** Build the morning report from the audit log of the just-completed run. */
+function buildAgentReport(task: string, summary: string): string {
+  const path = join(DATA_DIR, 'actions.jsonl');
+  const entries = existsSync(path)
+    ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+    : [];
+  const lastReq = [...entries].reverse().find((e) => e.type === 'request')?.requestId;
+  const run = entries.filter((e) => e.requestId === lastReq);
+
+  const did: string[] = [];
+  const queued: string[] = [];
+  let pendingArgs: unknown;
+  for (const e of run) {
+    if (e.type === 'tool_call') pendingArgs = e.args;
+    else if (e.type === 'tool_result') {
+      const r = e.result as { approved?: boolean } | undefined;
+      const line = `${String(e.tool)}(${JSON.stringify(pendingArgs)})`;
+      if (r && typeof r === 'object' && r.approved === false) queued.push(line);
+      else did.push(line);
+    }
+  }
+  const list = (xs: string[]) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '- (none)');
+  return (
+    `# Flint overnight run\n\n## Task\n${task}\n\n` +
+    `## Did autonomously (${did.length})\n${list(did)}\n\n` +
+    `## Queued for your approval (${queued.length})\n${list(queued)}\n\n` +
+    `## Summary\n${summary.trim() || '(none)'}\n`
+  );
+}
+
 /** Show the auditable action trace of the most recent run. */
 async function cmdLog(): Promise<void> {
   const path = join(DATA_DIR, 'actions.jsonl');
@@ -408,13 +496,14 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask voice | ask brief | ask watch | ask reflect | ask consolidate | ask lessons | ask log');
+    console.log('ask "<question>" | ask agent "<task>" | ask voice | ask brief | ask watch | ask reflect | ask consolidate | ask lessons | ask log');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
   if (cmd === 'consolidate') return cmdConsolidate();
   if (cmd === 'brief') return cmdBrief();
   if (cmd === 'watch') return cmdWatch();
+  if (cmd === 'agent') return cmdAgent(rest.join(' ') || undefined);
   if (cmd === 'voice') return cmdVoice(rest[0]);
   if (cmd === 'lessons') return cmdLessons();
   if (cmd === 'log') return cmdLog();

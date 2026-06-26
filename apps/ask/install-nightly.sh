@@ -24,16 +24,17 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
   --outfile="$DATA/ask.mjs"
 
 echo "installing wrappers + LaunchAgents..."
-# Nightly reflection (03:00) + morning brief (07:00). Both run the bundle.
+# overnight agent (02:00) + nightly reflection (03:00) + morning brief (07:00).
+cp "$REPO/apps/ask/overnight-agent.sh" "$DATA/overnight-agent.sh"
 cp "$REPO/apps/ask/nightly-reflect.sh" "$DATA/nightly-reflect.sh"
 cp "$REPO/apps/ask/morning-brief.sh" "$DATA/morning-brief.sh"
-chmod +x "$DATA/nightly-reflect.sh" "$DATA/morning-brief.sh"
+chmod +x "$DATA/overnight-agent.sh" "$DATA/nightly-reflect.sh" "$DATA/morning-brief.sh"
 
-for p in "$PLIST" com.flint.brief.plist; do
+for p in com.flint.agent.plist "$PLIST" com.flint.brief.plist; do
   cp "$REPO/apps/ask/$p" "$AGENTS/$p"
   launchctl unload "$AGENTS/$p" 2>/dev/null || true
   launchctl load -w "$AGENTS/$p"
 done
 
-echo "done. nightly reflection runs at 03:00; morning brief at 07:00."
-echo "test now: launchctl kickstart -k gui/$(id -u)/com.flint.brief"
+echo "done. overnight agent 02:00; reflection 03:00; brief 07:00."
+echo "overnight task: write ~/.flint/overnight-task.txt and ~/.flint/autonomy.json"

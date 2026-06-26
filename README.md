@@ -255,7 +255,14 @@ first, LoRA fine-tune only if needed) is written up in
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask log       # audited trace of the last run
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask brief     # proactive brief from your connected systems
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask voice     # talk to Flint, it talks back (local STT+TTS)
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask agent "<task>"  # autonomous run under the policy
   ```
+  **Autonomous overnight runs (`ask agent`):** Flint executes a task *unattended*
+  under an autonomy policy — reads + whitelisted reversible tools run on their
+  own; everything else is refused and queued in `~/.flint/overnight-report.md`
+  for your review. Destructive actions are never auto-approved; there's a per-run
+  action cap. Configure `~/.flint/autonomy.json` (`{"allow":["vantage.add_to_watchlist"]}`)
+  and `~/.flint/overnight-task.txt`. `install-nightly.sh` schedules it at 02:00.
   **Voice setup (one-time, all local):** `brew install whisper-cpp sox`, then
   download a model to `~/.flint/models/ggml-base.en.bin` (from
   huggingface.co/ggerganov/whisper.cpp). `ask voice` runs the live mic loop;
