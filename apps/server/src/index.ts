@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
   Flint,
   AnthropicProvider,
@@ -98,7 +100,8 @@ async function main(): Promise<void> {
   const tools: Tool[] = registry?.tools() ?? [];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog }));
+  const servers = registry?.connectedServers() ?? [];
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog, servers }));
   server.listen(PORT, () => console.error(`Flint listening on :${PORT} (provider=${provider.name}, model=${model})`));
 }
 
@@ -108,10 +111,32 @@ interface Ctx {
   model: string;
   tools: Tool[];
   actionLog: ActionLogObserver;
+  servers: string[];
 }
+
+/** The Flint console (the black-and-gold Jarvis UI). */
+const CONSOLE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console', 'index.html');
 
 async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
   const url = req.url ?? '/';
+
+  // CORS — let the console (any origin) call the API with the bearer token.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Serve the console UI (open — it's just the shell; the API still needs auth).
+  if (req.method === 'GET' && (url === '/' || url.startsWith('/console'))) {
+    if (!existsSync(CONSOLE_PATH)) return json(res, 404, { error: 'console not built' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(readFileSync(CONSOLE_PATH, 'utf8'));
+    return;
+  }
 
   if (req.method === 'GET' && url === '/health') {
     return json(res, 200, {
@@ -119,6 +144,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       provider: ctx.provider.name,
       model: ctx.model,
       tools: ctx.tools.length,
+      servers: ctx.servers,
     });
   }
 

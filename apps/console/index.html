@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Flint</title>
+<style>
+  :root{--bg:#050505;--gold:#d4af37;--gold-hi:#f3dd8e;--orange:#ffb14a;--ink:#e8e3d2;--mut:#8d7c54;--line:#19150f;}
+  *{box-sizing:border-box;margin:0;font-family:"SF Mono",ui-monospace,Menlo,monospace;}
+  html,body{height:100%;background:var(--bg);color:var(--ink);overflow:hidden;}
+  #app{display:grid;grid-template-rows:auto 1fr auto;height:100vh;}
+  header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);}
+  .brand{display:flex;align-items:center;gap:11px;cursor:pointer;}
+  .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,var(--orange) 55%,#7a4a10);box-shadow:0 0 16px var(--orange);}
+  .brand .nm{color:var(--gold-hi);letter-spacing:.42em;font-size:18px;font-weight:700;}
+  header .meta{font-size:11px;color:var(--mut);letter-spacing:.14em;text-align:right;line-height:1.7;}
+  header .meta b{color:var(--orange);}
+  main{display:grid;grid-template-columns:220px 1fr 290px;min-height:0;}
+  aside{border-right:1px solid var(--line);padding:14px 15px;overflow:auto;}
+  aside.right{border-right:none;border-left:1px solid var(--line);}
+  aside h3{font-size:10px;letter-spacing:.26em;color:#8a7320;text-transform:uppercase;margin-bottom:12px;}
+  .sys{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12.5px;border-bottom:1px dashed var(--line);}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--gold);box-shadow:0 0 8px var(--gold);}
+  .dot.off{background:#3a3a44;box-shadow:none;}
+  .center{position:relative;display:flex;flex-direction:column;min-height:0;}
+  #brainwrap{flex:1;position:relative;min-height:0;}
+  #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
+  .think{position:absolute;top:14px;left:0;right:0;text-align:center;font-size:11px;letter-spacing:.24em;color:var(--gold);text-transform:uppercase;pointer-events:none;}
+  #transcript{max-height:38%;overflow:auto;padding:8px 26px 12px;}
+  .msg{margin:8px 0;font-size:13.5px;line-height:1.5;}
+  .msg .who{font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);display:block;margin-bottom:3px;}
+  .msg.you .who{color:#7d96b8;} .msg.flint .who{color:var(--gold);}
+  .msg.flint{color:#f0e6cf;}
+  .log{font-size:11.5px;line-height:1.4;}
+  .log .row{display:flex;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);}
+  .log .a{flex:none;color:var(--gold);} .log .a.back{color:#6f9c6a;} .log .a.hold{color:#b9462e;}
+  .log .t{margin-left:auto;color:var(--mut);}
+  footer{padding:12px 18px 16px;border-top:1px solid var(--line);}
+  .bar{display:flex;align-items:center;gap:12px;padding:11px 16px;background:#0c0c12;border:1px solid #1d1d28;border-radius:999px;}
+  .bar input{flex:1;background:transparent;border:none;outline:none;color:var(--ink);font-size:13.5px;letter-spacing:.03em;}
+  .bar input::placeholder{color:var(--mut);}
+  .bar button{background:transparent;border:1px solid var(--gold-dim,#8a7320);color:var(--gold);border-radius:999px;padding:6px 16px;cursor:pointer;letter-spacing:.1em;font-size:11px;}
+  .bar button:hover{border-color:var(--gold);color:var(--gold-hi);}
+  #settings{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9;}
+  #settings .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:22px;width:360px;}
+  #settings h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:14px;text-transform:uppercase;}
+  #settings label{display:block;font-size:10px;color:var(--mut);letter-spacing:.14em;margin:12px 0 5px;}
+  #settings input{width:100%;background:#08080b;border:1px solid #222;border-radius:7px;color:var(--ink);padding:9px;font-size:12px;}
+  #settings .row{display:flex;gap:8px;margin-top:18px;}
+  #settings button{flex:1;background:var(--gold);color:#000;border:none;border-radius:7px;padding:9px;cursor:pointer;letter-spacing:.1em;font-weight:600;}
+  #settings button.ghost{background:transparent;color:var(--mut);border:1px solid #222;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand" onclick="openSettings()"><span class="sp"></span><span class="nm">FLINT</span></div>
+    <div class="meta"><span id="status">connecting…</span><br><span id="mode" style="color:var(--gold)">—</span></div>
+  </header>
+  <main>
+    <aside><h3>Systems</h3><div id="systems"><div class="sys"><span class="dot off"></span>—</div></div></aside>
+    <div class="center">
+      <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think">idle</div></div>
+      <div id="transcript"></div>
+    </div>
+    <aside class="right"><h3>Action log</h3><div class="log" id="log"></div></aside>
+  </main>
+  <footer>
+    <div class="bar">
+      <input id="input" placeholder="Flint, what's my brief?" autocomplete="off" />
+      <button onclick="send()">Ask</button>
+    </div>
+  </footer>
+</div>
+
+<div id="settings"><div class="card">
+  <h4>Connect to Flint</h4>
+  <label>Server URL (blank = same origin)</label><input id="s-url" placeholder="http://localhost:8787" />
+  <label>Token (FLINT_TOKEN)</label><input id="s-token" type="password" placeholder="bearer token" />
+  <div class="row"><button onclick="saveSettings()">Save</button><button class="ghost" onclick="closeSettings()">Cancel</button></div>
+</div></div>
+
+<script>
+/* ---------- config ---------- */
+var BASE = localStorage.getItem('flint_url') || '';
+var TOKEN = localStorage.getItem('flint_token') || '';
+function openSettings(){document.getElementById('s-url').value=BASE;document.getElementById('s-token').value=TOKEN;document.getElementById('settings').style.display='flex';}
+function closeSettings(){document.getElementById('settings').style.display='none';}
+function saveSettings(){BASE=document.getElementById('s-url').value.trim().replace(/\/$/,'');TOKEN=document.getElementById('s-token').value.trim();
+  localStorage.setItem('flint_url',BASE);localStorage.setItem('flint_token',TOKEN);closeSettings();refresh();}
+function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
+
+/* ---------- live data ---------- */
+function refresh(){
+  fetch(BASE+'/health').then(r=>r.json()).then(h=>{
+    document.getElementById('status').innerHTML=(h.model||'?')+' · <b>'+(h.provider||'').toUpperCase()+'</b>';
+    var sys=document.getElementById('systems');sys.innerHTML='';
+    (h.servers||[]).forEach(function(s){sys.innerHTML+='<div class="sys"><span class="dot"></span>'+s+'</div>';});
+    if(!(h.servers||[]).length)sys.innerHTML='<div class="sys"><span class="dot off"></span>no connectors</div>';
+  }).catch(function(){document.getElementById('status').textContent='offline — click FLINT to connect';});
+  pollLog();
+}
+function pollLog(){
+  if(!TOKEN)return;
+  fetch(BASE+'/actions',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(!d)return;var log=document.getElementById('log');var rows=(d.actions||[]).slice(-14).reverse();log.innerHTML='';
+    rows.forEach(function(e){
+      if(e.type==='tool_call')log.innerHTML+='<div class="row"><span class="a">→</span><span>'+e.tool+'</span></div>';
+      else if(e.type==='tool_result'){var held=e.result&&e.result.approved===false;log.innerHTML+='<div class="row"><span class="a '+(held?'hold':'back')+'">'+(held?'⚠':'←')+'</span><span>'+(held?'queued':e.tool)+'</span><span class="t">'+(e.durationMs||0)+'ms</span></div>';}
+      else if(e.type==='response')log.innerHTML+='<div class="row"><span class="a">✓</span><span>'+e.reason+'</span></div>';
+    });
+  }).catch(function(){});
+}
+setInterval(pollLog,4000);
+
+/* ---------- chat (SSE) ---------- */
+function addMsg(who,cls){var t=document.getElementById('transcript');var d=document.createElement('div');d.className='msg '+cls;
+  d.innerHTML='<span class="who">'+who+'</span><span class="body"></span>';t.appendChild(d);t.scrollTop=t.scrollHeight;return d.querySelector('.body');}
+function send(){
+  var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
+  if(!TOKEN){openSettings();return;}
+  addMsg('You','you').textContent=msg;
+  var body=addMsg('Flint','flint');document.getElementById('think').textContent='responding';setTalk(1);
+  fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:'console',message:msg})})
+  .then(function(res){
+    if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
+    var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
+    function pump(){return reader.read().then(function(r){
+      if(r.done){document.getElementById('think').textContent='idle';setTalk(0);pollLog();return;}
+      buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
+      parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
+        if(ev.type==='text'){body.textContent+=ev.delta;document.getElementById('transcript').scrollTop=9e9;setTalk(1);}
+        if(ev.type==='error')body.textContent+=' [error: '+(ev.error&&ev.error.kind||ev.error)+']';
+      }catch(e){}});
+      return pump();
+    });}
+    return pump();
+  }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='idle';setTalk(0);});
+}
+document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
+
+/* ---------- the brain (approved viz) ---------- */
+var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
+(function(){
+  var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
+  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.34;}
+  size();window.addEventListener('resize',size);
+  var N=520,P=[];for(var i=0;i<N;i++){var u=Math.random(),v=Math.random(),th=2*Math.PI*u,ph=Math.acos(2*v-1),shell=0.55+Math.random()*0.6;
+    P.push({sx:Math.sin(ph)*Math.cos(th),sy:Math.cos(ph),sz:Math.sin(ph)*Math.sin(th),rad:shell,sp:0.4+Math.random()*0.9,ph0:Math.random()*6.28,sz2:0.5+Math.random()*1.4});}
+  for(var a=0;a<N;a++){var best=[1e9,1e9],bi=[-1,-1],pa=P[a];for(var b=0;b<N;b++){if(b===a)continue;var pb=P[b];var d=(pa.sx-pb.sx)*(pa.sx-pb.sx)+(pa.sy-pb.sy)*(pa.sy-pb.sy)+(pa.sz-pb.sz)*(pa.sz-pb.sz);if(d<best[0]){best[1]=best[0];bi[1]=bi[0];best[0]=d;bi[0]=b;}else if(d<best[1]){best[1]=d;bi[1]=b;}}pa.n=bi;}
+  var flares=[],t0=performance.now();
+  function rot(p,ay,ax){var x=p.sx*p.rad,y=p.sy*p.rad,z=p.sz*p.rad;var cy1=Math.cos(ay),sy1=Math.sin(ay),x1=x*cy1-z*sy1,z1=x*sy1+z*cy1;var cx1=Math.cos(ax),sx1=Math.sin(ax),y1=y*cx1-z1*sx1,z2=y*sx1+z1*cx1;var fov=2.6,sc=fov/(fov+z2);return{X:cx+x1*R*sc,Y:cy+y1*R*sc,z:z2};}
+  function frame(now){var t=(now-t0)/1000;
+    talkNow+=(talkTarget-talkNow)*0.08;
+    var talk=talkNow*( (Math.sin(t*7)*0.5+0.5)*(Math.sin(t*13)*0.5+0.5) );
+    var breath=0.5+0.5*Math.sin(t*1.3),amp=0.22*breath+0.9*talk,ay=t*0.34,ax=Math.sin(t*0.22)*0.5+0.3,pr=R*(1+amp*0.10);
+    ctx.clearRect(0,0,W,H);var gg=ctx.createRadialGradient(cx,cy,0,cx,cy,R*3.2);gg.addColorStop(0,'rgba(255,150,40,'+(0.10+amp*0.10)+')');gg.addColorStop(0.5,'rgba(120,60,10,0.04)');gg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=gg;ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation='lighter';
+    var pj=new Array(N);for(var i=0;i<N;i++){var p=P[i];var wob=1+0.06*Math.sin(t*p.sp+p.ph0)+amp*0.05;pj[i]=rot({sx:p.sx,sy:p.sy,sz:p.sz,rad:p.rad*wob},ay+p.sz*0.15,ax);}
+    ctx.lineWidth=0.6;for(var i=0;i<N;i++){var pa=pj[i],p=P[i];for(var k=0;k<2;k++){var j=p.n[k];if(j<0)continue;var pb=pj[j];var fl=0.05+0.08*amp+0.04*Math.sin(t*4+i);ctx.strokeStyle='rgba(255,165,60,'+Math.max(0,fl)+')';ctx.beginPath();ctx.moveTo(pa.X,pa.Y);ctx.lineTo(pb.X,pb.Y);ctx.stroke();}}
+    for(var i=0;i<N;i++){var q=pj[i],p=P[i];var depth=(q.z+1.4)/2.8,rr=(0.9+1.7*depth)*p.sz2*(0.85+amp*0.5),br=0.35+0.65*depth,inner=p.rad<0.8,col=inner?'255,238,170':'255,'+Math.round(150+60*depth)+','+Math.round(40+20*depth);var g=ctx.createRadialGradient(q.X,q.Y,0,q.X,q.Y,rr*3.2);g.addColorStop(0,'rgba('+col+','+br+')');g.addColorStop(1,'rgba('+col+',0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(q.X,q.Y,rr*3.2,0,6.283);ctx.fill();}
+    var core=ctx.createRadialGradient(cx,cy,0,cx,cy,pr*0.7);core.addColorStop(0,'rgba(255,250,225,0.9)');core.addColorStop(0.25,'rgba(255,200,110,0.8)');core.addColorStop(0.6,'rgba(220,120,30,0.25)');core.addColorStop(1,'rgba(120,60,10,0)');ctx.fillStyle=core;ctx.beginPath();ctx.arc(cx,cy,pr*0.7,0,6.283);ctx.fill();
+    if(talk>0.15){ctx.strokeStyle='rgba(255,180,70,'+(talk*0.5)+')';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,R*(1.1+talk*0.7),0,6.283);ctx.stroke();}
+    if(Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.6,life:1});
+    for(var f=flares.length-1;f>=0;f--){var fo=flares[f];fo.r+=2.4;fo.life-=0.02;if(fo.life<=0){flares.splice(f,1);continue;}var fx=cx+Math.cos(fo.a)*fo.r,fy=cy+Math.sin(fo.a)*fo.r;var fgr=ctx.createRadialGradient(fx,fy,0,fx,fy,7);fgr.addColorStop(0,'rgba(255,210,120,'+(fo.life*0.6)+')');fgr.addColorStop(1,'rgba(255,150,40,0)');ctx.fillStyle=fgr;ctx.beginPath();ctx.arc(fx,fy,7,0,6.283);ctx.fill();}
+    ctx.globalCompositeOperation='source-over';
+    document.getElementById('think').textContent = talkNow>0.3?'responding':'idle';
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+
+refresh();
+if(!TOKEN) setTimeout(openSettings,400);
+</script>
+</body>
+</html>
