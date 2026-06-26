@@ -72,8 +72,8 @@
   #settings .card{width:min(460px,92vw);max-height:84vh;overflow:auto;}
   #settings .seg{font-size:10px;letter-spacing:.24em;color:#8a7320;text-transform:uppercase;margin:20px 0 6px;border-top:1px solid var(--line);padding-top:16px;}
   #settings .seg:first-of-type{border-top:none;padding-top:0;margin-top:2px;}
-  #settings #systems .sys{font-size:12.5px;}
-  #settings .log{max-height:230px;overflow:auto;}
+  #settings #systems .sys{font-size:12.5px;text-transform:uppercase;letter-spacing:.1em;}
+  #settings .log{max-height:46vh;overflow:auto;}
   .msg .body b{color:var(--gold-hi);font-weight:600;} .msg .body code{background:#1a1712;color:var(--gold-hi);padding:1px 5px;border-radius:4px;font-size:12.5px;}
   .msg .body i{color:#e8dcc0;font-style:italic;}
 </style>
@@ -86,7 +86,7 @@
   </header>
   <main>
     <div class="center">
-      <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think">idle</div></div>
+      <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
       <div id="transcript"></div>
     </div>
   </main>
@@ -105,8 +105,8 @@
   <div class="seg">Action Log</div>
   <div class="log" id="log"></div>
   <div class="seg">Connection</div>
-  <label>Server URL (blank = same origin)</label><input id="s-url" placeholder="http://localhost:8787" />
-  <label>Token (FLINT_TOKEN)</label><input id="s-token" type="password" placeholder="bearer token" />
+  <label>Server URL</label><input id="s-url" placeholder="leave blank for this device" />
+  <label>Token</label><input id="s-token" type="password" placeholder="bearer token" />
   <div class="row"><button onclick="saveSettings()">Save</button><button class="ghost" onclick="closeSettings()">Close</button></div>
 </div></div>
 
@@ -156,8 +156,8 @@ function pollLog(){
   if(!TOKEN)return;
   fetch(BASE+'/conversations',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
     if(!d)return;CONVOS=d.conversations||[];
-    var log=document.getElementById('log');var rows=CONVOS.slice(-16).reverse();log.innerHTML='';
-    if(!rows.length){log.innerHTML='<div class="row" style="cursor:default"><span class="a">·</span><span class="cv">no conversations yet</span></div>';return;}
+    var log=document.getElementById('log');var rows=CONVOS.slice(-100).reverse();log.innerHTML='';
+    if(!rows.length){log.innerHTML='<div class="row" style="cursor:default"><span class="a">·</span><span class="cv">No conversations yet</span></div>';return;}
     rows.forEach(function(e){
       var q=(e.question||'').replace(/\s+/g,' ').trim();
       var dt=new Date(e.ts);var hh=('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
@@ -174,7 +174,7 @@ function openConvo(id){var c=null;for(var i=0;i<CONVOS.length;i++){if(CONVOS[i].
   document.getElementById('cv-a').innerHTML=md(c.answer||'(no text captured)');
   document.getElementById('convo').style.display='flex';}
 function closeConvo(){document.getElementById('convo').style.display='none';}
-setInterval(pollLog,4000);
+setInterval(refresh,5000);
 
 /* ---------- chat (SSE) ---------- */
 function addMsg(who,cls){var t=document.getElementById('transcript');var d=document.createElement('div');d.className='msg '+cls;
@@ -189,7 +189,7 @@ function send(){
     if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
-      if(r.done){document.getElementById('think').textContent='idle';setTalk(0);pollLog();return;}
+      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
         if(ev.type==='text'){raw+=ev.delta;body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;setTalk(1);}
@@ -198,7 +198,7 @@ function send(){
       return pump();
     });}
     return pump();
-  }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='idle';setTalk(0);});
+  }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='';setTalk(0);});
 }
 document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
 
@@ -206,8 +206,11 @@ document.getElementById('input').addEventListener('keydown',function(e){if(e.key
 var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 (function(){
   var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
-  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.34;}
+  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.30;}
   size();window.addEventListener('resize',size);
+  // Refit whenever the canvas box changes size — e.g. the transcript growing
+  // underneath shrinks the brain area; without this the viz gets clipped.
+  if(window.ResizeObserver){new ResizeObserver(function(){size();}).observe(cvs);}
   var N=520,P=[];for(var i=0;i<N;i++){var u=Math.random(),v=Math.random(),th=2*Math.PI*u,ph=Math.acos(2*v-1),shell=0.55+Math.random()*0.6;
     P.push({sx:Math.sin(ph)*Math.cos(th),sy:Math.cos(ph),sz:Math.sin(ph)*Math.sin(th),rad:shell,sp:0.4+Math.random()*0.9,ph0:Math.random()*6.28,sz2:0.5+Math.random()*1.4});}
   for(var a=0;a<N;a++){var best=[1e9,1e9],bi=[-1,-1],pa=P[a];for(var b=0;b<N;b++){if(b===a)continue;var pb=P[b];var d=(pa.sx-pb.sx)*(pa.sx-pb.sx)+(pa.sy-pb.sy)*(pa.sy-pb.sy)+(pa.sz-pb.sz)*(pa.sz-pb.sz);if(d<best[0]){best[1]=best[0];bi[1]=bi[0];best[0]=d;bi[0]=b;}else if(d<best[1]){best[1]=d;bi[1]=b;}}pa.n=bi;}
@@ -227,7 +230,7 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
     if(Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.6,life:1});
     for(var f=flares.length-1;f>=0;f--){var fo=flares[f];fo.r+=2.4;fo.life-=0.02;if(fo.life<=0){flares.splice(f,1);continue;}var fx=cx+Math.cos(fo.a)*fo.r,fy=cy+Math.sin(fo.a)*fo.r;var fgr=ctx.createRadialGradient(fx,fy,0,fx,fy,7);fgr.addColorStop(0,'rgba(255,210,120,'+(fo.life*0.6)+')');fgr.addColorStop(1,'rgba(255,150,40,0)');ctx.fillStyle=fgr;ctx.beginPath();ctx.arc(fx,fy,7,0,6.283);ctx.fill();}
     ctx.globalCompositeOperation='source-over';
-    document.getElementById('think').textContent = talkNow>0.3?'responding':'idle';
+    document.getElementById('think').textContent = talkNow>0.3?'responding':'';
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
