@@ -103,6 +103,12 @@ wrapping a file/data-backed app:
 **Meridian's** trading signals (`list_tickers`, `get_signals`, `bias_summary` —
 net directional bias per ticker), reading `data/inputs/*.json`.
 
+[connectors/vantage-server.ts](connectors/vantage-server.ts) reads **Vantage's**
+live Postgres (`get_score`, `top_scores`, `find_company`, `list_watchlists`) and
+exposes ONE side-effecting tool — `add_to_watchlist` — annotated non-readonly so
+the safety gate checkpoints it (a real, reversible, non-financial **gated
+write**; approved executes, denied blocks).
+
 Verified end to end: Flint (local qwen2.5:14b) fused BOTH apps in one answer —
 "top 3 bullish tickers (Meridian) + best forecasting model by MASE (Prophet)" —
 with live data, no cloud. Point `ask` at multiple servers in `~/.flint/mcp.json`

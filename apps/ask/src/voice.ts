@@ -19,7 +19,11 @@ const exec = promisify(execFile);
 const DATA_DIR = join(homedir(), '.flint');
 
 export function defaultModelPath(): string {
-  return process.env.WHISPER_MODEL ?? join(DATA_DIR, 'models', 'ggml-base.en.bin');
+  if (process.env.WHISPER_MODEL) return process.env.WHISPER_MODEL;
+  // Prefer the more accurate small.en if present, else fall back to base.en.
+  const dir = join(DATA_DIR, 'models');
+  const small = join(dir, 'ggml-small.en.bin');
+  return existsSync(small) ? small : join(dir, 'ggml-base.en.bin');
 }
 
 /** Speak text aloud via macOS `say`. */
