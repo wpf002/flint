@@ -11,7 +11,7 @@ are the wall — not budgeted.
 | --- | --- | --- |
 | **0** | Flint core (provider-agnostic model layer) | ✅ **done** — `@flint/core`, contract suite green, adapters (Anthropic + Ollama), consumers |
 | **1** | Tool / actuation layer (MCP) | ◐ **substrate done** — `@flint/mcp` (client + registry + safety gate), tested through the loop. Remaining: wrap the real apps as MCP servers |
-| **2** | Orchestration (multi-step + checkpoints) | ◐ substrate — tool loop + idempotency-gated retry in core; no planner / approval UX over a real toolset yet |
+| **2** | Orchestration (multi-step + checkpoints) | ✅ **done** — multi-step tool loop, idempotency-gated retry, approver checkpoint, and a full **auditable action log** (`ActionLogObserver`; `ask log`; server `/actions`). Verified: a multi-app task with a clean audited trace |
 | **3** | Memory / context | ◐ reference-grade — durable `FileMemoryStore` + `LessonStore` + keyword retriever; **not** the real pgvector backend |
 | **4** | Voice / presence | ☐ not started |
 | **5** | Proactive | ◐ one case — nightly launchd reflection is a deterministic trigger; no general event bus |
