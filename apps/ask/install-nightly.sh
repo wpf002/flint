@@ -23,13 +23,17 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
   --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
   --outfile="$DATA/ask.mjs"
 
-echo "installing wrapper + LaunchAgent..."
+echo "installing wrappers + LaunchAgents..."
+# Nightly reflection (03:00) + morning brief (07:00). Both run the bundle.
 cp "$REPO/apps/ask/nightly-reflect.sh" "$DATA/nightly-reflect.sh"
-chmod +x "$DATA/nightly-reflect.sh"
-cp "$REPO/apps/ask/$PLIST" "$AGENTS/$PLIST"
+cp "$REPO/apps/ask/morning-brief.sh" "$DATA/morning-brief.sh"
+chmod +x "$DATA/nightly-reflect.sh" "$DATA/morning-brief.sh"
 
-launchctl unload "$AGENTS/$PLIST" 2>/dev/null || true
-launchctl load -w "$AGENTS/$PLIST"
+for p in "$PLIST" com.flint.brief.plist; do
+  cp "$REPO/apps/ask/$p" "$AGENTS/$p"
+  launchctl unload "$AGENTS/$p" 2>/dev/null || true
+  launchctl load -w "$AGENTS/$p"
+done
 
-echo "done. nightly reflection runs at 03:00."
-echo "test now: launchctl kickstart -k gui/$(id -u)/com.flint.reflect"
+echo "done. nightly reflection runs at 03:00; morning brief at 07:00."
+echo "test now: launchctl kickstart -k gui/$(id -u)/com.flint.brief"

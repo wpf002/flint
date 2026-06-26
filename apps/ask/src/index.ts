@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { Flint, AnthropicProvider, OllamaProvider, ActionLogObserver, type ProviderAdapter } from '@flint/core';
 import {
@@ -205,6 +205,53 @@ async function cmdConsolidate(): Promise<void> {
   for (const l of res.lessons) console.log(`  • (${l.category}) ${l.text}`);
 }
 
+/**
+ * Proactive morning brief (Phase 5). Unprompted: pulls current state from your
+ * systems (via the configured MCP connectors) and tells you what matters. Runs
+ * on a schedule (launchd) or on demand. Deterministic trigger (time) — the
+ * honest, solvable kind of proactivity.
+ */
+async function cmdBrief(): Promise<void> {
+  const { persona } = await buildPersona();
+  const specs = loadMcpSpecs();
+  let registry: McpRegistry | undefined;
+  if (specs.length > 0) {
+    registry = await McpRegistry.connect(specs, {
+      approver: makeApprover(),
+      onError: (server, err) => process.stderr.write(`[mcp] ${server} failed: ${String(err)}\n`),
+    });
+  }
+  const tools = registry?.tools() ?? [];
+
+  const prompt =
+    'Produce my brief. Use your tools to pull current state from my systems ' +
+    '(signals, forecasts, whatever is connected). Give 3-6 tight bullets of what ' +
+    'I should know right now and flag anything notable. No preamble, no filler.';
+
+  let out = '';
+  try {
+    for await (const ev of persona.chat({
+      conversationId: 'brief',
+      message: prompt,
+      ...(tools.length > 0 ? { tools } : {}),
+    })) {
+      if (ev.type === 'text') {
+        process.stdout.write(ev.delta);
+        out += ev.delta;
+      }
+      if (ev.type === 'error') process.stderr.write(`\n[error: ${ev.error.kind}]`);
+    }
+  } finally {
+    await registry?.close();
+  }
+  process.stdout.write('\n');
+  try {
+    writeFileSync(join(DATA_DIR, 'brief-latest.md'), `# Flint brief\n\n${out.trim()}\n`);
+  } catch {
+    /* best effort */
+  }
+}
+
 /** Show the auditable action trace of the most recent run. */
 async function cmdLog(): Promise<void> {
   const path = join(DATA_DIR, 'actions.jsonl');
@@ -255,11 +302,12 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask reflect | ask consolidate | ask lessons | ask log');
+    console.log('ask "<question>" | ask brief | ask reflect | ask consolidate | ask lessons | ask log');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
   if (cmd === 'consolidate') return cmdConsolidate();
+  if (cmd === 'brief') return cmdBrief();
   if (cmd === 'lessons') return cmdLessons();
   if (cmd === 'log') return cmdLog();
 

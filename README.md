@@ -253,7 +253,10 @@ first, LoRA fine-tune only if needed) is written up in
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask reflect   # distill nightly lessons
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask lessons   # what Flint has learned
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask log       # audited trace of the last run
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask brief     # proactive brief from your connected systems
   ```
+  `install-nightly.sh` schedules both: nightly reflection (03:00) and the
+  morning brief (07:00) via launchd. The brief lands in `~/.flint/brief-latest.md`.
   **Semantic memory (opt-in):** `ollama pull nomic-embed-text`, then set
   `FLINT_EMBED_MODEL=nomic-embed-text` to retrieve your writing/voice by meaning
   (embeddings + cosine) instead of keyword. Falls back to keyword if unset.
