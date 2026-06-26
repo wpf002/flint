@@ -99,8 +99,14 @@ wrapping a file/data-backed app:
   "args": ["packages/mcp/connectors/prophet-server.ts"] } ] }
 ```
 
-Verified end to end: Flint (local qwen2.5:14b) answered "which models are in
-production and which has the best MASE?" with live Prophet data, no cloud.
+[connectors/meridian-server.ts](connectors/meridian-server.ts) does the same for
+**Meridian's** trading signals (`list_tickers`, `get_signals`, `bias_summary` —
+net directional bias per ticker), reading `data/inputs/*.json`.
+
+Verified end to end: Flint (local qwen2.5:14b) fused BOTH apps in one answer —
+"top 3 bullish tickers (Meridian) + best forecasting model by MASE (Prophet)" —
+with live data, no cloud. Point `ask` at multiple servers in `~/.flint/mcp.json`
+and their tools aggregate into one set.
 
 ## Status
 
