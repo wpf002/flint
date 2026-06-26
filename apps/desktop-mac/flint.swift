@@ -3,7 +3,7 @@ import WebKit
 
 let FLINT_URL = "http://localhost:8080"
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
   var window: NSWindow!
   var web: WKWebView!
 
@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     let cfg = WKWebViewConfiguration()
     web = WKWebView(frame: frame, configuration: cfg)
     web.navigationDelegate = self
+    web.uiDelegate = self
     web.autoresizingMask = [.width, .height]
     if #available(macOS 12.0, *) { web.underPageBackgroundColor = .black }
     web.load(URLRequest(url: URL(string: FLINT_URL)!))
@@ -57,6 +58,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     NSApp.mainMenu = main
   }
   @objc func reloadFlint() { web.reload() }
+
+  // Grant the web view microphone access so in-app voice works (the app holds
+  // the NSMicrophoneUsageDescription; macOS still prompts once at the OS level).
+  func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+               initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+               decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+    decisionHandler(.grant)
+  }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
   func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

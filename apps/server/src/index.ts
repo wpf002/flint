@@ -1,7 +1,32 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
+/** Speech-to-text via whisper.cpp (the same pipeline the CLI voice mode uses). */
+const WHISPER_BIN = process.env.WHISPER_BIN?.trim() || '/opt/homebrew/bin/whisper-cli';
+const WHISPER_MODEL =
+  process.env.WHISPER_MODEL?.trim() || join(homedir(), '.flint', 'models', 'ggml-small.en.bin');
+async function transcribeAudio(buf: Buffer): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
+  try {
+    const inFile = join(dir, 'in');
+    const wav = join(dir, 'out.wav');
+    writeFileSync(inFile, buf);
+    // MediaRecorder gives mp4/m4a in WebKit; afconvert → 16 kHz mono WAV for whisper.
+    await execFileP('/usr/bin/afconvert', [inFile, wav, '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1']);
+    const { stdout } = await execFileP(WHISPER_BIN, ['-m', WHISPER_MODEL, '-f', wav, '-nt', '-np'], {
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return stdout.replace(/\s+/g, ' ').trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 import {
   Flint,
   AnthropicProvider,
@@ -270,6 +295,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, { conversations: ctx.convos.slice(-100) });
   }
 
+  // Voice input: the app records mic audio and posts it here; we transcribe with
+  // whisper.cpp and hand back the text (the client then sends it as a chat).
+  if (req.method === 'POST' && url === '/transcribe') {
+    const buf = await readRawBody(req);
+    if (!buf.length) return json(res, 400, { error: 'no audio' });
+    try {
+      return json(res, 200, { text: await transcribeAudio(buf) });
+    } catch (e) {
+      return json(res, 500, { error: `transcription failed: ${String(e)}` });
+    }
+  }
+
   if (req.method === 'POST' && url === '/generate') {
     const body = await readJson(req);
     const prompt = String(body.prompt ?? '');
@@ -319,6 +356,14 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(payload);
+}
+
+function readRawBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c as Buffer));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

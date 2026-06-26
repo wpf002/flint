@@ -32,7 +32,7 @@
   #brainwrap{flex:1;position:relative;min-height:0;}
   #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
   .think{display:none;}
-  aside.chat{width:460px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+  aside.chat{width:380px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
   #transcript{flex:1;overflow:auto;padding:16px 20px;}
   aside.chat .bar{margin:12px;}
   .msg{margin:8px 0;font-size:13.5px;line-height:1.5;}
@@ -49,6 +49,10 @@
   .bar input::placeholder{color:var(--mut);}
   .bar button{background:transparent;border:1px solid var(--gold-dim,#8a7320);color:var(--gold);border-radius:999px;padding:6px 16px;cursor:pointer;letter-spacing:.1em;font-size:11px;}
   .bar button:hover{border-color:var(--gold);color:var(--gold-hi);}
+  .bar .mic{padding:6px 11px;font-size:13px;line-height:1;}
+  .bar .mic.rec{background:var(--gold);color:#000;border-color:var(--gold);animation:micpulse 1s ease-in-out infinite;}
+  .bar .mic.busy{opacity:.5;}
+  @keyframes micpulse{0%,100%{box-shadow:0 0 0 0 rgba(212,175,55,.5);}50%{box-shadow:0 0 0 6px rgba(212,175,55,0);}}
   #settings{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9;}
   #settings .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:22px;width:360px;}
   #settings h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:14px;text-transform:uppercase;}
@@ -96,7 +100,8 @@
     <aside class="chat">
       <div id="transcript"></div>
       <div class="bar">
-        <input id="input" placeholder="Flint, what's my brief?" autocomplete="off" />
+        <input id="input" placeholder="How can I help you?" autocomplete="off" />
+        <button class="mic" id="micbtn" onclick="toggleMic()" title="Hold a conversation — speak, and Flint speaks back">🎤</button>
         <button onclick="send()">Ask</button>
       </div>
     </aside>
@@ -180,7 +185,8 @@ setInterval(refresh,5000);
 /* ---------- chat (SSE) ---------- */
 function addMsg(who,cls){var t=document.getElementById('transcript');var d=document.createElement('div');d.className='msg '+cls;
   d.innerHTML='<span class="who">'+who+'</span><span class="body"></span>';t.appendChild(d);t.scrollTop=t.scrollHeight;return d.querySelector('.body');}
-function send(){
+function send(speakBack){
+  var sb=speakBack===true;
   var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
   if(!TOKEN){openSettings();return;}
   addMsg('You','you').textContent=msg;
@@ -190,7 +196,7 @@ function send(){
     if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
-      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();return;}
+      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();if(sb)speakOut(raw);return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
         if(ev.type==='text'){raw+=ev.delta;body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;setTalk(1);}
@@ -202,6 +208,32 @@ function send(){
   }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='';setTalk(0);});
 }
 document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
+
+/* ---------- voice (speak to Flint, Flint speaks back) ---------- */
+var mediaRec=null,voChunks=[];
+function speakOut(t){try{if(!t)return;window.speechSynthesis.cancel();
+  var u=new SpeechSynthesisUtterance(t.replace(/[*_`#>\[\]]/g,'').slice(0,1500));u.rate=1.04;window.speechSynthesis.speak(u);}catch(e){}}
+function toggleMic(){
+  var btn=document.getElementById('micbtn');
+  if(mediaRec&&mediaRec.state==='recording'){mediaRec.stop();return;}
+  if(!navigator.mediaDevices||!window.MediaRecorder){alert('Voice input is not available in this view.');return;}
+  navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+    voChunks=[];try{mediaRec=new MediaRecorder(stream);}catch(e){mediaRec=new MediaRecorder(stream,{mimeType:'audio/mp4'});}
+    btn.classList.add('rec');
+    mediaRec.ondataavailable=function(e){if(e.data&&e.data.size)voChunks.push(e.data);};
+    mediaRec.onstop=function(){
+      btn.classList.remove('rec');stream.getTracks().forEach(function(t){t.stop();});
+      if(!voChunks.length)return;
+      var blob=new Blob(voChunks,{type:voChunks[0].type||'audio/mp4'});
+      btn.classList.add('busy');
+      fetch(BASE+'/transcribe',{method:'POST',headers:auth(),body:blob}).then(function(r){return r.json();}).then(function(d){
+        btn.classList.remove('busy');
+        if(d&&d.text){document.getElementById('input').value=d.text;send(true);}
+      }).catch(function(){btn.classList.remove('busy');});
+    };
+    mediaRec.start();
+  }).catch(function(e){alert('Microphone access is needed for voice: '+(e.message||e));});
+}
 
 /* ---------- the brain (approved viz) ---------- */
 var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}

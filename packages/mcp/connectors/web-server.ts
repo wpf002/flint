@@ -95,12 +95,24 @@ server.registerTool(
       const res = await fetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ api_key: key, query, max_results: n }),
-        signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify({
+          api_key: key,
+          query,
+          max_results: n,
+          include_answer: true, // Tavily synthesizes a current-info answer from live sources
+          search_depth: 'advanced',
+        }),
+        signal: AbortSignal.timeout(25_000),
       });
       if (!res.ok) return err(`tavily HTTP ${res.status}`);
-      const data = (await res.json()) as { results?: Array<{ title: string; url: string; content: string }> };
-      return text((data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })));
+      const data = (await res.json()) as {
+        answer?: string;
+        results?: Array<{ title: string; url: string; content: string }>;
+      };
+      return text({
+        answer: data.answer ?? null,
+        results: (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })),
+      });
     } catch (e) {
       return err(`search failed: ${e instanceof Error ? e.message : String(e)}`);
     }
