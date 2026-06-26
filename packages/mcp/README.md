@@ -123,6 +123,33 @@ macOS **Screen Recording** + **Accessibility** permissions, `cliclick`, an
 approver that approves, and a **vision model** for any autonomy (the text model
 can't see a screenshot). Never point it at anything destructive unattended.
 
+## The Legion (Roadmap v2 Phase 9) — read-only fleet observers
+
+Three connectors wrap the trading-bot fleets so Flint can **observe and report on
+them, never operate them**. Each is read-only by construction — no write tools
+exist, so there's nothing for the safety gate to even checkpoint. All three were
+verified end-to-end returning real, non-seeded data with **zero real money**:
+
+- [connectors/crossbar-server.ts](connectors/crossbar-server.ts) — the Crossbar
+  play-money prediction-market exchange (`markets`, `recent_trades`, `positions`,
+  `bot_snapshots`). Reads its Postgres. Verified against 450 live ESPN markets and
+  ~100 real bot trades. `CROSSBAR_DATABASE_URL` (default `…@localhost:5433/crossbar`).
+- [connectors/hive-server.ts](connectors/hive-server.ts) — the Hive bot-orchestration
+  control plane (`bots`, `recent_jobs` with their real results, `workers`,
+  `paper_trades`). Reads its Postgres. Verified against a real ESPN-scrape job run
+  by a live worker. `HIVE_DATABASE_URL` (default `…@localhost:5436/hive`). Trading
+  pool stays gated by Hive's own `TRADING_LIVE_ENABLED` (default off).
+- [connectors/bloomberg-server.ts](connectors/bloomberg-server.ts) — the Bloomberg /
+  AURORA terminal (`quotes`, `account`, `positions`, `orders`). Calls Bloomberg's
+  **HTTP API** (not its DB) so every number matches the terminal. Verified against
+  live Alpaca **paper** quotes/account/positions and bot-placed paper orders.
+  `BLOOMBERG_API_URL` (default `http://localhost:8000`). Live trading stays gated by
+  Bloomberg's `BOTS_ALLOW_LIVE` (keep it off + use `PK` paper keys).
+
+The rule: financial **writes** (place/cancel order, move money, enable live
+trading) never live in a Flint connector — they stay inside each app behind its
+own auth and live-trading gate. Flint sees everything and touches nothing.
+
 ## Wiring an existing MCP server (e.g. Trident)
 
 Apps that already expose their own MCP server need no connector — point Flint
