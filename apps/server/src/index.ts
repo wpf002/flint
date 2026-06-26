@@ -130,6 +130,24 @@ function recordConvo(convos: Convo[], question: string, answer: string): void {
   if (convos.length > 500) convos.splice(0, convos.length - 500);
 }
 
+/** Who/where/when context injected into every turn so Flint knows the user's
+ *  location and the real current time (the model has neither on its own). */
+const USER_LOCATION = process.env.FLINT_USER_LOCATION?.trim() || 'Dallas, Texas, USA';
+const USER_TZ = process.env.FLINT_USER_TZ?.trim() || 'America/Chicago';
+function userContext(): string {
+  const now = new Date().toLocaleString('en-US', {
+    timeZone: USER_TZ,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  return `[Context — not a user message: Right now it is ${now}. Will is located in ${USER_LOCATION}. Use this for any question about the time, date, day, the user's location, or local weather. Never say you lack access to the current time or to the user's location — you have both here.]`;
+}
+
 /** The Flint console (the black-and-gold Jarvis UI). $CONSOLE_PATH overrides the
  *  repo-relative default so a bundled server (e.g. ~/.flint/server.mjs) can still
  *  find it. */
@@ -236,7 +254,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const prompt = String(body.prompt ?? '');
     if (!prompt) return json(res, 400, { error: 'prompt required' });
     const out = await ctx.persona.generate({
-      prompt,
+      prompt: `${userContext()}\n\n${prompt}`,
       ...(ctx.tools.length ? { tools: ctx.tools } : {}),
     });
     recordConvo(ctx.convos, prompt, out.text);
@@ -259,7 +277,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answer = '';
     try {
       for await (const ev of ctx.persona.chat(
-        { conversationId, message, ...(ctx.tools.length ? { tools: ctx.tools } : {}) },
+        { conversationId, message: `${userContext()}\n\n${message}`, ...(ctx.tools.length ? { tools: ctx.tools } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;

@@ -16,7 +16,7 @@
   :root{--bg:#050505;--gold:#d4af37;--gold-hi:#f3dd8e;--orange:#ffb14a;--ink:#e8e3d2;--mut:#8d7c54;--line:#19150f;}
   *{box-sizing:border-box;margin:0;font-family:"SF Mono",ui-monospace,Menlo,monospace;}
   html,body{height:100%;background:var(--bg);color:var(--ink);overflow:hidden;}
-  #app{display:grid;grid-template-rows:auto 1fr auto;height:100vh;}
+  #app{display:grid;grid-template-rows:auto 1fr;height:100vh;}
   header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);}
   .brand{display:flex;align-items:center;gap:11px;cursor:pointer;}
   .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,var(--orange) 55%,#7a4a10);box-shadow:0 0 16px var(--orange);}
@@ -31,8 +31,10 @@
   .center{position:relative;display:flex;flex-direction:column;min-height:0;flex:1;}
   #brainwrap{flex:1;position:relative;min-height:0;}
   #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
-  .think{position:absolute;top:14px;left:0;right:0;text-align:center;font-size:11px;letter-spacing:.24em;color:var(--gold);text-transform:uppercase;pointer-events:none;}
-  #transcript{max-height:38%;overflow:auto;padding:8px 26px 12px;}
+  .think{display:none;}
+  aside.chat{width:460px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+  #transcript{flex:1;overflow:auto;padding:16px 20px;}
+  aside.chat .bar{margin:12px;}
   .msg{margin:8px 0;font-size:13.5px;line-height:1.5;}
   .msg .who{font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);display:block;margin-bottom:3px;}
   .msg.you .who{color:#7d96b8;} .msg.flint .who{color:var(--gold);}
@@ -72,6 +74,9 @@
   #settings .card{width:min(460px,92vw);max-height:84vh;overflow:auto;}
   #settings .seg{font-size:10px;letter-spacing:.24em;color:#8a7320;text-transform:uppercase;margin:20px 0 6px;border-top:1px solid var(--line);padding-top:16px;}
   #settings .seg:first-of-type{border-top:none;padding-top:0;margin-top:2px;}
+  #settings .seg-toggle{display:flex;justify-content:space-between;align-items:center;cursor:pointer;}
+  #settings .seg-toggle:hover{color:var(--gold);}
+  #settings .seg-toggle #logcaret{transition:transform .15s;}
   #settings #systems .sys{font-size:12.5px;text-transform:uppercase;letter-spacing:.1em;}
   #settings .log{max-height:46vh;overflow:auto;}
   .msg .body b{color:var(--gold-hi);font-weight:600;} .msg .body code{background:#1a1712;color:var(--gold-hi);padding:1px 5px;border-radius:4px;font-size:12.5px;}
@@ -87,23 +92,23 @@
   <main>
     <div class="center">
       <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
+    </div>
+    <aside class="chat">
       <div id="transcript"></div>
-    </div>
+      <div class="bar">
+        <input id="input" placeholder="Flint, what's my brief?" autocomplete="off" />
+        <button onclick="send()">Ask</button>
+      </div>
+    </aside>
   </main>
-  <footer>
-    <div class="bar">
-      <input id="input" placeholder="Flint, what's my brief?" autocomplete="off" />
-      <button onclick="send()">Ask</button>
-    </div>
-  </footer>
 </div>
 
 <div id="settings"><div class="card">
   <h4>Flint — Settings</h4>
   <div class="seg">Systems</div>
   <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
-  <div class="seg">Action Log</div>
-  <div class="log" id="log"></div>
+  <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
+  <div class="log" id="log" style="display:none"></div>
   <div class="row"><button onclick="closeSettings()">Close</button></div>
 </div></div>
 
@@ -168,6 +173,8 @@ function openConvo(id){var c=null;for(var i=0;i<CONVOS.length;i++){if(CONVOS[i].
   document.getElementById('cv-a').innerHTML=md(c.answer||'(no text captured)');
   document.getElementById('convo').style.display='flex';}
 function closeConvo(){document.getElementById('convo').style.display='none';}
+function toggleLog(){var l=document.getElementById('log'),c=document.getElementById('logcaret');
+  var open=l.style.display!=='none';l.style.display=open?'none':'block';c.textContent=open?'▸':'▾';}
 setInterval(refresh,5000);
 
 /* ---------- chat (SSE) ---------- */
@@ -200,7 +207,7 @@ document.getElementById('input').addEventListener('keydown',function(e){if(e.key
 var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 (function(){
   var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
-  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.30;}
+  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.20;}
   size();window.addEventListener('resize',size);
   // Refit whenever the canvas box changes size — e.g. the transcript growing
   // underneath shrinks the brain area; without this the viz gets clipped.
@@ -220,9 +227,9 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
     ctx.lineWidth=0.6;for(var i=0;i<N;i++){var pa=pj[i],p=P[i];for(var k=0;k<2;k++){var j=p.n[k];if(j<0)continue;var pb=pj[j];var fl=0.05+0.08*amp+0.04*Math.sin(t*4+i);ctx.strokeStyle='rgba(255,165,60,'+Math.max(0,fl)+')';ctx.beginPath();ctx.moveTo(pa.X,pa.Y);ctx.lineTo(pb.X,pb.Y);ctx.stroke();}}
     for(var i=0;i<N;i++){var q=pj[i],p=P[i];var depth=(q.z+1.4)/2.8,rr=(0.9+1.7*depth)*p.sz2*(0.85+amp*0.5),br=0.35+0.65*depth,inner=p.rad<0.8,col=inner?'255,238,170':'255,'+Math.round(150+60*depth)+','+Math.round(40+20*depth);var g=ctx.createRadialGradient(q.X,q.Y,0,q.X,q.Y,rr*3.2);g.addColorStop(0,'rgba('+col+','+br+')');g.addColorStop(1,'rgba('+col+',0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(q.X,q.Y,rr*3.2,0,6.283);ctx.fill();}
     var core=ctx.createRadialGradient(cx,cy,0,cx,cy,pr*0.7);core.addColorStop(0,'rgba(255,250,225,0.9)');core.addColorStop(0.25,'rgba(255,200,110,0.8)');core.addColorStop(0.6,'rgba(220,120,30,0.25)');core.addColorStop(1,'rgba(120,60,10,0)');ctx.fillStyle=core;ctx.beginPath();ctx.arc(cx,cy,pr*0.7,0,6.283);ctx.fill();
-    if(talk>0.15){ctx.strokeStyle='rgba(255,180,70,'+(talk*0.5)+')';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,R*(1.1+talk*0.7),0,6.283);ctx.stroke();}
-    if(Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.6,life:1});
-    for(var f=flares.length-1;f>=0;f--){var fo=flares[f];fo.r+=2.4;fo.life-=0.02;if(fo.life<=0){flares.splice(f,1);continue;}var fx=cx+Math.cos(fo.a)*fo.r,fy=cy+Math.sin(fo.a)*fo.r;var fgr=ctx.createRadialGradient(fx,fy,0,fx,fy,7);fgr.addColorStop(0,'rgba(255,210,120,'+(fo.life*0.6)+')');fgr.addColorStop(1,'rgba(255,150,40,0)');ctx.fillStyle=fgr;ctx.beginPath();ctx.arc(fx,fy,7,0,6.283);ctx.fill();}
+    if(talk>0.15){ctx.strokeStyle='rgba(255,180,70,'+(talk*0.5)+')';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,R*(1.05+talk*0.4),0,6.283);ctx.stroke();}
+    if(Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.45,life:1});
+    for(var f=flares.length-1;f>=0;f--){var fo=flares[f];fo.r+=1.5;fo.life-=0.03;if(fo.r>R*1.35)fo.life=0;if(fo.life<=0){flares.splice(f,1);continue;}var fx=cx+Math.cos(fo.a)*fo.r,fy=cy+Math.sin(fo.a)*fo.r;var fgr=ctx.createRadialGradient(fx,fy,0,fx,fy,7);fgr.addColorStop(0,'rgba(255,210,120,'+(fo.life*0.6)+')');fgr.addColorStop(1,'rgba(255,150,40,0)');ctx.fillStyle=fgr;ctx.beginPath();ctx.arc(fx,fy,7,0,6.283);ctx.fill();}
     ctx.globalCompositeOperation='source-over';
     document.getElementById('think').textContent = talkNow>0.3?'responding':'';
     requestAnimationFrame(frame);
