@@ -10,7 +10,7 @@ const execFileP = promisify(execFile);
 /** Speech-to-text via whisper.cpp (the same pipeline the CLI voice mode uses). */
 const WHISPER_BIN = process.env.WHISPER_BIN?.trim() || '/opt/homebrew/bin/whisper-cli';
 const WHISPER_MODEL =
-  process.env.WHISPER_MODEL?.trim() || join(homedir(), '.flint', 'models', 'ggml-small.en.bin');
+  process.env.WHISPER_MODEL?.trim() || join(homedir(), '.flint', 'models', 'ggml-base.en.bin');
 async function transcribeAudio(buf: Buffer): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
   try {

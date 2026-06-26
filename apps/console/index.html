@@ -191,16 +191,17 @@ function send(speakBack){
   var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
   if(!TOKEN){openSettings();return;}
   addMsg('You','you').textContent=msg;
-  var body=addMsg('Flint','flint');var raw='';document.getElementById('think').textContent='responding';setTalk(1);
+  var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb&&window.speechSynthesis)window.speechSynthesis.cancel();document.getElementById('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:'console',message:msg})})
   .then(function(res){
     if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
-      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();if(sb)speakOut(raw);return;}
+      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();if(sb){var tail=raw.slice(spoken);if(tail.trim())speakOut(tail);}return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
-        if(ev.type==='text'){raw+=ev.delta;body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;setTalk(1);}
+        if(ev.type==='text'){raw+=ev.delta;body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;setTalk(1);
+          if(sb){var rest=raw.slice(spoken),re=/[.!?](\s|$)/g,mm,last=-1;while((mm=re.exec(rest))){last=mm.index+1;}if(last>0){speakOut(rest.slice(0,last));spoken+=last;}}}
         if(ev.type==='error'){raw+=' [error: '+(ev.error&&ev.error.kind||ev.error)+']';body.innerHTML=md(raw);}
       }catch(e){}});
       return pump();
@@ -211,9 +212,18 @@ function send(speakBack){
 document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
 
 /* ---------- voice (speak to Flint, Flint speaks back) ---------- */
-var mediaRec=null,voChunks=[];
-function speakOut(t){try{if(!t)return;window.speechSynthesis.cancel();
-  var u=new SpeechSynthesisUtterance(t.replace(/[*_`#>\[\]]/g,'').slice(0,1500));u.rate=1.04;window.speechSynthesis.speak(u);}catch(e){}}
+var mediaRec=null,voChunks=[],_flintVoice=null;
+function pickVoice(){
+  if(_flintVoice)return _flintVoice;
+  var vs=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
+  var prefer=['Aaron','Daniel','Fred','Alex','Tom','Oliver','Arthur','Reed','Gordon','Rishi'];
+  for(var i=0;i<prefer.length;i++)for(var j=0;j<vs.length;j++)if(vs[j].name.indexOf(prefer[i])>=0){_flintVoice=vs[j];return _flintVoice;}
+  for(var k=0;k<vs.length;k++)if(/^en/i.test(vs[k].lang)&&/male|man/i.test(vs[k].name)){_flintVoice=vs[k];return _flintVoice;}
+  for(var l=0;l<vs.length;l++)if(/^en/i.test(vs[l].lang)){_flintVoice=vs[l];return _flintVoice;}
+  return null;
+}
+if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_flintVoice=null;pickVoice();};
+function speakOut(t){try{if(!t||!t.trim())return;var u=new SpeechSynthesisUtterance(t.replace(/[*_`#>\[\]]/g,'').trim());var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;window.speechSynthesis.speak(u);}catch(e){}}
 function toggleMic(){
   var btn=document.getElementById('micbtn');
   if(mediaRec&&mediaRec.state==='recording'){mediaRec.stop();return;}
