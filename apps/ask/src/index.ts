@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { say, transcribe, toWav16k, recordUtterance } from './voice.js';
 import { createInterface } from 'node:readline';
 import { Flint, AnthropicProvider, OllamaProvider, ActionLogObserver, type ProviderAdapter } from '@flint/core';
 import {
@@ -291,6 +292,72 @@ async function cmdWatch(): Promise<void> {
   }
 }
 
+/**
+ * Voice (Phase 4) — talk to Flint, it talks back. All local: whisper.cpp STT +
+ * macOS `say` TTS. `ask voice` runs the live mic loop; `ask voice <audiofile>`
+ * processes one clip (used to verify the chain without a mic).
+ */
+async function cmdVoice(fileArg?: string): Promise<void> {
+  const { persona } = await buildPersona();
+  const specs = loadMcpSpecs();
+  const registry = specs.length > 0
+    ? await McpRegistry.connect(specs, {
+        approver: makeApprover(),
+        onError: (server, err) => process.stderr.write(`[mcp] ${server} failed: ${String(err)}\n`),
+      })
+    : undefined;
+  const tools = registry?.tools() ?? [];
+  const tmp = join(DATA_DIR, 'voice');
+  mkdirSync(tmp, { recursive: true });
+
+  const respond = async (heard: string): Promise<void> => {
+    console.log(`You: ${heard}`);
+    let reply = '';
+    for await (const ev of persona.chat({
+      conversationId: 'voice',
+      message: heard,
+      ...(tools.length > 0 ? { tools } : {}),
+    })) {
+      if (ev.type === 'text') reply += ev.delta;
+      if (ev.type === 'error') process.stderr.write(`[error: ${ev.error.kind}]\n`);
+    }
+    console.log(`Flint: ${reply}`);
+    await say(reply);
+  };
+
+  try {
+    if (fileArg) {
+      // One-shot: transcribe a file → respond → speak.
+      let wav = fileArg;
+      if (!fileArg.toLowerCase().endsWith('.wav')) {
+        wav = join(tmp, 'in.wav');
+        await toWav16k(fileArg, wav);
+      }
+      const heard = await transcribe(wav);
+      if (heard) await respond(heard);
+      else console.log('(nothing transcribed)');
+      return;
+    }
+
+    // Live loop.
+    await say('Flint here. What do you need?');
+    for (;;) {
+      process.stderr.write('\n[listening — speak, then pause. Ctrl-C to stop]\n');
+      const wav = join(tmp, 'utt.wav');
+      await recordUtterance(wav);
+      const heard = await transcribe(wav);
+      if (!heard) continue;
+      if (/\b(goodbye|stop listening|that'?s all|exit|quit)\b/i.test(heard)) {
+        await say('Talk soon.');
+        break;
+      }
+      await respond(heard);
+    }
+  } finally {
+    await registry?.close();
+  }
+}
+
 /** Show the auditable action trace of the most recent run. */
 async function cmdLog(): Promise<void> {
   const path = join(DATA_DIR, 'actions.jsonl');
@@ -341,13 +408,14 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask brief | ask watch | ask reflect | ask consolidate | ask lessons | ask log');
+    console.log('ask "<question>" | ask voice | ask brief | ask watch | ask reflect | ask consolidate | ask lessons | ask log');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
   if (cmd === 'consolidate') return cmdConsolidate();
   if (cmd === 'brief') return cmdBrief();
   if (cmd === 'watch') return cmdWatch();
+  if (cmd === 'voice') return cmdVoice(rest[0]);
   if (cmd === 'lessons') return cmdLessons();
   if (cmd === 'log') return cmdLog();
 

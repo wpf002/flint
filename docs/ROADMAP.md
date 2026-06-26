@@ -13,7 +13,7 @@ are the wall — not budgeted.
 | **1** | Tool / actuation layer (MCP) | ◐ **substrate done** — `@flint/mcp` (client + registry + safety gate), tested through the loop. Remaining: wrap the real apps as MCP servers |
 | **2** | Orchestration (multi-step + checkpoints) | ✅ **done** — multi-step tool loop, idempotency-gated retry, approver checkpoint, and a full **auditable action log** (`ActionLogObserver`; `ask log`; server `/actions`). Verified: a multi-app task with a clean audited trace |
 | **3** | Memory / context | ◐ strong — durable `FileMemoryStore` + `LessonStore`, and **semantic retrieval** (`SemanticRetriever` + local `OllamaEmbedder`, meaning-based) verified live. Remaining: the durable pgvector backend (same `Retriever` interface; parked with Railway) |
-| **4** | Voice / presence | ☐ not started |
+| **4** | Voice / presence | ✅ built (local) — `ask voice`: whisper.cpp STT + macOS `say` TTS + `sox` mic capture. Full STT→Flint→TTS chain verified end to end (via a generated clip); live mic loop ready for the user to test. All local, no cloud |
 | **5** | Proactive | ✅ deterministic cases done — nightly reflection (03:00), morning brief (07:00), and a **watch-trigger framework** (`ask watch`, `~/.flint/triggers.json`): code-evaluated threshold alerts over live tool data, no LLM in the firing decision. Open-ended "notice what I didn't ask" stays out of scope (honest ceiling) |
 | **6** | Computer-use (gated) | ☐ not started |
 

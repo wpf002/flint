@@ -254,7 +254,12 @@ first, LoRA fine-tune only if needed) is written up in
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask lessons   # what Flint has learned
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask log       # audited trace of the last run
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask brief     # proactive brief from your connected systems
+  OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask voice     # talk to Flint, it talks back (local STT+TTS)
   ```
+  **Voice setup (one-time, all local):** `brew install whisper-cpp sox`, then
+  download a model to `~/.flint/models/ggml-base.en.bin` (from
+  huggingface.co/ggerganov/whisper.cpp). `ask voice` runs the live mic loop;
+  `ask voice <audiofile>` processes one clip. STT = whisper.cpp, TTS = macOS `say`.
   `install-nightly.sh` schedules both: nightly reflection (03:00) and the
   morning brief (07:00) via launchd. The brief lands in `~/.flint/brief-latest.md`.
 
