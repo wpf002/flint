@@ -100,7 +100,7 @@ server.registerTool(
           query,
           max_results: n,
           include_answer: true, // Tavily synthesizes a current-info answer from live sources
-          search_depth: 'advanced',
+          search_depth: 'basic', // basic + include_answer is ~2-3x faster than 'advanced' and still solid
         }),
         signal: AbortSignal.timeout(25_000),
       });

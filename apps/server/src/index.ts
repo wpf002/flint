@@ -72,7 +72,13 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
   if (ollamaModel) {
     return {
-      provider: new OllamaProvider({ baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' }),
+      provider: new OllamaProvider({
+        baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
+        // Bigger context so the ~4k of system+tool schemas leaves room for the
+        // conversation, tool results, and the answer (default 4k overflows and
+        // forces re-eval / truncation on tool-calling turns).
+        defaultOptions: { num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 8192) },
+      }),
       model: ollamaModel,
     };
   }
