@@ -4,7 +4,7 @@ import type {
   GenerateResult,
 } from '../adapter.js';
 import type { Message } from '../../types/message.js';
-import type { StreamEvent, TokenUsage, StreamDoneReason } from '../../types/stream.js';
+import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
 import type { ModelCapabilities } from '../../types/capabilities.js';
 import { FlintError } from '../../types/error.js';
@@ -13,7 +13,6 @@ import { newId } from '../../core/util.js';
 import { ollamaCapabilities } from './capabilities.js';
 import { OllamaHttpError, toAiError } from './errors.js';
 import { mapMessages, mapDoneReason } from './mapping.js';
-import { buildToolSystemPrompt, extractToolCall } from './tool-protocol.js';
 
 export interface OllamaProviderOptions {
   /** Base URL of the Ollama server. Defaults to http://localhost:11434. */
@@ -27,7 +26,11 @@ export interface OllamaProviderOptions {
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
 interface OllamaChatChunk {
-  message?: { role: string; content: string };
+  message?: {
+    role: string;
+    content: string;
+    tool_calls?: Array<{ function: { name: string; arguments: unknown } }>;
+  };
   done?: boolean;
   done_reason?: string;
   prompt_eval_count?: number;
@@ -78,18 +81,33 @@ export class OllamaProvider implements ProviderAdapter {
         output: chunk.eval_count ?? 0,
       };
 
-      const { message, reason } = this.interpret(text, args, chunk.done_reason);
-      return { message, usage, reason };
+      const calls = chunk.message?.tool_calls ?? [];
+      if (calls.length > 0) {
+        const toolCalls: ToolCall[] = calls.map((c) => ({
+          id: newId('toolu'),
+          toolName: c.function.name,
+          args: c.function.arguments,
+        }));
+        return {
+          message: encodeToolCallTurn(newId('msg'), text, toolCalls, 0),
+          usage,
+          reason: 'tool_call',
+        };
+      }
+      return {
+        message: encodeAssistantText(newId('msg'), text, 0),
+        usage,
+        reason: mapDoneReason(chunk.done_reason),
+      };
     } catch (err) {
       throw new FlintError(toAiError(err));
     }
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
-    const hasTools = Boolean(args.tools && args.tools.length > 0);
-    let buffered = '';
     const usage: TokenUsage = { input: 0, output: 0 };
     let doneReason: string | undefined;
+    const toolCalls: ToolCall[] = [];
 
     try {
       const body = this.buildBody(args, true);
@@ -104,13 +122,12 @@ export class OllamaProvider implements ProviderAdapter {
 
       for await (const line of readNdjson(resp.body)) {
         const chunk = JSON.parse(line) as OllamaChatChunk;
+        // Native tools: `content` is real text and tool calls are structured, so
+        // we stream text live AND capture calls — no buffering or guessing.
         const delta = chunk.message?.content ?? '';
-        if (delta) {
-          buffered += delta;
-          // In the prompted-tools regime we can't stream live (the text might
-          // BE a tool-call JSON) — buffer and decide at the end. Without tools,
-          // stream tokens as they arrive.
-          if (!hasTools) yield { type: 'text', delta };
+        if (delta) yield { type: 'text', delta };
+        for (const c of chunk.message?.tool_calls ?? []) {
+          toolCalls.push({ id: newId('toolu'), toolName: c.function.name, args: c.function.arguments });
         }
         if (chunk.done) {
           doneReason = chunk.done_reason;
@@ -119,22 +136,11 @@ export class OllamaProvider implements ProviderAdapter {
         }
       }
 
-      if (hasTools) {
-        const call = extractToolCall(buffered);
-        if (call) {
-          const toolCall: ToolCall = {
-            id: newId('toolu'),
-            toolName: call.name,
-            args: call.arguments,
-          };
-          yield { type: 'tool_call', call: toolCall };
-          yield { type: 'done', reason: 'tool_call', usage };
-          return;
-        }
-        // No tool call — emit the buffered answer as text now.
-        if (buffered) yield { type: 'text', delta: buffered };
+      if (toolCalls.length > 0) {
+        for (const call of toolCalls) yield { type: 'tool_call', call };
+        yield { type: 'done', reason: 'tool_call', usage };
+        return;
       }
-
       yield { type: 'done', reason: mapDoneReason(doneReason), usage };
     } catch (err) {
       yield { type: 'error', error: toAiError(err) };
@@ -144,48 +150,24 @@ export class OllamaProvider implements ProviderAdapter {
   // --- internals ------------------------------------------------------------
 
   private buildBody(args: GenerateArgs, stream: boolean): Record<string, unknown> {
-    const systemParts: string[] = [];
-    if (args.system) systemParts.push(args.system);
-    if (args.tools && args.tools.length > 0) {
-      systemParts.push(buildToolSystemPrompt(args.tools));
-    }
-    const systemPrefix = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
-
     const options: Record<string, unknown> = { ...this.defaultOptions };
     if (args.maxTokens !== undefined) options.num_predict = args.maxTokens;
 
-    return {
+    const body: Record<string, unknown> = {
       model: args.model,
-      messages: mapMessages(args.messages, systemPrefix),
+      messages: mapMessages(args.messages, args.system),
       stream,
       ...(Object.keys(options).length > 0 ? { options } : {}),
     };
-  }
-
-  /** Shared text→Message interpretation for the non-streaming path. */
-  private interpret(
-    text: string,
-    args: GenerateArgs,
-    doneReason: string | undefined,
-  ): { message: Message; reason: StreamDoneReason } {
     if (args.tools && args.tools.length > 0) {
-      const call = extractToolCall(text);
-      if (call) {
-        const toolCall: ToolCall = {
-          id: newId('toolu'),
-          toolName: call.name,
-          args: call.arguments,
-        };
-        return {
-          message: encodeToolCallTurn(newId('msg'), '', [toolCall], 0),
-          reason: 'tool_call',
-        };
-      }
+      // Native function-calling: hand Ollama the tool schemas directly, instead
+      // of describing them in a prompt and parsing the model's free text.
+      body.tools = args.tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
     }
-    return {
-      message: encodeAssistantText(newId('msg'), text, 0),
-      reason: mapDoneReason(doneReason),
-    };
+    return body;
   }
 }
 

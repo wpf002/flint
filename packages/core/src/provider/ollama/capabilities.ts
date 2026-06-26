@@ -18,7 +18,7 @@ function caps(
   structuredOutput: ModelCapabilities['structuredOutput'] = 'prompted',
 ): ModelCapabilities {
   return {
-    toolCalling: 'prompted',
+    toolCalling: 'native',
     structuredOutput,
     streaming: 'full',
     maxContextTokens,

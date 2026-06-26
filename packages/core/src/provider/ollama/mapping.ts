@@ -1,18 +1,24 @@
 import type { Message } from '../../types/message.js';
 import { decodeAssistantTurn, decodeToolResult } from '../../core/encoding.js';
 
+export interface OllamaToolCall {
+  function: { name: string; arguments: unknown };
+}
+
 export interface OllamaMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  tool_calls?: OllamaToolCall[];
+  tool_name?: string;
 }
 
 /**
- * Flatten canonical messages onto Ollama's chat format. Ollama (in the prompted
- * regime) has no tool/tool_result roles, so:
- *  - a `tool` turn (assistant tool call) becomes an assistant message whose
- *    content is the model's own emitted tool-call JSON,
- *  - a `tool_result` becomes a user message describing the result, fed back so
- *    the model can use it on the next pass.
+ * Flatten canonical messages onto Ollama's NATIVE chat format (the `/api/chat`
+ * tools API). Unlike the old prompted regime, tool calls and results travel as
+ * structured fields, not free text:
+ *  - a `tool` turn (assistant tool call) → an assistant message carrying
+ *    structured `tool_calls`,
+ *  - a `tool_result` → a `role: 'tool'` message with the result body.
  */
 export function mapMessages(messages: Message[], systemPrefix?: string): OllamaMessage[] {
   const out: OllamaMessage[] = [];
@@ -33,20 +39,19 @@ export function mapMessages(messages: Message[], systemPrefix?: string): OllamaM
         break;
       case 'tool': {
         const turn = decodeAssistantTurn(msg);
-        const calls = turn.toolCalls
-          .map((c) => JSON.stringify({ tool_call: { name: c.toolName, arguments: c.args } }))
-          .join('\n');
-        const content = [turn.text, calls].filter((s) => s.trim().length > 0).join('\n');
-        out.push({ role: 'assistant', content });
+        out.push({
+          role: 'assistant',
+          content: turn.text ?? '',
+          tool_calls: turn.toolCalls.map((c) => ({
+            function: { name: c.toolName, arguments: c.args },
+          })),
+        });
         break;
       }
       case 'tool_result': {
         const res = decodeToolResult(msg);
         const body = typeof res.result === 'string' ? res.result : JSON.stringify(res.result);
-        out.push({
-          role: 'user',
-          content: `Tool "${res.toolName}" returned:\n${body}`,
-        });
+        out.push({ role: 'tool', content: body, tool_name: res.toolName });
         break;
       }
     }
