@@ -58,6 +58,23 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
   process.exit(1);
 }
 
+/**
+ * Always-on approval policy for GUARDED (non-read-only) tools — e.g. Trident's
+ * calendar/email/drive. There's no human in the loop here, so we DEFAULT-DENY
+ * and only auto-approve tools whose name reads as a query/lookup. Anything that
+ * sends, creates, edits, deletes, moves money, or otherwise has consequences
+ * stays denied until there's an interactive/whitelisted approval path. Read-only
+ * connectors never reach this (they're classified safe and run freely).
+ */
+// Read verbs can appear anywhere in the name (e.g. gmail_search, gcal_upcoming).
+const READ_TOOL = /(search|list|read|get|fetch|lookup|find|query|upcoming|forecast|model|recent|summary|view|status|count|coverage|bias|quote|position|market|account|order|worker|\bbot|industr|digest|signal|score|ticker|detail|snapshot|trade|job|rule|recommend|health|latest|\btop|best)/i;
+// Anything that writes/sends/acts is denied (no human in the loop here).
+const WRITE_TOOL = /(send|create|update|delete|remove|trash|cancel|reply|draft|compose|schedule|book|insert|\bpost\b|\bput\b|transfer|\bpay\b|buy|sell|place_order|enable|disable|start_|stop_|move_|write_|add_to|set_)/i;
+async function readOnlyApprover(req: { server: string; tool: string }): Promise<boolean> {
+  const t = req.tool || '';
+  return READ_TOOL.test(t) && !WRITE_TOOL.test(t);
+}
+
 /** Optional MCP servers (your apps/integrations) from $MCP_CONFIG (a JSON file). */
 function loadMcpSpecs(): McpServerSpec[] {
   const path = process.env.MCP_CONFIG?.trim();
@@ -96,7 +113,7 @@ async function main(): Promise<void> {
   // tools are DENIED — there's no interactive approver in a server (a hosted
   // approval flow is a later step). Fail-safe by default.
   const specs = loadMcpSpecs();
-  const registry = specs.length > 0 ? await McpRegistry.connect(specs) : undefined;
+  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: readOnlyApprover }) : undefined;
   const tools: Tool[] = registry?.tools() ?? [];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
