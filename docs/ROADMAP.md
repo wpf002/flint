@@ -14,7 +14,7 @@ are the wall — not budgeted.
 | **2** | Orchestration (multi-step + checkpoints) | ✅ **done** — multi-step tool loop, idempotency-gated retry, approver checkpoint, and a full **auditable action log** (`ActionLogObserver`; `ask log`; server `/actions`). Verified: a multi-app task with a clean audited trace |
 | **3** | Memory / context | ◐ strong — durable `FileMemoryStore` + `LessonStore`, and **semantic retrieval** (`SemanticRetriever` + local `OllamaEmbedder`, meaning-based) verified live. Remaining: the durable pgvector backend (same `Retriever` interface; parked with Railway) |
 | **4** | Voice / presence | ☐ not started |
-| **5** | Proactive | ◐ growing — nightly reflection (03:00) **and** a morning brief (07:00) that pulls live state from connected systems and writes `~/.flint/brief-latest.md`, both via launchd, verified end to end. Remaining: a general "watch X, when Y" trigger framework |
+| **5** | Proactive | ✅ deterministic cases done — nightly reflection (03:00), morning brief (07:00), and a **watch-trigger framework** (`ask watch`, `~/.flint/triggers.json`): code-evaluated threshold alerts over live tool data, no LLM in the firing decision. Open-ended "notice what I didn't ask" stays out of scope (honest ceiling) |
 | **6** | Computer-use (gated) | ☐ not started |
 
 Bonus, off the original spec: `@flint/persona` (voice identity) and

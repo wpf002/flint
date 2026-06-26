@@ -21,4 +21,6 @@ export { reflect } from './reflect.js';
 export type { ReflectInput, ReflectResult } from './reflect.js';
 export { consolidate } from './consolidate.js';
 export type { ConsolidateInput, ConsolidateResult } from './consolidate.js';
+export { evaluateTriggers, selectValues } from './triggers.js';
+export type { Trigger, TriggerResult, CompareOp } from './triggers.js';
 export type { PersonaConfig, Retriever, WritingSample } from './types.js';

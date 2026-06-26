@@ -257,6 +257,13 @@ first, LoRA fine-tune only if needed) is written up in
   ```
   `install-nightly.sh` schedules both: nightly reflection (03:00) and the
   morning brief (07:00) via launchd. The brief lands in `~/.flint/brief-latest.md`.
+
+  **Watch triggers (`ask watch`):** deterministic threshold alerts over live tool
+  data — no LLM in the firing decision. Define them in `~/.flint/triggers.json`:
+  ```json
+  { "triggers": [ { "name": "bullish", "tool": "meridian.bias_summary",
+    "select": "*.score", "when": {"op": ">", "value": 0.5}, "alert": "Strong bullish bias" } ] }
+  ```
   **Semantic memory (opt-in):** `ollama pull nomic-embed-text`, then set
   `FLINT_EMBED_MODEL=nomic-embed-text` to retrieve your writing/voice by meaning
   (embeddings + cosine) instead of keyword. Falls back to keyword if unset.

@@ -11,8 +11,10 @@ import {
   OllamaEmbedder,
   reflect,
   consolidate,
+  evaluateTriggers,
   FLINT_STYLE_GUIDE,
   FLINT_VOICE_EXEMPLARS,
+  type Trigger,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec, type Approver } from '@flint/mcp';
 import { FileMemoryStore, FileLessonStore } from './stores.js';
@@ -252,6 +254,43 @@ async function cmdBrief(): Promise<void> {
   }
 }
 
+/**
+ * Evaluate watch triggers (Phase 5) from ~/.flint/triggers.json against your
+ * connected systems. Deterministic — code decides if an alert fires, not the
+ * model. Schedulable like brief/reflect.
+ */
+async function cmdWatch(): Promise<void> {
+  const path = join(DATA_DIR, 'triggers.json');
+  if (!existsSync(path)) {
+    console.log('No triggers. Create ~/.flint/triggers.json:');
+    console.log('  {"triggers":[{"name":"bullish","tool":"meridian.bias_summary","select":"*.score","when":{"op":">","value":0.5},"alert":"Strong bullish bias"}]}');
+    return;
+  }
+  const triggers = (JSON.parse(readFileSync(path, 'utf8')) as { triggers?: Trigger[] }).triggers ?? [];
+  const specs = loadMcpSpecs();
+  const registry = specs.length > 0
+    ? await McpRegistry.connect(specs, {
+        approver: makeApprover(),
+        onError: (server, err) => process.stderr.write(`[mcp] ${server} failed: ${String(err)}\n`),
+      })
+    : undefined;
+  try {
+    const results = await evaluateTriggers(triggers, registry?.tools() ?? []);
+    const fired = results.filter((r) => r.fired);
+    if (fired.length === 0) {
+      console.log(`Checked ${results.length} trigger(s); nothing fired.`);
+    } else {
+      console.log(`${fired.length} alert(s):`);
+      for (const r of fired) console.log(`  ⚠ ${r.name}: ${r.alert}`);
+    }
+    for (const r of results.filter((r) => r.error)) {
+      process.stderr.write(`  (trigger '${r.name}' error: ${r.error})\n`);
+    }
+  } finally {
+    await registry?.close();
+  }
+}
+
 /** Show the auditable action trace of the most recent run. */
 async function cmdLog(): Promise<void> {
   const path = join(DATA_DIR, 'actions.jsonl');
@@ -302,12 +341,13 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log('ask "<question>" | ask brief | ask reflect | ask consolidate | ask lessons | ask log');
+    console.log('ask "<question>" | ask brief | ask watch | ask reflect | ask consolidate | ask lessons | ask log');
     return;
   }
   if (cmd === 'reflect') return cmdReflect();
   if (cmd === 'consolidate') return cmdConsolidate();
   if (cmd === 'brief') return cmdBrief();
+  if (cmd === 'watch') return cmdWatch();
   if (cmd === 'lessons') return cmdLessons();
   if (cmd === 'log') return cmdLog();
 
