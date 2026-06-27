@@ -32,3 +32,14 @@ STYLE absorption, not generalizable capability. NEXT: grow the corpus to 1000+
 examples (Will's real daily usage = personalization, plus more diverse seeding)
 BEFORE scaling the model; use fewer iters / early-stop on best val loss; then 7B/14B
 pays off. eval_judge.py reads ANTHROPIC_API_KEY from ~/.flint/secrets.env.
+
+## Accumulation + auto-retrain (2026-06-27)
+- `bulk_seed.py` — Claude generates ~880 diverse PUBLIC questions, fired concurrently
+  at Flint so Claude's answers are captured as teacher data (corpus -> ~980).
+- `retrain.sh` — reusable retrain job: prepare -> train (periodic val + checkpoints)
+  -> `pick_best.py` (early-stop: activate the lowest-val-loss checkpoint, avoiding
+  cycle-2's overfit) -> Claude judge -> append to ~/.flint/brain/history.log.
+- `com.flint.retrain.plist` — launchd agent, runs retrain.sh WEEKLY (Sun 4am). So
+  Flint's brain improves automatically as the corpus grows from real usage.
+- Model via FLINT_BRAIN_MODEL env (default Qwen2.5-7B-Instruct-4bit). Iters scale to
+  ~2 epochs (capped 1000); early-stopping makes overshoot safe.
