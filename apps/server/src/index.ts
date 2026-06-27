@@ -354,6 +354,22 @@ function hashish(s: string): string {
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return String(h);
 }
+/** Human-readable event time in the user's timezone (e.g. "Sat, Jun 28, 2:00 PM").
+ *  All-day events (date only, no "T") omit the clock time. */
+function fmtWhen(iso: string): string {
+  try {
+    const timed = iso.includes('T');
+    return new Date(iso).toLocaleString('en-US', {
+      timeZone: USER_TZ,
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      ...(timed ? { hour: 'numeric', minute: '2-digit' } : {}),
+    });
+  } catch {
+    return iso;
+  }
+}
 
 /**
  * The proactive checks the watcher runs. Cheap (direct tool calls, no LLM),
@@ -378,16 +394,28 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
   };
   const checks: Check[] = [];
 
-  // Calendar: surface the next few upcoming events (once each).
+  // Calendar: remind about events starting within the next ~26h (once each),
+  // formatted human-readably. Nothing when the calendar is clear.
   if (byName.has('trident.gcal_upcoming')) {
     checks.push(async () => {
-      const text = await call('trident.gcal_upcoming', {});
-      return text
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean)
+      const text = await call('trident.gcal_upcoming', { days: 2 });
+      if (!text) return [];
+      let data: { events?: Array<{ id?: string; summary?: string; start?: string | null; location?: string | null }> };
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return [];
+      }
+      const soon = Date.now() + 26 * 60 * 60 * 1000;
+      return (data.events ?? [])
+        .filter((e) => e.start && new Date(e.start).getTime() <= soon)
         .slice(0, 3)
-        .map((line) => ({ title: 'Upcoming', body: line, kind: 'calendar', dedupe: `cal:${line}` }));
+        .map((e) => ({
+          title: 'Upcoming',
+          body: `${e.summary || 'Untitled event'} — ${fmtWhen(e.start as string)}${e.location ? ` · ${e.location}` : ''}`,
+          kind: 'calendar',
+          dedupe: `cal:${e.id || e.summary}:${e.start}`,
+        }));
     });
   }
 

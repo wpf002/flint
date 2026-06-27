@@ -55,6 +55,9 @@ export class Notifications {
 
   /** Add a notification (deduped by signature) and fan out to OS + phone. */
   push(title: string, body: string, kind: string, dedupe?: string): Notification | undefined {
+    // Safety net: never surface a raw JSON blob as a notification — a check
+    // should format human-readable text, not dump a tool payload.
+    if (/^\s*[{[]/.test(body)) return undefined;
     const sig = dedupe ?? `${kind}:${title}:${body}`;
     if (this.seen.has(sig)) return undefined;
     this.seen.add(sig);
