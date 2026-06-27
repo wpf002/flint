@@ -81,6 +81,25 @@
   .bchip{font-size:8px;letter-spacing:.16em;padding:1px 5px;margin-left:8px;border-radius:6px;vertical-align:middle;}
   .bchip.local{color:var(--mut);border:1px solid var(--line);}
   .bchip.frontier{color:#050505;background:var(--gold);font-weight:600;border:1px solid var(--gold);}
+  .hicon{position:relative;}
+  .nbadge{position:absolute;top:0;right:0;min-width:14px;height:14px;padding:0 3px;border-radius:8px;background:var(--orange);color:#000;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;line-height:14px;}
+  .propose{margin:8px 0 4px;padding:10px 12px;border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:8px;background:#0c0a06;}
+  .propose .pt{font-size:11px;color:var(--ink);margin-bottom:7px;}
+  .propose .pt b{color:var(--gold);}
+  .propose .pargs{font-size:10px;color:var(--mut);white-space:pre-wrap;word-break:break-word;margin-bottom:9px;}
+  .propose .prow{display:flex;gap:8px;}
+  .propose button{flex:1;border:none;border-radius:6px;padding:7px;font-size:11px;cursor:pointer;letter-spacing:.08em;font-weight:600;}
+  .propose .ok{background:var(--gold);color:#000;}
+  .propose .no{background:transparent;color:var(--mut);border:1px solid #222;}
+  .propose .res{font-size:10px;margin-top:8px;color:var(--mut);}
+  #notifs{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9;}
+  #notifs .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:22px;width:min(460px,92vw);max-height:84vh;overflow:auto;}
+  #notifs h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:14px;text-transform:uppercase;}
+  #notifs .nitem{padding:10px 0;border-bottom:1px solid var(--line);}
+  #notifs .nitem .nt{font-size:10px;color:var(--gold);letter-spacing:.1em;text-transform:uppercase;}
+  #notifs .nitem .nb{font-size:11px;color:var(--ink);margin-top:3px;}
+  #notifs .empty{color:var(--mut);font-size:11px;}
+  #notifs button{width:100%;background:transparent;color:var(--mut);border:1px solid #222;border-radius:7px;padding:9px;cursor:pointer;margin-top:16px;letter-spacing:.1em;}
   .hicon:hover{color:var(--gold);background:#140f06;}
   .hicon svg{display:block;}
   #settings .card{width:min(460px,92vw);max-height:84vh;overflow:auto;}
@@ -101,6 +120,7 @@
     <div class="brand"><span class="sp"></span><span class="nm">FLINT</span></div>
     <div class="hdr-right">
       <button class="hicon" onclick="newChat()" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+      <button class="hicon" id="bellbtn" onclick="openNotifs()" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="nbadge" id="nbadge">0</span></button>
       <button class="hicon" id="lobtn" onclick="toggleLO()" title="Local only" aria-label="Local only"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
       <button class="hicon" onclick="openSettings()" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
     </div>
@@ -127,6 +147,12 @@
   <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
   <div class="log" id="log" style="display:none"></div>
   <div class="row"><button onclick="closeSettings()">Close</button></div>
+</div></div>
+
+<div id="notifs" onclick="if(event.target===this)closeNotifs()"><div class="card">
+  <h4>Notifications</h4>
+  <div id="nlist"></div>
+  <button onclick="closeNotifs()">Close</button>
 </div></div>
 
 <div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
@@ -210,6 +236,33 @@ function toggleLO(){LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL
 function setBrainChip(bodyEl,brain){try{var who=bodyEl.parentNode.querySelector('.who');if(!who)return;var ex=who.querySelector('.bchip');if(ex)ex.remove();var c=document.createElement('span');c.className='bchip '+(brain==='frontier'?'frontier':'local');c.textContent=brain==='frontier'?'✦ CLAUDE':'LOCAL';who.appendChild(c);}catch(e){}}
 applyLO();
 
+/* ---------- proposed actions (one-tap approval) ---------- */
+function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
+  var card=document.createElement('div');card.className='propose';
+  var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
+  card.innerHTML='<div class="pt">Flint wants to run <b>'+a.fullName+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">Approve</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
+  card.querySelector('.ok').onclick=function(){approveAction(a.id,card);};
+  card.querySelector('.no').onclick=function(){rejectAction(a.id,card);};
+  host.appendChild(card);});document.getElementById('transcript').scrollTop=9e9;}
+function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+function approveAction(id,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){
+    var a=d.action||{};r.style.display='block';row.style.display='none';
+    if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
+    else{r.textContent='✗ '+(a.error||'failed');r.style.color='var(--orange)';}
+  }).catch(function(){r.style.display='block';r.textContent='✗ connection failed';r.style.color='var(--orange)';});}
+function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';var r=card.querySelector('.res');r.style.display='block';r.textContent='dismissed';}
+
+/* ---------- notifications (proactive) ---------- */
+function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;var b=document.getElementById('nbadge');var u=d.unread||0;b.textContent=u>9?'9+':u;b.style.display=u>0?'flex':'none';}).catch(function(){});}
+function openNotifs(){if(!TOKEN){openSettings();return;}fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.json();}).then(function(d){var list=document.getElementById('nlist');var items=(d&&d.items)||[];
+  list.innerHTML=items.length?items.map(function(n){return '<div class="nitem"><div class="nt">'+esc(n.title)+'</div><div class="nb">'+esc(n.body)+'</div></div>';}).join(''):'<div class="empty">Nothing new. Flint will surface things here as they come up.</div>';
+  document.getElementById('notifs').style.display='flex';
+  fetch(BASE+'/notifications/read',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:'{}'}).then(function(){pollNotifs();});
+  }).catch(function(){});}
+function closeNotifs(){document.getElementById('notifs').style.display='none';}
+pollNotifs();setInterval(pollNotifs,60000);
+
 function send(speakBack){
   var sb=speakBack===true;
   var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
@@ -225,6 +278,7 @@ function send(speakBack){
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
         if(ev.type==='meta'){setBrainChip(body,ev.brain);}
+        if(ev.type==='pending'){renderProposals(ev.actions,body);}
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;}
           else{var rest=raw.slice(spoken),re=/[.!?](\s|$)/g,mm,last=-1;while((mm=re.exec(rest))){last=mm.index+1;}if(last>0){speakSynced(rest.slice(0,last),body,vctx);spoken+=last;}}}

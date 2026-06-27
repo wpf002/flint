@@ -60,6 +60,10 @@ import {
   cosineSimilarity,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
+import { PersistentStore } from './persistent-store';
+import { KnowledgeStore, rememberTool } from './knowledge';
+import { ActionQueue, type PendingAction } from './actions';
+import { Notifications, Watcher, type Check } from './notifications';
 
 /**
  * Hosted Flint — the always-on shared service (Railway). Wraps the Flint client
@@ -105,6 +109,38 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
   }
   console.error('No provider configured. Set OLLAMA_MODEL (+ OLLAMA_HOST) or ANTHROPIC_API_KEY.');
   process.exit(1);
+}
+
+/**
+ * The escalation-brain provider — the swappable bridge toward independence.
+ * Today it's Claude (ANTHROPIC_API_KEY). The day a bigger LOCAL model is good
+ * enough, set FLINT_FRONTIER_PROVIDER=ollama + FLINT_FRONTIER_BASE_URL (e.g. a
+ * 70B on a home box) + FLINT_FRONTIER_MODEL and escalation points there instead
+ * — no other code changes, and Flint is fully independent. undefined → frontier
+ * off (pure local).
+ */
+function buildFrontierProvider(): { provider: ProviderAdapter; model: string } | undefined {
+  const kind = process.env.FLINT_FRONTIER_PROVIDER?.trim().toLowerCase();
+  const baseURL = process.env.FLINT_FRONTIER_BASE_URL?.trim();
+  if (kind === 'ollama' || (!kind && baseURL && !process.env.ANTHROPIC_API_KEY)) {
+    const model = process.env.FLINT_FRONTIER_MODEL?.trim();
+    if (!model) return undefined;
+    return {
+      provider: new OllamaProvider({
+        baseURL: baseURL ?? 'http://127.0.0.1:11434',
+        defaultOptions: { num_ctx: Number(process.env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
+      }),
+      model,
+    };
+  }
+  const key = process.env.ANTHROPIC_API_KEY?.trim();
+  if (key) {
+    return {
+      provider: new AnthropicProvider({ apiKey: key }),
+      model: process.env.FLINT_FRONTIER_MODEL?.trim() || 'claude-sonnet-4-6',
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -180,9 +216,11 @@ function judgeBrain(message: string, hasFrontier: boolean, localOnly: boolean): 
 const READ_TOOL = /(search|list|read|get|fetch|lookup|find|query|upcoming|forecast|model|recent|summary|view|status|count|coverage|bias|quote|position|market|account|order|worker|\bbot|industr|digest|signal|score|ticker|detail|snapshot|trade|job|rule|recommend|health|latest|\btop|best)/i;
 // Anything that writes/sends/acts is denied (no human in the loop here).
 const WRITE_TOOL = /(send|create|update|delete|remove|trash|cancel|reply|draft|compose|schedule|book|insert|\bpost\b|\bput\b|transfer|\bpay\b|buy|sell|place_order|enable|disable|start_|stop_|move_|write_|add_to|set_)/i;
-async function readOnlyApprover(req: { server: string; tool: string }): Promise<boolean> {
-  const t = req.tool || '';
-  return READ_TOOL.test(t) && !WRITE_TOOL.test(t);
+/** A tool that may run without human approval: read-only, or Flint's own memory
+ *  (`remember`, which only writes to local memory — never the outside world). */
+function isSafeTool(tool: string): boolean {
+  if (tool === 'remember') return true;
+  return READ_TOOL.test(tool) && !WRITE_TOOL.test(tool);
 }
 
 /** Optional MCP servers (your apps/integrations) from $MCP_CONFIG (a JSON file). */
@@ -218,6 +256,7 @@ function loadMcpSpecs(): McpServerSpec[] {
  * tool-calling reliable.
  */
 const CORE_TOOL_NAMES = [
+  'remember', // save a durable fact to long-term memory — always available
   'web.web_search', // current events, weather, news, scores, facts — the primary lookup
   'web.fetch_url', // read a specific URL
   'trident.perplexity_search', // deeper web research
@@ -304,14 +343,92 @@ class ToolRouter {
   }
 }
 
+/** Pull readable text out of an MCP tool result ({content:[{text}]} or a string). */
+function toolText(result: unknown): string {
+  const r = result as { content?: Array<{ text?: string }> } | null;
+  if (r && Array.isArray(r.content)) return r.content.map((c) => c?.text ?? '').join('\n').trim();
+  return typeof result === 'string' ? result : JSON.stringify(result ?? '');
+}
+function hashish(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return String(h);
+}
+
+/**
+ * The proactive checks the watcher runs. Cheap (direct tool calls, no LLM),
+ * resilient (a failing integration just yields nothing). Each only fires for a
+ * given item once (dedupe key). Tune cadence with FLINT_WATCH_MS.
+ */
+function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
+  const byName = new Map(tools.map((t) => [t.definition.name, t] as const));
+  const call = async (name: string, args: unknown): Promise<string> => {
+    const t = byName.get(name);
+    if (!t) return '';
+    try {
+      const res = await t.handler({ id: `watch_${name}`, toolName: name, args });
+      if (res && typeof res === 'object' && (res as { isError?: boolean }).isError) return '';
+      const text = toolText(res);
+      // Stay silent on error-ish payloads (auth failures, validation errors).
+      if (/invalid_grant|"error"|isError|-32602|validation error/i.test(text)) return '';
+      return text;
+    } catch {
+      return '';
+    }
+  };
+  const checks: Check[] = [];
+
+  // Calendar: surface the next few upcoming events (once each).
+  if (byName.has('trident.gcal_upcoming')) {
+    checks.push(async () => {
+      const text = await call('trident.gcal_upcoming', {});
+      return text
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .map((line) => ({ title: 'Upcoming', body: line, kind: 'calendar', dedupe: `cal:${line}` }));
+    });
+  }
+
+  // Market digest: ping once when bellwether publishes a new daily digest.
+  if (byName.has('bellwether.latest_digest')) {
+    checks.push(async () => {
+      const text = await call('bellwether.latest_digest', {});
+      if (!text) return [];
+      const head = text.split('\n').find((l) => l.trim()) ?? 'New digest';
+      return [{ title: 'Market digest', body: head.slice(0, 200), kind: 'digest', dedupe: `digest:${hashish(text)}` }];
+    });
+  }
+
+  return checks;
+}
+
+/** Build the per-request context block, injecting any long-term memory that's
+ *  relevant to this message so Flint "remembers" without bloating the prompt. */
+async function contextFor(message: string, knowledge: KnowledgeStore): Promise<string> {
+  const base = userContext();
+  let facts: string[] = [];
+  try {
+    facts = await knowledge.recall(message);
+  } catch {
+    /* memory recall is best-effort */
+  }
+  if (facts.length === 0) return base;
+  const block = facts.map((f) => `- ${f}`).join('\n');
+  return `${base}\n[Long-term memory — things you already know about Will; use if relevant, don't recite back:\n${block}\n]`;
+}
+
 async function main(): Promise<void> {
   loadSecrets(); // pull ANTHROPIC_API_KEY (and friends) from ~/.flint/secrets.env
   const { provider, model } = buildProvider();
   // Auditable action log (bounded ring buffer), exposed at GET /actions.
   const actionLog = new ActionLogObserver(undefined, 2000);
-  // Shared across both brains so a conversation stays coherent no matter which
-  // one answers a given turn.
-  const memory = new InMemoryStore();
+  // Durable conversation memory — survives restarts/reboots/crashes (was RAM
+  // only). Shared across both brains so a conversation stays coherent no matter
+  // which one answers a given turn.
+  const dataDir = join(homedir(), '.flint', 'memory');
+  const memory = new PersistentStore(join(dataDir, 'conversations.json'));
   const flint = new Flint({ provider, defaultModel: model, memory, observer: actionLog });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
@@ -322,49 +439,48 @@ async function main(): Promise<void> {
     lessonStore: new InMemoryLessonStore(),
   });
 
-  // Hosted Flint runs read-only (safe) tools freely; guarded (side-effecting)
-  // tools are DENIED — there's no interactive approver in a server (a hosted
-  // approval flow is a later step). Fail-safe by default.
-  const specs = loadMcpSpecs();
-  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: readOnlyApprover }) : undefined;
-  const tools: Tool[] = registry?.tools() ?? [];
-  if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
-
-  // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
   const embedder = new OllamaEmbedder({
     model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
     baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
   });
+
+  // Long-term compounding memory: durable facts Flint learns about Will, pulled
+  // into context by relevance. The `remember` tool lets Flint save them mid-chat.
+  const knowledge = new KnowledgeStore(join(dataDir, 'knowledge.json'), embedder);
+
+  // Action approval — read-only tools run freely; any write the model attempts is
+  // captured as a proposal for one-tap approval (see ActionQueue). This is what
+  // turns Flint from an oracle into an assistant, without losing the safety rail.
+  const actions = new ActionQueue(isSafeTool);
+  const specs = loadMcpSpecs();
+  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: actions.approver }) : undefined;
+  const tools: Tool[] = [...(registry?.tools() ?? []), rememberTool(knowledge)];
+  if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
+
+  // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
   const router = await ToolRouter.build(tools, embedder);
 
-  // Frontier escalation — the bridge. Built ONLY if a key is present in
-  // ~/.flint/secrets.env; otherwise Flint runs purely local (no errors, no
-  // dependency). Shares memory + the router's tools with the local brain, so
-  // escalated turns can still reach your systems and the web.
-  const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
+  // Frontier escalation — the bridge toward independence. Disabled cleanly if no
+  // provider is configured (pure local). Shares memory + the router's tools with
+  // the local brain, so escalated turns can still reach your systems and the web.
+  const frontierCfg = buildFrontierProvider();
   let frontier: { persona: Persona; model: string } | undefined;
-  if (anthropicKey) {
-    const fModel = process.env.FLINT_FRONTIER_MODEL?.trim() || 'claude-sonnet-4-6';
-    const fFlint = new Flint({
-      provider: new AnthropicProvider({ apiKey: anthropicKey }),
-      defaultModel: fModel,
-      memory,
-      observer: actionLog,
-    });
-    const fPersona = new Persona(fFlint, {
-      name: 'Flint',
-      styleGuide: FLINT_STYLE_GUIDE,
-      lessonStore: new InMemoryLessonStore(),
-    });
-    frontier = { persona: fPersona, model: fModel };
-    console.error(`[brain] frontier escalation ENABLED -> ${fModel}`);
+  if (frontierCfg) {
+    const fFlint = new Flint({ provider: frontierCfg.provider, defaultModel: frontierCfg.model, memory, observer: actionLog });
+    const fPersona = new Persona(fFlint, { name: 'Flint', styleGuide: FLINT_STYLE_GUIDE, lessonStore: new InMemoryLessonStore() });
+    frontier = { persona: fPersona, model: frontierCfg.model };
+    console.error(`[brain] frontier escalation ENABLED -> ${frontierCfg.provider.name}:${frontierCfg.model}`);
   } else {
-    console.error('[brain] frontier disabled (no ANTHROPIC_API_KEY in ~/.flint/secrets.env) — running local-only');
+    console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
   }
+
+  // Proactivity — a notifications feed + a watcher that surfaces things unasked.
+  const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
+  new Watcher(notes, buildChecks(tools, knowledge)).start();
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier }));
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, knowledge, actions, notes }));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -390,6 +506,9 @@ interface Ctx {
   servers: string[];
   convos: Convo[];
   frontier: { persona: Persona; model: string } | undefined;
+  knowledge: KnowledgeStore;
+  actions: ActionQueue;
+  notes: Notifications;
 }
 
 /** Record a finished exchange (bounded ring buffer). */
@@ -553,8 +672,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const localOnly = body.localOnly === true;
     const selected = await ctx.router.select(prompt);
     let brain = judgeBrain(prompt, !!ctx.frontier, localOnly);
+    const ctxBlock = await contextFor(prompt, ctx.knowledge);
+    const beforeActions = ctx.actions.snapshotIds();
     const ask = (p: Persona) =>
-      p.generate({ prompt: `${userContext()}\n\n${prompt}`, ...(selected.length ? { tools: selected } : {}) });
+      p.generate({ prompt: `${ctxBlock}\n\n${prompt}`, ...(selected.length ? { tools: selected } : {}) });
     let out;
     if (brain === 'frontier' && ctx.frontier) {
       try {
@@ -568,7 +689,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       out = await ask(ctx.persona);
     }
     recordConvo(ctx.convos, prompt, out.text);
-    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain });
+    const proposed = ctx.actions.newSince(beforeActions);
+    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, pending: proposed });
   }
 
   if (req.method === 'POST' && url === '/chat') {
@@ -579,6 +701,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const localOnly = body.localOnly === true;
     const selected = await ctx.router.select(message);
     let brain = judgeBrain(message, !!ctx.frontier, localOnly);
+    const ctxBlock = await contextFor(message, ctx.knowledge);
+    const beforeActions = ctx.actions.snapshotIds();
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -590,7 +714,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answer = '';
     const pump = async (persona: Persona) => {
       for await (const ev of persona.chat(
-        { conversationId, message: `${userContext()}\n\n${message}`, ...(selected.length ? { tools: selected } : {}) },
+        { conversationId, message: `${ctxBlock}\n\n${message}`, ...(selected.length ? { tools: selected } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;
@@ -618,11 +742,42 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         await pump(ctx.persona);
       }
       if (answer.trim()) recordConvo(ctx.convos, message, answer);
+      const proposed = ctx.actions.newSince(beforeActions);
+      if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
     } catch (err) {
       res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
     }
     res.end();
     return;
+  }
+
+  // Proposed actions awaiting one-tap approval (writes Flint wanted to make).
+  if (req.method === 'GET' && url.startsWith('/proposals')) {
+    return json(res, 200, { proposals: ctx.actions.list() });
+  }
+  if (req.method === 'POST' && url === '/proposals/approve') {
+    const body = await readJson(req);
+    const id = String(body.id ?? '');
+    const result = await ctx.actions.approve(id, ctx.tools);
+    if (!result) return json(res, 404, { error: 'no such proposal' });
+    if (result.status === 'done') ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
+    return json(res, 200, { action: result });
+  }
+  if (req.method === 'POST' && url === '/proposals/reject') {
+    const body = await readJson(req);
+    return json(res, 200, { ok: ctx.actions.reject(String(body.id ?? '')) });
+  }
+
+  // Proactive notifications feed.
+  if (req.method === 'GET' && url.startsWith('/notifications')) {
+    return json(res, 200, { items: ctx.notes.list(), unread: ctx.notes.unreadCount() });
+  }
+  if (req.method === 'POST' && url === '/notifications/read') {
+    const body = await readJson(req);
+    const id = body.id ? String(body.id) : '';
+    if (id) ctx.notes.markRead(id);
+    else ctx.notes.markAllRead();
+    return json(res, 200, { ok: true, unread: ctx.notes.unreadCount() });
   }
 
   return json(res, 404, { error: 'not found' });
