@@ -245,8 +245,20 @@ function _neuralFetch(clean){return fetch(BASE+'/speak',{method:'POST',headers:O
 // Speak a sentence AND reveal its text in sync — the words appear on screen the
 // instant Flint starts saying them. Audio for the next sentence is prefetched
 // while the current one plays, so there are no gaps. Sentences play in order.
+function speakForVoice(s){
+  // The on-screen text keeps symbols (97°F); the SPOKEN text expands them so the
+  // voice actually says the words.
+  return s.replace(/[*_`#>\[\]]/g,'')
+    .replace(/(\d)\s*°\s*F\b/g,'$1 degrees Fahrenheit')
+    .replace(/(\d)\s*°\s*C\b/g,'$1 degrees Celsius')
+    .replace(/°/g,' degrees')
+    .replace(/\bmph\b/gi,' miles per hour')
+    .replace(/(\d)\s*%/g,'$1 percent')
+    .replace(/\bRealFeel\b/gi,'real feel')
+    .replace(/\s+/g,' ').trim();
+}
 function speakSynced(sentence,body,vctx){
-  var clean=sentence.replace(/[*_`#>\[\]]/g,'').trim();
+  var clean=speakForVoice(sentence);
   var reveal=function(){vctx.displayed+=sentence;body.innerHTML=md(vctx.displayed);var tr=document.getElementById('transcript');if(tr)tr.scrollTop=9e9;};
   var blobP=clean?_neuralFetch(clean).catch(function(){return null;}):Promise.resolve(null); // fetch NOW (parallel prefetch)
   _ttsChain=_ttsChain.then(function(){
