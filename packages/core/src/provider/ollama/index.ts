@@ -118,7 +118,7 @@ export class OllamaProvider implements ProviderAdapter {
     // text instead of the structured field. Parse it back into a real call so
     // tools still fire reliably.
     if (toolCalls.length === 0 && args.tools && args.tools.length > 0) {
-      const recovered = extractTextToolCall(text, args.tools.map((t) => t.name));
+      const recovered = extractTextToolCall(text, args.tools);
       if (recovered) {
         toolCalls = [{ id: newId('toolu'), toolName: recovered.name, args: recovered.arguments }];
         text = '';
@@ -176,6 +176,14 @@ export class OllamaProvider implements ProviderAdapter {
     let doneReason: string | undefined;
     let sawTool = false;
     let producedAnything = false;
+    const toolDefs = args.tools ?? [];
+    // Some smaller models (notably llama3.1) emit a tool call as TEXT — a bare
+    // `{"name":...,"parameters":...}` JSON object — instead of a structured tool
+    // call. If the streamed content starts with `{`, we don't stream it raw
+    // (that would leak JSON to the user); we buffer it and try to recover a real
+    // tool call at the end. Prose answers (the common case) stream live as before.
+    let buf = '';
+    let mode: 'undecided' | 'stream' | 'buffer' = 'undecided';
     try {
       const body = this.buildBody(args, true);
       const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
@@ -189,8 +197,8 @@ export class OllamaProvider implements ProviderAdapter {
 
       for await (const line of readNdjson(resp.body)) {
         const chunk = JSON.parse(line) as OllamaChatChunk;
-        // A tool call can still appear on the answer pass (the model chains
-        // another lookup) — surface it so the loop runs it.
+        // A properly-structured tool call on the answer pass (model chains a
+        // lookup) — surface it so the loop runs it.
         for (const tc of chunk.message?.tool_calls ?? []) {
           sawTool = true;
           producedAnything = true;
@@ -199,13 +207,48 @@ export class OllamaProvider implements ProviderAdapter {
         const delta = chunk.message?.content ?? '';
         if (delta) {
           producedAnything = true;
-          yield { type: 'text', delta };
+          if (mode === 'stream') {
+            yield { type: 'text', delta };
+          } else if (mode === 'buffer') {
+            buf += delta;
+          } else {
+            // Undecided: keep buffering while the text is still a bare identifier
+            // (a tool name might be forming, e.g. "web_search"). Commit only when
+            // the disambiguating character arrives — "(" or "{" ⇒ a tool call to
+            // recover; anything else ⇒ prose, so flush and stream live.
+            buf += delta;
+            const trimmed = buf.replace(/^\s+/, '');
+            if (trimmed.length > 0 && !/^[\w.]+$/.test(trimmed)) {
+              if (looksLikeToolText(trimmed)) {
+                mode = 'buffer';
+              } else {
+                mode = 'stream';
+                yield { type: 'text', delta: buf };
+                buf = '';
+              }
+            }
+          }
         }
         if (chunk.done) {
           doneReason = chunk.done_reason;
           usage.input = chunk.prompt_eval_count ?? usage.input;
           usage.output = chunk.eval_count ?? usage.output;
         }
+      }
+
+      // Buffered a `{...}` blob: recover a real tool call if that's what it is,
+      // otherwise it was genuine JSON the user wanted — emit it as text.
+      if (mode === 'buffer' && buf.trim()) {
+        const recovered = extractTextToolCall(buf, toolDefs);
+        if (recovered) {
+          yield { type: 'tool_call', call: { id: newId('toolu'), toolName: recovered.name, args: recovered.arguments } };
+          yield { type: 'done', reason: 'tool_call', usage };
+          return;
+        }
+        yield { type: 'text', delta: buf };
+      } else if (mode === 'undecided' && buf) {
+        // Stream ended before we decided (a very short answer) — emit it.
+        yield { type: 'text', delta: buf };
       }
 
       // Safety net: a streamed answer pass that produced NOTHING (the empty-turn
@@ -276,35 +319,66 @@ async function* readNdjson(body: ReadableStream<Uint8Array>): AsyncGenerator<str
   }
 }
 
-/**
- * Recover a tool call the model dumped into its text content (instead of the
- * structured `tool_calls` field) — a common qwen failure mode when many tools
- * are offered. Scans for balanced JSON objects and accepts the first whose name
- * matches a known tool, tolerating leading/trailing garbage and a `tool_call`/
- * `function` wrapper.
- */
-function extractTextToolCall(
-  text: string,
-  toolNames: string[],
-): { name: string; arguments: unknown } | null {
-  if (!text || text.indexOf('{') === -1) return null;
-  const objs: string[] = [];
+interface ToolLike {
+  name: string;
+  inputSchema?: unknown;
+}
+
+/** Resolve a model-emitted name (bare "web_search" or full "web.web_search") to
+ *  the real namespaced tool. */
+function resolveTool(name: string, tools: ToolLike[]): ToolLike | undefined {
+  return tools.find((t) => t.name === name) ?? tools.find((t) => t.name.split('.').pop() === name);
+}
+/** The tool's primary parameter name (for mapping a positional arg). */
+function firstParamName(tool: ToolLike): string | undefined {
+  const s = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+  if (Array.isArray(s?.required) && s.required.length > 0) return s.required[0];
+  return s?.properties ? Object.keys(s.properties)[0] : undefined;
+}
+/** Top-level balanced `{...}` substrings. */
+function balancedObjects(text: string): string[] {
+  const out: string[] = [];
   let depth = 0;
   let start = -1;
   for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '{') {
+    if (text[i] === '{') {
       if (depth === 0) start = i;
       depth++;
-    } else if (ch === '}') {
+    } else if (text[i] === '}') {
       depth--;
       if (depth === 0 && start >= 0) {
-        objs.push(text.slice(start, i + 1));
+        out.push(text.slice(start, i + 1));
         start = -1;
       }
     }
   }
-  for (const candidate of objs) {
+  return out;
+}
+
+/** True if `text` looks like a tool call written as prose (so we should try to
+ *  recover it rather than show it). Used to decide whether to buffer a stream. */
+function looksLikeToolText(text: string): boolean {
+  const t = text.replace(/^\s+/, '');
+  return t.startsWith('{') || /^[\w.]+\s*\(/.test(t);
+}
+
+/**
+ * Recover a tool call the model dumped into its text content instead of the
+ * structured `tool_calls` field — a failure mode that varies by model. Handles
+ * BOTH formats seen in the wild:
+ *   - JSON:          {"name":"web_search","parameters":{"query":"…"}}   (qwen, llama)
+ *   - function-call: web_search("…")  |  web_search(query="…", max_results=1)  (llama3.1)
+ * Matches bare or namespaced names and maps a positional arg onto the tool's
+ * primary parameter via its schema.
+ */
+function extractTextToolCall(
+  text: string,
+  tools: ToolLike[],
+): { name: string; arguments: unknown } | null {
+  if (!text) return null;
+
+  // 1) JSON object format.
+  for (const candidate of balancedObjects(text)) {
     let obj: Record<string, unknown>;
     try {
       obj = JSON.parse(candidate) as Record<string, unknown>;
@@ -312,10 +386,51 @@ function extractTextToolCall(
       continue;
     }
     const inner = (obj.tool_call ?? obj.function ?? obj) as Record<string, unknown>;
-    const name = inner?.name;
-    if (typeof name === 'string' && toolNames.includes(name)) {
-      const argsv = (inner.arguments ?? inner.args ?? {}) as unknown;
-      return { name, arguments: argsv };
+    const raw = inner?.name;
+    if (typeof raw === 'string') {
+      const tool = resolveTool(raw, tools);
+      if (tool) {
+        const argsv = (inner.arguments ?? inner.parameters ?? inner.args ?? inner.input ?? {}) as unknown;
+        return { name: tool.name, arguments: argsv };
+      }
+    }
+  }
+
+  // 2) Function-call syntax: name(...).
+  const fc = text.match(/([a-zA-Z_][\w]*(?:\.[\w]+)?)\s*\(([\s\S]*)\)/);
+  const fcName = fc?.[1];
+  if (fcName) {
+    const tool = resolveTool(fcName, tools);
+    if (tool) {
+      const argStr = (fc?.[2] ?? '').trim();
+      const p = firstParamName(tool);
+      let args: unknown = {};
+      if (argStr.startsWith('{')) {
+        try {
+          args = JSON.parse(argStr);
+        } catch {
+          args = {};
+        }
+      } else if (/^["'][\s\S]*["']$/.test(argStr)) {
+        args = p ? { [p]: argStr.slice(1, -1) } : {};
+      } else if (argStr.includes('=')) {
+        const o: Record<string, unknown> = {};
+        for (const m of argStr.matchAll(/([a-zA-Z_]\w*)\s*=\s*("([^"]*)"|'([^']*)'|[\d.]+|true|false)/g)) {
+          const key = m[1];
+          const lit = m[2] ?? '';
+          if (!key) continue;
+          let v: unknown = m[3] ?? m[4] ?? lit;
+          if (m[3] === undefined && m[4] === undefined) {
+            if (/^[\d.]+$/.test(lit)) v = Number(lit);
+            else if (lit === 'true' || lit === 'false') v = lit === 'true';
+          }
+          o[key] = v;
+        }
+        args = o;
+      } else if (argStr.length > 0) {
+        args = p ? { [p]: argStr } : {};
+      }
+      return { name: tool.name, arguments: args };
     }
   }
   return null;
