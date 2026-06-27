@@ -185,36 +185,23 @@ type Brain = 'local' | 'frontier';
 // frontier brain (smart AND fast). This keeps private/cheap stuff local while
 // making Flint genuinely smart on any real question.
 
-// PRIVATE / personal data → LOCAL (never leaves the machine): your own systems,
-// email, calendar, drive, trading data, and facts about you. This is the line
-// that matters for independence — your private life stays on your hardware.
-const PRIVATE_RE =
-  /\b(vantage|bellwether|meridian|prophet|crossbar|hive|bloomberg|tdl|watchlist|portfolio|gmail|gcal|gdrive|inbox|e-?mails?|messages?|calendar|schedule|meetings?|appointments?|drive|my files|my bots|trades?|positions?|orders?|holdings?|digest|signals?|top scor|scoring|rankings?|ranked compan|companies by score|my )\b/i;
-// Facts about Will himself (already injected into context) → LOCAL.
-const RECALL_RE = /\b(my|i'm|i am)\b.*\b(name|dog|cat|birthday|favorite|prefer|allergic|remember|told you|said)\b/i;
-// Greetings / acks / "what time/date is it" (answerable instantly from context) → LOCAL.
-const TRIVIAL_RE = /^(hi|hey|hello|yo|sup|thanks|thank you|thx|ok|okay|cool|got it|nice|gm|good morning|good night|how are you|how'?s it going|what'?s up|what time|what'?s the (time|date)|what day)\b/i;
-// Explicit overrides.
-const FORCE_FRONTIER_RE = /\b(ask claude|use claude|think hard|deep dive|frontier brain)\b/i;
-const FORCE_LOCAL_RE = /\b(stay local|keep it local|local only|don'?t use claude|privately)\b/i;
+// Keep a query on the LOCAL brain only when the user explicitly asks to — the
+// Local-only toggle, or phrasing like "stay local" / "keep this private". This
+// is the privacy switch + offline fallback; otherwise Flint runs on Claude.
+const FORCE_LOCAL_RE = /\b(stay local|keep it local|keep this local|local only|on[- ]?device|on[- ]?machine|don'?t use claude|privately|keep this private|keep it private)\b/i;
 
 /**
- * Decide which brain answers. PRIVATE-LOCAL, PUBLIC-SMART: anything touching
- * Will's private data or systems — or trivial chit-chat — stays on the local
- * brain; every real public question (knowledge, news, weather, reasoning, code)
- * goes to the frontier brain, which is smart, fast, and reliable. The Local-only
- * toggle (localOnly) forces everything local regardless.
+ * Which brain answers. Flint IS Claude by default — equal-to-Claude capability
+ * on every query. The local model is the fallback, used only when no frontier is
+ * configured, the user flipped Local-only (localOnly), or the message asks to
+ * stay on-device. Everything else → frontier (Claude) + Flint's personal layer
+ * (memory, systems, voice, tools) on top.
  */
 function judgeBrain(message: string, hasFrontier: boolean, localOnly: boolean): Brain {
-  if (!hasFrontier || localOnly) return 'local';
-  const m = message.trim();
-  if (FORCE_FRONTIER_RE.test(m)) return 'frontier';
-  if (FORCE_LOCAL_RE.test(m)) return 'local';
-  if (PRIVATE_RE.test(m)) return 'local'; // your data never leaves the machine
-  if (RECALL_RE.test(m)) return 'local';
-  if (TRIVIAL_RE.test(m)) return 'local';
-  // Everything else — real public questions — goes to the brain that nails them.
-  return 'frontier';
+  if (!hasFrontier) return 'local'; // no Claude configured → local fallback
+  if (localOnly) return 'local'; // user forced everything on-device
+  if (FORCE_LOCAL_RE.test(message)) return 'local'; // "stay local" / "keep this private"
+  return 'frontier'; // default: Flint runs on Claude
 }
 
 /**
