@@ -64,6 +64,7 @@ import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
+import { TrainingLogger } from './training';
 
 /**
  * Hosted Flint — the always-on shared service (Railway). Wraps the Flint client
@@ -517,9 +518,14 @@ async function main(): Promise<void> {
   const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
   new Watcher(notes, buildChecks(tools, knowledge)).start();
 
+  // The seed of Flint's OWN brain: every interaction is captured as a training
+  // example (frontier answers = the teacher to distill from). Independence is
+  // built here, a little each day — see docs/INDEPENDENCE.md.
+  const training = new TrainingLogger(join(homedir(), '.flint', 'training', 'corpus.jsonl'));
+
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, knowledge, actions, notes }));
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, knowledge, actions, notes, training }));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -548,6 +554,16 @@ interface Ctx {
   knowledge: KnowledgeStore;
   actions: ActionQueue;
   notes: Notifications;
+  training: TrainingLogger;
+}
+
+/** Tool calls executed during a turn, pulled from the action log (for training capture). */
+function toolsSince(ctx: Ctx, beforeLen: number): Array<{ tool: string; outcome?: string; ms?: number }> {
+  const acts = ctx.actionLog.actions();
+  return acts
+    .slice(beforeLen)
+    .filter((a): a is Extract<typeof a, { type: 'tool_result' }> => (a as { type?: string }).type === 'tool_result')
+    .map((a) => ({ tool: a.tool, outcome: a.isError ? 'error' : 'ok', ms: a.durationMs }));
 }
 
 /** Record a finished exchange (bounded ring buffer). */
@@ -713,6 +729,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = judgeBrain(prompt, !!ctx.frontier, localOnly);
     const ctxBlock = await contextFor(prompt, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
+    const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
       p.generate({ prompt: `${ctxBlock}\n\n${prompt}`, ...(selected.length ? { tools: selected } : {}) });
     let out;
@@ -728,6 +745,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       out = await ask(ctx.persona);
     }
     recordConvo(ctx.convos, prompt, out.text);
+    ctx.training.log(
+      { conversationId: 'generate', brain, model: brain === 'frontier' && ctx.frontier ? ctx.frontier.model : ctx.model, input: prompt, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
+      Date.now(),
+    );
     const proposed = ctx.actions.newSince(beforeActions);
     return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, pending: proposed });
   }
@@ -742,6 +763,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = judgeBrain(message, !!ctx.frontier, localOnly);
     const ctxBlock = await contextFor(message, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
+    const beforeLog = ctx.actionLog.actions().length;
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -780,7 +802,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
         await pump(ctx.persona);
       }
-      if (answer.trim()) recordConvo(ctx.convos, message, answer);
+      if (answer.trim()) {
+        recordConvo(ctx.convos, message, answer);
+        ctx.training.log(
+          { conversationId, brain, model: brain === 'frontier' && ctx.frontier ? ctx.frontier.model : ctx.model, input: message, output: answer, tools: toolsSince(ctx, beforeLog) },
+          Date.now(),
+        );
+      }
       const proposed = ctx.actions.newSince(beforeActions);
       if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
     } catch (err) {
@@ -805,6 +833,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   if (req.method === 'POST' && url === '/proposals/reject') {
     const body = await readJson(req);
     return json(res, 200, { ok: ctx.actions.reject(String(body.id ?? '')) });
+  }
+
+  // Training corpus stats — the growing seed of Flint's own brain.
+  if (req.method === 'GET' && url.startsWith('/training')) {
+    return json(res, 200, ctx.training.stats());
   }
 
   // Proactive notifications feed.
