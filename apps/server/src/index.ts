@@ -179,29 +179,42 @@ function loadSecrets(): void {
  */
 type Brain = 'local' | 'frontier';
 
-// Live-data / tool / personal-systems asks: the LOCAL brain owns these — it has
-// the web_search + MCP tools, it's fast enough, and it keeps them private/cheap.
-const LIVE_DATA_RE =
-  /\b(weather|temperature|forecast|news|headline|price|prices|stock|stocks|market|markets|score|scores|standing|standings|who won|today|tonight|right now|currently|current|latest|recent|this week|calendar|schedule|meeting|email|inbox|drive|watchlist|digest|signal|signals|ticker|tickers|vantage|bellwether|meridian|prophet|crossbar|hive|bloomberg)\b/i;
-// Hard reasoning / coding / long-form generation: escalate to the frontier brain.
-const HARD_RE =
-  /\b(code|coding|function|implement|implementation|debug|refactor|algorithm|regex|architect|architecture|design|prove|proof|derive|theorem|trade-?off|tradeoffs?|analy[sz]e|analysis|strategy|step by step|reason through|optimi[sz]e|complexity|essay|draft|rewrite|critique|compare|pros and cons|explain why)\b/i;
-const CODE_HINT_RE = /```|=>|\bdef \b|\bclass \b|function\s*\(/;
-// Explicit user override — force the frontier brain regardless of heuristics.
+// SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
+// lookups, the user's own systems, casual chat, memory recall — and fast there.
+// Beyond that band it empties out or fabricates, so EVERYTHING ELSE goes to the
+// frontier brain (smart AND fast). This keeps private/cheap stuff local while
+// making Flint genuinely smart on any real question.
+
+// PRIVATE / personal data → LOCAL (never leaves the machine): your own systems,
+// email, calendar, drive, trading data, and facts about you. This is the line
+// that matters for independence — your private life stays on your hardware.
+const PRIVATE_RE =
+  /\b(vantage|bellwether|meridian|prophet|crossbar|hive|bloomberg|tdl|watchlist|portfolio|gmail|gcal|gdrive|inbox|e-?mails?|messages?|calendar|schedule|meetings?|appointments?|drive|my files|my bots|trades?|positions?|orders?|holdings?|digest|signals?|top scor|scoring|rankings?|ranked compan|companies by score|my )\b/i;
+// Facts about Will himself (already injected into context) → LOCAL.
+const RECALL_RE = /\b(my|i'm|i am)\b.*\b(name|dog|cat|birthday|favorite|prefer|allergic|remember|told you|said)\b/i;
+// Greetings / acks / "what time/date is it" (answerable instantly from context) → LOCAL.
+const TRIVIAL_RE = /^(hi|hey|hello|yo|sup|thanks|thank you|thx|ok|okay|cool|got it|nice|gm|good morning|good night|how are you|how'?s it going|what'?s up|what time|what'?s the (time|date)|what day)\b/i;
+// Explicit overrides.
 const FORCE_FRONTIER_RE = /\b(ask claude|use claude|think hard|deep dive|frontier brain)\b/i;
+const FORCE_LOCAL_RE = /\b(stay local|keep it local|local only|don'?t use claude|privately)\b/i;
 
 /**
- * Decide which brain answers. Default LOCAL (private, instant, free). Escalate
- * to frontier only for clearly-hard asks that don't need live data — and only
- * if frontier is available and the caller hasn't forced local-only.
+ * Decide which brain answers. PRIVATE-LOCAL, PUBLIC-SMART: anything touching
+ * Will's private data or systems — or trivial chit-chat — stays on the local
+ * brain; every real public question (knowledge, news, weather, reasoning, code)
+ * goes to the frontier brain, which is smart, fast, and reliable. The Local-only
+ * toggle (localOnly) forces everything local regardless.
  */
 function judgeBrain(message: string, hasFrontier: boolean, localOnly: boolean): Brain {
   if (!hasFrontier || localOnly) return 'local';
-  if (FORCE_FRONTIER_RE.test(message)) return 'frontier';
-  if (LIVE_DATA_RE.test(message)) return 'local';
-  const words = message.trim().split(/\s+/).length;
-  const hard = HARD_RE.test(message) || CODE_HINT_RE.test(message) || words > 40;
-  return hard ? 'frontier' : 'local';
+  const m = message.trim();
+  if (FORCE_FRONTIER_RE.test(m)) return 'frontier';
+  if (FORCE_LOCAL_RE.test(m)) return 'local';
+  if (PRIVATE_RE.test(m)) return 'local'; // your data never leaves the machine
+  if (RECALL_RE.test(m)) return 'local';
+  if (TRIVIAL_RE.test(m)) return 'local';
+  // Everything else — real public questions — goes to the brain that nails them.
+  return 'frontier';
 }
 
 /**
