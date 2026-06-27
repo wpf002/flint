@@ -391,13 +391,24 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
     });
   }
 
-  // Market digest: ping once when bellwether publishes a new daily digest.
-  if (byName.has('bellwether.latest_digest')) {
+  // Market signals: ping on new market-intelligence signals (newest few, once
+  // each). recent_signals works with no args; latest_digest would require an
+  // industry id, so this is the better proactive source.
+  if (byName.has('bellwether.recent_signals')) {
     checks.push(async () => {
-      const text = await call('bellwether.latest_digest', {});
+      const text = await call('bellwether.recent_signals', { limit: 5 });
       if (!text) return [];
-      const head = text.split('\n').find((l) => l.trim()) ?? 'New digest';
-      return [{ title: 'Market digest', body: head.slice(0, 200), kind: 'digest', dedupe: `digest:${hashish(text)}` }];
+      let rows: Array<{ headline?: string }> = [];
+      try {
+        rows = JSON.parse(text);
+      } catch {
+        return [];
+      }
+      if (!Array.isArray(rows)) return [];
+      return rows
+        .filter((r) => r && r.headline)
+        .slice(0, 3)
+        .map((r) => ({ title: 'Market signal', body: String(r.headline).slice(0, 200), kind: 'signal', dedupe: `sig:${r.headline}` }));
     });
   }
 
