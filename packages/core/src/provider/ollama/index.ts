@@ -25,6 +25,13 @@ export interface OllamaProviderOptions {
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
+interface FullResult {
+  text: string;
+  toolCalls: ToolCall[];
+  usage: TokenUsage;
+  doneReason: string | undefined;
+}
+
 interface OllamaChatChunk {
   message?: {
     role: string;
@@ -63,52 +70,101 @@ export class OllamaProvider implements ProviderAdapter {
     return Math.ceil(chars / 4);
   }
 
+  /** Non-streamed call with retry: native tool-calling is reliable only in
+   *  non-stream mode, and with many tools qwen occasionally returns an EMPTY
+   *  turn (no text, no call). Retry a couple times until it produces something
+   *  rather than handing the user back nothing. */
+  private async fetchFull(args: GenerateArgs): Promise<FullResult> {
+    let last: FullResult = { text: '', toolCalls: [], usage: { input: 0, output: 0 }, doneReason: undefined };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      last = await this.chatOnce(args, attempt);
+      if (last.toolCalls.length > 0 || last.text.trim().length > 0) return last;
+    }
+    return last;
+  }
+
+  private async chatOnce(args: GenerateArgs, attempt = 0): Promise<FullResult> {
+    const body = this.buildBody(args, false);
+    if (attempt > 0) {
+      // Last try came back empty. Nudge the model to commit, and raise the
+      // temperature so the retry explores a different path instead of repeating
+      // the same empty one.
+      const b = body as {
+        messages: Array<{ role: string; content: string }>;
+        options: Record<string, unknown>;
+      };
+      b.messages.push({
+        role: 'user',
+        content:
+          '(Your last reply was empty. Answer the question now — if it needs current info like weather, news, prices, or scores, call web_search with a plain query, then state the answer in words.)',
+      });
+      b.options = { ...b.options, temperature: 0.9 + attempt * 0.15 };
+    }
+    const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(args.signal ? { signal: args.signal } : {}),
+    });
+    if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
+    const chunk = (await resp.json()) as OllamaChatChunk;
+    let toolCalls: ToolCall[] = (chunk.message?.tool_calls ?? []).map((c) => ({
+      id: newId('toolu'),
+      toolName: c.function.name,
+      args: c.function.arguments,
+    }));
+    let text = chunk.message?.content ?? '';
+    // Recovery: with many tools, qwen sometimes dumps the tool call into the
+    // text instead of the structured field. Parse it back into a real call so
+    // tools still fire reliably.
+    if (toolCalls.length === 0 && args.tools && args.tools.length > 0) {
+      const recovered = extractTextToolCall(text, args.tools.map((t) => t.name));
+      if (recovered) {
+        toolCalls = [{ id: newId('toolu'), toolName: recovered.name, args: recovered.arguments }];
+        text = '';
+      }
+    }
+    return {
+      text,
+      toolCalls,
+      usage: { input: chunk.prompt_eval_count ?? 0, output: chunk.eval_count ?? 0 },
+      doneReason: chunk.done_reason,
+    };
+  }
+
   async generate(args: GenerateArgs): Promise<GenerateResult> {
     try {
-      const body = this.buildBody(args, false);
-      const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        ...(args.signal ? { signal: args.signal } : {}),
-      });
-      if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
-
-      const chunk = (await resp.json()) as OllamaChatChunk;
-      const text = chunk.message?.content ?? '';
-      const usage: TokenUsage = {
-        input: chunk.prompt_eval_count ?? 0,
-        output: chunk.eval_count ?? 0,
-      };
-
-      const calls = chunk.message?.tool_calls ?? [];
-      if (calls.length > 0) {
-        const toolCalls: ToolCall[] = calls.map((c) => ({
-          id: newId('toolu'),
-          toolName: c.function.name,
-          args: c.function.arguments,
-        }));
-        return {
-          message: encodeToolCallTurn(newId('msg'), text, toolCalls, 0),
-          usage,
-          reason: 'tool_call',
-        };
+      const { text, toolCalls, usage, doneReason } = await this.fetchFull(args);
+      if (toolCalls.length > 0) {
+        return { message: encodeToolCallTurn(newId('msg'), text, toolCalls, 0), usage, reason: 'tool_call' };
       }
-      return {
-        message: encodeAssistantText(newId('msg'), text, 0),
-        usage,
-        reason: mapDoneReason(chunk.done_reason),
-      };
+      return { message: encodeAssistantText(newId('msg'), text, 0), usage, reason: mapDoneReason(doneReason) };
     } catch (err) {
       throw new FlintError(toAiError(err));
     }
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
+    // Tools present → non-streamed (reliable tool calls), yield the result.
+    if (args.tools && args.tools.length > 0) {
+      try {
+        const { text, toolCalls, usage, doneReason } = await this.fetchFull(args);
+        if (toolCalls.length > 0) {
+          for (const call of toolCalls) yield { type: 'tool_call', call };
+          yield { type: 'done', reason: 'tool_call', usage };
+          return;
+        }
+        if (text) yield { type: 'text', delta: text };
+        yield { type: 'done', reason: mapDoneReason(doneReason), usage };
+      } catch (err) {
+        yield { type: 'error', error: toAiError(err) };
+      }
+      return;
+    }
+
+    // No tools → stream tokens live.
     const usage: TokenUsage = { input: 0, output: 0 };
     let doneReason: string | undefined;
-    const toolCalls: ToolCall[] = [];
-
     try {
       const body = this.buildBody(args, true);
       const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
@@ -122,24 +178,13 @@ export class OllamaProvider implements ProviderAdapter {
 
       for await (const line of readNdjson(resp.body)) {
         const chunk = JSON.parse(line) as OllamaChatChunk;
-        // Native tools: `content` is real text and tool calls are structured, so
-        // we stream text live AND capture calls — no buffering or guessing.
         const delta = chunk.message?.content ?? '';
         if (delta) yield { type: 'text', delta };
-        for (const c of chunk.message?.tool_calls ?? []) {
-          toolCalls.push({ id: newId('toolu'), toolName: c.function.name, args: c.function.arguments });
-        }
         if (chunk.done) {
           doneReason = chunk.done_reason;
           usage.input = chunk.prompt_eval_count ?? usage.input;
           usage.output = chunk.eval_count ?? usage.output;
         }
-      }
-
-      if (toolCalls.length > 0) {
-        for (const call of toolCalls) yield { type: 'tool_call', call };
-        yield { type: 'done', reason: 'tool_call', usage };
-        return;
       }
       yield { type: 'done', reason: mapDoneReason(doneReason), usage };
     } catch (err) {
@@ -193,6 +238,51 @@ async function* readNdjson(body: ReadableStream<Uint8Array>): AsyncGenerator<str
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * Recover a tool call the model dumped into its text content (instead of the
+ * structured `tool_calls` field) — a common qwen failure mode when many tools
+ * are offered. Scans for balanced JSON objects and accepts the first whose name
+ * matches a known tool, tolerating leading/trailing garbage and a `tool_call`/
+ * `function` wrapper.
+ */
+function extractTextToolCall(
+  text: string,
+  toolNames: string[],
+): { name: string; arguments: unknown } | null {
+  if (!text || text.indexOf('{') === -1) return null;
+  const objs: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        objs.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  for (const candidate of objs) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(candidate) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const inner = (obj.tool_call ?? obj.function ?? obj) as Record<string, unknown>;
+    const name = inner?.name;
+    if (typeof name === 'string' && toolNames.includes(name)) {
+      const argsv = (inner.arguments ?? inner.args ?? {}) as unknown;
+      return { name, arguments: argsv };
+    }
+  }
+  return null;
 }
 
 async function safeText(resp: Response): Promise<string> {

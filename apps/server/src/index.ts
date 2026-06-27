@@ -90,10 +90,12 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
     return {
       provider: new OllamaProvider({
         baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
-        // Bigger context so the ~4k of system+tool schemas leaves room for the
-        // conversation, tool results, and the answer (default 4k overflows and
-        // forces re-eval / truncation on tool-calling turns).
-        defaultOptions: { num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 8192) },
+        // IMPORTANT: keep num_ctx at 4096. Above ~6k, qwen2.5:14b's native
+        // tool-calling silently breaks — the model returns an EMPTY turn instead
+        // of emitting tool_calls (verified by bisection). 4096 keeps tool-calling
+        // reliable; the trade-off is a tighter window (curate the tool set so the
+        // prompt + tool results fit).
+        defaultOptions: { num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 4096) },
       }),
       model: ollamaModel,
     };
@@ -149,10 +151,12 @@ async function main(): Promise<void> {
   // Auditable action log (bounded ring buffer), exposed at GET /actions.
   const actionLog = new ActionLogObserver(undefined, 2000);
   const flint = new Flint({ provider, defaultModel: model, memory: new InMemoryStore(), observer: actionLog });
+  // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
+  // the prompt, injecting 3 more writing samples bloats it enough that the local
+  // model degrades to empty turns. The style guide alone carries the voice.
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
-    retriever: new InMemoryRetriever(FLINT_VOICE_EXEMPLARS),
     lessonStore: new InMemoryLessonStore(),
   });
 
@@ -213,7 +217,7 @@ function userContext(): string {
     minute: '2-digit',
     timeZoneName: 'short',
   });
-  return `[Context — not a user message: Right now it is ${now}. Will is located in ${USER_LOCATION}. Use this for any question about the time, date, day, the user's location, or local weather. Never say you lack access to the current time or to the user's location — you have both here.]`;
+  return `[Context — not a user message: Right now it is ${now}. Will is located in ${USER_LOCATION}. Use this ONLY for the current time/date and the user's location. It does NOT contain weather, news, prices, or scores — for any of those, call web_search (e.g. "weather in ${USER_LOCATION} today"). Never say you lack the current time or the user's location — you have both here.]`;
 }
 
 /** The Flint console (the black-and-gold Jarvis UI). $CONSOLE_PATH overrides the

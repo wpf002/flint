@@ -50,7 +50,7 @@ export interface ToolLoopParams {
   random?: () => number;
 }
 
-const DEFAULT_MAX_ITERATIONS = 16;
+const DEFAULT_MAX_ITERATIONS = 6;
 
 /**
  * The tool-call loop. Lives in Flint, never in apps (locked invariant #3).
