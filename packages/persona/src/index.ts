@@ -13,6 +13,17 @@ export { OllamaEmbedder, cosineSimilarity } from './embedder.js';
 export type { Embedder, OllamaEmbedderOptions } from './embedder.js';
 export { STARTER_STYLE_GUIDE } from './style-guide.js';
 export { FLINT_STYLE_GUIDE, FLINT_VOICE_EXEMPLARS, FLINT_BANNED_PHRASES } from './flint.js';
+export {
+  FLINT_CONSTITUTION,
+  CONSTITUTION_CORE,
+  JUDGE_RUBRIC,
+  HARD_CONSTRAINTS,
+  CONFLICT_ORDER,
+  PRINCIPLES,
+} from './constitution.js';
+export type { Principle } from './constitution.js';
+export { judgePair, buildJudgePrompt } from './judge.js';
+export type { JudgeVerdict, JudgeInput, JudgeModel } from './judge.js';
 export { checkVoice } from './voice-eval.js';
 export type { VoiceScore, VoiceViolation, VoiceCheckOptions } from './voice-eval.js';
 export { InMemoryLessonStore } from './lessons.js';
