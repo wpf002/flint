@@ -18,7 +18,7 @@ import {
 } from '../../core/encoding.js';
 import { anthropicCapabilities } from './capabilities.js';
 import { toAiError } from './errors.js';
-import { mapMessages, mapTools, mapStopReason } from './mapping.js';
+import { mapMessages, mapTools, mapStopReason, fromAnthropicToolName } from './mapping.js';
 
 export interface AnthropicProviderOptions {
   /** API key. Passed explicitly — `@flint/core` never reads process.env. */
@@ -120,7 +120,7 @@ export class AnthropicProvider implements ProviderAdapter {
         .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
         .map((b) => ({
           id: b.id,
-          toolName: b.name,
+          toolName: fromAnthropicToolName(b.name),
           args: b.input,
           rawProviderPayload: b,
         }));
@@ -202,7 +202,7 @@ export class AnthropicProvider implements ProviderAdapter {
               toolBuilders.delete(event.index);
               const call: ToolCall = {
                 id: b.id,
-                toolName: b.name,
+                toolName: fromAnthropicToolName(b.name),
                 args: b.json.trim().length > 0 ? safeParse(b.json) : {},
               };
               yield { type: 'tool_call', call };

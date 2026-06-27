@@ -54,10 +54,10 @@ import {
 } from '@flint/core';
 import {
   Persona,
-  InMemoryRetriever,
   InMemoryLessonStore,
   FLINT_STYLE_GUIDE,
-  FLINT_VOICE_EXEMPLARS,
+  OllamaEmbedder,
+  cosineSimilarity,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 
@@ -108,6 +108,67 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
 }
 
 /**
+ * Load extra secrets from ~/.flint/secrets.env (KEY=value per line, # comments)
+ * into process.env without overriding anything already set. This is where the
+ * ANTHROPIC_API_KEY for frontier escalation lives — kept OUT of the launchd
+ * plist (world-readable) and out of git (the file is under ~/.flint, not the
+ * repo). chmod 600 it.
+ */
+function loadSecrets(): void {
+  const path = join(homedir(), '.flint', 'secrets.env');
+  if (!existsSync(path)) return;
+  try {
+    for (const raw of readFileSync(path, 'utf8').split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const k = line.slice(0, eq).trim();
+      let v = line.slice(eq + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if (k && process.env[k] === undefined) process.env[k] = v;
+    }
+  } catch (err) {
+    console.error('[secrets] failed to read ~/.flint/secrets.env:', err);
+  }
+}
+
+/**
+ * The two brains Flint can answer with. `local` is the private, instant,
+ * always-available model on this machine — the default, and the independence
+ * goal. `frontier` is a BRIDGE: a hosted model (Claude) we escalate the
+ * genuinely-hard reasoning/coding asks to, until the local brain is good enough
+ * to retire it. Everything routes through one seam (judgeBrain) so flipping the
+ * bridge off later — or repointing it at a self-hosted model — is a one-liner.
+ */
+type Brain = 'local' | 'frontier';
+
+// Live-data / tool / personal-systems asks: the LOCAL brain owns these — it has
+// the web_search + MCP tools, it's fast enough, and it keeps them private/cheap.
+const LIVE_DATA_RE =
+  /\b(weather|temperature|forecast|news|headline|price|prices|stock|stocks|market|markets|score|scores|standing|standings|who won|today|tonight|right now|currently|current|latest|recent|this week|calendar|schedule|meeting|email|inbox|drive|watchlist|digest|signal|signals|ticker|tickers|vantage|bellwether|meridian|prophet|crossbar|hive|bloomberg)\b/i;
+// Hard reasoning / coding / long-form generation: escalate to the frontier brain.
+const HARD_RE =
+  /\b(code|coding|function|implement|implementation|debug|refactor|algorithm|regex|architect|architecture|design|prove|proof|derive|theorem|trade-?off|tradeoffs?|analy[sz]e|analysis|strategy|step by step|reason through|optimi[sz]e|complexity|essay|draft|rewrite|critique|compare|pros and cons|explain why)\b/i;
+const CODE_HINT_RE = /```|=>|\bdef \b|\bclass \b|function\s*\(/;
+// Explicit user override — force the frontier brain regardless of heuristics.
+const FORCE_FRONTIER_RE = /\b(ask claude|use claude|think hard|deep dive|frontier brain)\b/i;
+
+/**
+ * Decide which brain answers. Default LOCAL (private, instant, free). Escalate
+ * to frontier only for clearly-hard asks that don't need live data — and only
+ * if frontier is available and the caller hasn't forced local-only.
+ */
+function judgeBrain(message: string, hasFrontier: boolean, localOnly: boolean): Brain {
+  if (!hasFrontier || localOnly) return 'local';
+  if (FORCE_FRONTIER_RE.test(message)) return 'frontier';
+  if (LIVE_DATA_RE.test(message)) return 'local';
+  const words = message.trim().split(/\s+/).length;
+  const hard = HARD_RE.test(message) || CODE_HINT_RE.test(message) || words > 40;
+  return hard ? 'frontier' : 'local';
+}
+
+/**
  * Always-on approval policy for GUARDED (non-read-only) tools — e.g. Trident's
  * calendar/email/drive. There's no human in the loop here, so we DEFAULT-DENY
  * and only auto-approve tools whose name reads as a query/lookup. Anything that
@@ -146,11 +207,112 @@ function loadMcpSpecs(): McpServerSpec[] {
   }
 }
 
+/**
+ * The daily-driver tools, sent on EVERY request in a stable order. Keeping this
+ * core fixed means Ollama can reuse the KV cache (system + core prompt) across
+ * requests → fast. Anything not here is appended only when a query clearly needs
+ * it (see ToolRouter). Names are namespaced `server.tool` (matching the registry)
+ * because some bare names collide — e.g. both `web` and `trident` expose
+ * `web_search`. Names not currently wired are simply skipped. ~12 tools keeps the
+ * prompt comfortably under the 4096-token budget the local model needs to keep
+ * tool-calling reliable.
+ */
+const CORE_TOOL_NAMES = [
+  'web.web_search', // current events, weather, news, scores, facts — the primary lookup
+  'web.fetch_url', // read a specific URL
+  'trident.perplexity_search', // deeper web research
+  'trident.gcal_upcoming', // calendar
+  'trident.gmail_search', // email
+  'trident.gdrive_search', // drive
+  'vantage.get_score', // company scores
+  'vantage.top_scores', // rankings
+  'vantage.list_watchlists', // watchlists
+  'bellwether.recent_signals', // market signals
+  'bellwether.latest_digest', // daily digest
+  'meridian.get_signals', // trading signals by ticker
+];
+
+/**
+ * Tool router that keeps the common case fast AND reaches everything:
+ *  - a STABLE CORE (the daily tools) goes on every request → the prompt prefix is
+ *    cacheable, so most queries are quick;
+ *  - extra tools are APPENDED only when the query embeds close enough to them
+ *    (above a relevance floor), up to a small cap — so specialized asks
+ *    (forecasting, security rules, the bot fleet) still reach their tools.
+ * General/conversational queries get just the core; nothing irrelevant clutters
+ * the prompt to confuse the small model.
+ */
+class ToolRouter {
+  private constructor(
+    private readonly core: Tool[],
+    private readonly rest: Tool[],
+    private readonly restVectors: number[][],
+    private readonly embedder: OllamaEmbedder,
+    private readonly maxAppend: number,
+    private readonly floor: number,
+  ) {}
+
+  static async build(tools: Tool[], embedder: OllamaEmbedder): Promise<ToolRouter> {
+    const maxAppend = Math.max(0, Number(process.env.FLINT_TOOL_APPEND ?? 4));
+    const floor = Number(process.env.FLINT_TOOL_FLOOR ?? 0.55);
+    const byName = new Map(tools.map((t) => [t.definition.name, t] as const));
+    const core: Tool[] = [];
+    for (const n of CORE_TOOL_NAMES) {
+      const t = byName.get(n);
+      if (t) core.push(t);
+    }
+    const coreNames = new Set(core.map((t) => t.definition.name));
+    const rest = tools.filter((t) => !coreNames.has(t.definition.name));
+    let restVectors: number[][] = [];
+    if (rest.length > 0) {
+      try {
+        restVectors = await embedder.embed(
+          rest.map((t) => `${t.definition.name}: ${t.definition.description}`),
+        );
+      } catch (err) {
+        console.error('[router] rest embedding failed — appends disabled:', err);
+      }
+    }
+    // If the core didn't match anything wired, fall back to "everything is core".
+    const finalCore = core.length > 0 ? core : tools;
+    const finalRest = core.length > 0 ? rest : [];
+    console.error(
+      `[router] core=${finalCore.length} (cached) + up to ${maxAppend} of ${finalRest.length} by relevance (floor ${floor})`,
+    );
+    return new ToolRouter(finalCore, finalRest, restVectors, embedder, maxAppend, floor);
+  }
+
+  /** The stable core, plus any rest-tools the message clearly needs. */
+  async select(message: string): Promise<Tool[]> {
+    if (this.maxAppend === 0 || this.rest.length === 0 || this.restVectors.length !== this.rest.length) {
+      return this.core;
+    }
+    let qv: number[];
+    try {
+      qv = (await this.embedder.embed([message.slice(0, 2000)]))[0] ?? [];
+    } catch {
+      return this.core;
+    }
+    if (qv.length === 0) return this.core;
+    const appends = this.rest
+      .map((t, i) => ({ t, score: cosineSimilarity(qv, this.restVectors[i] ?? []) }))
+      .filter((x) => x.score >= this.floor)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, this.maxAppend)
+      .map((x) => x.t);
+    return appends.length > 0 ? [...this.core, ...appends] : this.core;
+  }
+}
+
 async function main(): Promise<void> {
+  loadSecrets(); // pull ANTHROPIC_API_KEY (and friends) from ~/.flint/secrets.env
   const { provider, model } = buildProvider();
   // Auditable action log (bounded ring buffer), exposed at GET /actions.
   const actionLog = new ActionLogObserver(undefined, 2000);
-  const flint = new Flint({ provider, defaultModel: model, memory: new InMemoryStore(), observer: actionLog });
+  // Shared across both brains so a conversation stays coherent no matter which
+  // one answers a given turn.
+  const memory = new InMemoryStore();
+  const flint = new Flint({ provider, defaultModel: model, memory, observer: actionLog });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -168,9 +330,41 @@ async function main(): Promise<void> {
   const tools: Tool[] = registry?.tools() ?? [];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
+  // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
+  const embedder = new OllamaEmbedder({
+    model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
+    baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
+  });
+  const router = await ToolRouter.build(tools, embedder);
+
+  // Frontier escalation — the bridge. Built ONLY if a key is present in
+  // ~/.flint/secrets.env; otherwise Flint runs purely local (no errors, no
+  // dependency). Shares memory + the router's tools with the local brain, so
+  // escalated turns can still reach your systems and the web.
+  const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
+  let frontier: { persona: Persona; model: string } | undefined;
+  if (anthropicKey) {
+    const fModel = process.env.FLINT_FRONTIER_MODEL?.trim() || 'claude-sonnet-4-6';
+    const fFlint = new Flint({
+      provider: new AnthropicProvider({ apiKey: anthropicKey }),
+      defaultModel: fModel,
+      memory,
+      observer: actionLog,
+    });
+    const fPersona = new Persona(fFlint, {
+      name: 'Flint',
+      styleGuide: FLINT_STYLE_GUIDE,
+      lessonStore: new InMemoryLessonStore(),
+    });
+    frontier = { persona: fPersona, model: fModel };
+    console.error(`[brain] frontier escalation ENABLED -> ${fModel}`);
+  } else {
+    console.error('[brain] frontier disabled (no ANTHROPIC_API_KEY in ~/.flint/secrets.env) — running local-only');
+  }
+
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, actionLog, servers, convos }));
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier }));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -191,9 +385,11 @@ interface Ctx {
   provider: ProviderAdapter;
   model: string;
   tools: Tool[];
+  router: ToolRouter;
   actionLog: ActionLogObserver;
   servers: string[];
   convos: Convo[];
+  frontier: { persona: Persona; model: string } | undefined;
 }
 
 /** Record a finished exchange (bounded ring buffer). */
@@ -354,12 +550,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const body = await readJson(req);
     const prompt = String(body.prompt ?? '');
     if (!prompt) return json(res, 400, { error: 'prompt required' });
-    const out = await ctx.persona.generate({
-      prompt: `${userContext()}\n\n${prompt}`,
-      ...(ctx.tools.length ? { tools: ctx.tools } : {}),
-    });
+    const localOnly = body.localOnly === true;
+    const selected = await ctx.router.select(prompt);
+    let brain = judgeBrain(prompt, !!ctx.frontier, localOnly);
+    const ask = (p: Persona) =>
+      p.generate({ prompt: `${userContext()}\n\n${prompt}`, ...(selected.length ? { tools: selected } : {}) });
+    let out;
+    if (brain === 'frontier' && ctx.frontier) {
+      try {
+        out = await ask(ctx.frontier.persona);
+      } catch (err) {
+        console.error('[brain] frontier failed, falling back to local:', err);
+        brain = 'local';
+        out = await ask(ctx.persona);
+      }
+    } else {
+      out = await ask(ctx.persona);
+    }
     recordConvo(ctx.convos, prompt, out.text);
-    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason });
+    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain });
   }
 
   if (req.method === 'POST' && url === '/chat') {
@@ -367,6 +576,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const conversationId = String(body.conversationId ?? 'default');
     const message = String(body.message ?? '');
     if (!message) return json(res, 400, { error: 'message required' });
+    const localOnly = body.localOnly === true;
+    const selected = await ctx.router.select(message);
+    let brain = judgeBrain(message, !!ctx.frontier, localOnly);
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -376,13 +588,34 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const ac = new AbortController();
     res.on('close', () => ac.abort());
     let answer = '';
-    try {
-      for await (const ev of ctx.persona.chat(
-        { conversationId, message: `${userContext()}\n\n${message}`, ...(ctx.tools.length ? { tools: ctx.tools } : {}) },
+    const pump = async (persona: Persona) => {
+      for await (const ev of persona.chat(
+        { conversationId, message: `${userContext()}\n\n${message}`, ...(selected.length ? { tools: selected } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;
         res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      }
+    };
+    try {
+      if (brain === 'frontier' && ctx.frontier) {
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+          await pump(ctx.frontier.persona);
+        } catch (err) {
+          // Only safe to fall back if nothing was streamed yet.
+          if (answer.length === 0) {
+            console.error('[brain] frontier failed pre-output, falling back to local:', err);
+            brain = 'local';
+            res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+            await pump(ctx.persona);
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+        await pump(ctx.persona);
       }
       if (answer.trim()) recordConvo(ctx.convos, message, answer);
     } catch (err) {

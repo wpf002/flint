@@ -63,7 +63,7 @@ export function mapMessages(
           blocks.push({
             type: 'tool_use',
             id: call.id,
-            name: call.toolName,
+            name: toAnthropicToolName(call.toolName),
             input: (call.args ?? {}) as Record<string, unknown>,
           });
         }
@@ -97,13 +97,26 @@ function stringifyResult(result: unknown): string {
   return JSON.stringify(result);
 }
 
+/**
+ * Anthropic requires tool names to match ^[a-zA-Z0-9_-]{1,128}$ — no dots. Our
+ * MCP tools are namespaced `server.tool`, so swap each `.` for `__` on the way
+ * out and back on the way in. Reversible because our tool names never contain
+ * `__` (single underscores in names like `gcal_upcoming` are untouched).
+ */
+export function toAnthropicToolName(name: string): string {
+  return name.replace(/\./g, '__');
+}
+export function fromAnthropicToolName(name: string): string {
+  return name.replace(/__/g, '.');
+}
+
 /** Map canonical tool definitions onto Anthropic's tool shape. */
 export function mapTools(tools: ToolDefinition[] | undefined): Tool[] | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => {
     const schema = t.inputSchema as Record<string, unknown>;
     return {
-      name: t.name,
+      name: toAnthropicToolName(t.name),
       description: t.description,
       input_schema: {
         type: 'object' as const,
