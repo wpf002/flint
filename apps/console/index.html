@@ -79,8 +79,6 @@
   .hicon{background:transparent;border:none;color:var(--mut);cursor:pointer;padding:6px;border-radius:8px;display:flex;align-items:center;}
   .hicon:hover{color:var(--gold);background:#140f06;}
   .hicon svg{display:block;}
-  .statusdot{width:8px;height:8px;border-radius:50%;background:#3a3a44;display:inline-block;margin-right:10px;vertical-align:middle;}
-  .statusdot.on{background:#6f9c6a;box-shadow:0 0 8px #6f9c6a;}
   #settings .card{width:min(460px,92vw);max-height:84vh;overflow:auto;}
   #settings .seg{font-size:10px;letter-spacing:.24em;color:#8a7320;text-transform:uppercase;margin:20px 0 6px;border-top:1px solid var(--line);padding-top:16px;}
   #settings .seg:first-of-type{border-top:none;padding-top:0;margin-top:2px;}
@@ -153,11 +151,10 @@ function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
 /* ---------- live data ---------- */
 function refresh(){
   fetch(BASE+'/health').then(r=>r.json()).then(h=>{
-    var sd=document.getElementById('statusdot');if(sd)sd.className='statusdot on';
     var sys=document.getElementById('systems');sys.innerHTML='';
     (h.servers||[]).forEach(function(s){sys.innerHTML+='<div class="sys"><span class="dot"></span>'+esc(s)+'</div>';});
     if(!(h.servers||[]).length)sys.innerHTML='<div class="sys"><span class="dot off"></span>No connectors</div>';
-  }).catch(function(){var sd=document.getElementById('statusdot');if(sd)sd.className='statusdot';});
+  }).catch(function(){});
   pollLog();
 }
 function md(s){
