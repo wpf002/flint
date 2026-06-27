@@ -145,8 +145,17 @@ export class OllamaProvider implements ProviderAdapter {
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
-    // Tools present → non-streamed (reliable tool calls), yield the result.
-    if (args.tools && args.tools.length > 0) {
+    // The tool-DECISION pass (tools offered, no tool result in history yet) must
+    // be reliable, so it's non-streamed with retry-on-empty. But once a tool has
+    // run — or there were never any tools — the model is just writing prose, so
+    // we STREAM it live: the user sees words as they're generated instead of
+    // waiting for the whole answer. (The 14B runs ~13 tok/s, so non-streamed the
+    // user stares at nothing for the full generation.)
+    const hasTools = !!(args.tools && args.tools.length > 0);
+    const lastRole = args.messages[args.messages.length - 1]?.role;
+    const answerPass = lastRole === 'tool_result';
+
+    if (hasTools && !answerPass) {
       try {
         const { text, toolCalls, usage, doneReason } = await this.fetchFull(args);
         if (toolCalls.length > 0) {
@@ -162,9 +171,11 @@ export class OllamaProvider implements ProviderAdapter {
       return;
     }
 
-    // No tools → stream tokens live.
+    // Live-streamed path: pure chat, or the answer pass after a tool result.
     const usage: TokenUsage = { input: 0, output: 0 };
     let doneReason: string | undefined;
+    let sawTool = false;
+    let producedAnything = false;
     try {
       const body = this.buildBody(args, true);
       const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
@@ -178,15 +189,40 @@ export class OllamaProvider implements ProviderAdapter {
 
       for await (const line of readNdjson(resp.body)) {
         const chunk = JSON.parse(line) as OllamaChatChunk;
+        // A tool call can still appear on the answer pass (the model chains
+        // another lookup) — surface it so the loop runs it.
+        for (const tc of chunk.message?.tool_calls ?? []) {
+          sawTool = true;
+          producedAnything = true;
+          yield { type: 'tool_call', call: { id: newId('toolu'), toolName: tc.function.name, args: tc.function.arguments } };
+        }
         const delta = chunk.message?.content ?? '';
-        if (delta) yield { type: 'text', delta };
+        if (delta) {
+          producedAnything = true;
+          yield { type: 'text', delta };
+        }
         if (chunk.done) {
           doneReason = chunk.done_reason;
           usage.input = chunk.prompt_eval_count ?? usage.input;
           usage.output = chunk.eval_count ?? usage.output;
         }
       }
-      yield { type: 'done', reason: mapDoneReason(doneReason), usage };
+
+      // Safety net: a streamed answer pass that produced NOTHING (the empty-turn
+      // failure mode) falls back to the reliable non-streamed retry path so the
+      // user never gets a blank reply.
+      if (!producedAnything && answerPass) {
+        const full = await this.fetchFull(args);
+        if (full.toolCalls.length > 0) {
+          for (const call of full.toolCalls) yield { type: 'tool_call', call };
+          yield { type: 'done', reason: 'tool_call', usage: full.usage };
+          return;
+        }
+        if (full.text) yield { type: 'text', delta: full.text };
+        yield { type: 'done', reason: mapDoneReason(full.doneReason), usage: full.usage };
+        return;
+      }
+      yield { type: 'done', reason: sawTool ? 'tool_call' : mapDoneReason(doneReason), usage };
     } catch (err) {
       yield { type: 'error', error: toAiError(err) };
     }
