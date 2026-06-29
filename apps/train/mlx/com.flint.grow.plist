@@ -2,28 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>com.flint.grow</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/Users/willfoti/.flint/brain/auto_grow.py</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>GROW_TARGET</key><string>150</string>
-    <key>GROW_CONCURRENCY</key><string>3</string>
-  </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>3</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
-  <key>RunAtLoad</key>
-  <false/>
-  <key>StandardOutPath</key>
-  <string>/Users/willfoti/.flint/brain/grow.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/willfoti/.flint/brain/grow.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>GROW_CONCURRENCY</key>
+		<string>3</string>
+		<key>GROW_TARGET</key>
+		<string>30</string>
+	</dict>
+	<key>Label</key>
+	<string>com.flint.grow</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/willfoti/.flint/brain/auto_grow.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/willfoti/.flint/brain/grow.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/willfoti/.flint/brain/grow.out.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
 </dict>
 </plist>
