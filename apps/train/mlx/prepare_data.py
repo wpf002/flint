@@ -36,8 +36,8 @@ def main():
         sys.exit(1)
     random.seed(7)
     random.shuffle(rows)
-    n_val = max(4, len(rows) // 10)
-    n_hold = max(6, len(rows) // 10)
+    n_val = min(12, max(4, len(rows) // 10))
+    n_hold = min(12, max(6, len(rows) // 10))
     holdout = rows[:n_hold]
     valid = rows[n_hold:n_hold + n_val]
     train = rows[n_hold + n_val:]

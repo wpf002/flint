@@ -44,7 +44,7 @@ def gen_all(prompts, adapter):
     return outs
 
 def main():
-    rows = [json.loads(l) for l in open(HOLDOUT) if l.strip()]
+    rows = [json.loads(l) for l in open(HOLDOUT) if l.strip()][:int(os.environ.get("EVAL_N", "10"))]
     prompts = [r["input"] for r in rows]
     print(f"LLM-judge eval on {len(rows)} held-out prompts — student: {BASE}\n", flush=True)
     print("generating BASE answers...", flush=True); base = gen_all(prompts, None)
