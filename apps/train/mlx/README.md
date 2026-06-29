@@ -43,3 +43,14 @@ pays off. eval_judge.py reads ANTHROPIC_API_KEY from ~/.flint/secrets.env.
   Flint's brain improves automatically as the corpus grows from real usage.
 - Model via FLINT_BRAIN_MODEL env (default Qwen2.5-7B-Instruct-4bit). Iters scale to
   ~2 epochs (capped 1000); early-stopping makes overshoot safe.
+
+## Autonomous growth (2026-06-28) — Flint trains itself
+- `auto_grow.py` + `com.flint.grow.plist`: DAILY (3am) Claude generates ~150 fresh
+  diverse questions (weighted to Will's domains + general breadth), Flint captures
+  Claude's answers as teacher data, deduped vs the corpus. Knobs: GROW_TARGET,
+  GROW_CONCURRENCY. So the corpus grows ~150/day with zero manual use.
+- Full autopilot: com.flint.grow (daily, generate data) + com.flint.retrain
+  (weekly, distill it into the model). Flint's brain compounds on its own.
+- CEILING: synthetic distillation is capped at the teacher (Claude) and has
+  diminishing returns on generic breadth — Will's REAL usage + REAL data remain the
+  higher-value, personalized fuel. This complements, doesn't replace, real use.
