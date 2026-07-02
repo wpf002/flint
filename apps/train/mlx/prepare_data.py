@@ -8,6 +8,20 @@ import json, os, random, sys
 CORPUS = os.path.expanduser("~/.flint/training/corpus.jsonl")
 OUT = os.path.expanduser("~/.flint/brain/data")
 HOLDOUT = os.path.expanduser("~/.flint/brain/holdout.jsonl")  # for eval (teacher answers kept)
+PUBLIC = os.path.expanduser("~/.flint/brain/data/public.jsonl")  # free open datasets (breadth)
+
+def load_public():
+    rows = []
+    if not os.path.exists(PUBLIC): return rows
+    for line in open(PUBLIC):
+        line = line.strip()
+        if not line: continue
+        try: r = json.loads(line)
+        except: continue
+        inp = (r.get("input") or "").strip(); out = (r.get("output") or "").strip()
+        if len(inp) >= 4 and len(out) >= 20:
+            rows.append({"input": inp, "output": out})
+    return rows
 
 def load():
     rows = []
@@ -38,9 +52,10 @@ def main():
     random.shuffle(rows)
     n_val = min(12, max(4, len(rows) // 10))
     n_hold = min(12, max(6, len(rows) // 10))
-    holdout = rows[:n_hold]
+    holdout = rows[:n_hold]                       # eval on realistic/personal prompts
     valid = rows[n_hold:n_hold + n_val]
-    train = rows[n_hold + n_val:]
+    train = rows[n_hold + n_val:] + load_public() # personal (moat) + free open data (breadth)
+    random.shuffle(train)
     os.makedirs(OUT, exist_ok=True)
 
     def to_chat(r):
