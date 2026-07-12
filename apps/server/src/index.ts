@@ -198,10 +198,12 @@ const FORCE_LOCAL_RE = /\b(stay local|keep it local|keep this local|local only|o
  * stay on-device. Everything else → frontier (Claude) + Flint's personal layer
  * (memory, systems, voice, tools) on top.
  */
-function judgeBrain(message: string, hasFrontier: boolean, localOnly: boolean): Brain {
+function judgeBrain(message: string, hasFrontier: boolean, _localOnly: boolean): Brain {
   if (!hasFrontier) return 'local'; // no Claude configured → local fallback
-  if (localOnly) return 'local'; // user forced everything on-device
-  if (FORCE_LOCAL_RE.test(message)) return 'local'; // "stay local" / "keep this private"
+  // NOTE: the localOnly toggle is intentionally ignored — a stuck sticky lock
+  // kept silently trapping answers on the weak local model. To keep a query
+  // on-device now, type "stay local" / "keep this private" (below).
+  if (FORCE_LOCAL_RE.test(message)) return 'local';
   return 'frontier'; // default: Flint runs on Claude
 }
 
