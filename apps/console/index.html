@@ -230,7 +230,7 @@ setInterval(refresh,5000);
 function addMsg(who,cls){var t=document.getElementById('transcript');var d=document.createElement('div');d.className='msg '+cls;
   d.innerHTML='<span class="who">'+who+'</span><span class="body"></span>';t.appendChild(d);t.scrollTop=t.scrollHeight;return d.querySelector('.body');}
 /* ---------- brain: local vs frontier ---------- */
-var LOCAL_ONLY=localStorage.getItem('flint_lo')==='1';
+var LOCAL_ONLY=false;localStorage.setItem('flint_lo','0');/* always start on the full brain (Claude); lock is per-session, never sticky */
 function applyLO(){var b=document.getElementById('lobtn');if(!b)return;b.classList.toggle('on',LOCAL_ONLY);b.title=LOCAL_ONLY?'Local only: ON — everything stays on this Mac (no frontier escalation)':'Local only: OFF — hard questions may escalate to the frontier brain';}
 function toggleLO(){LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL_ONLY?'1':'0');applyLO();}
 function setBrainChip(bodyEl,brain){try{var who=bodyEl.parentNode.querySelector('.who');if(!who)return;var ex=who.querySelector('.bchip');if(ex)ex.remove();var c=document.createElement('span');c.className='bchip '+(brain==='frontier'?'frontier':'local');c.textContent=brain==='frontier'?'✦ CLAUDE':'LOCAL';who.appendChild(c);}catch(e){}}
