@@ -36,9 +36,14 @@ export class KnowledgeStore {
   }
 
   /** Record a durable fact. De-dupes on exact text. Returns false if a no-op. */
+  /** Ephemeral / non-durable "facts" that should never be remembered — the model
+   *  used to save the current time as a permanent fact, cluttering memory. */
+  private static readonly EPHEMERAL = /^(it is currently|the current (date|time|day)|right now it is|today is|the time is)\b|\b\d{1,2}:\d{2}\s?(am|pm)\b/i;
+
   async add(text: string, source = 'user'): Promise<boolean> {
     const clean = text.trim();
     if (!clean) return false;
+    if (KnowledgeStore.EPHEMERAL.test(clean)) return false; // don't remember timestamps/ephemera
     if (this.facts.some((f) => f.text.toLowerCase() === clean.toLowerCase())) return false;
     let vector: number[] = [];
     try {
