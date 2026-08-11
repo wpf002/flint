@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Auto-deploy agent for the Mac Studio: pulls GitHub + redeploys Flint every 2 min.
+     Install: cp com.flint.deploy.plist ~/Library/LaunchAgents/ ;
+              launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.flint.deploy.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.deploy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/willfoti/Documents/GitHub/flint/apps/server/auto_deploy.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/willfoti/.nvm/versions/node/v24.15.0/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/willfoti/.flint/deploy.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/willfoti/.flint/deploy.err.log</string>
+</dict>
+</plist>
