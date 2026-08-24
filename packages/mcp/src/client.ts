@@ -1,6 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Tool, ToolDefinition, ToolHandler, ToolCall } from '@flint/core';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpServerSpec, RegistryOptions, ToolSafety } from './types.js';
 
 /** A connected MCP server: its tools mapped to Flint tools, plus a closer. */
@@ -25,15 +27,25 @@ export async function connectServer(
 ): Promise<ConnectedServer> {
   const client = new Client({ name: 'flint', version: '0.1.0' });
 
-  const transport =
-    spec.transport === 'stdio'
-      ? new StdioClientTransport({
-          command: spec.command,
-          ...(spec.args ? { args: spec.args } : {}),
-          ...(spec.env ? { env: spec.env } : {}),
-          ...(spec.cwd ? { cwd: spec.cwd } : {}),
-        })
-      : spec.transport;
+  /*
+   * Narrowed at the boundary: the SDK declares sessionId as `string | undefined`,
+   * which does not satisfy Transport's optional property under Flint's
+   * exactOptionalPropertyTypes. The shape is correct at runtime; loosening the
+   * compiler option for the whole package would be the wrong trade.
+   */
+  const transport: Transport =
+    spec.transport === 'http'
+      ? (new StreamableHTTPClientTransport(new URL(spec.url), {
+          ...(spec.headers ? { requestInit: { headers: spec.headers } } : {}),
+        }) as unknown as Transport)
+      : spec.transport === 'stdio'
+        ? (new StdioClientTransport({
+            command: spec.command,
+            ...(spec.args ? { args: spec.args } : {}),
+            ...(spec.env ? { env: spec.env } : {}),
+            ...(spec.cwd ? { cwd: spec.cwd } : {}),
+          }) as unknown as Transport)
+        : spec.transport;
 
   await client.connect(transport);
 

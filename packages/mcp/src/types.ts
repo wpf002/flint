@@ -1,11 +1,19 @@
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 /**
- * How to reach an MCP server. Each of your apps becomes one of these: a stdio
- * server you spawn (`command`), or — for tests / custom transports — a
- * pre-built Transport.
+ * How to reach an MCP server: a remote one over Streamable HTTP (`http`), a stdio
+ * server you spawn (`command`), or — for tests / custom transports — a pre-built
+ * Transport.
  */
 export type McpServerSpec =
+  | {
+      name: string;
+      /** A remote MCP server reached over Streamable HTTP. */
+      transport: 'http';
+      url: string;
+      /** Extra headers, typically a bearer token for the remote server. */
+      headers?: Record<string, string>;
+    }
   | {
       name: string;
       transport: 'stdio';

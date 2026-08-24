@@ -1,0 +1,19 @@
+{
+  "name": "@flint/train",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build-dataset": "tsx src/build-dataset.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@flint/core": "workspace:*",
+    "@flint/persona": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
