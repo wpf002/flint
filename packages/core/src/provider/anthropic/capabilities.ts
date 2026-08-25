@@ -6,6 +6,9 @@ import type { ModelCapabilities } from '../../types/capabilities.js';
  * fall back to a conservative Sonnet-class profile.
  */
 const KNOWN: Record<string, ModelCapabilities> = {
+  'claude-opus-5': caps(200_000, 64_000),
+  'claude-sonnet-5': caps(200_000, 64_000),
+  'claude-fable-5': caps(200_000, 64_000),
   'claude-opus-4-8': caps(200_000, 32_000),
   'claude-sonnet-4-6': caps(200_000, 64_000),
   'claude-haiku-4-5-20251001': caps(200_000, 32_000),

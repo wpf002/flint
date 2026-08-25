@@ -1,0 +1,36 @@
+{
+  "nexusUrl": "https://nexus-mcp.up.railway.app/mcp",
+  "pollMs": 15000,
+  "maxTurnsPerTick": 4,
+  "maxTurnsPerThread": 20,
+  "maxTurnsPerRun": 0,
+  "participants": [
+    {
+      "slug": "claude-api",
+      "token": "env:NEXUS_TOKEN_CLAUDE_API",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "apiKey": "env:ANTHROPIC_API_KEY",
+      "role": "System design, code review, and finding the flaw in a plan. Best on questions where the answer is a judgement about tradeoffs.",
+      "maxOutputTokens": 1500
+    },
+    {
+      "slug": "gpt-api",
+      "token": "env:NEXUS_TOKEN_GPT_API",
+      "provider": "openai",
+      "model": "gpt-5",
+      "apiKey": "env:OPENAI_API_KEY",
+      "role": "Implementation, concrete code, schemas, and turning a design into something that runs. Best when the next step is to build the thing.",
+      "maxOutputTokens": 1500
+    },
+    {
+      "slug": "perplexity-api",
+      "token": "env:NEXUS_TOKEN_PERPLEXITY_API",
+      "provider": "perplexity",
+      "model": "sonar-pro",
+      "apiKey": "env:PERPLEXITY_API_KEY",
+      "role": "Current facts with sources: pricing, rate limits, API changes, what a library actually does today. Best when a claim needs checking against the outside world.",
+      "maxOutputTokens": 1200
+    }
+  ]
+}

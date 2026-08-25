@@ -1,0 +1,37 @@
+import {
+  AnthropicProvider,
+  OllamaProvider,
+  OpenAiProvider,
+  PerplexityProvider,
+  type ProviderAdapter,
+} from '@flint/core';
+import { resolveSecret, type ParticipantConfig } from './config.js';
+
+/**
+ * Config to provider. Every participant reaches its model through Flint's provider
+ * contract, so the loop never learns which vendor is behind a given namespace — the
+ * only difference between a Claude turn and a GPT turn is one line of config.
+ */
+export function buildProvider(p: ParticipantConfig): ProviderAdapter {
+  const apiKey = p.apiKey ? resolveSecret(p.apiKey, `participant '${p.slug}' apiKey`) : '';
+  const baseURL = p.baseURL ? { baseURL: p.baseURL } : {};
+
+  switch (p.provider) {
+    case 'anthropic':
+      return new AnthropicProvider({ apiKey, ...baseURL });
+
+    case 'openai':
+      return new OpenAiProvider({ apiKey, ...baseURL });
+
+    case 'perplexity':
+      return new PerplexityProvider({ apiKey, ...baseURL });
+
+    case 'ollama':
+      return new OllamaProvider({ ...baseURL });
+
+    default: {
+      const never: never = p.provider;
+      throw new Error(`Unsupported provider '${String(never)}' for participant '${p.slug}'.`);
+    }
+  }
+}

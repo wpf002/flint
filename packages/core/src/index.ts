@@ -105,3 +105,7 @@ export { AnthropicProvider } from './provider/anthropic/index.js';
 export type { AnthropicProviderOptions } from './provider/anthropic/index.js';
 export { OllamaProvider } from './provider/ollama/index.js';
 export type { OllamaProviderOptions } from './provider/ollama/index.js';
+export { OpenAiProvider, OpenAiCompatibleProvider, openAiCapabilities } from './provider/openai/index.js';
+export type { OpenAiProviderOptions, ChatWire } from './provider/openai/index.js';
+export { PerplexityProvider, perplexityCapabilities } from './provider/perplexity/index.js';
+export type { PerplexityProviderOptions } from './provider/perplexity/index.js';
