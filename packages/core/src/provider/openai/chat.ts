@@ -235,9 +235,23 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
 async function httpError(response: Response): Promise<OpenAiHttpError> {
   const text = await response.text().catch(() => '');
   const parsed = safeJson(text) as { error?: { message?: string; code?: string; type?: string } } | undefined;
-  const message = parsed?.error?.message ?? text.slice(0, 500) ?? response.statusText;
+  const message = parsed?.error?.message ?? describeBody(text) ?? response.statusText;
   const code = parsed?.error?.code ?? parsed?.error?.type;
   return new OpenAiHttpError(response.status, message || response.statusText, code);
+}
+
+/**
+ * An edge under load answers with its own web page rather than the API's error shape.
+ * Pasting that into the message buried every log line under a page of markup and said
+ * nothing the status code had not already said.
+ */
+function describeBody(text: string): string | undefined {
+  const body = text.trim();
+  if (body.length === 0) return undefined;
+  if (/^<(!doctype|html)/i.test(body)) {
+    return 'the endpoint returned a web page instead of a response, which usually means its edge is failing rather than the API';
+  }
+  return body.slice(0, 300);
 }
 
 /**

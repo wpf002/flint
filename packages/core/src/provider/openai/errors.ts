@@ -19,6 +19,14 @@ export class OpenAiHttpError extends Error {
  * the only part of the body that is stable across OpenAI and its compatibles.
  */
 export function toAiError(err: unknown, providerLabel: string): AiError {
+  /*
+   * AbortSignal.timeout() raises TimeoutError, not AbortError, so a deadline that fired
+   * was landing in the generic branch and reporting as a non-retryable internal fault.
+   * A caller's own cancellation is not retryable; a deadline is.
+   */
+  if (err instanceof DOMException && err.name === 'TimeoutError') {
+    return makeAiError('timeout', `${providerLabel} did not answer in time`, { retryable: true, raw: err });
+  }
   if (err instanceof DOMException && err.name === 'AbortError') {
     return makeAiError('timeout', 'Request aborted', { retryable: false, raw: err });
   }
