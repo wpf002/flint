@@ -24,14 +24,19 @@ export class Participant {
   }
 
   static async connect(cfg: ParticipantConfig, nexusUrl: string): Promise<Participant> {
+    // Everything that can fail on configuration alone is resolved before the socket
+    // is opened. Connecting first would leave a live MCP session behind every
+    // participant that turns out to be missing an API key.
     const token = resolveSecret(cfg.token, `participant '${cfg.slug}' token`);
+    const provider = buildProvider(cfg);
+
     const server = await connectServer({
       name: 'nexus',
       transport: 'http',
       url: nexusUrl,
       headers: { Authorization: `Bearer ${token}` },
     });
-    return new Participant(cfg, buildProvider(cfg), server);
+    return new Participant(cfg, provider, server);
   }
 
   /** Calls a Nexus tool and returns its parsed JSON payload. */
