@@ -26,7 +26,12 @@ function fake(
   slug: string,
   threads: FakeThread[],
   reply: unknown = { content: 'work', summary: 'did work', next: 'other', ask: 'next bit' },
-  floor: { status?: string; yourTurnIf?: string; reason?: string } = {},
+  floor: {
+    status?: string;
+    yourTurnIf?: string;
+    reason?: string;
+    offers?: Array<{ id: string; subject: string; content: string; from: { slug: string } }>;
+  } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
@@ -63,6 +68,7 @@ function fake(
         };
       }
       if (tool === 'thread_append') return { seq: 1, next: (args.next as string) ?? null };
+      if (tool === 'check_inbox') return { handoffs: floor.offers ?? [] };
       return {};
     },
   } as unknown as Participant;
@@ -321,5 +327,97 @@ describe('a thread that reaches a conclusion', () => {
 
     expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
     expect(f.calls.find((c) => c.tool === 'thread_append')!.args.done).toBe(true);
+  });
+});
+
+describe('facts travelling between participants', () => {
+  const offer = { id: 'h1', subject: 'Redis Streams', content: 'The queue is Redis Streams.', from: { slug: 'gpt' } };
+
+  /*
+   * A fact learned mid-thread is usually a fact the next speaker needs. Offering it
+   * rather than pushing it is the rule the whole handoff mechanism exists to enforce.
+   */
+  it('offers a remembered fact onward to whoever speaks next', async () => {
+    const f = fake('claude', threads(1), {
+      content: 'work',
+      summary: 'did work',
+      next: 'gpt',
+      ask: 'next bit',
+      remember: ['The queue is Redis Streams.'],
+    });
+
+    await tick([f.participant], limits(), silent);
+
+    const sent = f.calls.find((c) => c.tool === 'handoff')!;
+    expect(sent.args.to).toBe('gpt');
+    expect(sent.args.content).toBe('The queue is Redis Streams.');
+  });
+
+  it('offers nothing onward when nobody was nominated', async () => {
+    const f = fake('claude', threads(1), {
+      content: 'work',
+      summary: 'did work',
+      done: true,
+      remember: ['A fact.'],
+    });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'handoff')).toBe(false);
+    expect(f.calls.some((c) => c.tool === 'remember')).toBe(true);
+  });
+
+  it('keeps an offer it chose to accept', async () => {
+    const f = fake(
+      'claude',
+      threads(1),
+      { content: 'work', summary: 'did work', next: 'gpt', ask: 'go', accept: ['h1'] },
+      { offers: [offer] },
+    );
+
+    await tick([f.participant], limits(), silent);
+
+    const accepted = f.calls.find((c) => c.tool === 'accept_handoff')!;
+    expect(accepted.args.handoffId).toBe('h1');
+    expect(accepted.args.content).toBe('The queue is Redis Streams.');
+  });
+
+  /* Anything not accepted simply stays pending and lapses. Silence is a decision. */
+  it('leaves an offer alone when it was not accepted', async () => {
+    const f = fake('claude', threads(1), undefined, { offers: [offer] });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'accept_handoff')).toBe(false);
+  });
+
+  it('ignores an accept naming an offer it was never shown', async () => {
+    const f = fake('claude', threads(1), {
+      content: 'x',
+      summary: 'y',
+      next: 'gpt',
+      ask: 'z',
+      accept: ['not-a-real-offer'],
+    });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'accept_handoff')).toBe(false);
+  });
+
+  it('still takes the turn when the inbox cannot be read', async () => {
+    const f = fake('claude', threads(1));
+    const blind = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'check_inbox') throw new Error('inbox unavailable');
+        return f.participant.call(tool, args);
+      },
+    } as unknown as typeof f.participant;
+
+    const result = await tick([blind], limits(), silent);
+
+    expect(result.turnsTaken).toBe(1);
+    expect(result.errors).toHaveLength(0);
   });
 });

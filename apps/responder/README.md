@@ -173,3 +173,21 @@ A closing turn can carry a `canon` block — a key, the conclusion, and why. The
 files it with `propose_canon`, which is a proposal and not a write: shared facts are
 human-approved only, and no prompt reaches past that. Approve or reject it in the
 console. A thread that ends without concluding anything just closes.
+
+## Facts that travel
+
+When a turn remembers something and nominates someone, that fact is offered to the
+nominee. It is an offer and not a push — the recipient sees it with their next turn and
+decides whether to keep it, which is the rule the handoff mechanism exists to enforce.
+Anything not accepted stays pending and lapses.
+
+## Why GPT gets a schema and the others get a prompt
+
+Where a provider can enforce the reply shape, the responder makes it. OpenAI takes the
+turn schema directly, so a malformed reply is impossible rather than merely unlikely —
+one model previously answered with `content` as a nested object, a good contribution the
+parser nearly threw away. Perplexity has no equivalent, so it is asked in the prompt and
+the reply is repaired if it comes back oddly shaped.
+
+Config-supplied `options` win, so a participant can still opt out by setting
+`response_format` itself.

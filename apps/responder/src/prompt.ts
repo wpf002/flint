@@ -54,6 +54,9 @@ export const TurnReplySchema = z
      * What the thread concluded, offered to shared memory. Only ever read when `done`
      * is set: a conclusion proposed mid-thread is a guess about where it is heading.
      */
+    /* Offers this turn is willing to take into its own memory. Ids come from the
+     * offers shown in the prompt; anything left out simply stays pending and lapses. */
+    accept: z.array(z.string().min(1)).max(10).default([]),
     canon: z
       .object({
         key: z.string().min(1).max(200),
@@ -70,6 +73,52 @@ export type TurnReply = z.infer<typeof TurnReplySchema>;
 function contentBudget(maxOutputTokens: number): number {
   return Math.max(200, Math.round((maxOutputTokens - 250) * 3.2));
 }
+
+/**
+ * The reply shape as JSON Schema, for providers that can guarantee it.
+ *
+ * Prompting for JSON and repairing what comes back works, but it is the difference
+ * between usually and always: one model answered with `content` as a nested object,
+ * which was a good contribution the parser nearly threw away. Where the provider can
+ * enforce the shape, enforcing it is strictly better than asking nicely.
+ */
+export const TURN_REPLY_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  // Strict mode requires every property to be listed as required, so anything genuinely
+  // optional is expressed as nullable instead. Omitting `remember` and `canon` here
+  // would silently make it impossible for a participant to store a fact or conclude a
+  // thread — the schema would forbid the very fields the loop reads.
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'canon'],
+  properties: {
+    content: { type: 'string', description: 'Your actual contribution.' },
+    summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
+    next: { type: ['string', 'null'], description: 'Slug of the next speaker, or null.' },
+    ask: { type: ['string', 'null'], description: 'What you need from them.' },
+    done: { type: 'boolean', description: 'True when the goal is met and nobody needs to speak next.' },
+    remember: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Durable facts worth keeping beyond this thread. Usually empty.',
+    },
+    accept: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Ids of offers you want to keep. Leave out anything you do not.',
+    },
+    canon: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['key', 'content', 'rationale'],
+      properties: {
+        key: { type: 'string', description: 'A short dotted key, e.g. "pricing.floor".' },
+        content: { type: 'string', description: 'What the thread concluded.' },
+        rationale: { type: ['string', 'null'], description: 'Why.' },
+      },
+      description: 'Only when done is true, and only if the thread concluded something worth keeping.',
+    },
+  },
+} as const;
 
 export function systemPrompt(slug: string, role: string | undefined, maxOutputTokens = 4_000): string {
   return [
@@ -108,7 +157,14 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     .join('\n');
 }
 
-export function threadPrompt(state: ThreadState, self: string): string {
+export interface Offer {
+  id: string;
+  subject: string;
+  content: string;
+  from: { slug: string };
+}
+
+export function threadPrompt(state: ThreadState, self: string, offers: Offer[] = []): string {
   const others = state.participants.filter((p) => p.slug !== self);
 
   const roster =
@@ -137,6 +193,13 @@ export function threadPrompt(state: ThreadState, self: string): string {
     history,
     '',
     state.ask ? `ASKED OF YOU: ${state.ask}` : 'Nothing specific was asked of you. Advance the goal.',
+    ...(offers.length > 0
+      ? [
+          '',
+          'OFFERED TO YOU (facts another participant thought you would need — list the id in "accept" to keep one):',
+          ...offers.map((o) => `- ${o.id} from ${o.from.slug}: ${o.subject}\n  ${o.content}`),
+        ]
+      : []),
     '',
     'Take your turn. JSON only.',
   ].join('\n');
@@ -173,6 +236,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       ask: null,
       done: false,
       remember: [],
+      accept: [],
     },
     malformed: true,
   };
@@ -203,6 +267,7 @@ function normalize(candidate: unknown): unknown {
   }
   if (typeof obj.content === 'string') obj.content = clip(obj.content, MAX_CONTENT);
   if (obj.next !== undefined && obj.next !== null && typeof obj.next !== 'string') obj.next = null;
+  if (obj.accept !== undefined && !Array.isArray(obj.accept)) obj.accept = [];
   // A malformed proposal is dropped rather than sent: canon is the one place where a
   // half-understood write is worse than no write.
   if (obj.canon !== undefined && obj.canon !== null) {

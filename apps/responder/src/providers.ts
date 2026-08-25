@@ -6,6 +6,7 @@ import {
   type ProviderAdapter,
 } from '@flint/core';
 import { resolveSecret, type ParticipantConfig } from './config.js';
+import { TURN_REPLY_JSON_SCHEMA } from './prompt.js';
 
 /**
  * Config to provider. Every participant reaches its model through Flint's provider
@@ -22,7 +23,20 @@ export function buildProvider(p: ParticipantConfig): ProviderAdapter {
       return new AnthropicProvider({ apiKey, ...baseURL });
 
     case 'openai':
-      return new OpenAiProvider({ apiKey, ...baseURL, ...extra });
+      return new OpenAiProvider({
+        apiKey,
+        ...baseURL,
+        ...extra,
+        extraBody: {
+          // Enforced rather than requested. Config-supplied options win, so a
+          // participant can still opt out by setting response_format itself.
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'turn', strict: true, schema: TURN_REPLY_JSON_SCHEMA },
+          },
+          ...(p.options ?? {}),
+        },
+      });
 
     case 'perplexity':
       return new PerplexityProvider({ apiKey, ...baseURL, ...extra });

@@ -1,6 +1,6 @@
 import { isFlintError } from '@flint/core';
 import type { Participant } from './participant.js';
-import { parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from './prompt.js';
+import { parseReply, systemPrompt, threadPrompt, ThreadStateSchema, type Offer } from './prompt.js';
 
 /**
  * The loop that makes the space self-running.
@@ -103,6 +103,16 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
   if (state.status !== 'OPEN') return false;
   if (state.yourTurnIf && state.yourTurnIf !== p.slug) return false;
 
+  /*
+   * Anything another participant has offered this one. Shown with the turn rather than
+   * handled separately: an offer is context for the work, and deciding on it in the
+   * same call it is read costs nothing extra.
+   */
+  const inbox = await p
+    .call<{ handoffs: Offer[] }>('check_inbox', { status: 'PENDING', direction: 'incoming', limit: 5 })
+    .catch(() => ({ handoffs: [] as Offer[] }));
+  const offers = inbox.handoffs ?? [];
+
   const generated = await p.provider.generate({
     model: p.cfg.model,
     system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens),
@@ -110,7 +120,7 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
       {
         id: `${job.threadId}:${state.turnCount}`,
         role: 'user',
-        content: threadPrompt(state, p.slug),
+        content: threadPrompt(state, p.slug, offers),
         timestamp: 0,
       },
     ],
@@ -164,12 +174,40 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
       .catch((err: unknown) => log(`[${p.slug}] could not propose to canon: ${describe(err)}`));
   }
 
+  // Offers this turn chose to keep. Accepting writes the fact into the accepter's own
+  // namespace, so it stays attributable to whoever took it, not to whoever sent it.
+  for (const id of reply.accept) {
+    const offer = offers.find((o) => o.id === id);
+    if (!offer) continue;
+    await p
+      .call('accept_handoff', { handoffId: id, content: offer.content, tags: ['handoff'] })
+      .then(() => log(`[${p.slug}] kept an offer from ${offer.from.slug}`))
+      .catch((err: unknown) => log(`[${p.slug}] could not accept an offer: ${describe(err)}`));
+  }
+
   // Facts the participant flagged as outliving the thread. Written under its own
   // namespace, so they are attributable and revocable like any other memory.
   for (const fact of reply.remember) {
     await p
       .call('remember', { content: fact, tags: ['thread', job.threadId] })
       .catch((err: unknown) => log(`[${p.slug}] could not store a fact: ${describe(err)}`));
+
+    /*
+     * A fact learned mid-thread is usually a fact the next speaker needs, so it is
+     * offered to them rather than left where only its author can see it. An offer, not
+     * a push: the recipient decides whether to keep it, which is the rule the whole
+     * handoff mechanism exists to enforce.
+     */
+    if (appended.next) {
+      await p
+        .call('handoff', {
+          to: appended.next,
+          subject: fact.slice(0, 200),
+          content: fact,
+          tags: ['thread', job.threadId],
+        })
+        .catch((err: unknown) => log(`[${p.slug}] could not offer a fact onward: ${describe(err)}`));
+    }
   }
 
   const cost = `${generated.usage.input}→${generated.usage.output} tok`;
