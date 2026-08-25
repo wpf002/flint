@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parseConfig, type ResponderConfig } from './config.js';
 import { Participant } from './participant.js';
 import { describe, tick, type Limits } from './loop.js';
+import { checkAll, publish } from './health.js';
 
 /**
  * `responder` — the half of Nexus that lets a thread advance without a human.
@@ -13,6 +14,7 @@ import { describe, tick, type Limits } from './loop.js';
  *   responder roles     publish each participant's declared strength to Nexus
  *   responder open      start a thread: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
+ *   responder health    probe every token and model key, report the result to Nexus
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
  *
@@ -57,7 +59,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|open|read|once|run>\n');
+    process.stdout.write('responder <check|roles|open|read|health|once|run>\n');
     return;
   }
 
@@ -123,6 +125,23 @@ async function main(): Promise<void> {
         return;
       }
 
+      case 'health': {
+        const checks = await checkAll(participants);
+        for (const c of checks) {
+          await publish(participants.find((p) => p.slug === c.slug)!, c);
+          const ok = c.nexus && c.model;
+          log(`${ok ? 'ok  ' : 'FAIL'} ${c.slug}  nexus=${c.nexus ? 'ok' : 'down'} model=${c.model ? 'ok' : 'down'}${c.note ? `  ${c.note}` : ''}`);
+        }
+        // Non-zero on failure so a scheduler, a CI step or a shell `&&` can act on it
+        // without parsing this output.
+        const broken = checks.filter((c) => !(c.nexus && c.model));
+        if (broken.length > 0) {
+          process.exitCode = 1;
+          log(`${broken.length} participant${broken.length === 1 ? '' : 's'} cannot take a turn: ${broken.map((c) => c.slug).join(', ')}`);
+        }
+        return;
+      }
+
       case 'once': {
         await runTick(participants, cfg, budgetFor(cfg));
         return;
@@ -134,7 +153,7 @@ async function main(): Promise<void> {
       }
 
       default:
-        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, once, run.`);
+        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, health, once, run.`);
     }
   } finally {
     await shutdown();

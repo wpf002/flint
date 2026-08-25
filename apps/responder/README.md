@@ -93,3 +93,44 @@ writes only its own memory, and cannot alter another participant's turns. A prom
 tells it to impersonate someone else changes nothing, because authorship is derived from
 the credential and never from the model's output. Every turn is audited on the Nexus
 side like any other.
+
+## Daily health checks
+
+A participant can be connected to Nexus and still unable to answer. The token proves
+one thing; the model key behind it is somewhere Nexus deliberately never sees. That gap
+is how three expired keys sat unnoticed for months while the console showed all green.
+
+```bash
+pnpm --filter responder responder health
+```
+
+Probes every namespace token and every model key, reports the result back to Nexus via
+`report_health`, and exits non-zero if anything cannot take a turn. The console then
+marks that participant **not working** instead of showing it as connected.
+
+The probe is a real generation capped at a single token, not a models-list call. A key
+can list models and still be refused a completion when its quota is spent, which is
+exactly the failure worth catching. A rate limit or provider outage at check time is
+recorded as transient rather than as a failure — a signal that cries wolf gets ignored.
+
+### Scheduling it
+
+`scripts/nexus-health.sh` runs the probe, appends a dated line to
+`~/.flint/logs/nexus-health.log` whether it passes or fails, and raises a macOS
+notification on failure. It logs successes too: a file that records only failures
+cannot tell "healthy" from "the check stopped running".
+
+`scripts/com.nexus.health.plist` runs it at 09:00 daily. Install with:
+
+```bash
+cp scripts/nexus-health.sh ~/.flint/nexus-health.sh && chmod +x ~/.flint/nexus-health.sh
+cp scripts/com.nexus.health.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nexus.health.plist
+```
+
+The script has to live outside `~/Documents`: macOS blocks launchd agents from
+executing anything in there, and the failure is a bare `Operation not permitted` with
+nothing pointing at the cause. `$FLINT_REPO` overrides where it looks for the checkout.
+
+A healthy report that stops arriving goes **stale** in the console rather than staying
+green, so a scheduler that quietly dies is visible too.
