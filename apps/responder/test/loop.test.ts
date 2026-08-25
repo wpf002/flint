@@ -26,7 +26,9 @@ function fake(
   slug: string,
   threads: FakeThread[],
   reply: unknown = { content: 'work', summary: 'did work', next: 'other', ask: 'next bit' },
+  floor: { status?: string; yourTurnIf?: string } = {},
 ): Fake {
+  const status = floor.status ?? 'OPEN';
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   const state = { generations: 0 };
 
@@ -52,7 +54,8 @@ function fake(
         return {
           threadId: t.threadId,
           goal: t.goal,
-          status: 'OPEN',
+          status,
+          yourTurnIf: floor.yourTurnIf ?? slug,
           turnCount: t.turns,
           ask: 'do the thing',
           participants: [{ slug, label: slug, good_at: 'testing' }],
@@ -199,5 +202,30 @@ describe('tick', () => {
 
     expect(result.turnsTaken).toBe(0);
     expect(result.errors[0]).toContain('exploded');
+  });
+});
+
+describe('a floor that moved between listing and reading', () => {
+  /*
+   * The model call sits between the listing and the append, so a stale listing that
+   * is only caught by the append would have been paid for and then rejected.
+   */
+  it('skips without generating when someone else now holds the floor', async () => {
+    const f = fake('claude', threads(1), undefined, { yourTurnIf: 'gpt' });
+
+    const result = await tick([f.participant], limits(), silent);
+
+    expect(result.turnsTaken).toBe(0);
+    expect(f.generations).toBe(0);
+    expect(f.calls.some((c) => c.tool === 'thread_append')).toBe(false);
+  });
+
+  it('skips without generating when the thread closed', async () => {
+    const f = fake('claude', threads(1), undefined, { status: 'CLOSED' });
+
+    const result = await tick([f.participant], limits(), silent);
+
+    expect(result.turnsTaken).toBe(0);
+    expect(f.generations).toBe(0);
   });
 });

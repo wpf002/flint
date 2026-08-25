@@ -15,6 +15,7 @@ export const ThreadStateSchema = z
     goal: z.string(),
     status: z.string(),
     turnCount: z.number(),
+    yourTurnIf: z.string().nullable().optional(),
     ask: z.string().nullable().optional(),
     participants: z
       .array(z.object({ slug: z.string(), label: z.string(), good_at: z.string() }))

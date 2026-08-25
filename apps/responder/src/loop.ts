@@ -94,9 +94,14 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
 
   const state = ThreadStateSchema.parse(await p.call('thread_read', { threadId: job.threadId }));
 
-  // The floor can move between listing and reading — another participant may have
-  // been renominated. Taking the turn anyway would just earn a 403 from Nexus.
+  /*
+   * The floor can move between listing and reading — someone may have been
+   * renominated, or the thread closed. Checking here rather than letting the append
+   * fail matters because the model call sits in between: a stale listing would
+   * otherwise be paid for and then rejected.
+   */
   if (state.status !== 'OPEN') return false;
+  if (state.yourTurnIf && state.yourTurnIf !== p.slug) return false;
 
   const generated = await p.provider.generate({
     model: p.cfg.model,
