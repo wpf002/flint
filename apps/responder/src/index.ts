@@ -152,13 +152,17 @@ async function main(): Promise<void> {
       }
 
       case 'once': {
-        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
+        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay, cfg.maxOutputTokensPerDay);
         if (ledger.remaining() <= 0) {
-          log(`daily cap reached (${ledger.spent}/${cfg.maxTurnsPerDay} turns). Nothing taken.`);
+          log(
+            ledger.tokensSpent
+              ? `daily budget spent (${ledger.tokens.toLocaleString()} output tokens). Nothing taken.`
+              : `daily turn cap reached (${ledger.spent}/${cfg.maxTurnsPerDay}). Nothing taken.`,
+          );
           return;
         }
-        const taken = await runTick(participants, cfg, Math.min(budgetFor(cfg), ledger.remaining()));
-        ledger.record(taken);
+        const round = await runRound(participants, cfg, Math.min(budgetFor(cfg), ledger.remaining()));
+        ledger.record(round.turnsTaken, round.tokensOut);
         return;
       }
 
@@ -168,11 +172,11 @@ async function main(): Promise<void> {
       }
 
       case 'spend': {
-        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
+        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay, cfg.maxOutputTokensPerDay);
         log(
           ledger.limited
-            ? `${ledger.spent} of ${cfg.maxTurnsPerDay} turns taken today; ${ledger.remaining()} left`
-            : `${ledger.spent} turns taken today; no daily cap set`,
+            ? `today: ${ledger.tokens.toLocaleString()} of ${cfg.maxOutputTokensPerDay.toLocaleString()} output tokens, ${ledger.spent} of ${cfg.maxTurnsPerDay} turns`
+            : `today: ${ledger.tokens.toLocaleString()} output tokens across ${ledger.spent} turns; no daily cap set`,
         );
         return;
       }
@@ -219,7 +223,11 @@ function budgetFor(cfg: ResponderConfig): number {
 /** Carried across rounds so a thread that keeps failing is rested, not hammered. */
 const failures: Failures = new Map();
 
-async function runTick(participants: Participant[], cfg: ResponderConfig, runBudget: number): Promise<number> {
+async function runRound(
+  participants: Participant[],
+  cfg: ResponderConfig,
+  runBudget: number,
+): Promise<{ turnsTaken: number; tokensOut: number }> {
   const limits: Limits = {
     maxTurnsPerTick: cfg.maxTurnsPerTick,
     maxTurnsPerThread: cfg.maxTurnsPerThread,
@@ -228,12 +236,12 @@ async function runTick(participants: Participant[], cfg: ResponderConfig, runBud
   };
   const result = await tick(participants, limits, log, failures);
   for (const err of result.errors) log(`! ${err}`);
-  return result.turnsTaken;
+  return { turnsTaken: result.turnsTaken, tokensOut: result.tokensOut };
 }
 
 async function runForever(participants: Participant[], cfg: ResponderConfig): Promise<void> {
   let budget = budgetFor(cfg);
-  const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
+  const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay, cfg.maxOutputTokensPerDay);
   let stopping = false;
 
   const stop = (): void => {
@@ -253,7 +261,7 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
   log(
     `watching ${participants.length} participant${participants.length === 1 ? '' : 's'} every ${cfg.pollMs / 1000}s ` +
       `(max ${cfg.maxTurnsPerTick} turns/round, ${cfg.maxTurnsPerThread}/thread` +
-      `${ledger.limited ? `, ${ledger.remaining()} left today` : ''}` +
+      `${ledger.limited ? `, ${Math.round(ledger.tokensRemaining() / 1000)}k tokens left today` : ''}` +
       `${Number.isFinite(budget) ? `, ${budget} this run` : ''})`,
   );
 
@@ -265,7 +273,11 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     ledger.rollover();
     if (ledger.remaining() <= 0) {
       if (!capped) {
-        log(`daily cap reached (${ledger.spent}/${cfg.maxTurnsPerDay} turns). Idling until tomorrow.`);
+        log(
+          ledger.tokensSpent
+            ? `daily budget spent (${ledger.tokens.toLocaleString()} output tokens). Idling until tomorrow.`
+            : `daily turn cap reached (${ledger.spent}/${cfg.maxTurnsPerDay}). Idling until tomorrow.`,
+        );
         capped = true;
       }
       await sleep(cfg.pollMs * 4, () => stopping);
@@ -275,10 +287,11 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
 
     const allowed = Math.min(budget, ledger.remaining());
     const startedAt = Date.now();
-    const taken = await runTick(participants, cfg, allowed).catch((err: unknown) => {
+    const round = await runRound(participants, cfg, allowed).catch((err: unknown) => {
       log(`! round failed: ${describe(err)}`);
-      return 0;
+      return { turnsTaken: 0, tokensOut: 0 };
     });
+    const taken = round.turnsTaken;
 
     /*
      * A quiet loop and a stalled one look identical from the outside, because an idle
@@ -289,7 +302,7 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     if (elapsed > cfg.turnTimeoutMs) {
       log(`round took ${Math.round(elapsed / 1000)}s, which is longer than a turn is allowed`);
     }
-    ledger.record(taken);
+    ledger.record(taken, round.tokensOut);
     budget -= taken;
 
     // Back off while nothing is happening so an idle space costs almost nothing,

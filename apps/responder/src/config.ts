@@ -95,11 +95,17 @@ export const ResponderConfigSchema = z
     /** Stop taking turns entirely after this many model calls. 0 disables the loop's own limit. */
     maxTurnsPerRun: z.number().int().min(0).default(0),
     /*
-     * The cap that survives a restart. A supervised process that crashes comes back
+     * The caps that survive a restart. A supervised process that crashes comes back
      * with a fresh run budget, so the run cap alone bounds nothing once the loop is
-     * left running. 0 disables it.
+     * left running. Either at 0 disables that one.
+     *
+     * Tokens is the honest unit — sixty short turns and sixty long ones cost very
+     * differently, and a thread's later turns cost several times its first because they
+     * carry the history. The turn cap stays as a second brake against a loop that
+     * somehow spends nothing but keeps going.
      */
-    maxTurnsPerDay: z.number().int().min(0).default(60),
+    maxTurnsPerDay: z.number().int().min(0).default(120),
+    maxOutputTokensPerDay: z.number().int().min(0).default(150_000),
     participants: z.array(ParticipantConfigSchema).min(1),
   })
   .strict();

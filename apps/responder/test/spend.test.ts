@@ -88,3 +88,48 @@ describe('SpendLedger', () => {
     expect(ledger.spent).toBe(0);
   });
 });
+
+describe("the budget a bill is actually made of", () => {
+  /*
+   * Sixty short turns and sixty long ones cost very differently, and a thread's later
+   * turns cost several times its first because they carry the history. Counting turns
+   * bounded the wrong thing.
+   */
+  it("stops on tokens even when turns are left", () => {
+    const ledger = SpendLedger.open(path, 100, 10_000);
+    ledger.record(3, 10_000);
+
+    expect(ledger.remaining()).toBe(0);
+    expect(ledger.tokensSpent).toBe(true);
+  });
+
+  it("still stops on turns when tokens are left", () => {
+    const ledger = SpendLedger.open(path, 2, 100_000);
+    ledger.record(2, 500);
+
+    expect(ledger.remaining()).toBe(0);
+    expect(ledger.tokensSpent).toBe(false);
+  });
+
+  it("carries the token count across a restart", () => {
+    SpendLedger.open(path, 100, 50_000).record(1, 12_000);
+
+    expect(SpendLedger.open(path, 100, 50_000).tokens).toBe(12_000);
+  });
+
+  it("is uncapped on tokens at a limit of zero", () => {
+    const ledger = SpendLedger.open(path, 0, 0);
+    ledger.record(50, 999_999);
+
+    expect(ledger.tokensRemaining()).toBe(Number.POSITIVE_INFINITY);
+    expect(ledger.remaining()).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("reads a ledger written before tokens were tracked as zero spent", () => {
+    writeFileSync(path, JSON.stringify({ day: utcDay(), turns: 9 }));
+
+    const ledger = SpendLedger.open(path, 100, 50_000);
+    expect(ledger.spent).toBe(9);
+    expect(ledger.tokens).toBe(0);
+  });
+});

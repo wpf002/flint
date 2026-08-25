@@ -49,6 +49,8 @@ const PASS_AFTER = 2;
 export interface TickResult {
   turnsTaken: number;
   threadsClosed: number;
+  /** Output tokens generated this round. What the round actually cost. */
+  tokensOut: number;
   errors: string[];
 }
 
@@ -82,7 +84,7 @@ export async function tick(
   log: Log,
   failures: Failures = new Map(),
 ): Promise<TickResult> {
-  const result: TickResult = { turnsTaken: 0, threadsClosed: 0, errors: [] };
+  const result: TickResult = { turnsTaken: 0, threadsClosed: 0, tokensOut: 0, errors: [] };
 
   const queues: Waiting[][] = [];
   for (const p of participants) {
@@ -149,6 +151,7 @@ export async function tick(
     for (const outcome of outcomes) {
       if (outcome.taken) result.turnsTaken += 1;
       if (outcome.closed) result.threadsClosed += 1;
+      result.tokensOut += outcome.tokensOut;
       if (outcome.error) result.errors.push(outcome.error);
     }
   }
@@ -159,6 +162,7 @@ export async function tick(
 interface Outcome {
   taken: boolean;
   closed: boolean;
+  tokensOut: number;
   error?: string;
 }
 
@@ -175,7 +179,7 @@ async function runJob(
   const failed = failures.get(job.threadId) ?? 0;
   if (failed >= BACKOFF_AFTER) {
     failures.set(job.threadId, failed >= BACKOFF_AFTER + BACKOFF_ROUNDS ? 0 : failed + 1);
-    return { taken: false, closed: false };
+    return { taken: false, closed: false, tokensOut: 0 };
   }
 
   if (job.turns >= limits.maxTurnsPerThread) {
@@ -183,21 +187,22 @@ async function runJob(
       await closeExhausted(job, limits.maxTurnsPerThread);
       failures.delete(job.threadId);
       log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${limits.maxTurnsPerThread}-turn cap`);
-      return { taken: false, closed: true };
+      return { taken: false, closed: true, tokensOut: 0 };
     } catch (err) {
       failures.set(job.threadId, failed + 1);
       return {
         taken: false,
         closed: false,
+        tokensOut: 0,
         error: `${job.participant.slug}: could not close ${short(job.threadId)} — ${describe(err)}`,
       };
     }
   }
 
   try {
-    const taken = await takeTurn(job, limits, log);
+    const { taken, tokensOut } = await takeTurn(job, limits, log);
     failures.delete(job.threadId);
-    return { taken, closed: false };
+    return { taken, closed: false, tokensOut };
   } catch (err) {
     const now = failed + 1;
     failures.set(job.threadId, now);
@@ -211,13 +216,14 @@ async function runJob(
       const passed = await passOn(job, participants, err, log).catch(() => false);
       if (passed) {
         failures.delete(job.threadId);
-        return { taken: false, closed: false };
+        return { taken: false, closed: false, tokensOut: 0 };
       }
     }
 
     return {
       taken: false,
       closed: false,
+      tokensOut: 0,
       error:
         `${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}` +
         (now >= BACKOFF_AFTER ? ` (resting it after ${now} failures)` : ''),
@@ -225,7 +231,7 @@ async function runJob(
   }
 }
 
-async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean> {
+async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken: boolean; tokensOut: number }> {
   const { participant: p } = job;
 
   const state = ThreadStateSchema.parse(await p.call('thread_read', { threadId: job.threadId }));
@@ -236,8 +242,8 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean
    * fail matters because the model call sits in between: a stale listing would
    * otherwise be paid for and then rejected.
    */
-  if (state.status !== 'OPEN') return false;
-  if (state.yourTurnIf && state.yourTurnIf !== p.slug) return false;
+  if (state.status !== 'OPEN') return { taken: false, tokensOut: 0 };
+  if (state.yourTurnIf && state.yourTurnIf !== p.slug) return { taken: false, tokensOut: 0 };
 
   /*
    * An open floor is a race: several participants can see it at once, and all of them
@@ -249,7 +255,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean
     try {
       await p.call('thread_reassign', { threadId: job.threadId, to: p.slug });
     } catch {
-      return false;
+      return { taken: false, tokensOut: 0 };
     }
   }
 
@@ -383,7 +389,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean
   log(
     `[${p.slug}] turn ${appended.seq} on ${short(job.threadId)}${job.volunteered ? ' (took an open floor)' : ''} ${handoff} (${cost})`,
   );
-  return true;
+  return { taken: true, tokensOut: generated.usage.output };
 }
 
 /**

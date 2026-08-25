@@ -35,5 +35,7 @@
       "role": "Current facts with sources: pricing, rate limits, API changes, what a library actually does today. Best when a claim needs checking against the outside world.",
       "maxOutputTokens": 2000
     }
-  ]
+  ],
+  "maxTurnsPerDay": 120,
+  "maxOutputTokensPerDay": 150000
 }
