@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { parseConfig, type ResponderConfig } from './config.js';
 import { Participant } from './participant.js';
-import { describe, tick, type Limits } from './loop.js';
+import { describe, tick, type Failures, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
 import { SpendLedger } from './spend.js';
 
@@ -216,6 +216,9 @@ function budgetFor(cfg: ResponderConfig): number {
   return cfg.maxTurnsPerRun > 0 ? cfg.maxTurnsPerRun : Number.POSITIVE_INFINITY;
 }
 
+/** Carried across rounds so a thread that keeps failing is rested, not hammered. */
+const failures: Failures = new Map();
+
 async function runTick(participants: Participant[], cfg: ResponderConfig, runBudget: number): Promise<number> {
   const limits: Limits = {
     maxTurnsPerTick: cfg.maxTurnsPerTick,
@@ -223,7 +226,7 @@ async function runTick(participants: Participant[], cfg: ResponderConfig, runBud
     runBudget,
     turnTimeoutMs: cfg.turnTimeoutMs,
   };
-  const result = await tick(participants, limits, log);
+  const result = await tick(participants, limits, log, failures);
   for (const err of result.errors) log(`! ${err}`);
   return result.turnsTaken;
 }

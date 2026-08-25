@@ -30,6 +30,19 @@ export interface Limits {
   turnTimeoutMs: number;
 }
 
+/**
+ * Consecutive failures per thread, carried between rounds.
+ *
+ * Without it a thread that cannot be answered — a provider refusing it, a payload it
+ * chokes on — is retried every fifteen seconds forever, and a single broken thread
+ * spends the day's budget failing.
+ */
+export type Failures = Map<string, number>;
+
+/** After this many consecutive failures a thread is left alone for a while. */
+const BACKOFF_AFTER = 3;
+const BACKOFF_ROUNDS = 20;
+
 export interface TickResult {
   turnsTaken: number;
   threadsClosed: number;
@@ -60,7 +73,12 @@ interface ThreadListing {
   }>;
 }
 
-export async function tick(participants: Participant[], limits: Limits, log: Log): Promise<TickResult> {
+export async function tick(
+  participants: Participant[],
+  limits: Limits,
+  log: Log,
+  failures: Failures = new Map(),
+): Promise<TickResult> {
   const result: TickResult = { turnsTaken: 0, threadsClosed: 0, errors: [] };
 
   const queues: Waiting[][] = [];
@@ -100,12 +118,22 @@ export async function tick(participants: Participant[], limits: Limits, log: Log
     if (result.turnsTaken >= limits.maxTurnsPerTick) break;
     if (limits.runBudget - result.turnsTaken <= 0) break;
 
+    // A thread that keeps failing is rested rather than hammered. The counter decays,
+    // so it comes back on its own once the cause has had time to clear.
+    const failed = failures.get(job.threadId) ?? 0;
+    if (failed >= BACKOFF_AFTER) {
+      failures.set(job.threadId, failed >= BACKOFF_AFTER + BACKOFF_ROUNDS ? 0 : failed + 1);
+      continue;
+    }
+
     if (job.turns >= limits.maxTurnsPerThread) {
       try {
         await closeExhausted(job, limits.maxTurnsPerThread);
+        failures.delete(job.threadId);
         result.threadsClosed += 1;
         log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${limits.maxTurnsPerThread}-turn cap`);
       } catch (err) {
+        failures.set(job.threadId, failed + 1);
         result.errors.push(`${job.participant.slug}: could not close ${short(job.threadId)} — ${describe(err)}`);
       }
       continue;
@@ -114,8 +142,14 @@ export async function tick(participants: Participant[], limits: Limits, log: Log
     try {
       const taken = await takeTurn(job, limits, log);
       if (taken) result.turnsTaken += 1;
+      failures.delete(job.threadId);
     } catch (err) {
-      result.errors.push(`${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}`);
+      const now = failed + 1;
+      failures.set(job.threadId, now);
+      result.errors.push(
+        `${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}` +
+          (now >= BACKOFF_AFTER ? ` (resting it after ${now} failures)` : ''),
+      );
     }
   }
 
@@ -289,6 +323,12 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean
  * which reads as a hang rather than a decision.
  */
 async function closeExhausted(job: Waiting, cap: number): Promise<void> {
+  // Closing is a turn, and a turn needs the floor. Skipping this left a capped thread
+  // with an open floor permanently unclosable: the append was refused every round.
+  if (job.volunteered) {
+    await job.participant.call('thread_reassign', { threadId: job.threadId, to: job.participant.slug });
+  }
+
   await job.participant.call('thread_append', {
     threadId: job.threadId,
     content:

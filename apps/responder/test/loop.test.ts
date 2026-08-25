@@ -422,3 +422,99 @@ describe('facts travelling between participants', () => {
     expect(result.errors).toHaveLength(0);
   });
 });
+
+describe("threads that cannot be answered", () => {
+  const broken = (slug: string, thr: FakeThread[]) => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const participant = {
+      slug,
+      cfg: { slug, model: 'm', maxOutputTokens: 500 },
+      replyMode: 'prompt',
+      provider: { name: 'fake', generate: async () => { throw new Error('provider refused'); } },
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        calls.push({ tool, args });
+        if (tool === 'thread_list') return { threads: thr };
+        if (tool === 'thread_read') {
+          return { threadId: thr[0]!.threadId, goal: 'g', status: 'OPEN', yourTurnIf: slug, turnCount: 1, ask: 'a', participants: [], turns: [] };
+        }
+        return {};
+      },
+    } as unknown as Participant;
+    return { participant, calls };
+  };
+
+  /*
+   * Without a memory across rounds a thread that cannot be answered is retried every
+   * fifteen seconds forever, and one broken thread spends the whole day's budget
+   * failing.
+   */
+  it("rests a thread after repeated failures instead of retrying forever", async () => {
+    const f = broken('claude', threads(1));
+    const failures = new Map<string, number>();
+
+    for (let round = 0; round < 3; round += 1) {
+      await tick([f.participant], limits(), silent, failures);
+    }
+    const attemptsBefore = f.calls.filter((c) => c.tool === 'thread_read').length;
+
+    await tick([f.participant], limits(), silent, failures);
+
+    expect(attemptsBefore).toBe(3);
+    expect(f.calls.filter((c) => c.tool === 'thread_read')).toHaveLength(3);
+  });
+
+  it("says it is resting the thread rather than failing silently", async () => {
+    const f = broken('claude', threads(1));
+    const failures = new Map<string, number>();
+
+    let last = await tick([f.participant], limits(), silent, failures);
+    for (let round = 0; round < 2; round += 1) {
+      last = await tick([f.participant], limits(), silent, failures);
+    }
+
+    expect(last.errors[0]).toMatch(/resting it after 3 failures/);
+  });
+
+  it("forgets the failures as soon as a turn lands", async () => {
+    const failures = new Map<string, number>([['t0', 2]]);
+    const f = fake('claude', threads(1));
+
+    await tick([f.participant], limits(), silent, failures);
+
+    expect(failures.has('t0')).toBe(false);
+  });
+});
+
+describe("a thread that has run out of turns", () => {
+  /*
+   * Closing is a turn, and a turn needs the floor. A capped thread whose floor was open
+   * could never be closed: the append was refused every round, forever.
+   */
+  it("claims the floor before closing one it only volunteered for", async () => {
+    const f = fake('claude', [{ threadId: 't0', goal: 'g', turns: 20, yourTurn: false }]);
+    const withOpenFloor = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'thread_list') {
+          return { threads: [{ threadId: 't0', goal: 'g', turns: 20, yourTurn: false, floorOpen: true, youMatch: true }] };
+        }
+        return f.participant.call(tool, args);
+      },
+    } as unknown as Participant;
+
+    const result = await tick([withOpenFloor], limits({ maxTurnsPerThread: 20 }), silent);
+
+    expect(result.threadsClosed).toBe(1);
+    const order = f.calls.map((c) => c.tool);
+    expect(order.indexOf('thread_reassign')).toBeLessThan(order.indexOf('thread_append'));
+  });
+
+  it("closes one it already holds without reassigning", async () => {
+    const f = fake('claude', threads(1, 20));
+
+    await tick([f.participant], limits({ maxTurnsPerThread: 20 }), silent);
+
+    expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+    expect(f.calls.find((c) => c.tool === 'thread_append')!.args.done).toBe(true);
+  });
+});
