@@ -113,64 +113,116 @@ export async function tick(
   }
 
   /*
-   * Round-robin across participants rather than draining one at a time. A single
-   * participant with a backlog would otherwise consume the entire tick budget and
-   * the others would look dead.
+   * Participants take their turns at the same time as each other.
+   *
+   * Sequentially, one slow provider held up every other participant: a round spent
+   * ninety seconds waiting on a search model while two others sat idle with work in
+   * front of them. Each wave takes at most one turn per participant, so concurrency is
+   * bounded by how many there are — the point is that nobody waits on somebody else's
+   * provider, not to run as many calls as possible.
    */
-  for (const job of interleave(queues)) {
-    if (result.turnsTaken >= limits.maxTurnsPerTick) break;
-    if (limits.runBudget - result.turnsTaken <= 0) break;
+  const remaining = queues.map((q) => [...q]);
+  /*
+   * Which participant a short wave starts from, rotated between waves. When the budget
+   * leaves room for fewer turns than there are participants, a fixed order would hand
+   * every last slot to whoever happens to be first in the list.
+   */
+  let first = 0;
 
-    // A thread that keeps failing is rested rather than hammered. The counter decays,
-    // so it comes back on its own once the cause has had time to clear.
-    const failed = failures.get(job.threadId) ?? 0;
-    if (failed >= BACKOFF_AFTER) {
-      failures.set(job.threadId, failed >= BACKOFF_AFTER + BACKOFF_ROUNDS ? 0 : failed + 1);
-      continue;
+  while (result.turnsTaken < limits.maxTurnsPerTick && limits.runBudget - result.turnsTaken > 0) {
+    /*
+     * Sized to what is still allowed, not to how many participants there are. A full
+     * wave starts before any of its turns finish, so an unsized one could overshoot the
+     * cap by up to one turn per participant — the cap would stop being a cap.
+     */
+    const room = Math.min(limits.maxTurnsPerTick - result.turnsTaken, limits.runBudget - result.turnsTaken);
+    const wave: Waiting[] = [];
+    for (let i = 0; i < remaining.length && wave.length < room; i += 1) {
+      const job = remaining[(first + i) % remaining.length]!.shift();
+      if (job) wave.push(job);
     }
+    if (wave.length === 0) break;
+    first = (first + 1) % Math.max(1, remaining.length);
 
-    if (job.turns >= limits.maxTurnsPerThread) {
-      try {
-        await closeExhausted(job, limits.maxTurnsPerThread);
-        failures.delete(job.threadId);
-        result.threadsClosed += 1;
-        log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${limits.maxTurnsPerThread}-turn cap`);
-      } catch (err) {
-        failures.set(job.threadId, failed + 1);
-        result.errors.push(`${job.participant.slug}: could not close ${short(job.threadId)} — ${describe(err)}`);
-      }
-      continue;
-    }
+    const outcomes = await Promise.all(wave.map((job) => runJob(job, participants, limits, log, failures)));
 
-    try {
-      const taken = await takeTurn(job, limits, log);
-      if (taken) result.turnsTaken += 1;
-      failures.delete(job.threadId);
-    } catch (err) {
-      const now = failed + 1;
-      failures.set(job.threadId, now);
-
-      /*
-       * A participant whose provider is down should not hold a thread the others could
-       * finish. Passing it on costs nothing and is what a person would do; resting the
-       * thread instead punishes the work for a fault in one participant.
-       */
-      if (now >= PASS_AFTER && !job.volunteered && isProviderFault(err)) {
-        const passed = await passOn(job, participants, err, log).catch(() => false);
-        if (passed) {
-          failures.delete(job.threadId);
-          continue;
-        }
-      }
-
-      result.errors.push(
-        `${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}` +
-          (now >= BACKOFF_AFTER ? ` (resting it after ${now} failures)` : ''),
-      );
+    for (const outcome of outcomes) {
+      if (outcome.taken) result.turnsTaken += 1;
+      if (outcome.closed) result.threadsClosed += 1;
+      if (outcome.error) result.errors.push(outcome.error);
     }
   }
 
   return result;
+}
+
+interface Outcome {
+  taken: boolean;
+  closed: boolean;
+  error?: string;
+}
+
+/** One participant's next piece of work, start to finish. */
+async function runJob(
+  job: Waiting,
+  participants: Participant[],
+  limits: Limits,
+  log: Log,
+  failures: Failures,
+): Promise<Outcome> {
+  // A thread that keeps failing is rested rather than hammered. The counter decays, so
+  // it comes back on its own once the cause has had time to clear.
+  const failed = failures.get(job.threadId) ?? 0;
+  if (failed >= BACKOFF_AFTER) {
+    failures.set(job.threadId, failed >= BACKOFF_AFTER + BACKOFF_ROUNDS ? 0 : failed + 1);
+    return { taken: false, closed: false };
+  }
+
+  if (job.turns >= limits.maxTurnsPerThread) {
+    try {
+      await closeExhausted(job, limits.maxTurnsPerThread);
+      failures.delete(job.threadId);
+      log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${limits.maxTurnsPerThread}-turn cap`);
+      return { taken: false, closed: true };
+    } catch (err) {
+      failures.set(job.threadId, failed + 1);
+      return {
+        taken: false,
+        closed: false,
+        error: `${job.participant.slug}: could not close ${short(job.threadId)} — ${describe(err)}`,
+      };
+    }
+  }
+
+  try {
+    const taken = await takeTurn(job, limits, log);
+    failures.delete(job.threadId);
+    return { taken, closed: false };
+  } catch (err) {
+    const now = failed + 1;
+    failures.set(job.threadId, now);
+
+    /*
+     * A participant whose provider is down should not hold a thread the others could
+     * finish. Passing it on costs nothing and is what a person would do; resting the
+     * thread instead punishes the work for a fault in one participant.
+     */
+    if (now >= PASS_AFTER && !job.volunteered && isProviderFault(err)) {
+      const passed = await passOn(job, participants, err, log).catch(() => false);
+      if (passed) {
+        failures.delete(job.threadId);
+        return { taken: false, closed: false };
+      }
+    }
+
+    return {
+      taken: false,
+      closed: false,
+      error:
+        `${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}` +
+        (now >= BACKOFF_AFTER ? ` (resting it after ${now} failures)` : ''),
+    };
+  }
 }
 
 async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean> {
@@ -354,19 +406,6 @@ async function closeExhausted(job: Waiting, cap: number): Promise<void> {
     summary: `Closed at the ${cap}-turn limit.`,
     done: true,
   });
-}
-
-/** Round-robin merge: one item from each queue in turn until all are empty. */
-function interleave<T>(queues: T[][]): T[] {
-  const out: T[] = [];
-  const longest = Math.max(0, ...queues.map((q) => q.length));
-  for (let i = 0; i < longest; i += 1) {
-    for (const q of queues) {
-      const item = q[i];
-      if (item !== undefined) out.push(item);
-    }
-  }
-  return out;
 }
 
 /**

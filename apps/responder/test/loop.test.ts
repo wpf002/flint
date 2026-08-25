@@ -603,3 +603,76 @@ describe("a participant whose provider is down", () => {
     expect(result.errors.length).toBeGreaterThan(0);
   });
 });
+
+describe("turns run alongside each other", () => {
+  /** A participant whose turn takes a fixed time, so overlap is measurable. */
+  const slow = (slug: string, ms: number) => {
+    const participant = {
+      slug,
+      cfg: { slug, model: 'm', maxOutputTokens: 500 },
+      replyMode: 'prompt',
+      provider: {
+        name: 'fake',
+        generate: async () => {
+          await new Promise((resolve) => setTimeout(resolve, ms));
+          return {
+            message: {
+              id: 'x',
+              role: 'assistant',
+              content: JSON.stringify({ content: 'c', summary: 's', next: 'other', ask: 'a' }),
+              timestamp: 0,
+            },
+            usage: { input: 1, output: 1 },
+            reason: 'complete',
+          };
+        },
+      },
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'thread_list') return { threads: [{ threadId: `${slug}-0`, goal: 'g', turns: 1, yourTurn: true }] };
+        if (tool === 'thread_read') {
+          return { threadId: `${slug}-0`, goal: 'g', status: 'OPEN', yourTurnIf: slug, turnCount: 1, ask: 'a', participants: [], turns: [] };
+        }
+        if (tool === 'thread_append') return { seq: 1, next: (args.next as string) ?? null };
+        return {};
+      },
+    } as unknown as Participant;
+    return participant;
+  };
+
+  /*
+   * Sequentially one slow provider held up every other participant — a round spent
+   * ninety seconds on a search model while two others sat idle with work in front of
+   * them.
+   */
+  it("does not make one participant wait on another's provider", async () => {
+    const started = Date.now();
+
+    const result = await tick([slow('a', 120), slow('b', 120), slow('c', 120)], limits(), silent);
+
+    expect(result.turnsTaken).toBe(3);
+    // Three 120ms turns in sequence would be 360ms; overlapped they finish in ~120.
+    expect(Date.now() - started).toBeLessThan(300);
+  });
+
+  it("still stops at the per-tick cap", async () => {
+    const result = await tick([slow('a', 5), slow('b', 5), slow('c', 5)], limits({ maxTurnsPerTick: 2 }), silent);
+
+    expect(result.turnsTaken).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("who goes first when the budget is nearly spent", () => {
+  /*
+   * A wave sized smaller than the number of participants has to choose. A fixed order
+   * would hand every last slot to whoever happens to be first in the list.
+   */
+  it("does not always favour the same participant", async () => {
+    const a = fake('a', threads(4));
+    const b = fake('b', threads(4));
+
+    await tick([a.participant, b.participant], limits({ maxTurnsPerTick: 3 }), silent);
+
+    expect(a.generations).toBeGreaterThan(0);
+    expect(b.generations).toBeGreaterThan(0);
+  });
+});
