@@ -118,6 +118,18 @@ export const ResponderConfigSchema = z
      */
     maxTurnsPerDay: z.number().int().min(0).default(120),
     maxOutputTokensPerDay: z.number().int().min(0).default(150_000),
+    /*
+     * Where a thread's files live and whether anything may be run in them.
+     *
+     * Off unless set. Executing what a model wrote is the highest-risk thing here, and
+     * a capability that arrives by upgrading rather than by choosing is one nobody
+     * decided to take on.
+     */
+    workspaceRoot: z.string().min(1).optional().describe("Directory for per-thread workspaces."),
+    canRun: z
+      .boolean()
+      .default(false)
+      .describe("Allow participants to run allowlisted commands in a thread's workspace."),
     participants: z.array(ParticipantConfigSchema).min(1),
   })
   .strict();

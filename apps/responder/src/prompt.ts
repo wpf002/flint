@@ -58,6 +58,11 @@ export const TurnReplySchema = z
      * offers shown in the prompt; anything left out simply stays pending and lapses. */
     accept: z.array(z.string().min(1)).max(10).default([]),
     /*
+     * Commands to run against what the thread has built. Each is an argv array rather
+     * than a string, so nothing here ever reaches a shell.
+     */
+    run: z.array(z.array(z.string().min(1)).min(1).max(12)).max(4).default([]),
+    /*
      * The thing the thread is for. Turns are a conversation; this is the work. Optional
      * because not every turn is a revision — a critique that changes nothing is still a
      * turn worth having.
@@ -101,7 +106,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // optional is expressed as nullable instead. Omitting `remember` and `canon` here
   // would silently make it impossible for a participant to store a fact or conclude a
   // thread — the schema would forbid the very fields the loop reads.
-  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'artifact', 'canon'],
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'artifact', 'canon'],
   properties: {
     content: { type: 'string', description: 'Your actual contribution.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
@@ -117,6 +122,12 @@ export const TURN_REPLY_JSON_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description: 'Ids of offers you want to keep. Leave out anything you do not.',
+    },
+    run: {
+      type: 'array',
+      items: { type: 'array', items: { type: 'string' } },
+      description:
+        'Commands to run against what the thread built, each as an argv array — ["pnpm","install"], not "pnpm install". Empty unless you want to check that something works.',
     },
     artifact: {
       type: ['object', 'null'],
@@ -195,6 +206,9 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     'them from memory. A plausible answer in the right shape is harder to catch than an obvious wrong one,',
     'and saying "I would need to look" is a better turn than a confident invention.',
     '',
+    'If a run failed, fixing it is your turn. Do not describe the fix and hand it on — change the artifact',
+    'and run it again. A thread that discusses an error it could have fixed has wasted a round.',
+    '',
     'Length is a decision, not a side effect. A README that a person reads before anything else should be',
     'short enough that they do. Cutting an artifact in half is as valuable a turn as adding to it, and much',
     'rarer — if it has grown past what the goal needs, say so and cut it.',
@@ -226,11 +240,19 @@ export interface BuiltArtifact {
   lastBy: string | null;
 }
 
+/** What happened last time something was run against the thread's files. */
+export interface RanBefore {
+  command: string;
+  ok: boolean;
+  output: string;
+}
+
 export function threadPrompt(
   state: ThreadState,
   self: string,
   offers: Offer[] = [],
   built: BuiltArtifact[] = [],
+  ran: RanBefore[] = [],
 ): string {
   const others = state.participants.filter((p) => p.slug !== self);
 
@@ -264,6 +286,13 @@ export function threadPrompt(
           '',
           'WHAT THE THREAD HAS BUILT SO FAR — revise this rather than starting again:',
           ...built.map((a) => `--- ${a.name} (v${a.version}, last by ${a.lastBy ?? 'someone'}) ---\n${a.content}`),
+        ]
+      : []),
+    ...(ran.length > 0
+      ? [
+          '',
+          'WHAT HAPPENED WHEN IT LAST RAN:',
+          ...ran.map((r) => `$ ${r.command}\n${r.ok ? 'succeeded' : 'FAILED'}\n${r.output || '(no output)'}`),
         ]
       : []),
     '',
@@ -312,6 +341,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       done: false,
       remember: [],
       accept: [],
+      run: [],
       artifact: null,
     },
     malformed: true,
@@ -344,6 +374,15 @@ function normalize(candidate: unknown): unknown {
   if (typeof obj.content === 'string') obj.content = clip(obj.content, MAX_CONTENT);
   if (obj.next !== undefined && obj.next !== null && typeof obj.next !== 'string') obj.next = null;
   if (obj.accept !== undefined && !Array.isArray(obj.accept)) obj.accept = [];
+  // A command sent as one string is the shape that would need a shell to interpret.
+  // Splitting it here keeps the no-shell rule from depending on the model's compliance.
+  if (Array.isArray(obj.run)) {
+    obj.run = (obj.run as unknown[])
+      .map((cmd) => (typeof cmd === 'string' ? cmd.split(/\s+/).filter(Boolean) : cmd))
+      .filter((cmd) => Array.isArray(cmd) && cmd.length > 0);
+  } else if (obj.run !== undefined) {
+    obj.run = [];
+  }
   // Same reasoning as canon: a half-understood artifact is worse than none, because the
   // next turn would revise the wrong thing.
   if (obj.artifact !== undefined && obj.artifact !== null) {

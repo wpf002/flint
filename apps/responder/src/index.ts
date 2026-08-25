@@ -233,6 +233,8 @@ async function runRound(
     maxTurnsPerThread: cfg.maxTurnsPerThread,
     runBudget,
     turnTimeoutMs: cfg.turnTimeoutMs,
+    ...(cfg.workspaceRoot ? { workspaceRoot: cfg.workspaceRoot } : {}),
+    canRun: cfg.canRun,
   };
   const result = await tick(participants, limits, log, failures);
   for (const err of result.errors) log(`! ${err}`);

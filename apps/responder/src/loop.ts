@@ -9,7 +9,18 @@ import {
   ThreadStateSchema,
   type BuiltArtifact,
   type Offer,
+  type RanBefore,
 } from './prompt.js';
+import { materialise, run as runCommand, workspaceFor } from './workspace.js';
+
+/**
+ * What each thread's commands last did, carried to the turn that has to act on it.
+ *
+ * In memory rather than in Nexus: it is the state of a directory on this machine, and
+ * Nexus is the shared record of what the participants said. A restart loses it, which
+ * costs one re-run and keeps the substrate honest about what it is.
+ */
+const ranLast = new Map<string, RanBefore[]>();
 
 /**
  * The loop that makes the space self-running.
@@ -23,6 +34,9 @@ import {
  */
 
 export interface Limits {
+  /** Where per-thread workspaces live, and whether anything may run in them. */
+  workspaceRoot?: string;
+  canRun?: boolean;
   maxTurnsPerTick: number;
   maxTurnsPerThread: number;
   /** Remaining model calls for the whole run. Infinity when uncapped. */
@@ -295,6 +309,23 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   }
 
   /*
+   * The thread's files on disk, brought up to date before anything runs against them.
+   * Rewritten every turn rather than only when they change: the workspace is a cache of
+   * the artifacts, and a cache that can disagree with its source is worse than none.
+   */
+  const workspace =
+    limits.canRun && limits.workspaceRoot ? workspaceFor(limits.workspaceRoot, job.threadId) : null;
+  if (workspace) {
+    for (const artifact of built) {
+      try {
+        materialise(workspace, artifact.name, artifact.content);
+      } catch (err) {
+        log(`[${p.slug}] could not write ${artifact.name} to disk: ${describe(err)}`);
+      }
+    }
+  }
+
+  /*
    * Where the provider can enforce the reply shape, it is made to. Asking in the prompt
    * works until it doesn't: one model opened valid JSON and then broke out of it
    * mid-string into prose, which cost the whole turn its nomination.
@@ -307,7 +338,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       {
         id: `${job.threadId}:${state.turnCount}`,
         role: 'user',
-        content: threadPrompt(state, p.slug, offers, built),
+        content: threadPrompt(state, p.slug, offers, built, ranLast.get(job.threadId) ?? []),
         timestamp: 0,
       },
     ],
@@ -359,6 +390,33 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * artifact still stands, which is the right way round — the document is the point and
    * the turn is the commentary.
    */
+  /*
+   * Anything this turn wrote goes to disk before its commands run, so a fix and the run
+   * that proves it belong to the same turn rather than to the next one.
+   */
+  if (workspace && reply.artifact) {
+    try {
+      materialise(workspace, reply.artifact.name, reply.artifact.content);
+    } catch (err) {
+      log(`[${p.slug}] could not write ${reply.artifact.name} to disk: ${describe(err)}`);
+    }
+  }
+
+  if (workspace && reply.run.length > 0) {
+    const results: RanBefore[] = [];
+    for (const argv of reply.run) {
+      const result = await runCommand(workspace, argv);
+      results.push({ command: result.command, ok: result.ok, output: result.output });
+      log(`[${p.slug}] $ ${result.command} — ${result.ok ? 'ok' : `failed (${result.code ?? 'no exit'})`}`);
+    }
+    /*
+     * Held for the next turn rather than written into this one. The output belongs to
+     * whoever has to act on it, and a turn made mostly of build log is a turn nobody
+     * reads — including the participant it was meant for.
+     */
+    ranLast.set(job.threadId, results);
+  }
+
   if (reply.artifact) {
     await p
       .call('artifact_write', {

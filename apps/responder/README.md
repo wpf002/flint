@@ -253,3 +253,43 @@ be read as who-changed-what.
 The ownership rule is deliberately not memory's. Memory is write-scoped because it is
 what a participant believes. An artifact is shared work, and several participants
 revising one document is the collaboration.
+
+## Running what the thread built
+
+Artifacts alone produce files nobody has run. A product needs the other half of the loop
+— write it, run it, see it fail, fix it — so a turn can ask for commands to be run
+against the thread's own files.
+
+```json
+{ "workspaceRoot": "~/.flint/workspaces", "canRun": true }
+```
+
+Off unless set. Executing what a model wrote is the highest-risk thing here, and a
+capability that arrives by upgrading rather than by choosing is one nobody decided to
+take on.
+
+### Why it runs in a container
+
+The allowlist stops a model asking for something obviously wrong. It does nothing about
+`pnpm install` running a package's postinstall script, which is arbitrary code from a
+stranger — and this loop runs unattended on a machine holding API keys and every
+repository. So the command runs somewhere it cannot do harm rather than being trusted
+not to.
+
+| Constraint | Why |
+|---|---|
+| `--network=none` | A postinstall cannot phone home or fetch a second payload. It also means installing new dependencies fails — that is the trade |
+| `--read-only` + small `/tmp` | Nothing outside the thread's directory survives the run |
+| `--cap-drop=ALL`, `no-new-privileges` | No route to root inside the container |
+| `--memory`, `--cpus`, `--pids-limit` | A runaway build cannot take the machine with it |
+| `--user=$(id -u)` | Files it writes stay owned by you, not root |
+| Only the thread's directory mounted | It cannot see another thread, or anything else |
+
+Commands are argv arrays and never touch a shell, so there is no string for a model to
+smuggle `; rm -rf ~` through. The allowlist covers the binary *and* its first argument:
+`pnpm install` is permitted, bare `pnpm` is not, because a permitted binary with an
+arbitrary subcommand is barely a restriction.
+
+Output from a run is held for the *next* turn rather than written into the one that
+caused it — the output belongs to whoever has to act on it, and a turn made mostly of
+build log is a turn nobody reads.

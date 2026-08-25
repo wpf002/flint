@@ -38,5 +38,7 @@
     }
   ],
   "maxTurnsPerDay": 120,
-  "maxOutputTokensPerDay": 150000
+  "maxOutputTokensPerDay": 150000,
+  "workspaceRoot": "/Users/willfoti/.flint/workspaces",
+  "canRun": true
 }
