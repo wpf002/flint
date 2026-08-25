@@ -9,6 +9,15 @@ export interface GenerateArgs {
   system?: string;
   messages: Message[];
   tools?: ToolDefinition[];
+  /**
+   * How the model may use the supplied tools.
+   *
+   * `{ name }` forces exactly that tool, which is how a provider guarantees a reply's
+   * shape rather than being asked for it in the prompt. Every provider here expresses
+   * the same three states, so it belongs in the contract rather than in each adapter's
+   * escape hatch.
+   */
+  toolChoice?: 'auto' | 'required' | { name: string };
   maxTokens?: number;
   signal?: AbortSignal;
 }

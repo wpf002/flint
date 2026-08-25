@@ -1,6 +1,6 @@
 import { connectServer, type ConnectedServer } from '@flint/mcp';
 import type { ProviderAdapter } from '@flint/core';
-import { resolveSecret, type ParticipantConfig } from './config.js';
+import { replyMode, resolveSecret, type ParticipantConfig, type ReplyMode } from './config.js';
 import { buildProvider } from './providers.js';
 
 /**
@@ -21,6 +21,11 @@ export class Participant {
 
   get slug(): string {
     return this.cfg.slug;
+  }
+
+  /** How this participant's reply shape is obtained: enforced, or merely asked for. */
+  get replyMode(): ReplyMode {
+    return replyMode(this.cfg.provider);
   }
 
   static async connect(cfg: ParticipantConfig, nexusUrl: string): Promise<Participant> {

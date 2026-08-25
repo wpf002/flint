@@ -13,7 +13,7 @@ import { SpendLedger } from './spend.js';
  *
  *   responder check     verify every participant's token and print who it is
  *   responder roles     publish each participant's declared strength to Nexus
- *   responder open      start a thread: open "<goal>" @slug "<ask>"
+ *   responder open      start a thread that runs itself: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
  *   responder health    probe every token and model key, report the result to Nexus
  *   responder spend     how many turns have been taken today
@@ -100,8 +100,14 @@ async function main(): Promise<void> {
         // Opened as the first participant, because a thread needs an author like
         // anything else here and the responder holds no separate identity of its own.
         const opener = participants[0]!;
+        /*
+         * Self-running by default. A thread opened from here exists to be answered
+         * without anyone relaying it, and a nomination of a browser-app client would
+         * park it indefinitely while looking exactly like one that is working.
+         */
         const thread = await opener.call<{ threadId: string; nextSpeaker: string | null }>('thread_open', {
           goal,
+          selfRunning: true,
           ...(slug ? { firstSpeaker: slug } : {}),
           ...(ask ? { ask } : {}),
         });

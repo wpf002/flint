@@ -120,6 +120,18 @@ export const TURN_REPLY_JSON_SCHEMA = {
   },
 } as const;
 
+/**
+ * The same shape offered as a tool, for providers that guarantee a call's arguments
+ * rather than a response format. Shares its schema with the response-format path, so the
+ * two enforcement routes can never drift into demanding different things.
+ */
+export const TAKE_TURN_TOOL = {
+  name: 'take_turn',
+  description: 'Record your turn in the thread. This is the only way to speak.',
+  inputSchema: TURN_REPLY_JSON_SCHEMA,
+  idempotent: false,
+} as const;
+
 export function systemPrompt(slug: string, role: string | undefined, maxOutputTokens = 4_000): string {
   return [
     `You are "${slug}", one of several AI participants working in a shared space called Nexus.`,

@@ -18,7 +18,7 @@ import {
 } from '../../core/encoding.js';
 import { anthropicCapabilities } from './capabilities.js';
 import { toAiError } from './errors.js';
-import { mapMessages, mapTools, mapStopReason, fromAnthropicToolName } from './mapping.js';
+import { mapMessages, mapTools, mapStopReason, mapToolChoice, fromAnthropicToolName } from './mapping.js';
 
 export interface AnthropicProviderOptions {
   /** API key. Passed explicitly — `@flint/core` never reads process.env. */
@@ -96,6 +96,7 @@ export class AnthropicProvider implements ProviderAdapter {
   async generate(args: GenerateArgs): Promise<GenerateResult> {
     const { system, messages } = mapMessages(args.messages, args.system);
     const tools = mapTools(args.tools);
+    const toolChoice = mapToolChoice(args.toolChoice);
     let sdk: AnthropicModule | undefined;
     try {
       const ready = await this.ready();
@@ -107,6 +108,7 @@ export class AnthropicProvider implements ProviderAdapter {
           messages,
           ...(system ? { system } : {}),
           ...(tools ? { tools } : {}),
+          ...(toolChoice ? { tool_choice: toolChoice } : {}),
         },
         args.signal ? { signal: args.signal } : {},
       );
@@ -145,6 +147,7 @@ export class AnthropicProvider implements ProviderAdapter {
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
     const { system, messages } = mapMessages(args.messages, args.system);
     const tools = mapTools(args.tools);
+    const toolChoice = mapToolChoice(args.toolChoice);
     let sdk: AnthropicModule | undefined;
 
     let inputTokens = 0;
@@ -167,6 +170,7 @@ export class AnthropicProvider implements ProviderAdapter {
           messages,
           ...(system ? { system } : {}),
           ...(tools ? { tools } : {}),
+          ...(toolChoice ? { tool_choice: toolChoice } : {}),
         },
         args.signal ? { signal: args.signal } : {},
       );

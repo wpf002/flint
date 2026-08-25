@@ -191,3 +191,24 @@ the reply is repaired if it comes back oddly shaped.
 
 Config-supplied `options` win, so a participant can still opt out by setting
 `response_format` itself.
+
+## How each reply shape is obtained
+
+| Provider | Mode | Guarantee |
+|---|---|---|
+| OpenAI | `response_format` json_schema | Enforced |
+| Perplexity | `response_format` json_schema | Enforced — verified against the real turn schema, not assumed from the absence of tool calling |
+| Anthropic | a forced `take_turn` tool call | Enforced |
+| Ollama | prompt, repaired on the way in | Requested |
+
+The difference is not academic. Asked in the prompt, one model opened valid JSON and
+then broke out of it mid-string into prose — the turn was recorded, but its nomination
+was lost and the thread stalled with an open floor. All three hosted providers now
+enforce the shape, sharing one schema so the two enforcement routes cannot drift.
+
+## Open floors
+
+A turn that nominates nobody leaves the floor open. Nexus scores it the same way it
+scores a nomination and offers it to whoever the ask points at; the responder takes it
+only for that participant, claiming it first so several volunteers cannot produce the
+same turn in parallel.

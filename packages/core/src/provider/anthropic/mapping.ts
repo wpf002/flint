@@ -126,6 +126,16 @@ export function mapTools(tools: ToolDefinition[] | undefined): Tool[] | undefine
   });
 }
 
+/** Map the canonical tool choice onto Anthropic's shape. */
+export function mapToolChoice(
+  choice: 'auto' | 'required' | { name: string } | undefined,
+): { type: 'auto' } | { type: 'any' } | { type: 'tool'; name: string } | undefined {
+  if (!choice) return undefined;
+  if (choice === 'auto') return { type: 'auto' };
+  if (choice === 'required') return { type: 'any' };
+  return { type: 'tool', name: toAnthropicToolName(choice.name) };
+}
+
 /** Map Anthropic's stop_reason onto the canonical done reason. */
 export function mapStopReason(stop: string | null): StreamDoneReason {
   switch (stop) {

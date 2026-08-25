@@ -1,6 +1,14 @@
 import { isFlintError } from '@flint/core';
 import type { Participant } from './participant.js';
-import { parseReply, systemPrompt, threadPrompt, ThreadStateSchema, type Offer } from './prompt.js';
+import { decodeAssistantTurn, type Message } from '@flint/core';
+import {
+  parseReply,
+  systemPrompt,
+  TAKE_TURN_TOOL,
+  threadPrompt,
+  ThreadStateSchema,
+  type Offer,
+} from './prompt.js';
 
 /**
  * The loop that makes the space self-running.
@@ -33,11 +41,21 @@ interface Waiting {
   threadId: string;
   goal: string;
   turns: number;
+  /** Nobody was named; this participant is volunteering rather than answering. */
+  volunteered: boolean;
 }
 
 /** What `thread_list` returns for one participant. */
 interface ThreadListing {
-  threads: Array<{ threadId: string; goal: string; turns: number; yourTurn: boolean }>;
+  threads: Array<{
+    threadId: string;
+    goal: string;
+    turns: number;
+    yourTurn: boolean;
+    floorOpen?: boolean;
+    youMatch?: boolean;
+    ask?: string | null;
+  }>;
 }
 
 export async function tick(participants: Participant[], limits: Limits, log: Log): Promise<TickResult> {
@@ -46,11 +64,24 @@ export async function tick(participants: Participant[], limits: Limits, log: Log
   const queues: Waiting[][] = [];
   for (const p of participants) {
     try {
-      const listing = await p.call<ThreadListing>('thread_list', { mine: true, status: 'OPEN' });
+      const listing = await p.call<ThreadListing>('thread_list', {
+        mine: true,
+        status: 'OPEN',
+        includeOpenFloor: true,
+      });
       queues.push(
         (listing.threads ?? [])
-          .filter((t) => t.yourTurn)
-          .map((t) => ({ participant: p, threadId: t.threadId, goal: t.goal, turns: t.turns })),
+          // An open floor is only taken by whoever the ask points at. Every participant
+          // can see every open thread; all of them volunteering would produce the same
+          // turn several times over and pay for each one.
+          .filter((t) => t.yourTurn || (t.floorOpen && t.youMatch))
+          .map((t) => ({
+            participant: p,
+            threadId: t.threadId,
+            goal: t.goal,
+            turns: t.turns,
+            volunteered: !t.yourTurn,
+          })),
       );
     } catch (err) {
       result.errors.push(`${p.slug}: could not list threads — ${describe(err)}`);
@@ -104,6 +135,20 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
   if (state.yourTurnIf && state.yourTurnIf !== p.slug) return false;
 
   /*
+   * An open floor is a race: several participants can see it at once, and all of them
+   * volunteering would produce the same turn three times over. Claiming it first turns
+   * the race into an ordinary nomination — whoever loses finds the floor taken on its
+   * next read and moves on.
+   */
+  if (job.volunteered) {
+    try {
+      await p.call('thread_reassign', { threadId: job.threadId, to: p.slug });
+    } catch {
+      return false;
+    }
+  }
+
+  /*
    * Anything another participant has offered this one. Shown with the turn rather than
    * handled separately: an offer is context for the work, and deciding on it in the
    * same call it is read costs nothing extra.
@@ -113,6 +158,12 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
     .catch(() => ({ handoffs: [] as Offer[] }));
   const offers = inbox.handoffs ?? [];
 
+  /*
+   * Where the provider can enforce the reply shape, it is made to. Asking in the prompt
+   * works until it doesn't: one model opened valid JSON and then broke out of it
+   * mid-string into prose, which cost the whole turn its nomination.
+   */
+  const forced = p.replyMode === 'tool';
   const generated = await p.provider.generate({
     model: p.cfg.model,
     system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens),
@@ -125,6 +176,7 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
       },
     ],
     maxTokens: p.cfg.maxOutputTokens,
+    ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
   });
 
   /*
@@ -139,7 +191,9 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
     );
   }
 
-  const { reply, malformed } = parseReply(generated.message.content);
+  // A forced tool call carries the reply as its arguments rather than as message text.
+  const raw = forced ? forcedReply(generated.message) : generated.message.content;
+  const { reply, malformed } = parseReply(raw);
   if (malformed) {
     log(`[${p.slug}] reply was not valid JSON; recording it as-is and nominating nobody`);
   }
@@ -217,7 +271,9 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
       ? `→ ${appended.next}${appended.routedBy === 'nexus' ? ' (routed by Nexus)' : ''}`
       : '→ floor open';
 
-  log(`[${p.slug}] turn ${appended.seq} on ${short(job.threadId)} ${handoff} (${cost})`);
+  log(
+    `[${p.slug}] turn ${appended.seq} on ${short(job.threadId)}${job.volunteered ? ' (took an open floor)' : ''} ${handoff} (${cost})`,
+  );
   return true;
 }
 
@@ -248,6 +304,13 @@ function interleave<T>(queues: T[][]): T[] {
     }
   }
   return out;
+}
+
+/** Pulls the forced call's arguments back out as JSON for the ordinary parser. */
+function forcedReply(message: Message): string {
+  const turn = decodeAssistantTurn(message);
+  const call = turn.toolCalls[0];
+  return call ? JSON.stringify(call.args ?? {}) : turn.text;
 }
 
 function short(threadId: string): string {

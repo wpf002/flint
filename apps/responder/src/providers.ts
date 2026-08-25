@@ -39,7 +39,16 @@ export function buildProvider(p: ParticipantConfig): ProviderAdapter {
       });
 
     case 'perplexity':
-      return new PerplexityProvider({ apiKey, ...baseURL, ...extra });
+      return new PerplexityProvider({
+        apiKey,
+        ...baseURL,
+        ...extra,
+        extraBody: {
+          // Perplexity's wrapper takes the bare schema — no name, no strict flag.
+          response_format: { type: 'json_schema', json_schema: { schema: TURN_REPLY_JSON_SCHEMA } },
+          ...(p.options ?? {}),
+        },
+      });
 
     case 'ollama':
       return new OllamaProvider({ ...baseURL });

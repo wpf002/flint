@@ -46,6 +46,32 @@ export const ParticipantConfigSchema = z
 
 export type ParticipantConfig = z.infer<typeof ParticipantConfigSchema>;
 
+/**
+ * How a participant's reply shape is obtained.
+ *
+ * `schema` and `tool` are guarantees the provider enforces; `prompt` is a request the
+ * reply may ignore. Worth naming rather than inferring at the call site, because the
+ * difference is exactly why one provider's turns needed repairing and another's did not.
+ */
+export type ReplyMode = 'schema' | 'tool' | 'prompt';
+
+export function replyMode(provider: ParticipantConfig['provider']): ReplyMode {
+  switch (provider) {
+    // Perplexity has no function calling, but its endpoint does honour a response
+    // format — checked against the real turn schema, not assumed from the absence of
+    // tools.
+    case 'openai':
+    case 'perplexity':
+      return 'schema';
+    case 'anthropic':
+      return 'tool';
+    // Ollama's tool calling is unreliable enough that forcing a call costs more turns
+    // than repairing the prose does.
+    default:
+      return 'prompt';
+  }
+}
+
 export const ResponderConfigSchema = z
   .object({
     nexusUrl: z.string().url().describe('Nexus MCP endpoint, e.g. https://nexus-mcp.up.railway.app/mcp'),
