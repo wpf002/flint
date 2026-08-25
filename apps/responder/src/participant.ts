@@ -1,6 +1,9 @@
 import { connectServer, type ConnectedServer } from '@flint/mcp';
 import type { ProviderAdapter } from '@flint/core';
 import { replyMode, resolveSecret, type ParticipantConfig, type ReplyMode } from './config.js';
+
+/** Longest any single Nexus call may take. Generous — it is a backstop, not a budget. */
+const NEXUS_CALL_TIMEOUT_MS = 30_000;
 import { buildProvider } from './providers.js';
 
 /**
@@ -44,9 +47,19 @@ export class Participant {
     return new Participant(cfg, provider, server);
   }
 
-  /** Calls a Nexus tool and returns its parsed JSON payload. */
+  /**
+   * Calls a Nexus tool and returns its parsed JSON payload.
+   *
+   * On its own clock. A hung request has no natural end, and the loop awaits these one
+   * at a time — so a single call that never returns stops the participant taking any
+   * turn, on any thread, indefinitely, while the process still reports as running.
+   */
   async call<T = unknown>(tool: string, args: Record<string, unknown> = {}): Promise<T> {
-    const result = (await this.server.client.callTool({ name: tool, arguments: args })) as {
+    const result = (await this.server.client.callTool(
+      { name: tool, arguments: args },
+      undefined,
+      { timeout: NEXUS_CALL_TIMEOUT_MS },
+    )) as {
       content?: Array<{ type: string; text?: string }>;
       isError?: boolean;
     };

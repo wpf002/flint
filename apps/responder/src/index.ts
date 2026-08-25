@@ -274,10 +274,21 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     capped = false;
 
     const allowed = Math.min(budget, ledger.remaining());
+    const startedAt = Date.now();
     const taken = await runTick(participants, cfg, allowed).catch((err: unknown) => {
       log(`! round failed: ${describe(err)}`);
       return 0;
     });
+
+    /*
+     * A quiet loop and a stalled one look identical from the outside, because an idle
+     * round prints nothing. A round that took far longer than it should is worth
+     * saying out loud — it is the only symptom a hang has.
+     */
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > cfg.turnTimeoutMs) {
+      log(`round took ${Math.round(elapsed / 1000)}s, which is longer than a turn is allowed`);
+    }
     ledger.record(taken);
     budget -= taken;
 
