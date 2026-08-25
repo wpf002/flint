@@ -221,6 +221,7 @@ async function runTick(participants: Participant[], cfg: ResponderConfig, runBud
     maxTurnsPerTick: cfg.maxTurnsPerTick,
     maxTurnsPerThread: cfg.maxTurnsPerThread,
     runBudget,
+    turnTimeoutMs: cfg.turnTimeoutMs,
   };
   const result = await tick(participants, limits, log);
   for (const err of result.errors) log(`! ${err}`);

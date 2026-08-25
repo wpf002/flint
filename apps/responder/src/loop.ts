@@ -26,6 +26,8 @@ export interface Limits {
   maxTurnsPerThread: number;
   /** Remaining model calls for the whole run. Infinity when uncapped. */
   runBudget: number;
+  /** How long one turn may take before it is abandoned. */
+  turnTimeoutMs: number;
 }
 
 export interface TickResult {
@@ -110,7 +112,7 @@ export async function tick(participants: Participant[], limits: Limits, log: Log
     }
 
     try {
-      const taken = await takeTurn(job, log);
+      const taken = await takeTurn(job, limits, log);
       if (taken) result.turnsTaken += 1;
     } catch (err) {
       result.errors.push(`${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}`);
@@ -120,7 +122,7 @@ export async function tick(participants: Participant[], limits: Limits, log: Log
   return result;
 }
 
-async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
+async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<boolean> {
   const { participant: p } = job;
 
   const state = ThreadStateSchema.parse(await p.call('thread_read', { threadId: job.threadId }));
@@ -176,6 +178,7 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
       },
     ],
     maxTokens: p.cfg.maxOutputTokens,
+    signal: AbortSignal.timeout(limits.turnTimeoutMs),
     ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
   });
 
@@ -243,7 +246,10 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
   // namespace, so they are attributable and revocable like any other memory.
   for (const fact of reply.remember) {
     await p
-      .call('remember', { content: fact, tags: ['thread', job.threadId] })
+      /* `kind` is required and was never sent, so every fact a participant tried to
+       * store was rejected. OBSERVATION is right for something noticed in a thread:
+       * it is what the participant saw, not a rule it is asserting. */
+      .call('remember', { kind: 'OBSERVATION', content: fact, tags: ['thread', job.threadId] })
       .catch((err: unknown) => log(`[${p.slug}] could not store a fact: ${describe(err)}`));
 
     /*

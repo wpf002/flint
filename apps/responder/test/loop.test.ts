@@ -86,6 +86,7 @@ const limits = (over: Partial<Limits> = {}): Limits => ({
   maxTurnsPerTick: 10,
   maxTurnsPerThread: 20,
   runBudget: Number.POSITIVE_INFINITY,
+  turnTimeoutMs: 90_000,
   ...over,
 });
 

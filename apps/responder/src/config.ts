@@ -85,6 +85,13 @@ export const ResponderConfigSchema = z
     maxTurnsPerTick: z.number().int().min(1).max(50).default(4),
     maxTurnsPerThread: z.number().int().min(2).max(200).default(20),
 
+    /*
+     * How long one turn may take before it is abandoned. A search-grounded model on a
+     * long thread can run for minutes, and the provider's own edge gives up first —
+     * serving an HTML error page that arrives as an unparseable success. Failing on our
+     * own clock produces a real error instead, and frees the round.
+     */
+    turnTimeoutMs: z.number().int().min(10_000).max(600_000).default(90_000),
     /** Stop taking turns entirely after this many model calls. 0 disables the loop's own limit. */
     maxTurnsPerRun: z.number().int().min(0).default(0),
     /*
