@@ -43,6 +43,7 @@ function fake(
     cfg: { slug, model: 'test-model', role: 'testing', maxOutputTokens: 500 },
     reportFailing: async () => {},
     reportRecovered: async () => {},
+    recheck: async () => {},
     provider: {
       name: 'fake',
       generate: async () => {
@@ -184,6 +185,9 @@ describe('tick', () => {
     const broken = {
       slug: 'gpt',
       cfg: { slug: 'gpt', model: 'm' },
+      reportFailing: async () => {},
+      reportRecovered: async () => {},
+      recheck: async () => {},
       provider: { name: 'fake', generate: async () => { throw new Error('unused'); } },
       call: async () => {
         throw new Error('token revoked');
@@ -435,6 +439,7 @@ describe("threads that cannot be answered", () => {
       replyMode: 'prompt',
       reportFailing: async () => {},
       reportRecovered: async () => {},
+      recheck: async () => {},
       provider: { name: 'fake', generate: async () => { throw new Error('provider refused'); } },
       call: async (tool: string, args: Record<string, unknown> = {}) => {
         calls.push({ tool, args });
@@ -538,6 +543,7 @@ describe("a participant whose provider is down", () => {
       reportRecovered: async () => {
         reported.push(true);
       },
+      recheck: async () => {},
       provider: {
         name: 'fake',
         generate: async () => {
@@ -624,6 +630,7 @@ describe("turns run alongside each other", () => {
       replyMode: 'prompt',
       reportFailing: async () => {},
       reportRecovered: async () => {},
+      recheck: async () => {},
       provider: {
         name: 'fake',
         generate: async () => {
@@ -707,6 +714,7 @@ describe("saying it works again", () => {
       reportRecovered: async () => {
         reported.push(true);
       },
+      recheck: async () => {},
     } as unknown as Participant;
     return { participant, reported };
   };
@@ -727,5 +735,33 @@ describe("saying it works again", () => {
     // The real participant only reports upward if it reported downward first, so a
     // healthy run costs no extra calls at all.
     expect(f.calls.some((c) => c.tool === 'report_health')).toBe(false);
+  });
+});
+
+describe("re-checking a participant that reported itself failing", () => {
+  /*
+   * Clearing the mark only when a turn lands meant a participant that recovered stayed
+   * flagged for as long as no work came its way — the console kept warning about
+   * something that was fine, which is how a warning stops being read.
+   */
+  it("re-checks every round, whether or not there is work", async () => {
+    let rechecks = 0;
+    const idle = {
+      slug: 'claude',
+      cfg: { slug: 'claude', model: 'm' },
+      replyMode: 'prompt',
+      reportFailing: async () => {},
+      reportRecovered: async () => {},
+      recheck: async () => {
+        rechecks += 1;
+      },
+      provider: { name: 'fake', generate: async () => { throw new Error('unused'); } },
+      call: async () => ({ threads: [] }),
+    } as unknown as Participant;
+
+    await tick([idle], limits(), silent);
+    await tick([idle], limits(), silent);
+
+    expect(rechecks).toBe(2);
   });
 });

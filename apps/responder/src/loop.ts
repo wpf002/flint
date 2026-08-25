@@ -86,6 +86,14 @@ export async function tick(
 ): Promise<TickResult> {
   const result: TickResult = { turnsTaken: 0, threadsClosed: 0, tokensOut: 0, errors: [] };
 
+  /*
+   * Anything that reported itself failing gets re-checked, whether or not there is work
+   * for it. Clearing the mark only when a turn lands meant a participant that recovered
+   * stayed flagged for as long as nothing happened to come its way — the console kept
+   * warning about something that was fine, which is how a warning stops being read.
+   */
+  await Promise.all(participants.map((p) => p.recheck()));
+
   const queues: Waiting[][] = [];
   for (const p of participants) {
     try {

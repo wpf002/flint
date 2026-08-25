@@ -4,6 +4,9 @@ import { replyMode, resolveSecret, type ParticipantConfig, type ReplyMode } from
 
 /** Longest any single Nexus call may take. Generous — it is a backstop, not a budget. */
 const NEXUS_CALL_TIMEOUT_MS = 30_000;
+
+/** How often a participant that reported itself failing tries again. */
+const RECHECK_EVERY_MS = 5 * 60_000;
 import { buildProvider } from './providers.js';
 
 /**
@@ -45,6 +48,7 @@ export class Participant {
    * stops being read.
    */
   private reportedFailing = false;
+  private lastRecheck = 0;
 
   async reportFailing(note: string): Promise<void> {
     await this.call('report_health', { ok: false, note: note.slice(0, 500) }).catch(() => {});
@@ -56,6 +60,31 @@ export class Participant {
     if (!this.reportedFailing) return;
     this.reportedFailing = false;
     await this.call('report_health', { ok: true }).catch(() => {});
+  }
+
+  /**
+   * Asks the model a trivial question, purely to find out whether it answers.
+   *
+   * Only for a participant that has reported itself failing, and only every few minutes,
+   * so a healthy space costs nothing. Recovery used to depend on a turn arriving, which
+   * meant a participant that got no work stayed marked broken however well it worked.
+   */
+  async recheck(now = Date.now()): Promise<void> {
+    if (!this.reportedFailing) return;
+    if (now - this.lastRecheck < RECHECK_EVERY_MS) return;
+    this.lastRecheck = now;
+
+    try {
+      await this.provider.generate({
+        model: this.cfg.model,
+        messages: [{ id: 'recheck', role: 'user', content: 'ok', timestamp: 0 }],
+        maxTokens: 256,
+        signal: AbortSignal.timeout(this.cfg.turnTimeoutMs ?? 60_000),
+      });
+      await this.reportRecovered();
+    } catch {
+      // Still down. The mark stands, and the next round will try again.
+    }
   }
 
   static async connect(cfg: ParticipantConfig, nexusUrl: string): Promise<Participant> {
