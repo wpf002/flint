@@ -40,6 +40,25 @@ export function toAiError(err: unknown, sdk?: AnthropicModule): AiError {
         raw: err,
       });
     }
+    /*
+     * A rejected credential is a configuration mistake, not an internal fault. It fell
+     * through to the generic branch below and surfaced as `internal: 401 {…}`, which
+     * reads as a bug in Flint rather than as "this key is wrong".
+     */
+    if (err instanceof sdk.AuthenticationError || err instanceof sdk.PermissionDeniedError) {
+      return makeAiError('validation', `anthropic: ${err.message} (check the API key)`, {
+        retryable: false,
+        providerCode: String(err.status),
+        raw: err,
+      });
+    }
+    if (err instanceof sdk.NotFoundError) {
+      return makeAiError('validation', `anthropic: ${err.message} (unknown model or endpoint)`, {
+        retryable: false,
+        providerCode: String(err.status),
+        raw: err,
+      });
+    }
     if (err instanceof sdk.BadRequestError || err instanceof sdk.UnprocessableEntityError) {
       const kind = /context|token|too long|too large/i.test(err.message)
         ? 'context_overflow'

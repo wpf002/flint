@@ -11,6 +11,7 @@ import { describe, tick, type Limits } from './loop.js';
  *
  *   responder check     verify every participant's token and print who it is
  *   responder roles     publish each participant's declared strength to Nexus
+ *   responder open      start a thread: open "<goal>" @slug "<ask>"
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
  *
@@ -55,7 +56,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|once|run>\n');
+    process.stdout.write('responder <check|roles|open|once|run>\n');
     return;
   }
 
@@ -88,6 +89,20 @@ async function main(): Promise<void> {
         return;
       }
 
+      case 'open': {
+        const { goal, slug, ask } = parseOpen(process.argv.slice(3));
+        // Opened as the first participant, because a thread needs an author like
+        // anything else here and the responder holds no separate identity of its own.
+        const opener = participants[0]!;
+        const thread = await opener.call<{ threadId: string; nextSpeaker: string | null }>('thread_open', {
+          goal,
+          ...(slug ? { firstSpeaker: slug } : {}),
+          ...(ask ? { ask } : {}),
+        });
+        log(`opened ${thread.threadId} as ${opener.slug}, waiting on ${thread.nextSpeaker ?? 'anyone'}`);
+        return;
+      }
+
       case 'once': {
         await runTick(participants, cfg, budgetFor(cfg));
         return;
@@ -99,11 +114,38 @@ async function main(): Promise<void> {
       }
 
       default:
-        throw new Error(`Unknown command '${command}'. Try: check, roles, once, run.`);
+        throw new Error(`Unknown command '${command}'. Try: check, roles, open, once, run.`);
     }
   } finally {
     await shutdown();
   }
+}
+
+/**
+ * `open "<goal>" @slug "<ask>"` — the same shape the Nexus console uses, so the two
+ * ways of starting a thread do not need separate syntax in your head.
+ */
+function parseOpen(args: string[]): { goal: string; slug?: string; ask?: string } {
+  const joined = args.join(' ').trim();
+  if (joined.length === 0) throw new Error('Usage: responder open "<goal>" @slug "<what you need from them>"');
+
+  const at = joined.indexOf('@');
+  if (at === -1) return { goal: strip(joined) };
+
+  const rest = joined.slice(at + 1).trimStart();
+  const gap = rest.search(/\s/);
+  const ask = gap === -1 ? '' : strip(rest.slice(gap));
+  return {
+    goal: strip(joined.slice(0, at)),
+    slug: gap === -1 ? rest : rest.slice(0, gap),
+    ...(ask ? { ask } : {}),
+  };
+}
+
+/** Drops the quotes a shell already removed, for anyone who quoted twice. */
+function strip(value: string): string {
+  const trimmed = value.trim();
+  return /^(".*"|'.*')$/s.test(trimmed) ? trimmed.slice(1, -1) : trimmed;
 }
 
 function budgetFor(cfg: ResponderConfig): number {
