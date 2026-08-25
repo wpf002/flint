@@ -7,6 +7,7 @@ import {
   TAKE_TURN_TOOL,
   threadPrompt,
   ThreadStateSchema,
+  type BuiltArtifact,
   type Offer,
 } from './prompt.js';
 
@@ -278,6 +279,22 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   const offers = inbox.handoffs ?? [];
 
   /*
+   * What the thread has built already, sent in full. Without it a participant cannot
+   * revise — it can only write something new over the top, which is how a document
+   * gets restarted five times instead of improved five times.
+   */
+  const listed = await p
+    .call<{ artifacts?: Array<{ name: string }> }>('artifact_read', { threadId: job.threadId })
+    .catch(() => ({ artifacts: [] }));
+  const built: BuiltArtifact[] = [];
+  for (const entry of listed.artifacts ?? []) {
+    const full = await p
+      .call<BuiltArtifact>('artifact_read', { threadId: job.threadId, name: entry.name })
+      .catch(() => null);
+    if (full) built.push(full);
+  }
+
+  /*
    * Where the provider can enforce the reply shape, it is made to. Asking in the prompt
    * works until it doesn't: one model opened valid JSON and then broke out of it
    * mid-string into prose, which cost the whole turn its nomination.
@@ -290,7 +307,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       {
         id: `${job.threadId}:${state.turnCount}`,
         role: 'user',
-        content: threadPrompt(state, p.slug, offers),
+        content: threadPrompt(state, p.slug, offers, built),
         timestamp: 0,
       },
     ],
@@ -337,6 +354,26 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * fires only on the closing turn: a conclusion proposed mid-thread is a guess about
    * where the thread is heading.
    */
+  /*
+   * The work itself, written before the turn that describes it. If the append fails the
+   * artifact still stands, which is the right way round — the document is the point and
+   * the turn is the commentary.
+   */
+  if (reply.artifact) {
+    await p
+      .call('artifact_write', {
+        threadId: job.threadId,
+        name: reply.artifact.name,
+        content: reply.artifact.content,
+        ...(reply.artifact.note ? { note: reply.artifact.note } : {}),
+      })
+      .then((written) => {
+        const v = (written as { version?: number }).version;
+        log(`[${p.slug}] wrote ${reply.artifact!.name}${v ? ` v${v}` : ''}`);
+      })
+      .catch((err: unknown) => log(`[${p.slug}] could not write ${reply.artifact!.name}: ${describe(err)}`));
+  }
+
   if (reply.done && reply.canon) {
     await p
       .call('propose_canon', {

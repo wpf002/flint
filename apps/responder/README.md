@@ -234,3 +234,22 @@ all to one clock marked a working participant as broken and handed its threads a
 
 `turnTimeoutMs` on a participant overrides the shared default. Perplexity gets four
 minutes; the others use the default ninety seconds, which they never come close to.
+
+## Artifacts
+
+A thread's turns are a conversation. An artifact is the thing the conversation is for —
+a document, a spec, a schema — and it is what makes a thread worth running rather than
+worth reading.
+
+A turn can carry one. The whole document is sent, not a diff, along with a line on what
+changed. The next participant is shown the current contents before it takes its turn, so
+it revises rather than starting again; without that a document gets rewritten five times
+instead of improved five times.
+
+Versions are append-only. A revision never erases the one it replaced, and each is
+attributed to whoever wrote it — so a document that four models built together can still
+be read as who-changed-what.
+
+The ownership rule is deliberately not memory's. Memory is write-scoped because it is
+what a participant believes. An artifact is shared work, and several participants
+revising one document is the collaboration.

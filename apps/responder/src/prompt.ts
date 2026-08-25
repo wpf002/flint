@@ -57,6 +57,18 @@ export const TurnReplySchema = z
     /* Offers this turn is willing to take into its own memory. Ids come from the
      * offers shown in the prompt; anything left out simply stays pending and lapses. */
     accept: z.array(z.string().min(1)).max(10).default([]),
+    /*
+     * The thing the thread is for. Turns are a conversation; this is the work. Optional
+     * because not every turn is a revision — a critique that changes nothing is still a
+     * turn worth having.
+     */
+    artifact: z
+      .object({
+        name: z.string().min(1).max(120),
+        content: z.string().min(1).max(100_000),
+        note: z.string().max(300).nullish(),
+      })
+      .nullish(),
     canon: z
       .object({
         key: z.string().min(1).max(200),
@@ -89,7 +101,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // optional is expressed as nullable instead. Omitting `remember` and `canon` here
   // would silently make it impossible for a participant to store a fact or conclude a
   // thread — the schema would forbid the very fields the loop reads.
-  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'canon'],
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'artifact', 'canon'],
   properties: {
     content: { type: 'string', description: 'Your actual contribution.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
@@ -105,6 +117,17 @@ export const TURN_REPLY_JSON_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description: 'Ids of offers you want to keep. Leave out anything you do not.',
+    },
+    artifact: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['name', 'content', 'note'],
+      properties: {
+        name: { type: 'string', description: 'A filename: "pricing-model.md", "schema.sql".' },
+        content: { type: 'string', description: 'The whole document as it should now stand, not a diff.' },
+        note: { type: ['string', 'null'], description: 'One line on what you changed.' },
+      },
+      description: 'The thing the thread is building. Write or revise it here.',
     },
     canon: {
       type: ['object', 'null'],
@@ -156,6 +179,12 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     '  "remember": ["a durable fact worth keeping beyond this thread"]',
     '}',
     '',
+    '"artifact" is what the thread is actually for. If the goal calls for something — a document, a spec,',
+    'a plan, a schema — build it there rather than describing it in your turn. Send the whole thing as it',
+    'should now stand, not a diff, and say in "note" what you changed. Revise what is already there instead',
+    'of starting again; your turn is for the reasoning, the artifact is for the result. Leave it out when',
+    'your turn genuinely changes nothing about it.',
+    '',
     '"remember" is optional and usually empty. Use it only for a fact that outlives this thread.',
     '',
     'When you set "done": true, also fill in "canon" with what the thread concluded — a short dotted key',
@@ -176,7 +205,19 @@ export interface Offer {
   from: { slug: string };
 }
 
-export function threadPrompt(state: ThreadState, self: string, offers: Offer[] = []): string {
+export interface BuiltArtifact {
+  name: string;
+  content: string;
+  version: number;
+  lastBy: string | null;
+}
+
+export function threadPrompt(
+  state: ThreadState,
+  self: string,
+  offers: Offer[] = [],
+  built: BuiltArtifact[] = [],
+): string {
   const others = state.participants.filter((p) => p.slug !== self);
 
   const roster =
@@ -203,6 +244,14 @@ export function threadPrompt(state: ThreadState, self: string, offers: Offer[] =
     '',
     `THREAD SO FAR (${state.turnCount} turn${state.turnCount === 1 ? '' : 's'}; older turns appear as their author's own summary):`,
     history,
+    '',
+    ...(built.length > 0
+      ? [
+          '',
+          'WHAT THE THREAD HAS BUILT SO FAR — revise this rather than starting again:',
+          ...built.map((a) => `--- ${a.name} (v${a.version}, last by ${a.lastBy ?? 'someone'}) ---\n${a.content}`),
+        ]
+      : []),
     '',
     state.ask ? `ASKED OF YOU: ${state.ask}` : 'Nothing specific was asked of you. Advance the goal.',
     ...(offers.length > 0
@@ -249,6 +298,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       done: false,
       remember: [],
       accept: [],
+      artifact: null,
     },
     malformed: true,
   };
@@ -280,6 +330,15 @@ function normalize(candidate: unknown): unknown {
   if (typeof obj.content === 'string') obj.content = clip(obj.content, MAX_CONTENT);
   if (obj.next !== undefined && obj.next !== null && typeof obj.next !== 'string') obj.next = null;
   if (obj.accept !== undefined && !Array.isArray(obj.accept)) obj.accept = [];
+  // Same reasoning as canon: a half-understood artifact is worse than none, because the
+  // next turn would revise the wrong thing.
+  if (obj.artifact !== undefined && obj.artifact !== null) {
+    const a = obj.artifact as Record<string, unknown>;
+    obj.artifact =
+      typeof a.name === 'string' && a.name.trim().length > 0 && a.content !== undefined
+        ? { name: a.name, content: render(a.content), ...(typeof a.note === 'string' ? { note: a.note } : {}) }
+        : null;
+  }
   // A malformed proposal is dropped rather than sent: canon is the one place where a
   // half-understood write is worse than no write.
   if (obj.canon !== undefined && obj.canon !== null) {

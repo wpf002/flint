@@ -220,3 +220,36 @@ describe('a conclusion offered to shared memory', () => {
     expect(reply.canon?.content).toContain('Redis Streams');
   });
 });
+
+describe("the artifact in a reply", () => {
+  it("keeps a well-formed one", () => {
+    const { reply } = parseReply(
+      JSON.stringify({
+        content: 'x',
+        summary: 'y',
+        artifact: { name: 'pricing.md', content: '# Pricing', note: 'Draft' },
+      }),
+    );
+
+    expect(reply.artifact?.name).toBe('pricing.md');
+    expect(reply.artifact?.note).toBe('Draft');
+  });
+
+  /* A half-understood artifact is worse than none: the next turn revises the wrong thing. */
+  it("drops one with no name", () => {
+    const { reply, malformed } = parseReply(
+      JSON.stringify({ content: 'x', summary: 'y', artifact: { content: 'orphaned' } }),
+    );
+
+    expect(malformed).toBe(false);
+    expect(reply.artifact).toBeNull();
+  });
+
+  it("renders a structured document rather than discarding it", () => {
+    const { reply } = parseReply(
+      JSON.stringify({ content: 'x', summary: 'y', artifact: { name: 'plan.json', content: { steps: ['a'] } } }),
+    );
+
+    expect(reply.artifact?.content).toContain('steps');
+  });
+});

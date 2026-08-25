@@ -32,6 +32,7 @@ function fake(
     yourTurnIf?: string;
     reason?: string;
     offers?: Array<{ id: string; subject: string; content: string; from: { slug: string } }>;
+    built?: Array<{ name: string }>;
   } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
@@ -73,6 +74,12 @@ function fake(
       }
       if (tool === 'thread_append') return { seq: 1, next: (args.next as string) ?? null };
       if (tool === 'check_inbox') return { handoffs: floor.offers ?? [] };
+      if (tool === 'artifact_read') {
+        return args.name
+          ? { name: args.name, content: 'existing', version: 1, lastBy: 'gpt' }
+          : { artifacts: floor.built ?? [] };
+      }
+      if (tool === 'artifact_write') return { name: args.name, version: 2, revised: true };
       return {};
     },
   } as unknown as Participant;
@@ -763,5 +770,69 @@ describe("re-checking a participant that reported itself failing", () => {
     await tick([idle], limits(), silent);
 
     expect(rechecks).toBe(2);
+  });
+});
+
+describe("what the thread is actually for", () => {
+  /*
+   * Turns are a conversation; the artifact is the work. Without it the only way to get
+   * value out of six turns is to read all six.
+   */
+  it("writes the artifact a turn produced", async () => {
+    const f = fake('claude', threads(1), {
+      content: 'Drafted it.',
+      summary: 'Drafted.',
+      next: 'gpt',
+      ask: 'review',
+      artifact: { name: 'pricing.md', content: '# Pricing\n\nTwo tiers.', note: 'First draft' },
+    });
+
+    await tick([f.participant], limits(), silent);
+
+    const written = f.calls.find((c) => c.tool === 'artifact_write')!;
+    expect(written.args.name).toBe('pricing.md');
+    expect(written.args.content).toContain('Two tiers');
+    expect(written.args.note).toBe('First draft');
+  });
+
+  it("writes nothing when the turn changed nothing about it", async () => {
+    const f = fake('claude', threads(1));
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'artifact_write')).toBe(false);
+  });
+
+  /* Without the current contents a participant can only write over the top, which is
+   * how a document gets restarted five times instead of improved five times. */
+  it("reads what already exists before taking its turn", async () => {
+    const f = fake('claude', threads(1), undefined, { built: [{ name: 'pricing.md' }] });
+
+    await tick([f.participant], limits(), silent);
+
+    const reads = f.calls.filter((c) => c.tool === 'artifact_read');
+    expect(reads.some((c) => c.args.name === 'pricing.md')).toBe(true);
+  });
+
+  it("still records the turn when the artifact cannot be written", async () => {
+    const f = fake('claude', threads(1), {
+      content: 'x',
+      summary: 'y',
+      next: 'gpt',
+      ask: 'z',
+      artifact: { name: 'pricing.md', content: 'draft' },
+    });
+    const blocked = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'artifact_write') throw new Error('thread closed');
+        return f.participant.call(tool, args);
+      },
+    } as unknown as Participant;
+
+    const result = await tick([blocked], limits(), silent);
+
+    expect(result.turnsTaken).toBe(1);
+    expect(result.errors).toHaveLength(0);
   });
 });
