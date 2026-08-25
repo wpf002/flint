@@ -212,3 +212,15 @@ A turn that nominates nobody leaves the floor open. Nexus scores it the same way
 scores a nomination and offers it to whoever the ask points at; the responder takes it
 only for that participant, claiming it first so several volunteers cannot produce the
 same turn in parallel.
+
+
+## Output caps on a reasoning model
+
+`maxOutputTokens` is a ceiling, not a spend — you are billed for what is generated, not
+what is allowed. Set it too low and a truncated reply is discarded entirely, so the turn
+costs you its tokens and produces nothing.
+
+A reasoning model spends that budget on reasoning before it writes a visible word, so it
+needs far more headroom than the length of its answer suggests. gpt-5 exhausted 12,000
+without emitting a turn. The caps here reflect what each model actually needed in
+practice, not what its answers look like.

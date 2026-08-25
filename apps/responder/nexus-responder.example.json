@@ -21,7 +21,7 @@
       "model": "gpt-5",
       "apiKey": "env:OPENAI_API_KEY",
       "role": "Implementation, concrete code, schemas, and turning a design into something that runs. Best when the next step is to build the thing.",
-      "maxOutputTokens": 12000,
+      "maxOutputTokens": 24000,
       "options": {
         "reasoning_effort": "low"
       }
