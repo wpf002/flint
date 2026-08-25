@@ -287,7 +287,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       },
     ],
     maxTokens: p.cfg.maxOutputTokens,
-    signal: AbortSignal.timeout(limits.turnTimeoutMs),
+    signal: AbortSignal.timeout(p.turnTimeoutMs ?? limits.turnTimeoutMs),
     ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
   });
 

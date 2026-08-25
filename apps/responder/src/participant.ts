@@ -26,6 +26,11 @@ export class Participant {
     return this.cfg.slug;
   }
 
+  /** How long this one's turn may take, if it needs longer than the shared default. */
+  get turnTimeoutMs(): number | undefined {
+    return this.cfg.turnTimeoutMs;
+  }
+
   /** How this participant's reply shape is obtained: enforced, or merely asked for. */
   get replyMode(): ReplyMode {
     return replyMode(this.cfg.provider);

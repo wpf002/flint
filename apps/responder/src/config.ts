@@ -41,6 +41,12 @@ export const ParticipantConfigSchema = z
      * cut off — and that knob has no equivalent on the other providers.
      */
     options: z.record(z.unknown()).optional(),
+    /*
+     * How long this participant's turn may take, overriding the shared default. A model
+     * that searches the live web before answering is legitimately slower than one that
+     * does not — holding them to the same clock marked a working participant as broken.
+     */
+    turnTimeoutMs: z.number().int().min(10_000).max(600_000).optional(),
   })
   .strict();
 

@@ -224,3 +224,13 @@ A reasoning model spends that budget on reasoning before it writes a visible wor
 needs far more headroom than the length of its answer suggests. gpt-5 exhausted 12,000
 without emitting a turn. The caps here reflect what each model actually needed in
 practice, not what its answers look like.
+
+## Why Perplexity gets its own clock
+
+A model that searches the live web before answering is legitimately slower than one that
+does not — `sonar-pro` takes roughly twice as long as `sonar` on the same prompt, and on
+a long thread it can exceed a timeout that is generous for everything else. Holding them
+all to one clock marked a working participant as broken and handed its threads away.
+
+`turnTimeoutMs` on a participant overrides the shared default. Perplexity gets four
+minutes; the others use the default ninety seconds, which they never come close to.

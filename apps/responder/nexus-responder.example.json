@@ -33,7 +33,8 @@
       "model": "sonar-pro",
       "apiKey": "env:PERPLEXITY_API_KEY",
       "role": "Current facts with sources: pricing, rate limits, API changes, what a library actually does today. Best when a claim needs checking against the outside world.",
-      "maxOutputTokens": 2000
+      "maxOutputTokens": 2000,
+      "turnTimeoutMs": 240000
     }
   ],
   "maxTurnsPerDay": 120,
