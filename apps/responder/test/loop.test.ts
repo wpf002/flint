@@ -26,7 +26,7 @@ function fake(
   slug: string,
   threads: FakeThread[],
   reply: unknown = { content: 'work', summary: 'did work', next: 'other', ask: 'next bit' },
-  floor: { status?: string; yourTurnIf?: string } = {},
+  floor: { status?: string; yourTurnIf?: string; reason?: string } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
@@ -42,7 +42,7 @@ function fake(
         return {
           message: { id: 'x', role: 'assistant', content: JSON.stringify(reply), timestamp: 0 },
           usage: { input: 10, output: 5 },
-          reason: 'complete',
+          reason: floor.reason ?? 'complete',
         };
       },
     },
@@ -227,5 +227,29 @@ describe('a floor that moved between listing and reading', () => {
 
     expect(result.turnsTaken).toBe(0);
     expect(f.generations).toBe(0);
+  });
+});
+
+describe('a reply cut off at the token cap', () => {
+  /*
+   * Truncation used to arrive as unparseable JSON, so it was recorded as a turn that
+   * nominated nobody. The thread stopped with nothing saying why.
+   */
+  it('records nothing and names the cap', async () => {
+    const f = fake('claude', threads(1), undefined, { reason: 'max_tokens' });
+
+    const result = await tick([f.participant], limits(), silent);
+
+    expect(result.turnsTaken).toBe(0);
+    expect(f.calls.some((c) => c.tool === 'thread_append')).toBe(false);
+    expect(result.errors[0]).toMatch(/token cap/);
+  });
+
+  it('leaves the floor where it is, so the turn is retried once the cap is raised', async () => {
+    const f = fake('claude', threads(1), undefined, { reason: 'max_tokens' });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.filter((c) => c.tool === 'thread_append')).toHaveLength(0);
   });
 });

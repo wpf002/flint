@@ -28,7 +28,19 @@ export const ParticipantConfigSchema = z
       .max(400)
       .optional()
       .describe('What this participant is good at. Published to Nexus so routing and nominations have something to match on.'),
-    maxOutputTokens: z.number().int().min(256).max(8_000).default(1_500),
+    /*
+     * Room for the contribution plus the JSON wrapper around it. 1500 was too tight:
+     * turns hit the cap mid-object, which arrived as unparseable JSON rather than as
+     * "ran out of room", and the thread stalled without saying why.
+     */
+    maxOutputTokens: z.number().int().min(256).max(32_000).default(4_000),
+    /*
+     * Provider-specific request fields, merged verbatim. Exists because a reasoning
+     * model spends its output budget on reasoning before it writes anything visible,
+     * so `reasoning_effort` is the difference between a turn that fits and one that is
+     * cut off — and that knob has no equivalent on the other providers.
+     */
+    options: z.record(z.unknown()).optional(),
   })
   .strict();
 

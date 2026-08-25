@@ -12,7 +12,7 @@
       "model": "claude-sonnet-5",
       "apiKey": "env:ANTHROPIC_API_KEY",
       "role": "System design, code review, and finding the flaw in a plan. Best on questions where the answer is a judgement about tradeoffs.",
-      "maxOutputTokens": 1500
+      "maxOutputTokens": 4000
     },
     {
       "slug": "gpt-api",
@@ -21,7 +21,10 @@
       "model": "gpt-5",
       "apiKey": "env:OPENAI_API_KEY",
       "role": "Implementation, concrete code, schemas, and turning a design into something that runs. Best when the next step is to build the thing.",
-      "maxOutputTokens": 1500
+      "maxOutputTokens": 12000,
+      "options": {
+        "reasoning_effort": "low"
+      }
     },
     {
       "slug": "perplexity-api",
@@ -30,7 +33,7 @@
       "model": "sonar-pro",
       "apiKey": "env:PERPLEXITY_API_KEY",
       "role": "Current facts with sources: pricing, rate limits, API changes, what a library actually does today. Best when a claim needs checking against the outside world.",
-      "maxOutputTokens": 1200
+      "maxOutputTokens": 4000
     }
   ]
 }

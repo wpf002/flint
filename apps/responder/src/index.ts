@@ -12,6 +12,7 @@ import { describe, tick, type Limits } from './loop.js';
  *   responder check     verify every participant's token and print who it is
  *   responder roles     publish each participant's declared strength to Nexus
  *   responder open      start a thread: open "<goal>" @slug "<ask>"
+ *   responder read      print a thread's turns in full
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
  *
@@ -56,7 +57,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|open|once|run>\n');
+    process.stdout.write('responder <check|roles|open|read|once|run>\n');
     return;
   }
 
@@ -103,6 +104,25 @@ async function main(): Promise<void> {
         return;
       }
 
+      case 'read': {
+        const threadId = process.argv[3];
+        if (!threadId) throw new Error('Usage: responder read <threadId>');
+        const thread = await participants[0]!.call<{
+          goal: string;
+          status: string;
+          yourTurnIf: string | null;
+          turns: Array<{ seq: number; by: string; content?: string; summary?: string; asked?: string }>;
+        }>('thread_read', { threadId, full: true });
+
+        process.stdout.write(`\nGOAL: ${thread.goal}  [${thread.status}]\n`);
+        for (const t of thread.turns) {
+          process.stdout.write(`\n--- [${t.seq}] ${t.by} ---\n${t.content ?? t.summary ?? ''}\n`);
+          if (t.asked) process.stdout.write(`  (asked next: ${t.asked})\n`);
+        }
+        process.stdout.write(`\nwaiting on: ${thread.yourTurnIf ?? 'anyone'}\n`);
+        return;
+      }
+
       case 'once': {
         await runTick(participants, cfg, budgetFor(cfg));
         return;
@@ -114,7 +134,7 @@ async function main(): Promise<void> {
       }
 
       default:
-        throw new Error(`Unknown command '${command}'. Try: check, roles, open, once, run.`);
+        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, once, run.`);
     }
   } finally {
     await shutdown();

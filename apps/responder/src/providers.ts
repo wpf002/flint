@@ -15,16 +15,17 @@ import { resolveSecret, type ParticipantConfig } from './config.js';
 export function buildProvider(p: ParticipantConfig): ProviderAdapter {
   const apiKey = p.apiKey ? resolveSecret(p.apiKey, `participant '${p.slug}' apiKey`) : '';
   const baseURL = p.baseURL ? { baseURL: p.baseURL } : {};
+  const extra = p.options ? { extraBody: p.options } : {};
 
   switch (p.provider) {
     case 'anthropic':
       return new AnthropicProvider({ apiKey, ...baseURL });
 
     case 'openai':
-      return new OpenAiProvider({ apiKey, ...baseURL });
+      return new OpenAiProvider({ apiKey, ...baseURL, ...extra });
 
     case 'perplexity':
-      return new PerplexityProvider({ apiKey, ...baseURL });
+      return new PerplexityProvider({ apiKey, ...baseURL, ...extra });
 
     case 'ollama':
       return new OllamaProvider({ ...baseURL });

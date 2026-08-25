@@ -113,3 +113,71 @@ describe('systemPrompt', () => {
     expect(prompt).toContain('Never nominate yourself');
   });
 });
+
+describe('replies that exceed what Nexus accepts', () => {
+  /*
+   * The fallback is built by hand rather than parsed, so nothing enforced the limits.
+   * An over-long reply reached the append and was rejected there, losing the turn
+   * outright — worse than recording a clipped one.
+   */
+  it('clips an over-long unstructured reply to what Nexus will take', () => {
+    const { reply, malformed } = parseReply('x'.repeat(20_000));
+
+    expect(malformed).toBe(true);
+    expect(reply.content.length).toBeLessThanOrEqual(8_000);
+    expect(reply.content).toMatch(/truncated/);
+  });
+
+  it('clips a well-formed reply whose content is too long, rather than dropping it', () => {
+    const { reply } = parseReply(
+      JSON.stringify({ content: 'y'.repeat(20_000), summary: 'long one', next: 'gpt' }),
+    );
+
+    expect(reply.content.length).toBeLessThanOrEqual(8_000);
+  });
+
+  it('says it was truncated, so a clipped turn never reads as a complete one', () => {
+    const { reply } = parseReply('z'.repeat(9_000));
+
+    expect(reply.content.endsWith('… [truncated]')).toBe(true);
+  });
+});
+
+describe('replies whose content is structured rather than a string', () => {
+  /*
+   * A model asked for {"content": "..."} sometimes answers with content as a nested
+   * object. The contribution is there and is good; rejecting it lost the whole turn
+   * and recorded the raw text instead, which was strictly worse.
+   */
+  it('renders an object content instead of discarding the turn', () => {
+    const { reply, malformed } = parseReply(
+      JSON.stringify({ content: { plan: ['a', 'b'], why: 'because' }, summary: 'Drafted a plan.', next: 'claude' }),
+    );
+
+    expect(malformed).toBe(false);
+    expect(reply.content).toContain('because');
+    expect(reply.next).toBe('claude');
+  });
+
+  it('derives a summary when the model omits one', () => {
+    const { reply, malformed } = parseReply(JSON.stringify({ content: 'First line.\nSecond line.', next: 'gpt' }));
+
+    expect(malformed).toBe(false);
+    expect(reply.summary).toBe('First line.');
+  });
+
+  it('drops a non-string nomination rather than sending Nexus something it will reject', () => {
+    const { reply, malformed } = parseReply(
+      JSON.stringify({ content: 'x', summary: 'y', next: { slug: 'gpt' } }),
+    );
+
+    expect(malformed).toBe(false);
+    expect(reply.next).toBeNull();
+  });
+
+  it('still refuses a reply with no content at all', () => {
+    const { malformed } = parseReply(JSON.stringify({ summary: 'nothing here' }));
+
+    expect(malformed).toBe(true);
+  });
+});

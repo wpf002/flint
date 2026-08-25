@@ -8,6 +8,11 @@ import { z } from 'zod';
  * at all — which is what lets a search-first model take a turn alongside the others.
  */
 
+/* Nexus's own limits. Exceeding either is rejected at the append, so the fallback has
+ * to respect them as strictly as the schema does. */
+const MAX_CONTENT = 8_000;
+const MAX_SUMMARY = 300;
+
 /** The shape `thread_read` returns. Only the parts a turn actually needs. */
 export const ThreadStateSchema = z
   .object({
@@ -39,8 +44,8 @@ export type ThreadState = z.infer<typeof ThreadStateSchema>;
 /** What a participant is expected to produce. Kept small so the JSON is easy to hit. */
 export const TurnReplySchema = z
   .object({
-    content: z.string().min(1).max(8_000),
-    summary: z.string().min(1).max(300),
+    content: z.string().min(1).max(MAX_CONTENT),
+    summary: z.string().min(1).max(MAX_SUMMARY),
     next: z.string().min(1).nullish(),
     ask: z.string().max(1_000).nullish(),
     done: z.boolean().default(false),
@@ -50,7 +55,12 @@ export const TurnReplySchema = z
 
 export type TurnReply = z.infer<typeof TurnReplySchema>;
 
-export function systemPrompt(slug: string, role: string | undefined): string {
+/** Roughly four characters to a token, less the JSON wrapper. Budget only, not billing. */
+function contentBudget(maxOutputTokens: number): number {
+  return Math.max(200, Math.round((maxOutputTokens - 250) * 3.2));
+}
+
+export function systemPrompt(slug: string, role: string | undefined, maxOutputTokens = 4_000): string {
   return [
     `You are "${slug}", one of several AI participants working in a shared space called Nexus.`,
     role ? `Your declared strength: ${role}` : null,
@@ -75,6 +85,8 @@ export function systemPrompt(slug: string, role: string | undefined): string {
     '}',
     '',
     '"remember" is optional and usually empty. Use it only for a fact that outlives this thread.',
+    '',
+    `Keep "content" under about ${contentBudget(maxOutputTokens)} characters. A reply that runs past the limit is cut off mid-JSON and cannot be recorded at all, so a shorter complete turn always beats a longer truncated one.`,
   ]
     .filter((line) => line !== null)
     .join('\n');
@@ -126,16 +138,21 @@ export function threadPrompt(state: ThreadState, self: string): string {
 export function parseReply(raw: string): { reply: TurnReply; malformed: boolean } {
   const candidate = extractJson(raw);
   if (candidate) {
-    const parsed = TurnReplySchema.safeParse(candidate);
+    const parsed = TurnReplySchema.safeParse(normalize(candidate));
     if (parsed.success) return { reply: parsed.data, malformed: false };
   }
 
+  /*
+   * Built by hand rather than parsed, so nothing enforces the limits here. An
+   * over-long reply used to be handed to Nexus intact and rejected at the append,
+   * which lost the turn entirely — worse than recording a clipped one.
+   */
   const text = raw.trim();
   const firstLine = text.split('\n').find((l) => l.trim().length > 0) ?? 'Unstructured reply.';
   return {
     reply: {
-      content: text.length > 0 ? text : '(the model returned nothing)',
-      summary: firstLine.slice(0, 280),
+      content: text.length > 0 ? clip(text, MAX_CONTENT) : '(the model returned nothing)',
+      summary: clip(firstLine, MAX_SUMMARY),
       next: null,
       ask: null,
       done: false,
@@ -143,6 +160,47 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
     },
     malformed: true,
   };
+}
+
+/**
+ * Coerces the shapes models reach for when the answer is structured.
+ *
+ * A model asked for `{"content": "..."}` will sometimes answer with `content` as a
+ * nested object — the contribution is there and is good, it is just not a string.
+ * Rejecting it lost the whole turn and recorded the raw text instead, which was
+ * strictly worse than rendering the object. Only the wrapper is coerced; nothing about
+ * the model's actual content is invented or discarded.
+ */
+function normalize(candidate: unknown): unknown {
+  if (typeof candidate !== 'object' || candidate === null) return candidate;
+  const obj = { ...(candidate as Record<string, unknown>) };
+
+  if (obj.content !== undefined && typeof obj.content !== 'string') {
+    obj.content = render(obj.content);
+  }
+  if (typeof obj.summary !== 'string' || obj.summary.trim().length === 0) {
+    const body = typeof obj.content === 'string' ? obj.content : '';
+    const firstLine = body.split('\n').find((l) => l.trim().length > 0) ?? 'Structured reply.';
+    obj.summary = clip(firstLine.trim(), MAX_SUMMARY);
+  } else {
+    obj.summary = clip(obj.summary, MAX_SUMMARY);
+  }
+  if (typeof obj.content === 'string') obj.content = clip(obj.content, MAX_CONTENT);
+  if (obj.next !== undefined && obj.next !== null && typeof obj.next !== 'string') obj.next = null;
+  if (obj.ask !== undefined && obj.ask !== null && typeof obj.ask !== 'string') obj.ask = render(obj.ask);
+
+  return obj;
+}
+
+function render(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+/** Truncates to a limit, saying so, so a clipped turn never reads as a complete one. */
+function clip(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  const marker = '… [truncated]';
+  return value.slice(0, limit - marker.length) + marker;
 }
 
 function extractJson(raw: string): unknown {

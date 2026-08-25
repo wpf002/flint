@@ -105,7 +105,7 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
 
   const generated = await p.provider.generate({
     model: p.cfg.model,
-    system: systemPrompt(p.slug, p.cfg.role),
+    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens),
     messages: [
       {
         id: `${job.threadId}:${state.turnCount}`,
@@ -116,6 +116,18 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
     ],
     maxTokens: p.cfg.maxOutputTokens,
   });
+
+  /*
+   * A reply cut off at the cap is not a badly-formatted reply, and recording it as one
+   * buries the cause: the turn lands truncated, nominates nobody, and the thread stops
+   * with nothing saying why. Refusing to append leaves the floor where it is, so the
+   * turn is retried once the cap is raised.
+   */
+  if (generated.reason === 'max_tokens') {
+    throw new Error(
+      `reply hit the ${p.cfg.maxOutputTokens}-token cap and was cut off. Nothing recorded — raise maxOutputTokens for '${p.slug}'.`,
+    );
+  }
 
   const { reply, malformed } = parseReply(generated.message.content);
   if (malformed) {
