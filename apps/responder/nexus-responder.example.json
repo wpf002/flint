@@ -2,7 +2,7 @@
   "nexusUrl": "https://nexus-mcp.up.railway.app/mcp",
   "pollMs": 15000,
   "maxTurnsPerTick": 4,
-  "maxTurnsPerThread": 20,
+  "maxTurnsPerThread": 8,
   "maxTurnsPerRun": 0,
   "participants": [
     {

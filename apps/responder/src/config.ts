@@ -89,7 +89,13 @@ export const ResponderConfigSchema = z
      * single conversation that has stopped converging.
      */
     maxTurnsPerTick: z.number().int().min(1).max(50).default(4),
-    maxTurnsPerThread: z.number().int().min(2).max(200).default(20),
+    /*
+     * Eight, not twenty. A thread of sixteen turns spent 168,000 tokens producing a
+     * README that four turns would have produced better: past a handful of rounds the
+     * participants stop improving the work and start fiddling with it. The cap is a
+     * backstop against that, not a target.
+     */
+    maxTurnsPerThread: z.number().int().min(2).max(200).default(8),
 
     /*
      * How long one turn may take before it is abandoned. A search-grounded model on a
