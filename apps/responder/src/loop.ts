@@ -43,6 +43,9 @@ export type Failures = Map<string, number>;
 const BACKOFF_AFTER = 3;
 const BACKOFF_ROUNDS = 20;
 
+/** Failures at which a participant stops holding the thread up and passes it on. */
+const PASS_AFTER = 2;
+
 export interface TickResult {
   turnsTaken: number;
   threadsClosed: number;
@@ -146,6 +149,20 @@ export async function tick(
     } catch (err) {
       const now = failed + 1;
       failures.set(job.threadId, now);
+
+      /*
+       * A participant whose provider is down should not hold a thread the others could
+       * finish. Passing it on costs nothing and is what a person would do; resting the
+       * thread instead punishes the work for a fault in one participant.
+       */
+      if (now >= PASS_AFTER && !job.volunteered && isProviderFault(err)) {
+        const passed = await passOn(job, participants, err, log).catch(() => false);
+        if (passed) {
+          failures.delete(job.threadId);
+          continue;
+        }
+      }
+
       result.errors.push(
         `${job.participant.slug}: turn on ${short(job.threadId)} failed — ${describe(err)}` +
           (now >= BACKOFF_AFTER ? ` (resting it after ${now} failures)` : ''),
@@ -350,6 +367,46 @@ function interleave<T>(queues: T[][]): T[] {
     }
   }
   return out;
+}
+
+/**
+ * True when the failure is the provider's rather than the thread's.
+ *
+ * A rejected payload or a bad request will fail the same way for everyone, so passing
+ * it on would only spread the failure. An unreachable or overloaded provider is
+ * specific to this participant, and someone else can answer.
+ */
+function isProviderFault(err: unknown): boolean {
+  if (!isFlintError(err)) return false;
+  return err.error.kind === 'provider_unavailable' || err.error.kind === 'timeout' || err.error.kind === 'rate_limit';
+}
+
+/**
+ * Hands a thread to someone who can answer it, and says in the thread why it moved.
+ * Silence would leave the next speaker guessing at a gap in the conversation.
+ */
+async function passOn(
+  job: Waiting,
+  participants: Participant[],
+  err: unknown,
+  log: Log,
+): Promise<boolean> {
+  const peer = participants.find((other) => other.slug !== job.participant.slug);
+  if (!peer) return false;
+
+  await job.participant.call('thread_reassign', {
+    threadId: job.threadId,
+    to: peer.slug,
+  });
+
+  // Recorded against the participant that could not answer, so the trail shows which
+  // one was unavailable rather than leaving an unexplained change of speaker.
+  await job.participant
+    .call('report_health', { ok: false, note: `could not take a turn: ${describe(err)}`.slice(0, 500) })
+    .catch(() => {});
+
+  log(`[${job.participant.slug}] could not answer, passed ${short(job.threadId)} to ${peer.slug}`);
+  return true;
 }
 
 /** Pulls the forced call's arguments back out as JSON for the ordinary parser. */

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { FlintError } from '@flint/core';
 import { tick, type Limits } from '../src/loop.js';
 import type { Participant } from '../src/participant.js';
 
@@ -516,5 +517,89 @@ describe("a thread that has run out of turns", () => {
 
     expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
     expect(f.calls.find((c) => c.tool === 'thread_append')!.args.done).toBe(true);
+  });
+});
+
+describe("a participant whose provider is down", () => {
+  const failing = (slug: string, kind: string) => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const participant = {
+      slug,
+      cfg: { slug, model: 'm', maxOutputTokens: 500 },
+      replyMode: 'prompt',
+      provider: {
+        name: 'fake',
+        generate: async () => {
+          throw new FlintError({ kind, message: 'down', retryable: true } as never);
+        },
+      },
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        calls.push({ tool, args });
+        if (tool === 'thread_list') return { threads: threads(1) };
+        if (tool === 'thread_read') {
+          return { threadId: 't0', goal: 'g', status: 'OPEN', yourTurnIf: slug, turnCount: 1, ask: 'a', participants: [], turns: [] };
+        }
+        return {};
+      },
+    } as unknown as Participant;
+    return { participant, calls };
+  };
+
+  const peer = () => fake('gpt', []).participant;
+
+  /*
+   * A participant whose provider is down should not hold a thread the others could
+   * finish. Resting the thread instead punishes the work for a fault in one of them.
+   */
+  it("passes the thread to someone who can answer", async () => {
+    const f = failing('claude', 'provider_unavailable');
+    const failures = new Map<string, number>();
+
+    await tick([f.participant, peer()], limits(), silent, failures);
+    await tick([f.participant, peer()], limits(), silent, failures);
+
+    const passed = f.calls.find((c) => c.tool === 'thread_reassign');
+    expect(passed!.args.to).toBe('gpt');
+  });
+
+  it("says it could not answer, so the console stops showing it as fine", async () => {
+    const f = failing('claude', 'timeout');
+    const failures = new Map<string, number>();
+
+    await tick([f.participant, peer()], limits(), silent, failures);
+    await tick([f.participant, peer()], limits(), silent, failures);
+
+    expect(f.calls.find((c) => c.tool === 'report_health')!.args.ok).toBe(false);
+  });
+
+  it("does not pass on the first failure, which is usually nothing", async () => {
+    const f = failing('claude', 'provider_unavailable');
+
+    await tick([f.participant, peer()], limits(), silent, new Map());
+
+    expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  /* A rejected payload fails the same way for everyone; passing it spreads the failure. */
+  it("keeps a thread whose own content is the problem", async () => {
+    const f = failing('claude', 'validation');
+    const failures = new Map<string, number>();
+
+    await tick([f.participant, peer()], limits(), silent, failures);
+    const result = await tick([f.participant, peer()], limits(), silent, failures);
+
+    expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("keeps it when there is nobody else to pass it to", async () => {
+    const f = failing('claude', 'provider_unavailable');
+    const failures = new Map<string, number>();
+
+    await tick([f.participant], limits(), silent, failures);
+    const result = await tick([f.participant], limits(), silent, failures);
+
+    expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
   });
 });
