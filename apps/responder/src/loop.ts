@@ -11,7 +11,7 @@ import {
   type Offer,
   type RanBefore,
 } from './prompt.js';
-import { materialise, run as runCommand, workspaceFor } from './workspace.js';
+import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 
 /**
  * What each thread's commands last did, carried to the turn that has to act on it.
@@ -316,6 +316,11 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   const workspace =
     limits.canRun && limits.workspaceRoot ? workspaceFor(limits.workspaceRoot, job.threadId) : null;
   if (workspace) {
+    // Before anything is written, so a build never fails for want of the network it was
+    // supposed to have.
+    const trouble = await ensureSandbox(limits.workspaceRoot!);
+    if (trouble) log(`[${p.slug}] ${trouble}`);
+
     for (const artifact of built) {
       try {
         materialise(workspace, artifact.name, artifact.content);

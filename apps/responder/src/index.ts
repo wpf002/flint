@@ -7,6 +7,7 @@ import { Participant } from './participant.js';
 import { describe, tick, type Failures, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
 import { SpendLedger } from './spend.js';
+import { exportWorkspace, workspaceFor } from './workspace.js';
 
 /**
  * `responder` — the half of Nexus that lets a thread advance without a human.
@@ -16,6 +17,7 @@ import { SpendLedger } from './spend.js';
  *   responder open      start a thread that runs itself: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
  *   responder health    probe every token and model key, report the result to Nexus
+ *   responder export    copy a thread's build out as an ordinary project
  *   responder spend     how many turns have been taken today
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
@@ -62,7 +64,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|open|read|health|spend|once|run>\n');
+    process.stdout.write('responder <check|roles|open|read|built|export|health|spend|once|run>\n');
     return;
   }
 
@@ -151,6 +153,22 @@ async function main(): Promise<void> {
         return;
       }
 
+      case 'export': {
+        const [threadId, ...rest] = process.argv.slice(3);
+        if (!threadId) throw new Error('Usage: responder export <threadId> [destination]');
+        if (!cfg.workspaceRoot) throw new Error('No workspaceRoot is set, so nothing has been built on disk.');
+
+        const from = workspaceFor(cfg.workspaceRoot, threadId);
+        // Named after the thread's goal rather than its id, because the directory is the
+        // product now and an id is not a name anyone wants to keep.
+        const fallback = join(process.cwd(), `nexus-${threadId.slice(0, 8)}`);
+        const result = await exportWorkspace(from, rest.join(' ') || fallback);
+
+        log(`copied ${result.files} file${result.files === 1 ? '' : 's'} to ${result.destination}`);
+        log('node_modules was left behind: reinstall it wherever this is going.');
+        return;
+      }
+
       case 'once': {
         const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay, cfg.maxOutputTokensPerDay);
         if (ledger.remaining() <= 0) {
@@ -182,7 +200,9 @@ async function main(): Promise<void> {
       }
 
       default:
-        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, health, spend, once, run.`);
+        throw new Error(
+          `Unknown command '${command}'. Try: check, roles, open, read, export, health, spend, once, run.`,
+        );
     }
   } finally {
     await shutdown();

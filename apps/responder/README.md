@@ -278,7 +278,7 @@ not to.
 
 | Constraint | Why |
 |---|---|
-| `--network=none` | A postinstall cannot phone home or fetch a second payload. It also means installing new dependencies fails — that is the trade |
+| Isolated network + egress proxy | The network has no route out at all; the proxy is the only way off it and answers only for the package registries. Installs work; a postinstall reaching anywhere else is refused |
 | `--read-only` + small `/tmp` | Nothing outside the thread's directory survives the run |
 | `--cap-drop=ALL`, `no-new-privileges` | No route to root inside the container |
 | `--memory`, `--cpus`, `--pids-limit` | A runaway build cannot take the machine with it |
@@ -293,3 +293,17 @@ arbitrary subcommand is barely a restriction.
 Output from a run is held for the *next* turn rather than written into the one that
 caused it — the output belongs to whoever has to act on it, and a turn made mostly of
 build log is a turn nobody reads.
+
+### Getting the product out
+
+```bash
+pnpm --filter responder responder export <threadId> ~/projects/the-thing
+```
+
+Copies the thread's build out as an ordinary project directory. `node_modules` is left
+behind deliberately: it is reproducible from the manifest, it is by far the largest thing
+there, and it was installed for a container's architecture rather than necessarily for
+wherever this is going.
+
+Verified end to end: `npm install` pulls through the proxy, the installed package runs,
+and an outbound request to anywhere else is refused.
