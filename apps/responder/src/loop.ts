@@ -386,6 +386,9 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       ? `→ ${appended.next}${appended.routedBy === 'nexus' ? ' (routed by Nexus)' : ''}`
       : '→ floor open';
 
+  // Working again is as worth saying as failing was.
+  await p.reportRecovered();
+
   log(
     `[${p.slug}] turn ${appended.seq} on ${short(job.threadId)}${job.volunteered ? ' (took an open floor)' : ''} ${handoff} (${cost})`,
   );
@@ -446,9 +449,7 @@ async function passOn(
 
   // Recorded against the participant that could not answer, so the trail shows which
   // one was unavailable rather than leaving an unexplained change of speaker.
-  await job.participant
-    .call('report_health', { ok: false, note: `could not take a turn: ${describe(err)}`.slice(0, 500) })
-    .catch(() => {});
+  await job.participant.reportFailing(`could not take a turn: ${describe(err)}`);
 
   log(`[${job.participant.slug}] could not answer, passed ${short(job.threadId)} to ${peer.slug}`);
   return true;

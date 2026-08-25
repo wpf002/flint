@@ -41,6 +41,8 @@ function fake(
   const participant = {
     slug,
     cfg: { slug, model: 'test-model', role: 'testing', maxOutputTokens: 500 },
+    reportFailing: async () => {},
+    reportRecovered: async () => {},
     provider: {
       name: 'fake',
       generate: async () => {
@@ -431,6 +433,8 @@ describe("threads that cannot be answered", () => {
       slug,
       cfg: { slug, model: 'm', maxOutputTokens: 500 },
       replyMode: 'prompt',
+      reportFailing: async () => {},
+      reportRecovered: async () => {},
       provider: { name: 'fake', generate: async () => { throw new Error('provider refused'); } },
       call: async (tool: string, args: Record<string, unknown> = {}) => {
         calls.push({ tool, args });
@@ -523,10 +527,17 @@ describe("a thread that has run out of turns", () => {
 describe("a participant whose provider is down", () => {
   const failing = (slug: string, kind: string) => {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const reported: boolean[] = [];
     const participant = {
       slug,
       cfg: { slug, model: 'm', maxOutputTokens: 500 },
       replyMode: 'prompt',
+      reportFailing: async () => {
+        reported.push(false);
+      },
+      reportRecovered: async () => {
+        reported.push(true);
+      },
       provider: {
         name: 'fake',
         generate: async () => {
@@ -542,7 +553,7 @@ describe("a participant whose provider is down", () => {
         return {};
       },
     } as unknown as Participant;
-    return { participant, calls };
+    return { participant, calls, reported };
   };
 
   const peer = () => fake('gpt', []).participant;
@@ -569,7 +580,7 @@ describe("a participant whose provider is down", () => {
     await tick([f.participant, peer()], limits(), silent, failures);
     await tick([f.participant, peer()], limits(), silent, failures);
 
-    expect(f.calls.find((c) => c.tool === 'report_health')!.args.ok).toBe(false);
+    expect(f.reported).toContain(false);
   });
 
   it("does not pass on the first failure, which is usually nothing", async () => {
@@ -611,6 +622,8 @@ describe("turns run alongside each other", () => {
       slug,
       cfg: { slug, model: 'm', maxOutputTokens: 500 },
       replyMode: 'prompt',
+      reportFailing: async () => {},
+      reportRecovered: async () => {},
       provider: {
         name: 'fake',
         generate: async () => {
@@ -674,5 +687,45 @@ describe("who goes first when the budget is nearly spent", () => {
 
     expect(a.generations).toBeGreaterThan(0);
     expect(b.generations).toBeGreaterThan(0);
+  });
+});
+
+describe("saying it works again", () => {
+  /*
+   * Health was only ever reported downward. A provider that recovered stayed marked
+   * broken until the next daily probe — up to a day of telling you something is wrong
+   * when it is not, and a warning that is wrong that often stops being read.
+   */
+  const recovering = () => {
+    const reported: boolean[] = [];
+    const f = fake('claude', threads(1));
+    const participant = {
+      ...f.participant,
+      reportFailing: async () => {
+        reported.push(false);
+      },
+      reportRecovered: async () => {
+        reported.push(true);
+      },
+    } as unknown as Participant;
+    return { participant, reported };
+  };
+
+  it("says so after a turn lands", async () => {
+    const r = recovering();
+
+    await tick([r.participant], limits(), silent);
+
+    expect(r.reported).toContain(true);
+  });
+
+  it("says nothing when it never claimed to be failing", async () => {
+    const f = fake('claude', threads(1));
+
+    await tick([f.participant], limits(), silent);
+
+    // The real participant only reports upward if it reported downward first, so a
+    // healthy run costs no extra calls at all.
+    expect(f.calls.some((c) => c.tool === 'report_health')).toBe(false);
   });
 });

@@ -67,10 +67,9 @@ async function check(p: Participant): Promise<Check> {
  * connected. Best effort: a failed report must not mask the failure it was reporting.
  */
 export async function publish(p: Participant, check: Check): Promise<void> {
-  await p
-    .call('report_health', {
-      ok: check.nexus && check.model,
-      ...(check.note ? { note: check.note.slice(0, 500) } : {}),
-    })
-    .catch(() => {});
+  if (check.nexus && check.model) {
+    await p.call('report_health', { ok: true }).catch(() => {});
+    return;
+  }
+  await p.reportFailing(check.note ?? 'could not take a turn');
 }

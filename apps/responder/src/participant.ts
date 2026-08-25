@@ -31,6 +31,28 @@ export class Participant {
     return replyMode(this.cfg.provider);
   }
 
+  /*
+   * Whether this participant has told Nexus it is failing.
+   *
+   * Health was only ever reported downward. A provider that recovered stayed marked
+   * broken in the console until the next daily probe, which is up to a day of telling
+   * you something is wrong when it is not — and a warning that is wrong that often
+   * stops being read.
+   */
+  private reportedFailing = false;
+
+  async reportFailing(note: string): Promise<void> {
+    await this.call('report_health', { ok: false, note: note.slice(0, 500) }).catch(() => {});
+    this.reportedFailing = true;
+  }
+
+  /** Clears a failure this participant reported, once it has actually worked again. */
+  async reportRecovered(): Promise<void> {
+    if (!this.reportedFailing) return;
+    this.reportedFailing = false;
+    await this.call('report_health', { ok: true }).catch(() => {});
+  }
+
   static async connect(cfg: ParticipantConfig, nexusUrl: string): Promise<Participant> {
     // Everything that can fail on configuration alone is resolved before the socket
     // is opened. Connecting first would leave a live MCP session behind every
