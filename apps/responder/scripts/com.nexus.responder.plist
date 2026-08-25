@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nexus.responder</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/willfoti/.flint/nexus-responder.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restarted if it dies, but not instantly: a loop failing on a bad config would
+       otherwise spin as fast as the machine allows. The daily ledger is on disk, so a
+       restart does not hand it a fresh budget. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/willfoti/.flint/logs/nexus-responder.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/willfoti/.flint/logs/nexus-responder.err</string>
+</dict>
+</plist>

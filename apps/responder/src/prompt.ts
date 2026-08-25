@@ -50,6 +50,17 @@ export const TurnReplySchema = z
     ask: z.string().max(1_000).nullish(),
     done: z.boolean().default(false),
     remember: z.array(z.string().min(1).max(1_000)).max(5).default([]),
+    /*
+     * What the thread concluded, offered to shared memory. Only ever read when `done`
+     * is set: a conclusion proposed mid-thread is a guess about where it is heading.
+     */
+    canon: z
+      .object({
+        key: z.string().min(1).max(200),
+        content: z.string().min(1).max(20_000),
+        rationale: z.string().max(2_000).optional(),
+      })
+      .nullish(),
   })
   .passthrough();
 
@@ -85,6 +96,11 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     '}',
     '',
     '"remember" is optional and usually empty. Use it only for a fact that outlives this thread.',
+    '',
+    'When you set "done": true, also fill in "canon" with what the thread concluded — a short dotted key',
+    'like "pricing.floor", the conclusion itself, and why. It is proposed to shared memory for a person to',
+    'approve or reject; nothing you write there takes effect on its own. Leave it out if the thread ended',
+    'without concluding anything worth keeping.',
     '',
     `Keep "content" under about ${contentBudget(maxOutputTokens)} characters. A reply that runs past the limit is cut off mid-JSON and cannot be recorded at all, so a shorter complete turn always beats a longer truncated one.`,
   ]
@@ -187,6 +203,15 @@ function normalize(candidate: unknown): unknown {
   }
   if (typeof obj.content === 'string') obj.content = clip(obj.content, MAX_CONTENT);
   if (obj.next !== undefined && obj.next !== null && typeof obj.next !== 'string') obj.next = null;
+  // A malformed proposal is dropped rather than sent: canon is the one place where a
+  // half-understood write is worse than no write.
+  if (obj.canon !== undefined && obj.canon !== null) {
+    const c = obj.canon as Record<string, unknown>;
+    obj.canon =
+      typeof c.key === 'string' && c.key.trim().length > 0 && c.content !== undefined
+        ? { key: c.key, content: render(c.content), ...(typeof c.rationale === 'string' ? { rationale: c.rationale } : {}) }
+        : null;
+  }
   if (obj.ask !== undefined && obj.ask !== null && typeof obj.ask !== 'string') obj.ask = render(obj.ask);
 
   return obj;

@@ -181,3 +181,42 @@ describe('replies whose content is structured rather than a string', () => {
     expect(malformed).toBe(true);
   });
 });
+
+describe('a conclusion offered to shared memory', () => {
+  it('keeps a well-formed proposal', () => {
+    const { reply } = parseReply(
+      JSON.stringify({
+        content: 'x',
+        summary: 'y',
+        done: true,
+        canon: { key: 'queue.choice', content: 'Redis Streams', rationale: 'Replay.' },
+      }),
+    );
+
+    expect(reply.canon?.key).toBe('queue.choice');
+    expect(reply.canon?.rationale).toBe('Replay.');
+  });
+
+  /* Canon is the one place a half-understood write is worse than no write. */
+  it('drops a proposal with no key rather than sending a broken one', () => {
+    const { reply, malformed } = parseReply(
+      JSON.stringify({ content: 'x', summary: 'y', done: true, canon: { content: 'no key here' } }),
+    );
+
+    expect(malformed).toBe(false);
+    expect(reply.canon).toBeNull();
+  });
+
+  it('renders a structured conclusion rather than discarding it', () => {
+    const { reply } = parseReply(
+      JSON.stringify({
+        content: 'x',
+        summary: 'y',
+        done: true,
+        canon: { key: 'k', content: { decision: 'Redis Streams' } },
+      }),
+    );
+
+    expect(reply.canon?.content).toContain('Redis Streams');
+  });
+});

@@ -6,6 +6,7 @@ import { parseConfig, type ResponderConfig } from './config.js';
 import { Participant } from './participant.js';
 import { describe, tick, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
+import { SpendLedger } from './spend.js';
 
 /**
  * `responder` — the half of Nexus that lets a thread advance without a human.
@@ -15,6 +16,7 @@ import { checkAll, publish } from './health.js';
  *   responder open      start a thread: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
  *   responder health    probe every token and model key, report the result to Nexus
+ *   responder spend     how many turns have been taken today
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
  *
@@ -22,6 +24,7 @@ import { checkAll, publish } from './health.js';
  */
 
 const DEFAULT_CONFIG = join(homedir(), '.flint', 'nexus-responder.json');
+const SPEND_LEDGER = join(homedir(), '.flint', 'responder-spend.json');
 
 function log(line: string): void {
   process.stdout.write(`${stamp()} ${line}\n`);
@@ -59,7 +62,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|open|read|health|once|run>\n');
+    process.stdout.write('responder <check|roles|open|read|health|spend|once|run>\n');
     return;
   }
 
@@ -143,7 +146,13 @@ async function main(): Promise<void> {
       }
 
       case 'once': {
-        await runTick(participants, cfg, budgetFor(cfg));
+        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
+        if (ledger.remaining() <= 0) {
+          log(`daily cap reached (${ledger.spent}/${cfg.maxTurnsPerDay} turns). Nothing taken.`);
+          return;
+        }
+        const taken = await runTick(participants, cfg, Math.min(budgetFor(cfg), ledger.remaining()));
+        ledger.record(taken);
         return;
       }
 
@@ -152,8 +161,18 @@ async function main(): Promise<void> {
         return;
       }
 
+      case 'spend': {
+        const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
+        log(
+          ledger.limited
+            ? `${ledger.spent} of ${cfg.maxTurnsPerDay} turns taken today; ${ledger.remaining()} left`
+            : `${ledger.spent} turns taken today; no daily cap set`,
+        );
+        return;
+      }
+
       default:
-        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, health, once, run.`);
+        throw new Error(`Unknown command '${command}'. Try: check, roles, open, read, health, spend, once, run.`);
     }
   } finally {
     await shutdown();
@@ -204,6 +223,7 @@ async function runTick(participants: Participant[], cfg: ResponderConfig, runBud
 
 async function runForever(participants: Participant[], cfg: ResponderConfig): Promise<void> {
   let budget = budgetFor(cfg);
+  const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay);
   let stopping = false;
 
   const stop = (): void => {
@@ -223,15 +243,32 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
   log(
     `watching ${participants.length} participant${participants.length === 1 ? '' : 's'} every ${cfg.pollMs / 1000}s ` +
       `(max ${cfg.maxTurnsPerTick} turns/round, ${cfg.maxTurnsPerThread}/thread` +
+      `${ledger.limited ? `, ${ledger.remaining()} left today` : ''}` +
       `${Number.isFinite(budget) ? `, ${budget} this run` : ''})`,
   );
 
   let idle = 0;
+  let capped = false;
   while (!stopping && budget > 0) {
-    const taken = await runTick(participants, cfg, budget).catch((err: unknown) => {
+    // Checked each round rather than once at the top, because a supervised process can
+    // outlive the day it started in.
+    ledger.rollover();
+    if (ledger.remaining() <= 0) {
+      if (!capped) {
+        log(`daily cap reached (${ledger.spent}/${cfg.maxTurnsPerDay} turns). Idling until tomorrow.`);
+        capped = true;
+      }
+      await sleep(cfg.pollMs * 4, () => stopping);
+      continue;
+    }
+    capped = false;
+
+    const allowed = Math.min(budget, ledger.remaining());
+    const taken = await runTick(participants, cfg, allowed).catch((err: unknown) => {
       log(`! round failed: ${describe(err)}`);
       return 0;
     });
+    ledger.record(taken);
     budget -= taken;
 
     // Back off while nothing is happening so an idle space costs almost nothing,

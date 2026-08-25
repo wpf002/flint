@@ -61,6 +61,12 @@ export const ResponderConfigSchema = z
 
     /** Stop taking turns entirely after this many model calls. 0 disables the loop's own limit. */
     maxTurnsPerRun: z.number().int().min(0).default(0),
+    /*
+     * The cap that survives a restart. A supervised process that crashes comes back
+     * with a fresh run budget, so the run cap alone bounds nothing once the loop is
+     * left running. 0 disables it.
+     */
+    maxTurnsPerDay: z.number().int().min(0).default(60),
     participants: z.array(ParticipantConfigSchema).min(1),
   })
   .strict();

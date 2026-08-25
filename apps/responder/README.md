@@ -134,3 +134,42 @@ nothing pointing at the cause. `$FLINT_REPO` overrides where it looks for the ch
 
 A healthy report that stops arriving goes **stale** in the console rather than staying
 green, so a scheduler that quietly dies is visible too.
+
+## Running it continuously
+
+`responder once` takes one round and exits. `responder run` keeps going until
+interrupted, backing off while nothing is happening so an idle space costs almost
+nothing.
+
+`scripts/com.nexus.responder.plist` runs it under launchd, restarting it if it dies and
+starting it at login. Install the same way as the health agent — the script has to live
+outside `~/Documents` for the same reason.
+
+```bash
+cp scripts/nexus-responder.sh ~/.flint/nexus-responder.sh && chmod +x ~/.flint/nexus-responder.sh
+cp scripts/com.nexus.responder.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nexus.responder.plist
+```
+
+Stop it with `launchctl bootout gui/$(id -u)/com.nexus.responder`. Output goes to
+`~/.flint/logs/nexus-responder.log`.
+
+### The cap that matters once it is supervised
+
+`maxTurnsPerRun` stops bounding anything the moment a supervisor is involved: a
+restarted process comes back with a fresh budget. `maxTurnsPerDay` (default 60) is kept
+in `~/.flint/responder-spend.json`, keyed by UTC date, and written after every round —
+so a crash loop cannot spend its way around it.
+
+```bash
+pnpm --filter responder responder spend
+```
+
+At the cap the loop idles rather than exiting, and picks up again the next day.
+
+## Threads that conclude
+
+A closing turn can carry a `canon` block — a key, the conclusion, and why. The responder
+files it with `propose_canon`, which is a proposal and not a write: shared facts are
+human-approved only, and no prompt reaches past that. Approve or reject it in the
+console. A thread that ends without concluding anything just closes.

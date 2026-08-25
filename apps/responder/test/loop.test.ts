@@ -253,3 +253,73 @@ describe('a reply cut off at the token cap', () => {
     expect(f.calls.filter((c) => c.tool === 'thread_append')).toHaveLength(0);
   });
 });
+
+describe('what a turn cost', () => {
+  it('reports its own token usage, since Nexus cannot measure it', async () => {
+    const f = fake('claude', threads(1));
+
+    await tick([f.participant], limits(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append')!;
+    expect(append.args.tokensIn).toBe(10);
+    expect(append.args.tokensOut).toBe(5);
+  });
+});
+
+describe('a thread that reaches a conclusion', () => {
+  const conclusion = {
+    content: 'Settled on Redis Streams.',
+    summary: 'Settled the queue question.',
+    done: true,
+    canon: { key: 'queue.choice', content: 'Redis Streams', rationale: 'Ordering plus replay.' },
+  };
+
+  /*
+   * Offering the conclusion to shared memory is the natural end of a thread. It is a
+   * proposal, never a write — canon stays human-approved, which no amount of prompting
+   * can change on the Nexus side.
+   */
+  it('proposes what it concluded, for a person to approve', async () => {
+    const f = fake('claude', threads(1), conclusion);
+
+    await tick([f.participant], limits(), silent);
+
+    const proposed = f.calls.find((c) => c.tool === 'propose_canon');
+    expect(proposed!.args.key).toBe('queue.choice');
+    expect(proposed!.args.content).toBe('Redis Streams');
+    expect(proposed!.args.rationale).toBe('Ordering plus replay.');
+  });
+
+  it('proposes nothing while the thread is still going', async () => {
+    const f = fake('claude', threads(1), { ...conclusion, done: false, next: 'gpt' });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
+  });
+
+  it('still records the closing turn when the proposal is rejected', async () => {
+    const f = fake('claude', threads(1), conclusion);
+    const flaky = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'propose_canon') throw new Error('key already proposed');
+        return f.participant.call(tool, args);
+      },
+    } as unknown as typeof f.participant;
+
+    const result = await tick([flaky], limits(), silent);
+
+    expect(result.turnsTaken).toBe(1);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('closes without proposing when nothing was worth keeping', async () => {
+    const f = fake('claude', threads(1), { content: 'x', summary: 'x', done: true });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
+    expect(f.calls.find((c) => c.tool === 'thread_append')!.args.done).toBe(true);
+  });
+});

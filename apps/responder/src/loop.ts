@@ -141,7 +141,28 @@ async function takeTurn(job: Waiting, log: Log): Promise<boolean> {
     ...(reply.next ? { next: reply.next } : {}),
     ...(reply.ask ? { ask: reply.ask } : {}),
     done: reply.done,
+    // Reported so "what did this thread cost" is answerable. Nexus never calls a model
+    // and cannot measure this itself.
+    tokensIn: generated.usage.input,
+    tokensOut: generated.usage.output,
   });
+
+  /*
+   * A thread that reached a conclusion offers it to shared memory. This is a proposal,
+   * not a write — canon is human-approved only, and nothing here can change that. It
+   * fires only on the closing turn: a conclusion proposed mid-thread is a guess about
+   * where the thread is heading.
+   */
+  if (reply.done && reply.canon) {
+    await p
+      .call('propose_canon', {
+        key: reply.canon.key,
+        content: reply.canon.content,
+        ...(reply.canon.rationale ? { rationale: reply.canon.rationale } : {}),
+      })
+      .then(() => log(`[${p.slug}] proposed "${reply.canon!.key}" to shared facts, awaiting your review`))
+      .catch((err: unknown) => log(`[${p.slug}] could not propose to canon: ${describe(err)}`));
+  }
 
   // Facts the participant flagged as outliving the thread. Written under its own
   // namespace, so they are attributable and revocable like any other memory.
