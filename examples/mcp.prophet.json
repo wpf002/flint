@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "trident",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["../trident/packages/mcp-server/dist/index.js"],
+      "env": {
+        "PROPHET_URL": "https://prophet-api-production.up.railway.app",
+        "PROPHET_API_KEY": ""
+      }
+    }
+  ]
+}
