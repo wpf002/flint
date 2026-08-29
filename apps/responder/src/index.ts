@@ -2,31 +2,80 @@ import 'dotenv/config';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { parseConfig, type ResponderConfig } from './config.js';
+import { parseConfig, resolveSecret, type ResponderConfig } from './config.js';
 import { Participant } from './participant.js';
 import { describe, tick, type Failures, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
-import { SpendLedger } from './spend.js';
+import { SpendLedger, utcDay } from './spend.js';
 import { exportWorkspace, workspaceFor } from './workspace.js';
+import { dueToday, openStandup, promptFrom } from './standup.js';
+import { beat, type Heartbeat } from './heartbeat.js';
+
+/** Days since the epoch, for anything that should rotate daily rather than randomly. */
+function dayIndex(today: string): number {
+  return Math.floor(Date.parse(`${today}T00:00:00Z`) / 86_400_000);
+}
 
 /**
  * `responder` — the half of Nexus that lets a thread advance without a human.
  *
- *   responder check     verify every participant's token and print who it is
- *   responder roles     publish each participant's declared strength to Nexus
  *   responder open      start a thread that runs itself: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
- *   responder health    probe every token and model key, report the result to Nexus
  *   responder export    copy a thread's build out as an ordinary project
  *   responder spend     how many turns have been taken today
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
+ *
+ * Roles, health probes and the daily standup used to be commands here. They are not any
+ * more: each is now something the loop does on its own schedule, because a capability you
+ * have to remember to invoke is one that quietly stops happening. What is left are the
+ * things a person actually asks for by hand.
  *
  * Config: $NEXUS_RESPONDER_CONFIG, or ~/.flint/nexus-responder.json.
  */
 
 const DEFAULT_CONFIG = join(homedir(), '.flint', 'nexus-responder.json');
 const SPEND_LEDGER = join(homedir(), '.flint', 'responder-spend.json');
+
+/** One row per runner. A second machine would report under its own name. */
+const RUNNER_NAME = 'responder';
+
+/** How often health is re-probed while running. Cheap, and the answer changes slowly. */
+const HEALTH_EVERY_MS = 30 * 60_000;
+
+function ledgerState(ledger: SpendLedger, cfg: ResponderConfig): Heartbeat {
+  return {
+    turnsToday: ledger.spent,
+    turnCap: cfg.maxTurnsPerDay,
+    tokensToday: ledger.tokens,
+    tokenCap: cfg.maxOutputTokensPerDay,
+  };
+}
+
+/**
+ * Today's standup, opened into the project with the most going on.
+ *
+ * Into a project rather than loose, because a conversation about how the group works
+ * belongs beside the work it is about. If nothing has happened at all there is nothing
+ * to discuss, and it does not run.
+ */
+async function holdStandup(participants: Participant[], log: (line: string) => void): Promise<boolean> {
+  const today = utcDay();
+  const order = [...participants].sort((a, b) => a.slug.localeCompare(b.slug));
+  // Rotated by date: whoever speaks first frames the question, and a fixed opener would
+  // make every standup a variation on one voice.
+  const day = dayIndex(today);
+  const opener = order[day % order.length]!;
+  const second = order[(day + 1) % order.length]!;
+
+  const signal = await opener
+    .call<{ silent: string[]; imbalance: number }>('participation', { days: 7 })
+    .catch(() => ({ silent: [] as string[], imbalance: 0 }));
+
+  const result = await openStandup(opener, today, signal.silent[0] ?? second.slug, promptFrom(today, signal));
+  if (result.opened) log(`standup ${result.threadId} opened by ${opener.slug}`);
+  return result.opened;
+}
 
 function log(line: string): void {
   process.stdout.write(`${stamp()} ${line}\n`);
@@ -50,7 +99,14 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
   const connected: Participant[] = [];
   for (const p of cfg.participants) {
     try {
-      connected.push(await Participant.connect(p, cfg.nexusUrl));
+      const participant = await Participant.connect(p, cfg.nexusUrl);
+      /*
+       * Published on connect rather than by a command. Routing and every nomination read
+       * these; a deployment that only ever ran `once` never published them, so they
+       * stayed empty and the matching had nothing to work with.
+       */
+      await participant.publishRole().catch(() => {});
+      connected.push(participant);
       log(`connected ${p.slug} (${p.provider}/${p.model})`);
     } catch (err) {
       // One bad token should not ground the others. The rest of the space still works.
@@ -64,7 +120,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <check|roles|open|read|built|export|health|spend|once|run>\n');
+    process.stdout.write('responder <open|read|export|spend|once|run>\n');
     return;
   }
 
@@ -77,26 +133,6 @@ async function main(): Promise<void> {
 
   try {
     switch (command) {
-      case 'check': {
-        for (const p of participants) {
-          const who = await p.call<{ namespace?: string; label?: string }>('whoami');
-          log(`${p.slug} → ${who.label ?? who.namespace ?? 'unknown'} (${p.cfg.provider}/${p.cfg.model})`);
-        }
-        return;
-      }
-
-      case 'roles': {
-        for (const p of participants) {
-          if (!p.cfg.role) {
-            log(`${p.slug} has no role configured; skipping`);
-            continue;
-          }
-          await p.publishRole();
-          log(`${p.slug} role published`);
-        }
-        return;
-      }
-
       case 'open': {
         const { goal, slug, ask } = parseOpen(process.argv.slice(3));
         // Opened as the first participant, because a thread needs an author like
@@ -136,23 +172,6 @@ async function main(): Promise<void> {
         return;
       }
 
-      case 'health': {
-        const checks = await checkAll(participants);
-        for (const c of checks) {
-          await publish(participants.find((p) => p.slug === c.slug)!, c);
-          const ok = c.nexus && c.model;
-          log(`${ok ? 'ok  ' : 'FAIL'} ${c.slug}  nexus=${c.nexus ? 'ok' : 'down'} model=${c.model ? 'ok' : 'down'}${c.note ? `  ${c.note}` : ''}`);
-        }
-        // Non-zero on failure so a scheduler, a CI step or a shell `&&` can act on it
-        // without parsing this output.
-        const broken = checks.filter((c) => !(c.nexus && c.model));
-        if (broken.length > 0) {
-          process.exitCode = 1;
-          log(`${broken.length} participant${broken.length === 1 ? '' : 's'} cannot take a turn: ${broken.map((c) => c.slug).join(', ')}`);
-        }
-        return;
-      }
-
       case 'export': {
         const [threadId, ...rest] = process.argv.slice(3);
         if (!threadId) throw new Error('Usage: responder export <threadId> [destination]');
@@ -179,8 +198,19 @@ async function main(): Promise<void> {
           );
           return;
         }
+        /*
+         * The same upkeep `run` does on a clock, done once. A cron-driven Nexus should
+         * not be a Nexus that never holds a standup and always looks unattended.
+         */
+        const known = await beat(participants[0]!, RUNNER_NAME, ledgerState(ledger, cfg));
+        let standupDay: string | undefined;
+        if (dueToday(utcDay(), known?.lastStandupDay ?? null) && (await holdStandup(participants, log))) {
+          standupDay = utcDay();
+        }
+
         const round = await runRound(participants, cfg, Math.min(budgetFor(cfg), ledger.remaining()));
         ledger.record(round.turnsTaken, round.tokensOut);
+        await beat(participants[0]!, RUNNER_NAME, ledgerState(ledger, cfg), standupDay);
         return;
       }
 
@@ -201,7 +231,7 @@ async function main(): Promise<void> {
 
       default:
         throw new Error(
-          `Unknown command '${command}'. Try: check, roles, open, read, export, health, spend, once, run.`,
+          `Unknown command '${command}'. Try: open, read, export, spend, once, run.`,
         );
     }
   } finally {
@@ -255,6 +285,14 @@ async function runRound(
     turnTimeoutMs: cfg.turnTimeoutMs,
     ...(cfg.workspaceRoot ? { workspaceRoot: cfg.workspaceRoot } : {}),
     canRun: cfg.canRun,
+    ...(cfg.sandboxUrl && cfg.sandboxToken
+      ? {
+          sandbox: {
+            url: cfg.sandboxUrl,
+            token: resolveSecret(cfg.sandboxToken, 'sandboxToken'),
+          },
+        }
+      : {}),
   };
   const result = await tick(participants, limits, log, failures);
   for (const err of result.errors) log(`! ${err}`);
@@ -265,6 +303,12 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
   let budget = budgetFor(cfg);
   const ledger = SpendLedger.open(SPEND_LEDGER, cfg.maxTurnsPerDay, cfg.maxOutputTokensPerDay);
   let stopping = false;
+  /*
+   * What Nexus remembers about this runner. Read once at the start rather than assumed,
+   * so a restart does not repeat a standup that already happened today.
+   */
+  let lastStandup = (await beat(participants[0]!, RUNNER_NAME, ledgerState(ledger, cfg)))?.lastStandupDay ?? null;
+  let lastHealthAt = 0;
 
   const stop = (): void => {
     if (stopping) process.exit(1); // a second interrupt means "now"
@@ -273,12 +317,6 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
-
-  // Roles first: routing and nominations both read them, and an unpublished role
-  // makes a participant invisible to the others' judgement.
-  for (const p of participants) {
-    await p.publishRole().catch((err: unknown) => log(`! ${p.slug} role: ${describe(err)}`));
-  }
 
   log(
     `watching ${participants.length} participant${participants.length === 1 ? '' : 's'} every ${cfg.pollMs / 1000}s ` +
@@ -308,6 +346,22 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     capped = false;
 
     const allowed = Math.min(budget, ledger.remaining());
+    /*
+     * Everything that used to be a command you had to remember, on a clock instead.
+     * A capability you have to invoke is one that silently stops happening.
+     */
+    if (Date.now() - lastHealthAt > HEALTH_EVERY_MS) {
+      lastHealthAt = Date.now();
+      for (const check of await checkAll(participants)) {
+        await publish(participants.find((p) => p.slug === check.slug)!, check);
+      }
+    }
+
+    if (dueToday(utcDay(), lastStandup)) {
+      const held = await holdStandup(participants, log);
+      if (held) lastStandup = utcDay();
+    }
+
     const startedAt = Date.now();
     const round = await runRound(participants, cfg, allowed).catch((err: unknown) => {
       log(`! round failed: ${describe(err)}`);
@@ -326,6 +380,9 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     }
     ledger.record(taken, round.tokensOut);
     budget -= taken;
+
+    // Said every round, so "nothing is driving Nexus" means exactly that.
+    await beat(participants[0]!, RUNNER_NAME, ledgerState(ledger, cfg), lastStandup ?? undefined);
 
     // Back off while nothing is happening so an idle space costs almost nothing,
     // and snap back to the configured cadence the moment work appears.

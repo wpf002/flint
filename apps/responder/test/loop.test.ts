@@ -492,6 +492,36 @@ describe("threads that cannot be answered", () => {
     expect(last.errors[0]).toMatch(/resting it after 3 failures/);
   });
 
+  /*
+   * A thread that has quietly stopped being attempted looks exactly like a thread nobody
+   * has got to yet, and those need opposite responses from a person. The log alone was
+   * not enough: it is on this machine, and the console is where anyone looks.
+   */
+  it('writes the rest into the thread, where it can be seen', async () => {
+    const f = broken('claude', threads(1));
+    const failures = new Map<string, number>();
+
+    for (let round = 0; round < 4; round += 1) {
+      await tick([f.participant], limits(), silent, failures);
+    }
+
+    const notes = f.calls.filter((c) => c.tool === 'thread_note');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.args).toMatchObject({ threadId: 't0' });
+    expect((notes[0]!.args.resting as { why: string }).why).toContain('repeated failures');
+  });
+
+  it('says it once, not every round it stays rested', async () => {
+    const f = broken('claude', threads(1));
+    const failures = new Map<string, number>();
+
+    for (let round = 0; round < 8; round += 1) {
+      await tick([f.participant], limits(), silent, failures);
+    }
+
+    expect(f.calls.filter((c) => c.tool === 'thread_note')).toHaveLength(1);
+  });
+
   it("forgets the failures as soon as a turn lands", async () => {
     const failures = new Map<string, number>([['t0', 2]]);
     const f = fake('claude', threads(1));
@@ -834,5 +864,101 @@ describe("what the thread is actually for", () => {
 
     expect(result.turnsTaken).toBe(1);
     expect(result.errors).toHaveLength(0);
+  });
+});
+
+/*
+ * A thread waiting on a participant that cannot answer.
+ *
+ * Passing a thread on happens when a turn is attempted and fails. A thread whose holder
+ * is already known to be down never gets that far — it is not listed as anyone's turn, so
+ * nothing tries it, and it simply stops with the console showing it waiting on someone
+ * who is never going to speak.
+ */
+function stranded(
+  slug: string,
+  failing: boolean,
+  others: Array<{ threadId: string; waitingOn: string; minutesAgo: number }>,
+): Fake {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const participant = {
+    slug,
+    failing,
+    cfg: { slug, model: 'm', role: 'testing', maxOutputTokens: 500 },
+    reportFailing: async () => {},
+    reportRecovered: async () => {},
+    recheck: async () => {},
+    provider: { name: 'fake', generate: async () => ({ message: { id: 'x', role: 'assistant', content: '{}', timestamp: 0 }, usage: { input: 1, output: 1 }, reason: 'complete' }) },
+    call: async (tool: string, args: Record<string, unknown> = {}) => {
+      calls.push({ tool, args });
+      if (tool === 'thread_list') {
+        return args.mine === false
+          ? {
+              threads: others.map((o) => ({
+                threadId: o.threadId,
+                goal: 'stuck',
+                turns: 2,
+                yourTurn: false,
+                waitingOn: o.waitingOn,
+                updatedAt: new Date(Date.now() - o.minutesAgo * 60_000).toISOString(),
+              })),
+            }
+          : { threads: [] };
+      }
+      return {};
+    },
+  } as unknown as Participant;
+  return { participant, calls, generations: 0 } as Fake;
+}
+
+describe('stranded threads', () => {
+  it('moves a thread off a participant that cannot answer', async () => {
+    const down = stranded('perplexity', true, []);
+    const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'perplexity', minutesAgo: 30 }]);
+
+    await tick([down.participant, up.participant], limits(), silent);
+
+    const moved = up.calls.find((c) => c.tool === 'thread_reassign');
+    expect(moved?.args).toMatchObject({ threadId: 'stuck', to: 'claude' });
+  });
+
+  it('says in the thread why the speaker changed', async () => {
+    const down = stranded('perplexity', true, []);
+    const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'perplexity', minutesAgo: 30 }]);
+
+    await tick([down.participant, up.participant], limits(), silent);
+
+    const note = up.calls.find((c) => c.tool === 'thread_note');
+    expect(String(note?.args.content)).toContain('perplexity');
+  });
+
+  // A model is allowed to be slow. Snatching a thread away from whoever holds it because
+  // one round went by would break every long turn.
+  it('leaves a recently-moved thread alone', async () => {
+    const down = stranded('perplexity', true, []);
+    const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'perplexity', minutesAgo: 2 }]);
+
+    await tick([down.participant, up.participant], limits(), silent);
+
+    expect(up.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  // A thread waiting on a person is waiting on a person. Moving it would be answering
+  // for them.
+  it('leaves a thread held by someone this runner does not drive', async () => {
+    const down = stranded('perplexity', true, []);
+    const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'will', minutesAgo: 90 }]);
+
+    await tick([down.participant, up.participant], limits(), silent);
+
+    expect(up.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('does not look for stranded threads while everyone is well', async () => {
+    const a = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'perplexity', minutesAgo: 90 }]);
+
+    await tick([a.participant], limits(), silent);
+
+    expect(a.calls.some((c) => c.tool === 'thread_list' && c.args.mine === false)).toBe(false);
   });
 });

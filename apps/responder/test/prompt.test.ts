@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
+import { lastRuns, parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -251,5 +251,56 @@ describe("the artifact in a reply", () => {
     );
 
     expect(reply.artifact?.content).toContain('steps');
+  });
+});
+
+/*
+ * What the last turn ran used to be held in a map on whichever machine ran it. Reading it
+ * off the thread is what makes a restart, a second runner and the console all see the
+ * same thing.
+ */
+describe('lastRuns', () => {
+  const state = (turns: unknown[]) =>
+    ThreadStateSchema.parse({
+      threadId: 't',
+      goal: 'g',
+      status: 'OPEN',
+      turnCount: turns.length,
+      participants: [],
+      turns,
+    });
+
+  it('finds nothing when no turn has run anything', () => {
+    expect(lastRuns(state([{ seq: 1, by: 'gpt', content: 'hi' }]))).toEqual([]);
+  });
+
+  it('takes the most recent turn that ran something', () => {
+    const runs = lastRuns(
+      state([
+        { seq: 1, by: 'gpt', content: 'a', runs: [{ command: 'old', ok: true, output: 'x' }] },
+        { seq: 2, by: 'claude', content: 'b', runs: [{ command: 'new', ok: false, output: 'y' }] },
+        { seq: 3, by: 'gpt', content: 'c' },
+      ]),
+    );
+    expect(runs).toEqual([{ command: 'new', ok: false, output: 'y' }]);
+  });
+
+  it('skips a turn that ran nothing rather than reporting none', () => {
+    const runs = lastRuns(
+      state([
+        { seq: 1, by: 'gpt', content: 'a', runs: [{ command: 'npm test', ok: true, output: 'ok' }] },
+        { seq: 2, by: 'claude', content: 'b', runs: [] },
+      ]),
+    );
+    expect(runs).toEqual([{ command: 'npm test', ok: true, output: 'ok' }]);
+  });
+
+  it('puts what was run in front of the next speaker', () => {
+    const prompt = threadPrompt(
+      state([{ seq: 1, by: 'gpt', content: 'a', runs: [{ command: 'npm test', ok: false, output: '2 failing' }] }]),
+      'claude',
+    );
+    expect(prompt).toContain('npm test');
+    expect(prompt).toContain('2 failing');
   });
 });

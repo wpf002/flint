@@ -50,6 +50,11 @@ export class Participant {
   private reportedFailing = false;
   private lastRecheck = 0;
 
+  /** Whether this one is currently telling Nexus it cannot work. */
+  get failing(): boolean {
+    return this.reportedFailing;
+  }
+
   async reportFailing(note: string): Promise<void> {
     await this.call('report_health', { ok: false, note: note.slice(0, 500) }).catch(() => {});
     this.reportedFailing = true;

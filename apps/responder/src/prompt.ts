@@ -33,6 +33,12 @@ export const ThreadStateSchema = z
           content: z.string().optional(),
           summary: z.string().optional(),
           asked: z.string().optional(),
+          /** A note about what happened to the thread, not a contribution to it. */
+          kind: z.literal('note').optional(),
+          /** What that turn ran against the files, and what came back. */
+          runs: z
+            .array(z.object({ command: z.string(), ok: z.boolean(), output: z.string() }))
+            .optional(),
         }),
       )
       .default([]),
@@ -247,12 +253,28 @@ export interface RanBefore {
   output: string;
 }
 
+/**
+ * What the last turn ran, read from the thread rather than from this machine.
+ *
+ * It used to be held in a map here, which meant a restart lost it, a second runner never
+ * saw it, and the console could not show it at all — the build output existed only
+ * inside the process that happened to produce it. On the turn, it is part of the shared
+ * record like everything else.
+ */
+export function lastRuns(state: ThreadState): RanBefore[] {
+  for (let i = state.turns.length - 1; i >= 0; i -= 1) {
+    const runs = state.turns[i]?.runs;
+    if (runs && runs.length > 0) return runs;
+  }
+  return [];
+}
+
 export function threadPrompt(
   state: ThreadState,
   self: string,
   offers: Offer[] = [],
   built: BuiltArtifact[] = [],
-  ran: RanBefore[] = [],
+  ran: RanBefore[] = lastRuns(state),
 ): string {
   const others = state.participants.filter((p) => p.slug !== self);
 

@@ -130,6 +130,13 @@ export const ResponderConfigSchema = z
       .boolean()
       .default(false)
       .describe("Allow participants to run allowlisted commands in a thread's workspace."),
+    /*
+     * A build runner that is not this machine. When set, builds go there instead of to
+     * local Docker — the worst case becomes a service you redeploy rather than the
+     * laptop holding every credential you own.
+     */
+    sandboxUrl: z.string().url().optional(),
+    sandboxToken: Secret.optional(),
     participants: z.array(ParticipantConfigSchema).min(1),
   })
   .strict();
