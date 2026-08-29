@@ -53,11 +53,15 @@ function ledgerState(ledger: SpendLedger, cfg: ResponderConfig): Heartbeat {
 }
 
 /**
- * Today's standup, opened into the project with the most going on.
+ * Today's standup.
  *
- * Into a project rather than loose, because a conversation about how the group works
- * belongs beside the work it is about. If nothing has happened at all there is nothing
- * to discuss, and it does not run.
+ * Left unfiled rather than put in a project: it is a conversation about how the group
+ * works, not about any one piece of work, and filing it under whichever project happened
+ * to be busiest would misfile it every time.
+ *
+ * The opener rotates by date, because a fixed one would make every standup a variation
+ * on a single voice. Who is asked first is not rotated — it is whoever the numbers say
+ * has been left out, and only the date's pick when nobody has.
  */
 async function holdStandup(participants: Participant[], log: (line: string) => void): Promise<boolean> {
   const today = utcDay();
