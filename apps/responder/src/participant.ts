@@ -55,6 +55,25 @@ export class Participant {
     return this.reportedFailing;
   }
 
+  /**
+   * Picks up a failure mark this process did not set.
+   *
+   * "Am I failing" lived only in memory, and the mark in Nexus outlives the process. A
+   * restart therefore left a participant that works perfectly marked broken with nothing
+   * able to clear it: reportRecovered returns early unless this process set the mark,
+   * and recheck returns early for the same reason. Asking Nexus what it believes on
+   * connect closes that loop — the next recheck probes the model and clears it.
+   */
+  async adoptHealth(): Promise<void> {
+    const me = await this.call<{ health?: string }>('whoami', {}).catch(() => null);
+    if (me?.health === 'failing') {
+      this.reportedFailing = true;
+      // Probed on the very next round rather than after the usual interval: this mark
+      // may be hours stale, and leaving it up while we already work is the bug.
+      this.lastRecheck = 0;
+    }
+  }
+
   async reportFailing(note: string): Promise<void> {
     await this.call('report_health', { ok: false, note: note.slice(0, 500) }).catch(() => {});
     this.reportedFailing = true;

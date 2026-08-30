@@ -128,6 +128,9 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
        * stayed empty and the matching had nothing to work with.
        */
       await participant.publishRole().catch(() => {});
+      // A failure mark outlives the process that set it, so nothing in a fresh process
+      // knows to clear it. Picking it up here is what lets the recheck loop do that.
+      await participant.adoptHealth().catch(() => {});
       connected.push(participant);
       log(`connected ${p.slug} (${p.provider}/${p.model})`);
     } catch (err) {

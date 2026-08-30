@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { FlintError } from '@flint/core';
 import { tick, type Limits } from '../src/loop.js';
-import type { Participant } from '../src/participant.js';
+import { Participant } from '../src/participant.js';
 
 /**
  * The loop is the only part of this that costs money per iteration, so what these
@@ -979,5 +979,88 @@ describe('stranded threads', () => {
     await tick([a.participant], limits(), silent);
 
     expect(a.calls.some((c) => c.tool === 'thread_list' && c.args.mine === false)).toBe(false);
+  });
+});
+
+
+/*
+ * "Am I failing" lived only in this process, while the mark lives in Nexus. A restart
+ * therefore left a participant that works perfectly marked broken with nothing able to
+ * clear it — both reportRecovered and recheck return early unless this process set it.
+ *
+ * Built through the real class rather than a stand-in, because the whole bug lives in
+ * private state that an object literal does not have.
+ */
+describe('a failure mark that outlived the process', () => {
+  const restarted = (health: string, answers: boolean) => {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    let probes = 0;
+    const provider = {
+      name: 'fake',
+      generate: async () => {
+        probes += 1;
+        if (!answers) throw new Error('still down');
+        return {
+          message: { id: 'x', role: 'assistant', content: '{}', timestamp: 0 },
+          usage: { input: 1, output: 1 },
+          reason: 'complete',
+        };
+      },
+    };
+    // Shaped like a real MCP reply, so the parsing in Participant.call is exercised
+    // rather than bypassed.
+    const server = {
+      client: {
+        callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+          calls.push({ tool: name, args });
+          const body = name === 'whoami' ? { namespace: 'claude', health } : {};
+          return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+        },
+      },
+    };
+    const Ctor = Participant as unknown as new (
+      cfg: unknown,
+      provider: unknown,
+      server: unknown,
+    ) => Participant;
+    const participant = new Ctor(
+      { slug: 'claude', model: 'm', role: 'testing', maxOutputTokens: 500, turnTimeoutMs: 1_000 },
+      provider,
+      server,
+    );
+    return { participant, calls, probes: () => probes };
+  };
+
+  it('picks the mark back up from Nexus', async () => {
+    const p = restarted('failing', true);
+    await p.participant.adoptHealth();
+    expect(p.participant.failing).toBe(true);
+  });
+
+  it('leaves a healthy participant alone', async () => {
+    const p = restarted('ok', true);
+    await p.participant.adoptHealth();
+    expect(p.participant.failing).toBe(false);
+  });
+
+  it('clears the mark on the very next round, not after the usual wait', async () => {
+    const p = restarted('failing', true);
+    await p.participant.adoptHealth();
+
+    await p.participant.recheck();
+
+    expect(p.probes()).toBe(1);
+    expect(p.calls.some((c) => c.tool === 'report_health' && c.args.ok === true)).toBe(true);
+    expect(p.participant.failing).toBe(false);
+  });
+
+  it('leaves the mark standing while the model really is down', async () => {
+    const p = restarted('failing', false);
+    await p.participant.adoptHealth();
+
+    await p.participant.recheck();
+
+    expect(p.participant.failing).toBe(true);
+    expect(p.calls.some((c) => c.tool === 'report_health' && c.args.ok === true)).toBe(false);
   });
 });
