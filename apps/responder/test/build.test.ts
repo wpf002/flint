@@ -178,3 +178,71 @@ describe('keepsAsArtifact', () => {
     expect(keepsAsArtifact(name)).toBe(kept);
   });
 });
+
+/*
+ * The sandbox sits between the model call and the append, so anything that throws here
+ * throws away a reply that has already been generated and billed — and because the turn
+ * never lands, the floor stays put and the identical turn is paid for again next round.
+ */
+describe('when the build sandbox is unreachable', () => {
+  it('still records the turn', async () => {
+    remote.buildRemotely.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const f = builder(REPLY);
+
+    await tick([f.participant], limitsFor(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'thread_append')).toBe(true);
+  });
+
+  it('tells the thread the commands did not run', async () => {
+    remote.buildRemotely.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const f = builder(REPLY);
+
+    await tick([f.participant], limitsFor(), silent);
+
+    const runs = f.calls.find((c) => c.tool === 'thread_append')?.args.runs as Array<{
+      command: string;
+      ok: boolean;
+      output: string;
+    }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.ok).toBe(false);
+    expect(runs[0]!.output).toContain('could not be reached');
+  });
+
+  it('counts the turn, so what it cost is not lost', async () => {
+    remote.buildRemotely.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const f = builder(REPLY);
+
+    const result = await tick([f.participant], limitsFor(), silent);
+
+    expect(result.turnsTaken).toBe(1);
+    expect(result.tokensOut).toBe(5);
+  });
+
+  /* A response missing the fields the caller reads must not throw either. */
+  it('survives a reply that is not the shape it claims', async () => {
+    remote.buildRemotely.mockResolvedValueOnce({} as never);
+    const f = builder(REPLY);
+
+    const result = await tick([f.participant], limitsFor(), silent);
+
+    expect(result.turnsTaken).toBe(1);
+  });
+});
+
+/* A product is nested, and Nexus now accepts nested names. */
+describe('nested build output', () => {
+  it('keeps a file in a folder', async () => {
+    remote.buildRemotely.mockResolvedValueOnce({
+      results: [],
+      files: { 'src/index.ts': 'export const a = 1;' },
+    } as never);
+    const f = builder(REPLY);
+
+    await tick([f.participant], limitsFor(), silent);
+
+    const written = f.calls.filter((c) => c.tool === 'artifact_write').map((c) => c.args.name);
+    expect(written).toContain('src/index.ts');
+  });
+});

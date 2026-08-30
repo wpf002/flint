@@ -251,7 +251,17 @@ async function rescueStranded(participants: Participant[], log: Log): Promise<vo
 
   for (const t of stuck) {
     try {
-      await rescuer.call('thread_reassign', { threadId: t.threadId, to: rescuer.slug });
+      /*
+       * Handed on by the participant that is stuck, not taken by the one picking it up.
+       *
+       * Nexus refuses a participant taking someone else's floor until it has sat for a
+       * day, so the rescuer asking for it was refused every time — the rescue never
+       * happened and logged a failure every round. Giving away a floor you hold is
+       * always allowed, and the stuck participant's Nexus token still works: it is its
+       * model that is down, not its connection.
+       */
+      const holder = broken.find((p) => p.slug === t.waitingOn);
+      await (holder ?? rescuer).call('thread_reassign', { threadId: t.threadId, to: rescuer.slug });
       await rescuer
         .call('thread_note', {
           threadId: t.threadId,
@@ -520,14 +530,35 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       for (const artifact of built) files[artifact.name] = artifact.content;
       if (reply.artifact) files[reply.artifact.name] = reply.artifact.content;
 
-      const remote = await buildRemotely(limits.sandbox, files, reply.run);
-      for (const result of remote.results) {
+      /*
+       * A sandbox that is down must not cost the turn.
+       *
+       * This sits between the model call and the append, so throwing here threw away a
+       * reply that had already been generated and billed — and because the turn never
+       * landed, the floor stayed put and the identical turn was regenerated and paid for
+       * again next round, with none of it reaching the daily token ledger. Reported as a
+       * failed command instead: that is something the thread can read and act on.
+       */
+      const remote = await buildRemotely(limits.sandbox, files, reply.run).catch((err: unknown) => {
+        log(`[${p.slug}] the build sandbox could not be reached: ${describe(err)}`);
+        return {
+          results: reply.run.map((argv) => ({
+            command: argv.join(' '),
+            ok: false,
+            code: null,
+            output: `The build sandbox could not be reached: ${describe(err)}. Nothing was run.`,
+          })),
+          files: {} as Record<string, string>,
+        };
+      });
+
+      for (const result of remote.results ?? []) {
         results.push({ command: result.command, ok: result.ok, output: result.output });
         log(`[${p.slug}] $ ${result.command} — ${result.ok ? 'ok' : `failed (${result.code ?? 'no exit'})`}`);
       }
       // Compiled output and lockfiles are part of what was built; losing them would make
       // every subsequent turn start from source again.
-      for (const [name, content] of Object.entries(remote.files)) {
+      for (const [name, content] of Object.entries(remote.files ?? {})) {
         try {
           materialise(workspace, name, content);
         } catch {
@@ -548,7 +579,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
        */
       const known = new Set(built.map((a) => a.name));
       if (reply.artifact) known.add(reply.artifact.name);
-      const produced = Object.entries(remote.files)
+      const produced = Object.entries(remote.files ?? {})
         .filter(([name]) => !known.has(name) && keepsAsArtifact(name))
         .slice(0, KEEP_PRODUCED);
 
@@ -561,7 +592,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
             note: 'Produced by the build rather than written by hand.',
           })
           .then(() => log(`[${p.slug}] kept ${name} from the build`))
-          .catch(() => undefined);
+          .catch((err: unknown) => log(`[${p.slug}] could not keep ${name}: ${describe(err)}`));
       }
     } else {
       for (const argv of reply.run) {

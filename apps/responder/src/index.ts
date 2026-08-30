@@ -77,8 +77,26 @@ async function holdStandup(participants: Participant[], log: (line: string) => v
     .catch(() => ({ silent: [] as string[], imbalance: 0 }));
 
   const result = await openStandup(opener, today, signal.silent[0] ?? second.slug, promptFrom(today, signal));
-  if (result.opened) log(`standup ${result.threadId} opened by ${opener.slug}`);
-  return result.opened;
+  if (result.opened) {
+    log(`standup ${result.threadId} opened by ${opener.slug}`);
+    return true;
+  }
+
+  /*
+   * A refusal because one is already open counts as held.
+   *
+   * Every standup goal differs only by its date, so Nexus's duplicate check treats
+   * yesterday's — if it is still open — as the same goal and refuses today's. Treating
+   * that as "not held" meant standups stopped for good the first time one stalled, and
+   * the loop retried the same refusal every round until someone noticed.
+   */
+  if (result.why?.includes('already open')) {
+    log(`standup not opened: one is already open. Treating today as held.`);
+    return true;
+  }
+
+  log(`standup could not be opened: ${result.why ?? 'no reason given'}`);
+  return false;
 }
 
 function log(line: string): void {
@@ -362,8 +380,10 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
     }
 
     if (dueToday(utcDay(), lastStandup)) {
-      const held = await holdStandup(participants, log);
-      if (held) lastStandup = utcDay();
+      // Marked held whether it was opened or refused as a duplicate: one already open is
+      // one that happened. Retrying it every fifteen seconds for the rest of the day
+      // would spend a round on a refusal that is never going to change its mind.
+      if (await holdStandup(participants, log)) lastStandup = utcDay();
     }
 
     const startedAt = Date.now();

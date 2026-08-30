@@ -912,14 +912,33 @@ function stranded(
 }
 
 describe('stranded threads', () => {
-  it('moves a thread off a participant that cannot answer', async () => {
+  /*
+   * Handed on by the one that is stuck, not taken by the one picking it up. Nexus
+   * refuses a participant taking someone else's floor for a day, so a rescuer asking for
+   * it was refused every time — the rescue never happened at all.
+   */
+  it('has the stuck participant hand the thread on', async () => {
     const down = stranded('perplexity', true, []);
     const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'perplexity', minutesAgo: 30 }]);
 
     await tick([down.participant, up.participant], limits(), silent);
 
-    const moved = up.calls.find((c) => c.tool === 'thread_reassign');
-    expect(moved?.args).toMatchObject({ threadId: 'stuck', to: 'claude' });
+    expect(down.calls.find((c) => c.tool === 'thread_reassign')?.args).toMatchObject({
+      threadId: 'stuck',
+      to: 'claude',
+    });
+    // The rescuer must not ask for it itself: that is the call Nexus refuses.
+    expect(up.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  /* Nothing to hand on with, so it falls back rather than doing nothing at all. */
+  it('falls back to asking, when the holder is not one of ours', async () => {
+    const down = stranded('perplexity', true, []);
+    const up = stranded('claude', false, [{ threadId: 'stuck', waitingOn: 'someone-else', minutesAgo: 30 }]);
+
+    await tick([down.participant, up.participant], limits(), silent);
+
+    expect(up.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
   });
 
   it('says in the thread why the speaker changed', async () => {
