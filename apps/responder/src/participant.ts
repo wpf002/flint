@@ -106,8 +106,18 @@ export class Participant {
         signal: AbortSignal.timeout(this.cfg.turnTimeoutMs ?? 60_000),
       });
       await this.reportRecovered();
-    } catch {
-      // Still down. The mark stands, and the next round will try again.
+    } catch (err) {
+      /*
+       * Still down, and this is the only place that knows why.
+       *
+       * A bare catch here left the console showing "model failing" with nothing behind
+       * it, so a key that had simply run out of credit was indistinguishable from an
+       * outage — and one of those you can fix in a minute. The note is what the console
+       * shows on hover, so the reason has to be carried back on every probe, not only on
+       * the turn that first failed.
+       */
+      const why = err instanceof Error ? err.message : String(err);
+      await this.call('report_health', { ok: false, note: why.slice(0, 500) }).catch(() => {});
     }
   }
 

@@ -1063,4 +1063,19 @@ describe('a failure mark that outlived the process', () => {
     expect(p.participant.failing).toBe(true);
     expect(p.calls.some((c) => c.tool === 'report_health' && c.args.ok === true)).toBe(false);
   });
+
+  /*
+   * A key that has run out of credit and a provider outage both read as "model failing",
+   * and one of those you can fix in a minute. The probe is the only thing that knows
+   * which, so it has to say.
+   */
+  it('says why it is still failing, every time it checks', async () => {
+    const p = restarted('failing', false);
+    await p.participant.adoptHealth();
+
+    await p.participant.recheck();
+
+    const said = p.calls.find((c) => c.tool === 'report_health' && c.args.ok === false);
+    expect(String(said?.args.note)).toContain('still down');
+  });
 });
