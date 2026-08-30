@@ -1,7 +1,36 @@
 # Flint → Mac Studio: the ultimate upgrade
 
 When the Mac Studio (M4 Max, 64GB) arrives, this turns Flint from a 7B into a
-fine-tuned **70B** trained on every lesson banked so far. Run top to bottom.
+fine-tuned **70B** trained on every lesson banked so far.
+
+## The one command (remote, from your laptop)
+
+Once the Studio is up and reachable (Remote Login on + Tailscale — see
+[REMOTE_ACCESS.md](REMOTE_ACCESS.md)), you don't run the steps below by hand.
+From your laptop, in this repo:
+
+```
+STUDIO=willfoti@studio ./apps/studio/migrate_to_studio.sh
+```
+
+That single script (see [apps/studio/README.md](../apps/studio/README.md)):
+1. **carries Flint's life over** — `~/.flint` (memory, the banked `training/corpus.jsonl`,
+   `secrets.env`, the `brain/` harness + 50k data) and the LaunchAgents, over
+   encrypted SSH/Tailscale;
+2. **bootstraps the Studio** — toolchain, clones the repo, rebuilds the server,
+   loads every agent → **Flint is live on the new machine** (still on the Claude
+   teacher);
+3. **starts the roadmap** — pulls the 70B and launches the overnight fine-tune,
+   detached, plus the daily/weekly flywheel.
+
+Flags: `--dry-run` (show, change nothing), `--with-models` (also copy the ~40GB
+ollama blobs instead of re-pulling), `--no-roadmap` (migrate only).
+
+Steps 3-4 below (**serve the 70B**, **flip to primary**) stay a human decision,
+gated on the training + eval verdict — the migrator does everything up to that
+gate. The rest of this doc is the manual reference for what the scripts automate.
+
+---
 
 ## 0. Transfer Flint to the Mac Studio
 Copy from the old Mac to the new one (same paths):
