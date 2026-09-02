@@ -92,4 +92,26 @@ describe('isSafeTool — auto-approval gate', () => {
       expect(isSafeTool(t)).toBe(false);
     }
   });
+
+  // REGRESSION GUARD. The first attempt at this fix was a blocklist: it denied
+  // close_position but allowed open_position, denied submit_order but allowed
+  // new_order. Every name below leaked through that version. A blocklist of
+  // verbs guarding an allowlist of nouns is not deny-by-default.
+  it('denies the MIRRORS of the blocked names, not just the blocked names', () => {
+    for (const t of [
+      'open_position', 'exit_position', 'flatten_position', 'reduce_position',
+      'new_order', 'limit_order', 'market_order', 'fill_order', 'amend_order',
+      'stop_order', 'bracket_order',
+      'place_trade', 'trade', 'settle_trade', 'reverse_trade',
+      'fund_account', 'sweep_account', 'link_account', 'debit_account',
+      'move_funds', 'rebalance', 'allocate_capital', 'short_stock',
+    ]) {
+      expect(isSafeTool(t), `${t} must NOT auto-approve`).toBe(false);
+    }
+  });
+
+  it('a dangerous word in the NAMESPACE is caught too', () => {
+    expect(isSafeTool('execute.trade')).toBe(false);
+    expect(isSafeTool('broker.buy')).toBe(false);
+  });
 });

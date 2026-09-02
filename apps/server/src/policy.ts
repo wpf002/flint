@@ -33,9 +33,32 @@ export function judgeBrain(message: string, hasFrontier: boolean, localOnly: boo
   return 'frontier'; // default: Flint runs on Claude
 }
 
-/** Read verbs may appear anywhere in the name (e.g. gmail_search, gcal_upcoming). */
-export const READ_TOOL =
-  /(search|list|read|get|fetch|lookup|find|query|upcoming|forecast|model|recent|summary|view|status|count|coverage|bias|quote|position|market|account|order|worker|\bbot|industr|digest|signal|score|ticker|detail|snapshot|trade|job|rule|recommend|health|latest|\btop|best)/i;
+/**
+ * Segments that MEAN "read". A tool auto-approves only if one of its name
+ * segments is in this set — nouns are deliberately NOT here.
+ *
+ * The previous version matched a substring regex that included `position`,
+ * `order`, `trade`, `account` and `market`. Those are nouns, so `close_position`
+ * was denied only because a hand-written blocklist named it, while its exact
+ * mirrors — `open_position`, `exit_position`, `flatten_position`, `new_order`,
+ * `market_order`, `fill_order`, `place_trade`, `fund_account` — all sailed
+ * through. A blocklist of verbs against an allowlist of nouns is not
+ * deny-by-default; this is.
+ */
+export const READ_SEGMENTS = new Set([
+  'search', 'list', 'read', 'get', 'fetch', 'lookup', 'find', 'query', 'view',
+  'show', 'describe', 'inspect', 'count', 'summary', 'summarize', 'summarise',
+  'digest', 'report', 'status', 'health', 'check', 'forecast', 'predict',
+  'score', 'scores', 'rank', 'rankings', 'compare', 'recent', 'latest',
+  'upcoming', 'history', 'detail', 'details', 'snapshot', 'coverage', 'bias',
+  'quote', 'quotes', 'signal', 'signals', 'top', 'best', 'recommend',
+  'recommendations', 'info', 'stats', 'metrics', 'peek', 'browse', 'load',
+]);
+
+/** Split a tool name into comparable segments: `gcal.list_events` -> [gcal, list, events]. */
+export function segmentsOf(tool: string): string[] {
+  return tool.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
 
 /**
  * Anything that writes, sends, acts, or moves money is denied — there is no
@@ -62,14 +85,22 @@ export const NEVER_AUTO =
  * A tool that may run without human approval: read-only, or Flint's own memory
  * (`remember`, which only writes to local memory — never the outside world).
  *
- * Deny-by-default: a name must look like a read AND must not look like an
- * action. Anything unrecognised falls through to `false` and queues.
+ * GENUINELY deny-by-default. A name must positively prove it is a read by
+ * carrying a read verb as one of its segments; anything unrecognised is denied
+ * and queues for one-tap approval. Denying a real read is a mild annoyance;
+ * auto-running a real trade is not, so the asymmetry is deliberate.
+ *
+ * NOTE ON SCOPE: this gate only sees tools the MCP layer classified 'guarded'.
+ * A connector that self-declares `readOnlyHint: true` is classified 'safe' in
+ * packages/mcp/src/client.ts and never reaches this function at all.
  */
 export function isSafeTool(tool: string): boolean {
   if (tool === 'remember') return true;
-  // MCP tools are namespaced `server.tool` — judge the tool half.
-  const name = tool.includes('.') ? tool.slice(tool.indexOf('.') + 1) : tool;
-  if (NEVER_AUTO.test(name)) return false; // absolute deny, wins over everything
-  if (WRITE_TOOL.test(name)) return false;
-  return READ_TOOL.test(name);
+  // Judge the WHOLE name, not just the half after the dot — a namespace can
+  // carry the dangerous word (e.g. `execute.trade`).
+  if (NEVER_AUTO.test(tool)) return false; // absolute deny, wins over everything
+  if (WRITE_TOOL.test(tool)) return false;
+  const segs = segmentsOf(tool);
+  if (segs.length === 0) return false;
+  return segs.some((s) => READ_SEGMENTS.has(s));
 }
