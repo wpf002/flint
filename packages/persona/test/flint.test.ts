@@ -7,7 +7,8 @@ describe('FLINT_STYLE_GUIDE', () => {
   it('encodes the load-bearing rules', () => {
     expect(FLINT_STYLE_GUIDE).toMatch(/Answer first/i);
     expect(FLINT_STYLE_GUIDE).toMatch(/Disagree hard/i);
-    expect(FLINT_STYLE_GUIDE).toMatch(/never bluff|fabricate/i);
+    // Matches fabricate/fabricating/fabrication — the rule, not one conjugation.
+    expect(FLINT_STYLE_GUIDE).toMatch(/never bluff|fabricat|made-up fact/i);
   });
 
   it('lists the hard bans', () => {

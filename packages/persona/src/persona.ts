@@ -11,11 +11,19 @@ export interface PersonaChatInput {
   conversationId: string;
   message: string;
   tools?: Tool[];
+  /**
+   * Per-turn context (current date/time, recalled long-term memory). Goes into
+   * the SYSTEM prompt, never into the stored user message — so it stays fresh
+   * each turn instead of being persisted into history and replayed forever.
+   */
+  context?: string;
 }
 
 export interface PersonaGenerateInput {
   prompt: string;
   tools?: Tool[];
+  /** Per-turn context — see PersonaChatInput.context. */
+  context?: string;
 }
 
 /**
@@ -43,7 +51,7 @@ export class Persona {
     input: PersonaChatInput,
     options?: CallOptions,
   ): AsyncIterable<StreamEvent> {
-    const system = await this.buildSystem(input.message);
+    const system = await this.buildSystem(input.message, input.context);
     yield* this.flint.chat(
       {
         conversationId: input.conversationId,
@@ -60,7 +68,7 @@ export class Persona {
     input: PersonaGenerateInput,
     options?: CallOptions,
   ): Promise<GenerateOutcome> {
-    const system = await this.buildSystem(input.prompt);
+    const system = await this.buildSystem(input.prompt, input.context);
     return this.flint.generate(
       {
         system,
@@ -82,7 +90,7 @@ export class Persona {
    * accumulated lessons. The lessons section is how the persona evolves — what
    * nightly reflection learns shows up here on every subsequent call.
    */
-  private async buildSystem(query: string): Promise<string> {
+  private async buildSystem(query: string, context?: string): Promise<string> {
     let system = this.config.styleGuide;
 
     if (this.config.retriever) {
@@ -104,6 +112,13 @@ export class Persona {
         system +=
           `\n\nWhat you've learned from past sessions — apply these:\n${block}`;
       }
+    }
+
+    // Per-turn context LAST so it's the freshest thing the model reads. It lives
+    // only in this call's system prompt — never in stored history — so yesterday's
+    // "right now it is..." can't come back and contradict today's.
+    if (context && context.trim().length > 0) {
+      system += `\n\n${context.trim()}`;
     }
 
     return system;

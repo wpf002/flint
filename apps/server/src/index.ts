@@ -88,6 +88,17 @@ if (!TOKEN) {
 
 const PORT = Number(process.env.PORT ?? 8080);
 
+/**
+ * Hosts this server will answer to. Blocks DNS rebinding — a page on evil.com
+ * cannot point that name at 127.0.0.1 and become same-origin with Flint, because
+ * `evil.com` is not in this set. Covers loopback, Tailscale MagicDNS short names
+ * (`studio`) and *.ts.net, and tailnet 100.x addresses. Override with
+ * FLINT_ALLOWED_HOSTS (a regex source) if you front Flint with another name.
+ */
+const ALLOWED_HOSTS = process.env.FLINT_ALLOWED_HOSTS?.trim()
+  ? new RegExp(process.env.FLINT_ALLOWED_HOSTS.trim(), 'i')
+  : /^(localhost|127\.0\.0\.1|\[?::1\]?|0\.0\.0\.0|[a-z0-9-]+|.*\.ts\.net|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+)$/i;
+
 function buildProvider(): { provider: ProviderAdapter; model: string } {
   const ollamaModel = process.env.OLLAMA_MODEL?.trim();
   const key = process.env.ANTHROPIC_API_KEY?.trim();
@@ -178,7 +189,7 @@ function loadSecrets(): void {
  * to retire it. Everything routes through one seam (judgeBrain) so flipping the
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
-type Brain = 'local' | 'frontier';
+import { judgeBrain, isSafeTool, type Brain } from './policy';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -186,45 +197,8 @@ type Brain = 'local' | 'frontier';
 // frontier brain (smart AND fast). This keeps private/cheap stuff local while
 // making Flint genuinely smart on any real question.
 
-// Keep a query on the LOCAL brain only when the user explicitly asks to — the
-// Local-only toggle, or phrasing like "stay local" / "keep this private". This
-// is the privacy switch + offline fallback; otherwise Flint runs on Claude.
-const FORCE_LOCAL_RE = /\b(stay local|keep it local|keep this local|local only|on[- ]?device|on[- ]?machine|don'?t use claude|privately|keep this private|keep it private)\b/i;
-
-/**
- * Which brain answers. Flint IS Claude by default — equal-to-Claude capability
- * on every query. The local model is the fallback, used only when no frontier is
- * configured, the user flipped Local-only (localOnly), or the message asks to
- * stay on-device. Everything else → frontier (Claude) + Flint's personal layer
- * (memory, systems, voice, tools) on top.
- */
-function judgeBrain(message: string, hasFrontier: boolean, _localOnly: boolean): Brain {
-  if (!hasFrontier) return 'local'; // no Claude configured → local fallback
-  // NOTE: the localOnly toggle is intentionally ignored — a stuck sticky lock
-  // kept silently trapping answers on the weak local model. To keep a query
-  // on-device now, type "stay local" / "keep this private" (below).
-  if (FORCE_LOCAL_RE.test(message)) return 'local';
-  return 'frontier'; // default: Flint runs on Claude
-}
-
-/**
- * Always-on approval policy for GUARDED (non-read-only) tools — e.g. Trident's
- * calendar/email/drive. There's no human in the loop here, so we DEFAULT-DENY
- * and only auto-approve tools whose name reads as a query/lookup. Anything that
- * sends, creates, edits, deletes, moves money, or otherwise has consequences
- * stays denied until there's an interactive/whitelisted approval path. Read-only
- * connectors never reach this (they're classified safe and run freely).
- */
-// Read verbs can appear anywhere in the name (e.g. gmail_search, gcal_upcoming).
-const READ_TOOL = /(search|list|read|get|fetch|lookup|find|query|upcoming|forecast|model|recent|summary|view|status|count|coverage|bias|quote|position|market|account|order|worker|\bbot|industr|digest|signal|score|ticker|detail|snapshot|trade|job|rule|recommend|health|latest|\btop|best)/i;
-// Anything that writes/sends/acts is denied (no human in the loop here).
-const WRITE_TOOL = /(send|create|update|delete|remove|trash|cancel|reply|draft|compose|schedule|book|insert|\bpost\b|\bput\b|transfer|\bpay\b|buy|sell|place_order|enable|disable|start_|stop_|move_|write_|add_to|set_)/i;
-/** A tool that may run without human approval: read-only, or Flint's own memory
- *  (`remember`, which only writes to local memory — never the outside world). */
-function isSafeTool(tool: string): boolean {
-  if (tool === 'remember') return true;
-  return READ_TOOL.test(tool) && !WRITE_TOOL.test(tool);
-}
+// Routing + auto-approval policy live in ./policy.ts so they can be unit-tested
+// (this module calls main() at import time, so nothing here is importable).
 
 /** Optional MCP servers (your apps/integrations) from $MCP_CONFIG (a JSON file). */
 function loadMcpSpecs(): McpServerSpec[] {
@@ -613,14 +587,25 @@ const PNG_ASSETS: Record<string, true> = {
 async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
   const url = req.url ?? '/';
 
-  // CORS — let the console (any origin) call the API with the bearer token.
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // NO CORS headers, deliberately. The console is served by this same server, so
+  // it is same-origin and needs none. A wildcard Access-Control-Allow-Origin used
+  // to be set here, which let ANY page open in the browser read GET / — and that
+  // response carries the injected bearer token, i.e. any website could scrape the
+  // token and then drive the whole API from inside the loopback. Without CORS
+  // headers a cross-origin fetch is still sent but its response is unreadable,
+  // and the Authorization header can't be set cross-origin without a preflight.
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
     return;
+  }
+
+  // DNS-rebinding guard: an attacker can point a hostname at 127.0.0.1 to make
+  // their page same-origin with us. Only serve requests addressed to a host we
+  // expect (loopback, or the tailnet name Flint is reached by).
+  const host = (req.headers.host ?? '').split(':')[0]?.toLowerCase() ?? '';
+  if (host && !ALLOWED_HOSTS.test(host)) {
+    return json(res, 403, { error: 'bad host' });
   }
 
   // Serve the console UI. We inject the bearer token so the installed app (Mac
@@ -733,7 +718,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
-      p.generate({ prompt: `${ctxBlock}\n\n${prompt}`, ...(selected.length ? { tools: selected } : {}) });
+      p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) });
     let out;
     if (brain === 'frontier' && ctx.frontier) {
       try {
@@ -777,7 +762,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answer = '';
     const pump = async (persona: Persona) => {
       for await (const ev of persona.chat(
-        { conversationId, message: `${ctxBlock}\n\n${message}`, ...(selected.length ? { tools: selected } : {}) },
+        { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;
