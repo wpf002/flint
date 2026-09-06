@@ -59,14 +59,32 @@ describe('contract (ollama): stream-basic', () => {
   });
 });
 
-describe('contract (ollama): prompted tool-call', () => {
+/*
+ * CONTRACT NOTE. stream() splits by pass, and the fixture has to match the pass:
+ *
+ *  - The tool-DECISION pass (tools offered, no tool_result in history yet) is
+ *    deliberately NON-streamed for reliability — see the comment at the top of
+ *    OllamaProvider.stream. So it must be driven with jsonProvider.
+ *  - The ANSWER pass (history ends in a tool_result) and pure chat ARE streamed,
+ *    so those use streamingProvider.
+ *
+ * These tests used to drive the decision pass with streamingProvider, which
+ * stopped matching the implementation at 09dac5a (native function-calling) and
+ * b84b90e (stream the answer pass). They asserted a superseded design, not a bug.
+ */
+describe('contract (ollama): tool-call recovery on the DECISION pass (non-streamed)', () => {
   it('parses a tool-call JSON out of model text → tool_call then done.reason tool_call', async () => {
-    // Model emits the prompted JSON, wrapped in a code fence + prose (repair path).
-    const provider = streamingProvider([
-      textChunk('```json\n{"tool_call": {"name": "get_weather", '),
-      textChunk('"arguments": {"city": "Paris"}}}\n```'),
-      finalChunk({ input: 30, output: 12 }),
-    ]);
+    // Model emits the prompted JSON, wrapped in a code fence (repair path).
+    const provider = jsonProvider({
+      message: {
+        role: 'assistant',
+        content: '```json\n{"tool_call": {"name": "get_weather", "arguments": {"city": "Paris"}}}\n```',
+      },
+      done: true,
+      done_reason: 'stop',
+      prompt_eval_count: 30,
+      eval_count: 12,
+    });
     const events: StreamEvent[] = [];
     for await (const ev of provider.stream({
       model: 'llama3.1',
@@ -88,10 +106,11 @@ describe('contract (ollama): prompted tool-call', () => {
   });
 
   it('treats plain text as a normal answer (no tool call)', async () => {
-    const provider = streamingProvider([
-      textChunk('It is sunny in Paris.'),
-      finalChunk({}),
-    ]);
+    const provider = jsonProvider({
+      message: { role: 'assistant', content: 'It is sunny in Paris.' },
+      done: true,
+      done_reason: 'stop',
+    });
     const events: StreamEvent[] = [];
     for await (const ev of provider.stream({
       model: 'llama3.1',
@@ -101,6 +120,47 @@ describe('contract (ollama): prompted tool-call', () => {
       events.push(ev);
     }
     expect(events.some((e) => e.type === 'tool_call')).toBe(false);
+    expect(
+      events
+        .filter((e): e is Extract<StreamEvent, { type: 'text' }> => e.type === 'text')
+        .map((e) => e.delta)
+        .join(''),
+    ).toBe('It is sunny in Paris.');
+    const terminal = events.at(-1);
+    expect(terminal?.type === 'done' && terminal.reason).toBe('complete');
+  });
+});
+
+describe('contract (ollama): the ANSWER pass really streams', () => {
+  // History ending in a tool_result puts stream() on the live-streamed path.
+  const toolResultMsg = {
+    id: 'tr1',
+    role: 'tool_result' as const,
+    content: JSON.stringify({ toolName: 'get_weather', result: 'sunny', isError: false }),
+    toolCallId: 'toolu_1',
+    timestamp: 0,
+  };
+
+  it('yields prose deltas live after a tool result', async () => {
+    const provider = streamingProvider([
+      textChunk('It is '),
+      textChunk('sunny in Paris.'),
+      finalChunk({ input: 40, output: 6 }),
+    ]);
+    const events: StreamEvent[] = [];
+    for await (const ev of provider.stream({
+      model: 'llama3.1',
+      messages: [userMsg, toolResultMsg],
+      tools: [weatherTool],
+    })) {
+      events.push(ev);
+    }
+    const deltas = events.filter(
+      (e): e is Extract<StreamEvent, { type: 'text' }> => e.type === 'text',
+    );
+    // More than one delta proves it streamed rather than buffering the whole answer.
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.map((e) => e.delta).join('')).toBe('It is sunny in Paris.');
     const terminal = events.at(-1);
     expect(terminal?.type === 'done' && terminal.reason).toBe('complete');
   });
@@ -135,11 +195,20 @@ describe('contract (ollama): error-normalization', () => {
 });
 
 describe('contract (ollama): idempotency via the Flint loop', () => {
+  // generate() is non-streamed, so this must be a jsonProvider — a streaming
+  // fixture here produced zero tool calls and the tool never ran, which made the
+  // "did not retry" assertion pass for the wrong reason before it broke outright.
   function toolCallProvider() {
-    return streamingProvider([
-      textChunk('{"tool_call": {"name": "do_thing", "arguments": {"x": 1}}}'),
-      finalChunk({ reason: 'stop', input: 10, output: 5 }),
-    ]);
+    return jsonProvider({
+      message: {
+        role: 'assistant',
+        content: '{"tool_call": {"name": "do_thing", "arguments": {"x": 1}}}',
+      },
+      done: true,
+      done_reason: 'stop',
+      prompt_eval_count: 10,
+      eval_count: 5,
+    });
   }
 
   function failingTool(idempotent: boolean, counter: { n: number }): Tool {
