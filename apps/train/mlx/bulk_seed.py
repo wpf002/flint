@@ -17,6 +17,7 @@ def anthropic_key():
             return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise SystemExit("no ANTHROPIC_API_KEY")
 KEY = anthropic_key()
+CORPUS = os.path.expanduser("~/.flint/training/corpus.jsonl")
 
 THEMES = [
   "how things work in science and engineering", "computer science, programming, and software design",
@@ -46,6 +47,14 @@ def gen_questions(theme):
             out.append(q)
     return out
 
+def existing():
+    s = set()
+    if os.path.exists(CORPUS):
+        for l in open(CORPUS):
+            try: s.add(json.loads(l).get("input", "").strip().lower())
+            except: pass
+    return s
+
 def ask(args):
     i, q = args
     body = json.dumps({"conversationId": f"bulk-{i}", "message": q}).encode()
@@ -67,8 +76,18 @@ def main():
     for t in THEMES:
         qs += gen_questions(t)
         print(f"  +{t[:30]}... total={len(qs)}", flush=True)
-    # dedupe
-    seen, uniq = set(), []
+    # dedupe — seeded from the corpus on disk, as auto_grow already does. A
+    # question we've already captured an answer for would route to the frontier
+    # brain again and be paid for again in full, only to land as a duplicate row.
+    # Same corpus either way; we just stop re-buying answers we own. If the
+    # corpus can't be read, fall back to the old within-run-only dedupe rather
+    # than skipping the seeding run.
+    try:
+        seen = existing()
+    except Exception as e:
+        print("  corpus dedupe unavailable:", str(e)[:60], flush=True)
+        seen = set()
+    uniq = []
     for q in qs:
         k = q.lower()
         if k not in seen:

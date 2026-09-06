@@ -298,6 +298,16 @@ class ToolRouter {
     return new ToolRouter(finalCore, finalRest, restVectors, embedder, maxAppend, floor);
   }
 
+  /**
+   * How many tools at the FRONT of every selection are the fixed core. Callers
+   * use it to place a prompt-cache breakpoint on the last core tool: tools are
+   * rendered before the system prompt, so a query that triggers an append still
+   * reads the core schemas from cache instead of paying full price for them.
+   */
+  get coreLength(): number {
+    return this.core.length;
+  }
+
   /** The stable core, plus any rest-tools the message clearly needs. */
   async select(message: string): Promise<Tool[]> {
     if (this.maxAppend === 0 || this.rest.length === 0 || this.restVectors.length !== this.rest.length) {
@@ -483,7 +493,23 @@ async function main(): Promise<void> {
   let frontier: { persona: Persona; model: string } | undefined;
   if (frontierCfg) {
     const fFlint = new Flint({ provider: frontierCfg.provider, defaultModel: frontierCfg.model, memory, observer: actionLog });
-    const fPersona = new Persona(fFlint, { name: 'Flint', styleGuide: FLINT_STYLE_GUIDE, lessonStore: new InMemoryLessonStore() });
+    // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
+    // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
+    // of the style guide. Everything before them is byte-identical on every
+    // request, so inside the cache's 5-minute window — a tool loop, a multi-turn
+    // chat, a bulk_seed burst — those thousands of input tokens are billed at the
+    // cache-read rate instead of full price, over and over. The per-turn context
+    // block (which carries the clock) stays outside the breakpoint, so nothing
+    // the model reads changes.
+    const fPersona = new Persona(fFlint, {
+      name: 'Flint',
+      styleGuide: FLINT_STYLE_GUIDE,
+      lessonStore: new InMemoryLessonStore(),
+      cache: {
+        system: true,
+        ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}),
+      },
+    });
     frontier = { persona: fPersona, model: frontierCfg.model };
     console.error(`[brain] frontier escalation ENABLED -> ${frontierCfg.provider.name}:${frontierCfg.model}`);
   } else {

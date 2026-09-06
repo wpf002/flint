@@ -6,6 +6,17 @@ import { AiErrorSchema, type AiError } from './error.js';
 export const TokenUsageSchema = z.object({
   input: z.number().int().nonnegative(),
   output: z.number().int().nonnegative(),
+  /**
+   * Input tokens WRITTEN to the provider's prompt cache (a one-off premium).
+   * Optional: only providers that cache report it.
+   */
+  cacheWrite: z.number().int().nonnegative().optional(),
+  /**
+   * Input tokens READ back from that cache — the cheap ones, and therefore the
+   * only visible proof a breakpoint is paying for itself. Without this a cache
+   * hit is indistinguishable from a miss in the logs.
+   */
+  cacheRead: z.number().int().nonnegative().optional(),
 });
 export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 

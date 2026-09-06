@@ -1,4 +1,5 @@
 import type { FlintConfig, CallOptions } from '../types/config.js';
+import type { CacheHints } from '../provider/adapter.js';
 import type { Message } from '../types/message.js';
 import type { StreamEvent, StreamDoneReason, TokenUsage } from '../types/stream.js';
 import type { ToolDefinition, ToolHandler } from '../types/tool.js';
@@ -28,6 +29,11 @@ export interface GenerateInput {
   messages?: Message[];
   prompt?: string;
   tools?: Tool[];
+  /**
+   * Optional prompt-cache breakpoints, passed straight to the provider. Purely a
+   * cost hint — omit it and the call is exactly what it was before.
+   */
+  cache?: CacheHints;
 }
 
 /** Inputs for a memory-backed chat turn. */
@@ -37,6 +43,8 @@ export interface ChatInput {
   message: string | Message;
   system?: string;
   tools?: Tool[];
+  /** Optional prompt-cache breakpoints — see GenerateInput.cache. */
+  cache?: CacheHints;
 }
 
 export interface GenerateOutcome {
@@ -135,6 +143,7 @@ export class Flint {
       const generated = this.runLoop(
         {
           system: input.system,
+          cache: input.cache,
           baseMessages: [...history, userMessage],
           tools: input.tools ?? [],
         },
@@ -182,7 +191,7 @@ export class Flint {
     const resolved = resolveCall(this.config, options);
     const baseMessages = resolveMessages(input);
     return this.runLoop(
-      { system: input.system, baseMessages, tools: input.tools ?? [] },
+      { system: input.system, cache: input.cache, baseMessages, tools: input.tools ?? [] },
       resolved,
       sink,
     );
@@ -190,7 +199,12 @@ export class Flint {
 
   /** Shared loop driver: context assembly + concurrency + the tool loop. */
   private async *runLoop(
-    work: { system?: string | undefined; baseMessages: Message[]; tools: Tool[] },
+    work: {
+      system?: string | undefined;
+      cache?: CacheHints | undefined;
+      baseMessages: Message[];
+      tools: Tool[];
+    },
     resolved: ResolvedCall,
     sink: LoopSink,
   ): AsyncGenerator<StreamEvent, void, void> {
@@ -254,6 +268,7 @@ export class Flint {
         provider,
         model: resolved.model,
         system: work.system,
+        cache: work.cache,
         initialMessages: assembled,
         tools: definitions,
         handlers,

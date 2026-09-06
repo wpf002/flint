@@ -2,14 +2,20 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Message } from '../../types/message.js';
 import type { ToolDefinition } from '../../types/tool.js';
 import type { StreamDoneReason } from '../../types/stream.js';
+import type { CacheHints } from '../adapter.js';
 import { decodeAssistantTurn, decodeToolResult } from '../../core/encoding.js';
 
 type MessageParam = Anthropic.MessageParam;
 type ContentBlockParam = Anthropic.ContentBlockParam;
+type TextBlockParam = Anthropic.TextBlockParam;
 type Tool = Anthropic.Tool;
 
 export interface MappedRequest {
-  system: string | undefined;
+  /**
+   * A plain string, unless a cache breakpoint was asked for — then the SAME
+   * bytes, split into two text blocks with `cache_control` on the first.
+   */
+  system: string | TextBlockParam[] | undefined;
   messages: MessageParam[];
 }
 
@@ -23,6 +29,7 @@ export interface MappedRequest {
 export function mapMessages(
   messages: Message[],
   explicitSystem: string | undefined,
+  cache?: CacheHints,
 ): MappedRequest {
   const systemParts: string[] = [];
   if (explicitSystem) systemParts.push(explicitSystem);
@@ -87,9 +94,51 @@ export function mapMessages(
   }
 
   return {
-    system: systemParts.length > 0 ? systemParts.join('\n\n') : undefined,
+    system: splitSystemAtBreakpoint(
+      systemParts.length > 0 ? systemParts.join('\n\n') : undefined,
+      cache,
+    ),
     messages: out,
   };
+}
+
+/**
+ * Split the system prompt at its cache breakpoint. The stable half is marked
+ * `cache_control`, so every repeat call inside the cache's 5-minute window bills
+ * it at the cache-read rate instead of re-charging full input price for the same
+ * few thousand tokens of style guide — which is most of what a tool loop's
+ * second, third and fourth provider calls otherwise pay for.
+ *
+ * Byte-preserving by construction: block A is the prompt MINUS the volatile
+ * suffix, so the `\n\n` that separated the two halves stays on the END of block
+ * A and `A + B` is the original string exactly. If the declared suffix isn't
+ * actually a suffix — e.g. a `system` message got hoisted in behind it — we fail
+ * open and send the single unsplit string rather than reorder the prompt.
+ */
+function splitSystemAtBreakpoint(
+  system: string | undefined,
+  cache: CacheHints | undefined,
+): string | TextBlockParam[] | undefined {
+  if (system === undefined || !cache?.system) return system;
+  try {
+    const tail = cache.systemSuffix ?? '';
+    if (tail.length === 0) {
+      return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+    }
+    if (tail.length >= system.length || !system.endsWith(tail)) return system;
+    return [
+      {
+        type: 'text',
+        text: system.slice(0, system.length - tail.length),
+        cache_control: { type: 'ephemeral' },
+      },
+      { type: 'text', text: tail },
+    ];
+  } catch {
+    // A cache breakpoint is an optimization, never a requirement — on anything
+    // unexpected, send the prompt exactly as it would have been sent before.
+    return system;
+  }
 }
 
 function stringifyResult(result: unknown): string {
@@ -111,9 +160,12 @@ export function fromAnthropicToolName(name: string): string {
 }
 
 /** Map canonical tool definitions onto Anthropic's tool shape. */
-export function mapTools(tools: ToolDefinition[] | undefined): Tool[] | undefined {
+export function mapTools(
+  tools: ToolDefinition[] | undefined,
+  cache?: CacheHints,
+): Tool[] | undefined {
   if (!tools || tools.length === 0) return undefined;
-  return tools.map((t) => {
+  const mapped = tools.map((t) => {
     const schema = t.inputSchema as Record<string, unknown>;
     return {
       name: toAnthropicToolName(t.name),
@@ -124,6 +176,37 @@ export function mapTools(tools: ToolDefinition[] | undefined): Tool[] | undefine
       },
     } satisfies Tool;
   });
+  return markToolBreakpoint(mapped, cache);
+}
+
+/**
+ * Mark one tool as the end of a cacheable prefix. Tools render BEFORE the system
+ * prompt, so this is the cheaper of the two breakpoints to hit: a request whose
+ * router appended extra tools misses the system breakpoint entirely but still
+ * reads the fixed core schemas from cache instead of paying for them again.
+ *
+ * Order is never touched — exactly one entry is copied with `cache_control`
+ * added — and an index outside the array is ignored, so a mis-sized hint costs
+ * nothing rather than dropping tools.
+ */
+function markToolBreakpoint(tools: Tool[], cache: CacheHints | undefined): Tool[] {
+  if (!cache) return tools;
+  try {
+    const at =
+      cache.toolsThrough !== undefined
+        ? cache.toolsThrough
+        : cache.tools
+          ? tools.length - 1
+          : -1;
+    if (!Number.isInteger(at) || at < 0 || at >= tools.length) return tools;
+    const target = tools[at];
+    if (!target) return tools;
+    const out = tools.slice();
+    out[at] = { ...target, cache_control: { type: 'ephemeral' } };
+    return out;
+  } catch {
+    return tools;
+  }
 }
 
 /** Map the canonical tool choice onto Anthropic's shape. */

@@ -4,6 +4,7 @@ import type {
   GenerateOutcome,
   Tool,
   CallOptions,
+  CacheHints,
 } from '@flint/core';
 import type { PersonaConfig, WritingSample } from './types.js';
 
@@ -51,13 +52,14 @@ export class Persona {
     input: PersonaChatInput,
     options?: CallOptions,
   ): AsyncIterable<StreamEvent> {
-    const system = await this.buildSystem(input.message, input.context);
+    const { stable, context } = await this.buildSystem(input.message, input.context);
     yield* this.flint.chat(
       {
         conversationId: input.conversationId,
         message: input.message,
-        system,
+        system: stable + (context ?? ''),
         ...(input.tools ? { tools: input.tools } : {}),
+        ...this.cacheHints(context),
       },
       options,
     );
@@ -68,12 +70,13 @@ export class Persona {
     input: PersonaGenerateInput,
     options?: CallOptions,
   ): Promise<GenerateOutcome> {
-    const system = await this.buildSystem(input.prompt, input.context);
+    const { stable, context } = await this.buildSystem(input.prompt, input.context);
     return this.flint.generate(
       {
-        system,
+        system: stable + (context ?? ''),
         prompt: input.prompt,
         ...(input.tools ? { tools: input.tools } : {}),
+        ...this.cacheHints(context),
       },
       options,
     );
@@ -86,11 +89,40 @@ export class Persona {
   }
 
   /**
+   * Per-call cache hints, and only when the persona was configured with them.
+   * The stable half of the system prompt is the same bytes on every turn, so
+   * marking it stops the provider from re-charging full input price for the
+   * style guide on every message and on every iteration of a tool loop. With no
+   * `cache` in the config nothing is sent and the call is exactly as before.
+   */
+  private cacheHints(context: string | undefined): { cache?: CacheHints } {
+    const cache = this.config.cache;
+    if (!cache) return {};
+    return {
+      cache: {
+        ...cache,
+        // The per-turn context carries a minute-resolution timestamp, so it must
+        // sit AFTER the breakpoint or the prefix would be new on every call.
+        ...(context !== undefined ? { systemSuffix: context } : {}),
+      },
+    };
+  }
+
+  /**
    * Assemble the system prompt: style guide + retrieved writing samples +
    * accumulated lessons. The lessons section is how the persona evolves — what
    * nightly reflection learns shows up here on every subsequent call.
+   *
+   * Returned split at the per-turn boundary rather than as one string: `stable`
+   * is what repeats call after call (and so is what can be cached), `context` is
+   * this turn's freshly-built block. `stable + context` is byte-for-byte the
+   * single string this used to return — the separating blank line stays on the
+   * END of `stable` — so a caller that just concatenates loses nothing.
    */
-  private async buildSystem(query: string, context?: string): Promise<string> {
+  private async buildSystem(
+    query: string,
+    context?: string,
+  ): Promise<{ stable: string; context?: string }> {
     let system = this.config.styleGuide;
 
     if (this.config.retriever) {
@@ -117,10 +149,9 @@ export class Persona {
     // Per-turn context LAST so it's the freshest thing the model reads. It lives
     // only in this call's system prompt — never in stored history — so yesterday's
     // "right now it is..." can't come back and contradict today's.
-    if (context && context.trim().length > 0) {
-      system += `\n\n${context.trim()}`;
-    }
+    const tail = context?.trim() ?? '';
+    if (tail.length > 0) return { stable: `${system}\n\n`, context: tail };
 
-    return system;
+    return { stable: system };
   }
 }

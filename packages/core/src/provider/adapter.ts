@@ -3,6 +3,38 @@ import type { StreamEvent, TokenUsage, StreamDoneReason } from '../types/stream.
 import type { ToolDefinition } from '../types/tool.js';
 import type { ModelCapabilities } from '../types/capabilities.js';
 
+/**
+ * Where a provider may put a prompt-cache breakpoint for this call.
+ *
+ * This is a pure COST hint and never a behavioural one: a provider that ignores
+ * it sends exactly the same prompt, and a provider that honours it gets the same
+ * answer back — the marked prefix is simply billed at the cache-read rate instead
+ * of being re-charged at full input price on every repeat call. It lives in the
+ * contract rather than in one adapter's escape hatch because the caller is the
+ * only party that knows which half of its prompt is actually stable.
+ */
+export interface CacheHints {
+  /** Put a breakpoint at the end of the system prompt (after `systemSuffix`, if any, is split off). */
+  system?: boolean;
+  /** Put a breakpoint on the LAST tool. */
+  tools?: boolean;
+  /**
+   * Put the tool breakpoint on the tool at this index instead of the last one.
+   * That matters when a router appends variable tools after a fixed core: the
+   * breakpoint belongs on the last FIXED tool, so an append-triggering request
+   * still reads the core schemas from cache rather than paying full price for
+   * everything. Out-of-range values are ignored.
+   */
+  toolsThrough?: number;
+  /**
+   * The volatile tail of `system` — a literal SUFFIX of that same string, not a
+   * replacement for or an addition to it. Everything before it is the stable,
+   * cacheable half. A provider that ignores this still sends an identical
+   * `system`, which is why splitting here can never change the answer.
+   */
+  systemSuffix?: string;
+}
+
 /** Shared shape for the two generation entry points. */
 export interface GenerateArgs {
   model: string;
@@ -19,6 +51,12 @@ export interface GenerateArgs {
    */
   toolChoice?: 'auto' | 'required' | { name: string };
   maxTokens?: number;
+  /**
+   * Optional prompt-cache breakpoints. Providers that don't cache (Ollama,
+   * OpenAI, Perplexity) ignore it; omit it and the request is byte-identical to
+   * one made before this field existed.
+   */
+  cache?: CacheHints;
   signal?: AbortSignal;
 }
 

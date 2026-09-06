@@ -94,8 +94,8 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   async generate(args: GenerateArgs): Promise<GenerateResult> {
-    const { system, messages } = mapMessages(args.messages, args.system);
-    const tools = mapTools(args.tools);
+    const { system, messages } = mapMessages(args.messages, args.system, args.cache);
+    const tools = mapTools(args.tools, args.cache);
     const toolChoice = mapToolChoice(args.toolChoice);
     let sdk: AnthropicModule | undefined;
     try {
@@ -130,6 +130,10 @@ export class AnthropicProvider implements ProviderAdapter {
       const usage: TokenUsage = {
         input: resp.usage.input_tokens,
         output: resp.usage.output_tokens,
+        // Carry the cache counters through: a cache HIT and a full-price miss
+        // are identical in every other field, so without these there is no way
+        // to tell whether a breakpoint is actually saving anything.
+        ...cacheUsage(resp.usage),
       };
       const reason = mapStopReason(resp.stop_reason);
       const id = resp.id;
@@ -145,13 +149,14 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
-    const { system, messages } = mapMessages(args.messages, args.system);
-    const tools = mapTools(args.tools);
+    const { system, messages } = mapMessages(args.messages, args.system, args.cache);
+    const tools = mapTools(args.tools, args.cache);
     const toolChoice = mapToolChoice(args.toolChoice);
     let sdk: AnthropicModule | undefined;
 
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheTokens: { cacheWrite?: number; cacheRead?: number } = {};
     let stopReason: string | null = null;
 
     // Active tool_use blocks being assembled, keyed by content-block index.
@@ -179,6 +184,8 @@ export class AnthropicProvider implements ProviderAdapter {
         switch (event.type) {
           case 'message_start':
             inputTokens = event.message.usage.input_tokens;
+            // Cache accounting arrives once, on the opening event (see generate()).
+            cacheTokens = cacheUsage(event.message.usage);
             break;
 
           case 'content_block_start':
@@ -227,7 +234,7 @@ export class AnthropicProvider implements ProviderAdapter {
       yield {
         type: 'done',
         reason: mapStopReason(stopReason),
-        usage: { input: inputTokens, output: outputTokens },
+        usage: { input: inputTokens, output: outputTokens, ...cacheTokens },
       };
     } catch (err) {
       // ALWAYS terminate with an error event (never just stop). Invariant for
@@ -235,6 +242,23 @@ export class AnthropicProvider implements ProviderAdapter {
       yield { type: 'error', error: toAiError(err, sdk) };
     }
   }
+}
+
+/**
+ * Pull the prompt-cache counters off an SDK usage object. Both fields are absent
+ * (or null) unless a `cache_control` breakpoint was sent, so the result is
+ * spread in and simply adds nothing on an uncached call.
+ */
+function cacheUsage(usage: {
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+}): { cacheWrite?: number; cacheRead?: number } {
+  const write = usage.cache_creation_input_tokens;
+  const read = usage.cache_read_input_tokens;
+  return {
+    ...(typeof write === 'number' ? { cacheWrite: write } : {}),
+    ...(typeof read === 'number' ? { cacheRead: read } : {}),
+  };
 }
 
 /** Tolerant JSON parse for streamed tool args; returns {} on malformed input. */

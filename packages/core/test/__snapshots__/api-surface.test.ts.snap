@@ -41,6 +41,7 @@ exports[`public API surface > matches the committed snapshot 1`] = `
   "type AnthropicProviderOptions",
   "type AssistantTurn",
   "type BeginTurnInput",
+  "type CacheHints",
   "type CallOptions",
   "type ChatInput",
   "type ChatWire",

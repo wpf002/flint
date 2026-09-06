@@ -64,6 +64,7 @@ export type {
   ProviderAdapter,
   GenerateArgs,
   GenerateResult,
+  CacheHints,
 } from './provider/adapter.js';
 
 // --- observability ----------------------------------------------------------

@@ -1,3 +1,4 @@
+import type { CacheHints } from '@flint/core';
 import type { LessonStore } from './lessons.js';
 
 /** A piece of the user's own writing — the raw material for "your voice". */
@@ -39,4 +40,14 @@ export interface PersonaConfig {
   lessonStore?: LessonStore;
   /** How many recent lessons to inject per call. Default 8. */
   lessonsK?: number;
+  /**
+   * Optional prompt-cache breakpoints, forwarded to the provider on every call
+   * (see `CacheHints` in `@flint/core`). Off by default. When set, the stable
+   * half of the system prompt — style guide + lessons, byte-identical turn after
+   * turn — is marked cacheable, so a repeat call bills it at the cache-read rate
+   * instead of re-charging full input price for the same few thousand tokens.
+   * The per-turn context block is always left outside the breakpoint, and
+   * providers that don't cache ignore the hint: same prompt, same answer.
+   */
+  cache?: CacheHints;
 }

@@ -1,4 +1,4 @@
-import type { ProviderAdapter } from '../provider/adapter.js';
+import type { ProviderAdapter, CacheHints } from '../provider/adapter.js';
 import type { Message } from '../types/message.js';
 import type {
   StreamEvent,
@@ -30,6 +30,12 @@ export interface ToolLoopParams {
   provider: ProviderAdapter;
   model: string;
   system: string | undefined;
+  /**
+   * Optional prompt-cache breakpoints for every provider call in this turn. The
+   * loop re-sends the same system + tool prefix on each iteration, so this is
+   * where a breakpoint earns most of its money.
+   */
+  cache: CacheHints | undefined;
   /** Full context to send on the first iteration (history + new user message). */
   initialMessages: Message[];
   tools: ToolDefinition[];
@@ -113,10 +119,7 @@ export async function* runToolLoop(
     if (!streamed) return; // unreachable; satisfies the type checker
 
     // Accumulate usage across iterations.
-    sink.usage = {
-      input: sink.usage.input + streamed.usage.input,
-      output: sink.usage.output + streamed.usage.output,
-    };
+    sink.usage = addUsage(sink.usage, streamed.usage);
 
     if (streamed.reason !== 'tool_call') {
       // Normal completion (or max_tokens): record assistant text, end the turn.
@@ -174,6 +177,28 @@ export async function* runToolLoop(
   yield { type: 'error', error: err };
 }
 
+/**
+ * Sum two usage records. The cache counters are optional — only providers that
+ * cache report them — and dropping them here would hide the saving on exactly
+ * the multi-iteration turns where a breakpoint pays off most.
+ */
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  const cacheWrite = addOptional(a.cacheWrite, b.cacheWrite);
+  const cacheRead = addOptional(a.cacheRead, b.cacheRead);
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    ...(cacheWrite !== undefined ? { cacheWrite } : {}),
+    ...(cacheRead !== undefined ? { cacheRead } : {}),
+  };
+}
+
+function addOptional(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a + b;
+}
+
 interface StreamOnceResult {
   text: string;
   toolCalls: ToolCall[];
@@ -202,6 +227,7 @@ async function* streamOnce(
     messages: conversation,
     ...(params.tools.length > 0 ? { tools: params.tools } : {}),
     ...(params.system ? { system: params.system } : {}),
+    ...(params.cache ? { cache: params.cache } : {}),
     ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
     ...(params.signal ? { signal: params.signal } : {}),
   });
