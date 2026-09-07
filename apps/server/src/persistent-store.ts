@@ -28,6 +28,12 @@ export class PersistentStore implements MemoryStore {
     this.load();
   }
 
+  /** Every conversation id currently held. Used by the memory extractor to walk
+   *  recent history; MemoryStore itself has no enumeration in its contract. */
+  conversationIds(): string[] {
+    return [...this.conversations.keys()];
+  }
+
   async beginTurn(input: BeginTurnInput): Promise<Turn> {
     const turns = this.conversations.get(input.conversationId) ?? [];
     if (turns.some((t) => t.id === input.turnId)) {

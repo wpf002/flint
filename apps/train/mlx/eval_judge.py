@@ -44,7 +44,13 @@ def gen_all(prompts, adapter):
     return outs
 
 def main():
-    rows = [json.loads(l) for l in open(HOLDOUT) if l.strip()][:int(os.environ.get("EVAL_N", "10"))]
+    # Default to the WHOLE frozen holdout. It used to be 10, which is why the
+    # history reads as noise: at n=10 a 5-4 result and a coin flip are the same
+    # number. EVAL_N still truncates for a quick smoke run.
+    rows = [json.loads(l) for l in open(HOLDOUT) if l.strip()]
+    cap = int(os.environ.get("EVAL_N", "0"))
+    if cap > 0:
+        rows = rows[:cap]
     prompts = [r["input"] for r in rows]
     print(f"LLM-judge eval on {len(rows)} held-out prompts — student: {BASE}\n", flush=True)
     print("generating BASE answers...", flush=True); base = gen_all(prompts, None)
@@ -68,7 +74,32 @@ def main():
     print(f"Flint wins: {fw}/{n}   Base wins: {bw}/{n}   Ties: {tie}/{n}")
     print("verdict:", "✅ Flint is better — the owned brain absorbed real capability" if fw > bw
           else ("≈ roughly even — needs more training data" if fw == bw else "❌ base still better — more data/iters needed"))
+
+    # Is this result distinguishable from a coin flip? Ignoring ties, a fair coin
+    # gives each side (fw+bw)/2. Two standard deviations is the rough bar. Without
+    # this the log invites reading noise as progress.
+    dec = fw + bw
+    if dec >= 4:
+        import math
+        sd = math.sqrt(dec) / 2.0
+        edge = abs(fw - dec / 2.0)
+        sig = "SIGNIFICANT" if edge >= 2 * sd else ("weak" if edge >= sd else "NOISE")
+        print(f"signal: {sig}  ({fw}-{bw} decisive, coin-flip sd={sd:.1f}, edge={edge:.1f})")
+    else:
+        sig = "NOISE"
+        print(f"signal: NOISE (only {dec} decisive comparisons)")
     print("=============================================")
+
+    # Append a row so weeks are comparable at a glance. The frozen holdout is what
+    # makes this a trend line rather than a list of unrelated numbers.
+    csv_path = os.path.join(BRAIN, "eval_history.csv")
+    new = not os.path.exists(csv_path)
+    with open(csv_path, "a") as f:
+        if new:
+            f.write("ts,base,adapter,n,flint_wins,base_wins,ties,signal\n")
+        ts = os.environ.get("EVAL_TS", "")
+        f.write(f"{ts},{BASE},{os.path.basename(ADAPTER)},{n},{fw},{bw},{tie},{sig}\n")
+    print(f"logged -> {csv_path}")
 
 if __name__ == "__main__":
     main()

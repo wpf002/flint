@@ -65,6 +65,7 @@ import { KnowledgeStore, rememberTool } from './knowledge';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
+import { MemoryExtractor } from './memory-extract';
 
 /**
  * Hosted Flint — the always-on shared service (Railway). Wraps the Flint client
@@ -519,6 +520,18 @@ async function main(): Promise<void> {
   // Proactivity — a notifications feed + a watcher that surfaces things unasked.
   const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
   new Watcher(notes, buildChecks(tools, knowledge)).start();
+
+  // Long-term memory that actually grows. `remember` alone produced 9 facts in
+  // 1,421 turns, because it only fires when the model elects to call it; this
+  // reads the turns Flint has already had and extracts the durable ones. Uses
+  // the frontier brain (skips entirely if none is configured) and writes through
+  // KnowledgeStore.add, so dedupe + the ephemeral filter still apply.
+  new MemoryExtractor(
+    memory,
+    knowledge,
+    () => frontier?.persona,
+    join(dataDir, 'extract-state.json'),
+  ).start();
 
   // The seed of Flint's OWN brain: every interaction is captured as a training
   // example (frontier answers = the teacher to distill from). Independence is
