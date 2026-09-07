@@ -14,6 +14,12 @@ after=$(git rev-parse HEAD)
 
 if [ "$before" != "$after" ]; then
   echo "$(date '+%F %T') new code $before -> $after — redeploying Flint..."
+  # A pulled commit can add or bump a dependency. install-server.sh now runs a
+  # gate (typecheck + tests) that needs devDependencies present, so install
+  # before building or the deploy fails on a missing package rather than on
+  # anything actually wrong with the code.
+  pnpm install --frozen-lockfile >/dev/null 2>&1 || pnpm install >/dev/null 2>&1 || \
+    echo "$(date '+%F %T') WARNING: pnpm install failed; build may fail"
   ./apps/server/install-server.sh
   echo "$(date '+%F %T') deployed $after"
 else

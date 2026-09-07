@@ -67,7 +67,26 @@ if [ -d "$BRAIN" ] && [ ! -x "$BRAIN/.venv/bin/python" ]; then
 fi
 [ -x "$BRAIN/.venv/bin/python" ] && ok "brain venv ready" || echo "  ! brain venv missing (did ~/.flint/brain sync over?)"
 
-step "8/8 build server + load agents"
+step "8/9 install agents that live in the repo but aren't running on the old Mac"
+# migrate_to_studio.sh rsyncs only the plists ALREADY INSTALLED on the laptop.
+# Several agents ship in the repo and are deliberately not running there —
+# com.flint.deploy (the git auto-pull that IS the Studio's whole update path) and
+# com.flint.grow (the daily corpus growth). Without this step they would simply
+# not exist on the Studio and nothing would say so.
+for src in \
+  "$REPO/apps/server/com.flint.deploy.plist" \
+  "$REPO/apps/train/mlx/com.flint.grow.plist" \
+  "$REPO/apps/train/mlx/com.flint.retrain.plist"; do
+  [ -f "$src" ] || continue
+  dst="$HOME/Library/LaunchAgents/$(basename "$src")"
+  if [ -f "$dst" ]; then
+    ok "$(basename "$src") already present (transferred) — keeping it"
+  else
+    cp "$src" "$dst" && ok "installed $(basename "$src") from the repo"
+  fi
+done
+
+step "9/9 build server + load agents"
 ( cd "$REPO" && ./apps/server/install-server.sh ) || { echo "  ✗ server build/deploy failed — see output above"; exit 1; }
 UID_N="$(id -u)"
 # (N) null_glob so an absent class (e.g. no com.nexus.*) doesn't abort the script.
