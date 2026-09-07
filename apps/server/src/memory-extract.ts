@@ -50,6 +50,8 @@ export class MemoryExtractor {
     private readonly persona: () => Persona | undefined,
     private readonly statePath: string,
     private readonly everyMs = Number(process.env.FLINT_EXTRACT_INTERVAL_MS ?? 6 * 60 * 60 * 1000),
+    /** Turns handled per pass. Bounds the first run against a full backlog. */
+    private readonly maxTurnsPerPass = Number(process.env.FLINT_EXTRACT_MAX_TURNS ?? 100),
   ) {}
 
   start(): void {
@@ -75,47 +77,75 @@ export class MemoryExtractor {
     }
   }
 
-  /** One extraction pass. Returns how many new facts were stored. */
+  /**
+   * One extraction pass. Returns how many new facts were stored.
+   *
+   * BOUNDED ON PURPOSE. The first pass faces the entire backlog — 1,421 turns
+   * here — and processing it all at once would be ~57 frontier calls in a single
+   * burst, before writing a watermark or logging anything. Instead each pass
+   * takes the OLDEST unprocessed turns up to a cap and advances the watermark
+   * only over what it actually handled, so the backlog is worked off a slice at
+   * a time and an interrupted pass loses at most one slice.
+   */
   async run(): Promise<number> {
     const persona = this.persona();
     if (!persona) return 0; // no frontier configured — skip rather than use the 7B
 
     const state = this.loadState();
-    const chunks: string[] = [];
-    const nextMarks: Record<string, number> = { ...state.watermarks };
+    const pending: Array<{ cid: string; at: number; chunk: string }> = [];
 
     for (const cid of this.memory.conversationIds()) {
       const since = state.watermarks[cid] ?? 0;
       const turns = await this.memory.getTurns(cid);
-      const fresh = turns.filter((t) => t.status === 'complete' && t.updatedAt > since);
-      if (fresh.length === 0) continue;
-      nextMarks[cid] = Math.max(since, ...fresh.map((t) => t.updatedAt));
-
-      for (const t of fresh) {
+      for (const t of turns) {
+        if (t.status !== 'complete' || t.updatedAt <= since) continue;
         const user = t.messages.find((m) => m.role === 'user')?.content ?? '';
-        const asst = t.messages.filter((m) => m.role === 'assistant').map((m) => m.content).join(' ');
         if (!user.trim()) continue;
+        const asst = t.messages.filter((m) => m.role === 'assistant').map((m) => m.content).join(' ');
         // The user's own words carry the facts; the answer is context only, and
         // clipped hard so one long reply can't crowd out the rest of the batch.
-        chunks.push(`WILL: ${clip(user, 1200)}\nASSISTANT: ${clip(asst, 400)}`);
+        pending.push({
+          cid,
+          at: t.updatedAt,
+          chunk: `WILL: ${clip(user, 1200)}\nASSISTANT: ${clip(asst, 400)}`,
+        });
       }
     }
+    if (pending.length === 0) return 0;
 
-    if (chunks.length === 0) return 0;
+    pending.sort((a, b) => a.at - b.at); // oldest first, so the watermark is a clean cut
+    const slice = pending.slice(0, this.maxTurnsPerPass);
+    console.error(
+      `[memory-extract] pass: ${slice.length} of ${pending.length} unprocessed turn(s)`,
+    );
 
+    const nextMarks: Record<string, number> = { ...state.watermarks };
     let stored = 0;
-    // Batch so a busy week doesn't become one enormous prompt.
-    for (const batch of batches(chunks, 25)) {
-      const out = await persona.generate({
-        prompt: `${EXTRACT_PROMPT}\n\n---\n${batch.join('\n\n---\n')}`,
-      });
-      for (const fact of parseFacts(out.text)) {
-        if (await this.knowledge.add(fact, 'history')) stored++;
+    let handled = 0;
+    try {
+      // Batch so a busy week doesn't become one enormous prompt.
+      for (const batch of batches(slice, 25)) {
+        const out = await persona.generate({
+          prompt: `${EXTRACT_PROMPT}\n\n---\n${batch.map((b) => b.chunk).join('\n\n---\n')}`,
+        });
+        for (const fact of parseFacts(out.text)) {
+          if (await this.knowledge.add(fact, 'history')) stored++;
+        }
+        // Advance per batch, not per pass, so a mid-pass failure still keeps
+        // the progress already paid for.
+        for (const b of batch) {
+          nextMarks[b.cid] = Math.max(nextMarks[b.cid] ?? 0, b.at);
+          handled++;
+        }
+        this.saveState({ watermarks: nextMarks });
       }
+    } finally {
+      this.saveState({ watermarks: nextMarks });
     }
 
-    this.saveState({ watermarks: nextMarks });
-    if (stored > 0) console.error(`[memory-extract] stored ${stored} new fact(s) from ${chunks.length} turn(s)`);
+    console.error(
+      `[memory-extract] stored ${stored} new fact(s) from ${handled} turn(s); ${pending.length - handled} still queued`,
+    );
     return stored;
   }
 
