@@ -14,9 +14,15 @@ AGENTS="$HOME/Library/LaunchAgents"
 PLIST="com.flint.server.plist"
 mkdir -p "$DATA" "$AGENTS"
 
-echo "building @flint/core + @flint/persona..."
+echo "building @flint/core + @flint/persona + @flint/mcp..."
+# ALL THREE. apps/server imports @flint/mcp (src/index.ts, src/actions.ts) and
+# packages/mcp resolves through its dist/, which is gitignored — so on a FRESH
+# CLONE (i.e. the Mac Studio) skipping this build makes both the typecheck gate
+# and esbuild fail with "Cannot find module @flint/mcp", and Flint never starts.
+# It only worked here because a stale dist/ happened to be on disk.
 pnpm --filter @flint/core build >/dev/null
 pnpm --filter @flint/persona build >/dev/null
+pnpm --filter @flint/mcp build >/dev/null
 
 # ---- GATE: never deploy a broken Flint -----------------------------------
 # (runs AFTER the workspace build — the server typechecks against their dist
