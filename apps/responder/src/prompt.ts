@@ -513,17 +513,40 @@ function clip(value: string, limit: number): string {
   return value.slice(0, limit - marker.length) + marker;
 }
 
+/*
+ * Finds the reply object in what the model returned.
+ *
+ * The whole reply is tried first, then the span from its first "{" to its last "}". A
+ * code fence is looked for only after both fail. It used to be looked for first, and a
+ * reply whose strings contained a fence (any README with a ```bash example, any plan
+ * with a code block) was cut at the fence inside the JSON and thrown away whole: every
+ * file the turn wrote, its commands and its handoff. A reply wrapped in a ```json fence
+ * still parses at the second step, because its outer braces are the object's own.
+ */
 function extractJson(raw: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(raw);
-  const body = fenced?.[1] ?? raw;
-
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start === -1 || end <= start) return undefined;
-
-  try {
-    return JSON.parse(body.slice(start, end + 1));
-  } catch {
-    return undefined;
+  const attempts: Array<() => string | undefined> = [
+    () => raw.trim(),
+    () => braces(raw),
+    () => {
+      const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(raw)?.[1];
+      return fenced === undefined ? undefined : braces(fenced);
+    },
+  ];
+  for (const attempt of attempts) {
+    const text = attempt();
+    if (!text || !text.startsWith('{')) continue;
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Not this span. Try the next.
+    }
   }
+  return undefined;
+}
+
+/** From the first "{" to the last "}", or undefined when there isn't such a span. */
+function braces(text: string): string | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  return start === -1 || end <= start ? undefined : text.slice(start, end + 1);
 }

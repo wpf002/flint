@@ -369,3 +369,48 @@ describe('the sandbox in the system prompt', () => {
     expect(systemPrompt('gpt-api', 'implementation', 4_000, false)).not.toContain('"run" executes commands');
   });
 });
+
+/*
+ * The first real product build lost three of its first four turns here. Every reply that
+ * wrote a README with a code example was cut at the fence inside its own JSON.
+ */
+describe('a reply whose content contains code fences', () => {
+  const README = '# csv2md\n\n```bash\nnpx csv2md data.csv\n```\n\nThen:\n\n```\n| a | b |\n```\n';
+
+  it('keeps the files, the commands and the handoff', () => {
+    const raw = JSON.stringify({
+      content: 'Implemented it.\n\n```js\nexport const parse = () => [];\n```',
+      summary: 'built csv2md',
+      next: 'claude-api',
+      ask: 'Review it.',
+      done: false,
+      run: [['npm', 'test']],
+      files: [
+        { name: 'README.md', content: README, note: null },
+        { name: 'src/csv.js', content: 'export const parse = () => [];', note: null },
+      ],
+    });
+    const { reply, malformed } = parseReply(raw);
+
+    expect(malformed).toBe(false);
+    expect(reply.files.map((f) => f.name)).toEqual(['README.md', 'src/csv.js']);
+    expect(reply.files[0]!.content).toBe(README);
+    expect(reply.run).toEqual([['npm', 'test']]);
+    expect(reply.next).toBe('claude-api');
+  });
+
+  it('still reads a reply wrapped in a json fence', () => {
+    const raw = '```json\n' + JSON.stringify({ content: 'x', summary: 'y', next: null }) + '\n```';
+    expect(parseReply(raw).malformed).toBe(false);
+  });
+
+  it('still reads a reply with prose before it', () => {
+    const raw = 'Here is my turn:\n' + JSON.stringify({ content: 'x', summary: 'y', next: null });
+    expect(parseReply(raw).malformed).toBe(false);
+  });
+
+  it('still reads a fenced reply whose own content has a fence', () => {
+    const inner = JSON.stringify({ content: 'see:\n```bash\nnpm test\n```', summary: 'y', next: null });
+    expect(parseReply('```json\n' + inner + '\n```').malformed).toBe(false);
+  });
+});
