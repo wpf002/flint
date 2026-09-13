@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dueToday, openStandup, promptFor, promptFrom, standupGoal, STANDUP_ASK } from '../src/standup.js';
+import { dueToday, isStandupGoal, openStandup, promptFor, promptFrom, standupGoal, STANDUP_ASK } from '../src/standup.js';
 
 /*
  * The standup exists because the participants only ever meet inside work threads, so
@@ -144,5 +144,16 @@ describe('openStandup with a chosen question', () => {
 
     await openStandup(opener, '2026-08-29', 'gpt');
     expect(String(sent?.ask)).toContain(promptFor('2026-08-29'));
+  });
+});
+
+describe('isStandupGoal', () => {
+  it('recognises any day\'s standup', () => {
+    expect(isStandupGoal(standupGoal('2026-09-13'))).toBe(true);
+    expect(isStandupGoal(standupGoal('2027-01-01'))).toBe(true);
+  });
+
+  it('does not match an ordinary goal that mentions a standup', () => {
+    expect(isStandupGoal('Write the standup template')).toBe(false);
   });
 });

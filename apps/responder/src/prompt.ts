@@ -152,8 +152,11 @@ export const TURN_REPLY_JSON_SCHEMA = {
       required: ['key', 'content', 'rationale'],
       properties: {
         key: { type: 'string', description: 'A short dotted key, e.g. "pricing.floor".' },
-        content: { type: 'string', description: 'What the thread concluded.' },
-        rationale: { type: ['string', 'null'], description: 'Why.' },
+        content: {
+          type: 'string',
+          description: 'What the thread concluded, in one or two plain sentences under 280 characters, with correct grammar.',
+        },
+        rationale: { type: ['string', 'null'], description: 'Why, in one sentence under 160 characters.' },
       },
       description: 'Only when done is true, and only if the thread concluded something worth keeping.',
     },
@@ -225,6 +228,9 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     'like "pricing.floor", the conclusion itself, and why. It is proposed to shared memory for a person to',
     'approve or reject; nothing you write there takes effect on its own. Leave it out if the thread ended',
     'without concluding anything worth keeping.',
+    'A person reads every proposal, so write it for them. "content" is the conclusion in one or two plain',
+    'sentences, under 280 characters, in sentence case with correct grammar and punctuation. No hedging, no',
+    'process notes, no slashes standing in for words. "rationale" is one sentence under 160 characters.',
     '',
     `Keep "content" under about ${contentBudget(maxOutputTokens)} characters. A reply that runs past the limit is cut off mid-JSON and cannot be recorded at all, so a shorter complete turn always beats a longer truncated one.`,
   ]

@@ -1079,3 +1079,31 @@ describe('a failure mark that outlived the process', () => {
     expect(String(said?.args.note)).toContain('still down');
   });
 });
+
+/*
+ * What reaches a person's canon review queue. Standups filled it with notes about the
+ * standup process, and over-long proposals are refused by Nexus anyway.
+ */
+describe('canon proposals', () => {
+  const closing = (canon: unknown) => ({ content: 'Done.', summary: 'done', next: null, ask: null, done: true, canon });
+
+  it('proposes what an ordinary thread concluded', async () => {
+    const f = fake('claude', [{ threadId: 't0', goal: 'Pick a queue', turns: 2, yourTurn: true }], closing({ key: 'queue', content: 'Use Redis.', rationale: 'Cheapest.' }));
+    await tick([f.participant], limits(), silent);
+    expect(f.calls.filter((c) => c.tool === 'propose_canon')).toHaveLength(1);
+  });
+
+  it('does not propose canon from a standup', async () => {
+    const f = fake('claude', [{ threadId: 't0', goal: 'Standup for 2026-09-13: how this group is working, and what should change', turns: 2, yourTurn: true }], closing({ key: 'nexus.standup.x', content: 'We need logs.', rationale: 'Said twice.' }));
+    await tick([f.participant], limits(), silent);
+    expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
+    // The turn itself still lands. Only the proposal is dropped.
+    expect(f.calls.some((c) => c.tool === 'thread_append')).toBe(true);
+  });
+
+  it('does not send a proposal longer than Nexus accepts', async () => {
+    const f = fake('claude', [{ threadId: 't0', goal: 'Pick a queue', turns: 2, yourTurn: true }], closing({ key: 'queue', content: 'x'.repeat(601), rationale: 'r' }));
+    await tick([f.participant], limits(), silent);
+    expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
+  });
+});

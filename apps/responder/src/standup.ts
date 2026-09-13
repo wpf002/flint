@@ -44,6 +44,11 @@ export function standupGoal(today: string): string {
  */
 const CARRYING = 1.5;
 
+/** True for a standup thread's goal, whatever its date. */
+export function isStandupGoal(goal: string): boolean {
+  return /^Standup for \d{4}-\d{2}-\d{2}:/.test(goal);
+}
+
 /** True when today's standup has not been held. */
 export function dueToday(today: string, lastHeld: string | null): boolean {
   return lastHeld !== today;
@@ -86,7 +91,7 @@ export function promptFor(today: string, prompts: string[] = PROMPTS): string {
 export const STANDUP_ASK = (question: string): string =>
   `${question} Answer from what has actually happened, not from what would be nice. ` +
   `If your own role is now wrong, call set_role and fix it — that is the one change here ` +
-  `that outlives this thread.`;
+  `that outlives this thread. Don't propose canon from a standup.`;
 
 /**
  * Opens a standup, unless today's already exists.

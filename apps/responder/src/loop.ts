@@ -12,6 +12,7 @@ import {
   type RanBefore,
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
+import { isStandupGoal } from './standup.js';
 import { buildRemotely, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -71,6 +72,10 @@ const MAX_RUNS = 10;
 const MAX_COMMAND = 300;
 const MAX_OUTPUT = 2_000;
 const TRIM_NOTE = '…earlier output trimmed\n';
+
+/** What Nexus accepts in a canon proposal. */
+const MAX_CANON = 600;
+const MAX_RATIONALE = 300;
 
 /** How many build-produced files one turn may keep. A guard, not a target. */
 const KEEP_PRODUCED = 5;
@@ -631,7 +636,22 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
     tokensOut: generated.usage.output,
   });
 
-  if (reply.done && reply.canon) {
+  /*
+   * Two kinds of proposal never reach a person's review queue.
+   *
+   * Standups: they're about how the group works, and they filled the queue with hedged
+   * notes on the standup process itself, one or two a day, with nothing durable in them.
+   * A role that's wrong gets fixed with set_role, which needs no review.
+   *
+   * Anything over Nexus's 600-character limit: Nexus would refuse it anyway, and a
+   * conclusion that long isn't one a person should have to read to approve.
+   */
+  const proposal = reply.done && reply.canon ? reply.canon : null;
+  if (proposal && isStandupGoal(state.goal)) {
+    log(`[${p.slug}] not proposing "${proposal.key}" to canon: standups don't propose canon`);
+  } else if (proposal && (proposal.content.length > MAX_CANON || (proposal.rationale?.length ?? 0) > MAX_RATIONALE)) {
+    log(`[${p.slug}] not proposing "${proposal.key}" to canon: longer than Nexus accepts`);
+  } else if (reply.done && reply.canon) {
     await p
       .call('propose_canon', {
         key: reply.canon.key,
