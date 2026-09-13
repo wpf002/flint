@@ -1137,3 +1137,15 @@ describe('closing a build thread', () => {
     expect(f.calls.some((c) => c.tool === 'thread_note')).toBe(false);
   });
 });
+
+describe('canon from a build thread', () => {
+  it('is not proposed: the product is the result', async () => {
+    const f = fake(
+      'gpt-api',
+      [{ threadId: 't0', goal: "Build csv2md. Done when `npm test` passes.", turns: 9, yourTurn: true }],
+      { content: 'Done.', summary: 'done', next: null, ask: null, done: false, canon: { key: 'cli.csv2md', content: 'csv2md exists.', rationale: 'Built it.' } },
+    );
+    await tick([f.participant], limits(), silent);
+    expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
+  });
+});

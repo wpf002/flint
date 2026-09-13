@@ -14,7 +14,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { refuseClose } from './closing.js';
+import { needsPassingRun, refuseClose } from './closing.js';
 import { buildRemotely, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -671,6 +671,10 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   const proposal = done && reply.canon ? reply.canon : null;
   if (proposal && isStandupGoal(state.goal)) {
     log(`[${p.slug}] not proposing "${proposal.key}" to canon: standups don't propose canon`);
+  } else if (proposal && needsPassingRun(state.goal)) {
+    // A build's result is the product, and it's already in the thread's files. A canon
+    // entry restating what was built is one more thing in a person's review queue.
+    log(`[${p.slug}] not proposing "${proposal.key}" to canon: a build's result is its files`);
   } else if (proposal && (proposal.content.length > MAX_CANON || (proposal.rationale?.length ?? 0) > MAX_RATIONALE)) {
     log(`[${p.slug}] not proposing "${proposal.key}" to canon: longer than Nexus accepts`);
   } else if (done && reply.canon) {
