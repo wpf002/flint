@@ -30,3 +30,42 @@ export function refuseClose(goal: string, latestRuns: RanBefore[]): string | nul
   }
   return null;
 }
+
+/*
+ * A page that works and was never designed.
+ *
+ * The second product build shipped an HTML page with no CSS at all: default controls, a
+ * full-grid table, and black text on a dark background for anyone in dark mode. Every
+ * test passed, because nothing tests how a page looks. This can't judge whether a design
+ * is good. It refuses a page with essentially no styling, or one that leaves text and
+ * background colors to the browser.
+ */
+
+/** A goal with something a person looks at. */
+export function hasInterface(goal: string): boolean {
+  return /\b(html|web ?page|page|ui|interface|screen|front-?end|dashboard|website|web app)\b/i.test(goal);
+}
+
+/** CSS declarations below which a page counts as unstyled. */
+export const MIN_DECLARATIONS = 25;
+
+export function refuseUnstyled(goal: string, files: Array<{ name: string; content: string }>): string | null {
+  if (!hasInterface(goal)) return null;
+  const pages = files.filter((f) => /\.html?$/i.test(f.name));
+  if (pages.length === 0) return null;
+
+  const css = [
+    ...files.filter((f) => /\.css$/i.test(f.name)).map((f) => f.content),
+    ...pages.flatMap((f) => [...f.content.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1] ?? '')),
+  ].join('\n');
+  const declarations = (css.match(/[a-z-]+\s*:\s*[^;{}]+;/gi) ?? []).length;
+  if (declarations < MIN_DECLARATIONS) {
+    return `The page is essentially unstyled (${declarations} CSS declarations). Its design is part of done: style it before closing.`;
+  }
+  const setsBackground = /(^|[\s;{])background(-color)?\s*:/i.test(css);
+  const setsColor = /(^|[\s;{])color\s*:/i.test(css);
+  if (!setsBackground || !setsColor) {
+    return 'The page leaves its text or background color to the browser, which is unreadable in dark mode. Set both explicitly before closing.';
+  }
+  return null;
+}

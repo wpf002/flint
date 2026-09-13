@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { FlintError } from '@flint/core';
-import { tick, type Limits } from '../src/loop.js';
+import { builderFor, tick, withRetry, type Limits } from '../src/loop.js';
 import { Participant } from '../src/participant.js';
 
 /**
@@ -98,6 +98,7 @@ const limits = (over: Partial<Limits> = {}): Limits => ({
   maxTurnsPerThread: 20,
   runBudget: Number.POSITIVE_INFINITY,
   turnTimeoutMs: 90_000,
+  retryDelaysMs: [],
   ...over,
 });
 
@@ -1158,5 +1159,56 @@ describe('a turn that sends more files than it may write', () => {
 
     const note = f.calls.find((c) => c.tool === 'thread_note');
     expect(String(note?.args.content)).toContain('README.md');
+  });
+});
+
+describe('withRetry', () => {
+  const unavailable = () => new FlintError({ kind: 'provider_unavailable', message: 'HTTP 502', retryable: true } as never);
+
+  it('returns once a retry succeeds', async () => {
+    let calls = 0;
+    const result = await withRetry(silent, 'perplexity-api', async () => {
+      calls += 1;
+      if (calls < 3) throw unavailable();
+      return 'answered';
+    }, [0, 0]);
+    expect(result).toBe('answered');
+    expect(calls).toBe(3);
+  });
+
+  it('gives up after the last delay', async () => {
+    let calls = 0;
+    await expect(withRetry(silent, 'p', async () => { calls += 1; throw unavailable(); }, [0, 0])).rejects.toThrow();
+    expect(calls).toBe(3);
+  });
+
+  /* A turn that already ran out its clock would only run it out again. */
+  it('does not retry a timeout', async () => {
+    let calls = 0;
+    const timeout = new FlintError({ kind: 'timeout', message: 'slow', retryable: true } as never);
+    await expect(withRetry(silent, 'p', async () => { calls += 1; throw timeout; }, [0, 0])).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+});
+
+describe('builderFor', () => {
+  const roster = [
+    { slug: 'claude-api', good_at: 'System design, code review, and finding the flaw in a plan.' },
+    { slug: 'gpt-api', good_at: 'Implementation, concrete code, schemas, and turning a design into something that runs.' },
+    { slug: 'perplexity-api', good_at: 'Current facts with sources: pricing, rate limits, API changes.' },
+  ];
+
+  it('picks the strongest coder who did not just speak', () => {
+    expect(builderFor(roster, 'claude-api')).toBe('gpt-api');
+  });
+
+  /* The second product build routed "fix the failing tests" to Perplexity. */
+  it('never picks the fact-checker over a coder', () => {
+    expect(builderFor(roster, 'gpt-api')).toBe('claude-api');
+    expect(builderFor(roster, 'perplexity-api')).toBe('gpt-api');
+  });
+
+  it('leaves routing to Nexus when nobody codes', () => {
+    expect(builderFor([{ slug: 'perplexity-api', good_at: 'Current facts.' }], 'gpt-api')).toBeNull();
   });
 });

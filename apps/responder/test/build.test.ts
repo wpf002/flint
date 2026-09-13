@@ -43,6 +43,7 @@ function limitsFor(over: Record<string, unknown> = {}) {
     maxTurnsPerThread: 20,
     runBudget: Number.POSITIVE_INFINITY,
     turnTimeoutMs: 90_000,
+    retryDelaysMs: [],
     canRun: true,
     workspaceRoot: root,
     sandbox: { url: 'http://sandbox.invalid', token: 't' },
@@ -295,5 +296,40 @@ describe('closing after a passing run', () => {
     const f = builder({ content: 'Close enough.', summary: 'red', done: true, files: [], run: [['npm', 'test']] }, GOAL_THREAD);
     await tick([f.participant], limitsFor(), silent);
     expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(false);
+  });
+});
+
+describe('closing a build with a page', () => {
+  const GOAL = 'Build forecast. GET / serves one HTML page where a person types a city. `npm test` passes.';
+  const passing = () =>
+    remote.buildRemotely.mockResolvedValueOnce({
+      results: [{ command: 'npm test', ok: true, code: 0, output: 'pass 15' }],
+      files: {},
+    } as never);
+  const closing = (html: string) => ({
+    content: 'Done.',
+    summary: 'done',
+    done: true,
+    files: [{ name: 'public/index.html', content: html, note: null }],
+    run: [['npm', 'test']],
+  });
+
+  it('stays open when the tests pass but the page is unstyled, and goes to the designer', async () => {
+    passing();
+    const f = builder(closing('<html><body><h1>7-day Forecast</h1></body></html>'), GOAL);
+    await tick([f.participant], limitsFor(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append');
+    expect(append?.args.done).toBe(false);
+    expect(String(append?.args.ask)).toMatch(/design standard/);
+  });
+
+  it('closes when the tests pass and the page is styled', async () => {
+    passing();
+    const css = `body { color: #111; background: #fff; }\n${Array.from({ length: 30 }, (_, i) => `.c${i} { margin: ${i}px; }`).join('\n')}`;
+    const f = builder(closing(`<html><head><style>${css}</style></head><body></body></html>`), GOAL);
+    await tick([f.participant], limitsFor(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
   });
 });

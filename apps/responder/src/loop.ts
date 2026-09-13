@@ -15,7 +15,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { needsPassingRun, refuseClose } from './closing.js';
+import { needsPassingRun, refuseClose, refuseUnstyled } from './closing.js';
 import { buildRemotely, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -41,6 +41,8 @@ export interface Limits {
   runBudget: number;
   /** How long one turn may take before it is abandoned. */
   turnTimeoutMs: number;
+  /** Delays before retrying a provider that failed on its edge. Tests pass []. */
+  retryDelaysMs?: number[];
 }
 
 /**
@@ -449,7 +451,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * mid-string into prose, which cost the whole turn its nomination.
    */
   const forced = p.replyMode === 'tool';
-  const generated = await p.provider.generate({
+  const generated = await withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
     system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens, Boolean(workspace)),
     messages: [
@@ -463,7 +465,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
     maxTokens: p.cfg.maxOutputTokens,
     signal: AbortSignal.timeout(p.turnTimeoutMs ?? limits.turnTimeoutMs),
     ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
-  });
+  }), limits.retryDelaysMs);
 
   /*
    * A reply cut off at the cap is not a badly-formatted reply, and recording it as one
@@ -632,10 +634,23 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * run in it has passed that check. The turn still lands, and the floor goes to whoever
    * Nexus routes the ask to, which for building is the participant whose strength it is.
    */
-  const refused = reply.done ? refuseClose(state.goal, ran.length > 0 ? ran : lastRuns(state)) : null;
+  const failing = reply.done ? refuseClose(state.goal, ran.length > 0 ? ran : lastRuns(state)) : null;
+  // Judged on the files as they stand after this turn, not on the last turn's.
+  const unstyled =
+    reply.done && !failing
+      ? refuseUnstyled(state.goal, [...built.filter((b) => !reply.files.some((f) => f.name === b.name)), ...reply.files])
+      : null;
+  const refused = failing ?? unstyled;
   const done = reply.done && !refused;
-  const next = refused ? null : reply.next;
-  const ask = refused ? `${refused} Build what is missing, run the tests, and fix them until they pass.` : reply.ask;
+  // Named, not left to Nexus. Routing on the refusal's wording sent "fix the failing
+  // tests" to Perplexity (API) in the second product build, the one participant here
+  // whose strength is facts rather than code.
+  const next = refused ? builderFor(state.participants, p.slug, unstyled ? 'design' : 'code') : reply.next;
+  const ask = failing
+    ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
+    : unstyled
+      ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
+      : reply.ask;
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
@@ -775,6 +790,60 @@ async function rest(job: Waiting, rounds: number): Promise<void> {
       why: 'repeated failures taking a turn',
     },
   });
+}
+
+/** Delays before each retry of a provider that failed on its edge. */
+export const RETRY_DELAYS_MS = [5_000, 15_000];
+
+/**
+ * Retries a model call that failed on the provider's edge (a 502 page, a dropped
+ * connection) before the turn counts as failed.
+ *
+ * Perplexity (API) answered with HTTP 502 on four of seven attempts in one afternoon,
+ * each a few seconds long. Every failure used to cost the participant its turn: the
+ * thread passed to someone else, and the question it was best placed to answer got
+ * answered from memory instead. Timeouts are not retried; a turn that already ran out
+ * its clock would only run it out again.
+ */
+export async function withRetry<T>(
+  log: Log,
+  slug: string,
+  call: () => Promise<T>,
+  delays: number[] = RETRY_DELAYS_MS,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (err) {
+      const transient = isFlintError(err) && err.error.kind === 'provider_unavailable';
+      if (!transient || attempt >= delays.length) throw err;
+      log(`[${slug}] provider unavailable, retrying in ${delays[attempt]! / 1000}s: ${describe(err)}`);
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+}
+
+/**
+ * Who fixes a build that can't close yet: the participant, other than the one who just
+ * spoke, whose declared strength is closest to writing or reviewing code. Null when
+ * nobody's is, which leaves routing to Nexus.
+ */
+export function builderFor(
+  participants: Array<{ slug: string; good_at: string }>,
+  author: string,
+  focus: 'code' | 'design' = 'code',
+): string | null {
+  const terms =
+    focus === 'design'
+      ? /\b(interface|visual|ui|ux|typography|design)\b/gi
+      : /\b(implement\w*|code|build\w*|review\w*|debug\w*|test\w*|schema\w*)\b/gi;
+  const score = (goodAt: string) => (goodAt.match(terms) ?? []).length;
+  const best = participants
+    .filter((candidate) => candidate.slug !== author)
+    .map((candidate) => ({ slug: candidate.slug, score: score(candidate.good_at) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)[0];
+  return best?.slug ?? null;
 }
 
 /**

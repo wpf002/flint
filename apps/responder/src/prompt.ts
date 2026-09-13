@@ -212,6 +212,26 @@ const SANDBOX_LINES = [
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
 ];
 
+/*
+ * The second product build shipped a page with no CSS: default controls, a full-grid
+ * table, black text on a dark background. Every test passed. How a page looks isn't
+ * polish for later when a person is the one using it.
+ */
+const DESIGN_LINES = [
+  '',
+  'If the goal includes anything a person looks at (a page, a screen, a component), its design is part of',
+  'done. A page that works with default browser styling is not finished.',
+  '- Set text and background colors explicitly, with readable contrast. Browser defaults render black text',
+  '  on a dark background for anyone in dark mode.',
+  '- One font stack, a small type scale (for example 14, 16, 20 and 32px), spacing on a 4 or 8px grid.',
+  '- Neutrals plus one accent color, used for the primary action.',
+  '- Constrain and center the content, and make it work at 375px wide as well as on a desktop.',
+  '- Style every control: padding, radius, borders, and hover and focus states for inputs and buttons.',
+  '- Design the empty, loading and error states, not only the success state.',
+  '- In data tables, right-align numbers, show units, and use light row dividers instead of a full grid.',
+  '- Before closing, read the CSS as a designer would and fix anything that still looks like a default.',
+];
+
 export function systemPrompt(
   slug: string,
   role: string | undefined,
@@ -255,6 +275,7 @@ export function systemPrompt(
     'file per turn. Revise what is already there instead of starting again. Leave "files" empty when your turn',
     'changes nothing.',
     ...(canRun ? SANDBOX_LINES : []),
+    ...DESIGN_LINES,
     '',
     'You cannot see the system you are working on. If a turn needs facts about Nexus itself — what happened',
     'this week, what the tables actually are — say so in your turn and ask for them rather than describing',
@@ -393,10 +414,16 @@ export function threadPrompt(
  * malformed reply stops the loop instead of letting it spend on guesses.
  */
 export function parseReply(raw: string): { reply: TurnReply; malformed: boolean } {
-  const candidate = extractJson(raw);
-  if (candidate) {
-    const parsed = TurnReplySchema.safeParse(normalize(candidate));
-    if (parsed.success) return { reply: foldFiles(parsed.data), malformed: false };
+  const located = locateJson(raw);
+  if (located) {
+    const parsed = TurnReplySchema.safeParse(normalize(located.value));
+    if (parsed.success) {
+      const reply = foldFiles(parsed.data);
+      if (SOURCES.test(located.after)) {
+        reply.content = clip(`${reply.content}\n\n${located.after}`, MAX_CONTENT);
+      }
+      return { reply, malformed: false };
+    }
   }
 
   /*
@@ -531,6 +558,11 @@ function clip(value: string, limit: number): string {
  * still parses at the second step, because its outer braces are the object's own.
  */
 function extractJson(raw: string): unknown {
+  return locateJson(raw)?.value;
+}
+
+/** The reply object and whatever text followed it, or undefined when there's no object. */
+function locateJson(raw: string): { value: unknown; after: string } | undefined {
   const attempts: Array<() => string | undefined> = [
     () => raw.trim(),
     () => braces(raw),
@@ -543,13 +575,23 @@ function extractJson(raw: string): unknown {
     const text = attempt();
     if (!text || !text.startsWith('{')) continue;
     try {
-      return JSON.parse(text);
+      const value = JSON.parse(text);
+      const end = raw.lastIndexOf(text) + text.length;
+      return { value, after: end > 0 ? raw.slice(end).replace(/^\s*```\s*/, '').trim() : '' };
     } catch {
       // Not this span. Try the next.
     }
   }
   return undefined;
 }
+
+/*
+ * Perplexity's sources arrive after the reply object, because its API returns them
+ * outside the message and Flint appends them there. Parsing kept only the object, so
+ * every source Perplexity (API) ever cited was dropped before the thread saw it, and its
+ * fact checks read as unsourced claims. They're kept on the turn's content now.
+ */
+const SOURCES = /^(Sources|References|Citations):?\s*\n/i;
 
 /** From the first "{" to the last "}", or undefined when there isn't such a span. */
 function braces(text: string): string | undefined {

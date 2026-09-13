@@ -420,3 +420,27 @@ describe('a reply whose content contains code fences', () => {
     expect(parseReply('```json\n' + inner + '\n```').malformed).toBe(false);
   });
 });
+
+/*
+ * Perplexity's sources arrive after the reply object. Parsing kept only the object, so
+ * every source it ever cited was dropped before the thread saw it.
+ */
+describe('sources after the reply', () => {
+  it('keeps them on the turn', () => {
+    const raw = `${JSON.stringify({ content: 'The daily param is precipitation_probability_max.', summary: 's', next: null })}\n\nSources:\n[1] Open-Meteo Docs — https://open-meteo.com/en/docs`;
+    const { reply, malformed } = parseReply(raw);
+    expect(malformed).toBe(false);
+    expect(reply.content).toContain('precipitation_probability_max');
+    expect(reply.content).toContain('https://open-meteo.com/en/docs');
+  });
+
+  it('adds nothing when there are no sources', () => {
+    const { reply } = parseReply(JSON.stringify({ content: 'Plain.', summary: 's', next: null }));
+    expect(reply.content).toBe('Plain.');
+  });
+
+  it('ignores other trailing text', () => {
+    const { reply } = parseReply(`${JSON.stringify({ content: 'Plain.', summary: 's', next: null })}\nthanks!`);
+    expect(reply.content).toBe('Plain.');
+  });
+});

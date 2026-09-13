@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsPassingRun, refuseClose } from '../src/closing.js';
+import { needsPassingRun, refuseClose, refuseUnstyled } from '../src/closing.js';
 
 /*
  * The first real product build ended on turn 1: asked to confirm three Node APIs,
@@ -45,5 +45,42 @@ describe('refuseClose', () => {
 
   it('never gets in the way of a goal with no check', () => {
     expect(refuseClose('Pick a message queue', [])).toBeNull();
+  });
+});
+
+/*
+ * The second product build shipped a page with no CSS: default controls, a full-grid
+ * table, black text on a dark background. Every test passed, because nothing tests how a
+ * page looks. This can't judge whether a design is good, only refuse one that is absent.
+ */
+describe('refuseUnstyled', () => {
+  const UI_GOAL = 'Build forecast. GET / serves one HTML page where a person types a city. `npm test` passes.';
+  const page = (head: string) => ({ name: 'public/index.html', content: `<!doctype html><html><head>${head}</head><body><h1>7-day Forecast</h1></body></html>` });
+  const styled = Array.from({ length: 30 }, (_, i) => `.c${i} { margin: ${i}px; }`).join('\n');
+  const withColors = `body { color: #111; background: #fff; }\n${styled}`;
+
+  it('refuses a page with no styling at all', () => {
+    expect(refuseUnstyled(UI_GOAL, [page('')])).toMatch(/essentially unstyled/);
+  });
+
+  it('refuses a styled page that leaves the colors to the browser', () => {
+    expect(refuseUnstyled(UI_GOAL, [page(`<style>${styled}</style>`)])).toMatch(/unreadable in dark mode/);
+  });
+
+  it('accepts a styled page with explicit colors', () => {
+    expect(refuseUnstyled(UI_GOAL, [page(`<style>${withColors}</style>`)])).toBeNull();
+  });
+
+  it('reads a separate stylesheet too', () => {
+    expect(refuseUnstyled(UI_GOAL, [page('<link rel="stylesheet" href="app.css">'), { name: 'public/app.css', content: withColors }])).toBeNull();
+  });
+
+  /* A CLI has no page to style. */
+  it('says nothing about a goal with no interface', () => {
+    expect(refuseUnstyled('Build csv2md, a CLI. `npm test` passes.', [{ name: 'src/cli.js', content: 'x' }])).toBeNull();
+  });
+
+  it('says nothing when a UI goal has produced no page yet', () => {
+    expect(refuseUnstyled(UI_GOAL, [{ name: 'src/server.js', content: 'x' }])).toBeNull();
   });
 });
