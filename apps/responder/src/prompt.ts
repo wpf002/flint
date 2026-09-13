@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VISUAL_REVIEW } from './closing.js';
 
 /**
  * Turning a Nexus thread into one model call, and the model's reply back into a turn.
@@ -47,8 +48,8 @@ export const ThreadStateSchema = z
 
 export type ThreadState = z.infer<typeof ThreadStateSchema>;
 
-/** Most files one turn may write. Enough for a small app in one go. */
-export const MAX_FILES_PER_TURN = 12;
+/** Most files one turn may write. Enough for a small app in one go: the fourth build's first turn wrote 14. */
+export const MAX_FILES_PER_TURN = 16;
 
 const FileSchema = z.object({
   name: z.string().min(1).max(120),
@@ -210,30 +211,36 @@ const SANDBOX_LINES = [
   'Every command must exit. A server, watcher or prompt left waiting is killed after 3 minutes and counts',
   'as a failure, so start servers inside tests on port 0 and close them when the test ends.',
   'To see a page, run ["screenshot", "server.js", "/"] for a server (it is started with a PORT to listen on)',
-  'or ["screenshot", "public/index.html"] for a file. It is rendered at desktop and phone width and a designer',
-  'reviews the screenshots. The review comes back with the run output. A build with a page cannot close',
-  'until its latest review passes, and a turn that changes the page must screenshot it again. To show a',
-  'filled-in state, let the page take its input from the URL (for example /?city=Chicago) and render that path.',
+  'or ["screenshot", "public/index.html"] for a file. It is rendered at desktop and phone width, and a design',
+  'lead reviews the screenshots by itself. The review is not a command: never put "visual review" in "run".',
+  'Its verdict comes back with the run output. A build with a page cannot close until its latest review',
+  'passes, and a turn that changes the page must screenshot it again. To show a filled-in state, let the page',
+  'take its input from the URL (for example /?city=Chicago) and screenshot that path too.',
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
 ];
 
 /*
  * The second product build shipped a page with no CSS: default controls, a full-grid
- * table, black text on a dark background. Every test passed. How a page looks isn't
- * polish for later when a person is the one using it.
+ * table, black text on a dark background. Every test passed. The fourth was styled and
+ * still plain: a small form at the top of an empty screen and a bare table. How a page
+ * looks isn't polish for later when a person is the one using it.
  */
 const DESIGN_LINES = [
   '',
   'If the goal includes anything a person looks at (a page, a screen, a component), its design is part of',
-  'done. A page that works with default browser styling is not finished.',
-  '- Set text and background colors explicitly, with readable contrast. Browser defaults render black text',
-  '  on a dark background for anyone in dark mode.',
-  '- One font stack, a small type scale (for example 14, 16, 20 and 32px), spacing on a 4 or 8px grid.',
-  '- Neutrals plus one accent color, used for the primary action.',
-  '- Constrain and center the content, and make it work at 375px wide as well as on a desktop.',
-  '- Style every control: padding, radius, borders, and hover and focus states for inputs and buttons.',
-  '- Design the empty, loading and error states, not only the success state.',
-  '- In data tables, right-align numbers, show units, and use light row dividers instead of a full grid.',
+  'done, and the bar is a finished product, not a tidy prototype. A design lead reviews screenshots of it.',
+  '- Compose the page: a header that names the product and says in one line what it does, then the main',
+  '  content in a centered card or panel, about 720 to 960px wide. Nothing stranded at the top of an empty screen.',
+  '- Set text and background colors explicitly, with readable contrast.',
+  '- One font stack, a clear type scale (for example 13, 15, 20 and 32px), and spacing on an 8px grid.',
+  '- Neutrals plus one accent color, used for the primary action and for emphasis.',
+  '- Style every control the same way: equal heights, radius and borders, hover and focus states, and a',
+  '  custom arrow on selects. On phones, stack controls full width with tap targets at least 44px tall.',
+  '- Design every state: an empty state that invites the first action (an icon, a sentence, and example',
+  '  inputs as buttons), a loading state, and an error that reads as an alert.',
+  '- Present results so they scan: cards or a table inside a panel, units shown, numbers right-aligned, and',
+  '  the most important value emphasised.',
+  '- Keep it self-contained: system fonts, inline SVG for icons, no external requests.',
   '- Before closing, read the CSS as a designer would and fix anything that still looks like a default.',
 ];
 
@@ -262,6 +269,12 @@ export function systemPrompt(
     '  say so and close it. Do not add a section because it is your turn.',
     '- Before you revise, ask whether the change is worth another round. Tightening someone else\'s wording',
     '  is not. A missing piece, a wrong claim, or a real disagreement is.',
+    '- In a thread that builds something, every turn after the plan changes a file or runs something.',
+    '  Confirming facts in prose is not a turn. Put what you checked where the product uses it: the code,',
+    '  the recorded test fixtures, or the README.',
+    '- When you plan a build, give every participant files to own that fit their strength. Checking current',
+    '  facts fits the API client\'s endpoints and parameters, the test fixtures recorded from real responses,',
+    '  and the README.',
     '',
     'Reply with a single JSON object and nothing else. No prose before or after, no code fences.',
     '{',
@@ -400,7 +413,12 @@ export function threadPrompt(
       ? [
           '',
           'WHAT HAPPENED WHEN IT LAST RAN:',
-          ...ran.map((r) => `$ ${r.command}\n${r.ok ? 'succeeded' : 'FAILED'}\n${r.output || '(no output)'}`),
+          // A review shown like a command got sent to the sandbox as one in the fourth build.
+          ...ran.map((r) =>
+            r.command === VISUAL_REVIEW
+              ? `Design review of the screenshots (automatic, not a command): ${r.ok ? 'PASSED' : 'FIXES REQUESTED'}\n${r.output || '(no notes)'}`
+              : `$ ${r.command}\n${r.ok ? 'succeeded' : 'FAILED'}\n${r.output || '(no output)'}`,
+          ),
         ]
       : []),
     '',

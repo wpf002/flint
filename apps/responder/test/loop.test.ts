@@ -1153,7 +1153,7 @@ describe('canon from a build thread', () => {
 
 describe('a turn that sends more files than it may write', () => {
   it('tells the thread which files were not written', async () => {
-    const files = Array.from({ length: 13 }, (_, i) => ({ name: i === 12 ? 'README.md' : `src/f${i}.js`, content: 'x', note: null }));
+    const files = Array.from({ length: 17 }, (_, i) => ({ name: i === 16 ? 'README.md' : `src/f${i}.js`, content: 'x', note: null }));
     const f = fake('gpt-api', [{ threadId: 't0', goal: 'Pick a queue', turns: 2, yourTurn: true }], { content: 'Built.', summary: 'built', next: 'claude', ask: 'review', done: false, files });
     await tick([f.participant], limits(), silent);
 

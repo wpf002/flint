@@ -1,5 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
+import { namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
+
+/* The fourth build put "visual review" in its commands, and the refusal read as a failed review. */
+describe('namesReview', () => {
+  it('recognises the review asked for as a command, however it is split', () => {
+    expect(namesReview(['visual', 'review'])).toBe(true);
+    expect(namesReview(['visual review'])).toBe(true);
+    expect(namesReview(['Visual', 'Review', 'desktop'])).toBe(true);
+  });
+
+  it('leaves real commands alone', () => {
+    expect(namesReview(['screenshot', 'server.js', '/'])).toBe(false);
+    expect(namesReview(['npm', 'test'])).toBe(false);
+    expect(namesReview(['node', 'visual-review.js'])).toBe(false);
+  });
+});
 
 /*
  * The first real product build ended on turn 1: asked to confirm three Node APIs,

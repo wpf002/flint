@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { VISUAL_REVIEW } from '../src/closing.js';
 import { lastRuns, parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
-import { parseVerdict } from '../src/visual-review.js';
+import { parseVerdict, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -304,6 +305,18 @@ describe('lastRuns', () => {
     expect(prompt).toContain('npm test');
     expect(prompt).toContain('2 failing');
   });
+
+  /* Shown as "$ visual review", the fourth build sent it to the sandbox as a command. */
+  it('shows a design review as a verdict, not as a command someone ran', () => {
+    const prompt = threadPrompt(
+      state([{ seq: 1, by: 'gpt', content: 'a', runs: [{ command: VISUAL_REVIEW, ok: false, output: 'Phone: the button overflows.' }] }]),
+      'claude',
+    );
+    expect(prompt).not.toContain(`$ ${VISUAL_REVIEW}`);
+    expect(prompt).toContain('not a command');
+    expect(prompt).toContain('FIXES REQUESTED');
+    expect(prompt).toContain('button overflows');
+  });
 });
 
 /*
@@ -346,17 +359,17 @@ describe('files in a reply', () => {
   });
 
   /* Past the limit the schema would reject the whole reply, losing every file. */
-  it('keeps the first 12 files when sent more, without losing the turn', () => {
-    const files = Array.from({ length: 14 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+  it('keeps the first 16 files when sent more, without losing the turn', () => {
+    const files = Array.from({ length: 18 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
     const { reply: r, malformed } = reply({ files });
     expect(malformed).toBe(false);
-    expect(r.files).toHaveLength(12);
+    expect(r.files).toHaveLength(16);
   });
 
   /* The first csv2md build lost its README this way, and nothing said so. */
   it('names the files it could not keep', () => {
-    const files = Array.from({ length: 14 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
-    expect(reply({ files }).reply.dropped).toEqual(['f12.js', 'f13.js']);
+    const files = Array.from({ length: 18 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+    expect(reply({ files }).reply.dropped).toEqual(['f16.js', 'f17.js']);
   });
 
   it('has no files when the model returns unstructured text', () => {
@@ -460,5 +473,35 @@ describe('parseVerdict', () => {
   /* A page nobody would sign off on doesn't ship. */
   it('fails a review with no verdict', () => {
     expect(parseVerdict('Looks nice overall!').pass).toBe(false);
+  });
+});
+
+/* The fourth build's reviewer once came back empty, and that was recorded as a request for fixes. */
+describe('withVerdict', () => {
+  const replies = (...texts: string[]) => {
+    const queue = [...texts];
+    return vi.fn(async () => ({ text: queue.shift() ?? '', tokensOut: 10, stop: 'end_turn' }));
+  };
+
+  it('returns the first verdict without asking again', async () => {
+    const ask = replies('VERDICT: PASS\n- Optional: a loading state.');
+    const review = await withVerdict(ask);
+    expect(review).toMatchObject({ pass: true, tokensOut: 10 });
+    expect(review.unavailable).toBeUndefined();
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again when a reply has no verdict, and counts both', async () => {
+    const ask = replies('', 'VERDICT: FIX\n- Desktop: the form is stranded at the top.');
+    const review = await withVerdict(ask);
+    expect(review).toMatchObject({ pass: false, tokensOut: 20 });
+    expect(review.notes).toContain('stranded');
+    expect(review.unavailable).toBeUndefined();
+  });
+
+  it('says there was no review when no attempt gave a verdict', async () => {
+    const review = await withVerdict(replies('', ''));
+    expect(review.unavailable).toBe(true);
+    expect(review.notes).toContain('end_turn');
   });
 });

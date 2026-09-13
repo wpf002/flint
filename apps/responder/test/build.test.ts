@@ -51,7 +51,11 @@ function limitsFor(over: Record<string, unknown> = {}) {
   } as unknown as Limits;
 }
 
-function builder(reply: unknown, goal = 'build it') {
+function builder(
+  reply: unknown,
+  goal = 'build it',
+  participants: Array<{ slug: string; label: string; good_at: string }> = [{ slug: 'gpt', label: 'gpt', good_at: 'building' }],
+) {
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   const participant = {
     slug: 'gpt',
@@ -78,7 +82,7 @@ function builder(reply: unknown, goal = 'build it') {
           status: 'OPEN',
           yourTurnIf: 'gpt',
           turnCount: 1,
-          participants: [{ slug: 'gpt', label: 'gpt', good_at: 'building' }],
+          participants,
           turns: [],
         };
       }
@@ -375,5 +379,67 @@ describe('closing a build with a page', () => {
     await tick([f.participant], limitsFor({ reviewScreens: async () => ({ pass: true, notes: 'ok', tokensOut: 40 }) }), silent);
 
     expect(f.calls.find((c) => c.tool === 'thread_append')?.args.tokensOut).toBe(45);
+  });
+
+  /* The fourth build sent "visual review" to the sandbox, and the refusal read as a failed review. */
+  it('never sends a review asked for by name to the sandbox', async () => {
+    withScreens();
+    const f = builder({ ...shooting(styledPage), run: [['npm', 'test'], ['screenshot', 'server.js', '/'], ['visual', 'review']] }, GOAL);
+    await tick([f.participant], limitsFor({ reviewScreens: async () => ({ pass: true, notes: 'Ship it.', tokensOut: 40 }) }), silent);
+
+    const sent = (remote.buildRemotely.mock.calls[0] as unknown as [unknown, unknown, string[][]])[2];
+    expect(sent).toEqual([['npm', 'test'], ['screenshot', 'server.js', '/']]);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
+  });
+
+  /* An empty reply from the reviewer was recorded as a review asking for fixes, with none listed. */
+  it('records no review when the reviewer gave no verdict, and keeps the thread open', async () => {
+    withScreens();
+    const f = builder(shooting(styledPage), GOAL);
+    await tick(
+      [f.participant],
+      limitsFor({ reviewScreens: async () => ({ pass: false, notes: 'No verdict after 2 attempts', tokensOut: 20, unavailable: true }) }),
+      silent,
+    );
+
+    const append = f.calls.find((c) => c.tool === 'thread_append');
+    const runs = append?.args.runs as Array<{ command: string; output: string }>;
+    expect(append?.args.done).toBe(false);
+    expect(runs.some((r) => r.command === 'visual review')).toBe(false);
+    expect(runs.find((r) => r.command.startsWith('screenshot'))?.output).toMatch(/could not run/);
+    expect(append?.args.tokensOut).toBe(25);
+  });
+});
+
+/*
+ * Who gets a build that can't close yet when the turn names nobody. In the fourth build,
+ * Nexus routed two such turns to Perplexity (API) while the tests or the page review were
+ * still open, and both times it re-confirmed the API and tried to close.
+ */
+describe('routing a build that is still open', () => {
+  const GOAL = 'Build csv2md. `npm test` passes in the build sandbox.';
+  const ROSTER = [
+    { slug: 'gpt', label: 'GPT', good_at: 'Implementation and concrete code.' },
+    { slug: 'claude-api', label: 'Claude', good_at: 'System design and code review.' },
+    { slug: 'perplexity-api', label: 'Perplexity', good_at: 'Current facts with sources.' },
+  ];
+  const turn = (next: string | null) => ({ content: 'Wrote the parser.', summary: 'parser', done: false, files: [], run: [], next });
+
+  it('names a builder instead of leaving it to Nexus', async () => {
+    const f = builder(turn(null), GOAL, ROSTER);
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('claude-api');
+  });
+
+  it('keeps a speaker the turn named itself', async () => {
+    const f = builder(turn('perplexity-api'), GOAL, ROSTER);
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('perplexity-api');
+  });
+
+  it('leaves a thread with nothing to pass to Nexus', async () => {
+    const f = builder(turn(null), 'Draft the launch announcement.', ROSTER);
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBeUndefined();
   });
 });

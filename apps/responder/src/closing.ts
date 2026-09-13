@@ -20,6 +20,18 @@ const TEST_COMMAND = /\btest\b|--test\b|\bvitest\b|\bjest\b|\bpytest\b/;
 /** The label a visual review gets among a turn's runs. */
 export const VISUAL_REVIEW = 'visual review';
 
+/**
+ * A command that asks for the review by name.
+ *
+ * Only the responder produces a review, after a screenshot. The fourth product build
+ * copied the label out of the run history into its own commands. The sandbox refused
+ * it, and the refusal carried the review's label, so the close gate read it as a
+ * review that had asked for fixes.
+ */
+export function namesReview(argv: string[]): boolean {
+  return /^visual\s+review\b/i.test(argv.join(' ').trim());
+}
+
 /** Runs, newest first: this turn's, then each earlier turn's that ran anything. */
 export type RunHistory = RanBefore[][];
 

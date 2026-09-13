@@ -16,7 +16,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
+import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
 import type { ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
@@ -534,7 +534,11 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    */
   let ran: RanBefore[] = [];
   let reviewTokens = 0;
-  if (workspace && reply.run.length > 0) {
+  const commands = reply.run.filter((argv) => !namesReview(argv));
+  if (commands.length < reply.run.length) {
+    log(`[${p.slug}] dropped "${VISUAL_REVIEW}" from its commands: the review runs by itself after a screenshot`);
+  }
+  if (workspace && commands.length > 0) {
     const results: RanBefore[] = [];
 
     if (limits.sandbox) {
@@ -556,10 +560,10 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
        * again next round, with none of it reaching the daily token ledger. Reported as a
        * failed command instead: that is something the thread can read and act on.
        */
-      const remote = await buildRemotely(limits.sandbox, files, reply.run).catch((err: unknown) => {
+      const remote = await buildRemotely(limits.sandbox, files, commands).catch((err: unknown) => {
         log(`[${p.slug}] the build sandbox could not be reached: ${describe(err)}`);
         return {
-          results: reply.run.map((argv) => ({
+          results: commands.map((argv) => ({
             command: argv.join(' '),
             ok: false,
             code: null,
@@ -576,10 +580,27 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       if ((remote.images?.length ?? 0) > 0 && limits.reviewScreens) {
         const review = await limits
           .reviewScreens(remote.images!, state.goal)
-          .catch((err: unknown) => ({ pass: false, notes: `The visual review could not run: ${describe(err)}`, tokensOut: 0 }));
+          .catch((err: unknown) => ({
+            pass: false,
+            notes: `The visual review could not run: ${describe(err)}`,
+            tokensOut: 0,
+            unavailable: true,
+          }));
         reviewTokens += review.tokensOut;
-        results.push({ command: VISUAL_REVIEW, ok: review.pass, output: review.notes });
-        log(`[${p.slug}] ${VISUAL_REVIEW} — ${review.pass ? 'pass' : 'fixes requested'}`);
+        if (review.unavailable) {
+          /*
+           * No verdict is not a verdict. The fourth build's reviewer once came back empty,
+           * and recording that as a review gave the next speaker a request for fixes with
+           * no fixes in it. Nothing is recorded, so the gate still asks for a review, and
+           * the screenshot's output says why there wasn't one.
+           */
+          log(`[${p.slug}] ${VISUAL_REVIEW} unavailable: ${review.notes}`);
+          const shot = [...results].reverse().find((r) => /^screenshot\b/.test(r.command));
+          if (shot) shot.output = `${shot.output}\nThe visual review could not run on this screenshot. Screenshot again to get one.`;
+        } else {
+          results.push({ command: VISUAL_REVIEW, ok: review.pass, output: review.notes });
+          log(`[${p.slug}] ${VISUAL_REVIEW} — ${review.pass ? 'pass' : 'fixes requested'}`);
+        }
       }
       // Compiled output and lockfiles are part of what was built; losing them would make
       // every subsequent turn start from source again.
@@ -620,7 +641,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
           .catch((err: unknown) => log(`[${p.slug}] could not keep ${name}: ${describe(err)}`));
       }
     } else {
-      for (const argv of reply.run) {
+      for (const argv of commands) {
         const result = await runCommand(workspace, argv);
         results.push({ command: result.command, ok: result.ok, output: result.output });
         log(`[${p.slug}] $ ${result.command} — ${result.ok ? 'ok' : `failed (${result.code ?? 'no exit'})`}`);
@@ -651,25 +672,32 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   // Judged on the files as they stand after this turn, not on the last turn's.
   const current = [...built.filter((b) => !reply.files.some((f) => f.name === b.name)), ...reply.files];
   const pageChanged = pagesIn(reply.files).length > 0 || reply.files.some((f) => /\.css$/i.test(f.name) || /<style[\s>]/i.test(f.content));
-  const failing = reply.done ? refuseClose(state.goal, history) : null;
-  const unstyled = reply.done && !failing ? refuseUnstyled(state.goal, current) : null;
+  // What would keep the thread open if this turn closed it, judged whether or not it tries.
+  const failing = refuseClose(state.goal, history);
+  const unstyled = failing ? null : refuseUnstyled(state.goal, current);
   const unreviewed =
-    reply.done && !failing && !unstyled
-      ? refuseUnreviewed(state.goal, current, ran.length > 0 ? history : [[], ...history], pageChanged)
-      : null;
-  const refused = failing ?? unstyled ?? unreviewed;
+    failing || unstyled
+      ? null
+      : refuseUnreviewed(state.goal, current, ran.length > 0 ? history : [[], ...history], pageChanged);
+  const blocker = failing ?? unstyled ?? unreviewed;
+  const refused = reply.done ? blocker : null;
   const done = reply.done && !refused;
-  // Named, not left to Nexus. Routing on the refusal's wording sent "fix the failing
-  // tests" to Perplexity (API) in the second product build, the one participant here
-  // whose strength is facts rather than code.
-  const next = refused ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
-  const ask = failing
-    ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
-    : unstyled
-      ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
-      : unreviewed
-        ? `${unreviewed} Fix what the review found, then screenshot the page again in the same turn.`
-        : reply.ask;
+  /*
+   * Named, not left to Nexus, whenever the build can't close yet and the turn didn't
+   * name anyone itself. Routing on the refusal's wording sent "fix the failing tests" to
+   * Perplexity (API) in the second product build. In the fourth, two turns that named
+   * nobody went to Perplexity (API) while the tests or the review were still open, and
+   * both times it re-confirmed the API and tried to close.
+   */
+  const next =
+    refused || (blocker && !reply.next) ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
+  const ask = !refused
+    ? reply.ask
+    : failing
+      ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
+      : unstyled
+        ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
+        : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn.`;
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
