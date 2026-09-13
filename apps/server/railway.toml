@@ -1,0 +1,20 @@
+# Intended Railway settings for the hosted Flint service (apps/server). Nothing reads this
+# file. Nothing deploys apps/server today.
+#
+# It used to sit at the repo root, where Railway reads it for EVERY service that deploys
+# from this repo. Its dockerfilePath overrode nexus-responder's own setting, and the
+# responder service came up running the Flint server. Config as Code is also deprecated
+# (Railway stops reading these files on 2026-12-01), so set these values on the service.
+#
+# Build context is the repo root so the Dockerfile can see the whole workspace.
+
+[build]
+# No builder key. Railway's Builder enum has no DOCKERFILE value, and an invalid value
+# makes Railway discard the whole file. dockerfilePath alone selects the Dockerfile.
+dockerfilePath = "apps/server/Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
