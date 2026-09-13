@@ -31,11 +31,19 @@ function dayIndex(today: string): number {
  * have to remember to invoke is one that quietly stops happening. What is left are the
  * things a person actually asks for by hand.
  *
- * Config: $NEXUS_RESPONDER_CONFIG, or ~/.flint/nexus-responder.json.
+ * Config: $NEXUS_RESPONDER_CONFIG_JSON (inline), $NEXUS_RESPONDER_CONFIG (a path),
+ * or ~/.flint/nexus-responder.json. Spend ledger: $NEXUS_RESPONDER_STATE_DIR, or ~/.flint.
  */
 
 const DEFAULT_CONFIG = join(homedir(), '.flint', 'nexus-responder.json');
-const SPEND_LEDGER = join(homedir(), '.flint', 'responder-spend.json');
+
+/*
+ * Where the daily spend ledger lives. It has to survive a restart, or every restart hands
+ * the loop a fresh day's budget and the daily cap stops being a cap. On a laptop the home
+ * directory survives; in a container only a mounted volume does, so it is configurable.
+ */
+const STATE_DIR = process.env.NEXUS_RESPONDER_STATE_DIR?.trim() || join(homedir(), '.flint');
+const SPEND_LEDGER = join(STATE_DIR, 'responder-spend.json');
 
 /** One row per runner. A second machine would report under its own name. */
 const RUNNER_NAME = 'responder';
@@ -108,6 +116,13 @@ function stamp(): string {
 }
 
 function loadConfig(): ResponderConfig {
+  /*
+   * Inline JSON first, for a host with no filesystem to put a config file on. It carries
+   * no secrets: every token and key in it is an `env:` reference resolved separately.
+   */
+  const inline = process.env.NEXUS_RESPONDER_CONFIG_JSON?.trim();
+  if (inline) return parseConfig(JSON.parse(inline));
+
   const path = process.env.NEXUS_RESPONDER_CONFIG?.trim() || DEFAULT_CONFIG;
   if (!existsSync(path)) {
     throw new Error(

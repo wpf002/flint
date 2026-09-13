@@ -1,0 +1,16 @@
+# Railway config for the Nexus responder (service nexus-responder in the nexus project).
+#
+# Not read in place. The repo-root railway.toml belongs to apps/server, and Railway reads
+# config from the root of the upload, so scripts/deploy.sh copies this file to the root
+# of a staged copy.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "apps/responder/Dockerfile"
+
+[deploy]
+# Always, not on_failure. The loop never exits on its own: it idles at the daily cap and
+# stops only when Railway sends SIGTERM. on_failure gives up after its retries, so a
+# Nexus outage longer than the backoff would leave nothing taking turns until someone
+# redeployed.
+restartPolicyType = "always"
