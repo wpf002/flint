@@ -17,6 +17,8 @@ export interface RemoteBuild {
   results: RunResult[];
   /** Everything the build produced, so a compile step's output is not lost. */
   files: Record<string, string>;
+  /** Screenshots from a `screenshot` command, at desktop and phone width. */
+  images?: Array<{ name: string; width: number; height: number; base64: string }>;
 }
 
 export interface RemoteSandbox {

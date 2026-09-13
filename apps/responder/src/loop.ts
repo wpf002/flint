@@ -12,11 +12,13 @@ import {
   type RanBefore,
   lastRuns,
   MAX_FILES_PER_TURN,
+  runHistory,
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { needsPassingRun, refuseClose, refuseUnstyled } from './closing.js';
-import { buildRemotely, type RemoteSandbox } from './remote-sandbox.js';
+import { needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
+import type { ReviewScreens } from './visual-review.js';
+import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
  * The loop that makes the space self-running.
@@ -43,6 +45,8 @@ export interface Limits {
   turnTimeoutMs: number;
   /** Delays before retrying a provider that failed on its edge. Tests pass []. */
   retryDelaysMs?: number[];
+  /** Looks at screenshots the sandbox renders. Without one, screenshots go unreviewed. */
+  reviewScreens?: ReviewScreens;
 }
 
 /**
@@ -529,6 +533,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * it from the thread rather than from whichever process happened to produce it.
    */
   let ran: RanBefore[] = [];
+  let reviewTokens = 0;
   if (workspace && reply.run.length > 0) {
     const results: RanBefore[] = [];
 
@@ -561,12 +566,20 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
             output: `The build sandbox could not be reached: ${describe(err)}. Nothing was run.`,
           })),
           files: {} as Record<string, string>,
-        };
+        } as RemoteBuild;
       });
 
       for (const result of remote.results ?? []) {
         results.push({ command: result.command, ok: result.ok, output: result.output });
         log(`[${p.slug}] $ ${result.command} — ${result.ok ? 'ok' : `failed (${result.code ?? 'no exit'})`}`);
+      }
+      if ((remote.images?.length ?? 0) > 0 && limits.reviewScreens) {
+        const review = await limits
+          .reviewScreens(remote.images!, state.goal)
+          .catch((err: unknown) => ({ pass: false, notes: `The visual review could not run: ${describe(err)}`, tokensOut: 0 }));
+        reviewTokens += review.tokensOut;
+        results.push({ command: VISUAL_REVIEW, ok: review.pass, output: review.notes });
+        log(`[${p.slug}] ${VISUAL_REVIEW} — ${review.pass ? 'pass' : 'fixes requested'}`);
       }
       // Compiled output and lockfiles are part of what was built; losing them would make
       // every subsequent turn start from source again.
@@ -634,23 +647,29 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * run in it has passed that check. The turn still lands, and the floor goes to whoever
    * Nexus routes the ask to, which for building is the participant whose strength it is.
    */
-  const failing = reply.done ? refuseClose(state.goal, ran.length > 0 ? ran : lastRuns(state)) : null;
+  const history = [ran, ...runHistory(state)].filter((runs) => runs.length > 0);
   // Judged on the files as they stand after this turn, not on the last turn's.
-  const unstyled =
-    reply.done && !failing
-      ? refuseUnstyled(state.goal, [...built.filter((b) => !reply.files.some((f) => f.name === b.name)), ...reply.files])
+  const current = [...built.filter((b) => !reply.files.some((f) => f.name === b.name)), ...reply.files];
+  const pageChanged = pagesIn(reply.files).length > 0 || reply.files.some((f) => /\.css$/i.test(f.name) || /<style[\s>]/i.test(f.content));
+  const failing = reply.done ? refuseClose(state.goal, history) : null;
+  const unstyled = reply.done && !failing ? refuseUnstyled(state.goal, current) : null;
+  const unreviewed =
+    reply.done && !failing && !unstyled
+      ? refuseUnreviewed(state.goal, current, ran.length > 0 ? history : [[], ...history], pageChanged)
       : null;
-  const refused = failing ?? unstyled;
+  const refused = failing ?? unstyled ?? unreviewed;
   const done = reply.done && !refused;
   // Named, not left to Nexus. Routing on the refusal's wording sent "fix the failing
   // tests" to Perplexity (API) in the second product build, the one participant here
   // whose strength is facts rather than code.
-  const next = refused ? builderFor(state.participants, p.slug, unstyled ? 'design' : 'code') : reply.next;
+  const next = refused ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
   const ask = failing
     ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
     : unstyled
       ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
-      : reply.ask;
+      : unreviewed
+        ? `${unreviewed} Fix what the review found, then screenshot the page again in the same turn.`
+        : reply.ask;
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
@@ -664,7 +683,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
     // Reported so "what did this thread cost" is answerable. Nexus never calls a model
     // and cannot measure this itself.
     tokensIn: generated.usage.input,
-    tokensOut: generated.usage.output,
+    tokensOut: generated.usage.output + reviewTokens,
   });
 
   /*
@@ -770,7 +789,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   log(
     `[${p.slug}] turn ${appended.seq} on ${short(job.threadId)}${job.volunteered ? ' (took an open floor)' : ''} ${handoff} (${cost})`,
   );
-  return { taken: true, tokensOut: generated.usage.output };
+  return { taken: true, tokensOut: generated.usage.output + reviewTokens };
 }
 
 /**

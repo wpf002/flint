@@ -324,12 +324,56 @@ describe('closing a build with a page', () => {
     expect(String(append?.args.ask)).toMatch(/design standard/);
   });
 
-  it('closes when the tests pass and the page is styled', async () => {
-    passing();
-    const css = `body { color: #111; background: #fff; }\n${Array.from({ length: 30 }, (_, i) => `.c${i} { margin: ${i}px; }`).join('\n')}`;
-    const f = builder(closing(`<html><head><style>${css}</style></head><body></body></html>`), GOAL);
-    await tick([f.participant], limitsFor(), silent);
+  const css = `body { color: #111; background: #fff; }\n${Array.from({ length: 30 }, (_, i) => `.c${i} { margin: ${i}px; }`).join('\n')}`;
+  const styledPage = `<html><head><style>${css}</style></head><body></body></html>`;
+  const withScreens = () =>
+    remote.buildRemotely.mockResolvedValueOnce({
+      results: [
+        { command: 'npm test', ok: true, code: 0, output: 'pass 15' },
+        { command: 'screenshot server.js /', ok: true, code: 0, output: 'Rendered /' },
+      ],
+      files: {},
+      images: [{ name: 'mobile', width: 375, height: 812, base64: 'iVBOR' }],
+    } as never);
+  const shooting = (html: string) => ({ ...closing(html), run: [['npm', 'test'], ['screenshot', 'server.js', '/']] });
 
-    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
+  it('closes when the tests pass, the page is styled, and the visual review passes', async () => {
+    withScreens();
+    const f = builder(shooting(styledPage), GOAL);
+    await tick([f.participant], limitsFor({ reviewScreens: async () => ({ pass: true, notes: 'Ship it.', tokensOut: 40 }) }), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append');
+    expect(append?.args.done).toBe(true);
+    expect(append?.args.runs).toEqual(expect.arrayContaining([expect.objectContaining({ command: 'visual review', ok: true })]));
+  });
+
+  it('stays open when the review asks for fixes, and hands the fixes to the designer', async () => {
+    withScreens();
+    const f = builder(shooting(styledPage), GOAL);
+    await tick(
+      [f.participant],
+      limitsFor({ reviewScreens: async () => ({ pass: false, notes: 'Phone: the button overflows the right edge.', tokensOut: 40 }) }),
+      silent,
+    );
+
+    const append = f.calls.find((c) => c.tool === 'thread_append');
+    expect(append?.args.done).toBe(false);
+    expect(String(append?.args.ask)).toContain('button overflows');
+  });
+
+  it('stays open when a styled page was never screenshotted', async () => {
+    passing();
+    const f = builder(closing(styledPage), GOAL);
+    await tick([f.participant], limitsFor({ reviewScreens: async () => ({ pass: true, notes: '', tokensOut: 0 }) }), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(false);
+  });
+
+  it('counts what the review cost toward the turn', async () => {
+    withScreens();
+    const f = builder(shooting(styledPage), GOAL);
+    await tick([f.participant], limitsFor({ reviewScreens: async () => ({ pass: true, notes: 'ok', tokensOut: 40 }) }), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.tokensOut).toBe(45);
   });
 });

@@ -209,6 +209,11 @@ const SANDBOX_LINES = [
   'them first. The output comes back to whoever speaks next.',
   'Every command must exit. A server, watcher or prompt left waiting is killed after 3 minutes and counts',
   'as a failure, so start servers inside tests on port 0 and close them when the test ends.',
+  'To see a page, run ["screenshot", "server.js", "/"] for a server (it is started with a PORT to listen on)',
+  'or ["screenshot", "public/index.html"] for a file. It is rendered at desktop and phone width and a designer',
+  'reviews the screenshots. The review comes back with the run output. A build with a page cannot close',
+  'until its latest review passes, and a turn that changes the page must screenshot it again. To show a',
+  'filled-in state, let the page take its input from the URL (for example /?city=Chicago) and render that path.',
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
 ];
 
@@ -334,6 +339,14 @@ export interface RanBefore {
  * inside the process that happened to produce it. On the turn, it is part of the shared
  * record like everything else.
  */
+/** Every turn's runs, newest first, skipping turns that ran nothing. */
+export function runHistory(state: ThreadState): RanBefore[][] {
+  return state.turns
+    .map((t) => t.runs ?? [])
+    .filter((runs) => runs.length > 0)
+    .reverse();
+}
+
 export function lastRuns(state: ThreadState): RanBefore[] {
   for (let i = state.turns.length - 1; i >= 0; i -= 1) {
     const runs = state.turns[i]?.runs;

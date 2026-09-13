@@ -9,6 +9,7 @@ import { checkAll, publish } from './health.js';
 import { SpendLedger, utcDay } from './spend.js';
 import { exportThread } from './export.js';
 import { probeSandbox } from './remote-sandbox.js';
+import { anthropicReviewer, type ReviewScreens } from './visual-review.js';
 import { dueToday, openStandup, promptFrom } from './standup.js';
 import { beat, type Heartbeat } from './heartbeat.js';
 
@@ -310,6 +311,18 @@ function budgetFor(cfg: ResponderConfig): number {
   return cfg.maxTurnsPerRun > 0 ? cfg.maxTurnsPerRun : Number.POSITIVE_INFINITY;
 }
 
+/*
+ * The model that looks at screenshots: the first Anthropic participant's, with its key.
+ * Built once. Null when no participant can see images, and screenshots then go unreviewed.
+ */
+let reviewer: ReviewScreens | null | undefined;
+function reviewerFor(cfg: ResponderConfig): ReviewScreens | null {
+  if (reviewer !== undefined) return reviewer;
+  const seer = cfg.participants.find((p) => p.provider === 'anthropic');
+  reviewer = seer?.apiKey ? anthropicReviewer(resolveSecret(seer.apiKey, `participant '${seer.slug}' apiKey`), seer.model) : null;
+  return reviewer;
+}
+
 /** Carried across rounds so a thread that keeps failing is rested, not hammered. */
 const failures: Failures = new Map();
 
@@ -334,7 +347,8 @@ async function runRound(
         }
       : {}),
   };
-  const result = await tick(participants, limits, log, failures);
+  const reviewer = reviewerFor(cfg);
+  const result = await tick(participants, reviewer ? { ...limits, reviewScreens: reviewer } : limits, log, failures);
   for (const err of result.errors) log(`! ${err}`);
   return { turnsTaken: result.turnsTaken, tokensOut: result.tokensOut };
 }

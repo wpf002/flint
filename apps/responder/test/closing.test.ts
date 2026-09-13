@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsPassingRun, refuseClose, refuseUnstyled } from '../src/closing.js';
+import { needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
 
 /*
  * The first real product build ended on turn 1: asked to confirm three Node APIs,
@@ -31,16 +31,26 @@ describe('refuseClose', () => {
     expect(refuseClose(BUILD_GOAL, [])).toMatch(/nothing has been run/);
   });
 
-  it('refuses when the last run failed', () => {
-    expect(refuseClose(BUILD_GOAL, [ok('npm install'), failed('npm test')])).toMatch(/failed at `npm test`/);
+  it('refuses when the last test run failed', () => {
+    expect(refuseClose(BUILD_GOAL, [[ok('npm install'), failed('npm test')]])).toMatch(/failed at `npm test`/);
   });
 
-  it('refuses a passing run that ran no tests', () => {
-    expect(refuseClose(BUILD_GOAL, [ok('npm install')])).toMatch(/included no tests/);
+  it('refuses runs that never included the tests', () => {
+    expect(refuseClose(BUILD_GOAL, [[ok('npm install')]])).toMatch(/included the tests/);
   });
 
   it('allows a close once the tests pass', () => {
-    expect(refuseClose(BUILD_GOAL, [ok('npm install'), ok('npm test')])).toBeNull();
+    expect(refuseClose(BUILD_GOAL, [[ok('npm install'), ok('npm test')]])).toBeNull();
+  });
+
+  /* The third build's check that an unknown city exits 1 blocked the close for three turns. */
+  it('ignores a smoke check that fails on purpose', () => {
+    expect(refuseClose(BUILD_GOAL, [[ok('npm test'), failed('node bin/forecast.js Nonexistentcity')]])).toBeNull();
+  });
+
+  it('judges the newest run that included tests, even if later turns ran other things', () => {
+    expect(refuseClose(BUILD_GOAL, [[ok('node bin/forecast.js Chicago')], [ok('npm test')]])).toBeNull();
+    expect(refuseClose(BUILD_GOAL, [[ok('node bin/forecast.js Chicago')], [failed('npm test')]])).toMatch(/failed/);
   });
 
   it('never gets in the way of a goal with no check', () => {
@@ -82,5 +92,41 @@ describe('refuseUnstyled', () => {
 
   it('says nothing when a UI goal has produced no page yet', () => {
     expect(refuseUnstyled(UI_GOAL, [{ name: 'src/server.js', content: 'x' }])).toBeNull();
+  });
+});
+
+/*
+ * The third build's stylesheet was clean and its button ran off a phone screen. Every
+ * participant read the CSS; nobody saw the page.
+ */
+describe('refuseUnreviewed', () => {
+  const GOAL = 'Build forecast. GET / serves one HTML page. `npm test` passes.';
+  const PAGE = [{ name: 'server.js', content: '<!doctype html><html><body></body></html>' }];
+  const review = (ok: boolean, output = ok ? 'Ship it.' : 'Phone: the button overflows.') => ({ command: VISUAL_REVIEW, ok, output });
+  const tests = { command: 'npm test', ok: true, output: '' };
+
+  it('refuses a page nobody has looked at', () => {
+    expect(refuseUnreviewed(GOAL, PAGE, [[tests]], false)).toMatch(/Nobody has looked/);
+  });
+
+  it('passes on the review\'s fixes', () => {
+    expect(refuseUnreviewed(GOAL, PAGE, [[tests, review(false)]], false)).toMatch(/button overflows/);
+  });
+
+  it('accepts a page whose latest review passed', () => {
+    expect(refuseUnreviewed(GOAL, PAGE, [[tests], [review(true)]], false)).toBeNull();
+  });
+
+  it('judges the newest review, not the first good one', () => {
+    expect(refuseUnreviewed(GOAL, PAGE, [[review(false)], [review(true)]], false)).toMatch(/asked for fixes/);
+  });
+
+  /* A review of the page as it was is not a review of the page as it is. */
+  it('refuses a turn that changed the page without looking at the change', () => {
+    expect(refuseUnreviewed(GOAL, PAGE, [[], [review(true)]], true)).toMatch(/changed the page/);
+  });
+
+  it('says nothing about a build with no page', () => {
+    expect(refuseUnreviewed('Build csv2md, a CLI. `npm test` passes.', [{ name: 'src/cli.js', content: 'x' }], [[tests]], false)).toBeNull();
   });
 });

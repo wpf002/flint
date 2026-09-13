@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { lastRuns, parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
+import { parseVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -442,5 +443,22 @@ describe('sources after the reply', () => {
   it('ignores other trailing text', () => {
     const { reply } = parseReply(`${JSON.stringify({ content: 'Plain.', summary: 's', next: null })}\nthanks!`);
     expect(reply.content).toBe('Plain.');
+  });
+});
+
+describe('parseVerdict', () => {
+  it('reads a pass', () => {
+    expect(parseVerdict('VERDICT: PASS\n- Optional: friendlier dates.')).toEqual({ pass: true, notes: '- Optional: friendlier dates.' });
+  });
+
+  it('reads a fix with its notes', () => {
+    const v = parseVerdict('VERDICT: FIX\n- Phone: the button overflows the right edge.');
+    expect(v.pass).toBe(false);
+    expect(v.notes).toContain('button overflows');
+  });
+
+  /* A page nobody would sign off on doesn't ship. */
+  it('fails a review with no verdict', () => {
+    expect(parseVerdict('Looks nice overall!').pass).toBe(false);
   });
 });
