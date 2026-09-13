@@ -21,6 +21,8 @@ interface Fake {
   participant: Participant;
   calls: Array<{ tool: string; args: Record<string, unknown> }>;
   generations: number;
+  /** What the last generate call was given. */
+  lastArgs: unknown;
 }
 
 function fake(
@@ -38,7 +40,7 @@ function fake(
 ): Fake {
   const status = floor.status ?? 'OPEN';
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
-  const state = { generations: 0 };
+  const state = { generations: 0, lastArgs: undefined as unknown };
 
   const participant = {
     slug,
@@ -48,8 +50,9 @@ function fake(
     recheck: async () => {},
     provider: {
       name: 'fake',
-      generate: async () => {
+      generate: async (args: unknown) => {
         state.generations += 1;
+        state.lastArgs = args;
         return {
           message: { id: 'x', role: 'assistant', content: JSON.stringify(reply), timestamp: 0 },
           usage: { input: 10, output: 5 },
@@ -90,6 +93,9 @@ function fake(
     calls,
     get generations() {
       return state.generations;
+    },
+    get lastArgs() {
+      return state.lastArgs;
     },
   } as Fake;
 }
@@ -1290,5 +1296,48 @@ describe('builderFor', () => {
 
   it('leaves routing to Nexus when nobody codes', () => {
     expect(builderFor([{ slug: 'perplexity-api', good_at: 'Current facts.' }], 'gpt-api')).toBeNull();
+  });
+});
+
+/* A three-line fix used to cost the whole file again in output tokens. */
+describe('a turn that edits a file instead of resending it', () => {
+  it('writes the file with the change applied', async () => {
+    const f = fake(
+      'gpt',
+      threads(1),
+      { content: 'Tightened the button.', summary: 'edit', next: null, edits: [{ name: 'a.md', find: 'exist', replace: 'revis', note: 'shorter' }] },
+      { built: [{ name: 'a.md' }] },
+    );
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'artifact_write')?.args).toMatchObject({ name: 'a.md', content: 'revising', note: 'shorter' });
+  });
+
+  it('leaves the file alone and says so when the text is not there', async () => {
+    const f = fake(
+      'gpt',
+      threads(1),
+      { content: 'x', summary: 'y', next: null, edits: [{ name: 'a.md', find: 'nope', replace: 'z', note: null }] },
+      { built: [{ name: 'a.md' }] },
+    );
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'artifact_write')).toBe(false);
+    expect(String(f.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('could not be applied');
+  });
+});
+
+/* Every turn re-sent the whole thread and every file; most of it was the same as last time. */
+describe('what a turn sends the model', () => {
+  it('puts what stays the same in the system prompt behind a cache breakpoint, and the conversation in the message', async () => {
+    const f = fake('gpt', threads(1), undefined, { built: [{ name: 'a.md' }] });
+    await tick([f.participant], limits(), silent);
+
+    const args = f.lastArgs as { system: string; messages: Array<{ content: string }>; cache?: unknown };
+    expect(args.system).toContain('GOAL: goal 0');
+    expect(args.system).toContain('--- a.md');
+    expect(args.messages[0]?.content).toContain('THREAD SO FAR');
+    expect(args.messages[0]?.content).not.toContain('--- a.md');
+    expect(args.cache).toEqual({ system: true });
   });
 });

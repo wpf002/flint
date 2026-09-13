@@ -58,6 +58,17 @@ const FileSchema = z.object({
   note: z.string().max(300).nullish(),
 });
 
+/** Most edits one turn may send. Twenty covers a page of CSS fixes with room over. */
+export const MAX_EDITS_PER_TURN = 20;
+
+/** A change to part of a file that already exists. Cheaper than the file again. */
+const EditSchema = z.object({
+  name: z.string().min(1).max(120),
+  find: z.string().min(1).max(20_000),
+  replace: z.string().max(20_000),
+  note: z.string().max(300).nullish(),
+});
+
 /** What a participant is expected to produce. Kept small so the JSON is easy to hit. */
 export const TurnReplySchema = z
   .object({
@@ -94,6 +105,11 @@ export const TurnReplySchema = z
     files: z.array(FileSchema).max(MAX_FILES_PER_TURN).default([]),
     /** Files the model sent past the per-turn limit, by name. Never written. */
     dropped: z.array(z.string()).default([]),
+    /*
+     * Changes to files that already exist, as find-and-replace pairs. A revision used
+     * to be the whole file again, so a three-line fix cost as much as the file.
+     */
+    edits: z.array(EditSchema).max(MAX_EDITS_PER_TURN).default([]),
     canon: z
       .object({
         key: z.string().min(1).max(200),
@@ -106,6 +122,7 @@ export const TurnReplySchema = z
 
 export type TurnReply = z.infer<typeof TurnReplySchema>;
 export type TurnFile = z.infer<typeof FileSchema>;
+export type TurnEdit = z.infer<typeof EditSchema>;
 
 /** Roughly four characters to a token, less the JSON wrapper. Budget only, not billing. */
 function contentBudget(maxOutputTokens: number): number {
@@ -127,7 +144,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // optional is expressed as nullable instead. Omitting `remember` and `canon` here
   // would silently make it impossible for a participant to store a fact or conclude a
   // thread — the schema would forbid the very fields the loop reads.
-  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'canon'],
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'edits', 'canon'],
   properties: {
     content: { type: 'string', description: 'Your actual contribution, as prose. A file goes in "files", never here.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
@@ -164,7 +181,25 @@ export const TURN_REPLY_JSON_SCHEMA = {
           note: { type: ['string', 'null'], description: 'One line on what you changed.' },
         },
       },
-      description: `What the thread is building. Up to ${MAX_FILES_PER_TURN} files per turn. Empty when this turn changes no file.`,
+      description: `New files and full rewrites. Up to ${MAX_FILES_PER_TURN} files per turn. Empty when this turn writes no whole file.`,
+    },
+    edits: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'find', 'replace', 'note'],
+        properties: {
+          name: { type: 'string', description: 'A file that already exists in the thread, by its path.' },
+          find: {
+            type: 'string',
+            description: 'The exact text to replace, as it appears in the file, occurring once. Include surrounding lines to make it unique.',
+          },
+          replace: { type: 'string', description: 'What goes in its place. Empty to delete the text.' },
+          note: { type: ['string', 'null'], description: 'One line on what the change does.' },
+        },
+      },
+      description: `Changes to existing files as find-and-replace pairs, up to ${MAX_EDITS_PER_TURN} per turn. Use these for any change to a file that exists; use "files" only for new files or rewrites.`,
     },
     canon: {
       type: ['object', 'null'],
@@ -271,6 +306,7 @@ export function systemPrompt(
   maxOutputTokens = 4_000,
   canRun = false,
   mode: ReplyMode = 'prompt',
+  context = '',
 ): string {
   return [
     `You are "${slug}", one of several AI participants working in a shared space called Nexus.`,
@@ -317,6 +353,11 @@ export function systemPrompt(
     'file per turn. Revise what is already there instead of starting again. Leave "files" empty when your turn',
     'changes nothing. A file belongs in "files" and nowhere else: code pasted into "content" is not written',
     'anywhere, is cut off at 8,000 characters, and costs the thread a round.',
+    'To change part of a file that already exists, send "edits" instead of the file: each one names the file,',
+    'the exact text to replace as it appears there (once, so include surrounding lines to make it unique), and',
+    'the replacement. An edit costs a fraction of a rewrite; resending a 300-line file to change three lines',
+    'is the most expensive thing a turn can do. Use "files" for new files and rewrites only. An edit whose',
+    'text is not found is refused and reported, and the file is left as it was.',
     ...(canRun ? SANDBOX_LINES : []),
     ...DESIGN_LINES,
     '',
@@ -343,6 +384,7 @@ export function systemPrompt(
     'process notes, no slashes standing in for words. "rationale" is one sentence under 160 characters.',
     '',
     `Keep "content" under about ${contentBudget(maxOutputTokens)} characters. A reply that runs past the limit is cut off mid-JSON and cannot be recorded at all, so a shorter complete turn always beats a longer truncated one.`,
+    ...(context ? ['', context] : []),
   ]
     .filter((line) => line !== null)
     .join('\n');
@@ -393,12 +435,19 @@ export function lastRuns(state: ThreadState): RanBefore[] {
   return [];
 }
 
-export function threadPrompt(
+/**
+ * The part of a turn's prompt that stays the same from turn to turn: the goal, who is
+ * here, and the files as they stand. It goes in the system prompt, ahead of everything
+ * that changes, so a provider that caches a repeated prefix bills it at the cache rate.
+ * In the fifth product build every turn re-sent the whole thread and every file, fifteen
+ * to twenty-four thousand input tokens a turn, most of it identical to the turn before.
+ *
+ * Files are listed by name, so a change to one leaves the ones before it in place.
+ */
+export function threadContext(
   state: ThreadState,
   self: string,
-  offers: Offer[] = [],
   built: BuiltArtifact[] = [],
-  ran: RanBefore[] = lastRuns(state),
   down: string[] = [],
 ): string {
   const others = state.participants.filter((p) => p.slug !== self);
@@ -417,6 +466,30 @@ export function threadPrompt(
           .join('\n')
       : '- nobody else is active right now';
 
+  const files = [...built].sort((a, b) => a.name.localeCompare(b.name));
+
+  return [
+    `GOAL: ${state.goal}`,
+    '',
+    'WHO ELSE IS HERE:',
+    roster,
+    ...(files.length > 0
+      ? [
+          '',
+          'WHAT THE THREAD HAS BUILT SO FAR — revise this rather than starting again, with "edits" for small changes:',
+          ...files.map((a) => `--- ${a.name} (v${a.version}, last by ${a.lastBy ?? 'someone'}) ---\n${a.content}`),
+        ]
+      : []),
+  ].join('\n');
+}
+
+/** The part of a turn's prompt that changes every turn: the conversation, the last run, the ask. */
+export function threadPrompt(
+  state: ThreadState,
+  self: string,
+  offers: Offer[] = [],
+  ran: RanBefore[] = lastRuns(state),
+): string {
   const history =
     state.turns.length > 0
       ? state.turns
@@ -429,21 +502,11 @@ export function threadPrompt(
       : '(no turns yet — you are opening the work)';
 
   return [
-    `GOAL: ${state.goal}`,
-    '',
-    'WHO ELSE IS HERE:',
-    roster,
+    `You are ${self}. The goal, the roster and the files are in your instructions above.`,
     '',
     `THREAD SO FAR (${state.turnCount} turn${state.turnCount === 1 ? '' : 's'}; older turns appear as their author's own summary):`,
     history,
     '',
-    ...(built.length > 0
-      ? [
-          '',
-          'WHAT THE THREAD HAS BUILT SO FAR — revise this rather than starting again:',
-          ...built.map((a) => `--- ${a.name} (v${a.version}, last by ${a.lastBy ?? 'someone'}) ---\n${a.content}`),
-        ]
-      : []),
     ...(ran.length > 0
       ? [
           '',
@@ -512,6 +575,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       artifact: null,
       files: [],
       dropped: [],
+      edits: [],
     },
     malformed: true,
   };
@@ -561,6 +625,15 @@ function normalize(candidate: unknown): unknown {
       .filter((cmd) => Array.isArray(cmd) && cmd.length > 0);
   } else if (obj.run !== undefined) {
     obj.run = [];
+  }
+  // A malformed edit is dropped on its own; the rest of the turn stands.
+  if (Array.isArray(obj.edits)) {
+    obj.edits = obj.edits
+      .map(normalizeEdit)
+      .filter((e): e is NonNullable<ReturnType<typeof normalizeEdit>> => e !== null)
+      .slice(0, MAX_EDITS_PER_TURN);
+  } else if (obj.edits !== undefined) {
+    obj.edits = [];
   }
   // Same reasoning as canon: a half-understood artifact is worse than none, because the
   // next turn would revise the wrong thing.
@@ -664,4 +737,19 @@ function braces(text: string): string | undefined {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   return start === -1 || end <= start ? undefined : text.slice(start, end + 1);
+}
+
+/** An edit with the three strings it needs, or null. `replace` may be empty. */
+function normalizeEdit(value: unknown): { name: string; find: string; replace: string; note?: string | null } | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const e = value as Record<string, unknown>;
+  if (typeof e.name !== 'string' || e.name.trim().length === 0) return null;
+  if (typeof e.find !== 'string' || e.find.length === 0) return null;
+  if (typeof e.replace !== 'string') return null;
+  return {
+    name: e.name.trim(),
+    find: e.find,
+    replace: e.replace,
+    ...(typeof e.note === 'string' ? { note: clip(e.note, 300) } : {}),
+  };
 }

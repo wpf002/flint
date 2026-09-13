@@ -1,10 +1,12 @@
 import { isFlintError } from '@flint/core';
 import type { Participant } from './participant.js';
 import { decodeAssistantTurn, type Message } from '@flint/core';
+import { applyEdits } from './edits.js';
 import {
   parseReply,
   systemPrompt,
   TAKE_TURN_TOOL,
+  threadContext,
   threadPrompt,
   ThreadStateSchema,
   type BuiltArtifact,
@@ -471,12 +473,25 @@ async function takeTurn(
   const forced = p.replyMode === 'tool';
   const generated = await withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
-    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens, Boolean(workspace), p.replyMode),
+    /*
+     * What stays the same from turn to turn goes first, in the system prompt, and gets a
+     * cache breakpoint. A provider that caches a repeated prefix then bills the goal, the
+     * roster and the files at its cache rate; one that doesn't ignores the hint.
+     */
+    system: systemPrompt(
+      p.slug,
+      p.cfg.role,
+      p.cfg.maxOutputTokens,
+      Boolean(workspace),
+      p.replyMode,
+      threadContext(state, p.slug, built, down),
+    ),
+    cache: { system: true },
     messages: [
       {
         id: `${job.threadId}:${state.turnCount}`,
         role: 'user',
-        content: threadPrompt(state, p.slug, offers, built, lastRuns(state), down),
+        content: threadPrompt(state, p.slug, offers, lastRuns(state)),
         timestamp: 0,
       },
     ],
@@ -505,11 +520,23 @@ async function takeTurn(
   }
 
   /*
+   * Edits become whole files here, on top of what the thread has built, so everything
+   * after this point handles one kind of thing. A refused edit changes nothing and is
+   * reported to the thread below.
+   */
+  const applied = applyEdits(reply.edits, reply.files, built);
+  const files = applied.files;
+  for (const bad of applied.failed) log(`[${p.slug}] edit to ${bad.name} not applied: ${bad.reason}`);
+  if (reply.edits.length > applied.failed.length) {
+    log(`[${p.slug}] applied ${reply.edits.length - applied.failed.length} edit(s)`);
+  }
+
+  /*
    * The work itself, written before the turn that describes it. If the append fails the
    * artifact still stands, which is the right way round — the document is the point and
    * the turn is the commentary.
    */
-  for (const file of reply.files) {
+  for (const file of files) {
     await p
       .call('artifact_write', {
         threadId: job.threadId,
@@ -529,7 +556,7 @@ async function takeTurn(
    * that proves it belong to the same turn rather than to the next one.
    */
   if (workspace) {
-    for (const file of reply.files) {
+    for (const file of files) {
       try {
         materialise(workspace, file.name, file.content);
       } catch (err) {
@@ -561,9 +588,9 @@ async function takeTurn(
        * whatever it produced comes back, because the runner keeps nothing between calls
        * — which is the property that makes it safe to give it code at all.
        */
-      const files: Record<string, string> = {};
-      for (const artifact of built) files[artifact.name] = artifact.content;
-      for (const file of reply.files) files[file.name] = file.content;
+      const bundle: Record<string, string> = {};
+      for (const artifact of built) bundle[artifact.name] = artifact.content;
+      for (const file of files) bundle[file.name] = file.content;
 
       /*
        * A sandbox that is down must not cost the turn.
@@ -574,7 +601,7 @@ async function takeTurn(
        * again next round, with none of it reaching the daily token ledger. Reported as a
        * failed command instead: that is something the thread can read and act on.
        */
-      const remote = await buildRemotely(limits.sandbox, files, commands).catch((err: unknown) => {
+      const remote = await buildRemotely(limits.sandbox, bundle, commands).catch((err: unknown) => {
         log(`[${p.slug}] the build sandbox could not be reached: ${describe(err)}`);
         return {
           results: commands.map((argv) => ({
@@ -642,7 +669,7 @@ async function takeTurn(
        * and would turn every build into a wall of versions nobody reads.
        */
       const known = new Set(built.map((a) => a.name));
-      for (const file of reply.files) known.add(file.name);
+      for (const file of files) known.add(file.name);
       const produced = Object.entries(remote.files ?? {})
         .filter(([name]) => !known.has(name) && keepsAsArtifact(name))
         .slice(0, KEEP_PRODUCED);
@@ -688,8 +715,8 @@ async function takeTurn(
    */
   const history = [ran, ...runHistory(state)].filter((runs) => runs.length > 0);
   // Judged on the files as they stand after this turn, not on the last turn's.
-  const current = [...built.filter((b) => !reply.files.some((f) => f.name === b.name)), ...reply.files];
-  const pageChanged = pagesIn(reply.files).length > 0 || reply.files.some((f) => /\.css$/i.test(f.name) || /<style[\s>]/i.test(f.content));
+  const current = [...built.filter((b) => !files.some((f) => f.name === b.name)), ...files];
+  const pageChanged = pagesIn(files).length > 0 || files.some((f) => /\.css$/i.test(f.name) || /<style[\s>]/i.test(f.content));
   // What would keep the thread open if this turn closed it, judged whether or not it tries.
   const failing = refuseClose(state.goal, history);
   const unstyled = failing ? null : refuseUnstyled(state.goal, current);
@@ -767,12 +794,22 @@ async function takeTurn(
   }
 
   // Nothing was written, and the next speaker would otherwise take the prose for a file.
-  if (reply.files.length === 0 && pastedFile(reply.content)) {
+  if (files.length === 0 && pastedFile(reply.content)) {
     log(`[${p.slug}] pasted a file into its turn instead of sending it in "files". Nothing was written.`);
     await p
       .call('thread_note', {
         threadId: job.threadId,
         content: `${p.slug} pasted a file into its turn instead of sending it in "files", so nothing was written. Whoever speaks next: write the file.`,
+      })
+      .catch(() => undefined);
+  }
+
+  if (applied.failed.length > 0) {
+    const what = applied.failed.map((bad) => `${bad.name}: ${bad.reason}`).join('; ');
+    await p
+      .call('thread_note', {
+        threadId: job.threadId,
+        content: `${applied.failed.length} edit(s) from ${p.slug} could not be applied, so those files are unchanged: ${what}. Send the exact text as it appears in the file, or the whole file.`,
       })
       .catch(() => undefined);
   }

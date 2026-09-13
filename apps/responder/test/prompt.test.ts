@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
-import { lastRuns, parseReply, pastedFile, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
+import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
 import { DEFECTS_ONLY_AFTER, parseVerdict, reviewRequest, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
@@ -80,23 +80,33 @@ describe('threadPrompt', () => {
   });
 
   it('shows the other participants and what they are good at', () => {
-    const prompt = threadPrompt(state, 'claude');
+    const context = threadContext(state, 'claude');
 
-    expect(prompt).toContain('gpt (GPT): implementation');
+    expect(context).toContain('gpt (GPT): implementation');
   });
 
   it('leaves the speaker out of its own roster, since it cannot nominate itself', () => {
-    const prompt = threadPrompt(state, 'claude');
+    const context = threadContext(state, 'claude');
 
-    expect(prompt).not.toContain('claude (Claude)');
+    expect(context).not.toContain('claude (Claude)');
   });
 
-  it('carries the goal, the history and the ask directed at the speaker', () => {
-    const prompt = threadPrompt(state, 'gpt');
+  it('carries the goal in the stable part and the history and ask in the changing part', () => {
+    expect(threadContext(state, 'gpt')).toContain('Design the ingest pipeline.');
 
-    expect(prompt).toContain('Design the ingest pipeline.');
+    const prompt = threadPrompt(state, 'gpt');
     expect(prompt).toContain('[0] claude: We need a queue.');
     expect(prompt).toContain('ASKED OF YOU: Pick a queue.');
+  });
+
+  /* Listed by name, so a change to one file leaves the ones before it in the cached prefix. */
+  it('lists the files in a fixed order', () => {
+    const built = [
+      { name: 'server.js', content: 'b', version: 1, lastBy: 'gpt' },
+      { name: 'README.md', content: 'a', version: 1, lastBy: 'gpt' },
+    ];
+    const context = threadContext(state, 'gpt', built);
+    expect(context.indexOf('--- README.md')).toBeLessThan(context.indexOf('--- server.js'));
   });
 
   it('says so plainly when nothing was asked', () => {
@@ -562,12 +572,30 @@ describe('threadPrompt, when a participant cannot answer', () => {
   });
 
   it('says so in the roster', () => {
-    const prompt = threadPrompt(state, 'claude', [], [], [], ['gpt']);
-    expect(prompt).toContain('gpt (GPT): implementation (UNABLE TO ANSWER RIGHT NOW');
+    const context = threadContext(state, 'claude', [], ['gpt']);
+    expect(context).toContain('gpt (GPT): implementation (UNABLE TO ANSWER RIGHT NOW');
   });
 
   it('says nothing when everyone can', () => {
-    expect(threadPrompt(state, 'claude')).not.toContain('UNABLE TO ANSWER');
+    expect(threadContext(state, 'claude')).not.toContain('UNABLE TO ANSWER');
+  });
+});
+
+describe('edits in a reply', () => {
+  it('keeps well-formed edits and drops malformed ones', () => {
+    const { reply, malformed } = parseReply(
+      JSON.stringify({
+        content: 'x',
+        summary: 'y',
+        edits: [{ name: 'a.js', find: 'old', replace: 'new', note: null }, { name: 'b.js', replace: 'x' }, 'nope'],
+      }),
+    );
+    expect(malformed).toBe(false);
+    expect(reply.edits).toEqual([{ name: 'a.js', find: 'old', replace: 'new' }]);
+  });
+
+  it('defaults to none', () => {
+    expect(parseReply(wellFormed).reply.edits).toEqual([]);
   });
 });
 
