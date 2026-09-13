@@ -11,6 +11,7 @@ import {
   type Offer,
   type RanBefore,
   lastRuns,
+  MAX_FILES_PER_TURN,
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
@@ -661,6 +662,17 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * Anything over Nexus's 600-character limit: Nexus would refuse it anyway, and a
    * conclusion that long isn't one a person should have to read to approve.
    */
+  if (reply.dropped.length > 0) {
+    const names = reply.dropped.join(', ');
+    log(`[${p.slug}] wrote more than ${MAX_FILES_PER_TURN} files. Not written: ${names}`);
+    await p
+      .call('thread_note', {
+        threadId: job.threadId,
+        content: `${p.slug} sent more than ${MAX_FILES_PER_TURN} files in one turn, so these were not written: ${names}. Write them in the next turn.`,
+      })
+      .catch(() => undefined);
+  }
+
   // Said in the thread, where the next speaker and the console both read it.
   if (refused) {
     await p

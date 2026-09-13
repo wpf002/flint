@@ -345,11 +345,17 @@ describe('files in a reply', () => {
   });
 
   /* Past the limit the schema would reject the whole reply, losing every file. */
-  it('keeps the first 8 files when sent more, without losing the turn', () => {
-    const files = Array.from({ length: 10 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+  it('keeps the first 12 files when sent more, without losing the turn', () => {
+    const files = Array.from({ length: 14 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
     const { reply: r, malformed } = reply({ files });
     expect(malformed).toBe(false);
-    expect(r.files).toHaveLength(8);
+    expect(r.files).toHaveLength(12);
+  });
+
+  /* The first csv2md build lost its README this way, and nothing said so. */
+  it('names the files it could not keep', () => {
+    const files = Array.from({ length: 14 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+    expect(reply({ files }).reply.dropped).toEqual(['f12.js', 'f13.js']);
   });
 
   it('has no files when the model returns unstructured text', () => {

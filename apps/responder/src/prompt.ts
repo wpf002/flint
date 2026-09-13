@@ -48,7 +48,7 @@ export const ThreadStateSchema = z
 export type ThreadState = z.infer<typeof ThreadStateSchema>;
 
 /** Most files one turn may write. Enough for a small app in one go. */
-export const MAX_FILES_PER_TURN = 8;
+export const MAX_FILES_PER_TURN = 12;
 
 const FileSchema = z.object({
   name: z.string().min(1).max(120),
@@ -90,6 +90,8 @@ export const TurnReplySchema = z
      * accepted and folded in.
      */
     files: z.array(FileSchema).max(MAX_FILES_PER_TURN).default([]),
+    /** Files the model sent past the per-turn limit, by name. Never written. */
+    dropped: z.array(z.string()).default([]),
     canon: z
       .object({
         key: z.string().min(1).max(200),
@@ -414,6 +416,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       run: [],
       artifact: null,
       files: [],
+      dropped: [],
     },
     malformed: true,
   };
@@ -470,12 +473,14 @@ function normalize(candidate: unknown): unknown {
   // A malformed entry is dropped, not the whole list: one bad file shouldn't cost the
   // turn the other files it wrote.
   if (Array.isArray(obj.files)) {
-    obj.files = obj.files
+    const files = obj.files
       .map(normalizeFile)
-      .filter((f): f is NonNullable<ReturnType<typeof normalizeFile>> => f !== null)
-      // Trimmed here, before the schema sees it. Past the limit the schema would
-      // reject the whole reply, losing every file and the turn with it.
-      .slice(0, MAX_FILES_PER_TURN);
+      .filter((f): f is NonNullable<ReturnType<typeof normalizeFile>> => f !== null);
+    // Trimmed here, before the schema sees it. Past the limit the schema would reject the
+    // whole reply, losing every file and the turn with it. What was trimmed is kept by
+    // name so the thread is told: the first csv2md build silently lost its README.
+    obj.files = files.slice(0, MAX_FILES_PER_TURN);
+    obj.dropped = files.slice(MAX_FILES_PER_TURN).map((f) => f.name);
   } else if (obj.files === null) {
     obj.files = [];
   }
