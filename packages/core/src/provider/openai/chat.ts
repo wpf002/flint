@@ -235,7 +235,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
 async function httpError(response: Response): Promise<OpenAiHttpError> {
   const text = await response.text().catch(() => '');
   const parsed = safeJson(text) as { error?: { message?: string; code?: string; type?: string } } | undefined;
-  const message = parsed?.error?.message ?? describeBody(text) ?? response.statusText;
+  const message = parsed?.error?.message ?? describeBody(text, response.status) ?? response.statusText;
   const code = parsed?.error?.code ?? parsed?.error?.type;
   return new OpenAiHttpError(response.status, message || response.statusText, code);
 }
@@ -245,11 +245,18 @@ async function httpError(response: Response): Promise<OpenAiHttpError> {
  * Pasting that into the message buried every log line under a page of markup and said
  * nothing the status code had not already said.
  */
-function describeBody(text: string): string | undefined {
+function describeBody(text: string, status?: number): string | undefined {
   const body = text.trim();
   if (body.length === 0) return undefined;
   if (/^<(!doctype|html)/i.test(body)) {
-    return 'the endpoint returned a web page instead of a response, which usually means its edge is failing rather than the API';
+    /*
+     * The status and the page's title, and nothing else from it. Without them a 502
+     * outage and a bot-check page served to a datacenter IP read the same, and they
+     * have opposite fixes: wait it out, or change where the request comes from.
+     */
+    const title = /<title[^>]*>([^<]{1,120})<\/title>/i.exec(body)?.[1]?.trim();
+    const detail = [status ? `HTTP ${status}` : null, title ? `"${title}"` : null].filter(Boolean).join(', ');
+    return `the endpoint returned a web page instead of a response${detail ? ` (${detail})` : ''}, which usually means its edge is failing rather than the API`;
   }
   return body.slice(0, 300);
 }

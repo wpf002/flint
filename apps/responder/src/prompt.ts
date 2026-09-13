@@ -207,6 +207,8 @@ const SANDBOX_LINES = [
   'pnpm, python3 -m, pip3 install, git (init, status, diff, add, log, commit), ls, cat, mkdir. The npm registry',
   'is reachable. Nothing installed carries over to the next run, so a run that needs dependencies installs',
   'them first. The output comes back to whoever speaks next.',
+  'Every command must exit. A server, watcher or prompt left waiting is killed after 3 minutes and counts',
+  'as a failure, so start servers inside tests on port 0 and close them when the test ends.',
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
 ];
 
