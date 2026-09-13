@@ -7,7 +7,8 @@ import { Participant } from './participant.js';
 import { describe, tick, type Failures, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
 import { SpendLedger, utcDay } from './spend.js';
-import { exportWorkspace, workspaceFor } from './workspace.js';
+import { exportThread } from './export.js';
+import { probeSandbox } from './remote-sandbox.js';
 import { dueToday, openStandup, promptFrom } from './standup.js';
 import { beat, type Heartbeat } from './heartbeat.js';
 
@@ -215,16 +216,15 @@ async function main(): Promise<void> {
       case 'export': {
         const [threadId, ...rest] = process.argv.slice(3);
         if (!threadId) throw new Error('Usage: responder export <threadId> [destination]');
-        if (!cfg.workspaceRoot) throw new Error('No workspaceRoot is set, so nothing has been built on disk.');
 
-        const from = workspaceFor(cfg.workspaceRoot, threadId);
-        // Named after the thread's goal rather than its id, because the directory is the
-        // product now and an id is not a name anyone wants to keep.
         const fallback = join(process.cwd(), `nexus-${threadId.slice(0, 8)}`);
-        const result = await exportWorkspace(from, rest.join(' ') || fallback);
+        const result = await exportThread(participants[0]!, threadId, rest.join(' ') || fallback);
 
-        log(`copied ${result.files} file${result.files === 1 ? '' : 's'} to ${result.destination}`);
-        log('node_modules was left behind: reinstall it wherever this is going.');
+        log(`wrote ${result.files} file${result.files === 1 ? '' : 's'} to ${result.destination}`);
+        if (result.refused.length > 0) {
+          log(`not written, because they'd land outside it: ${result.refused.join(', ')}`);
+        }
+        log('Dependencies are not included. Install them wherever this is going.');
         return;
       }
 
@@ -348,6 +348,11 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
    * so a restart does not repeat a standup that already happened today.
    */
   let lastStandup = (await beat(participants[0]!, RUNNER_NAME, ledgerState(ledger, cfg)))?.lastStandupDay ?? null;
+
+  if (cfg.canRun && cfg.sandboxUrl && cfg.sandboxToken) {
+    const sandbox = { url: cfg.sandboxUrl, token: resolveSecret(cfg.sandboxToken, 'sandboxToken') };
+    log(await probeSandbox(sandbox).catch((err: unknown) => `build sandbox could not be reached: ${describe(err)}`));
+  }
   let lastHealthAt = 0;
 
   const stop = (): void => {

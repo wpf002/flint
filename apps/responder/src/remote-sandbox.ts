@@ -64,3 +64,19 @@ export async function buildRemotely(
 
   return (await response.json()) as RemoteBuild;
 }
+
+/**
+ * Runs `node --version` through the sandbox, once, at startup.
+ *
+ * A wrong URL, a token that doesn't match, or a sandbox running the wrong program all
+ * look fine until the first real build fails, which may be days later, inside a thread,
+ * as a failed command a participant then tries to fix. Checked when the responder starts,
+ * it's one log line saying which.
+ */
+export async function probeSandbox(sandbox: RemoteSandbox): Promise<string> {
+  const build = await buildRemotely(sandbox, {}, [['node', '--version']]);
+  const result = build.results?.[0];
+  return result?.ok
+    ? `build sandbox answered (node ${result.output.trim()})`
+    : `build sandbox is not usable: ${result?.output ?? 'it returned no result'}`;
+}
