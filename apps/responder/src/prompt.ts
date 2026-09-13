@@ -47,6 +47,15 @@ export const ThreadStateSchema = z
 
 export type ThreadState = z.infer<typeof ThreadStateSchema>;
 
+/** Most files one turn may write. Enough for a small app in one go. */
+export const MAX_FILES_PER_TURN = 8;
+
+const FileSchema = z.object({
+  name: z.string().min(1).max(120),
+  content: z.string().min(1).max(100_000),
+  note: z.string().max(300).nullish(),
+});
+
 /** What a participant is expected to produce. Kept small so the JSON is easy to hit. */
 export const TurnReplySchema = z
   .object({
@@ -73,13 +82,14 @@ export const TurnReplySchema = z
      * because not every turn is a revision — a critique that changes nothing is still a
      * turn worth having.
      */
-    artifact: z
-      .object({
-        name: z.string().min(1).max(120),
-        content: z.string().min(1).max(100_000),
-        note: z.string().max(300).nullish(),
-      })
-      .nullish(),
+    artifact: FileSchema.nullish(),
+    /*
+     * Every file this turn writes. One file per turn meant a six-file app needed six
+     * turns just to exist, each handing the floor to someone else in between, and the
+     * thread hit its turn cap before anything could be tested. `artifact` is still
+     * accepted and folded in.
+     */
+    files: z.array(FileSchema).max(MAX_FILES_PER_TURN).default([]),
     canon: z
       .object({
         key: z.string().min(1).max(200),
@@ -91,6 +101,7 @@ export const TurnReplySchema = z
   .passthrough();
 
 export type TurnReply = z.infer<typeof TurnReplySchema>;
+export type TurnFile = z.infer<typeof FileSchema>;
 
 /** Roughly four characters to a token, less the JSON wrapper. Budget only, not billing. */
 function contentBudget(maxOutputTokens: number): number {
@@ -112,7 +123,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // optional is expressed as nullable instead. Omitting `remember` and `canon` here
   // would silently make it impossible for a participant to store a fact or conclude a
   // thread — the schema would forbid the very fields the loop reads.
-  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'artifact', 'canon'],
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'canon'],
   properties: {
     content: { type: 'string', description: 'Your actual contribution.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
@@ -135,16 +146,21 @@ export const TURN_REPLY_JSON_SCHEMA = {
       description:
         'Commands to run against what the thread built, each as an argv array — ["pnpm","install"], not "pnpm install". Empty unless you want to check that something works.',
     },
-    artifact: {
-      type: ['object', 'null'],
-      additionalProperties: false,
-      required: ['name', 'content', 'note'],
-      properties: {
-        name: { type: 'string', description: 'A filename: "pricing-model.md", "schema.sql".' },
-        content: { type: 'string', description: 'The whole document as it should now stand, not a diff.' },
-        note: { type: ['string', 'null'], description: 'One line on what you changed.' },
+    files: {
+      type: 'array',
+      // No maxItems. OpenAI's strict mode has rejected array-length keywords, which would
+      // fail every GPT turn. The limit is enforced when the reply is parsed.
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'content', 'note'],
+        properties: {
+          name: { type: 'string', description: 'A path: "README.md", "src/index.js", "test/csv.test.js".' },
+          content: { type: 'string', description: 'The whole file as it should now stand, not a diff.' },
+          note: { type: ['string', 'null'], description: 'One line on what you changed.' },
+        },
       },
-      description: 'The thing the thread is building. Write or revise it here.',
+      description: `What the thread is building. Up to ${MAX_FILES_PER_TURN} files per turn. Empty when this turn changes no file.`,
     },
     canon: {
       type: ['object', 'null'],
@@ -175,7 +191,29 @@ export const TAKE_TURN_TOOL = {
   idempotent: false,
 } as const;
 
-export function systemPrompt(slug: string, role: string | undefined, maxOutputTokens = 4_000): string {
+/*
+ * Shown only when builds are on. Without it models guessed at what they could run, and a
+ * refused `bash -c` or `yarn` costs a whole turn to find out about. The allowlist itself
+ * lives in Nexus's sandbox (apps/sandbox/src/index.ts); a refusal names what is allowed.
+ */
+const SANDBOX_LINES = [
+  '',
+  '"run" executes commands in a disposable build sandbox after your files are written. Every file in the',
+  'thread is copied into a fresh directory first. Each command is an argv array, like ["npm","test"], and',
+  'there is no shell, so no pipes, redirects or "&&". Up to 4 commands per turn, stopping at the first',
+  'failure. Available: node, npm (install, ci, run, test, exec), npx (tsc, vitest, jest, eslint, tsx, vite),',
+  'pnpm, python3 -m, pip3 install, git (init, status, diff, add, log, commit), ls, cat, mkdir. The npm registry',
+  'is reachable. Nothing installed carries over to the next run, so a run that needs dependencies installs',
+  'them first. The output comes back to whoever speaks next.',
+  'Something is only done when a run shows it working. Run the tests before you call a program finished.',
+];
+
+export function systemPrompt(
+  slug: string,
+  role: string | undefined,
+  maxOutputTokens = 4_000,
+  canRun = false,
+): string {
   return [
     `You are "${slug}", one of several AI participants working in a shared space called Nexus.`,
     role ? `Your declared strength: ${role}` : null,
@@ -204,11 +242,13 @@ export function systemPrompt(slug: string, role: string | undefined, maxOutputTo
     '  "remember": ["a durable fact worth keeping beyond this thread"]',
     '}',
     '',
-    '"artifact" is what the thread is actually for. If the goal calls for something — a document, a spec,',
-    'a plan, a schema — build it there rather than describing it in your turn. Send the whole thing as it',
-    'should now stand, not a diff, and say in "note" what you changed. Revise what is already there instead',
-    'of starting again; your turn is for the reasoning, the artifact is for the result. Leave it out when',
-    'your turn genuinely changes nothing about it.',
+    '"files" is what the thread is actually for. If the goal calls for something — a document, a spec, a',
+    'schema, a working program — build it there rather than describing it in your turn. Each file is sent',
+    `whole, as it should now stand, not a diff, with "note" saying what you changed. Up to ${MAX_FILES_PER_TURN} files per`,
+    'turn, and paths can be nested ("src/index.js"). Write everything a step needs in one turn instead of one',
+    'file per turn. Revise what is already there instead of starting again. Leave "files" empty when your turn',
+    'changes nothing.',
+    ...(canRun ? SANDBOX_LINES : []),
     '',
     'You cannot see the system you are working on. If a turn needs facts about Nexus itself — what happened',
     'this week, what the tables actually are — say so in your turn and ask for them rather than describing',
@@ -350,7 +390,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
   const candidate = extractJson(raw);
   if (candidate) {
     const parsed = TurnReplySchema.safeParse(normalize(candidate));
-    if (parsed.success) return { reply: parsed.data, malformed: false };
+    if (parsed.success) return { reply: foldFiles(parsed.data), malformed: false };
   }
 
   /*
@@ -371,9 +411,20 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       accept: [],
       run: [],
       artifact: null,
+      files: [],
     },
     malformed: true,
   };
+}
+
+/**
+ * One list of files, whichever field the model used. A name written twice in one turn
+ * keeps its last version, which is what the model meant by writing it again.
+ */
+function foldFiles(reply: TurnReply): TurnReply {
+  const byName = new Map<string, TurnFile>();
+  for (const file of [...reply.files, ...(reply.artifact ? [reply.artifact] : [])]) byName.set(file.name, file);
+  return { ...reply, files: [...byName.values()].slice(0, MAX_FILES_PER_TURN) };
 }
 
 /**
@@ -413,12 +464,18 @@ function normalize(candidate: unknown): unknown {
   }
   // Same reasoning as canon: a half-understood artifact is worse than none, because the
   // next turn would revise the wrong thing.
-  if (obj.artifact !== undefined && obj.artifact !== null) {
-    const a = obj.artifact as Record<string, unknown>;
-    obj.artifact =
-      typeof a.name === 'string' && a.name.trim().length > 0 && a.content !== undefined
-        ? { name: a.name, content: render(a.content), ...(typeof a.note === 'string' ? { note: a.note } : {}) }
-        : null;
+  if (obj.artifact !== undefined && obj.artifact !== null) obj.artifact = normalizeFile(obj.artifact);
+  // A malformed entry is dropped, not the whole list: one bad file shouldn't cost the
+  // turn the other files it wrote.
+  if (Array.isArray(obj.files)) {
+    obj.files = obj.files
+      .map(normalizeFile)
+      .filter((f): f is NonNullable<ReturnType<typeof normalizeFile>> => f !== null)
+      // Trimmed here, before the schema sees it. Past the limit the schema would
+      // reject the whole reply, losing every file and the turn with it.
+      .slice(0, MAX_FILES_PER_TURN);
+  } else if (obj.files === null) {
+    obj.files = [];
   }
   // A malformed proposal is dropped rather than sent: canon is the one place where a
   // half-understood write is worse than no write.
@@ -432,6 +489,15 @@ function normalize(candidate: unknown): unknown {
   if (obj.ask !== undefined && obj.ask !== null && typeof obj.ask !== 'string') obj.ask = render(obj.ask);
 
   return obj;
+}
+
+/** A file entry the parser can trust, or null. A half-understood file is worse than none. */
+function normalizeFile(value: unknown): { name: string; content: string; note?: string } | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const a = value as Record<string, unknown>;
+  return typeof a.name === 'string' && a.name.trim().length > 0 && a.content !== undefined
+    ? { name: a.name, content: render(a.content), ...(typeof a.note === 'string' ? { note: a.note } : {}) }
+    : null;
 }
 
 function render(value: unknown): string {

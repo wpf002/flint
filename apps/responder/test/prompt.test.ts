@@ -304,3 +304,68 @@ describe('lastRuns', () => {
     expect(prompt).toContain('2 failing');
   });
 });
+
+/*
+ * One file per turn meant a six-file app needed six turns just to exist, and the thread
+ * hit its turn cap before anything was tested.
+ */
+describe('files in a reply', () => {
+  const reply = (extra: Record<string, unknown>) => parseReply(JSON.stringify({ content: 'x', summary: 'y', ...extra }));
+
+  it('takes several files in one turn, nested paths included', () => {
+    const { reply: r } = reply({
+      files: [
+        { name: 'package.json', content: '{}', note: null },
+        { name: 'src/index.js', content: 'export {}', note: 'entry' },
+      ],
+    });
+    expect(r.files.map((f) => f.name)).toEqual(['package.json', 'src/index.js']);
+  });
+
+  it('folds a legacy single artifact into the list', () => {
+    const { reply: r } = reply({ artifact: { name: 'README.md', content: '# App' } });
+    expect(r.files.map((f) => f.name)).toEqual(['README.md']);
+  });
+
+  it('keeps the last version of a file written twice', () => {
+    const { reply: r } = reply({
+      files: [
+        { name: 'a.js', content: 'one' },
+        { name: 'a.js', content: 'two' },
+      ],
+    });
+    expect(r.files).toHaveLength(1);
+    expect(r.files[0]!.content).toBe('two');
+  });
+
+  it('drops a malformed file and keeps the rest', () => {
+    const { reply: r, malformed } = reply({ files: [{ content: 'no name' }, { name: 'ok.js', content: 'fine' }] });
+    expect(malformed).toBe(false);
+    expect(r.files.map((f) => f.name)).toEqual(['ok.js']);
+  });
+
+  /* Past the limit the schema would reject the whole reply, losing every file. */
+  it('keeps the first 8 files when sent more, without losing the turn', () => {
+    const files = Array.from({ length: 10 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+    const { reply: r, malformed } = reply({ files });
+    expect(malformed).toBe(false);
+    expect(r.files).toHaveLength(8);
+  });
+
+  it('has no files when the model returns unstructured text', () => {
+    expect(parseReply('just prose').reply.files).toEqual([]);
+  });
+});
+
+describe('the sandbox in the system prompt', () => {
+  it('is described when builds are on', () => {
+    const prompt = systemPrompt('gpt-api', 'implementation', 4_000, true);
+    expect(prompt).toContain('"run" executes commands');
+    expect(prompt).toContain('no shell');
+  });
+
+  /* A model told it can run things when it can't would plan turns around runs that never happen. */
+  it('is not mentioned when builds are off', () => {
+    expect(systemPrompt('gpt-api', 'implementation', 4_000, false)).not.toContain('"run" executes commands');
+  });
+});

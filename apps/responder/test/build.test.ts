@@ -246,3 +246,30 @@ describe('nested build output', () => {
     expect(written).toContain('src/index.ts');
   });
 });
+
+describe('a turn that writes several files', () => {
+  const MULTI = {
+    content: 'Scaffolded the CLI.',
+    summary: 'scaffold',
+    files: [
+      { name: 'package.json', content: '{"name":"csv2md","type":"module"}', note: null },
+      { name: 'src/csv.js', content: 'export const parse = () => [];', note: null },
+      { name: 'test/csv.test.js', content: 'import "node:test";', note: null },
+    ],
+    run: [['npm', 'test']],
+  };
+
+  it('writes every file to Nexus', async () => {
+    const f = builder(MULTI);
+    await tick([f.participant], limitsFor(), silent);
+    const written = f.calls.filter((c) => c.tool === 'artifact_write').map((c) => c.args.name);
+    expect(written).toEqual(expect.arrayContaining(['package.json', 'src/csv.js', 'test/csv.test.js']));
+  });
+
+  it('sends every file to the sandbox before the run', async () => {
+    const f = builder(MULTI);
+    await tick([f.participant], limitsFor(), silent);
+    const sent = (remote.buildRemotely.mock.calls[0] as unknown as [unknown, Record<string, string>])[1];
+    expect(Object.keys(sent)).toEqual(expect.arrayContaining(['package.json', 'src/csv.js', 'test/csv.test.js']));
+  });
+});

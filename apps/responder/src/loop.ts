@@ -448,7 +448,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   const forced = p.replyMode === 'tool';
   const generated = await p.provider.generate({
     model: p.cfg.model,
-    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens),
+    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens, Boolean(workspace)),
     messages: [
       {
         id: `${job.threadId}:${state.turnCount}`,
@@ -486,30 +486,32 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * artifact still stands, which is the right way round — the document is the point and
    * the turn is the commentary.
    */
-  if (reply.artifact) {
+  for (const file of reply.files) {
     await p
       .call('artifact_write', {
         threadId: job.threadId,
-        name: reply.artifact.name,
-        content: reply.artifact.content,
-        ...(reply.artifact.note ? { note: reply.artifact.note } : {}),
+        name: file.name,
+        content: file.content,
+        ...(file.note ? { note: file.note } : {}),
       })
       .then((written) => {
         const v = (written as { version?: number }).version;
-        log(`[${p.slug}] wrote ${reply.artifact!.name}${v ? ` v${v}` : ''}`);
+        log(`[${p.slug}] wrote ${file.name}${v ? ` v${v}` : ''}`);
       })
-      .catch((err: unknown) => log(`[${p.slug}] could not write ${reply.artifact!.name}: ${describe(err)}`));
+      .catch((err: unknown) => log(`[${p.slug}] could not write ${file.name}: ${describe(err)}`));
   }
 
   /*
    * Anything this turn wrote goes to disk before its commands run, so a fix and the run
    * that proves it belong to the same turn rather than to the next one.
    */
-  if (workspace && reply.artifact) {
-    try {
-      materialise(workspace, reply.artifact.name, reply.artifact.content);
-    } catch (err) {
-      log(`[${p.slug}] could not write ${reply.artifact.name} to disk: ${describe(err)}`);
+  if (workspace) {
+    for (const file of reply.files) {
+      try {
+        materialise(workspace, file.name, file.content);
+      } catch (err) {
+        log(`[${p.slug}] could not write ${file.name} to disk: ${describe(err)}`);
+      }
     }
   }
 
@@ -533,7 +535,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
        */
       const files: Record<string, string> = {};
       for (const artifact of built) files[artifact.name] = artifact.content;
-      if (reply.artifact) files[reply.artifact.name] = reply.artifact.content;
+      for (const file of reply.files) files[file.name] = file.content;
 
       /*
        * A sandbox that is down must not cost the turn.
@@ -583,7 +585,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
        * and would turn every build into a wall of versions nobody reads.
        */
       const known = new Set(built.map((a) => a.name));
-      if (reply.artifact) known.add(reply.artifact.name);
+      for (const file of reply.files) known.add(file.name);
       const produced = Object.entries(remote.files ?? {})
         .filter(([name]) => !known.has(name) && keepsAsArtifact(name))
         .slice(0, KEEP_PRODUCED);
