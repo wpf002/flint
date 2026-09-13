@@ -546,3 +546,27 @@ describe('withVerdict, when the reply was made of something other than text', ()
     expect(review.notes).toContain('blocks: thinking');
   });
 });
+
+/* A roster that hides a participant's state gets turns handed to someone who cannot take them. */
+describe('threadPrompt, when a participant cannot answer', () => {
+  const state = ThreadStateSchema.parse({
+    threadId: 't1',
+    goal: 'Build it.',
+    status: 'OPEN',
+    turnCount: 1,
+    participants: [
+      { slug: 'claude', label: 'Claude', good_at: 'design' },
+      { slug: 'gpt', label: 'GPT', good_at: 'implementation' },
+    ],
+    turns: [],
+  });
+
+  it('says so in the roster', () => {
+    const prompt = threadPrompt(state, 'claude', [], [], [], ['gpt']);
+    expect(prompt).toContain('gpt (GPT): implementation (UNABLE TO ANSWER RIGHT NOW');
+  });
+
+  it('says nothing when everyone can', () => {
+    expect(threadPrompt(state, 'claude')).not.toContain('UNABLE TO ANSWER');
+  });
+});

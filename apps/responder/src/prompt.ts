@@ -399,12 +399,22 @@ export function threadPrompt(
   offers: Offer[] = [],
   built: BuiltArtifact[] = [],
   ran: RanBefore[] = lastRuns(state),
+  down: string[] = [],
 ): string {
   const others = state.participants.filter((p) => p.slug !== self);
 
+  // Said in the roster, so a turn does its part itself rather than handing to someone
+  // whose provider is down and waiting.
   const roster =
     others.length > 0
-      ? others.map((p) => `- ${p.slug} (${p.label}): ${p.good_at}`).join('\n')
+      ? others
+          .map(
+            (p) =>
+              `- ${p.slug} (${p.label}): ${p.good_at}${
+                down.includes(p.slug) ? ' (UNABLE TO ANSWER RIGHT NOW. Do not hand to it; do its part yourself or hand to someone else.)' : ''
+              }`,
+          )
+          .join('\n')
       : '- nobody else is active right now';
 
   const history =

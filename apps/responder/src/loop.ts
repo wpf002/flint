@@ -339,8 +339,11 @@ async function runJob(
     }
   }
 
+  // Who cannot answer right now, so a turn never hands the thread to them.
+  const down = participants.filter((o) => o.failing && o.slug !== job.participant.slug).map((o) => o.slug);
+
   try {
-    const { taken, tokensOut } = await takeTurn(job, limits, log);
+    const { taken, tokensOut } = await takeTurn(job, limits, log, down);
     failures.delete(job.threadId);
     return { taken, closed: false, tokensOut };
   } catch (err) {
@@ -351,8 +354,13 @@ async function runJob(
      * A participant whose provider is down should not hold a thread the others could
      * finish. Passing it on costs nothing and is what a person would do; resting the
      * thread instead punishes the work for a fault in one participant.
+     *
+     * A transient fault gets a second try, since one failed call is usually nothing.
+     * An account fault does not clear by itself: the sixth product build spent three
+     * rounds and a fifteen-minute rescue each time a builder with no credit was tried.
      */
-    if (now >= PASS_AFTER && !job.volunteered && isProviderFault(err)) {
+    const fault = providerFault(err);
+    if (!job.volunteered && (fault === 'account' || (fault === 'transient' && now >= PASS_AFTER))) {
       const passed = await passOn(job, participants, err, log).catch(() => false);
       if (passed) {
         failures.delete(job.threadId);
@@ -371,7 +379,12 @@ async function runJob(
   }
 }
 
-async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken: boolean; tokensOut: number }> {
+async function takeTurn(
+  job: Waiting,
+  limits: Limits,
+  log: Log,
+  down: string[] = [],
+): Promise<{ taken: boolean; tokensOut: number }> {
   const { participant: p } = job;
 
   const state = ThreadStateSchema.parse(await p.call('thread_read', { threadId: job.threadId }));
@@ -463,7 +476,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       {
         id: `${job.threadId}:${state.turnCount}`,
         role: 'user',
-        content: threadPrompt(state, p.slug, offers, built),
+        content: threadPrompt(state, p.slug, offers, built, lastRuns(state), down),
         timestamp: 0,
       },
     ],
@@ -690,8 +703,21 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * nobody went to Perplexity (API) while the tests or the review were still open, and
    * both times it re-confirmed the API and tried to close.
    */
-  const next =
+  const wanted =
     refused || (blocker && !reply.next) ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
+  /*
+   * Never to someone known to be unable to answer. In the sixth product build the
+   * builder ran out of credit, and each turn handed the thread back to it anyway; each
+   * time it took three failures and a fifteen-minute rescue to move on.
+   */
+  const able = state.participants.filter((c) => c.slug !== p.slug && !down.includes(c.slug));
+  const next =
+    wanted && down.includes(wanted)
+      ? (builderFor(able, p.slug, failing ? 'code' : 'design') ?? able[0]?.slug ?? null)
+      : wanted;
+  if (wanted && next !== wanted) {
+    log(`[${p.slug}] handed to ${wanted}, which cannot answer right now; ${next ? `${next} gets it` : 'the floor is open'} instead`);
+  }
   const ask = !refused
     ? reply.ask
     : failing
@@ -743,6 +769,15 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       .call('thread_note', {
         threadId: job.threadId,
         content: `${p.slug} pasted a file into its turn instead of sending it in "files", so nothing was written. Whoever speaks next: write the file.`,
+      })
+      .catch(() => undefined);
+  }
+
+  if (wanted && next !== wanted) {
+    await p
+      .call('thread_note', {
+        threadId: job.threadId,
+        content: `${wanted} was handed the thread but is unable to answer right now, so ${next ? `it went to ${next}` : 'the floor is open'} instead.`,
       })
       .catch(() => undefined);
   }
@@ -928,15 +963,19 @@ async function closeExhausted(job: Waiting, cap: number): Promise<void> {
 }
 
 /**
- * True when the failure is the provider's rather than the thread's.
+ * Whether the failure is the provider's rather than the thread's, and what kind.
  *
  * A rejected payload or a bad request will fail the same way for everyone, so passing
  * it on would only spread the failure. An unreachable or overloaded provider is
- * specific to this participant, and someone else can answer.
+ * transient and specific to this participant. An account with no credit or a bad key
+ * is specific to it too, and stays that way until a person acts.
  */
-function isProviderFault(err: unknown): boolean {
-  if (!isFlintError(err)) return false;
-  return err.error.kind === 'provider_unavailable' || err.error.kind === 'timeout' || err.error.kind === 'rate_limit';
+export function providerFault(err: unknown): 'transient' | 'account' | null {
+  if (!isFlintError(err)) return null;
+  const { kind } = err.error;
+  if (kind === 'provider_unavailable' || kind === 'timeout' || kind === 'rate_limit') return 'transient';
+  if (kind === 'validation' && /quota|billing|credit|api key/i.test(err.message)) return 'account';
+  return null;
 }
 
 /**
@@ -949,7 +988,17 @@ async function passOn(
   err: unknown,
   log: Log,
 ): Promise<boolean> {
-  const peer = participants.find((other) => other.slug !== job.participant.slug);
+  /*
+   * To someone who can answer, and for preference someone who builds. The first name in
+   * the config used to get it whatever its state, so a thread could be passed from one
+   * participant that was down to another.
+   */
+  const able = participants.filter((other) => other.slug !== job.participant.slug && !other.failing);
+  const builder = builderFor(
+    able.map((other) => ({ slug: other.slug, good_at: other.cfg.role ?? '' })),
+    job.participant.slug,
+  );
+  const peer = able.find((other) => other.slug === builder) ?? able[0];
   if (!peer) return false;
 
   await job.participant.call('thread_reassign', {

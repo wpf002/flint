@@ -33,6 +33,7 @@ function fake(
     reason?: string;
     offers?: Array<{ id: string; subject: string; content: string; from: { slug: string } }>;
     built?: Array<{ name: string }>;
+    participants?: Array<{ slug: string; label: string; good_at: string }>;
   } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
@@ -68,7 +69,7 @@ function fake(
           yourTurnIf: floor.yourTurnIf ?? slug,
           turnCount: t.turns,
           ask: 'do the thing',
-          participants: [{ slug, label: slug, good_at: 'testing' }],
+          participants: floor.participants ?? [{ slug, label: slug, good_at: 'testing' }],
           turns: [],
         };
       }
@@ -568,7 +569,7 @@ describe("a thread that has run out of turns", () => {
 });
 
 describe("a participant whose provider is down", () => {
-  const failing = (slug: string, kind: string) => {
+  const failing = (slug: string, kind: string, message = 'down') => {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const reported: boolean[] = [];
     const participant = {
@@ -585,7 +586,7 @@ describe("a participant whose provider is down", () => {
       provider: {
         name: 'fake',
         generate: async () => {
-          throw new FlintError({ kind, message: 'down', retryable: true } as never);
+          throw new FlintError({ kind, message, retryable: true } as never);
         },
       },
       call: async (tool: string, args: Record<string, unknown> = {}) => {
@@ -656,6 +657,85 @@ describe("a participant whose provider is down", () => {
 
     expect(f.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
     expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  /*
+   * The sixth product build: the builder ran out of credit, and every attempt cost three
+   * failures and a fifteen-minute rescue. No credit does not clear by waiting.
+   */
+  it("passes on at the first failure when the account is out of credit", async () => {
+    const f = failing('gpt', 'validation', 'openai: You have no credits remaining. Add credits to continue.');
+
+    await tick([f.participant, fake('claude', []).participant], limits(), silent, new Map());
+
+    expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('claude');
+  });
+
+  it("passes to someone who can answer, not to the next name in the config", async () => {
+    const f = failing('claude', 'provider_unavailable');
+    const sick = fake('gpt', []).participant;
+    (sick as unknown as { failing: boolean }).failing = true;
+    const well = fake('perplexity', []).participant;
+    const failures = new Map<string, number>();
+
+    await tick([f.participant, sick, well], limits(), silent, failures);
+    await tick([f.participant, sick, well], limits(), silent, failures);
+
+    expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('perplexity');
+  });
+
+  it("prefers a builder among those who can answer", async () => {
+    const f = failing('claude', 'provider_unavailable');
+    const facts = fake('perplexity', []).participant;
+    (facts as unknown as { cfg: { role: string } }).cfg.role = 'Current facts with sources.';
+    const code = fake('gpt', []).participant;
+    (code as unknown as { cfg: { role: string } }).cfg.role = 'Implementation and concrete code.';
+    const failures = new Map<string, number>();
+
+    await tick([f.participant, facts, code], limits(), silent, failures);
+    await tick([f.participant, facts, code], limits(), silent, failures);
+
+    expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('gpt');
+  });
+});
+
+/* Handing a thread to a participant that cannot answer parks it until somebody rescues it. */
+describe("a turn that hands to a participant that cannot answer", () => {
+  const roster = [
+    { slug: 'claude', label: 'Claude', good_at: 'System design and code review.' },
+    { slug: 'gpt', label: 'GPT', good_at: 'Implementation and concrete code.' },
+    { slug: 'perplexity', label: 'Perplexity', good_at: 'Current facts with sources.' },
+  ];
+  const sick = () => {
+    const p = fake('gpt', []).participant;
+    (p as unknown as { failing: boolean }).failing = true;
+    return p;
+  };
+
+  it("hands to someone who can instead, and says so in the thread", async () => {
+    const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'gpt', ask: 'Run the tests.' }, { participants: roster });
+
+    await tick([f.participant, sick(), fake('perplexity', []).participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('perplexity');
+    expect(String(f.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('unable to answer');
+  });
+
+  it("leaves the floor open when nobody else can", async () => {
+    const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'gpt', ask: 'Run the tests.' }, { participants: roster.slice(0, 2) });
+
+    await tick([f.participant, sick()], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBeUndefined();
+  });
+
+  it("keeps a nomination of someone who can answer", async () => {
+    const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'perplexity', ask: 'Check the docs.' }, { participants: roster });
+
+    await tick([f.participant, sick(), fake('perplexity', []).participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('perplexity');
+    expect(f.calls.some((c) => c.tool === 'thread_note')).toBe(false);
   });
 });
 
