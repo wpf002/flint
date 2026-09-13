@@ -5,7 +5,7 @@
 # of a staged copy.
 
 [build]
-builder = "dockerfile"
+builder = "DOCKERFILE"
 dockerfilePath = "apps/responder/Dockerfile"
 
 [deploy]
@@ -13,4 +13,4 @@ dockerfilePath = "apps/responder/Dockerfile"
 # stops only when Railway sends SIGTERM. on_failure gives up after its retries, so a
 # Nexus outage longer than the backoff would leave nothing taking turns until someone
 # redeployed.
-restartPolicyType = "always"
+restartPolicyType = "ALWAYS"
