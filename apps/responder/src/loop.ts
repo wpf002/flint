@@ -12,6 +12,7 @@ import {
   type RanBefore,
   lastRuns,
   MAX_FILES_PER_TURN,
+  pastedFile,
   runHistory,
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
@@ -457,7 +458,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   const forced = p.replyMode === 'tool';
   const generated = await withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
-    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens, Boolean(workspace)),
+    system: systemPrompt(p.slug, p.cfg.role, p.cfg.maxOutputTokens, Boolean(workspace), p.replyMode),
     messages: [
       {
         id: `${job.threadId}:${state.turnCount}`,
@@ -731,6 +732,17 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
       .call('thread_note', {
         threadId: job.threadId,
         content: `${p.slug} sent more than ${MAX_FILES_PER_TURN} files in one turn, so these were not written: ${names}. Write them in the next turn.`,
+      })
+      .catch(() => undefined);
+  }
+
+  // Nothing was written, and the next speaker would otherwise take the prose for a file.
+  if (reply.files.length === 0 && pastedFile(reply.content)) {
+    log(`[${p.slug}] pasted a file into its turn instead of sending it in "files". Nothing was written.`);
+    await p
+      .call('thread_note', {
+        threadId: job.threadId,
+        content: `${p.slug} pasted a file into its turn instead of sending it in "files", so nothing was written. Whoever speaks next: write the file.`,
       })
       .catch(() => undefined);
   }

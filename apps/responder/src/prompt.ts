@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { VISUAL_REVIEW } from './closing.js';
+import type { ReplyMode } from './config.js';
 
 /**
  * Turning a Nexus thread into one model call, and the model's reply back into a turn.
@@ -128,7 +129,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // thread — the schema would forbid the very fields the loop reads.
   required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'canon'],
   properties: {
-    content: { type: 'string', description: 'Your actual contribution.' },
+    content: { type: 'string', description: 'Your actual contribution, as prose. A file goes in "files", never here.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
     next: { type: ['string', 'null'], description: 'Slug of the next speaker, or null.' },
     ask: { type: ['string', 'null'], description: 'What you need from them.' },
@@ -244,11 +245,32 @@ const DESIGN_LINES = [
   '- Before closing, read the CSS as a designer would and fix anything that still looks like a default.',
 ];
 
+/**
+ * A file that was pasted into the turn instead of being sent as one.
+ *
+ * The fifth product build lost a round this way: Claude (API) rewrote the page inside
+ * "content", which was cut off at the content limit, and nothing was written for the
+ * next turn to run.
+ */
+export function pastedFile(content: string): boolean {
+  if (/<!doctype html|<html[\s>]/i.test(content)) return true;
+  const fences = content.match(/```[^\n]*\n[\s\S]*?(```|$)/g) ?? [];
+  return fences.some((block) => block.split('\n').length >= 40);
+}
+
+/*
+ * How the reply is asked for depends on how the provider enforces it. Telling a
+ * participant whose provider forces a tool call to "reply with a JSON object" gave
+ * replies that did both at once: in the fifth product build, Claude (API) wrote the
+ * fields as text inside the call's content argument, and one ask ended in a stray
+ * closing tag.
+ */
 export function systemPrompt(
   slug: string,
   role: string | undefined,
   maxOutputTokens = 4_000,
   canRun = false,
+  mode: ReplyMode = 'prompt',
 ): string {
   return [
     `You are "${slug}", one of several AI participants working in a shared space called Nexus.`,
@@ -276,7 +298,9 @@ export function systemPrompt(
     '  facts fits the API client\'s endpoints and parameters, the test fixtures recorded from real responses,',
     '  and the README.',
     '',
-    'Reply with a single JSON object and nothing else. No prose before or after, no code fences.',
+    mode === 'tool'
+      ? 'Take your turn by calling the take_turn tool once, with these fields as its arguments. Do not write JSON, XML or field names as text anywhere: what you say goes in "content" as plain prose.'
+      : 'Reply with a single JSON object and nothing else. No prose before or after, no code fences.',
     '{',
     '  "content": "your actual contribution",',
     '  "summary": "one line describing your own turn, under 300 characters",',
@@ -291,7 +315,8 @@ export function systemPrompt(
     `whole, as it should now stand, not a diff, with "note" saying what you changed. Up to ${MAX_FILES_PER_TURN} files per`,
     'turn, and paths can be nested ("src/index.js"). Write everything a step needs in one turn instead of one',
     'file per turn. Revise what is already there instead of starting again. Leave "files" empty when your turn',
-    'changes nothing.',
+    'changes nothing. A file belongs in "files" and nowhere else: code pasted into "content" is not written',
+    'anywhere, is cut off at 8,000 characters, and costs the thread a round.',
     ...(canRun ? SANDBOX_LINES : []),
     ...DESIGN_LINES,
     '',

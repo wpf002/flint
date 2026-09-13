@@ -443,3 +443,22 @@ describe('routing a build that is still open', () => {
     expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBeUndefined();
   });
 });
+
+/* The fifth build's page was rewritten inside the turn, cut off, and never written. */
+describe('a turn that pasted a file instead of sending it', () => {
+  it('says so in the thread, so the next speaker writes the file', async () => {
+    const lines = Array.from({ length: 50 }, (_, i) => `<div class="row-${i}"></div>`).join('\n');
+    const f = builder({ content: `Applying the fixes directly:\n\`\`\`html\n<!doctype html>\n${lines}\n\`\`\``, summary: 'fixes', done: false, files: [], run: [] });
+    await tick([f.participant], limitsFor(), silent);
+
+    const note = f.calls.find((c) => c.tool === 'thread_note');
+    expect(String(note?.args.content)).toContain('nothing was written');
+    expect(f.calls.some((c) => c.tool === 'artifact_write')).toBe(false);
+  });
+
+  it('says nothing when the file was sent as one', async () => {
+    const f = builder({ content: 'Rewrote the page.', summary: 'page', done: false, files: [{ name: 'public/index.html', content: '<!doctype html><html></html>', note: null }], run: [] });
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.some((c) => c.tool === 'thread_note')).toBe(false);
+  });
+});

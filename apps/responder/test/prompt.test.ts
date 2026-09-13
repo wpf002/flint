@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
-import { lastRuns, parseReply, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
+import { lastRuns, parseReply, pastedFile, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
 import { parseVerdict, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
@@ -503,5 +503,46 @@ describe('withVerdict', () => {
     const review = await withVerdict(replies('', ''));
     expect(review.unavailable).toBe(true);
     expect(review.notes).toContain('end_turn');
+  });
+});
+
+/*
+ * Told to "reply with a JSON object" while its provider forced a tool call, Claude (API)
+ * did both at once in the fifth product build: fields as text inside the call's content.
+ */
+describe('how the reply is asked for', () => {
+  it('asks a tool-call participant to call take_turn, not to write JSON', () => {
+    const prompt = systemPrompt('claude-api', 'design', 4_000, true, 'tool');
+    expect(prompt).toContain('take_turn');
+    expect(prompt).not.toContain('Reply with a single JSON object');
+  });
+
+  it('asks everyone else for a JSON object', () => {
+    expect(systemPrompt('gpt-api', 'implementation', 4_000, true, 'schema')).toContain('Reply with a single JSON object');
+    expect(systemPrompt('llama', 'implementation')).toContain('Reply with a single JSON object');
+  });
+});
+
+/* The fifth build rewrote the page inside "content", where it was cut off and never written. */
+describe('pastedFile', () => {
+  it('spots a long fenced block', () => {
+    const lines = Array.from({ length: 45 }, (_, i) => `const a${i} = ${i};`).join('\n');
+    expect(pastedFile(`Here is the file:\n\`\`\`js\n${lines}\n\`\`\``)).toBe(true);
+  });
+
+  it('spots a page even when the fence was cut off', () => {
+    expect(pastedFile('Applying directly:\n```html\n<!doctype html>\n<html><body>… [truncated]')).toBe(true);
+  });
+
+  it('leaves a short snippet alone', () => {
+    expect(pastedFile('Change this one rule:\n```css\n.hint { flex-wrap: wrap; }\n```')).toBe(false);
+  });
+});
+
+describe('withVerdict, when the reply was made of something other than text', () => {
+  it('says what the blocks were', async () => {
+    const review = await withVerdict(async () => ({ text: '', tokensOut: 10, stop: 'max_tokens', blocks: ['thinking'] }));
+    expect(review.unavailable).toBe(true);
+    expect(review.notes).toContain('blocks: thinking');
   });
 });

@@ -68,7 +68,14 @@ export function anthropicReviewer(apiKey: string, model: string): ReviewScreens 
     withVerdict(async () => {
       const response = await client.messages.create({
         model,
-        max_tokens: 2_000,
+        /*
+         * Twice in the fifth product build the reply was empty at the token cap: the
+         * output was spent before any text. Thinking is off, because a verdict on four
+         * screenshots does not need it, and the cap is high enough that it cannot be
+         * the reason there is no text.
+         */
+        max_tokens: 4_000,
+        thinking: { type: 'disabled' },
         system: PROMPT,
         messages: [
           {
@@ -87,7 +94,12 @@ export function anthropicReviewer(apiKey: string, model: string): ReviewScreens 
         .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
         .map((block) => block.text)
         .join('\n');
-      return { text, tokensOut: response.usage.output_tokens, stop: response.stop_reason ?? null };
+      return {
+        text,
+        tokensOut: response.usage.output_tokens,
+        stop: response.stop_reason ?? null,
+        blocks: response.content.map((block) => block.type),
+      };
     });
 }
 
@@ -98,11 +110,11 @@ export function anthropicReviewer(apiKey: string, model: string): ReviewScreens 
  * review, it asked for fixes and listed none.
  */
 export async function withVerdict(
-  ask: () => Promise<{ text: string; tokensOut: number; stop: string | null }>,
+  ask: () => Promise<{ text: string; tokensOut: number; stop: string | null; blocks?: string[] }>,
   attempts = 2,
 ): Promise<Review> {
   let tokensOut = 0;
-  let last: { text: string; stop: string | null } = { text: '', stop: null };
+  let last: { text: string; stop: string | null; blocks?: string[] } = { text: '', stop: null };
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const reply = await ask();
     tokensOut += reply.tokensOut;
@@ -110,11 +122,13 @@ export async function withVerdict(
     last = reply;
   }
   const said = last.text.trim().slice(0, 200) || 'an empty reply';
+  // What the reply was made of, so an empty one can be explained rather than guessed at.
+  const made = last.blocks?.length ? `, blocks: ${last.blocks.join(',')}` : '';
   return {
     pass: false,
     unavailable: true,
     tokensOut,
-    notes: `No verdict after ${attempts} attempts (stop reason: ${last.stop ?? 'unknown'}), only ${said}`,
+    notes: `No verdict after ${attempts} attempts (stop reason: ${last.stop ?? 'unknown'}${made}), only ${said}`,
   };
 }
 
