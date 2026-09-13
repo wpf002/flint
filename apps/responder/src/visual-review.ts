@@ -28,7 +28,50 @@ export interface Review {
   unavailable?: boolean;
 }
 
-export type ReviewScreens = (screens: Screen[], goal: string) => Promise<Review>;
+/** What the reviewer said before, so a round of fixes is judged against it. */
+export interface PriorReview {
+  /** How many reviews in this thread have asked for fixes. */
+  fixRounds: number;
+  /** The newest review's notes, or null before any review. */
+  notes: string | null;
+}
+
+export type ReviewScreens = (screens: Screen[], goal: string, prior?: PriorReview) => Promise<Review>;
+
+/*
+ * After this many rounds of fixes, only defects block. The fifth product build went
+ * five rounds and the sixth six, each one raising something new: the hint wraps, then
+ * the hint overflows, then the header contrast. Two rounds is enough to get the design
+ * right; after that a review that keeps finding things is spending more than it saves.
+ */
+export const DEFECTS_ONLY_AFTER = 2;
+
+type Block = { type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: 'image/png'; data: string } };
+
+/** The user turn put to the reviewer: the screenshots, the goal, and what it said last time. */
+export function reviewRequest(screens: Screen[], goal: string, prior?: PriorReview): Block[] {
+  const blocks: Block[] = screens.flatMap((s): Block[] => [
+    { type: 'text', text: `${s.name} view, ${s.width}px wide:` },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: s.base64 } },
+  ]);
+  blocks.push({ type: 'text', text: `What the page is for: ${goal}` });
+  if (prior?.notes) {
+    blocks.push({
+      type: 'text',
+      text: `Your previous review asked for:\n${prior.notes}\nThe page has been revised since. Say which of those are fixed and which are not.`,
+    });
+  }
+  if (prior && prior.fixRounds >= DEFECTS_ONLY_AFTER) {
+    blocks.push({
+      type: 'text',
+      text:
+        `This page has been through ${prior.fixRounds} rounds of fixes. From here, block only on defects: something cut off, ` +
+        'overflowing, overlapping, unreadable, or a state that looks broken. If there is no defect the verdict is PASS, ' +
+        'and anything else you would still change goes under optional improvements.',
+    });
+  }
+  return blocks;
+}
 
 /*
  * The bar is a finished product. The fourth product build passed a review that only
@@ -64,7 +107,7 @@ const PROMPT = [
 
 export function anthropicReviewer(apiKey: string, model: string): ReviewScreens {
   const client = new Anthropic({ apiKey });
-  return (screens, goal) =>
+  return (screens, goal, prior) =>
     withVerdict(async () => {
       const response = await client.messages.create({
         model,
@@ -77,18 +120,7 @@ export function anthropicReviewer(apiKey: string, model: string): ReviewScreens 
         max_tokens: 4_000,
         thinking: { type: 'disabled' },
         system: PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              ...screens.flatMap((s) => [
-                { type: 'text' as const, text: `${s.name} view, ${s.width}px wide:` },
-                { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png' as const, data: s.base64 } },
-              ]),
-              { type: 'text' as const, text: `What the page is for: ${goal}` },
-            ],
-          },
-        ],
+        messages: [{ role: 'user', content: reviewRequest(screens, goal, prior) }],
       });
       const text = response.content
         .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')

@@ -592,8 +592,12 @@ async function takeTurn(
         log(`[${p.slug}] $ ${result.command} — ${result.ok ? 'ok' : `failed (${result.code ?? 'no exit'})`}`);
       }
       if ((remote.images?.length ?? 0) > 0 && limits.reviewScreens) {
+        // What the reviewer said before, so this round is judged against it rather than
+        // from scratch, and so a page that has been fixed twice is only blocked on defects.
+        const reviews = runHistory(state).flat().filter((r) => r.command === VISUAL_REVIEW);
+        const prior = { fixRounds: reviews.filter((r) => !r.ok).length, notes: reviews[0]?.output ?? null };
         const review = await limits
-          .reviewScreens(remote.images!, state.goal)
+          .reviewScreens(remote.images!, state.goal, prior)
           .catch((err: unknown) => ({
             pass: false,
             notes: `The visual review could not run: ${describe(err)}`,

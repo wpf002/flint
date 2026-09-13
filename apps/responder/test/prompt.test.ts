@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
 import { lastRuns, parseReply, pastedFile, systemPrompt, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
-import { parseVerdict, withVerdict } from '../src/visual-review.js';
+import { DEFECTS_ONLY_AFTER, parseVerdict, reviewRequest, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -568,5 +568,30 @@ describe('threadPrompt, when a participant cannot answer', () => {
 
   it('says nothing when everyone can', () => {
     expect(threadPrompt(state, 'claude')).not.toContain('UNABLE TO ANSWER');
+  });
+});
+
+/* Judged from scratch each round, the reviewer found something new every time. */
+describe('reviewRequest', () => {
+  const screens = [{ name: 'phone', width: 375, height: 812, base64: 'iVBOR' }];
+  const text = (prior?: { fixRounds: number; notes: string | null }) =>
+    reviewRequest(screens, 'a forecast page', prior)
+      .flatMap((b) => (b.type === 'text' ? [b.text] : []))
+      .join('\n');
+
+  it('asks from scratch before any review', () => {
+    const t = text();
+    expect(t).toContain('a forecast page');
+    expect(t).not.toContain('previous review');
+    expect(t).not.toContain('block only on defects');
+  });
+
+  it('shows the reviewer what it asked for last time', () => {
+    expect(text({ fixRounds: 1, notes: 'Phone: the button overflows.' })).toContain('Phone: the button overflows.');
+  });
+
+  it('limits the third round to defects', () => {
+    expect(text({ fixRounds: 1, notes: 'x' })).not.toContain('block only on defects');
+    expect(text({ fixRounds: DEFECTS_ONLY_AFTER, notes: 'x' })).toContain('block only on defects');
   });
 });

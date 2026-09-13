@@ -55,6 +55,7 @@ function builder(
   reply: unknown,
   goal = 'build it',
   participants: Array<{ slug: string; label: string; good_at: string }> = [{ slug: 'gpt', label: 'gpt', good_at: 'building' }],
+  turns: unknown[] = [],
 ) {
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   const participant = {
@@ -83,7 +84,7 @@ function builder(
           yourTurnIf: 'gpt',
           turnCount: 1,
           participants,
-          turns: [],
+          turns,
         };
       }
       if (tool === 'thread_append') return { seq: 2, next: null };
@@ -390,6 +391,22 @@ describe('closing a build with a page', () => {
     const sent = (remote.buildRemotely.mock.calls[0] as unknown as [unknown, unknown, string[][]])[2];
     expect(sent).toEqual([['npm', 'test'], ['screenshot', 'server.js', '/']]);
     expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
+  });
+
+  /* A review from scratch each round found something new every time; five rounds in the fifth build. */
+  it('tells the reviewer what it asked for before, and how many rounds of fixes there have been', async () => {
+    withScreens();
+    const earlier = (seq: number, ok: boolean, output: string) => ({
+      seq,
+      by: 'gpt',
+      content: 'x',
+      runs: [{ command: 'visual review', ok, output }],
+    });
+    const reviewScreens = vi.fn(async () => ({ pass: true, notes: 'Ship it.', tokensOut: 40 }));
+    const f = builder(shooting(styledPage), GOAL, undefined, [earlier(1, false, 'Phone: the button overflows.'), earlier(2, false, 'Phone: the hint wraps.')]);
+    await tick([f.participant], limitsFor({ reviewScreens }), silent);
+
+    expect(reviewScreens).toHaveBeenCalledWith(expect.anything(), GOAL, { fixRounds: 2, notes: 'Phone: the hint wraps.' });
   });
 
   /* An empty reply from the reviewer was recorded as a review asking for fixes, with none listed. */
