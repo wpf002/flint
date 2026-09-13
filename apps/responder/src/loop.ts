@@ -10,9 +10,11 @@ import {
   type BuiltArtifact,
   type Offer,
   type RanBefore,
+  lastRuns,
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
+import { refuseClose } from './closing.js';
 import { buildRemotely, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -624,13 +626,24 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   }
 
 
+  /*
+   * A close has to be earned. When the goal names a check, the thread stays open until a
+   * run in it has passed that check. The turn still lands, and the floor goes to whoever
+   * Nexus routes the ask to, which for building is the participant whose strength it is.
+   */
+  const refused = reply.done ? refuseClose(state.goal, ran.length > 0 ? ran : lastRuns(state)) : null;
+  const done = reply.done && !refused;
+  const next = refused ? null : reply.next;
+  const ask = refused ? `${refused} Build what is missing, run the tests, and fix them until they pass.` : reply.ask;
+  if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
+
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
     threadId: job.threadId,
     content: reply.content,
     summary: reply.summary,
-    ...(reply.next ? { next: reply.next } : {}),
-    ...(reply.ask ? { ask: reply.ask } : {}),
-    done: reply.done,
+    ...(next ? { next } : {}),
+    ...(ask ? { ask } : {}),
+    done,
     ...(ran.length > 0 ? { runs: ran } : {}),
     // Reported so "what did this thread cost" is answerable. Nexus never calls a model
     // and cannot measure this itself.
@@ -648,12 +661,19 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
    * Anything over Nexus's 600-character limit: Nexus would refuse it anyway, and a
    * conclusion that long isn't one a person should have to read to approve.
    */
-  const proposal = reply.done && reply.canon ? reply.canon : null;
+  // Said in the thread, where the next speaker and the console both read it.
+  if (refused) {
+    await p
+      .call('thread_note', { threadId: job.threadId, content: `Not closed yet. ${refused}` })
+      .catch((err: unknown) => log(`[${p.slug}] could not note why the thread stayed open: ${describe(err)}`));
+  }
+
+  const proposal = done && reply.canon ? reply.canon : null;
   if (proposal && isStandupGoal(state.goal)) {
     log(`[${p.slug}] not proposing "${proposal.key}" to canon: standups don't propose canon`);
   } else if (proposal && (proposal.content.length > MAX_CANON || (proposal.rationale?.length ?? 0) > MAX_RATIONALE)) {
     log(`[${p.slug}] not proposing "${proposal.key}" to canon: longer than Nexus accepts`);
-  } else if (reply.done && reply.canon) {
+  } else if (done && reply.canon) {
     await p
       .call('propose_canon', {
         key: reply.canon.key,
@@ -707,7 +727,7 @@ async function takeTurn(job: Waiting, limits: Limits, log: Log): Promise<{ taken
   }
 
   const cost = `${generated.usage.input}→${generated.usage.output} tok`;
-  const handoff = reply.done
+  const handoff = done
     ? 'closed the thread'
     : appended.next
       ? `→ ${appended.next}${appended.routedBy === 'nexus' ? ' (routed by Nexus)' : ''}`

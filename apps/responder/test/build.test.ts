@@ -50,7 +50,7 @@ function limitsFor(over: Record<string, unknown> = {}) {
   } as unknown as Limits;
 }
 
-function builder(reply: unknown) {
+function builder(reply: unknown, goal = 'build it') {
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   const participant = {
     slug: 'gpt',
@@ -69,11 +69,11 @@ function builder(reply: unknown) {
     },
     call: async (tool: string, args: Record<string, unknown> = {}) => {
       calls.push({ tool, args });
-      if (tool === 'thread_list') return { threads: [{ threadId: 't0', goal: 'build it', turns: 1, yourTurn: true }] };
+      if (tool === 'thread_list') return { threads: [{ threadId: 't0', goal, turns: 1, yourTurn: true }] };
       if (tool === 'thread_read') {
         return {
           threadId: 't0',
-          goal: 'build it',
+          goal,
           status: 'OPEN',
           yourTurnIf: 'gpt',
           turnCount: 1,
@@ -271,5 +271,29 @@ describe('a turn that writes several files', () => {
     await tick([f.participant], limitsFor(), silent);
     const sent = (remote.buildRemotely.mock.calls[0] as unknown as [unknown, Record<string, string>])[1];
     expect(Object.keys(sent)).toEqual(expect.arrayContaining(['package.json', 'src/csv.js', 'test/csv.test.js']));
+  });
+});
+
+describe('closing after a passing run', () => {
+  const GOAL_THREAD = "Build csv2md. It's done when `npm test` passes.";
+
+  it('closes when this turn ran the tests and they passed', async () => {
+    remote.buildRemotely.mockResolvedValueOnce({
+      results: [{ command: 'npm test', ok: true, code: 0, output: 'pass 17' }],
+      files: {},
+    } as never);
+    const f = builder({ content: 'Tests pass.', summary: 'green', done: true, files: [], run: [['npm', 'test']] }, GOAL_THREAD);
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
+  });
+
+  it('stays open when this turn ran the tests and they failed', async () => {
+    remote.buildRemotely.mockResolvedValueOnce({
+      results: [{ command: 'npm test', ok: false, code: 1, output: 'fail 2' }],
+      files: {},
+    } as never);
+    const f = builder({ content: 'Close enough.', summary: 'red', done: true, files: [], run: [['npm', 'test']] }, GOAL_THREAD);
+    await tick([f.participant], limitsFor(), silent);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(false);
   });
 });

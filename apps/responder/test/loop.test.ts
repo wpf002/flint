@@ -1107,3 +1107,33 @@ describe('canon proposals', () => {
     expect(f.calls.some((c) => c.tool === 'propose_canon')).toBe(false);
   });
 });
+
+describe('closing a build thread', () => {
+  const GOAL = "Build csv2md. It's done when `npm test` passes in the build sandbox.";
+  const closes = { content: 'Confirmed the APIs.', summary: 'confirmed', next: null, ask: null, done: true };
+
+  it('keeps the thread open when nothing has been run', async () => {
+    const f = fake('perplexity-api', [{ threadId: 't0', goal: GOAL, turns: 1, yourTurn: true }], closes);
+    await tick([f.participant], limits(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append');
+    expect(append?.args.done).toBe(false);
+    expect(String(append?.args.ask)).toMatch(/run the tests/);
+  });
+
+  it('says in the thread why it stayed open', async () => {
+    const f = fake('perplexity-api', [{ threadId: 't0', goal: GOAL, turns: 1, yourTurn: true }], closes);
+    await tick([f.participant], limits(), silent);
+
+    const note = f.calls.find((c) => c.tool === 'thread_note');
+    expect(String(note?.args.content)).toMatch(/Not closed yet/);
+  });
+
+  it('lets an ordinary thread close as before', async () => {
+    const f = fake('claude', [{ threadId: 't0', goal: 'Pick a queue', turns: 2, yourTurn: true }], closes);
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.done).toBe(true);
+    expect(f.calls.some((c) => c.tool === 'thread_note')).toBe(false);
+  });
+});
