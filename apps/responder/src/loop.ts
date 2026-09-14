@@ -480,9 +480,10 @@ async function takeTurn(
   const generated = await withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
     /*
-     * What stays the same from turn to turn goes first, in the system prompt, and gets a
-     * cache breakpoint. A provider that caches a repeated prefix then bills the goal, the
-     * roster and the files at its cache rate; one that doesn't ignores the hint.
+     * What stays the same from turn to turn goes first, in the system prompt, so a
+     * provider that caches a repeated prefix can. No breakpoint is asked for: in a build
+     * a file changes almost every turn, and the eighth product build's eleven turns had
+     * no cache hit at all, only the write premium.
      */
     system: systemPrompt(
       p.slug,
@@ -492,7 +493,6 @@ async function takeTurn(
       p.replyMode,
       threadContext(state, p.slug, built, down),
     ),
-    cache: { system: true },
     messages: [
       {
         id: `${job.threadId}:${state.turnCount}`,

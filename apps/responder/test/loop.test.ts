@@ -1329,7 +1329,7 @@ describe('a turn that edits a file instead of resending it', () => {
 
 /* Every turn re-sent the whole thread and every file; most of it was the same as last time. */
 describe('what a turn sends the model', () => {
-  it('puts what stays the same in the system prompt behind a cache breakpoint, and the conversation in the message', async () => {
+  it('puts what stays the same in the system prompt, and the conversation in the message', async () => {
     const f = fake('gpt', threads(1), undefined, { built: [{ name: 'a.md' }] });
     await tick([f.participant], limits(), silent);
 
@@ -1338,7 +1338,7 @@ describe('what a turn sends the model', () => {
     expect(args.system).toContain('--- a.md');
     expect(args.messages[0]?.content).toContain('THREAD SO FAR');
     expect(args.messages[0]?.content).not.toContain('--- a.md');
-    expect(args.cache).toEqual({ system: true });
+    expect(args.cache).toBeUndefined();
   });
 });
 
