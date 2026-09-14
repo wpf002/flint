@@ -68,6 +68,9 @@ const BACKOFF_ROUNDS = 20;
 /** Failures at which a participant stops holding the thread up and passes it on. */
 const PASS_AFTER = 2;
 
+/** Turns a standup may run. Enough for each participant to speak once and one to close. */
+const STANDUP_TURN_CAP = 4;
+
 /**
  * How long a thread may sit with a participant that cannot answer before it is moved.
  *
@@ -324,11 +327,14 @@ async function runJob(
     return { taken: false, closed: false, tokensOut: 0 };
   }
 
-  if (job.turns >= limits.maxTurnsPerThread) {
+  // A standup is a few sentences each, not a build. One ran twelve turns and wrote
+  // five versions of a retry procedure nobody asked for.
+  const cap = isStandupGoal(job.goal) ? STANDUP_TURN_CAP : limits.maxTurnsPerThread;
+  if (job.turns >= cap) {
     try {
-      await closeExhausted(job, limits.maxTurnsPerThread);
+      await closeExhausted(job, cap);
       failures.delete(job.threadId);
-      log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${limits.maxTurnsPerThread}-turn cap`);
+      log(`[${job.participant.slug}] closed ${short(job.threadId)} at the ${cap}-turn cap`);
       return { taken: false, closed: true, tokensOut: 0 };
     } catch (err) {
       failures.set(job.threadId, failed + 1);
@@ -524,6 +530,14 @@ async function takeTurn(
    * after this point handles one kind of thing. A refused edit changes nothing and is
    * reported to the thread below.
    */
+  // A standup talks; it builds nothing. Files and commands sent from one are dropped.
+  if (isStandupGoal(state.goal) && (reply.files.length > 0 || reply.edits.length > 0 || reply.run.length > 0)) {
+    log(`[${p.slug}] dropped ${reply.files.length} file(s), ${reply.edits.length} edit(s) and ${reply.run.length} command(s) from a standup turn`);
+    reply.files = [];
+    reply.edits = [];
+    reply.run = [];
+  }
+
   const applied = applyEdits(reply.edits, reply.files, built);
   const files = applied.files;
   for (const bad of applied.failed) log(`[${p.slug}] edit to ${bad.name} not applied: ${bad.reason}`);
@@ -755,7 +769,7 @@ async function takeTurn(
       ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
       : unstyled
         ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
-        : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn.`;
+        : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn. Do not try to close again until a turn has changed a file and screenshotted it: a close attempt that changes nothing is a wasted turn.`;
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
@@ -892,7 +906,9 @@ async function takeTurn(
     }
   }
 
-  const cost = `${generated.usage.input}→${generated.usage.output} tok`;
+  // Cache reads are shown so the prefix ordering can be checked against the bill.
+  const cached = generated.usage.cacheRead ? `, ${generated.usage.cacheRead} cached` : '';
+  const cost = `${generated.usage.input}→${generated.usage.output} tok${cached}`;
   const handoff = done
     ? 'closed the thread'
     : appended.next

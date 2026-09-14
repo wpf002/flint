@@ -1341,3 +1341,30 @@ describe('what a turn sends the model', () => {
     expect(args.cache).toEqual({ system: true });
   });
 });
+
+/* One standup ran twelve turns and wrote five versions of a retry procedure nobody asked for. */
+describe('a standup', () => {
+  const goal = 'Standup for 2026-09-14: how this group is working, and what should change';
+
+  it('writes no files and runs nothing, whatever a turn sends', async () => {
+    const f = fake('gpt', [{ threadId: 's0', goal, turns: 1, yourTurn: true }], {
+      content: 'The handoff to Perplexity wastes a turn.',
+      summary: 'handoffs',
+      next: 'claude',
+      files: [{ name: 'ops/retry-sop.md', content: 'x', note: null }],
+      run: [['npm', 'test']],
+    });
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.some((c) => c.tool === 'artifact_write')).toBe(false);
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.runs).toBeUndefined();
+  });
+
+  it('closes at its own short cap, not the build cap', async () => {
+    const f = fake('gpt', [{ threadId: 's0', goal, turns: 4, yourTurn: true }]);
+    const result = await tick([f.participant], limits({ maxTurnsPerThread: 30 }), silent);
+
+    expect(result.threadsClosed).toBe(1);
+    expect(f.generations).toBe(0);
+  });
+});
