@@ -18,6 +18,28 @@ export interface Screen {
   width: number;
   height: number;
   base64: string;
+  /** The address the page was captured at, when it is known. */
+  path?: string;
+}
+
+/**
+ * Which address each screenshot was taken at, read from the sandbox's "Rendered" lines.
+ *
+ * The sandbox names a shot by its size alone, so captures of four addresses reached the
+ * reviewer as "desktop" and "mobile" four times over. In the first build the chat apps
+ * reviewed, every capture showed the empty page, /?city=Denver included, and the review
+ * passed: nothing told it that three of the four should have shown something else.
+ */
+export function withPaths(images: Screen[], outputs: string[]): Screen[] {
+  const paths: string[] = [];
+  for (const output of outputs) {
+    const rendered = /^Rendered (.+?): (\w+ \d+x\d+(?:, \w+ \d+x\d+)*)\.$/m.exec(output);
+    if (!rendered) continue;
+    for (const _size of rendered[2]!.split(', ')) paths.push(rendered[1]!);
+  }
+  // Shots and lines disagree only if the sandbox changed its wording; unlabeled beats mislabeled.
+  if (paths.length !== images.length) return images;
+  return images.map((screen, i) => ({ ...screen, path: paths[i]! }));
 }
 
 export interface Review {
@@ -51,7 +73,7 @@ type Block = { type: 'text'; text: string } | { type: 'image'; source: { type: '
 /** The user turn put to the reviewer: the screenshots, the goal, and what it said last time. */
 export function reviewRequest(screens: Screen[], goal: string, prior?: PriorReview): Block[] {
   const blocks: Block[] = screens.flatMap((s): Block[] => [
-    { type: 'text', text: `${s.name} view, ${s.width}px wide:` },
+    { type: 'text', text: `${s.name} view${s.path ? ` of ${s.path}` : ''}, ${s.width}px wide:` },
     { type: 'image', source: { type: 'base64', media_type: 'image/png', data: s.base64 } },
   ]);
   blocks.push({ type: 'text', text: `What the page is for: ${goal}` });
@@ -66,7 +88,8 @@ export function reviewRequest(screens: Screen[], goal: string, prior?: PriorRevi
       type: 'text',
       text:
         `This page has been through ${prior.fixRounds} rounds of fixes. From here, block only on defects: something cut off, ` +
-        'overflowing, overlapping, unreadable, or a state that looks broken. If there is no defect the verdict is PASS, ' +
+        'overflowing, overlapping, unreadable, a state that looks broken, or a capture that shows a different state ' +
+        'than its address asks for. If there is no defect the verdict is PASS, ' +
         'and anything else you would still change goes under optional improvements.',
     });
   }
@@ -97,6 +120,9 @@ const PROMPT = [
   '  such as emphasis on the most important value.',
   '- A phone layout that is the desktop squeezed: controls should stack full width, and tap targets should',
   '  be at least 44px tall.',
+  '- The wrong state: each capture names the address it was taken at. When the address asks for something,',
+  '  such as a search (?city=), an error or a demo state, and the capture shows the empty or starting page',
+  '  instead, that state failed to render. That is a defect however clean the page looks.',
   '',
   'Reply with the first line exactly "VERDICT: PASS" or "VERDICT: FIX". Then at most 6 bullets, most',
   'important first, each naming the problem, where it is, and the concrete change. For example: "Desktop:',

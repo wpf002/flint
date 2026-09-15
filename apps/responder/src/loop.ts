@@ -20,7 +20,7 @@ import {
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
 import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
-import type { ReviewScreens } from './visual-review.js';
+import { withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -638,7 +638,7 @@ async function takeTurn(
         const reviews = runHistory(state).flat().filter((r) => r.command === VISUAL_REVIEW);
         const prior = { fixRounds: reviews.filter((r) => !r.ok).length, notes: reviews[0]?.output ?? null };
         const review = await limits
-          .reviewScreens(remote.images!, state.goal, prior)
+          .reviewScreens(withPaths(remote.images!, (remote.results ?? []).map((r) => r.output)), state.goal, prior)
           .catch((err: unknown) => ({
             pass: false,
             notes: `The visual review could not run: ${describe(err)}`,

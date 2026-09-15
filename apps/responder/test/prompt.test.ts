@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
 import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
-import { DEFECTS_ONLY_AFTER, parseVerdict, reviewRequest, withVerdict } from '../src/visual-review.js';
+import { DEFECTS_ONLY_AFTER, parseVerdict, reviewRequest, withPaths, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -621,5 +621,41 @@ describe('reviewRequest', () => {
   it('limits the third round to defects', () => {
     expect(text({ fixRounds: 1, notes: 'x' })).not.toContain('block only on defects');
     expect(text({ fixRounds: DEFECTS_ONLY_AFTER, notes: 'x' })).toContain('block only on defects');
+  });
+
+  it('names the address a capture was taken at', () => {
+    const labeled = reviewRequest([{ ...screens[0]!, path: '/?city=Denver' }], 'a page')
+      .flatMap((b) => (b.type === 'text' ? [b.text] : []))
+      .join('\n');
+    expect(labeled).toContain('phone view of /?city=Denver, 375px wide');
+  });
+});
+
+/* Four captures of four addresses reached the reviewer under the same two names, and an empty page passed for all of them. */
+describe('withPaths', () => {
+  const shot = (name: string) => ({ name, width: name === 'desktop' ? 1280 : 375, height: 800, base64: 'iVBOR' });
+
+  it('labels each shot with the address its command rendered, in order', () => {
+    const images = [shot('desktop'), shot('mobile'), shot('desktop'), shot('mobile')];
+    const outputs = [
+      'TAP version 13\n# pass 7',
+      'Rendered /: desktop 1280x800, mobile 375x812.',
+      'Rendered /?city=Denver: desktop 1280x800, mobile 375x812.',
+    ];
+    expect(withPaths(images, outputs).map((s) => s.path)).toEqual(['/', '/', '/?city=Denver', '/?city=Denver']);
+  });
+
+  it('counts only the sizes a command actually captured', () => {
+    const outputs = ['Rendered index.html: desktop 1280x800.', 'Rendered /?demo=loading: desktop 1280x800, mobile 375x812.'];
+    expect(withPaths([shot('desktop'), shot('desktop'), shot('mobile')], outputs).map((s) => s.path)).toEqual([
+      'index.html',
+      '/?demo=loading',
+      '/?demo=loading',
+    ]);
+  });
+
+  it('leaves shots unlabeled when the lines and shots disagree', () => {
+    const images = [shot('desktop'), shot('mobile')];
+    expect(withPaths(images, ['Rendered /: desktop 1280x800.'])).toEqual(images);
   });
 });
