@@ -103,12 +103,14 @@ export function reviewRequest(screens: Screen[], goal: string, prior?: PriorRevi
  */
 const PROMPT = [
   'You are the design lead signing off a product page before it ships. You see screenshots at desktop',
-  '(1280px) and phone (375px) width, in each state that was captured, such as empty and filled.',
+  '(1280px, light mode) and phone (375px, dark mode) width, in each state that was captured, such as empty',
+  'and filled. People use both colour schemes, so each one has to hold up on its own.',
   '',
   'Pass only a page that looks like a finished product a design team shipped. A working, tidy prototype',
   'is not enough. Ask for fixes when you see any of these:',
   '- Defects: anything cut off, overflowing, overlapping or out of reach. Text that is hard to read: low',
-  '  contrast, too small, or lines too long.',
+  '  contrast (dark text on a dark background counts, on buttons and chips too), too small, or lines too',
+  '  long. A text field squashed shorter than the button beside or below it.',
   '- Unfinished composition: controls stranded at the top of a mostly empty desktop screen, no header that',
   '  names the product and says what it does, or content that is not grouped into panels or cards.',
   '- Weak hierarchy: headings, labels and values at similar sizes and weights, or no obvious primary action.',
