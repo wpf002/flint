@@ -1,4 +1,5 @@
 import type { RanBefore } from './prompt.js';
+import { measuredIn } from './visual-review.js';
 
 /*
  * When a thread may close.
@@ -129,6 +130,17 @@ export function refuseUnreviewed(
   const latest = history.flat().find((r) => r.command === VISUAL_REVIEW);
   if (!latest) {
     return 'Nobody has looked at the page yet. Run ["screenshot", "server.js", "/"] (or the HTML file) so it gets a visual review before closing.';
+  }
+  /*
+   * Measured problems hold the build even when the reviewer passed it. In the fourth aqi
+   * run the review passed a 17px text field and a 2:1 button three times. Capped like the
+   * review, so a problem the builders can't fix doesn't hold the thread forever.
+   */
+  const shotRuns = history.filter((runs) => runs.some((r) => /^screenshot\b/.test(r.command)));
+  const measured = measuredIn((shotRuns[0] ?? []).map((r) => r.output));
+  const measuredRounds = shotRuns.filter((runs) => measuredIn(runs.map((r) => r.output)).length > 0).length;
+  if (measured.length > 0 && measuredRounds <= MAX_REVIEW_ROUNDS) {
+    return `The phone view was measured and still has problems:\n${measured.map((m) => `- ${m}`).join('\n')}`;
   }
   if (latest.ok) return null;
   const rounds = history.flat().filter((r) => r.command === VISUAL_REVIEW && !r.ok).length;

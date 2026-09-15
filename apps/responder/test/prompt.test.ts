@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
 import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
-import { DEFECTS_ONLY_AFTER, parseVerdict, reviewRequest, withPaths, withVerdict } from '../src/visual-review.js';
+import { DEFECTS_ONLY_AFTER, measuredIn, parseVerdict, reviewRequest, withPaths, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
   content: 'Here is the schema.',
@@ -650,6 +650,30 @@ describe('reviewRequest', () => {
       .flatMap((b) => (b.type === 'text' ? [b.text] : []))
       .join('\n');
     expect(labeled).toContain('phone view of /?city=Denver, 375px wide');
+  });
+});
+
+/* The screenshots showed a 17px text field and a 2:1 button, and three reviews passed them. */
+describe('measuredIn', () => {
+  const outputs = [
+    'Rendered /: desktop 1280x800, mobile 375x812.\nMeasured on the phone view (dark mode):\n- input#city is 17px tall; controls on a phone need to be at least 44px.\n- button#submit "Check" text is 2.1:1 against its background; it needs 4.5:1.',
+    'Rendered /?city=Denver: desktop 1280x800, mobile 375x812.',
+    '# tests 15',
+  ];
+
+  it('reads each measured problem with the address it was measured on', () => {
+    expect(measuredIn(outputs)).toEqual([
+      'On /: input#city is 17px tall; controls on a phone need to be at least 44px.',
+      'On /: button#submit "Check" text is 2.1:1 against its background; it needs 4.5:1.',
+    ]);
+  });
+
+  it('hands them to the reviewer as defects', () => {
+    const text = reviewRequest([], 'a page', undefined, measuredIn(outputs))
+      .flatMap((b) => (b.type === 'text' ? [b.text] : []))
+      .join('\n');
+    expect(text).toContain('These are facts, each one is a defect');
+    expect(text).toContain('- On /: input#city is 17px tall');
   });
 });
 

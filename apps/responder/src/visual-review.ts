@@ -58,7 +58,32 @@ export interface PriorReview {
   notes: string | null;
 }
 
-export type ReviewScreens = (screens: Screen[], goal: string, prior?: PriorReview) => Promise<Review>;
+export type ReviewScreens = (screens: Screen[], goal: string, prior?: PriorReview, measured?: string[]) => Promise<Review>;
+
+/** The header the sandbox writes above what it measured on the phone view. */
+export const MEASURED = /^Measured on the phone view/;
+
+/**
+ * What the sandbox measured in the page, one line per problem and address.
+ *
+ * The fourth aqi run passed three reviews with a 17px text field and a 2:1 button; the
+ * screenshots showed both and the reviewer missed both. Measurements are handed over as
+ * facts rather than left to be noticed.
+ */
+export function measuredIn(outputs: string[]): string[] {
+  const found: string[] = [];
+  for (const output of outputs) {
+    const lines = output.split('\n');
+    const at = lines.findIndex((line) => MEASURED.test(line));
+    if (at < 0) continue;
+    const path = /^Rendered (.+?): /.exec(lines[0] ?? '')?.[1];
+    for (const line of lines.slice(at + 1)) {
+      if (!line.startsWith('- ')) break;
+      found.push(`${path ? `On ${path}: ` : ''}${line.slice(2)}`);
+    }
+  }
+  return found;
+}
 
 /*
  * After this many rounds of fixes, only defects block. The fifth product build went
@@ -71,12 +96,20 @@ export const DEFECTS_ONLY_AFTER = 2;
 type Block = { type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: 'image/png'; data: string } };
 
 /** The user turn put to the reviewer: the screenshots, the goal, and what it said last time. */
-export function reviewRequest(screens: Screen[], goal: string, prior?: PriorReview): Block[] {
+export function reviewRequest(screens: Screen[], goal: string, prior?: PriorReview, measured: string[] = []): Block[] {
   const blocks: Block[] = screens.flatMap((s): Block[] => [
     { type: 'text', text: `${s.name} view${s.path ? ` of ${s.path}` : ''}, ${s.width}px wide:` },
     { type: 'image', source: { type: 'base64', media_type: 'image/png', data: s.base64 } },
   ]);
   blocks.push({ type: 'text', text: `What the page is for: ${goal}` });
+  if (measured.length > 0) {
+    blocks.push({
+      type: 'text',
+      text:
+        `Measured in a browser on the phone view. These are facts, each one is a defect, and the verdict is FIX while any remain:\n` +
+        measured.map((m) => `- ${m}`).join('\n'),
+    });
+  }
   if (prior?.notes) {
     blocks.push({
       type: 'text',
@@ -135,7 +168,7 @@ const PROMPT = [
 
 export function anthropicReviewer(apiKey: string, model: string): ReviewScreens {
   const client = new Anthropic({ apiKey });
-  return (screens, goal, prior) =>
+  return (screens, goal, prior, measured) =>
     withVerdict(async () => {
       const response = await client.messages.create({
         model,
@@ -148,7 +181,7 @@ export function anthropicReviewer(apiKey: string, model: string): ReviewScreens 
         max_tokens: 4_000,
         thinking: { type: 'disabled' },
         system: PROMPT,
-        messages: [{ role: 'user', content: reviewRequest(screens, goal, prior) }],
+        messages: [{ role: 'user', content: reviewRequest(screens, goal, prior, measured) }],
       });
       const text = response.content
         .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')

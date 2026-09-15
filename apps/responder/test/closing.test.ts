@@ -156,4 +156,27 @@ describe('refuseUnreviewed', () => {
     const rounds = Array.from({ length: MAX_REVIEW_ROUNDS }, () => [review(false)]);
     expect(refuseUnreviewed(GOAL, PAGE, [[], ...rounds], true)).toMatch(/changed the page/);
   });
+
+  /* The fourth aqi run's review passed a 17px text field and a 2:1 button three times. */
+  const shot = (problems: string[]) => ({
+    command: 'screenshot server.js /',
+    ok: true,
+    output: `Rendered /: desktop 1280x800, mobile 375x812.${problems.length ? `\nMeasured on the phone view (dark mode):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
+  });
+
+  it('holds a build the review passed while the phone view measures a problem', () => {
+    const refused = refuseUnreviewed(GOAL, PAGE, [[shot(['input#city is 17px tall; controls on a phone need to be at least 44px.']), review(true)]], false);
+    expect(refused).toMatch(/measured and still has problems/);
+    expect(refused).toContain('On /: input#city is 17px tall');
+  });
+
+  it('lets it close once the newest screenshots measure clean', () => {
+    const history = [[shot([]), review(true)], [shot(['input#city is 17px tall.']), review(false)]];
+    expect(refuseUnreviewed(GOAL, PAGE, history, false)).toBeNull();
+  });
+
+  it('stops holding on measurements the builders could not fix after enough rounds', () => {
+    const rounds = Array.from({ length: MAX_REVIEW_ROUNDS + 1 }, () => [shot(['input#city is 17px tall.']), review(true)]);
+    expect(refuseUnreviewed(GOAL, PAGE, rounds, false)).toBeNull();
+  });
 });

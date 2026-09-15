@@ -21,7 +21,7 @@ import {
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
 import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
-import { withPaths, type ReviewScreens } from './visual-review.js';
+import { measuredIn, withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
 /**
@@ -702,8 +702,9 @@ async function takeTurn(
         // from scratch, and so a page that has been fixed twice is only blocked on defects.
         const reviews = runHistory(state).flat().filter((r) => r.command === VISUAL_REVIEW);
         const prior = { fixRounds: reviews.filter((r) => !r.ok).length, notes: reviews[0]?.output ?? null };
+        const outputs = (remote.results ?? []).map((r) => r.output);
         const review = await limits
-          .reviewScreens(withPaths(remote.images!, (remote.results ?? []).map((r) => r.output)), state.goal, prior)
+          .reviewScreens(withPaths(remote.images!, outputs), state.goal, prior, measuredIn(outputs))
           .catch((err: unknown) => ({
             pass: false,
             notes: `The visual review could not run: ${describe(err)}`,

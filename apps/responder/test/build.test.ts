@@ -406,7 +406,7 @@ describe('closing a build with a page', () => {
     const f = builder(shooting(styledPage), GOAL, undefined, [earlier(1, false, 'Phone: the button overflows.'), earlier(2, false, 'Phone: the hint wraps.')]);
     await tick([f.participant], limitsFor({ reviewScreens }), silent);
 
-    expect(reviewScreens).toHaveBeenCalledWith(expect.anything(), GOAL, { fixRounds: 2, notes: 'Phone: the hint wraps.' });
+    expect(reviewScreens).toHaveBeenCalledWith(expect.anything(), GOAL, { fixRounds: 2, notes: 'Phone: the hint wraps.' }, []);
   });
 
   /* An empty reply from the reviewer was recorded as a review asking for fixes, with none listed. */
