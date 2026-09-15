@@ -166,6 +166,9 @@ export async function tick(
   await rescueStranded(participants, log).catch((err: unknown) =>
     result.errors.push(`could not check for stranded threads — ${describe(err)}`),
   );
+  await coverMissedTurns(participants, log).catch((err: unknown) =>
+    result.errors.push(`could not check for missed chat-app turns — ${describe(err)}`),
+  );
 
   const queues: Waiting[][] = [];
   for (const p of participants) {
@@ -294,6 +297,67 @@ async function rescueStranded(participants: Participant[], log: Log): Promise<vo
       log(`[${rescuer.slug}] rescued ${short(t.threadId)} from ${t.waitingOn}`);
     } catch (err) {
       log(`[${rescuer.slug}] could not rescue ${short(t.threadId)}: ${describe(err)}`);
+    }
+  }
+}
+
+/*
+ * Who does a chat app's part when the app misses its turn.
+ *
+ * The apps check in on their own schedules, hourly at best. In the aqi builds ChatGPT took
+ * none of its turns in forty hours: its scheduled check switched itself off twice and its
+ * copy of Nexus's tools went stale twice. Each time the finished build waited on it, for
+ * nine hours once, and nothing said so. Now the step goes to the same maker's API model,
+ * the thread records why, and the build carries on.
+ */
+export const STANDS_IN_FOR: Readonly<Record<string, string>> = {
+  claude: 'claude-api',
+  chatgpt: 'gpt-api',
+  perplexity: 'perplexity-api',
+};
+
+/** Nexus lets a participant move a scheduled app's floor after 90 minutes; one minute's margin. */
+export const MISSED_TURN_MS = 91 * 60 * 1000;
+
+/** How often to look. Every round would be a listing every fifteen seconds for an hourly event. */
+export const MISSED_TURN_CHECK_MS = 5 * 60 * 1000;
+
+const missedTurns = { lastChecked: 0 };
+
+export async function coverMissedTurns(
+  participants: Participant[],
+  log: Log,
+  now = Date.now(),
+  state = missedTurns,
+): Promise<void> {
+  if (now - state.lastChecked < MISSED_TURN_CHECK_MS) return;
+  state.lastChecked = now;
+
+  const healthy = participants.filter((p) => !p.failing);
+  const lister = healthy[0];
+  if (!lister) return;
+
+  const listing = await lister.call<ThreadListing>('thread_list', { mine: false, status: 'OPEN', limit: 50 });
+  for (const t of listing.threads ?? []) {
+    const app = t.waitingOn;
+    if (!app || !Object.hasOwn(STANDS_IN_FOR, app)) continue;
+    const at = t.updatedAt ? Date.parse(t.updatedAt) : Number.NaN;
+    if (!Number.isFinite(at) || now - at < MISSED_TURN_MS) continue;
+    const standIn = healthy.find((p) => p.slug === STANDS_IN_FOR[app]);
+    if (!standIn) continue;
+
+    try {
+      // Taken by the stand-in itself, so the ask stays as it was written for the app.
+      await standIn.call('thread_reassign', { threadId: t.threadId, to: standIn.slug });
+      await standIn
+        .call('thread_note', {
+          threadId: t.threadId,
+          content: `${app} did not take its turn within 90 minutes, so ${standIn.slug} is doing its part. The ask is unchanged.`,
+        })
+        .catch(() => undefined);
+      log(`[${standIn.slug}] covered ${short(t.threadId)} for ${app}, which missed its turn`);
+    } catch (err) {
+      log(`[${standIn.slug}] could not cover ${short(t.threadId)} for ${app}: ${describe(err)}`);
     }
   }
 }

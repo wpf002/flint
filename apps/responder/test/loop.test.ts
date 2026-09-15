@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { FlintError } from '@flint/core';
-import { builderFor, tick, withRetry, type Limits } from '../src/loop.js';
+import { builderFor, coverMissedTurns, MISSED_TURN_CHECK_MS, MISSED_TURN_MS, tick, withRetry, type Limits } from '../src/loop.js';
 import { Participant } from '../src/participant.js';
 
 /**
@@ -15,6 +15,8 @@ interface FakeThread {
   goal: string;
   turns: number;
   yourTurn: boolean;
+  waitingOn?: string | null;
+  updatedAt?: string;
 }
 
 interface Fake {
@@ -702,6 +704,58 @@ describe("a participant whose provider is down", () => {
     await tick([f.participant, facts, code], limits(), silent, failures);
 
     expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('gpt');
+  });
+});
+
+/* ChatGPT took none of its turns in forty hours of aqi builds, and each time the build just waited. */
+describe('a chat app that misses its turn', () => {
+  const now = Date.parse('2026-09-15T20:00:00Z');
+  const waiting = (waitingOn: string, minutesAgo: number): FakeThread[] => [
+    { threadId: 't0', goal: 'Build aqi', turns: 6, yourTurn: false, waitingOn, updatedAt: new Date(now - minutesAgo * 60_000).toISOString() },
+  ];
+  const fresh = () => ({ lastChecked: 0 });
+
+  it("has the same maker's API model take the step and say why", async () => {
+    const gpt = fake('gpt-api', waiting('chatgpt', 120));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.find((c) => c.tool === 'thread_reassign')?.args).toEqual({ threadId: 't0', to: 'gpt-api' });
+    expect(String(gpt.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('chatgpt did not take its turn');
+  });
+
+  it('leaves a step the app still has time for', async () => {
+    const gpt = fake('gpt-api', waiting('chatgpt', MISSED_TURN_MS / 60_000 - 5));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('leaves a floor held by anyone without a stand-in', async () => {
+    const gpt = fake('gpt-api', waiting('flint', 600));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('leaves it when the stand-in is not one of these participants', async () => {
+    const claude = fake('claude-api', waiting('chatgpt', 600));
+
+    await coverMissedTurns([claude.participant], silent, now, fresh());
+
+    expect(claude.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('looks at most every few minutes', async () => {
+    const gpt = fake('gpt-api', []);
+    const state = fresh();
+
+    await coverMissedTurns([gpt.participant], silent, now, state);
+    await coverMissedTurns([gpt.participant], silent, now + MISSED_TURN_CHECK_MS - 1, state);
+
+    expect(gpt.calls.filter((c) => c.tool === 'thread_list')).toHaveLength(1);
   });
 });
 

@@ -65,6 +65,7 @@ import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
+import { nexusRunCheck } from './nexus-watch';
 import { TrainingLogger } from './training';
 import { MemoryExtractor } from './memory-extract';
 
@@ -419,6 +420,23 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
         .slice(0, 3)
         .map((r) => ({ title: 'Market signal', body: String(r.headline).slice(0, 200), kind: 'signal', dedupe: `sig:${r.headline}` }));
     });
+  }
+
+  // Nexus builds: started, a chat app's step covered, stalled, finished. Called without
+  // the error-text filter above, which would hide any thread whose turns mention an error.
+  if (byName.has('nexus.thread_list') && byName.has('nexus.thread_read')) {
+    checks.push(
+      nexusRunCheck(async (name, args) => {
+        const t = byName.get(name);
+        if (!t) return '';
+        try {
+          const res = await t.handler({ id: `watch_${name}`, toolName: name, args });
+          return res && typeof res === 'object' && (res as { isError?: boolean }).isError ? '' : toolText(res);
+        } catch {
+          return '';
+        }
+      }),
+    );
   }
 
   return checks;
