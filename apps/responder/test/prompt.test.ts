@@ -653,6 +653,32 @@ describe('reviewRequest', () => {
   });
 });
 
+/* The fifth aqi run sent "npm test; screenshot server.js /" for several turns; it ran a binary called "test;". */
+describe('commands joined the way a shell would take them', () => {
+  const runs = (reply: unknown) => parseReply(JSON.stringify({ ...JSON.parse(wellFormed), run: reply })).reply.run;
+
+  it('splits a string of commands into separate commands', () => {
+    expect(runs(['npm test; screenshot server.js /'])).toEqual([
+      ['npm', 'test'],
+      ['screenshot', 'server.js', '/'],
+    ]);
+  });
+
+  it('splits an argv array that carries the join inside it', () => {
+    expect(runs([['npm', 'test', '&&', 'node', 'bin/aqi.js', 'Denver']])).toEqual([
+      ['npm', 'test'],
+      ['node', 'bin/aqi.js', 'Denver'],
+    ]);
+  });
+
+  it('leaves a plain command alone', () => {
+    expect(runs([['npm', 'test'], 'node --test'])).toEqual([
+      ['npm', 'test'],
+      ['node', '--test'],
+    ]);
+  });
+});
+
 /* The screenshots showed a 17px text field and a 2:1 button, and three reviews passed them. */
 describe('measuredIn', () => {
   const outputs = [

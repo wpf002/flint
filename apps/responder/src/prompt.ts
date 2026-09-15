@@ -615,6 +615,20 @@ function foldFiles(reply: TurnReply): TurnReply {
  * strictly worse than rendering the object. Only the wrapper is coerced; nothing about
  * the model's actual content is invented or discarded.
  */
+/*
+ * "npm test; screenshot server.js /" is two commands, not one whose binary is "test;".
+ *
+ * There is no shell in the sandbox, so that ran as a program called "test;" and failed,
+ * which the close gate read as failing tests. In the fifth aqi run the builders sent it
+ * turn after turn and the tests could never pass. Splitting is what the model meant.
+ */
+function shellSplit(value: string): string[][] {
+  return value
+    .split(/\s*(?:;|&&|\|\|)\s*/)
+    .map((part) => part.trim().split(/\s+/).filter(Boolean))
+    .filter((argv) => argv.length > 0);
+}
+
 function normalize(candidate: unknown): unknown {
   if (typeof candidate !== 'object' || candidate === null) return candidate;
   const obj = { ...(candidate as Record<string, unknown>) };
@@ -636,7 +650,7 @@ function normalize(candidate: unknown): unknown {
   // Splitting it here keeps the no-shell rule from depending on the model's compliance.
   if (Array.isArray(obj.run)) {
     const commands = (obj.run as unknown[])
-      .map((cmd) => (typeof cmd === 'string' ? cmd.split(/\s+/).filter(Boolean) : cmd))
+      .flatMap((cmd) => (typeof cmd === 'string' ? shellSplit(cmd) : Array.isArray(cmd) ? shellSplit(cmd.join(' ')) : [cmd]))
       .filter((cmd): cmd is unknown[] => Array.isArray(cmd) && cmd.length > 0);
     // Trimmed like files. In the aqi build five turns in a row asked for the tests and
     // four screenshots, one over the limit, and the schema threw out each whole reply
