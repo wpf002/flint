@@ -58,6 +58,9 @@ const FileSchema = z.object({
   note: z.string().max(300).nullish(),
 });
 
+/** Most commands one turn may run: the tests and four screenshots, with one to spare. */
+export const MAX_COMMANDS_PER_TURN = 6;
+
 /** Most edits one turn may send. Twenty covers a page of CSS fixes with room over. */
 export const MAX_EDITS_PER_TURN = 20;
 
@@ -89,7 +92,9 @@ export const TurnReplySchema = z
      * Commands to run against what the thread has built. Each is an argv array rather
      * than a string, so nothing here ever reaches a shell.
      */
-    run: z.array(z.array(z.string().min(1)).min(1).max(12)).max(4).default([]),
+    run: z.array(z.array(z.string().min(1)).min(1).max(12)).max(MAX_COMMANDS_PER_TURN).default([]),
+    /** Commands the model sent past the per-turn limit. Never run. */
+    droppedRuns: z.array(z.string()).default([]),
     /*
      * The thing the thread is for. Turns are a conversation; this is the work. Optional
      * because not every turn is a revision — a critique that changes nothing is still a
@@ -239,7 +244,7 @@ const SANDBOX_LINES = [
   '',
   '"run" executes commands in a disposable build sandbox after your files are written. Every file in the',
   'thread is copied into a fresh directory first. Each command is an argv array, like ["npm","test"], and',
-  'there is no shell, so no pipes, redirects or "&&". Up to 4 commands per turn, stopping at the first',
+  `there is no shell, so no pipes, redirects or "&&". Up to ${MAX_COMMANDS_PER_TURN} commands per turn, stopping at the first`,
   'failure. Available: node, npm (install, ci, run, test, exec), npx (tsc, vitest, jest, eslint, tsx, vite),',
   'pnpm, python3 -m, pip3 install, git (init, status, diff, add, log, commit), ls, cat, mkdir. The npm registry',
   'is reachable. Nothing installed carries over to the next run, so a run that needs dependencies installs',
@@ -572,6 +577,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       remember: [],
       accept: [],
       run: [],
+      droppedRuns: [],
       artifact: null,
       files: [],
       dropped: [],
@@ -620,9 +626,14 @@ function normalize(candidate: unknown): unknown {
   // A command sent as one string is the shape that would need a shell to interpret.
   // Splitting it here keeps the no-shell rule from depending on the model's compliance.
   if (Array.isArray(obj.run)) {
-    obj.run = (obj.run as unknown[])
+    const commands = (obj.run as unknown[])
       .map((cmd) => (typeof cmd === 'string' ? cmd.split(/\s+/).filter(Boolean) : cmd))
-      .filter((cmd) => Array.isArray(cmd) && cmd.length > 0);
+      .filter((cmd): cmd is unknown[] => Array.isArray(cmd) && cmd.length > 0);
+    // Trimmed like files. In the aqi build five turns in a row asked for the tests and
+    // four screenshots, one over the limit, and the schema threw out each whole reply
+    // with its edits.
+    obj.run = commands.slice(0, MAX_COMMANDS_PER_TURN);
+    obj.droppedRuns = commands.slice(MAX_COMMANDS_PER_TURN).map((cmd) => cmd.join(' '));
   } else if (obj.run !== undefined) {
     obj.run = [];
   }

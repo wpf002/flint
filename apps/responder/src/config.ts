@@ -102,8 +102,13 @@ export const ResponderConfigSchema = z
      * long thread can run for minutes, and the provider's own edge gives up first —
      * serving an HTML error page that arrives as an unparseable success. Failing on our
      * own clock produces a real error instead, and frees the round.
+     *
+     * Six minutes, not ninety seconds. A first build turn writes the whole app, 15k
+     * tokens or more, and in the aqi build Claude and GPT each hit the old limit twice
+     * before either wrote a file: 17 minutes of aborted, still-billed generations.
+     * A participant whose edge fails sooner sets its own, as Perplexity does.
      */
-    turnTimeoutMs: z.number().int().min(10_000).max(600_000).default(90_000),
+    turnTimeoutMs: z.number().int().min(10_000).max(600_000).default(360_000),
     /** Stop taking turns entirely after this many model calls. 0 disables the loop's own limit. */
     maxTurnsPerRun: z.number().int().min(0).default(0),
     /*

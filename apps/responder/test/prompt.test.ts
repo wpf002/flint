@@ -599,6 +599,28 @@ describe('edits in a reply', () => {
   });
 });
 
+/* Five aqi turns asked for the tests plus four screenshots, and each whole reply was thrown out with its edits. */
+describe('commands over the limit', () => {
+  const withRuns = (n: number) =>
+    JSON.stringify({
+      ...JSON.parse(wellFormed),
+      edits: [{ name: 'a.js', find: 'old', replace: 'new' }],
+      run: [['npm', 'test'], ...Array.from({ length: n - 1 }, (_, i) => ['screenshot', 'server.js', `/?s=${i}`])],
+    });
+
+  it('keeps the reply and its edits, and runs the first six', () => {
+    const { reply, malformed } = parseReply(withRuns(7));
+    expect(malformed).toBe(false);
+    expect(reply.edits).toHaveLength(1);
+    expect(reply.run).toHaveLength(6);
+    expect(reply.droppedRuns).toEqual(['screenshot server.js /?s=5']);
+  });
+
+  it('drops nothing at the limit', () => {
+    expect(parseReply(withRuns(6)).reply.droppedRuns).toEqual([]);
+  });
+});
+
 /* Judged from scratch each round, the reviewer found something new every time. */
 describe('reviewRequest', () => {
   const screens = [{ name: 'phone', width: 375, height: 812, base64: 'iVBOR' }];

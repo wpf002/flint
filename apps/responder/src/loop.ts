@@ -13,6 +13,7 @@ import {
   type Offer,
   type RanBefore,
   lastRuns,
+  MAX_COMMANDS_PER_TURN,
   MAX_FILES_PER_TURN,
   pastedFile,
   runHistory,
@@ -803,6 +804,17 @@ async function takeTurn(
       .call('thread_note', {
         threadId: job.threadId,
         content: `${p.slug} sent more than ${MAX_FILES_PER_TURN} files in one turn, so these were not written: ${names}. Write them in the next turn.`,
+      })
+      .catch(() => undefined);
+  }
+
+  if (reply.droppedRuns.length > 0) {
+    const commands = reply.droppedRuns.join('; ');
+    log(`[${p.slug}] asked for more than ${MAX_COMMANDS_PER_TURN} commands. Not run: ${commands}`);
+    await p
+      .call('thread_note', {
+        threadId: job.threadId,
+        content: `${p.slug} asked for more than ${MAX_COMMANDS_PER_TURN} commands in one turn, so these did not run: ${commands}. Run them in the next turn.`,
       })
       .catch(() => undefined);
   }
