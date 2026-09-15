@@ -60,6 +60,7 @@ import {
   cosineSimilarity,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
+import { parseMcpConfig } from './mcp-config';
 import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { ActionQueue, type PendingAction } from './actions';
@@ -201,22 +202,14 @@ import { judgeBrain, isSafeTool, type Brain } from './policy';
 // Routing + auto-approval policy live in ./policy.ts so they can be unit-tested
 // (this module calls main() at import time, so nothing here is importable).
 
-/** Optional MCP servers (your apps/integrations) from $MCP_CONFIG (a JSON file). */
+/** Optional MCP servers (your apps/integrations) from $MCP_CONFIG (a JSON file), local or remote. */
 function loadMcpSpecs(): McpServerSpec[] {
   const path = process.env.MCP_CONFIG?.trim();
   if (!path || !existsSync(path)) return [];
   try {
-    const cfg = JSON.parse(readFileSync(path, 'utf8')) as {
-      servers?: Array<{ name: string; command: string; args?: string[]; cwd?: string; env?: Record<string, string> }>;
-    };
-    return (cfg.servers ?? []).map((s) => ({
-      name: s.name,
-      transport: 'stdio' as const,
-      command: s.command,
-      ...(s.args ? { args: s.args } : {}),
-      ...(s.cwd ? { cwd: s.cwd } : {}),
-      ...(s.env ? { env: s.env } : {}),
-    }));
+    const { specs, problems } = parseMcpConfig(readFileSync(path, 'utf8'));
+    for (const problem of problems) console.error(`[mcp] ${problem}`);
+    return specs;
   } catch (err) {
     console.error('[mcp] failed to read MCP_CONFIG:', err);
     return [];

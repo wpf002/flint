@@ -44,6 +44,21 @@ tools. **Read-only tools run freely; side-effecting tools are DENIED** — a hos
 service has no interactive approver yet (a hosted approval flow is a later step).
 Fail-safe by design.
 
+Each entry either starts a server on this machine or reaches a remote one:
+
+```json
+{
+  "servers": [
+    { "name": "web", "command": "node", "args": ["web-server.mjs"] },
+    { "name": "nexus", "url": "https://nexus-mcp.up.railway.app/mcp",
+      "headers": { "Authorization": "Bearer ${NEXUS_TOKEN_FLINT}" } }
+  ]
+}
+```
+
+`${NAME}` in a header is read from the server's environment, so a token can stay out of
+the file. A remote server whose variable isn't set is skipped and logged by name.
+
 ## Deploy to Railway
 
 ```bash
