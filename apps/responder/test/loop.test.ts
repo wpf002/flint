@@ -35,7 +35,7 @@ function fake(
     reason?: string;
     offers?: Array<{ id: string; subject: string; content: string; from: { slug: string } }>;
     built?: Array<{ name: string }>;
-    participants?: Array<{ slug: string; label: string; good_at: string }>;
+    participants?: Array<{ slug: string; label: string; good_at: string; answers_on_its_own?: boolean }>;
   } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
@@ -702,6 +702,37 @@ describe("a participant whose provider is down", () => {
     await tick([f.participant, facts, code], limits(), silent, failures);
 
     expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('gpt');
+  });
+});
+
+/* The second aqi run handed a page that was still failing its design review to ChatGPT, an hour away. */
+describe("a turn that hands a blocked build to a chat app", () => {
+  const roster = [
+    { slug: 'claude-api', label: 'Claude (API)', good_at: 'Interface design and code review.', answers_on_its_own: true },
+    { slug: 'gpt-api', label: 'GPT (API)', good_at: 'Implementation and concrete code.', answers_on_its_own: true },
+    { slug: 'chatgpt', label: 'ChatGPT', good_at: 'No profile set.', answers_on_its_own: false },
+  ];
+  const handoff = { content: 'Built it.', summary: 'built', next: 'chatgpt', ask: 'Review the page.' };
+
+  it('keeps it with a builder and asks for what is missing', async () => {
+    const blocked = [{ threadId: 't0', goal: 'Build a CLI; npm test passes.', turns: 3, yourTurn: true }];
+    const f = fake('claude-api', blocked, handoff, { participants: roster });
+
+    await tick([f.participant], limits(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append')?.args;
+    expect(append?.next).toBe('gpt-api');
+    expect(String(append?.ask)).toContain('passing test run');
+  });
+
+  it('hands a build with nothing blocking it to the chat app as asked', async () => {
+    const f = fake('claude-api', threads(1), handoff, { participants: roster });
+
+    await tick([f.participant], limits(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append')?.args;
+    expect(append?.next).toBe('chatgpt');
+    expect(append?.ask).toBe('Review the page.');
   });
 });
 

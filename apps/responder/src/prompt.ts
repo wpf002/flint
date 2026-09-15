@@ -25,7 +25,15 @@ export const ThreadStateSchema = z
     yourTurnIf: z.string().nullable().optional(),
     ask: z.string().nullable().optional(),
     participants: z
-      .array(z.object({ slug: z.string(), label: z.string(), good_at: z.string() }))
+      .array(
+        z.object({
+          slug: z.string(),
+          label: z.string(),
+          good_at: z.string(),
+          /** False for a chat app, which only answers when its own schedule or a person prompts it. */
+          answers_on_its_own: z.boolean().optional(),
+        }),
+      )
       .default([]),
     turns: z
       .array(

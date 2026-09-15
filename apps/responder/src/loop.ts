@@ -749,8 +749,18 @@ async function takeTurn(
    * nobody went to Perplexity (API) while the tests or the review were still open, and
    * both times it re-confirmed the API and tried to close.
    */
+  /*
+   * Not to a chat app while the build is blocked, either. In the second aqi run GPT handed
+   * the page to ChatGPT for its one review while the design review was still failing: a
+   * review from an app that answers within the hour, spent on a page the builders already
+   * knew was broken.
+   */
+  const handedEarly =
+    !refused && Boolean(blocker) && Boolean(reply.next) &&
+    state.participants.find((c) => c.slug === reply.next)?.answers_on_its_own === false;
+  const held = refused ?? (handedEarly ? blocker : null);
   const wanted =
-    refused || (blocker && !reply.next) ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
+    held || (blocker && !reply.next) ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
   /*
    * Never to someone known to be unable to answer. In the sixth product build the
    * builder ran out of credit, and each turn handed the thread back to it anyway; each
@@ -764,7 +774,7 @@ async function takeTurn(
   if (wanted && next !== wanted) {
     log(`[${p.slug}] handed to ${wanted}, which cannot answer right now; ${next ? `${next} gets it` : 'the floor is open'} instead`);
   }
-  const ask = !refused
+  const ask = !held
     ? reply.ask
     : failing
       ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
@@ -772,6 +782,7 @@ async function takeTurn(
         ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
         : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn. Do not try to close again until a turn has changed a file and screenshotted it: a close attempt that changes nothing is a wasted turn.`;
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
+  if (handedEarly) log(`[${p.slug}] handed ${short(job.threadId)} to ${reply.next} while it was blocked; kept with the builders: ${blocker}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
     threadId: job.threadId,
