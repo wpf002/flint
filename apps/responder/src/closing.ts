@@ -100,6 +100,14 @@ export function refuseUnstyled(goal: string, files: Array<{ name: string; conten
   return null;
 }
 
+/*
+ * After this many reviews have asked for fixes, the review stops holding the build. The
+ * third aqi run went sixteen rounds on one phone chart: the builders can't see the
+ * screenshots, each round cost about 35k tokens, and the thread spent its whole turn cap
+ * there. The newest notes are still in the thread for whoever speaks next.
+ */
+export const MAX_REVIEW_ROUNDS = 6;
+
 /**
  * Why a build with a page can't close until someone has looked at it.
  *
@@ -122,5 +130,8 @@ export function refuseUnreviewed(
   if (!latest) {
     return 'Nobody has looked at the page yet. Run ["screenshot", "server.js", "/"] (or the HTML file) so it gets a visual review before closing.';
   }
-  return latest.ok ? null : `The last visual review asked for fixes:\n${latest.output.slice(0, 700)}`;
+  if (latest.ok) return null;
+  const rounds = history.flat().filter((r) => r.command === VISUAL_REVIEW && !r.ok).length;
+  if (rounds >= MAX_REVIEW_ROUNDS) return null;
+  return `The last visual review asked for fixes:\n${latest.output.slice(0, 700)}`;
 }

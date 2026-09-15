@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
 
 /* The fourth build put "visual review" in its commands, and the refusal read as a failed review. */
 describe('namesReview', () => {
@@ -143,5 +143,17 @@ describe('refuseUnreviewed', () => {
 
   it('says nothing about a build with no page', () => {
     expect(refuseUnreviewed('Build csv2md, a CLI. `npm test` passes.', [{ name: 'src/cli.js', content: 'x' }], [[tests]], false)).toBeNull();
+  });
+
+  /* The third aqi run spent sixteen review rounds, and its whole turn cap, on one phone chart. */
+  it('stops holding the build once enough reviews have asked for fixes', () => {
+    const rounds = Array.from({ length: MAX_REVIEW_ROUNDS }, () => [review(false)]);
+    expect(refuseUnreviewed(GOAL, PAGE, rounds.slice(1), false)).toMatch(/asked for fixes/);
+    expect(refuseUnreviewed(GOAL, PAGE, rounds, false)).toBeNull();
+  });
+
+  it('still wants a changed page looked at after that', () => {
+    const rounds = Array.from({ length: MAX_REVIEW_ROUNDS }, () => [review(false)]);
+    expect(refuseUnreviewed(GOAL, PAGE, [[], ...rounds], true)).toMatch(/changed the page/);
   });
 });
