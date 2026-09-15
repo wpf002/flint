@@ -87,6 +87,18 @@ const STRANDED_MS = 15 * 60_000;
 const MAX_RUNS = 10;
 const MAX_COMMAND = 300;
 const MAX_OUTPUT = 2_000;
+
+/*
+ * What Nexus accepts in an ask. A refusal composed here is not clipped by the reply
+ * parser, and the measured phone-view problems made one long enough that Nexus refused
+ * the whole turn as invalid — three times in the fifth aqi run, until the builder was
+ * rested. The ask is the one field this code writes without a schema behind it.
+ */
+const MAX_ASK = 1_000;
+
+export function clipAsk(ask: string): string {
+  return ask.length > MAX_ASK ? `${ask.slice(0, MAX_ASK - 1)}…` : ask;
+}
 const TRIM_NOTE = '…earlier output trimmed\n';
 
 /** What Nexus accepts in a canon proposal. */
@@ -854,7 +866,7 @@ async function takeTurn(
     content: reply.content,
     summary: reply.summary,
     ...(next ? { next } : {}),
-    ...(ask ? { ask } : {}),
+    ...(ask ? { ask: clipAsk(ask) } : {}),
     done,
     ...(ran.length > 0 ? { runs: ran } : {}),
     // Reported so "what did this thread cost" is answerable. Nexus never calls a model

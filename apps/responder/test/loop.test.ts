@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { FlintError } from '@flint/core';
-import { builderFor, coverMissedTurns, MISSED_TURN_CHECK_MS, MISSED_TURN_MS, tick, withRetry, type Limits } from '../src/loop.js';
+import { builderFor, clipAsk, coverMissedTurns, MISSED_TURN_CHECK_MS, MISSED_TURN_MS, tick, withRetry, type Limits } from '../src/loop.js';
 import { Participant } from '../src/participant.js';
 
 /**
@@ -704,6 +704,23 @@ describe("a participant whose provider is down", () => {
     await tick([f.participant, facts, code], limits(), silent, failures);
 
     expect(f.calls.find((c) => c.tool === 'thread_reassign')?.args.to).toBe('gpt');
+  });
+});
+
+/*
+ * Nexus refuses an ask over 1,000 characters. A refusal composed in the loop has no schema
+ * behind it, and the measured phone-view problems made one long enough that three turns in
+ * the fifth aqi run were rejected whole, until the builder was rested.
+ */
+describe('clipAsk', () => {
+  it('leaves an ask Nexus accepts alone', () => {
+    expect(clipAsk('Fix the failing test.')).toBe('Fix the failing test.');
+  });
+
+  it('clips a longer one to the limit, visibly', () => {
+    const clipped = clipAsk('x'.repeat(3000));
+    expect(clipped).toHaveLength(1000);
+    expect(clipped.endsWith('…')).toBe(true);
   });
 });
 
