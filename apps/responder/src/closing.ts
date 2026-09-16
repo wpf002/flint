@@ -199,3 +199,57 @@ export function stepFor(goal: string, slug: string): string | null {
 export function refuseSkipped(slug: string): string {
   return `The goal gives ${slug} a step and ${slug} hasn't taken it, so this can't close yet.`;
 }
+
+/*
+ * A review whose fixes were said to be made and weren't.
+ *
+ * In the eighth aqi run ChatGPT's review named four fixes in public/app.js and server.js.
+ * The closing turn described all four as done and wrote only public/app.js: server.js
+ * still sent plain-text errors, and the thread closed. A file the review names that
+ * nobody has written since the review holds the close. Capped by turns, because a review
+ * can name a file only to say it's fine.
+ */
+
+/** Builder turns after a review before its unchanged files stop holding the close. */
+export const REVIEW_FIX_TURNS = 4;
+
+/** Whether the text names this file as a path of its own, so `server.js` isn't found in `src/server.js`. */
+function namesFile(text: string, name: string): boolean {
+  return new RegExp(`(?<![\\w./-])${escapeSlug(name)}(?![\\w-])`).test(text);
+}
+
+export function unappliedReview(
+  turns: Array<{ by: string; at?: string | undefined; kind?: 'note' | undefined; content?: string | undefined }>,
+  participants: Array<{ slug: string; answers_on_its_own?: boolean | undefined }>,
+  files: Array<{ name: string; history?: Array<{ at: string }> | undefined }>,
+  writtenNow: string[],
+): { by: string; files: string[] } | null {
+  const apps = new Set(participants.filter((p) => p.answers_on_its_own === false).map((p) => p.slug));
+  // The review is the newest turn by an app, or by whoever covered an app that missed it.
+  let review = -1;
+  turns.forEach((t, i) => {
+    if (t.kind === 'note') return;
+    const prev = turns[i - 1];
+    const covered =
+      prev?.kind === 'note' && prev.by === t.by && /^\S+ did not take its turn within 90 minutes/.test(prev.content ?? '');
+    if (apps.has(t.by) || covered) review = i;
+  });
+  if (review < 0) return null;
+  const { by, at, content } = turns[review]!;
+  const since = at ? Date.parse(at) : Number.NaN;
+  if (!content || !Number.isFinite(since)) return null;
+  const later = turns.slice(review + 1).filter((t) => t.kind !== 'note').length;
+  if (later >= REVIEW_FIX_TURNS) return null;
+
+  const untouched = files
+    .filter((f) => namesFile(content, f.name))
+    .filter((f) => !writtenNow.includes(f.name))
+    .filter((f) => !(f.history ?? []).some((h) => Date.parse(h.at) > since))
+    .map((f) => f.name);
+  return untouched.length > 0 ? { by, files: untouched } : null;
+}
+
+export function refuseUnapplied(found: { by: string; files: string[] }): string {
+  const list = found.files.join(', ');
+  return `${found.by}'s review named ${list}, and nothing has changed ${found.files.length === 1 ? 'it' : 'them'} since, so this can't close yet.`;
+}

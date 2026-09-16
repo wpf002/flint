@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, VISUAL_REVIEW } from '../src/closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, REVIEW_FIX_TURNS, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from '../src/closing.js';
 
 /* The fourth build put "visual review" in its commands, and the refusal read as a failed review. */
 describe('namesReview', () => {
@@ -237,5 +237,54 @@ describe('stepFor', () => {
 
   it('does not match claude inside claude-api', () => {
     expect(stepFor('3) claude-api builds.', 'claude')).toBeNull();
+  });
+});
+
+describe('unappliedReview', () => {
+  const participants = [
+    { slug: 'claude', answers_on_its_own: false },
+    { slug: 'chatgpt', answers_on_its_own: false },
+    { slug: 'claude-api', answers_on_its_own: true },
+    { slug: 'gpt-api', answers_on_its_own: true },
+  ];
+  const review = {
+    by: 'chatgpt',
+    at: '2026-09-16T21:39:16.875Z',
+    content: '1. `public/app.js` — use textContent. 4. `server.js` — return JSON error bodies.',
+  };
+  const before = '2026-09-16T21:10:00.000Z';
+  const after = '2026-09-16T21:40:23.000Z';
+  const file = (name: string, ...ats: string[]) => ({ name, history: ats.map((at, i) => ({ version: i + 1, at })) });
+
+  it('names a file the review asked to change that nobody has written since (the eighth aqi run)', () => {
+    const found = unappliedReview([{ by: 'claude-api', at: before, content: 'plan' }, review], participants,
+      [file('public/app.js', before, after), file('server.js', before), file('README.md', before)], []);
+    expect(found).toEqual({ by: 'chatgpt', files: ['server.js'] });
+  });
+
+  it('is satisfied when every named file has a version newer than the review', () => {
+    expect(unappliedReview([review], participants, [file('public/app.js', after), file('server.js', before, after)], [])).toBeNull();
+  });
+
+  it('counts a file this turn is writing', () => {
+    expect(unappliedReview([review], participants, [file('public/app.js', after), file('server.js', before)], ['server.js'])).toBeNull();
+  });
+
+  it('treats the stand-in that covered a missed review as the reviewer', () => {
+    const turns = [
+      { by: 'gpt-api', kind: 'note' as const, content: 'chatgpt did not take its turn within 90 minutes, so gpt-api is doing its part. The ask is unchanged.' },
+      { by: 'gpt-api', at: review.at, content: review.content },
+    ];
+    expect(unappliedReview(turns, participants, [file('server.js', before)], [])).toEqual({ by: 'gpt-api', files: ['server.js'] });
+  });
+
+  it('stops holding the close after ${REVIEW_FIX_TURNS} builder turns', () => {
+    const later = Array.from({ length: REVIEW_FIX_TURNS }, () => ({ by: 'gpt-api', at: after, content: 'x' }));
+    expect(unappliedReview([review, ...later], participants, [file('server.js', before)], [])).toBeNull();
+  });
+
+  it('does not read src/server.js as server.js', () => {
+    const r = { ...review, content: 'Change src/server.js.' };
+    expect(unappliedReview([r], participants, [file('server.js', before)], [])).toBeNull();
   });
 });

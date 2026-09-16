@@ -40,6 +40,7 @@ export const ThreadStateSchema = z
         z.object({
           seq: z.number(),
           by: z.string(),
+          at: z.string().optional(),
           content: z.string().optional(),
           summary: z.string().optional(),
           asked: z.string().optional(),
@@ -416,6 +417,8 @@ export interface BuiltArtifact {
   content: string;
   version: number;
   lastBy: string | null;
+  /** Each version and when it was written. */
+  history?: Array<{ version: number; at: string }>;
 }
 
 /** What happened last time something was run against the thread's files. */

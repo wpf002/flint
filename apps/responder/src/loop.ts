@@ -20,7 +20,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, VISUAL_REVIEW } from './closing.js';
+import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnapplied, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from './closing.js';
 import { measuredIn, withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
@@ -820,7 +820,21 @@ async function takeTurn(
   // Asked only of a build that could otherwise close: an app's hour spent on a build the
   // builders know is broken is wasted. Not a blocker, so a hand to that app goes through.
   const skipped = blocker ? null : skippedStep(state.goal, state.participants, state.turns);
-  const refused = reply.done ? (blocker ?? (skipped ? refuseSkipped(skipped) : null)) : null;
+  // Read in full only for a close attempt: the review is often older than the last three
+  // turns, which a plain read returns as summaries.
+  const unapplied =
+    reply.done && !blocker && !skipped
+      ? await p
+          .call('thread_read', { threadId: job.threadId, full: true })
+          .then((full) => {
+            const whole = ThreadStateSchema.parse(full);
+            return unappliedReview(whole.turns, whole.participants, built, files.map((f) => f.name));
+          })
+          .catch(() => null)
+      : null;
+  const refused = reply.done
+    ? (blocker ?? (skipped ? refuseSkipped(skipped) : unapplied ? refuseUnapplied(unapplied) : null))
+    : null;
   const toApp = refused !== null && !blocker && skipped !== null ? skipped : null;
   const done = reply.done && !refused;
   /*
@@ -862,6 +876,8 @@ async function takeTurn(
     ? reply.ask
     : toApp
       ? `${refused} The build passes its tests and its design review. ${stepFor(state.goal, toApp) ?? 'Take the step the goal gives you, then hand on as it says.'}`
+    : unapplied
+      ? `${refused} Make the fixes it asked for in those files, run the tests, and screenshot the page again if it changed. If a file needs no change, say why in the turn.`
     : failing
       ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
       : unstyled
