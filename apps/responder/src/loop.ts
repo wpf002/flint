@@ -854,9 +854,13 @@ async function takeTurn(
     !refused && Boolean(blocker) && Boolean(reply.next) &&
     state.participants.find((c) => c.slug === reply.next)?.answers_on_its_own === false;
   const held = refused ?? (handedEarly ? blocker : null);
+  /*
+   * Never back to itself. In the ninth aqi run claude-api named itself next; Nexus refused
+   * the append, and the whole turn (26k tokens of input) was thrown away and redone.
+   */
   const wanted = toApp
     ? toApp
-    : held || (blocker && !reply.next)
+    : held || (blocker && !reply.next) || reply.next === p.slug
       ? builderFor(state.participants, p.slug, failing ? 'code' : 'design')
       : reply.next;
   /*
