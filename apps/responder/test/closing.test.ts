@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from '../src/closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, VISUAL_REVIEW } from '../src/closing.js';
 
 /* The fourth build put "visual review" in its commands, and the refusal read as a failed review. */
 describe('namesReview', () => {
@@ -178,5 +178,64 @@ describe('refuseUnreviewed', () => {
   it('stops holding on measurements the builders could not fix after enough rounds', () => {
     const rounds = Array.from({ length: MAX_REVIEW_ROUNDS + 1 }, () => [shot(['input#city is 17px tall.']), review(true)]);
     expect(refuseUnreviewed(GOAL, PAGE, rounds, false)).toBeNull();
+  });
+});
+
+describe('skippedStep', () => {
+  const goal =
+    'How we work: claude, chatgpt and perplexity are chat apps. 1) claude plans, then hands to perplexity. ' +
+    '2) perplexity checks the plan and hands to gpt-api. 3) gpt-api and claude-api build it, then hand to chatgpt. ' +
+    '4) chatgpt reads the page files and hands to claude-api. 5) gpt-api and claude-api fix and close.';
+  const participants = [
+    { slug: 'claude', answers_on_its_own: false },
+    { slug: 'chatgpt', answers_on_its_own: false },
+    { slug: 'perplexity', answers_on_its_own: false },
+    { slug: 'claude-api', answers_on_its_own: true },
+    { slug: 'gpt-api', answers_on_its_own: true },
+  ];
+
+  it('names the first app whose step has not happened, in the order of the plan', () => {
+    const turns = [{ by: 'claude' }, { by: 'gpt-api' }, { by: 'claude-api' }];
+    expect(skippedStep(goal, participants, turns)).toBe('perplexity');
+  });
+
+  it('is satisfied once every named app has taken a turn', () => {
+    const turns = [{ by: 'claude' }, { by: 'perplexity' }, { by: 'gpt-api' }, { by: 'chatgpt' }, { by: 'claude-api' }];
+    expect(skippedStep(goal, participants, turns)).toBeNull();
+  });
+
+  it('counts a step the responder covered after the app missed it', () => {
+    const turns = [
+      { by: 'claude' },
+      { by: 'perplexity' },
+      { by: 'gpt-api', kind: 'note' as const, content: 'chatgpt did not take its turn within 90 minutes, so gpt-api is doing its part. The ask is unchanged.' },
+      { by: 'gpt-api' },
+    ];
+    expect(skippedStep(goal, participants, turns)).toBeNull();
+  });
+
+  it('does not count a note by the app as its step', () => {
+    const turns = [{ by: 'claude', kind: 'note' as const, content: 'step 1 as a note' }, { by: 'perplexity' }, { by: 'chatgpt' }];
+    expect(skippedStep(goal, participants, turns)).toBe('claude');
+  });
+
+  it('does not read claude-api as claude', () => {
+    expect(skippedStep('1) claude-api builds it.', participants, [])).toBeNull();
+  });
+
+  it('asks nothing of a thread whose roster has no chat apps', () => {
+    expect(skippedStep(goal, participants.filter((p) => p.answers_on_its_own), [])).toBeNull();
+  });
+});
+
+describe('stepFor', () => {
+  const goal = '1) claude plans. 2) perplexity checks and hands to gpt-api. 3) gpt-api and claude-api build. 4) chatgpt reads the page files with artifact_read, gives at most 5 fixes, and hands to claude-api. 5) gpt-api closes.';
+
+  it('returns the step that starts with the participant', () => {
+    expect(stepFor(goal, 'chatgpt')).toBe('4) chatgpt reads the page files with artifact_read, gives at most 5 fixes, and hands to claude-api.');
+  });
+
+  it('does not match claude inside claude-api', () => {
+    expect(stepFor('3) claude-api builds.', 'claude')).toBeNull();
   });
 });

@@ -20,7 +20,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseUnreviewed, refuseUnstyled, VISUAL_REVIEW } from './closing.js';
+import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, VISUAL_REVIEW } from './closing.js';
 import { measuredIn, withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
@@ -817,7 +817,11 @@ async function takeTurn(
       ? null
       : refuseUnreviewed(state.goal, current, ran.length > 0 ? history : [[], ...history], pageChanged);
   const blocker = failing ?? unstyled ?? unreviewed;
-  const refused = reply.done ? blocker : null;
+  // Asked only of a build that could otherwise close: an app's hour spent on a build the
+  // builders know is broken is wasted. Not a blocker, so a hand to that app goes through.
+  const skipped = blocker ? null : skippedStep(state.goal, state.participants, state.turns);
+  const refused = reply.done ? (blocker ?? (skipped ? refuseSkipped(skipped) : null)) : null;
+  const toApp = refused !== null && !blocker && skipped !== null ? skipped : null;
   const done = reply.done && !refused;
   /*
    * Named, not left to Nexus, whenever the build can't close yet and the turn didn't
@@ -836,8 +840,11 @@ async function takeTurn(
     !refused && Boolean(blocker) && Boolean(reply.next) &&
     state.participants.find((c) => c.slug === reply.next)?.answers_on_its_own === false;
   const held = refused ?? (handedEarly ? blocker : null);
-  const wanted =
-    held || (blocker && !reply.next) ? builderFor(state.participants, p.slug, failing ? 'code' : 'design') : reply.next;
+  const wanted = toApp
+    ? toApp
+    : held || (blocker && !reply.next)
+      ? builderFor(state.participants, p.slug, failing ? 'code' : 'design')
+      : reply.next;
   /*
    * Never to someone known to be unable to answer. In the sixth product build the
    * builder ran out of credit, and each turn handed the thread back to it anyway; each
@@ -853,12 +860,14 @@ async function takeTurn(
   }
   const ask = !held
     ? reply.ask
+    : toApp
+      ? `${refused} The build passes its tests and its design review. ${stepFor(state.goal, toApp) ?? 'Take the step the goal gives you, then hand on as it says.'}`
     : failing
       ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
       : unstyled
         ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
         : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn. Do not try to close again until a turn has changed a file and screenshotted it: a close attempt that changes nothing is a wasted turn.`;
-  if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}`);
+  if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}${toApp ? ` Handed to ${toApp}.` : ''}`);
   if (handedEarly) log(`[${p.slug}] handed ${short(job.threadId)} to ${reply.next} while it was blocked; kept with the builders: ${blocker}`);
 
   const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {

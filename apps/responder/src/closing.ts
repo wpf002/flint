@@ -149,3 +149,53 @@ export function refuseUnreviewed(
   if (rounds >= MAX_REVIEW_ROUNDS) return null;
   return `The last visual review asked for fixes:\n${latest.output.slice(0, 700)}`;
 }
+
+/*
+ * A step the goal gives a chat app, not yet taken.
+ *
+ * The sixth aqi run's goal gave ChatGPT the one review of the finished page. The builders
+ * passed the tests and the design review and closed on turn 36 without handing it over:
+ * nothing checked that the goal's steps had happened. A step the responder covered after
+ * the app missed it counts as taken. The thread records that with a note, and holding the
+ * close for the app again would only repeat the wait.
+ */
+
+const escapeSlug = (slug: string) => slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Where a slug is last named as itself, so `claude` isn't found inside `claude-api`. */
+function lastMention(goal: string, slug: string): number {
+  const re = new RegExp(`(?<![\\w-])${escapeSlug(slug)}(?![\\w-])`, 'g');
+  let at = -1;
+  for (const m of goal.matchAll(re)) at = m.index ?? at;
+  return at;
+}
+
+export function skippedStep(
+  goal: string,
+  participants: Array<{ slug: string; answers_on_its_own?: boolean | undefined }>,
+  turns: Array<{ by: string; kind?: 'note' | undefined; content?: string | undefined }>,
+): string | null {
+  const named = participants
+    .filter((p) => p.answers_on_its_own === false)
+    .map((p) => ({ slug: p.slug, at: lastMention(goal, p.slug) }))
+    .filter((p) => p.at >= 0)
+    // By where the goal last names them, which for a numbered plan is the app's own step.
+    .sort((a, b) => a.at - b.at);
+  for (const { slug } of named) {
+    const spoke = turns.some((t) => t.kind !== 'note' && t.by === slug);
+    const covered = turns.some((t) => t.kind === 'note' && (t.content ?? '').startsWith(`${slug} did not take its turn`));
+    if (!spoke && !covered) return slug;
+  }
+  return null;
+}
+
+/** The numbered step of the goal that starts with this participant, if there is one. */
+export function stepFor(goal: string, slug: string): string | null {
+  const steps = goal.split(/(?=(?<![\w-])\d+\)\s)/);
+  const own = new RegExp(`^\\d+\\)\\s*${escapeSlug(slug)}(?![\\w-])`);
+  return steps.map((s) => s.trim()).find((s) => own.test(s)) ?? null;
+}
+
+export function refuseSkipped(slug: string): string {
+  return `The goal gives ${slug} a step and ${slug} hasn't taken it, so this can't close yet.`;
+}
