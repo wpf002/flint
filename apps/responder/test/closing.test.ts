@@ -204,6 +204,15 @@ describe('skippedStep', () => {
     expect(skippedStep(goal, participants, turns)).toBeNull();
   });
 
+  it('counts a step handed to the API model because the app was not due', () => {
+    const turns = [
+      { by: 'claude' },
+      { by: 'perplexity-api', kind: 'note' as const, content: "perplexity isn't due to check in for 44 minutes, so perplexity-api is doing its part now. The ask is unchanged." },
+      { by: 'chatgpt' },
+    ];
+    expect(skippedStep(goal, participants, turns)).toBeNull();
+  });
+
   it('counts a step the responder covered after the app missed it', () => {
     const turns = [
       { by: 'claude' },

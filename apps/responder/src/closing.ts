@@ -160,6 +160,13 @@ export function refuseUnreviewed(
  * close for the app again would only repeat the wait.
  */
 
+/**
+ * The note the responder writes when an API model takes a chat app's step: the app, then
+ * the model doing its part. Missed after ninety minutes, not due soon, or a [fast] goal.
+ */
+export const COVER_NOTE =
+  /^(\S+) (?:did not take its turn within 90 minutes|isn't due to check in for \d+ minutes|was passed over because this goal is marked \[fast\]), so (\S+) is doing its part/;
+
 const escapeSlug = (slug: string) => slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Where a slug is last named as itself, so `claude` isn't found inside `claude-api`. */
@@ -183,7 +190,7 @@ export function skippedStep(
     .sort((a, b) => a.at - b.at);
   for (const { slug } of named) {
     const spoke = turns.some((t) => t.kind !== 'note' && t.by === slug);
-    const covered = turns.some((t) => t.kind === 'note' && (t.content ?? '').startsWith(`${slug} did not take its turn`));
+    const covered = turns.some((t) => t.kind === 'note' && COVER_NOTE.exec(t.content ?? '')?.[1] === slug);
     if (!spoke && !covered) return slug;
   }
   return null;
@@ -230,8 +237,7 @@ export function unappliedReview(
   turns.forEach((t, i) => {
     if (t.kind === 'note') return;
     const prev = turns[i - 1];
-    const covered =
-      prev?.kind === 'note' && prev.by === t.by && /^\S+ did not take its turn within 90 minutes/.test(prev.content ?? '');
+    const covered = prev?.kind === 'note' && COVER_NOTE.exec(prev.content ?? '')?.[2] === t.by;
     if (apps.has(t.by) || covered) review = i;
   });
   if (review < 0) return null;

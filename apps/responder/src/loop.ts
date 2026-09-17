@@ -331,8 +331,19 @@ export const STANDS_IN_FOR: Readonly<Record<string, string>> = {
 /** Nexus lets a participant move a scheduled app's floor after 90 minutes; one minute's margin. */
 export const MISSED_TURN_MS = 91 * 60 * 1000;
 
-/** How often to look. Every round would be a listing every fifteen seconds for an hourly event. */
-export const MISSED_TURN_CHECK_MS = 5 * 60 * 1000;
+/** How often to look. A step moved because its app isn't due should move within a minute. */
+export const MISSED_TURN_CHECK_MS = 60 * 1000;
+
+/**
+ * A step waits for its app only when Nexus expects the app to look within this long; the
+ * same margin Nexus uses before it lets the floor move.
+ *
+ * Two apps' hourly schedules were 74 of the ninth aqi build's 87 minutes. Nexus now
+ * predicts each app's next check-in from its last few, so a step whose app isn't due soon
+ * goes to the matching API model at once. A goal marked [fast] never waits for an app; one
+ * marked [wait] only moves after the ninety minutes.
+ */
+export const DUE_SOON_MS = 15 * 60 * 1000;
 
 const missedTurns = { lastChecked: 0 };
 
@@ -354,20 +365,31 @@ export async function coverMissedTurns(
     const app = t.waitingOn;
     if (!app || !Object.hasOwn(STANDS_IN_FOR, app)) continue;
     const at = t.updatedAt ? Date.parse(t.updatedAt) : Number.NaN;
-    if (!Number.isFinite(at) || now - at < MISSED_TURN_MS) continue;
     const standIn = healthy.find((p) => p.slug === STANDS_IN_FOR[app]);
     if (!standIn) continue;
+
+    let why: string | null = null;
+    if (/\[fast\]/i.test(t.goal)) {
+      why = `${app} was passed over because this goal is marked [fast], so ${standIn.slug} is doing its part now.`;
+    } else if (Number.isFinite(at) && now - at >= MISSED_TURN_MS) {
+      why = `${app} did not take its turn within 90 minutes, so ${standIn.slug} is doing its part.`;
+    } else if (!/\[wait\]/i.test(t.goal)) {
+      const read = await standIn
+        .call<{ participants?: Array<{ slug: string; next_check_in?: string | null }> }>('thread_read', { threadId: t.threadId })
+        .catch(() => null);
+      const next = read?.participants?.find((p) => p.slug === app)?.next_check_in;
+      const due = next ? Date.parse(next) - now : Number.NaN;
+      if (Number.isFinite(due) && due > DUE_SOON_MS) {
+        why = `${app} isn't due to check in for ${Math.round(due / 60_000)} minutes, so ${standIn.slug} is doing its part now.`;
+      }
+    }
+    if (!why) continue;
 
     try {
       // Taken by the stand-in itself, so the ask stays as it was written for the app.
       await standIn.call('thread_reassign', { threadId: t.threadId, to: standIn.slug });
-      await standIn
-        .call('thread_note', {
-          threadId: t.threadId,
-          content: `${app} did not take its turn within 90 minutes, so ${standIn.slug} is doing its part. The ask is unchanged.`,
-        })
-        .catch(() => undefined);
-      log(`[${standIn.slug}] covered ${short(t.threadId)} for ${app}, which missed its turn`);
+      await standIn.call('thread_note', { threadId: t.threadId, content: `${why} The ask is unchanged.` }).catch(() => undefined);
+      log(`[${standIn.slug}] took ${short(t.threadId)}'s step for ${app}: ${why}`);
     } catch (err) {
       log(`[${standIn.slug}] could not cover ${short(t.threadId)} for ${app}: ${describe(err)}`);
     }

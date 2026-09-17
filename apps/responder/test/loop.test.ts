@@ -765,7 +765,60 @@ describe('a chat app that misses its turn', () => {
     expect(claude.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
   });
 
-  it('looks at most every few minutes', async () => {
+  /* Two apps' hourly schedules were 74 of the ninth aqi build's 87 minutes. */
+  const withCheckIn = (minutes: number | null) => ({
+    participants: [
+      { slug: 'gpt-api', label: 'GPT (API)', good_at: 'code', answers_on_its_own: true },
+      { slug: 'chatgpt', label: 'ChatGPT', good_at: 'review', answers_on_its_own: false, next_check_in: minutes === null ? null : new Date(now + minutes * 60_000).toISOString() },
+    ],
+  });
+
+  it("gives the step to the API model at once when the app isn't due for a while", async () => {
+    const gpt = fake('gpt-api', waiting('chatgpt', 2), undefined, withCheckIn(40));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.find((c) => c.tool === 'thread_reassign')?.args).toEqual({ threadId: 't0', to: 'gpt-api' });
+    expect(String(gpt.calls.find((c) => c.tool === 'thread_note')?.args.content)).toBe(
+      "chatgpt isn't due to check in for 40 minutes, so gpt-api is doing its part now. The ask is unchanged.",
+    );
+  });
+
+  it('waits for an app due to check in within fifteen minutes', async () => {
+    const gpt = fake('gpt-api', waiting('chatgpt', 2), undefined, withCheckIn(10));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('waits out the ninety minutes when Nexus has no schedule for the app', async () => {
+    const gpt = fake('gpt-api', waiting('chatgpt', 30), undefined, withCheckIn(null));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('never waits for an app on a goal marked [fast]', async () => {
+    const threads = [{ ...waiting('chatgpt', 1)[0]!, goal: 'Build fx [fast]' }];
+    const gpt = fake('gpt-api', threads, undefined, withCheckIn(5));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(String(gpt.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('marked [fast]');
+  });
+
+  it('only moves after ninety minutes on a goal marked [wait]', async () => {
+    const threads = [{ ...waiting('chatgpt', 2)[0]!, goal: 'Build fx [wait]' }];
+    const gpt = fake('gpt-api', threads, undefined, withCheckIn(50));
+
+    await coverMissedTurns([gpt.participant], silent, now, fresh());
+
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
+  });
+
+  it('looks at most once a minute', async () => {
     const gpt = fake('gpt-api', []);
     const state = fresh();
 
