@@ -20,7 +20,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnapplied, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from './closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnapplied, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from './closing.js';
 import { measuredIn, withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
@@ -735,9 +735,26 @@ async function takeTurn(
         // What the reviewer said before, so this round is judged against it rather than
         // from scratch, and so a page that has been fixed twice is only blocked on defects.
         const reviews = runHistory(state).flat().filter((r) => r.command === VISUAL_REVIEW);
-        const prior = { fixRounds: reviews.filter((r) => !r.ok).length, notes: reviews[0]?.output ?? null };
+        const fixRounds = reviews.filter((r) => !r.ok).length;
+        const prior = { fixRounds, notes: reviews[0]?.output ?? null };
         const outputs = (remote.results ?? []).map((r) => r.output);
-        const review = await limits
+        /*
+         * After this many rounds the review stops running at all, rather than only stopping
+         * the close. The eleventh product build spent fourteen turns on one chart the
+         * reviewer kept calling clipped; every round produced a new request, so the builders
+         * kept going and the thread hit its turn cap. What is measured still holds the close.
+         */
+        const stopped = fixRounds >= MAX_REVIEW_ROUNDS;
+        if (stopped) {
+          const shot = [...results].reverse().find((r) => /^screenshot\b/.test(r.command));
+          if (shot) {
+            shot.output = `${shot.output}\nThe visual review has asked for fixes ${fixRounds} times, so it has stopped. Fix anything measured above, then close.`;
+          }
+          log(`[${p.slug}] ${VISUAL_REVIEW} stopped after ${fixRounds} rounds of fixes`);
+        }
+        const review = stopped
+          ? { pass: true, notes: '', tokensOut: 0, unavailable: true as const }
+          : await limits
           .reviewScreens(withPaths(remote.images!, outputs), state.goal, prior, measuredIn(outputs))
           .catch((err: unknown) => ({
             pass: false,
@@ -746,7 +763,7 @@ async function takeTurn(
             unavailable: true,
           }));
         reviewTokens += review.tokensOut;
-        if (review.unavailable) {
+        if (review.unavailable && !stopped) {
           /*
            * No verdict is not a verdict. The fourth build's reviewer once came back empty,
            * and recording that as a review gave the next speaker a request for fixes with
@@ -756,7 +773,7 @@ async function takeTurn(
           log(`[${p.slug}] ${VISUAL_REVIEW} unavailable: ${review.notes}`);
           const shot = [...results].reverse().find((r) => /^screenshot\b/.test(r.command));
           if (shot) shot.output = `${shot.output}\nThe visual review could not run on this screenshot. Screenshot again to get one.`;
-        } else {
+        } else if (!stopped) {
           results.push({ command: VISUAL_REVIEW, ok: review.pass, output: review.notes });
           log(`[${p.slug}] ${VISUAL_REVIEW} — ${review.pass ? 'pass' : 'fixes requested'}`);
         }

@@ -409,6 +409,26 @@ describe('closing a build with a page', () => {
     expect(reviewScreens).toHaveBeenCalledWith(expect.anything(), GOAL, { fixRounds: 2, notes: 'Phone: the hint wraps.' }, []);
   });
 
+  /* The eleventh build spent fourteen turns on a chart the reviewer kept calling clipped. */
+  it('stops reviewing after six rounds of fixes and says so on the screenshot', async () => {
+    withScreens();
+    const failed = (seq: number) => ({
+      seq,
+      by: 'gpt',
+      content: 'x',
+      runs: [{ command: 'visual review', ok: false, output: `Phone: round ${seq}.` }],
+    });
+    const reviewScreens = vi.fn(async () => ({ pass: true, notes: 'Ship it.', tokensOut: 40 }));
+    const f = builder(shooting(styledPage), GOAL, undefined, [1, 2, 3, 4, 5, 6].map(failed));
+
+    await tick([f.participant], limitsFor({ reviewScreens }), silent);
+
+    expect(reviewScreens).not.toHaveBeenCalled();
+    const runs = f.calls.find((c) => c.tool === 'thread_append')?.args.runs as Array<{ command: string; output: string }>;
+    expect(runs.some((r) => r.command === 'visual review')).toBe(false);
+    expect(runs.find((r) => /^screenshot/.test(r.command))?.output).toContain('asked for fixes 6 times, so it has stopped');
+  });
+
   /* An empty reply from the reviewer was recorded as a review asking for fixes, with none listed. */
   it('records no review when the reviewer gave no verdict, and keeps the thread open', async () => {
     withScreens();
