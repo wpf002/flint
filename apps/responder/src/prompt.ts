@@ -292,6 +292,9 @@ const DESIGN_LINES = [
   '- Present results so they scan: cards or a table inside a panel, units shown, numbers right-aligned, and',
   '  the most important value emphasised.',
   '- Keep it self-contained: system fonts, inline SVG for icons, no external requests.',
+  '- A command line is an interface too: accept its flags before or after the positional arguments, print a',
+  '  usage line on stderr when they are missing, and cover both orders in the tests. The twelfth build read',
+  '  `daylight "Denver" --json` as a city named Denver --json.',
   '- Before closing, read the CSS as a designer would and fix anything that still looks like a default.',
 ];
 
