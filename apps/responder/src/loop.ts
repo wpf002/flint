@@ -322,6 +322,9 @@ async function rescueStranded(participants: Participant[], log: Log): Promise<vo
  * nine hours once, and nothing said so. Now the step goes to the same maker's API model,
  * the thread records why, and the build carries on.
  */
+/** The most a retry after a cut-off reply will ask for, whatever the configured cap is. */
+export const MAX_OUTPUT_CEILING = 32_000;
+
 export const STANDS_IN_FOR: Readonly<Record<string, string>> = {
   claude: 'claude-api',
   chatgpt: 'gpt-api',
@@ -576,7 +579,8 @@ async function takeTurn(
    * mid-string into prose, which cost the whole turn its nomination.
    */
   const forced = p.replyMode === 'tool';
-  const generated = await withRetry(log, p.slug, () => p.provider.generate({
+  const generateWith = async (maxTokens: number) =>
+    withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
     /*
      * What stays the same from turn to turn goes first, in the system prompt, so a
@@ -587,7 +591,7 @@ async function takeTurn(
     system: systemPrompt(
       p.slug,
       p.cfg.role,
-      p.cfg.maxOutputTokens,
+      maxTokens,
       Boolean(workspace),
       p.replyMode,
       threadContext(state, p.slug, built, down),
@@ -600,10 +604,25 @@ async function takeTurn(
         timestamp: 0,
       },
     ],
-    maxTokens: p.cfg.maxOutputTokens,
+    maxTokens,
     signal: AbortSignal.timeout(p.turnTimeoutMs ?? limits.turnTimeoutMs),
     ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
   }), limits.retryDelaysMs);
+
+  let generated = await generateWith(p.cfg.maxOutputTokens);
+  /*
+   * A reply cut off at the cap used to throw the turn away and wait for someone to raise
+   * the configured limit. In the fourteenth build that happened twice in a row on one
+   * turn, each time after the model had written most of a page. One retry with more room
+   * costs less than the turn it saves.
+   */
+  if (generated.reason === 'max_tokens') {
+    const roomier = Math.min(p.cfg.maxOutputTokens * 2, MAX_OUTPUT_CEILING);
+    if (roomier > p.cfg.maxOutputTokens) {
+      log(`[${p.slug}] reply hit the ${p.cfg.maxOutputTokens}-token cap; asking again with ${roomier}`);
+      generated = await generateWith(roomier);
+    }
+  }
 
   /*
    * A reply cut off at the cap is not a badly-formatted reply, and recording it as one
@@ -613,7 +632,7 @@ async function takeTurn(
    */
   if (generated.reason === 'max_tokens') {
     throw new Error(
-      `reply hit the ${p.cfg.maxOutputTokens}-token cap and was cut off. Nothing recorded — raise maxOutputTokens for '${p.slug}'.`,
+      `reply hit the ${p.cfg.maxOutputTokens}-token cap and was cut off, twice. Nothing recorded — raise maxOutputTokens for '${p.slug}' or have it write fewer files in a turn.`,
     );
   }
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { FlintError } from '@flint/core';
 import { builderFor, clipAsk, coverMissedTurns, MISSED_TURN_CHECK_MS, MISSED_TURN_MS, tick, withRetry, type Limits } from '../src/loop.js';
 import { Participant } from '../src/participant.js';
+import { MAX_FILES_PER_TURN } from '../src/prompt.js';
 
 /**
  * The loop is the only part of this that costs money per iteration, so what these
@@ -1394,7 +1395,8 @@ describe('canon from a build thread', () => {
 
 describe('a turn that sends more files than it may write', () => {
   it('tells the thread which files were not written', async () => {
-    const files = Array.from({ length: 17 }, (_, i) => ({ name: i === 16 ? 'README.md' : `src/f${i}.js`, content: 'x', note: null }));
+    const over = MAX_FILES_PER_TURN + 1;
+    const files = Array.from({ length: over }, (_, i) => ({ name: i === over - 1 ? 'README.md' : `src/f${i}.js`, content: 'x', note: null }));
     const f = fake('gpt-api', [{ threadId: 't0', goal: 'Pick a queue', turns: 2, yourTurn: true }], { content: 'Built.', summary: 'built', next: 'claude', ask: 'review', done: false, files });
     await tick([f.participant], limits(), silent);
 

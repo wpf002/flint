@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
-import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema } from '../src/prompt.js';
+import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema, MAX_FILES_PER_TURN } from '../src/prompt.js';
 import { DEFECTS_ONLY_AFTER, measuredIn, parseVerdict, reviewRequest, withPaths, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
@@ -369,17 +369,17 @@ describe('files in a reply', () => {
   });
 
   /* Past the limit the schema would reject the whole reply, losing every file. */
-  it('keeps the first 16 files when sent more, without losing the turn', () => {
-    const files = Array.from({ length: 18 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+  it('keeps as many files as a turn may write when sent more, without losing the turn', () => {
+    const files = Array.from({ length: MAX_FILES_PER_TURN + 2 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
     const { reply: r, malformed } = reply({ files });
     expect(malformed).toBe(false);
-    expect(r.files).toHaveLength(16);
+    expect(r.files).toHaveLength(MAX_FILES_PER_TURN);
   });
 
   /* The first csv2md build lost its README this way, and nothing said so. */
   it('names the files it could not keep', () => {
-    const files = Array.from({ length: 18 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
-    expect(reply({ files }).reply.dropped).toEqual(['f16.js', 'f17.js']);
+    const files = Array.from({ length: MAX_FILES_PER_TURN + 2 }, (_, i) => ({ name: `f${i}.js`, content: 'x' }));
+    expect(reply({ files }).reply.dropped).toEqual([`f${MAX_FILES_PER_TURN}.js`, `f${MAX_FILES_PER_TURN + 1}.js`]);
   });
 
   it('has no files when the model returns unstructured text', () => {

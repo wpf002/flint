@@ -59,7 +59,12 @@ export const ThreadStateSchema = z
 export type ThreadState = z.infer<typeof ThreadStateSchema>;
 
 /** Most files one turn may write. Enough for a small app in one go: the fourth build's first turn wrote 14. */
-export const MAX_FILES_PER_TURN = 16;
+/*
+ * Sixteen was enough until a build's first turn: the tenth, thirteenth and fourteenth all
+ * wrote their whole skeleton at once and lost the last three files — fixtures and the
+ * README — to the cap, costing a turn each time.
+ */
+export const MAX_FILES_PER_TURN = 24;
 
 const FileSchema = z.object({
   name: z.string().min(1).max(120),
