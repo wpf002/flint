@@ -20,7 +20,7 @@ import {
 } from './prompt.js';
 import { ensureSandbox, materialise, run as runCommand, workspaceFor } from './workspace.js';
 import { isStandupGoal } from './standup.js';
-import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, pagesIn, refuseClose, refuseSkipped, refuseUnapplied, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from './closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, pagesIn, refuseClose, refuseNoLiveRun, refuseSkipped, refuseUnapplied, refuseUnreviewed, refuseUnstyled, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from './closing.js';
 import { measuredIn, withPaths, type ReviewScreens } from './visual-review.js';
 import { buildRemotely, type RemoteBuild, type RemoteSandbox } from './remote-sandbox.js';
 
@@ -850,12 +850,13 @@ async function takeTurn(
   const pageChanged = pagesIn(files).length > 0 || files.some((f) => /\.css$/i.test(f.name) || /<style[\s>]/i.test(f.content));
   // What would keep the thread open if this turn closed it, judged whether or not it tries.
   const failing = refuseClose(state.goal, history);
-  const unstyled = failing ? null : refuseUnstyled(state.goal, current);
+  const noLiveRun = failing ? null : refuseNoLiveRun(state.goal, history);
+  const unstyled = failing || noLiveRun ? null : refuseUnstyled(state.goal, current);
   const unreviewed =
-    failing || unstyled
+    failing || noLiveRun || unstyled
       ? null
       : refuseUnreviewed(state.goal, current, ran.length > 0 ? history : [[], ...history], pageChanged);
-  const blocker = failing ?? unstyled ?? unreviewed;
+  const blocker = failing ?? noLiveRun ?? unstyled ?? unreviewed;
   // Asked only of a build that could otherwise close: an app's hour spent on a build the
   // builders know is broken is wasted. Not a blocker, so a hand to that app goes through.
   const skipped = blocker ? null : skippedStep(state.goal, state.participants, state.turns);
@@ -920,9 +921,11 @@ async function takeTurn(
     : toApp
       ? `${refused} The build passes its tests and its design review. ${stepFor(state.goal, toApp) ?? 'Take the step the goal gives you, then hand on as it says.'}`
     : unapplied
-      ? `${refused} Make the fixes it asked for in those files, run the tests, and screenshot the page again if it changed. If a file needs no change, say why in the turn.`
+      ? `${refused} Make the fixes it asked for in those files and run what proves them. If one truly needs no change, write in your turn: no change needed: <file> — <why>. Closing again without either does nothing.`
     : failing
       ? `${failing} Build what is missing, run the tests, and fix them until they pass.`
+    : noLiveRun
+      ? noLiveRun
       : unstyled
         ? `${unstyled} Follow the design standard: explicit colors, a type scale, styled controls, and empty, loading and error states.`
         : `${unreviewed} Fix what the review found, then screenshot the page again in the same turn. Do not try to close again until a turn has changed a file and screenshotted it: a close attempt that changes nothing is a wasted turn.`;

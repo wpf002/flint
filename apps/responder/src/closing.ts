@@ -217,8 +217,16 @@ export function refuseSkipped(slug: string): string {
  * can name a file only to say it's fine.
  */
 
-/** Builder turns after a review before its unchanged files stop holding the close. */
-export const REVIEW_FIX_TURNS = 4;
+/**
+ * Builder turns after a review before its unchanged files stop holding the close. A backstop
+ * only: the way past the gate is to change the file, or to say in the turn why it needs none.
+ * At four the thirteenth build simply waited the gate out and closed with the bug the review
+ * had named.
+ */
+export const REVIEW_FIX_TURNS = 8;
+
+/** How a turn excuses a file the review named: "no change needed: src/wikimedia.js — reason". */
+export const EXCUSED = /no change needed:\s*([A-Za-z0-9._/-]+)/gi;
 
 /** Whether the text names this file as a path of its own, so `server.js` isn't found in `src/server.js`. */
 function namesFile(text: string, name: string): boolean {
@@ -247,9 +255,15 @@ export function unappliedReview(
   const later = turns.slice(review + 1).filter((t) => t.kind !== 'note').length;
   if (later >= REVIEW_FIX_TURNS) return null;
 
+  // A file the builders have argued needs no change, in a turn after the review.
+  const excused = new Set<string>();
+  for (const t of turns.slice(review + 1)) {
+    for (const m of (t.content ?? '').matchAll(EXCUSED)) excused.add(m[1]!);
+  }
+
   const untouched = files
     .filter((f) => namesFile(content, f.name))
-    .filter((f) => !writtenNow.includes(f.name))
+    .filter((f) => !writtenNow.includes(f.name) && !excused.has(f.name))
     .filter((f) => !(f.history ?? []).some((h) => Date.parse(h.at) > since))
     .map((f) => f.name);
   return untouched.length > 0 ? { by, files: untouched } : null;
@@ -258,4 +272,26 @@ export function unappliedReview(
 export function refuseUnapplied(found: { by: string; files: string[] }): string {
   const list = found.files.join(', ');
   return `${found.by}'s review named ${list}, and nothing has changed ${found.files.length === 1 ? 'it' : 'them'} since, so this can't close yet.`;
+}
+
+/*
+ * Tests that serve every response from a fixture prove the code, not the address it calls.
+ * The thirteenth build's pageviews URL had /user/user/ where Wikimedia wants /all-access/user/,
+ * so every live count came back 0. Twenty-six tests passed, because none of them made a request.
+ */
+
+/** A goal whose program is supposed to reach a live service. */
+export function needsLiveRun(goal: string): boolean {
+  return /\bfetched live\b|\blive API\b|\bagainst the live\b/i.test(goal);
+}
+
+/** A run of the program itself: node something.js, not node --test. */
+const LIVE_RUN = /^node\s+(?!--)\S+\.(?:js|mjs|cjs)\b/;
+
+export function refuseNoLiveRun(goal: string, history: RunHistory): string | null {
+  if (!needsLiveRun(goal)) return null;
+  const ran = history.flat().some((r) => LIVE_RUN.test(r.command) && r.ok);
+  return ran
+    ? null
+    : 'Nothing here has run the program itself: the tests serve every response from a fixture, so a wrong URL passes them. Run it once for real, like ["node","bin/thing.js","Denver"], and read what comes back.';
 }

@@ -267,6 +267,10 @@ const SANDBOX_LINES = [
   'passes, and a turn that changes the page must screenshot it again. To show a filled-in state, let the page',
   'take its input from the URL (for example /?city=Chicago) and screenshot that path too.',
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
+  'Tests that serve every response from a fixture prove the code, not the address it calls. Before closing,',
+  'run the program itself once for real — ["node","bin/thing.js","Denver"] — and read the output. The',
+  'thirteenth build shipped "0 views" for every article: its tests passed on fixtures while the live URL it',
+  'built was wrong. The sandbox can reach the internet.',
 ];
 
 /*

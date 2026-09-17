@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseUnstyled, REVIEW_FIX_TURNS, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from '../src/closing.js';
+import { MAX_REVIEW_ROUNDS, namesReview, needsPassingRun, refuseClose, refuseUnreviewed, refuseNoLiveRun, refuseUnstyled, REVIEW_FIX_TURNS, skippedStep, stepFor, unappliedReview, VISUAL_REVIEW } from '../src/closing.js';
 
 /* The fourth build put "visual review" in its commands, and the refusal read as a failed review. */
 describe('namesReview', () => {
@@ -295,5 +295,54 @@ describe('unappliedReview', () => {
   it('does not read src/server.js as server.js', () => {
     const r = { ...review, content: 'Change src/server.js.' };
     expect(unappliedReview([r], participants, [file('server.js', before)], [])).toBeNull();
+  });
+});
+
+/* The thirteenth build shipped "0 views" for every article: its pageviews URL was wrong and no test made a request. */
+describe('refuseNoLiveRun', () => {
+  const goal = 'Build wiki. `node bin/wiki.js "Denver"` prints the summary and views, fetched live; npm test passes on fixtures.';
+  const run = (command: string, ok = true) => ({ command, ok, output: '' });
+
+  it('holds a build whose only runs are the tests', () => {
+    expect(refuseNoLiveRun(goal, [[run('npm test')]])).toContain('Run it once for real');
+  });
+
+  it('is satisfied by one real run of the program', () => {
+    expect(refuseNoLiveRun(goal, [[run('npm test')], [run('node bin/wiki.js Denver')]])).toBeNull();
+  });
+
+  it('does not count a run of the program that failed', () => {
+    expect(refuseNoLiveRun(goal, [[run('node bin/wiki.js Denver', false)]])).not.toBeNull();
+  });
+
+  it('does not count node --test as running the program', () => {
+    expect(refuseNoLiveRun(goal, [[run('node --test')]])).not.toBeNull();
+  });
+
+  it('asks nothing of a goal that never mentions live data', () => {
+    expect(refuseNoLiveRun('Build csv2md. npm test passes.', [[run('npm test')]])).toBeNull();
+  });
+});
+
+describe('a file the review named that the builders argue needs no change', () => {
+  const participants = [
+    { slug: 'chatgpt', answers_on_its_own: false },
+    { slug: 'claude-api', answers_on_its_own: true },
+  ];
+  const review = { by: 'chatgpt', at: '2026-09-17T19:49:00.000Z', content: 'Fix src/wikimedia.js and server.js.' };
+  const file = (name: string, at: string) => ({ name, history: [{ version: 1, at }] });
+  const old = '2026-09-17T19:39:00.000Z';
+
+  it('lets the close through once a later turn says why, naming the file', () => {
+    const turns = [review, { by: 'claude-api', at: '2026-09-17T19:51:00.000Z', content: 'no change needed: src/wikimedia.js — the URL matches the docs.\nno change needed: server.js — it already returns JSON errors.' }];
+    expect(unappliedReview(turns, participants, [file('src/wikimedia.js', old), file('server.js', old)], [])).toBeNull();
+  });
+
+  it('still holds the files nobody has changed or explained', () => {
+    const turns = [review, { by: 'claude-api', at: '2026-09-17T19:51:00.000Z', content: 'no change needed: server.js — already fine.' }];
+    expect(unappliedReview(turns, participants, [file('src/wikimedia.js', old), file('server.js', old)], [])).toEqual({
+      by: 'chatgpt',
+      files: ['src/wikimedia.js'],
+    });
   });
 });
