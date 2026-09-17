@@ -142,7 +142,7 @@ export function refuseUnreviewed(
   if (measured.length > 0 && measuredRounds <= MAX_REVIEW_ROUNDS) {
     // Five is enough to act on, and this text becomes the ask, which Nexus caps at 1,000.
     const worst = [...new Set(measured)].slice(0, 5);
-    return `The phone view was measured and still has problems:\n${worst.map((m) => `- ${m}`).join('\n')}`;
+    return `The page was measured and still has problems:\n${worst.map((m) => `- ${m}`).join('\n')}`;
   }
   if (latest.ok) return null;
   const rounds = history.flat().filter((r) => r.command === VISUAL_REVIEW && !r.ok).length;

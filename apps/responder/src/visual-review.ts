@@ -61,7 +61,7 @@ export interface PriorReview {
 export type ReviewScreens = (screens: Screen[], goal: string, prior?: PriorReview, measured?: string[]) => Promise<Review>;
 
 /** The header the sandbox writes above what it measured on the phone view. */
-export const MEASURED = /^Measured on the phone view/;
+export const MEASURED = /^Measured on the (phone|desktop) view/;
 
 /**
  * What the sandbox measured in the page, one line per problem and address.
@@ -74,13 +74,16 @@ export function measuredIn(outputs: string[]): string[] {
   const found: string[] = [];
   for (const output of outputs) {
     const lines = output.split('\n');
-    const at = lines.findIndex((line) => MEASURED.test(line));
-    if (at < 0) continue;
     const path = /^Rendered (.+?): /.exec(lines[0] ?? '')?.[1];
-    for (const line of lines.slice(at + 1)) {
-      if (!line.startsWith('- ')) break;
-      found.push(`${path ? `On ${path}: ` : ''}${line.slice(2)}`);
-    }
+    // One block per view the sandbox measured: phone, and since the tenth build, desktop.
+    lines.forEach((heading, at) => {
+      const view = MEASURED.exec(heading)?.[1];
+      if (!view) return;
+      for (const line of lines.slice(at + 1)) {
+        if (!line.startsWith('- ')) break;
+        found.push(`${path ? `On ${path} (${view}): ` : ''}${line.slice(2)}`);
+      }
+    });
   }
   return found;
 }

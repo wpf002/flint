@@ -689,8 +689,18 @@ describe('measuredIn', () => {
 
   it('reads each measured problem with the address it was measured on', () => {
     expect(measuredIn(outputs)).toEqual([
-      'On /: input#city is 17px tall; controls on a phone need to be at least 44px.',
-      'On /: button#submit "Check" text is 2.1:1 against its background; it needs 4.5:1.',
+      'On / (phone): input#city is 17px tall; controls on a phone need to be at least 44px.',
+      'On / (phone): button#submit "Check" text is 2.1:1 against its background; it needs 4.5:1.',
+    ]);
+  });
+
+  /* The tenth build's Convert button ran 41px out of its card at desktop width; only the phone was measured. */
+  it('reads the desktop view as well as the phone view', () => {
+    const both =
+      'Rendered /: desktop 1280x800, mobile 375x812.\nMeasured on the desktop view (light mode):\n- button#submit "Convert" sticks out of section#form-card by 41px at 1280px wide.\nMeasured on the phone view (dark mode):\n- input#amount is 30px tall; controls on a phone need to be at least 44px.';
+    expect(measuredIn([both])).toEqual([
+      'On / (desktop): button#submit "Convert" sticks out of section#form-card by 41px at 1280px wide.',
+      'On / (phone): input#amount is 30px tall; controls on a phone need to be at least 44px.',
     ]);
   });
 
@@ -699,7 +709,7 @@ describe('measuredIn', () => {
       .flatMap((b) => (b.type === 'text' ? [b.text] : []))
       .join('\n');
     expect(text).toContain('These are facts, each one is a defect');
-    expect(text).toContain('- On /: input#city is 17px tall');
+    expect(text).toContain('- On / (phone): input#city is 17px tall');
   });
 });
 

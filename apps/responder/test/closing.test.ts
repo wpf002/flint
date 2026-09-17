@@ -167,7 +167,7 @@ describe('refuseUnreviewed', () => {
   it('holds a build the review passed while the phone view measures a problem', () => {
     const refused = refuseUnreviewed(GOAL, PAGE, [[shot(['input#city is 17px tall; controls on a phone need to be at least 44px.']), review(true)]], false);
     expect(refused).toMatch(/measured and still has problems/);
-    expect(refused).toContain('On /: input#city is 17px tall');
+    expect(refused).toContain('On / (phone): input#city is 17px tall');
   });
 
   it('lets it close once the newest screenshots measure clean', () => {
