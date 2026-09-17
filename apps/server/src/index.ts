@@ -422,7 +422,7 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
     });
   }
 
-  // Nexus builds: started, a chat app's step covered, stalled, finished. Called without
+  // Nexus builds, when one finishes. Called without
   // the error-text filter above, which would hide any thread whose turns mention an error.
   if (byName.has('nexus.thread_list') && byName.has('nexus.thread_read')) {
     checks.push(
