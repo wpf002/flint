@@ -276,6 +276,9 @@ const SANDBOX_LINES = [
   'run the program itself once for real — ["node","bin/thing.js","Denver"] — and read the output. The',
   'thirteenth build shipped "0 views" for every article: its tests passed on fixtures while the live URL it',
   'built was wrong. The sandbox can reach the internet.',
+  'A server never answers 500 for something it can name: a bad parameter is a 400, something not found a 404,',
+  'and a service it depends on that fails or refuses a 502, each with a JSON body saying which. The fourteenth',
+  'build answered ?lang=zz with a bare 500.',
 ];
 
 /*
