@@ -579,8 +579,10 @@ async function takeTurn(
    * mid-string into prose, which cost the whole turn its nomination.
    */
   const forced = p.replyMode === 'tool';
-  const generateWith = async (maxTokens: number) =>
-    withRetry(log, p.slug, () => p.provider.generate({
+  // Summed across every generation this turn makes: a retry with more room, a re-ask with files.
+  const spent = { input: 0, output: 0, cacheRead: 0 };
+  const generateWith = async (maxTokens: number, need: string[] = []) => {
+    const g = await withRetry(log, p.slug, () => p.provider.generate({
     model: p.cfg.model,
     /*
      * What stays the same from turn to turn goes first, in the system prompt, so a
@@ -594,7 +596,7 @@ async function takeTurn(
       maxTokens,
       Boolean(workspace),
       p.replyMode,
-      threadContext(state, p.slug, built, down),
+      threadContext(state, p.slug, built, down, need),
     ),
     messages: [
       {
@@ -608,6 +610,11 @@ async function takeTurn(
     signal: AbortSignal.timeout(p.turnTimeoutMs ?? limits.turnTimeoutMs),
     ...(forced ? { tools: [TAKE_TURN_TOOL], toolChoice: { name: TAKE_TURN_TOOL.name } } : {}),
   }), limits.retryDelaysMs);
+    spent.input += g.usage.input;
+    spent.output += g.usage.output;
+    spent.cacheRead += g.usage.cacheRead ?? 0;
+    return g;
+  };
 
   let generated = await generateWith(p.cfg.maxOutputTokens);
   /*
@@ -637,8 +644,24 @@ async function takeTurn(
   }
 
   // A forced tool call carries the reply as its arguments rather than as message text.
-  const raw = forced ? forcedReply(generated.message) : generated.message.content;
-  const { reply, malformed } = parseReply(raw);
+  let { reply, malformed } = parseReply(forced ? forcedReply(generated.message) : generated.message.content);
+
+  /*
+   * A turn that only asks to see files it was shown by name. Above WORKING_SET_CHARS a turn
+   * sees the files that matter to it and a listing of the rest; this is how it reads one.
+   * Asked again at once, in the same turn, with them shown. Once: a second request is
+   * recorded as it is.
+   */
+  const known = new Set(built.map((b) => b.name));
+  const requested = reply.need.filter((n) => known.has(n));
+  if (!malformed && requested.length > 0 && reply.files.length === 0 && reply.edits.length === 0 && reply.run.length === 0 && !reply.done) {
+    log(`[${p.slug}] asked to see ${requested.join(', ')}; asking again with them shown`);
+    generated = await generateWith(p.cfg.maxOutputTokens, requested);
+    if (generated.reason === 'max_tokens') {
+      throw new Error(`reply hit the ${p.cfg.maxOutputTokens}-token cap after asking for files. Nothing recorded.`);
+    }
+    ({ reply, malformed } = parseReply(forced ? forcedReply(generated.message) : generated.message.content));
+  }
   if (malformed) {
     log(`[${p.slug}] reply was not valid JSON; recording it as-is and nominating nobody`);
   }
@@ -961,8 +984,8 @@ async function takeTurn(
     ...(ran.length > 0 ? { runs: ran } : {}),
     // Reported so "what did this thread cost" is answerable. Nexus never calls a model
     // and cannot measure this itself.
-    tokensIn: generated.usage.input,
-    tokensOut: generated.usage.output + reviewTokens,
+    tokensIn: spent.input,
+    tokensOut: spent.output + reviewTokens,
   });
 
   /*
@@ -1097,8 +1120,8 @@ async function takeTurn(
   }
 
   // Cache reads are shown so the prefix ordering can be checked against the bill.
-  const cached = generated.usage.cacheRead ? `, ${generated.usage.cacheRead} cached` : '';
-  const cost = `${generated.usage.input}→${generated.usage.output} tok${cached}`;
+  const cached = spent.cacheRead ? `, ${spent.cacheRead} cached` : '';
+  const cost = `${spent.input}→${spent.output} tok${cached}`;
   const handoff = done
     ? 'closed the thread'
     : appended.next
@@ -1111,7 +1134,7 @@ async function takeTurn(
   log(
     `[${p.slug}] turn ${appended.seq} on ${short(job.threadId)}${job.volunteered ? ' (took an open floor)' : ''} ${handoff} (${cost})`,
   );
-  return { taken: true, tokensOut: generated.usage.output + reviewTokens };
+  return { taken: true, tokensOut: spent.output + reviewTokens };
 }
 
 /**

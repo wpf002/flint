@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { VISUAL_REVIEW } from '../src/closing.js';
-import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema, MAX_FILES_PER_TURN } from '../src/prompt.js';
+import { lastRuns, parseReply, pastedFile, systemPrompt, threadContext, threadPrompt, ThreadStateSchema, MAX_FILES_PER_TURN, WORKING_SET_CHARS, workingSet } from '../src/prompt.js';
 import { DEFECTS_ONLY_AFTER, measuredIn, parseVerdict, reviewRequest, withPaths, withVerdict } from '../src/visual-review.js';
 
 const wellFormed = JSON.stringify({
@@ -739,5 +739,37 @@ describe('withPaths', () => {
   it('leaves shots unlabeled when the lines and shots disagree', () => {
     const images = [shot('desktop'), shot('mobile')];
     expect(withPaths(images, ['Rendered /: desktop 1280x800.'])).toEqual(images);
+  });
+});
+
+/* claude-api was reading 28k tokens a turn at twenty files; a bigger build would not fit. */
+describe('the files a turn sees', () => {
+  const state = (ask: string, turns: Array<{ seq: number; by: string; content?: string }> = []) =>
+    ThreadStateSchema.parse({ threadId: 't', goal: 'Build ledger', status: 'OPEN', turnCount: turns.length, ask, participants: [], turns });
+  const file = (name: string, size: number, lastBy = 'gpt-api') => ({ name, content: 'x'.repeat(size), version: 1, lastBy });
+
+  it('shows every file while the build is small', () => {
+    const built = [file('a.js', 100), file('b.js', 100)];
+    expect(workingSet(built, state('fix a.js')).listed).toEqual([]);
+  });
+
+  it('shows what the ask and the recent turns name, and lists the rest, once the build is big', () => {
+    const built = Array.from({ length: 30 }, (_, i) => file(`src/m${i}.js`, 4_000));
+    const { full, listed } = workingSet(built, state('Fix src/m7.js so the test passes.', [{ seq: 1, by: 'claude-api', content: 'I changed src/m12.js.' }]));
+    expect(full.map((f) => f.name)).toEqual(expect.arrayContaining(['src/m7.js', 'src/m12.js']));
+    expect(full.reduce((n, f) => n + f.content.length, 0)).toBeLessThanOrEqual(WORKING_SET_CHARS);
+    expect(listed.length).toBeGreaterThan(0);
+  });
+
+  it('always shows a file the turn asked to see', () => {
+    const built = Array.from({ length: 30 }, (_, i) => file(`src/m${i}.js`, 4_000, 'someone'));
+    expect(workingSet(built, state('carry on'), ['src/m29.js']).full.map((f) => f.name)).toContain('src/m29.js');
+  });
+
+  it('lists what it did not show, with how to ask for it', () => {
+    const built = Array.from({ length: 30 }, (_, i) => file(`src/m${i}.js`, 4_000, 'someone'));
+    const context = threadContext(state('carry on'), 'claude-api', built);
+    expect(context).toContain('OTHER FILES IN THIS BUILD');
+    expect(context).toContain('- src/m3.js — 1 lines, v1, last by someone');
   });
 });

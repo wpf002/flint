@@ -1525,3 +1525,33 @@ describe('a standup', () => {
     expect(f.generations).toBe(0);
   });
 });
+
+/* A turn that only sees a listing of some files must be able to read one before changing it. */
+describe('a turn that asks to see files', () => {
+  it('is asked again at once with them shown, as one turn', async () => {
+    let asked = 0;
+    const f = fake('gpt-api', [{ threadId: 't0', goal: 'Build ledger', turns: 3, yourTurn: true }],
+      { content: 'Need to read it first.', summary: 'reading', next: null, ask: null, done: false, need: ['src/db.js'] },
+      { built: [{ name: 'src/db.js' }] });
+    const generate = f.participant.provider.generate.bind(f.participant.provider);
+    (f.participant.provider as { generate: typeof generate }).generate = async (args) => {
+      asked += 1;
+      return generate(args);
+    };
+
+    await tick([f.participant], limits(), silent);
+
+    expect(asked).toBe(2);
+    expect(f.calls.filter((c) => c.tool === 'thread_append')).toHaveLength(1);
+  });
+
+  it('is not asked again when the turn also changed something', async () => {
+    const f = fake('gpt-api', [{ threadId: 't0', goal: 'Build ledger', turns: 3, yourTurn: true }],
+      { content: 'Wrote it.', summary: 'wrote', next: null, ask: null, done: false, need: ['src/db.js'], files: [{ name: 'src/x.js', content: 'x', note: null }] },
+      { built: [{ name: 'src/db.js' }] });
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.generations).toBe(1);
+  });
+});

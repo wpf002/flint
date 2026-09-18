@@ -124,6 +124,8 @@ export const TurnReplySchema = z
     files: z.array(FileSchema).max(MAX_FILES_PER_TURN).default([]),
     /** Files the model sent past the per-turn limit, by name. Never written. */
     dropped: z.array(z.string()).default([]),
+    /** Files it needs to see before it can do its part, when they were only listed. */
+    need: z.array(z.string().min(1)).max(40).default([]),
     /*
      * Changes to files that already exist, as find-and-replace pairs. A revision used
      * to be the whole file again, so a three-line fix cost as much as the file.
@@ -163,7 +165,7 @@ export const TURN_REPLY_JSON_SCHEMA = {
   // optional is expressed as nullable instead. Omitting `remember` and `canon` here
   // would silently make it impossible for a participant to store a fact or conclude a
   // thread — the schema would forbid the very fields the loop reads.
-  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'edits', 'canon'],
+  required: ['content', 'summary', 'next', 'ask', 'done', 'remember', 'accept', 'run', 'files', 'edits', 'canon', 'need'],
   properties: {
     content: { type: 'string', description: 'Your actual contribution, as prose. A file goes in "files", never here.' },
     summary: { type: 'string', description: 'One line about your own turn, under 300 characters.' },
@@ -220,6 +222,12 @@ export const TURN_REPLY_JSON_SCHEMA = {
       },
       description: `Changes to existing files as find-and-replace pairs, up to ${MAX_EDITS_PER_TURN} per turn. Use these for any change to a file that exists; use "files" only for new files or rewrites.`,
     },
+    need: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Paths of listed files you must read before you can do your part. Send only this, with everything else empty, and you are asked again at once with those files shown. Empty otherwise.',
+    },
     canon: {
       type: ['object', 'null'],
       additionalProperties: false,
@@ -272,6 +280,8 @@ const SANDBOX_LINES = [
   'passes, and a turn that changes the page must screenshot it again. To show a filled-in state, let the page',
   'take its input from the URL (for example /?city=Chicago) and screenshot that path too.',
   'Something is only done when a run shows it working. Run the tests before you call a program finished.',
+  'Storage without a dependency: Node 22 has SQLite built in — import { DatabaseSync } from "node:sqlite". Take',
+  'the database path from an environment variable, and give each test its own ":memory:" database.',
   'Tests that serve every response from a fixture prove the code, not the address it calls. Before closing,',
   'run the program itself once for real — ["node","bin/thing.js","Denver"] — and read the output. The',
   'thirteenth build shipped "0 views" for every article: its tests passed on fixtures while the live URL it',
@@ -476,11 +486,72 @@ export function lastRuns(state: ThreadState): RanBefore[] {
  *
  * Files are listed by name, so a change to one leaves the ones before it in place.
  */
+/*
+ * The files a turn sees in full.
+ *
+ * Every file went into every turn, which put a single thread's ceiling at about twenty
+ * files: claude-api was reading 28k tokens a turn by then. Above this many characters a
+ * turn gets the files that matter to it now, in full, and a one-line listing of the rest,
+ * and can ask for any listed file by name.
+ */
+export const WORKING_SET_CHARS = 60_000;
+
+/** Whether a text names this path as a path of its own. */
+function mentions(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+  return new RegExp(`(?<![\\w./-])${escaped}(?![\\w-])`).test(text);
+}
+
+export function workingSet(
+  built: BuiltArtifact[],
+  state: ThreadState,
+  need: string[] = [],
+  ran: RanBefore[] = [],
+): { full: BuiltArtifact[]; listed: BuiltArtifact[] } {
+  const files = [...built].sort((a, b) => a.name.localeCompare(b.name));
+  const total = files.reduce((sum, f) => sum + f.content.length, 0);
+  if (total <= WORKING_SET_CHARS) return { full: files, listed: [] };
+
+  const recent = state.turns.slice(-4).map((t) => `${t.content ?? t.summary ?? ''}\n${t.asked ?? ''}`).join('\n');
+  const ask = state.ask ?? '';
+  const output = ran.map((r) => `${r.command}\n${r.output}`).join('\n');
+  const lastTurnBy = state.turns.filter((t) => t.kind !== 'note').at(-1)?.by;
+  const score = (f: BuiltArtifact): number => {
+    if (need.includes(f.name)) return 1_000;
+    let s = 0;
+    if (mentions(ask, f.name)) s += 100;
+    if (mentions(output, f.name)) s += 80;
+    if (mentions(recent, f.name)) s += 60;
+    if (f.lastBy && f.lastBy === lastTurnBy) s += 40;
+    if (/(^|\/)package\.json$/.test(f.name)) s += 30;
+    return s;
+  };
+  const ranked = files
+    .map((f) => ({ f, s: score(f) }))
+    .sort((a, b) => b.s - a.s || a.f.content.length - b.f.content.length);
+  const full: BuiltArtifact[] = [];
+  let used = 0;
+  for (const { f, s } of ranked) {
+    // A requested file is always shown; the rest fill what room is left, most relevant first.
+    if (s >= 1_000 || (s > 0 && used + f.content.length <= WORKING_SET_CHARS)) {
+      full.push(f);
+      used += f.content.length;
+    }
+  }
+  const shown = new Set(full.map((f) => f.name));
+  return {
+    full: full.sort((a, b) => a.name.localeCompare(b.name)),
+    listed: files.filter((f) => !shown.has(f.name)),
+  };
+}
+
 export function threadContext(
   state: ThreadState,
   self: string,
   built: BuiltArtifact[] = [],
   down: string[] = [],
+  need: string[] = [],
+  ran: RanBefore[] = lastRuns(state),
 ): string {
   const others = state.participants.filter((p) => p.slug !== self);
 
@@ -498,7 +569,8 @@ export function threadContext(
           .join('\n')
       : '- nobody else is active right now';
 
-  const files = [...built].sort((a, b) => a.name.localeCompare(b.name));
+  const { full: files, listed } = workingSet(built, state, need, ran);
+  const lines = (text: string) => text.split('\n').length;
 
   return [
     `GOAL: ${state.goal}`,
@@ -510,6 +582,13 @@ export function threadContext(
           '',
           'WHAT THE THREAD HAS BUILT SO FAR — revise this rather than starting again, with "edits" for small changes:',
           ...files.map((a) => `--- ${a.name} (v${a.version}, last by ${a.lastBy ?? 'someone'}) ---\n${a.content}`),
+        ]
+      : []),
+    ...(listed.length > 0
+      ? [
+          '',
+          `OTHER FILES IN THIS BUILD (${listed.length}, not shown). To change or rely on one, first send only "need": ["path", …] and you are asked again at once with them shown. Never edit a file you have not seen:`,
+          ...listed.map((a) => `- ${a.name} — ${lines(a.content)} lines, v${a.version}, last by ${a.lastBy ?? 'someone'}`),
         ]
       : []),
   ].join('\n');
@@ -609,6 +688,7 @@ export function parseReply(raw: string): { reply: TurnReply; malformed: boolean 
       files: [],
       dropped: [],
       edits: [],
+      need: [],
     },
     malformed: true,
   };
