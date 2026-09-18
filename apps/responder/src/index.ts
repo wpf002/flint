@@ -162,7 +162,7 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'run';
   if (command === 'help' || command === '--help' || command === '-h') {
-    process.stdout.write('responder <open|read|export|spend|once|run>\n');
+    process.stdout.write('responder <open|plan|read|export|spend|once|run>\n');
     return;
   }
 
@@ -192,6 +192,37 @@ async function main(): Promise<void> {
           ...(ask ? { ask } : {}),
         });
         log(`opened ${thread.threadId} as ${opener.slug}, waiting on ${thread.nextSpeaker ?? 'anyone'}`);
+        return;
+      }
+
+      /*
+       * A build too big for one thread, as milestones: the first opens now, and Nexus opens
+       * each of the rest when the one before it closes, carrying its files forward.
+       * The plan is a JSON file: { "goals": [...], "firstSpeaker", "thenFirstSpeaker", "ask" }.
+       */
+      case 'plan': {
+        const path = process.argv[3];
+        if (!path) throw new Error('Usage: responder plan <plan.json>');
+        const plan = JSON.parse(readFileSync(path, 'utf8')) as {
+          goals: string[];
+          firstSpeaker?: string;
+          thenFirstSpeaker?: string;
+          ask?: string;
+          selfRunning?: boolean;
+        };
+        const [goal, ...then] = plan.goals ?? [];
+        if (!goal) throw new Error('The plan has no goals.');
+        const opener = participants[0]!;
+        const thread = await opener.call<{ threadId: string; nextSpeaker: string | null }>('thread_open', {
+          goal,
+          selfRunning: plan.selfRunning ?? false,
+          ...(plan.firstSpeaker ? { firstSpeaker: plan.firstSpeaker } : {}),
+          ...(plan.ask ? { ask: plan.ask } : {}),
+          ...(then.length > 0 ? { then } : {}),
+          ...(plan.thenFirstSpeaker ? { thenFirstSpeaker: plan.thenFirstSpeaker } : {}),
+        });
+        log(`opened ${thread.threadId}, milestone 1 of ${then.length + 1}, waiting on ${thread.nextSpeaker ?? 'anyone'}`);
+        process.stdout.write(`${thread.threadId}\n`);
         return;
       }
 
