@@ -652,8 +652,21 @@ async function takeTurn(
    * Asked again at once, in the same turn, with them shown. Once: a second request is
    * recorded as it is.
    */
-  const known = new Set(built.map((b) => b.name));
-  const requested = reply.need.filter((n) => known.has(n));
+  /*
+   * Resolved against the build's paths, so "app.js" finds "public/app.js". In the ledger
+   * build a turn asked for files by bare name, nothing matched, and the request was
+   * recorded as a turn instead of being answered.
+   */
+  const requested = [
+    ...new Set(
+      reply.need.flatMap((n) => {
+        const exact = built.find((b) => b.name === n);
+        if (exact) return [exact.name];
+        const endings = built.filter((b) => b.name.endsWith(`/${n.replace(/^\.?\//, '')}`));
+        return endings.length === 1 ? [endings[0]!.name] : [];
+      }),
+    ),
+  ];
   if (!malformed && requested.length > 0 && reply.files.length === 0 && reply.edits.length === 0 && reply.run.length === 0 && !reply.done) {
     log(`[${p.slug}] asked to see ${requested.join(', ')}; asking again with them shown`);
     generated = await generateWith(p.cfg.maxOutputTokens, requested);
@@ -940,25 +953,47 @@ async function takeTurn(
    * Never back to itself. In the ninth aqi run claude-api named itself next; Nexus refused
    * the append, and the whole turn (26k tokens of input) was thrown away and redone.
    */
+  /*
+   * Who builds when the chosen builder can't. Only participants that answer on their own,
+   * and the author itself when none of them can: in the ledger build gpt-api ran out of
+   * credit, the fallback took the first name in the roster, a chat app, and the thread
+   * waited ninety minutes for it three times. Nexus accepts a self-hand when nobody else
+   * who answers on their own is able.
+   */
+  const focus = failing ? 'code' : 'design';
+  const autonomousAble = state.participants.filter(
+    (c) => c.slug !== p.slug && !down.includes(c.slug) && c.answers_on_its_own !== false,
+  );
+  const builder = () =>
+    builderFor(autonomousAble, p.slug, focus) ?? builderFor(autonomousAble, p.slug, focus === 'code' ? 'design' : 'code') ?? p.slug;
+  // Only a build: a discussion that names nobody and asks nothing is left for Nexus to route.
+  const building = needsPassingRun(state.goal);
+  /*
+   * A turn that names nobody on a thread that isn't finished. The last milestone of the
+   * ledger build passed its review and handed to no one, and with no ask to route on, the
+   * floor sat open for three hours. It goes to the chat app whose step is still due, or to
+   * a builder.
+   */
+  const pendingApp = building && !reply.done && !blocker && !reply.next && !reply.ask ? skippedStep(state.goal, state.participants, state.turns) : null;
   const wanted = toApp
     ? toApp
-    : held || (blocker && !reply.next) || reply.next === p.slug
-      ? builderFor(state.participants, p.slug, failing ? 'code' : 'design')
-      : reply.next;
+    : pendingApp
+      ? pendingApp
+      : held || (blocker && !reply.next) || reply.next === p.slug || (building && !reply.next && !reply.ask && !done)
+        ? builder()
+        : reply.next;
   /*
    * Never to someone known to be unable to answer. In the sixth product build the
    * builder ran out of credit, and each turn handed the thread back to it anyway; each
    * time it took three failures and a fifteen-minute rescue to move on.
    */
-  const able = state.participants.filter((c) => c.slug !== p.slug && !down.includes(c.slug));
-  const next =
-    wanted && down.includes(wanted)
-      ? (builderFor(able, p.slug, failing ? 'code' : 'design') ?? able[0]?.slug ?? null)
-      : wanted;
+  const next = wanted && down.includes(wanted) ? builder() : wanted;
   if (wanted && next !== wanted) {
     log(`[${p.slug}] handed to ${wanted}, which cannot answer right now; ${next ? `${next} gets it` : 'the floor is open'} instead`);
   }
-  const ask = !held
+  const ask = pendingApp && next === pendingApp
+    ? `The build passes its tests and its design review. ${stepFor(state.goal, pendingApp) ?? 'Take the step the goal gives you, then hand on as it says.'}`
+    : !held
     ? reply.ask
     : toApp
       ? `${refused} The build passes its tests and its design review. ${stepFor(state.goal, toApp) ?? 'Take the step the goal gives you, then hand on as it says.'}`

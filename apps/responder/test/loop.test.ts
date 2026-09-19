@@ -39,6 +39,7 @@ function fake(
     offers?: Array<{ id: string; subject: string; content: string; from: { slug: string } }>;
     built?: Array<{ name: string }>;
     participants?: Array<{ slug: string; label: string; good_at: string; answers_on_its_own?: boolean }>;
+    turns?: unknown[];
   } = {},
 ): Fake {
   const status = floor.status ?? 'OPEN';
@@ -76,7 +77,7 @@ function fake(
           turnCount: t.turns,
           ask: 'do the thing',
           participants: floor.participants ?? [{ slug, label: slug, good_at: 'testing' }],
-          turns: [],
+          turns: floor.turns ?? [],
         };
       }
       if (tool === 'thread_append') return { seq: 1, next: (args.next as string) ?? null };
@@ -874,21 +875,45 @@ describe("a turn that hands to a participant that cannot answer", () => {
     return p;
   };
 
-  it("hands to someone who can instead, and says so in the thread", async () => {
+  /* In the ledger build the fallback took the first name in the roster, a chat app, three times. */
+  it("keeps building itself rather than handing a build to someone who can't build", async () => {
     const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'gpt', ask: 'Run the tests.' }, { participants: roster });
 
     await tick([f.participant, sick(), fake('perplexity', []).participant], limits(), silent);
 
-    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('perplexity');
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('claude');
     expect(String(f.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('unable to answer');
   });
 
-  it("leaves the floor open when nobody else can", async () => {
+  it("keeps the floor itself when nobody else can answer", async () => {
     const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'gpt', ask: 'Run the tests.' }, { participants: roster.slice(0, 2) });
 
     await tick([f.participant, sick()], limits(), silent);
 
-    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBeUndefined();
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('claude');
+  });
+
+  it("hands to another builder that can answer", async () => {
+    const withBuilder = [...roster, { slug: 'codex', label: 'Codex', good_at: 'Implementation and code.' }];
+    const f = fake('claude', threads(1), { content: 'Fixed the page.', summary: 'page', next: 'gpt', ask: 'Run the tests.' }, { participants: withBuilder });
+
+    await tick([f.participant, sick(), fake('codex', []).participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('codex');
+  });
+
+  /* The last ledger milestone passed its review, named nobody and asked nothing; the floor sat open for three hours. */
+  it("gives an unnamed hand-off with no ask to the chat app whose step is due", async () => {
+    const apps = [...roster, { slug: 'chatgpt', label: 'ChatGPT', good_at: 'Review.', answers_on_its_own: false }];
+    const f = fake('claude', [{ threadId: 't0', goal: 'Build x. Done when npm test passes. 1) claude builds it. 2) chatgpt reviews the page files.', turns: 4, yourTurn: true }],
+      { content: 'Review passed.', summary: 'passed', next: null, ask: null, done: false },
+      { participants: apps, turns: [{ seq: 3, by: 'gpt', content: 'Tests pass.', runs: [{ command: 'npm test', ok: true, output: 'ok' }] }] });
+
+    await tick([f.participant, fake('gpt', []).participant], limits(), silent);
+
+    const append = f.calls.find((c) => c.tool === 'thread_append')?.args;
+    expect(append?.next).toBe('chatgpt');
+    expect(String(append?.ask)).toContain('2) chatgpt reviews the page files.');
   });
 
   it("keeps a nomination of someone who can answer", async () => {
