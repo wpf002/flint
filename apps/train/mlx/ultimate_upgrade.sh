@@ -10,6 +10,18 @@ export ADAPTER="$BRAIN/adapters70b"
 OLLAMA_PLIST="$HOME/Library/LaunchAgents/com.flint.ollama.plist"
 TS=$(date "+%Y-%m-%d %H:%M")
 
+# macOS lets the GPU wire only ~75% of RAM by default: ~48GB on a 64GB Studio.
+# The 72B 4-bit base is ~41GB before activations, LoRA state and the eval pass,
+# so a QLoRA run at the default limit OOMs or swaps. sysctl reports 0 for "default".
+# Raise it once per boot (resets on reboot):  sudo sysctl iogpu.wired_limit_mb=57344
+WIRED_MB=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
+if [ "${FLINT_SKIP_WIRED_CHECK:-0}" != 1 ] && [ "$WIRED_MB" -lt "${FLINT_MIN_WIRED_MB:-56000}" ]; then
+  echo "✗ GPU wired limit is ${WIRED_MB}MB (0 = macOS default, ~48GB on 64GB)."
+  echo "  A 72B QLoRA run needs ~56GB. Run this, then retry:"
+  echo "    sudo sysctl iogpu.wired_limit_mb=57344"
+  exit 1
+fi
+
 echo "[$TS] ULTIMATE UPGRADE — base=$BASE_MODEL"
 echo "[$TS] locking out ollama for the whole run..."
 launchctl unload "$OLLAMA_PLIST" 2>/dev/null || true
