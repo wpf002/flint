@@ -7,6 +7,7 @@ import { Participant } from './participant.js';
 import { describe, tick, type Failures, type Limits } from './loop.js';
 import { checkAll, publish } from './health.js';
 import { SpendLedger, utcDay } from './spend.js';
+import { BudgetLedger, describeBudget } from './budget.js';
 import { exportThread } from './export.js';
 import { probeSandbox } from './remote-sandbox.js';
 import { anthropicReviewer, type ReviewScreens } from './visual-review.js';
@@ -24,7 +25,7 @@ function dayIndex(today: string): number {
  *   responder open      start a thread that runs itself: open "<goal>" @slug "<ask>"
  *   responder read      print a thread's turns in full
  *   responder export    copy a thread's build out as an ordinary project
- *   responder spend     how many turns have been taken today
+ *   responder spend     today's turns and tokens, and what each participant has spent
  *   responder once      take one round of waiting turns and exit (cron-friendly)
  *   responder run       poll and keep taking turns until interrupted
  *
@@ -46,12 +47,20 @@ const DEFAULT_CONFIG = join(homedir(), '.flint', 'nexus-responder.json');
  */
 const STATE_DIR = process.env.NEXUS_RESPONDER_STATE_DIR?.trim() || join(homedir(), '.flint');
 const SPEND_LEDGER = join(STATE_DIR, 'responder-spend.json');
+/** Dollars per participant, today and this month. Beside the token ledger, for the same reason. */
+const BUDGET_LEDGER = join(STATE_DIR, 'responder-budget.json');
 
 /** One row per runner. A second machine would report under its own name. */
 const RUNNER_NAME = 'responder';
 
-/** How often health is re-probed while running. Cheap, and the answer changes slowly. */
-const HEALTH_EVERY_MS = 30 * 60_000;
+/*
+ * How often an idle model is probed while running.
+ *
+ * Every probe is a paid generation. At every half hour that was 48 a day per model,
+ * whether or not anything was being built, and the answer changes slowly. A model that
+ * answered anything within the window has already proved it works and is not probed.
+ */
+const HEALTH_EVERY_MS = 6 * 60 * 60_000;
 
 function ledgerState(ledger: SpendLedger, cfg: ResponderConfig): Heartbeat {
   return {
@@ -136,9 +145,10 @@ function loadConfig(): ResponderConfig {
 
 async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
   const connected: Participant[] = [];
+  const book = BudgetLedger.open(BUDGET_LEDGER);
   for (const p of cfg.participants) {
     try {
-      const participant = await Participant.connect(p, cfg.nexusUrl);
+      const participant = await Participant.connect(p, cfg.nexusUrl, book);
       /*
        * Published on connect rather than by a command. Routing and every nomination read
        * these; a deployment that only ever ran `once` never published them, so they
@@ -149,7 +159,8 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
       // knows to clear it. Picking it up here is what lets the recheck loop do that.
       await participant.adoptHealth().catch(() => {});
       connected.push(participant);
-      log(`connected ${p.slug} (${p.provider}/${p.model})`);
+      const budget = participant.budget ? `, spent ${describeBudget(participant.budget, book.spent(p.slug))}` : '';
+      log(`connected ${p.slug} (${p.provider}/${p.model}${budget})`);
     } catch (err) {
       // One bad token should not ground the others. The rest of the space still works.
       log(`could not connect ${p.slug}: ${describe(err)}`);
@@ -298,6 +309,10 @@ async function main(): Promise<void> {
             ? `today: ${ledger.tokens.toLocaleString()} of ${cfg.maxOutputTokensPerDay.toLocaleString()} output tokens, ${ledger.spent} of ${cfg.maxTurnsPerDay} turns`
             : `today: ${ledger.tokens.toLocaleString()} output tokens across ${ledger.spent} turns; no daily cap set`,
         );
+        const book = BudgetLedger.open(BUDGET_LEDGER);
+        for (const p of participants) {
+          log(`${p.slug}: ${describeBudget(p.budget, book.spent(p.slug))}${p.resting ? ` (resting: ${p.resting})` : ''}`);
+        }
         return;
       }
 
@@ -442,7 +457,9 @@ async function runForever(participants: Participant[], cfg: ResponderConfig): Pr
      */
     if (Date.now() - lastHealthAt > HEALTH_EVERY_MS) {
       lastHealthAt = Date.now();
-      for (const check of await checkAll(participants)) {
+      // Not one resting on its budget: a passing probe would clear the mark keeping it resting.
+      const due = participants.filter((p) => !p.resting && Date.now() - p.lastAnsweredAt > HEALTH_EVERY_MS);
+      for (const check of await checkAll(due)) {
         await publish(participants.find((p) => p.slug === check.slug)!, check);
       }
     }

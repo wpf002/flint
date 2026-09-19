@@ -1,13 +1,14 @@
 import { connectServer, type ConnectedServer } from '@flint/mcp';
-import type { ProviderAdapter } from '@flint/core';
+import type { ProviderAdapter, TokenUsage } from '@flint/core';
 import { replyMode, resolveSecret, type ParticipantConfig, type ReplyMode } from './config.js';
+import { budgetOf, costOf, type Budget, type BudgetLedger } from './budget.js';
 
 /** Longest any single Nexus call may take. Generous — it is a backstop, not a budget. */
 const NEXUS_CALL_TIMEOUT_MS = 30_000;
 
 /** How often a participant that reported itself failing tries again. */
 const RECHECK_EVERY_MS = 5 * 60_000;
-import { buildProvider } from './providers.js';
+import { buildProvider, metered } from './providers.js';
 
 /**
  * One AI in the shared space: a Nexus namespace it speaks as, and a model that
@@ -19,11 +20,53 @@ import { buildProvider } from './providers.js';
  * write-scoping means it cannot edit anyone else's memory or turns either.
  */
 export class Participant {
+  /** The model, with every call's usage charged to this participant's budget. */
+  readonly provider: ProviderAdapter;
+  readonly budget: Budget | null;
+  /** When the model last answered anything. One that answered recently needs no probe. */
+  lastAnsweredAt = 0;
+  private restReported = false;
+
   private constructor(
     readonly cfg: ParticipantConfig,
-    readonly provider: ProviderAdapter,
+    model: ProviderAdapter,
     private readonly server: ConnectedServer,
-  ) {}
+    private readonly book: BudgetLedger | null = null,
+  ) {
+    this.provider = metered(model, (usage) => this.charge(usage));
+    this.budget = budgetOf(cfg);
+  }
+
+  private charge(usage: TokenUsage): void {
+    this.lastAnsweredAt = Date.now();
+    this.book?.charge(this.slug, costOf(this.cfg.model, usage));
+  }
+
+  /** Why this participant is resting on its budget, or null when it may work. */
+  get resting(): string | null {
+    return this.book ? this.book.over(this.slug, this.budget) : null;
+  }
+
+  /**
+   * Tells Nexus when this participant starts or stops resting, once each way.
+   *
+   * Sent as a health report because that is what Nexus and this loop route around: a
+   * participant marked failing is never handed a thread. The note says why, so the
+   * console shows a participant saving credit rather than a broken one.
+   */
+  async syncRest(log: (line: string) => void): Promise<void> {
+    const why = this.resting;
+    if (why && !this.restReported) {
+      this.restReported = true;
+      const note = `Resting to save credit: ${why}. Its turns go to whoever else can answer.`;
+      await this.call('report_health', { ok: false, note: note.slice(0, 500) }).catch(() => {});
+      log(`[${this.slug}] resting: ${why}`);
+    } else if (!why && this.restReported) {
+      this.restReported = false;
+      if (!this.reportedFailing) await this.call('report_health', { ok: true }).catch(() => {});
+      log(`[${this.slug}] budget renewed; taking turns again`);
+    }
+  }
 
   get slug(): string {
     return this.cfg.slug;
@@ -50,9 +93,9 @@ export class Participant {
   private reportedFailing = false;
   private lastRecheck = 0;
 
-  /** Whether this one is currently telling Nexus it cannot work. */
+  /** Whether this one cannot work right now: its model is failing, or it is resting. */
   get failing(): boolean {
-    return this.reportedFailing;
+    return this.reportedFailing || this.resting !== null;
   }
 
   /**
@@ -94,7 +137,9 @@ export class Participant {
    * meant a participant that got no work stayed marked broken however well it worked.
    */
   async recheck(now = Date.now()): Promise<void> {
-    if (!this.reportedFailing) return;
+    // A resting participant is not probed: the probe is a paid call, and one that
+    // succeeded would clear the mark that keeps it resting.
+    if (!this.reportedFailing || this.resting) return;
     if (now - this.lastRecheck < RECHECK_EVERY_MS) return;
     this.lastRecheck = now;
 
@@ -121,7 +166,7 @@ export class Participant {
     }
   }
 
-  static async connect(cfg: ParticipantConfig, nexusUrl: string): Promise<Participant> {
+  static async connect(cfg: ParticipantConfig, nexusUrl: string, book: BudgetLedger | null = null): Promise<Participant> {
     // Everything that can fail on configuration alone is resolved before the socket
     // is opened. Connecting first would leave a live MCP session behind every
     // participant that turns out to be missing an API key.
@@ -134,7 +179,7 @@ export class Participant {
       url: nexusUrl,
       headers: { Authorization: `Bearer ${token}` },
     });
-    return new Participant(cfg, provider, server);
+    return new Participant(cfg, provider, server, book);
   }
 
   /**

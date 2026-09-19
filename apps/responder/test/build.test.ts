@@ -65,6 +65,7 @@ function builder(
     reportFailing: async () => {},
     reportRecovered: async () => {},
     recheck: async () => {},
+    syncRest: async () => {},
     provider: {
       name: 'fake',
       generate: async () => ({

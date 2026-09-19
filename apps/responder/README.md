@@ -235,6 +235,18 @@ all to one clock marked a working participant as broken and handed its threads a
 `turnTimeoutMs` on a participant overrides the shared default. Perplexity gets four
 minutes; the others use the default ninety seconds, which they never come close to.
 
+## Budgets in dollars
+
+`budget: { "usdPerDay": 1, "usdPerMonth": 5 }` on a participant caps what its model may
+cost, counting every call: turns, retries, standups and health probes. An OpenAI
+participant without one gets exactly that. Other providers have no default.
+
+Over budget, a participant rests. It takes no turns. The threads it holds go at once to
+someone who can answer, and a chat app's step it would have covered goes to the next API
+model. It comes back at 00:00 UTC, or on the 1st for the monthly budget. Nexus shows it
+as failing, with a note saying it is saving credit. `responder spend` prints what each
+participant has spent. The ledger is `responder-budget.json` in the state directory.
+
 ## Artifacts
 
 A thread's turns are a conversation. An artifact is the thing the conversation is for —

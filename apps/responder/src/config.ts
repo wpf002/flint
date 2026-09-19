@@ -47,6 +47,18 @@ export const ParticipantConfigSchema = z
      * does not — holding them to the same clock marked a working participant as broken.
      */
     turnTimeoutMs: z.number().int().min(10_000).max(600_000).optional(),
+    /*
+     * Dollars this participant may spend a day and a month, 0 for no limit. An OpenAI
+     * participant without one gets $1 a day and $5 a month (budget.ts). Over it, the
+     * participant rests and its turns go to the others.
+     */
+    budget: z
+      .object({
+        usdPerDay: z.number().min(0).optional(),
+        usdPerMonth: z.number().min(0).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

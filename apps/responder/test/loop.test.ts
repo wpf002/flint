@@ -52,6 +52,7 @@ function fake(
     reportFailing: async () => {},
     reportRecovered: async () => {},
     recheck: async () => {},
+    syncRest: async () => {},
     provider: {
       name: 'fake',
       generate: async (args: unknown) => {
@@ -207,6 +208,7 @@ describe('tick', () => {
       reportFailing: async () => {},
       reportRecovered: async () => {},
       recheck: async () => {},
+      syncRest: async () => {},
       provider: { name: 'fake', generate: async () => { throw new Error('unused'); } },
       call: async () => {
         throw new Error('token revoked');
@@ -459,6 +461,7 @@ describe("threads that cannot be answered", () => {
       reportFailing: async () => {},
       reportRecovered: async () => {},
       recheck: async () => {},
+      syncRest: async () => {},
       provider: { name: 'fake', generate: async () => { throw new Error('provider refused'); } },
       call: async (tool: string, args: Record<string, unknown> = {}) => {
         calls.push({ tool, args });
@@ -593,6 +596,7 @@ describe("a participant whose provider is down", () => {
         reported.push(true);
       },
       recheck: async () => {},
+      syncRest: async () => {},
       provider: {
         name: 'fake',
         generate: async () => {
@@ -936,6 +940,7 @@ describe("turns run alongside each other", () => {
       reportFailing: async () => {},
       reportRecovered: async () => {},
       recheck: async () => {},
+      syncRest: async () => {},
       provider: {
         name: 'fake',
         generate: async () => {
@@ -1020,6 +1025,7 @@ describe("saying it works again", () => {
         reported.push(true);
       },
       recheck: async () => {},
+      syncRest: async () => {},
     } as unknown as Participant;
     return { participant, reported };
   };
@@ -1057,6 +1063,7 @@ describe("re-checking a participant that reported itself failing", () => {
       replyMode: 'prompt',
       reportFailing: async () => {},
       reportRecovered: async () => {},
+      syncRest: async () => {},
       recheck: async () => {
         rechecks += 1;
       },
@@ -1156,6 +1163,7 @@ function stranded(
     reportFailing: async () => {},
     reportRecovered: async () => {},
     recheck: async () => {},
+    syncRest: async () => {},
     provider: { name: 'fake', generate: async () => ({ message: { id: 'x', role: 'assistant', content: '{}', timestamp: 0 }, usage: { input: 1, output: 1 }, reason: 'complete' }) },
     call: async (tool: string, args: Record<string, unknown> = {}) => {
       calls.push({ tool, args });
@@ -1578,5 +1586,49 @@ describe('a turn that asks to see files', () => {
     await tick([f.participant], limits(), silent);
 
     expect(f.generations).toBe(1);
+  });
+});
+
+/*
+ * GPT used two $10 blocks of OpenAI credit in a week. Its budget stops the spending, and
+ * these cover that stopping it never stops the build.
+ */
+describe('a participant resting on its budget', () => {
+  const rest = (p: Participant, why = "used today's $1.00 budget ($1.02 spent); back at 00:00 UTC"): void => {
+    Object.assign(p as unknown as { failing: boolean; resting: string }, { failing: true, resting: why });
+  };
+
+  it('takes no turn, even one that is its own', async () => {
+    const gpt = fake('gpt-api', threads(1));
+    rest(gpt.participant);
+
+    await tick([gpt.participant], limits(), silent, new Map());
+
+    expect(gpt.generations).toBe(0);
+  });
+
+  it('has its threads moved at once, not after the usual wait', async () => {
+    const gpt = stranded('gpt-api', true, []);
+    rest(gpt.participant);
+    const claude = stranded('claude-api', false, [{ threadId: 'held', waitingOn: 'gpt-api', minutesAgo: 0 }]);
+
+    await tick([gpt.participant, claude.participant], limits(), silent);
+
+    expect(gpt.calls.find((c) => c.tool === 'thread_reassign')?.args).toMatchObject({ threadId: 'held', to: 'claude-api' });
+    expect(String(claude.calls.find((c) => c.tool === 'thread_note')?.args.content)).toContain('resting to save credit');
+  });
+
+  it("has another API model do a chat app's step when the app's own is resting", async () => {
+    const now = Date.parse('2026-09-15T20:00:00Z');
+    const gpt = fake('gpt-api', []);
+    rest(gpt.participant);
+    const claude = fake('claude-api', [
+      { threadId: 't0', goal: 'Build aqi', turns: 6, yourTurn: false, waitingOn: 'chatgpt', updatedAt: new Date(now - 120 * 60_000).toISOString() },
+    ]);
+
+    await coverMissedTurns([gpt.participant, claude.participant], silent, now, { lastChecked: 0 });
+
+    expect(claude.calls.find((c) => c.tool === 'thread_reassign')?.args).toEqual({ threadId: 't0', to: 'claude-api' });
+    expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
   });
 });

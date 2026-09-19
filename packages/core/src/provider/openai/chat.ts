@@ -55,7 +55,28 @@ interface RawDeltaToolCall {
 interface ChatResponse {
   id?: string;
   choices?: ChatChoice[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: ChatUsage;
+}
+
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  /** The part of the prompt served from OpenAI's cache, billed at a tenth of the rate. */
+  prompt_tokens_details?: { cached_tokens?: number | null } | null;
+}
+
+/**
+ * Token counts in Flint's shape. prompt_tokens includes the cached part; it is reported
+ * separately as cacheRead, which is what a cost has to be worked out from.
+ */
+function toUsage(raw: ChatUsage | undefined, fallback: TokenUsage = { input: 0, output: 0 }): TokenUsage {
+  if (!raw) return fallback;
+  const cached = raw.prompt_tokens_details?.cached_tokens;
+  return {
+    input: raw.prompt_tokens ?? fallback.input,
+    output: raw.completion_tokens ?? fallback.output,
+    ...(typeof cached === 'number' && cached > 0 ? { cacheRead: cached } : {}),
+  };
 }
 
 export class OpenAiCompatibleProvider implements ProviderAdapter {
@@ -94,10 +115,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
         rawProviderPayload: c,
       }));
 
-      const usage: TokenUsage = {
-        input: raw.usage?.prompt_tokens ?? 0,
-        output: raw.usage?.completion_tokens ?? 0,
-      };
+      const usage = toUsage(raw.usage);
       const id = raw.id ?? newId(this.name);
       const message =
         toolCalls.length > 0
@@ -131,12 +149,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
         if (!parsed) continue;
         lastChunk = parsed;
 
-        if (parsed.usage) {
-          usage = {
-            input: parsed.usage.prompt_tokens ?? usage.input,
-            output: parsed.usage.completion_tokens ?? usage.output,
-          };
-        }
+        if (parsed.usage) usage = toUsage(parsed.usage, usage);
 
         const choice = parsed.choices?.[0];
         if (!choice) continue;

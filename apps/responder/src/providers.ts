@@ -4,6 +4,7 @@ import {
   OpenAiProvider,
   PerplexityProvider,
   type ProviderAdapter,
+  type TokenUsage,
 } from '@flint/core';
 import { resolveSecret, type ParticipantConfig } from './config.js';
 import { TURN_REPLY_JSON_SCHEMA } from './prompt.js';
@@ -58,4 +59,30 @@ export function buildProvider(p: ParticipantConfig): ProviderAdapter {
       throw new Error(`Unsupported provider '${String(never)}' for participant '${p.slug}'.`);
     }
   }
+}
+
+/**
+ * The same provider, reporting what each call used.
+ *
+ * Every paid call goes through here: turns, retries, standups and health probes alike.
+ * A budget that only counted turns would miss the probes, which ran every half hour
+ * whether or not anything was being built.
+ */
+export function metered(inner: ProviderAdapter, onUsage: (usage: TokenUsage) => void): ProviderAdapter {
+  return {
+    name: inner.name,
+    getCapabilities: (model) => inner.getCapabilities(model),
+    estimateTokens: (messages, model) => inner.estimateTokens(messages, model),
+    async generate(args) {
+      const result = await inner.generate(args);
+      onUsage(result.usage);
+      return result;
+    },
+    async *stream(args) {
+      for await (const event of inner.stream(args)) {
+        if (event.type === 'done') onUsage(event.usage);
+        yield event;
+      }
+    },
+  };
 }

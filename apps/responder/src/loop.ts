@@ -167,6 +167,10 @@ export async function tick(
 ): Promise<TickResult> {
   const result: TickResult = { turnsTaken: 0, threadsClosed: 0, tokensOut: 0, errors: [] };
 
+  // Whether anyone is resting on its budget is settled first, so nothing below hands
+  // work to a participant that has run out.
+  for (const p of participants) await p.syncRest(log);
+
   /*
    * Anything that reported itself failing gets re-checked, whether or not there is work
    * for it. Clearing the mark only when a turn lands meant a participant that recovered
@@ -184,6 +188,11 @@ export async function tick(
 
   const queues: Waiting[][] = [];
   for (const p of participants) {
+    // Not asked for work while resting. What it holds is moved by rescueStranded.
+    if (p.resting) {
+      queues.push([]);
+      continue;
+    }
     try {
       const listing = await p.call<ThreadListing>('thread_list', {
         mine: true,
@@ -280,7 +289,10 @@ async function rescueStranded(participants: Participant[], log: Log): Promise<vo
   });
 
   const stuck = (listing.threads ?? []).filter((t) => {
-    if (!t.waitingOn || !broken.some((p) => p.slug === t.waitingOn)) return false;
+    const holder = broken.find((p) => p.slug === t.waitingOn);
+    if (!holder) return false;
+    // Resting lasts until the budget renews, so there is nothing to wait for.
+    if (holder.resting) return true;
     const at = t.updatedAt ? Date.parse(t.updatedAt) : Number.NaN;
     return Number.isFinite(at) && Date.now() - at > STRANDED_MS;
   });
@@ -297,13 +309,15 @@ async function rescueStranded(participants: Participant[], log: Log): Promise<vo
        * model that is down, not its connection.
        */
       const holder = broken.find((p) => p.slug === t.waitingOn);
+      const resting = holder?.resting;
       await (holder ?? rescuer).call('thread_reassign', { threadId: t.threadId, to: rescuer.slug });
       await rescuer
         .call('thread_note', {
           threadId: t.threadId,
-          content:
-            `This was waiting on ${t.waitingOn}, which has been unable to answer for a while, ` +
-            `so ${rescuer.slug} has picked it up rather than leaving it stopped.`,
+          content: resting
+            ? `This was waiting on ${t.waitingOn}, which is resting to save credit (${resting}), so ${rescuer.slug} has picked it up.`
+            : `This was waiting on ${t.waitingOn}, which has been unable to answer for a while, ` +
+              `so ${rescuer.slug} has picked it up rather than leaving it stopped.`,
         })
         .catch(() => undefined);
       log(`[${rescuer.slug}] rescued ${short(t.threadId)} from ${t.waitingOn}`);
@@ -330,6 +344,13 @@ export const STANDS_IN_FOR: Readonly<Record<string, string>> = {
   chatgpt: 'gpt-api',
   perplexity: 'perplexity-api',
 };
+
+/**
+ * Who does an app's step when the app's own API model can't: the first of these able to.
+ * Without a second choice, a chat app's step waited on the app for as long as its API
+ * model was out of credit or resting.
+ */
+export const COVER_FALLBACK: readonly string[] = ['claude-api', 'gpt-api', 'perplexity-api'];
 
 /** Nexus lets a participant move a scheduled app's floor after 90 minutes; one minute's margin. */
 export const MISSED_TURN_MS = 91 * 60 * 1000;
@@ -368,7 +389,13 @@ export async function coverMissedTurns(
     const app = t.waitingOn;
     if (!app || !Object.hasOwn(STANDS_IN_FOR, app)) continue;
     const at = t.updatedAt ? Date.parse(t.updatedAt) : Number.NaN;
-    const standIn = healthy.find((p) => p.slug === STANDS_IN_FOR[app]);
+    // Only when the maker's API model is one of ours. When it can't answer, out of
+    // credit or resting on its budget, the next one able to takes the step instead.
+    const own = participants.find((p) => p.slug === STANDS_IN_FOR[app]);
+    if (!own) continue;
+    const standIn = own.failing
+      ? COVER_FALLBACK.map((slug) => healthy.find((p) => p.slug === slug)).find((p) => p !== undefined)
+      : own;
     if (!standIn) continue;
 
     let why: string | null = null;
@@ -414,6 +441,9 @@ async function runJob(
   log: Log,
   failures: Failures,
 ): Promise<Outcome> {
+  // Went over its budget earlier this round. The thread moves to someone else next round.
+  if (job.participant.resting) return { taken: false, closed: false, tokensOut: 0 };
+
   // A thread that keeps failing is rested rather than hammered. The counter decays, so
   // it comes back on its own once the cause has had time to clear.
   const failed = failures.get(job.threadId) ?? 0;
