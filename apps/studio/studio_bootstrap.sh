@@ -43,10 +43,27 @@ export PATH="$HOME/.local/bin:$PATH"
 ok "uv $(uv --version 2>/dev/null || echo '?')"
 
 step "5/8 ollama"
-if [ ! -x "$HOME/.flint-ollama/ollama" ] && ! have ollama; then
-  brew install ollama >/dev/null 2>&1 || echo "  ! install ollama by hand: brew install ollama"
+# This used to print "ollama present" unconditionally, including when the install
+# had failed, and the server then booted and hung waiting on embeddings with no
+# obvious cause. Verify instead of announcing.
+if ! have ollama && [ ! -x "$HOME/.flint-ollama/ollama" ]; then
+  brew install ollama 2>&1 | tail -3
 fi
-ok "ollama present"
+OLLAMA_BIN="$(command -v ollama || echo "$HOME/.flint-ollama/ollama")"
+[ -x "$OLLAMA_BIN" ] || { echo "  ✗ ollama not installed — run: brew install ollama"; exit 1; }
+ok "ollama at $OLLAMA_BIN"
+
+step "5b/8 point the ollama agent at THIS machine's binary"
+# com.flint.ollama.plist rsyncs from the old Mac, where ollama lived in
+# ~/.flint-ollama. On a fresh Mac it's a Homebrew path, so the agent silently
+# fails to launch, the server starts, hangs on embeddings, and /health never
+# answers. Rewrite the path to whatever this machine actually has.
+OP="$HOME/Library/LaunchAgents/com.flint.ollama.plist"
+if [ -f "$OP" ] && ! grep -q "$OLLAMA_BIN" "$OP"; then
+  /usr/bin/sed -i "" "s#<string>[^<]*/ollama</string>#<string>$OLLAMA_BIN</string>#" "$OP"
+  /usr/bin/sed -i "" "s#<string>/Users/[^<]*/.flint-ollama</string>#<string>$HOME</string>#" "$OP"
+  plutil -lint "$OP" >/dev/null && ok "ollama agent repointed at $OLLAMA_BIN"
+fi
 
 step "6/8 clone/refresh repo -> $REPO"
 if [ -d "$REPO/.git" ]; then
@@ -79,7 +96,7 @@ else
   git clone --quiet https://github.com/wpf002/trident.git "$TRIDENT" || echo "  ! trident clone failed"
 fi
 if [ -d "$TRIDENT" ]; then
-  ( cd "$TRIDENT" && npm install --silent && npm run build:server --silent ) \
+  ( cd "$TRIDENT" && npm install --silent && npm run build --silent ) \
     && ok "trident MCP server built" \
     || echo "  ! trident build failed — gmail/gcal/gdrive tools will be offline"
 fi
