@@ -140,6 +140,18 @@ if [ -f "$REPO/apps/responder/.env" ]; then
   fi
 fi
 
+# trident/.env is gitignored too and holds its Google OAuth credentials.
+if [ -f "$HOME/Documents/GitHub/trident/.env" ]; then
+  say "2b/3 carry trident/.env (Google OAuth for gmail/gcal/gdrive)"
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry] rsync trident/.env -> $STUDIO:Documents/GitHub/trident/.env"
+  else
+    ssh "${SSH_OPTS[@]}" "$STUDIO" 'mkdir -p $HOME/Documents/GitHub/trident' 2>/dev/null || true
+    rsync -aH "$HOME/Documents/GitHub/trident/.env" "$STUDIO:Documents/GitHub/trident/.env" \
+      && echo "  ✓ trident secrets carried" || echo "  ! trident/.env not copied"
+  fi
+fi
+
 # ---- 3. start the roadmap -------------------------------------------------
 if [ "$ROADMAP" = 1 ]; then
   say "3/3 start the roadmap (pull 70B + launch the overnight fine-tune, detached)"

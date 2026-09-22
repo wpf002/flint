@@ -67,6 +67,23 @@ if [ -d "$BRAIN" ] && [ ! -x "$BRAIN/.venv/bin/python" ]; then
 fi
 [ -x "$BRAIN/.venv/bin/python" ] && ok "brain venv ready" || echo "  ! brain venv missing (did ~/.flint/brain sync over?)"
 
+step "7b/9 clone + build trident (4 of Flint's tools come from it)"
+# ~/.flint/mcp.json runs trident's MCP server from
+# ~/Documents/GitHub/trident/packages/mcp-server/dist/index.js. That repo is NOT
+# this one and bootstrap used to skip it, so gmail/gcal/gdrive/perplexity_search
+# would fail on the Studio. dist/ is gitignored, so it has to be built here.
+TRIDENT="$HOME/Documents/GitHub/trident"
+if [ -d "$TRIDENT/.git" ]; then
+  git -C "$TRIDENT" pull --quiet --ff-only 2>/dev/null || true
+else
+  git clone --quiet https://github.com/wpf002/trident.git "$TRIDENT" || echo "  ! trident clone failed"
+fi
+if [ -d "$TRIDENT" ]; then
+  ( cd "$TRIDENT" && npm install --silent && npm run build:server --silent ) \
+    && ok "trident MCP server built" \
+    || echo "  ! trident build failed — gmail/gcal/gdrive tools will be offline"
+fi
+
 step "8/9 install agents that live in the repo but aren't running on the old Mac"
 # migrate_to_studio.sh rsyncs only the plists ALREADY INSTALLED on the laptop.
 # Several agents ship in the repo and are deliberately not running there —
