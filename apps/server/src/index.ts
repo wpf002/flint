@@ -57,13 +57,13 @@ import {
   InMemoryLessonStore,
   FLINT_STYLE_GUIDE,
   OllamaEmbedder,
-  cosineSimilarity,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { parseMcpConfig } from './mcp-config';
 import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
+import { ToolRouter } from './router';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
@@ -246,88 +246,6 @@ const CORE_TOOL_NAMES = [
   'meridian.get_signals', // trading signals by ticker
 ];
 
-/**
- * Tool router that keeps the common case fast AND reaches everything:
- *  - a STABLE CORE (the daily tools) goes on every request → the prompt prefix is
- *    cacheable, so most queries are quick;
- *  - extra tools are APPENDED only when the query embeds close enough to them
- *    (above a relevance floor), up to a small cap — so specialized asks
- *    (forecasting, security rules, the bot fleet) still reach their tools.
- * General/conversational queries get just the core; nothing irrelevant clutters
- * the prompt to confuse the small model.
- */
-class ToolRouter {
-  private constructor(
-    private readonly core: Tool[],
-    private readonly rest: Tool[],
-    private readonly restVectors: number[][],
-    private readonly embedder: OllamaEmbedder,
-    private readonly maxAppend: number,
-    private readonly floor: number,
-  ) {}
-
-  static async build(tools: Tool[], embedder: OllamaEmbedder): Promise<ToolRouter> {
-    const maxAppend = Math.max(0, Number(process.env.FLINT_TOOL_APPEND ?? 4));
-    const floor = Number(process.env.FLINT_TOOL_FLOOR ?? 0.55);
-    const byName = new Map(tools.map((t) => [t.definition.name, t] as const));
-    const core: Tool[] = [];
-    for (const n of CORE_TOOL_NAMES) {
-      const t = byName.get(n);
-      if (t) core.push(t);
-    }
-    const coreNames = new Set(core.map((t) => t.definition.name));
-    const rest = tools.filter((t) => !coreNames.has(t.definition.name));
-    let restVectors: number[][] = [];
-    if (rest.length > 0) {
-      try {
-        restVectors = await embedder.embed(
-          rest.map((t) => `${t.definition.name}: ${t.definition.description}`),
-        );
-      } catch (err) {
-        console.error('[router] rest embedding failed — appends disabled:', err);
-      }
-    }
-    // If the core didn't match anything wired, fall back to "everything is core".
-    const finalCore = core.length > 0 ? core : tools;
-    const finalRest = core.length > 0 ? rest : [];
-    console.error(
-      `[router] core=${finalCore.length} (cached) + up to ${maxAppend} of ${finalRest.length} by relevance (floor ${floor})`,
-    );
-    return new ToolRouter(finalCore, finalRest, restVectors, embedder, maxAppend, floor);
-  }
-
-  /**
-   * How many tools at the FRONT of every selection are the fixed core. Callers
-   * use it to place a prompt-cache breakpoint on the last core tool: tools are
-   * rendered before the system prompt, so a query that triggers an append still
-   * reads the core schemas from cache instead of paying full price for them.
-   */
-  get coreLength(): number {
-    return this.core.length;
-  }
-
-  /** The stable core, plus any rest-tools the message clearly needs. */
-  async select(message: string): Promise<Tool[]> {
-    if (this.maxAppend === 0 || this.rest.length === 0 || this.restVectors.length !== this.rest.length) {
-      return this.core;
-    }
-    let qv: number[];
-    try {
-      qv = (await this.embedder.embed([message.slice(0, 2000)]))[0] ?? [];
-    } catch {
-      return this.core;
-    }
-    if (qv.length === 0) return this.core;
-    const appends = this.rest
-      .map((t, i) => ({ t, score: cosineSimilarity(qv, this.restVectors[i] ?? []) }))
-      .filter((x) => x.score >= this.floor)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, this.maxAppend)
-      .map((x) => x.t);
-    return appends.length > 0 ? [...this.core, ...appends] : this.core;
-  }
-}
-
 /** Pull readable text out of an MCP tool result ({content:[{text}]} or a string). */
 function toolText(result: unknown): string {
   const r = result as { content?: Array<{ text?: string }> } | null;
@@ -500,7 +418,7 @@ async function main(): Promise<void> {
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
   // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
-  const router = await ToolRouter.build(tools, embedder);
+  const router = await ToolRouter.build(tools, embedder, CORE_TOOL_NAMES);
 
   // Frontier escalation — the bridge toward independence. Disabled cleanly if no
   // provider is configured (pure local). Shares memory + the router's tools with
