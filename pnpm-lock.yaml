@@ -40,6 +40,28 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  apps/parity:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: 0.100.1
+        version: 0.100.1(zod@3.25.76)
+      '@flint/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^20
+        version: 20.19.41
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.4
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@20.19.41)
+
   apps/playground:
     dependencies:
       '@flint/core':

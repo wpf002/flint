@@ -679,6 +679,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       model: ctx.model,
       tools: ctx.tools.length,
       servers: ctx.servers,
+      // Lets apps/eval check, BEFORE sending anything, that /generate honours
+      // `eval: true` (an older server would log the replays as training data).
+      evalMode: true,
     });
   }
 
@@ -736,13 +739,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const attachments = att.attachments;
     if (!prompt && attachments.length === 0) return json(res, 400, { error: 'prompt required' });
     const localOnly = body.localOnly === true;
+    // Eval mode (apps/parity, the parity harness): replaying Will's past prompts
+    // must not feed the answers back into the training corpus (the eval would
+    // leak into what it measures), must not save facts to long-term memory, and
+    // must not leave write proposals in the approval queue. The answer itself is
+    // produced exactly as a normal turn would be.
+    const evalMode = body.eval === true;
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
-    const selected = await ctx.router.select(asText);
+    const routed = await ctx.router.select(asText);
+    const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
     let brain = route.brain;
     const ctxBlock = await contextFor(asText, ctx.knowledge);
-    const tier = classifyMessage(prompt, { toolsLikely: selected.length > ctx.router.coreLength });
+    const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
     let answeredBy = ctx.model;
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
@@ -764,12 +774,28 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     } else {
       out = await ask(ctx.persona);
     }
+    const toolsUsed = toolsSince(ctx, beforeLog);
+    const proposed = ctx.actions.newSince(beforeActions);
+    if (evalMode) {
+      // Nothing an eval replay proposes should ever be approvable.
+      for (const p of proposed) ctx.actions.reject(p.id);
+      return json(res, 200, {
+        text: out.text,
+        usage: out.usage,
+        reason: out.reason,
+        brain,
+        ...(brain === 'frontier' ? { tier } : {}),
+        model: answeredBy,
+        tools: toolsUsed,
+        proposed: proposed.map((p) => p.fullName),
+        eval: true,
+      });
+    }
     recordConvo(ctx.convos, asText, out.text);
     ctx.training.log(
-      { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
+      { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsUsed, usage: out.usage },
       Date.now(),
     );
-    const proposed = ctx.actions.newSince(beforeActions);
     return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, ...(brain === 'frontier' ? { tier } : {}), model: answeredBy, pending: proposed });
   }
 

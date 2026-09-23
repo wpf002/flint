@@ -10,8 +10,9 @@ here; Railway has no GPU.
 
 | Method | Path | Auth | Body | Returns |
 | --- | --- | --- | --- | --- |
-| GET | `/health` | no | — | `{ ok, provider, model, tools }` |
+| GET | `/health` | no | — | `{ ok, provider, model, tools, servers, evalMode }` |
 | POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason }` |
+| POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, tools, proposed, eval }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`) |
 | POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.

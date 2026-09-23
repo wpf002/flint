@@ -1,0 +1,23 @@
+{
+  "name": "@flint/parity",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build-prompts": "tsx src/cli.ts build-prompts",
+    "parity": "tsx src/cli.ts run",
+    "report": "tsx src/cli.ts report",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.100.1",
+    "@flint/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  }
+}
