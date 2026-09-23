@@ -64,6 +64,7 @@ import { parseMcpConfig } from './mcp-config';
 import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
+import { deepResearchTool } from './deep-research';
 import { ToolRouter } from './router';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
@@ -234,6 +235,10 @@ const CORE_TOOL_NAMES = [
   // Flint's own training run/evals. Core, not appended: a training run unloads
   // ollama, so the embedder the router appends by is down exactly when Will asks.
   'training_status',
+  // Multi-query search + page reads + rerank → a numbered evidence pack. Core so
+  // it's always reachable (the router's embedder is down during training), and
+  // its description is one short line to respect the local 4096-token budget.
+  'deep_research',
   'web.web_search', // current events, weather, news, scores, facts — the primary lookup
   'web.fetch_url', // read a specific URL
   'trident.perplexity_search', // deeper web research
@@ -408,6 +413,9 @@ async function main(): Promise<void> {
 
   // Set once the frontier is built below; training_status reads it at call time.
   let frontierModel: string | undefined;
+  // deep_research plans its queries with the frontier brain when there is one
+  // (bare generate — no persona/style guide, a few hundred tokens); heuristics otherwise.
+  let frontierFlint: Flint | undefined;
   const tools: Tool[] = [
     ...(registry?.tools() ?? []),
     rememberTool(knowledge),
@@ -415,6 +423,14 @@ async function main(): Promise<void> {
       brainDir: join(homedir(), '.flint', 'brain'),
       corpus: () => training.stats(),
       serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel }),
+    }),
+    deepResearchTool({
+      tools: registry?.tools() ?? [],
+      embedder,
+      complete: async (prompt) => {
+        if (!frontierFlint) throw new Error('no frontier brain');
+        return (await frontierFlint.generate({ prompt })).text;
+      },
     }),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
@@ -429,6 +445,7 @@ async function main(): Promise<void> {
   // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
   const frontierCfg = buildFrontierProvider();
   let frontier: { persona: Persona; model: string } | undefined;
+  const flintOf = new Map<Persona, Flint>();
   const brains = buildTiers<Persona>({
     env: process.env,
     factory: envProviderFactory(process.env),
@@ -445,7 +462,7 @@ async function main(): Promise<void> {
       // block (which carries the clock) stays outside the breakpoint, so nothing
       // the model reads changes.
       // Caching is Anthropic-only; every other adapter would ignore the hint anyway.
-      return new Persona(fFlint, {
+      const fPersona = new Persona(fFlint, {
         name: 'Flint',
         styleGuide: FLINT_STYLE_GUIDE,
         lessonStore: new InMemoryLessonStore(),
@@ -453,11 +470,15 @@ async function main(): Promise<void> {
           ? { cache: { system: true, ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}) } }
           : {}),
       });
+      flintOf.set(fPersona, fFlint);
+      return fPersona;
     },
   });
   if (brains) {
     frontier = { persona: brains.primary.persona, model: brains.primary.label };
     frontierModel = brains.primary.label;
+    // Query planning is light work: give deep_research the routine tier's client.
+    frontierFlint = flintOf.get(brains.chain('routine')[0]?.persona ?? brains.primary.persona);
     console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
