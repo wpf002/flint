@@ -8,7 +8,9 @@ REPO="${FLINT_REPO:-$HOME/Documents/GitHub/flint}"
 cd "$REPO"
 
 before=$(git rev-parse HEAD 2>/dev/null || echo none)
-git fetch --quiet origin main || { echo "$(date '+%F %T') fetch failed"; exit 0; }
+# A stalled connection used to hold the fetch ~3 minutes, past the next tick.
+# Abort once the transfer drops below 1 KB/s for 20s; the next run retries.
+git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --quiet origin main || { echo "$(date '+%F %T') fetch failed"; exit 0; }
 git reset --hard --quiet origin/main   # match GitHub exactly (Studio is deploy-only, never edited directly)
 after=$(git rev-parse HEAD)
 
