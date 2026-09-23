@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/willfoti/flint/apps/studio/backup_flint.sh</string>
+  </array>
+  <!-- 02:30: after the day's traffic, before grow (03:00) and retrain (Sun 04:00). -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/Users/willfoti/.flint/backup.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/willfoti/.flint/backup.err.log</string>
+</dict>
+</plist>
