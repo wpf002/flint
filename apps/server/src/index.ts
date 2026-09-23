@@ -49,6 +49,7 @@ import {
   OllamaProvider,
   InMemoryStore,
   ActionLogObserver,
+  FlintError,
   type ProviderAdapter,
   type Tool,
 } from '@flint/core';
@@ -193,6 +194,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { judgeBrain, isSafeTool, type Brain } from './policy';
+import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -423,30 +425,40 @@ async function main(): Promise<void> {
   // Frontier escalation — the bridge toward independence. Disabled cleanly if no
   // provider is configured (pure local). Shares memory + the router's tools with
   // the local brain, so escalated turns can still reach your systems and the web.
+  // Tiers (./brains): judgeBrain still decides local-vs-frontier; the tier set
+  // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
   const frontierCfg = buildFrontierProvider();
   let frontier: { persona: Persona; model: string } | undefined;
-  if (frontierCfg) {
-    const fFlint = new Flint({ provider: frontierCfg.provider, defaultModel: frontierCfg.model, memory, observer: actionLog });
-    // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
-    // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
-    // of the style guide. Everything before them is byte-identical on every
-    // request, so inside the cache's 5-minute window — a tool loop, a multi-turn
-    // chat, a bulk_seed burst — those thousands of input tokens are billed at the
-    // cache-read rate instead of full price, over and over. The per-turn context
-    // block (which carries the clock) stays outside the breakpoint, so nothing
-    // the model reads changes.
-    const fPersona = new Persona(fFlint, {
-      name: 'Flint',
-      styleGuide: FLINT_STYLE_GUIDE,
-      lessonStore: new InMemoryLessonStore(),
-      cache: {
-        system: true,
-        ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}),
-      },
-    });
-    frontier = { persona: fPersona, model: frontierCfg.model };
-    frontierModel = `${frontierCfg.provider.name}:${frontierCfg.model}`;
-    console.error(`[brain] frontier escalation ENABLED -> ${frontierCfg.provider.name}:${frontierCfg.model}`);
+  const brains = buildTiers<Persona>({
+    env: process.env,
+    factory: envProviderFactory(process.env),
+    legacy: frontierCfg,
+    log: (m) => console.error(m),
+    makePersona: (fProvider, fModel) => {
+      const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer: actionLog });
+      // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
+      // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
+      // of the style guide. Everything before them is byte-identical on every
+      // request, so inside the cache's 5-minute window — a tool loop, a multi-turn
+      // chat, a bulk_seed burst — those thousands of input tokens are billed at the
+      // cache-read rate instead of full price, over and over. The per-turn context
+      // block (which carries the clock) stays outside the breakpoint, so nothing
+      // the model reads changes.
+      // Caching is Anthropic-only; every other adapter would ignore the hint anyway.
+      return new Persona(fFlint, {
+        name: 'Flint',
+        styleGuide: FLINT_STYLE_GUIDE,
+        lessonStore: new InMemoryLessonStore(),
+        ...(fProvider.name === 'anthropic'
+          ? { cache: { system: true, ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}) } }
+          : {}),
+      });
+    },
+  });
+  if (brains) {
+    frontier = { persona: brains.primary.persona, model: brains.primary.label };
+    frontierModel = brains.primary.label;
+    console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
   }
@@ -469,7 +481,7 @@ async function main(): Promise<void> {
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, knowledge, actions, notes, training }));
+  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training }));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -495,6 +507,8 @@ interface Ctx {
   servers: string[];
   convos: Convo[];
   frontier: { persona: Persona; model: string } | undefined;
+  brains: BrainSet<Persona> | undefined;
+  memory: PersistentStore;
   knowledge: KnowledgeStore;
   actions: ActionQueue;
   notes: Notifications;
@@ -508,6 +522,11 @@ function toolsSince(ctx: Ctx, beforeLen: number): Array<{ tool: string; outcome?
     .slice(beforeLen)
     .filter((a): a is Extract<typeof a, { type: 'tool_result' }> => (a as { type?: string }).type === 'tool_result')
     .map((a) => ({ tool: a.tool, outcome: a.isError ? 'error' : 'ok', ms: a.durationMs }));
+}
+
+/** One line per tier fallback, with the AiError kind that caused it. */
+function logFallback(from: { label: string }, to: { label: string }, err: unknown): void {
+  console.error(`[brain] ${from.label} failed (${describeError(err)}) — falling back to ${to.label}`);
 }
 
 /** Record a finished exchange (bounded ring buffer). */
@@ -681,16 +700,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!prompt) return json(res, 400, { error: 'prompt required' });
     const localOnly = body.localOnly === true;
     const selected = await ctx.router.select(prompt);
-    let brain = judgeBrain(prompt, !!ctx.frontier, localOnly);
+    let brain = judgeBrain(prompt, !!ctx.brains, localOnly);
+    const tier = classifyMessage(prompt, { toolsLikely: selected.length > ctx.router.coreLength });
+    let answeredBy = ctx.model;
     const ctxBlock = await contextFor(prompt, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
       p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) });
     let out;
-    if (brain === 'frontier' && ctx.frontier) {
+    if (brain === 'frontier' && ctx.brains) {
       try {
-        out = await ask(ctx.frontier.persona);
+        const won = await runWithFallback(ctx.brains.chain(tier), (b) => ask(b.persona), { onFallback: logFallback });
+        out = won.result;
+        answeredBy = won.brain.label;
       } catch (err) {
         console.error('[brain] frontier failed, falling back to local:', err);
         brain = 'local';
@@ -701,11 +724,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
     recordConvo(ctx.convos, prompt, out.text);
     ctx.training.log(
-      { conversationId: 'generate', brain, model: brain === 'frontier' && ctx.frontier ? ctx.frontier.model : ctx.model, input: prompt, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
+      { conversationId: 'generate', brain, model: answeredBy, input: prompt, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
       Date.now(),
     );
     const proposed = ctx.actions.newSince(beforeActions);
-    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, pending: proposed });
+    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, ...(brain === 'frontier' ? { tier } : {}), model: answeredBy, pending: proposed });
   }
 
   if (req.method === 'POST' && url === '/chat') {
@@ -715,7 +738,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!message) return json(res, 400, { error: 'message required' });
     const localOnly = body.localOnly === true;
     const selected = await ctx.router.select(message);
-    let brain = judgeBrain(message, !!ctx.frontier, localOnly);
+    let brain = judgeBrain(message, !!ctx.brains, localOnly);
+    const turns = brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
+    const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
+    let answeredBy = ctx.model;
     const ctxBlock = await contextFor(message, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
@@ -728,23 +754,39 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const ac = new AbortController();
     res.on('close', () => ac.abort());
     let answer = '';
-    const pump = async (persona: Persona) => {
+    const pump = async (persona: Persona, recoverable = false) => {
       for await (const ev of persona.chat(
         { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;
+        // A provider error arrives as an event, not a throw. When another tier is
+        // left to try and no text has gone out, throw it to the tier fallback.
+        if (recoverable && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
         res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
     };
     try {
-      if (brain === 'frontier' && ctx.frontier) {
+      if (brain === 'frontier' && ctx.brains) {
         try {
-          res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
-          await pump(ctx.frontier.persona);
+          const chain = ctx.brains.chain(tier);
+          const won = await runWithFallback(
+            chain,
+            async (b) => {
+              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier, model: b.label })}\n\n`);
+              try {
+                await pump(b.persona, b !== chain[chain.length - 1]); // last tier behaves as before
+              } catch (err) {
+                if (answer.length > 0) throw new NoFallback(err); // text already streamed
+                throw err;
+              }
+            },
+            { signal: ac.signal, onFallback: logFallback },
+          );
+          answeredBy = won.brain.label;
         } catch (err) {
           // Only safe to fall back if nothing was streamed yet.
-          if (answer.length === 0) {
+          if (answer.length === 0 && !ac.signal.aborted) {
             console.error('[brain] frontier failed pre-output, falling back to local:', err);
             brain = 'local';
             res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
@@ -760,7 +802,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       if (answer.trim()) {
         recordConvo(ctx.convos, message, answer);
         ctx.training.log(
-          { conversationId, brain, model: brain === 'frontier' && ctx.frontier ? ctx.frontier.model : ctx.model, input: message, output: answer, tools: toolsSince(ctx, beforeLog) },
+          { conversationId, brain, model: answeredBy, input: message, output: answer, tools: toolsSince(ctx, beforeLog) },
           Date.now(),
         );
       }
