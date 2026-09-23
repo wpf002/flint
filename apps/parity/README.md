@@ -93,6 +93,20 @@ writes the report and exits. Rough full-set cost at the defaults: about $15 of
 answers, $15 to $25 of Flint frontier tokens, and $20 to $35 of judging. Budget $60 to $80,
 or less with `--judge-model claude-sonnet-5`.
 
+**Flint on his own (`--flint-local`).** Flint answers with the local brain only
+(`localOnly: true`, no Claude), as the contestant `flint-local`. Point it at an
+existing run with `--run <ts>` and the competitors' answers are reused, so only Flint's
+local answers and the new verdicts cost anything (local answers are free). Its
+verdicts carry `subject: "flint-local"` and never mix with normal Flint's. The report
+goes to `report-flint-local.md`, and history rows get `subject=flint-local` (the
+history CSV's last column; older files are upgraded in place). The local brain has
+to be up (Ollama). A training run unloads it, so wait for that to finish.
+
+```
+pnpm --filter @flint/parity parity --run <ts> --flint-local --budget-usd 40
+pnpm --filter @flint/parity report --run <ts> --flint-local
+```
+
 **Resume.** Re-run with `--run <ts>` (or a path). Cached successful answers and
 verdicts are reused, and failures are retried. That is how you continue after a budget
 stop or Ctrl-C.
