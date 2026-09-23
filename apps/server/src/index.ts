@@ -63,6 +63,7 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { parseMcpConfig } from './mcp-config';
 import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
+import { trainingStatusTool } from './training-status';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
@@ -228,6 +229,9 @@ function loadMcpSpecs(): McpServerSpec[] {
  */
 const CORE_TOOL_NAMES = [
   'remember', // save a durable fact to long-term memory — always available
+  // Flint's own training run/evals. Core, not appended: a training run unloads
+  // ollama, so the embedder the router appends by is down exactly when Will asks.
+  'training_status',
   'web.web_search', // current events, weather, news, scores, facts — the primary lookup
   'web.fetch_url', // read a specific URL
   'trident.perplexity_search', // deeper web research
@@ -477,7 +481,22 @@ async function main(): Promise<void> {
   const actions = new ActionQueue(isSafeTool);
   const specs = loadMcpSpecs();
   const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: actions.approver }) : undefined;
-  const tools: Tool[] = [...(registry?.tools() ?? []), rememberTool(knowledge)];
+  // The seed of Flint's OWN brain: every interaction is captured as a training
+  // example (frontier answers = the teacher to distill from). Independence is
+  // built here, a little each day — see docs/INDEPENDENCE.md.
+  const training = new TrainingLogger(join(homedir(), '.flint', 'training', 'corpus.jsonl'));
+
+  // Set once the frontier is built below; training_status reads it at call time.
+  let frontierModel: string | undefined;
+  const tools: Tool[] = [
+    ...(registry?.tools() ?? []),
+    rememberTool(knowledge),
+    trainingStatusTool({
+      brainDir: join(homedir(), '.flint', 'brain'),
+      corpus: () => training.stats(),
+      serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel }),
+    }),
+  ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
   // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
@@ -508,6 +527,7 @@ async function main(): Promise<void> {
       },
     });
     frontier = { persona: fPersona, model: frontierCfg.model };
+    frontierModel = `${frontierCfg.provider.name}:${frontierCfg.model}`;
     console.error(`[brain] frontier escalation ENABLED -> ${frontierCfg.provider.name}:${frontierCfg.model}`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
@@ -528,11 +548,6 @@ async function main(): Promise<void> {
     () => frontier?.persona,
     join(dataDir, 'extract-state.json'),
   ).start();
-
-  // The seed of Flint's OWN brain: every interaction is captured as a training
-  // example (frontier answers = the teacher to distill from). Independence is
-  // built here, a little each day — see docs/INDEPENDENCE.md.
-  const training = new TrainingLogger(join(homedir(), '.flint', 'training', 'corpus.jsonl'));
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
