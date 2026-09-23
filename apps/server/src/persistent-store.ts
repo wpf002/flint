@@ -9,7 +9,29 @@ import {
   type CommitTurnInput,
   type FailTurnInput,
   type Message,
+  hasPayload,
+  shedPayload,
 } from '@flint/core';
+
+/**
+ * How many of a conversation's most recent turns keep their attachment bodies
+ * in RAM, so "and what about the chart on page 3?" still has the PDF to look
+ * at. Older turns keep only the metadata (the adapters render it as a note).
+ * Bodies are NEVER written to disk: conversations.json holds chat history, not
+ * a pile of base64 photos, and a restart simply sheds them.
+ */
+export const ATTACHMENT_RETAIN_TURNS = 3;
+
+/** A message with any attachment bodies dropped (metadata kept). Same object if nothing to shed. */
+export function shedMessage(m: Message): Message {
+  if (!m.attachments || !m.attachments.some(hasPayload)) return m;
+  return { ...m, attachments: m.attachments.map(shedPayload) };
+}
+
+function shedTurn(t: Turn): Turn {
+  if (!t.messages.some((m) => m.attachments?.some(hasPayload))) return t;
+  return { ...t, messages: t.messages.map(shedMessage) };
+}
 
 /**
  * Disk-backed MemoryStore — the fix for Flint forgetting everything on restart.
@@ -49,6 +71,8 @@ export class PersistentStore implements MemoryStore {
       ...(input.context !== undefined ? { context: input.context } : {}),
     });
     turns.push(turn);
+    // Past the retention window, attachment bodies go (the newest turns keep theirs).
+    for (let i = 0; i < turns.length - ATTACHMENT_RETAIN_TURNS; i++) turns[i] = shedTurn(turns[i]!);
     this.conversations.set(input.conversationId, turns);
     this.scheduleSave();
     return structuredClone(turn);
@@ -147,7 +171,10 @@ export class PersistentStore implements MemoryStore {
       const snapshot = {
         schemaVersion: this.schemaVersion,
         savedAt: Date.now(),
-        conversations: Object.fromEntries(this.conversations),
+        // Attachment bodies stay in RAM only — see ATTACHMENT_RETAIN_TURNS.
+        conversations: Object.fromEntries(
+          [...this.conversations].map(([id, turns]) => [id, turns.map(shedTurn)] as const),
+        ),
       };
       const tmp = `${this.path}.tmp`;
       writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');

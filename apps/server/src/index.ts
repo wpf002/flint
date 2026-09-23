@@ -70,6 +70,13 @@ import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { MemoryExtractor } from './memory-extract';
+import {
+  parseAttachments,
+  readJsonLimited,
+  mediaNeeds,
+  summarizeAttachments,
+  MAX_BODY_BYTES,
+} from './attachments';
 
 /**
  * Hosted Flint — the always-on shared service (Railway). Wraps the Flint client
@@ -194,8 +201,8 @@ function loadSecrets(): void {
  * to retire it. Everything routes through one seam (judgeBrain) so flipping the
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
-import { judgeBrain, isSafeTool, type Brain } from './policy';
-import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet } from './brains';
+import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
+import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, mediaChain } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -444,7 +451,7 @@ async function main(): Promise<void> {
   // Tiers (./brains): judgeBrain still decides local-vs-frontier; the tier set
   // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
   const frontierCfg = buildFrontierProvider();
-  let frontier: { persona: Persona; model: string } | undefined;
+  let frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   let extractFlint: Flint | undefined; // bare frontier (no persona) for background jobs like memory extraction
   const flintOf = new Map<Persona, Flint>();
   const brains = buildTiers<Persona>({
@@ -476,7 +483,7 @@ async function main(): Promise<void> {
     },
   });
   if (brains) {
-    frontier = { persona: brains.primary.persona, model: brains.primary.label };
+    frontier = { persona: brains.primary.persona, model: brains.primary.label, media: mediaOf(brains.primary) };
     frontierModel = brains.primary.label;
     // Query planning is light work: give deep_research the routine tier's client.
     // Memory extraction is judgment work: the primary tier, bare (no persona).
@@ -531,7 +538,7 @@ interface Ctx {
   actionLog: ActionLogObserver;
   servers: string[];
   convos: Convo[];
-  frontier: { persona: Persona; model: string } | undefined;
+  frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   brains: BrainSet<Persona> | undefined;
   memory: PersistentStore;
   knowledge: KnowledgeStore;
@@ -720,26 +727,36 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   }
 
   if (req.method === 'POST' && url === '/generate') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, MAX_BODY_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     const prompt = String(body.prompt ?? '');
-    if (!prompt) return json(res, 400, { error: 'prompt required' });
+    const att = parseAttachments(body.attachments);
+    if (!att.ok) return json(res, att.status, { error: att.error });
+    const attachments = att.attachments;
+    if (!prompt && attachments.length === 0) return json(res, 400, { error: 'prompt required' });
     const localOnly = body.localOnly === true;
-    const selected = await ctx.router.select(prompt);
-    let brain = judgeBrain(prompt, !!ctx.brains, localOnly);
+    const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    if ('error' in route) return json(res, 422, { error: route.error });
+    const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
+    const selected = await ctx.router.select(asText);
+    let brain = route.brain;
+    const ctxBlock = await contextFor(asText, ctx.knowledge);
     const tier = classifyMessage(prompt, { toolsLikely: selected.length > ctx.router.coreLength });
     let answeredBy = ctx.model;
-    const ctxBlock = await contextFor(prompt, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
-      p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) });
+      p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) });
     let out;
     if (brain === 'frontier' && ctx.brains) {
       try {
-        const won = await runWithFallback(ctx.brains.chain(tier), (b) => ask(b.persona), { onFallback: logFallback });
+        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => ask(b.persona), { onFallback: logFallback });
         out = won.result;
         answeredBy = won.brain.label;
       } catch (err) {
+        // An image/PDF turn has no honest fallback — the local brain can't see it.
+        if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}` });
         console.error('[brain] frontier failed, falling back to local:', err);
         brain = 'local';
         out = await ask(ctx.persona);
@@ -747,9 +764,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     } else {
       out = await ask(ctx.persona);
     }
-    recordConvo(ctx.convos, prompt, out.text);
+    recordConvo(ctx.convos, asText, out.text);
     ctx.training.log(
-      { conversationId: 'generate', brain, model: answeredBy, input: prompt, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
+      { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsSince(ctx, beforeLog), usage: out.usage },
       Date.now(),
     );
     const proposed = ctx.actions.newSince(beforeActions);
@@ -757,17 +774,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   }
 
   if (req.method === 'POST' && url === '/chat') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, MAX_BODY_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     const conversationId = String(body.conversationId ?? 'default');
     const message = String(body.message ?? '');
-    if (!message) return json(res, 400, { error: 'message required' });
+    const att = parseAttachments(body.attachments);
+    if (!att.ok) return json(res, att.status, { error: att.error });
+    const attachments = att.attachments;
+    if (!message && attachments.length === 0) return json(res, 400, { error: 'message required' });
     const localOnly = body.localOnly === true;
-    const selected = await ctx.router.select(message);
-    let brain = judgeBrain(message, !!ctx.brains, localOnly);
+    // Image/PDF turns must reach a frontier that can see them — or be refused, never answered blind.
+    const route = routeTurn({ message, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    if ('error' in route) return json(res, 422, { error: route.error });
+    // Router, recall, the Action Log and the training corpus see names, never file bodies.
+    const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
+    const selected = await ctx.router.select(asText);
+    let brain = route.brain;
     const turns = brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
     const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
     let answeredBy = ctx.model;
-    const ctxBlock = await contextFor(message, ctx.knowledge);
+    const ctxBlock = await contextFor(asText, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
 
@@ -781,7 +808,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answer = '';
     const pump = async (persona: Persona, recoverable = false) => {
       for await (const ev of persona.chat(
-        { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}) },
+        { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
         { signal: ac.signal },
       )) {
         if (ev.type === 'text') answer += ev.delta;
@@ -794,7 +821,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     try {
       if (brain === 'frontier' && ctx.brains) {
         try {
-          const chain = ctx.brains.chain(tier);
+          const chain = mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary);
           const won = await runWithFallback(
             chain,
             async (b) => {
@@ -811,7 +838,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           answeredBy = won.brain.label;
         } catch (err) {
           // Only safe to fall back if nothing was streamed yet.
-          if (answer.length === 0 && !ac.signal.aborted) {
+          if (answer.length === 0 && route.localFallback && !ac.signal.aborted) {
             console.error('[brain] frontier failed pre-output, falling back to local:', err);
             brain = 'local';
             res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
@@ -825,9 +852,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         await pump(ctx.persona);
       }
       if (answer.trim()) {
-        recordConvo(ctx.convos, message, answer);
+        recordConvo(ctx.convos, asText, answer);
         ctx.training.log(
-          { conversationId, brain, model: answeredBy, input: message, output: answer, tools: toolsSince(ctx, beforeLog) },
+          { conversationId, brain, model: answeredBy, input: asText, output: answer, tools: toolsSince(ctx, beforeLog) },
           Date.now(),
         );
       }

@@ -7,7 +7,7 @@ import type {
 
 /** Lazily-resolved SDK module type — the package is an optional peer dep. */
 type AnthropicModule = typeof import('@anthropic-ai/sdk');
-import type { Message } from '../../types/message.js';
+import { estimateMessageTokens, type Message } from '../../types/message.js';
 import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
 import type { ModelCapabilities } from '../../types/capabilities.js';
@@ -88,9 +88,8 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   estimateTokens(messages: Message[], _model: string): number {
-    // Best-effort heuristic (~4 chars/token). Budgeting only, not billing.
-    const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
-    return Math.ceil(chars / 4);
+    // Best-effort heuristic (~4 chars/token + a per-attachment cost). Budgeting only.
+    return estimateMessageTokens(messages);
   }
 
   async generate(args: GenerateArgs): Promise<GenerateResult> {

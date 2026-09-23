@@ -10,6 +10,8 @@ import {
   shouldFallBack,
   NoFallback,
   type ProviderFactory,
+  mediaChain,
+  type BrainTier,
 } from '../src/brains';
 
 /** A provider that is never called — tier resolution only needs a name. */
@@ -275,5 +277,32 @@ describe('fallback down the tiers', () => {
     });
     await expect(runWithFallback(one.chain('hard'), attempt)).rejects.toBeInstanceOf(FlintError);
     expect(attempt).toHaveBeenCalledOnce();
+  });
+});
+
+describe('mediaChain', () => {
+  const tier = (label: string, vision: boolean, pdf: boolean) =>
+    ({
+      tier: 'standard',
+      provider: { getCapabilities: () => ({ vision, pdfInput: pdf }) },
+      model: label,
+      label,
+      persona: label,
+    }) as unknown as BrainTier<string>;
+  const sees = tier('sees', true, true);
+  const blind = tier('blind', false, false);
+  const imagesOnly = tier('images-only', true, false);
+
+  it('leaves a text-only turn alone', () => {
+    expect(mediaChain([blind, sees], {}, sees)).toEqual([blind, sees]);
+  });
+
+  it('drops tiers that cannot read the attachment', () => {
+    expect(mediaChain([blind, imagesOnly, sees], { pdf: true }, sees).map((b) => b.label)).toEqual(['sees']);
+    expect(mediaChain([blind, imagesOnly, sees], { image: true }, sees).map((b) => b.label)).toEqual(['images-only', 'sees']);
+  });
+
+  it('falls back to the primary when no tier in the chain can', () => {
+    expect(mediaChain([blind], { image: true }, sees)).toEqual([sees]);
   });
 });

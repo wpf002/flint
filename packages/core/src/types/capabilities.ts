@@ -17,6 +17,14 @@ export const ModelCapabilitiesSchema = z.object({
   streaming: z.enum(['full', 'text-only', 'none']),
   maxContextTokens: z.number().int().positive(),
   maxOutputTokens: z.number().int().positive(),
+  /**
+   * Can read image attachments natively. Optional: absent means NO — an adapter
+   * that never claimed it keeps rendering images as a text note, which is the
+   * honest failure (the model is told a file was attached, not shown it).
+   */
+  vision: z.boolean().optional(),
+  /** Can read a PDF natively (as a document block / file part). Absent means no. */
+  pdfInput: z.boolean().optional(),
 });
 
 export type ModelCapabilities = z.infer<typeof ModelCapabilitiesSchema>;

@@ -67,6 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     decisionHandler(.grant)
   }
 
+  // <input type="file"> does nothing in a WKWebView on macOS unless the host
+  // shows the open panel itself — this is what makes the console's paperclip
+  // (attach images / PDFs / text files) work in the app, not just in Safari.
+  func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+               initiatedByFrame frame: WKFrameInfo,
+               completionHandler: @escaping ([URL]?) -> Void) {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.beginSheetModal(for: window) { resp in
+      completionHandler(resp == .OK ? panel.urls : nil)
+    }
+  }
+
   func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
   func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     if !flag { window.makeKeyAndOrderFront(nil) }

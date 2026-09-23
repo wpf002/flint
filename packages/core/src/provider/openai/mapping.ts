@@ -2,11 +2,29 @@ import type { Message } from '../../types/message.js';
 import type { ToolDefinition } from '../../types/tool.js';
 import type { StreamDoneReason } from '../../types/stream.js';
 import { decodeAssistantTurn, decodeToolResult } from '../../core/encoding.js';
+import {
+  attachmentNote,
+  hasPayload,
+  renderTextAttachment,
+  type Attachment,
+} from '../../types/attachment.js';
+
+/** A chat-completions content part (user turns only). */
+export type OpenAiContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'file'; file: { filename: string; file_data: string } };
+
+/** What the target model can read natively — from its capabilities. */
+export interface MediaSupport {
+  vision?: boolean;
+  pdfInput?: boolean;
+}
 
 /** A message in the OpenAI chat-completions format. */
 export interface OpenAiMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | null | OpenAiContentPart[];
   tool_calls?: Array<{
     id: string;
     type: 'function';
@@ -27,7 +45,11 @@ export interface OpenAiTool {
  * own `role: 'tool'` message keyed by `tool_call_id`, rather than a block inside a
  * user message. Everything else is a direct translation.
  */
-export function mapMessages(messages: Message[], explicitSystem: string | undefined): OpenAiMessage[] {
+export function mapMessages(
+  messages: Message[],
+  explicitSystem: string | undefined,
+  media: MediaSupport = {},
+): OpenAiMessage[] {
   const out: OpenAiMessage[] = [];
   if (explicitSystem && explicitSystem.trim().length > 0) {
     out.push({ role: 'system', content: explicitSystem });
@@ -40,7 +62,7 @@ export function mapMessages(messages: Message[], explicitSystem: string | undefi
         break;
 
       case 'user':
-        out.push({ role: 'user', content: msg.content });
+        out.push({ role: 'user', content: userContent(msg, media) });
         break;
 
       case 'assistant':
@@ -77,6 +99,40 @@ export function mapMessages(messages: Message[], explicitSystem: string | undefi
   }
 
   return out;
+}
+
+/**
+ * A user turn's content. No attachments → the plain string, exactly as before.
+ * With attachments → content parts (files first, then the typed text), where an
+ * image/PDF the model can't read natively becomes a text note. If every part
+ * ended up as text, it collapses back to ONE string: endpoints that only accept
+ * string content (Perplexity) never see an array they'd reject.
+ */
+function userContent(msg: Message, media: MediaSupport): string | OpenAiContentPart[] {
+  const attachments = msg.attachments ?? [];
+  if (attachments.length === 0) return msg.content;
+  const parts = attachments.map((a) => attachmentPart(a, media));
+  if (msg.content.trim().length > 0) parts.push({ type: 'text', text: msg.content });
+  if (parts.every((p) => p.type === 'text')) {
+    return parts.map((p) => (p as { text: string }).text).join('\n\n');
+  }
+  return parts;
+}
+
+export function attachmentPart(a: Attachment, media: MediaSupport): OpenAiContentPart {
+  if (!hasPayload(a)) return { type: 'text', text: attachmentNote(a, 'shed') };
+  if (a.kind === 'text') return { type: 'text', text: renderTextAttachment(a) };
+  if (a.kind === 'image') {
+    if (!media.vision) return { type: 'text', text: attachmentNote(a, 'unsupported') };
+    return { type: 'image_url', image_url: { url: `data:${a.mediaType};base64,${a.data}` } };
+  }
+  if (!media.pdfInput || a.mediaType !== 'application/pdf') {
+    return { type: 'text', text: attachmentNote(a, 'unsupported') };
+  }
+  return {
+    type: 'file',
+    file: { filename: a.name ?? 'document.pdf', file_data: `data:application/pdf;base64,${a.data}` },
+  };
 }
 
 /**

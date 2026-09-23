@@ -1,5 +1,6 @@
 import type { Message } from '../../types/message.js';
 import { decodeAssistantTurn, decodeToolResult } from '../../core/encoding.js';
+import { attachmentNote, hasPayload, renderTextAttachment } from '../../types/attachment.js';
 
 export interface OllamaToolCall {
   function: { name: string; arguments: unknown };
@@ -32,7 +33,7 @@ export function mapMessages(messages: Message[], systemPrefix?: string): OllamaM
         out.push({ role: 'system', content: msg.content });
         break;
       case 'user':
-        out.push({ role: 'user', content: msg.content });
+        out.push({ role: 'user', content: userText(msg) });
         break;
       case 'assistant':
         out.push({ role: 'assistant', content: msg.content });
@@ -58,6 +59,27 @@ export function mapMessages(messages: Message[], systemPrefix?: string): OllamaM
   }
 
   return out;
+}
+
+/**
+ * A user turn as text. The local brain is text-only as served here, so a text
+ * file is inlined and an image/PDF becomes a note saying it can't be seen —
+ * never silently dropped. (The server routes image/PDF turns to the frontier;
+ * this is the honest floor if one ever lands here anyway.) No attachments →
+ * the content string, unchanged.
+ */
+function userText(msg: Message): string {
+  const attachments = msg.attachments ?? [];
+  if (attachments.length === 0) return msg.content;
+  const parts = attachments.map((a) =>
+    !hasPayload(a)
+      ? attachmentNote(a, 'shed')
+      : a.kind === 'text'
+        ? renderTextAttachment(a)
+        : attachmentNote(a, 'unsupported'),
+  );
+  if (msg.content.trim().length > 0) parts.push(msg.content);
+  return parts.join('\n\n');
 }
 
 /** Map Ollama's `done_reason` onto the canonical stream reason (text turns). */

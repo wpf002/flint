@@ -33,6 +33,60 @@ export function judgeBrain(message: string, hasFrontier: boolean, localOnly: boo
   return 'frontier'; // default: Flint runs on Claude
 }
 
+/** What the attachments on a turn need, and what the frontier model can read. */
+export interface MediaFlags {
+  image?: boolean;
+  pdf?: boolean;
+}
+
+export type TurnRoute =
+  | {
+      brain: Brain;
+      /**
+       * Whether a frontier failure may silently retry on the local brain. False
+       * when the turn carries an image/PDF: the local model would answer
+       * WITHOUT seeing the file, and a confident answer about a picture it never
+       * saw is worse than an error.
+       */
+      localFallback: boolean;
+    }
+  | { error: string };
+
+/**
+ * judgeBrain, plus the one thing it can't know: an image or PDF can only be
+ * read by a frontier model that supports it. Text-file attachments are just
+ * text and route exactly like a plain message.
+ *
+ * Privacy still wins. If Local-only is on (or the message asks to stay
+ * private), an image is NOT quietly shipped to the frontier — the turn is
+ * refused with a message that says why, so the user decides.
+ */
+export function routeTurn(opts: {
+  message: string;
+  hasFrontier: boolean;
+  localOnly: boolean;
+  needs: MediaFlags;
+  frontierCan: MediaFlags;
+}): TurnRoute {
+  const brain = judgeBrain(opts.message, opts.hasFrontier, opts.localOnly);
+  const visual = !!opts.needs.image || !!opts.needs.pdf;
+  if (!visual) return { brain, localFallback: true };
+
+  const what = opts.needs.image && opts.needs.pdf ? 'images or PDFs' : opts.needs.image ? 'images' : 'PDFs';
+  if (brain === 'local') {
+    if (!opts.hasFrontier) {
+      return { error: `The local brain can't read ${what}, and no frontier brain is configured. Send it as text instead.` };
+    }
+    return {
+      error: `Local-only is on, and the on-device brain can't read ${what}. Turn Local-only off to send the file to the frontier brain, or remove the attachment.`,
+    };
+  }
+  if ((opts.needs.image && !opts.frontierCan.image) || (opts.needs.pdf && !opts.frontierCan.pdf)) {
+    return { error: `The frontier brain configured here can't read ${what}.` };
+  }
+  return { brain: 'frontier', localFallback: false };
+}
+
 /**
  * Segments that MEAN "read". A tool auto-approves only if one of its name
  * segments is in this set — nouns are deliberately NOT here.

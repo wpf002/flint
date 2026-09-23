@@ -5,6 +5,8 @@ import type {
   Tool,
   CallOptions,
   CacheHints,
+  Attachment,
+  Message,
 } from '@flint/core';
 import type { PersonaConfig, WritingSample } from './types.js';
 
@@ -18,6 +20,12 @@ export interface PersonaChatInput {
    * each turn instead of being persisted into history and replayed forever.
    */
   context?: string;
+  /**
+   * Files attached to this user turn (images, PDFs, text). Validated by the
+   * caller; carried on the canonical user Message so each adapter can render
+   * them natively. Omit (or pass []) and the turn is exactly a plain string.
+   */
+  attachments?: Attachment[];
 }
 
 export interface PersonaGenerateInput {
@@ -25,6 +33,20 @@ export interface PersonaGenerateInput {
   tools?: Tool[];
   /** Per-turn context — see PersonaChatInput.context. */
   context?: string;
+  /** Files attached to the prompt — see PersonaChatInput.attachments. */
+  attachments?: Attachment[];
+}
+
+/** The user turn: a plain string when there's nothing attached (unchanged path). */
+function userTurn(text: string, attachments: Attachment[] | undefined): string | Message {
+  if (!attachments || attachments.length === 0) return text;
+  return {
+    id: `msg_${globalThis.crypto.randomUUID()}`,
+    role: 'user',
+    content: text,
+    timestamp: Date.now(),
+    attachments,
+  };
 }
 
 /**
@@ -56,7 +78,7 @@ export class Persona {
     yield* this.flint.chat(
       {
         conversationId: input.conversationId,
-        message: input.message,
+        message: userTurn(input.message, input.attachments),
         system: stable + (context ?? ''),
         ...(input.tools ? { tools: input.tools } : {}),
         ...this.cacheHints(context),
@@ -74,7 +96,9 @@ export class Persona {
     return this.flint.generate(
       {
         system: stable + (context ?? ''),
-        prompt: input.prompt,
+        ...(input.attachments && input.attachments.length > 0
+          ? { messages: [userTurn(input.prompt, input.attachments) as Message] }
+          : { prompt: input.prompt }),
         ...(input.tools ? { tools: input.tools } : {}),
         ...this.cacheHints(context),
       },

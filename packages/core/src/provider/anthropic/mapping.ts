@@ -4,6 +4,12 @@ import type { ToolDefinition } from '../../types/tool.js';
 import type { StreamDoneReason } from '../../types/stream.js';
 import type { CacheHints } from '../adapter.js';
 import { decodeAssistantTurn, decodeToolResult } from '../../core/encoding.js';
+import {
+  attachmentNote,
+  hasPayload,
+  renderTextAttachment,
+  type Attachment,
+} from '../../types/attachment.js';
 
 type MessageParam = Anthropic.MessageParam;
 type ContentBlockParam = Anthropic.ContentBlockParam;
@@ -53,7 +59,7 @@ export function mapMessages(
         break;
 
       case 'user':
-        pushBlocks('user', [{ type: 'text', text: msg.content }]);
+        pushBlocks('user', userBlocks(msg));
         break;
 
       case 'assistant':
@@ -138,6 +144,45 @@ function splitSystemAtBreakpoint(
     // A cache breakpoint is an optimization, never a requirement — on anything
     // unexpected, send the prompt exactly as it would have been sent before.
     return system;
+  }
+}
+
+/** Anthropic's accepted image media types (anything else is refused at the boundary). */
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+
+/**
+ * A user turn's blocks. Attachments go FIRST, then the typed text — Anthropic's
+ * own guidance for image/document prompts, and it keeps the question as the
+ * last thing the model reads. A message with no attachments maps exactly as it
+ * always did: one text block.
+ */
+function userBlocks(msg: Message): ContentBlockParam[] {
+  const attachments = msg.attachments ?? [];
+  if (attachments.length === 0) return [{ type: 'text', text: msg.content }];
+  const blocks = attachments.map(attachmentBlock);
+  if (msg.content.trim().length > 0) blocks.push({ type: 'text', text: msg.content });
+  return blocks;
+}
+
+export function attachmentBlock(a: Attachment): ContentBlockParam {
+  if (!hasPayload(a)) return { type: 'text', text: attachmentNote(a, 'shed') };
+  switch (a.kind) {
+    case 'text':
+      return { type: 'text', text: renderTextAttachment(a) };
+    case 'image':
+      if (!IMAGE_TYPES.has(a.mediaType)) return { type: 'text', text: attachmentNote(a, 'unsupported') };
+      return {
+        type: 'image',
+        source: { type: 'base64', media_type: a.mediaType as ImageMediaType, data: a.data as string },
+      };
+    case 'document':
+      if (a.mediaType !== 'application/pdf') return { type: 'text', text: attachmentNote(a, 'unsupported') };
+      return {
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: a.data as string },
+        ...(a.name ? { title: a.name } : {}),
+      };
   }
 }
 

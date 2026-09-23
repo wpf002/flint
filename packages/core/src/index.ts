@@ -19,6 +19,18 @@ export type {
 export { MessageSchema, parseMessage, Role } from './types/message.js';
 export type { Message } from './types/message.js';
 
+// --- attachments (images, PDFs, text files on a user message) ---------------
+export {
+  AttachmentSchema,
+  AttachmentKind,
+  hasPayload,
+  needsVision,
+  describeAttachment,
+  attachmentNote,
+  shedPayload,
+} from './types/attachment.js';
+export type { Attachment } from './types/attachment.js';
+
 // --- streaming --------------------------------------------------------------
 export {
   StreamEventSchema,
