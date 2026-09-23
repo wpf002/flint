@@ -476,14 +476,20 @@ export interface Candidate {
 export function parseCandidates(text: string): Candidate[] | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
   const body = fenced?.[1] ?? text;
-  const start = body.indexOf('[');
-  const end = body.lastIndexOf(']');
-  if (start === -1 || end <= start) return null;
+  // The model sometimes answers "[]", then reasons in prose, then gives its real
+  // array. First-'[' to last-']' spans the prose and never parses, so take the
+  // LAST balanced array that does: that's its final answer.
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.slice(start, end + 1));
-  } catch {
-    return null;
+  for (const chunk of topLevelArrays(body).reverse()) {
+    try {
+      const v: unknown = JSON.parse(chunk);
+      if (Array.isArray(v)) {
+        parsed = v;
+        break;
+      }
+    } catch {
+      /* try the previous one */
+    }
   }
   if (!Array.isArray(parsed)) return null;
   const out: Candidate[] = [];
@@ -498,6 +504,33 @@ export function parseCandidates(text: string): Candidate[] | null {
       if (Number.isInteger(turn) && turn > 0) c.turn = turn;
     }
     if (c && c.fact.length >= 8 && c.fact.length <= 400) out.push(c);
+  }
+  return out;
+}
+
+/** Every top-level `[...]` span in `text`, bracket-balanced and string-aware. */
+function topLevelArrays(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"' && depth > 0) inStr = true;
+    else if (ch === '[') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === ']' && depth > 0) {
+      depth--;
+      if (depth === 0) out.push(text.slice(start, i + 1));
+    }
   }
   return out;
 }

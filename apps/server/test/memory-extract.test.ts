@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseFacts } from '../src/memory-extract';
+import { parseCandidates, parseFacts } from '../src/memory-extract';
 
 describe('parseFacts', () => {
   it('parses a bare JSON array', () => {
@@ -32,5 +32,34 @@ describe('parseFacts', () => {
   it('drops non-strings and junk-length entries', () => {
     const out = parseFacts('["ok", 42, null, "tiny", "' + 'x'.repeat(500) + '", "a real durable fact here"]');
     expect(out).toEqual(['a real durable fact here']);
+  });
+});
+
+describe('parseCandidates: a reply that thinks out loud', () => {
+  it('takes the final array when the model says [] then reasons, then answers', () => {
+    const reply = `[]
+
+Wait, I need to output just the JSON. Let me check the turns for any durable facts.
+
+Turn 1: Will has NVDA on his watchlist [maybe]. That's durable.
+
+[{"fact": "Will keeps NVDA on his watchlist", "category": "finance", "turn": 1, "supersedes": []}]`;
+    expect(parseCandidates(reply)).toEqual([
+      { fact: 'Will keeps NVDA on his watchlist', category: 'finance', turn: 1, supersedes: [] },
+    ]);
+  });
+
+  it('keeps an honest empty answer that has prose after it', () => {
+    expect(parseCandidates('[]\n\nNothing durable in these turns.')).toEqual([]);
+  });
+
+  it('is not fooled by brackets inside fact strings', () => {
+    expect(parseCandidates('[{"fact": "Will names branches like fix/[area]-thing"}]')?.[0]?.fact).toBe(
+      'Will names branches like fix/[area]-thing',
+    );
+  });
+
+  it('still returns null when nothing parses', () => {
+    expect(parseCandidates('I could not find anything [see above')).toBeNull();
   });
 });
