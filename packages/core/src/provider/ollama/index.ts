@@ -3,7 +3,7 @@ import type {
   GenerateArgs,
   GenerateResult,
 } from '../adapter.js';
-import type { Message } from '../../types/message.js';
+import { estimateMessageTokens, type Message } from '../../types/message.js';
 import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
 import type { ModelCapabilities } from '../../types/capabilities.js';
@@ -66,8 +66,8 @@ export class OllamaProvider implements ProviderAdapter {
   }
 
   estimateTokens(messages: Message[], _model: string): number {
-    const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
-    return Math.ceil(chars / 4);
+    // Best-effort heuristic (~4 chars/token + a per-attachment cost). Budgeting only.
+    return estimateMessageTokens(messages);
   }
 
   /** Non-streamed call with retry: native tool-calling is reliable only in

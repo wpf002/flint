@@ -1,5 +1,5 @@
 import type { ProviderAdapter, GenerateArgs, GenerateResult } from '../adapter.js';
-import type { Message } from '../../types/message.js';
+import { estimateMessageTokens, type Message } from '../../types/message.js';
 import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
 import type { ModelCapabilities } from '../../types/capabilities.js';
@@ -96,9 +96,8 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   estimateTokens(messages: Message[], _model: string): number {
-    // Best-effort heuristic (~4 chars/token). Budgeting only, never billing.
-    const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
-    return Math.ceil(chars / 4);
+    // Best-effort heuristic (~4 chars/token + a per-attachment cost). Budgeting only.
+    return estimateMessageTokens(messages);
   }
 
   async generate(args: GenerateArgs): Promise<GenerateResult> {
@@ -211,9 +210,13 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
 
   private buildBody(args: GenerateArgs, stream: boolean): Record<string, unknown> {
     const tools = this.wire.supportsTools ? mapTools(args.tools) : undefined;
+    const caps = this.wire.capabilities(args.model);
     return {
       model: args.model,
-      messages: mapMessages(args.messages, args.system),
+      messages: mapMessages(args.messages, args.system, {
+        vision: caps.vision === true,
+        pdfInput: caps.pdfInput === true,
+      }),
       [this.wire.maxTokensField]: args.maxTokens ?? this.wire.defaultMaxTokens,
       ...(tools ? { tools } : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),

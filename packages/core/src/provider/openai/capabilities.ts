@@ -6,13 +6,18 @@ import type { ModelCapabilities } from '../../types/capabilities.js';
  * context window produces a request the API rejects, while under-claiming only costs
  * some trimming.
  */
-function caps(maxContextTokens: number, maxOutputTokens: number): ModelCapabilities {
+function caps(maxContextTokens: number, maxOutputTokens: number, multimodal = true): ModelCapabilities {
   return {
     toolCalling: 'native',
     structuredOutput: 'native',
     streaming: 'full',
     maxContextTokens,
     maxOutputTokens,
+    // The named families all take image_url and file (PDF) content parts. An
+    // UNKNOWN model gets neither: claiming vision it lacks is a 400 from the API,
+    // while under-claiming only costs a text note in place of the file.
+    vision: multimodal,
+    pdfInput: multimodal,
   };
 }
 
@@ -28,5 +33,5 @@ export function openAiCapabilities(model: string): ModelCapabilities {
   for (const entry of KNOWN) {
     if (entry.match.test(model)) return entry.caps;
   }
-  return caps(128_000, 16_384);
+  return caps(128_000, 16_384, false);
 }

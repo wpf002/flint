@@ -21,6 +21,10 @@ function caps(maxContextTokens: number, maxOutputTokens: number): ModelCapabilit
     streaming: 'full',
     maxContextTokens,
     maxOutputTokens,
+    // Every Claude model in the table (and the Sonnet-class fallback) takes
+    // image and PDF document blocks.
+    vision: true,
+    pdfInput: true,
   };
 }
 

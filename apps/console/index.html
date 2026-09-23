@@ -112,6 +112,23 @@
   #settings .log{max-height:46vh;overflow:auto;}
   .msg .body b{color:var(--gold-hi);font-weight:600;} .msg .body code{background:#1a1712;color:var(--gold-hi);padding:1px 5px;border-radius:4px;font-size:12.5px;}
   .msg .body i{color:#e8dcc0;font-style:italic;}
+  /* ---------- attachments ---------- */
+  .bar .clip{padding:7px 11px;display:flex;align-items:center;}
+  .bar .clip svg{display:block;}
+  #chips{display:none;flex-wrap:wrap;gap:6px;margin:0 12px -4px;padding-top:8px;}
+  #chips.on{display:flex;}
+  .chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px 4px 8px;border:1px solid #2a2415;border-radius:8px;background:#0c0a06;font-size:10.5px;color:var(--ink);}
+  .chip img{width:22px;height:22px;object-fit:cover;border-radius:4px;flex:none;}
+  .chip .ck{flex:none;font-size:8px;letter-spacing:.16em;color:var(--gold);border:1px solid #3a3118;border-radius:4px;padding:1px 4px;}
+  .chip .cn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;}
+  .chip .cs{color:var(--mut);flex:none;}
+  .chip button{background:transparent;border:none;color:var(--mut);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;}
+  .chip button:hover{color:var(--gold-hi);}
+  .msg .atts{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 5px;}
+  .msg .atts img{max-width:150px;max-height:110px;border-radius:6px;border:1px solid #2a2415;display:block;}
+  .msg .atts .chip{padding:3px 8px;}
+  #attnote{display:none;margin:6px 14px 0;font-size:10.5px;color:var(--orange);}
+  aside.chat.drop{box-shadow:inset 0 0 0 1px var(--gold);background:#0b0904;}
 </style>
 </head>
 <body>
@@ -131,8 +148,12 @@
     </div>
     <aside class="chat">
       <div id="transcript"></div>
+      <div id="attnote"></div>
+      <div id="chips"></div>
       <div class="bar">
         <input id="input" placeholder="How can I help you?" autocomplete="off" />
+        <input type="file" id="filepick" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.log,.ini,.conf,.env,.sql,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.h,.cpp,.hpp,.cs,.php,.sh,.zsh,.bash,.html,.css,.tex,.diff,.patch" />
+        <button class="clip" id="clipbtn" onclick="document.getElementById('filepick').click()" title="Attach images, PDFs or text files" aria-label="Attach files"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
         <button class="mic" id="micbtn" onclick="toggleMic()" title="Hold a conversation — speak, and Flint speaks back" aria-label="Speak"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="18.5" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg></button>
         <button class="sendbtn" onclick="send()" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
       </div>
@@ -268,13 +289,18 @@ pollNotifs();setInterval(pollNotifs,60000);
 
 function send(speakBack){
   var sb=speakBack===true;
-  var inp=document.getElementById('input');var msg=inp.value.trim();if(!msg)return;inp.value='';
+  var inp=document.getElementById('input');var msg=inp.value.trim();
+  if(ATT_READING){attNote('Still reading an attachment — one moment.');return;}
+  var atts=PENDING.slice();if(!msg&&!atts.length)return;
   if(!TOKEN){openSettings();return;}
-  addMsg('You','you').textContent=msg;
+  inp.value='';PENDING=[];renderChips();attNote('');
+  var you=addMsg('You','you');you.textContent=msg;if(atts.length)renderSentAtts(you,atts);
   var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};document.getElementById('think').textContent='responding';setTalk(1);
-  fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY})})
+  fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY,attachments:atts.map(function(a){return {name:a.name,type:a.type,data:a.data};})})})
   .then(function(res){
     if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
+    /* Refusals (bad file, too large, Local-only + image) come back as JSON, not a stream. */
+    if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent='['+((d&&d.error)||('error '+res.status))+']';document.getElementById('think').textContent='';setTalk(0);});}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
       if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
@@ -293,6 +319,61 @@ function send(speakBack){
   }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='';setTalk(0);});
 }
 document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
+
+/* ---------- attachments (images, PDFs, text files) ----------
+   Mirrors the server's limits so a bad file is caught before upload; the server
+   re-checks everything by the file's actual bytes, so this is convenience, not
+   the gate. Images and PDFs are read by the frontier brain only. */
+var PENDING=[],ATT_READING=0;
+var ATT_MAX=5,ATT_TOTAL=24*1048576,ATT_LIM={image:5*1048576,document:20*1048576,text:512*1024};
+var IMG_TYPES={'image/png':1,'image/jpeg':1,'image/gif':1,'image/webp':1};
+var TEXT_EXT=/\.(txt|md|markdown|csv|tsv|json|jsonl|ndjson|xml|ya?ml|toml|log|ini|conf|env|sql|m?js|cjs|tsx?|jsx|py|rb|go|rs|java|kt|swift|c|h|cpp|hpp|cs|php|sh|zsh|bash|html?|css|tex|srt|vtt|diff|patch)$/i;
+function attKind(f){if(IMG_TYPES[f.type])return 'image';if(f.type==='application/pdf'||/\.pdf$/i.test(f.name))return 'document';
+  if(/^text\//.test(f.type)||/^application\/(json|xml|x-yaml|yaml|javascript|typescript|x-sh|sql|toml|x-ndjson)$/.test(f.type)||TEXT_EXT.test(f.name))return 'text';return null;}
+function escA(s){return esc(s).replace(/"/g,'&quot;');}
+function fmtSize(n){return n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':(n/1048576).toFixed(1)+' MB';}
+function attNote(t){var n=document.getElementById('attnote');n.textContent=t||'';n.style.display=t?'block':'none';}
+function addFiles(list){
+  var files=Array.prototype.slice.call(list||[]);if(!files.length)return;attNote('');
+  var total=PENDING.reduce(function(s,a){return s+a.size;},0);
+  files.forEach(function(f){
+    var kind=attKind(f);
+    if(!kind){attNote(f.name+': unsupported — images (PNG/JPEG/GIF/WebP), PDFs and text files only.');return;}
+    if(PENDING.length>=ATT_MAX){attNote('Up to '+ATT_MAX+' files per message.');return;}
+    if(f.size>ATT_LIM[kind]){attNote(f.name+' is over the '+fmtSize(ATT_LIM[kind])+' limit.');return;}
+    if(total+f.size>ATT_TOTAL){attNote('Attachments total over '+fmtSize(ATT_TOTAL)+'.');return;}
+    total+=f.size;
+    var a={name:f.name||('pasted.'+(f.type.split('/')[1]||'bin')),type:f.type,size:f.size,kind:kind,data:null,url:null};
+    PENDING.push(a);ATT_READING++;
+    var r=new FileReader();
+    r.onload=function(){var s=String(r.result||'');a.data=s.slice(s.indexOf(',')+1);if(kind==='image')a.url=s;ATT_READING--;renderChips();};
+    r.onerror=function(){ATT_READING--;PENDING=PENDING.filter(function(x){return x!==a;});attNote('Could not read '+a.name+'.');renderChips();};
+    r.readAsDataURL(f);
+  });
+  renderChips();
+  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote('Local-only is on — the on-device brain can’t read images or PDFs.');
+}
+function chipHtml(a,removable,i){
+  var lead=a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="">':'<span class="ck">'+(a.kind==='document'?'PDF':a.kind==='image'?'IMG':'TXT')+'</span>';
+  return '<div class="chip">'+lead+'<span class="cn" title="'+escA(a.name)+'">'+esc(a.name)+'</span><span class="cs">'+fmtSize(a.size)+'</span>'+(removable?'<button data-i="'+i+'" aria-label="Remove">×</button>':'')+'</div>';}
+function renderChips(){
+  var c=document.getElementById('chips');c.classList.toggle('on',PENDING.length>0);
+  c.innerHTML=PENDING.map(function(a,i){return chipHtml(a,true,i);}).join('');
+  Array.prototype.forEach.call(c.querySelectorAll('button'),function(b){b.onclick=function(){PENDING.splice(Number(b.getAttribute('data-i')),1);renderChips();attNote('');};});
+}
+function renderSentAtts(bodyEl,atts){
+  var box=document.createElement('div');box.className='atts';
+  box.innerHTML=atts.map(function(a){return a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="'+escA(a.name)+'" title="'+escA(a.name)+'">':chipHtml(a,false,0);}).join('');
+  bodyEl.parentNode.insertBefore(box,bodyEl);
+}
+document.getElementById('filepick').addEventListener('change',function(e){addFiles(e.target.files);e.target.value='';});
+document.getElementById('input').addEventListener('paste',function(e){var f=e.clipboardData&&e.clipboardData.files;if(f&&f.length){e.preventDefault();addFiles(f);}});
+(function(){var zone=document.querySelector('aside.chat'),depth=0;
+  zone.addEventListener('dragenter',function(e){if(e.dataTransfer&&Array.prototype.indexOf.call(e.dataTransfer.types||[],'Files')>=0){depth++;zone.classList.add('drop');}});
+  zone.addEventListener('dragover',function(e){e.preventDefault();});
+  zone.addEventListener('dragleave',function(){depth=Math.max(0,depth-1);if(!depth)zone.classList.remove('drop');});
+  zone.addEventListener('drop',function(e){e.preventDefault();depth=0;zone.classList.remove('drop');if(e.dataTransfer)addFiles(e.dataTransfer.files);});
+})();
 
 /* ---------- voice (speak to Flint, Flint speaks back) ---------- */
 var mediaRec=null,voChunks=[],_flintVoice=null;

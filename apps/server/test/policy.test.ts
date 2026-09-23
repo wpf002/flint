@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { judgeBrain, isSafeTool } from '../src/policy';
+import { judgeBrain, isSafeTool, routeTurn } from '../src/policy';
 
 describe('judgeBrain', () => {
   it('falls back to local when no frontier is configured', () => {
@@ -113,5 +113,40 @@ describe('isSafeTool — auto-approval gate', () => {
   it('a dangerous word in the NAMESPACE is caught too', () => {
     expect(isSafeTool('execute.trade')).toBe(false);
     expect(isSafeTool('broker.buy')).toBe(false);
+  });
+});
+
+describe('routeTurn (attachments)', () => {
+  const base = { message: 'what is in this?', hasFrontier: true, localOnly: false, frontierCan: { image: true, pdf: true } };
+
+  it('routes a plain turn exactly like judgeBrain, with local fallback allowed', () => {
+    expect(routeTurn({ ...base, needs: {} })).toEqual({ brain: 'frontier', localFallback: true });
+    expect(routeTurn({ ...base, localOnly: true, needs: {} })).toEqual({ brain: 'local', localFallback: true });
+    expect(routeTurn({ ...base, hasFrontier: false, needs: {} })).toEqual({ brain: 'local', localFallback: true });
+  });
+
+  it('sends image and PDF turns to the frontier, with NO silent local fallback', () => {
+    expect(routeTurn({ ...base, needs: { image: true } })).toEqual({ brain: 'frontier', localFallback: false });
+    expect(routeTurn({ ...base, needs: { pdf: true } })).toEqual({ brain: 'frontier', localFallback: false });
+  });
+
+  it('refuses rather than answering blind when there is no frontier', () => {
+    const r = routeTurn({ ...base, hasFrontier: false, needs: { image: true } });
+    expect((r as { error: string }).error).toMatch(/no frontier brain/);
+  });
+
+  // Privacy wins: Local-only must never be overridden by an attachment.
+  it('HONORS Local-only: an image is refused, not shipped off-device', () => {
+    const r = routeTurn({ ...base, localOnly: true, needs: { image: true } });
+    expect((r as { error: string }).error).toMatch(/Local-only is on/);
+    const r2 = routeTurn({ ...base, message: 'keep this private: what is this?', needs: { pdf: true } });
+    expect(r2).toHaveProperty('error');
+  });
+
+  it('refuses when the configured frontier cannot read the file type', () => {
+    const r = routeTurn({ ...base, frontierCan: {}, needs: { image: true } });
+    expect((r as { error: string }).error).toMatch(/can't read images/);
+    const r2 = routeTurn({ ...base, frontierCan: { image: true }, needs: { image: true, pdf: true } });
+    expect(r2).toHaveProperty('error');
   });
 });
