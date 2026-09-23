@@ -445,6 +445,7 @@ async function main(): Promise<void> {
   // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
   const frontierCfg = buildFrontierProvider();
   let frontier: { persona: Persona; model: string } | undefined;
+  let extractFlint: Flint | undefined; // bare frontier (no persona) for background jobs like memory extraction
   const flintOf = new Map<Persona, Flint>();
   const brains = buildTiers<Persona>({
     env: process.env,
@@ -478,6 +479,8 @@ async function main(): Promise<void> {
     frontier = { persona: brains.primary.persona, model: brains.primary.label };
     frontierModel = brains.primary.label;
     // Query planning is light work: give deep_research the routine tier's client.
+    // Memory extraction is judgment work: the primary tier, bare (no persona).
+    extractFlint = flintOf.get(brains.primary.persona);
     frontierFlint = flintOf.get(brains.chain('routine')[0]?.persona ?? brains.primary.persona);
     console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
@@ -491,12 +494,13 @@ async function main(): Promise<void> {
   // Long-term memory that actually grows. `remember` alone produced 9 facts in
   // 1,421 turns, because it only fires when the model elects to call it; this
   // reads the turns Flint has already had and extracts the durable ones. Uses
-  // the frontier brain (skips entirely if none is configured) and writes through
-  // KnowledgeStore.add, so dedupe + the ephemeral filter still apply.
+  // the bare frontier model with a curator prompt, not the persona (skips entirely
+  // if none is configured), under a daily call cap, and writes through
+  // KnowledgeStore, so dedupe, tombstones + the ephemeral filter still apply.
   new MemoryExtractor(
     memory,
     knowledge,
-    () => frontier?.persona,
+    () => extractFlint,
     join(dataDir, 'extract-state.json'),
   ).start();
 
