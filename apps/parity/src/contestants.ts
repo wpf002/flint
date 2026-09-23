@@ -150,19 +150,27 @@ export function flintContestant(opts: {
   frontierModel: string;
   allowTrainingLog: boolean;
   timeoutMs: number;
+  /**
+   * Answer with the local brain only (the server's `localOnly`), no Claude: how
+   * Flint does on his own. A separate contestant name, so its answers and
+   * verdicts never mix with normal Flint's in the same run.
+   */
+  localOnly?: boolean;
 }): Contestant {
+  const localOnly = opts.localOnly === true;
   return {
-    name: 'flint',
+    name: localOnly ? 'flint-local' : 'flint',
     model: `flint@${opts.url}`,
     // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
-    // re-send it: estimate generously.
-    estimate: (p) => estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 }),
+    // re-send it: estimate generously. The local brain costs nothing.
+    estimate: (p) =>
+      localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 }),
     async answer(p, signal) {
       const timeout = AbortSignal.timeout(opts.timeoutMs);
       const r = await fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
         method: 'POST',
         headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: p.prompt, eval: true }),
+        body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}) }),
         signal: AbortSignal.any([signal, timeout]),
       });
       const body = (await r.json().catch(() => ({}))) as FlintGenerateResponse;
@@ -173,6 +181,7 @@ export function flintContestant(opts: {
             'Deploy the server from this branch, or pass --allow-training-log to accept that.',
         );
       }
+      if (localOnly && body.brain !== 'local') throw new FatalError(`asked for localOnly but brain=${body.brain ?? '?'} answered`);
       const text = (body.text ?? '').trim();
       if (!text) throw new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`);
       const usage = body.usage;

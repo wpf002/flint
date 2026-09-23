@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { CATEGORIES } from './categorize.js';
 import type { Outcome } from './judge.js';
@@ -19,6 +19,8 @@ export interface AnswerRow {
 }
 
 export interface JudgmentRow {
+  /** Which Flint was judged ('flint' or 'flint-local'). Rows written before this field existed are 'flint'. */
+  subject?: string;
   promptId: string;
   category: string;
   competitor: string;
@@ -119,10 +121,11 @@ export function summarize(judgments: readonly JudgmentRow[]): CompetitorSummary[
   return out;
 }
 
-export const HISTORY_HEADER =
+const HISTORY_HEADER_V1 =
   'ts,run,prompt_set,competitor,competitor_model,judge_model,n,flint_wins,competitor_wins,ties,flint_win_rate,p_value,signal,judge_errors';
+export const HISTORY_HEADER = HISTORY_HEADER_V1 + ',subject';
 
-export function historyRow(run: string, promptSet: string, s: CompetitorSummary, ts: string): string {
+export function historyRow(run: string, promptSet: string, s: CompetitorSummary, ts: string, subject = 'flint'): string {
   const cells = [
     ts,
     run,
@@ -138,6 +141,7 @@ export function historyRow(run: string, promptSet: string, s: CompetitorSummary,
     s.p.toPrecision(3),
     s.signal,
     s.judgeErrors,
+    subject,
   ];
   return cells.map((c) => csvCell(String(c))).join(',');
 }
@@ -148,8 +152,18 @@ function csvCell(s: string): string {
 
 export function appendHistory(path: string, rows: string[]): void {
   mkdirSync(dirname(path), { recursive: true });
+  migrateHistory(path);
   const header = existsSync(path) ? '' : HISTORY_HEADER + '\n';
   appendFileSync(path, header + rows.map((r) => r + '\n').join(''), 'utf8');
+}
+
+/** A v1 file (no subject column) gets the column, with every old row marked 'flint'. */
+export function migrateHistory(path: string): void {
+  if (!existsSync(path)) return;
+  const lines = readFileSync(path, 'utf8').split('\n');
+  if (lines[0] !== HISTORY_HEADER_V1) return;
+  const body = lines.slice(1).filter((l) => l.trim()).map((l) => `${l},flint`);
+  writeFileSync(path, [HISTORY_HEADER, ...body].join('\n') + '\n', 'utf8');
 }
 
 const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
@@ -165,11 +179,13 @@ export interface ReportInput {
   budgetUsd: number;
   stoppedForBudget: boolean;
   notes: string[];
+  /** Which Flint this report judges; omitted means 'flint'. */
+  subject?: string;
 }
 
 export function renderMarkdown(r: ReportInput): string {
   const L: string[] = [];
-  L.push(`# Flint parity eval — ${r.run}`, '');
+  L.push(`# Flint parity eval — ${r.run}${r.subject && r.subject !== 'flint' ? ` (${r.subject})` : ''}`, '');
   L.push(`Prompt set: \`${r.promptSet}\` (${r.promptCount} prompts in this run).`);
   L.push(`Spend this invocation: $${r.spendUsd.toFixed(2)} of a $${r.budgetUsd.toFixed(2)} budget${r.stoppedForBudget ? ' — **stopped early: budget reached**' : ''}.`, '');
 

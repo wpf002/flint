@@ -136,6 +136,7 @@ async function run(argv: string[]): Promise<void> {
       'judge-max-tokens': { type: 'string', default: '4096' },
       'no-judge': { type: 'boolean', default: false },
       'allow-training-log': { type: 'boolean', default: false },
+      'flint-local': { type: 'boolean', default: false },
       seed: { type: 'string', default: '1' },
       prompts: { type: 'string', default: PROMPTS_PATH },
     },
@@ -185,9 +186,10 @@ async function run(argv: string[]): Promise<void> {
       frontierModel: DEFAULTS.flintFrontierModel,
       allowTrainingLog: values['allow-training-log']!,
       timeoutMs: Number(values['flint-timeout-s']) * 1000,
+      localOnly: values['flint-local']!,
     });
     contestants.push(flint);
-    log(`flint: ${url} (local brain ${String(health.provider)}:${String(health.model)}, ${String(health.tools)} tools)`);
+    log(`${flint.name}: ${url} (local brain ${String(health.provider)}:${String(health.model)}, ${String(health.tools)} tools)`);
   }
   const need = (name: string, key: string): string | undefined => {
     if (!wanted.has(name)) return undefined;
@@ -321,9 +323,12 @@ async function run(argv: string[]): Promise<void> {
   const judgeModel = values['judge-model']!;
   const judgments = new Map<string, JudgmentRow>();
   let newJudgments = 0;
+  // Verdicts for normal Flint and local-only Flint share a run dir; the subject keeps them apart.
+  const subject = flint.name;
+  const subjectOf = (j: JudgmentRow): string => j.subject ?? 'flint';
   const judgeKey = (id: string, comp: string, compModel: string): string => `${id}|${comp}|${compModel}|${judgeModel}`;
   for (const j of readJsonl<JudgmentRow>(judgmentsPath)) {
-    if (j.ok && j.judgeModel === judgeModel) judgments.set(judgeKey(j.promptId, j.competitor, j.competitorModel), j);
+    if (j.ok && j.judgeModel === judgeModel && subjectOf(j) === subject) judgments.set(judgeKey(j.promptId, j.competitor, j.competitorModel), j);
   }
   if (!values['no-judge'] && !stopped()) {
     if (!anthropicKey) throw new Error('the judge needs ANTHROPIC_API_KEY');
@@ -354,6 +359,7 @@ async function run(argv: string[]): Promise<void> {
         const settle = budget.reserve(est);
         if (!settle) return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
         const base = {
+          subject,
           promptId: p.id,
           category: p.category,
           competitor: comp.name,
@@ -386,7 +392,7 @@ async function run(argv: string[]): Promise<void> {
           appendJsonl(judgmentsPath, row);
           judgments.set(judgeKey(p.id, comp.name, comp.model), row);
           newJudgments++;
-          log(`  ⚖ ${p.id} vs ${comp.name.padEnd(10)} -> flint ${row.outcome}`);
+          log(`  ⚖ ${p.id} vs ${comp.name.padEnd(10)} -> ${subject} ${row.outcome}`);
         } catch (err) {
           const usage = (err as { usage?: { input: number; output: number } }).usage;
           const cost = usage ? costOf('anthropic', judgeModel, usage) : 0;
@@ -402,7 +408,10 @@ async function run(argv: string[]): Promise<void> {
 
   // ---- report
   const ids = new Set(prompts.map((p) => p.id));
-  const allJudgments = readJsonl<JudgmentRow>(judgmentsPath).filter((j) => ids.has(j.promptId) && j.judgeModel === judgeModel);
+  const allJudgments = readJsonl<JudgmentRow>(judgmentsPath).filter(
+    (j) => ids.has(j.promptId) && j.judgeModel === judgeModel && subjectOf(j) === subject,
+  );
+  const reportName = subject === 'flint' ? 'report.md' : `report-${subject}.md`;
   // Keep one row per pair: the latest successful one, else the latest failure.
   const latest = new Map<string, JudgmentRow>();
   for (const j of allJudgments) {
@@ -418,7 +427,7 @@ async function run(argv: string[]): Promise<void> {
     `Competitors answer through their raw APIs with no tools (no web search), given the same date/location context Flint gets; Flint answers end to end with its tools. Categories that need live data or Will's systems measure that difference on purpose.`,
   );
   if (competitors.some((c) => c.model.startsWith('claude')) && judgeModel.startsWith('claude')) {
-    notes.push(`The judge (${judgeModel}) is a Claude model and so is a competitor — expect some self-preference in that column. Flint's frontier brain is also Claude.`);
+    notes.push(`The judge (${judgeModel}) is a Claude model and so is a competitor — expect some self-preference in that column.${subject === 'flint' ? " Flint's frontier brain is also Claude." : ''}`);
   }
   const md = renderMarkdown({
     run,
@@ -431,8 +440,9 @@ async function run(argv: string[]): Promise<void> {
     budgetUsd: budget.limitUsd,
     stoppedForBudget: budget.exhausted,
     notes,
+    subject,
   });
-  writeFileSync(join(runDir, 'report.md'), md);
+  writeFileSync(join(runDir, reportName), md);
 
   // One row per competitor, cumulative for the run. A resumed run appends a
   // fresh cumulative row (same `run` id) only when it judged something new, so
@@ -441,11 +451,11 @@ async function run(argv: string[]): Promise<void> {
   const recordHistory = scored.length > 0 && newJudgments > 0;
   if (recordHistory) {
     const ts = new Date().toISOString();
-    appendHistory(HISTORY_PATH, scored.map((s) => historyRow(run, basename(promptsPath), s, ts)));
+    appendHistory(HISTORY_PATH, scored.map((s) => historyRow(run, basename(promptsPath), s, ts, subject)));
   }
 
   process.stdout.write(md + '\n');
-  log(`spent $${budget.spent.toFixed(4)} this invocation; report -> ${join(runDir, 'report.md')}`);
+  log(`spent $${budget.spent.toFixed(4)} this invocation; report -> ${join(runDir, reportName)}`);
   log(recordHistory ? `history -> ${HISTORY_PATH}` : 'nothing new judged; history unchanged');
   if (stopReason && stopReason !== `budget of $${budget.limitUsd.toFixed(2)} reached`) process.exitCode = 1;
 }
@@ -465,7 +475,8 @@ function latestAnswers(rows: readonly AnswerRow[]): AnswerRow[] {
 // report
 
 function report(argv: string[]): void {
-  const { values } = parseArgs({ args: argv, options: { run: { type: 'string' } } });
+  const { values } = parseArgs({ args: argv, options: { run: { type: 'string' }, 'flint-local': { type: 'boolean', default: false } } });
+  const subject = values['flint-local'] ? 'flint-local' : 'flint';
   if (!values.run) throw new Error('--run <dir|name> required');
   const runDir = existsSync(values.run) ? resolve(values.run) : join(EVAL_DIR, 'runs', values.run);
   const meta = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as {
@@ -475,7 +486,9 @@ function report(argv: string[]): void {
     judgeModel: string;
   };
   const ids = new Set(meta.promptIds);
-  const judgments = readJsonl<JudgmentRow>(join(runDir, 'judgments.jsonl')).filter((j) => ids.has(j.promptId) && j.judgeModel === meta.judgeModel);
+  const judgments = readJsonl<JudgmentRow>(join(runDir, 'judgments.jsonl')).filter(
+    (j) => ids.has(j.promptId) && j.judgeModel === meta.judgeModel && (j.subject ?? 'flint') === subject,
+  );
   const latest = new Map<string, JudgmentRow>();
   for (const j of judgments) {
     const k = `${j.promptId}|${j.competitor}|${j.competitorModel}`;
@@ -495,8 +508,9 @@ function report(argv: string[]): void {
     budgetUsd: spend,
     stoppedForBudget: false,
     notes: ['Re-rendered from cached rows; spend shown is the run total across invocations.'],
+    subject,
   });
-  writeFileSync(join(runDir, 'report.md'), md);
+  writeFileSync(join(runDir, subject === 'flint' ? 'report.md' : `report-${subject}.md`), md);
   process.stdout.write(md + '\n');
 }
 
