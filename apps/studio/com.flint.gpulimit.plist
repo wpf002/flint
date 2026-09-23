@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- iogpu.wired_limit_mb resets to 0 (macOS default, ~48GB on 64GB) on every
+       boot, and the 72B QLoRA run needs ~56GB. Set it at boot so a reboot
+       can't silently block the next 70B train. -->
+  <key>Label</key><string>com.flint.gpulimit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/sbin/sysctl</string>
+    <string>iogpu.wired_limit_mb=57344</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
