@@ -33,7 +33,11 @@ TRAIN_N=$(wc -l < "$BRAIN/data/train.jsonl" | tr -d ' ')
 
 # A real fine-tune: multiple passes, early-stopped so it can't overfit.
 # ~2 epochs, capped so an overnight run finishes; bump ITERS if you want more.
-ITERS="${UPGRADE_ITERS:-8000}"; [ $((TRAIN_N*2)) -lt $ITERS ] && ITERS=$((TRAIN_N*2))
+# 8000 was far too many. Measured on the first real 72B run (2026-09-22):
+# val loss bottomed at iter 800 (1.403) and rose steadily to 2.02 by 7200, so
+# 7200 iterations were actively harmful and only pick_best rescued the result.
+# Early stopping still protects overshoot; this just stops burning 7 hours.
+ITERS="${UPGRADE_ITERS:-2000}"; [ $((TRAIN_N*2)) -lt $ITERS ] && ITERS=$((TRAIN_N*2))
 STEP=$(( ITERS / 10 )); [ $STEP -lt 100 ] && STEP=100
 
 echo "[$TS] fine-tuning 70B: train_n=$TRAIN_N iters=$ITERS step=$STEP (this takes hours)"
@@ -48,7 +52,10 @@ echo "[$TS] selecting best checkpoint (early-stop)..."
 "$PY" "$BRAIN/pick_best.py" "$TRAINLOG" "$ADAPTER"
 
 echo "[$TS] judging Flint-70B vs base 70B (Claude referee)..."
-RESULT=$(EVAL_N=15 "$PY" "$BRAIN/eval_judge.py" 2>&1 | grep -E "Flint wins|verdict" || echo "eval failed")
+# No EVAL_N cap. This used to be 15, which cannot separate a real gain from a
+# coin flip — the first 72B run came back 4-4-7 and said "roughly even" when it
+# had measured nothing. Judge the whole frozen holdout.
+RESULT=$(EVAL_TS="$TS" "$PY" "$BRAIN/eval_judge.py" 2>&1 | grep -E "Flint wins|verdict|signal:" || echo "eval failed")
 
 launchctl load -w "$OLLAMA_PLIST" 2>/dev/null || true
 { echo "[$TS] ULTIMATE UPGRADE 70B  train_n=$TRAIN_N iters=$ITERS"; echo "  $RESULT"; echo "------"; } >> "$LOG"
