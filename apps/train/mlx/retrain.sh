@@ -44,6 +44,11 @@ echo "[$TS] judging vs base..."
 # real gain from a coin flip, which is why the history read as noise.
 RESULT=$(EVAL_TS="$TS" "$PY" "$BRAIN/eval_judge.py" 2>&1 | grep -E "Flint wins|verdict|signal:" || echo "eval failed")
 
+GATE=$("$PY" "$BRAIN/promote_gate.py" "$ADAPTER" 2>&1 || true)
+echo "$GATE"
+RESULT="$RESULT
+  $GATE"
+
 echo "[$TS] reloading ollama..."
 /bin/launchctl load -w "$HOME/Library/LaunchAgents/com.flint.ollama.plist" 2>/dev/null || true
 

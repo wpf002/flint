@@ -57,6 +57,11 @@ echo "[$TS] judging Flint-70B vs base 70B (Claude referee)..."
 # had measured nothing. Judge the whole frozen holdout.
 RESULT=$(EVAL_TS="$TS" "$PY" "$BRAIN/eval_judge.py" 2>&1 | grep -E "Flint wins|verdict|signal:" || echo "eval failed")
 
+GATE=$("$PY" "$BRAIN/promote_gate.py" "$ADAPTER" 2>&1 || true)
+echo "$GATE"
+RESULT="$RESULT
+  $GATE"
+
 launchctl load -w "$OLLAMA_PLIST" 2>/dev/null || true
 { echo "[$TS] ULTIMATE UPGRADE 70B  train_n=$TRAIN_N iters=$ITERS"; echo "  $RESULT"; echo "------"; } >> "$LOG"
 echo "=== UPGRADE COMPLETE ==="

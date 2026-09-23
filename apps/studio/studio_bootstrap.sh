@@ -110,7 +110,8 @@ step "8/9 install agents that live in the repo but aren't running on the old Mac
 for src in \
   "$REPO/apps/server/com.flint.deploy.plist" \
   "$REPO/apps/train/mlx/com.flint.grow.plist" \
-  "$REPO/apps/train/mlx/com.flint.retrain.plist"; do
+  "$REPO/apps/train/mlx/com.flint.retrain.plist" \
+  "$REPO/apps/studio/com.flint.backup.plist"; do
   [ -f "$src" ] || continue
   dst="$HOME/Library/LaunchAgents/$(basename "$src")"
   if [ -f "$dst" ]; then
