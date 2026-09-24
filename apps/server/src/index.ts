@@ -403,17 +403,27 @@ async function main(): Promise<void> {
   // Eval-only local-model override (apps/parity --local-model, see local-model.ts):
   // the same local persona on the same OllamaProvider, memory and action log, with
   // a different default model. Built lazily per model; never used by normal traffic.
-  const localModels =
+  // Candidates get their own client with a larger context window than the live
+  // 4096: Flint's prompt is ~2k tokens, and thinking models (qwen3.8, muse-glimmer)
+  // spend more on reasoning. At 4096 Ollama silently drops the oldest tokens (the
+  // persona and tool schemas), so the bake-off would measure truncation, not the model.
+  const overrideProvider =
     provider.name === 'ollama'
-      ? new LocalPersonaCache(
-          (m) =>
-            new Persona(new Flint({ provider, defaultModel: m, memory, observer: actionLog }), {
-              name: 'Flint',
-              styleGuide: FLINT_STYLE_GUIDE,
-              lessonStore,
-            }),
-        )
+      ? new OllamaProvider({
+          baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
+          defaultOptions: { num_ctx: Number(process.env.FLINT_EVAL_NUM_CTX ?? 16384) },
+        })
       : undefined;
+  const localModels = overrideProvider
+    ? new LocalPersonaCache(
+        (m) =>
+          new Persona(new Flint({ provider: overrideProvider, defaultModel: m, memory, observer: actionLog }), {
+            name: 'Flint',
+            styleGuide: FLINT_STYLE_GUIDE,
+            lessonStore,
+          }),
+      )
+    : undefined;
 
   const embedder = new OllamaEmbedder({
     model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
