@@ -230,6 +230,32 @@ describe('PerplexityProvider', () => {
     expect(result.message.content).toContain('https://example.test/a');
   });
 
+  it('lists every source the reply cites, not just the first ten', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ title: `S${i + 1}`, url: `https://example.test/${i + 1}` }));
+    const { fn } = stubFetch({
+      ...sonar,
+      choices: [{ message: { content: 'Salt lowers the freezing point [3][14][17].' }, finish_reason: 'stop' }],
+      search_results: many,
+    });
+    const provider = new PerplexityProvider({ apiKey: 'k', fetch: fn });
+
+    const result = await provider.generate({ model: 'sonar-pro', messages: [user('hi')] });
+
+    expect(result.message.content).toContain('[17] S17');
+    expect(result.message.content).not.toContain('[18] S18');
+  });
+
+  it('still lists ten when the reply cites fewer', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ title: `S${i + 1}`, url: `https://example.test/${i + 1}` }));
+    const { fn } = stubFetch({ ...sonar, search_results: many });
+    const provider = new PerplexityProvider({ apiKey: 'k', fetch: fn });
+
+    const result = await provider.generate({ model: 'sonar-pro', messages: [user('hi')] });
+
+    expect(result.message.content).toContain('[10] S10');
+    expect(result.message.content).not.toContain('[11] S11');
+  });
+
   it('leaves the reply alone when citations are turned off', async () => {
     const { fn } = stubFetch(sonar);
     const provider = new PerplexityProvider({ apiKey: 'k', fetch: fn, citations: false });
