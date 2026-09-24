@@ -4,8 +4,9 @@ Is Flint as good as ChatGPT, Claude and Perplexity on the things Will actually a
 him? `apps/train/mlx/eval_judge.py` can't answer that: it compares a fine-tuned model
 with its own base. This package runs Flint **end to end** (router, persona, memory,
 tools) against the vendors' strong general models on a frozen set of Will's real
-prompts. A Claude judge compares each pair blind, and the result gets a sign test so a
-coin flip doesn't read as progress.
+prompts. An LLM judge (one Claude model, or a cross-vendor panel with `--judge-panel`)
+compares each pair blind, and the result gets a sign test so a coin flip doesn't read as
+progress.
 
 Everything it writes lives under `~/.flint/eval/`:
 
@@ -14,7 +15,7 @@ Everything it writes lives under `~/.flint/eval/`:
 | `parity_prompts.jsonl` (+ `.meta.json`) | the frozen prompt set |
 | `runs/<ts>/answers.jsonl` | every answer from every contestant (the resume cache) |
 | `runs/<ts>/judgments.jsonl` | every judge verdict, with its reason |
-| `runs/<ts>/report.md` | the report |
+| `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local` and each `--local-model` candidate) |
 | `runs/<ts>/run.json` | the config the run started with |
 | `parity_history.csv` | one row per competitor per run, for the trend line |
 
@@ -65,6 +66,7 @@ Contestants (`--contestants flint,openai,claude,perplexity`):
 | `claude` | `AnthropicProvider` | `claude-opus-5` | `--claude-model` / `PARITY_CLAUDE_MODEL` |
 | `perplexity` | `PerplexityProvider` (skipped with a note if no key) | `sonar-pro` | `--perplexity-model` / `PARITY_PERPLEXITY_MODEL` |
 | judge | `AnthropicProvider` | `claude-opus-5` | `--judge-model` / `PARITY_JUDGE_MODEL` |
+| judge panel | `AnthropicProvider` + `OpenAiProvider` | off | `--judge-panel` / `PARITY_JUDGE_PANEL` (see below) |
 
 Keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`) come from the
 environment or `~/.flint/secrets.env`, parsed the same way as the server's
@@ -80,7 +82,9 @@ against the live server once this branch is deployed.
 
 Other flags: `--limit N` takes N prompts round-robin across categories.
 `--categories a,b` filters by category. `--concurrency 3` sets vendor and judge
-concurrency. `--flint-concurrency 1` stays at 1 so the tools reported for each Flint
+concurrency. `--judge-only` (with `--run`) re-judges cached answers without calling Flint
+or any contestant, so the server needn't be up and nothing is re-answered; pairs with a
+missing answer are skipped. `--flint-concurrency 1` stays at 1 so the tools reported for each Flint
 answer are exact. `--max-tokens 8192` caps answers and `--judge-max-tokens 4096` caps
 the judge. `--flint-timeout-s 240`. `--no-judge` collects answers only. `--seed 1` sets
 the A/B order.
@@ -107,6 +111,31 @@ pnpm --filter @flint/parity parity --run <ts> --flint-local --budget-usd 40
 pnpm --filter @flint/parity report --run <ts> --flint-local
 ```
 
+**Bake-off candidate local models (`--local-model <name>`).** Runs Flint's real local
+pipeline (persona, tools, memory context) on a different Ollama model, without changing
+the live server's `OLLAMA_MODEL` or restarting it. Implies `--flint-local`. The request
+carries `localModel`, which the server accepts only with `eval: true` and `localOnly: true`
+(anything else is a 400); it builds and caches a persona identical to its own local one
+except for the model. The contestant is `flint-local@<name>`, so each candidate's
+answers, verdicts, report (`report-flint-local@<name>.md`, with `:` and `/` turned into
+`_`) and history rows (`subject`) are kept separate. Before sending anything the harness
+checks that the model is pulled (`GET $OLLAMA_HOST/api/tags`, default
+`http://127.0.0.1:11434`) and that the server's `/health` has `localModelOverride: true`.
+If an answer comes back from any other model, the run stops. Needs a server deployed from
+this branch.
+
+```
+ollama pull qwen3:14b                                           # first; the harness won't pull
+pnpm --filter @flint/parity parity --run <ts> --local-model qwen3:14b --contestants flint,openai,claude,perplexity --claude-model <the run's claude model> --budget-usd 40
+pnpm --filter @flint/parity report --run <ts> --local-model qwen3:14b
+```
+
+Reuse an existing run so the competitors' answers are cached and only the candidate's
+(free) answers and the verdicts cost anything. Pass the same `--claude-model` /
+`--openai-model` the run used, or those answers won't match the cache and get re-bought.
+Run candidates one at a time: Ollama swaps models in and out of memory, so interleaving
+them is slow.
+
 **Resume.** Re-run with `--run <ts>` (or a path). Cached successful answers and
 verdicts are reused, and failures are retried. That is how you continue after a budget
 stop or Ctrl-C.
@@ -114,7 +143,48 @@ stop or Ctrl-C.
 **Failures.** A prompt Flint fails on (e.g. the local brain is down) is not judged and
 not counted as a loss. It's listed in the report so you can fix the cause and resume.
 
-## 3. Read the result
+## 3. The judge panel (`--judge-panel`)
+
+A single Claude judge prefers answers written by its own model. Measured on the same 29
+sampled pairs of Opus-backed Flint vs GPT-5: the Opus judge said 25-4 for Flint, a GPT-5
+judge said 12-15-2, and the two agreed on only 16 of 29.
+
+`--judge-panel anthropic:claude-opus-5-5,openai:gpt-5` has every panelist judge each pair
+independently, with the same rubric and prompt as the single judge. Each panelist gets its
+own A/B order (seeded from the seed, the pair and the judge, so it is reproducible). The
+consensus rule: **a win or loss counts only if every panelist gives it; any disagreement
+is a tie (a "split")**. That makes the panel conservative: it only calls a result when
+judges from different vendors see it the same way. If any panelist errors, the pair is a
+judge error, excluded from the tally and retried on resume, not a tie.
+
+- Each judgment row keeps every panelist's verdict: `panel: [{judge, flintIsA, verdict,
+  outcome, reason, costUsd}]`, plus `agreed`. The top-level `verdict`/`outcome` is the
+  consensus.
+- The rows' `judgeModel` is the panel id, e.g.
+  `panel:anthropic:claude-opus-5-5+openai:gpt-5` (members sorted, so the order you list
+  them in doesn't matter). Panel and single-judge verdicts therefore never mix in the resume
+  cache, the report or `parity_history.csv` (its `judge_model` column holds the panel id).
+- The report adds a per-competitor **panel agreement** rate (the share of pairs where all
+  panelists agreed) and states the consensus rule.
+- Budget: every panelist's call is reserved before any of them runs, and each is settled at
+  its real cost. OpenAI panelists get `max(--judge-max-tokens, 16384)` output tokens, since
+  GPT-5's reasoning counts against that cap. A pair costs about $0.04 for Opus 5.5 + GPT-5.
+- Supported panel providers: `anthropic`, `openai` (keys as above). At least two judges.
+
+Re-judge an existing run with the panel, without re-answering anything:
+
+```
+pnpm --filter @flint/parity parity --run 20260924-tiered --judge-only \
+  --judge-panel anthropic:claude-opus-5-5,openai:gpt-5 \
+  --contestants flint,openai,claude,perplexity --claude-model claude-opus-5-5 --budget-usd 45
+pnpm --filter @flint/parity report --run 20260924-tiered --judge-panel anthropic:claude-opus-5-5,openai:gpt-5
+```
+
+Add `--flint-local` to both lines to re-judge the local-only answers. `report` defaults to
+the judge in `run.json`; pass `--judge-model` or `--judge-panel` to render another judge's
+verdicts.
+
+## 4. Read the result
 
 Per competitor, the report shows Flint's W/L/T, its win rate (a tie counts as half, so
 50% is parity), the exact two-sided sign test p on decisive games, and a signal using
@@ -137,8 +207,8 @@ rows without calling anything.
 - **Memory prompts favour Flint by design.** Questions like "what's my dog's name?"
   need Flint's long-term memory, which the vendors don't have.
 - **Self-preference.** The default judge is Claude. The `claude` competitor is also
-  Claude, and so is Flint's frontier brain. Cross-check important results with a
-  non-Claude judge when one is wired, or at least with a different Claude tier.
+  Claude, and so is Flint's frontier brain. Quote important results from a
+  `--judge-panel` run, not the single judge (see section 3).
 - **Prices are list-price estimates** kept in `src/pricing.ts`. Unknown models are
   priced high, so the guard trips early rather than late.
 
@@ -151,4 +221,6 @@ pnpm --filter @flint/parity test        # no network
 The tests cover category tagging, trivial filtering, dedupe, determinism and
 stratification, strict judge parsing (with one retry), position randomization, the
 sign test, the budget guard (including under concurrency), pricing, the history CSV,
-secrets parsing and token resolution.
+secrets parsing and token resolution; the panel's consensus rule, per-panelist A/B order,
+error and budget handling, and cache separation from single-judge rows; and the
+local-model contestant's naming, report filename, model-mismatch guard and Ollama check.

@@ -156,12 +156,21 @@ export function flintContestant(opts: {
    * verdicts never mix with normal Flint's in the same run.
    */
   localOnly?: boolean;
+  /**
+   * Bake-offs: answer with this Ollama model instead of the server's own local
+   * one (the server's eval-only `localModel`). Implies localOnly. The contestant
+   * becomes `flint-local@<model>` so each candidate's answers and verdicts stay
+   * separate, and a reply from any other model stops the run.
+   */
+  localModel?: string;
   /** How long to keep retrying while the server is unreachable (a deploy restart). */
   restartWaitMs?: number;
 }): Contestant {
-  const localOnly = opts.localOnly === true;
+  const localModel = opts.localModel;
+  if (localModel !== undefined) assertLocalModelName(localModel);
+  const localOnly = opts.localOnly === true || localModel !== undefined;
   return {
-    name: localOnly ? 'flint-local' : 'flint',
+    name: flintContestantName({ localOnly, localModel }),
     model: `flint@${opts.url}`,
     // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
     // re-send it: estimate generously. The local brain costs nothing.
@@ -173,7 +182,7 @@ export function flintContestant(opts: {
           fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
             method: 'POST',
             headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}) }),
+            body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}), ...(localModel ? { localModel } : {}) }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
           }),
         signal,
@@ -188,6 +197,11 @@ export function flintContestant(opts: {
         );
       }
       if (localOnly && body.brain !== 'local') throw new FatalError(`asked for localOnly but brain=${body.brain ?? '?'} answered`);
+      if (localModel !== undefined && body.model !== localModel) {
+        throw new FatalError(
+          `asked for localModel ${localModel} but the server answered with ${body.model ?? '?'} — it predates the local-model override, or ignored it`,
+        );
+      }
       const text = (body.text ?? '').trim();
       if (!text) throw new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`);
       const usage = body.usage;
@@ -229,6 +243,34 @@ export async function fetchWhileRestarting(
       delay = Math.min(delay * 2, 15_000);
     }
   }
+}
+
+/** Same rule as the server's apps/server/src/local-model.ts. */
+export const LOCAL_MODEL_RE = /^[a-z0-9._:\-/]+$/i;
+
+export function assertLocalModelName(name: string): void {
+  if (!name || name.length > 100 || !LOCAL_MODEL_RE.test(name)) {
+    throw new Error(`--local-model: "${name}" isn't an Ollama model name (letters, digits, . _ : - /, at most 100 chars)`);
+  }
+}
+
+/** 'flint', 'flint-local', or 'flint-local@<model>' for a bake-off candidate. */
+export function flintContestantName(opts: { localOnly?: boolean; localModel?: string | undefined }): string {
+  if (opts.localModel) return `flint-local@${opts.localModel}`;
+  return opts.localOnly ? 'flint-local' : 'flint';
+}
+
+/**
+ * Is `model` pulled on the Ollama at `host`? (`GET /api/tags`). A bare name
+ * matches its `:latest` tag, as `ollama run` does. Throws if Ollama can't be reached.
+ */
+export async function ollamaHasModel(model: string, host: string, fetchFn: typeof fetch = fetch): Promise<{ ok: boolean; available: string[] }> {
+  const r = await fetchFn(`${host.replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`Ollama at ${host} answered /api/tags with HTTP ${r.status}`);
+  const body = (await r.json()) as { models?: Array<{ name?: string; model?: string }> };
+  const available = (body.models ?? []).map((m) => m.name ?? m.model ?? '').filter(Boolean);
+  const want = model.includes(':') ? [model] : [model, `${model}:latest`];
+  return { ok: available.some((a) => want.includes(a)), available };
 }
 
 /** An error that should stop the whole run, not just fail one prompt. */

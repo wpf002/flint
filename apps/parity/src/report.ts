@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname } from 'node:path';
 import { CATEGORIES } from './categorize.js';
 import type { Outcome } from './judge.js';
+import type { PanelVerdict } from './panel.js';
 import { signalOf, verdictOf, type Signal } from './stats.js';
 
 export interface AnswerRow {
@@ -34,6 +35,51 @@ export interface JudgmentRow {
   error?: string;
   costUsd: number;
   ts: number;
+  /**
+   * Panel judging only (`judgeModel` is then a `panel:...` id): every panelist's
+   * own verdict. The top-level verdict/outcome is the consensus, expressed in the
+   * row's `flintIsA` order.
+   */
+  panel?: PanelVerdict[];
+  /** Panel only: did every panelist give the same outcome? (false = a split, scored as a tie) */
+  agreed?: boolean;
+}
+
+/** Resume-cache / report key for one judged pair (the judge is part of it). */
+export function judgmentKey(j: Pick<JudgmentRow, 'promptId' | 'competitor' | 'competitorModel' | 'judgeModel'>): string {
+  return `${j.promptId}|${j.competitor}|${j.competitorModel}|${j.judgeModel}`;
+}
+
+const subjectOf = (j: JudgmentRow): string => j.subject ?? 'flint';
+
+/**
+ * The successful verdicts a run can reuse for this judge (a model name, or a
+ * panel id) and subject. A single judge's rows never satisfy a panel and vice
+ * versa, because their judgeModel differs.
+ */
+export function cachedJudgments(rows: readonly JudgmentRow[], judgeModel: string, subject: string): Map<string, JudgmentRow> {
+  const m = new Map<string, JudgmentRow>();
+  for (const j of rows) if (j.ok && j.judgeModel === judgeModel && subjectOf(j) === subject) m.set(judgmentKey(j), j);
+  return m;
+}
+
+/** One row per pair for this judge + subject: the latest success, else the latest failure. */
+export function latestJudgments(rows: readonly JudgmentRow[], judgeModel: string, subject: string, promptIds?: ReadonlySet<string>): JudgmentRow[] {
+  const m = new Map<string, JudgmentRow>();
+  for (const j of rows) {
+    if (j.judgeModel !== judgeModel || subjectOf(j) !== subject) continue;
+    if (promptIds && !promptIds.has(j.promptId)) continue;
+    const k = judgmentKey(j);
+    const prev = m.get(k);
+    if (!prev || j.ok || !prev.ok) m.set(k, j);
+  }
+  return [...m.values()];
+}
+
+/** `report.md` for Flint, else `report-<subject>.md` with anything not filename-safe (`:` `/` ...) as `_`. */
+export function reportFileName(subject: string): string {
+  if (subject === 'flint') return 'report.md';
+  return `report-${subject.replace(/[^A-Za-z0-9._@-]/g, '_')}.md`;
 }
 
 export interface Tally {
@@ -54,6 +100,8 @@ export interface CompetitorSummary {
   verdict: string;
   byCategory: Record<string, Tally & { p: number; signal: Signal }>;
   judgeErrors: number;
+  /** Panel judging: of the scored pairs, how many every panelist agreed on. */
+  panelAgreement?: { agreed: number; n: number };
 }
 
 const empty = (): Tally => ({ wins: 0, losses: 0, ties: 0 });
@@ -85,10 +133,16 @@ export function summarize(judgments: readonly JudgmentRow[]): CompetitorSummary[
     const total = empty();
     const cats = new Map<string, Tally>();
     let judgeErrors = 0;
+    let panelN = 0;
+    let panelAgreed = 0;
     for (const r of rows) {
       if (!r.ok || !r.outcome) {
         judgeErrors++;
         continue;
+      }
+      if (r.panel) {
+        panelN++;
+        if (r.agreed) panelAgreed++;
       }
       add(total, r.outcome);
       const c = cats.get(r.category) ?? empty();
@@ -116,6 +170,7 @@ export function summarize(judgments: readonly JudgmentRow[]): CompetitorSummary[
       verdict: verdictOf(total.wins, total.losses, signal),
       byCategory,
       judgeErrors,
+      ...(panelN ? { panelAgreement: { agreed: panelAgreed, n: panelN } } : {}),
     });
   }
   return out;
@@ -209,6 +264,20 @@ export function renderMarkdown(r: ReportInput): string {
     }
     L.push('', 'Win rate counts a tie as half. p is the exact two-sided sign test on decisive games (ties dropped); SIGNIFICANT means p < 0.05, weak p < 0.32, fewer than 4 decisive games is always NOISE.', '');
 
+    const paneled = r.summaries.filter((s) => s.panelAgreement);
+    if (paneled.length) {
+      L.push('### Panel agreement', '', '| vs | judge | agreed | of | agreement |', '| --- | --- | ---: | ---: | ---: |');
+      for (const s of paneled) {
+        const a = s.panelAgreement!;
+        L.push(`| ${s.competitor} | \`${s.judgeModel}\` | ${a.agreed} | ${a.n} | ${pct(a.n ? a.agreed / a.n : 0)} |`);
+      }
+      L.push(
+        '',
+        'Consensus rule: each pair is judged independently by every panelist (each with its own A/B order). A win or loss counts only when ALL panelists give it; any disagreement is scored as a tie (a split). A pair where any panelist errored is a judge error: excluded here and retried on resume. Low agreement means the judges themselves disagree about which answer is better, and the W/L above is correspondingly conservative.',
+        '',
+      );
+    }
+
     for (const s of r.summaries) {
       L.push(`### vs ${s.competitor} — by category`, '', '| category | W | L | T | win rate | p | signal |', '| --- | ---: | ---: | ---: | ---: | ---: | --- |');
       for (const [cat, t] of Object.entries(s.byCategory)) {
@@ -219,7 +288,7 @@ export function renderMarkdown(r: ReportInput): string {
     }
   }
 
-  const flintErr = r.answers.filter((a) => a.contestant === 'flint' && !a.ok);
+  const flintErr = r.answers.filter((a) => a.contestant === (r.subject ?? 'flint') && !a.ok);
   if (flintErr.length) {
     L.push('## Flint failures', '', 'Prompts Flint failed to answer are NOT judged (they are infrastructure failures, e.g. the local brain being down), so they do not count as losses. Fix them and re-run the same run dir to fill them in.', '');
     for (const a of flintErr.slice(0, 20)) L.push(`- \`${a.promptId}\`: ${(a.error ?? '').slice(0, 200)}`);

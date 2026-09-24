@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HISTORY_HEADER, appendHistory, migrateHistory } from '../src/report.js';
-import { FatalError, fetchWhileRestarting, flintContestant } from '../src/contestants.js';
+import { HISTORY_HEADER, appendHistory, migrateHistory, reportFileName } from '../src/report.js';
+import { FatalError, assertLocalModelName, fetchWhileRestarting, flintContestant, flintContestantName, ollamaHasModel } from '../src/contestants.js';
 
 const V1 =
   'ts,run,prompt_set,competitor,competitor_model,judge_model,n,flint_wins,competitor_wins,ties,flint_win_rate,p_value,signal,judge_errors';
@@ -94,5 +94,76 @@ describe('fetchWhileRestarting', () => {
       fetchWhileRestarting(async () => { n++; throw new Error('HTTP 500'); }, new AbortController().signal, 120_000, noSleep),
     ).rejects.toThrow('HTTP 500');
     expect(n).toBe(1);
+  });
+});
+
+describe('local-model bake-off contestant', () => {
+  const prompt = { id: 'p1', prompt: 'hi', category: 'knowledge' } as never;
+  const mk = (localModel: string) =>
+    flintContestant({ url: 'http://x', token: 't', frontierModel: 'claude-sonnet-4-6', allowTrainingLog: false, timeoutMs: 1000, localModel });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is named per candidate, so answers and verdicts stay separate', () => {
+    expect(mk('qwen3:14b').name).toBe('flint-local@qwen3:14b');
+    expect(flintContestantName({ localOnly: true, localModel: 'gemma3:12b' })).toBe('flint-local@gemma3:12b');
+    expect(flintContestantName({ localOnly: true })).toBe('flint-local');
+    expect(flintContestantName({})).toBe('flint');
+  });
+
+  it('gets a filename-safe report path', () => {
+    expect(reportFileName('flint')).toBe('report.md');
+    expect(reportFileName('flint-local')).toBe('report-flint-local.md');
+    expect(reportFileName('flint-local@qwen3:14b')).toBe('report-flint-local@qwen3_14b.md');
+    expect(reportFileName('flint-local@hf.co/bartowski/Qwen3-14B-GGUF:Q4_K_M')).toBe('report-flint-local@hf.co_bartowski_Qwen3-14B-GGUF_Q4_K_M.md');
+    expect(reportFileName('flint-local@../../x')).not.toContain('/');
+  });
+
+  it('sends localModel with eval + localOnly and is free', async () => {
+    const c = mk('qwen3:14b');
+    expect(c.estimate(prompt)).toBe(0);
+    let sent: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_u: string, init: { body: string }) => {
+      sent = JSON.parse(init.body);
+      return new Response(JSON.stringify({ text: 'hello', brain: 'local', model: 'qwen3:14b', eval: true, usage: { input: 10, output: 5 } }));
+    });
+    const a = await c.answer(prompt, new AbortController().signal);
+    expect(sent).toEqual({ prompt: 'hi', eval: true, localOnly: true, localModel: 'qwen3:14b' });
+    expect(a.costUsd).toBe(0);
+    expect(a.meta?.model).toBe('qwen3:14b');
+  });
+
+  it('stops the run when another model answered (server predates or ignored the override)', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ text: 'x', brain: 'local', model: 'qwen2.5:14b', eval: true })));
+    await expect(mk('qwen3:14b').answer(prompt, new AbortController().signal)).rejects.toBeInstanceOf(FatalError);
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ text: 'x', brain: 'local', eval: true })));
+    await expect(mk('qwen3:14b').answer(prompt, new AbortController().signal)).rejects.toBeInstanceOf(FatalError);
+  });
+
+  it('refuses a name the server would reject', () => {
+    expect(() => mk('qwen 14b')).toThrow(/isn't an Ollama model name/);
+    expect(() => assertLocalModelName('a'.repeat(101))).toThrow();
+    expect(() => assertLocalModelName('hf.co/org/repo:Q4_K_M')).not.toThrow();
+  });
+});
+
+describe('ollamaHasModel', () => {
+  const tags = (names: string[]) =>
+    (async () => new Response(JSON.stringify({ models: names.map((name) => ({ name, model: name })) }))) as unknown as typeof fetch;
+
+  it('finds an exact tag, and a bare name as :latest', async () => {
+    expect((await ollamaHasModel('qwen3:14b', 'http://o', tags(['qwen3:14b', 'nomic-embed-text:latest']))).ok).toBe(true);
+    expect((await ollamaHasModel('nomic-embed-text', 'http://o', tags(['nomic-embed-text:latest']))).ok).toBe(true);
+  });
+
+  it('reports a model that is not pulled, with what is available', async () => {
+    const r = await ollamaHasModel('qwen3:32b', 'http://o', tags(['qwen3:14b']));
+    expect(r).toEqual({ ok: false, available: ['qwen3:14b'] });
+    // A tagged ask never matches a different tag.
+    expect((await ollamaHasModel('qwen3:14b', 'http://o', tags(['qwen3:latest']))).ok).toBe(false);
+  });
+
+  it('throws when Ollama answers with an error', async () => {
+    const down = (async () => new Response('no', { status: 500 })) as unknown as typeof fetch;
+    await expect(ollamaHasModel('qwen3:14b', 'http://o', down)).rejects.toThrow(/HTTP 500/);
   });
 });
