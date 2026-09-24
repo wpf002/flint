@@ -66,6 +66,7 @@ import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
 import { ToolRouter } from './router';
+import { safeHandler } from './safe-handler';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
@@ -513,7 +514,7 @@ async function main(): Promise<void> {
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer((req, res) => void handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training }));
+  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
