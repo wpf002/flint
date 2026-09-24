@@ -156,6 +156,8 @@ export function flintContestant(opts: {
    * verdicts never mix with normal Flint's in the same run.
    */
   localOnly?: boolean;
+  /** How long to keep retrying while the server is unreachable (a deploy restart). */
+  restartWaitMs?: number;
 }): Contestant {
   const localOnly = opts.localOnly === true;
   return {
@@ -166,13 +168,17 @@ export function flintContestant(opts: {
     estimate: (p) =>
       localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 }),
     async answer(p, signal) {
-      const timeout = AbortSignal.timeout(opts.timeoutMs);
-      const r = await fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}) }),
-        signal: AbortSignal.any([signal, timeout]),
-      });
+      const r = await fetchWhileRestarting(
+        () =>
+          fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}) }),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
+          }),
+        signal,
+        opts.restartWaitMs ?? 120_000,
+      );
       const body = (await r.json().catch(() => ({}))) as FlintGenerateResponse;
       if (!r.ok) throw new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}`);
       if (body.eval !== true && !opts.allowTrainingLog) {
@@ -195,6 +201,34 @@ export function flintContestant(opts: {
       };
     },
   };
+}
+
+/**
+ * Auto-deploy restarts Flint on every commit to main. A restart takes ~10s, and
+ * with no retry a run fired its whole prompt list into that window: 299 prompts
+ * failed as "fetch failed" in 80ms. A request the server never received (no HTTP
+ * response at all) is retried with backoff until `waitMs` runs out; an HTTP error
+ * or a timeout on a request that did connect is returned/thrown as before.
+ */
+export async function fetchWhileRestarting(
+  attempt: () => Promise<Response>,
+  signal: AbortSignal,
+  waitMs: number,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<Response> {
+  let waited = 0;
+  let delay = 1000;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const unreachable = err instanceof TypeError && /fetch failed/i.test(err.message);
+      if (!unreachable || signal.aborted || waited >= waitMs) throw err;
+      await sleep(delay);
+      waited += delay;
+      delay = Math.min(delay * 2, 15_000);
+    }
+  }
 }
 
 /** An error that should stop the whole run, not just fail one prompt. */

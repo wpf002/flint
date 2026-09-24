@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HISTORY_HEADER, appendHistory, migrateHistory } from '../src/report.js';
-import { FatalError, flintContestant } from '../src/contestants.js';
+import { FatalError, fetchWhileRestarting, flintContestant } from '../src/contestants.js';
 
 const V1 =
   'ts,run,prompt_set,competitor,competitor_model,judge_model,n,flint_wins,competitor_wins,ties,flint_win_rate,p_value,signal,judge_errors';
@@ -60,5 +60,39 @@ describe('flint-local contestant', () => {
 
   it('normal flint is unchanged', () => {
     expect(mk(false).name).toBe('flint');
+  });
+});
+
+describe('fetchWhileRestarting', () => {
+  const noSleep = async () => {};
+  const refused = () => new TypeError('fetch failed');
+
+  it('waits out a server restart instead of failing the prompt', async () => {
+    let n = 0;
+    const r = await fetchWhileRestarting(
+      async () => {
+        if (++n < 4) throw refused();
+        return new Response('ok');
+      },
+      new AbortController().signal,
+      120_000,
+      noSleep,
+    );
+    expect(await r.text()).toBe('ok');
+    expect(n).toBe(4);
+  });
+
+  it('gives up once the wait budget is spent', async () => {
+    await expect(
+      fetchWhileRestarting(async () => { throw refused(); }, new AbortController().signal, 3000, noSleep),
+    ).rejects.toThrow('fetch failed');
+  });
+
+  it('does not retry errors from a server that answered', async () => {
+    let n = 0;
+    await expect(
+      fetchWhileRestarting(async () => { n++; throw new Error('HTTP 500'); }, new AbortController().signal, 120_000, noSleep),
+    ).rejects.toThrow('HTTP 500');
+    expect(n).toBe(1);
   });
 });
