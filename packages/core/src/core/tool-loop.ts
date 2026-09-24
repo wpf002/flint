@@ -262,6 +262,22 @@ async function* streamOnce(
 }
 
 /**
+ * The tool the model meant. Tool-calling templates expect names like
+ * [a-zA-Z0-9_-], so models drop Flint's `server.` namespace (qwen3.8 called
+ * `web_search` for `web.web_search`) or swap the dot for a separator. Resolve
+ * only when exactly one offered tool fits; otherwise leave it unresolved.
+ */
+export function resolveToolName(called: string, offered: readonly string[]): string | undefined {
+  if (offered.includes(called)) return called;
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const one = (xs: string[]): string | undefined => (xs.length === 1 ? xs[0] : undefined);
+  return (
+    one(offered.filter((n) => norm(n) === norm(called))) ??
+    one(offered.filter((n) => n.endsWith(`.${called}`)))
+  );
+}
+
+/**
  * Execute one tool call. Idempotency gates auto-retry (locked invariant #5):
  *  - idempotent     → retry the handler up to the policy on failure,
  *  - non-idempotent → run exactly once; a failure surfaces to the app.
@@ -269,23 +285,29 @@ async function* streamOnce(
  * a manual retry decision rather than silently re-running side effects.
  */
 async function executeTool(params: ToolLoopParams, call: ToolCall): Promise<ToolResult> {
-  const def = params.tools.find((t) => t.name === call.toolName);
-  const handler = params.handlers.get(call.toolName);
-
-  if (!def || !handler) {
-    throw new FlintError(
-      makeAiError('validation', `No handler registered for tool '${call.toolName}'`, {
-        retryable: false,
-      }),
-    );
+  const offered = params.tools.map((t) => t.name).filter((n) => params.handlers.has(n));
+  const name = resolveToolName(call.toolName, offered);
+  if (name === undefined) {
+    // Nothing ran, so letting the model try again is safe: tell it which tools
+    // exist instead of failing the whole turn on one misspelled name.
+    return {
+      toolCallId: call.id,
+      toolName: call.toolName,
+      result: { error: `Unknown tool '${call.toolName}'. Available tools: ${offered.join(', ')}` },
+      isError: true,
+    };
   }
+  const def = params.tools.find((t) => t.name === name)!;
+  const handler = params.handlers.get(name)!;
+  // The handler sees the real name; the transcript keeps the name the model used.
+  const target = name === call.toolName ? call : { ...call, toolName: name };
 
   const maxAttempts = def.idempotent ? params.retryPolicy.maxAttempts : 1;
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await handler(call);
+      const result = await handler(target);
       return { toolCallId: call.id, toolName: call.toolName, result, isError: false };
     } catch (err) {
       lastErr = err;
