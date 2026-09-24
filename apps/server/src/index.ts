@@ -70,6 +70,7 @@ import { safeHandler } from './safe-handler';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
+import { LocalPersonaCache, parseLocalModelRequest, resolveLocalPersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
 import {
   parseAttachments,
@@ -393,11 +394,26 @@ async function main(): Promise<void> {
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
+  const lessonStore = new InMemoryLessonStore();
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
-    lessonStore: new InMemoryLessonStore(),
+    lessonStore,
   });
+  // Eval-only local-model override (apps/parity --local-model, see local-model.ts):
+  // the same local persona on the same OllamaProvider, memory and action log, with
+  // a different default model. Built lazily per model; never used by normal traffic.
+  const localModels =
+    provider.name === 'ollama'
+      ? new LocalPersonaCache(
+          (m) =>
+            new Persona(new Flint({ provider, defaultModel: m, memory, observer: actionLog }), {
+              name: 'Flint',
+              styleGuide: FLINT_STYLE_GUIDE,
+              lessonStore,
+            }),
+        )
+      : undefined;
 
   const embedder = new OllamaEmbedder({
     model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
@@ -514,7 +530,7 @@ async function main(): Promise<void> {
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
+  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -532,6 +548,8 @@ interface Convo {
 
 interface Ctx {
   persona: Persona;
+  /** Eval-only local-model override personas; undefined when the local brain isn't Ollama. */
+  localModels: LocalPersonaCache<Persona> | undefined;
   provider: ProviderAdapter;
   model: string;
   tools: Tool[];
@@ -683,6 +701,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // Lets apps/eval check, BEFORE sending anything, that /generate honours
       // `eval: true` (an older server would log the replays as training data).
       evalMode: true,
+      // Lets apps/parity --local-model check that /generate honours `localModel`.
+      localModelOverride: !!ctx.localModels,
     });
   }
 
@@ -746,6 +766,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // must not leave write proposals in the approval queue. The answer itself is
     // produced exactly as a normal turn would be.
     const evalMode = body.eval === true;
+    // Eval-only: answer with a different Ollama model (bake-offs). 400 unless eval + localOnly.
+    const lm = parseLocalModelRequest(body);
+    if (!lm.ok) return json(res, lm.status, { error: lm.error });
+    const local = resolveLocalPersona(lm.model, { persona: ctx.persona, model: ctx.model }, ctx.localModels);
+    if (!local.ok) return json(res, local.status, { error: local.error });
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
@@ -754,7 +779,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = route.brain;
     const ctxBlock = await contextFor(asText, ctx.knowledge);
     const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
-    let answeredBy = ctx.model;
+    let answeredBy = local.model;
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
@@ -770,10 +795,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}` });
         console.error('[brain] frontier failed, falling back to local:', err);
         brain = 'local';
-        out = await ask(ctx.persona);
+        out = await ask(local.persona);
       }
     } else {
-      out = await ask(ctx.persona);
+      out = await ask(local.persona);
     }
     const toolsUsed = toolsSince(ctx, beforeLog);
     const proposed = ctx.actions.newSince(beforeActions);
