@@ -130,7 +130,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nexus.health.plist
 
 The script has to live outside `~/Documents`: macOS blocks launchd agents from
 executing anything in there, and the failure is a bare `Operation not permitted` with
-nothing pointing at the cause. `$FLINT_REPO` overrides where it looks for the checkout.
+nothing pointing at the cause. It runs from `~/flint` when that checkout exists (the
+Studio's deploy checkout) and `~/Documents/GitHub/flint` otherwise; `$FLINT_REPO`
+overrides both.
 
 A healthy report that stops arriving goes **stale** in the console rather than staying
 green, so a scheduler that quietly dies is visible too.
