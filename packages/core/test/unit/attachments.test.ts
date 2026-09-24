@@ -51,7 +51,7 @@ describe('anthropic mapping', () => {
 
   it('sends images as image blocks and PDFs as document blocks, text last', () => {
     const { messages } = mapAnthropic([user('what is this?', [PNG, PDF, TXT])], undefined);
-    const blocks = messages[0]!.content as Array<Record<string, unknown>>;
+    const blocks = messages[0]!.content as unknown as Array<Record<string, unknown>>;
     expect(blocks.map((b) => b.type)).toEqual(['image', 'document', 'text', 'text']);
     expect(blocks[0]).toEqual({
       type: 'image',

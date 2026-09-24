@@ -19,7 +19,10 @@ export interface PerplexityProviderOptions {
 
 const DEFAULT_BASE_URL = 'https://api.perplexity.ai';
 const DEFAULT_MAX_TOKENS = 2048;
+/** Sources listed when the reply cites none (or isn't known yet, while streaming). */
 const MAX_CITATIONS = 10;
+/** Hard ceiling, however high the reply's markers go. */
+const CITATION_CEILING = 50;
 const HEADING = 'Sources:';
 
 /**
@@ -66,12 +69,25 @@ export class PerplexityProvider extends OpenAiCompatibleProvider {
 
   private sourcesBlock(raw: unknown, existing: string): string | undefined {
     if (!this.citations || existing.includes(`\n${HEADING}\n`)) return undefined;
-    const sources = extractSources(raw);
+    const sources = extractSources(raw, existing);
     return sources.length > 0 ? `\n\n${HEADING}\n${sources.join('\n')}` : undefined;
   }
 }
 
-function extractSources(raw: unknown): string[] {
+/**
+ * How many sources to list. sonar-pro routinely cites [11]..[19]; listing only the
+ * first 10 left those markers pointing at nothing (266 of 300 answers in the parity
+ * run), which reads as fabricated citations. So list up to the highest marker the
+ * reply uses. While streaming the text isn't known yet, so list them all.
+ */
+function sourceLimit(text: string, available: number): number {
+  if (!text) return Math.min(available, CITATION_CEILING);
+  let highest = 0;
+  for (const m of text.matchAll(/\[(\d{1,3})\]/g)) highest = Math.max(highest, Number(m[1]));
+  return Math.min(available, CITATION_CEILING, Math.max(MAX_CITATIONS, highest));
+}
+
+function extractSources(raw: unknown, text: string): string[] {
   const body = raw as
     | { citations?: unknown; search_results?: Array<{ title?: string; url?: string }> }
     | undefined;
@@ -79,13 +95,13 @@ function extractSources(raw: unknown): string[] {
 
   if (Array.isArray(body.search_results)) {
     return body.search_results
-      .slice(0, MAX_CITATIONS)
+      .slice(0, sourceLimit(text, body.search_results.length))
       .map((s, i) => `[${i + 1}] ${s.title ?? s.url ?? 'source'}${s.url && s.title ? ` — ${s.url}` : ''}`);
   }
 
   if (Array.isArray(body.citations)) {
     return body.citations
-      .slice(0, MAX_CITATIONS)
+      .slice(0, sourceLimit(text, body.citations.length))
       .filter((c): c is string => typeof c === 'string')
       .map((c, i) => `[${i + 1}] ${c}`);
   }
