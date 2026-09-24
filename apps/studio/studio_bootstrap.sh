@@ -11,7 +11,9 @@ set -uo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/wpf002/flint.git}"
 BRANCH="${FLINT_BRANCH:-main}"
-REPO="$HOME/Documents/GitHub/flint"
+# Deploy-only checkout: com.flint.deploy hard-resets it to origin every 2 min.
+# Do dev work in a separate clone (~/Documents/GitHub/flint), never here.
+REPO="$HOME/flint"
 NODE_VERSION="v24.15.0"          # matches the PATH baked into the LaunchAgents
 ok(){ echo "  ✓ $*"; }
 step(){ echo; echo "== $*"; }

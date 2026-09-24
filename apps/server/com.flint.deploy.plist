@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Auto-deploy agent for the Mac Studio: pulls GitHub + redeploys Flint every 2 min.
+     It runs from, and hard-resets, the deploy-only checkout at ~/flint, so a dev
+     checkout in ~/Documents/GitHub/flint on the same machine is never wiped.
      Install: cp com.flint.deploy.plist ~/Library/LaunchAgents/ ;
               launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.flint.deploy.plist -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -9,10 +11,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>/Users/willfoti/Documents/GitHub/flint/apps/server/auto_deploy.sh</string>
+    <string>/Users/willfoti/flint/apps/server/auto_deploy.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>FLINT_REPO</key><string>/Users/willfoti/flint</string>
     <key>PATH</key><string>/Users/willfoti/.nvm/versions/node/v24.15.0/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartInterval</key><integer>120</integer>

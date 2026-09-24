@@ -132,9 +132,9 @@ fi
 if [ -f "$REPO/apps/responder/.env" ]; then
   say "2b/3 carry apps/responder/.env (Nexus tokens + Perplexity key)"
   if [ "$DRY" = 1 ]; then
-    echo "  [dry] rsync apps/responder/.env -> $STUDIO:Documents/GitHub/flint/apps/responder/.env"
+    echo "  [dry] rsync apps/responder/.env -> $STUDIO:flint/apps/responder/.env"
   else
-    rsync -aH "$REPO/apps/responder/.env" "$STUDIO:Documents/GitHub/flint/apps/responder/.env" \
+    rsync -aH "$REPO/apps/responder/.env" "$STUDIO:flint/apps/responder/.env" \
       && echo "  ✓ responder secrets carried" \
       || echo "  ! could not copy apps/responder/.env — Nexus responder will not start"
   fi
@@ -156,9 +156,9 @@ fi
 if [ "$ROADMAP" = 1 ]; then
   say "3/3 start the roadmap (pull 70B + launch the overnight fine-tune, detached)"
   if [ "$DRY" = 1 ]; then
-    echo "  [dry] ssh zsh ~/Documents/GitHub/flint/apps/studio/studio_roadmap.sh"
+    echo "  [dry] ssh zsh ~/flint/apps/studio/studio_roadmap.sh"
   else
-    ssh "${SSH_OPTS[@]}" "$STUDIO" '/bin/zsh $HOME/Documents/GitHub/flint/apps/studio/studio_roadmap.sh'
+    ssh "${SSH_OPTS[@]}" "$STUDIO" '/bin/zsh $HOME/flint/apps/studio/studio_roadmap.sh'
   fi
 else
   echo "  (--no-roadmap: skipped training kickoff — run studio_roadmap.sh on the Studio when ready)"

@@ -4,7 +4,7 @@
 # edit code anywhere -> git push -> within a couple minutes the Studio pulls it
 # and Flint updates itself. No manual steps on the Studio.
 set -e
-REPO="${FLINT_REPO:-$HOME/Documents/GitHub/flint}"
+REPO="${FLINT_REPO:-$HOME/flint}"   # the deploy-only checkout; never point this at a dev clone
 cd "$REPO"
 
 before=$(git rev-parse HEAD 2>/dev/null || echo none)
