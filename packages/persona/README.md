@@ -56,9 +56,9 @@ Flint's style guides are exported by name in `FLINT_STYLE_VARIANTS`:
 
 The server picks one per brain from `FLINT_STYLE_VARIANT` / `FLINT_LOCAL_STYLE_VARIANT`
 (both `v1` when unset), and an eval request can name one with `styleVariant`
-(`apps/parity --flint-variant`). A name means one text: v1 is pinned by hash in
-`test/flint-variants.test.ts`. Revise a guide under a new name, or cached parity
-answers for the old name stop meaning what they say.
+(`apps/parity --flint-variant`). A name means one text: every variant is pinned
+by sha256 in `test/flint-variants.test.ts`. Revise a guide under a new name (`v3`,
+`local-v2`), or cached parity answers for the old name stop meaning what they say.
 
 ## Why it's a separate package
 
