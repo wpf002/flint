@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- SearXNG: the keyless search behind Flint's web_search (SEARCH_PROVIDER=auto).
+       A TEMPLATE: install_searxng.sh fills in __SEARXNG_HOME__ and __PORT__ and
+       loads it, so don't copy this file by hand. Loopback only. Served by granian
+       with the settings SearXNG's own container uses, not Flask's dev server. -->
+  <key>Label</key><string>com.flint.searxng</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__SEARXNG_HOME__/venv/bin/granian</string>
+    <string>searx.webapp:app</string>
+  </array>
+  <key>WorkingDirectory</key><string>__SEARXNG_HOME__/src</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SEARXNG_SETTINGS_PATH</key><string>__SEARXNG_HOME__/settings.yml</string>
+    <key>GRANIAN_INTERFACE</key><string>wsgi</string>
+    <key>GRANIAN_HOST</key><string>127.0.0.1</string>
+    <key>GRANIAN_PORT</key><string>__PORT__</string>
+    <key>GRANIAN_WEBSOCKETS</key><string>false</string>
+    <key>GRANIAN_BLOCKING_THREADS</key><string>4</string>
+    <key>GRANIAN_WORKERS_KILL_TIMEOUT</key><string>30s</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <!-- deep_research fans out ~5 searches at once; keep it up, but don't spin on a crash loop. -->
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>__SEARXNG_HOME__/logs/searxng.out.log</string>
+  <key>StandardErrorPath</key><string>__SEARXNG_HOME__/logs/searxng.err.log</string>
+</dict>
+</plist>
