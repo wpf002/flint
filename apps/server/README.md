@@ -18,6 +18,11 @@ here; Railway has no GPU.
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
 
+When no frontier tier answers (each one refused or came back with no text and no tool
+call), `/generate` returns a short honest message as `text`; in eval mode the response
+also carries `unanswered: "refusal" | "empty"`, so apps/parity records the prompt as a
+failure instead of judging that message as an answer.
+
 ```bash
 curl -s $URL/health
 curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \

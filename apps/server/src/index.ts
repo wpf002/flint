@@ -804,11 +804,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // guide of the persona whose answer this is (./style-variant echoStyle).
     const answered = echoStyle(ask);
     let out;
+    let unanswered: Unanswered | undefined; // set when `out.text` is the honest message, not an answer
     if (brain === 'frontier' && ctx.brains) {
       try {
         // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
         const won = await answerWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
         out = won.result;
+        unanswered = won.unanswered;
         answeredBy = won.brain.label;
       } catch (err) {
         // An image/PDF turn has no honest fallback — the local brain can't see it.
@@ -829,6 +831,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         text: out.text,
         usage: out.usage,
         reason: out.reason,
+        // 'refusal' | 'empty' when `text` is the honest "no model answered" message, so apps/parity doesn't judge it.
+        ...(unanswered ? { unanswered } : {}),
         brain,
         ...(brain === 'frontier' ? { tier } : {}),
         model: answeredBy,

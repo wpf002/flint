@@ -236,6 +236,21 @@ everything still shows 0-N); a competitor the subject answered alongside but was
 judged against (a later candidate run against fewer competitors) is left out. Failures
 are listed in the report so you can fix the cause and resume.
 
+A prompt no model answered is a failure too: when every tier refuses or comes back empty,
+the server sends an honest fallback message ("I can't get you an answer on that one: ...")
+and marks the eval response `unanswered: "refusal" | "empty"`. The harness records that
+as a failure (`flint did not answer (unanswered=...)`), exactly as the empty reply it
+replaced was recorded in earlier runs, and the report counts how many failures it was.
+
+**Compare answers from the same server build.** Answers are cached per contestant
+name, not per server build. Resuming an older run's `flint` on a newer server only
+re-asks the prompts that failed, so the run ends up mixing two builds' answers (in
+`20260924-tiered`, that would be ~11 refused prompts retried on a server with the
+refusal fallback and `calculate`, next to 289 cached answers from the old one). To
+measure a server change, answer every prompt on the new build: a fresh run, or a fresh
+Flint contestant name in the existing run (e.g. a `flint#v1` baseline, once
+`--flint-variant` exists), never a resume of the old `flint` answers.
+
 ## 3. The judge panel (`--judge-panel`)
 
 A single Claude judge prefers answers written by its own model. Measured on the same 29
@@ -347,6 +362,8 @@ rows without calling anything.
   `--judge-panel` run, not the single judge (see section 3).
 - **Prices are list-price estimates** kept in `src/pricing.ts`. Unknown models are
   priced high, so the guard trips early rather than late.
+- **One server build per comparison.** A win rate only compares with another from the
+  same server build and prompt set (see "Compare answers from the same server build").
 
 ## Tests
 
@@ -371,4 +388,4 @@ separation and report file, and resume behaviour). The steps `run` wires togethe
 tested through a recording judge (src/steps.ts): which pairs a grounded judge skips,
 that it is shown the context and called and priced as the real model, never the
 `+grounded` id, that an interrupted call is not recorded as a failure, and the Flint
-preflight.
+preflight; and an `unanswered` reply recorded as a failure, not judged, and counted in the report.
