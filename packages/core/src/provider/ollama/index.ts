@@ -97,16 +97,17 @@ export class OllamaProvider implements ProviderAdapter {
    *  non-stream mode, and with many tools qwen occasionally returns an EMPTY
    *  turn (no text, no call). Retry a couple times until it produces something
    *  rather than handing the user back nothing. */
-  private async fetchFull(args: GenerateArgs): Promise<FullResult> {
+  private async fetchFull(args: GenerateArgs, recoverWith: ToolLike[] = args.tools ?? []): Promise<FullResult> {
     let last: FullResult = { text: '', toolCalls: [], usage: { input: 0, output: 0 }, doneReason: undefined };
     for (let attempt = 0; attempt < 3; attempt++) {
-      last = await this.chatOnce(args, attempt);
+      last = await this.chatOnce(args, attempt, recoverWith);
       if (last.toolCalls.length > 0 || last.text.trim().length > 0) return last;
     }
     return last;
   }
 
-  private async chatOnce(args: GenerateArgs, attempt = 0): Promise<FullResult> {
+  /** `recoverWith`: the tools a call written as text is matched against (see honourToolChoice). */
+  private async chatOnce(args: GenerateArgs, attempt = 0, recoverWith: ToolLike[] = args.tools ?? []): Promise<FullResult> {
     const body = this.buildBody(args, false);
     if (attempt > 0) {
       // Last try came back empty. Nudge the model to commit, and raise the
@@ -140,8 +141,8 @@ export class OllamaProvider implements ProviderAdapter {
     // Recovery: with many tools, qwen sometimes dumps the tool call into the
     // text instead of the structured field. Parse it back into a real call so
     // tools still fire reliably.
-    if (toolCalls.length === 0 && args.tools && args.tools.length > 0) {
-      const recovered = extractTextToolCall(text, args.tools);
+    if (toolCalls.length === 0 && recoverWith.length > 0) {
+      const recovered = extractTextToolCall(text, recoverWith);
       if (recovered) {
         toolCalls = [{ id: newId('toolu'), toolName: recovered.name, args: recovered.arguments }];
         text = '';
@@ -158,7 +159,7 @@ export class OllamaProvider implements ProviderAdapter {
   async generate(rawArgs: GenerateArgs): Promise<GenerateResult> {
     const args = honourToolChoice(rawArgs);
     try {
-      const { text, toolCalls, usage, doneReason } = await this.fetchFull(args);
+      const { text, toolCalls, usage, doneReason } = await this.fetchFull(args, rawArgs.tools ?? []);
       if (toolCalls.length > 0) {
         return { message: encodeToolCallTurn(newId('msg'), text, toolCalls, 0), usage, reason: 'tool_call' };
       }
@@ -201,7 +202,10 @@ export class OllamaProvider implements ProviderAdapter {
     let doneReason: string | undefined;
     let sawTool = false;
     let producedAnything = false;
-    const toolDefs = args.tools ?? [];
+    // The tools as the caller defined them, even when honourToolChoice didn't
+    // offer them: a call the model writes as text on the answer-only call must
+    // still be recognised as a call, not shown as the answer.
+    const toolDefs = rawArgs.tools ?? [];
     // Some smaller models (notably llama3.1) emit a tool call as TEXT — a bare
     // `{"name":...,"parameters":...}` JSON object — instead of a structured tool
     // call. If the streamed content starts with `{`, we don't stream it raw
@@ -238,12 +242,13 @@ export class OllamaProvider implements ProviderAdapter {
             buf += delta;
           } else {
             // Undecided: keep buffering while the text is still a bare identifier
-            // (a tool name might be forming, e.g. "web_search"). Commit only when
-            // the disambiguating character arrives — "(" or "{" ⇒ a tool call to
+            // (a tool name might be forming, e.g. "web_search") or the start of a
+            // `<tool_call>` tag. Commit only when the disambiguating character
+            // arrives — "(", "{" or a whole `<tool_call>` ⇒ a tool call to
             // recover; anything else ⇒ prose, so flush and stream live.
             buf += delta;
             const trimmed = buf.replace(/^\s+/, '');
-            if (trimmed.length > 0 && !/^[\w.]+$/.test(trimmed)) {
+            if (trimmed.length > 0 && !undecided(trimmed)) {
               if (looksLikeToolText(trimmed)) {
                 mode = 'buffer';
               } else {
@@ -328,6 +333,13 @@ export class OllamaProvider implements ProviderAdapter {
  * calls and results already in the history. So `none` (the tool loop's
  * answer-only call) is honoured by not offering the tools at all. Any other
  * choice leaves the request exactly as it was.
+ *
+ * Without tools, Ollama also stops parsing the model's tool-call output, so a
+ * model that still calls one writes it as text (bare JSON, or qwen's
+ * `<tool_call>` markup). Callers therefore recover text-form calls against the
+ * ORIGINAL `rawArgs.tools`: a recovered call is a tool_call, which the loop
+ * drops on that call (and then fails the turn as empty), instead of tool
+ * syntax shown to the user and stored as the answer.
  */
 function honourToolChoice(args: GenerateArgs): GenerateArgs {
   if (args.toolChoice !== 'none') return args;
@@ -395,11 +407,20 @@ function balancedObjects(text: string): string[] {
   return out;
 }
 
+/** How qwen-family templates wrap a tool call; it reaches `content` when no tools were offered. */
+const TOOL_CALL_TAG = '<tool_call>';
+
+/** Too little text yet to tell prose from a tool call: a bare identifier (a
+ *  tool name forming) or the beginning of a `<tool_call>` tag. */
+function undecided(trimmed: string): boolean {
+  return /^[\w.]+$/.test(trimmed) || (trimmed.length < TOOL_CALL_TAG.length && TOOL_CALL_TAG.startsWith(trimmed));
+}
+
 /** True if `text` looks like a tool call written as prose (so we should try to
  *  recover it rather than show it). Used to decide whether to buffer a stream. */
 function looksLikeToolText(text: string): boolean {
   const t = text.replace(/^\s+/, '');
-  return t.startsWith('{') || /^[\w.]+\s*\(/.test(t);
+  return t.startsWith('{') || t.startsWith(TOOL_CALL_TAG) || /^[\w.]+\s*\(/.test(t);
 }
 
 /**

@@ -21,7 +21,11 @@ but are called out explicitly here.
 - **The tool loop no longer fails a turn at its iteration limit outright.** It
   makes one more call with `toolChoice: 'none'` and a note asking for an answer
   from the tool results so far; only if that call fails or comes back empty does
-  the turn end in the old "exceeded N iterations" error.
+  the turn end in the old "exceeded N iterations" error. On Ollama (which gets
+  no tools on that call, so doesn't parse tool calls either) a call the model
+  writes as text anyway (JSON, `<tool_call>` markup or `name(...)`) is recovered
+  against the caller's tools and dropped, so it ends the turn as empty rather
+  than coming back as the answer.
 - **A tool handler that returns `{ isError: true, ... }`** (what `@flint/mcp`
   returns for an MCP error result) is now recorded as `ToolResult.isError`, so
   the model gets `is_error` and observers see a failure instead of `ok`.
