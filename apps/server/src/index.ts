@@ -65,7 +65,7 @@ import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
 import { calculateTool } from './calculate';
-import { answerWithFallback, guardAnswer } from './unanswered';
+import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
@@ -886,13 +886,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const ac = new AbortController();
     res.on('close', () => ac.abort());
     let answer = '';
+    const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
     // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
     const pump = async (persona: Persona, recoverable = false, tried?: number) => {
       const events = persona.chat(
         { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
         { signal: ac.signal },
       );
-      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried })) {
+      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers })) {
         if (ev.type === 'text') answer += ev.delta;
         // A provider error arrives as an event, not a throw. When another tier is
         // left to try and no text has gone out, throw it to the tier fallback.

@@ -19,6 +19,7 @@ import {
   unanswered,
   unansweredMessage,
   type ReplyLike,
+  type Unanswered,
 } from '../src/unanswered';
 import { TrainingLogger } from '../src/training';
 
@@ -68,6 +69,13 @@ describe('the honest message', () => {
     expect(unansweredMessage('refusal', 1)).toMatch(/the model I asked declined it/);
     expect(unansweredMessage('refusal', 3)).toMatch(/all 3 models I tried declined it/);
     expect(unansweredMessage('empty', 2)).toMatch(/all 2 models I tried returned nothing/);
+  });
+
+  it('claims a reason only for the models that gave it', () => {
+    expect(unansweredMessage('refusal', 3, 3)).toMatch(/all 3 models I tried declined it/);
+    expect(unansweredMessage('refusal', 2, 1)).toMatch(/the last model I tried declined it/);
+    expect(unansweredMessage('empty', 3, 2)).toMatch(/the last model I tried returned nothing/);
+    expect(unansweredMessage('refusal', 1, 1)).toMatch(/the model I asked declined it/);
   });
 
   it('is recognisable, and a real answer is not', () => {
@@ -143,6 +151,23 @@ describe('answerWithFallback (/generate)', () => {
     expect(won.result.text).toBe(unansweredMessage('empty', 2));
   });
 
+  it('speaks for every model only when every model ended the same way', async () => {
+    const outage = new FlintError(makeAiError('provider_unavailable', '529 overloaded'));
+    // An earlier tier errored: it did not decline anything.
+    const erredThenRefused = await answerWithFallback(chain.slice(0, 2), async (b) => {
+      if (b.persona === 'opus') throw outage;
+      return reply('', 'refusal');
+    });
+    expect(erredThenRefused.unanswered).toBe('refusal');
+    expect(erredThenRefused.result.text).not.toMatch(/all 2 models/);
+    expect(erredThenRefused.result.text).toMatch(/the last model I tried declined it/);
+    // An earlier tier refused, the last came back empty: not "all returned nothing".
+    const refusedThenEmpty = await answerWithFallback(chain.slice(0, 2), async (b) => reply('', b.persona === 'opus' ? 'refusal' : 'complete'));
+    expect(refusedThenEmpty.unanswered).toBe('empty');
+    expect(refusedThenEmpty.result.text).toMatch(/the last model I tried returned nothing/);
+    expect(isUnansweredMessage(refusedThenEmpty.result.text)).toBe(true);
+  });
+
   it('a provider error on the last tier is still thrown (the caller goes local, as before)', async () => {
     const outage = new FlintError(makeAiError('provider_unavailable', '529 overloaded'));
     await expect(
@@ -168,28 +193,37 @@ describe('answerWithFallback (/generate)', () => {
 describe('guardAnswer (/chat)', () => {
   const done = (reason: 'complete' | 'refusal' = 'complete'): StreamEvent => ({ type: 'done', reason, usage });
 
-  it('on a tier with a fallback, a silent refusal throws before its done is shown', async () => {
+  it('on a tier with a fallback, a silent refusal throws before its done is shown, and is tallied', async () => {
     const seen: StreamEvent[] = [];
+    const noAnswers: Unanswered[] = [];
     const run = async () => {
-      for await (const ev of guardAnswer(play([done('refusal')]), { recoverable: true, tried: 1 })) seen.push(ev);
+      for await (const ev of guardAnswer(play([done('refusal')]), { recoverable: true, tried: 1, noAnswers })) seen.push(ev);
     };
     await expect(run()).rejects.toBeInstanceOf(NoAnswer);
     expect(seen).toEqual([]);
+    expect(noAnswers).toEqual(['refusal']);
   });
 
   it('on the last tier, the honest message goes out ahead of the done', async () => {
-    const out = await collect(guardAnswer(play([done('refusal')]), { recoverable: false, tried: 2 }));
+    const out = await collect(guardAnswer(play([done('refusal')]), { recoverable: false, tried: 2, noAnswers: ['refusal'] }));
     expect(out).toEqual([{ type: 'text', delta: unansweredMessage('refusal', 2) }, done('refusal')]);
   });
 
+  it('does not say every model declined when an earlier tier errored instead', async () => {
+    // Tier 1 failed with an error (not tallied); only this, the 2nd, refused.
+    const out = await collect(guardAnswer(play([done('refusal')]), { recoverable: false, tried: 2, noAnswers: [] }));
+    expect(out[0]).toEqual({ type: 'text', delta: unansweredMessage('refusal', 2, 1) });
+    expect(out[0]!.type === 'text' && out[0]!.delta).toMatch(/the last model I tried declined it/);
+  });
+
   it('an empty complete reply is caught the same way', async () => {
-    await expect(collect(guardAnswer(play([done()]), { recoverable: true, tried: 1 }))).rejects.toBeInstanceOf(NoAnswer);
-    const last = await collect(guardAnswer(play([{ type: 'text', delta: '  ' }, done()]), { recoverable: false, tried: 1 }));
+    await expect(collect(guardAnswer(play([done()]), { recoverable: true, tried: 1, noAnswers: [] }))).rejects.toBeInstanceOf(NoAnswer);
+    const last = await collect(guardAnswer(play([{ type: 'text', delta: '  ' }, done()]), { recoverable: false, tried: 1, noAnswers: [] }));
     expect(last.map((e) => (e.type === 'text' ? e.delta : e.type))).toEqual(['  ', unansweredMessage('empty', 1), 'done']);
   });
 
   it('whitespace already sent cannot be retried: the honest message follows it instead', async () => {
-    const out = await collect(guardAnswer(play([{ type: 'text', delta: '\n' }, done('refusal')]), { recoverable: true, tried: 1 }));
+    const out = await collect(guardAnswer(play([{ type: 'text', delta: '\n' }, done('refusal')]), { recoverable: true, tried: 1, noAnswers: [] }));
     expect(out.map((e) => e.type)).toEqual(['text', 'text', 'done']);
   });
 
@@ -201,7 +235,7 @@ describe('guardAnswer (/chat)', () => {
       [{ type: 'error', error: makeAiError('rate_limit', '429') }],
     ];
     for (const events of cases) {
-      expect(await collect(guardAnswer(play(events), { recoverable: true, tried: 1 }))).toEqual(events);
+      expect(await collect(guardAnswer(play(events), { recoverable: true, tried: 1, noAnswers: [] }))).toEqual(events);
     }
   });
 });
@@ -227,11 +261,15 @@ describe('a /chat turn that falls back', () => {
   async function chatLikeServer(chain: BrainTier<Flint>[], conversationId: string, message: string) {
     const written: StreamEvent[] = [];
     let answer = '';
+    const noAnswers: Unanswered[] = [];
     const won = await runWithFallback(chain, async (b) => {
+      const recoverable = b !== chain[chain.length - 1];
       try {
         const events = b.persona.chat({ conversationId, message });
-        for await (const ev of guardAnswer(events, { recoverable: b !== chain[chain.length - 1], tried: chain.indexOf(b) + 1 })) {
+        for await (const ev of guardAnswer(events, { recoverable, tried: chain.indexOf(b) + 1, noAnswers })) {
           if (ev.type === 'text') answer += ev.delta;
+          // As index.ts's pump: a provider error event before any text goes to the next tier.
+          if (recoverable && ev.type === 'error' && answer.length === 0) throw new FlintError(ev.error);
           written.push(ev);
         }
       } catch (err) {
@@ -266,7 +304,24 @@ describe('a /chat turn that falls back', () => {
     const { written, answer } = await chatLikeServer([tier('a', refuses()), tier('b', refuses())], 'c', 'q');
 
     expect(answer).toBe(unansweredMessage('refusal', 2));
+    expect(answer).toMatch(/all 2 models I tried declined it/);
     expect(written.at(-1)).toMatchObject({ type: 'done', reason: 'refusal' });
     expect(await memory.getMessages('c')).toEqual([]);
+  });
+
+  it('an erroring first tier and a refusing second: only the last is said to have declined', async () => {
+    const memory = new InMemoryStore();
+    const overloaded = new Flint({
+      provider: stubProvider([{ type: 'error', error: makeAiError('provider_unavailable', '529 overloaded', { retryable: false }) }]),
+      defaultModel: 'a',
+      memory,
+    });
+    const refuses = new Flint({ provider: stubProvider([{ type: 'done', reason: 'refusal', usage }]), defaultModel: 'b', memory });
+
+    const { answer } = await chatLikeServer([tier('a', overloaded), tier('b', refuses)], 'c', 'q');
+
+    expect(answer).not.toMatch(/all 2 models/);
+    expect(answer).toBe(unansweredMessage('refusal', 2, 1));
+    expect(answer).toMatch(/the last model I tried declined it/);
   });
 });

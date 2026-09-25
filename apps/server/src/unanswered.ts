@@ -59,9 +59,14 @@ export class NoAnswer extends Error {
 const REFUSAL_LEAD = "I can't get you an answer on that one:";
 const EMPTY_LEAD = 'I came back empty on that one:';
 
-/** What the user reads when no brain in the chain produced an answer. */
-export function unansweredMessage(why: Unanswered, tried: number): string {
-  const who = tried > 1 ? `all ${tried} models I tried` : 'the model I asked';
+/**
+ * What the user reads when no brain in the chain produced an answer. `why` is
+ * how the LAST attempt ended; `alike` is how many of the `tried` attempts ended
+ * that same way. Only when all of them did does the message speak for every
+ * model: a tier that errored (529) or came back empty did not decline anything.
+ */
+export function unansweredMessage(why: Unanswered, tried: number, alike = tried): string {
+  const who = tried <= 1 ? 'the model I asked' : alike >= tried ? `all ${tried} models I tried` : 'the last model I tried';
   return why === 'refusal'
     ? `${REFUSAL_LEAD} ${who} declined it. If it's a legitimate ask, rephrase it or add why you need it.`
     : `${EMPTY_LEAD} ${who} returned nothing. Ask again, or rephrase it.`;
@@ -87,6 +92,7 @@ export async function answerWithFallback<P, T extends ReplyLike>(
   opts: { signal?: AbortSignal; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
 ): Promise<{ result: T; brain: BrainTier<P>; unanswered?: Unanswered }> {
   let tried = 0;
+  const noAnswers: Unanswered[] = []; // how each non-answering attempt ended; errors are not in it
   try {
     return await runWithFallback(
       chain,
@@ -94,7 +100,10 @@ export async function answerWithFallback<P, T extends ReplyLike>(
         tried++;
         const reply = await ask(brain);
         const why = unanswered({ text: reply.text, reason: reply.reason, usedTools: reply.messages.some((m) => m.role === 'tool') });
-        if (why) throw new NoAnswer(why, { reply, brain });
+        if (why) {
+          noAnswers.push(why);
+          throw new NoAnswer(why, { reply, brain });
+        }
         return reply;
       },
       opts,
@@ -102,7 +111,8 @@ export async function answerWithFallback<P, T extends ReplyLike>(
   } catch (err) {
     if (!(err instanceof NoAnswer) || err.carried === undefined) throw err;
     const { reply, brain } = err.carried as { reply: T; brain: BrainTier<P> };
-    return { result: { ...reply, text: unansweredMessage(err.why, tried) }, brain, unanswered: err.why };
+    const alike = noAnswers.filter((w) => w === err.why).length;
+    return { result: { ...reply, text: unansweredMessage(err.why, tried, alike) }, brain, unanswered: err.why };
   }
 }
 
@@ -118,10 +128,15 @@ export async function answerWithFallback<P, T extends ReplyLike>(
  *
  * Stopping at the `done` also keeps a retried turn out of memory: the chat turn
  * commits only after its `done` is consumed, so leaving there fails the turn.
+ *
+ * `tried` is this tier's place in the chain (every attempt so far, errors
+ * included); `noAnswers` is one array shared by all the turn's tiers, where a
+ * tier that throws NoAnswer records how it ended, so the last tier's message
+ * claims a reason only for the models that gave it.
  */
 export async function* guardAnswer(
   events: AsyncIterable<StreamEvent>,
-  opts: { recoverable: boolean; tried: number },
+  opts: { recoverable: boolean; tried: number; noAnswers: Unanswered[] },
 ): AsyncGenerator<StreamEvent, void, void> {
   let text = '';
   let usedTools = false;
@@ -133,8 +148,12 @@ export async function* guardAnswer(
       if (why && text.trim().length === 0) {
         // Retry only when not even whitespace went out: the caller refuses to
         // fall back once its streamed answer is non-empty.
-        if (opts.recoverable && text.length === 0) throw new NoAnswer(why);
-        yield { type: 'text', delta: unansweredMessage(why, opts.tried) };
+        if (opts.recoverable && text.length === 0) {
+          opts.noAnswers.push(why);
+          throw new NoAnswer(why);
+        }
+        const alike = opts.noAnswers.filter((w) => w === why).length + 1; // + this one
+        yield { type: 'text', delta: unansweredMessage(why, opts.tried, alike) };
       }
     }
     yield ev;
