@@ -1,8 +1,10 @@
 /**
  * Flint's tool selection on a task, scored on its own: did he reach for the
- * systems the task needs? The head-to-head can't show this, because every
+ * systems the task needs? The plain head-to-head can't show this, because every
  * competitor is handed whatever Flint retrieved (a miss here costs both sides
- * the same data). So it is its own metric, Flint only.
+ * the same data, and the pair usually reads as a tie). So it is its own metric,
+ * Flint only, and the report's "strict + tool selection" line counts a judged
+ * pair on a task Flint got wrong here as a loss (tasks-report tasksSelectionStrict).
  *
  * - A task's `need` is a list of groups; a group is met by calling any tool in
  *   it. `correct` = every group met, and no unrequested write.

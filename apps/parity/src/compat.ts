@@ -122,7 +122,7 @@ export function bedrockOpenAiEndpoint(cfg: AmazonConfig): CompatEndpoint {
 }
 
 /** Names the harness already uses; a `--openai-compatible` endpoint can't take one. */
-const RESERVED = new Set(['flint', 'flint-local', 'openai', 'claude', 'anthropic', 'perplexity', 'google', 'amazon', 'judge', 'panel']);
+const RESERVED = new Set(['flint', 'flint-local', 'openai', 'claude', 'claude-base', 'anthropic', 'perplexity', 'google', 'amazon', 'judge', 'panel']);
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -442,9 +442,10 @@ export async function addVendorContestants(opts: {
 
 /**
  * The vendor a contestant sends data to, as named on the privacy allowlist
- * (`--share-personal-with`): `claude` is Anthropic, and every other contestant
- * is its own vendor (an `--openai-compatible` endpoint goes by its name).
+ * (`--share-personal-with`): `claude` (and `claude-base`, Flint's own base model
+ * as a baseline) is Anthropic, and every other contestant is its own vendor (an
+ * `--openai-compatible` endpoint goes by its name).
  */
 export function privacyVendorOf(contestant: string): string {
-  return contestant === 'claude' ? 'anthropic' : contestant;
+  return contestant === 'claude' || contestant === 'claude-base' ? 'anthropic' : contestant;
 }

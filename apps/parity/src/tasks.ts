@@ -74,10 +74,20 @@ export interface TaskTemplate {
    * competitors and judges (it is personal, and nobody needs it).
    */
   memory?: 'task' | 'incidental';
-  /** `local`: the prompt asks to stay on-device; the report checks the local brain answered. */
+  /**
+   * `local`: the prompt asks to stay on-device; the report checks the local brain
+   * answered, and no cloud vendor sees it unless Will says so (`--share-local-with`).
+   */
   route?: 'local';
   /** A reference the judge gets computed at answer time: `weekday-offset` uses slot `day_offset`. */
   computed?: 'weekday-offset';
+  /**
+   * `flint-only`: the task is about Flint himself (his identity, his training,
+   * his persona). No competitor can answer it as Flint, and a rubric that asks for
+   * Flint's persona would favour him by design, so it is scored for tool selection
+   * only: no competitor is asked, no pair judged, no history row.
+   */
+  scoring?: 'flint-only';
 }
 
 export interface TaskFile {
@@ -107,6 +117,7 @@ export interface TaskPrompt {
   memory: 'task' | 'incidental';
   route?: 'local';
   computed?: 'weekday-offset';
+  scoring?: 'flint-only';
 }
 
 const ID_RE = /^[a-z]+(?:-[a-z]+)*-\d{2}$/;
@@ -179,6 +190,7 @@ export function validateTaskFile(raw: unknown): TaskFile {
     if (t.memory !== undefined && t.memory !== 'task' && t.memory !== 'incidental') problems.push(`${where}: memory must be task or incidental`);
     if (t.route !== undefined && t.route !== 'local') problems.push(`${where}: route must be local`);
     if (t.computed !== undefined && t.computed !== 'weekday-offset') problems.push(`${where}: unknown computed`);
+    if (t.scoring !== undefined && t.scoring !== 'flint-only') problems.push(`${where}: scoring must be flint-only`);
     if (t.computed === 'weekday-offset' && !t.slots?.day_offset) problems.push(`${where}: weekday-offset needs a day_offset slot`);
     const slots = t.slots ?? {};
     const used = new Set<string>();
@@ -425,6 +437,7 @@ export function instantiate(
         memory: t.memory ?? 'incidental',
         ...(t.route ? { route: t.route } : {}),
         ...(t.computed ? { computed: t.computed } : {}),
+        ...(t.scoring ? { scoring: t.scoring } : {}),
       });
     }
   }
