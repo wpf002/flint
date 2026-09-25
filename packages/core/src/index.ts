@@ -103,6 +103,7 @@ export {
   costOf,
   estimateCost,
   vendorOfProvider,
+  parseBrainLabel,
   ttsCostOf,
   TAVILY_USD_PER_CREDIT,
   tavilySearchCredits,

@@ -5,6 +5,7 @@ import {
   costOf,
   estimateCost,
   vendorOfProvider,
+  parseBrainLabel,
   ttsCostOf,
   tavilySearchCredits,
   TAVILY_USD_PER_CREDIT,
@@ -29,6 +30,19 @@ describe('priceOf', () => {
     expect(priceOf('gpt-5-mini').input).toBe(0.25);
     expect(priceOf('sonar-pro').output).toBe(15);
     expect(priceOf('gpt-5-2025-08-07').input).toBe(1.25); // dated snapshot of gpt-5
+  });
+
+  it('prices Opus 4 (alias and snapshot) at its own $15 / $75, not the Opus 4.5+ rate', () => {
+    const opus4 = { input: 15, output: 75, cachedInput: 1.5, cacheWrite: 18.75 };
+    expect(priceOf('claude-opus-4-0')).toEqual(opus4);
+    expect(priceOf('claude-opus-4-20250514')).toEqual(opus4);
+    expect(priceOf('claude-opus-4-1-20250805')).toEqual(opus4);
+    for (const m of ['claude-opus-4-5', 'claude-opus-4-5-20251101', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8']) {
+      expect(priceOf(m)).toMatchObject({ input: 5, output: 25, cachedInput: 0.5 });
+    }
+    // An Opus 4.x the table doesn't know is priced high, never as a cheaper 4.x.
+    expect(isListedModel('claude-opus-4-9')).toBe(false);
+    expect(isListedModel('claude-opus-4')).toBe(false);
   });
 
   it('never prices a newer version as its cheaper predecessor', () => {
@@ -67,6 +81,20 @@ describe('other paid calls', () => {
     expect(vendorOfProvider('openai')).toBe('openai');
     expect(vendorOfProvider('perplexity')).toBe('perplexity');
     expect(vendorOfProvider('ollama')).toBeUndefined();
+  });
+
+  it('splits a brain label into the vendor that bills it and the model the table prices', () => {
+    expect(parseBrainLabel('anthropic:claude-opus-5-5')).toEqual({ provider: 'anthropic', vendor: 'anthropic', model: 'claude-opus-5-5' });
+    expect(parseBrainLabel('openai:gpt-5')).toEqual({ provider: 'openai', vendor: 'openai', model: 'gpt-5' });
+    expect(parseBrainLabel('ollama:qwen3:30b')).toEqual({ provider: 'ollama', model: 'qwen3:30b' });
+    // A bare model, or an Ollama tag whose name isn't a provider, is left whole.
+    expect(parseBrainLabel('claude-opus-5-5')).toEqual({ model: 'claude-opus-5-5' });
+    expect(parseBrainLabel('muse-glimmer:30b')).toEqual({ model: 'muse-glimmer:30b' });
+    // The label itself is not a model the table knows; the split one is, at list price.
+    expect(isListedModel('anthropic:claude-opus-5-5')).toBe(false);
+    const { vendor, model } = parseBrainLabel('anthropic:claude-opus-5-5');
+    const u = { input: 2000, output: 1500, cacheRead: 12000 };
+    expect(costOf(vendor!, model, u)).toBeCloseTo((2000 * 4 + 1500 * 20 + 12000 * 0.2) / 1e6, 9);
   });
 
   it('prices TTS per character, unknown models at the HD rate', () => {
