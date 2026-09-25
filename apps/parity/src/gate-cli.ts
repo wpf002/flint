@@ -14,6 +14,10 @@
  *        [--budget-usd 30] [--verdict-out file] [--dry-run]
  *   gate --no-manifest --candidate qwen3.8:27b ...          a base-model swap (nothing trained)
  *   gate --decide-only --runs parity_prompts=<run dir> --candidate-subject <name> --baseline-subject <name> ...
+ *   gate --preflight-only [--manifest m | --no-manifest] [--sets ...]
+ *        only the free checks (sets on disk, the manifest): prints them as JSON and
+ *        exits 0 PROCEED / 1 REJECT / 3 HOLD. No server, model or paid call, and
+ *        nothing written. cycle.sh runs it before training.
  *
  * For each set it makes a fresh run dir and calls this package's own `run`
  * twice (./gate#planSetRuns): the live local model (`--flint-local`) and then
@@ -22,7 +26,8 @@
  * guarded against other sets, a contaminated manifest) run first.
  *
  * Exit: 0 PROMOTE, 1 REJECT, 3 HOLD, 2 error. It never promotes: a PROMOTE
- * prints the command that would, and running it is Will's step.
+ * prints the commands that would (./gate#promotionCommands, also kept in the
+ * verdict record as `promote`), and running them is Will's step.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -46,6 +51,9 @@ import {
   planSetRuns,
   poolSets,
   preflightChecks,
+  preflightExitCode,
+  preflightVerdict,
+  promotionCommands,
   renderGate,
   serverFingerprint,
   setOutcome,
@@ -160,6 +168,7 @@ async function main(): Promise<number> {
       'verdict-out': { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
       'decide-only': { type: 'boolean', default: false },
+      'preflight-only': { type: 'boolean', default: false },
       runs: { type: 'string' },
       'baseline-subject': { type: 'string' },
       'candidate-subject': { type: 'string' },
@@ -176,8 +185,9 @@ async function main(): Promise<number> {
     ...(values['max-latency-ratio'] ? { maxLatencyRatio: Number(values['max-latency-ratio']) } : {}),
   };
   const decideOnly = values['decide-only']!;
+  const preflightOnly = values['preflight-only']!;
   const candidate = values.candidate?.trim();
-  if (!candidate && !(decideOnly && values['candidate-subject'])) throw new Error('--candidate <ollama model> is required');
+  if (!candidate && !preflightOnly && !(decideOnly && values['candidate-subject'])) throw new Error('--candidate <ollama model> is required');
   if (candidate) assertLocalModelName(candidate);
   const think = parseLocalThink(values['candidate-think']);
   const candidateVariant = flintVariantFlag(values['candidate-variant']);
@@ -203,13 +213,25 @@ async function main(): Promise<number> {
   if (values['no-manifest']) manifest = 'not-required';
   else if (values.manifest) manifest = parseManifest(values.manifest, readFileSync(values.manifest, 'utf8'));
 
+  // ---- --preflight-only: the free checks and nothing else (no server, no model, no files)
+  if (preflightOnly) {
+    const checks = preflightChecks({ missingSets, manifest, sets: present });
+    const { verdict, reasons } = preflightVerdict(checks);
+    log(`gate preflight: ${verdict}${reasons.length ? `: ${reasons.join('; ')}` : ''}`);
+    process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), preflight: true, decision: { verdict, checks, reasons } }) + '\n');
+    return preflightExitCode(verdict);
+  }
+
   const label = candidate ?? candidateSubject;
   const outDir = resolve(values['out-dir']!);
   const ts = stamp();
   const finish = (input: GateInput): number => {
     const decision = decideGate(input);
     const md = renderGate(input, decision);
-    const record = { ts: new Date().toISOString(), decision, input: { ...input, pooled: input.pooled } };
+    // How to serve it as it was judged (model, think flag, style variant); only for a real candidate.
+    const promote =
+      decision.verdict === 'PROMOTE' && candidate ? promotionCommands({ candidate, think, variant: candidateVariant, flintUrl: values['flint-url']! }) : undefined;
+    const record = { ts: new Date().toISOString(), decision, ...(promote ? { promote } : {}), input: { ...input, pooled: input.pooled } };
     mkdirSync(outDir, { recursive: true });
     const base = join(outDir, `${label.replace(/[^A-Za-z0-9._-]/g, '_')}-${ts}`);
     writeFileAtomic(`${base}.json`, JSON.stringify(record, null, 2) + '\n');
@@ -219,13 +241,7 @@ async function main(): Promise<number> {
     appendFileSync(hist, (existsSync(hist) ? '' : GATE_HISTORY_HEADER + '\n') + gateHistoryRow(record.ts, input, decision) + '\n');
     process.stdout.write(md + '\n');
     log(`verdict: ${decision.verdict} -> ${base}.json`);
-    if (decision.verdict === 'PROMOTE' && candidate) {
-      log(
-        `To serve it (Will's call; the gate never does):\n` +
-          `  /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:OLLAMA_MODEL ${candidate}" ~/Library/LaunchAgents/com.flint.server.plist\n` +
-          `  launchctl kickstart -k gui/$(id -u)/com.flint.server`,
-      );
-    }
+    if (promote) log(`To serve it as it was judged (Will's call; the gate never does):\n${promote.map((l) => `  ${l}`).join('\n')}`);
     return exitCodeOf(decision.verdict);
   };
   const emptyPaired = poolSets([], t.ciLevel);

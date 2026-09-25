@@ -2,31 +2,41 @@
 # cycle.sh — one training cycle for Flint's local brain, promoted only if it
 # measurably improves Flint-local's standing against GPT-5.
 #
-#   cycle.sh [--if-due] [--force] [--dry-run] [--profile <name>]
+#   cycle.sh [--if-due] [--force] [--dry-run] [--profile <name>] [--gate-sets <spec>]
 #
-#   --if-due   what the scheduled job runs: exit quietly unless cycle_state.py says
-#              a cycle is due (enough new compliant data, 7+ days, kill switch off)
-#   --force    run even if not due / the kill switch is on (a deliberate manual run)
-#   --dry-run  print the plan and the data counts; train, package and gate nothing
+#   --if-due     what the scheduled job runs: exit quietly unless cycle_state.py says
+#                a cycle is due (the data builds, enough new of it, 7+ days, kill switch off)
+#   --force      run even if not due / the kill switch is on (a deliberate manual run)
+#   --dry-run    print the plan and the data counts; train, package and gate nothing
+#   --gate-sets  the gate's --sets (default: the gate's own, parity_prompts.jsonl:100,flint_tasks.jsonl;
+#                or FLINT_GATE_SETS). Until flint_tasks.jsonl exists: parity_prompts.jsonl:100
 #
-# Steps: build data (contamination-guarded, terms-compliant) -> memcheck (fit next
-# to the live model or defer) -> train_lora.py (early stopping) -> package the
-# candidate into Ollama -> parity gate vs GPT-5 against the live local model ->
-# unload the candidate -> record. Everything lands in ~/.flint/brain/cycles/<id>/.
+# Steps: the gate's free preflight (can it judge a candidate at all?) -> build data
+# (contamination-guarded, terms-compliant) -> the preflight again, against this
+# data's manifest -> memcheck (fit next to the live model or defer) -> train_lora.py
+# (early stopping) -> package the candidate into Ollama -> parity gate vs GPT-5
+# against the live local model -> unload the candidate -> record. Everything lands
+# in ~/.flint/brain/cycles/<id>/.
+#
+# The preflight comes first because nothing after it can rescue a gate that would
+# HOLD or REJECT unjudged (a prompt set missing, data guarded against another
+# version of a set): training anyway spends up to 4 h of GPU next to the live model
+# and leaves a ~17 GB candidate in Ollama that no gate can promote.
 #
 # What it never does:
 # - touch the live model or the Ollama service. No launchctl, no eviction. If
 #   training can't fit next to the live model it defers (memcheck.py). Taking the
 #   live model offline for training ("cover mode") is a decision for Will, see
 #   README "Why no cover mode".
-# - promote. A PROMOTE verdict prints the one command that serves the candidate;
-#   running it is Will's step.
+# - promote. A PROMOTE verdict prints the commands that serve the candidate as it
+#   was judged (the gate's `promote`, kept in gate.json); running them is Will's step.
 # - run while a local parity run (bake-off or gate) is using the GPU, or while
 #   another cycle holds the lock.
 #
-# Exit 0 for every recorded outcome (NO_DATA, DEFER, REJECT, HOLD...): the outcome
-# is in state.json and the log, and launchd shouldn't treat "nothing to do" as a
-# crash. Exit 1 only for a broken setup (no training python, bad profile).
+# Exit 0 for every recorded outcome (NO_DATA, UNGATEABLE, DEFER, REJECT, HOLD...):
+# the outcome is in state.json and the log, and launchd shouldn't treat "nothing to
+# do" as a crash. Exit 1 only for a broken setup (no training python, bad profile,
+# a gate that can't run at all).
 
 setopt pipe_fail no_unset
 
@@ -41,6 +51,7 @@ STATE=$CYCLES/state.json
 LOCK=$BRAIN/cycle.lock.d
 TRAINING_MARK=$BRAIN/TRAINING.json
 PY=${FLINT_TRAIN_PY:-$HOME/.flint-train/venv/bin/python}
+GATE_SETS=${FLINT_GATE_SETS:-}
 PROFILE_SHA=""
 ID=""
 DIR=""
@@ -67,6 +78,17 @@ cleanup() {
 trap cleanup EXIT
 trap 'stamp "interrupted"; record ERROR reason="\"interrupted\""; exit 130' INT TERM HUP
 
+# apps/parity's gate, run by its own tsx. Not through `pnpm run` / `pnpm --filter`:
+# pnpm turns every non-zero exit into 1, so a HOLD (3) or a gate error (2) would
+# arrive here as REJECT (1), `ollama rm` the candidate and count toward the kill switch.
+gate_cli() {
+  ( cd "$REPO_ROOT/apps/parity" && ./node_modules/.bin/tsx src/gate-cli.ts "$@" )
+}
+
+verdict_of() {  # the gate's exit code as its verdict (exitCodeOf / preflightExitCode)
+  case $1 in 0) print PASS ;; 1) print REJECT ;; 3) print HOLD ;; *) print "ERROR (exit $1)" ;; esac
+}
+
 pyget() {  # pyget '<json>' key [key...]: print one nested value
   "$PY" -c '
 import json, sys
@@ -84,7 +106,8 @@ main() {
       --force) FORCE=1 ;;
       --dry-run) DRY=1 ;;
       --profile) shift; PROFILE=$1 ;;
-      -h|--help) sed -n '2,29p' "$SCRIPT_DIR/cycle.sh"; return 0 ;;
+      --gate-sets) shift; GATE_SETS=$1 ;;
+      -h|--help) sed -n '2,39p' "$SCRIPT_DIR/cycle.sh"; return 0 ;;
       *) print -u2 "cycle.sh: unknown flag $1"; return 1 ;;
     esac
     shift
@@ -126,8 +149,23 @@ main() {
     stamp "due: $WHY"
   fi
 
+  # --- can the gate judge a candidate at all? Its free checks (no server, model or
+  # paid call), before any data is built or any GPU is used.
+  local -a SETS_ARGS=()
+  [[ -n $GATE_SETS ]] && SETS_ARGS=(--sets "$GATE_SETS")
+  local PRE PRC
+  PRE=$(gate_cli --preflight-only --no-manifest "${SETS_ARGS[@]}")
+  PRC=$?
+  case $PRC in
+    0) ;;
+    1|3)
+      stamp "not gateable: the gate would $(verdict_of $PRC) any candidate unjudged (reasons above), so a cycle stops here: nothing built or trained. Build the missing set, or pass the sets you have with --gate-sets (e.g. parity_prompts.jsonl:100)."
+      (( DRY )) || return 0 ;;
+    *) print -u2 "cycle.sh: the gate's preflight failed to run (exit $PRC)"; return 1 ;;
+  esac
+
   if (( DRY )); then
-    stamp "dry run: would build data, memcheck, train ($PROFILE), package ${PREFIX}:c<id>, gate it (think=$THINK variant=${VARIANT:-live}) and record. Nothing else ran."
+    stamp "dry run: would build data, preflight the gate against it, memcheck, train ($PROFILE), package ${PREFIX}:c<id>, gate it (sets=${GATE_SETS:-default} think=$THINK variant=${VARIANT:-live}) and record. Nothing else ran."
     return 0
   fi
 
@@ -168,6 +206,19 @@ main() {
   esac
   local TARGETS
   TARGETS=$(pyget "$(cat "$DIR/data/manifest.json")" counts targets)
+
+  # 1b. the gate's free checks again, now against this data's manifest: was it
+  # guarded against the exact prompt sets that would judge it?
+  PRE=$(gate_cli --preflight-only --manifest "$DIR/data/manifest.json" "${SETS_ARGS[@]}")
+  PRC=$?
+  case $PRC in
+    0) ;;
+    1|3)
+      print -r -- "${PRE##*$'\n'}" > "$DIR/gate.json"
+      stamp "UNGATEABLE: the gate would $(verdict_of $PRC) this data's candidate unjudged (see $DIR/gate.json): nothing trained"
+      record UNGATEABLE targets=$TARGETS gate="\"$DIR/gate.json\""; return 0 ;;
+    *) stamp "gate preflight failed (exit $PRC)"; record ERROR targets=$TARGETS reason='"gate preflight"'; return 0 ;;
+  esac
 
   # 2. memory: fit next to the live model, or defer
   local MEM MEMRC
@@ -214,9 +265,9 @@ print(round(min(float(sys.argv[1]), (stop - now).total_seconds() / 3600), 2))' "
   stamp "judging candidate $TAG against GPT-5 through the parity gate..."
   local THINK_FLAG=off
   [[ $THINK == true ]] && THINK_FLAG=on
-  local -a GATE_ARGS=(--candidate "$TAG" --candidate-think "$THINK_FLAG" --manifest "$DIR/data/manifest.json" --verdict-out "$DIR/gate.json" --budget-usd "${FLINT_GATE_BUDGET_USD:-30}")
+  local -a GATE_ARGS=(--candidate "$TAG" --candidate-think "$THINK_FLAG" --manifest "$DIR/data/manifest.json" --verdict-out "$DIR/gate.json" --budget-usd "${FLINT_GATE_BUDGET_USD:-30}" "${SETS_ARGS[@]}")
   [[ -n $VARIANT ]] && GATE_ARGS+=(--candidate-variant "$VARIANT")
-  ( cd "$REPO_ROOT" && pnpm --silent --filter @flint/parity gate "${GATE_ARGS[@]}" )
+  gate_cli "${GATE_ARGS[@]}"
   local GRC=$? RESULT
   case $GRC in
     0) RESULT=PROMOTE ;;
@@ -229,12 +280,14 @@ print(round(min(float(sys.argv[1]), (stop - now).total_seconds() / 3600), 2))' "
   stamp "verdict: $RESULT"
   case $RESULT in
     PROMOTE)
-      cat <<EOF
-Candidate $TAG beat the live local model against GPT-5 (details: $DIR/gate.json).
-Promotion is yours to run (nothing here changes what Flint serves):
-  /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:OLLAMA_MODEL $TAG" ~/Library/LaunchAgents/com.flint.server.plist
-  launchctl kickstart -k gui/\$(id -u)/com.flint.server
-EOF
+      # The gate wrote how to serve it as it was judged (model, think flag, variant,
+      # a real reload and a /health check): one source for those commands.
+      print -r -- "Candidate $TAG beat the live local model against GPT-5 (details: $DIR/gate.json)."
+      print -r -- "Promotion is yours to run (nothing here changes what Flint serves):"
+      "$PY" -c '
+import json, sys
+lines = json.load(open(sys.argv[1])).get("promote") or ["(no promote commands in the verdict: see the gate output above)"]
+print("\n".join("  " + l for l in lines))' "$DIR/gate.json"
       ;;
     REJECT)
       # Nothing will ever serve it: free the disk (the Ollama copy; the fused weights below).

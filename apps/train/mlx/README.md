@@ -33,7 +33,9 @@ decides those.
 ## The cycle
 
 ```
+gate --preflight-only  can the gate judge a candidate at all?  -> go | not gateable   (free: no server, model or paid call)
 build_data.py      corpus + sample batches -> train/valid/manifest       (contamination-guarded, terms-compliant)
+gate --preflight-only  was this data guarded against the gate's sets? -> go | UNGATEABLE
 memcheck.py        fits next to the live model?  -> footprint | DEFER     (never touches Ollama)
 train_lora.py      LoRA with in-process early stopping -> best adapter | NO_CANDIDATE | PREEMPTED
 package_candidate  fuse + `ollama create flint-muse:c<id>`                (never the live tag)
@@ -51,8 +53,19 @@ PROMOTE keeps it (~17 GB) until you `ollama rm` it.
 ```bash
 ./cycle.sh --dry-run                 # counts and the plan; writes nothing
 ./cycle.sh --force                   # one supervised cycle
+./cycle.sh --force --gate-sets parity_prompts.jsonl:100   # ...until flint_tasks.jsonl exists
 ./cycle.sh --if-due                  # what the schedule runs: no-op unless due
 ```
+
+The gate's free checks run twice before any GPU is used: before the data is built
+(every `--gate-sets` set on disk; default `parity_prompts.jsonl:100,flint_tasks.jsonl`,
+or `FLINT_GATE_SETS`), and against the built manifest (guarded against those exact
+sets). If the gate would HOLD or REJECT a candidate unjudged, the cycle stops there:
+before the data it writes nothing, after it records `UNGATEABLE` with the reasons in
+`gate.json`. Training anyway would spend up to 4 hours of GPU next to the live model and
+leave a ~17 GB candidate in Ollama that no gate could promote. cycle.sh calls the gate
+through its own `tsx`, not `pnpm run`, which turns every failing exit into 1 (a HOLD
+would read as REJECT, remove the candidate and count toward the kill switch).
 
 | file | does |
 | --- | --- |
@@ -75,12 +88,13 @@ PROMOTE keeps it (~17 GB) until you `ollama rm` it.
 
 | kind | allowed when |
 | --- | --- |
-| `human` | Will wrote the answer (a correction, a rewrite) |
+| `human` | Will wrote the answer (a correction, a rewrite); `teacher.model` is empty or `will`, and a human row naming any model is refused |
 | `self` | the base model's own answer (profile `self_models`) that passed at least one verifiable check (tests ran, the calculator agreed, the tool call matched its schema), recorded in `teacher.checks` |
 | `open-weight` | a model listed in the profile's `[teachers]` with an `apache-2.0`/`mit` licence (the licence comes from the profile, never the row) |
 
 A frontier vendor's output (Claude, GPT, Sonar, Gemini, Nova, Grok...) is never a
-target, whatever the row says; there is no flag for it. Anthropic's terms prohibit using
+target, whatever the row says, `kind: human` included (a "Will edited Claude's reply"
+row is still Claude's text); there is no flag for it. Anthropic's terms prohibit using
 outputs as training targets and OpenAI's bar developing competing models. (Policy, not
 legal advice.) Prompts a vendor model wrote (the retired `bulk_seed`/`auto_grow` rows)
 are dropped too. Will's own prompts are his: when their answer is refused, the prompt
@@ -89,7 +103,9 @@ goes to `prompts_for_sampling.jsonl` for a compliant teacher to answer.
 **What that leaves today:** zero target rows. Of the corpus's 827 rows, 625 have
 Claude-written prompts, 101 overlap the parity set, 17 are in the eval pool, 42 are
 trivial, and the rest have Claude's answers. 40 eligible prompts remain for sampling.
-The cycle stays `not due` until compliant targets reach the profile's `min_train` (200).
+The cycle stays `not due` until the data would actually build: `min_train` (200) rows
+left for training *after* the valid split takes its share (so about 250 compliant
+targets), `min_valid` (50) valid rows, and enough rows with reasoning.
 
 **Sample batches** (`~/.flint/training/samples/*.jsonl`) are how compliant targets
 arrive. One row per example:
@@ -219,18 +235,26 @@ p < 0.05, a gain of at least 5 points in strict win rate against GPT-5, and the 
 bootstrap interval above 0, with no set going backwards, no category (n >= 10) dropping
 more than 10 points, the answer rate within a point, and the median answer no more than
 1.3x slower. HOLD when the measurement can't be trusted: a missing set (so with no
-`flint_tasks.jsonl` yet, a cycle's gate always HOLDs), a server deploy mid-gate, too few
-pairs, too many judge errors, a manifest guarded against another set version. REJECT
-outright for a contaminated manifest. About $20 a gate. It never promotes: PROMOTE
-prints the command, and running it is Will's call.
+`flint_tasks.jsonl` yet, a cycle with the default sets stops before training, see
+above), a server deploy mid-gate, too few pairs, too many judge errors, a manifest
+guarded against another set version. REJECT outright for a contaminated manifest. About
+$20 a gate. It never promotes: PROMOTE prints the commands that serve the candidate
+exactly as it was judged (also kept in `gate.json` as `promote`), and running them is
+Will's call. They set `OLLAMA_MODEL`, and `OLLAMA_THINK` to the think flag it was gated
+with (`serve.think`; the live plist has none, and a fused candidate on Ollama's MLX
+engine may default differently), reload the server so launchd re-reads the plist
+(`bootout` + `bootstrap`; `kickstart -k` would restart the old definition, still on the
+old model), and check that `/health` reports the candidate.
 
 ## Scheduling
 
 `com.flint.retrain.plist` runs `~/flint/apps/train/mlx/cycle.sh --if-due` nightly at
 02:30 from the deploy checkout. **It ships disabled**, and keeps the retired job's label
-so launchd's existing `disabled` override still applies. A cycle is due only with
-enough compliant data (>= `min_train`), 150+ new target rows or a changed profile since
-the last training cycle, and 7+ days since it. Two REJECT/NO_CANDIDATE results in a row
+so launchd's existing `disabled` override still applies. A cycle is due only when the
+data would build (`build_data --count-only` status `ok`), with 150+ new target rows or a
+changed profile since the last training cycle, and 7+ days since it. A due cycle whose
+gate would HOLD unjudged (with the default sets: until `flint_tasks.jsonl` exists) stops
+before building anything, every night, at the cost of a few seconds. Two REJECT/NO_CANDIDATE results in a row
 turn on the kill switch: only `cycle.sh --force` runs after that. A cycle also stands
 down while a local parity run (a bake-off or a gate) is using the GPU, and holds a lock
 so two never overlap. The gate refuses to run while a cycle trains (`TRAINING.json`).
@@ -256,8 +280,8 @@ Never re-enable the currently installed plist as it is: it runs the retired
 2. Terms-compliant targets in `~/.flint/training/samples/` (see Data), enough to pass
    `min_train`. `./cycle.sh --dry-run` shows the count.
 3. A real-task set for the gate, `~/.flint/eval/flint_tasks.jsonl`, from eval-pool
-   conversations only. Until then pass `--sets parity_prompts.jsonl:100` to the gate by
-   hand; a scheduled cycle HOLDs.
+   conversations only. Until then run the cycle with `--gate-sets
+   parity_prompts.jsonl:100`; with the default sets it stops before training (not gateable).
 4. A scratch packaging test (`package_candidate.sh` on a first adapter) to settle the
    two unverified Ollama import questions.
 5. `./cycle.sh --force` once, watched, when the bake-off isn't using Ollama.
@@ -292,5 +316,9 @@ pnpm --filter @flint/train test      # = cd mlx && python3 -m unittest discover 
 Stdlib only (Python 3.11+ for `tomllib`); no mlx, network or `~/.flint`. They cover
 the shared parity fixtures, the guard, the pool, the terms policy, every builder filter
 and the render, early stopping, the training driver's config and mask checks,
-memcheck's decisions, due/kill-switch logic, the profiles, the shell scripts' syntax
-and dry runs, and that nothing here unloads Ollama.
+memcheck's decisions, due/kill-switch logic (against the builder's own verdict), the
+profiles, the shell scripts' syntax and dry runs, cycle.sh stopping before training
+when the gate would HOLD, and that nothing here unloads Ollama. The cycle.sh tests run
+the real gate's free `--preflight-only` (skipped without `pnpm install`), with Ollama's
+host pointed at a closed port, `pgrep`/`taskpolicy`/`ollama` stubbed on `PATH`, and a
+measured peak that makes memcheck defer, so none of them can train.

@@ -26,7 +26,8 @@ const TRAINING_PROC_RE =
   /cycle\.sh|train_lora\.py|build_data\.py|package_candidate\.sh|gate-cli\.ts|ultimate_upgrade\.sh|retrain\.sh|mlx_lm lora|eval_judge\.py|prepare_data\.py/;
 
 /** cycle.sh's stamped line for an outcome that ends a cycle before the gate ("[2026-10-01 02:31] NO_DATA (see ...)"). */
-const CYCLE_END_RE = /^\[[\d: -]+\] (NO_DATA|DEFER|NO_CANDIDATE|PREEMPTED|PACKAGE_FAILED|CONTAMINATED|build_data failed|train_lora failed)\b/;
+const CYCLE_END_RE =
+  /^\[[\d: -]+\] (NO_DATA|UNGATEABLE|DEFER|NO_CANDIDATE|PREEMPTED|PACKAGE_FAILED|CONTAMINATED|build_data failed|gate preflight failed|train_lora failed)\b/;
 
 export type Phase = 'preparing' | 'loading' | 'training' | 'selecting' | 'judging' | 'complete' | 'stopped';
 
