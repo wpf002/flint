@@ -80,7 +80,7 @@ const STOPWORDS = new Set(
  * in their one real noun ("explain the history of X and why it matters") score
  * 0.8 and look like duplicates; on content words they don't.
  */
-function wordSet(s: string): Set<string> {
+export function wordSet(s: string): Set<string> {
   return new Set(normalize(s).split(' ').filter((w) => w && !STOPWORDS.has(w)));
 }
 

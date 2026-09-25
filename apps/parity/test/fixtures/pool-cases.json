@@ -1,0 +1,125 @@
+{
+  "_comment": "Shared contract between apps/parity/src/pool.ts and apps/train/mlx/pool.py (test/pool.test.ts, tests/test_pool.py).",
+  "cases": [
+    {
+      "conversationId": "c1783820981374",
+      "prompt": "anything at all",
+      "key": "conv:c1783820981374",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c1789499701925",
+      "prompt": "what is on my calendar",
+      "key": "conv:c1789499701925",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "console",
+      "prompt": "Explain the birthday paradox.",
+      "key": "prompt:00100cd7a076",
+      "pool": "train"
+    },
+    {
+      "conversationId": "console",
+      "prompt": "explain the birthday paradox",
+      "key": "prompt:00100cd7a076",
+      "pool": "train"
+    },
+    {
+      "conversationId": "generate",
+      "prompt": "How does a transistor work?",
+      "key": "prompt:449c4bc967f3",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "default",
+      "prompt": "Write a haiku about Dallas in September.",
+      "key": "prompt:80e1b0283887",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "",
+      "prompt": "who is fighting at UFC 329?",
+      "key": "prompt:2e11e1df2627",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "Console",
+      "prompt": "Why is the sky blue?",
+      "key": "prompt:4c216839c0f8",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "seed-12",
+      "prompt": "What causes the seasons to change?",
+      "key": "conv:seed-12",
+      "pool": "train"
+    },
+    {
+      "conversationId": "ufcdiag",
+      "prompt": "who won ufc 329",
+      "key": "conv:ufcdiag",
+      "pool": "eval"
+    },
+    {
+      "conversationId": "c1",
+      "prompt": "a",
+      "key": "conv:c1",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c2",
+      "prompt": "a",
+      "key": "conv:c2",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c3",
+      "prompt": "a",
+      "key": "conv:c3",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c4",
+      "prompt": "a",
+      "key": "conv:c4",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c5",
+      "prompt": "a",
+      "key": "conv:c5",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c6",
+      "prompt": "a",
+      "key": "conv:c6",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c7",
+      "prompt": "a",
+      "key": "conv:c7",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c8",
+      "prompt": "a",
+      "key": "conv:c8",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c9",
+      "prompt": "a",
+      "key": "conv:c9",
+      "pool": "train"
+    },
+    {
+      "conversationId": "c10",
+      "prompt": "a",
+      "key": "conv:c10",
+      "pool": "train"
+    }
+  ]
+}

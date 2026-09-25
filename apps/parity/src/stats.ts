@@ -4,8 +4,8 @@
  * Binomial(n, 0.5), two-sided, exactly — no normal approximation, because the
  * per-category cells are small.
  *
- * The signal labels match apps/train/mlx/eval_judge.py so the two histories read
- * the same: that script calls an edge of 2 coin-flip SDs SIGNIFICANT and 1 SD
+ * The signal labels match the retired apps/train/mlx/eval_judge.py so the two histories read
+ * the same: that script called an edge of 2 coin-flip SDs SIGNIFICANT and 1 SD
  * "weak". Those are p ≈ 0.05 and p ≈ 0.32 two-sided, which is what's used here,
  * computed exactly.
  */

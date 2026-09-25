@@ -1,0 +1,32 @@
+{
+  "builderVersion": 2,
+  "status": "ok",
+  "profile": {
+    "name": "muse-glimmer-30b"
+  },
+  "guard": {
+    "jaccard": 0.6,
+    "containment": 0.8,
+    "evalSets": [
+      {
+        "path": "/Users/willfoti/.flint/eval/gate_prompts.jsonl",
+        "required": true,
+        "present": true,
+        "sha256": "d27244da6b2ade764d2864f484db51710f2109d68a79ab4acba4a19455ce42ac",
+        "n": 60
+      },
+      {
+        "path": "/Users/willfoti/.flint/eval/flint_tasks.jsonl",
+        "required": false,
+        "present": false,
+        "sha256": null,
+        "n": 0
+      }
+    ],
+    "droppedByEvalSet": {},
+    "overlap": {
+      "train": 2,
+      "valid": 0
+    }
+  }
+}
