@@ -24,3 +24,29 @@ export type {
   ApprovalRequest,
   ToolSafety,
 } from './types.js';
+// The `web` connector's search backends (Tavily / Brave / keyless SearXNG), shared
+// so evals like apps/parity's search-compare see exactly what web_search sees.
+export {
+  WebSearch,
+  searchConfigFromEnv,
+  describeSearchConfig,
+  toToolPayload,
+  tavilySearch,
+  braveSearch,
+  searxngSearch,
+  DEFAULT_SEARXNG_URL,
+  NO_KEY_MESSAGE,
+} from './search-providers.js';
+export type {
+  SearchBackend,
+  SearchMode,
+  KeyedBackend,
+  SearchItem,
+  SearchSuccess,
+  SearchFailure,
+  SearchOutcome,
+  SearchConfig,
+  FailureKind,
+  FetchLike,
+  WebSearchDeps,
+} from './search-providers.js';

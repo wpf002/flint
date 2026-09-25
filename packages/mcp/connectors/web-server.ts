@@ -2,20 +2,32 @@
  * Web connector — gives Flint the open internet (Roadmap v2 Phase 11). Two
  * read-only tools:
  *   fetch_url(url)    — fetch a page and return readable text (keyless)
- *   web_search(query) — live search via a provider (needs a key)
+ *   web_search(query) — live search: a metered provider, keyless SearXNG, or both
  *
- * Search providers (set SEARCH_PROVIDER + SEARCH_API_KEY):
- *   tavily (default) — https://tavily.com  ·  brave — https://brave.com/search/api
+ * Search (full semantics in ../src/search-providers.ts):
+ *   SEARCH_PROVIDER  tavily (default when unset) | brave | searxng | auto
+ *   SEARCH_API_KEY   the tavily/brave key
+ *   SEARXNG_URL      default http://127.0.0.1:8888 (apps/studio/install_searxng.sh)
+ * `auto` is the recommended setting: the keyed provider stays primary while it
+ * works, and SearXNG answers when there is no key or the provider fails. Each
+ * result carries `source` (the backend that answered) and, after a fallback,
+ * `fallback: {from, reason}`.
  *
  * SECURITY: fetched/searched content is UNTRUSTED (prompt-injection risk). It is
  * returned as data for Flint to read, never as instructions. Reads are safe
  * (ungated); keep it that way — never let a web tool trigger a side effect.
  *
- *   SEARCH_PROVIDER=tavily SEARCH_API_KEY=tvly-... tsx packages/mcp/connectors/web-server.ts
+ *   SEARCH_PROVIDER=auto SEARCH_API_KEY=tvly-... tsx packages/mcp/connectors/web-server.ts
+ *
+ * Deployed as a self-contained bundle (the import below is inlined):
+ *   esbuild packages/mcp/connectors/web-server.ts --bundle --platform=node --format=esm \
+ *     --target=node20 --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
+ *     --outfile=$HOME/.flint/connectors/web-server.mjs
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { WebSearch, describeSearchConfig, searchConfigFromEnv, toToolPayload } from '../src/search-providers.js';
 
 function text(v: unknown) {
   return { content: [{ type: 'text' as const, text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] };
@@ -41,6 +53,11 @@ function htmlToText(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+// One router for the process: auto mode's cooldown after a spent key lives here.
+const searchConfig = searchConfigFromEnv();
+const search = new WebSearch(searchConfig, { log: (m) => console.error(m) });
+console.error(`[web] search: ${describeSearchConfig(searchConfig)}`);
 
 const server = new McpServer({ name: 'web', version: '1.0.0' });
 
@@ -75,47 +92,8 @@ server.registerTool(
     annotations: readOnly,
   },
   async ({ query, max_results }) => {
-    const key = process.env.SEARCH_API_KEY?.trim();
-    const provider = (process.env.SEARCH_PROVIDER ?? 'tavily').toLowerCase();
-    const n = Math.max(1, Math.min(max_results ?? 5, 10));
-    if (!key) {
-      return err('web_search needs a key: set SEARCH_PROVIDER (tavily|brave) + SEARCH_API_KEY.');
-    }
-    try {
-      if (provider === 'brave') {
-        const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${n}`, {
-          headers: { 'X-Subscription-Token': key, accept: 'application/json' },
-          signal: AbortSignal.timeout(20_000),
-        });
-        if (!res.ok) return err(`brave HTTP ${res.status}`);
-        const data = (await res.json()) as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
-        return text((data.web?.results ?? []).slice(0, n).map((r) => ({ title: r.title, url: r.url, snippet: r.description })));
-      }
-      // default: tavily
-      const res = await fetch('https://api.tavily.com/search', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          api_key: key,
-          query,
-          max_results: n,
-          include_answer: true, // Tavily synthesizes a current-info answer from live sources
-          search_depth: 'basic', // basic + include_answer is ~2-3x faster than 'advanced' and still solid
-        }),
-        signal: AbortSignal.timeout(25_000),
-      });
-      if (!res.ok) return err(`tavily HTTP ${res.status}`);
-      const data = (await res.json()) as {
-        answer?: string;
-        results?: Array<{ title: string; url: string; content: string }>;
-      };
-      return text({
-        answer: data.answer ?? null,
-        results: (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })),
-      });
-    } catch (e) {
-      return err(`search failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    const out = await search.search(query, max_results);
+    return out.ok ? text(toToolPayload(out)) : err(out.error);
   },
 );
 
