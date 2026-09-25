@@ -31,6 +31,8 @@
  */
 import { pairScores, strictScores, subjectStats, type PairedResult, type PromptScore } from './paired.js';
 import type { AnswerRow, JudgmentRow } from './report.js';
+import { baseClass, DEFAULT_SHARING, vendorAllowed } from './task-privacy.js';
+import type { TaskPrompt } from './tasks.js';
 
 export type GateVerdict = 'PROMOTE' | 'REJECT' | 'HOLD';
 
@@ -430,6 +432,25 @@ export function parseSetsSpec(spec: string): SetSpec[] {
   }
   if (out.length === 0) throw new Error('--sets names no prompt set');
   return out;
+}
+
+/** The vendor behind each `--competitor` the gate accepts. */
+export const GATE_COMPETITOR_VENDOR: Readonly<Record<string, string>> = { openai: 'openai', claude: 'anthropic', perplexity: 'perplexity' };
+
+const isTaskRow = (p: object): p is TaskPrompt =>
+  typeof (p as Partial<TaskPrompt>).privacy === 'string' && typeof (p as Partial<TaskPrompt>).templateId === 'string';
+
+/**
+ * A Flint-tasks set (`pnpm --filter @flint/parity build-tasks`, rows with a
+ * privacy class) keeps that suite's privacy rules in the gate: `run` sends each
+ * prompt to the competitor and Flint's answer to every judge, so only the prompts
+ * all of those vendors may see under the default sharing are gated on (personal
+ * tasks: Anthropic only; "stay local" tasks: nobody). Any other set's rows pass
+ * through unchanged. Applied before `:N`, so a slice is of what may be sent.
+ */
+export function gateShareable<T extends object>(prompts: readonly T[], vendors: readonly string[]): { kept: T[]; withheld: number } {
+  const kept = prompts.filter((p) => !isTaskRow(p) || vendors.every((v) => vendorAllowed(v, baseClass(p), DEFAULT_SHARING)));
+  return { kept, withheld: prompts.length - kept.length };
 }
 
 /** Score one set's run directory for both subjects against one competitor under one judge. */

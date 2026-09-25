@@ -11,7 +11,9 @@ import {
   decideGate,
   describeFingerprintChange,
   exitCodeOf,
+  GATE_COMPETITOR_VENDOR,
   gateHistoryRow,
+  gateShareable,
   parseManifest,
   parseSetsSpec,
   parseSpent,
@@ -301,6 +303,20 @@ describe('REJECT rules', () => {
 });
 
 describe('gate plumbing', () => {
+  it("keeps the Flint-tasks privacy rules: a tasks set is cut to what every vendor it's sent to may see", () => {
+    const task = (id: string, privacy: string, route?: 'local') => ({ id, prompt: id, category: 'task:x', templateId: id, privacy, ...(route ? { route } : {}) });
+    const rows = [task('web', 'public'), task('vantage', 'systems'), task('mail', 'personal-comms'), task('money', 'personal-finance'), task('here', 'systems', 'local')];
+    // The default gate: GPT-5 competes, the Opus + GPT-5 panel judges.
+    const openaiGate = gateShareable(rows, [GATE_COMPETITOR_VENDOR.openai!, 'anthropic', 'openai']);
+    expect(openaiGate.kept.map((p) => p.id)).toEqual(['web', 'vantage']);
+    expect(openaiGate.withheld).toBe(3);
+    // All-Anthropic: personal tasks may go, stay-local still may not.
+    expect(gateShareable(rows, [GATE_COMPETITOR_VENDOR.claude!, 'anthropic']).kept.map((p) => p.id)).toEqual(['web', 'vantage', 'mail', 'money']);
+    // A parity set (no privacy class) is never cut.
+    const parity = [{ id: 'p1', prompt: 'x', category: 'coding' }];
+    expect(gateShareable(parity, ['openai'])).toEqual({ kept: parity, withheld: 0 });
+  });
+
   it('parses --sets', () => {
     expect(parseSetsSpec('parity_prompts.jsonl:100, flint_tasks.jsonl')).toEqual([
       { name: 'parity_prompts', file: 'parity_prompts.jsonl', limit: 100 },

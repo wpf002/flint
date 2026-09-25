@@ -43,7 +43,9 @@ import {
   decideGate,
   describeFingerprintChange,
   exitCodeOf,
+  GATE_COMPETITOR_VENDOR,
   GATE_HISTORY_HEADER,
+  gateShareable,
   gateHistoryRow,
   parseManifest,
   parseSetsSpec,
@@ -197,6 +199,9 @@ async function main(): Promise<number> {
   if (!competitorModel) throw new Error(`--competitor ${competitor}: one of ${Object.keys(COMPETITOR_MODEL_DEFAULTS).join(', ')}`);
   const judgeModel = values['judge-model']?.trim() || panelId(parseJudgePanel(values['judge-panel']?.trim() || DEFAULT_PANEL));
   const judgeArgs = values['judge-model'] ? ['--judge-model', values['judge-model'].trim()] : ['--judge-panel', values['judge-panel']?.trim() || DEFAULT_PANEL];
+  // Every vendor a gated prompt (or Flint's answer to it) is sent to: a Flint-tasks set is cut to what they all may see.
+  const judgeVendors = values['judge-model'] ? ['anthropic'] : parseJudgePanel(values['judge-panel']?.trim() || DEFAULT_PANEL).map((p) => p.vendor);
+  const sendsTo = [...new Set([GATE_COMPETITOR_VENDOR[competitor]!, ...judgeVendors])];
   const baselineSubject = values['baseline-subject']?.trim() || flintContestantName({ localOnly: true, styleVariant: baselineVariant });
   const candidateSubject =
     values['candidate-subject']?.trim() ||
@@ -207,6 +212,11 @@ async function main(): Promise<number> {
   const sets = specs.map((s) => ({ ...s, path: isAbsolute(s.file) ? s.file : join(EVAL_DIR, s.file) }));
   const missingSets = sets.filter((s) => !existsSync(s.path)).map((s) => s.path);
   const present = sets.filter((s) => existsSync(s.path)).map((s) => ({ ...s, sha256: sha256File(s.path) }));
+  /** A set's prompts as the gate runs and scores them: what `sendsTo` may see, then its `:N` slice. */
+  const gatedPrompts = (s: (typeof present)[number]): { rows: EvalPrompt[]; shareable: EvalPrompt[]; withheld: number } => {
+    const { kept, withheld } = gateShareable(readJsonl<EvalPrompt>(s.path), sendsTo);
+    return { rows: s.limit !== undefined ? takeBalanced(kept, s.limit) : kept, shareable: kept, withheld };
+  };
 
   // ---- manifest
   let manifest: ManifestInfo | 'not-required' | undefined;
@@ -285,9 +295,17 @@ async function main(): Promise<number> {
       // Created up front: `run --run <path>` treats a path that doesn't exist yet as a run *name*.
       if (!values['dry-run']) mkdirSync(runDir, { recursive: true });
       runDirs.set(s.name, runDir);
+      // A Flint-tasks set: `run` gets only the prompts every vendor it sends to may see (gateShareable).
+      const g = gatedPrompts(s);
+      let promptsPath = s.path;
+      if (g.withheld > 0) {
+        log(`gate: ${s.name}: ${g.withheld} Flint-tasks prompt(s) withheld (personal: Anthropic only; stay local: nobody), since this gate sends to ${sendsTo.join(', ')}`);
+        promptsPath = join(runDir, 'gate-prompts.jsonl');
+        if (!values['dry-run']) writeFileAtomic(promptsPath, g.shareable.map((p) => JSON.stringify(p)).join('\n') + '\n');
+      }
       const plan = planSetRuns({
         runDir,
-        promptsPath: s.path,
+        promptsPath,
         limit: s.limit,
         competitor,
         competitorModel,
@@ -341,8 +359,7 @@ async function main(): Promise<number> {
   // ---- score and decide
   const outcomes = present.map((s) => {
     const runDir = runDirs.get(s.name)!;
-    let prompts = readJsonl<EvalPrompt>(s.path);
-    if (s.limit !== undefined) prompts = takeBalanced(prompts, s.limit);
+    const prompts = gatedPrompts(s).rows;
     return setOutcome({
       name: s.name,
       path: s.path,
