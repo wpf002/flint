@@ -92,10 +92,34 @@ the A/B order.
 **Budget.** `--budget-usd` (default 10) is a hard ceiling for the invocation. Each paid
 call reserves a pessimistic estimate first and is refused if spent + in-flight + estimate
 would cross the limit. After the call, the real cost is computed from the returned
-usage and list prices (`src/pricing.ts`). On a refusal the run stops launching work,
-writes the report and exits. Rough full-set cost at the defaults: about $15 of
+usage and list prices (`src/pricing.ts`, which re-exports the one price table in
+`@flint/core` that the server's spend ledger also uses). On a refusal the run stops
+launching work, writes the report and exits. Rough full-set cost at the defaults: about $15 of
 answers, $15 to $25 of Flint frontier tokens, and $20 to $35 of judging. Budget $60 to $80,
 or less with `--judge-model claude-sonnet-5`.
+
+**Shared daily budget.** On top of `--budget-usd`, every parity invocation on the
+machine draws on ONE daily eval budget: `PARITY_DAILY_BUDGET_USD` (default $25; days end
+at midnight in `FLINT_USER_TZ`, default America/Chicago). Before its first paid call an
+invocation reserves its `--budget-usd` in an append-only ledger,
+`~/.flint/eval/spend-ledger.jsonl` (`$PARITY_DIR/spend-ledger.jsonl`; override with
+`--spend-ledger <path>` or `PARITY_SPEND_LEDGER`), out of what today's eval spend and
+the other running evals' unspent reservations leave:
+
+- enough left: it runs with its full `--budget-usd`;
+- less left than asked: it runs capped at what is left (logged, and noted in the report),
+  and stops there like any budget stop;
+- less than $0.50 left (or than the ask, if that is smaller): it refuses to start and
+  says how much was spent and held.
+
+Every settled call is appended to the ledger as it happens, so a run that is killed
+still has its spend counted; its reservation stops holding budget once its process is
+gone. A full set costs more than the default day: raise `PARITY_DAILY_BUDGET_USD` for
+that day, or let it resume (`--run <ts>`) across days. Flint's own frontier calls during
+an eval are priced here (they are in the answer's usage), and the server logs them as
+`eval` rows that don't count against its own `FLINT_BUDGET_*` caps, so each dollar sits
+under exactly one cap. The server's tool searches (Perplexity, Tavily) during an eval DO
+count against the server's caps, since the harness can't see them.
 
 **Flint on his own (`--flint-local`).** Flint answers with the local brain only
 (`localOnly: true`, no Claude), as the contestant `flint-local`. Point it at an
@@ -409,8 +433,9 @@ measures that too.
 - **Self-preference.** The default judge is Claude. The `claude` competitor is also
   Claude, and so is Flint's frontier brain. Quote important results from a
   `--judge-panel` run, not the single judge (see section 3).
-- **Prices are list-price estimates** kept in `src/pricing.ts`. Unknown models are
-  priced high, so the guard trips early rather than late.
+- **Prices are list-price estimates** kept in `packages/core/src/pricing.ts` (each row
+  names its source; rows marked "verify" were not checked against the vendor's page).
+  Unknown models are priced high, so the guard trips early rather than late.
 - **One server build per comparison.** A win rate only compares with another from the
   same server build and prompt set (see "Compare answers from the same server build").
 
@@ -422,7 +447,8 @@ pnpm --filter @flint/parity test        # no network
 
 The tests cover category tagging, trivial filtering, dedupe, determinism and
 stratification, strict judge parsing (with one retry), position randomization, the
-sign test, the budget guard (including under concurrency), pricing, the history CSV,
+sign test, the budget guard (including under concurrency), the shared daily eval budget
+(concurrent invocations, crashed runs, midnight in Chicago), pricing, the history CSV,
 secrets parsing and token resolution; the panel's consensus rule, per-panelist A/B order,
 error and budget handling, and cache separation from single-judge rows; which judge a
 run uses (flags, then a resumed run's own, then the defaults); the

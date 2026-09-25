@@ -14,6 +14,7 @@ import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { AnthropicProvider, OpenAiProvider, type ProviderAdapter } from '@flint/core';
 import { BudgetGuard } from './budget.js';
+import { DailyEvalBudget, dailyLimitFrom } from './daily-budget.js';
 import {
   assertLocalModelName,
   claudeContestant,
@@ -137,6 +138,8 @@ async function run(argv: string[]): Promise<void> {
     options: {
       limit: { type: 'string' },
       'budget-usd': { type: 'string', default: '10' },
+      // The shared daily eval ledger (daily-budget.ts); PARITY_SPEND_LEDGER also sets it.
+      'spend-ledger': { type: 'string' },
       run: { type: 'string' },
       contestants: { type: 'string', default: 'flint,openai,claude,perplexity' },
       categories: { type: 'string' },
@@ -176,7 +179,10 @@ async function run(argv: string[]): Promise<void> {
   }
   if (values.limit) prompts = takeBalanced(prompts, Number(values.limit));
 
-  const budget = new BudgetGuard(Number(values['budget-usd']));
+  const budgetUsd = Number(values['budget-usd']);
+  if (!(budgetUsd > 0)) throw new Error(`--budget-usd must be > 0 (got ${values['budget-usd']})`);
+  // Checked now so a bad value fails before anything else; the ledger is opened just before the first paid call.
+  const dailyLimitUsd = dailyLimitFrom(process.env);
   const seed = Number(values.seed);
   const maxTokens = Number(values['max-tokens']);
   const now = new Date();
@@ -294,6 +300,27 @@ async function run(argv: string[]): Promise<void> {
   if (!flint) throw new Error('parity needs flint in --contestants');
   const competitors = contestants.filter((c) => c !== flint);
   if (competitors.length === 0) throw new Error('no competitor has a key — nothing to compare Flint against');
+
+  // ---- shared daily eval budget: this invocation's --budget-usd is reserved out of
+  // PARITY_DAILY_BUDGET_USD (default $25) across every parity invocation today, before
+  // any paid call. Less left than asked: capped at what's left. Nearly nothing: refused.
+  const daily = new DailyEvalBudget({
+    path: resolve(values['spend-ledger'] ?? (process.env.PARITY_SPEND_LEDGER?.trim() || join(EVAL_DIR, 'spend-ledger.jsonl'))),
+    dailyLimitUsd,
+    timeZone: process.env.FLINT_USER_TZ?.trim() || 'America/Chicago',
+  });
+  const grant = daily.open(basename(runDir), budgetUsd);
+  if (!grant.ok) throw new Error(grant.reason);
+  process.once('exit', () => daily.close());
+  if (grant.clipped) {
+    const why =
+      `today's shared eval budget ($${daily.dailyLimitUsd.toFixed(2)}, PARITY_DAILY_BUDGET_USD) had $${grant.grantedUsd.toFixed(2)} left ` +
+      `($${grant.spentTodayUsd.toFixed(2)} spent today${grant.heldUsd > 0 ? `, $${grant.heldUsd.toFixed(2)} held by other running evals` : ''}), ` +
+      `so this invocation is capped at $${grant.grantedUsd.toFixed(2)} instead of --budget-usd $${budgetUsd.toFixed(2)}`;
+    log(why);
+    notes.push(`Capped by the shared daily eval budget: ${why}.`);
+  }
+  const budget = new BudgetGuard(grant.grantedUsd, (usd) => daily.spend(usd));
 
   // ---- run dir (resolved above)
   mkdirSync(runDir, { recursive: true });
@@ -447,7 +474,13 @@ async function run(argv: string[]): Promise<void> {
   const summaries = summarize(latestJudgments(readJsonl<JudgmentRow>(judgmentsPath), judgeModel, subject, ids));
   const answerRows = latestAnswers(readJsonl<AnswerRow>(answersPath).filter((a) => ids.has(a.promptId)));
 
-  if (budget.exhausted) notes.push('The budget guard stopped the run; re-run with the same --run and a fresh --budget-usd to continue where it left off.');
+  if (budget.exhausted) {
+    notes.push(
+      grant.clipped
+        ? "The budget guard stopped the run at the shared daily eval budget; re-run with the same --run tomorrow (or raise PARITY_DAILY_BUDGET_USD) to continue where it left off."
+        : 'The budget guard stopped the run; re-run with the same --run and a fresh --budget-usd to continue where it left off.',
+    );
+  }
   notes.push(
     `Competitors answer through their raw APIs with no tools (no web search), given the same date/location context Flint gets; Flint answers end to end with its tools. Categories that need live data or Will's systems measure that difference on purpose.`,
   );
@@ -492,7 +525,9 @@ async function run(argv: string[]): Promise<void> {
   }
 
   process.stdout.write(md + '\n');
-  log(`spent $${budget.spent.toFixed(4)} this invocation; report -> ${join(runDir, reportName)}`);
+  daily.close();
+  const today = daily.state();
+  log(`spent $${budget.spent.toFixed(4)} this invocation ($${today.spentTodayUsd.toFixed(2)} of the $${daily.dailyLimitUsd.toFixed(2)} daily eval budget today); report -> ${join(runDir, reportName)}`);
   log(recordHistory ? `history -> ${HISTORY_PATH}` : 'nothing new judged; history unchanged');
   if (stopReason && stopReason !== `budget of $${budget.limitUsd.toFixed(2)} reached`) process.exitCode = 1;
 }
