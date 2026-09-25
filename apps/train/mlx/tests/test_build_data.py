@@ -133,6 +133,29 @@ class Filters(BuildBase):
         self.assertEqual(res.train[0]["messages"][-1]["tool_calls"][0]["function"]["name"], "web.web_search")
         self.assertTrue(all(x["tools"] == [{"name": "web.web_search"}] for x in res.train))
 
+    def test_only_the_last_exchange_is_a_target(self):
+        # Earlier turns are history, possibly another model's answers: context, never targets.
+        msgs = [
+            {"role": "user", "content": TOPICS[7]},
+            {"role": "assistant", "content": "An earlier answer by some other model. " * 3},
+            {"role": "user", "content": TOPICS[8]},
+            {"role": "assistant", "content": "The teacher's own answer to the follow-up. " * 3},
+        ]
+        rows = self._rows([sample_row(TOPICS[8], messages=msgs, cid=next(self.cids))])
+        res = self.run_build(rows, profile=small_profile(min_train=1, valid_n=0, min_valid=0))
+        self.assertEqual(len(res.train), 1)
+        self.assertEqual(len(res.train[0]["messages"]), 4)
+        self.assertTrue(res.train[0]["messages"][-1]["content"].startswith("The teacher's own answer"))
+
+    def test_a_last_exchange_without_a_final_answer_is_too_short(self):
+        msgs = [
+            {"role": "user", "content": TOPICS[7]},
+            {"role": "assistant", "content": LONG},
+            {"role": "user", "content": TOPICS[9]},
+        ]
+        res = self.run_build(self._rows([sample_row(TOPICS[9], messages=msgs, cid=next(self.cids))]))
+        self.assertEqual(res.manifest["drops"]["target:too-short"], 1)
+
     def test_bad_tool_call_json_is_dropped(self):
         msgs = [
             {"role": "user", "content": TOPICS[6]},
