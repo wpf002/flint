@@ -1,0 +1,65 @@
+# Alternate base: mixture-of-experts, 36B total / ~3B active. Cheapest to train
+# per token (LoRA on the experts works), but the 20 GB of 4-bit weights make
+# memory the tightest of the three next to the live model. Same linear-attention
+# training caveat as qwen3.8.
+
+name = "qwen3.6-35b-a3b"
+
+[base]
+family = "qwen3.6"
+mlx_model = "mlx-community/Qwen3.6-35B-A3B-4bit"
+mlx_revision = "38740b847e4cb78f352aba30aa41c76e08e6eb46"
+hf_source = "Qwen/Qwen3.6-35B-A3B"
+licence = "apache-2.0"
+ollama_live = "qwen3.6:35b"
+ollama_mlx_baseline = ""
+candidate_prefix = "flint-qwen36"
+self_models = ["qwen3.6", "flint-qwen36"]
+reasoning_key = "reasoning_content"
+
+[toolchain]
+mlx_lm_version = "0.32.0"
+mlx_lm_git = "1b3594b9c3a252b1c5d386424543b4cd6519d47c"
+
+[lora]
+num_layers = 16
+rank = 16
+scale = 20.0
+dropout = 0.05
+
+[train]
+batch_size = 1
+grad_accumulation_steps = 8
+learning_rate = 1e-4
+lr_end = 1e-5
+warmup_updates = 10
+max_epochs = 2
+max_seq_length = 2048
+grad_checkpoint = true
+mask_prompt = true
+evals_per_epoch = 4
+min_steps_per_eval = 40
+min_train = 200
+min_valid = 50
+valid_n = 120
+max_human_share = 0.30
+min_reasoning_share = 0.3
+
+[early_stop]
+patience = 3
+min_delta = 0.005
+min_epochs = 0.5
+diverge = 1.25
+max_hours = 4.0
+
+[serve]
+think = true
+variant = ""
+
+[memory]
+live_resident_gb = 20.0
+headroom_gb = 10.0
+footprints = ["2048x16", "2048x8", "1536x8"]
+peak_gb = { "2048x16" = 30.0, "2048x8" = 27.0, "1536x8" = 24.0 }
+
+[teachers]

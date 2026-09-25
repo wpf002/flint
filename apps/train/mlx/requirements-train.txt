@@ -1,0 +1,8 @@
+# The training venv (setup_train_env.sh). Pinned: train_lora.py refuses any
+# mlx-lm whose version differs from the profile's toolchain.mlx_lm_version, and
+# checks lora.train_model's signature before it trains.
+#
+# muse_glimmer support landed after the 0.31.3 PyPI release (mlx-lm PR #1710,
+# merged 2026-08-25). 1b3594b9 is the last commit touching
+# mlx_lm/models/muse_glimmer.py (2026-09-09); its package version is 0.32.0.
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@1b3594b9c3a252b1c5d386424543b4cd6519d47c

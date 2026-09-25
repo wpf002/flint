@@ -10,3 +10,5 @@ coverage/
 .verdaccio/storage/
 .verdaccio/htpasswd
 *.tgz
+__pycache__/
+*.pyc
