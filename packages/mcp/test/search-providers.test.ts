@@ -57,7 +57,7 @@ const SEARX_OK = {
     { title: 'Fed holds rates', url: 'https://apnews.com/x', content: 'The Federal Reserve held...', engine: 'duckduckgo', publishedDate: '2026-09-17T18:00:00' },
     { title: 'bad scheme', url: 'javascript:alert(1)', content: 'dropped' },
     { title: '', url: 'https://federalreserve.gov/y', content: '' },
-    { title: 'Third', url: 'https://c.com/3', content: 'three' },
+    { title: 'Third', url: 'https://c.com/3', content: 'rate outlook' },
   ],
   answers: [{ answer: '3.75% to 4%', url: 'https://federalreserve.gov' }],
   suggestions: [],
@@ -96,13 +96,44 @@ describe('config from env', () => {
       SEARCH_KEY_PROVIDER: 'brave',
       SEARXNG_URL: 'http://127.0.0.1:8899///',
       SEARCH_COOLDOWN_MS: '5000',
+      SEARCH_HEDGE_MS: '3000',
     });
-    expect(c).toMatchObject({ mode: 'auto', apiKey: 'k', keyProvider: 'brave', searxngUrl: 'http://127.0.0.1:8899', cooldownMs: 5000 });
-    // auto leaves room for the fallback inside deep_research's 25s search budget
-    expect(c.timeoutMs.brave).toBe(12_000);
+    expect(c).toMatchObject({ mode: 'auto', apiKey: 'k', keyProvider: 'brave', searxngUrl: 'http://127.0.0.1:8899', cooldownMs: 5000, hedgeMs: 3000 });
     expect(searchConfigFromEnv({ SEARCH_PROVIDER: 'auto' }).searxngUrl).toBe('http://127.0.0.1:8888');
     expect(searchConfigFromEnv({ SEARCH_PROVIDER: 'auto' }).apiKey).toBeUndefined();
     expect(searchConfigFromEnv({ SEARCH_TIMEOUT_MS: 'soon' }).timeoutMs.tavily).toBe(25_000);
+  });
+
+  it('auto keeps a slow paid reply: SearXNG is asked at 12s, the primary still has until 22s (tavily) / 20s (brave)', () => {
+    // 22s = 12s hedge + SearXNG's 10s, so the whole search fits deep_research's 25s per-search budget.
+    const c = searchConfigFromEnv({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-x' });
+    expect(c.timeoutMs).toEqual({ tavily: 22_000, brave: 20_000, searxng: 10_000 });
+    expect(c.hedgeMs).toBe(12_000);
+    expect(c.hedgeMs + c.timeoutMs.searxng).toBeLessThanOrEqual(c.timeoutMs.tavily);
+  });
+
+  it.each([
+    ['tvly-dev-abc', undefined, 'tavily'],
+    ['BSAabc123', undefined, 'brave'],
+    ['abc123', 'brave', 'brave'],
+    ['abc123', ' Tavily ', 'tavily'],
+  ] as const)('auto: key %s with SEARCH_KEY_PROVIDER=%s belongs to %s', (key, declared, provider) => {
+    const c = searchConfigFromEnv({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: key, ...(declared ? { SEARCH_KEY_PROVIDER: declared } : {}) });
+    expect(c.keyProvider).toBe(provider);
+    expect(c.configError).toBeUndefined();
+  });
+
+  it.each([
+    ['abc123', undefined, /can't tell whether SEARCH_API_KEY is a tavily or a brave key/],
+    ['tvly-x', 'brave', /SEARCH_KEY_PROVIDER=brave, but SEARCH_API_KEY looks like a tavily key/],
+    ['BSAabc', 'tavily', /SEARCH_KEY_PROVIDER=tavily, but SEARCH_API_KEY looks like a brave key/],
+    ['abc123', 'bing', /SEARCH_KEY_PROVIDER=bing is not tavily or brave/],
+  ] as const)('auto: key %s with SEARCH_KEY_PROVIDER=%s is not used anywhere', (key, declared, error) => {
+    const c = searchConfigFromEnv({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: key, ...(declared ? { SEARCH_KEY_PROVIDER: declared } : {}) });
+    expect(c.keyProvider).toBeUndefined();
+    expect(c.configError).toMatch(error);
+    expect(describeSearchConfig(c)).toMatch(/^auto: config error: .*; searxng only at http:\/\/127\.0\.0\.1:8888$/);
+    expect(describeSearchConfig(c)).not.toContain(key);
   });
 
   it('describes itself without the key', () => {
@@ -166,7 +197,7 @@ describe('mapping each backend to the tool shape', () => {
       results: [
         { title: 'Fed holds rates', url: 'https://apnews.com/x', snippet: 'The Federal Reserve held...', published_date: '2026-09-17T18:00:00' },
         { title: 'https://federalreserve.gov/y', url: 'https://federalreserve.gov/y', snippet: '' },
-        { title: 'Third', url: 'https://c.com/3', snippet: 'three' },
+        { title: 'Third', url: 'https://c.com/3', snippet: 'rate outlook' },
       ],
       source: 'searxng',
     });
@@ -224,8 +255,24 @@ describe('auto: keyed primary, SearXNG fallback', () => {
   });
 
   it('SEARCH_KEY_PROVIDER=brave makes brave the primary', async () => {
-    const { ws } = router({ ...AUTO, SEARCH_KEY_PROVIDER: 'brave' }, { brave: () => json({ web: { results: [] } }) });
+    const { ws } = router({ ...AUTO, SEARCH_API_KEY: 'k', SEARCH_KEY_PROVIDER: 'brave' }, { brave: () => json({ web: { results: [] } }) });
     expect(ws.plan()).toEqual(['brave', 'searxng']);
+  });
+
+  it('a Brave key with no SEARCH_KEY_PROVIDER goes to Brave, never to Tavily', async () => {
+    const { ws, stub } = router({ ...AUTO, SEARCH_API_KEY: 'BSAsecret' }, { brave: () => json({ web: { results: [{ title: 'T', url: 'https://b.com', description: 'd' }] } }) });
+    expect(ws.plan()).toEqual(['brave', 'searxng']);
+    expect(ok(await ws.search('q')).source).toBe('brave');
+    expect(stub.calls.map((c) => c.backend)).toEqual(['brave']);
+  });
+
+  it("a key whose provider can't be told is sent nowhere: SearXNG answers alone", async () => {
+    const { ws, stub } = router({ ...AUTO, SEARCH_API_KEY: 'mystery-key' }, { searxng: () => json(SEARX_OK) });
+    expect(ws.plan()).toEqual(['searxng']);
+    const out = ok(await ws.search('q'));
+    expect(out.source).toBe('searxng');
+    expect(stub.calls.map((c) => c.backend)).toEqual(['searxng']);
+    expect(JSON.stringify(stub.calls)).not.toContain('mystery-key');
   });
 
   it.each([
@@ -254,6 +301,19 @@ describe('auto: keyed primary, SearXNG fallback', () => {
     expect(out.fallback).toEqual({ from: 'tavily', reason: 'tavily found nothing' });
   });
 
+  it("keeps the primary's paid answer when it found no results and SearXNG did", async () => {
+    const { ws } = router(AUTO, {
+      tavily: () => json({ answer: 'Tavily says X.', results: [] }),
+      searxng: () => json({ results: [{ title: 'Fed', url: 'https://a.com', content: 'x' }] }),
+    });
+    const out = ok(await ws.search('fed'));
+    expect(out).toMatchObject({ source: 'searxng', answer: 'Tavily says X.', fallback: { from: 'tavily', reason: 'tavily found nothing' } });
+    expect(out.results).toHaveLength(1);
+    // SearXNG's own direct answer, when it has one, is about the results it returned: that one stays.
+    const own = router(AUTO, { tavily: () => json({ answer: 'Tavily says X.', results: [] }), searxng: () => json(SEARX_OK) });
+    expect(ok(await own.ws.search('fed rate')).answer).toBe('3.75% to 4%');
+  });
+
   it('keeps the primary empty result (and its answer) when SearXNG has nothing either', async () => {
     const { ws } = router(AUTO, {
       tavily: () => json({ answer: 'Only an answer.', results: [] }),
@@ -278,12 +338,12 @@ describe('auto: keyed primary, SearXNG fallback', () => {
       { tavily: () => (quota ? json({}, 432) : json(TAVILY_OK)), searxng: () => json(SEARX_OK) },
       clock,
     );
-    ok(await ws.search('first'));
+    ok(await ws.search('fed rate first'));
     expect(logs.some((l) => l.includes('tavily HTTP 432 (quota); searxng answers for in 10 min'))).toBe(true);
     expect(ws.plan()).toEqual(['searxng', 'tavily']);
 
     const logsBefore = logs.length;
-    const parked = ok(await ws.search('second'));
+    const parked = ok(await ws.search('fed rate second'));
     expect(parked.source).toBe('searxng');
     expect(parked.fallback?.reason).toMatch(/^skipped after tavily HTTP 432 \(quota\), retrying in 10 min$/);
     expect(stub.count('tavily')).toBe(1); // not re-tried while parked
@@ -292,7 +352,43 @@ describe('auto: keyed primary, SearXNG fallback', () => {
     quota = false;
     clock.t += 600_000;
     expect(ws.plan()).toEqual(['tavily', 'searxng']);
-    expect(ok(await ws.search('third')).source).toBe('tavily');
+    expect(ok(await ws.search('fed rate third')).source).toBe('tavily');
+  });
+
+  it.each([
+    [401, 'auth'],
+    [403, 'auth'],
+    [402, 'quota'],
+    [432, 'quota'],
+    [433, 'quota'],
+  ] as const)('HTTP %i (%s) parks the key for the cooldown after one failure', async (status, kind) => {
+    const clock = { t: 0 };
+    const { ws, stub } = router({ ...AUTO, SEARCH_COOLDOWN_MS: '600000' }, { tavily: () => json({}, status), searxng: () => json(SEARX_OK) }, clock);
+    const out = ok(await ws.search('q'));
+    expect(out.fallback?.reason).toBe(`tavily HTTP ${status} (${kind})`);
+    expect(ws.plan()).toEqual(['searxng', 'tavily']);
+    await ws.search('q');
+    expect(stub.calls.map((c) => c.backend)).toEqual(['tavily', 'searxng', 'searxng']);
+    clock.t += 599_999;
+    expect(ws.plan()[0]).toBe('searxng');
+    clock.t += 1;
+    expect(ws.plan()[0]).toBe('tavily');
+  });
+
+  it('a 429 with no Retry-After parks the key for 60s', async () => {
+    const clock = { t: 0 };
+    const { ws } = router(AUTO, { tavily: () => json({}, 429), searxng: () => json(SEARX_OK) }, clock);
+    await ws.search('q');
+    clock.t += 59_999;
+    expect(ws.plan()[0]).toBe('searxng');
+    clock.t += 1;
+    expect(ws.plan()[0]).toBe('tavily');
+  });
+
+  it.each([429, 401, 403])("a SearXNG %i never parks the paid key", async (status) => {
+    const { ws } = router(AUTO, { tavily: () => json({}, 500), searxng: () => json({}, status) });
+    expect((await ws.search('q')).ok).toBe(false);
+    expect(ws.plan()).toEqual(['tavily', 'searxng']);
   });
 
   it('a 429 parks the key only for Retry-After', async () => {
@@ -313,12 +409,61 @@ describe('auto: keyed primary, SearXNG fallback', () => {
   it('while parked, a failing SearXNG still gets the key a try', async () => {
     const clock = { t: 0 };
     let calls = 0;
-    const { ws } = router(AUTO, { tavily: () => (++calls === 1 ? json({}, 401) : json(TAVILY_OK)), searxng: refused }, clock);
+    const { ws, stub } = router(AUTO, { tavily: () => (++calls === 1 ? json({}, 401) : json(TAVILY_OK)), searxng: refused }, clock);
     expect((await ws.search('q')).ok).toBe(false); // 401 then SearXNG down
+    expect(ws.plan()).toEqual(['searxng', 'tavily']); // the 401 parked the key
     const out = ok(await ws.search('q')); // parked: SearXNG first (down), then the key, which works now
+    expect(stub.calls.map((c) => c.backend)).toEqual(['tavily', 'searxng', 'searxng', 'tavily']);
     expect(out.source).toBe('tavily');
     expect(out.fallback).toBeUndefined();
     expect(ws.plan()[0]).toBe('tavily'); // a success clears the cooldown
+  });
+});
+
+// ---------------------------------------------------------------- auto: a slow primary
+
+describe('auto: a slow primary is hedged, not abandoned', () => {
+  // Scaled down: SearXNG is asked once the primary has taken 30ms; the primary may take up to 400ms.
+  const SLOW = { SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-x', SEARCH_HEDGE_MS: '30', SEARCH_TIMEOUT_MS: '400', SEARXNG_TIMEOUT_MS: '400' };
+  const after = (ms: number, res: () => Response): Route => () => new Promise((r) => setTimeout(() => r(res()), ms));
+
+  it('a reply that arrives after the hedge point but before the deadline is used (it was billed)', async () => {
+    const { ws, stub, logs } = router(SLOW, { tavily: after(120, () => json(TAVILY_OK)), searxng: () => json(SEARX_OK) });
+    const out = ok(await ws.search('q'));
+    expect(out).toMatchObject({ source: 'tavily', answer: 'The Fed held rates at 3.75-4%.' });
+    expect(out.fallback).toBeUndefined();
+    expect(stub.calls.map((c) => c.backend)).toEqual(['tavily', 'searxng']); // SearXNG was asked, then not needed
+    expect(logs.join('\n')).toContain('tavily slow');
+  });
+
+  it('a fast reply never wakes SearXNG', async () => {
+    const { ws, stub } = router(SLOW, { tavily: () => json(TAVILY_OK), searxng: () => json(SEARX_OK) });
+    expect(ok(await ws.search('q')).source).toBe('tavily');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(stub.count('searxng')).toBe(0);
+  });
+
+  it('a primary that never answers: the SearXNG result started at the hedge point answers at the deadline', async () => {
+    const { ws, stub } = router(SLOW, { tavily: hang, searxng: () => json(SEARX_OK) });
+    const t = Date.now();
+    const out = ok(await ws.search('q'));
+    expect(Date.now() - t).toBeGreaterThanOrEqual(390);
+    expect(out).toMatchObject({ source: 'searxng', fallback: { from: 'tavily', reason: 'tavily timed out after 400ms' } });
+    expect(stub.count('searxng')).toBe(1); // the hedged call, not a second one
+  });
+
+  it('a slow primary that then fails uses the SearXNG call already in flight', async () => {
+    const { ws, stub } = router(SLOW, { tavily: after(80, () => json({}, 500)), searxng: () => json(SEARX_OK) });
+    const out = ok(await ws.search('q'));
+    expect(out).toMatchObject({ source: 'searxng', fallback: { from: 'tavily', reason: 'tavily HTTP 500' } });
+    expect(stub.calls.map((c) => c.backend)).toEqual(['tavily', 'searxng']);
+  });
+
+  it('a slow primary that finds nothing gets the hedged SearXNG results', async () => {
+    const { ws, stub } = router(SLOW, { tavily: after(80, () => json({ answer: null, results: [] })), searxng: () => json(SEARX_OK) });
+    const out = ok(await ws.search('fed rate'));
+    expect(out).toMatchObject({ source: 'searxng', fallback: { reason: 'tavily found nothing' } });
+    expect(stub.count('searxng')).toBe(1);
   });
 });
 
@@ -361,5 +506,60 @@ describe('SearXNG replies that are not results', () => {
   it('times out instead of hanging', async () => {
     const { ws } = router(S, { searxng: hang });
     expect(await ws.search('q')).toMatchObject({ ok: false, kind: 'timeout', error: 'searxng timed out after 40ms' });
+  });
+});
+
+// ---------------------------------------------------------------- searxng relevance
+
+describe('SearXNG results that share nothing with the query are dropped', () => {
+  const S = { SEARCH_PROVIDER: 'searxng', ...FAST };
+  // What a broken engine (Bing's scraper, live on 2026-09-25) put at ranks 1 and 3 for this query.
+  const MIXED = {
+    results: [
+      { title: 'nocache - npm', url: 'https://www.npmjs.com/package/nocache', content: 'Middleware to destroy caching', engine: 'bing' },
+      { title: 'Servers which support WSGI — WSGI.org', url: 'https://wsgi.readthedocs.io/en/latest/servers.html', content: 'Gunicorn, uWSGI', engine: 'mojeek' },
+      { title: 'Adult videos', url: 'https://example-adult.com/', content: 'Free videos', engine: 'bing' },
+      { title: 'Granian Alternatives and Reviews', url: 'https://www.libhunt.com/r/granian', content: '', engine: 'mojeek' },
+      { title: 'emmett-framework', url: 'https://github.com/emmett-framework/granian', content: 'A Rust HTTP server for Python applications', engine: 'mojeek' },
+    ],
+  };
+
+  it('keeps results that mention any query term in the title, snippet or URL, in rank order', async () => {
+    const { ws } = router(S, { searxng: () => json(MIXED) });
+    const out = ok(await ws.search('granian wsgi server'));
+    expect(out.results.map((r) => r.url)).toEqual([
+      'https://wsgi.readthedocs.io/en/latest/servers.html',
+      'https://www.libhunt.com/r/granian',
+      'https://github.com/emmett-framework/granian',
+    ]);
+  });
+
+  it('matches inflections and case (a term inside a longer word counts)', async () => {
+    const { ws } = router(S, {
+      searxng: () => json({ results: [{ title: 'FOMC: Federal Reserve decided to hold', url: 'https://federalreserve.gov/x', content: '' }, { title: 'FedEx tracking', url: 'https://fedex.com', content: '' }] }),
+    });
+    expect(ok(await ws.search('What did the Fed DECIDE?')).results).toHaveLength(2);
+  });
+
+  it('fills up to max_results from the relevant ones', async () => {
+    const { ws } = router(S, { searxng: () => json(MIXED) });
+    expect(ok(await ws.search('granian', 2)).results.map((r) => r.url)).toEqual(['https://www.libhunt.com/r/granian', 'https://github.com/emmett-framework/granian']);
+  });
+
+  it('everything unrelated is a failure that says so, not an empty web', async () => {
+    const junk = { results: MIXED.results.filter((r) => r.engine === 'bing'), unresponsive_engines: [['duckduckgo', 'CAPTCHA']] };
+    const { ws } = router(S, { searxng: () => json(junk) });
+    expect(await ws.search('granian wsgi server')).toMatchObject({
+      ok: false,
+      kind: 'empty',
+      error: 'searxng found nothing relevant (2 unrelated results dropped; engines failing: duckduckgo: CAPTCHA)',
+    });
+  });
+
+  it('leaves queries it cannot tokenize alone: only stopwords or short terms, or scripts without spaces', async () => {
+    for (const q of ['q', 'what is it', 'AI', '東京の天気']) {
+      const { ws } = router(S, { searxng: () => json(MIXED) });
+      expect(ok(await ws.search(q, 10)).results, q).toHaveLength(5);
+    }
   });
 });

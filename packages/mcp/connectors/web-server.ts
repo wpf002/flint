@@ -5,9 +5,10 @@
  *   web_search(query) — live search: a metered provider, keyless SearXNG, or both
  *
  * Search (full semantics in ../src/search-providers.ts):
- *   SEARCH_PROVIDER  tavily (default when unset) | brave | searxng | auto
- *   SEARCH_API_KEY   the tavily/brave key
- *   SEARXNG_URL      default http://127.0.0.1:8888 (apps/studio/install_searxng.sh)
+ *   SEARCH_PROVIDER      tavily (default when unset) | brave | searxng | auto
+ *   SEARCH_API_KEY       the tavily/brave key
+ *   SEARCH_KEY_PROVIDER  auto only: tavily | brave, when the key's prefix (tvly- / BSA) doesn't say
+ *   SEARXNG_URL          default http://127.0.0.1:8888 (apps/studio/install_searxng.sh)
  * `auto` is the recommended setting: the keyed provider stays primary while it
  * works, and SearXNG answers when there is no key or the provider fails. Each
  * result carries `source` (the backend that answered) and, after a fallback,

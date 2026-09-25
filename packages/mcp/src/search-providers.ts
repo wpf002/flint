@@ -14,10 +14,18 @@
  *                   is set, so capability is unchanged while it works. SearXNG
  *                   answers when there is no key, and gets one retry when the
  *                   primary fails (non-2xx, quota, rate limit, timeout, network,
- *                   an unreadable reply) or finds nothing. After an auth or quota
- *                   failure the primary is skipped for a cooldown instead of
- *                   being re-tried on every query; it comes back after the
- *                   cooldown, or at once if SearXNG fails in the meantime.
+ *                   an unreadable reply) or finds nothing. A slow primary is
+ *                   hedged, not abandoned: SearXNG is asked too once it has taken
+ *                   SEARCH_HEDGE_MS, and the primary's reply still wins if it
+ *                   comes before its own timeout. After an auth or quota failure
+ *                   the primary is skipped for a cooldown instead of being
+ *                   re-tried on every query; it comes back after the cooldown,
+ *                   or at once if SearXNG fails in the meantime.
+ *
+ * In auto, SEARCH_API_KEY goes only to the provider it evidently belongs to:
+ * SEARCH_KEY_PROVIDER when set, else the key's prefix (tvly- is Tavily, BSA is
+ * Brave). A key that can't be placed, or contradicts SEARCH_KEY_PROVIDER, is
+ * sent nowhere, and describeSearchConfig says why.
  *
  * Every success names the backend that answered (`source`), and a fallback
  * names what it replaced and why, so logs and evals can attribute answers.
@@ -65,10 +73,17 @@ export type SearchOutcome = SearchSuccess | SearchFailure;
 export interface SearchConfig {
   mode: SearchMode;
   apiKey?: string;
-  /** In auto mode, which metered backend SEARCH_API_KEY belongs to. */
-  keyProvider: KeyedBackend;
+  /**
+   * In auto mode, which metered backend SEARCH_API_KEY belongs to. Unset when
+   * that can't be told (see configError): the key is then used nowhere.
+   */
+  keyProvider?: KeyedBackend;
+  /** Why auto mode isn't using SEARCH_API_KEY, for the startup log. */
+  configError?: string;
   searxngUrl: string;
   timeoutMs: Record<SearchBackend, number>;
+  /** Auto mode: once the primary has taken this long, SearXNG is asked too. */
+  hedgeMs: number;
   /** How long auto mode skips a primary after an auth or quota failure. */
   cooldownMs: number;
 }
@@ -87,32 +102,53 @@ export function searchConfigFromEnv(env: Record<string, string | undefined> = pr
   // Anything unrecognised meant tavily before this module existed; it still does.
   const mode: SearchMode = raw === 'brave' || raw === 'searxng' || raw === 'auto' ? raw : 'tavily';
   const apiKey = env.SEARCH_API_KEY?.trim();
-  const keyProvider: KeyedBackend = env.SEARCH_KEY_PROVIDER?.trim().toLowerCase() === 'brave' ? 'brave' : 'tavily';
-  // auto has a second backend to try, so the primary gets less rope: a fallback
-  // has to finish inside deep_research's 25s per-search budget.
-  const primaryMs = positive(env.SEARCH_TIMEOUT_MS);
+  const owner = mode === 'auto' && apiKey ? keyOwner(apiKey, env.SEARCH_KEY_PROVIDER) : undefined;
   const auto = mode === 'auto';
+  const primaryMs = positive(env.SEARCH_TIMEOUT_MS);
   return {
     mode,
     ...(apiKey ? { apiKey } : {}),
-    keyProvider,
+    ...(owner && 'provider' in owner ? { keyProvider: owner.provider } : {}),
+    ...(owner && 'error' in owner ? { configError: owner.error } : {}),
     searxngUrl: (env.SEARXNG_URL?.trim() || DEFAULT_SEARXNG_URL).replace(/\/+$/, ''),
     timeoutMs: {
-      tavily: primaryMs ?? (auto ? 12_000 : 25_000),
-      brave: primaryMs ?? (auto ? 12_000 : 20_000),
+      // auto: SearXNG is asked at hedgeMs (12s) and has 10s, so tavily's 22s keeps
+      // the whole search inside deep_research's 25s per-search budget.
+      tavily: primaryMs ?? (auto ? 22_000 : 25_000),
+      brave: primaryMs ?? 20_000,
       searxng: positive(env.SEARXNG_TIMEOUT_MS) ?? 10_000,
     },
+    hedgeMs: positive(env.SEARCH_HEDGE_MS) ?? 12_000,
     cooldownMs: positive(env.SEARCH_COOLDOWN_MS) ?? 15 * 60_000,
   };
+}
+
+/**
+ * Which metered API a key belongs to: SEARCH_KEY_PROVIDER when set, else the
+ * key's prefix. Either way a key never goes to a vendor whose prefix it lacks
+ * when it carries the other vendor's prefix. The error never includes the key.
+ */
+export function keyOwner(apiKey: string, declared?: string): { provider: KeyedBackend } | { error: string } {
+  const looks: KeyedBackend | undefined = /^tvly-/i.test(apiKey) ? 'tavily' : /^BSA/.test(apiKey) ? 'brave' : undefined;
+  const said = declared?.trim().toLowerCase();
+  if (!said) {
+    return looks
+      ? { provider: looks }
+      : { error: "can't tell whether SEARCH_API_KEY is a tavily or a brave key; set SEARCH_KEY_PROVIDER" };
+  }
+  if (said !== 'tavily' && said !== 'brave') return { error: `SEARCH_KEY_PROVIDER=${said} is not tavily or brave` };
+  if (looks && looks !== said) return { error: `SEARCH_KEY_PROVIDER=${said}, but SEARCH_API_KEY looks like a ${looks} key` };
+  return { provider: said };
 }
 
 /** One line for the connector's startup log. Never includes the key. */
 export function describeSearchConfig(c: SearchConfig): string {
   if (c.mode === 'searxng') return `searxng at ${c.searxngUrl}`;
   if (c.mode === 'auto') {
-    return c.apiKey
+    if (!c.apiKey) return `auto: no key, searxng at ${c.searxngUrl}`;
+    return c.keyProvider
       ? `auto: ${c.keyProvider} (key set), searxng fallback at ${c.searxngUrl}`
-      : `auto: no key, searxng at ${c.searxngUrl}`;
+      : `auto: config error: ${c.configError}; searxng only at ${c.searxngUrl}`;
   }
   return c.apiKey ? `${c.mode} (key set, no fallback)` : `${c.mode} with no key: web_search disabled`;
 }
@@ -180,12 +216,15 @@ export async function searxngSearch(query: string, n: number, baseUrl: string, o
     if (!res.ok) return httpFailure('searxng', res);
     const data = await readJson('searxng', res, FORMATS_HINT);
     if (!isRecord(data) || !Array.isArray(data.results)) throw new ParseFailure('searxng reply has no results list');
-    const results = list(data.results)
-      .flatMap((r) => item(r.title, r.url, r.content, r.publishedDate))
-      .slice(0, n);
+    const all = list(data.results).flatMap((r) => item(r.title, r.url, r.content, r.publishedDate));
+    const results = all.filter(relevantTo(query)).slice(0, n);
     if (results.length === 0) {
-      // Every engine blocked or timed out is a failure, not an empty web.
+      // Every engine blocked, timed out or off-topic is a failure, not an empty web.
       const failing = unresponsive(data.unresponsive_engines);
+      if (all.length > 0) {
+        const why = `${all.length} unrelated result${all.length === 1 ? '' : 's'} dropped${failing ? `; engines failing: ${failing}` : ''}`;
+        return { ok: false, source: 'searxng', kind: 'empty', error: `searxng found nothing relevant (${why})` };
+      }
       if (failing) return { ok: false, source: 'searxng', kind: 'empty', error: `searxng found nothing (engines failing: ${failing})` };
     }
     return { ok: true, source: 'searxng', answer: firstAnswer(data.answers) ?? null, results };
@@ -216,7 +255,7 @@ export class WebSearch {
     this.log = deps.log ?? (() => {});
   }
 
-  /** The keyed backend auto mode prefers, if it has a key. */
+  /** The keyed backend auto mode prefers, if it has a key it can place. */
   get primary(): KeyedBackend | undefined {
     return this.config.mode === 'auto' && this.config.apiKey ? this.config.keyProvider : undefined;
   }
@@ -243,9 +282,13 @@ export class WebSearch {
     let skipped = parked ? `skipped after ${this.cooldown!.reason}, retrying ${untilText(this.cooldown!.until - this.now())}` : undefined;
     const failures: SearchFailure[] = [];
     let empty: SearchSuccess | undefined;
+    // The SearXNG call a slow primary's hedge already started, if it did.
+    let hedged: Promise<SearchOutcome> | undefined;
 
     for (const backend of order) {
-      const out = await this.call(backend, query, n);
+      let out: SearchOutcome;
+      if (backend === primary && !parked) ({ out, hedged } = await this.callHedged(primary, query, n));
+      else out = await (backend === 'searxng' && hedged ? hedged : this.call(backend, query, n));
       if (!out.ok) {
         this.noteFailure(out);
         failures.push(out);
@@ -262,7 +305,8 @@ export class WebSearch {
       if (backend === 'searxng' && primary && skipped) {
         if (empty && out.results.length === 0) return empty;
         if (!parked) this.log(`[web_search] ${skipped}; searxng answered`);
-        return { ...out, fallback: { from: primary, reason: skipped } };
+        // A primary that found no pages may still have answered (and billed for it).
+        return { ...out, answer: out.answer ?? empty?.answer ?? null, fallback: { from: primary, reason: skipped } };
       }
       return out;
     }
@@ -272,6 +316,25 @@ export class WebSearch {
       ...first!,
       error: [first!.error, ...rest.map((f) => `fallback ${f.error}`)].join('; '),
     };
+  }
+
+  /**
+   * The primary, hedged: if it hasn't answered after hedgeMs, SearXNG starts
+   * alongside, but the primary's reply (already paid for) is still the one used
+   * if it comes before the primary's own timeout. The caller uses `hedged` only
+   * if the primary fails or finds nothing.
+   */
+  private async callHedged(primary: KeyedBackend, query: string, n: number): Promise<{ out: SearchOutcome; hedged?: Promise<SearchOutcome> }> {
+    const call = this.call(primary, query, n);
+    const { hedgeMs, timeoutMs } = this.config;
+    if (!(hedgeMs < timeoutMs[primary])) return { out: await call };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const first = await Promise.race([call, new Promise<undefined>((resolve) => (timer = setTimeout(() => resolve(undefined), hedgeMs)))]);
+    clearTimeout(timer);
+    if (first) return { out: first };
+    this.log(`[web_search] ${primary} slow (no reply after ${hedgeMs}ms); asking searxng too`);
+    const hedged = this.call('searxng', query, n);
+    return { out: await call, hedged };
   }
 
   private call(backend: SearchBackend, query: string, n: number): Promise<SearchOutcome> {
@@ -382,6 +445,41 @@ function item(title: unknown, url: unknown, snippet: unknown, date?: unknown): S
   if (!u || !/^https?:\/\//i.test(u)) return [];
   const d = str(date);
   return [{ title: str(title) ?? u, url: u, snippet: str(snippet) ?? '', ...(d ? { published_date: d } : {}) }];
+}
+
+const STOPWORDS = new Set(
+  'the and for with from that this what when where which who whom whose why how are was were been being does did has have had can could would should will shall may might must its into onto about than then there their them they you your our not but any all some'.split(
+    ' ',
+  ),
+);
+
+/** Scripts written without spaces between words: there, "a query term" isn't something a regex can cut out. */
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
+/**
+ * A SearXNG result must mention at least one of the query's terms (3+ letters,
+ * not a stopword) in its title, snippet or URL; a term inside a longer word
+ * counts ("decide" in "decided", "fed" in "federal"). The bar is low on
+ * purpose: it keeps anything plausibly on topic and only stops an engine whose
+ * scraper broke from putting unrelated pages (it happened: npm, FedEx, adult
+ * sites) at rank 1. A query with no such terms isn't filtered at all.
+ */
+function relevantTo(query: string): (r: SearchItem) => boolean {
+  if (UNSPACED.test(query)) return () => true;
+  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])].filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  if (terms.length === 0) return () => true;
+  return (r) => {
+    const hay = `${r.title}\n${r.snippet}\n${safeDecode(r.url)}`.toLowerCase();
+    return terms.some((t) => hay.includes(t));
+  };
+}
+
+function safeDecode(u: string): string {
+  try {
+    return decodeURIComponent(u);
+  } catch {
+    return u;
+  }
 }
 
 function firstAnswer(answers: unknown): string | undefined {
