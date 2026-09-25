@@ -94,6 +94,23 @@ export type {
 export { ActionLogObserver, combineObservers } from './observability/action-log.js';
 export type { ActionEntry } from './observability/action-log.js';
 
+// --- pricing (one price table for every budget guard) -------------------------
+export {
+  PAID_VENDORS,
+  UNLISTED_PRICE,
+  priceOf,
+  isListedModel,
+  costOf,
+  estimateCost,
+  vendorOfProvider,
+  ttsCostOf,
+  TAVILY_USD_PER_CREDIT,
+  tavilySearchCredits,
+  PERPLEXITY_SEARCH_CALL_USD,
+  spendPeriod,
+} from './pricing.js';
+export type { TokenPrice, TokenVendor, PaidVendor } from './pricing.js';
+
 // --- memory -----------------------------------------------------------------
 export { InMemoryStore } from './memory/in-memory.js';
 export { SCHEMA_VERSION, TurnSchema, TurnStatus } from './memory/store.js';
