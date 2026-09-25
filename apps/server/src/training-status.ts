@@ -11,13 +11,22 @@ import type { Tool } from '@flint/core';
  * here is read from the files the pipeline already writes; nothing is inferred.
  */
 
-/** The logs a run writes to, newest wins. Paths are relative to the brain dir. */
+/**
+ * The logs a run writes to, newest wins. Paths are relative to the brain dir.
+ * The training cycle (apps/train/mlx/cycle.sh) replaced the 70B upgrade and the
+ * weekly retrain; their logs stay readable so the history still answers.
+ */
 const RUN_LOGS = [
-  { file: 'upgrade.out', kind: '70B upgrade (ultimate_upgrade.sh)' },
-  { file: 'retrain.out.log', kind: 'weekly retrain (retrain.sh)' },
+  { file: 'cycles/latest/cycle.log', kind: 'training cycle (cycle.sh), gated against GPT-5' },
+  { file: 'upgrade.out', kind: '70B upgrade (ultimate_upgrade.sh, retired)' },
+  { file: 'retrain.out.log', kind: 'weekly retrain (retrain.sh, retired)' },
 ] as const;
 
-const TRAINING_PROC_RE = /ultimate_upgrade\.sh|retrain\.sh|mlx_lm lora|eval_judge\.py|prepare_data\.py/;
+const TRAINING_PROC_RE =
+  /cycle\.sh|train_lora\.py|build_data\.py|package_candidate\.sh|gate-cli\.ts|ultimate_upgrade\.sh|retrain\.sh|mlx_lm lora|eval_judge\.py|prepare_data\.py/;
+
+/** cycle.sh's stamped line for an outcome that ends a cycle before the gate ("[2026-10-01 02:31] NO_DATA (see ...)"). */
+const CYCLE_END_RE = /^\[[\d: -]+\] (NO_DATA|DEFER|NO_CANDIDATE|PREEMPTED|PACKAGE_FAILED|CONTAMINATED|build_data failed|train_lora failed)\b/;
 
 export type Phase = 'preparing' | 'loading' | 'training' | 'selecting' | 'judging' | 'complete' | 'stopped';
 
@@ -74,6 +83,11 @@ export function parseRunLog(text: string, running: boolean): Omit<RunStatus, 'ki
     if (/Loading pretrained model/.test(line)) sawLoad = true;
     const val = line.match(/Iter (\d+): Val loss ([\d.]+)/);
     if (val) out.valLoss.push({ iter: Number(val[1]), loss: Number(val[2]) });
+    // train_lora.py's early-stopping callback: the base first, then each eval (step = updates done).
+    const esBase = line.match(/early_stop: base val ([\d.]+)/);
+    if (esBase) out.valLoss.push({ iter: 0, loss: Number(esBase[1]) });
+    const es = line.match(/early_stop: step (\d+) val ([\d.]+)/);
+    if (es) out.valLoss.push({ iter: Number(es[1]), loss: Number(es[2]) });
     const tr = line.match(/Iter (\d+): Train loss ([\d.]+).*?It\/sec ([\d.]+)/);
     if (tr) {
       out.iter = Number(tr[1]);
@@ -85,7 +99,11 @@ export function parseRunLog(text: string, running: boolean): Omit<RunStatus, 'ki
     if (pick?.[1]) out.pickedCheckpoint = pick[1];
     if (/judging/.test(line)) sawJudge = true;
     if (/Flint wins|verdict|signal:/.test(line)) result.push(line.trim());
-    if (/UPGRADE COMPLETE|RETRAIN DONE/.test(line)) sawDone = true;
+    if (/UPGRADE COMPLETE|RETRAIN DONE|CYCLE DONE/.test(line)) sawDone = true;
+    if (CYCLE_END_RE.test(line)) {
+      sawDone = true;
+      result.push(line.trim());
+    }
   }
 
   if (out.valLoss.length > 0) {
@@ -174,6 +192,7 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
 
   const evalPath = join(brainDir, 'eval_history.csv');
   const evals = existsSync(evalPath) ? parseEvalHistory(readFileSync(evalPath, 'utf8')).slice(-3) : [];
+  const latestCycle = readLatestCycle(brainDir);
 
   const adapters: Record<string, string> = {};
   for (const d of ['adapters7b', 'adapters70b']) {
@@ -188,13 +207,70 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
 
   return {
     latestRun: latestRun ?? null,
+    latestCycle,
+    cycleNote:
+      "The training cycle ships a local model only if it measurably improves Flint-local's standing against GPT-5: the candidate and the live local model answer the same prompts, a cross-vendor judge panel compares each with GPT-5's answer, and PROMOTE needs a significant gain of at least 5 points in strict win rate with no regression elsewhere. HOLD means the measurement wasn't trustworthy (missing prompt set, server changed, too few pairs); promotion itself is always Will's manual step.",
     recentEvals: evals,
     evalNote:
-      'Each eval: Claude judges the fine-tuned model vs its base on a frozen held-out set. signal=NOISE means the gap is within coin-flip range — not a real win yet. signal=SIGNIFICANT means the gap is real in whichever direction the wins point: if baseWins > flintWins, the fine-tune made that model worse.',
+      'recentEvals are from the retired pipeline, which compared a fine-tune with its own base (never with a frontier model); kept for the record. signal=NOISE means the gap was within coin-flip range.',
     corpus: deps.corpus(),
     adaptersOnDisk: adapters,
     servingNow: { ...serving, fineTunedServing },
   };
+}
+
+export interface CycleStatus {
+  id?: string;
+  result?: string;
+  profile?: string;
+  targets?: number;
+  candidate?: string;
+  startedAt?: string;
+  endedAt?: string;
+  /** From the cycle's adapter/early_stop.json. */
+  training?: { exit?: string; baseVal?: number; bestVal?: number; bestStep?: number; stopReason?: string; peakMemoryGb?: number };
+  /** From the cycle's gate.json. */
+  gate?: { verdict?: string; reasons?: string[] };
+}
+
+function readJson(path: string): Record<string, unknown> | undefined {
+  try {
+    return existsSync(path) ? (JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The last cycle's record (cycles/state.json) plus its training summary and gate verdict. Null before the first cycle. */
+export function readLatestCycle(brainDir: string): CycleStatus | null {
+  const state = readJson(join(brainDir, 'cycles', 'state.json'));
+  const cycles = Array.isArray(state?.cycles) ? (state.cycles as Array<Record<string, unknown>>) : [];
+  const last = cycles.at(-1);
+  if (!last) return null;
+  const dir = join(brainDir, 'cycles', String(last.id ?? ''));
+  const out: CycleStatus = {};
+  for (const k of ['id', 'result', 'profile', 'candidate', 'startedAt', 'endedAt'] as const) if (typeof last[k] === 'string') out[k] = last[k] as string;
+  if (typeof last.targets === 'number') out.targets = last.targets;
+  const es = readJson(join(dir, 'adapter', 'early_stop.json'));
+  if (es) {
+    out.training = {
+      ...(typeof es.exit === 'string' ? { exit: es.exit } : {}),
+      ...(typeof es.base_val === 'number' ? { baseVal: es.base_val } : {}),
+      ...(typeof es.best_val === 'number' ? { bestVal: es.best_val } : {}),
+      ...(typeof es.best_iter === 'number' ? { bestStep: es.best_iter } : {}),
+      ...(typeof es.stop_reason === 'string' ? { stopReason: es.stop_reason } : {}),
+      ...(typeof es.peakMemoryGbMlx === 'number' ? { peakMemoryGb: es.peakMemoryGbMlx } : {}),
+    };
+  }
+  const gate = readJson(join(dir, 'gate.json'));
+  const decision = gate?.decision as { verdict?: unknown; reasons?: unknown } | undefined;
+  if (decision) {
+    out.gate = {
+      ...(typeof decision.verdict === 'string' ? { verdict: decision.verdict } : {}),
+      ...(Array.isArray(decision.reasons) ? { reasons: decision.reasons.filter((r): r is string => typeof r === 'string') } : {}),
+    };
+  }
+  return out;
 }
 
 export function trainingStatusTool(deps: TrainingStatusDeps): Tool {
@@ -202,7 +278,7 @@ export function trainingStatusTool(deps: TrainingStatusDeps): Tool {
     definition: {
       name: 'training_status',
       description:
-        "Flint's own training: the live or latest fine-tune run (phase, iteration, loss, ETA), recent eval results vs the base model, corpus size, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
+        "Flint's own training: the live or latest training cycle (phase, loss, ETA), its gate verdict against GPT-5, corpus size, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
       inputSchema: { type: 'object', properties: {} },
       idempotent: true,
     },

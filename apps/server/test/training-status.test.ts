@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -21,7 +21,30 @@ Flint wins: 39/150   Base wins: 31/150   Ties: 80/150
 signal: NOISE  (39-31 decisive, coin-flip sd=4.2, edge=4.0)
 `;
 
+const CYCLE_DONE = `[2026-10-01 02:30] cycle 20261001-0230: profile=muse-glimmer-30b
+[2026-10-01 02:31] training: footprint 2048x16, budget 33.0 GB, up to 4.0 h
+[2026-10-01 02:31] training: profile=muse-glimmer-30b model=mlx-community/Muse-Glimmer-30B-4bit train_n=640 iters=1280 valid_n=120
+early_stop: base val 1.9000
+early_stop: step 160 val 1.8000 (new best, saved)
+early_stop: step 400 val 1.7100 (new best, saved)
+early_stop: step 560 val 1.7300 (best 1.7100 @ 400, 1/3 without improvement)
+[2026-10-01 05:02] train_lora: CANDIDATE (stopped: patience); base val 1.9 best 1.71 @ step 400
+[2026-10-01 05:20] judging candidate flint-muse:c20261001-0230 against GPT-5 through the parity gate...
+[2026-10-01 06:10] verdict: REJECT
+[2026-10-01 06:10] === CYCLE DONE ===
+`;
+
 describe('parseRunLog', () => {
+  it('reads a training cycle log: header, early-stop curve, verdict', () => {
+    const r = parseRunLog(CYCLE_DONE, false);
+    expect(r.phase).toBe('complete');
+    expect(r.trainExamples).toBe(640);
+    expect(r.totalIters).toBe(1280);
+    expect(r.valLoss.map((v) => v.iter)).toEqual([0, 160, 400, 560]);
+    expect(r.bestVal).toEqual({ iter: 400, loss: 1.71 });
+    expect(r.result).toContain('[2026-10-01 06:10] verdict: REJECT');
+  });
+
   it('reads progress, loss and ETA from a live run', () => {
     const r = parseRunLog(MID_RUN, true);
     expect(r.phase).toBe('training');
@@ -77,6 +100,48 @@ describe('readTrainingStatus', () => {
     expect(s.corpus.total).toBe(793);
     // the stock qwen isn't Flint's fine-tune — he must not claim it is
     expect(s.servingNow.fineTunedServing).toBe(false);
+  });
+
+  it('reads the training cycle: its log, early-stop summary and gate verdict', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-brain-'));
+    const cycle = join(dir, 'cycles', '20261001-0230');
+    mkdirSync(join(cycle, 'adapter'), { recursive: true });
+    // cycles/latest is a symlink in production; a plain dir reads the same.
+    mkdirSync(join(dir, 'cycles', 'latest'), { recursive: true });
+    writeFileSync(join(dir, 'upgrade.out'), DONE);
+    writeFileSync(join(dir, 'cycles', 'latest', 'cycle.log'), CYCLE_DONE);
+    // The cycle log is newer than the retired 70B log.
+    utimesSync(join(dir, 'upgrade.out'), new Date('2026-09-23T00:00:00Z'), new Date('2026-09-23T00:00:00Z'));
+    writeFileSync(
+      join(dir, 'cycles', 'state.json'),
+      JSON.stringify({ cycles: [{ id: '20261001-0230', result: 'REJECT', profile: 'muse-glimmer-30b', targets: 312, candidate: 'flint-muse:c20261001-0230' }] }),
+    );
+    writeFileSync(join(cycle, 'adapter', 'early_stop.json'), JSON.stringify({ exit: 'CANDIDATE', base_val: 1.9, best_val: 1.71, best_iter: 400, stop_reason: 'patience: 3 evals', peakMemoryGbMlx: 27.4 }));
+    writeFileSync(join(cycle, 'gate.json'), JSON.stringify({ decision: { verdict: 'REJECT', reasons: ['strict win rate vs the frontier model 14.1% → 16.0% (+1.9 pts; need +5.0 pts)'] } }));
+    const s = await readTrainingStatus({
+      brainDir: dir,
+      corpus: () => ({ total: 900, teacher: 800, student: 100 }),
+      serving: () => ({ local: 'ollama:muse-glimmer:30b' }),
+      isRunning: async () => false,
+    });
+    expect(s.latestRun?.kind).toMatch(/training cycle/);
+    expect(s.latestRun?.phase).toBe('complete');
+    expect(s.latestRun?.bestVal).toEqual({ iter: 400, loss: 1.71 });
+    expect(s.latestRun?.result?.some((l) => l.includes('verdict: REJECT'))).toBe(true);
+    expect(s.latestCycle).toMatchObject({
+      id: '20261001-0230',
+      result: 'REJECT',
+      targets: 312,
+      training: { exit: 'CANDIDATE', bestVal: 1.71, bestStep: 400, peakMemoryGb: 27.4 },
+      gate: { verdict: 'REJECT' },
+    });
+    expect(s.servingNow.fineTunedServing).toBe(false);
+  });
+
+  it('a cycle that ends before training reads as finished, not stopped', () => {
+    const r = parseRunLog('[2026-10-01 02:30] cycle 20261001-0230: profile=muse-glimmer-30b\n[2026-10-01 02:30] NO_DATA (see /x/manifest.json)\n', false);
+    expect(r.phase).toBe('complete');
+    expect(r.result).toEqual(['[2026-10-01 02:30] NO_DATA (see /x/manifest.json)']);
   });
 
   it('works on an empty brain dir', async () => {
