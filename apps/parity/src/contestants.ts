@@ -129,6 +129,8 @@ interface FlintGenerateResponse {
   reason?: string;
   brain?: 'local' | 'frontier';
   model?: string;
+  /** Echo of the request's `localThink`, from a server that honoured it. */
+  localThink?: boolean;
   tools?: Array<{ tool: string; outcome?: string }>;
   proposed?: string[];
   eval?: boolean;
@@ -163,14 +165,23 @@ export function flintContestant(opts: {
    * separate, and a reply from any other model stops the run.
    */
   localModel?: string;
+  /**
+   * Bake-offs: Ollama's `think` for the candidate (the server's eval-only
+   * `localThink`; `--local-think on|off`). Only with `localModel`. Adds `~think`
+   * or `~nothink` to the contestant name; left out, the name and the request are
+   * exactly as before, so answers cached without it stay valid and separate.
+   */
+  localThink?: boolean;
   /** How long to keep retrying while the server is unreachable (a deploy restart). */
   restartWaitMs?: number;
 }): Contestant {
   const localModel = opts.localModel;
   if (localModel !== undefined) assertLocalModelName(localModel);
+  const localThink = opts.localThink;
+  if (localThink !== undefined && localModel === undefined) throw new Error('--local-think needs --local-model');
   const localOnly = opts.localOnly === true || localModel !== undefined;
   return {
-    name: flintContestantName({ localOnly, localModel }),
+    name: flintContestantName({ localOnly, localModel, localThink }),
     model: `flint@${opts.url}`,
     // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
     // re-send it: estimate generously. The local brain costs nothing.
@@ -182,7 +193,13 @@ export function flintContestant(opts: {
           fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
             method: 'POST',
             headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ prompt: p.prompt, eval: true, ...(localOnly ? { localOnly: true } : {}), ...(localModel ? { localModel } : {}) }),
+            body: JSON.stringify({
+              prompt: p.prompt,
+              eval: true,
+              ...(localOnly ? { localOnly: true } : {}),
+              ...(localModel ? { localModel } : {}),
+              ...(localThink !== undefined ? { localThink } : {}),
+            }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
           }),
         signal,
@@ -200,6 +217,11 @@ export function flintContestant(opts: {
       if (localModel !== undefined && body.model !== localModel) {
         throw new FatalError(
           `asked for localModel ${localModel} but the server answered with ${body.model ?? '?'} — it predates the local-model override, or ignored it`,
+        );
+      }
+      if (localThink !== undefined && body.localThink !== localThink) {
+        throw new FatalError(
+          `asked for localThink ${String(localThink)} but the server didn't echo it (got ${String(body.localThink)}) — it predates the think override, or ignored it`,
         );
       }
       const text = (body.text ?? '').trim();
@@ -254,10 +276,51 @@ export function assertLocalModelName(name: string): void {
   }
 }
 
-/** 'flint', 'flint-local', or 'flint-local@<model>' for a bake-off candidate. */
-export function flintContestantName(opts: { localOnly?: boolean; localModel?: string | undefined }): string {
-  if (opts.localModel) return `flint-local@${opts.localModel}`;
+/**
+ * 'flint', 'flint-local', or 'flint-local@<model>' for a bake-off candidate, with
+ * '~think' / '~nothink' appended only when `localThink` is set. Without it the
+ * name is unchanged, so earlier runs' answers and verdicts still match. (`~` can't
+ * occur in a model name, so the suffix is unambiguous.)
+ */
+export function flintContestantName(opts: { localOnly?: boolean; localModel?: string | undefined; localThink?: boolean | undefined }): string {
+  if (opts.localModel) {
+    const think = opts.localThink === undefined ? '' : opts.localThink ? '~think' : '~nothink';
+    return `flint-local@${opts.localModel}${think}`;
+  }
   return opts.localOnly ? 'flint-local' : 'flint';
+}
+
+/** `--local-think on|off` → true / false; absent → undefined. Anything else throws. */
+export function parseLocalThink(v: string | undefined): boolean | undefined {
+  if (v === undefined) return undefined;
+  const s = v.trim().toLowerCase();
+  if (s === 'on') return true;
+  if (s === 'off') return false;
+  throw new Error(`--local-think must be on or off, not "${v}"`);
+}
+
+/** The `--local-think` flag as `localThink`, refused without `--local-model` (it has nothing to apply to). */
+export function localThinkFlag(v: string | undefined, localModel: string | undefined): boolean | undefined {
+  const think = parseLocalThink(v);
+  if (think !== undefined && !localModel) throw new Error('--local-think needs --local-model (it sets think for that candidate only)');
+  return think;
+}
+
+/**
+ * What Ollama says `model` can do (`POST /api/show` → `capabilities`, e.g.
+ * ["completion","tools","thinking"]). Undefined when this Ollama doesn't report
+ * capabilities. Throws if Ollama can't be reached or doesn't know the model.
+ */
+export async function ollamaModelCapabilities(model: string, host: string, fetchFn: typeof fetch = fetch): Promise<string[] | undefined> {
+  const r = await fetchFn(`${host.replace(/\/$/, '')}/api/show`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!r.ok) throw new Error(`Ollama at ${host} answered /api/show for ${model} with HTTP ${r.status}`);
+  const body = (await r.json()) as { capabilities?: unknown };
+  return Array.isArray(body.capabilities) ? body.capabilities.filter((c): c is string => typeof c === 'string') : undefined;
 }
 
 /**

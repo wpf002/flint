@@ -22,7 +22,9 @@ import {
   flintContestant,
   flintContestantName,
   flintHealth,
+  localThinkFlag,
   ollamaHasModel,
+  ollamaModelCapabilities,
   openaiContestant,
   perplexityContestant,
   resolveFlintToken,
@@ -151,6 +153,7 @@ async function run(argv: string[]): Promise<void> {
       'allow-training-log': { type: 'boolean', default: false },
       'flint-local': { type: 'boolean', default: false },
       'local-model': { type: 'string' },
+      'local-think': { type: 'string' },
       seed: { type: 'string', default: '1' },
       prompts: { type: 'string', default: PROMPTS_PATH },
     },
@@ -192,6 +195,7 @@ async function run(argv: string[]): Promise<void> {
   if (judgeOnly && !values.run) throw new Error('--judge-only re-judges an existing run: pass --run <ts>');
   if (judgeOnly && values['no-judge']) throw new Error('--judge-only and --no-judge together do nothing');
   const localModel = values['local-model']?.trim() || undefined;
+  const localThink = localThinkFlag(values['local-think'], localModel);
   if (localModel && !judgeOnly) {
     assertLocalModelName(localModel);
     let has: { ok: boolean; available: string[] };
@@ -205,6 +209,14 @@ async function run(argv: string[]): Promise<void> {
         `--local-model: ${localModel} isn't pulled on ${DEFAULTS.ollamaHost}. Run \`ollama pull ${localModel}\` first. ` +
           `Available: ${has.available.join(', ') || '(none)'}`,
       );
+    }
+    // Ollama answers `think: true` on a model that can't think with a 400 on
+    // every call, so every prompt would just fail. Refuse up front instead.
+    if (localThink === true) {
+      const caps = await ollamaModelCapabilities(localModel, DEFAULTS.ollamaHost);
+      if (caps && !caps.includes('thinking')) {
+        throw new Error(`--local-think on: ${localModel} can't think (Ollama capabilities: ${caps.join(', ') || 'none'}); Ollama would reject every request`);
+      }
     }
   }
 
@@ -222,6 +234,9 @@ async function run(argv: string[]): Promise<void> {
     if (!judgeOnly && localModel && health.localModelOverride !== true) {
       throw new Error(`the Flint server at ${url} doesn't support the eval-only local-model override (/health has no localModelOverride, or its local brain isn't Ollama). Deploy this branch first.`);
     }
+    if (!judgeOnly && localThink !== undefined && health.localThinkOverride !== true) {
+      throw new Error(`the Flint server at ${url} doesn't support --local-think (/health has no localThinkOverride). Deploy this branch first.`);
+    }
     const token = judgeOnly
       ? 'unused'
       : resolveFlintToken({
@@ -238,6 +253,7 @@ async function run(argv: string[]): Promise<void> {
       timeoutMs: Number(values['flint-timeout-s']) * 1000,
       localOnly: values['flint-local']! || localModel !== undefined,
       ...(localModel ? { localModel } : {}),
+      ...(localThink !== undefined ? { localThink } : {}),
     });
     contestants.push(flint);
     log(judgeOnly ? `${flint.name}: cached answers only (--judge-only)` : `${flint.name}: ${url} (local brain ${String(health.provider)}:${String(health.model)}, ${String(health.tools)} tools)`);
@@ -558,6 +574,7 @@ function report(argv: string[]): void {
       run: { type: 'string' },
       'flint-local': { type: 'boolean', default: false },
       'local-model': { type: 'string' },
+      'local-think': { type: 'string' },
       // Which verdicts to render; defaults to the judge the run was created with.
       'judge-model': { type: 'string' },
       'judge-panel': { type: 'string' },
@@ -565,7 +582,8 @@ function report(argv: string[]): void {
   });
   const localModel = values['local-model']?.trim() || undefined;
   if (localModel) assertLocalModelName(localModel);
-  const subject = flintContestantName({ localOnly: values['flint-local'], localModel });
+  const localThink = localThinkFlag(values['local-think'], localModel);
+  const subject = flintContestantName({ localOnly: values['flint-local'], localModel, localThink });
   if (!values.run) throw new Error('--run <dir|name> required');
   const runDir = existsSync(values.run) ? resolve(values.run) : join(EVAL_DIR, 'runs', values.run);
   const meta = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as {

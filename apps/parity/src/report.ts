@@ -76,10 +76,14 @@ export function latestJudgments(rows: readonly JudgmentRow[], judgeModel: string
   return [...m.values()];
 }
 
-/** `report.md` for Flint, else `report-<subject>.md` with anything not filename-safe (`:` `/` ...) as `_`. */
+/**
+ * `report.md` for Flint, else `report-<subject>.md` with anything not filename-safe
+ * (`:` `/` ...) as `_`. `~` is kept, so a `--local-think` variant
+ * (`flint-local@<model>~nothink`) gets its own, readable report next to the plain one.
+ */
 export function reportFileName(subject: string): string {
   if (subject === 'flint') return 'report.md';
-  return `report-${subject.replace(/[^A-Za-z0-9._@-]/g, '_')}.md`;
+  return `report-${subject.replace(/[^A-Za-z0-9._@~-]/g, '_')}.md`;
 }
 
 export interface Tally {

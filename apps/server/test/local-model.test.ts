@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { LOCAL_MODEL_MAX_LEN, LocalPersonaCache, parseLocalModelRequest, resolveLocalPersona } from '../src/local-model';
+import { OllamaProvider } from '@flint/core';
+import {
+  LOCAL_MODEL_MAX_LEN,
+  LocalPersonaCache,
+  evalOllamaOptions,
+  overrideKey,
+  parseLocalModelRequest,
+  parseOllamaThink,
+  resolveLocalPersona,
+  thinkOption,
+} from '../src/local-model';
 
 describe('parseLocalModelRequest', () => {
   const evalLocal = { eval: true, localOnly: true };
@@ -86,5 +96,140 @@ describe('resolveLocalPersona', () => {
 
   it('refuses an override when the local brain is not Ollama', () => {
     expect(resolveLocalPersona('qwen3:14b', base, undefined)).toMatchObject({ ok: false, status: 422 });
+  });
+});
+
+describe('localThink (the think override)', () => {
+  const evalLocal = { eval: true, localOnly: true, localModel: 'qwen3.8:27b' };
+
+  it('is accepted with a valid localModel and echoed back', () => {
+    expect(parseLocalModelRequest({ ...evalLocal, localThink: false })).toEqual({ ok: true, model: 'qwen3.8:27b', think: false });
+    expect(parseLocalModelRequest({ ...evalLocal, localThink: true })).toEqual({ ok: true, model: 'qwen3.8:27b', think: true });
+  });
+
+  it('is undefined when not sent (or null), so no think field reaches Ollama', () => {
+    const r = parseLocalModelRequest(evalLocal);
+    expect(r).toMatchObject({ ok: true, model: 'qwen3.8:27b' });
+    expect(r.ok && r.think).toBeUndefined();
+    const n = parseLocalModelRequest({ ...evalLocal, localThink: null });
+    expect(n).toMatchObject({ ok: true, model: 'qwen3.8:27b' });
+    expect(n.ok && n.think).toBeUndefined();
+    expect(parseLocalModelRequest({ prompt: 'hi' })).toMatchObject({ ok: true, model: undefined, think: undefined });
+  });
+
+  it('is refused without a localModel, even on an eval + localOnly request', () => {
+    for (const body of [
+      { localThink: false },
+      { eval: true, localOnly: true, localThink: true },
+      { eval: true, localOnly: true, localModel: null, localThink: false },
+    ]) {
+      const r = parseLocalModelRequest(body);
+      expect(r, JSON.stringify(body)).toMatchObject({ ok: false, status: 400 });
+      if (!r.ok) expect(r.error).toMatch(/only accepted with localModel/);
+    }
+  });
+
+  it('is refused with an invalid localModel', () => {
+    expect(parseLocalModelRequest({ ...evalLocal, localModel: 'bad name', localThink: false })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it('must be a real boolean', () => {
+    for (const bad of ['false', 'true', 0, 1, 'off', {}]) {
+      const r = parseLocalModelRequest({ ...evalLocal, localThink: bad });
+      expect(r, JSON.stringify(bad)).toMatchObject({ ok: false, status: 400 });
+      if (!r.ok) expect(r.error).toMatch(/must be a boolean/);
+    }
+  });
+
+  it('still needs eval + localOnly, like localModel', () => {
+    expect(parseLocalModelRequest({ localOnly: true, localModel: 'qwen3.8:27b', localThink: false })).toMatchObject({ ok: false, status: 400 });
+    expect(parseLocalModelRequest({ eval: true, localModel: 'qwen3.8:27b', localThink: false })).toMatchObject({ ok: false, status: 400 });
+  });
+});
+
+describe('OLLAMA_THINK (the live local brain)', () => {
+  it('reads "true" and "false", ignoring case and surrounding space', () => {
+    expect(parseOllamaThink('true')).toBe(true);
+    expect(parseOllamaThink('false')).toBe(false);
+    expect(parseOllamaThink(' FALSE ')).toBe(false);
+    expect(parseOllamaThink('True')).toBe(true);
+  });
+
+  it('treats unset or anything else as unset: no think field, unchanged behaviour', () => {
+    for (const v of [undefined, '', '  ', '1', '0', 'yes', 'no', 'on', 'off', 'truthy']) {
+      expect(parseOllamaThink(v), JSON.stringify(v)).toBeUndefined();
+      expect(thinkOption(parseOllamaThink(v))).not.toHaveProperty('think');
+    }
+    expect(thinkOption(false)).toEqual({ think: false });
+    expect(thinkOption(true)).toEqual({ think: true });
+  });
+});
+
+describe('evalOllamaOptions (the override personas’ provider)', () => {
+  it('keeps the 16K eval context and the Ollama host', () => {
+    expect(evalOllamaOptions({}, undefined)).toEqual({ baseURL: 'http://127.0.0.1:11434', defaultOptions: { num_ctx: 16384 } });
+    expect(evalOllamaOptions({ OLLAMA_HOST: 'http://studio:11434', FLINT_EVAL_NUM_CTX: '32768' }, false)).toEqual({
+      baseURL: 'http://studio:11434',
+      defaultOptions: { num_ctx: 32768 },
+      think: false,
+    });
+  });
+
+  it('carries think only when the request set it', () => {
+    expect(evalOllamaOptions({}, undefined)).not.toHaveProperty('think');
+    expect(evalOllamaOptions({}, true).think).toBe(true);
+  });
+
+  it('builds a provider whose /api/chat bodies carry that think and the eval context', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = (async (_u: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+      return new Response(JSON.stringify({ message: { role: 'assistant', content: 'ok' }, done: true, done_reason: 'stop' }));
+    }) as unknown as typeof globalThis.fetch;
+    const msg = { id: 'u', role: 'user' as const, content: 'hi', timestamp: 0 };
+    for (const think of [false, true, undefined]) {
+      await new OllamaProvider({ ...evalOllamaOptions({}, think), fetch }).generate({ model: 'qwen3.8:27b', messages: [msg] });
+    }
+    expect(bodies.map((b) => b.think)).toEqual([false, true, undefined]);
+    expect(bodies[2]).not.toHaveProperty('think');
+    for (const b of bodies) expect(b.options).toEqual({ num_ctx: 16384 });
+  });
+});
+
+describe('override personas per (model, think)', () => {
+  it('keys a bare model by its name and the think variants apart', () => {
+    expect(overrideKey('qwen3.8:27b', undefined)).toBe('qwen3.8:27b');
+    expect(overrideKey('qwen3.8:27b', true)).toBe('qwen3.8:27b~think');
+    expect(overrideKey('qwen3.8:27b', false)).toBe('qwen3.8:27b~nothink');
+  });
+
+  it('builds one persona per (model, think) and reuses it', () => {
+    const made: Array<[string, boolean | undefined]> = [];
+    const cache = new LocalPersonaCache((m, think) => {
+      made.push([m, think]);
+      return { m, think };
+    });
+    const plain = cache.get('qwen3.8:27b');
+    const off = cache.get('qwen3.8:27b', false);
+    const on = cache.get('qwen3.8:27b', true);
+    expect(new Set([plain, off, on]).size).toBe(3);
+    expect(cache.get('qwen3.8:27b', false)).toBe(off);
+    expect(cache.get('qwen3.8:27b', undefined)).toBe(plain);
+    expect(off).toEqual({ m: 'qwen3.8:27b', think: false });
+    expect(made).toEqual([
+      ['qwen3.8:27b', undefined],
+      ['qwen3.8:27b', false],
+      ['qwen3.8:27b', true],
+    ]);
+    expect(cache.size).toBe(3);
+  });
+
+  it('resolveLocalPersona hands think to the cache and still echoes the plain model', () => {
+    const base = { persona: 'main', model: 'qwen2.5:7b' };
+    const cache = new LocalPersonaCache((m, think) => `persona:${m}:${String(think)}`);
+    expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false)).toEqual({ ok: true, persona: 'persona:muse-glimmer:30b:false', model: 'muse-glimmer:30b' });
+    expect(resolveLocalPersona('muse-glimmer:30b', base, cache)).toEqual({ ok: true, persona: 'persona:muse-glimmer:30b:undefined', model: 'muse-glimmer:30b' });
+    // No override: the server's own persona, whatever think says.
+    expect(resolveLocalPersona(undefined, base, cache, false)).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:7b' });
   });
 });

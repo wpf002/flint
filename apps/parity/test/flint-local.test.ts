@@ -3,7 +3,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HISTORY_HEADER, appendHistory, migrateHistory, reportFileName } from '../src/report.js';
-import { FatalError, assertLocalModelName, fetchWhileRestarting, flintContestant, flintContestantName, ollamaHasModel } from '../src/contestants.js';
+import {
+  FatalError,
+  assertLocalModelName,
+  fetchWhileRestarting,
+  flintContestant,
+  flintContestantName,
+  localThinkFlag,
+  ollamaHasModel,
+  ollamaModelCapabilities,
+  parseLocalThink,
+} from '../src/contestants.js';
 
 const V1 =
   'ts,run,prompt_set,competitor,competitor_model,judge_model,n,flint_wins,competitor_wins,ties,flint_win_rate,p_value,signal,judge_errors';
@@ -143,6 +153,100 @@ describe('local-model bake-off contestant', () => {
     expect(() => mk('qwen 14b')).toThrow(/isn't an Ollama model name/);
     expect(() => assertLocalModelName('a'.repeat(101))).toThrow();
     expect(() => assertLocalModelName('hf.co/org/repo:Q4_K_M')).not.toThrow();
+  });
+});
+
+describe('--local-think (think on/off for a bake-off candidate)', () => {
+  const prompt = { id: 'p1', prompt: 'hi', category: 'knowledge' } as never;
+  const base = { url: 'http://x', token: 't', frontierModel: 'claude-sonnet-4-6', allowTrainingLog: false, timeoutMs: 1000 };
+  const mk = (localThink: boolean | undefined) =>
+    flintContestant({ ...base, localModel: 'qwen3.8:27b', ...(localThink !== undefined ? { localThink } : {}) });
+  const reply = (extra: Record<string, unknown>) =>
+    new Response(JSON.stringify({ text: 'hello', brain: 'local', model: 'qwen3.8:27b', eval: true, ...extra }));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('suffixes the name only when the flag is given, so earlier cached answers keep matching', () => {
+    expect(mk(false).name).toBe('flint-local@qwen3.8:27b~nothink');
+    expect(mk(true).name).toBe('flint-local@qwen3.8:27b~think');
+    expect(mk(undefined).name).toBe('flint-local@qwen3.8:27b');
+    expect(flintContestantName({ localOnly: true, localModel: 'muse-glimmer:30b', localThink: undefined })).toBe('flint-local@muse-glimmer:30b');
+  });
+
+  it('gets its own filename-safe report, next to the plain candidate', () => {
+    const names = [undefined, true, false].map((t) => reportFileName(mk(t).name));
+    expect(names).toEqual([
+      'report-flint-local@qwen3.8_27b.md',
+      'report-flint-local@qwen3.8_27b~think.md',
+      'report-flint-local@qwen3.8_27b~nothink.md',
+    ]);
+    for (const n of names) expect(n).not.toMatch(/[/:]/);
+    expect(reportFileName('flint-local@hf.co/org/repo:Q4_K_M~nothink')).toBe('report-flint-local@hf.co_org_repo_Q4_K_M~nothink.md');
+  });
+
+  it('sends localThink with localModel, eval and localOnly', async () => {
+    let sent: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_u: string, init: { body: string }) => {
+      sent = JSON.parse(init.body);
+      return reply({ localThink: false });
+    });
+    const a = await mk(false).answer(prompt, new AbortController().signal);
+    expect(sent).toEqual({ prompt: 'hi', eval: true, localOnly: true, localModel: 'qwen3.8:27b', localThink: false });
+    expect(a.costUsd).toBe(0);
+  });
+
+  it('sends no localThink without the flag', async () => {
+    let sent: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_u: string, init: { body: string }) => {
+      sent = JSON.parse(init.body);
+      return reply({});
+    });
+    await mk(undefined).answer(prompt, new AbortController().signal);
+    expect(sent).not.toHaveProperty('localThink');
+  });
+
+  it('stops the run when the server did not honour it (no echo, or a different value)', async () => {
+    vi.stubGlobal('fetch', async () => reply({}));
+    await expect(mk(false).answer(prompt, new AbortController().signal)).rejects.toBeInstanceOf(FatalError);
+    vi.stubGlobal('fetch', async () => reply({ localThink: true }));
+    await expect(mk(false).answer(prompt, new AbortController().signal)).rejects.toBeInstanceOf(FatalError);
+    vi.stubGlobal('fetch', async () => reply({ localThink: true }));
+    await expect(mk(true).answer(prompt, new AbortController().signal)).resolves.toMatchObject({ text: 'hello' });
+  });
+
+  it('is refused without a local model', () => {
+    expect(() => flintContestant({ ...base, localThink: false })).toThrow(/needs --local-model/);
+    expect(() => flintContestant({ ...base, localOnly: true, localThink: true })).toThrow(/needs --local-model/);
+    expect(() => localThinkFlag('off', undefined)).toThrow(/needs --local-model/);
+    expect(() => localThinkFlag('on', '')).toThrow(/needs --local-model/);
+    expect(localThinkFlag(undefined, undefined)).toBeUndefined();
+    expect(localThinkFlag('on', 'qwen3.8:27b')).toBe(true);
+  });
+
+  it('parses on/off and nothing else', () => {
+    expect(parseLocalThink('on')).toBe(true);
+    expect(parseLocalThink('off')).toBe(false);
+    expect(parseLocalThink(' OFF ')).toBe(false);
+    expect(parseLocalThink(undefined)).toBeUndefined();
+    for (const bad of ['', 'true', 'false', 'yes', '1']) expect(() => parseLocalThink(bad), bad).toThrow(/on or off/);
+  });
+});
+
+describe('ollamaModelCapabilities', () => {
+  it("reads /api/show's capabilities for the model", async () => {
+    let sent: { url: string; body: unknown } | undefined;
+    const show = (async (url: string, init: { body: string }) => {
+      sent = { url, body: JSON.parse(init.body) };
+      return new Response(JSON.stringify({ capabilities: ['completion', 'tools', 'thinking'] }));
+    }) as unknown as typeof fetch;
+    expect(await ollamaModelCapabilities('qwen3.8:27b', 'http://o/', show)).toEqual(['completion', 'tools', 'thinking']);
+    expect(sent).toEqual({ url: 'http://o/api/show', body: { model: 'qwen3.8:27b' } });
+  });
+
+  it('is undefined when this Ollama reports no capabilities, and throws on an error', async () => {
+    const old = (async () => new Response(JSON.stringify({ template: '...' }))) as unknown as typeof fetch;
+    expect(await ollamaModelCapabilities('qwen2.5:7b', 'http://o', old)).toBeUndefined();
+    const missing = (async () => new Response('{"error":"model not found"}', { status: 404 })) as unknown as typeof fetch;
+    await expect(ollamaModelCapabilities('nope', 'http://o', missing)).rejects.toThrow(/HTTP 404/);
   });
 });
 

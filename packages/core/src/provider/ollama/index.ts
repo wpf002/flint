@@ -21,6 +21,22 @@ export interface OllamaProviderOptions {
   fetch?: typeof fetch;
   /** Default Ollama `options` (temperature, num_ctx, …) merged into every call. */
   defaultOptions?: Record<string, unknown>;
+  /**
+   * Ollama's top-level `think` flag, sent on every /api/chat call (generate and
+   * stream) when set. Undefined, the default, sends nothing: the model's own
+   * default applies and request bodies are exactly what they were before this
+   * option existed.
+   *
+   * What Ollama 0.34 does with it (checked against the local server):
+   *  - thinking models (qwen3.8, muse-glimmer) think when it's omitted, and with
+   *    `true`. `false` turns that off: no `message.thinking`, far fewer tokens
+   *    (muse-glimmer still spends some on reasoning Ollama drops). Either way the
+   *    answer in `message.content` stays clean; reasoning never reaches Flint's text.
+   *  - a model without the thinking capability (qwen2.5) accepts `false` as a
+   *    no-op, but answers `true` with HTTP 400 "does not support thinking" on
+   *    every call. So only set `true` for a model that can think.
+   */
+  think?: boolean;
 }
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
@@ -36,6 +52,8 @@ interface OllamaChatChunk {
   message?: {
     role: string;
     content: string;
+    /** A thinking model's reasoning. Deliberately never read: only `content` is the answer. */
+    thinking?: string;
     tool_calls?: Array<{ function: { name: string; arguments: unknown } }>;
   };
   done?: boolean;
@@ -54,11 +72,13 @@ export class OllamaProvider implements ProviderAdapter {
   private readonly baseURL: string;
   private readonly fetchImpl: typeof fetch;
   private readonly defaultOptions: Record<string, unknown>;
+  private readonly think: boolean | undefined;
 
   constructor(opts: OllamaProviderOptions = {}) {
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
     this.fetchImpl = opts.fetch ?? fetch;
     this.defaultOptions = opts.defaultOptions ?? {};
+    this.think = opts.think;
   }
 
   getCapabilities(model: string): ModelCapabilities {
@@ -283,6 +303,9 @@ export class OllamaProvider implements ProviderAdapter {
       stream,
       ...(Object.keys(options).length > 0 ? { options } : {}),
     };
+    // Only when configured: omitting it keeps the body byte-identical to before,
+    // and `think: true` would be a 400 on a model that can't think (see `think`).
+    if (this.think !== undefined) body.think = this.think;
     if (args.tools && args.tools.length > 0) {
       // Native function-calling: hand Ollama the tool schemas directly, instead
       // of describing them in a prompt and parsing the model's free text.
