@@ -211,6 +211,17 @@ export function parseSearchResult(raw: unknown): ParsedSearch {
   if (isRecord(value) && str(value.error) && !Object.keys(value).some((k) => k !== 'error' && value[k] != null)) {
     return { hits: [], error: str(value.error)!.slice(0, 200) };
   }
+  // Perplexity via Trident: {content, citations: ["https://…", …]}. The citations
+  // are the sources the call paid for; the content is its answer, used like
+  // Tavily's (an unsourced summary) minus its own [n] markers, which would
+  // otherwise read as the pack's numbering.
+  if (isRecord(value) && Array.isArray(value.citations)) {
+    const urls = value.citations.filter((c): c is string => typeof c === 'string' && /^https?:\/\//i.test(c.trim())).map((c) => c.trim());
+    const summary = str(value.content)?.replace(/\s*\[\d+\]/g, '').replace(/\s+/g, ' ').trim();
+    if (urls.length > 0 || summary) {
+      return { hits: urls.map((url) => ({ title: hostOf(url) ?? url, url, snippet: '' })), ...(summary ? { summary } : {}) };
+    }
+  }
 
   const hits: Omit<SearchHit, 'query' | 'rank'>[] = [];
   let summary: string | undefined;
