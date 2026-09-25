@@ -93,10 +93,30 @@ the A/B order.
 call reserves a pessimistic estimate first and is refused if spent + in-flight + estimate
 would cross the limit. After the call, the real cost is computed from the returned
 usage and list prices (`src/pricing.ts`, which re-exports the one price table in
-`@flint/core` that the server's spend ledger also uses). On a refusal the run stops
-launching work, writes the report and exits. Rough full-set cost at the defaults: about $15 of
-answers, $15 to $25 of Flint frontier tokens, and $20 to $35 of judging. Budget $60 to $80,
-or less with `--judge-model claude-sonnet-5`.
+`@flint/core` that the server's spend ledger also uses). A Flint replay is charged what the
+server says it cost (`costUsd` on every eval response: each model pass and fallback attempt,
+the research planner and paid searches); an older server's answer is priced from its usage at
+the answering model's list price. A call that fails is still charged what it cost: the
+server's `costUsd` for an unanswered or failed replay, the estimate for a call cut off by
+`--flint-timeout-s` or by the run stopping (the vendor bills the work done), and nothing only
+for a request that never reached the server. On a refusal the run stops launching work,
+writes the report and exits.
+
+Rough full-set cost at the defaults (300 prompts, list prices, `src/pricing.ts`):
+
+| Part | Per prompt | Full set |
+| --- | --- | --- |
+| Competitor answers: `claude-opus-5` (~110 tokens in, ~1,000 out with thinking), `gpt-5` (~1,500 out with reasoning), `sonar-pro` (~600 out + $0.014 request fee) | ~$0.064 | ~$19 |
+| Flint replays: 2-3 tool-loop passes of ~2K fresh + ~11K cached input and ~800 out, on `claude-sonnet-5` (routine) to `claude-opus-5-5` | $0.03-0.08 | $9-24 |
+| Flint's paid searches (Tavily / Perplexity, ~$0.008 each; mostly the ~43 research prompts) | | ~$2 |
+| Judging: `claude-opus-5`, 3 pairs per prompt, ~3K in, ~800 out | ~$0.105 | ~$32 (~$13 with `--judge-model claude-sonnet-5`) |
+
+So about $60 to $80 a full set, or $40 to $60 with a Sonnet judge: two to three days at the
+default `PARITY_DAILY_BUDGET_USD` of $25 (below), resumed with `--run <ts>`. These are
+estimates; a run's report has the real figure. (Earlier builds of the harness priced Flint's
+brain labels such as `anthropic:claude-opus-5-5` at the unlisted rate, cache reads at $10/M
+instead of $0.20/M: about 7x a real replay's cost. Reports from those runs overstate Flint's
+cost, and the daily budget would have stopped runs long before real spend reached it.)
 
 **Shared daily budget.** On top of `--budget-usd`, every parity invocation on the
 machine draws on ONE daily eval budget: `PARITY_DAILY_BUDGET_USD` (default $25; days end
@@ -115,11 +135,14 @@ the other running evals' unspent reservations leave:
 Every settled call is appended to the ledger as it happens, so a run that is killed
 still has its spend counted; its reservation stops holding budget once its process is
 gone. A full set costs more than the default day: raise `PARITY_DAILY_BUDGET_USD` for
-that day, or let it resume (`--run <ts>`) across days. Flint's own frontier calls during
-an eval are priced here (they are in the answer's usage), and the server logs them as
-`eval` rows that don't count against its own `FLINT_BUDGET_*` caps, so each dollar sits
-under exactly one cap. The server's tool searches (Perplexity, Tavily) during an eval DO
-count against the server's caps, since the harness can't see them.
+that day, or let it resume (`--run <ts>`) across days. Everything a Flint replay costs
+the server (its frontier calls, fallback attempts, research planner and Perplexity / Tavily
+searches) is charged here, from the `costUsd` the server reports, and the server logs all of it
+as `eval` rows that don't count against its own `FLINT_BUDGET_*` caps, so each dollar sits
+under exactly one cap and evals never use up Will's own search budget. If Will's own cap for a
+paid search is spent, the server still refuses that search during an eval and says so
+(`budgetBlocked`); that answer is recorded as a Flint failure (not judged, retried on resume),
+like an `unanswered` one, rather than judged as if Flint had searched.
 
 **Flint on his own (`--flint-local`).** Flint answers with the local brain only
 (`localOnly: true`, no Claude), as the contestant `flint-local`. Point it at an
@@ -448,7 +471,9 @@ pnpm --filter @flint/parity test        # no network
 The tests cover category tagging, trivial filtering, dedupe, determinism and
 stratification, strict judge parsing (with one retry), position randomization, the
 sign test, the budget guard (including under concurrency), the shared daily eval budget
-(concurrent invocations, crashed runs, midnight in Chicago), pricing, the history CSV,
+(concurrent invocations, crashed runs, midnight in Chicago), what a Flint replay is charged
+(the server's `costUsd`, a brain label priced at list, failures, timeouts and aborts charged,
+`budgetBlocked` answers not judged), pricing, the history CSV,
 secrets parsing and token resolution; the panel's consensus rule, per-panelist A/B order,
 error and budget handling, and cache separation from single-judge rows; which judge a
 run uses (flags, then a resumed run's own, then the defaults); the

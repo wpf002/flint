@@ -6,7 +6,7 @@
  * failures are recorded.
  */
 import type { ProviderAdapter, TokenUsage } from '@flint/core';
-import { FatalError, type Contestant } from './contestants.js';
+import { FatalError, costOfFailure, type Contestant } from './contestants.js';
 import { groundingChars } from './grounding.js';
 import { flintIsA, judgePair, outcomeFor } from './judge.js';
 import { judgeWithPanel, verdictFor, type Panelist } from './panel.js';
@@ -42,7 +42,8 @@ export async function answerOne(opts: {
   reserve: Reserve;
 }): Promise<AnswerStep> {
   const { contestant: c, prompt: p, signal } = opts;
-  const settle = opts.reserve(c.estimate(p));
+  const estimate = c.estimate(p);
+  const settle = opts.reserve(estimate);
   if (!settle) return { kind: 'refused' };
   const t0 = Date.now();
   try {
@@ -65,7 +66,13 @@ export async function answerOne(opts: {
       },
     };
   } catch (err) {
-    settle(0);
+    // A failed call can still have been billed, and that spend belongs under this
+    // budget (and the shared daily one) like any other: what the contestant says
+    // it cost (Flint's server reports every replay's cost, answered or not), or,
+    // for a call cut off by a timeout or the run stopping, the estimate, since the
+    // vendor bills the work already done. Only a call that never got going is free.
+    const cost = costOfFailure(err) ?? (signal.aborted || cutOff(err) ? estimate : 0);
+    settle(cost);
     if (err instanceof FatalError) return { kind: 'fatal', error: err };
     if (signal.aborted) return { kind: 'aborted' };
     return {
@@ -76,12 +83,18 @@ export async function answerOne(opts: {
         model: c.model,
         ok: false,
         error: err instanceof Error ? err.message : String(err),
-        costUsd: 0,
+        costUsd: cost,
         ms: Date.now() - t0,
         ts: Date.now(),
       },
     };
   }
+}
+
+/** A request cut off by its own timeout (or an abort): it reached the vendor, which billed the work done. */
+function cutOff(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return name === 'TimeoutError' || name === 'AbortError';
 }
 
 interface Named {
