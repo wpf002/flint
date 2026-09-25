@@ -137,16 +137,31 @@ the tool calls). `web_search` is set through the connector's `env` in `~/.flint/
 | **`auto`** (recommended) | the keyed provider stays **primary** while its key works; SearXNG answers when there is no key, and gets one retry when the provider fails (non-2xx, quota, rate limit, timeout, network, unreadable reply) or finds nothing |
 
 In `auto`, an auth or quota failure (401/402/403/432/433) parks the key for
-`SEARCH_COOLDOWN_MS` (default 15 min) and a 429 parks it for its `Retry-After`, so a spent key
-isn't hit on every query. SearXNG answers meanwhile, and the key is tried again
-straight away if SearXNG fails. `SEARCH_KEY_PROVIDER=brave` says the key is a Brave key
-(default `tavily`). The primary's timeout drops to 12s in `auto` (`SEARCH_TIMEOUT_MS`) so a
-fallback still fits inside deep_research's 25s per search. SearXNG gets `SEARXNG_TIMEOUT_MS`
-(default 10s).
+`SEARCH_COOLDOWN_MS` (default 15 min) and a 429 parks it for its `Retry-After` (60s without
+one), so a spent key isn't hit on every query. SearXNG answers meanwhile, and the key is
+tried again straight away if SearXNG fails.
+
+In `auto` the key goes only to the provider it belongs to: `SEARCH_KEY_PROVIDER` (`tavily` or
+`brave`) when set, else the key's prefix (`tvly-` is Tavily, `BSA` is Brave). A key that
+matches neither, or carries the other vendor's prefix, is sent nowhere. SearXNG answers
+alone, and the connector's startup line says `auto: config error: …`.
+
+A slow provider is hedged, not dropped. Once it has taken `SEARCH_HEDGE_MS` (default 12s),
+SearXNG is asked too, but the provider's reply, already billed, is still used if it arrives
+before `SEARCH_TIMEOUT_MS` (in `auto`: tavily 22s, brave 20s). SearXNG's results are used
+only if the provider fails or finds nothing. SearXNG gets `SEARXNG_TIMEOUT_MS` (default 10s),
+so a search ends within 22s, inside deep_research's 25s per search.
+
+SearXNG results that share no term with the query (in the title, snippet or URL) are dropped.
+The bar is low on purpose: it only stops an engine whose scraper broke from putting unrelated
+pages at the top. If nothing relevant is left, that's a failure (`searxng found nothing
+relevant`), not an empty web. When the provider found no pages but did give an `answer`, a
+SearXNG fallback keeps that answer.
 
 Every result says which backend answered (`"source": "tavily" | "brave" | "searxng"`), and a
 fallback adds `"fallback": {"from": "tavily", "reason": "tavily HTTP 432 (quota)"}`. The
-connector logs one stderr line per fallback, and one when a key is parked. It never logs keys.
+connector logs one stderr line per fallback, one per hedge, and one when a key is parked. It
+never logs keys.
 Install SearXNG with [apps/studio/install_searxng.sh](../../apps/studio/install_searxng.sh), and
 compare its results with the provider's using `pnpm --filter @flint/parity search-compare`.
 

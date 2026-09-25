@@ -29,6 +29,7 @@ export type {
 export {
   WebSearch,
   searchConfigFromEnv,
+  keyOwner,
   describeSearchConfig,
   toToolPayload,
   tavilySearch,
