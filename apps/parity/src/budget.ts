@@ -16,7 +16,11 @@ export class BudgetGuard {
   private reservedUsd = 0;
   private refused = false;
 
-  constructor(readonly limitUsd: number) {
+  constructor(
+    readonly limitUsd: number,
+    /** Told each call's actual cost as it settles (the shared daily eval ledger records it). */
+    private readonly onSettle?: (actualUsd: number) => void,
+  ) {
     if (!(limitUsd > 0)) throw new Error(`budget must be > 0 (got ${limitUsd})`);
   }
 
@@ -33,7 +37,9 @@ export class BudgetGuard {
       if (settled) return;
       settled = true;
       this.reservedUsd -= est;
-      this.spentUsd += Math.max(0, actualUsd);
+      const actual = Math.max(0, Number.isFinite(actualUsd) ? actualUsd : 0);
+      this.spentUsd += actual;
+      this.onSettle?.(actual);
     };
   }
 
