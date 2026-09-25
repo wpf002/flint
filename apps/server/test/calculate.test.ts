@@ -1,11 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { calculate, calculateTool, MAX_EXPRESSION_LENGTH } from '../src/calculate';
 
-/** The result of an expression that must evaluate. */
-function value(expr: string): number {
+/** The result of an expression that must evaluate: a number, or a string in exponent form past 15 digits. */
+function result(expr: string): number | string {
   const out = calculate(expr);
   if (!out.ok) throw new Error(`${expr}: ${out.error}`);
   return out.result;
+}
+
+/** The numeric result of an expression that must evaluate to a plain number. */
+function value(expr: string): number {
+  const r = result(expr);
+  if (typeof r !== 'number') throw new Error(`${expr}: expected a plain number, got ${r}`);
+  return r;
 }
 
 /** The error of an expression that must be rejected. */
@@ -119,6 +126,50 @@ describe('calculate: numbers, functions and constants', () => {
     expect(value('2^53 - 1')).toBe(Number.MAX_SAFE_INTEGER);
     expect(value('0 * -1')).toBe(0);
     expect(Object.is(value('0 * -1'), -0)).toBe(false);
+  });
+
+  it('gives a result past 15 digits in exponent form, so rounded digits never read as exact', () => {
+    // 2^60 = 1152921504606846976; as a plain number it would print 1152921504606850000.
+    expect(result('2^60')).toBe('1.15292150460685e+18');
+    expect(result('2^64')).toBe('1.84467440737096e+19');
+    expect(result('-(3^40)')).toBe('-1.21576654590569e+19');
+    expect(result('10^21')).toBe('1e+21');
+    expect(result('1234567890123456.5')).toBe('1.23456789012346e+15'); // a non-integer ≥ 1e15 too
+    expect(result('999999999999999.9')).toBe('1e+15'); // rounds up across the line, so it is not exact either
+    // Below 1e15, and every safe integer, stays a plain number.
+    expect(result('2^53')).toBe('9.00719925474099e+15');
+    expect(result('2^52')).toBe(2 ** 52);
+    expect(result('123456789012345.6')).toBe(123456789012346);
+    expect(result('1e-7')).toBe(1e-7);
+    // What the model reads: nothing that looks like an exact 19-digit integer.
+    expect(JSON.stringify(calculateTool().handler({ id: 't', toolName: 'calculate', args: { expression: '2^60' } }))).toBe(
+      '{"expression":"2 ^ 60","result":"1.15292150460685e+18"}',
+    );
+  });
+});
+
+describe('calculate: the normalized expression is one it accepts', () => {
+  it.each([
+    ['7 % (-3)', '7 % (-3)'],
+    ['2 * -3', '2 * (-3)'],
+    ['2 - -3', '2 - (-3)'],
+    ['6 / -2', '6 / (-2)'],
+    ['2 + -pi', '2 + (-pi)'],
+    ['2^-1', '2 ^ (-1)'],
+  ])('%s reads as %s', (input, shown) => {
+    const first = calculate(input);
+    expect(first).toMatchObject({ ok: true, expression: shown });
+    // Feeding the shown form back gives the same reading and the same result.
+    const again = calculate(first.ok ? first.expression : '');
+    expect(again).toEqual(first);
+  });
+
+  it('round-trips a mix of every construct', () => {
+    for (const expr of ['-2^2 % 3 - -(4 * -min(1, -2)) / -ln(e)', '10 % (-(3)) * 2', '(1 - 2) % (0 - 3)', '1e21 * -2 + 1e-7 % 3']) {
+      const first = calculate(expr);
+      expect(first.ok, `${expr}: ${first.ok ? '' : first.error}`).toBe(true);
+      expect(calculate(first.ok ? first.expression : ''), expr).toEqual(first);
+    }
   });
 });
 
