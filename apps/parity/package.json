@@ -11,6 +11,7 @@
     "build-tasks": "tsx src/cli.ts build-tasks",
     "tasks": "tsx src/cli.ts tasks",
     "tasks-report": "tsx src/cli.ts tasks-report",
+    "gate": "tsx src/gate-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

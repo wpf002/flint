@@ -1,0 +1,447 @@
+{
+  "_comment": "Shared contract between apps/parity/src/prompts.ts and apps/train/mlx/parity_text.py. Checked by test/normalize-fixture.test.ts and apps/train/mlx/tests/test_parity_text.py. guardMatch = the contamination guard (Jaccard >= 0.6 or 80% containment).",
+  "cases": [
+    {
+      "input": "Explain the birthday paradox.",
+      "normalized": "explain the birthday paradox",
+      "id": "00100cd7a076",
+      "words": [
+        "birthday",
+        "paradox"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "  Explain   the\tbirthday\nparadox!!  ",
+      "normalized": "explain the birthday paradox",
+      "id": "00100cd7a076",
+      "words": [
+        "birthday",
+        "paradox"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "What’s the difference between TCP and UDP?",
+      "normalized": "what's the difference between tcp and udp",
+      "id": "4f08e6a00648",
+      "words": [
+        "between",
+        "difference",
+        "tcp",
+        "udp",
+        "what's"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "What's the difference between TCP and UDP?",
+      "normalized": "what's the difference between tcp and udp",
+      "id": "4f08e6a00648",
+      "words": [
+        "between",
+        "difference",
+        "tcp",
+        "udp",
+        "what's"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Café crème: how is it made?",
+      "normalized": "caf cr me how is it made",
+      "id": "37d396169177",
+      "words": [
+        "caf",
+        "cr",
+        "made"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "İstanbul vs Constantinople — what changed in 1930?",
+      "normalized": "i stanbul vs constantinople what changed in 1930",
+      "id": "a8e86b16cbc8",
+      "words": [
+        "1930",
+        "changed",
+        "constantinople",
+        "stanbul",
+        "vs"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "The Kelvin scale starts at absolute zero, why?",
+      "normalized": "the kelvin scale starts at absolute zero why",
+      "id": "2374164b05d6",
+      "words": [
+        "absolute",
+        "kelvin",
+        "scale",
+        "starts",
+        "zero"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Rate my 🔥 portfolio: AAPL 40%, NVDA 60%",
+      "normalized": "rate my portfolio aapl 40 nvda 60",
+      "id": "81f2e657c332",
+      "words": [
+        "40",
+        "60",
+        "aapl",
+        "nvda",
+        "portfolio",
+        "rate"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Don't you think 2+2=4?",
+      "normalized": "don't you think 2 2 4",
+      "id": "7647d61426d9",
+      "words": [
+        "2",
+        "4",
+        "don't",
+        "think"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "hey",
+      "normalized": "hey",
+      "id": "fa690b82061e",
+      "words": [
+        "hey"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "hi flint how are you",
+      "normalized": "hi flint how are you",
+      "id": "b8741ea550b3",
+      "words": [
+        "flint",
+        "hi"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "good morning! what is on my calendar today and who do I meet at 3pm?",
+      "normalized": "good morning what is on my calendar today and who do i meet at 3pm",
+      "id": "d3c9fb11bc7f",
+      "words": [
+        "3pm",
+        "calendar",
+        "good",
+        "meet",
+        "morning",
+        "today"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "thanks!",
+      "normalized": "thanks",
+      "id": "a6a2729cbf6b",
+      "words": [
+        "thanks"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "yes do it",
+      "normalized": "yes do it",
+      "id": "b9bf1eb15cb9",
+      "words": [
+        "yes"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "go ahead and send it",
+      "normalized": "go ahead and send it",
+      "id": "8f7d7668aa51",
+      "words": [
+        "ahead",
+        "go",
+        "send"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "Reply with exactly: UI-OK",
+      "normalized": "reply with exactly ui ok",
+      "id": "29a854993a8a",
+      "words": [
+        "exactly",
+        "ok",
+        "reply",
+        "ui"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "say OK",
+      "normalized": "say ok",
+      "id": "7be8ca738338",
+      "words": [
+        "ok",
+        "say"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "Answer with one line: what is 2+2",
+      "normalized": "answer with one line what is 2 2",
+      "id": "68776d65acec",
+      "words": [
+        "2",
+        "answer",
+        "line",
+        "one"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "https://example.com/some/path?q=1",
+      "normalized": "https example com some path q 1",
+      "id": "526c4e53f655",
+      "words": [
+        "1",
+        "com",
+        "example",
+        "https",
+        "path",
+        "q"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "what is love",
+      "normalized": "what is love",
+      "id": "e1fb7e986379",
+      "words": [
+        "love"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "who is fighting at UFC 329?",
+      "normalized": "who is fighting at ufc 329",
+      "id": "2e11e1df2627",
+      "words": [
+        "329",
+        "fighting",
+        "ufc"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Who is fighting in the UFC 329 main event? Search the web.",
+      "normalized": "who is fighting in the ufc 329 main event search the web",
+      "id": "5eaa82b381a7",
+      "words": [
+        "329",
+        "event",
+        "fighting",
+        "main",
+        "search",
+        "ufc",
+        "web"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Explain the history of the printing press and why it matters",
+      "normalized": "explain the history of the printing press and why it matters",
+      "id": "953b9a0686bd",
+      "words": [
+        "history",
+        "matters",
+        "press",
+        "printing"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "Explain the history of the steam engine and why it matters",
+      "normalized": "explain the history of the steam engine and why it matters",
+      "id": "401a30323602",
+      "words": [
+        "engine",
+        "history",
+        "matters",
+        "steam"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "How does a transistor work?",
+      "normalized": "how does a transistor work",
+      "id": "449c4bc967f3",
+      "words": [
+        "transistor",
+        "work"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "How do transistors work",
+      "normalized": "how do transistors work",
+      "id": "6e8e3f965d55",
+      "words": [
+        "transistors",
+        "work"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "I'm referencing the email from yesterday",
+      "normalized": "i'm referencing the email from yesterday",
+      "id": "f7f93699ede4",
+      "words": [
+        "email",
+        "i'm",
+        "referencing",
+        "yesterday"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "Write a haiku about Dallas in September.",
+      "normalized": "write a haiku about dallas in september",
+      "id": "80e1b0283887",
+      "words": [
+        "dallas",
+        "haiku",
+        "september",
+        "write"
+      ],
+      "trivial": false
+    },
+    {
+      "input": "",
+      "normalized": "",
+      "id": "e3b0c44298fc",
+      "words": [],
+      "trivial": true
+    },
+    {
+      "input": "   ",
+      "normalized": "",
+      "id": "e3b0c44298fc",
+      "words": [],
+      "trivial": true
+    },
+    {
+      "input": "OK",
+      "normalized": "ok",
+      "id": "2689367b205c",
+      "words": [
+        "ok"
+      ],
+      "trivial": true
+    },
+    {
+      "input": "tell me about the Roman Empire's fall",
+      "normalized": "tell me about the roman empire's fall",
+      "id": "41ac008d9a97",
+      "words": [
+        "empire's",
+        "fall",
+        "roman"
+      ],
+      "trivial": false
+    }
+  ],
+  "pairs": [
+    {
+      "a": "Explain the birthday paradox.",
+      "b": "explain the birthday paradox",
+      "jaccard": 1,
+      "nearDuplicate": true,
+      "guardMatch": true
+    },
+    {
+      "a": "who is fighting at UFC 329?",
+      "b": "Who is fighting in the UFC 329 main event? Search the web.",
+      "jaccard": 0.428571,
+      "nearDuplicate": true,
+      "guardMatch": true
+    },
+    {
+      "a": "Explain the history of the printing press and why it matters",
+      "b": "Explain the history of the steam engine and why it matters",
+      "jaccard": 0.333333,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "How does a transistor work?",
+      "b": "How do transistors work",
+      "jaccard": 0.333333,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "What causes the seasons to change on Earth?",
+      "b": "Why do the seasons change on Earth",
+      "jaccard": 0.75,
+      "nearDuplicate": true,
+      "guardMatch": true
+    },
+    {
+      "a": "Compare Rust and Go for backend services",
+      "b": "Compare Go and Rust for building backend services at scale",
+      "jaccard": 0.714286,
+      "nearDuplicate": true,
+      "guardMatch": true
+    },
+    {
+      "a": "What is dark matter?",
+      "b": "What is dark energy?",
+      "jaccard": 0.333333,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "best pizza in Dallas",
+      "b": "best tacos in Dallas",
+      "jaccard": 0.5,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "Compare postgres mysql performance",
+      "b": "Compare postgres sqlite performance",
+      "jaccard": 0.6,
+      "nearDuplicate": false,
+      "guardMatch": true
+    },
+    {
+      "a": "quantum entanglement",
+      "b": "quantum entanglement explained simply for kids",
+      "jaccard": 0.4,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "hi",
+      "b": "hello",
+      "jaccard": 0,
+      "nearDuplicate": false,
+      "guardMatch": false
+    },
+    {
+      "a": "",
+      "b": "",
+      "jaccard": 1,
+      "nearDuplicate": true,
+      "guardMatch": true
+    }
+  ]
+}

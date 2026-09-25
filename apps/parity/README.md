@@ -1,8 +1,8 @@
 # @flint/parity: the parity eval
 
 Is Flint as good as ChatGPT, Claude and Perplexity on the things Will actually asks
-him? `apps/train/mlx/eval_judge.py` can't answer that: it compares a fine-tuned model
-with its own base. This package runs Flint **end to end** (router, persona, memory,
+him? The retired `apps/train/mlx/eval_judge.py` couldn't answer that: it compared a
+fine-tuned model with its own base. This package runs Flint **end to end** (router, persona, memory,
 tools) against the vendors' strong general models on a frozen set of Will's real
 prompts. An LLM judge (one Claude model, or a cross-vendor panel with `--judge-panel`)
 compares each pair blind, and the result gets a sign test so a coin flip doesn't read as
@@ -405,7 +405,7 @@ pnpm --filter @flint/parity report --run <ts> --flint-variant v2 --judge-groundi
 
 Per competitor, the report shows Flint's W/L/T, its win rate (a tie counts as half, so
 50% is parity), the exact two-sided sign test p on decisive games, and a signal using
-the same labels as `eval_judge.py`: **SIGNIFICANT** (p < 0.05), **weak** (p < 0.32),
+the same labels as the retired `eval_judge.py`: **SIGNIFICANT** (p < 0.05), **weak** (p < 0.32),
 **NOISE** (anything else, or fewer than 4 decisive games). Next to it, the strict line
 counts Flint's failures as losses (see Failures above), and the contestants table shows
 each one's answer rate. The same breakdown is then repeated per category. `parity_history.csv` gets one cumulative row per competitor per
@@ -633,6 +633,70 @@ million tokens is at the top of that); a two-member panel with Fable and the con
 $0.10-0.20 per pair, so $40-80 for five competitors. Budget $80-120 for the full set with
 every vendor, much less with `--limit` or fewer competitors.
 
+## 7. The promotion gate (`gate`)
+
+Should a local-model candidate (a fine-tune from apps/train/mlx, or another base
+model) replace the live local model? Only if Flint-local then wins **measurably more
+often against a frontier model**: same prompts, same competitor answers, same judge,
+prompt for prompt. Val loss and "beats its own base" never decide it.
+
+```
+pnpm --filter @flint/parity gate --candidate flint-muse:c20261001-0230 --candidate-think on \
+  --manifest ~/.flint/brain/cycles/20261001-0230/data/manifest.json        # a trained candidate
+pnpm --filter @flint/parity gate --no-manifest --candidate qwen3.8:27b \
+  --sets parity_prompts.jsonl:100                                          # a base swap
+pnpm --filter @flint/parity gate --decide-only --runs parity_prompts=20260924-tiered \
+  --sets parity_prompts.jsonl --no-manifest --candidate qwen3.8:27b \
+  --baseline-subject flint-local@muse-glimmer:30b --candidate-subject flint-local@qwen3.8:27b \
+  --judge-model claude-opus-5-5 --out-dir /tmp/gates                       # re-decide cached verdicts, no calls
+```
+
+**How it measures.** For each set in `--sets` (default
+`parity_prompts.jsonl:100,flint_tasks.jsonl`; `:N` is a balanced slice, as `--limit`)
+it makes a fresh run dir (`runs/gate-<candidate>-<ts>-<set>`) and calls `run` twice:
+the live local model as Will gets it (`--flint-local`: live model, think setting and
+style variant), then the candidate (`--local-model`, plus `--local-think` /
+`--flint-variant` if given), both with `--contestants flint,<competitor>` (default
+`openai`, `gpt-5`) and the judge panel (default `anthropic:claude-opus-5-5,openai:gpt-5`).
+GPT-5's answers are bought once and shared. If any pair ends in a judge error, it
+resumes once to re-judge. Each subject gets a strict score per prompt (win 1, tie 0.5,
+loss or failure to answer 0), and the decision is on the per-prompt difference
+(src/paired.ts): the counts of prompts that got better and worse, a one-sided exact sign
+test, Δ (the change in strict win rate against GPT-5), and a seeded 90% bootstrap
+interval, pooled over the sets (each prompt once) and per set and category.
+
+**PROMOTE** (exit 0) needs all of: pooled p < 0.05, Δ ≥ +5 points, the interval's lower
+end > 0; Δ ≥ 0 on every set (Will's own tasks can't pay for textbook gains); no category
+with n ≥ 10 down more than 10 points; the answer rate down at most a point; the median
+answer at most 1.3x slower. Any miss is **REJECT** (exit 1). **HOLD** (exit 3) means
+the measurement can't be trusted, and wins over REJECT: a set is missing, the server
+changed during the gate (`/health` or `~/flint`'s HEAD: auto-deploy restarts it on
+every commit to main), a `run` stopped early, fewer than 50 paired prompts, more than 5%
+judge errors on a set, no manifest for a trained candidate, or a manifest whose training
+data was guarded against a different version of a set (sha256) than the one judging it.
+A manifest reporting any eval overlap is REJECTED outright. Missing sets and manifest
+problems are checked before anything is paid for. Exit 2 is an error (server down, a
+cycle training: the gate won't time models against a busy GPU).
+
+Why those numbers: re-answering with the same model flips about 8 of 99 prompts
+(20260924-tiered), so a real change shows up as a lopsided better/worse count.
+qwen3.8:27b vs muse-glimmer:30b on that run is 31 better, 18 worse, +3.4 points,
+p = 0.043 one-sided: significant, but under the margin (and 1.6x slower), so REJECT;
+a +9-point gain with 12 better and 3 worse (p = 0.018) passes. `--margin`, `--alpha`,
+`--min-paired`, `--max-category-drop` and `--max-latency-ratio` override the defaults.
+
+Output: `~/.flint/eval/gates/<candidate>-<ts>.json` (every check, the pooled and
+per-set numbers) and `.md`, a row in `gates/gate_history.csv`, and `--verdict-out`
+when given (the cycle keeps a copy in its own dir). Cost: about $4 of GPT-5 answers
+plus ~$0.04 per panel pair, two subjects, so ~$20 for 100 + a task set;
+`--budget-usd` (default 30) is split across the runs as they go. **It never
+promotes**: a PROMOTE prints the command that sets `OLLAMA_MODEL` and restarts the
+server, and running it is Will's call.
+
+`src/pool.ts` is the permanent train/eval split of conversations shared with
+apps/train/mlx/pool.py: a real-task set (`flint_tasks.jsonl`) must be built only from
+conversations with `poolOf(...) === 'eval'`, and training uses only the rest.
+
 ## Caveats (read these before quoting a number)
 
 - **The competitors get no tools.** They answer through the raw APIs with the same
@@ -700,3 +764,8 @@ tested through a recording judge (src/steps.ts): which pairs a grounded judge sk
 that it is shown the context and called and priced as the real model, never the
 `+grounded` id, that an interrupted call is not recorded as a failure, and the Flint
 preflight; and an `unanswered` reply recorded as a failure, not judged, and counted in the report.
+The gate's tests (test/gate.test.ts, test/paired.test.ts) run every decision rule on
+fixture judgments (test/fixtures/gate/, a 60-prompt run dir) and on synthetic score
+sets, including the two calibration cases above, and run the CLI end to end with
+`--decide-only`. test/normalize-fixture.test.ts pins the prompt identity and pool split
+the Python training side ports (apps/train/mlx/tests check the same fixtures).
