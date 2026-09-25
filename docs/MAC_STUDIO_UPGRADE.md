@@ -1,5 +1,17 @@
 # Flint → Mac Studio: the ultimate upgrade
 
+> **Superseded (2026-09).** The migration below happened; the 70B training path did
+> not pan out and is retired. The 72B QLoRA run (Qwen2.5-72B on ~700 corpus rows +
+> 30k OpenHermes) went 31-34 against its own base over 150 prompts (noise), and
+> nothing in this plan ever measured the local model against a frontier model. The
+> weekly retrain and daily grow trained on Claude's answers, which Anthropic's terms
+> prohibit as training targets, and unloaded Ollama to make room. The local brain is
+> now muse-glimmer:30b; local training runs through
+> [apps/train/mlx/cycle.sh](../apps/train/mlx/README.md) and ships a candidate only
+> if the parity gate shows Flint-local measurably closer to GPT-5. Steps 1-5 below are
+> kept as a record; don't run them. See
+> [apps/train/mlx/HISTORY.md](../apps/train/mlx/HISTORY.md).
+
 When the Mac Studio (M4 Max, 64GB) arrives, this turns Flint from a 7B into a
 fine-tuned **70B** trained on every lesson banked so far.
 

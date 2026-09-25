@@ -1,75 +1,46 @@
 #!/bin/zsh
-# studio_roadmap.sh — runs ON the Mac Studio. Starts the roadmap that turns Flint
-# from a 7B-on-Claude into a real, owned 70B AI:
-#   1. launch the ultimate upgrade — an overnight QLoRA fine-tune on EVERY banked
-#      lesson, early-stopped and Claude-judged — DETACHED so it survives logout/SSH.
-#   2. make sure the flywheel agents (daily grow + weekly retrain) are running.
+# studio_roadmap.sh — runs ON the Mac Studio. Reports where Flint's local brain
+# stands and what a training cycle would do. It starts nothing.
 #
-# The ollama 70B serving base is intentionally NOT pulled here: the fine-tune
-# UNLOADS ollama for its whole multi-hour run, so a concurrent `ollama pull` would
-# lose its server and fail. Pull it at SERVE time instead (step 3 below).
+# It used to launch an overnight QLoRA fine-tune of Qwen2.5-72B and bootstrap the
+# daily-grow / weekly-retrain agents. All three are retired (apps/train/mlx/HISTORY.md):
+# - the 72B fine-tune never beat its own base (31-34 of 150, noise), and nothing
+#   ever measured it against a frontier model;
+# - both agents trained on Claude's answers, which Anthropic's terms prohibit as
+#   training targets, and the retrain unloaded Ollama (taking memory recall and
+#   embeddings down for every frontier turn too).
 #
-# NOT automated here (on purpose): SERVING the 70B and FLIPPING it to primary.
-# Those wait on the training + eval verdict (docs/MAC_STUDIO_UPGRADE.md steps 3-4) —
-# auto-promoting an unproven brain would make Flint worse, not better.
+# What replaced them is apps/train/mlx/cycle.sh: a candidate ships only if the
+# parity gate shows it makes Flint-local measurably better against GPT-5. Its
+# schedule (com.flint.retrain) ships disabled; see apps/train/mlx/README.md
+# "Scheduling" before enabling it.
 set -uo pipefail
 
-BRAIN="$HOME/.flint/brain"
-FLINT_70B="${FLINT_70B:-mlx-community/Qwen2.5-72B-Instruct-4bit}"   # MLX base: fine-tune + serve (auto-downloaded)
-OLLAMA_70B="${OLLAMA_70B:-qwen2.5:72b}"                            # ollama base: pulled at serve time (option B)
+REPO="${FLINT_REPO:-$HOME/flint}"
+MLX="$REPO/apps/train/mlx"
 export PATH="$HOME/.flint-ollama:/opt/homebrew/bin:$HOME/.local/bin:$PATH"
-mkdir -p "$HOME/.flint/logs"
 
-echo "== 1/2 launch the ultimate upgrade (overnight fine-tune), detached"
-# Checked here too: the run is detached, so a failure inside it only lands in
-# upgrade.out. Failing now puts the message in your terminal.
-# macOS lets the GPU wire only ~75% of RAM by default: ~48GB on a 64GB Studio.
-# The 72B 4-bit base is ~41GB before activations, LoRA state and the eval pass,
-# so a QLoRA run at the default limit OOMs or swaps. sysctl reports 0 for "default".
-# Raise it once per boot (resets on reboot):  sudo sysctl iogpu.wired_limit_mb=57344
-WIRED_MB=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
-if [ "${FLINT_SKIP_WIRED_CHECK:-0}" != 1 ] && [ "$WIRED_MB" -lt "${FLINT_MIN_WIRED_MB:-56000}" ]; then
-  echo "✗ GPU wired limit is ${WIRED_MB}MB (0 = macOS default, ~48GB on 64GB)."
-  echo "  A 72B QLoRA run needs ~56GB. Run this, then retry:"
-  echo "    sudo sysctl iogpu.wired_limit_mb=57344"
-  exit 1
-fi
-if [ ! -x "$BRAIN/.venv/bin/python" ]; then
-  echo "   ! brain venv missing — run studio_bootstrap.sh first. Not starting training."
-  exit 1
-fi
-if [ ! -f "$BRAIN/ultimate_upgrade.sh" ]; then
-  echo "   ! $BRAIN/ultimate_upgrade.sh not found — did ~/.flint/brain sync over? Aborting."
-  exit 1
-fi
-chmod +x "$BRAIN/ultimate_upgrade.sh" 2>/dev/null || true
-nohup env FLINT_70B="$FLINT_70B" /bin/zsh "$BRAIN/ultimate_upgrade.sh" > "$BRAIN/upgrade.out" 2>&1 &
-echo "   training started (pid $!) — watch: tail -f ~/.flint/brain/upgrade.out"
+echo "== local brain"
+curl -s -m 5 http://127.0.0.1:8080/health | /usr/bin/python3 -c 'import json,sys; h=json.load(sys.stdin); print(f"   serving: {h.get(\"provider\")}:{h.get(\"model\")}")' 2>/dev/null \
+  || echo "   ! server not answering on :8080"
 
-echo "== 2/2 flywheel agents (daily grow + weekly retrain)"
-UID_N="$(id -u)"
-for a in com.flint.grow com.flint.retrain; do
-  P="$HOME/Library/LaunchAgents/$a.plist"
-  if [ -e "$P" ]; then
-    launchctl bootstrap "gui/$UID_N" "$P" 2>/dev/null || true
-    echo "   ✓ $a"
-  else
-    echo "   ! $a.plist not found (install it to keep the flywheel turning)"
-  fi
-done
+echo "== scheduled training (com.flint.retrain)"
+if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q '"com.flint.retrain" => disabled'; then
+  echo "   disabled (as shipped)"
+else
+  echo "   ! not marked disabled: check it runs $MLX/cycle.sh, not ~/.flint/brain/retrain.sh"
+fi
+
+echo "== what a cycle would do now (dry run: builds nothing, trains nothing)"
+if [ -x "$MLX/cycle.sh" ]; then
+  /bin/zsh "$MLX/cycle.sh" --dry-run --if-due
+else
+  echo "   ! $MLX/cycle.sh not found — is $REPO the deploy checkout?"
+fi
 
 cat <<'EOF'
 
-== ROADMAP STARTED ==
-Running now, hands-off:
-  - 70B base downloading
-  - overnight fine-tune on every banked lesson (Claude judges it vs the base 70B)
-  - grow (daily) + retrain (weekly) keep the corpus and model improving
-
-WHEN THE UPGRADE FINISHES — check the verdict in ~/.flint/brain/history.log — do the
-two human-gated steps that make Flint his own AI:
-  3. SERVE Flint-70B   — docs/MAC_STUDIO_UPGRADE.md step 3
-       (for the ollama serving path, pull the base now that training is done:
-        ollama pull qwen2.5:72b)
-  4. FLIP to primary   — docs/MAC_STUDIO_UPGRADE.md step 4 (judgeBrain: local-first, Claude backup)
+Next steps are in apps/train/mlx/README.md: set up the training venv
+(setup_train_env.sh), get terms-compliant training data, run ONE supervised
+cycle, and only then enable the schedule. Promotion stays a manual step.
 EOF

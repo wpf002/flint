@@ -29,6 +29,17 @@ team, trillions of tokens). You CAN own one and grow it into Flint. The ladder:
 
 Independence is BUILT now (capture + distill), not flipped later.
 
+> **Update (2026-09): steps 2 and 4 changed.** Claude's answers are no longer
+> training targets: Anthropic's terms prohibit using outputs as training targets
+> (OpenAI's bar developing competing models), and the research and Flint's own runs
+> agree that imitation moves style, not the knowledge gap the local model actually
+> loses on. The measure is also different: not "does it match Claude's answers" but
+> "does Flint-local win measurably more often against GPT-5". A local candidate
+> ships only through that gate, trained on terms-compliant data (Will's own, the
+> base model's verified self-samples, or open-weight teachers whose licences allow
+> it). Parity with the frontier comes from the frontier tiers for now. See
+> [apps/train/mlx/README.md](../apps/train/mlx/README.md).
+
 ## The swappable brain seam (today's crutch, tomorrow's switch)
 
 Today Flint defaults to Claude for capability and falls back to the local model
