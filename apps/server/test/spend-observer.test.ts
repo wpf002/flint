@@ -100,6 +100,24 @@ describe('spendObserver', () => {
     expect(rows()[0]!.model).toBe('claude-sonnet-5');
   });
 
+  it('records a stream cut off mid-answer at the usage the provider billed', async () => {
+    // What the Anthropic adapter yields when /chat's tab closes part way: the input
+    // (and cache) counts from message_start, output so far, on the error event.
+    const billed: TokenUsage = { input: 3_000, output: 40, cacheRead: 9_000 };
+    const ac = new AbortController();
+    const provider = scripted('anthropic', [
+      [text('Partial '), { type: 'error', error: makeAiError('internal', 'Request was aborted', { retryable: false }), usage: billed }],
+    ]);
+    const flint = new Flint({ provider, defaultModel: 'claude-opus-5-5', observer: spendObserver(ledger) });
+    ac.abort();
+    const events: StreamEvent[] = [];
+    for await (const ev of flint.stream({ prompt: 'long answer' }, { signal: ac.signal })) events.push(ev);
+    expect(events[events.length - 1]!.type).toBe('error');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', tokens: billed });
+    expect(ledger.totals('anthropic').day.usd).toBeCloseTo(costOf('anthropic', 'claude-opus-5-5', billed), 6);
+  });
+
   it('records every fallback attempt that finished, on its own vendor', async () => {
     const brain = (label: string, provider: ProviderAdapter, model: string): BrainTier<Flint> => ({
       tier: 'standard',

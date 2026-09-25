@@ -639,9 +639,13 @@ export function kindFromContext(context: unknown): SpendKind | undefined {
  * The observer every Flint client in the server shares. Core emits one
  * `onResponse` per provider pass, so each tool-loop iteration, each retry, the
  * answer-only call and each fallback tier's attempt is its own ledger row. The
- * local brain (Ollama) is free and not recorded. A stream that dies before its
- * `done` reports no usage and so is not counted (the provider bills little or
- * nothing for those).
+ * local brain (Ollama) is free and not recorded. A stream cut off part way (a
+ * closed tab, a timeout, an error mid-answer) is billed by the vendor for its
+ * full input and the output generated so far; the Anthropic adapter reports
+ * that on its error event and core passes it here (reason `aborted` / `error`),
+ * so it is counted too. A request that failed before reaching the model was not
+ * billed and reports nothing. (The OpenAI adapter reports no partial usage, so
+ * a cut-off OpenAI stream is not counted: an under-count, rare on a last resort.)
  */
 export function spendObserver(ledger: SpendLedger): AiObserver {
   return {
