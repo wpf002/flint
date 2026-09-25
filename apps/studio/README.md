@@ -49,12 +49,18 @@ It writes `~/searxng/{src,venv,settings.yml,logs}` and
 `~/Library/LaunchAgents/com.flint.searxng.plist`, rendered from the template
 `com.flint.searxng.plist` and served by granian as SearXNG's own container does.
 `settings.yml` is written **once**, mode 600, with a secret generated at install. Re-runs
-never touch it; delete it to get a fresh one. The settings: DuckDuckGo, Brave, Bing, Mojeek,
-Wikipedia and Qwant; safe search off; JSON output on; the limiter off, since it guards
-public instances and this one only listens on loopback. Some engines get blocked from some
-IPs (Mojeek and Qwant did in testing). SearXNG suspends them for a while and the rest carry
-the query. Re-running the script is safe: it reports `✓` for what it changed and `=` for
-what it kept.
+never touch it; delete it to get a fresh one. The settings: DuckDuckGo, Brave, Mojeek and
+Wikipedia; safe search moderate; JSON output on; the limiter off, since it guards public
+instances and this one only listens on loopback. Bing and Qwant stay disabled, as upstream
+ships them. In testing, Bing's scraper put unrelated pages at rank 1 (npm for "granian wsgi
+server", FedEx for a Fed-rates query, adult sites), and Qwant only ever answered CAPTCHA.
+Add an engine only after `search-compare` shows it helps. The scraped engines get blocked
+from some IPs: in testing, DuckDuckGo answered CAPTCHA, Brave rate-limited after about a
+dozen queries, and Mojeek sometimes returned 403. SearXNG suspends a blocked engine for a
+while and the rest carry the query. When none can, `web_search` reports that as a failure
+rather than an empty web. This is why the key stays primary. Re-running the script is safe:
+it reports `✓` for what it changed and `=` for what it kept, and warns if an existing
+`settings.yml` still enables Bing or Qwant.
 
 Then switch the web connector over. In `~/.flint/mcp.json`, set the `web` server's `env`:
 
@@ -63,7 +69,9 @@ Then switch the web connector over. In `~/.flint/mcp.json`, set the `web` server
 ```
 
 Add `"SEARXNG_URL"` only if you changed the port. Remove `SEARCH_API_KEY` to run fully
-keyless. Every `web_search` result now says which backend answered (`"source"`), plus a
+keyless. A `tvly-…` key goes to Tavily and a `BSA…` key to Brave. A key of any other shape
+is used nowhere until you add `"SEARCH_KEY_PROVIDER": "tavily"` or `"brave"`; the
+connector's startup line in the server log says so. Every `web_search` result now says which backend answered (`"source"`), plus a
 `"fallback"` reason when SearXNG stood in (all the knobs are in
 [packages/mcp/README.md](../../packages/mcp/README.md#web-search-metered-keyless-or-both)).
 The connector runs from a bundle, and auto-deploy rebuilds only `server.mjs`. So after

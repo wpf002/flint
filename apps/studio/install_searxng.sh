@@ -99,6 +99,8 @@ fi
 if [ -f "$SETTINGS" ]; then
   say "= kept $SETTINGS (existing secret untouched; delete the file to regenerate it)"
   grep -q 'ultrasecretkey' "$SETTINGS" && say "! $SETTINGS still has SearXNG's placeholder secret; SearXNG will refuse to start"
+  grep -Eq '^[[:space:]]*keep_only:.*\b(bing|qwant)\b' "$SETTINGS" &&
+    say "! $SETTINGS enables bing/qwant (an early version of this script did): bing ranks unrelated and adult pages first; delete the file and re-run"
 else
   SECRET="$(openssl rand -hex 32)"
   (
@@ -107,12 +109,17 @@ else
 # SearXNG for Flint: loopback-only, keyless metasearch behind web_search.
 # Written once by apps/studio/install_searxng.sh, which never overwrites it.
 # Everything not set here is SearXNG's default: https://docs.searxng.org/admin/settings/
+#
+# Engines: only ones upstream ships enabled, plus Mojeek. Bing and Qwant stay
+# off, as upstream ships them: Bing's scraper returns unrelated pages (npm,
+# FedEx, adult sites) at rank 1, and Qwant only ever answered CAPTCHA. Add an
+# engine only after search-compare (apps/parity) shows it helps.
 use_default_settings:
   engines:
-    keep_only: [duckduckgo, brave, bing, mojeek, wikipedia, qwant]
+    keep_only: [duckduckgo, brave, mojeek, wikipedia]
 
 search:
-  safe_search: 0
+  safe_search: 1          # moderate: these results reach the model, and deep_research fetches the top pages
   autocomplete: ""
   default_lang: "en"
   formats: [html, json]   # json is what web_search reads
@@ -131,12 +138,8 @@ server:
 outgoing:
   request_timeout: 5.0    # per engine; web_search waits 10s for the whole answer
 
-# bing and qwant ship disabled, and mojeek inactive, in SearXNG's defaults.
+# mojeek ships inactive in SearXNG's defaults.
 engines:
-  - name: bing
-    disabled: false
-  - name: qwant
-    disabled: false
   - name: mojeek
     inactive: false
     disabled: false
@@ -190,5 +193,7 @@ rm -f "$DIR/logs/check.json"
 say ""
 say "Next: in ~/.flint/mcp.json, set the web server's env to"
 say "  \"SEARCH_PROVIDER\": \"auto\"   (keep SEARCH_API_KEY: it stays primary while it works)"
+say "  a tvly-… key is Tavily's and a BSA… key Brave's; any other key also needs"
+say "  \"SEARCH_KEY_PROVIDER\": \"tavily\" or \"brave\", or it is used nowhere"
 [ "$PORT" = 8888 ] || say "  \"SEARXNG_URL\": \"$URL\""
 say "then rebuild the web connector bundle and restart Flint (apps/studio/README.md, Keyless search)."
