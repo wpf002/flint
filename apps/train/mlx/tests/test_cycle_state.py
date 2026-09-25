@@ -5,8 +5,9 @@ import os
 import unittest
 from contextlib import redirect_stdout
 
-from helpers import temp_dir
+from helpers import compliant_samples, eval_set, temp_dir, train_pool_cid, write_jsonl
 
+import build_data
 import cycle_state
 from cycle_state import is_due
 
@@ -18,8 +19,8 @@ def rec(id_, result, days_ago, targets=300, sha="p1"):
     return {"id": id_, "result": result, "startedAt": t, "endedAt": t, "targets": targets, "profileSha": sha}
 
 
-def due(cycles, targets=500, sha="p1"):
-    return is_due({"cycles": cycles}, targets=targets, profile_sha=sha, now=NOW, min_train=200)
+def due(cycles, targets=500, sha="p1", status="ok", reason=""):
+    return is_due({"cycles": cycles}, targets=targets, build_status=status, build_reason=reason, profile_sha=sha, now=NOW, min_train=200)
 
 
 class Due(unittest.TestCase):
@@ -30,6 +31,16 @@ class Due(unittest.TestCase):
 
     def test_first_cycle(self):
         self.assertTrue(due([])[0])
+
+    def test_only_a_build_that_would_train_is_due(self):
+        # 220 targets clear min_train before the split, but the valid split leaves
+        # 176 train rows: the builder says NO_DATA, so a cycle would only record that.
+        ok, why = due([], targets=220, status="NO_DATA", reason="176 unique target rows < min_train 200")
+        self.assertFalse(ok)
+        self.assertIn("NO_DATA", why)
+        self.assertIn("176 unique target rows", why)
+        # No status at all (an older builder, a truncated line) is never "due".
+        self.assertFalse(due([], targets=500, status=None)[0])
 
     def test_min_days_since_the_last_training_cycle(self):
         self.assertFalse(due([rec("a", "HOLD", 3)])[0])
@@ -66,8 +77,45 @@ class Cli(unittest.TestCase):
     def test_due_exit_codes(self):
         state = os.path.join(temp_dir(), "state.json")
         with redirect_stdout(io.StringIO()):
-            self.assertEqual(cycle_state.main(["--state", state, "due", "--count-json", '{"targets": 10}', "--profile-sha", "x", "--min-train", "200"]), 10)
-            self.assertEqual(cycle_state.main(["--state", state, "due", "--count-json", '{"targets": 300}', "--profile-sha", "x", "--min-train", "200"]), 0)
+            self.assertEqual(cycle_state.main(["--state", state, "due", "--count-json", '{"status": "NO_DATA", "targets": 10}', "--profile-sha", "x", "--min-train", "200"]), 10)
+            self.assertEqual(cycle_state.main(["--state", state, "due", "--count-json", '{"status": "ok", "targets": 300}', "--profile-sha", "x", "--min-train", "200"]), 0)
+            self.assertEqual(cycle_state.main(["--state", state, "due", "--count-json", '{"targets": 300}', "--profile-sha", "x", "--min-train", "200"]), 10)
+
+
+class DueAgreesWithTheBuilder(unittest.TestCase):
+    """cycle.sh's path: build_data --count-only, then `due` on its JSON, with the real profile's thresholds."""
+
+    def count_json(self, n):
+        d = temp_dir()
+        ev = eval_set(d, ["Explain the birthday paradox."])
+        os.makedirs(os.path.join(d, "samples"))
+        write_jsonl(os.path.join(d, "samples", "b1.jsonl"), compliant_samples(n, train_pool_cid()))
+        args = ["--profile", "muse-glimmer-30b", "--corpus", os.path.join(d, "none.jsonl"), "--samples-dir", os.path.join(d, "samples")]
+        args += ["--eval-set", ev, "--optional-eval-set", os.path.join(d, "flint_tasks.jsonl"), "--count-only"]
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(build_data.main(args), 0)
+        return out.getvalue().strip()
+
+    def due(self, count):
+        state = os.path.join(temp_dir(), "state.json")
+        with redirect_stdout(io.StringIO()) as out:
+            rc = cycle_state.main(["--state", state, "due", "--count-json", count, "--profile-sha", "x", "--min-train", "200"])
+        return rc, out.getvalue()
+
+    def test_220_targets_is_not_due_because_the_build_would_be_no_data(self):
+        count = self.count_json(220)
+        c = json.loads(count)
+        self.assertEqual((c["targets"], c["status"]), (220, "NO_DATA"))
+        self.assertLess(c["trainTargets"], 200)
+        rc, why = self.due(count)
+        self.assertEqual(rc, cycle_state.EXIT_NOT_DUE, why)
+        self.assertIn("NO_DATA", why)
+
+    def test_260_targets_builds_and_is_due(self):
+        count = self.count_json(260)
+        self.assertEqual(json.loads(count)["status"], "ok")
+        rc, why = self.due(count)
+        self.assertEqual(rc, cycle_state.EXIT_DUE, why)
 
 
 if __name__ == "__main__":

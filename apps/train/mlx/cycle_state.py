@@ -5,8 +5,11 @@ No calendar retrain. The old weekly job retrained whether or not there was
 anything new to learn, and nothing stopped it after a string of failures. A
 cycle is due only when all of these hold:
 
-- there is enough compliant data to train on at all (build_data --count-only
-  targets >= the profile's min_train);
+- the data would actually build: build_data --count-only reports status "ok",
+  which means enough compliant rows to train on AFTER the valid split takes its
+  share (min_train train rows, min_valid valid rows) and enough reasoning rows.
+  Counting targets before the split said "due" at 200 while the build needed
+  ~250, and every night between the two ran an empty NO_DATA cycle;
 - something changed since the last cycle that trained: at least --min-new
   (150) more target rows, or a different profile (a new base, new knobs);
 - at least --min-days (7) since the last cycle that trained;
@@ -17,6 +20,7 @@ cycle is due only when all of these hold:
 State lives in ~/.flint/brain/cycles/state.json (one record per cycle).
 
   cycle_state.py due --count-json '<build_data --count-only output>' --profile-sha <sha> --min-train 200
+                     (the count JSON must carry build_data's `status`; without it nothing is due)
   cycle_state.py record --id <cycle id> --result <RESULT> [--set key=value ...]
   cycle_state.py last
 """
@@ -61,12 +65,15 @@ def is_due(
     state: Dict[str, Any],
     *,
     targets: int,
+    build_status: Optional[str],
     profile_sha: str,
     now: _dt.datetime,
     min_train: int,
+    build_reason: str = "",
     min_new: int = 150,
     min_days: float = 7.0,
 ) -> Tuple[bool, str]:
+    """`targets` and `build_status` are build_data --count-only's `targets` and `status`."""
     cycles: List[Dict[str, Any]] = state.get("cycles", [])
     finished = [c for c in cycles if c.get("result") in RESULTS]
     decided = [c for c in finished if c.get("result") in {"PROMOTE", "REJECT", "HOLD", "NO_CANDIDATE"}]
@@ -77,6 +84,11 @@ def is_due(
         )
     if targets < min_train:
         return False, f"only {targets} compliant target rows (min_train {min_train}): nothing worth training yet"
+    if build_status != "ok":
+        # The builder applies min_train to what is left after the valid split, plus
+        # min_valid and the reasoning share: only its own verdict says a cycle can train.
+        why = f": {build_reason}" if build_reason else ""
+        return False, f"the data wouldn't build (build_data status {build_status or 'missing'}{why}): nothing to train yet"
     trained = [c for c in finished if c.get("result") in TRAINED]
     if not trained:
         return True, f"first cycle: {targets} compliant target rows"
@@ -132,7 +144,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if a.cmd == "due":
         counts = json.loads(a.count_json)
-        due, why = is_due(state, targets=int(counts.get("targets", 0)), profile_sha=a.profile_sha, now=now, min_train=a.min_train, min_new=a.min_new, min_days=a.min_days)
+        due, why = is_due(
+            state,
+            targets=int(counts.get("targets", 0)),
+            build_status=counts.get("status"),
+            build_reason=str(counts.get("statusReason") or ""),
+            profile_sha=a.profile_sha,
+            now=now,
+            min_train=a.min_train,
+            min_new=a.min_new,
+            min_days=a.min_days,
+        )
         print(why)
         return EXIT_DUE if due else EXIT_NOT_DUE
 
