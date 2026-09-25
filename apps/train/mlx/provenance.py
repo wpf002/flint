@@ -11,7 +11,8 @@ for it: changing that is a deliberate code change, not a config flag.
 
 What a target may come from, and nothing else (allow-list, fail closed):
 
-- human       Will wrote the answer himself (a correction, a rewrite).
+- human       Will wrote the answer himself (a correction, a rewrite). Its
+              `model` is empty or "will": a human row naming a model is refused.
 - self        the base model's own answer (profile [base].self_models), and
               only if it passed at least one verifiable check (tests ran, the
               calculator agreed, the tool call matched its schema...) recorded
@@ -33,6 +34,8 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
 PERMISSIVE_LICENCES = frozenset({"apache-2.0", "mit"})
+# The `model` a human row may carry: nothing, or Will himself.
+HUMAN_AUTHORS = frozenset({"", "will"})
 
 # Model names that are a frontier vendor's hosted model. Checked BEFORE the
 # allow-list, so a profile can't accidentally list one as a teacher.
@@ -64,10 +67,16 @@ def judge_target(teacher: Mapping[str, object], self_models: Iterable[str], teac
     """Decide one row's target. `teacher` is {kind, model, checks?}."""
     kind = str(teacher.get("kind") or "").strip().lower()
     model = str(teacher.get("model") or "").strip()
-    if kind == "human":
-        return Verdict(True, "human", "")
+    # First, for every kind: a row can't launder a vendor's answer by calling it
+    # "human" (say, a correction flow that records "Will edited Claude's reply").
     if model and FRONTIER_VENDOR.search(model):
         return Verdict(False, "refused", "frontier-vendor-output")
+    if kind == "human":
+        # Will wrote it, so no model did. A human row that names one is another
+        # model's answer under the wrong label.
+        if model.lower() not in HUMAN_AUTHORS:
+            return Verdict(False, "refused", "human-row-names-a-model")
+        return Verdict(True, "human", "")
     if kind == "self":
         if not model or not _family_match(model, self_models):
             return Verdict(False, "refused", "self-sample-from-another-model")

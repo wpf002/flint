@@ -56,6 +56,15 @@ class Filters(BuildBase):
         self.assertEqual(len(res.sampling_prompts), 4)
         self.assertEqual(res.status, "NO_DATA")
 
+    def test_a_vendor_answer_labelled_human_is_still_a_vendor_answer(self):
+        # e.g. a correction flow that records "Will edited Claude's reply" as kind human.
+        rows = self._rows([sample_row(TOPICS[i], kind="human", model="claude-opus-5-5", cid=next(self.cids), ts=i) for i in range(8)])
+        res = self.run_build(rows)
+        self.assertEqual(res.manifest["counts"]["targets"], 0)
+        self.assertEqual(res.manifest["drops"]["target:frontier-vendor-output"], 8)
+        self.assertEqual(res.status, "NO_DATA")
+        self.assertEqual(res.train, [])
+
     def test_vendor_written_prompts_are_dropped_entirely(self):
         path = write_jsonl(os.path.join(self.dir, "corpus.jsonl"), [corpus_row(TOPICS[0], cid="bulk-1"), corpus_row(TOPICS[1], cid="grow_2")])
         res = self.run_build([], corpus=load_corpus(path))

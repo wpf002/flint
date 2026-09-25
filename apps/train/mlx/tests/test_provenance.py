@@ -29,7 +29,7 @@ class TargetPolicy(unittest.TestCase):
             "bedrock:anything",
             "grok-4",
         ]:
-            for kind in ("frontier", "open-weight", "self"):
+            for kind in ("frontier", "open-weight", "self", "human", "Human"):
                 with self.subTest(model=model, kind=kind):
                     v = self.verdict(kind=kind, model=model, checks=VERIFIED)
                     self.assertFalse(v.ok)
@@ -41,6 +41,17 @@ class TargetPolicy(unittest.TestCase):
 
     def test_human(self):
         self.assertTrue(self.verdict(kind="human").ok)
+        self.assertTrue(self.verdict(kind="human", model="will").ok)
+        self.assertTrue(self.verdict(kind="human", model="Will").ok)
+
+    def test_a_human_row_that_names_a_model_is_that_models_answer(self):
+        # "human" is Will's own writing: a row naming any model is mislabelled,
+        # open-weight or otherwise, and never a Will-written (repeated) target.
+        for model in ["qwen3.8:27b", "muse-glimmer:30b", "some-new-model"]:
+            with self.subTest(model=model):
+                v = self.verdict(kind="human", model=model, checks=VERIFIED)
+                self.assertFalse(v.ok)
+                self.assertEqual(v.reason, "human-row-names-a-model")
 
     def test_self_needs_same_family_and_a_verified_check(self):
         self.assertTrue(self.verdict(kind="self", model="muse-glimmer:30b", checks=VERIFIED).ok)
