@@ -123,6 +123,36 @@ macOS **Screen Recording** + **Accessibility** permissions, `cliclick`, an
 approver that approves, and a **vision model** for any autonomy (the text model
 can't see a screenshot). Never point it at anything destructive unattended.
 
+## Web search: metered, keyless, or both
+
+[connectors/web-server.ts](connectors/web-server.ts) gives Flint `fetch_url` (always
+keyless) and `web_search`, whose backends live in
+[src/search-providers.ts](src/search-providers.ts) (exported, so evals can call exactly what
+the tool calls). `web_search` is set through the connector's `env` in `~/.flint/mcp.json`:
+
+| `SEARCH_PROVIDER` | behaviour |
+| --- | --- |
+| unset / `tavily` / `brave` | that provider only, as before: needs `SEARCH_API_KEY`, and a failed call is an error |
+| `searxng` | the local SearXNG only (`SEARXNG_URL`, default `http://127.0.0.1:8888`) |
+| **`auto`** (recommended) | the keyed provider stays **primary** while its key works; SearXNG answers when there is no key, and gets one retry when the provider fails (non-2xx, quota, rate limit, timeout, network, unreadable reply) or finds nothing |
+
+In `auto`, an auth or quota failure (401/402/403/432/433) parks the key for
+`SEARCH_COOLDOWN_MS` (default 15 min) and a 429 parks it for its `Retry-After`, so a spent key
+isn't hit on every query. SearXNG answers meanwhile, and the key is tried again
+straight away if SearXNG fails. `SEARCH_KEY_PROVIDER=brave` says the key is a Brave key
+(default `tavily`). The primary's timeout drops to 12s in `auto` (`SEARCH_TIMEOUT_MS`) so a
+fallback still fits inside deep_research's 25s per search. SearXNG gets `SEARXNG_TIMEOUT_MS`
+(default 10s).
+
+Every result says which backend answered (`"source": "tavily" | "brave" | "searxng"`), and a
+fallback adds `"fallback": {"from": "tavily", "reason": "tavily HTTP 432 (quota)"}`. The
+connector logs one stderr line per fallback, and one when a key is parked. It never logs keys.
+Install SearXNG with [apps/studio/install_searxng.sh](../../apps/studio/install_searxng.sh), and
+compare its results with the provider's using `pnpm --filter @flint/parity search-compare`.
+
+The live connector runs as a bundle; rebuild it after changing either file (the command is in
+the header of `web-server.ts`).
+
 ## The Legion (Roadmap v2 Phase 9) — read-only fleet observers
 
 Three connectors wrap the trading-bot fleets so Flint can **observe and report on
