@@ -12,8 +12,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { BudgetGuard } from './budget.js';
-import { DailyEvalBudget, dailyLimitFrom } from './daily-budget.js';
+import { dailyLimitFrom, openSharedEvalBudget, spendLedgerPath } from './daily-budget.js';
 import { addVendorContestants, VENDOR_KEY_ENV, providerForVendor } from './compat.js';
 import {
   assertLocalModelName,
@@ -327,23 +326,16 @@ async function run(argv: string[]): Promise<void> {
   // ---- shared daily eval budget: this invocation's --budget-usd is reserved out of
   // PARITY_DAILY_BUDGET_USD (default $25) across every parity invocation today, before
   // any paid call. Less left than asked: capped at what's left. Nearly nothing: refused.
-  const daily = new DailyEvalBudget({
-    path: resolve(values['spend-ledger'] ?? (process.env.PARITY_SPEND_LEDGER?.trim() || join(EVAL_DIR, 'spend-ledger.jsonl'))),
+  const { budget, daily, clipped } = openSharedEvalBudget({
+    run: basename(runDir),
+    budgetUsd,
     dailyLimitUsd,
-    timeZone: process.env.FLINT_USER_TZ?.trim() || 'America/Chicago',
+    ledgerPath: spendLedgerPath(values['spend-ledger'], process.env, EVAL_DIR),
+    env: process.env,
+    log,
+    notes,
   });
-  const grant = daily.open(basename(runDir), budgetUsd);
-  if (!grant.ok) throw new Error(grant.reason);
   process.once('exit', () => daily.close());
-  if (grant.clipped) {
-    const why =
-      `today's shared eval budget ($${daily.dailyLimitUsd.toFixed(2)}, PARITY_DAILY_BUDGET_USD) had $${grant.grantedUsd.toFixed(2)} left ` +
-      `($${grant.spentTodayUsd.toFixed(2)} spent today${grant.heldUsd > 0 ? `, $${grant.heldUsd.toFixed(2)} held by other running evals` : ''}), ` +
-      `so this invocation is capped at $${grant.grantedUsd.toFixed(2)} instead of --budget-usd $${budgetUsd.toFixed(2)}`;
-    log(why);
-    notes.push(`Capped by the shared daily eval budget: ${why}.`);
-  }
-  const budget = new BudgetGuard(grant.grantedUsd, (usd) => daily.spend(usd));
 
   // ---- run dir (resolved above)
   mkdirSync(runDir, { recursive: true });
@@ -495,7 +487,7 @@ async function run(argv: string[]): Promise<void> {
 
   if (budget.exhausted) {
     notes.push(
-      grant.clipped
+      clipped
         ? "The budget guard stopped the run at the shared daily eval budget; re-run with the same --run tomorrow (or raise PARITY_DAILY_BUDGET_USD) to continue where it left off."
         : 'The budget guard stopped the run; re-run with the same --run and a fresh --budget-usd to continue where it left off.',
     );

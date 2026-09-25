@@ -1,6 +1,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spendPeriod } from '@flint/core';
+import { BudgetGuard } from './budget.js';
 
 /**
  * One daily eval budget shared by EVERY parity invocation: two runs started in
@@ -237,4 +238,46 @@ export function dailyLimitFrom(env: Record<string, string | undefined>): number 
   const n = Number(raw.replace(/^\$/, ''));
   if (!Number.isFinite(n) || n < 0) throw new Error(`PARITY_DAILY_BUDGET_USD=${JSON.stringify(raw)} is not a dollar amount`);
   return n;
+}
+
+/** The shared ledger: `--spend-ledger`, else PARITY_SPEND_LEDGER, else `<evalDir>/spend-ledger.jsonl`. */
+export function spendLedgerPath(flag: string | undefined, env: Record<string, string | undefined>, evalDir: string): string {
+  return resolve(flag ?? (env.PARITY_SPEND_LEDGER?.trim() || join(evalDir, 'spend-ledger.jsonl')));
+}
+
+/**
+ * What every paid parity command does before its first paid call: reserve its
+ * `--budget-usd` out of today's shared eval budget (PARITY_DAILY_BUDGET_USD) and
+ * spend only through the returned BudgetGuard. The guard's limit is the grant
+ * (capped at what today has left) and every call it settles is appended to the
+ * ledger. Throws when today's budget is spent; a capped grant is logged and
+ * added to `notes`. Close `daily` when the invocation ends (and on process exit).
+ */
+export function openSharedEvalBudget(opts: {
+  run: string;
+  budgetUsd: number;
+  dailyLimitUsd: number;
+  ledgerPath: string;
+  env: Record<string, string | undefined>;
+  log: (msg: string) => void;
+  notes: string[];
+  now?: () => number;
+}): { budget: BudgetGuard; daily: DailyEvalBudget; clipped: boolean } {
+  const daily = new DailyEvalBudget({
+    path: opts.ledgerPath,
+    dailyLimitUsd: opts.dailyLimitUsd,
+    timeZone: opts.env.FLINT_USER_TZ?.trim() || 'America/Chicago',
+    ...(opts.now ? { now: opts.now } : {}),
+  });
+  const grant = daily.open(opts.run, opts.budgetUsd);
+  if (!grant.ok) throw new Error(grant.reason);
+  if (grant.clipped) {
+    const why =
+      `today's shared eval budget ($${daily.dailyLimitUsd.toFixed(2)}, PARITY_DAILY_BUDGET_USD) had $${grant.grantedUsd.toFixed(2)} left ` +
+      `($${grant.spentTodayUsd.toFixed(2)} spent today${grant.heldUsd > 0 ? `, $${grant.heldUsd.toFixed(2)} held by other running evals` : ''}), ` +
+      `so this invocation is capped at $${grant.grantedUsd.toFixed(2)} instead of --budget-usd $${opts.budgetUsd.toFixed(2)}`;
+    opts.log(why);
+    opts.notes.push(`Capped by the shared daily eval budget: ${why}.`);
+  }
+  return { budget: new BudgetGuard(grant.grantedUsd, (usd) => daily.spend(usd)), daily, clipped: grant.clipped };
 }

@@ -17,7 +17,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { BudgetGuard } from './budget.js';
+import { dailyLimitFrom, openSharedEvalBudget, spendLedgerPath } from './daily-budget.js';
 import { addVendorContestants, DEFAULT_AMAZON_MODEL, DEFAULT_GOOGLE_MODEL, privacyVendorOf, providerForVendor, VENDOR_KEY_ENV } from './compat.js';
 import {
   claudeContestant,
@@ -472,6 +472,7 @@ export async function runTasks(argv: string[]): Promise<void> {
       limit: { type: 'string' },
       systems: { type: 'string' },
       'budget-usd': { type: 'string', default: '10' },
+      'spend-ledger': { type: 'string' },
       contestants: { type: 'string', default: 'flint,openai,claude,perplexity,google,amazon' },
       concurrency: { type: 'string', default: '3' },
       'flint-concurrency': { type: 'string', default: '1' },
@@ -517,7 +518,10 @@ export async function runTasks(argv: string[]): Promise<void> {
   if (values.limit) prompts = takeBalanced(prompts, Number(values.limit));
   const ids = new Set(prompts.map((p) => p.id));
 
-  const budget = new BudgetGuard(Number(values['budget-usd']));
+  const budgetUsd = Number(values['budget-usd']);
+  if (!(budgetUsd > 0)) throw new Error(`--budget-usd must be > 0 (got ${values['budget-usd']})`);
+  // Checked now so a bad value fails before anything else; the ledger is opened just before the first paid call.
+  const dailyLimitUsd = dailyLimitFrom(process.env);
   const seed = Number(values.seed);
   const maxTokens = Number(values['max-tokens']);
   // A competitor's system prompt is per prompt, from when Flint answered it (TaskContext.system);
@@ -664,6 +668,19 @@ export async function runTasks(argv: string[]): Promise<void> {
   );
   if (competitors.length === 0) throw new Error('no competitor has a key — nothing to compare Flint against');
 
+  // ---- shared daily eval budget, as for `run`: this invocation's --budget-usd is reserved
+  // out of PARITY_DAILY_BUDGET_USD before any paid call (Flint replays, competitors, judges).
+  const { budget, daily, clipped } = openSharedEvalBudget({
+    run: `tasks/${basename(runDir)}`,
+    budgetUsd,
+    dailyLimitUsd,
+    ledgerPath: spendLedgerPath(values['spend-ledger'], process.env, EVAL_DIR),
+    env: process.env,
+    log,
+    notes,
+  });
+  process.once('exit', () => daily.close());
+
   // ---- run dir
   mkdirSync(runDir, { recursive: true });
   if (!existsSync(snapshotPath)) writeFileAtomic(snapshotPath, prompts.map((p) => JSON.stringify(p)).join('\n') + '\n');
@@ -795,7 +812,13 @@ export async function runTasks(argv: string[]): Promise<void> {
   }
 
   // ---- report + history
-  if (budget.exhausted) notes.push('The budget guard stopped the run; re-run with the same --run and a fresh --budget-usd to continue where it left off.');
+  if (budget.exhausted) {
+    notes.push(
+      clipped
+        ? 'The budget guard stopped the run at the shared daily eval budget; re-run with the same --run tomorrow (or raise PARITY_DAILY_BUDGET_USD) to continue where it left off.'
+        : 'The budget guard stopped the run; re-run with the same --run and a fresh --budget-usd to continue where it left off.',
+    );
+  }
   const md = renderRun({
     run,
     runDir,
@@ -818,7 +841,9 @@ export async function runTasks(argv: string[]): Promise<void> {
     log(`history -> ${TASKS_HISTORY}`);
   } else log('nothing new judged; history unchanged');
   process.stdout.write(md.text + '\n');
-  log(`spent $${budget.spent.toFixed(4)} this invocation; report -> ${md.path}`);
+  daily.close();
+  const today = daily.state();
+  log(`spent $${budget.spent.toFixed(4)} this invocation ($${today.spentTodayUsd.toFixed(2)} of the $${daily.dailyLimitUsd.toFixed(2)} daily eval budget today); report -> ${md.path}`);
   if (stopReason && stopReason !== budgetStop) process.exitCode = 1;
 }
 
