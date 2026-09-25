@@ -70,7 +70,7 @@ import { safeHandler } from './safe-handler';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, parseLocalModelRequest, resolveLocalPersona } from './local-model';
+import { LocalPersonaCache, evalOllamaOptions, parseLocalModelRequest, parseOllamaThink, resolveLocalPersona, thinkOption } from './local-model';
 import { MemoryExtractor } from './memory-extract';
 import {
   parseAttachments,
@@ -126,6 +126,8 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
         // reliable; the trade-off is a tighter window (curate the tool set so the
         // prompt + tool results fit).
         defaultOptions: { num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 4096) },
+        // OLLAMA_THINK=true|false sets Ollama's `think`; unset sends nothing (as before).
+        ...thinkOption(parseOllamaThink(process.env.OLLAMA_THINK)),
       }),
       model: ollamaModel,
     };
@@ -400,30 +402,21 @@ async function main(): Promise<void> {
     styleGuide: FLINT_STYLE_GUIDE,
     lessonStore,
   });
-  // Eval-only local-model override (apps/parity --local-model, see local-model.ts):
-  // the same local persona on the same OllamaProvider, memory and action log, with
-  // a different default model. Built lazily per model; never used by normal traffic.
-  // Candidates get their own client with a larger context window than the live
-  // 4096: Flint's prompt is ~2k tokens, and thinking models (qwen3.8, muse-glimmer)
-  // spend more on reasoning. At 4096 Ollama silently drops the oldest tokens (the
-  // persona and tool schemas), so the bake-off would measure truncation, not the model.
-  const overrideProvider =
+  // Eval-only local-model override (apps/parity --local-model / --local-think, see
+  // local-model.ts): the same local persona, memory and action log, with a different
+  // default model. Built lazily per (model, think); never used by normal traffic.
+  // Candidates get their own Ollama client with a 16K context (evalOllamaOptions)
+  // carrying that request's `think`.
+  const localModels =
     provider.name === 'ollama'
-      ? new OllamaProvider({
-          baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
-          defaultOptions: { num_ctx: Number(process.env.FLINT_EVAL_NUM_CTX ?? 16384) },
-        })
+      ? new LocalPersonaCache(
+          (m, think) =>
+            new Persona(
+              new Flint({ provider: new OllamaProvider(evalOllamaOptions(process.env, think)), defaultModel: m, memory, observer: actionLog }),
+              { name: 'Flint', styleGuide: FLINT_STYLE_GUIDE, lessonStore },
+            ),
+        )
       : undefined;
-  const localModels = overrideProvider
-    ? new LocalPersonaCache(
-        (m) =>
-          new Persona(new Flint({ provider: overrideProvider, defaultModel: m, memory, observer: actionLog }), {
-            name: 'Flint',
-            styleGuide: FLINT_STYLE_GUIDE,
-            lessonStore,
-          }),
-      )
-    : undefined;
 
   const embedder = new OllamaEmbedder({
     model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
@@ -713,6 +706,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       evalMode: true,
       // Lets apps/parity --local-model check that /generate honours `localModel`.
       localModelOverride: !!ctx.localModels,
+      // ...and `localThink` (apps/parity --local-think).
+      localThinkOverride: !!ctx.localModels,
     });
   }
 
@@ -776,10 +771,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // must not leave write proposals in the approval queue. The answer itself is
     // produced exactly as a normal turn would be.
     const evalMode = body.eval === true;
-    // Eval-only: answer with a different Ollama model (bake-offs). 400 unless eval + localOnly.
+    // Eval-only: answer with a different Ollama model (bake-offs), optionally with
+    // `think` set. 400 unless eval + localOnly (and localThink only with localModel).
     const lm = parseLocalModelRequest(body);
     if (!lm.ok) return json(res, lm.status, { error: lm.error });
-    const local = resolveLocalPersona(lm.model, { persona: ctx.persona, model: ctx.model }, ctx.localModels);
+    const local = resolveLocalPersona(lm.model, { persona: ctx.persona, model: ctx.model }, ctx.localModels, lm.think);
     if (!local.ok) return json(res, local.status, { error: local.error });
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
@@ -822,6 +818,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         brain,
         ...(brain === 'frontier' ? { tier } : {}),
         model: answeredBy,
+        // Echoed so apps/parity can tell the override was honoured, as it does for `model`.
+        ...(lm.think !== undefined ? { localThink: lm.think } : {}),
         tools: toolsUsed,
         proposed: proposed.map((p) => p.fullName),
         eval: true,
