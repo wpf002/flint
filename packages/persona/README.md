@@ -44,6 +44,22 @@ await me.learn([{ id: '2', text: 'Another sample…' }]);
   or `persona.learn([...])`). Swap `InMemoryRetriever` for an embedding-backed
   store later by implementing the `Retriever` interface.
 
+## Flint's own guides (style variants)
+
+Flint's style guides are exported by name in `FLINT_STYLE_VARIANTS`:
+
+| variant | guide | what |
+| --- | --- | --- |
+| `v1` | `FLINT_STYLE_GUIDE` | what Flint runs on today, frontier and local |
+| `v2` | `FLINT_STYLE_GUIDE_V2` | v1 with six rules revised from parity run 20260924-tiered (search only for facts that change, no provenance narration, depth by question type, calibration on contested questions, no talk of its own training off-topic, derived numbers via the calculate tool) |
+| `local-v1` | `FLINT_LOCAL_STYLE_GUIDE` | a compact guide for 27-30B local models: 1,072 Qwen2.5 tokens against v1's 3,125, the same rules plus no invented specifics, at most two searches, no template phrases |
+
+The server picks one per brain from `FLINT_STYLE_VARIANT` / `FLINT_LOCAL_STYLE_VARIANT`
+(both `v1` when unset), and an eval request can name one with `styleVariant`
+(`apps/parity --flint-variant`). A name means one text: v1 is pinned by hash in
+`test/flint-variants.test.ts`. Revise a guide under a new name, or cached parity
+answers for the old name stop meaning what they say.
+
 ## Why it's a separate package
 
 `@flint/core` deliberately ships no personalization or retrieval (that's the
