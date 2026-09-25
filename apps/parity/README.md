@@ -15,7 +15,7 @@ Everything it writes lives under `~/.flint/eval/`:
 | `parity_prompts.jsonl` (+ `.meta.json`) | the frozen prompt set |
 | `runs/<ts>/answers.jsonl` | every answer from every contestant (the resume cache) |
 | `runs/<ts>/judgments.jsonl` | every judge verdict, with its reason |
-| `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local`, each `--local-model` candidate, each `--local-think` variant and each `--flint-variant`) |
+| `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local`, each `--local-model` candidate, each `--local-think` variant and each `--flint-variant`; a `--judge-grounding` judge's is `report+grounded.md` / `report+grounded-<subject>.md`) |
 | `runs/<ts>/run.json` | the config the run started with |
 | `parity_history.csv` | one row per competitor per run, for the trend line |
 
@@ -218,7 +218,8 @@ pnpm --filter @flint/parity report --run <ts> --flint-variant v2 --judge-panel a
 
 **Resume.** Re-run with `--run <ts>` (or a path). Cached successful answers and
 verdicts are reused, and failures are retried. That is how you continue after a budget
-stop or Ctrl-C. A resumed run keeps the judge in its `run.json` (model or panel) unless
+stop or Ctrl-C. A call cut off by the run stopping (Ctrl-C, or another prompt's fatal
+error) is not recorded at all, so it never counts as a failure, only as not asked yet. A resumed run keeps the judge in its `run.json` (model or panel) unless
 you pass `--judge-model` or `--judge-panel`, as `report` does, so a later invocation on
 the same run can't switch judges by accident.
 
@@ -228,8 +229,12 @@ head-to-head tally leaves it out. That hides a Flint that often fails to answer,
 report also shows each contestant's **answer rate** (answered / asked) and, next to the
 normal tally, a **strict** line per competitor in which every prompt Flint failed and
 the competitor answered counts as a Flint loss. A competitor's failures are not counted
-as Flint wins, so the strict line is a lower bound for Flint. Failures are listed in the
-report so you can fix the cause and resume.
+as Flint wins, so the strict line is a lower bound for Flint. `report` gives a strict
+line against each competitor the subject was judged against, and against any that
+answered only prompts the subject failed (nothing to judge, so a candidate that failed
+everything still shows 0-N); a competitor the subject answered alongside but was never
+judged against (a later candidate run against fewer competitors) is left out. Failures
+are listed in the report so you can fix the cause and resume.
 
 ## 3. The judge panel (`--judge-panel`)
 
@@ -290,13 +295,17 @@ judge prompt is byte-for-byte what it was**.
   injected into that turn's context, and its tool results; see
   apps/server/src/grounding.ts). The harness stores it on the answer row
   (`answers.jsonl` `grounding`) whether or not the judge uses it. The tool results are
-  read from the server's action log for the duration of the turn, so a request running
-  at the same time (another eval answer, or Will chatting) could add its own: keep
-  `--flint-concurrency 1`, as for the `tools` list.
+  the ones that turn produced, and only those: the server files each action-log entry
+  under the /generate turn whose async context produced it (`TurnLog`), so a request
+  running at the same time (another eval answer, a second harness, Will chatting) never
+  adds its own. (The response's older `tools` list still reads the shared log, so keep
+  `--flint-concurrency 1` if you rely on it.)
 - Grounded verdicts carry the judge id plus `+grounded` (`claude-opus-5-5+grounded`,
   `panel:anthropic:claude-opus-5-5+openai:gpt-5+grounded`), so they never share a resume
-  cache entry, a report or a `parity_history.csv` row with ungrounded ones. A new run
-  started with the flag records that id in `run.json`, and a resumed run keeps it.
+  cache entry, a report or a `parity_history.csv` row with ungrounded ones. The report
+  is `report+grounded.md` (`report+grounded-<subject>.md` for another subject, e.g.
+  `report+grounded-flint+v2.md`), next to the ungrounded one. A new run started with the
+  flag records that id in `run.json`, and a resumed run keeps it.
 - A cached Flint answer with no `grounding` (answered by a server before this) is not
   judged grounded: its pairs are skipped and counted in the report's notes. Answer again
   in a new run, or under a `--flint-variant` name, to judge those prompts grounded.
@@ -355,6 +364,11 @@ local-model contestant's naming, report filename, model-mismatch guard and Ollam
 `--local-think`'s naming (unchanged without the flag), request field, echo guard,
 flag parsing and the Ollama capability check; `--flint-variant`'s naming alone and with
 the local flags, report filename, request field, echo guard, HTTP 400 stop and `/health`
-preflight (with a stub fetch); answer rates and the strict tally; and judge grounding
-(parsing, the unchanged default prompt, the grounded prompt, panel pass-through, the
-`+grounded` judge id and its cache separation, and resume behaviour).
+preflight (with a stub fetch); answer rates and the strict tally, including `report`'s
+for a subject that failed everything; and judge grounding (parsing, the unchanged default
+prompt, the grounded prompt, panel pass-through, the `+grounded` judge id, its cache
+separation and report file, and resume behaviour). The steps `run` wires together are
+tested through a recording judge (src/steps.ts): which pairs a grounded judge skips,
+that it is shown the context and called and priced as the real model, never the
+`+grounded` id, that an interrupted call is not recorded as a failure, and the Flint
+preflight.

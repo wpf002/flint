@@ -67,6 +67,21 @@ describe('--flint-variant: contestant naming', () => {
     expect(reportFileName('flint-local@qwen3.8:27b~nothink')).toBe('report-flint-local@qwen3.8_27b~nothink.md');
   });
 
+  it("gives a grounded judge's report its own file, so a grounded pass never overwrites the ungrounded one", () => {
+    expect(reportFileName('flint', 'claude-opus-5-5+grounded')).toBe('report+grounded.md');
+    expect(reportFileName('flint#v2', 'claude-opus-5-5+grounded')).toBe('report+grounded-flint+v2.md');
+    expect(reportFileName('flint-local@muse-glimmer:30b~nothink#local-v1', 'panel:anthropic:claude-opus-5-5+openai:gpt-5+grounded')).toBe(
+      'report+grounded-flint-local@muse-glimmer_30b~nothink+local-v1.md',
+    );
+    // Ungrounded judges (a model or a panel) keep today's names.
+    expect(reportFileName('flint', 'claude-opus-5-5')).toBe('report.md');
+    expect(reportFileName('flint#v2', 'panel:anthropic:claude-opus-5-5+openai:gpt-5')).toBe('report-flint+v2.md');
+    // No grounded name equals any ungrounded one, even for a variant called "grounded".
+    const subjects = ['flint', 'flint#v2', 'flint#grounded', 'flint-local', 'flint-local@m:1', 'flint-local@m:1#grounded'];
+    const plain = new Set(subjects.map((s) => reportFileName(s, 'j')));
+    for (const s of subjects) expect(plain.has(reportFileName(s, 'j+grounded')), s).toBe(false);
+  });
+
   it("keeps a variant's verdicts apart from plain Flint's", () => {
     const row = (subject: string): JudgmentRow => ({
       subject,

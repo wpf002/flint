@@ -10,11 +10,13 @@
  *   grounding: { memory: string[], tools: [{ name, isError, excerpt }] }
  *
  * `memory` is exactly the recalled facts injected into the turn's context block;
- * `tools` is every tool result the turn produced, each cut to 800 characters.
+ * `tools` is every tool result the turn produced (that turn's only: see
+ * TurnLog), each cut to 800 characters.
  * Building the context block lives here too, so the facts reported are the ones
  * the model saw. The block itself is byte-identical to what the server built
  * before, so answers don't change.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ActionEntry } from '@flint/core';
 
 /** Longest tool-result excerpt returned (and so shown to the judge). */
@@ -59,27 +61,56 @@ export async function recallContext(
 }
 
 /**
- * A position in the action log. The log is a bounded ring buffer (2000 entries):
- * once it's full, its length stops growing, so "entries after index N" (what
- * toolsSince does) finds nothing. This remembers the last entry instead, which
- * stays findable until it's evicted.
+ * The action-log entries of one request's turn, and no other's.
+ *
+ * The server has one action log, shared by the local brain, the bake-off
+ * personas and every frontier tier. Reading "what was logged while this turn
+ * ran" off it picks up whatever else ran at the same time: Will chatting (his
+ * email or calendar results), a second harness, `--flint-concurrency` > 1. Those
+ * excerpts would be shown to every judge, OpenAI in a panel included, as what
+ * Flint had. So the turn runs inside `run()` (an AsyncLocalStorage scope), and
+ * the log's `onEntry` hook, `recordTurnEntry`, files each entry under the turn
+ * whose async context produced it. The core emits tool events from inside the
+ * turn's own tool loop, so they land in the right turn; a request that isn't
+ * in a scope (/chat, a normal /generate) is recorded nowhere but the log.
+ *
+ * This also doesn't depend on the log's 2000-entry ring buffer: once that is
+ * full its length stops growing, so an index taken before the turn finds nothing.
  */
-export interface LogMark {
-  last: ActionEntry | undefined;
+export class TurnLog {
+  readonly entries: ActionEntry[] = [];
+  private active = 0;
+
+  /** Run `fn` as (part of) this turn: what the action log records inside it is this turn's. */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    this.active++;
+    try {
+      return await turnScope.run(this, fn);
+    } finally {
+      this.active--;
+    }
+  }
+
+  /**
+   * Called by recordTurnEntry. Only while a run() is in flight: something the
+   * turn started that outlives it (a timer, a lazily opened connection) keeps its
+   * async context, and must not keep filling a finished turn's log.
+   */
+  record(entry: ActionEntry): void {
+    if (this.active > 0) this.entries.push(entry);
+  }
+
+  /** The `grounding` of the eval response: `facts` (the recalled memory) and this turn's tool results. */
+  grounding(facts: readonly string[]): Grounding {
+    return evalGrounding(facts, this.entries);
+  }
 }
 
-export function markLog(entries: readonly ActionEntry[]): LogMark {
-  return { last: entries[entries.length - 1] };
-}
+const turnScope = new AsyncLocalStorage<TurnLog>();
 
-/**
- * The entries recorded after `mark`. If the marked entry has been evicted, every
- * entry still in the buffer is newer than it, so all of them are returned.
- */
-export function entriesSince(entries: readonly ActionEntry[], mark: LogMark): ActionEntry[] {
-  if (!mark.last) return [...entries];
-  const i = entries.lastIndexOf(mark.last);
-  return i < 0 ? [...entries] : entries.slice(i + 1);
+/** The action log's `onEntry` hook (index.ts): files the entry under the turn it was produced in, if any. */
+export function recordTurnEntry(entry: ActionEntry): void {
+  turnScope.getStore()?.record(entry);
 }
 
 /**

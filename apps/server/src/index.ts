@@ -72,7 +72,7 @@ import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
-import { entriesSince, evalGrounding, markLog, recallContext } from './grounding';
+import { TurnLog, recallContext, recordTurnEntry } from './grounding';
 import {
   parseAttachments,
   readJsonLimited,
@@ -369,8 +369,9 @@ async function contextFor(message: string, knowledge: KnowledgeStore): Promise<s
 async function main(): Promise<void> {
   loadSecrets(); // pull ANTHROPIC_API_KEY (and friends) from ~/.flint/secrets.env
   const { provider, model } = buildProvider();
-  // Auditable action log (bounded ring buffer), exposed at GET /actions.
-  const actionLog = new ActionLogObserver(undefined, 2000);
+  // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
+  // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
+  const actionLog = new ActionLogObserver(recordTurnEntry, 2000);
   // Durable conversation memory — survives restarts/reboots/crashes (was RAM
   // only). Shared across both brains so a conversation stays coherent no matter
   // which one answers a given turn.
@@ -791,9 +792,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answeredBy = local.model;
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
-    const logMark = markLog(ctx.actionLog.actions());
+    // This turn's own action-log entries (not a concurrent /chat's), for the eval response's `grounding`.
+    const turn = new TurnLog();
     const ask = (p: Persona) =>
-      p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) });
+      turn.run(() => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }));
     // Every persona call goes through `answered`, so the eval echo names the style
     // guide of the persona whose answer this is (./style-variant echoStyle).
     const answered = echoStyle(ask);
@@ -833,7 +835,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         styleVariant: answered.styleVariant(),
         tools: toolsUsed,
         // What the turn was grounded on (recalled memory, tool results), for apps/parity --judge-grounding.
-        grounding: evalGrounding(recalled.facts, entriesSince(ctx.actionLog.actions(), logMark)),
+        grounding: turn.grounding(recalled.facts),
         proposed: proposed.map((p) => p.fullName),
         eval: true,
       });

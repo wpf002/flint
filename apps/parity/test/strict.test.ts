@@ -3,6 +3,8 @@ import {
   answerRate,
   latestAnswers,
   renderMarkdown,
+  rerenderReport,
+  strictCompetitorsFor,
   strictSummarize,
   summarize,
   type AnswerRow,
@@ -211,5 +213,88 @@ describe('report: answer rate and the strict line', () => {
     });
     expect(only).toContain('_No judgments yet._');
     expect(only).toContain('| openai (`openai-model`) | 0 | 1 | 1 | 0 | 0.0% |');
+  });
+});
+
+describe('`report` (rerenderReport): the strict line for a re-rendered subject', () => {
+  const ids = ['p1', 'p2', 'p3', 'p4', 'p5'];
+  // A run started with flint, openai and claude; a later bake-off candidate faced openai only.
+  const meta = {
+    promptSet: 'set.jsonl',
+    promptIds: ids,
+    contestants: [
+      { name: 'flint', model: 'flint-model' },
+      { name: 'openai', model: 'openai-model' },
+      { name: 'claude', model: 'claude-model' },
+    ],
+    judgeModel: 'judge',
+  };
+  const cand = 'flint-local@cand:7b';
+  const vs = (promptId: string, competitor: string, outcome: 'win' | 'loss', subject = cand): JudgmentRow => ({
+    ...verdict(promptId, outcome, subject),
+    competitor,
+    competitorModel: `${competitor}-model`,
+  });
+  const competitorsAnswered = ids.flatMap((id) => [ans(id, 'openai', true), ans(id, 'claude', true)]);
+
+  it('shows 0-N for a subject that failed every prompt, with no verdicts at all (as `run` writes it)', () => {
+    const answers = [...competitorsAnswered, ...ids.map((id) => ans(id, cand, false, 'flint-model'))];
+    const md = rerenderReport({ run: 'r', meta, answers, judgments: [], subject: cand, judgeModel: 'judge' });
+    expect(md).toContain('_No judgments yet._');
+    expect(md).toContain('### Strict: a Flint failure counts as a loss');
+    expect(md).toContain('| openai (`openai-model`) | 0 | 5 | 5 | 0 | 0.0% |');
+    // The same data rendered the way `run` does (every competitor of the invocation) gives the same line.
+    const asRun = renderMarkdown({
+      run: 'r',
+      promptSet: 'set.jsonl',
+      promptCount: 5,
+      contestants: [{ name: cand, model: 'flint-model' }, meta.contestants[1]!],
+      answers: latestAnswers(answers),
+      summaries: [],
+      spendUsd: 0,
+      budgetUsd: 1,
+      stoppedForBudget: false,
+      notes: [],
+      subject: cand,
+      promptIds: new Set(ids),
+    });
+    expect(asRun).toContain('| openai (`openai-model`) | 0 | 5 | 5 | 0 | 0.0% |');
+  });
+
+  it('leaves out a competitor the subject answered alongside but was never judged against (its line would be failures only)', () => {
+    const answers = [
+      ...competitorsAnswered,
+      ...['p1', 'p2', 'p3'].map((id) => ans(id, cand, true, 'flint-model')),
+      ...['p4', 'p5'].map((id) => ans(id, cand, false, 'flint-model')),
+    ];
+    const judgments = [vs('p1', 'openai', 'win'), vs('p2', 'openai', 'win'), vs('p3', 'openai', 'loss')];
+    const md = rerenderReport({ run: 'r', meta, answers, judgments, subject: cand, judgeModel: 'judge' });
+    expect(md).toContain('| openai (`openai-model`) | 2 | 3 | 2 | 0 | 40.0% |');
+    expect(md).not.toMatch(/\| claude \(`claude-model`\) \| \d/);
+  });
+
+  it('only counts verdicts of the judge being rendered', () => {
+    const answers = [...competitorsAnswered, ...ids.map((id) => ans(id, cand, true, 'flint-model'))];
+    const judgments = [vs('p1', 'openai', 'win'), { ...vs('p2', 'openai', 'win'), judgeModel: 'judge+grounded' }];
+    const md = rerenderReport({ run: 'r', meta, answers, judgments, subject: cand, judgeModel: 'judge+grounded' });
+    expect(md).toContain('Judge: `judge+grounded`.');
+    expect(md).toContain('| openai (`openai-model`) | 1 | 0 | 0 | 100.0% |');
+    expect(md).toContain('Grounded judge (--judge-grounding)');
+  });
+
+  it('strictCompetitorsFor: judged competitors, plus those with nothing to judge', () => {
+    const answers = latestAnswers([
+      ans('p1', cand, true, 'flint-model'),
+      ans('p2', cand, false, 'flint-model'),
+      ans('p1', 'openai', true),
+      ans('p1', 'claude', true), // answered alongside, never judged against: out
+      ans('p2', 'perplexity', true), // never answered alongside: in (the failure is its whole tally)
+      ans('p1', 'flint', true, 'flint-model'), // another Flint: never a competitor
+    ]);
+    const out = strictCompetitorsFor({ subject: cand, answers, judgments: [vs('p1', 'openai', 'win')], contestants: meta.contestants });
+    expect(out).toEqual([
+      { name: 'openai', model: 'openai-model' },
+      { name: 'perplexity', model: 'perplexity-model' },
+    ]);
   });
 });

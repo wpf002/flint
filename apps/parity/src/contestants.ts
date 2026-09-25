@@ -429,6 +429,43 @@ export async function ollamaHasModel(model: string, host: string, fetchFn: typeo
 /** An error that should stop the whole run, not just fail one prompt. */
 export class FatalError extends Error {}
 
+/**
+ * What `run` checks on the Flint server before sending it a prompt: /health
+ * answers, the server has eval mode (without it every replay is logged to the
+ * training corpus) unless `allowTrainingLog`, and it supports every eval-only
+ * override asked for (`--local-model`, `--local-think`, `--flint-variant`).
+ * Returns /health's body. `--judge-only` checks nothing and calls nothing: it
+ * never asks Flint anything, so the server needn't be up.
+ */
+export async function preflightFlint(opts: {
+  url: string;
+  judgeOnly: boolean;
+  allowTrainingLog: boolean;
+  localModel?: string | undefined;
+  localThink?: boolean | undefined;
+  styleVariant?: string | undefined;
+  fetchFn?: typeof fetch;
+}): Promise<Record<string, unknown>> {
+  const { url } = opts;
+  if (opts.judgeOnly) return {};
+  const health = await flintHealth(url, opts.fetchFn);
+  if (!health) throw new Error(`Flint isn't answering at ${url}/health`);
+  if (health.evalMode !== true && !opts.allowTrainingLog) {
+    throw new Error(
+      `the Flint server at ${url} predates eval mode (/health has no evalMode), so every replay would be logged to the training corpus. ` +
+        'Deploy the server with eval mode, point --flint-url at one that has it, or pass --allow-training-log.',
+    );
+  }
+  if (opts.localModel && health.localModelOverride !== true) {
+    throw new Error(`the Flint server at ${url} doesn't support the eval-only local-model override (/health has no localModelOverride, or its local brain isn't Ollama). Deploy this branch first.`);
+  }
+  if (opts.localThink !== undefined && health.localThinkOverride !== true) {
+    throw new Error(`the Flint server at ${url} doesn't support --local-think (/health has no localThinkOverride). Deploy this branch first.`);
+  }
+  if (opts.styleVariant !== undefined) assertStyleVariantSupported(health, opts.styleVariant, url);
+  return health;
+}
+
 export async function flintHealth(url: string, fetchFn: typeof fetch = fetch): Promise<Record<string, unknown> | undefined> {
   try {
     const r = await fetchFn(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(5000) });

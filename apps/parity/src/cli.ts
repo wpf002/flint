@@ -15,27 +15,23 @@ import { parseArgs } from 'node:util';
 import { AnthropicProvider, OpenAiProvider, type ProviderAdapter } from '@flint/core';
 import { BudgetGuard } from './budget.js';
 import {
-  FatalError,
   assertLocalModelName,
-  assertStyleVariantSupported,
   claudeContestant,
   competitorSystem,
   flintContestant,
   flintContestantName,
-  flintHealth,
   flintVariantFlag,
   localThinkFlag,
   ollamaHasModel,
   ollamaModelCapabilities,
   openaiContestant,
   perplexityContestant,
+  preflightFlint,
   resolveFlintToken,
   type Contestant,
 } from './contestants.js';
-import { groundedJudgeId, groundingChars, splitGroundedJudgeId } from './grounding.js';
-import { flintIsA, judgePair, outcomeFor } from './judge.js';
-import { chooseGroundedJudge, judgeWithPanel, panelId, parseJudgePanel, verdictFor, type Panelist } from './panel.js';
-import { estimateCost, costOf } from './pricing.js';
+import { GROUNDED_NOTE, groundedJudgeId } from './grounding.js';
+import { chooseGroundedJudge, panelId, parseJudgePanel, type Panelist } from './panel.js';
 import { buildPromptSet, takeBalanced, type EvalPrompt, type TrainingRecord } from './prompts.js';
 import {
   appendHistory,
@@ -46,11 +42,14 @@ import {
   latestJudgments,
   renderMarkdown,
   reportFileName,
+  rerenderReport,
   summarize,
   type AnswerRow,
   type JudgmentRow,
+  type RunMeta,
 } from './report.js';
 import { loadSecretsInto } from './secrets.js';
+import { answerOne, judgeOne, pairsToJudge, type JudgeSetup } from './steps.js';
 import { appendJsonl, pool, readJsonl, writeFileAtomic } from './util.js';
 
 const FLINT_HOME = join(homedir(), '.flint');
@@ -252,21 +251,7 @@ async function run(argv: string[]): Promise<void> {
   if (wanted.has('flint')) {
     const url = values['flint-url']!;
     // --judge-only never calls Flint: the server needn't be up, its cached answers are enough.
-    const health = judgeOnly ? {} : await flintHealth(url);
-    if (!health) throw new Error(`Flint isn't answering at ${url}/health`);
-    if (!judgeOnly && health.evalMode !== true && !values['allow-training-log']) {
-      throw new Error(
-        `the Flint server at ${url} predates eval mode (/health has no evalMode), so every replay would be logged to the training corpus. ` +
-          'Deploy the server with eval mode, point --flint-url at one that has it, or pass --allow-training-log.',
-      );
-    }
-    if (!judgeOnly && localModel && health.localModelOverride !== true) {
-      throw new Error(`the Flint server at ${url} doesn't support the eval-only local-model override (/health has no localModelOverride, or its local brain isn't Ollama). Deploy this branch first.`);
-    }
-    if (!judgeOnly && localThink !== undefined && health.localThinkOverride !== true) {
-      throw new Error(`the Flint server at ${url} doesn't support --local-think (/health has no localThinkOverride). Deploy this branch first.`);
-    }
-    if (!judgeOnly && styleVariant !== undefined) assertStyleVariantSupported(health, styleVariant, url);
+    const health = await preflightFlint({ url, judgeOnly, allowTrainingLog: values['allow-training-log']!, localModel, localThink, styleVariant });
     const token = judgeOnly
       ? 'unused'
       : resolveFlintToken({
@@ -356,7 +341,6 @@ async function run(argv: string[]): Promise<void> {
   const answers = new Map<string, AnswerRow>();
   for (const a of readJsonl<AnswerRow>(answersPath)) if (a.ok) answers.set(answerKey(a.promptId, a.contestant, a.model), a);
 
-  const failed: AnswerRow[] = [];
   await Promise.all(
     contestants.map((c) => {
       // --judge-only: nothing is (re-)answered; pairs without cached answers are just skipped.
@@ -366,48 +350,24 @@ async function run(argv: string[]): Promise<void> {
         todo,
         limit,
         async (p) => {
-          const settle = budget.reserve(c.estimate(p));
-          if (!settle) return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
-          const t0 = Date.now();
-          try {
-            const res = await c.answer(p, ac.signal);
-            settle(res.costUsd);
-            const row: AnswerRow = {
-              promptId: p.id,
-              contestant: c.name,
-              model: c.model,
-              ok: true,
-              text: res.text,
-              ...(res.usage ? { usage: res.usage } : {}),
-              costUsd: res.costUsd,
-              ms: Date.now() - t0,
-              ...(res.meta ? { meta: res.meta } : {}),
-              ...(res.grounding ? { grounding: res.grounding } : {}),
-              ts: Date.now(),
-            };
-            appendJsonl(answersPath, row);
-            answers.set(answerKey(p.id, c.name, c.model), row);
-            log(`  ✓ ${c.name.padEnd(10)} ${p.id} ${p.category} (${((Date.now() - t0) / 1000).toFixed(1)}s, $${res.costUsd.toFixed(4)})`);
-          } catch (err) {
-            settle(0);
-            if (err instanceof FatalError) {
-              stop(err.message);
+          const r = await answerOne({ contestant: c, prompt: p, signal: ac.signal, reserve: (est) => budget.reserve(est) });
+          switch (r.kind) {
+            case 'refused':
+              return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
+            case 'fatal':
+              stop(r.error.message);
               ac.abort();
               return;
-            }
-            const row: AnswerRow = {
-              promptId: p.id,
-              contestant: c.name,
-              model: c.model,
-              ok: false,
-              error: err instanceof Error ? err.message : String(err),
-              costUsd: 0,
-              ms: Date.now() - t0,
-              ts: Date.now(),
-            };
-            appendJsonl(answersPath, row);
-            failed.push(row);
-            log(`  ✗ ${c.name.padEnd(10)} ${p.id} ${row.error?.slice(0, 160)}`);
+            case 'aborted':
+              // The run stopped mid-call: not a failure, so not recorded (resuming asks again).
+              return log(`  … ${c.name.padEnd(10)} ${p.id} interrupted, not recorded`);
+            case 'failed':
+              appendJsonl(answersPath, r.row);
+              return log(`  ✗ ${c.name.padEnd(10)} ${p.id} ${r.row.error?.slice(0, 160)}`);
+            case 'answered':
+              appendJsonl(answersPath, r.row);
+              answers.set(answerKey(p.id, c.name, c.model), r.row);
+              return log(`  ✓ ${c.name.padEnd(10)} ${p.id} ${p.category} (${(r.row.ms / 1000).toFixed(1)}s, $${r.row.costUsd.toFixed(4)})`);
           }
         },
         stopped,
@@ -419,7 +379,7 @@ async function run(argv: string[]): Promise<void> {
   const judgments = new Map<string, JudgmentRow>();
   let newJudgments = 0;
   // Prompts whose cached Flint answer has no grounding: a grounded judge can't judge them.
-  const ungrounded = new Set<string>();
+  let ungrounded = new Set<string>();
   // Verdicts for normal Flint, local-only Flint and each local-model candidate share
   // a run dir; the subject keeps them apart. judgeModel (a model, or a panel id,
   // `+grounded` or not) keeps single-judge, panel and grounded verdicts apart.
@@ -433,23 +393,17 @@ async function run(argv: string[]): Promise<void> {
         ? new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY!.trim() })
         : new OpenAiProvider({ apiKey: process.env.OPENAI_API_KEY!.trim() });
     const panel: Panelist[] | undefined = panelSpecs?.map((p) => ({ ...p, provider: providerFor(p.vendor) }));
-    const judgeProvider = panel ? undefined : providerFor('anthropic');
-    const pairs: Array<{ p: EvalPrompt; comp: Contestant }> = [];
-    for (const p of prompts) {
-      const fa = answers.get(answerKey(p.id, flint.name, flint.model));
-      if (!fa) continue;
-      for (const comp of competitors) {
-        if (!answers.get(answerKey(p.id, comp.name, comp.model))) continue;
-        if (judgments.has(keyOf(p.id, comp))) continue;
-        // Answered by a server that didn't report grounding: judging it "grounded"
-        // with nothing to show would mix two kinds of verdict under one id.
-        if (grounded && !fa.grounding) {
-          ungrounded.add(p.id);
-          continue;
-        }
-        pairs.push({ p, comp });
-      }
-    }
+    const setup: JudgeSetup = { judgeModel, model: judgeApiModel, grounded, panel, provider: panel ? undefined : providerFor('anthropic') };
+    const todo = pairsToJudge({
+      prompts,
+      flint,
+      competitors,
+      answer: (promptId, c) => answers.get(answerKey(promptId, c.name, c.model)),
+      judged: (promptId, comp) => judgments.has(keyOf(promptId, comp)),
+      grounded,
+    });
+    const pairs = todo.pairs;
+    ungrounded = todo.ungrounded;
     if (ungrounded.size) log(`skipping ${ungrounded.size} prompt(s) whose Flint answer has no grounding recorded (answered before the server reported it)`);
     log(`judging ${pairs.length} pair(s) with ${judgeModel}`);
     const judgeMaxTokens = Number(values['judge-max-tokens']);
@@ -457,87 +411,29 @@ async function run(argv: string[]): Promise<void> {
       pairs,
       Number(values.concurrency),
       async ({ p, comp }) => {
-        const fa = answers.get(answerKey(p.id, flint!.name, flint!.model))!;
-        const ca = answers.get(answerKey(p.id, comp.name, comp.model))!;
-        const aIsFlint = flintIsA(p.id, comp.name, seed);
-        const grounding = grounded ? fa.grounding : undefined;
-        const base = {
+        const r = await judgeOne({
+          judge: setup,
           subject,
-          promptId: p.id,
-          category: p.category,
-          competitor: comp.name,
-          competitorModel: comp.model,
-          judgeModel,
-          flintIsA: aIsFlint,
-        };
-        const record = (row: JudgmentRow): void => {
-          appendJsonl(judgmentsPath, row);
-          if (row.ok) {
-            judgments.set(keyOf(p.id, comp), row);
-            newJudgments++;
-            const split = row.panel && !row.agreed ? ' (split)' : '';
-            log(`  ⚖ ${p.id} vs ${comp.name.padEnd(10)} -> ${subject} ${row.outcome}${split}`);
-          } else {
-            log(`  ✗ judge ${p.id} vs ${comp.name}: ${row.error?.slice(0, 160)}`);
-          }
-        };
-
-        if (panel) {
-          const r = await judgeWithPanel({
-            panel,
-            reserve: (est) => budget.reserve(est),
-            judgeMaxTokens,
-            prompt: p,
-            competitor: comp.name,
-            flintAnswer: fa.text!,
-            competitorAnswer: ca.text!,
-            seed,
-            now,
-            signal: ac.signal,
-            grounding,
-          });
-          if (r.kind === 'refused') return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
-          if (r.kind === 'error') return record({ ...base, ok: false, error: r.error, panel: r.panel, costUsd: r.costUsd, ts: Date.now() });
-          return record({
-            ...base,
-            ok: true,
-            verdict: verdictFor(r.outcome, aIsFlint),
-            outcome: r.outcome,
-            agreed: r.agreed,
-            reason: r.panel.map((v) => `[${v.judge}: ${v.outcome}] ${v.reason}`).join(' '),
-            panel: r.panel,
-            costUsd: r.costUsd,
-            ts: Date.now(),
-          });
-        }
-
-        const [ansA, ansB] = aIsFlint ? [fa.text!, ca.text!] : [ca.text!, fa.text!];
-        const est = estimateCost('anthropic', judgeApiModel, p.prompt.length + ansA.length + ansB.length + groundingChars(grounding), {
-          overheadTokens: 700,
-          expectedOutputTokens: 800,
+          prompt: p,
+          competitor: comp,
+          flintAnswer: answers.get(answerKey(p.id, flint!.name, flint!.model))!,
+          competitorAnswer: answers.get(answerKey(p.id, comp.name, comp.model))!,
+          seed,
+          now,
+          signal: ac.signal,
+          judgeMaxTokens,
+          reserve: (est) => budget.reserve(est),
         });
-        const settle = budget.reserve(est);
-        if (!settle) return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
-        try {
-          const j = await judgePair({
-            provider: judgeProvider!,
-            model: judgeApiModel,
-            maxTokens: judgeMaxTokens,
-            prompt: p,
-            answerA: ansA,
-            answerB: ansB,
-            now,
-            signal: ac.signal,
-            grounding,
-          });
-          const cost = costOf('anthropic', judgeApiModel, j.usage);
-          settle(cost);
-          record({ ...base, ok: true, verdict: j.verdict, outcome: outcomeFor(j.verdict, aIsFlint), reason: j.reason, costUsd: cost, ts: Date.now() });
-        } catch (err) {
-          const usage = (err as { usage?: { input: number; output: number } }).usage;
-          const cost = usage ? costOf('anthropic', judgeApiModel, usage) : 0;
-          settle(cost);
-          record({ ...base, ok: false, error: err instanceof Error ? err.message : String(err), costUsd: cost, ts: Date.now() });
+        if (r.kind === 'refused') return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
+        const row = r.row;
+        appendJsonl(judgmentsPath, row);
+        if (row.ok) {
+          judgments.set(keyOf(p.id, comp), row);
+          newJudgments++;
+          const split = row.panel && !row.agreed ? ' (split)' : '';
+          log(`  ⚖ ${p.id} vs ${comp.name.padEnd(10)} -> ${subject} ${row.outcome}${split}`);
+        } else {
+          log(`  ✗ judge ${p.id} vs ${comp.name}: ${row.error?.slice(0, 160)}`);
         }
       },
       stopped,
@@ -546,7 +442,7 @@ async function run(argv: string[]): Promise<void> {
 
   // ---- report
   const ids = new Set(prompts.map((p) => p.id));
-  const reportName = reportFileName(subject);
+  const reportName = reportFileName(subject, judgeModel);
   // One row per pair: the latest successful one, else the latest failure.
   const summaries = summarize(latestJudgments(readJsonl<JudgmentRow>(judgmentsPath), judgeModel, subject, ids));
   const answerRows = latestAnswers(readJsonl<AnswerRow>(answersPath).filter((a) => ids.has(a.promptId)));
@@ -601,9 +497,6 @@ async function run(argv: string[]): Promise<void> {
   if (stopReason && stopReason !== `budget of $${budget.limitUsd.toFixed(2)} reached`) process.exitCode = 1;
 }
 
-const GROUNDED_NOTE =
-  "Grounded judge (--judge-grounding): the judge also saw the memory Flint's server recalled and the results of the tools Flint called (each cut to 800 characters), and was told that facts this context supports are not fabrications. These verdicts are kept apart from ungrounded ones (judge id ends in +grounded).";
-
 // --------------------------------------------------------------------------
 // report
 
@@ -630,46 +523,18 @@ function report(argv: string[]): void {
   const subject = flintContestantName({ localOnly: values['flint-local'], localModel, localThink, styleVariant });
   if (!values.run) throw new Error('--run <dir|name> required');
   const runDir = existsSync(values.run) ? resolve(values.run) : join(EVAL_DIR, 'runs', values.run);
-  const meta = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as {
-    promptSet: string;
-    promptIds: string[];
-    contestants: Array<{ name: string; model: string }>;
-    judgeModel: string;
-  };
+  const meta = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as RunMeta;
   const chosen = values['judge-panel'] ? panelId(parseJudgePanel(values['judge-panel'])) : values['judge-model'] ?? meta.judgeModel;
   const judgeModel = values['judge-grounding'] ? groundedJudgeId(chosen) : chosen;
-  const ids = new Set(meta.promptIds);
-  const rows = readJsonl<JudgmentRow>(join(runDir, 'judgments.jsonl'));
-  const answers = latestAnswers(readJsonl<AnswerRow>(join(runDir, 'answers.jsonl')));
-  const judgeRows = rows.filter((j) => ids.has(j.promptId) && j.judgeModel === judgeModel && (j.subject ?? 'flint') === subject);
-  const spend = answers.reduce((s, a) => s + (a.costUsd || 0), 0) + judgeRows.reduce((s, j) => s + (j.costUsd || 0), 0);
-  // run.json lists the contestants the run started with; a later --flint-local /
-  // --local-model / --flint-variant invocation answered as its own contestant, so add that one.
-  const extra = meta.contestants.some((c) => c.name === subject) ? [] : answers.filter((a) => a.contestant === subject).slice(0, 1);
-  const contestants = [...extra.map((a) => ({ name: a.contestant, model: a.model })), ...meta.contestants];
-  // The strict line covers the competitors this subject was judged against, not
-  // every competitor run.json lists (a later candidate may have faced only one).
-  const judgedAgainst = new Map(judgeRows.map((j) => [j.competitor, j.competitorModel] as const));
-  const notes = [`Re-rendered from cached rows (judge: ${judgeModel}); spend shown is the run total across invocations.`];
-  if (splitGroundedJudgeId(judgeModel).grounded) notes.push(GROUNDED_NOTE);
-  const md = renderMarkdown({
+  const md = rerenderReport({
     run: basename(runDir),
-    promptSet: meta.promptSet,
-    promptCount: meta.promptIds.length,
-    contestants,
-    // The run's prompts only, like the verdicts: answer rates and the strict line cover the same set.
-    answers: answers.filter((a) => ids.has(a.promptId)),
-    summaries: summarize(latestJudgments(rows, judgeModel, subject, ids)),
-    spendUsd: spend,
-    budgetUsd: spend,
-    stoppedForBudget: false,
-    notes,
+    meta,
+    answers: readJsonl<AnswerRow>(join(runDir, 'answers.jsonl')),
+    judgments: readJsonl<JudgmentRow>(join(runDir, 'judgments.jsonl')),
     subject,
     judgeModel,
-    promptIds: ids,
-    strictCompetitors: [...judgedAgainst].map(([name, model]) => ({ name, model })),
   });
-  writeFileSync(join(runDir, reportFileName(subject)), md);
+  writeFileSync(join(runDir, reportFileName(subject, judgeModel)), md);
   process.stdout.write(md + '\n');
 }
 

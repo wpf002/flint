@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { CATEGORIES } from './categorize.js';
-import type { FlintGrounding } from './grounding.js';
+import { GROUNDED_NOTE, splitGroundedJudgeId, type FlintGrounding } from './grounding.js';
 import type { Outcome } from './judge.js';
 import type { PanelVerdict } from './panel.js';
 import { signalOf, verdictOf, type Signal } from './stats.js';
@@ -89,10 +89,17 @@ export function latestJudgments(rows: readonly JudgmentRow[], judgeModel: string
  * A `--flint-variant`'s `#` becomes `+` (`flint#v2` → `report-flint+v2.md`): `#`
  * is a comment in the shell and a fragment in a link, and `_` could collide with
  * a model name's `_`, which `+` can't.
+ *
+ * A grounded judge's report (`judgeModel` ends in `+grounded`) gets `+grounded`
+ * right after `report` (`report+grounded.md`, `report+grounded-flint+v2.md`), so
+ * a grounded pass and an ungrounded one on the same run never overwrite each
+ * other's report. As a prefix it can't collide with any ungrounded name, even a
+ * variant's that happened to be called `grounded`.
  */
-export function reportFileName(subject: string): string {
-  if (subject === 'flint') return 'report.md';
-  return `report-${subject.replace(/#/g, '+').replace(/[^A-Za-z0-9._@~+-]/g, '_')}.md`;
+export function reportFileName(subject: string, judgeModel?: string): string {
+  const stem = judgeModel !== undefined && splitGroundedJudgeId(judgeModel).grounded ? 'report+grounded' : 'report';
+  if (subject === 'flint') return `${stem}.md`;
+  return `${stem}-${subject.replace(/#/g, '+').replace(/[^A-Za-z0-9._@~+-]/g, '_')}.md`;
 }
 
 /** Latest answer per (prompt, contestant, model): the success if there is one, else the latest failure. */
@@ -454,4 +461,94 @@ export function renderMarkdown(r: ReportInput): string {
     L.push('');
   }
   return L.join('\n');
+}
+
+/**
+ * The competitors `report` gives a strict line for. run.json lists every
+ * competitor the run started with, but a later invocation on the run (another
+ * `--local-model` candidate, a `--flint-variant`) may have faced only some of
+ * them, and a line against one it never faced would count its failures and none
+ * of its wins. So a competitor is in when:
+ * - the subject was judged against it (by this judge), or
+ * - it answered a prompt in scope and the two never both answered one: there
+ *   was nothing to judge, so the subject's failures it answered are the whole
+ *   strict tally. A subject that failed every prompt shows 0-N, as in the report
+ *   `run` writes.
+ * A competitor that answered alongside the subject but has no verdict against it
+ * is left out.
+ */
+export function strictCompetitorsFor(opts: {
+  subject: string;
+  /** Latest answer rows, in scope. */
+  answers: readonly AnswerRow[];
+  /** This judge's verdict rows for the subject, in scope. */
+  judgments: readonly JudgmentRow[];
+  /** run.json's contestants. */
+  contestants: ReadonlyArray<{ name: string; model: string }>;
+}): Array<{ name: string; model: string }> {
+  const out = new Map<string, string>();
+  for (const j of opts.judgments) if (!out.has(j.competitor)) out.set(j.competitor, j.competitorModel);
+  const subjectAnswered = new Set(opts.answers.filter((a) => a.ok && a.contestant === opts.subject).map((a) => a.promptId));
+  const candidates = [...opts.contestants, ...opts.answers.filter((a) => a.ok).map((a) => ({ name: a.contestant, model: a.model }))];
+  for (const c of candidates) {
+    if (isFlintName(c.name) || out.has(c.name)) continue;
+    const answered = opts.answers.filter((a) => a.ok && a.contestant === c.name && a.model === c.model).map((a) => a.promptId);
+    if (answered.length === 0) continue;
+    // Both answered a prompt, yet no verdict: not faced by this subject (or not judged yet).
+    if (answered.some((id) => subjectAnswered.has(id))) continue;
+    out.set(c.name, c.model);
+  }
+  return [...out].map(([name, model]) => ({ name, model }));
+}
+
+/** What `report` reads from a run's run.json. */
+export interface RunMeta {
+  promptSet: string;
+  promptIds: string[];
+  contestants: Array<{ name: string; model: string }>;
+  judgeModel: string;
+}
+
+/**
+ * `report`: one subject's report for one judge, re-rendered from a run's cached
+ * rows (all of answers.jsonl and judgments.jsonl), over run.json's prompts.
+ */
+export function rerenderReport(opts: {
+  run: string;
+  meta: RunMeta;
+  answers: readonly AnswerRow[];
+  judgments: readonly JudgmentRow[];
+  subject: string;
+  /** The judge id to render (`+grounded` for a grounded judge's verdicts). */
+  judgeModel: string;
+}): string {
+  const { meta, subject, judgeModel } = opts;
+  const ids = new Set(meta.promptIds);
+  const answers = latestAnswers(opts.answers);
+  const judgeRows = opts.judgments.filter((j) => ids.has(j.promptId) && j.judgeModel === judgeModel && subjectOf(j) === subject);
+  const spend = answers.reduce((s, a) => s + (a.costUsd || 0), 0) + judgeRows.reduce((s, j) => s + (j.costUsd || 0), 0);
+  // run.json lists the contestants the run started with; a later --flint-local /
+  // --local-model / --flint-variant invocation answered as its own contestant, so add that one.
+  const extra = meta.contestants.some((c) => c.name === subject) ? [] : answers.filter((a) => a.contestant === subject).slice(0, 1);
+  const contestants = [...extra.map((a) => ({ name: a.contestant, model: a.model })), ...meta.contestants];
+  // The run's prompts only, like the verdicts: answer rates and the strict line cover the same set.
+  const inScope = answers.filter((a) => ids.has(a.promptId));
+  const notes = [`Re-rendered from cached rows (judge: ${judgeModel}); spend shown is the run total across invocations.`];
+  if (splitGroundedJudgeId(judgeModel).grounded) notes.push(GROUNDED_NOTE);
+  return renderMarkdown({
+    run: opts.run,
+    promptSet: meta.promptSet,
+    promptCount: meta.promptIds.length,
+    contestants,
+    answers: inScope,
+    summaries: summarize(latestJudgments(opts.judgments, judgeModel, subject, ids)),
+    spendUsd: spend,
+    budgetUsd: spend,
+    stoppedForBudget: false,
+    notes,
+    subject,
+    judgeModel,
+    promptIds: ids,
+    strictCompetitors: strictCompetitorsFor({ subject, answers: inScope, judgments: judgeRows, contestants: meta.contestants }),
+  });
 }
