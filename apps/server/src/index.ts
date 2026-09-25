@@ -64,6 +64,7 @@ import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
+import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer } from './unanswered';
 import { ToolRouter } from './router';
 import { safeHandler } from './safe-handler';
@@ -244,6 +245,7 @@ const CORE_TOOL_NAMES = [
   // it's always reachable (the router's embedder is down during training), and
   // its description is one short line to respect the local 4096-token budget.
   'deep_research',
+  'calculate', // arithmetic by a parser, not in the model's head (./calculate)
   'web.web_search', // current events, weather, news, scores, facts — the primary lookup
   'web.fetch_url', // read a specific URL
   'trident.perplexity_search', // deeper web research
@@ -446,6 +448,7 @@ async function main(): Promise<void> {
         return (await frontierFlint.generate({ prompt })).text;
       },
     }),
+    calculateTool(),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
