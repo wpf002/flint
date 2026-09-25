@@ -341,27 +341,46 @@ function render(n: Node): string {
       const l = render(n.left);
       const r = render(n.right);
       const wrapL = rightAssoc ? prec(n.left) <= p : prec(n.left) < p;
-      const wrapR = rightAssoc ? prec(n.right) < p : prec(n.right) <= p;
+      // A negated right operand is always parenthesised: `7 % -3` is refused as
+      // a percentage (notAPercentage), so the form shown must be `7 % (-3)`,
+      // and `2 * (-3)` reads more plainly than `2 * -3` anyway.
+      const wrapR = n.right.kind === 'neg' || (rightAssoc ? prec(n.right) < p : prec(n.right) <= p);
       return `${wrapL ? `(${l})` : l} ${n.op} ${wrapR ? `(${r})` : r}`;
     }
   }
 }
 
+/** At and above this, 15 significant digits no longer reach the units digit. */
+const EXPONENT_FROM = 1e15;
+
 /**
  * Float noise off (0.1 + 0.2 → 0.3): 15 significant digits, which a double
  * holds exactly. Safe integers are returned untouched.
+ *
+ * Anything else from 1e15 up is a 15-digit approximation, and as a plain
+ * number it would print padded with zeros (2^60 → 1152921504606850000, where
+ * the exact value is 1152921504606846976) that the model would pass on as
+ * exact. So it comes back as a string in exponent form instead:
+ * "1.15292150460685e+18".
  */
-function tidy(x: number): number {
+function tidy(x: number): number | string {
   if (x === 0) return 0; // no -0
   if (Number.isInteger(x) && Math.abs(x) <= Number.MAX_SAFE_INTEGER) return x;
-  return Number(x.toPrecision(15));
+  const rounded = x.toPrecision(15);
+  if (Math.abs(Number(rounded)) < EXPONENT_FROM) return Number(rounded);
+  // toPrecision is already in exponent form here (the exponent is ≥ the
+  // precision, rounding included); only the mantissa's trailing zeros go.
+  const [mantissa = rounded, exponent] = rounded.split('e');
+  const short = mantissa.includes('.') ? mantissa.replace(/\.?0+$/, '') : mantissa;
+  return exponent === undefined ? short : `${short}e${exponent}`;
 }
 
 // ---------------------------------------------------------------------------
 // public surface
 
 export type Calculation =
-  | { ok: true; expression: string; result: number }
+  /** `result` is a string (exponent form, 15 significant digits) only when it is not exact and at least 1e15 in size. */
+  | { ok: true; expression: string; result: number | string }
   | { ok: false; error: string };
 
 /** Evaluate one expression. Never throws; never runs anything but the grammar above. */
