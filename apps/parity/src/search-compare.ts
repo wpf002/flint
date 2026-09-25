@@ -36,7 +36,8 @@ import {
   type SearchItem,
   type SearchOutcome,
 } from '@flint/mcp';
-import { BudgetGuard } from './budget.js';
+import type { BudgetGuard } from './budget.js';
+import { dailyLimitFrom, openSharedEvalBudget, spendLedgerPath, type DailyEvalBudget } from './daily-budget.js';
 import { parseJudgeOutput, type Verdict } from './judge.js';
 import { costOf, estimateCost } from './pricing.js';
 import { loadSecretsInto } from './secrets.js';
@@ -424,6 +425,36 @@ function clip(s: string, n: number): string {
 
 const DEFAULT_SEARCH_COST: Record<KeyedBackend, number> = { tavily: 0.008, brave: 0.005 };
 
+/**
+ * search-compare's budget: its --budget-usd is reserved out of today's shared eval
+ * budget (PARITY_DAILY_BUDGET_USD, the ledger every parity invocation draws on)
+ * before the first metered search, and every search and judge call it settles is
+ * appended to that ledger. Throws when today's budget is spent. Close `daily` when
+ * the invocation ends.
+ */
+export function openCompareBudget(opts: {
+  budgetUsd: number;
+  ledgerFlag: string | undefined;
+  env: Record<string, string | undefined>;
+  evalDir: string;
+  log: (msg: string) => void;
+  now?: () => number;
+}): { budget: BudgetGuard; daily: DailyEvalBudget; clipped: boolean; notes: string[] } {
+  const notes: string[] = [];
+  const at = new Date(opts.now?.() ?? Date.now());
+  const opened = openSharedEvalBudget({
+    run: `search-compare/${at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}`,
+    budgetUsd: opts.budgetUsd,
+    dailyLimitUsd: dailyLimitFrom(opts.env),
+    ledgerPath: spendLedgerPath(opts.ledgerFlag, opts.env, opts.evalDir),
+    env: opts.env,
+    log: opts.log,
+    notes,
+    ...(opts.now ? { now: opts.now } : {}),
+  });
+  return { ...opened, notes };
+}
+
 async function main(argv: string[]): Promise<void> {
   const flint = join(homedir(), '.flint');
   const evalDir = process.env.PARITY_DIR?.trim() || join(flint, 'eval');
@@ -444,6 +475,7 @@ async function main(argv: string[]): Promise<void> {
       seed: { type: 'string', default: '1' },
       concurrency: { type: 'string', default: '2' },
       out: { type: 'string' },
+      'spend-ledger': { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
     },
   });
@@ -475,6 +507,10 @@ async function main(argv: string[]): Promise<void> {
   const health = await fetch(`${searxngUrl}/healthz`, { signal: AbortSignal.timeout(5_000) }).catch((e: unknown) => e);
   if (!(health instanceof Response) || !health.ok) throw new Error(`SearXNG not answering at ${searxngUrl}/healthz; start it (apps/studio/install_searxng.sh) or pass --searxng-url`);
 
+  // Reserve --budget-usd out of today's shared eval budget before the first paid call.
+  const { budget, daily } = openCompareBudget({ budgetUsd, ledgerFlag: values['spend-ledger'], env: process.env, evalDir, log });
+  process.once('exit', () => daily.close());
+
   const apiKey = key.apiKey;
   const primaryOpts = { fetch, timeoutMs: 25_000 };
   const deps: CompareDeps = {
@@ -483,19 +519,20 @@ async function main(argv: string[]): Promise<void> {
     searxng: (q) => searxngSearch(q, n, searxngUrl, { fetch, timeoutMs: 15_000 }),
     judge: new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY!.trim() }),
     judgeModel,
-    budget: new BudgetGuard(budgetUsd),
+    budget,
     searchCostUsd,
     seed: Number(values.seed),
     now: new Date(),
     includeAnswer: values['include-answer']!,
   };
   const rows = await runCompare(prompts, deps, Math.max(1, Number(values.concurrency)));
+  daily.close();
   const totals = summarizeCompare(rows);
   const dead = keyUnusable(rows);
   // A refused or spent key on the first prompt: no quality verdict, nothing charged.
   if (dead && totals.judged + totals.forfeits === 0) throw new Error(`provider key unusable: nothing to compare (${dead})`);
   if (values.out) for (const r of rows) appendJsonl(resolve(values.out), { ...r, providerName, judgeModel, at: deps.now.toISOString() });
-  process.stdout.write(`${renderCompare(rows, totals, { providerName, judgeModel, searxngUrl, budgetUsd, results: n, now: deps.now })}\n`);
+  process.stdout.write(`${renderCompare(rows, totals, { providerName, judgeModel, searxngUrl, budgetUsd: budget.limitUsd, results: n, now: deps.now })}\n`);
   if (dead) log(`stopped after ${rows.length} of ${prompts.length}: provider key unusable (${dead}); the totals cover the rows before it`);
   else if (rows.length < prompts.length) log(`stopped after ${rows.length} of ${prompts.length}: budget reached`);
 }

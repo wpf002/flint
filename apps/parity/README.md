@@ -434,7 +434,8 @@ pnpm --filter @flint/parity search-compare --query "..." --query "..."  # your o
 | flag | default | |
 | --- | --- | --- |
 | `--prompts` / `--category` | `~/.flint/eval/parity_prompts.jsonl` / `research` | read only; `--category all` for every prompt |
-| `--budget-usd` | `1` | hard cap on metered searches + judge; every paid call is reserved first |
+| `--budget-usd` | `1` | hard cap on metered searches + judge; every paid call is reserved first. Reserved out of the shared daily eval budget (`PARITY_DAILY_BUDGET_USD`, section 2) before the first paid call, and every search and judge call settles into the same ledger |
+| `--spend-ledger` | `$PARITY_SPEND_LEDGER` or `~/.flint/eval/spend-ledger.jsonl` | the shared daily eval ledger |
 | `--judge-model` | `claude-haiku-4-5` (`SEARCH_COMPARE_JUDGE_MODEL`) | e.g. `claude-sonnet-5` |
 | `--provider` | from the key's config | `tavily` or `brave` |
 | `--search-cost-usd` | tavily `0.008`, brave `0.005` | per successful metered search; a rejected one (quota, bad key) is free |

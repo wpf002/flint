@@ -6,6 +6,7 @@ import {
   compareOne,
   keyUnusable,
   loadComparePrompts,
+  openCompareBudget,
   promptsFromQueries,
   providerIsA,
   renderCompare,
@@ -17,7 +18,7 @@ import {
   type CompareDeps,
   type ComparePrompt,
 } from '../src/search-compare.js';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -304,5 +305,55 @@ describe('report', () => {
     expect(md).toContain('**Availability:** tavily failed 0 of 2 · searxng failed 1 of 2 (those rows are left out of the wins and the sign test)');
     expect(md).toMatch(/\*\*Sign test\*\* \(ties dropped\): p = 1\.000, NOISE: no detectable difference/);
     expect(md).toMatch(/\*\*Spend:\*\* \$0\.0\d{3} of \$1\.00 \(tavily searches \$0\.0160, judge \$0\.0012\)/);
+  });
+});
+
+describe('the shared daily eval budget', () => {
+  const NOON = Date.UTC(2026, 8, 25, 17, 0); // 12:00 CDT
+  const ledgerRows = (path: string) =>
+    readFileSync(path, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { type: string; run: string; usd: number });
+
+  it("reserves --budget-usd out of today's eval budget and settles every search and judge call into the shared ledger", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'search-compare-daily-'));
+    try {
+      const logged: string[] = [];
+      const { budget, daily } = openCompareBudget({ budgetUsd: 1, ledgerFlag: undefined, env: { PARITY_DAILY_BUDGET_USD: '5' }, evalDir: dir, log: (m) => logged.push(m), now: () => NOON });
+      const d = deps({ budget });
+      const row = await compareOne(P, d);
+      expect(row.how).toBe('judge');
+      daily.close();
+      const rows = ledgerRows(join(dir, 'spend-ledger.jsonl'));
+      expect(rows[0]).toMatchObject({ type: 'reserve', usd: 1 });
+      expect(rows[0]!.run).toMatch(/^search-compare\//);
+      const spent = rows.filter((r) => r.type === 'spend').reduce((a, r) => a + r.usd, 0);
+      expect(spent).toBeGreaterThan(0.008); // the metered search plus the judge (SearXNG is free)
+      expect(spent).toBeCloseTo(budget.spent, 10);
+      expect(rows.at(-1)).toMatchObject({ type: 'release' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is capped by what today's other evals left, and refuses to start once the day is spent", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'search-compare-daily-'));
+    try {
+      const ledger = join(dir, 'ledger.jsonl');
+      const env = { PARITY_DAILY_BUDGET_USD: '2' };
+      const open = (budgetUsd: number) => openCompareBudget({ budgetUsd, ledgerFlag: ledger, env, evalDir: dir, log: () => {}, now: () => NOON });
+      const first = open(1.5);
+      first.budget.reserve(1.5)!(1.5);
+      first.daily.close();
+      const capped = open(1);
+      expect(capped.clipped).toBe(true);
+      expect(capped.budget.limitUsd).toBeCloseTo(0.5, 9);
+      capped.budget.reserve(0.5)!(0.5);
+      capped.daily.close();
+      expect(() => open(1)).toThrow(/spent|left/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
