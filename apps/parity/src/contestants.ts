@@ -8,6 +8,7 @@ import {
   type ProviderAdapter,
   type TokenUsage,
 } from '@flint/core';
+import { parseGrounding, type FlintGrounding } from './grounding.js';
 import { costOf, estimateCost, type Vendor } from './pricing.js';
 import type { EvalPrompt } from './prompts.js';
 
@@ -17,6 +18,8 @@ export interface AnswerResult {
   costUsd: number;
   /** Contestant-specific extras (Flint: brain, model, tools used). */
   meta?: Record<string, unknown>;
+  /** Flint only: the memory and tool results the answer was grounded on (the eval response's `grounding`). */
+  grounding?: FlintGrounding;
 }
 
 export interface Contestant {
@@ -131,6 +134,10 @@ interface FlintGenerateResponse {
   model?: string;
   /** Echo of the request's `localThink`, from a server that honoured it. */
   localThink?: boolean;
+  /** The style variant the answering persona used, from a server with style variants. */
+  styleVariant?: string;
+  /** What the turn was grounded on (recalled memory, tool results), from a server that reports it. */
+  grounding?: unknown;
   tools?: Array<{ tool: string; outcome?: string }>;
   proposed?: string[];
   eval?: boolean;
@@ -172,6 +179,18 @@ export function flintContestant(opts: {
    * exactly as before, so answers cached without it stay valid and separate.
    */
   localThink?: boolean;
+  /**
+   * A/B tests: the persona style variant to answer with (the server's eval-only
+   * `styleVariant`; `--flint-variant <v>`). Adds `#<v>` to the contestant name;
+   * left out, the name and the request are exactly as before. A reply that
+   * doesn't echo the same variant stops the run.
+   */
+  styleVariant?: string;
+  /**
+   * `--judge-grounding`: every answer must carry `grounding`, since a grounded
+   * judge can't judge one without it. A server that doesn't send it stops the run.
+   */
+  requireGrounding?: boolean;
   /** How long to keep retrying while the server is unreachable (a deploy restart). */
   restartWaitMs?: number;
 }): Contestant {
@@ -179,9 +198,11 @@ export function flintContestant(opts: {
   if (localModel !== undefined) assertLocalModelName(localModel);
   const localThink = opts.localThink;
   if (localThink !== undefined && localModel === undefined) throw new Error('--local-think needs --local-model');
+  const styleVariant = opts.styleVariant;
+  if (styleVariant !== undefined) assertStyleVariantName(styleVariant);
   const localOnly = opts.localOnly === true || localModel !== undefined;
   return {
-    name: flintContestantName({ localOnly, localModel, localThink }),
+    name: flintContestantName({ localOnly, localModel, localThink, styleVariant }),
     model: `flint@${opts.url}`,
     // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
     // re-send it: estimate generously. The local brain costs nothing.
@@ -199,6 +220,7 @@ export function flintContestant(opts: {
               ...(localOnly ? { localOnly: true } : {}),
               ...(localModel ? { localModel } : {}),
               ...(localThink !== undefined ? { localThink } : {}),
+              ...(styleVariant !== undefined ? { styleVariant } : {}),
             }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
           }),
@@ -206,6 +228,11 @@ export function flintContestant(opts: {
         opts.restartWaitMs ?? 120_000,
       );
       const body = (await r.json().catch(() => ({}))) as FlintGenerateResponse;
+      // A 400 is the server refusing the request's shape (an eval-only field it
+      // doesn't accept, e.g. an unknown styleVariant), so every prompt would fail
+      // the same way. Stop, rather than record hundreds of "Flint failures" that
+      // the strict tally would count as losses.
+      if (r.status === 400) throw new FatalError(`flint rejected the request (HTTP 400: ${body.error ?? 'no body'})`);
       if (!r.ok) throw new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}`);
       if (body.eval !== true && !opts.allowTrainingLog) {
         throw new FatalError(
@@ -224,6 +251,17 @@ export function flintContestant(opts: {
           `asked for localThink ${String(localThink)} but the server didn't echo it (got ${String(body.localThink)}) — it predates the think override, or ignored it`,
         );
       }
+      if (styleVariant !== undefined && body.styleVariant !== styleVariant) {
+        throw new FatalError(
+          `asked for styleVariant ${styleVariant} but the server answered with ${body.styleVariant ?? '(no styleVariant echoed)'} — it predates style variants, or ignored it`,
+        );
+      }
+      const grounding = parseGrounding(body.grounding);
+      if (opts.requireGrounding && !grounding) {
+        throw new FatalError(
+          '--judge-grounding: the Flint server sent no `grounding` with its eval answer (it predates it), so the grounded judge would have nothing to show. Deploy the server with eval grounding first.',
+        );
+      }
       const text = (body.text ?? '').trim();
       if (!text) throw new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`);
       const usage = body.usage;
@@ -233,7 +271,15 @@ export function flintContestant(opts: {
         text,
         ...(usage ? { usage } : {}),
         costUsd,
-        meta: { brain: body.brain, model, tools: body.tools ?? [], proposed: body.proposed ?? [], reason: body.reason },
+        meta: {
+          brain: body.brain,
+          model,
+          tools: body.tools ?? [],
+          proposed: body.proposed ?? [],
+          reason: body.reason,
+          ...(body.styleVariant !== undefined ? { styleVariant: body.styleVariant } : {}),
+        },
+        ...(grounding ? { grounding } : {}),
       };
     },
   };
@@ -278,16 +324,60 @@ export function assertLocalModelName(name: string): void {
 
 /**
  * 'flint', 'flint-local', or 'flint-local@<model>' for a bake-off candidate, with
- * '~think' / '~nothink' appended only when `localThink` is set. Without it the
- * name is unchanged, so earlier runs' answers and verdicts still match. (`~` can't
- * occur in a model name, so the suffix is unambiguous.)
+ * '~think' / '~nothink' appended only when `localThink` is set, then '#<variant>'
+ * only when `styleVariant` is set. Without them the name is unchanged, so earlier
+ * runs' answers and verdicts still match. (`~` and `#` can't occur in a model
+ * name, and `#` can't occur in a variant, so the suffixes are unambiguous.)
  */
-export function flintContestantName(opts: { localOnly?: boolean; localModel?: string | undefined; localThink?: boolean | undefined }): string {
+export function flintContestantName(opts: {
+  localOnly?: boolean;
+  localModel?: string | undefined;
+  localThink?: boolean | undefined;
+  styleVariant?: string | undefined;
+}): string {
+  const variant = opts.styleVariant === undefined ? '' : `#${opts.styleVariant}`;
   if (opts.localModel) {
     const think = opts.localThink === undefined ? '' : opts.localThink ? '~think' : '~nothink';
-    return `flint-local@${opts.localModel}${think}`;
+    return `flint-local@${opts.localModel}${think}${variant}`;
   }
-  return opts.localOnly ? 'flint-local' : 'flint';
+  return `${opts.localOnly ? 'flint-local' : 'flint'}${variant}`;
+}
+
+/** Style variant names: `v1`, `v2`, `local-v1`. Letters, digits, `.`, `_`, `-`; nothing that could collide with a name suffix. */
+export const STYLE_VARIANT_RE = /^[a-z0-9][a-z0-9._-]*$/i;
+export const STYLE_VARIANT_MAX_LEN = 40;
+
+export function assertStyleVariantName(v: string): void {
+  if (!v || v.length > STYLE_VARIANT_MAX_LEN || !STYLE_VARIANT_RE.test(v)) {
+    throw new Error(`--flint-variant: "${v}" isn't a style variant name (letters, digits, . _ -, at most ${STYLE_VARIANT_MAX_LEN} chars, e.g. v2 or local-v1)`);
+  }
+}
+
+/** The `--flint-variant` flag: trimmed and checked; absent → undefined. */
+export function flintVariantFlag(v: string | undefined): string | undefined {
+  if (v === undefined) return undefined;
+  const s = v.trim();
+  assertStyleVariantName(s);
+  return s;
+}
+
+/**
+ * Before sending anything with `--flint-variant`: the server's /health must list
+ * the variant in `styleVariants`. A server without the field predates style
+ * variants and would ignore (or 400) the request.
+ */
+export function assertStyleVariantSupported(health: Record<string, unknown>, variant: string, url: string): void {
+  const known = health.styleVariants;
+  if (!Array.isArray(known)) {
+    throw new Error(
+      `--flint-variant ${variant}: the Flint server at ${url} doesn't support style variants (/health has no styleVariants). ` +
+        'Deploy the server with style variants first (FLINT_STYLE_VARIANT / styleVariant on /generate).',
+    );
+  }
+  const names = known.filter((k): k is string => typeof k === 'string');
+  if (!names.includes(variant)) {
+    throw new Error(`--flint-variant ${variant}: the Flint server at ${url} doesn't know that variant (it has: ${names.join(', ') || 'none'})`);
+  }
 }
 
 /** `--local-think on|off` → true / false; absent → undefined. Anything else throws. */
@@ -339,9 +429,9 @@ export async function ollamaHasModel(model: string, host: string, fetchFn: typeo
 /** An error that should stop the whole run, not just fail one prompt. */
 export class FatalError extends Error {}
 
-export async function flintHealth(url: string): Promise<Record<string, unknown> | undefined> {
+export async function flintHealth(url: string, fetchFn: typeof fetch = fetch): Promise<Record<string, unknown> | undefined> {
   try {
-    const r = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetchFn(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(5000) });
     return r.ok ? ((await r.json()) as Record<string, unknown>) : undefined;
   } catch {
     return undefined;

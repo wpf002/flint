@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { CATEGORIES } from './categorize.js';
+import type { FlintGrounding } from './grounding.js';
 import type { Outcome } from './judge.js';
 import type { PanelVerdict } from './panel.js';
 import { signalOf, verdictOf, type Signal } from './stats.js';
@@ -16,6 +17,11 @@ export interface AnswerRow {
   costUsd: number;
   ms: number;
   meta?: Record<string, unknown>;
+  /**
+   * Flint only, from a server that reports it: the recalled memory and tool
+   * results the answer was grounded on. What `--judge-grounding` shows the judge.
+   */
+  grounding?: FlintGrounding;
   ts: number;
 }
 
@@ -80,10 +86,24 @@ export function latestJudgments(rows: readonly JudgmentRow[], judgeModel: string
  * `report.md` for Flint, else `report-<subject>.md` with anything not filename-safe
  * (`:` `/` ...) as `_`. `~` is kept, so a `--local-think` variant
  * (`flint-local@<model>~nothink`) gets its own, readable report next to the plain one.
+ * A `--flint-variant`'s `#` becomes `+` (`flint#v2` → `report-flint+v2.md`): `#`
+ * is a comment in the shell and a fragment in a link, and `_` could collide with
+ * a model name's `_`, which `+` can't.
  */
 export function reportFileName(subject: string): string {
   if (subject === 'flint') return 'report.md';
-  return `report-${subject.replace(/[^A-Za-z0-9._@~-]/g, '_')}.md`;
+  return `report-${subject.replace(/#/g, '+').replace(/[^A-Za-z0-9._@~+-]/g, '_')}.md`;
+}
+
+/** Latest answer per (prompt, contestant, model): the success if there is one, else the latest failure. */
+export function latestAnswers(rows: readonly AnswerRow[]): AnswerRow[] {
+  const m = new Map<string, AnswerRow>();
+  for (const r of rows) {
+    const k = `${r.promptId}|${r.contestant}|${r.model}`;
+    const prev = m.get(k);
+    if (!prev || r.ok || !prev.ok) m.set(k, r);
+  }
+  return [...m.values()];
 }
 
 export interface Tally {
@@ -180,6 +200,91 @@ export function summarize(judgments: readonly JudgmentRow[]): CompetitorSummary[
   return out;
 }
 
+/**
+ * A Flint subject's name ('flint', 'flint-local', 'flint-local@<model>~nothink',
+ * 'flint#v2', ...) as opposed to a competitor's ('openai', 'claude', 'perplexity').
+ */
+export function isFlintName(name: string): boolean {
+  return /^flint(?:$|[-@#~])/.test(name);
+}
+
+/** Answer rate per contestant: answered / (answered + failed), over the latest row per prompt. */
+export interface AnswerRate {
+  answered: number;
+  failed: number;
+  /** answered / (answered + failed); undefined when nothing was attempted. */
+  rate: number | undefined;
+}
+
+export function answerRate(answers: readonly AnswerRow[], contestant: string): AnswerRate {
+  // A prompt counts once: answered if any row for it succeeded, else failed.
+  const byPrompt = new Map<string, boolean>();
+  for (const a of answers) if (a.contestant === contestant) byPrompt.set(a.promptId, (byPrompt.get(a.promptId) ?? false) || a.ok);
+  const answered = [...byPrompt.values()].filter(Boolean).length;
+  const failed = byPrompt.size - answered;
+  return { answered, failed, rate: byPrompt.size ? answered / byPrompt.size : undefined };
+}
+
+/**
+ * The strict head-to-head for one competitor: the judged tally, plus a loss for
+ * every prompt Flint failed to answer (no successful answer after retries: an
+ * empty answer, an HTTP error, a timeout) that the competitor did answer. The
+ * normal tally leaves those out, so a Flint that fails often looks as good as one
+ * that doesn't. A competitor's failures are not counted as Flint wins.
+ */
+export interface StrictSummary {
+  competitor: string;
+  competitorModel: string;
+  total: Tally;
+  /** Of total.losses, how many are Flint failures rather than judged losses. */
+  flintFailures: number;
+  n: number;
+  winRate: number;
+  p: number;
+  signal: Signal;
+  verdict: string;
+}
+
+export function strictSummarize(opts: {
+  summaries: readonly CompetitorSummary[];
+  answers: readonly AnswerRow[];
+  /** Which Flint the report judges. */
+  subject: string;
+  /** The competitors that took part; a competitor with verdicts but not listed here is included too. */
+  competitors: ReadonlyArray<{ name: string; model: string }>;
+  promptIds?: ReadonlySet<string>;
+}): StrictSummary[] {
+  const inScope = (a: AnswerRow): boolean => !opts.promptIds || opts.promptIds.has(a.promptId);
+  const flintOk = new Set<string>();
+  const flintTried = new Set<string>();
+  for (const a of opts.answers) {
+    if (a.contestant !== opts.subject || !inScope(a)) continue;
+    flintTried.add(a.promptId);
+    if (a.ok) flintOk.add(a.promptId);
+  }
+  const flintFailed = new Set([...flintTried].filter((id) => !flintOk.has(id)));
+
+  // Each competitor once: the model its verdicts were given against, else the listed one.
+  const comps = new Map<string, string>();
+  for (const c of opts.competitors) if (!isFlintName(c.name) && !comps.has(c.name)) comps.set(c.name, c.model);
+  for (const s of opts.summaries) comps.set(s.competitor, s.competitorModel);
+
+  const out: StrictSummary[] = [];
+  for (const [competitor, competitorModel] of [...comps.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const judged = opts.summaries.find((s) => s.competitor === competitor)?.total ?? empty();
+    const answeredByComp = new Set(
+      opts.answers.filter((a) => a.ok && a.contestant === competitor && a.model === competitorModel && inScope(a)).map((a) => a.promptId),
+    );
+    const flintFailures = [...flintFailed].filter((id) => answeredByComp.has(id)).length;
+    const total: Tally = { wins: judged.wins, losses: judged.losses + flintFailures, ties: judged.ties };
+    const n = total.wins + total.losses + total.ties;
+    if (n === 0) continue;
+    const { signal, p } = signalOf(total.wins, total.losses);
+    out.push({ competitor, competitorModel, total, flintFailures, n, winRate: winRate(total), p, signal, verdict: verdictOf(total.wins, total.losses, signal) });
+  }
+  return out;
+}
+
 const HISTORY_HEADER_V1 =
   'ts,run,prompt_set,competitor,competitor_model,judge_model,n,flint_wins,competitor_wins,ties,flint_win_rate,p_value,signal,judge_errors';
 export const HISTORY_HEADER = HISTORY_HEADER_V1 + ',subject';
@@ -240,23 +345,41 @@ export interface ReportInput {
   notes: string[];
   /** Which Flint this report judges; omitted means 'flint'. */
   subject?: string;
+  /** The judge id the verdicts carry (a model or a panel id, `+grounded` when grounded), shown in the header. */
+  judgeModel?: string;
+  /** The prompts in scope, for the strict tally; omitted means every answer given. */
+  promptIds?: ReadonlySet<string>;
+  /**
+   * The competitors this subject was (to be) judged against, for the strict
+   * line; omitted means the non-Flint `contestants`. `report` passes the ones
+   * with verdicts, since run.json lists every competitor the run started with.
+   */
+  strictCompetitors?: Array<{ name: string; model: string }>;
 }
 
 export function renderMarkdown(r: ReportInput): string {
   const L: string[] = [];
-  L.push(`# Flint parity eval — ${r.run}${r.subject && r.subject !== 'flint' ? ` (${r.subject})` : ''}`, '');
+  const subject = r.subject ?? 'flint';
+  L.push(`# Flint parity eval — ${r.run}${subject !== 'flint' ? ` (${subject})` : ''}`, '');
   L.push(`Prompt set: \`${r.promptSet}\` (${r.promptCount} prompts in this run).`);
+  if (r.judgeModel) L.push(`Judge: \`${r.judgeModel}\`.`);
   L.push(`Spend this invocation: $${r.spendUsd.toFixed(2)} of a $${r.budgetUsd.toFixed(2)} budget${r.stoppedForBudget ? ' — **stopped early: budget reached**' : ''}.`, '');
 
-  L.push('## Contestants', '', '| contestant | model | answered | failed | spend |', '| --- | --- | ---: | ---: | ---: |');
+  L.push('## Contestants', '', '| contestant | model | answered | failed | answer rate | spend |', '| --- | --- | ---: | ---: | ---: | ---: |');
   for (const c of r.contestants) {
-    const mine = r.answers.filter((a) => a.contestant === c.name);
-    const ok = mine.filter((a) => a.ok).length;
-    const cost = mine.reduce((s, a) => s + (a.costUsd || 0), 0);
-    L.push(`| ${c.name} | \`${c.model}\` | ${ok} | ${mine.length - ok} | $${cost.toFixed(2)} |`);
+    const rate = answerRate(r.answers, c.name);
+    const cost = r.answers.filter((a) => a.contestant === c.name).reduce((s, a) => s + (a.costUsd || 0), 0);
+    L.push(`| ${c.name} | \`${c.model}\` | ${rate.answered} | ${rate.failed} | ${rate.rate === undefined ? '—' : pct(rate.rate)} | $${cost.toFixed(2)} |`);
   }
-  L.push('');
+  L.push('', 'Answer rate: of the prompts a contestant was asked, the share it answered. A failure is a prompt with no successful answer after retries.', '');
 
+  const strict = strictSummarize({
+    summaries: r.summaries,
+    answers: r.answers,
+    subject,
+    competitors: r.strictCompetitors ?? r.contestants,
+    ...(r.promptIds ? { promptIds: r.promptIds } : {}),
+  });
   L.push('## Head to head (from Flint\'s side)', '');
   if (r.summaries.length === 0) L.push('_No judgments yet._', '');
   else {
@@ -267,7 +390,27 @@ export function renderMarkdown(r: ReportInput): string {
       );
     }
     L.push('', 'Win rate counts a tie as half. p is the exact two-sided sign test on decisive games (ties dropped); SIGNIFICANT means p < 0.05, weak p < 0.32, fewer than 4 decisive games is always NOISE.', '');
+  }
+  if (strict.length) {
+    L.push(
+      '### Strict: a Flint failure counts as a loss',
+      '',
+      '| vs | W | L | of which Flint failed | T | strict win rate | p (sign test) | signal | verdict |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |',
+    );
+    for (const s of strict) {
+      L.push(
+        `| ${s.competitor} (\`${s.competitorModel}\`) | ${s.total.wins} | ${s.total.losses} | ${s.flintFailures} | ${s.total.ties} | ${pct(s.winRate)} | ${s.p.toPrecision(3)} | ${s.signal} | ${s.verdict} |`,
+      );
+    }
+    L.push(
+      '',
+      'The tally above only counts pairs where both sides answered. Here every prompt Flint failed to answer (no successful answer after retries: an empty answer, an HTTP error, a timeout) that the competitor did answer is added as a Flint loss, so failing to answer can never help Flint. Competitor failures are not counted as Flint wins, so this is a lower bound for Flint.',
+      '',
+    );
+  }
 
+  if (r.summaries.length) {
     const paneled = r.summaries.filter((s) => s.panelAgreement);
     if (paneled.length) {
       L.push('### Panel agreement', '', '| vs | judge | agreed | of | agreement |', '| --- | --- | ---: | ---: | ---: |');
@@ -292,10 +435,16 @@ export function renderMarkdown(r: ReportInput): string {
     }
   }
 
-  const flintErr = r.answers.filter((a) => a.contestant === (r.subject ?? 'flint') && !a.ok);
+  const flintErr = r.answers.filter((a) => a.contestant === subject && !a.ok && (!r.promptIds || r.promptIds.has(a.promptId)));
   if (flintErr.length) {
-    L.push('## Flint failures', '', 'Prompts Flint failed to answer are NOT judged (they are infrastructure failures, e.g. the local brain being down), so they do not count as losses. Fix them and re-run the same run dir to fill them in.', '');
+    L.push(
+      '## Flint failures',
+      '',
+      'Prompts Flint failed to answer are not judged, so the head-to-head tally leaves them out; the strict line counts each one a competitor answered as a loss. Some are infrastructure failures (e.g. the local brain being down): fix those and re-run the same run dir to fill them in.',
+      '',
+    );
     for (const a of flintErr.slice(0, 20)) L.push(`- \`${a.promptId}\`: ${(a.error ?? '').slice(0, 200)}`);
+    if (flintErr.length > 20) L.push(`- … and ${flintErr.length - 20} more`);
     L.push('');
   }
 
