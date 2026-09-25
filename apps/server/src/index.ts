@@ -96,6 +96,7 @@ import {
   type FrontierPlan,
 } from './spend';
 import { TurnLog, recallContext, recordTurnEntry } from './grounding';
+import { GROUNDING_CHARS_MAX, parseGroundingCharsRequest, runDiscoveryTool, wiredToolNames } from './eval-tools';
 import {
   parseAttachments,
   readJsonLimited,
@@ -769,6 +770,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       localThinkOverride: !!ctx.localModels,
       // The `styleVariant`s /generate accepts (apps/parity --flint-variant).
       styleVariants: STYLE_VARIANTS,
+      // The longest tool excerpt an eval /generate may ask for with `groundingChars`
+      // (apps/parity tasks), and that GET /eval/tools + POST /eval/tool exist (./eval-tools).
+      groundingCharsMax: GROUNDING_CHARS_MAX,
+      evalDiscovery: true,
     });
   }
 
@@ -847,6 +852,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // unless eval: true and a known variant; without it each brain uses its live one.
     const sv = parseStyleVariantRequest(body);
     if (!sv.ok) return json(res, sv.status, { error: sv.error });
+    // Eval-only: longer tool excerpts in the response's `grounding` (apps/parity tasks,
+    // which hands competitors the data Flint read). 400 unless eval: true and in range.
+    const gc = parseGroundingCharsRequest(body);
+    if (!gc.ok) return json(res, gc.status, { error: gc.error });
     const personas = turnPersonas({ styleVariant: sv.variant, localModel: lm.model, localThink: lm.think }, ctx);
     if (!personas.ok) return json(res, personas.status, { error: personas.error });
     const local = personas.local;
@@ -947,7 +956,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         styleVariant: answered.styleVariant(),
         tools: toolsUsed,
         // What the turn was grounded on (recalled memory, tool results), for apps/parity --judge-grounding.
-        grounding: turn.grounding(recalled.facts),
+        grounding: turn.grounding(recalled.facts, gc.chars),
+        // The excerpt length used, echoed only when asked for (apps/parity checks it).
+        ...(gc.chars !== undefined ? { groundingChars: gc.chars } : {}),
         proposed: proposed.map((p) => p.fullName),
         // eval: true, plus what the replay cost (costUsd, costByVendor, paidCalls) and
         // budgetBlocked when a paid tool was refused for budget (./spend TurnSpend).
@@ -1085,6 +1096,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
     res.end();
     return;
+  }
+
+  // Eval-only discovery for apps/parity tasks (./eval-tools): the wired tool names, and
+  // one call to a fixed read-only allowlist. Audited in the action log like any tool call.
+  if (req.method === 'GET' && url === '/eval/tools') {
+    return json(res, 200, { tools: wiredToolNames(ctx.tools) });
+  }
+  if (req.method === 'POST' && url === '/eval/tool') {
+    const read = await readJsonLimited(req, MAX_BODY_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const out = await runDiscoveryTool({
+      tools: ctx.tools,
+      body: read.body,
+      audit: (e) => {
+        const requestId = `eval-discovery-${Date.now()}`;
+        const base = { requestId, provider: 'eval-discovery', model: '-', timestamp: Date.now() };
+        ctx.actionLog.onToolCall({ ...base, call: { id: requestId, toolName: e.name, args: e.args }, idempotent: true });
+        ctx.actionLog.onToolResult({ ...base, toolCallId: requestId, toolName: e.name, result: e.result, isError: e.isError, durationMs: e.durationMs });
+      },
+    });
+    return json(res, out.status, out.body);
   }
 
   // Proposed actions awaiting one-tap approval (writes Flint wanted to make).
