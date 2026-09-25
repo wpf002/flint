@@ -1,30 +1,59 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- com.flint.retrain: the scheduled local-brain training cycle (cycle.sh in its if-due mode).
+
+     SHIPPED DISABLED. Same label as the retired weekly retrain on purpose: launchd
+     keeps "com.flint.retrain => disabled" in its override database (see
+     `launchctl print-disabled gui/$(id -u)`), so installing this file changes
+     nothing until Will explicitly enables it.
+
+     What it runs is not the old job. The copy installed on the Studio today points
+     at ~/.flint/brain/retrain.sh, which unloads Ollama (taking memory recall and
+     embeddings down for every frontier turn too) and trains a Qwen 7B on Claude's
+     answers. Never re-enable that one. This one runs the deploy checkout's
+     cycle.sh, which is a no-op unless a cycle is due, never touches Ollama, and
+     only reports a PROMOTE (promotion stays a manual step).
+
+     To enable, after ONE supervised manual cycle has run cleanly end to end
+     (apps/train/mlx/README.md "Scheduling"):
+       cp ~/flint/apps/train/mlx/com.flint.retrain.plist ~/Library/LaunchAgents/
+       launchctl enable gui/$(id -u)/com.flint.retrain
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.flint.retrain.plist
+     To disable again:
+       launchctl bootout gui/$(id -u)/com.flint.retrain; launchctl disable gui/$(id -u)/com.flint.retrain -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.flint.retrain</string>
+  <key>Disabled</key>
+  <true/>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>/Users/willfoti/.flint/brain/retrain.sh</string>
+    <string>/Users/willfoti/flint/apps/train/mlx/cycle.sh</string>
+    <string>--if-due</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    <string>/Users/willfoti/.nvm/versions/node/v24.15.0/bin:/Users/willfoti/.flint-ollama:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FLINT_TRAIN_PY</key>
+    <string>/Users/willfoti/.flint-train/venv/bin/python</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Weekday</key><integer>0</integer>
-    <key>Hour</key><integer>4</integer>
-    <key>Minute</key><integer>0</integer>
+    <key>Hour</key><integer>2</integer>
+    <key>Minute</key><integer>30</integer>
   </dict>
   <key>RunAtLoad</key>
   <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
   <key>StandardOutPath</key>
-  <string>/Users/willfoti/.flint/brain/retrain.out.log</string>
+  <string>/Users/willfoti/.flint/brain/cycle.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/willfoti/.flint/brain/retrain.err.log</string>
+  <string>/Users/willfoti/.flint/brain/cycle.err.log</string>
 </dict>
 </plist>

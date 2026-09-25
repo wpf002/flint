@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build-dataset": "tsx src/build-dataset.ts",
+    "test": "cd mlx && python3 -m unittest discover -s tests -t tests",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

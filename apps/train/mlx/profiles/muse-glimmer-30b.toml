@@ -1,0 +1,91 @@
+# The default base: the model Flint's local brain runs on today.
+#
+# Why this one (docs: README.md "Why muse-glimmer"): it is the live local model,
+# Apache-2.0, and the research recommendation was one narrow, measured LoRA on
+# it, not a base swap. The Qwen profiles next to this file are the alternates.
+# A profile never downloads anything by itself: train_lora.py runs with
+# HF_HUB_OFFLINE=1 unless you pass --allow-download.
+
+name = "muse-glimmer-30b"
+
+[base]
+family = "muse-glimmer"
+# MLX weights to train on (4-bit, 19.4 GB incl. the vision tower mlx-lm drops).
+mlx_model = "mlx-community/Muse-Glimmer-30B-4bit"
+mlx_revision = "3e7677d7a40d348a3daba263a2b1c0aa41910710"
+hf_source = "meta-models/Muse-Glimmer-30B"
+licence = "apache-2.0"
+# What Ollama serves today, i.e. the baseline a candidate must beat.
+ollama_live = "muse-glimmer:30b"
+# The same weights on Ollama's MLX engine. A fused candidate runs on that engine,
+# so a gate against this tag isolates the fine-tune from the engine change.
+ollama_mlx_baseline = "muse-glimmer:30b-mlx"
+# Candidates are created as <candidate_prefix>:c<cycle id>.
+candidate_prefix = "flint-muse"
+# Answers from these model families count as the base's own ("self") samples.
+self_models = ["muse-glimmer", "flint-muse"]
+# The chat template's reasoning channel (assistant `to=self` turn).
+reasoning_key = "reasoning_content"
+
+[toolchain]
+# muse_glimmer landed in mlx-lm after the 0.31.3 PyPI release (PR #1710, merged
+# 2026-08-25). This is the last commit touching mlx_lm/models/muse_glimmer.py
+# (2026-09-09); its package version is 0.32.0. train_lora.py refuses any other.
+mlx_lm_version = "0.32.0"
+mlx_lm_git = "1b3594b9c3a252b1c5d386424543b4cd6519d47c"
+
+[lora]
+num_layers = 16          # the last 16 of 52 blocks; every linear layer in each
+rank = 16
+scale = 20.0
+dropout = 0.05
+
+[train]
+batch_size = 1
+grad_accumulation_steps = 8
+learning_rate = 1e-4     # LoRA range 1e-4..2e-4 (research); cosine to lr_end
+lr_end = 1e-5
+warmup_updates = 10
+max_epochs = 2
+max_seq_length = 2048    # >= 4096 would crowd the live model out of memory
+grad_checkpoint = true
+mask_prompt = true
+evals_per_epoch = 4
+min_steps_per_eval = 40
+min_train = 200          # fewer target rows than this: NO_DATA, no run
+min_valid = 50
+valid_n = 120
+max_human_share = 0.30   # Will-written rows are repeated up to this share
+# Serving with thinking on and training only on final answers erodes the
+# reasoning channel (Unsloth's warning for Glimmer). Below this share of rows
+# carrying reasoning_content the build stops with NO_DATA.
+min_reasoning_share = 0.3
+
+[early_stop]
+patience = 3             # evals without a min_delta improvement
+min_delta = 0.005
+min_epochs = 0.5         # patience can't stop a run before this
+diverge = 1.25           # val loss above best x this stops at once
+max_hours = 4.0
+
+[serve]
+# How the candidate is served and gated: same think setting as the live model
+# (thinking on), and the live FLINT_LOCAL_STYLE_VARIANT when variant is "".
+think = true
+variant = ""
+
+[memory]
+# Ollama's live footprint, taken as the worst case even when the model is
+# idle-unloaded (the next chat reloads it): 16.8 GB weights + 1.4 GB vision
+# projector + KV cache for num_ctx 16384 + nomic-embed-text.
+live_resident_gb = 20.0
+headroom_gb = 10.0
+# Training peak per footprint (seq x LoRA blocks), GB. Estimates extrapolated
+# from Flint's 72B run (46 GB) and Unsloth's 22.6 GiB at seq 1024; the first
+# real run's measured peak (early_stop.json) replaces them.
+footprints = ["2048x16", "2048x8", "1536x8"]
+peak_gb = { "2048x16" = 30.0, "2048x8" = 27.0, "1536x8" = 24.0 }
+
+# Open-weight models whose answers may be training targets, with the licence
+# that allows it. Empty by default: add one on purpose.
+[teachers]
