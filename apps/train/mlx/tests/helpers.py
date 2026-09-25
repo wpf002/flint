@@ -56,6 +56,14 @@ def sample_row(prompt, output=LONG, *, kind="human", model="", checks=None, cid=
     return r
 
 
+def compliant_samples(n, cids):
+    """n distinct, non-trivial, Will-written targets that carry reasoning: what the real profile trains on."""
+    return [
+        sample_row(f"Draft notes on topic{i} using method{i} for client{i} this quarter", cid=next(cids), ts=i, reasoning="Weigh the options first.")
+        for i in range(n)
+    ]
+
+
 def train_pool_cid(start=0):
     """Conversation ids that pool.py assigns to the train pool (so rows aren't dropped as eval-pool)."""
     from pool import pool_of

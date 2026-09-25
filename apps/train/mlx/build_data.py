@@ -526,7 +526,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if a.count_only:
         c = res.manifest["counts"]
-        print(json.dumps({"status": res.status, "targets": c["targets"], "trainTargets": c["trainTargets"], "samplingPrompts": c["samplingPrompts"], "fingerprint": fingerprint, "drops": res.manifest["drops"]}))
+        print(
+            json.dumps(
+                {
+                    "status": res.status,
+                    "statusReason": res.manifest["statusReason"],
+                    "targets": c["targets"],
+                    "trainTargets": c["trainTargets"],
+                    "validTargets": c["validTargets"],
+                    "samplingPrompts": c["samplingPrompts"],
+                    "fingerprint": fingerprint,
+                    "drops": res.manifest["drops"],
+                }
+            )
+        )
         return EXIT_OK
 
     os.makedirs(a.out, exist_ok=True)
