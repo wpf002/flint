@@ -157,6 +157,12 @@ export class AnthropicProvider implements ProviderAdapter {
     let outputTokens = 0;
     let cacheTokens: { cacheWrite?: number; cacheRead?: number } = {};
     let stopReason: string | null = null;
+    // For a stream cut off part way (see the catch): whether the request reached
+    // the model at all, whether a final output count arrived, and the characters
+    // streamed so far (text and tool arguments), to estimate output without one.
+    let started = false;
+    let outputCounted = false;
+    let streamedChars = 0;
 
     // Active tool_use blocks being assembled, keyed by content-block index.
     const toolBuilders = new Map<
@@ -182,6 +188,7 @@ export class AnthropicProvider implements ProviderAdapter {
       for await (const event of stream) {
         switch (event.type) {
           case 'message_start':
+            started = true;
             inputTokens = event.message.usage.input_tokens;
             // Cache accounting arrives once, on the opening event (see generate()).
             cacheTokens = cacheUsage(event.message.usage);
@@ -199,8 +206,10 @@ export class AnthropicProvider implements ProviderAdapter {
 
           case 'content_block_delta':
             if (event.delta.type === 'text_delta') {
+              streamedChars += event.delta.text.length;
               yield { type: 'text', delta: event.delta.text };
             } else if (event.delta.type === 'input_json_delta') {
+              streamedChars += event.delta.partial_json.length;
               const b = toolBuilders.get(event.index);
               if (b) b.json += event.delta.partial_json;
             }
@@ -223,6 +232,7 @@ export class AnthropicProvider implements ProviderAdapter {
           case 'message_delta':
             stopReason = event.delta.stop_reason ?? stopReason;
             outputTokens = event.usage.output_tokens;
+            outputCounted = true;
             break;
 
           case 'message_stop':
@@ -238,7 +248,15 @@ export class AnthropicProvider implements ProviderAdapter {
     } catch (err) {
       // ALWAYS terminate with an error event (never just stop). Invariant for
       // the streaming contract: exactly one terminal `done` or `error`.
-      yield { type: 'error', error: toAiError(err, sdk) };
+      // Past message_start the request reached the model, and Anthropic bills a
+      // cut-off stream (a closed tab, a timeout) its full input plus the output
+      // generated so far: report that, so a spend ledger can count it. The
+      // final output count only arrives at the end, so until then it's estimated
+      // from what streamed (~4 chars a token; unstreamed thinking isn't in it).
+      const usage: TokenUsage | undefined = started
+        ? { input: inputTokens, output: outputCounted ? outputTokens : Math.ceil(streamedChars / 4), ...cacheTokens }
+        : undefined;
+      yield { type: 'error', error: toAiError(err, sdk), ...(usage ? { usage } : {}) };
     }
   }
 }

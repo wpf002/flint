@@ -60,8 +60,11 @@ shared with apps/parity):
 - **Frontier model calls** (Anthropic, and OpenAI / Perplexity when a tier uses them): one
   row per provider pass, from the usage the provider reports. So every tool-loop
   iteration, retry, answer-only call and fallback tier's attempt is its own row. A stream
-  that dies before it finishes reports no usage and is not counted. The local brain
-  (Ollama) is free and never recorded.
+  cut off part way (a closed tab, a timeout, an error mid-answer) is still billed by the
+  vendor for its full input and the output so far, and is recorded at that usage (Claude;
+  the OpenAI adapter reports none, so a cut-off OpenAI stream is not counted). A request
+  that failed before reaching the model was not billed and is not recorded. The local
+  brain (Ollama) is free and never recorded.
 - **Memory extraction and the research planner**: the same, tagged `extract` / `plan`.
 - **TTS** (`/speak`): per character sent, at the model's list price (`tts-1`: $15 / 1M).
 - **Perplexity and Tavily searches** run in the MCP processes, so their usage never reaches

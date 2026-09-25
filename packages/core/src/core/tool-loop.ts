@@ -315,6 +315,12 @@ async function* streamOnce(
         emitResponse(params, event.reason, event.usage, now() - startedAt);
         return { text, toolCalls, reason: event.reason, usage: event.usage };
       case 'error':
+        // A pass that failed or was cancelled after reaching the model was still
+        // billed: report what the provider says it had used, so a cost observer
+        // (the server's spend ledger) counts it rather than under-counting.
+        if (event.usage) {
+          emitResponse(params, params.signal?.aborted ? 'aborted' : 'error', event.usage, now() - startedAt);
+        }
         throw new FlintError(event.error);
     }
   }

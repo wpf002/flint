@@ -52,11 +52,17 @@ export const StreamEventSchema = z.discriminatedUnion('type', [
     reason: StreamDoneReason,
     usage: TokenUsageSchema,
   }),
-  z.object({ type: z.literal('error'), error: AiErrorSchema }),
+  z.object({ type: z.literal('error'), error: AiErrorSchema, usage: TokenUsageSchema.optional() }),
 ]);
 
 export type StreamEvent =
   | { type: 'text'; delta: string }
   | { type: 'tool_call'; call: ToolCall }
   | { type: 'done'; reason: StreamDoneReason; usage: TokenUsage }
-  | { type: 'error'; error: AiError };
+  /**
+   * `usage`: what the provider had already billed when the stream failed or was
+   * cancelled (a closed tab, a timeout). A request that got as far as the model
+   * is billed its full input and whatever output was generated, so an adapter
+   * that knows it reports it here; absent when nothing was billed or it can't tell.
+   */
+  | { type: 'error'; error: AiError; usage?: TokenUsage };
