@@ -86,8 +86,11 @@ class Row:
     pid: str = ""
 
     def final_text(self) -> str:
+        """The teacher's final answer: the last plain assistant turn after the last user turn."""
         if self.messages:
             for m in reversed(self.messages):
+                if m.get("role") == "user":
+                    return ""
                 if m.get("role") == "assistant" and not m.get("tool_calls"):
                     return _text(m.get("content"))
             return ""
@@ -251,7 +254,7 @@ def split_valid(rows: List[Row], valid_n: int, seed: int) -> Tuple[List[Row], Li
 
 
 def render(row: Row, system: Optional[str], reasoning_key: str) -> List[Dict[str, Any]]:
-    """mlx-lm chat rows: one per assistant turn (mask_prompt masks all but the last message)."""
+    """mlx-lm chat rows: one per assistant turn of the final exchange (mask_prompt masks all but the last message)."""
     head = [{"role": "system", "content": system}] if system else []
     if row.messages:
         msgs = row.messages
@@ -263,9 +266,12 @@ def render(row: Row, system: Optional[str], reasoning_key: str) -> List[Dict[str
         if row.reasoning:
             final[reasoning_key] = row.reasoning
         msgs = [{"role": "user", "content": row.prompt}, final]
+    # Only the last exchange is the teacher's: assistant turns before the last user
+    # message are history (possibly another model's answers) and stay masked context.
+    last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
     out = []
     for i, m in enumerate(msgs):
-        if m.get("role") != "assistant":
+        if i <= last_user or m.get("role") != "assistant":
             continue
         rendered: Dict[str, Any] = {"messages": head + msgs[: i + 1]}
         if row.tool_defs:

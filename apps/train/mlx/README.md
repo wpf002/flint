@@ -141,8 +141,10 @@ never past 30% of the set.
 
 **Rendering:** the live local system prompt when given (`--local-prompt`, or
 `FLINT_LOCAL_PROMPT` for the cycle: `{"system": ..., "sha": ...}`); a sample's own
-recorded system prompt wins. One row per assistant turn (mask_prompt trains only the
-last message, so each tool call and the final answer are each a target once). Without
+recorded system prompt wins. One row per assistant turn of the final exchange
+(mask_prompt trains only the last message, so each tool call and the final answer
+are each a target once). Earlier turns are history, possibly another model's
+answers, and stay masked context, never targets. Without
 a system prompt the builder warns: the model would train in a context it's never
 served in. The gate still judges the served model, so that wastes a run rather than
 shipping a bad one.
