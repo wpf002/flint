@@ -563,3 +563,26 @@ describe('SearXNG results that share nothing with the query are dropped', () => 
     }
   });
 });
+
+describe('keylessOnly (set by the spend guard at the metered vendor\'s cap)', () => {
+  it('auto mode with a working key: goes straight to SearXNG and never calls the metered vendor', async () => {
+    const { ws, stub } = router({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-k' }, { tavily: () => json(TAVILY_OK), searxng: () => json(SEARX_OK) });
+    const out = await ws.search('fed rate', 3, { keylessOnly: true });
+    expect(out.ok && out.source).toBe('searxng');
+    expect(stub.count('tavily')).toBe(0);
+    expect(stub.count('searxng')).toBe(1);
+  });
+
+  it('legacy keyed mode (no SearXNG configured): refuses instead of spending', async () => {
+    const { ws, stub } = router({ SEARCH_PROVIDER: 'tavily', SEARCH_API_KEY: 'tvly-k' }, { tavily: () => json(TAVILY_OK) });
+    const out = await ws.search('fed rate', 3, { keylessOnly: true });
+    expect(out.ok).toBe(false);
+    expect(stub.count('tavily')).toBe(0);
+  });
+
+  it('without the flag, auto mode still prefers the metered vendor', async () => {
+    const { ws, stub } = router({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-k' }, { tavily: () => json(TAVILY_OK), searxng: () => json(SEARX_OK) });
+    const out = await ws.search('fed rate', 3);
+    expect(out.ok && out.source).toBe('tavily');
+  });
+});

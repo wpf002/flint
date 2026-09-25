@@ -89,11 +89,13 @@ server.registerTool(
   'web_search',
   {
     description: 'Search the live web. Returns titles, URLs, and snippets (untrusted content).',
-    inputSchema: { query: z.string(), max_results: z.number().optional() },
+    // `keyless` is set by Flint's spend guard (never shown to the model): once the
+    // metered provider's budget is spent, searches go to SearXNG only.
+    inputSchema: { query: z.string(), max_results: z.number().optional(), keyless: z.boolean().optional() },
     annotations: readOnly,
   },
-  async ({ query, max_results }) => {
-    const out = await search.search(query, max_results);
+  async ({ query, max_results, keyless }) => {
+    const out = await search.search(query, max_results, { keylessOnly: keyless === true });
     return out.ok ? text(toToolPayload(out)) : err(out.error);
   },
 );

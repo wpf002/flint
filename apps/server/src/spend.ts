@@ -871,6 +871,13 @@ export interface PaidToolSpec {
    * another spent one.
    */
   instead: PaidToolAlternative[];
+  /**
+   * The argument that makes this tool search keyless (SearXNG, free) instead of
+   * the metered vendor — `keyless` on web.web_search once the connector supports
+   * it. At the vendor's cap the guard sets it rather than refusing, so a spent
+   * budget means free search, not no search. Hidden from the model.
+   */
+  keylessArg?: string;
 }
 
 export interface PaidToolAlternative {
@@ -914,7 +921,15 @@ export function paidToolSpecs(env: Record<string, string | undefined>): PaidTool
         { tool: 'trident.web_search', vendor: 'tavily' },
       ],
     },
-    { name: 'web.web_search', vendor: 'tavily', kind: 'tool-search', model: 'search-basic', usdPerCall: () => tavily, instead: insteadOfTavily },
+    {
+      name: 'web.web_search',
+      vendor: 'tavily',
+      kind: 'tool-search',
+      model: 'search-basic',
+      usdPerCall: () => tavily,
+      instead: insteadOfTavily,
+      keylessArg: 'keyless',
+    },
     // trident's web_search is Tavily too, and takes a search_depth.
     {
       name: 'trident.web_search',
@@ -939,7 +954,12 @@ export function paidToolSpecs(env: Record<string, string | undefined>): PaidTool
 export function refusalText(
   spec: PaidToolSpec,
   blocked: string,
-  opts: { wired: ReadonlySet<string>; guard: { blocked(vendor: PaidVendor): string | undefined } },
+  opts: {
+    wired: ReadonlySet<string>;
+    guard: { blocked(vendor: PaidVendor): string | undefined };
+    /** Tools that keep working (keyless) after their vendor's budget is spent. */
+    keyless?: ReadonlySet<string>;
+  },
 ): string {
   const keyless = opts.wired.has(KEYLESS_FETCH_TOOL) ? `${KEYLESS_FETCH_TOOL} on a keyless search page (${KEYLESS_SEARCH})` : undefined;
   const seen = new Set<PaidVendor>();
@@ -947,7 +967,7 @@ export function refusalText(
   const spent = new Set<PaidVendor>([spec.vendor]);
   for (const alt of spec.instead) {
     if (!opts.wired.has(alt.tool)) continue;
-    if (opts.guard.blocked(alt.vendor)) {
+    if (opts.guard.blocked(alt.vendor) && !opts.keyless?.has(alt.tool)) {
       spent.add(alt.vendor);
       continue;
     }
@@ -1003,25 +1023,71 @@ export function toolSucceeded(result: unknown): boolean {
 export function meterPaidTools(tools: Tool[], deps: { guard: SpendGuard; specs: PaidToolSpec[] }): Tool[] {
   const byName = new Map(deps.specs.map((s) => [s.name, s] as const));
   const wired = new Set(tools.map((t) => t.definition.name));
+  const keylessTools = new Set(
+    tools
+      .filter((t) => {
+        const s = byName.get(t.definition.name);
+        return !!s?.keylessArg && hasInputProperty(t.definition, s.keylessArg);
+      })
+      .map((t) => t.definition.name),
+  );
   return tools.map((tool) => {
     const spec = byName.get(tool.definition.name);
     if (!spec) return tool;
+    const keyless = keylessTools.has(tool.definition.name) ? spec.keylessArg : undefined;
     return {
-      definition: tool.definition,
+      // The model never sees the keyless switch; only the guard sets it.
+      definition: keyless ? withoutInputProperty(tool.definition, keyless) : tool.definition,
       handler: async (call) => {
+        const args = { ...((call.args as Record<string, unknown> | null) ?? {}) };
+        if (keyless) delete args[keyless];
         const blocked = deps.guard.blocked(spec.vendor);
         if (blocked) {
+          // A spent budget turns into free (keyless) search where the tool can do it.
+          if (keyless) return tool.handler({ ...call, args: { ...args, [keyless]: true } });
           currentTurnSpend()?.noteBlocked(spec.name);
-          return { isError: true, content: refusalText(spec, blocked, { wired, guard: deps.guard }) };
+          return { isError: true, content: refusalText(spec, blocked, { wired, guard: deps.guard, keyless: keylessTools }) };
         }
-        const result = await tool.handler(call);
-        if (toolSucceeded(result)) {
-          deps.guard.ledger.record({ vendor: spec.vendor, model: spec.model, kind: spec.kind, usd: spec.usdPerCall(call.args) });
+        const result = await tool.handler({ ...call, args });
+        // Billed only when the metered vendor answered: a SearXNG answer is free.
+        if (toolSucceeded(result) && resultSource(result) !== 'searxng') {
+          deps.guard.ledger.record({ vendor: spec.vendor, model: spec.model, kind: spec.kind, usd: spec.usdPerCall(args) });
         }
         return result;
       },
     };
   });
+}
+
+/** The `source` a web_search result names (packages/mcp search-providers), if any. */
+export function resultSource(result: unknown): string | undefined {
+  let text: string | undefined;
+  if (typeof result === 'string') text = result;
+  else if (result && typeof result === 'object') {
+    const r = result as { source?: unknown; content?: unknown };
+    if (typeof r.source === 'string') return r.source;
+    if (Array.isArray(r.content)) text = r.content.map((c) => (c as { text?: unknown })?.text).filter((t): t is string => typeof t === 'string').join('');
+  }
+  if (!text || !text.trim().startsWith('{')) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { source?: unknown };
+    return typeof parsed.source === 'string' ? parsed.source : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasInputProperty(def: Tool['definition'], name: string): boolean {
+  const props = (def.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  return !!props && Object.prototype.hasOwnProperty.call(props, name);
+}
+
+function withoutInputProperty(def: Tool['definition'], name: string): Tool['definition'] {
+  const schema = def.inputSchema as { properties?: Record<string, unknown>; required?: unknown };
+  const properties = { ...(schema.properties ?? {}) };
+  delete properties[name];
+  const required = Array.isArray(schema.required) ? schema.required.filter((r) => r !== name) : schema.required;
+  return { ...def, inputSchema: { ...schema, properties, ...(required !== undefined ? { required } : {}) } };
 }
 
 // ---------------------------------------------------------------------------
