@@ -4,6 +4,7 @@ import {
   classifyMessage,
   parseTierSpec,
   readTierSpecs,
+  readLastResortSpec,
   buildTiers,
   envProviderFactory,
   runWithFallback,
@@ -197,6 +198,73 @@ describe('tier config from env', () => {
     expect(oa?.name).toBe('openai');
     expect(f('openai')).toBe(oa);
     expect(f('ollama')?.name).toBe('ollama'); // local: no key needed
+  });
+});
+
+describe('FLINT_TIER_LAST_RESORT', () => {
+  const LAST = { FLINT_TIER_LAST_RESORT: 'openai:gpt-5' };
+
+  it('unset: no extra link anywhere (today exactly)', () => {
+    const set = buildTiers({ env: {}, factory: factoryWith('anthropic', 'openai'), legacy: LEGACY, makePersona: persona })!;
+    expect(set.lastResort).toBeUndefined();
+    expect(set.describe()).not.toMatch(/last_resort/);
+  });
+
+  it('is appended to the end of every chain, with the same persona builder as the tiers', () => {
+    const makePersona = vi.fn(persona);
+    const set = buildTiers({
+      env: { ...LAST, FLINT_TIER_HARD: 'anthropic:claude-opus-4-1', FLINT_TIER_ROUTINE: 'anthropic:claude-haiku-4-5' },
+      factory: factoryWith('anthropic', 'openai'),
+      legacy: LEGACY,
+      makePersona,
+    })!;
+    expect(set.chain('hard').map((b) => b.label)).toEqual([
+      'anthropic:claude-opus-4-1',
+      'anthropic:claude-sonnet-4-6',
+      'anthropic:claude-haiku-4-5',
+      'openai:gpt-5',
+    ]);
+    expect(set.chain('routine').map((b) => b.label)).toEqual(['anthropic:claude-haiku-4-5', 'anthropic:claude-sonnet-4-6', 'openai:gpt-5']);
+    expect(set.lastResort).toMatchObject({ tier: 'last_resort', label: 'openai:gpt-5', persona: { id: 'openai:gpt-5' } });
+    expect(makePersona.mock.calls.map(([p, m]) => `${p.name}:${m}`)).toContain('openai:gpt-5');
+    expect(set.describe()).toMatch(/ last_resort=openai:gpt-5$/);
+    // It never becomes a tier: the classifier's tiers are unchanged.
+    expect(set.get('code').label).toBe('anthropic:claude-sonnet-4-6');
+  });
+
+  it('extends the single legacy brain too', () => {
+    const set = buildTiers({ env: LAST, factory: factoryWith('anthropic', 'openai'), legacy: LEGACY, makePersona: persona })!;
+    expect(set.chain('standard').map((b) => b.label)).toEqual(['anthropic:claude-sonnet-4-6', 'openai:gpt-5']);
+    expect(set.tiered).toBe(false); // classification still can't change who answers first
+  });
+
+  it('is not repeated when a tier already is that brain', () => {
+    const set = buildTiers({
+      env: { ...LAST, FLINT_TIER_CODE: 'openai:gpt-5' },
+      factory: factoryWith('anthropic', 'openai'),
+      legacy: LEGACY,
+      makePersona: persona,
+    })!;
+    expect(set.chain('code').map((b) => b.label)).toEqual(['openai:gpt-5', 'anthropic:claude-sonnet-4-6']);
+    expect(set.chain('standard').map((b) => b.label)).toEqual(['anthropic:claude-sonnet-4-6', 'openai:gpt-5']);
+  });
+
+  it('is skipped (logged) without a key, ignored when malformed, and off with FLINT_TIERS=off', () => {
+    const log = vi.fn();
+    const noKey = buildTiers({ env: LAST, factory: factoryWith('anthropic'), legacy: LEGACY, makePersona: persona, log })!;
+    expect(noKey.lastResort).toBeUndefined();
+    expect(log.mock.calls.map((c) => c[0]).join('\n')).toMatch(/last resort skipped: openai/);
+
+    const warn = vi.fn();
+    expect(readLastResortSpec({ FLINT_TIER_LAST_RESORT: 'gpt-5' }, warn)).toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(readLastResortSpec({ ...LAST, FLINT_TIERS: 'off' })).toBeUndefined();
+    const off = buildTiers({ env: { ...LAST, FLINT_TIERS: 'off' }, factory: factoryWith('anthropic', 'openai'), legacy: LEGACY, makePersona: persona })!;
+    expect(off.chain('hard').map((b) => b.label)).toEqual(['anthropic:claude-sonnet-4-6']);
+  });
+
+  it('never makes a frontier on its own (no standard → still local-only)', () => {
+    expect(buildTiers({ env: LAST, factory: factoryWith('openai'), legacy: undefined, makePersona: persona })).toBeUndefined();
   });
 });
 

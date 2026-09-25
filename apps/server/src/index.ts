@@ -64,6 +64,7 @@ import { PersistentStore } from './persistent-store';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
+import { answerWithFallback, guardAnswer } from './unanswered';
 import { ToolRouter } from './router';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
@@ -802,7 +803,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let out;
     if (brain === 'frontier' && ctx.brains) {
       try {
-        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
+        // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
+        const won = await answerWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
         out = won.result;
         answeredBy = won.brain.label;
       } catch (err) {
@@ -881,11 +883,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const ac = new AbortController();
     res.on('close', () => ac.abort());
     let answer = '';
-    const pump = async (persona: Persona, recoverable = false) => {
-      for await (const ev of persona.chat(
+    // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
+    const pump = async (persona: Persona, recoverable = false, tried?: number) => {
+      const events = persona.chat(
         { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
         { signal: ac.signal },
-      )) {
+      );
+      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried })) {
         if (ev.type === 'text') answer += ev.delta;
         // A provider error arrives as an event, not a throw. When another tier is
         // left to try and no text has gone out, throw it to the tier fallback.
@@ -902,7 +906,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
             async (b) => {
               res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier, model: b.label })}\n\n`);
               try {
-                await pump(b.persona, b !== chain[chain.length - 1]); // last tier behaves as before
+                await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1); // last tier: errors as before, no answer → honest message
               } catch (err) {
                 if (answer.length > 0) throw new NoFallback(err); // text already streamed
                 throw err;

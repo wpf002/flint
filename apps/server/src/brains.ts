@@ -18,6 +18,11 @@
  *   FLINT_TIER_ROUTINE   short chit-chat / quick lookups; unset → standard
  *   FLINT_TIER_HARD      multi-step reasoning, analysis, planning; unset → standard
  *   FLINT_TIER_CODE      writing / debugging code; unset → standard
+ *   FLINT_TIER_LAST_RESORT  appended to the END of every fallback chain; unset →
+ *                        no extra link (today's chains exactly). Meant for another
+ *                        vendor (e.g. `openai:gpt-5`): the Claude tiers refuse the
+ *                        same prompts alike, so a refusal only has somewhere to go
+ *                        if the last link isn't Claude. Same persona as every tier.
  *   FLINT_TIERS=off      kill switch: ignore every FLINT_TIER_* (legacy only)
  * Providers: anthropic (ANTHROPIC_API_KEY), openai (OPENAI_API_KEY),
  * perplexity (PERPLEXITY_API_KEY; no tool calling), ollama (FLINT_TIER_OLLAMA_HOST
@@ -151,6 +156,16 @@ export function readTierSpecs(env: Env, warn: (msg: string) => void = () => {}):
   return out;
 }
 
+/** FLINT_TIER_LAST_RESORT, unless FLINT_TIERS=off (a malformed value is reported via `warn`). */
+export function readLastResortSpec(env: Env, warn: (msg: string) => void = () => {}): TierSpec | undefined {
+  if (env.FLINT_TIERS?.trim().toLowerCase() === 'off') return undefined;
+  const raw = env.FLINT_TIER_LAST_RESORT;
+  if (!raw?.trim()) return undefined;
+  const spec = parseTierSpec(raw);
+  if (!spec) warn(`FLINT_TIER_LAST_RESORT=${JSON.stringify(raw)} is not provider:model — ignored`);
+  return spec;
+}
+
 /** Build (or reuse) the adapter for a provider name; undefined = no key / unknown. */
 export type ProviderFactory = (provider: string) => ProviderAdapter | undefined;
 
@@ -197,8 +212,11 @@ export function envProviderFactory(env: Env): ProviderFactory {
 // the tier set
 
 export interface BrainTier<P> {
-  /** The tier this brain was CONFIGURED for (a fallback may serve another tier's request). */
-  tier: Tier;
+  /**
+   * The tier this brain was CONFIGURED for (a fallback may serve another tier's
+   * request); `last_resort` is FLINT_TIER_LAST_RESORT, the end of every chain.
+   */
+  tier: Tier | 'last_resort';
   provider: ProviderAdapter;
   model: string;
   /** `provider:model` — what observability records. */
@@ -207,7 +225,11 @@ export interface BrainTier<P> {
 }
 
 export class BrainSet<P> {
-  constructor(private readonly byTier: Record<Tier, BrainTier<P>>) {}
+  constructor(
+    private readonly byTier: Record<Tier, BrainTier<P>>,
+    /** FLINT_TIER_LAST_RESORT: tried after every tier of any chain. */
+    readonly lastResort?: BrainTier<P>,
+  ) {}
 
   /** The everyday brain — what `frontier` meant before tiers. */
   get primary(): BrainTier<P> {
@@ -224,12 +246,14 @@ export class BrainSet<P> {
     return this.byTier[tier];
   }
 
-  /** Ordered, de-duplicated brains to try for a tier: its own, then down the ladder. */
+  /**
+   * Ordered, de-duplicated brains to try for a tier: its own, then down the
+   * ladder, then the last resort (when set and not already in the chain).
+   */
   chain(tier: Tier): BrainTier<P>[] {
     const seen = new Set<string>();
     const out: BrainTier<P>[] = [];
-    for (const t of FALLBACK[tier]) {
-      const b = this.byTier[t];
+    for (const b of [...FALLBACK[tier].map((t) => this.byTier[t]), ...(this.lastResort ? [this.lastResort] : [])]) {
       if (seen.has(b.label)) continue;
       seen.add(b.label);
       out.push(b);
@@ -239,7 +263,8 @@ export class BrainSet<P> {
 
   /** One line per tier for the boot log. */
   describe(): string {
-    return TIERS.map((t) => `${t}=${this.byTier[t].label}`).join(' ');
+    const tiers = TIERS.map((t) => `${t}=${this.byTier[t].label}`).join(' ');
+    return this.lastResort ? `${tiers} last_resort=${this.lastResort.label}` : tiers;
   }
 }
 
@@ -266,7 +291,7 @@ export function buildTiers<P>(opts: BuildTiersOptions<P>): BrainSet<P> | undefin
   const log = opts.log ?? (() => {});
   const specs = readTierSpecs(opts.env, (m) => log(`[brain] ${m}`));
   const personas = new Map<string, P>();
-  const brainFor = (tier: Tier, provider: ProviderAdapter, model: string): BrainTier<P> => {
+  const brainFor = (tier: Tier | 'last_resort', provider: ProviderAdapter, model: string): BrainTier<P> => {
     const label = `${provider.name}:${model}`;
     let persona = personas.get(label);
     if (persona === undefined) {
@@ -301,7 +326,26 @@ export function buildTiers<P>(opts: BuildTiersOptions<P>): BrainSet<P> | undefin
   for (const tier of TIERS) {
     byTier[tier] = tier === 'standard' ? { ...standard, tier: 'standard' } : built[tier] ?? { ...standard, tier };
   }
-  return new BrainSet(byTier);
+  return new BrainSet(byTier, lastResortBrain(opts, brainFor, log));
+}
+
+/** The FLINT_TIER_LAST_RESORT brain, or undefined when unset / unbuildable. */
+function lastResortBrain<P>(
+  opts: BuildTiersOptions<P>,
+  brainFor: (tier: 'last_resort', provider: ProviderAdapter, model: string) => BrainTier<P>,
+  log: (msg: string) => void,
+): BrainTier<P> | undefined {
+  const spec = readLastResortSpec(opts.env, (m) => log(`[brain] ${m}`));
+  if (!spec) return undefined;
+  const provider = opts.factory(spec.provider);
+  if (!provider) {
+    log(`[brain] last resort skipped: ${spec.provider} unavailable (no key / unknown provider) for ${spec.model}`);
+    return undefined;
+  }
+  if (spec.provider === 'anthropic') {
+    log('[brain] the last resort is anthropic — the Claude tiers refuse alike, so it will rarely rescue a refusal');
+  }
+  return brainFor('last_resort', provider, spec.model);
 }
 
 // ---------------------------------------------------------------------------
