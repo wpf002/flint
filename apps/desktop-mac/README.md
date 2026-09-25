@@ -9,7 +9,8 @@ Build and install by hand:
 ./apps/desktop-mac/install_app.sh
 ```
 It compiles `flint.swift`, bundles it with `Info.plist` and `flint.icns`, signs
-it ad-hoc and replaces `/Applications/Flint.app`. The icon was made from
+it with the stable "Flint Dev" identity (`create_signing_identity.sh` makes it on
+first run) and replaces `/Applications/Flint.app`. The icon was made from
 `../console/app-assets/icon.svg`.
 
 ## Updates
@@ -21,5 +22,6 @@ after you quit installs it. A change that fails to build is skipped until the
 directory changes again. The console itself is served by the server, so UI
 changes reach the app without any of this.
 
-Ad-hoc signing means macOS may ask for the microphone again after an update
-that changes `flint.swift`.
+The stable signature is what keeps the microphone grant across updates: macOS
+keys it to the signing certificate, and an ad-hoc signature changes with every
+build.
