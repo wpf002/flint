@@ -9,6 +9,7 @@
  * judge would only give its own model becomes a split (a tie).
  */
 import type { ProviderAdapter, TokenUsage } from '@flint/core';
+import { claudeAlwaysThinks } from './contestants.js';
 import { groundedJudgeId, groundingChars, splitGroundedJudgeId, type FlintGrounding } from './grounding.js';
 import { flintIsA, judgePair, outcomeFor, type JudgeExtras, type JudgePrompt, type Outcome, type Verdict } from './judge.js';
 import { costOf, estimateCost, type Vendor } from './pricing.js';
@@ -180,7 +181,8 @@ export function panelistMaxTokens(p: PanelistSpec, judgeMaxTokens: number): numb
 
 /** GPT-5-class and Gemini 2.5+ models think by default, and the thinking counts as output. */
 function reasons(p: PanelistSpec): boolean {
-  return p.vendor === 'openai' || p.vendor === 'google';
+  // Claude Fable / Mythos and Opus 5.5 always think, like OpenAI's and Gemini's reasoning models.
+  return p.vendor === 'openai' || p.vendor === 'google' || (p.vendor === 'anthropic' && claudeAlwaysThinks(p.model));
 }
 
 export type PanelResult =

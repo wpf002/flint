@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { PERSONAL, effectivePrivacy } from '../src/task-privacy.js';
 import {
@@ -62,6 +63,32 @@ describe('the committed task templates', () => {
   it('ask the local brain only through the prompt text the server routes on', () => {
     for (const t of FILE.templates.filter((x) => x.route === 'local')) expect(t.template).toMatch(/^(Stay local|Keep this private):/);
   });
+
+  it('mark route: local on exactly the templates the server keeps on-device (so none leaks to a cloud vendor)', () => {
+    // The server's own rule (apps/server/src/policy.ts FORCE_LOCAL_RE), read from its source so the two can't drift.
+    const policy = readFileSync(fileURLToPath(new URL('../../server/src/policy.ts', import.meta.url)), 'utf8');
+    const m = /FORCE_LOCAL_RE =\s*\/(.+)\/([a-z]*);/.exec(policy);
+    expect(m, 'FORCE_LOCAL_RE in apps/server/src/policy.ts').toBeTruthy();
+    const forceLocal = new RegExp(m![1]!, m![2]);
+    for (const t of FILE.templates) expect(t.route === 'local', t.id).toBe(forceLocal.test(t.template));
+  });
+
+  it('score the tasks about Flint himself Flint-only, and no compared rubric asks for his persona', () => {
+    const flintOnly = FILE.templates.filter((t) => t.scoring === 'flint-only').map((t) => t.id).sort();
+    expect(flintOnly).toEqual(['persona-chat-96', 'persona-chat-97', 'self-compare-76', 'self-honesty-74', 'self-identity-75', 'self-status-73']);
+    // Every self/persona template: the question is about the assistant itself, which no competitor is.
+    for (const t of FILE.templates.filter((x) => x.system === 'self' || x.system === 'persona')) expect(t.scoring, t.id).toBe('flint-only');
+    // A rubric that rewards Flint's persona, or asks about "your" training, can't be met by a competitor answering as itself.
+    for (const t of FILE.templates.filter((x) => x.scoring !== 'flint-only')) {
+      expect(t.great, t.id).not.toMatch(/\bpersona\b|in character/i);
+      expect(t.template, t.id).not.toMatch(/\byour (training|own local brain)\b|\bAre you Claude\b/i);
+    }
+  });
+
+  it('reject an unknown scoring', () => {
+    const bad = { ...FILE, templates: [{ ...FILE.templates[0]!, scoring: 'judged' }] };
+    expect(() => validateTaskFile(bad)).toThrow(/scoring must be flint-only/);
+  });
 });
 
 describe('instantiate', () => {
@@ -77,6 +104,8 @@ describe('instantiate', () => {
       tools: { need: [['trident.gmail_search']], ok: [] },
       memory: 'incidental',
     });
+    expect(r.prompts.find((p) => p.templateId === 'gmail-triage-24')).not.toHaveProperty('scoring');
+    expect(r.prompts.find((p) => p.templateId === 'self-identity-75')).toMatchObject({ scoring: 'flint-only' });
     for (const p of r.prompts) {
       expect(p.id).toMatch(new RegExp(`^${p.templateId}~[0-9a-f]{8}$`));
       expect(p.prompt).not.toMatch(/\{[a-z_.]+\}/);

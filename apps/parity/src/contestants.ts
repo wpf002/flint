@@ -23,8 +23,12 @@ export interface AnswerResult {
   grounding?: FlintGrounding;
 }
 
-/** What a contestant is asked: parity's EvalPrompt and a Flint-tasks prompt both fit. */
-export type AskPrompt = Pick<EvalPrompt, 'id' | 'prompt'>;
+/**
+ * What a contestant is asked: parity's EvalPrompt and a Flint-tasks prompt both
+ * fit. `system` (Flint tasks) replaces a vendor contestant's own system prompt for
+ * this one call: a competitor is told the time Flint answered, not the time it is asked.
+ */
+export type AskPrompt = Pick<EvalPrompt, 'id' | 'prompt'> & { system?: string };
 
 export interface Contestant {
   /** Stable key: 'flint' | 'openai' | 'claude' | 'perplexity' | 'google' | 'amazon' | a --openai-compatible name. */
@@ -69,11 +73,11 @@ export function providerContestant(opts: {
   return {
     name,
     model,
-    estimate: (p) => estimateCost(vendor, model, p.prompt.length + system.length),
+    estimate: (p) => estimateCost(vendor, model, p.prompt.length + (p.system ?? system).length),
     async answer(p, signal) {
       const res = await provider.generate({
         model,
-        system,
+        system: p.system ?? system,
         messages: [{ id: `eval-${p.id}`, role: 'user', content: p.prompt, timestamp: Date.now() }],
         maxTokens,
         signal,
@@ -85,8 +89,21 @@ export function providerContestant(opts: {
   };
 }
 
-export function claudeContestant(apiKey: string, model: string, system: string, maxTokens: number): Contestant {
-  return providerContestant({ name: 'claude', vendor: 'anthropic', model, provider: new AnthropicProvider({ apiKey }), maxTokens, system });
+/**
+ * Claude models whose thinking can't be turned off (Fable, Mythos, Opus 5.5):
+ * the thinking counts against max_tokens, so a short cap can end the reply
+ * before any text, which would read as a failure rather than an answer.
+ */
+export function claudeAlwaysThinks(model: string): boolean {
+  return /^claude-(fable|mythos)-|^claude-opus-5-5/.test(model);
+}
+
+/** The output cap an always-thinking Claude model gets at least (as Gemini's, compat.ts). */
+export const THINKING_MIN_MAX_TOKENS = 16_384;
+
+export function claudeContestant(apiKey: string, model: string, system: string, maxTokens: number, name = 'claude'): Contestant {
+  const cap = claudeAlwaysThinks(model) ? Math.max(maxTokens, THINKING_MIN_MAX_TOKENS) : maxTokens;
+  return providerContestant({ name, vendor: 'anthropic', model, provider: new AnthropicProvider({ apiKey }), maxTokens: cap, system });
 }
 
 export function openaiContestant(apiKey: string, model: string, system: string, maxTokens: number): Contestant {
@@ -142,6 +159,8 @@ interface FlintGenerateResponse {
   localThink?: boolean;
   /** Echo of the request's `groundingChars` (Flint tasks), from a server that honoured it. */
   groundingChars?: number;
+  /** Echo of the request's `recall` (Flint tasks), from a server that honoured it. */
+  recall?: boolean;
   /** The style variant the answering persona used, from a server with style variants. */
   styleVariant?: string;
   /** What the turn was grounded on (recalled memory, tool results), from a server that reports it. */
@@ -242,6 +261,14 @@ export function flintContestant(opts: {
    * request is exactly as before (800-character excerpts).
    */
   groundingChars?: number;
+  /**
+   * Flint tasks: the prompts to answer WITHOUT long-term memory (the server's
+   * eval-only `recall: false`): every task whose point isn't memory, since the
+   * competitors are handed Flint's data and that data leaves Will's memory out.
+   * A reply that doesn't echo `recall: false`, or still carries recalled memory,
+   * stops the run. Left out, the request is exactly as before.
+   */
+  withholdMemory?: (p: AskPrompt) => boolean;
   /** How long to keep retrying while the server is unreachable (a deploy restart). */
   restartWaitMs?: number;
 }): Contestant {
@@ -261,6 +288,7 @@ export function flintContestant(opts: {
     model: `flint@${opts.url}`,
     estimate,
     async answer(p, signal) {
+      const noRecall = opts.withholdMemory?.(p) === true;
       const r = await fetchWhileRestarting(
         () =>
           fetch(`${opts.url.replace(/\/$/, '')}/generate`, {
@@ -274,6 +302,7 @@ export function flintContestant(opts: {
               ...(localThink !== undefined ? { localThink } : {}),
               ...(styleVariant !== undefined ? { styleVariant } : {}),
               ...(opts.groundingChars !== undefined ? { groundingChars: opts.groundingChars } : {}),
+              ...(noRecall ? { recall: false } : {}),
             }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
           }),
@@ -353,6 +382,13 @@ export function flintContestant(opts: {
           ),
         );
       }
+      // Flint must not have read memory the competitors won't get: the head-to-head
+      // (and the judges' "both had the same data") would be false.
+      if (noRecall && (body.recall !== false || (grounding?.memory.length ?? 0) > 0)) {
+        throw new FatalError(
+          `asked for recall: false but the server ${body.recall !== false ? `didn't echo it (got ${String(body.recall)})` : `still recalled ${grounding!.memory.length} memory fact(s)`} — it predates the recall override, or ignored it`,
+        );
+      }
       const text = (body.text ?? '').trim();
       if (!text) throw fail(new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`));
       const usage = body.usage;
@@ -369,6 +405,7 @@ export function flintContestant(opts: {
           reason: body.reason,
           ...(body.styleVariant !== undefined ? { styleVariant: body.styleVariant } : {}),
           ...(opts.groundingChars !== undefined ? { groundingChars: opts.groundingChars } : {}),
+          ...(noRecall ? { recall: false } : {}),
         },
         ...(grounding ? { grounding } : {}),
       };
@@ -539,6 +576,8 @@ export async function preflightFlint(opts: {
   groundingChars?: number | undefined;
   /** Flint tasks' builder: the server must have GET /eval/tools and POST /eval/tool. */
   discovery?: boolean | undefined;
+  /** Flint tasks: the run will send `recall: false`, so the server must honour it. */
+  recallOverride?: boolean | undefined;
   fetchFn?: typeof fetch;
 }): Promise<Record<string, unknown>> {
   const { url } = opts;
@@ -567,6 +606,12 @@ export async function preflightFlint(opts: {
       );
     }
     if (opts.groundingChars > max) throw new Error(`--context-chars ${opts.groundingChars}: the Flint server at ${url} allows at most ${max}`);
+  }
+  if (opts.recallOverride && health.evalRecallOverride !== true) {
+    throw new Error(
+      `the Flint server at ${url} can't answer without long-term memory (/health has no evalRecallOverride), so on every task that isn't about memory Flint would read facts the competitors don't get. ` +
+        'Deploy the server with the eval recall override first, or pass --allow-short-context to run against an older server (tasks where it recalled something are then not compared).',
+    );
   }
   if (opts.discovery && health.evalDiscovery !== true) {
     throw new Error(`the Flint server at ${url} has no eval discovery (/health has no evalDiscovery). Deploy the server with it first, or pass --no-discover (templates that need it are skipped).`);
