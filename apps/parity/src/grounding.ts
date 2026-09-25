@@ -76,6 +76,10 @@ export function groundingBlock(g: FlintGrounding): string {
 
 export const GROUNDED_SUFFIX = '+grounded';
 
+/** The report note for a grounded judge's verdicts. */
+export const GROUNDED_NOTE =
+  "Grounded judge (--judge-grounding): the judge also saw the memory Flint's server recalled and the results of the tools Flint called (each cut to 800 characters), and was told that facts this context supports are not fabrications. These verdicts are kept apart from ungrounded ones (judge id ends in +grounded).";
+
 /** `claude-opus-5-5` → `claude-opus-5-5+grounded`; a panel id likewise. Idempotent. */
 export function groundedJudgeId(judgeModel: string): string {
   return judgeModel.endsWith(GROUNDED_SUFFIX) ? judgeModel : `${judgeModel}${GROUNDED_SUFFIX}`;

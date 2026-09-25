@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ActionLogObserver, type ActionEntry } from '@flint/core';
+import { ActionLogObserver, Flint, type ActionEntry, type GenerateArgs, type ProviderAdapter, type StreamEvent, type Tool } from '@flint/core';
 import {
   TOOL_EXCERPT_CHARS,
-  entriesSince,
+  TurnLog,
   evalGrounding,
   groundingTools,
-  markLog,
   recallContext,
+  recordTurnEntry,
   toolExcerpt,
   withMemory,
 } from '../src/grounding';
@@ -112,39 +112,125 @@ describe('groundingTools / evalGrounding', () => {
   });
 });
 
-describe('markLog / entriesSince', () => {
-  it("returns only this turn's entries", () => {
-    const log = new ActionLogObserver(undefined, 2000);
-    logTool(log, 'before', 'old');
-    const mark = markLog(log.actions());
-    logTool(log, 'web_search', 'sunny');
-    expect(groundingTools(entriesSince(log.actions(), mark))).toEqual([{ name: 'web_search', isError: false, excerpt: 'sunny' }]);
+/**
+ * A provider that, for the user message "<name>", calls the tool `<name>_tool`
+ * once and then answers "done". What the server's personas run on, minus the model.
+ */
+function toolCallingProvider(): ProviderAdapter {
+  return {
+    name: 'mock',
+    getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 100_000, maxOutputTokens: 4096 }),
+    estimateTokens: (m) => m.reduce((n, x) => n + String(x.content).length, 0),
+    async generate() {
+      throw new Error('unused');
+    },
+    async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
+      if (!args.messages.some((m) => m.role === 'tool_result')) {
+        const who = String(args.messages.find((m) => m.role === 'user')?.content ?? '');
+        yield { type: 'tool_call', call: { id: `c-${who}`, toolName: `${who}_tool`, args: {} } };
+        yield { type: 'done', reason: 'tool_call', usage: { input: 1, output: 1 } };
+      } else {
+        yield { type: 'text', delta: 'done' };
+        yield { type: 'done', reason: 'complete', usage: { input: 1, output: 1 } };
+      }
+    },
+  };
+}
+
+const tool = (name: string, handler: () => Promise<unknown>): Tool => ({
+  definition: { name, description: name, inputSchema: { type: 'object' }, idempotent: true },
+  handler,
+});
+
+const toolNames = (t: TurnLog): string[] => t.grounding([]).tools.map((x) => x.name);
+
+describe('TurnLog: a turn sees its own tool results, not a concurrent turn\'s', () => {
+  it('keeps overlapping turns apart on one shared action log (an eval answer while Will chats)', async () => {
+    // Like the server: one action log, several Flint instances (local brain, tiers) observing into it.
+    const log = new ActionLogObserver(recordTurnEntry, 2000);
+    const flint = () => new Flint({ provider: toolCallingProvider(), defaultModel: 'm', observer: log });
+    // Every tool waits until all three are in flight, and the eval turn's tool returns last,
+    // so the other two turns' results are logged while the eval turn is still running.
+    let started = 0;
+    let allStarted!: () => void;
+    const barrier = new Promise<void>((r) => (allStarted = r));
+    const gated = (name: string, result: string, extraMs = 0) =>
+      tool(name, async () => {
+        if (++started === 3) allStarted();
+        await barrier;
+        if (extraMs) await new Promise((r) => setTimeout(r, extraMs));
+        return result;
+      });
+    const evalTurn = new TurnLog();
+    const otherEval = new TurnLog();
+    const before = log.actions().length;
+    await Promise.all([
+      evalTurn.run(() => flint().generate({ prompt: 'eval', tools: [gated('eval_tool', 'Dallas: 72°F', 30)] })),
+      otherEval.run(() => flint().generate({ prompt: 'other', tools: [gated('other_tool', 'NVDA 81')] })),
+      // A /chat turn: not in any TurnLog.
+      flint().generate({ prompt: 'chat', tools: [gated('chat_tool', "Will's inbox: 3 unread from Sam")] }),
+    ]);
+
+    expect(evalTurn.grounding(['fact'])).toEqual({ memory: ['fact'], tools: [{ name: 'eval_tool', isError: false, excerpt: 'Dallas: 72°F' }] });
+    expect(toolNames(otherEval)).toEqual(['other_tool']);
+    // Reading the shared log for the duration of the eval turn (what a mark or an index does)
+    // picks up both other turns, Will's inbox included.
+    expect(groundingTools(log.actions().slice(before)).map((t) => t.name).sort()).toEqual(['chat_tool', 'eval_tool', 'other_tool']);
   });
 
-  it('works from an empty log', () => {
-    const log = new ActionLogObserver(undefined, 2000);
-    const mark = markLog(log.actions());
-    logTool(log, 'web_search', 'sunny');
-    expect(entriesSince(log.actions(), mark)).toHaveLength(1);
+  it('holds when turns queue for the same Flint instance (the slot handoff keeps each turn its own)', async () => {
+    const log = new ActionLogObserver(recordTurnEntry, 2000);
+    const shared = new Flint({ provider: toolCallingProvider(), defaultModel: 'm', observer: log, maxConcurrent: 1 });
+    const slow = tool('a_tool', () => new Promise((r) => setTimeout(() => r('a'), 10)));
+    const fast = tool('b_tool', async () => 'b');
+    const a = new TurnLog();
+    const b = new TurnLog();
+    await Promise.all([a.run(() => shared.generate({ prompt: 'a', tools: [slow] })), b.run(() => shared.generate({ prompt: 'b', tools: [fast] }))]);
+    expect(toolNames(a)).toEqual(['a_tool']);
+    expect(toolNames(b)).toEqual(['b_tool']);
   });
 
-  it('still finds the turn once the ring buffer is full (where a length index finds nothing)', () => {
-    const log = new ActionLogObserver(undefined, 5);
-    for (let i = 0; i < 5; i++) logTool(log, `old${i}`, 'x');
+  it('collects every run() of the turn (a tier fallback asks again)', async () => {
+    const log = new ActionLogObserver(recordTurnEntry, 2000);
+    const turn = new TurnLog();
+    await turn.run(async () => logTool(log, 'web_search', 'first try'));
+    await turn.run(async () => logTool(log, 'vantage.score', { score: 81 }));
+    expect(turn.grounding([]).tools).toEqual([
+      { name: 'web_search', isError: false, excerpt: 'first try' },
+      { name: 'vantage.score', isError: false, excerpt: '{"score":81}' },
+    ]);
+  });
+
+  it("doesn't depend on the action log's ring buffer (once full, an index taken before the turn finds nothing)", async () => {
+    const log = new ActionLogObserver(recordTurnEntry, 3);
+    for (let i = 0; i < 3; i++) logTool(log, `old${i}`, 'x');
     const beforeLen = log.actions().length;
-    const mark = markLog(log.actions());
-    logTool(log, 'web_search', 'sunny');
-    logTool(log, 'gmail.search', 'inbox');
-    // The index approach (toolsSince) sees nothing: the length stayed at 5.
+    const turn = new TurnLog();
+    await turn.run(async () => {
+      for (let i = 0; i < 5; i++) logTool(log, `t${i}`, 'y');
+    });
     expect(log.actions().slice(beforeLen)).toHaveLength(0);
-    expect(groundingTools(entriesSince(log.actions(), mark)).map((t) => t.name)).toEqual(['web_search', 'gmail.search']);
+    expect(toolNames(turn)).toEqual(['t0', 't1', 't2', 't3', 't4']);
   });
 
-  it('returns everything left when the marked entry itself was evicted', () => {
-    const log = new ActionLogObserver(undefined, 3);
-    logTool(log, 'old', 'x');
-    const mark = markLog(log.actions());
-    for (let i = 0; i < 4; i++) logTool(log, `new${i}`, 'y');
-    expect(entriesSince(log.actions(), mark).map((e) => (e as { tool: string }).tool)).toEqual(['new1', 'new2', 'new3']);
+  it('stops recording once the turn is over, even for work it started that outlives it', async () => {
+    const log = new ActionLogObserver(recordTurnEntry, 2000);
+    const turn = new TurnLog();
+    let late!: Promise<void>;
+    await turn.run(async () => {
+      logTool(log, 'web_search', 'in time');
+      // Carries the turn's async context past its end.
+      late = new Promise((r) => setTimeout(() => (logTool(log, 'late', 'after'), r()), 5));
+    });
+    await late;
+    expect(toolNames(turn)).toEqual(['web_search']);
+    expect(log.actions()).toHaveLength(2);
+  });
+
+  it('files an entry logged outside any turn nowhere but the log', () => {
+    const log = new ActionLogObserver(recordTurnEntry, 2000);
+    expect(() => logTool(log, 'web_search', 'x')).not.toThrow();
+    expect(log.actions()).toHaveLength(1);
+    expect(toolNames(new TurnLog())).toEqual([]);
   });
 });

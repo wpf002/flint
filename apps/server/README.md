@@ -12,7 +12,7 @@ here; Railway has no GPU.
 | --- | --- | --- | --- | --- |
 | GET | `/health` | no | — | `{ ok, provider, model, tools, servers, evalMode, styleVariants, … }` |
 | POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason }` |
-| POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its tool results (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
+| POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
 | POST | `/generate` (eval, style variant) | yes | `{ prompt, eval: true, styleVariant: "v2" }` | as above, answered with that style guide; `styleVariant` echoes the variant of the persona that answered, read from its own guide (not from the request). Unknown variant, or no `eval: true`: 400. `/health` lists the known ones as `styleVariants` (used by `apps/parity --flint-variant`) |
 | POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
 
