@@ -91,6 +91,29 @@ describe('search parsing + dedupe', () => {
     expect(parseSearchResult({ isError: true, content: 'no key' }).hits).toEqual([]);
   });
 
+  it('tells a search tool that could not run from one that found nothing', () => {
+    // Trident's perplexity_search with no PERPLEXITY_API_KEY answers normally, with only an error.
+    const noKey = parseSearchResult(JSON.stringify({ error: 'PERPLEXITY_API_KEY not set. Add it to your .env file to enable perplexity_search.' }));
+    expect(noKey).toEqual({ hits: [], error: 'PERPLEXITY_API_KEY not set. Add it to your .env file to enable perplexity_search.' });
+    // An MCP error result, e.g. web_search with no key and no SearXNG.
+    expect(parseSearchResult({ isError: true, content: 'tavily HTTP 432 (quota); fallback searxng unreachable at http://127.0.0.1:8888 (ECONNREFUSED)' }).error).toMatch(/^tavily HTTP 432/);
+    expect(parseSearchResult({ isError: true, content: '{"error":"boom"}' }).error).toBe('boom');
+    // A real empty search is not an error.
+    expect(parseSearchResult(JSON.stringify({ answer: null, results: [], source: 'searxng' }))).toEqual({ hits: [] });
+  });
+
+  it('reads web_search results from SearXNG, fallback and all', () => {
+    const out = parseSearchResult(
+      JSON.stringify({
+        answer: null,
+        results: [{ title: 'AP', url: 'https://apnews.com/x', snippet: 'held', published_date: '2026-09-17T18:00:00' }],
+        source: 'searxng',
+        fallback: { from: 'tavily', reason: 'tavily HTTP 432 (quota)' },
+      }),
+    );
+    expect(out).toEqual({ hits: [{ title: 'AP', url: 'https://apnews.com/x', snippet: 'held', date: '2026-09-17' }] });
+  });
+
   it('normalizes URLs: hash, tracking params, www, trailing slash', () => {
     expect(normalizeUrl('https://www.Example.com/a/?utm_source=x&id=2#top')).toBe('example.com/a?id=2');
     expect(normalizeUrl('https://example.com/a')).toBe('example.com/a');
@@ -293,6 +316,65 @@ describe('deepResearch pipeline (all stubbed, no network)', () => {
     expect(pack.text).toMatch(/^\[1\] /m);
     expect(pack.cited.every((s, i) => pack.text.includes(`[${i + 1}] ${s.title}`))).toBe(true);
     expect(pack.cited.find((s) => s.url.includes('reuters'))?.date).toBe('2026-09-17');
+  });
+
+  it('keyless: no frontier brain, no Perplexity key, SearXNG web results — still a cited pack', async () => {
+    const searched: string[] = [];
+    const web = stubTool('web.web_search', (args) => {
+      searched.push(String(args.query));
+      return JSON.stringify({
+        answer: null,
+        results: [
+          { title: 'FOMC statement', url: 'https://www.federalreserve.gov/newsevents/2026-09-17.htm', snippet: para('kept the federal funds rate target range at 3.75 to 4 percent') },
+          { title: 'AP', url: 'https://apnews.com/article/fed-holds', snippet: para('left the federal funds rate unchanged at the September FOMC meeting') },
+        ],
+        source: 'searxng',
+      });
+    });
+    const perplexityCalls = vi.fn();
+    const perplexity = stubTool('trident.perplexity_search', (args) => {
+      perplexityCalls(args);
+      return JSON.stringify({ error: 'PERPLEXITY_API_KEY not set. Add it to your .env file to enable perplexity_search.' });
+    });
+    const logs: string[] = [];
+    const pack = await deepResearch(Q, {
+      tools: [web, perplexity],
+      // Exactly how apps/server wires it when no frontier brain is configured.
+      complete: async () => {
+        throw new Error('no frontier brain');
+      },
+      fetchPage: async (url) =>
+        url.includes('federalreserve')
+          ? page('Federal Reserve statement', para('decided to maintain the target range for the federal funds rate at 3-3/4 to 4 percent'))
+          : page('Fed holds', 'Markets had priced in a hold before the September FOMC meeting, and Treasury yields barely moved after the federal funds rate decision was announced on Wednesday afternoon.'),
+      embedder: { embed: async () => { throw new Error('ollama down'); } },
+      now: () => NOW,
+      log: (m) => logs.push(m),
+    });
+
+    expect(pack.planner).toBe('heuristic');
+    expect(logs).toContain('[research] planner failed (no frontier brain); using heuristics');
+    expect(searched).toEqual(pack.queries);
+    expect(perplexityCalls).toHaveBeenCalledOnce(); // first query only, as with a key
+    expect(logs.some((l) => l.startsWith('[research] trident.perplexity_search unavailable') && l.includes('PERPLEXITY_API_KEY not set'))).toBe(true);
+    expect(pack.cited.map((s) => s.url)).toEqual(
+      expect.arrayContaining(['https://www.federalreserve.gov/newsevents/2026-09-17.htm', 'https://apnews.com/article/fed-holds']),
+    );
+    // The key error is neither evidence nor an engine summary.
+    expect(pack.text).not.toContain('PERPLEXITY_API_KEY');
+    expect(pack.text).not.toContain('Search-engine summary');
+  });
+
+  it('skips Perplexity entirely when Trident is not wired', async () => {
+    const calls: string[] = [];
+    const web = stubTool('web.web_search', (args) => {
+      calls.push(`web:${String(args.query)}`);
+      return JSON.stringify({ answer: null, results: [{ title: 'AP', url: 'https://apnews.com/x', snippet: para('held rates') }], source: 'searxng' });
+    });
+    const pack = await deepResearch(Q, { tools: [web], fetchPage: async () => page('AP', para('held rates')), now: () => NOW, log: () => {} });
+    expect(calls.every((c) => c.startsWith('web:'))).toBe(true);
+    expect(calls).toHaveLength(pack.queries.length);
+    expect(pack.cited.map((s) => s.url)).toEqual(['https://apnews.com/x']);
   });
 
   it('uses the brain for planning when given one', async () => {
