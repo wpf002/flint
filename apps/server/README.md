@@ -12,7 +12,7 @@ here; Railway has no GPU.
 | --- | --- | --- | --- | --- |
 | GET | `/health` | no | — | `{ ok, provider, model, tools, servers, evalMode, styleVariants, … }` |
 | POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason }` |
-| POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
+| POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval, costUsd, costByVendor, paidCalls, budgetBlocked? }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `costUsd` is what the replay's paid calls cost (every model pass and fallback attempt, the research planner, paid searches; see "Spend caps"), and error responses (500 / 502 / 503) carry it too; `budgetBlocked` lists the paid tools refused because Flint's own cap for them is spent. `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
 | POST | `/generate` (eval, style variant) | yes | `{ prompt, eval: true, styleVariant: "v2" }` | as above, answered with that style guide; `styleVariant` echoes the variant of the persona that answered, read from its own guide (not from the request). Unknown variant, or no `eval: true`: 400. `/health` lists the known ones as `styleVariants` (used by `apps/parity --flint-variant`) |
 | POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
 | GET | `/spend` | yes | — | Paid API spend today and this month per vendor, against the caps (see "Spend caps") |
@@ -107,17 +107,28 @@ every decision is made before a call, so a turn already streaming always finishe
 | --- | --- | --- | --- | --- |
 | under 50% / 50% | unchanged | unchanged | unchanged | unchanged |
 | 80% | standard, hard and code questions answer on the **routine** tier (only when that is a different, cheaper brain; not when it can't read the turn's image/PDF) | memory extraction and research query planning wait (planning falls back to heuristic queries) | unchanged | unchanged |
-| 100% | Claude is not called. The next brain in the chain whose vendor has budget answers (e.g. an OpenAI `FLINT_TIER_LAST_RESORT`); with none left, the **local brain** answers, and the first such answer in each `/chat` conversation each day (every `/generate` answer) ends with `(Running on my local brain — today's Claude budget is spent.)` (or "this month's"); the note is shown, never stored as the answer. An image/PDF turn gets a 422 saying why instead of a blind answer | paused | the spent tool returns an error naming the alternative (`perplexity_search` → `web_search`; `web_search` → `perplexity_search` or `fetch_url` on a keyless search page), so the model routes around it | OpenAI spent: `/speak` returns 503 `{ budget: true, fallback: "browser" }` and the console speaks with the browser's voice |
+| 100% | Claude is not called. The next brain in the chain whose vendor has budget answers (e.g. an OpenAI `FLINT_TIER_LAST_RESORT`); with none left, the **local brain** answers, and the first such answer in each `/chat` conversation each day (every `/generate` answer) ends with `(Running on my local brain — today's Claude budget is spent.)` (or "this month's"); the note is shown, never stored as the answer. An image/PDF turn gets a 422 saying why instead of a blind answer | paused | the spent tool returns an error naming only alternatives that are wired and still have budget (`perplexity_search` → `web_search`; `web_search` → `perplexity_search`; plus `fetch_url` on a keyless search page when it is wired). With both spent it says paid search is off and points at the keyless fetch, or, without one, tells the model to answer from what it knows and say live search is unavailable | OpenAI spent: `/speak` returns 503 `{ budget: true, fallback: "browser" }` and the console speaks with the browser's voice |
 
 The same levels apply per vendor to any tier on that vendor. Responses say when the guard
 changed a turn: `/generate` adds `budget: "degraded" | "exhausted"` (and `degradedFrom`), and
-the `/chat` `meta` event carries the same fields.
+the `/chat` `meta` event carries the same fields. All of it is decided per turn by one tested
+function (`budgetTurn` in `src/spend.ts`); index.ts only applies it.
 
-**Evals.** A parity replay (`/generate` with `eval: true`) is routed as if uncapped, and its
-model calls are recorded as `eval` rows that do NOT count toward these caps: the parity
-harness has its own shared daily budget (`PARITY_DAILY_BUDGET_USD`, apps/parity README) and
-prices Flint's answers into it, so each dollar sits under exactly one cap. Tool searches
-during an eval do count here (the harness can't see them).
+Without `OLLAMA_MODEL` the "local" brain is itself Claude (`FLINT_MODEL`). It is then held to
+Claude's cap like the tiers: once Claude's budget is spent, a turn that would land on it gets a
+503 saying so (and naming the cap) instead of calling Claude past its cap, and the budget note
+names the brain that actually answers when it isn't the free local one.
+
+**Evals.** A parity replay (`/generate` with `eval: true`) is routed as if uncapped, and runs in
+its own spend scope (`TurnSpend`): every paid call made inside it, model passes, fallback
+attempts, the research planner and Perplexity / Tavily searches alike, is recorded as an `eval`
+row that does NOT count toward these caps, and the response reports the total as `costUsd`,
+whether the replay answered, came back `unanswered`, or failed. The parity harness charges
+exactly that to its own shared daily budget (`PARITY_DAILY_BUDGET_USD`, apps/parity README), so
+each dollar sits under exactly one cap. A paid search is still refused inside an eval when
+Flint's own cap for it is spent (a `$0` kill switch holds for evals too); the response then lists
+it in `budgetBlocked`, and parity doesn't judge that answer. A client that hangs up (parity's
+timeout, a stopped run) cancels the turn, as `/chat` does, so an abandoned replay stops spending.
 
 **Visibility.** `GET /spend` returns
 `{ timeZone, day, month, thresholds, vendors: { anthropic: { name, today: { usd, capUsd, pct, evalUsd, calls }, month: {...}, fraction, level, binding, effect }, openai, perplexity, tavily } }`.

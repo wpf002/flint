@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ProviderAdapter, Tool } from '@flint/core';
+import { Flint, costOf, type ProviderAdapter, type Tool } from '@flint/core';
 import {
   SpendLedger,
   SpendGuard,
@@ -22,9 +22,15 @@ import {
   kindFromContext,
   spendContext,
   pausable,
+  budgetTurn,
+  TurnSpend,
+  currentTurnSpend,
+  spendObserver,
+  KEYLESS_SEARCH,
   type Caps,
   type Notifier,
   type BrainChooser,
+  type TurnBudgetInput,
 } from '../src/spend';
 import { FALLBACK, type BrainTier, type Tier } from '../src/brains';
 import { planQueries, deepResearch, DEFAULT_LIMITS } from '../src/deep-research';
@@ -494,20 +500,67 @@ describe('meterPaidTools', () => {
     expect(l.totals('tavily').day.calls).toBe(0);
   });
 
-  it('at the cap: refuses with a routable error before calling the vendor', async () => {
-    const l = ledgerAt({ now: NOON });
-    const g = new SpendGuard(l, caps({ perplexity: { dailyUsd: 0.01 }, tavily: { monthlyUsd: 0.008 } }));
-    l.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.01 });
-    l.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.008 });
+  it('at the cap: refuses with a routable error before calling the vendor, naming the other search', async () => {
     const seen: unknown[] = [];
-    const [pplx, tav] = meterPaidTools([stubTool('trident.perplexity_search', 'answer', seen), stubTool('web.web_search', 'hits', seen)], { guard: g, specs });
+    const tools = [stubTool('trident.perplexity_search', 'answer', seen), stubTool('web.web_search', 'hits', seen), stubTool('web.fetch_url', 'page', seen)];
+    // Perplexity spent, Tavily not: Perplexity's refusal names web_search.
+    const l1 = ledgerAt({ now: NOON });
+    l1.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.01 });
+    const [pplx] = meterPaidTools(tools, { guard: new SpendGuard(l1, caps({ perplexity: { dailyUsd: 0.01 } })), specs });
     const a = (await pplx!.handler({ id: '1', toolName: 'trident.perplexity_search', args: { query: 'q' } })) as { isError: boolean; content: string };
-    const b = (await tav!.handler({ id: '2', toolName: 'web.web_search', args: { query: 'q' } })) as { isError: boolean; content: string };
-    expect(seen).toEqual([]); // the vendor was never called
     expect(a.isError).toBe(true);
-    expect(a.content).toBe("Perplexity budget reached: today's $0.01 cap is spent. Use web.web_search (or deep_research) for this instead.");
+    expect(a.content).toBe(
+      `Perplexity budget reached: today's $0.01 cap is spent. Use web.web_search (or deep_research), or web.fetch_url on a keyless search page (${KEYLESS_SEARCH}) for this instead.`,
+    );
+    // Tavily spent (monthly), Perplexity not: Tavily's refusal names perplexity_search.
+    const l2 = new SpendLedger({ dir: mkdtempSync(join(dir, 'b-')), timeZone: 'America/Chicago', now: () => NOON });
+    l2.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.008 });
+    const [, tav] = meterPaidTools(tools, { guard: new SpendGuard(l2, caps({ tavily: { monthlyUsd: 0.008 } })), specs });
+    const b = (await tav!.handler({ id: '2', toolName: 'web.web_search', args: { query: 'q' } })) as { isError: boolean; content: string };
     expect(b.isError).toBe(true);
-    expect(b.content).toMatch(/^Tavily budget reached: this month's \$0\.01 cap is spent\. Use trident\.perplexity_search .*web\.fetch_url on a keyless search page \(https:\/\/html\.duckduckgo\.com/);
+    expect(b.content).toMatch(/^Tavily budget reached: this month's \$0\.01 cap is spent\. Use trident\.perplexity_search, or web\.fetch_url on a keyless search page \(https:\/\/html\.duckduckgo\.com/);
+    expect(seen).toEqual([]); // no vendor was ever called
+  });
+
+  describe('with both search vendors spent', () => {
+    function bothSpent() {
+      const l = ledgerAt({ now: NOON });
+      l.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.01 });
+      l.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.01 });
+      return new SpendGuard(l, caps({ perplexity: { dailyUsd: 0 }, tavily: { dailyUsd: 0 } }));
+    }
+    const call = async (t: Tool) => (await t.handler({ id: 'x', toolName: t.definition.name, args: { query: 'q' } })) as { isError: boolean; content: string };
+
+    it('never sends the model to the other spent search; points at the keyless fetch when it is wired', async () => {
+      const [pplx, tav, trident] = meterPaidTools(
+        [stubTool('trident.perplexity_search', 'a'), stubTool('web.web_search', 'b'), stubTool('trident.web_search', 'c'), stubTool('web.fetch_url', 'page')],
+        { guard: bothSpent(), specs },
+      );
+      for (const t of [pplx!, tav!, trident!]) {
+        const r = await call(t);
+        expect(r.isError).toBe(true);
+        expect(r.content).not.toMatch(/Use (trident\.perplexity_search|web\.web_search|trident\.web_search)/);
+        expect(r.content).toMatch(/Paid web search is off for now \(the (Perplexity and Tavily|Tavily and Perplexity) budgets are spent\)\. Use web\.fetch_url on a keyless search page/);
+      }
+    });
+
+    it('without a page fetcher: answer from what it knows, and say search is unavailable', async () => {
+      const [pplx, tav] = meterPaidTools([stubTool('trident.perplexity_search', 'a'), stubTool('web.web_search', 'b')], { guard: bothSpent(), specs });
+      for (const t of [pplx!, tav!]) {
+        const r = await call(t);
+        expect(r.content).not.toMatch(/web\.fetch_url|Use trident|Use web\.web_search/);
+        expect(r.content).toMatch(/Answer from what you already know, and tell Will that live search is unavailable/);
+      }
+    });
+  });
+
+  it('names only alternatives that are wired', async () => {
+    const l = ledgerAt({ now: NOON });
+    const [tav] = meterPaidTools([stubTool('web.web_search', 'b')], { guard: new SpendGuard(l, caps({ tavily: { dailyUsd: 0 } })), specs });
+    const r = (await tav!.handler({ id: 'x', toolName: 'web.web_search', args: {} })) as { content: string };
+    // No trident (so no perplexity_search) and no web.fetch_url in this server: nothing to route to.
+    expect(r.content).not.toMatch(/perplexity_search|fetch_url/);
+    expect(r.content).toMatch(/Paid web search is off for now \(the Tavily budget is spent\)\. Answer from what you already know/);
   });
 
   it('takes per-call prices from env', async () => {
@@ -666,5 +719,219 @@ describe('deep_research under the caps', () => {
     expect(pack.cited.map((c) => c.url)).toEqual(['https://b.example/y']);
     expect(l.totals('tavily').day.calls).toBe(1); // only the row recorded before the cap
     expect(l.totals('perplexity').day.calls).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// one turn's budget decision (what /generate and /chat apply)
+
+describe('budgetTurn', () => {
+  const ROUTE = { brain: 'frontier' as const, localFallback: true };
+  const base = (over: Partial<TurnBudgetInput<string>> = {}): TurnBudgetInput<string> => ({
+    brains: brainsOf(WILL),
+    tier: 'hard',
+    guard: guardWith(0),
+    route: ROUTE,
+    localProvider: 'ollama',
+    localModel: 'muse-glimmer:30b',
+    ...over,
+  });
+
+  it('under the caps: the frontier chain as without caps, no note, no eval tag', () => {
+    const b = budgetTurn(base());
+    expect(b.ok).toBe(true);
+    if (!b.ok) return;
+    expect(b.brain).toBe('frontier');
+    expect(labels(b.plan!)).toEqual(brainsOf(WILL).chain('hard').map((x) => x.label));
+    expect(b.note).toBeUndefined();
+    expect(b.callOpts).toBeUndefined();
+    expect(b.fields).toEqual({});
+  });
+
+  it('an eval replay is exempt from the caps and its calls are tagged eval', () => {
+    // Claude's cap is 5x spent: a normal turn would go local; the replay is routed as if uncapped.
+    const b = budgetTurn(base({ guard: guardWith(50), evalMode: true }));
+    expect(b.ok).toBe(true);
+    if (!b.ok) return;
+    expect(b.brain).toBe('frontier');
+    expect(b.plan!.exhausted).toBeUndefined();
+    expect(labels(b.plan!)).toEqual(brainsOf(WILL).chain('hard').map((x) => x.label));
+    expect(kindFromContext(b.callOpts?.context)).toBe('eval');
+    expect(b.note).toBeUndefined();
+  });
+
+  it('every frontier budget spent (/chat): the local brain answers, with the note once per conversation per day', () => {
+    const notes = new NoteOnce(() => '2026-09-25');
+    const turn = (conversationId: string) => budgetTurn(base({ guard: guardWith(10), once: { notes, conversationId } }));
+    const first = turn('console');
+    expect(first).toMatchObject({ ok: true, brain: 'local', note: "(Running on my local brain — today's Claude budget is spent.)", fields: { budget: 'exhausted' } });
+    expect(first.ok && first.callOpts).toBeFalsy();
+    const again = turn('console');
+    expect(again).toMatchObject({ ok: true, brain: 'local' });
+    expect(again.ok && again.note).toBeUndefined();
+    expect(turn('phone')).toMatchObject({ ok: true, brain: 'local', note: expect.stringMatching(/local brain/) });
+  });
+
+  it('/generate (no NoteOnce): every exhausted answer carries the note', () => {
+    for (let i = 0; i < 2; i++) {
+      expect(budgetTurn(base({ guard: guardWith(10) }))).toMatchObject({ ok: true, brain: 'local', note: expect.stringMatching(/Claude budget is spent/) });
+    }
+  });
+
+  it('at 80%: degraded to the routine tier, and says so', () => {
+    expect(budgetTurn(base({ guard: guardWith(8) }))).toMatchObject({ ok: true, brain: 'frontier', fields: { budget: 'degraded', degradedFrom: 'hard' } });
+  });
+
+  it('an image / PDF turn with no frontier budget: a 422 saying why, never answered blind', () => {
+    const b = budgetTurn(base({ guard: guardWith(10), route: { brain: 'frontier', localFallback: false } }));
+    expect(b).toMatchObject({ ok: false, status: 422, error: expect.stringMatching(/Today's Claude budget is spent, and the local brain can't read images/) });
+  });
+
+  describe('a local brain that is itself a paid model (no OLLAMA_MODEL: Claude)', () => {
+    const paidLocal = { localProvider: 'anthropic', localModel: 'claude-sonnet-4-6' };
+    const openaiOnly = brainsOf({ routine: 'openai:gpt-5', standard: 'openai:gpt-5', hard: 'openai:gpt-5', code: 'openai:gpt-5' });
+
+    it('Claude spent: refuses honestly instead of calling Claude past its cap', () => {
+      const exhausted = budgetTurn(base({ ...paidLocal, guard: guardWith(10) }));
+      expect(exhausted).toMatchObject({
+        ok: false,
+        status: 503,
+        error: expect.stringMatching(/^Claude \(Anthropic\) budget reached: today's \$10\.00 cap is spent\. No brain with budget left/),
+      });
+      // A turn routed local in the first place is refused the same way.
+      expect(budgetTurn(base({ ...paidLocal, guard: guardWith(10), route: { brain: 'local', localFallback: true } }))).toMatchObject({ ok: false, status: 503 });
+    });
+
+    it('a frontier turn with budget left keeps going, but may not fall back to the spent local brain', () => {
+      const b = budgetTurn(base({ ...paidLocal, brains: openaiOnly, guard: guardWith(10) }));
+      expect(b).toMatchObject({ ok: true, brain: 'frontier', localRefusal: expect.stringMatching(/Claude \(Anthropic\) budget reached/) });
+    });
+
+    it('its own budget left: answers, and the note names the brain that actually answers', () => {
+      const b = budgetTurn(base({ ...paidLocal, brains: openaiOnly, guard: guardWith(0, { openaiUsd: 5 }) }));
+      expect(b).toMatchObject({ ok: true, brain: 'local', note: "(Running on my fallback brain (anthropic:claude-sonnet-4-6) — today's OpenAI budget is spent.)" });
+      expect(b.ok && b.localRefusal).toBeFalsy();
+    });
+
+    it('eval replays stay exempt', () => {
+      const b = budgetTurn(base({ ...paidLocal, guard: guardWith(50), evalMode: true, route: { brain: 'local', localFallback: true } }));
+      expect(b).toMatchObject({ ok: true, brain: 'local' });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// one eval replay's spend
+
+describe('TurnSpend', () => {
+  it("files every row recorded in its scope under its kind and tally, and never charges Flint's caps", async () => {
+    const l = ledgerAt({ now: NOON });
+    const g = new SpendGuard(l, caps({ anthropic: { dailyUsd: 1 }, tavily: { dailyUsd: 1 } }));
+    const t = new TurnSpend('eval');
+    await t.run(async () => {
+      l.record({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', usd: 0.3 });
+      await Promise.resolve();
+      l.record({ vendor: 'anthropic', model: 'claude-sonnet-5', kind: 'plan', usd: 0.02 }); // the planner inside an eval
+      l.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.008 });
+    });
+    l.record({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', usd: 0.1 }); // Will's own turn, outside
+    expect(t.fields()).toEqual({ costUsd: 0.328, costByVendor: { anthropic: 0.32, tavily: 0.008 }, paidCalls: 3 });
+    const rows = readFileSync(join(dir, 'spend-2026-09.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((x) => JSON.parse(x) as { kind: string });
+    expect(rows.map((r) => r.kind)).toEqual(['eval', 'eval', 'eval', 'chat']);
+    expect(l.totals('anthropic').day.usd).toBeCloseTo(0.1, 9);
+    expect(l.totals('anthropic').day.evalUsd).toBeCloseTo(0.32, 9);
+    expect(l.totals('tavily').day).toMatchObject({ usd: 0, evalUsd: 0.008 });
+    expect(g.status('anthropic').level).toBe('ok');
+  });
+
+  it('keeps concurrent turns apart', async () => {
+    const l = ledgerAt({ now: NOON });
+    const a = new TurnSpend('eval');
+    const b = new TurnSpend('eval');
+    const tick = () => new Promise((r) => setTimeout(r, 1));
+    await Promise.all([
+      a.run(async () => {
+        for (let i = 0; i < 3; i++) {
+          await tick();
+          l.record({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', usd: 0.1 });
+        }
+      }),
+      b.run(async () => {
+        for (let i = 0; i < 2; i++) {
+          await tick();
+          l.record({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', usd: 1 });
+        }
+      }),
+    ]);
+    expect(a.fields()).toMatchObject({ costUsd: 0.3, paidCalls: 3 });
+    expect(b.fields()).toMatchObject({ costUsd: 2, paidCalls: 2 });
+    expect(currentTurnSpend()).toBeUndefined();
+  });
+
+  it("an eval's paid search counts as eval spend, and a refused one is reported as budgetBlocked", async () => {
+    const l = ledgerAt({ now: NOON });
+    // Will's own searches already spent Perplexity's cap today; Tavily has room.
+    l.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.01 });
+    const g = new SpendGuard(l, caps({ perplexity: { dailyUsd: 0.01 }, tavily: { dailyUsd: 0.01 } }));
+    const [pplx, tav] = meterPaidTools([stubTool('trident.perplexity_search', 'answer'), stubTool('web.web_search', '{"results":[]}')], {
+      guard: g,
+      specs: paidToolSpecs({}),
+    });
+    const t = new TurnSpend('eval');
+    await t.run(async () => {
+      await tav!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q' } });
+      await tav!.handler({ id: '2', toolName: 'web.web_search', args: { query: 'q' } });
+      await pplx!.handler({ id: '3', toolName: 'trident.perplexity_search', args: { query: 'q' } });
+    });
+    // Two eval searches ($0.016) would have spent Will's $0.01 Tavily cap: they don't touch it.
+    expect(l.totals('tavily').day).toMatchObject({ usd: 0, evalUsd: 0.016 });
+    expect(g.blocked('tavily')).toBeUndefined();
+    expect(t.fields()).toEqual({ costUsd: 0.016, costByVendor: { tavily: 0.016 }, paidCalls: 2, budgetBlocked: ['trident.perplexity_search'] });
+  });
+
+  it("an eval's research planner is not paused by Flint's own 80% line", async () => {
+    const l = ledgerAt({ now: NOON });
+    const g = new SpendGuard(l, caps({ anthropic: { dailyUsd: 10 } }));
+    l.record({ vendor: 'anthropic', model: 'claude-opus-5-5', kind: 'chat', usd: 9 });
+    const complete = pausable(async () => 'planned', () => g.backgroundBlocked('anthropic'));
+    await expect(complete('q')).rejects.toThrow(/background work waits/);
+    await expect(new TurnSpend('eval').run(() => complete('q'))).resolves.toBe('planned');
+  });
+
+  it('with a real Flint client: the tool loop, its search and the answer are one eval cost', async () => {
+    const l = ledgerAt({ now: NOON });
+    const g = new SpendGuard(l, caps());
+    const [search] = meterPaidTools([stubTool('web.web_search', '{"results":[]}')], { guard: g, specs: paidToolSpecs({}) });
+    const u1 = { input: 1_000, output: 100, cacheRead: 8_000 };
+    const u2 = { input: 1_500, output: 600, cacheRead: 8_000 };
+    let pass = 0;
+    const provider = {
+      name: 'anthropic',
+      getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 200_000, maxOutputTokens: 8_192 }),
+      estimateTokens: () => 10,
+      generate: () => Promise.reject(new Error('stream only')),
+      stream: () =>
+        (async function* () {
+          if (pass++ === 0) {
+            yield { type: 'tool_call' as const, call: { id: 't1', toolName: 'web.web_search', args: { query: 'x' } } };
+            yield { type: 'done' as const, reason: 'tool_call' as const, usage: u1 };
+          } else {
+            yield { type: 'text' as const, delta: 'Found it.' };
+            yield { type: 'done' as const, reason: 'complete' as const, usage: u2 };
+          }
+        })(),
+    } as unknown as ProviderAdapter;
+    const flint = new Flint({ provider, defaultModel: 'claude-opus-5-5', observer: spendObserver(l) });
+    const t = new TurnSpend('eval');
+    const out = await t.run(() => flint.generate({ prompt: 'look it up', tools: [search!] }, { context: spendContext('eval') }));
+    expect(out.text).toBe('Found it.');
+    const expected = costOf('anthropic', 'claude-opus-5-5', u1) + costOf('anthropic', 'claude-opus-5-5', u2) + 0.008;
+    expect(t.fields().costUsd).toBeCloseTo(expected, 6);
+    expect(t.fields().paidCalls).toBe(3);
+    expect(l.totals('anthropic').day.usd).toBe(0);
+    expect(l.totals('tavily').day.usd).toBe(0);
   });
 });

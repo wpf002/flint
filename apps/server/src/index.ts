@@ -87,10 +87,9 @@ import {
   spendContext,
   paidToolSpecs,
   meterPaidTools,
-  planFrontier,
+  budgetTurn,
+  TurnSpend,
   describePlan,
-  budgetNote,
-  budgetMediaError,
   speakWithinBudget,
   spendStatusTool,
   pausable,
@@ -643,13 +642,6 @@ function logPlan(plan: FrontierPlan<Persona>): void {
   if (line) console.error(`[spend] ${line}`);
 }
 
-/** What a response says about the spend guard's effect on its turn (nothing when there was none). */
-function budgetFields(plan: FrontierPlan<Persona> | undefined): { budget?: 'degraded' | 'exhausted'; degradedFrom?: string } {
-  if (plan?.exhausted) return { budget: 'exhausted' };
-  if (plan?.degradedFrom) return { budget: 'degraded', degradedFrom: plan.degradedFrom };
-  return {};
-}
-
 /** Record a finished exchange (bounded ring buffer). */
 function recordConvo(convos: Convo[], question: string, answer: string): void {
   convos.push({ id: convos.length + 1, ts: Date.now(), question, answer: answer.trim() });
@@ -863,51 +855,75 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const routed = await ctx.router.select(asText);
     const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
-    let brain = route.brain;
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
     const recalled = await recallContext(userContext(), asText, ctx.knowledge);
     const ctxBlock = recalled.block;
     const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
+    // Everything the spend caps decide about this turn, before any call (./spend budgetTurn).
+    // Eval replays are exempt (the eval harness budgets them) and their calls are tagged `eval`.
+    const budget = budgetTurn({
+      brains: ctx.brains,
+      tier,
+      guard: ctx.spend,
+      route,
+      localProvider: ctx.provider.name,
+      localModel: ctx.model,
+      evalMode,
+      canRead: canReadMedia(mediaNeeds(attachments)),
+    });
+    if (!budget.ok) return json(res, budget.status, { error: budget.error });
+    const { plan, note } = budget; // /generate is one-shot: each answer carries the note
+    if (plan) logPlan(plan);
+    let brain = budget.brain;
     let answeredBy = local.model;
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     // This turn's own action-log entries (not a concurrent /chat's), for the eval response's `grounding`.
     const turn = new TurnLog();
-    // An eval replay's model calls are ledgered as `eval`: the parity harness's own daily budget covers them.
-    const callOpts = evalMode ? { context: spendContext('eval') } : undefined;
+    // An eval replay's paid calls (models, tools, the research planner): tallied, so the
+    // response says what the replay cost whether or not it answered (apps/parity charges it).
+    const evalSpend = evalMode ? new TurnSpend('eval') : undefined;
+    const evalFields = () => (evalSpend ? { eval: true, ...evalSpend.fields() } : {});
+    // A client that hangs up (apps/parity's timeout, a stopped run) cancels the turn, as /chat does.
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    const callOpts = { ...budget.callOpts, signal: abort.signal };
     const ask = (p: Persona) =>
-      turn.run(() => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }, callOpts));
+      turn.run(() => {
+        const call = () => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }, callOpts);
+        return evalSpend ? evalSpend.run(call) : call();
+      });
     // Every persona call goes through `answered`, so the eval echo names the style
     // guide of the persona whose answer this is (./style-variant echoStyle).
     const answered = echoStyle(ask);
     let out;
     let unanswered: Unanswered | undefined; // set when `out.text` is the honest message, not an answer
-    // Which frontier brains may answer under the spend caps, decided before any call (./spend).
-    // Eval replays are exempt: the eval harness budgets them, and measures Flint as he runs uncapped.
-    const plan = brain === 'frontier' && ctx.brains ? planFrontier(ctx.brains, tier, ctx.spend, { exempt: evalMode, canRead: canReadMedia(mediaNeeds(attachments)) }) : undefined;
-    let note: string | undefined; // the honest line when the budget put this turn on the local brain
-    if (plan) logPlan(plan);
-    if (plan?.exhausted) {
-      if (!route.localFallback) return json(res, 422, { error: budgetMediaError(plan.exhausted) });
-      brain = 'local';
-      note = budgetNote(plan.exhausted); // /generate is one-shot: each answer says why
-    }
-    if (brain === 'frontier' && plan) {
-      try {
-        // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
-        const won = await answerWithFallback(plan.chain, (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
-        out = won.result;
-        unanswered = won.unanswered;
-        answeredBy = won.brain.label;
-      } catch (err) {
-        // An image/PDF turn has no honest fallback — the local brain can't see it.
-        if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}` });
-        console.error('[brain] frontier failed, falling back to local:', err);
-        brain = 'local';
+    try {
+      if (brain === 'frontier' && plan) {
+        try {
+          // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
+          const won = await answerWithFallback(plan.chain, (b) => answered.ask(personas.frontier(b)), { signal: abort.signal, onFallback: logFallback });
+          out = won.result;
+          unanswered = won.unanswered;
+          answeredBy = won.brain.label;
+        } catch (err) {
+          if (abort.signal.aborted) return; // the client is gone: nothing to answer
+          // An image/PDF turn has no honest fallback — the local brain can't see it.
+          if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}`, ...evalFields() });
+          // Nor does a turn whose local brain is a paid model with its budget spent.
+          if (budget.localRefusal) return json(res, 503, { error: `frontier failed: ${String(err)}. ${budget.localRefusal}`, ...evalFields() });
+          console.error('[brain] frontier failed, falling back to local:', err);
+          brain = 'local';
+          out = await answered.ask(local.persona);
+        }
+      } else {
         out = await answered.ask(local.persona);
       }
-    } else {
-      out = await answered.ask(local.persona);
+    } catch (err) {
+      if (abort.signal.aborted) return;
+      // An eval replay says what it cost even when it fails, so apps/parity can charge it.
+      if (evalMode) return json(res, 500, { error: `flint failed: ${String(err)}`, ...evalFields() });
+      throw err;
     }
     const toolsUsed = toolsSince(ctx, beforeLog);
     const proposed = ctx.actions.newSince(beforeActions);
@@ -933,7 +949,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // What the turn was grounded on (recalled memory, tool results), for apps/parity --judge-grounding.
         grounding: turn.grounding(recalled.facts),
         proposed: proposed.map((p) => p.fullName),
-        eval: true,
+        // eval: true, plus what the replay cost (costUsd, costByVendor, paidCalls) and
+        // budgetBlocked when a paid tool was refused for budget (./spend TurnSpend).
+        ...evalFields(),
       });
     }
     recordConvo(ctx.convos, asText, out.text);
@@ -947,7 +965,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       reason: out.reason,
       brain,
       ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
-      ...budgetFields(plan),
+      ...budget.fields,
       model: answeredBy,
       pending: proposed,
     });
@@ -970,18 +988,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // Router, recall, the Action Log and the training corpus see names, never file bodies.
     const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const selected = await ctx.router.select(asText);
-    let brain = route.brain;
-    const turns = brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
+    const turns = route.brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
     const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
-    // Which frontier brains may answer under the spend caps, decided before anything streams (./spend).
-    const plan = brain === 'frontier' && ctx.brains ? planFrontier(ctx.brains, tier, ctx.spend, { canRead: canReadMedia(mediaNeeds(attachments)) }) : undefined;
-    let note: string | undefined; // the honest line, once per conversation per day
+    // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
+    // the honest note once per conversation per day.
+    const budget = budgetTurn({
+      brains: ctx.brains,
+      tier,
+      guard: ctx.spend,
+      route,
+      localProvider: ctx.provider.name,
+      localModel: ctx.model,
+      canRead: canReadMedia(mediaNeeds(attachments)),
+      once: { notes: ctx.budgetNotes, conversationId },
+    });
+    if (!budget.ok) return json(res, budget.status, { error: budget.error });
+    const { plan, note } = budget;
     if (plan) logPlan(plan);
-    if (plan?.exhausted) {
-      if (!route.localFallback) return json(res, 422, { error: budgetMediaError(plan.exhausted) });
-      brain = 'local';
-      if (ctx.budgetNotes.take(conversationId)) note = budgetNote(plan.exhausted);
-    }
+    let brain = budget.brain;
     let answeredBy = ctx.model;
     const ctxBlock = await contextFor(asText, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
@@ -1019,7 +1043,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           const won = await runWithFallback(
             chain,
             async (b) => {
-              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budgetFields(plan) })}\n\n`);
+              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields })}\n\n`);
               try {
                 await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1); // last tier: errors as before, no answer → honest message
               } catch (err) {
@@ -1031,18 +1055,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           );
           answeredBy = won.brain.label;
         } catch (err) {
-          // Only safe to fall back if nothing was streamed yet.
-          if (answer.length === 0 && route.localFallback && !ac.signal.aborted) {
+          // Only safe to fall back if nothing was streamed yet, and (a paid local brain) its budget isn't spent.
+          if (answer.length === 0 && route.localFallback && !ac.signal.aborted && !budget.localRefusal) {
             console.error('[brain] frontier failed pre-output, falling back to local:', err);
             brain = 'local';
             res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
             await pump(ctx.persona);
+          } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
+            throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
           } else {
             throw err;
           }
         }
       } else {
-        res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budgetFields(plan) })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields })}\n\n`);
         await pump(ctx.persona);
       }
       if (answer.trim()) {

@@ -23,6 +23,7 @@
  *
  * Kept out of index.ts so it is unit-testable (index.ts runs main() on import).
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -41,6 +42,7 @@ import {
   type Tool,
 } from '@flint/core';
 import type { BrainTier, Tier } from './brains';
+import type { Brain } from './policy';
 
 export type { PaidVendor } from '@flint/core';
 
@@ -133,15 +135,20 @@ export class SpendLedger {
    */
   record(entry: Omit<SpendRow, 'ts'> & { ts?: number }): SpendRow {
     const usd = Number.isFinite(entry.usd) && entry.usd > 0 ? Math.round(entry.usd * 1e6) / 1e6 : 0;
+    // A call made inside a TurnSpend scope (an eval replay) is that turn's: it
+    // takes the scope's kind whatever the caller tagged it (the research
+    // planner's `plan` inside an eval is eval spend), and joins the turn's tally.
+    const scope = spendScope.getStore();
     const row: SpendRow = {
       ts: entry.ts ?? this.now(),
       vendor: entry.vendor,
       model: entry.model,
-      kind: entry.kind,
+      kind: scope?.kind ?? entry.kind,
       usd,
       ...(entry.tokens ? { tokens: entry.tokens } : {}),
     };
     this.add(row);
+    scope?.add(row);
     try {
       mkdirSync(this.dir, { recursive: true });
       appendFileSync(this.fileFor(this.period(row.ts).month), JSON.stringify(row) + '\n', 'utf8');
@@ -588,10 +595,16 @@ export function describePlan<P>(plan: FrontierPlan<P>): string | undefined {
   return parts.length > 0 ? parts.join('; ') : undefined;
 }
 
-/** The one line appended to a local answer when budgets moved the turn off the frontier. */
-export function budgetNote(exhausted: { vendor: PaidVendor; binding: 'daily' | 'monthly' }): string {
+/**
+ * The one line appended to a local answer when budgets moved the turn off the
+ * frontier. `answeredBy` names a local brain that is itself a paid model (the
+ * server without OLLAMA_MODEL runs its "local" persona on Claude), so the note
+ * never calls a paid model's answer "my local brain".
+ */
+export function budgetNote(exhausted: { vendor: PaidVendor; binding: 'daily' | 'monthly' }, answeredBy?: string): string {
   const when = exhausted.binding === 'monthly' ? "this month's" : "today's";
-  return `(Running on my local brain — ${when} ${SHORT_NAMES[exhausted.vendor]} budget is spent.)`;
+  const on = answeredBy ? `my fallback brain (${answeredBy})` : 'my local brain';
+  return `(Running on ${on} — ${when} ${SHORT_NAMES[exhausted.vendor]} budget is spent.)`;
 }
 
 /** The refusal for an image / PDF turn when no frontier brain that can read it has budget left. */
@@ -620,6 +633,165 @@ export class NoteOnce {
     this.seen.add(conversationId);
     return true;
   }
+}
+
+// ---------------------------------------------------------------------------
+// one turn's budget decision (what /generate and /chat apply)
+
+export interface TurnBudgetInput<P> {
+  /** The frontier tiers, or undefined when there is no frontier. */
+  brains: BrainChooser<P> | undefined;
+  tier: Tier;
+  guard: BudgetView & { blocked(vendor: PaidVendor): string | undefined };
+  /** routeTurn's decision. */
+  route: { brain: Brain; localFallback: boolean };
+  /** The local brain's provider name: `ollama` (free), or `anthropic` when OLLAMA_MODEL is unset. */
+  localProvider: string;
+  /** The local brain's model, for the note when it is a paid one. */
+  localModel: string;
+  /** A parity replay (`/generate` with `eval: true`). */
+  evalMode?: boolean;
+  /** For turns carrying an image / PDF: which brains can read it (undefined: a text turn). */
+  canRead?: ((brain: BrainTier<P>) => boolean) | undefined;
+  /** /chat: the note once per conversation per day. /generate omits it: every answer says why. */
+  once?: { notes: NoteOnce; conversationId: string };
+}
+
+export type TurnBudget<P> =
+  | { ok: false; status: 422 | 503; error: string }
+  | {
+      ok: true;
+      /** The brain that answers: routeTurn's, or `local` when every frontier budget is spent. */
+      brain: Brain;
+      /** The frontier brains that may answer, in order; undefined for a local turn. */
+      plan?: FrontierPlan<P>;
+      /** The honest line to show with the answer (never stored as the answer). */
+      note?: string;
+      /** CallOptions for the turn's model calls: an eval replay's are tagged `eval`. */
+      callOpts?: { context: { spendKind: SpendKind } };
+      /** What the response says about the guard's effect on the turn. */
+      fields: { budget?: 'degraded' | 'exhausted'; degradedFrom?: Tier };
+      /**
+       * Why the local brain must not answer this turn (it is a paid model whose
+       * vendor is spent); undefined when it may. A frontier failure that would
+       * fall back to it refuses with this instead.
+       */
+      localRefusal?: string;
+    };
+
+/** The refusal when the only brain left to answer is a paid one whose budget is spent. */
+export function budgetSpentError(vendor: PaidVendor, guard: { blocked(vendor: PaidVendor): string | undefined }): string {
+  const why = guard.blocked(vendor) ?? `${VENDOR_NAMES[vendor]} budget reached.`;
+  return `${why} No brain with budget left can answer, so none was called. Ask again after the budget resets, or raise the cap (FLINT_BUDGET_${vendor.toUpperCase()}_*).`;
+}
+
+/**
+ * Everything the spend caps decide about one turn, BEFORE any call: which
+ * brains may answer (planFrontier), whether the turn moves to the local brain
+ * because every frontier budget is spent (and the honest note it gets), the
+ * 422 for an image / PDF turn with no frontier budget left, the eval tag, and
+ * the refusal when the local brain is itself a paid model whose budget is
+ * spent (no spending past a cap, and no silent failure either).
+ *
+ * Eval replays are exempt from the caps (the parity harness budgets them) and
+ * their model calls are tagged `eval`, so they never count toward Flint's own
+ * caps. index.ts only applies the result.
+ */
+export function budgetTurn<P>(input: TurnBudgetInput<P>): TurnBudget<P> {
+  const { brains, tier, guard, route, evalMode } = input;
+  const plan =
+    route.brain === 'frontier' && brains ? planFrontier(brains, tier, guard, { exempt: evalMode, canRead: input.canRead }) : undefined;
+  // The local brain costs money only when it isn't Ollama; eval replays are exempt.
+  const localVendor = vendorOfProvider(input.localProvider);
+  const localRefusal =
+    !evalMode && localVendor !== undefined && guard.status(localVendor).level === 'exhausted' ? budgetSpentError(localVendor, guard) : undefined;
+  let brain: Brain = route.brain;
+  let note: string | undefined;
+  if (plan?.exhausted) {
+    if (!route.localFallback) return { ok: false, status: 422, error: budgetMediaError(plan.exhausted) };
+    brain = 'local';
+    if (!localRefusal && (!input.once || input.once.notes.take(input.once.conversationId))) {
+      note = budgetNote(plan.exhausted, localVendor ? `${input.localProvider}:${input.localModel}` : undefined);
+    }
+  }
+  if (brain === 'local' && localRefusal) return { ok: false, status: 503, error: localRefusal };
+  return {
+    ok: true,
+    brain,
+    ...(plan ? { plan } : {}),
+    ...(note ? { note } : {}),
+    ...(evalMode ? { callOpts: { context: spendContext('eval') } } : {}),
+    fields: budgetFields(plan),
+    ...(localRefusal ? { localRefusal } : {}),
+  };
+}
+
+/** What a response says about the spend guard's effect on its turn (nothing when there was none). */
+export function budgetFields<P>(plan: FrontierPlan<P> | undefined): { budget?: 'degraded' | 'exhausted'; degradedFrom?: Tier } {
+  if (plan?.exhausted) return { budget: 'exhausted' };
+  if (plan?.degradedFrom) return { budget: 'degraded', degradedFrom: plan.degradedFrom };
+  return {};
+}
+
+// ---------------------------------------------------------------------------
+// one turn's spend (an eval replay's cost, reported back to apps/parity)
+
+const spendScope = new AsyncLocalStorage<TurnSpend>();
+
+/**
+ * The paid calls made inside one turn. `run()` opens an AsyncLocalStorage
+ * scope (as TurnLog does for grounding): every ledger row recorded inside it,
+ * however deep (each tool-loop pass, each fallback tier's attempt, the answer-
+ * only call, the research planner, each Perplexity / Tavily search), joins this
+ * tally and takes this turn's kind. /generate runs each eval replay in one, so
+ * the eval response says what the replay really cost, answered or not, and
+ * apps/parity charges exactly that to its daily eval budget.
+ */
+export class TurnSpend {
+  private usd = 0;
+  private calls = 0;
+  private readonly byVendor: Partial<Record<PaidVendor, number>> = {};
+  private readonly blockedTools = new Set<string>();
+
+  constructor(readonly kind: SpendKind) {}
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    return spendScope.run(this, fn);
+  }
+
+  /** Called by the ledger for each row recorded inside the scope. */
+  add(row: SpendRow): void {
+    this.usd += row.usd;
+    this.calls++;
+    this.byVendor[row.vendor] = (this.byVendor[row.vendor] ?? 0) + row.usd;
+  }
+
+  /** Called by meterPaidTools when it refused a paid tool inside the scope (its vendor's cap is spent). */
+  noteBlocked(tool: string): void {
+    this.blockedTools.add(tool);
+  }
+
+  /**
+   * What an eval response carries: `costUsd` (every paid call of the turn,
+   * priced as the ledger prices it), `costByVendor`, `paidCalls`, and
+   * `budgetBlocked` (the paid tools refused for budget) when there were any.
+   */
+  fields(): { costUsd: number; costByVendor: Partial<Record<PaidVendor, number>>; paidCalls: number; budgetBlocked?: string[] } {
+    const round = (n: number) => Math.round(n * 1e6) / 1e6;
+    const byVendor: Partial<Record<PaidVendor, number>> = {};
+    for (const [v, n] of Object.entries(this.byVendor) as Array<[PaidVendor, number]>) byVendor[v] = round(n);
+    return {
+      costUsd: round(this.usd),
+      costByVendor: byVendor,
+      paidCalls: this.calls,
+      ...(this.blockedTools.size > 0 ? { budgetBlocked: [...this.blockedTools] } : {}),
+    };
+  }
+}
+
+/** The turn whose scope the caller is running in, if any. */
+export function currentTurnSpend(): TurnSpend | undefined {
+  return spendScope.getStore();
 }
 
 // ---------------------------------------------------------------------------
@@ -667,10 +839,12 @@ export function spendObserver(ledger: SpendLedger): AiObserver {
  * Wrap an OPTIONAL frontier completion (the research planner) so it refuses
  * while `paused()` gives a reason. It throws rather than returning nothing, so
  * the caller's own fallback takes over (deep_research plans heuristically).
+ * Inside an eval replay it never pauses: the replay is exempt from Flint's caps
+ * like the rest of its turn, and its planner call is eval spend, not Will's.
  */
 export function pausable(complete: (prompt: string) => Promise<string>, paused: () => string | undefined): (prompt: string) => Promise<string> {
   return async (prompt) => {
-    const why = paused();
+    const why = currentTurnSpend()?.kind === 'eval' ? undefined : paused();
     if (why) throw new Error(why);
     return complete(prompt);
   };
@@ -687,8 +861,22 @@ export interface PaidToolSpec {
   /** What the ledger row names as the model. */
   model: string;
   usdPerCall: (args: unknown) => number;
-  /** Where the model should go instead once this vendor's budget is spent. */
-  instead: string;
+  /**
+   * Where the model should go instead once this vendor's budget is spent, best
+   * first. The refusal names only those that are wired and whose own vendor
+   * still has budget (refusalText), so a spent search never sends the model to
+   * another spent one.
+   */
+  instead: PaidToolAlternative[];
+}
+
+export interface PaidToolAlternative {
+  /** The tool to suggest; named only when it is wired. */
+  tool: string;
+  /** The paid vendor it spends; named only while that vendor has budget. */
+  vendor: PaidVendor;
+  /** How to name it (default: the tool name). */
+  say?: string;
 }
 
 function positive(raw: string | undefined): number | undefined {
@@ -698,6 +886,8 @@ function positive(raw: string | undefined): number | undefined {
 
 /** A keyless search the model can still reach through web.fetch_url. */
 export const KEYLESS_SEARCH = 'https://html.duckduckgo.com/html/?q=<url-encoded query>';
+/** The free page fetcher (packages/mcp web server) that reaches KEYLESS_SEARCH. */
+export const KEYLESS_FETCH_TOOL = 'web.fetch_url';
 
 /**
  * The MCP tools that cost money per call, priced per SUCCESSFUL call (their
@@ -708,7 +898,7 @@ export const KEYLESS_SEARCH = 'https://html.duckduckgo.com/html/?q=<url-encoded 
 export function paidToolSpecs(env: Record<string, string | undefined>): PaidToolSpec[] {
   const perplexity = positive(env.FLINT_PERPLEXITY_USD_PER_CALL) ?? PERPLEXITY_SEARCH_CALL_USD;
   const tavily = positive(env.FLINT_TAVILY_USD_PER_CALL) ?? TAVILY_USD_PER_CREDIT;
-  const insteadOfTavily = `Use trident.perplexity_search for this instead, or web.fetch_url on a keyless search page (${KEYLESS_SEARCH}).`;
+  const insteadOfTavily: PaidToolAlternative[] = [{ tool: 'trident.perplexity_search', vendor: 'perplexity' }];
   return [
     {
       name: 'trident.perplexity_search',
@@ -716,7 +906,10 @@ export function paidToolSpecs(env: Record<string, string | undefined>): PaidTool
       kind: 'tool-perplexity',
       model: 'sonar',
       usdPerCall: () => perplexity,
-      instead: 'Use web.web_search (or deep_research) for this instead.',
+      instead: [
+        { tool: 'web.web_search', vendor: 'tavily', say: 'web.web_search (or deep_research)' },
+        { tool: 'trident.web_search', vendor: 'tavily' },
+      ],
     },
     { name: 'web.web_search', vendor: 'tavily', kind: 'tool-search', model: 'search-basic', usdPerCall: () => tavily, instead: insteadOfTavily },
     // trident's web_search is Tavily too, and takes a search_depth.
@@ -729,6 +922,41 @@ export function paidToolSpecs(env: Record<string, string | undefined>): PaidTool
       instead: insteadOfTavily,
     },
   ];
+}
+
+/**
+ * The refusal a spent paid tool returns, built at call time: it names only
+ * alternatives that are wired and whose vendor still has budget (one per
+ * vendor), plus the keyless page fetch when web.fetch_url is wired. With every
+ * paid search spent it says so plainly and points at the keyless fetch, or,
+ * without one, tells the model to answer from what it knows and say live search
+ * is unavailable, so it stops hopping between spent tools (each hop is another
+ * paid model pass).
+ */
+export function refusalText(
+  spec: PaidToolSpec,
+  blocked: string,
+  opts: { wired: ReadonlySet<string>; guard: { blocked(vendor: PaidVendor): string | undefined } },
+): string {
+  const keyless = opts.wired.has(KEYLESS_FETCH_TOOL) ? `${KEYLESS_FETCH_TOOL} on a keyless search page (${KEYLESS_SEARCH})` : undefined;
+  const seen = new Set<PaidVendor>();
+  const paid: string[] = [];
+  const spent = new Set<PaidVendor>([spec.vendor]);
+  for (const alt of spec.instead) {
+    if (!opts.wired.has(alt.tool)) continue;
+    if (opts.guard.blocked(alt.vendor)) {
+      spent.add(alt.vendor);
+      continue;
+    }
+    if (seen.has(alt.vendor)) continue;
+    seen.add(alt.vendor);
+    paid.push(alt.say ?? alt.tool);
+  }
+  if (paid.length > 0) return `${blocked} Use ${[...paid, ...(keyless ? [keyless] : [])].join(', or ')} for this instead.`;
+  const names = [...spent].map((v) => SHORT_NAMES[v]).join(' and ');
+  const off = `Paid web search is off for now (the ${names} ${spent.size > 1 ? 'budgets are' : 'budget is'} spent).`;
+  if (keyless) return `${blocked} ${off} Use ${keyless} instead.`;
+  return `${blocked} ${off} Answer from what you already know, and tell Will that live search is unavailable until the budget resets.`;
 }
 
 /**
@@ -762,9 +990,16 @@ export function toolSucceeded(result: unknown): boolean {
  * vendor's budget is spent (never a silent failure), and recorded per
  * successful call. Every other tool passes through untouched. deep_research
  * calls these same wrapped handlers, so its searches are metered and gated too.
+ *
+ * Inside an eval replay (a TurnSpend scope) a successful call is recorded as
+ * `eval` spend (the ledger takes the scope's kind), so parity's searches never
+ * use up Will's own Tavily / Perplexity caps; the replay's cost reports them to
+ * parity instead. A refusal there is noted on the turn (`budgetBlocked`), so
+ * parity doesn't judge an answer Flint had to give without search.
  */
 export function meterPaidTools(tools: Tool[], deps: { guard: SpendGuard; specs: PaidToolSpec[] }): Tool[] {
   const byName = new Map(deps.specs.map((s) => [s.name, s] as const));
+  const wired = new Set(tools.map((t) => t.definition.name));
   return tools.map((tool) => {
     const spec = byName.get(tool.definition.name);
     if (!spec) return tool;
@@ -772,7 +1007,10 @@ export function meterPaidTools(tools: Tool[], deps: { guard: SpendGuard; specs: 
       definition: tool.definition,
       handler: async (call) => {
         const blocked = deps.guard.blocked(spec.vendor);
-        if (blocked) return { isError: true, content: `${blocked} ${spec.instead}` };
+        if (blocked) {
+          currentTurnSpend()?.noteBlocked(spec.name);
+          return { isError: true, content: refusalText(spec, blocked, { wired, guard: deps.guard }) };
+        }
         const result = await tool.handler(call);
         if (toolSucceeded(result)) {
           deps.guard.ledger.record({ vendor: spec.vendor, model: spec.model, kind: spec.kind, usd: spec.usdPerCall(call.args) });
