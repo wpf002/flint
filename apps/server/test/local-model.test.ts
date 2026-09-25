@@ -4,7 +4,9 @@ import {
   LOCAL_MODEL_MAX_LEN,
   LocalPersonaCache,
   evalOllamaOptions,
+  liveOllamaOptions,
   overrideKey,
+  overridePersonaCache,
   parseLocalModelRequest,
   parseOllamaThink,
   resolveLocalPersona,
@@ -86,11 +88,15 @@ describe('resolveLocalPersona', () => {
 
   it('uses the server persona when there is no override', () => {
     expect(resolveLocalPersona(undefined, base, undefined)).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:14b' });
-    expect(resolveLocalPersona(undefined, base, new LocalPersonaCache((m) => m))).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:14b' });
+    expect(resolveLocalPersona(undefined, base, new LocalPersonaCache((m, think) => ({ persona: m, think })))).toEqual({
+      ok: true,
+      persona: 'main',
+      model: 'qwen2.5:14b',
+    });
   });
 
   it('uses the cached override persona and echoes the override model', () => {
-    const cache = new LocalPersonaCache((m) => `persona:${m}`);
+    const cache = new LocalPersonaCache((m, think) => ({ persona: `persona:${m}`, think }));
     expect(resolveLocalPersona('qwen3:14b', base, cache)).toEqual({ ok: true, persona: 'persona:qwen3:14b', model: 'qwen3:14b' });
   });
 
@@ -226,10 +232,98 @@ describe('override personas per (model, think)', () => {
 
   it('resolveLocalPersona hands think to the cache and still echoes the plain model', () => {
     const base = { persona: 'main', model: 'qwen2.5:7b' };
-    const cache = new LocalPersonaCache((m, think) => `persona:${m}:${String(think)}`);
-    expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false)).toEqual({ ok: true, persona: 'persona:muse-glimmer:30b:false', model: 'muse-glimmer:30b' });
-    expect(resolveLocalPersona('muse-glimmer:30b', base, cache)).toEqual({ ok: true, persona: 'persona:muse-glimmer:30b:undefined', model: 'muse-glimmer:30b' });
-    // No override: the server's own persona, whatever think says.
-    expect(resolveLocalPersona(undefined, base, cache, false)).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:7b' });
+    const cache = new LocalPersonaCache((m, think) => ({ persona: `persona:${m}:${String(think)}`, think }));
+    expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false)).toEqual({
+      ok: true,
+      persona: 'persona:muse-glimmer:30b:false',
+      model: 'muse-glimmer:30b',
+      think: false,
+    });
+    const plain = resolveLocalPersona('muse-glimmer:30b', base, cache);
+    expect(plain).toEqual({ ok: true, persona: 'persona:muse-glimmer:30b:undefined', model: 'muse-glimmer:30b' });
+    expect(plain).not.toHaveProperty('think');
+    // No override: the server's own persona, whatever think says, and no think echo.
+    const own = resolveLocalPersona(undefined, base, cache, false);
+    expect(own).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:7b' });
+    expect(own).not.toHaveProperty('think');
+  });
+
+  it("echoes the think the persona was built with, not the request's", () => {
+    // A persona whose client dropped the flag must not be reported as honouring it:
+    // no echo, so apps/parity's localThink check stops the run.
+    const base = { persona: 'main', model: 'qwen2.5:7b' };
+    const dropsIt = new LocalPersonaCache((m) => ({ persona: `persona:${m}`, think: undefined }));
+    const r = resolveLocalPersona('qwen3.8:27b', base, dropsIt, false);
+    expect(r).toMatchObject({ ok: true, persona: 'persona:qwen3.8:27b' });
+    expect(r).not.toHaveProperty('think');
+  });
+});
+
+/** An Ollama that records every /api/chat body and answers "ok". */
+function captureOllama(): { fetch: typeof globalThis.fetch; bodies: Array<Record<string, unknown>> } {
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetch = (async (_u: string, init: { body: string }) => {
+    bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    return new Response(JSON.stringify({ message: { role: 'assistant', content: 'ok' }, done: true, done_reason: 'stop' }));
+  }) as unknown as typeof globalThis.fetch;
+  return { fetch, bodies };
+}
+const hi = { id: 'u', role: 'user' as const, content: 'hi', timestamp: 0 };
+
+describe('overridePersonaCache (what main() builds for bake-offs)', () => {
+  it("sends the request's think to Ollama, with the eval context, and echoes it", async () => {
+    const { fetch, bodies } = captureOllama();
+    // main() wraps the provider in a Persona; the provider is all that matters here.
+    const cache = overridePersonaCache({}, (provider, model) => ({ provider, model }), { fetch });
+    const base = { persona: undefined as never, model: 'qwen2.5:7b' };
+    const echoes: Array<boolean | undefined> = [];
+    for (const think of [false, true, undefined]) {
+      const local = resolveLocalPersona('qwen3.8:27b', base, cache, think);
+      if (!local.ok) throw new Error(local.error);
+      echoes.push(local.think);
+      expect(local.persona.model).toBe('qwen3.8:27b');
+      await local.persona.provider.generate({ model: local.persona.model, messages: [hi] });
+    }
+    expect(bodies.map((b) => b.think)).toEqual([false, true, undefined]);
+    expect(bodies[2]).not.toHaveProperty('think');
+    for (const b of bodies) expect(b.options).toEqual({ num_ctx: 16384 });
+    expect(echoes).toEqual([false, true, undefined]);
+  });
+
+  it('builds one client per (model, think), reused, and honours OLLAMA_HOST', async () => {
+    const urls: string[] = [];
+    const fetch = (async (u: string) => {
+      urls.push(u);
+      return new Response(JSON.stringify({ message: { role: 'assistant', content: 'ok' }, done: true }));
+    }) as unknown as typeof globalThis.fetch;
+    let built = 0;
+    const cache = overridePersonaCache({ OLLAMA_HOST: 'http://studio:11434' }, (provider) => (built++, provider), { fetch });
+    expect(cache.get('qwen3.8:27b', false)).toBe(cache.get('qwen3.8:27b', false));
+    expect(cache.get('qwen3.8:27b', false)).not.toBe(cache.get('qwen3.8:27b'));
+    expect(built).toBe(2);
+    await cache.get('qwen3.8:27b', false).persona.generate({ model: 'qwen3.8:27b', messages: [hi] });
+    expect(urls).toEqual(['http://studio:11434/api/chat']);
+  });
+});
+
+describe('liveOllamaOptions (the live local brain)', () => {
+  it('sends OLLAMA_THINK to Ollama, keeps num_ctx 4096 by default, and sends no think when unset', async () => {
+    const { fetch, bodies } = captureOllama();
+    for (const env of [{ OLLAMA_THINK: 'false' }, { OLLAMA_THINK: ' TRUE ' }, {}, { OLLAMA_THINK: 'off' }]) {
+      await new OllamaProvider({ ...liveOllamaOptions(env), fetch }).generate({ model: 'qwen3.8:27b', messages: [hi] });
+    }
+    expect(bodies.map((b) => b.think)).toEqual([false, true, undefined, undefined]);
+    expect(bodies[2]).not.toHaveProperty('think');
+    expect(bodies[3]).not.toHaveProperty('think');
+    for (const b of bodies) expect(b.options).toEqual({ num_ctx: 4096 });
+  });
+
+  it('takes OLLAMA_HOST and OLLAMA_NUM_CTX', () => {
+    expect(liveOllamaOptions({})).toEqual({ baseURL: 'http://127.0.0.1:11434', defaultOptions: { num_ctx: 4096 } });
+    expect(liveOllamaOptions({ OLLAMA_HOST: 'http://gpu:11434', OLLAMA_NUM_CTX: '8192', OLLAMA_THINK: 'false' })).toEqual({
+      baseURL: 'http://gpu:11434',
+      defaultOptions: { num_ctx: 8192 },
+      think: false,
+    });
   });
 });

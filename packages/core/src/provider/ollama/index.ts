@@ -29,9 +29,12 @@ export interface OllamaProviderOptions {
    *
    * What Ollama 0.34 does with it (checked against the local server):
    *  - thinking models (qwen3.8, muse-glimmer) think when it's omitted, and with
-   *    `true`. `false` turns that off: no `message.thinking`, far fewer tokens
-   *    (muse-glimmer still spends some on reasoning Ollama drops). Either way the
-   *    answer in `message.content` stays clean; reasoning never reaches Flint's text.
+   *    `true`; that reasoning comes back in `message.thinking`, which is never
+   *    read, so it stays out of Flint's text. `false` turns thinking off: no
+   *    `message.thinking` and far fewer tokens (muse-glimmer still spends some on
+   *    reasoning Ollama drops). But a model can then reason in `message.content`
+   *    itself: qwen3.8 sometimes leads with an answer and visibly corrects it
+   *    ("Wait, ..."), and that is part of the answer Flint returns.
    *  - a model without the thinking capability (qwen2.5) accepts `false` as a
    *    no-op, but answers `true` with HTTP 400 "does not support thinking" on
    *    every call. So only set `true` for a model that can think.

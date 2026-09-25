@@ -65,7 +65,7 @@ Contestants (`--contestants flint,openai,claude,perplexity`):
 | `openai` | `OpenAiProvider` from @flint/core | `gpt-5` | `--openai-model` / `PARITY_OPENAI_MODEL` |
 | `claude` | `AnthropicProvider` | `claude-opus-5` | `--claude-model` / `PARITY_CLAUDE_MODEL` |
 | `perplexity` | `PerplexityProvider` (skipped with a note if no key) | `sonar-pro` | `--perplexity-model` / `PARITY_PERPLEXITY_MODEL` |
-| judge | `AnthropicProvider` | `claude-opus-5` | `--judge-model` / `PARITY_JUDGE_MODEL` |
+| judge | `AnthropicProvider` | `claude-opus-5` (a resumed run keeps its own, see Resume) | `--judge-model` / `PARITY_JUDGE_MODEL` |
 | judge panel | `AnthropicProvider` + `OpenAiProvider` | off | `--judge-panel` / `PARITY_JUDGE_PANEL` (see below) |
 
 Keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`) come from the
@@ -137,24 +137,45 @@ Run candidates one at a time: Ollama swaps models in and out of memory, so inter
 them is slow.
 
 **Thinking on or off (`--local-think on|off`).** Thinking models (qwen3.8, muse-glimmer)
-reason before they answer unless told not to. Ollama returns the reasoning separately
-(`message.thinking`), so it never reaches Flint's answer, but it is most of the answer
-time. `--local-think off` (or `on`) sends `localThink` with the request, and the server
-answers with a persona built on an Ollama client that sends that `think` flag (same 16K
-context as any candidate). It works only with `--local-model`; on its own it's an error.
+reason before they answer unless told not to. With thinking on, Ollama returns the
+reasoning separately (`message.thinking`), which Flint never reads, and it is most of the
+answer time. With it off there is no `thinking` field, but the model can still reason in
+the answer itself (see below). `--local-think off` (or `on`) sends `localThink` with the
+request, and the server answers with a persona built on an Ollama client that sends that
+`think` flag (same 16K context as any candidate). It works only with `--local-model`; on
+its own it's an error.
 The contestant becomes `flint-local@<name>~nothink` (or `~think`), with its own answers,
 verdicts, report (`report-flint-local@<name>~nothink.md`) and history rows. **Without the
 flag nothing changes**: no `localThink` is sent, the model thinks by its own default, and
 the name stays `flint-local@<name>`. So a run's existing answers for that candidate stay
 valid and are never mixed with a think variant. Before sending anything the harness checks
 that `/health` has `localThinkOverride: true` and, for `on`, that Ollama lists `thinking`
-among the model's capabilities (`POST /api/show`). If the server doesn't echo
-`localThink` back on an answer, the run stops.
+among the model's capabilities (`POST /api/show`). The server echoes `localThink` as the
+`think` the answering persona's Ollama client was built with, not the request's value;
+if the echo is missing or different, the run stops.
+
+To compare a variant with the thinking run of the same model, give it the same prompts,
+competitors and judge. In `20260924-tiered` the thinking candidates answered
+`--limit 100` and were judged only against `openai` by `claude-opus-5-5`:
 
 ```
-pnpm --filter @flint/parity parity --run <ts> --local-model qwen3.8:27b --local-think off --contestants flint,openai,claude,perplexity --claude-model <the run's claude model> --budget-usd 40
-pnpm --filter @flint/parity report --run <ts> --local-model qwen3.8:27b --local-think off
+pnpm --filter @flint/parity parity --run 20260924-tiered --local-model qwen3.8:27b --local-think off --limit 100 --contestants flint,openai --judge-model claude-opus-5-5 --budget-usd 5
+pnpm --filter @flint/parity report --run 20260924-tiered --local-model qwen3.8:27b --local-think off --judge-model claude-opus-5-5
 ```
+
+Without `--limit 100` it answers all 300 prompts, and with the default `--contestants`
+it judges against all three competitors and re-buys any competitor answer that's missing.
+That is about 9x the judging cost (about $13 against about $1.50 per model) and a
+result you can't read against the thinking one.
+
+**Check no-think answers for visible reasoning.** With `think: false` a model may do its
+reasoning in the answer text. qwen3.8:27b, with a system prompt telling it to lead with
+the answer, said "He has 24 sheep", then corrected itself in the answer ("Wait, I made a
+calculation error...") and ended at 36. The judge sees that, and so would Will if it went live. Before deciding on
+`OLLAMA_THINK=false`, grep the variant's answers in `answers.jsonl` for
+`Wait,` / `Let me re-read` / `Correction`, and compare each answer's `usage.output`
+tokens with its length. muse-glimmer does the opposite: it still spends tokens reasoning,
+but Ollama drops them, so they cost time without showing.
 
 What `think` does, on Ollama 0.34.2, for one arithmetic word problem at temperature 0.
 That's one prompt: it shows the mechanism, not the quality. Measuring quality is what the
@@ -162,7 +183,7 @@ bake-off is for.
 
 | model | `think` omitted | `think: false` | `think: true` |
 | --- | --- | --- | --- |
-| qwen3.8:27b | thinks: 115 tokens, 2.6s, right answer | no reasoning at all: 9 tokens, 0.3s, **wrong** answer | thinks: 115 tokens, 2.2s, right answer |
+| qwen3.8:27b | thinks: 115 tokens, 2.6s, right answer | no `thinking` field: 9 tokens, 0.3s, **wrong** answer (on other prompts it reasons in the answer text instead, see above) | thinks: 115 tokens, 2.2s, right answer |
 | muse-glimmer:30b | thinks: 426 tokens, 14s | no `thinking` field, but still 181 tokens and 6s: it still reasons, and Ollama drops it | thinks: 426 tokens, 14s |
 | qwen2.5:7b (live) | no reasoning | identical to omitted | HTTP 400 "does not support thinking" |
 
@@ -171,7 +192,9 @@ apps/server/README.md). Unset, it behaves exactly as before.
 
 **Resume.** Re-run with `--run <ts>` (or a path). Cached successful answers and
 verdicts are reused, and failures are retried. That is how you continue after a budget
-stop or Ctrl-C.
+stop or Ctrl-C. A resumed run keeps the judge in its `run.json` (model or panel) unless
+you pass `--judge-model` or `--judge-panel`, as `report` does, so a later invocation on
+the same run can't switch judges by accident.
 
 **Failures.** A prompt Flint fails on (e.g. the local brain is down) is not judged and
 not counted as a loss. It's listed in the report so you can fix the cause and resume.
@@ -255,7 +278,8 @@ The tests cover category tagging, trivial filtering, dedupe, determinism and
 stratification, strict judge parsing (with one retry), position randomization, the
 sign test, the budget guard (including under concurrency), pricing, the history CSV,
 secrets parsing and token resolution; the panel's consensus rule, per-panelist A/B order,
-error and budget handling, and cache separation from single-judge rows; the
+error and budget handling, and cache separation from single-judge rows; which judge a
+run uses (flags, then a resumed run's own, then the defaults); the
 local-model contestant's naming, report filename, model-mismatch guard and Ollama check;
 and `--local-think`'s naming (unchanged without the flag), request field, echo guard,
 flag parsing and the Ollama capability check.

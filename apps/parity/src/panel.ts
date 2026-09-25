@@ -71,6 +71,45 @@ export function isPanelId(judgeModel: string): boolean {
   return judgeModel.startsWith('panel:');
 }
 
+/** The judge a `run` invocation uses: a model, or a panel (whose id is `judgeModel`). */
+export interface JudgeChoice {
+  judgeModel: string;
+  panel?: PanelistSpec[];
+  /** 'run' when it came from a resumed run's run.json. */
+  from: 'flag' | 'run' | 'default';
+}
+
+/**
+ * Which judge a `run` invocation uses. An explicit `--judge-panel`, then
+ * `--judge-model`, wins. Otherwise a resumed run keeps the judge its run.json
+ * was created with, so a later invocation on it (another `--local-model`
+ * candidate, a `--local-think` variant) is judged like the verdicts it will be
+ * compared with, and `report`, which also defaults to run.json's judge, renders
+ * them. Only a new run falls back to the defaults (PARITY_JUDGE_PANEL, then
+ * PARITY_JUDGE_MODEL / claude-opus-5).
+ */
+export function chooseJudge(opts: {
+  judgeModel?: string | undefined;
+  judgePanel?: string | undefined;
+  resumed?: { judgeModel?: string; judgePanel?: string[] } | undefined;
+  defaults: { judgeModel: string; judgePanel: string };
+}): JudgeChoice {
+  const asPanel = (spec: string, from: JudgeChoice['from']): JudgeChoice => {
+    const panel = parseJudgePanel(spec);
+    return { judgeModel: panelId(panel), panel, from };
+  };
+  if (opts.judgePanel?.trim()) return asPanel(opts.judgePanel, 'flag');
+  if (opts.judgeModel?.trim()) return { judgeModel: opts.judgeModel.trim(), from: 'flag' };
+  const r = opts.resumed;
+  if (r?.judgePanel && r.judgePanel.length > 0) return asPanel(r.judgePanel.join(','), 'run');
+  if (r?.judgeModel?.trim()) {
+    const m = r.judgeModel.trim();
+    return isPanelId(m) ? asPanel(m.slice('panel:'.length).split('+').join(','), 'run') : { judgeModel: m, from: 'run' };
+  }
+  if (opts.defaults.judgePanel.trim()) return asPanel(opts.defaults.judgePanel, 'default');
+  return { judgeModel: opts.defaults.judgeModel, from: 'default' };
+}
+
 /**
  * Flint's slot for one panelist. Seeded by the pair AND the judge, so each
  * panelist sees an independent (but reproducible) order: a position bias in
