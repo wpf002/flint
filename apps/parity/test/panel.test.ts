@@ -3,6 +3,7 @@ import type { GenerateArgs, ProviderAdapter } from '@flint/core';
 import { BudgetGuard } from '../src/budget.js';
 import { flintIsA, outcomeFor, type Outcome } from '../src/judge.js';
 import {
+  chooseJudge,
   consensus,
   judgeWithPanel,
   panelId,
@@ -253,5 +254,46 @@ describe('single judge vs panel rows', () => {
     expect(md).toContain('Consensus rule');
     // Single-judge summaries have no agreement section.
     expect(summarize([row('claude-opus-5-5')])[0]!.panelAgreement).toBeUndefined();
+  });
+});
+
+describe('chooseJudge (which judge a run invocation uses)', () => {
+  const defaults = { judgeModel: 'claude-opus-5', judgePanel: '' };
+  // The tiered run: created with --judge-model claude-opus-5-5, so run.json says so.
+  const tiered = { judgeModel: 'claude-opus-5-5' };
+  const panelRun = { judgeModel: 'panel:anthropic:claude-opus-5-5+openai:gpt-5', judgePanel: ['anthropic:claude-opus-5-5', 'openai:gpt-5'] };
+
+  it("keeps a resumed run's own judge when no judge flag is given, not the default", () => {
+    // A later --local-model / --local-think invocation must be judged like the
+    // verdicts it's compared with, and like `report` (run.json's judge) renders.
+    expect(chooseJudge({ resumed: tiered, defaults })).toEqual({ judgeModel: 'claude-opus-5-5', from: 'run' });
+    expect(chooseJudge({ resumed: tiered, defaults: { judgeModel: 'claude-opus-5', judgePanel: 'anthropic:a,openai:b' } })).toEqual({
+      judgeModel: 'claude-opus-5-5',
+      from: 'run',
+    });
+  });
+
+  it("keeps a resumed run's panel, from judgePanel or from the panel id alone", () => {
+    const want = parseJudgePanel('anthropic:claude-opus-5-5,openai:gpt-5');
+    expect(chooseJudge({ resumed: panelRun, defaults })).toEqual({ judgeModel: panelRun.judgeModel, panel: want, from: 'run' });
+    expect(chooseJudge({ resumed: { judgeModel: panelRun.judgeModel }, defaults })).toEqual({ judgeModel: panelRun.judgeModel, panel: want, from: 'run' });
+  });
+
+  it('lets an explicit --judge-panel, then --judge-model, override the run', () => {
+    expect(chooseJudge({ judgeModel: 'claude-sonnet-5', resumed: tiered, defaults })).toEqual({ judgeModel: 'claude-sonnet-5', from: 'flag' });
+    const p = chooseJudge({ judgePanel: 'openai:gpt-5,anthropic:claude-opus-5-5', judgeModel: 'claude-sonnet-5', resumed: tiered, defaults });
+    expect(p).toMatchObject({ judgeModel: 'panel:anthropic:claude-opus-5-5+openai:gpt-5', from: 'flag' });
+    expect(chooseJudge({ judgeModel: 'claude-opus-5-5', resumed: panelRun, defaults })).toEqual({ judgeModel: 'claude-opus-5-5', from: 'flag' });
+  });
+
+  it('uses the defaults for a new run (or a run.json without a judge): the env panel, else the default model', () => {
+    expect(chooseJudge({ defaults })).toEqual({ judgeModel: 'claude-opus-5', from: 'default' });
+    expect(chooseJudge({ resumed: {}, defaults })).toEqual({ judgeModel: 'claude-opus-5', from: 'default' });
+    expect(chooseJudge({ defaults: { judgeModel: 'claude-opus-5', judgePanel: 'anthropic:claude-opus-5-5,openai:gpt-5' } })).toMatchObject({
+      judgeModel: 'panel:anthropic:claude-opus-5-5+openai:gpt-5',
+      from: 'default',
+    });
+    // Empty flags count as not given.
+    expect(chooseJudge({ judgeModel: '', judgePanel: ' ', resumed: tiered, defaults })).toEqual({ judgeModel: 'claude-opus-5-5', from: 'run' });
   });
 });

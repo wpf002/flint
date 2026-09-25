@@ -70,7 +70,7 @@ import { safeHandler } from './safe-handler';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, evalOllamaOptions, parseLocalModelRequest, parseOllamaThink, resolveLocalPersona, thinkOption } from './local-model';
+import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, resolveLocalPersona, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
 import {
   parseAttachments,
@@ -118,17 +118,9 @@ function buildProvider(): { provider: ProviderAdapter; model: string } {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
   if (ollamaModel) {
     return {
-      provider: new OllamaProvider({
-        baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
-        // IMPORTANT: keep num_ctx at 4096. Above ~6k, qwen2.5:14b's native
-        // tool-calling silently breaks — the model returns an EMPTY turn instead
-        // of emitting tool_calls (verified by bisection). 4096 keeps tool-calling
-        // reliable; the trade-off is a tighter window (curate the tool set so the
-        // prompt + tool results fit).
-        defaultOptions: { num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 4096) },
-        // OLLAMA_THINK=true|false sets Ollama's `think`; unset sends nothing (as before).
-        ...thinkOption(parseOllamaThink(process.env.OLLAMA_THINK)),
-      }),
+      // OLLAMA_HOST, OLLAMA_NUM_CTX (keep it at 4096, see liveOllamaOptions) and
+      // OLLAMA_THINK=true|false (unset sends no `think`, as before).
+      provider: new OllamaProvider(liveOllamaOptions(process.env)),
       model: ollamaModel,
     };
   }
@@ -406,15 +398,15 @@ async function main(): Promise<void> {
   // local-model.ts): the same local persona, memory and action log, with a different
   // default model. Built lazily per (model, think); never used by normal traffic.
   // Candidates get their own Ollama client with a 16K context (evalOllamaOptions)
-  // carrying that request's `think`.
+  // carrying that request's `think` (overridePersonaCache).
   const localModels =
     provider.name === 'ollama'
-      ? new LocalPersonaCache(
-          (m, think) =>
-            new Persona(
-              new Flint({ provider: new OllamaProvider(evalOllamaOptions(process.env, think)), defaultModel: m, memory, observer: actionLog }),
-              { name: 'Flint', styleGuide: FLINT_STYLE_GUIDE, lessonStore },
-            ),
+      ? overridePersonaCache(process.env, (candidate, m) =>
+          new Persona(new Flint({ provider: candidate, defaultModel: m, memory, observer: actionLog }), {
+            name: 'Flint',
+            styleGuide: FLINT_STYLE_GUIDE,
+            lessonStore,
+          }),
         )
       : undefined;
 
@@ -552,7 +544,7 @@ interface Convo {
 interface Ctx {
   persona: Persona;
   /** Eval-only local-model override personas; undefined when the local brain isn't Ollama. */
-  localModels: LocalPersonaCache<Persona> | undefined;
+  localModels: LocalPersonaCache<OverridePersona<Persona>> | undefined;
   provider: ProviderAdapter;
   model: string;
   tools: Tool[];
@@ -818,8 +810,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         brain,
         ...(brain === 'frontier' ? { tier } : {}),
         model: answeredBy,
-        // Echoed so apps/parity can tell the override was honoured, as it does for `model`.
-        ...(lm.think !== undefined ? { localThink: lm.think } : {}),
+        // The `think` the answering persona's Ollama client sends (not the request's
+        // localThink), so apps/parity can tell the flag reached Ollama, as it does for `model`.
+        ...(local.think !== undefined ? { localThink: local.think } : {}),
         tools: toolsUsed,
         proposed: proposed.map((p) => p.fullName),
         eval: true,

@@ -31,7 +31,7 @@ import {
   type Contestant,
 } from './contestants.js';
 import { flintIsA, judgePair, outcomeFor } from './judge.js';
-import { judgeWithPanel, panelId, parseJudgePanel, verdictFor, type Panelist, type PanelistSpec } from './panel.js';
+import { chooseJudge, judgeWithPanel, panelId, parseJudgePanel, verdictFor, type Panelist } from './panel.js';
 import { estimateCost, costOf } from './pricing.js';
 import { buildPromptSet, takeBalanced, type EvalPrompt, type TrainingRecord } from './prompts.js';
 import {
@@ -144,8 +144,9 @@ async function run(argv: string[]): Promise<void> {
       'claude-model': { type: 'string', default: DEFAULTS.claudeModel },
       'openai-model': { type: 'string', default: DEFAULTS.openaiModel },
       'perplexity-model': { type: 'string', default: DEFAULTS.perplexityModel },
-      'judge-model': { type: 'string', default: DEFAULTS.judgeModel },
-      'judge-panel': { type: 'string', default: DEFAULTS.judgePanel },
+      // No defaults here: a resumed run keeps its own judge (chooseJudge).
+      'judge-model': { type: 'string' },
+      'judge-panel': { type: 'string' },
       'max-tokens': { type: 'string', default: '8192' },
       'judge-max-tokens': { type: 'string', default: '4096' },
       'no-judge': { type: 'boolean', default: false },
@@ -181,9 +182,24 @@ async function run(argv: string[]): Promise<void> {
   const wanted = new Set(values.contestants!.split(',').map((s) => s.trim()));
   const contestants: Contestant[] = [];
   let flint: Contestant | undefined;
+  // ---- run dir (new, or resumed). Resolved before the judge: a resumed run keeps its own.
+  const runDir = values.run
+    ? existsSync(values.run)
+      ? resolve(values.run)
+      : join(EVAL_DIR, 'runs', values.run)
+    : join(EVAL_DIR, 'runs', runStamp(now));
+  const runMeta = join(runDir, 'run.json');
+  const resumed = existsSync(runMeta) ? (JSON.parse(readFileSync(runMeta, 'utf8')) as { judgeModel?: string; judgePanel?: string[] }) : undefined;
   // ---- judge (validated up front: a missing key should fail before any answer is bought)
-  const panelSpecs: PanelistSpec[] | undefined = values['judge-panel'] ? parseJudgePanel(values['judge-panel']) : undefined;
-  const judgeModel = panelSpecs ? panelId(panelSpecs) : values['judge-model']!;
+  const judge = chooseJudge({
+    judgeModel: values['judge-model'],
+    judgePanel: values['judge-panel'],
+    resumed,
+    defaults: { judgeModel: DEFAULTS.judgeModel, judgePanel: DEFAULTS.judgePanel },
+  });
+  const panelSpecs = judge.panel;
+  const judgeModel = judge.judgeModel;
+  if (judge.from === 'run') log(`judge: ${judgeModel}, the run's own (run.json); pass --judge-model or --judge-panel to use another`);
   const vendorKey = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY' } as const;
   if (!values['no-judge']) {
     for (const v of panelSpecs ? [...new Set(panelSpecs.map((p) => p.vendor))] : (['anthropic'] as const)) {
@@ -277,16 +293,10 @@ async function run(argv: string[]): Promise<void> {
   const competitors = contestants.filter((c) => c !== flint);
   if (competitors.length === 0) throw new Error('no competitor has a key — nothing to compare Flint against');
 
-  // ---- run dir (new, or resumed)
-  const runDir = values.run
-    ? existsSync(values.run)
-      ? resolve(values.run)
-      : join(EVAL_DIR, 'runs', values.run)
-    : join(EVAL_DIR, 'runs', runStamp(now));
+  // ---- run dir (resolved above)
   mkdirSync(runDir, { recursive: true });
   const answersPath = join(runDir, 'answers.jsonl');
   const judgmentsPath = join(runDir, 'judgments.jsonl');
-  const runMeta = join(runDir, 'run.json');
   if (!existsSync(runMeta)) {
     writeFileSync(
       runMeta,

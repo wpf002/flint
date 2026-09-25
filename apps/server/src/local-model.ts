@@ -18,7 +18,7 @@
  * how a bake-off measures them with it off. Accepted only with a valid
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
-import type { OllamaProviderOptions } from '@flint/core';
+import { OllamaProvider, type OllamaProviderOptions } from '@flint/core';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
 export const LOCAL_MODEL_RE = /^[a-z0-9._:\-/]+$/i;
@@ -70,6 +70,24 @@ export function parseOllamaThink(raw: string | undefined): boolean | undefined {
 /** `{ think }` for OllamaProviderOptions, or nothing at all when it's unset. */
 export function thinkOption(think: boolean | undefined): Pick<OllamaProviderOptions, 'think'> {
   return think === undefined ? {} : { think };
+}
+
+/**
+ * The live local brain's Ollama client (buildProvider in index.ts): OLLAMA_HOST,
+ * OLLAMA_NUM_CTX and OLLAMA_THINK.
+ */
+export function liveOllamaOptions(env: Record<string, string | undefined>): OllamaProviderOptions {
+  return {
+    baseURL: env.OLLAMA_HOST ?? 'http://127.0.0.1:11434',
+    // IMPORTANT: keep num_ctx at 4096. Above ~6k, qwen2.5:14b's native
+    // tool-calling silently breaks — the model returns an EMPTY turn instead
+    // of emitting tool_calls (verified by bisection). 4096 keeps tool-calling
+    // reliable; the trade-off is a tighter window (curate the tool set so the
+    // prompt + tool results fit).
+    defaultOptions: { num_ctx: Number(env.OLLAMA_NUM_CTX ?? 4096) },
+    // OLLAMA_THINK=true|false sets Ollama's `think`; unset sends nothing (as before).
+    ...thinkOption(parseOllamaThink(env.OLLAMA_THINK)),
+  };
 }
 
 /**
@@ -130,19 +148,47 @@ export class LocalPersonaCache<P> {
   }
 }
 
+/** One cached override: the persona, and the `think` its Ollama client was built with. */
+export interface OverridePersona<P> {
+  persona: P;
+  /** What the persona's OllamaProvider sends as `think`; undefined means it sends none. */
+  think: boolean | undefined;
+}
+
+/**
+ * The override cache main() builds: for each (model, think), `build` wraps a new
+ * OllamaProvider made from evalOllamaOptions(env, think) in a persona. Each entry
+ * records the `think` that provider was actually given, and /generate echoes that
+ * (not the request), so apps/parity's echo check fails if the flag is lost on the
+ * way to Ollama.
+ */
+export function overridePersonaCache<P>(
+  env: Record<string, string | undefined>,
+  build: (provider: OllamaProvider, model: string) => P,
+  opts: { fetch?: typeof fetch; max?: number } = {},
+): LocalPersonaCache<OverridePersona<P>> {
+  return new LocalPersonaCache((model, think) => {
+    const options: OllamaProviderOptions = { ...evalOllamaOptions(env, think), ...(opts.fetch ? { fetch: opts.fetch } : {}) };
+    return { persona: build(new OllamaProvider(options), model), think: options.think };
+  }, opts.max);
+}
+
 /**
  * Which persona and model label answer a /generate turn. Without an override
  * it's the server's own local persona, exactly as before. With one, the cached
  * override persona for (model, think), or an error if this server's local brain
- * isn't Ollama (no cache was built).
+ * isn't Ollama (no cache was built). `think` in the result is what that persona's
+ * Ollama client sends, present only when it sends one: the eval answer's
+ * `localThink` echo.
  */
 export function resolveLocalPersona<P>(
   override: string | undefined,
   base: { persona: P; model: string },
-  cache: LocalPersonaCache<P> | undefined,
+  cache: LocalPersonaCache<OverridePersona<P>> | undefined,
   think?: boolean,
-): { ok: true; persona: P; model: string } | { ok: false; status: 422; error: string } {
+): { ok: true; persona: P; model: string; think?: boolean } | { ok: false; status: 422; error: string } {
   if (override === undefined) return { ok: true, persona: base.persona, model: base.model };
   if (!cache) return { ok: false, status: 422, error: "localModel needs an Ollama local brain, and this server's isn't one" };
-  return { ok: true, persona: cache.get(override, think), model: override };
+  const hit = cache.get(override, think);
+  return { ok: true, persona: hit.persona, model: override, ...(hit.think !== undefined ? { think: hit.think } : {}) };
 }
