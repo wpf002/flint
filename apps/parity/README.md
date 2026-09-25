@@ -378,12 +378,20 @@ pnpm --filter @flint/parity search-compare --query "..." --query "..."  # your o
 
 Keys come from `ANTHROPIC_API_KEY` (env or `~/.flint/secrets.env`) and `SEARCH_API_KEY`
 (env, else the `web` server's env in `~/.flint/mcp.json`, which is what Flint runs with).
-It only reads those files and never prints a key. The output is a per-prompt table (latency,
-shared URLs, winner, the judge's reason with the A/B layout) plus totals: wins, ties,
-forfeits, a sign test, mean latency, and spend split into searches and judge. A side that
-errors or finds nothing **forfeits** without a judge call. If the provider is over quota,
-every row is a SearXNG forfeit and the run costs nothing, which is itself the answer to
-"do we need the fallback".
+It only reads those files and never prints a key. The provider is placed as `web_search`
+places it: `--provider`, `SEARCH_KEY_PROVIDER` or an explicit `SEARCH_PROVIDER`, checked
+against the key's prefix. The output is a per-prompt table (latency, shared URLs, winner,
+the judge's reason with the A/B layout) plus totals: wins, ties, forfeits, availability, a
+sign test, mean latency, and spend split into searches and judge.
+
+A side that searched and found nothing **forfeits** without a judge call. A side whose
+search **failed** makes the row **unavailable**, with no winner. That covers a refused or
+spent key, a rate limit, a timeout, and SearXNG's engines all blocked. A failure says nothing
+about the other side's result quality, so these rows are left out of the wins and the sign
+test. The **Availability** line reports how often each side failed. If the provider's key is
+refused or over quota, the run stops at the first prompt with `provider key unusable: nothing
+to compare`, having charged nothing. If the key runs out partway, the report covers the rows
+judged before that.
 
 By default the judge sees sources only. Tavily's synthesized `answer` is part of what the
 local model reads from `web_search`, and SearXNG rarely has one, so `--include-answer`

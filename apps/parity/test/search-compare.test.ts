@@ -4,6 +4,7 @@ import type { SearchOutcome } from '@flint/mcp';
 import { BudgetGuard } from '../src/budget.js';
 import {
   compareOne,
+  keyUnusable,
   loadComparePrompts,
   promptsFromQueries,
   providerIsA,
@@ -136,19 +137,37 @@ describe('compareOne', () => {
     expect(bad.judgeUsd).toBeGreaterThan(0); // tokens spent on bad replies still count
   });
 
-  it('a side with nothing forfeits without a judge call; a failed metered search costs nothing', async () => {
+  it('a side that searched and found nothing forfeits, without a judge call', async () => {
+    const bare = deps({ primary: async () => okResults('tavily', []) });
+    expect(await compareOne(P, bare)).toMatchObject({ winner: 'searxng', how: 'forfeit', reason: 'tavily returned no results', searchUsd: 0.008 });
+    expect(bare.judge.calls).toHaveLength(0);
+    const quiet = deps({ searxng: async () => okResults('searxng', []) });
+    expect(await compareOne(P, quiet)).toMatchObject({ winner: 'provider', how: 'forfeit', reason: 'searxng returned no results' });
+    const neither = deps({ primary: async () => okResults('tavily', []), searxng: async () => okResults('searxng', []) });
+    expect(await compareOne(P, neither)).toMatchObject({ winner: 'none', how: 'skipped', reason: 'tavily returned no results; searxng returned no results' });
+  });
+
+  it("a side that couldn't search at all wins nothing for the other: the row is unavailable, and a rejected metered search costs nothing", async () => {
     const down = deps({ searxng: async () => ({ ok: false, source: 'searxng', kind: 'network', error: 'searxng unreachable' }) });
-    expect(await compareOne(P, down)).toMatchObject({ winner: 'provider', how: 'forfeit', reason: 'searxng unreachable', searchUsd: 0.008 });
+    expect(await compareOne(P, down)).toMatchObject({ winner: 'none', how: 'unavailable', reason: 'searxng unreachable', searchUsd: 0.008 });
     expect(down.judge.calls).toHaveLength(0);
 
     const quota = deps({ primary: async () => ({ ok: false, source: 'tavily', kind: 'quota', error: 'tavily HTTP 432 (quota)' }) });
-    expect(await compareOne(P, quota)).toMatchObject({ winner: 'searxng', how: 'forfeit', searchUsd: 0 });
+    const row = await compareOne(P, quota);
+    expect(row).toMatchObject({ winner: 'none', how: 'unavailable', reason: 'tavily HTTP 432 (quota)', searchUsd: 0 });
+    expect(row.provider).toMatchObject({ kind: 'quota', error: 'tavily HTTP 432 (quota)' });
 
-    const nothing = deps({
+    const captcha = deps({
       primary: async () => okResults('tavily', []),
       searxng: async () => ({ ok: false, source: 'searxng', kind: 'empty', error: 'searxng found nothing (engines failing: qwant: CAPTCHA)' }),
     });
-    expect(await compareOne(P, nothing)).toMatchObject({ winner: 'none', how: 'skipped', reason: 'tavily returned no results; searxng found nothing (engines failing: qwant: CAPTCHA)' });
+    expect(await compareOne(P, captcha)).toMatchObject({ winner: 'none', how: 'unavailable', reason: 'searxng found nothing (engines failing: qwant: CAPTCHA)' });
+
+    const both = deps({
+      primary: async () => ({ ok: false, source: 'tavily', kind: 'timeout', error: 'tavily timed out after 25000ms' }),
+      searxng: async () => ({ ok: false, source: 'searxng', kind: 'network', error: 'searxng unreachable' }),
+    });
+    expect(await compareOne(P, both)).toMatchObject({ winner: 'none', how: 'unavailable', reason: 'tavily timed out after 25000ms; searxng unreachable' });
   });
 
   it('a judge error is a skipped row, not a crash', async () => {
@@ -179,6 +198,54 @@ describe('budget', () => {
   });
 });
 
+describe('an unusable key or a blocked SearXNG is not a quality verdict', () => {
+  const quota = async (): Promise<SearchOutcome> => ({ ok: false, source: 'tavily', kind: 'quota', error: 'tavily HTTP 432 (quota)' });
+  const prompts = promptsFromQueries(Array.from({ length: 25 }, (_, i) => `research question ${i}`));
+
+  it('stops at the first auth or quota failure: nothing judged, nothing charged, no "searxng ahead"', async () => {
+    for (const kind of ['quota', 'auth'] as const) {
+      const d = deps({ primary: async () => ({ ok: false, source: 'tavily', kind, error: `tavily HTTP ${kind === 'auth' ? 401 : 432}` }) });
+      const rows = await runCompare(prompts, d, 1);
+      expect(rows).toHaveLength(1);
+      expect(keyUnusable(rows)).toMatch(/^tavily HTTP (401|432)$/);
+      expect(d.judge.calls).toHaveLength(0);
+      expect(d.budget.spent).toBe(0);
+      const t = summarizeCompare(rows);
+      expect(t).toMatchObject({ provider: 0, searxng: 0, judged: 0, forfeits: 0, signal: 'NOISE', unavailable: { provider: 1, searxng: 0 } });
+    }
+  });
+
+  it('with concurrency, stops launching once a key failure lands', async () => {
+    const d = deps({ primary: quota });
+    const rows = await runCompare(prompts, d, 2);
+    expect(rows.length).toBeLessThanOrEqual(2);
+  });
+
+  it('a key that runs out partway keeps the rows judged before it, and counts only those', async () => {
+    let n = 0;
+    const d = deps({ primary: async (q) => (++n <= 4 ? okResults('tavily', [`https://t.com/${q}`]) : quota()), replies: Array(4).fill('{"verdict":"A","reason":"r"}') });
+    const rows = await runCompare(prompts, d, 1);
+    expect(rows).toHaveLength(5);
+    const t = summarizeCompare(rows);
+    expect(t.judged).toBe(4);
+    expect(t.provider + t.searxng + t.tie).toBe(4);
+    expect(t.unavailable.provider).toBe(1);
+  });
+
+  it('SearXNG blocked on every prompt is not a provider win either', async () => {
+    const d = deps({ searxng: async () => ({ ok: false, source: 'searxng', kind: 'empty', error: 'searxng found nothing (engines failing: duckduckgo: CAPTCHA)' }) });
+    const rows = await runCompare(prompts, d, 2);
+    expect(rows).toHaveLength(25);
+    const t = summarizeCompare(rows);
+    expect(t).toMatchObject({ provider: 0, searxng: 0, signal: 'NOISE', unavailable: { provider: 0, searxng: 25 } });
+    expect(d.judge.calls).toHaveLength(0);
+    const md = renderCompare(rows, t, { providerName: 'tavily', judgeModel: d.judgeModel, searxngUrl: 'http://127.0.0.1:8888', budgetUsd: 1, results: 5, now: NOW });
+    expect(md).toContain('**Availability:** tavily failed 0 of 25 · searxng failed 25 of 25 (those rows are left out of the wins and the sign test)');
+    expect(md).toContain('**Sign test:** nothing was judged');
+    expect(md).not.toMatch(/ahead/);
+  });
+});
+
 describe('inputs', () => {
   it('reads research prompts from a frozen set and skips junk lines', () => {
     const dir = mkdtempSync(join(tmpdir(), 'search-compare-'));
@@ -206,6 +273,18 @@ describe('inputs', () => {
     expect(resolveSearchKey({ SEARCH_KEY_PROVIDER: 'brave' }, '{not json')).toEqual({ provider: 'brave', from: 'nowhere' });
     expect(resolveSearchKey({}, JSON.stringify({ servers: [{ name: 'web', env: { SEARCH_PROVIDER: 'auto', SEARCH_KEY_PROVIDER: 'brave', SEARCH_API_KEY: 'k' } }] })).provider).toBe('brave');
   });
+
+  it('in auto, places the key by its prefix like web_search does, and never guesses', () => {
+    expect(resolveSearchKey({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'BSAkey' }).provider).toBe('brave');
+    expect(resolveSearchKey({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-key' }).provider).toBe('tavily');
+    const mystery = resolveSearchKey({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'mystery-key' });
+    expect(mystery.provider).toBeUndefined();
+    expect(mystery.error).toMatch(/can't tell whether SEARCH_API_KEY is a tavily or a brave key/);
+    expect(mystery.error).not.toContain('mystery-key');
+    // --provider names it; a key carrying the other vendor's prefix is still refused
+    expect(resolveSearchKey({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'mystery-key' }, undefined, 'brave').provider).toBe('brave');
+    expect(resolveSearchKey({ SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'BSAkey' }, undefined, 'tavily')).toMatchObject({ error: expect.stringMatching(/looks like a brave key/) });
+  });
 });
 
 describe('report', () => {
@@ -220,8 +299,9 @@ describe('report', () => {
     expect(md).toContain('| 1 | What did the Fed decide in September 2026? |');
     // pipes escaped, and the blind layout named so "Set A" in a reason can be read
     expect(md).toContain(`| tie | A=${providerIsA('p1', 1) ? 'tavily' : 'searxng'}: both cite the Fed \\| CNBC |`);
-    expect(md).toMatch(/\| 2 \| weather in Dallas \| 2 · \d\.\ds \| ✗ searxng timed out after 10000ms \| 0 \| tavily \(forfeit\) \|/);
-    expect(md).toContain('**Totals:** tavily 1 · searxng 0 · tie 1 · no contest 0 (judged 1, forfeits 1, of 2)');
+    expect(md).toMatch(/\| 2 \| weather in Dallas \| 2 · \d\.\ds \| ✗ searxng timed out after 10000ms \| 0 \| — \(unavailable\) \|/);
+    expect(md).toContain('**Totals:** tavily 0 · searxng 0 · tie 1 · no contest 1 (judged 1, forfeits 0, unavailable 1, of 2)');
+    expect(md).toContain('**Availability:** tavily failed 0 of 2 · searxng failed 1 of 2 (those rows are left out of the wins and the sign test)');
     expect(md).toMatch(/\*\*Sign test\*\* \(ties dropped\): p = 1\.000, NOISE: no detectable difference/);
     expect(md).toMatch(/\*\*Spend:\*\* \$0\.0\d{3} of \$1\.00 \(tavily searches \$0\.0160, judge \$0\.0012\)/);
   });

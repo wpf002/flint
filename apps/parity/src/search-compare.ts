@@ -28,8 +28,10 @@ import { AnthropicProvider, decodeAssistantTurn, type ProviderAdapter, type Toke
 import {
   DEFAULT_SEARXNG_URL,
   braveSearch,
+  keyOwner,
   searxngSearch,
   tavilySearch,
+  type FailureKind,
   type KeyedBackend,
   type SearchItem,
   type SearchOutcome,
@@ -51,10 +53,14 @@ export interface Side {
   n: number;
   ms: number;
   urls: string[];
+  /** Set when the search itself failed (as opposed to finding nothing). */
   error?: string;
+  kind?: FailureKind;
 }
 
 export type Winner = 'provider' | 'searxng' | 'tie' | 'none';
+
+export const BUDGET_EXHAUSTED = 'budget exhausted';
 
 export interface CompareRow {
   id: string;
@@ -64,8 +70,14 @@ export interface CompareRow {
   /** URLs both sets share (normalized). */
   shared: number;
   winner: Winner;
-  /** judge: a verdict. forfeit: only one side had results. skipped: nothing to judge, budget, or a judge error. */
-  how: 'judge' | 'forfeit' | 'skipped';
+  /**
+   * judge: a verdict. forfeit: one side searched and found nothing, the other
+   * had results. unavailable: a side's search failed (key refused or spent,
+   * rate limit, timeout, SearXNG's engines blocked), which says nothing about
+   * result quality, so no winner. skipped: nothing on either side, budget, or a
+   * judge error.
+   */
+  how: 'judge' | 'forfeit' | 'unavailable' | 'skipped';
   reason: string;
   providerWasA?: boolean;
   searchUsd: number;
@@ -150,7 +162,7 @@ export function sharedUrls(a: string[], b: string[]): number {
 }
 
 function side(out: SearchOutcome, ms: number): Side {
-  if (!out.ok) return { n: 0, ms, urls: [], error: out.error };
+  if (!out.ok) return { n: 0, ms, urls: [], error: out.error, kind: out.kind };
   return { n: out.results.length, ms, urls: out.results.map((r) => r.url) };
 }
 
@@ -166,7 +178,7 @@ export async function compareOne(p: ComparePrompt, d: CompareDeps): Promise<Comp
   const empty: Side = { n: 0, ms: 0, urls: [] };
   const settleSearch = d.budget.reserve(d.searchCostUsd);
   if (!settleSearch) {
-    return { ...base, provider: empty, searxng: empty, shared: 0, winner: 'none', how: 'skipped', reason: 'budget exhausted', searchUsd: 0, judgeUsd: 0 };
+    return { ...base, provider: empty, searxng: empty, shared: 0, winner: 'none', how: 'skipped', reason: BUDGET_EXHAUSTED, searchUsd: 0, judgeUsd: 0 };
   }
   const [prim, sx] = await Promise.all([timed(() => d.primary(p.prompt)), timed(() => d.searxng(p.prompt))]);
   // Metered APIs bill a successful search; a rejected one (quota, bad key) costs nothing.
@@ -180,12 +192,15 @@ export async function compareOne(p: ComparePrompt, d: CompareDeps): Promise<Comp
     searchUsd,
     judgeUsd: 0,
   };
-  const pHas = prim.out.ok && prim.out.results.length > 0;
-  const sHas = sx.out.ok && sx.out.results.length > 0;
-  const why = (s: Side, name: string) => s.error ?? `${name} returned no results`;
-  if (!pHas && !sHas) return { ...row, winner: 'none', how: 'skipped', reason: `${why(row.provider, d.providerName)}; ${why(row.searxng, 'searxng')}` };
-  if (!sHas) return { ...row, winner: 'provider', how: 'forfeit', reason: why(row.searxng, 'searxng') };
-  if (!pHas) return { ...row, winner: 'searxng', how: 'forfeit', reason: why(row.provider, d.providerName) };
+  // A side that couldn't search tells us nothing about the other side's results.
+  const failed = [row.provider.error, row.searxng.error].filter((e): e is string => e !== undefined);
+  if (failed.length > 0) return { ...row, winner: 'none', how: 'unavailable', reason: failed.join('; ') };
+  const pHas = row.provider.n > 0;
+  const sHas = row.searxng.n > 0;
+  const none = (name: string) => `${name} returned no results`;
+  if (!pHas && !sHas) return { ...row, winner: 'none', how: 'skipped', reason: `${none(d.providerName)}; ${none('searxng')}` };
+  if (!sHas) return { ...row, winner: 'provider', how: 'forfeit', reason: none('searxng') };
+  if (!pHas) return { ...row, winner: 'searxng', how: 'forfeit', reason: none(d.providerName) };
 
   const pOut = prim.out as Extract<SearchOutcome, { ok: true }>;
   const sOut = sx.out as Extract<SearchOutcome, { ok: true }>;
@@ -230,21 +245,47 @@ export async function compareOne(p: ComparePrompt, d: CompareDeps): Promise<Comp
   }
 }
 
-/** Every prompt, `concurrency` at a time, stopping new work once the budget refuses anything. */
+/**
+ * The provider's error when its key was refused or is spent: every later prompt
+ * would fail the same way, so there is nothing left to compare.
+ */
+export function keyUnusable(rows: CompareRow[]): string | undefined {
+  return rows.find((r) => r.provider.kind === 'auth' || r.provider.kind === 'quota')?.provider.error;
+}
+
+/**
+ * Every prompt, `concurrency` at a time. Stops launching new ones once the
+ * budget refuses anything, or once the provider's key is refused or spent.
+ */
 export async function runCompare(prompts: ComparePrompt[], d: CompareDeps, concurrency = 2): Promise<CompareRow[]> {
   const rows = new Map<string, CompareRow>();
-  await pool(prompts, concurrency, async (p) => void rows.set(p.id, await compareOne(p, d)), () => d.budget.exhausted);
+  let dead = false;
+  await pool(
+    prompts,
+    concurrency,
+    async (p) => {
+      const row = await compareOne(p, d);
+      rows.set(p.id, row);
+      if (keyUnusable([row])) dead = true;
+    },
+    () => d.budget.exhausted || dead,
+  );
   return prompts.flatMap((p) => rows.get(p.id) ?? []);
 }
 
 export interface CompareTotals {
   prompts: number;
+  /** Wins, ties and the sign test count judged rows and genuine forfeits only. */
   provider: number;
   searxng: number;
   tie: number;
   none: number;
   judged: number;
   forfeits: number;
+  /** Rows where a side's search failed, and how often each side failed, of `searched`. */
+  unavailable: { rows: number; provider: number; searxng: number };
+  /** Rows where both searches ran (not stopped by the budget first). */
+  searched: number;
   p: number;
   signal: string;
   meanMs: { provider: number; searxng: number };
@@ -256,7 +297,9 @@ export interface CompareTotals {
 export function summarizeCompare(rows: CompareRow[]): CompareTotals {
   const count = (w: Winner) => rows.filter((r) => r.winner === w).length;
   const ran = rows.filter((r) => r.provider.ms > 0 || r.searxng.ms > 0);
+  const searched = rows.filter((r) => r.reason !== BUDGET_EXHAUSTED);
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+  // An unavailable row's winner is 'none', so it never reaches these counts.
   const { signal, p } = signalOf(count('provider'), count('searxng'));
   return {
     prompts: rows.length,
@@ -266,6 +309,12 @@ export function summarizeCompare(rows: CompareRow[]): CompareTotals {
     none: count('none'),
     judged: rows.filter((r) => r.how === 'judge').length,
     forfeits: rows.filter((r) => r.how === 'forfeit').length,
+    unavailable: {
+      rows: rows.filter((r) => r.how === 'unavailable').length,
+      provider: searched.filter((r) => r.provider.error !== undefined).length,
+      searxng: searched.filter((r) => r.searxng.error !== undefined).length,
+    },
+    searched: searched.length,
     p,
     signal,
     meanMs: { provider: mean(ran.map((r) => r.provider.ms)), searxng: mean(ran.map((r) => r.searxng.ms)) },
@@ -283,7 +332,16 @@ export function renderCompare(
   const P = meta.providerName;
   const cell = (s: Side) => (s.error ? `✗ ${clip(s.error, 40)}` : `${s.n} · ${(s.ms / 1000).toFixed(1)}s`);
   const who = (r: CompareRow) =>
-    r.winner === 'none' ? '—' : `${r.winner === 'provider' ? P : r.winner}${r.how === 'forfeit' ? ' (forfeit)' : ''}`;
+    r.winner === 'none'
+      ? r.how === 'unavailable'
+        ? '— (unavailable)'
+        : '—'
+      : `${r.winner === 'provider' ? P : r.winner}${r.how === 'forfeit' ? ' (forfeit)' : ''}`;
+  const decisive = t.provider + t.searxng + t.tie;
+  const sign =
+    decisive === 0
+      ? '**Sign test:** nothing was judged'
+      : `**Sign test** (ties dropped): p = ${t.p.toFixed(3)}, ${t.signal}${t.signal === 'NOISE' ? ': no detectable difference' : t.provider > t.searxng ? `: ${P} ahead` : ': searxng ahead'}`;
   const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\s+/g, ' ');
   // The judge's reasons say "Set A"/"Set B"; say which backend that was.
   const why = (r: CompareRow) => (r.how === 'judge' && r.providerWasA !== undefined ? `A=${r.providerWasA ? P : 'searxng'}: ${r.reason}` : r.reason);
@@ -296,8 +354,9 @@ export function renderCompare(
     '|---|---|---|---|---|---|---|',
     ...rows.map((r, i) => `| ${i + 1} | ${esc(clip(r.prompt, 70))} | ${esc(cell(r.provider))} | ${esc(cell(r.searxng))} | ${r.shared} | ${who(r)} | ${esc(clip(why(r), 150))} |`),
     '',
-    `**Totals:** ${P} ${t.provider} · searxng ${t.searxng} · tie ${t.tie} · no contest ${t.none} (judged ${t.judged}, forfeits ${t.forfeits}, of ${t.prompts})`,
-    `**Sign test** (ties dropped): p = ${t.p.toFixed(3)}, ${t.signal}${t.signal === 'NOISE' ? ': no detectable difference' : t.provider > t.searxng ? `: ${P} ahead` : ': searxng ahead'}`,
+    `**Totals:** ${P} ${t.provider} · searxng ${t.searxng} · tie ${t.tie} · no contest ${t.none} (judged ${t.judged}, forfeits ${t.forfeits}, unavailable ${t.unavailable.rows}, of ${t.prompts})`,
+    `**Availability:** ${P} failed ${t.unavailable.provider} of ${t.searched} · searxng failed ${t.unavailable.searxng} of ${t.searched} (those rows are left out of the wins and the sign test)`,
+    sign,
     `**Latency** (mean): ${P} ${(t.meanMs.provider / 1000).toFixed(2)}s · searxng ${(t.meanMs.searxng / 1000).toFixed(2)}s · shared URLs (mean) ${t.meanShared.toFixed(1)} of ${meta.results}`,
     `**Spend:** $${(t.searchUsd + t.judgeUsd).toFixed(4)} of $${meta.budgetUsd.toFixed(2)} (${P} searches $${t.searchUsd.toFixed(4)}, judge $${t.judgeUsd.toFixed(4)})`,
   ];
@@ -323,22 +382,37 @@ export function promptsFromQueries(queries: string[]): ComparePrompt[] {
 export function resolveSearchKey(
   env: Record<string, string | undefined>,
   mcpJson?: string,
-): { provider: KeyedBackend; apiKey?: string; from: string } {
-  const pick = (e: Record<string, unknown>): KeyedBackend =>
-    [e.SEARCH_KEY_PROVIDER, e.SEARCH_PROVIDER].some((v) => typeof v === 'string' && v.trim().toLowerCase() === 'brave') ? 'brave' : 'tavily';
+  /** --provider: names the key's provider, like SEARCH_KEY_PROVIDER. */
+  override?: string,
+): { provider?: KeyedBackend; apiKey?: string; from: string; error?: string } {
   const key = env.SEARCH_API_KEY?.trim();
-  if (key) return { provider: pick(env), apiKey: key, from: 'SEARCH_API_KEY in the environment' };
+  if (key) return { ...keyProvider(env, key, override), apiKey: key, from: 'SEARCH_API_KEY in the environment' };
   if (mcpJson) {
     try {
       const cfg = JSON.parse(mcpJson) as { servers?: Array<{ name?: string; env?: Record<string, unknown> }> };
       const web = cfg.servers?.find((s) => s?.name === 'web')?.env ?? {};
       const k = typeof web.SEARCH_API_KEY === 'string' ? web.SEARCH_API_KEY.trim() : '';
-      if (k) return { provider: pick(web), apiKey: k, from: "the web server's env in mcp.json" };
+      if (k) return { ...keyProvider(web, k, override), apiKey: k, from: "the web server's env in mcp.json" };
     } catch {
       /* unreadable config: same as no key */
     }
   }
-  return { provider: pick(env), from: 'nowhere' };
+  return { ...keyProvider(env, undefined, override), from: 'nowhere' };
+}
+
+/**
+ * Which provider a key is for: --provider, SEARCH_KEY_PROVIDER, or an explicit
+ * SEARCH_PROVIDER=tavily|brave, checked against the key's prefix exactly as
+ * web_search's auto mode checks it (keyOwner), so a key is never sent to a
+ * vendor it evidently isn't for. Without a key, only names the provider.
+ */
+function keyProvider(e: Record<string, unknown>, key: string | undefined, override?: string): { provider?: KeyedBackend; error?: string } {
+  const s = (v: unknown) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
+  const mode = s(e.SEARCH_PROVIDER);
+  const declared = s(override) || s(e.SEARCH_KEY_PROVIDER) || (mode === 'tavily' || mode === 'brave' ? mode : '');
+  if (!key) return { provider: declared === 'brave' ? 'brave' : 'tavily' };
+  const owner = keyOwner(key, declared || undefined);
+  return 'provider' in owner ? { provider: owner.provider } : { error: owner.error };
 }
 
 function clip(s: string, n: number): string {
@@ -384,8 +458,9 @@ async function main(argv: string[]): Promise<void> {
 
   loadSecretsInto(join(flint, 'secrets.env'));
   const mcpPath = process.env.MCP_CONFIG?.trim() || join(flint, 'mcp.json');
-  const key = resolveSearchKey(process.env, existsSync(mcpPath) ? readFileSync(mcpPath, 'utf8') : undefined);
-  const providerName = (values.provider?.toLowerCase() === 'brave' ? 'brave' : values.provider ? 'tavily' : key.provider) as KeyedBackend;
+  const key = resolveSearchKey(process.env, existsSync(mcpPath) ? readFileSync(mcpPath, 'utf8') : undefined, values.provider);
+  if (!key.provider) throw new Error(`${key.error ?? 'unknown search provider'} (key from ${key.from}; --provider tavily|brave also names it)`);
+  const providerName = key.provider;
   const searchCostUsd = values['search-cost-usd'] !== undefined ? Number(values['search-cost-usd']) : DEFAULT_SEARCH_COST[providerName];
   const judgeModel = values['judge-model']!;
   const worst = prompts.length * (searchCostUsd + 2 * estimateCost('anthropic', judgeModel, 12_000, { overheadTokens: 50, expectedOutputTokens: JUDGE_MAX_TOKENS }));
@@ -415,10 +490,14 @@ async function main(argv: string[]): Promise<void> {
     includeAnswer: values['include-answer']!,
   };
   const rows = await runCompare(prompts, deps, Math.max(1, Number(values.concurrency)));
-  if (values.out) for (const r of rows) appendJsonl(resolve(values.out), { ...r, providerName, judgeModel, at: deps.now.toISOString() });
   const totals = summarizeCompare(rows);
+  const dead = keyUnusable(rows);
+  // A refused or spent key on the first prompt: no quality verdict, nothing charged.
+  if (dead && totals.judged + totals.forfeits === 0) throw new Error(`provider key unusable: nothing to compare (${dead})`);
+  if (values.out) for (const r of rows) appendJsonl(resolve(values.out), { ...r, providerName, judgeModel, at: deps.now.toISOString() });
   process.stdout.write(`${renderCompare(rows, totals, { providerName, judgeModel, searxngUrl, budgetUsd, results: n, now: deps.now })}\n`);
-  if (rows.length < prompts.length) log(`stopped after ${rows.length} of ${prompts.length}: budget reached`);
+  if (dead) log(`stopped after ${rows.length} of ${prompts.length}: provider key unusable (${dead}); the totals cover the rows before it`);
+  else if (rows.length < prompts.length) log(`stopped after ${rows.length} of ${prompts.length}: budget reached`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
