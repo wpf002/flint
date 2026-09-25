@@ -66,12 +66,12 @@ import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
 import { ToolRouter } from './router';
 import { safeHandler } from './safe-handler';
+import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, resolveLocalPersona, type OverridePersona } from './local-model';
+import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
-import { STYLE_VARIANTS, StyledPersonas, chooseStyles, parseStyleVariantRequest, readStyleDefaults, styleEcho, styleGuideFor, type StyleVariant } from './style-variant';
 import {
   parseAttachments,
   readJsonLimited,
@@ -783,9 +783,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // unless eval: true and a known variant; without it each brain uses its live one.
     const sv = parseStyleVariantRequest(body);
     if (!sv.ok) return json(res, sv.status, { error: sv.error });
-    const style = chooseStyles(sv.variant, ctx.styled.defaults);
-    const local = resolveLocalPersona(lm.model, { persona: ctx.styled.local(style.local), model: ctx.model }, ctx.localModels, lm.think, style.local);
-    if (!local.ok) return json(res, local.status, { error: local.error });
+    const personas = turnPersonas({ styleVariant: sv.variant, localModel: lm.model, localThink: lm.think }, ctx);
+    if (!personas.ok) return json(res, personas.status, { error: personas.error });
+    const local = personas.local;
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
@@ -799,10 +799,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const beforeLog = ctx.actionLog.actions().length;
     const ask = (p: Persona) =>
       p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) });
+    // Every persona call goes through `answered`, so the eval echo names the style
+    // guide of the persona whose answer this is (./style-variant echoStyle).
+    const answered = echoStyle(ask);
     let out;
     if (brain === 'frontier' && ctx.brains) {
       try {
-        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => ask(ctx.styled.frontier(b, style.frontier)), { onFallback: logFallback });
+        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
         out = won.result;
         answeredBy = won.brain.label;
       } catch (err) {
@@ -810,10 +813,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}` });
         console.error('[brain] frontier failed, falling back to local:', err);
         brain = 'local';
-        out = await ask(local.persona);
+        out = await answered.ask(local.persona);
       }
     } else {
-      out = await ask(local.persona);
+      out = await answered.ask(local.persona);
     }
     const toolsUsed = toolsSince(ctx, beforeLog);
     const proposed = ctx.actions.newSince(beforeActions);
@@ -830,8 +833,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // The `think` the answering persona's Ollama client sends (not the request's
         // localThink), so apps/parity can tell the flag reached Ollama, as it does for `model`.
         ...(local.think !== undefined ? { localThink: local.think } : {}),
-        // The style variant of the brain that answered (apps/parity checks it against --flint-variant).
-        styleVariant: styleEcho(brain, style),
+        // The style variant of the persona that answered, read from its guide, not the
+        // request (apps/parity checks it against --flint-variant).
+        styleVariant: answered.styleVariant(),
         tools: toolsUsed,
         proposed: proposed.map((p) => p.fullName),
         eval: true,

@@ -9,7 +9,11 @@
  *  - Eval only, per request: POST /generate { eval: true, styleVariant: "v2" }
  *    (apps/parity --flint-variant v2). Anything but a known variant, or one
  *    without eval: true, is a 400. The eval response echoes `styleVariant`: the
- *    variant of the brain that actually answered.
+ *    variant of the persona that actually produced the answer, read from that
+ *    persona's own style guide (styleVariantOf / echoStyle), never copied from
+ *    the request. So if a turn is ever answered by the wrong persona (a merge
+ *    that routes around turnPersonas, say), the echo says so and apps/parity's
+ *    echo check stops the run instead of filing v1 answers under "v2".
  *  - Live, from env: FLINT_STYLE_VARIANT picks the frontier tiers' guide and
  *    FLINT_LOCAL_STYLE_VARIANT the local brain's (and the eval local-model
  *    override personas'). Unset, both are "v1", so nothing changes; an unknown
@@ -25,6 +29,7 @@
  */
 import type { ProviderAdapter } from '@flint/core';
 import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
+import { resolveLocalPersona, type LocalPersonaCache, type OverridePersona } from './local-model';
 
 export type StyleVariant = FlintStyleVariant;
 
@@ -96,9 +101,42 @@ export function chooseStyles(requested: StyleVariant | undefined, defaults: Styl
   return requested === undefined ? defaults : { frontier: requested, local: requested };
 }
 
-/** The `styleVariant` an eval /generate echoes: the variant of the brain that actually answered. */
-export function styleEcho(brain: 'local' | 'frontier', chosen: StyleDefaults): StyleVariant {
-  return brain === 'frontier' ? chosen.frontier : chosen.local;
+/** A persona, as far as naming its style goes: the guide it speaks with (@flint/persona's Persona.styleGuide). */
+export interface StyledPersona {
+  readonly styleGuide: string;
+}
+
+/**
+ * The variant whose guide `p` actually speaks with, or undefined when its guide
+ * is no known variant's text. Read from the persona, not from what a request
+ * asked for: this is what an eval /generate echoes. (Each variant's text is
+ * distinct and pinned, @flint/persona test/flint-variants.test.ts.)
+ */
+export function styleVariantOf(p: StyledPersona): StyleVariant | undefined {
+  return STYLE_VARIANTS.find((v) => FLINT_STYLE_VARIANTS[v] === p.styleGuide);
+}
+
+/**
+ * Wraps a turn's call to a persona (`ask`) so the eval echo can name the style of
+ * the persona that produced the answer: the last one whose call returned. A tier
+ * that threw and fell back to the next doesn't count, and nor does the variant the
+ * request asked for. `styleVariant()` is undefined until a call has returned, or
+ * when the answering persona's guide is no known variant (the field is then left
+ * out of the response, and apps/parity's echo check fails).
+ */
+export function echoStyle<P extends StyledPersona, R>(ask: (p: P) => Promise<R>): {
+  ask: (p: P) => Promise<R>;
+  styleVariant: () => StyleVariant | undefined;
+} {
+  let answered: P | undefined;
+  return {
+    ask: async (p) => {
+      const out = await ask(p);
+      answered = p;
+      return out;
+    },
+    styleVariant: () => (answered === undefined ? undefined : styleVariantOf(answered)),
+  };
 }
 
 /** The part of a frontier tier (brains.ts BrainTier) a variant persona is built from. */
@@ -154,4 +192,56 @@ export class StyledPersonas<P> {
     }
     return p;
   }
+}
+
+/** What one /generate turn asked for, already validated (parseLocalModelRequest, parseStyleVariantRequest). */
+export interface TurnRequest {
+  /** Eval `styleVariant`; undefined for all live traffic. */
+  styleVariant: StyleVariant | undefined;
+  /** Eval `localModel` (a bake-off candidate); undefined for the live local model. */
+  localModel: string | undefined;
+  /** Eval `localThink`, only with localModel. */
+  localThink: boolean | undefined;
+}
+
+/** The personas one /generate turn may be answered by, each in the turn's style variant. */
+export interface TurnPersonas<P> {
+  /** The local brain: the live local persona, or the eval localModel override, and its model label. */
+  local: { persona: P; model: string; think?: boolean };
+  /** A frontier tier's persona (the tier's own for the live default). */
+  frontier: (brain: StyledBrain<P>) => P;
+}
+
+/**
+ * Every persona choice a /generate turn makes, in one place: the variant for each
+ * brain (the requested one on either, else each brain's live default), the local
+ * persona (the live one, or the (model, think, variant) override for an eval
+ * localModel), and the frontier chooser. With no styleVariant and no localModel
+ * (all live traffic) these are exactly the personas main() built at boot. A 422
+ * when localModel is asked of a server whose local brain isn't Ollama.
+ */
+export function turnPersonas<P>(
+  req: TurnRequest,
+  server: {
+    styled: StyledPersonas<P>;
+    /** The live local model's label. */
+    model: string;
+    /** Eval local-model override personas; undefined when the local brain isn't Ollama. */
+    localModels: LocalPersonaCache<OverridePersona<P>> | undefined;
+  },
+): ({ ok: true } & TurnPersonas<P>) | { ok: false; status: 422; error: string } {
+  const style = chooseStyles(req.styleVariant, server.styled.defaults);
+  const local = resolveLocalPersona(
+    req.localModel,
+    { persona: server.styled.local(style.local), model: server.model },
+    server.localModels,
+    req.localThink,
+    style.local,
+  );
+  if (!local.ok) return local;
+  return {
+    ok: true,
+    local: { persona: local.persona, model: local.model, ...(local.think !== undefined ? { think: local.think } : {}) },
+    frontier: (brain) => server.styled.frontier(brain, style.frontier),
+  };
 }
