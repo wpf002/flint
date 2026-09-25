@@ -27,3 +27,7 @@ if [ "$before" != "$after" ]; then
 else
   echo "$(date '+%F %T') up to date ($after)"
 fi
+
+# The native app is not part of the server deploy. Checked every tick, not only
+# on new code: an update waiting for Flint.app to quit installs the tick after.
+./apps/desktop-mac/update_app.sh || echo "$(date '+%F %T') app: update_app.sh failed"
