@@ -152,11 +152,15 @@ export function preflightChecks(opts: {
     return checks;
   }
   const overlap = m.overlap.train + m.overlap.valid;
+  // The builder's own CONTAMINATED verdict counts even if its overlap tally doesn't say so.
+  const clean = overlap === 0 && m.status !== 'CONTAMINATED';
   checks.push({
     id: 'contamination',
     severity: 'fatal',
-    ok: overlap === 0,
-    detail: overlap === 0 ? 'manifest: 0 training rows overlap an eval set' : `manifest: ${overlap} training rows overlap an eval set (${m.path}); the candidate saw its own exam`,
+    ok: clean,
+    detail: clean
+      ? 'manifest: 0 training rows overlap an eval set'
+      : `manifest: ${Number.isNaN(overlap) ? 'unknown' : overlap} training rows overlap an eval set, status ${m.status} (${m.path}); the candidate saw its own exam`,
   });
   checks.push({ id: 'manifest', severity: 'hold', ok: m.status === 'ok', detail: `manifest status ${m.status}` });
   for (const s of opts.sets) {

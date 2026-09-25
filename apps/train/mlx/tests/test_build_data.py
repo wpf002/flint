@@ -9,7 +9,7 @@ from helpers import LONG, corpus_row, eval_pool_cid, eval_set, sample_row, small
 import build_data
 from build_data import Row, build, load_corpus, load_samples, render, repeat_factor
 from contamination import ContaminationGuard
-from parity_text import is_near_duplicate, word_set
+from parity_text import is_near_duplicate, prompt_id, word_set
 
 EVAL_PROMPTS = ["Explain the birthday paradox.", "How does a transistor work?", "Compare postgres mysql performance"]
 
@@ -192,6 +192,26 @@ class SplitAndRender(BuildBase):
         res = self.run_build(rows, profile=p)
         self.assertEqual(res.manifest["counts"]["byKind"], {"human": 1})
         self.assertEqual(res.manifest["drops"]["duplicate"], 2)
+
+    def test_greetings_and_near_duplicates_are_dropped_before_the_split(self):
+        near = TOPICS[0] + " mountains"  # not the same text after normalize, but parity's near-duplicate
+        self.assertTrue(is_near_duplicate(word_set(TOPICS[0]), word_set(near)))
+        greetings = ["hey there", "thanks, that works great"]
+        rows = self._rows(
+            [sample_row(g, cid=next(self.cids), ts=i) for i, g in enumerate(greetings)]
+            + [sample_row(TOPICS[0], cid=next(self.cids), ts=10), sample_row(near, cid=next(self.cids), ts=11)]
+            + [sample_row(TOPICS[i], cid=next(self.cids), ts=20 + i) for i in range(1, 5)]
+        )
+        res = self.run_build(rows, profile=small_profile(min_train=1, valid_n=2, min_valid=1))
+        self.assertEqual(res.manifest["drops"]["trivial-prompt"], 2)
+        self.assertEqual(res.manifest["drops"]["duplicate"], 1)
+        self.assertEqual(res.manifest["counts"]["targets"], 5)
+        ids = res.manifest["promptIds"]["train"] + res.manifest["promptIds"]["valid"]
+        self.assertFalse({prompt_id(g) for g in greetings} & set(ids))
+        # The older copy is kept, and only one of the pair is anywhere in train or valid.
+        self.assertIn(prompt_id(TOPICS[0]), ids)
+        self.assertNotIn(prompt_id(near), ids)
+        self.assertEqual([p for p in res.sampling_prompts if p["prompt"] in greetings], [])
 
     def test_valid_is_fixed_and_has_no_near_duplicate_in_train(self):
         rows = self.many(10)

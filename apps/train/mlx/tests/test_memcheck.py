@@ -46,6 +46,13 @@ class Decide(unittest.TestCase):
         self.assertEqual(r["decision"], "defer")
         self.assertIn("pressure", r["reason"])
 
+    def test_ram_that_fits_is_not_enough_past_the_gpu_wired_limit(self):
+        # Plenty of RAM, but macOS's default wired limit (~75% of RAM) or a low
+        # iogpu.wired_limit_mb caps what the GPU can hold: 20 live + 24 (smallest) > 40 - 2.
+        r = decide(MUSE, ram_gb=200.0, wired_limit_gb=40.0, ollama_now_gb=None, pressure="normal", measured={})
+        self.assertEqual(r["decision"], "defer")
+        self.assertTrue(all(t["fitsRam"] and not t["fitsWired"] for t in r["tried"]))
+
     def test_a_32gb_machine_defers(self):
         r = decide(MUSE, ram_gb=34.4, wired_limit_gb=25.8, ollama_now_gb=18.0, pressure="normal", measured={})
         self.assertEqual(r["decision"], "defer")

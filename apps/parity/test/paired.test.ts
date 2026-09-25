@@ -27,6 +27,17 @@ describe('bootstrapMeanCI', () => {
     expect(a[0]).toBeGreaterThan(0);
   });
 
+  it('is a two-sided interval at the level asked for, not a narrower one', () => {
+    // 50 ones and 50 zeros: the bootstrap mean is ~ Normal(0.5, 0.05), so a 90% interval is
+    // about ±1.645 sd = ±0.082 (an 80% one would be ±0.064). The lower end is the 5th percentile.
+    const xs = [...Array(50).fill(1), ...Array(50).fill(0)];
+    const [lo, hi] = bootstrapMeanCI(xs, 0.9, 10_000, 3);
+    expect(0.5 - lo).toBeGreaterThan(0.075);
+    expect(0.5 - lo).toBeLessThan(0.09);
+    expect(hi - 0.5).toBeGreaterThan(0.075);
+    expect(hi - 0.5).toBeLessThan(0.09);
+  });
+
   it('is [0, 0] for nothing', () => {
     expect(bootstrapMeanCI([], 0.9, 100, 1)).toEqual([0, 0]);
   });

@@ -58,6 +58,13 @@ class Guard(unittest.TestCase):
         with self.assertRaises(MissingEvalSet):
             ContaminationGuard.from_paths([os.path.join(self.dir, "nope.jsonl")])
 
+    def test_required_set_missing_fails_closed_even_when_an_optional_set_is_present(self):
+        # flint_tasks.jsonl on disk must not stand in for a missing parity_prompts.jsonl:
+        # the data would be called clean against a set it was never checked against.
+        tasks = eval_set(self.dir, ["Summarize my calendar for next week"], name="flint_tasks.jsonl")
+        with self.assertRaises(MissingEvalSet):
+            ContaminationGuard.from_paths([os.path.join(self.dir, "parity_prompts_missing.jsonl")], [tasks])
+
     def test_optional_set_missing_is_recorded_absent(self):
         g = ContaminationGuard.from_paths([self.path], [os.path.join(self.dir, "flint_tasks.jsonl")])
         sets = g.describe()["evalSets"]
