@@ -17,11 +17,13 @@ import { BudgetGuard } from './budget.js';
 import {
   FatalError,
   assertLocalModelName,
+  assertStyleVariantSupported,
   claudeContestant,
   competitorSystem,
   flintContestant,
   flintContestantName,
   flintHealth,
+  flintVariantFlag,
   localThinkFlag,
   ollamaHasModel,
   ollamaModelCapabilities,
@@ -30,8 +32,9 @@ import {
   resolveFlintToken,
   type Contestant,
 } from './contestants.js';
+import { groundedJudgeId, groundingChars, splitGroundedJudgeId } from './grounding.js';
 import { flintIsA, judgePair, outcomeFor } from './judge.js';
-import { chooseJudge, judgeWithPanel, panelId, parseJudgePanel, verdictFor, type Panelist } from './panel.js';
+import { chooseGroundedJudge, judgeWithPanel, panelId, parseJudgePanel, verdictFor, type Panelist } from './panel.js';
 import { estimateCost, costOf } from './pricing.js';
 import { buildPromptSet, takeBalanced, type EvalPrompt, type TrainingRecord } from './prompts.js';
 import {
@@ -39,6 +42,7 @@ import {
   cachedJudgments,
   historyRow,
   judgmentKey,
+  latestAnswers,
   latestJudgments,
   renderMarkdown,
   reportFileName,
@@ -155,6 +159,8 @@ async function run(argv: string[]): Promise<void> {
       'flint-local': { type: 'boolean', default: false },
       'local-model': { type: 'string' },
       'local-think': { type: 'string' },
+      'flint-variant': { type: 'string' },
+      'judge-grounding': { type: 'boolean', default: false },
       seed: { type: 'string', default: '1' },
       prompts: { type: 'string', default: PROMPTS_PATH },
     },
@@ -191,15 +197,21 @@ async function run(argv: string[]): Promise<void> {
   const runMeta = join(runDir, 'run.json');
   const resumed = existsSync(runMeta) ? (JSON.parse(readFileSync(runMeta, 'utf8')) as { judgeModel?: string; judgePanel?: string[] }) : undefined;
   // ---- judge (validated up front: a missing key should fail before any answer is bought)
-  const judge = chooseJudge({
+  const judge = chooseGroundedJudge({
     judgeModel: values['judge-model'],
     judgePanel: values['judge-panel'],
+    judgeGrounding: values['judge-grounding'],
     resumed,
     defaults: { judgeModel: DEFAULTS.judgeModel, judgePanel: DEFAULTS.judgePanel },
   });
   const panelSpecs = judge.panel;
+  // The id verdicts carry (keys, reports, history): `+grounded` when grounded.
   const judgeModel = judge.judgeModel;
+  // The model a single judge calls and is priced as (never the `+grounded` id).
+  const judgeApiModel = judge.model;
+  const grounded = judge.grounded;
   if (judge.from === 'run') log(`judge: ${judgeModel}, the run's own (run.json); pass --judge-model or --judge-panel to use another`);
+  if (grounded) log(`judge sees Flint's grounding (recalled memory + tool results): verdicts are kept under ${judgeModel}`);
   const vendorKey = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY' } as const;
   if (!values['no-judge']) {
     for (const v of panelSpecs ? [...new Set(panelSpecs.map((p) => p.vendor))] : (['anthropic'] as const)) {
@@ -212,6 +224,7 @@ async function run(argv: string[]): Promise<void> {
   if (judgeOnly && values['no-judge']) throw new Error('--judge-only and --no-judge together do nothing');
   const localModel = values['local-model']?.trim() || undefined;
   const localThink = localThinkFlag(values['local-think'], localModel);
+  const styleVariant = flintVariantFlag(values['flint-variant']);
   if (localModel && !judgeOnly) {
     assertLocalModelName(localModel);
     let has: { ok: boolean; available: string[] };
@@ -253,6 +266,7 @@ async function run(argv: string[]): Promise<void> {
     if (!judgeOnly && localThink !== undefined && health.localThinkOverride !== true) {
       throw new Error(`the Flint server at ${url} doesn't support --local-think (/health has no localThinkOverride). Deploy this branch first.`);
     }
+    if (!judgeOnly && styleVariant !== undefined) assertStyleVariantSupported(health, styleVariant, url);
     const token = judgeOnly
       ? 'unused'
       : resolveFlintToken({
@@ -270,6 +284,9 @@ async function run(argv: string[]): Promise<void> {
       localOnly: values['flint-local']! || localModel !== undefined,
       ...(localModel ? { localModel } : {}),
       ...(localThink !== undefined ? { localThink } : {}),
+      ...(styleVariant !== undefined ? { styleVariant } : {}),
+      // A grounded judge needs every new answer's grounding; a server without it stops the run.
+      requireGrounding: grounded,
     });
     contestants.push(flint);
     log(judgeOnly ? `${flint.name}: cached answers only (--judge-only)` : `${flint.name}: ${url} (local brain ${String(health.provider)}:${String(health.model)}, ${String(health.tools)} tools)`);
@@ -365,6 +382,7 @@ async function run(argv: string[]): Promise<void> {
               costUsd: res.costUsd,
               ms: Date.now() - t0,
               ...(res.meta ? { meta: res.meta } : {}),
+              ...(res.grounding ? { grounding: res.grounding } : {}),
               ts: Date.now(),
             };
             appendJsonl(answersPath, row);
@@ -400,9 +418,11 @@ async function run(argv: string[]): Promise<void> {
   // ---- judge
   const judgments = new Map<string, JudgmentRow>();
   let newJudgments = 0;
+  // Prompts whose cached Flint answer has no grounding: a grounded judge can't judge them.
+  const ungrounded = new Set<string>();
   // Verdicts for normal Flint, local-only Flint and each local-model candidate share
-  // a run dir; the subject keeps them apart. judgeModel (a model, or a panel id) keeps
-  // single-judge and panel verdicts apart.
+  // a run dir; the subject keeps them apart. judgeModel (a model, or a panel id,
+  // `+grounded` or not) keeps single-judge, panel and grounded verdicts apart.
   const subject = flint.name;
   const keyOf = (promptId: string, comp: Contestant): string =>
     judgmentKey({ promptId, competitor: comp.name, competitorModel: comp.model, judgeModel });
@@ -421,9 +441,16 @@ async function run(argv: string[]): Promise<void> {
       for (const comp of competitors) {
         if (!answers.get(answerKey(p.id, comp.name, comp.model))) continue;
         if (judgments.has(keyOf(p.id, comp))) continue;
+        // Answered by a server that didn't report grounding: judging it "grounded"
+        // with nothing to show would mix two kinds of verdict under one id.
+        if (grounded && !fa.grounding) {
+          ungrounded.add(p.id);
+          continue;
+        }
         pairs.push({ p, comp });
       }
     }
+    if (ungrounded.size) log(`skipping ${ungrounded.size} prompt(s) whose Flint answer has no grounding recorded (answered before the server reported it)`);
     log(`judging ${pairs.length} pair(s) with ${judgeModel}`);
     const judgeMaxTokens = Number(values['judge-max-tokens']);
     await pool(
@@ -433,6 +460,7 @@ async function run(argv: string[]): Promise<void> {
         const fa = answers.get(answerKey(p.id, flint!.name, flint!.model))!;
         const ca = answers.get(answerKey(p.id, comp.name, comp.model))!;
         const aIsFlint = flintIsA(p.id, comp.name, seed);
+        const grounding = grounded ? fa.grounding : undefined;
         const base = {
           subject,
           promptId: p.id,
@@ -466,6 +494,7 @@ async function run(argv: string[]): Promise<void> {
             seed,
             now,
             signal: ac.signal,
+            grounding,
           });
           if (r.kind === 'refused') return stop(`budget of $${budget.limitUsd.toFixed(2)} reached`);
           if (r.kind === 'error') return record({ ...base, ok: false, error: r.error, panel: r.panel, costUsd: r.costUsd, ts: Date.now() });
@@ -483,7 +512,7 @@ async function run(argv: string[]): Promise<void> {
         }
 
         const [ansA, ansB] = aIsFlint ? [fa.text!, ca.text!] : [ca.text!, fa.text!];
-        const est = estimateCost('anthropic', judgeModel, p.prompt.length + ansA.length + ansB.length, {
+        const est = estimateCost('anthropic', judgeApiModel, p.prompt.length + ansA.length + ansB.length + groundingChars(grounding), {
           overheadTokens: 700,
           expectedOutputTokens: 800,
         });
@@ -492,20 +521,21 @@ async function run(argv: string[]): Promise<void> {
         try {
           const j = await judgePair({
             provider: judgeProvider!,
-            model: judgeModel,
+            model: judgeApiModel,
             maxTokens: judgeMaxTokens,
             prompt: p,
             answerA: ansA,
             answerB: ansB,
             now,
             signal: ac.signal,
+            grounding,
           });
-          const cost = costOf('anthropic', judgeModel, j.usage);
+          const cost = costOf('anthropic', judgeApiModel, j.usage);
           settle(cost);
           record({ ...base, ok: true, verdict: j.verdict, outcome: outcomeFor(j.verdict, aIsFlint), reason: j.reason, costUsd: cost, ts: Date.now() });
         } catch (err) {
           const usage = (err as { usage?: { input: number; output: number } }).usage;
-          const cost = usage ? costOf('anthropic', judgeModel, usage) : 0;
+          const cost = usage ? costOf('anthropic', judgeApiModel, usage) : 0;
           settle(cost);
           record({ ...base, ok: false, error: err instanceof Error ? err.message : String(err), costUsd: cost, ts: Date.now() });
         }
@@ -532,6 +562,12 @@ async function run(argv: string[]): Promise<void> {
   } else if (competitors.some((c) => c.model.startsWith('claude')) && judgeModel.startsWith('claude')) {
     notes.push(`The judge (${judgeModel}) is a Claude model and so is a competitor — expect some self-preference in that column.${subject === 'flint' ? " Flint's frontier brain is also Claude." : ''}`);
   }
+  if (grounded) notes.push(GROUNDED_NOTE);
+  if (ungrounded.size) {
+    notes.push(
+      `${ungrounded.size} prompt(s) were not judged: their cached Flint answer has no grounding recorded (answered before the server reported it). Answer them again in a new run, or under a --flint-variant name, to judge them grounded.`,
+    );
+  }
   const md = renderMarkdown({
     run,
     promptSet: promptsPath,
@@ -544,6 +580,8 @@ async function run(argv: string[]): Promise<void> {
     stoppedForBudget: budget.exhausted,
     notes,
     subject,
+    judgeModel,
+    promptIds: ids,
   });
   writeFileSync(join(runDir, reportName), md);
 
@@ -563,16 +601,8 @@ async function run(argv: string[]): Promise<void> {
   if (stopReason && stopReason !== `budget of $${budget.limitUsd.toFixed(2)} reached`) process.exitCode = 1;
 }
 
-/** One row per (prompt, contestant, model): the success if there is one, else the latest failure. */
-function latestAnswers(rows: readonly AnswerRow[]): AnswerRow[] {
-  const m = new Map<string, AnswerRow>();
-  for (const r of rows) {
-    const k = `${r.promptId}|${r.contestant}|${r.model}`;
-    const prev = m.get(k);
-    if (!prev || r.ok || !prev.ok) m.set(k, r);
-  }
-  return [...m.values()];
-}
+const GROUNDED_NOTE =
+  "Grounded judge (--judge-grounding): the judge also saw the memory Flint's server recalled and the results of the tools Flint called (each cut to 800 characters), and was told that facts this context supports are not fabrications. These verdicts are kept apart from ungrounded ones (judge id ends in +grounded).";
 
 // --------------------------------------------------------------------------
 // report
@@ -585,15 +615,19 @@ function report(argv: string[]): void {
       'flint-local': { type: 'boolean', default: false },
       'local-model': { type: 'string' },
       'local-think': { type: 'string' },
+      'flint-variant': { type: 'string' },
       // Which verdicts to render; defaults to the judge the run was created with.
       'judge-model': { type: 'string' },
       'judge-panel': { type: 'string' },
+      // ...and the grounded verdicts of that judge (`<judge>+grounded`).
+      'judge-grounding': { type: 'boolean', default: false },
     },
   });
   const localModel = values['local-model']?.trim() || undefined;
   if (localModel) assertLocalModelName(localModel);
   const localThink = localThinkFlag(values['local-think'], localModel);
-  const subject = flintContestantName({ localOnly: values['flint-local'], localModel, localThink });
+  const styleVariant = flintVariantFlag(values['flint-variant']);
+  const subject = flintContestantName({ localOnly: values['flint-local'], localModel, localThink, styleVariant });
   if (!values.run) throw new Error('--run <dir|name> required');
   const runDir = existsSync(values.run) ? resolve(values.run) : join(EVAL_DIR, 'runs', values.run);
   const meta = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as {
@@ -602,28 +636,38 @@ function report(argv: string[]): void {
     contestants: Array<{ name: string; model: string }>;
     judgeModel: string;
   };
-  const judgeModel = values['judge-panel'] ? panelId(parseJudgePanel(values['judge-panel'])) : values['judge-model'] ?? meta.judgeModel;
+  const chosen = values['judge-panel'] ? panelId(parseJudgePanel(values['judge-panel'])) : values['judge-model'] ?? meta.judgeModel;
+  const judgeModel = values['judge-grounding'] ? groundedJudgeId(chosen) : chosen;
   const ids = new Set(meta.promptIds);
   const rows = readJsonl<JudgmentRow>(join(runDir, 'judgments.jsonl'));
   const answers = latestAnswers(readJsonl<AnswerRow>(join(runDir, 'answers.jsonl')));
   const judgeRows = rows.filter((j) => ids.has(j.promptId) && j.judgeModel === judgeModel && (j.subject ?? 'flint') === subject);
   const spend = answers.reduce((s, a) => s + (a.costUsd || 0), 0) + judgeRows.reduce((s, j) => s + (j.costUsd || 0), 0);
   // run.json lists the contestants the run started with; a later --flint-local /
-  // --local-model invocation answered as its own contestant, so add that one.
+  // --local-model / --flint-variant invocation answered as its own contestant, so add that one.
   const extra = meta.contestants.some((c) => c.name === subject) ? [] : answers.filter((a) => a.contestant === subject).slice(0, 1);
   const contestants = [...extra.map((a) => ({ name: a.contestant, model: a.model })), ...meta.contestants];
+  // The strict line covers the competitors this subject was judged against, not
+  // every competitor run.json lists (a later candidate may have faced only one).
+  const judgedAgainst = new Map(judgeRows.map((j) => [j.competitor, j.competitorModel] as const));
+  const notes = [`Re-rendered from cached rows (judge: ${judgeModel}); spend shown is the run total across invocations.`];
+  if (splitGroundedJudgeId(judgeModel).grounded) notes.push(GROUNDED_NOTE);
   const md = renderMarkdown({
     run: basename(runDir),
     promptSet: meta.promptSet,
     promptCount: meta.promptIds.length,
     contestants,
-    answers,
+    // The run's prompts only, like the verdicts: answer rates and the strict line cover the same set.
+    answers: answers.filter((a) => ids.has(a.promptId)),
     summaries: summarize(latestJudgments(rows, judgeModel, subject, ids)),
     spendUsd: spend,
     budgetUsd: spend,
     stoppedForBudget: false,
-    notes: [`Re-rendered from cached rows (judge: ${judgeModel}); spend shown is the run total across invocations.`],
+    notes,
     subject,
+    judgeModel,
+    promptIds: ids,
+    strictCompetitors: [...judgedAgainst].map(([name, model]) => ({ name, model })),
   });
   writeFileSync(join(runDir, reportFileName(subject)), md);
   process.stdout.write(md + '\n');

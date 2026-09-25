@@ -15,7 +15,7 @@ Everything it writes lives under `~/.flint/eval/`:
 | `parity_prompts.jsonl` (+ `.meta.json`) | the frozen prompt set |
 | `runs/<ts>/answers.jsonl` | every answer from every contestant (the resume cache) |
 | `runs/<ts>/judgments.jsonl` | every judge verdict, with its reason |
-| `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local`, each `--local-model` candidate and each `--local-think` variant) |
+| `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local`, each `--local-model` candidate, each `--local-think` variant and each `--flint-variant`) |
 | `runs/<ts>/run.json` | the config the run started with |
 | `parity_history.csv` | one row per competitor per run, for the trend line |
 
@@ -190,14 +190,46 @@ bake-off is for.
 The live server's own local brain takes the same flag from `OLLAMA_THINK` (see
 apps/server/README.md). Unset, it behaves exactly as before.
 
+**Persona style variants (`--flint-variant <v>`).** A/B tests a persona style guide
+without changing what Will gets. The request carries `styleVariant`, which the server
+accepts only with `eval: true` (anything else is a 400), and answers with that variant's
+persona: `v1` (today's `FLINT_STYLE_GUIDE`), `v2` (a new frontier persona), `local-v1` (a
+compact local guide). The live defaults stay as they are unless `FLINT_STYLE_VARIANT` /
+`FLINT_LOCAL_STYLE_VARIANT` are set on the server. It works on its own and with
+`--flint-local`, `--local-model` and `--local-think`: the contestant gets `#<v>` appended
+(`flint#v2`, `flint-local#local-v1`, `flint-local@muse-glimmer:30b~nothink#local-v1`), so
+its answers, verdicts, report (`#` becomes `+`: `report-flint+v2.md`,
+`report-flint-local@muse-glimmer_30b~nothink+local-v1.md`) and history rows never mix
+with cached ones. **Without the flag nothing changes**: no `styleVariant` is sent and
+the name stays as before. Before sending anything the harness checks that `/health`
+lists the variant in `styleVariants` (a server without that field predates style
+variants, and the run stops with a message saying so). Every reply must echo
+`styleVariant` as the variant actually used; a missing or different echo stops the run.
+So does any HTTP 400: that's the server refusing the request's shape, which would fail
+every prompt the same way.
+
+A fair A/B names both sides, so both are answered fresh by the same server:
+
+```
+pnpm --filter @flint/parity parity --run <ts> --flint-variant v1 --contestants flint,openai --judge-panel anthropic:claude-opus-5-5,openai:gpt-5 --budget-usd 30
+pnpm --filter @flint/parity parity --run <ts> --flint-variant v2 --contestants flint,openai --judge-panel anthropic:claude-opus-5-5,openai:gpt-5 --budget-usd 30
+pnpm --filter @flint/parity report --run <ts> --flint-variant v2 --judge-panel anthropic:claude-opus-5-5,openai:gpt-5
+```
+
 **Resume.** Re-run with `--run <ts>` (or a path). Cached successful answers and
 verdicts are reused, and failures are retried. That is how you continue after a budget
 stop or Ctrl-C. A resumed run keeps the judge in its `run.json` (model or panel) unless
 you pass `--judge-model` or `--judge-panel`, as `report` does, so a later invocation on
 the same run can't switch judges by accident.
 
-**Failures.** A prompt Flint fails on (e.g. the local brain is down) is not judged and
-not counted as a loss. It's listed in the report so you can fix the cause and resume.
+**Failures.** A prompt Flint fails on (no successful answer after retries: an empty
+answer, an HTTP 500, a timeout, the local brain being down) is not judged, so the
+head-to-head tally leaves it out. That hides a Flint that often fails to answer, so the
+report also shows each contestant's **answer rate** (answered / asked) and, next to the
+normal tally, a **strict** line per competitor in which every prompt Flint failed and
+the competitor answered counts as a Flint loss. A competitor's failures are not counted
+as Flint wins, so the strict line is a lower bound for Flint. Failures are listed in the
+report so you can fix the cause and resume.
 
 ## 3. The judge panel (`--judge-panel`)
 
@@ -240,13 +272,52 @@ Add `--flint-local` to both lines to re-judge the local-only answers. `report` d
 the judge in `run.json`; pass `--judge-model` or `--judge-panel` to render another judge's
 verdicts.
 
-## 4. Read the result
+## 4. Judge grounding (`--judge-grounding`)
+
+The judge sees two answers and nothing else. When Flint states a fact it read from
+long-term memory or a tool result (the dog's name, a Vantage score, today's calendar),
+the judge can't tell it from an invention, and the rubric calls fabricated specifics a
+severe failure. With `--judge-grounding` the judge (or every panelist) also sees what
+Flint's answer was grounded on, in the user message between the request and the
+answers: "Context Flint had access to (the other assistant did not)", the recalled
+memory and each tool result (name, ok/error, the first 800 characters), with the
+instruction that a fact this context supports is not a fabrication. It doesn't say which
+slot is Flint's. The system prompt and rubric are unchanged, and **without the flag the
+judge prompt is byte-for-byte what it was**.
+
+- Where it comes from: every eval `/generate` response now carries
+  `grounding: { memory: string[], tools: [{ name, isError, excerpt }] }` (the facts
+  injected into that turn's context, and its tool results; see
+  apps/server/src/grounding.ts). The harness stores it on the answer row
+  (`answers.jsonl` `grounding`) whether or not the judge uses it. The tool results are
+  read from the server's action log for the duration of the turn, so a request running
+  at the same time (another eval answer, or Will chatting) could add its own: keep
+  `--flint-concurrency 1`, as for the `tools` list.
+- Grounded verdicts carry the judge id plus `+grounded` (`claude-opus-5-5+grounded`,
+  `panel:anthropic:claude-opus-5-5+openai:gpt-5+grounded`), so they never share a resume
+  cache entry, a report or a `parity_history.csv` row with ungrounded ones. A new run
+  started with the flag records that id in `run.json`, and a resumed run keeps it.
+- A cached Flint answer with no `grounding` (answered by a server before this) is not
+  judged grounded: its pairs are skipped and counted in the report's notes. Answer again
+  in a new run, or under a `--flint-variant` name, to judge those prompts grounded.
+- When answering, a server that sends no `grounding` stops the run (it predates it).
+- `report --judge-grounding` renders the grounded verdicts of the chosen judge.
+- **Privacy:** the context goes to every judge, including OpenAI in a panel, and tool
+  excerpts can contain email, calendar or Drive text. The flag is opt-in for that reason.
+
+```
+pnpm --filter @flint/parity parity --run <ts> --flint-variant v2 --judge-grounding --contestants flint,openai --budget-usd 30
+pnpm --filter @flint/parity report --run <ts> --flint-variant v2 --judge-grounding
+```
+
+## 5. Read the result
 
 Per competitor, the report shows Flint's W/L/T, its win rate (a tie counts as half, so
 50% is parity), the exact two-sided sign test p on decisive games, and a signal using
 the same labels as `eval_judge.py`: **SIGNIFICANT** (p < 0.05), **weak** (p < 0.32),
-**NOISE** (anything else, or fewer than 4 decisive games). The same breakdown is then
-repeated per category. `parity_history.csv` gets one cumulative row per competitor per
+**NOISE** (anything else, or fewer than 4 decisive games). Next to it, the strict line
+counts Flint's failures as losses (see Failures above), and the contestants table shows
+each one's answer rate. The same breakdown is then repeated per category. `parity_history.csv` gets one cumulative row per competitor per
 invocation that judged something new. For a resumed run, the last row for that `run`
 id is the result.
 
@@ -281,5 +352,9 @@ secrets parsing and token resolution; the panel's consensus rule, per-panelist A
 error and budget handling, and cache separation from single-judge rows; which judge a
 run uses (flags, then a resumed run's own, then the defaults); the
 local-model contestant's naming, report filename, model-mismatch guard and Ollama check;
-and `--local-think`'s naming (unchanged without the flag), request field, echo guard,
-flag parsing and the Ollama capability check.
+`--local-think`'s naming (unchanged without the flag), request field, echo guard,
+flag parsing and the Ollama capability check; `--flint-variant`'s naming alone and with
+the local flags, report filename, request field, echo guard, HTTP 400 stop and `/health`
+preflight (with a stub fetch); answer rates and the strict tally; and judge grounding
+(parsing, the unchanged default prompt, the grounded prompt, panel pass-through, the
+`+grounded` judge id and its cache separation, and resume behaviour).

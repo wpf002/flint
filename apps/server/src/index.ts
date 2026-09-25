@@ -72,6 +72,7 @@ import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
+import { entriesSince, evalGrounding, markLog, recallContext } from './grounding';
 import {
   parseAttachments,
   readJsonLimited,
@@ -362,16 +363,7 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
 /** Build the per-request context block, injecting any long-term memory that's
  *  relevant to this message so Flint "remembers" without bloating the prompt. */
 async function contextFor(message: string, knowledge: KnowledgeStore): Promise<string> {
-  const base = userContext();
-  let facts: string[] = [];
-  try {
-    facts = await knowledge.recall(message);
-  } catch {
-    /* memory recall is best-effort */
-  }
-  if (facts.length === 0) return base;
-  const block = facts.map((f) => `- ${f}`).join('\n');
-  return `${base}\n[Long-term memory — things you already know about Will; use if relevant, don't recite back:\n${block}\n]`;
+  return (await recallContext(userContext(), message, knowledge)).block;
 }
 
 async function main(): Promise<void> {
@@ -792,11 +784,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const routed = await ctx.router.select(asText);
     const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
     let brain = route.brain;
-    const ctxBlock = await contextFor(asText, ctx.knowledge);
+    // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
+    const recalled = await recallContext(userContext(), asText, ctx.knowledge);
+    const ctxBlock = recalled.block;
     const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
     let answeredBy = local.model;
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
+    const logMark = markLog(ctx.actionLog.actions());
     const ask = (p: Persona) =>
       p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) });
     // Every persona call goes through `answered`, so the eval echo names the style
@@ -837,6 +832,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // request (apps/parity checks it against --flint-variant).
         styleVariant: answered.styleVariant(),
         tools: toolsUsed,
+        // What the turn was grounded on (recalled memory, tool results), for apps/parity --judge-grounding.
+        grounding: evalGrounding(recalled.facts, entriesSince(ctx.actionLog.actions(), logMark)),
         proposed: proposed.map((p) => p.fullName),
         eval: true,
       });

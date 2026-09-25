@@ -9,6 +9,7 @@
  * judge would only give its own model becomes a split (a tie).
  */
 import type { ProviderAdapter, TokenUsage } from '@flint/core';
+import { groundedJudgeId, groundingChars, splitGroundedJudgeId, type FlintGrounding } from './grounding.js';
 import { flintIsA, judgePair, outcomeFor, type Outcome, type Verdict } from './judge.js';
 import { costOf, estimateCost, type Vendor } from './pricing.js';
 import type { EvalPrompt } from './prompts.js';
@@ -110,6 +111,32 @@ export function chooseJudge(opts: {
   return { judgeModel: opts.defaults.judgeModel, from: 'default' };
 }
 
+export interface GroundedJudgeChoice extends JudgeChoice {
+  /** The judge without the `+grounded` suffix: the model to call (single judge) or the panel id. */
+  model: string;
+  /** `--judge-grounding`: the judge sees what Flint was grounded on (see grounding.ts). */
+  grounded: boolean;
+}
+
+/**
+ * chooseJudge, plus grounding. `judgeModel` is the id the verdicts carry, with
+ * `+grounded` when grounded, so grounded and ungrounded verdicts never share a
+ * cache entry, a report or a history row. `--judge-grounding` grounds whichever
+ * judge is chosen. Without it, a resumed run whose own judge is grounded stays
+ * grounded (a resumed run keeps its judge), and an explicit judge flag is not.
+ */
+export function chooseGroundedJudge(
+  opts: Parameters<typeof chooseJudge>[0] & { judgeGrounding?: boolean | undefined },
+): GroundedJudgeChoice {
+  const flagged = opts.judgeModel?.trim() ? splitGroundedJudgeId(opts.judgeModel.trim()) : undefined;
+  if (flagged?.grounded) throw new Error(`--judge-model: pass the model alone ("${flagged.base}") and add --judge-grounding`);
+  const own = opts.resumed?.judgeModel?.trim() ? splitGroundedJudgeId(opts.resumed.judgeModel.trim()) : undefined;
+  const { judgeGrounding, ...rest } = opts;
+  const choice = chooseJudge({ ...rest, resumed: opts.resumed && own ? { ...opts.resumed, judgeModel: own.base } : opts.resumed });
+  const grounded = judgeGrounding === true || (choice.from === 'run' && own?.grounded === true);
+  return { ...choice, model: choice.judgeModel, judgeModel: grounded ? groundedJudgeId(choice.judgeModel) : choice.judgeModel, grounded };
+}
+
 /**
  * Flint's slot for one panelist. Seeded by the pair AND the judge, so each
  * panelist sees an independent (but reproducible) order: a position bias in
@@ -170,9 +197,11 @@ export async function judgeWithPanel(opts: {
   seed: number;
   now: Date;
   signal: AbortSignal;
+  /** `--judge-grounding`: what Flint was grounded on, shown to every panelist. */
+  grounding?: FlintGrounding | undefined;
 }): Promise<PanelResult> {
   const { panel, prompt } = opts;
-  const chars = prompt.prompt.length + opts.flintAnswer.length + opts.competitorAnswer.length;
+  const chars = prompt.prompt.length + opts.flintAnswer.length + opts.competitorAnswer.length + groundingChars(opts.grounding);
   const settles: Array<(actualUsd: number) => void> = [];
   for (const p of panel) {
     const s = opts.reserve(panelistEstimate(p, chars));
@@ -196,6 +225,7 @@ export async function judgeWithPanel(opts: {
           answerB,
           now: opts.now,
           signal: opts.signal,
+          grounding: opts.grounding,
         });
         const costUsd = costOf(p.vendor, p.model, j.usage);
         settles[i]!(costUsd);

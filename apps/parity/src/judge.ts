@@ -1,4 +1,5 @@
 import { decodeAssistantTurn, type ProviderAdapter, type TokenUsage } from '@flint/core';
+import { groundingBlock, type FlintGrounding } from './grounding.js';
 import type { EvalPrompt } from './prompts.js';
 import { seededRng, seedFrom } from './util.js';
 
@@ -31,12 +32,18 @@ If they are genuinely equivalent in quality, or both fail equally, call it a TIE
 Reply with ONLY a JSON object, no prose before or after, no code fence:
 {"verdict": "A" | "B" | "TIE", "reason": "<one or two sentences>"}`;
 
-export function judgeUserMessage(p: EvalPrompt, answerA: string, answerB: string, now: Date): string {
+/**
+ * The judge's user message. With `grounding` (`--judge-grounding` only), the
+ * context Flint had goes between the request and the answers; without it the
+ * message is exactly what it has always been.
+ */
+export function judgeUserMessage(p: EvalPrompt, answerA: string, answerB: string, now: Date, grounding?: FlintGrounding): string {
   return [
     `Date of this evaluation: ${now.toISOString().slice(0, 10)}. Request category: ${p.category}.`,
     '',
     `<request>\n${p.prompt}\n</request>`,
     '',
+    ...(grounding ? [groundingBlock(grounding), ''] : []),
     `<answer_a>\n${answerA}\n</answer_a>`,
     '',
     `<answer_b>\n${answerB}\n</answer_b>`,
@@ -100,6 +107,8 @@ export async function judgePair(opts: {
   answerB: string;
   now: Date;
   signal: AbortSignal;
+  /** `--judge-grounding`: what Flint was grounded on, shown to the judge. */
+  grounding?: FlintGrounding | undefined;
 }): Promise<JudgeCall> {
   const usage: TokenUsage = { input: 0, output: 0 };
   let lastErr: unknown;
@@ -112,7 +121,7 @@ export async function judgePair(opts: {
         {
           id: `judge-${opts.prompt.id}-${attempt}`,
           role: 'user',
-          content: judgeUserMessage(opts.prompt, opts.answerA, opts.answerB, opts.now),
+          content: judgeUserMessage(opts.prompt, opts.answerA, opts.answerB, opts.now, opts.grounding),
           timestamp: Date.now(),
         },
       ],
