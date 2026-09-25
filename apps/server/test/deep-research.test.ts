@@ -102,6 +102,23 @@ describe('search parsing + dedupe', () => {
     expect(parseSearchResult(JSON.stringify({ answer: null, results: [], source: 'searxng' }))).toEqual({ hits: [] });
   });
 
+  it('reads Perplexity via Trident: citations are sources, content a summary without its own [n]', () => {
+    const out = parseSearchResult(
+      JSON.stringify({
+        content: 'The Fed held at 3.75-4% [1][2]. Markets expected it [3].',
+        citations: ['https://www.reuters.com/markets/fed', ' https://federalreserve.gov/x ', 'not a url', 7],
+        model: 'sonar',
+      }),
+    );
+    expect(out).toEqual({
+      hits: [
+        { title: 'reuters.com', url: 'https://www.reuters.com/markets/fed', snippet: '' },
+        { title: 'federalreserve.gov', url: 'https://federalreserve.gov/x', snippet: '' },
+      ],
+      summary: 'The Fed held at 3.75-4%. Markets expected it.',
+    });
+  });
+
   it('reads web_search results from SearXNG, fallback and all', () => {
     const out = parseSearchResult(
       JSON.stringify({
@@ -363,6 +380,26 @@ describe('deepResearch pipeline (all stubbed, no network)', () => {
     // The key error is neither evidence nor an engine summary.
     expect(pack.text).not.toContain('PERPLEXITY_API_KEY');
     expect(pack.text).not.toContain('Search-engine summary');
+  });
+
+  it("fetches and cites the sources a paid Perplexity call returned (Trident's real reply shape)", async () => {
+    const web = stubTool('web.web_search', () => JSON.stringify({ answer: null, results: [], source: 'searxng' }));
+    const perplexity = stubTool('trident.perplexity_search', () =>
+      JSON.stringify({ content: 'The Fed held [1].', citations: ['https://www.federalreserve.gov/newsevents/2026-09-17.htm'], model: 'sonar' }),
+    );
+    const fetched: string[] = [];
+    const pack = await deepResearch(Q, {
+      tools: [web, perplexity],
+      fetchPage: async (url) => {
+        fetched.push(url);
+        return page('Federal Reserve statement', para('decided to maintain the target range for the federal funds rate at 3-3/4 to 4 percent'), '2026-09-17');
+      },
+      now: () => NOW,
+      log: () => {},
+    });
+    expect(fetched).toEqual(['https://www.federalreserve.gov/newsevents/2026-09-17.htm']);
+    expect(pack.cited.map((s) => s.url)).toEqual(['https://www.federalreserve.gov/newsevents/2026-09-17.htm']);
+    expect(pack.text).toContain('Search-engine summary (unsourced — trust only where [n] agrees): The Fed held.');
   });
 
   it('skips Perplexity entirely when Trident is not wired', async () => {
