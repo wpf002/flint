@@ -130,6 +130,8 @@ interface FlintGenerateResponse {
   text?: string;
   usage?: TokenUsage;
   reason?: string;
+  /** Set when no model answered and `text` is the server's honest fallback message instead. */
+  unanswered?: 'refusal' | 'empty';
   brain?: 'local' | 'frontier';
   model?: string;
   /** Echo of the request's `localThink`, from a server that honoured it. */
@@ -249,6 +251,13 @@ export function flintContestant(opts: {
       if (localThink !== undefined && body.localThink !== localThink) {
         throw new FatalError(
           `asked for localThink ${String(localThink)} but the server didn't echo it (got ${String(body.localThink)}) — it predates the think override, or ignored it`,
+        );
+      }
+      // The server's "no model answered" message is not an answer. A failure, as the
+      // empty reply it replaced was: not judged, not a loss, retried on resume.
+      if (body.unanswered) {
+        throw new Error(
+          `flint did not answer (unanswered=${body.unanswered}, reason=${body.reason ?? '?'}, model=${body.model ?? '?'}): it sent its fallback message, which is not judged`,
         );
       }
       if (styleVariant !== undefined && body.styleVariant !== styleVariant) {

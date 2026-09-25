@@ -450,6 +450,13 @@ export function renderMarkdown(r: ReportInput): string {
       'Prompts Flint failed to answer are not judged, so the head-to-head tally leaves them out; the strict line counts each one a competitor answered as a loss. Some are infrastructure failures (e.g. the local brain being down): fix those and re-run the same run dir to fill them in.',
       '',
     );
+    const unanswered = flintErr.filter((a) => /\bunanswered=/.test(a.error ?? '')).length;
+    if (unanswered) {
+      L.push(
+        `${unanswered} of these ${flintErr.length} were not answered by any model (\`unanswered=\`: every tier refused or came back empty, and the server sent its fallback message). A resume on the same server build will most likely fail them again.`,
+        '',
+      );
+    }
     for (const a of flintErr.slice(0, 20)) L.push(`- \`${a.promptId}\`: ${(a.error ?? '').slice(0, 200)}`);
     if (flintErr.length > 20) L.push(`- … and ${flintErr.length - 20} more`);
     L.push('');
