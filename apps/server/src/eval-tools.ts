@@ -1,6 +1,9 @@
 /**
  * Eval-only server hooks for the "Flint tasks" suite in apps/parity (see its
- * README). Neither changes a normal turn.
+ * README). None changes a normal turn.
+ *
+ * 0. `recall: false` on an eval /generate (parseRecallRequest): answer without
+ *    long-term memory, so Flint and the competitors have the same data.
  *
  * 1. `groundingChars` on an eval /generate. The suite hands each frontier
  *    competitor the data Flint's tools returned, so the comparison is answer
@@ -44,6 +47,23 @@ export function parseGroundingCharsRequest(body: Record<string, unknown>): Groun
   }
   if (body.eval !== true) return { ok: false, status: 400, error: 'groundingChars is only accepted with eval: true' };
   return { ok: true, chars: raw };
+}
+
+export type RecallRequest = { ok: true; recall: boolean; asked: boolean } | { ok: false; status: 400; error: string };
+
+/**
+ * Validate the `recall` field of a /generate body. Absent (all normal traffic):
+ * recall as always. `recall: false` (eval only) skips long-term memory for the
+ * turn: apps/parity tasks sends it on every task whose point isn't memory, since
+ * the frontier competitors are handed exactly Flint's data and that data leaves
+ * Will's memory out. `asked` says whether to echo it (apps/parity checks the echo).
+ */
+export function parseRecallRequest(body: Record<string, unknown>): RecallRequest {
+  const raw = body.recall;
+  if (raw === undefined || raw === null) return { ok: true, recall: true, asked: false };
+  if (typeof raw !== 'boolean') return { ok: false, status: 400, error: 'recall must be true or false' };
+  if (body.eval !== true) return { ok: false, status: 400, error: 'recall is only accepted with eval: true' };
+  return { ok: true, recall: raw, asked: true };
 }
 
 /**

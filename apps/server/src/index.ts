@@ -96,7 +96,7 @@ import {
   type FrontierPlan,
 } from './spend';
 import { TurnLog, recallContext, recordTurnEntry } from './grounding';
-import { GROUNDING_CHARS_MAX, parseGroundingCharsRequest, runDiscoveryTool, wiredToolNames } from './eval-tools';
+import { GROUNDING_CHARS_MAX, parseGroundingCharsRequest, parseRecallRequest, runDiscoveryTool, wiredToolNames } from './eval-tools';
 import {
   parseAttachments,
   readJsonLimited,
@@ -774,6 +774,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // (apps/parity tasks), and that GET /eval/tools + POST /eval/tool exist (./eval-tools).
       groundingCharsMax: GROUNDING_CHARS_MAX,
       evalDiscovery: true,
+      // That an eval /generate honours `recall: false` (apps/parity tasks: answer on the
+      // same data the frontier competitors get, which leaves long-term memory out).
+      evalRecallOverride: true,
     });
   }
 
@@ -856,6 +859,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // which hands competitors the data Flint read). 400 unless eval: true and in range.
     const gc = parseGroundingCharsRequest(body);
     if (!gc.ok) return json(res, gc.status, { error: gc.error });
+    // Eval-only: `recall: false` answers without long-term memory (apps/parity tasks,
+    // whose competitors get exactly Flint's data). 400 unless eval: true and a boolean.
+    const rc = parseRecallRequest(body);
+    if (!rc.ok) return json(res, rc.status, { error: rc.error });
     const personas = turnPersonas({ styleVariant: sv.variant, localModel: lm.model, localThink: lm.think }, ctx);
     if (!personas.ok) return json(res, personas.status, { error: personas.error });
     const local = personas.local;
@@ -865,7 +872,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const routed = await ctx.router.select(asText);
     const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
-    const recalled = await recallContext(userContext(), asText, ctx.knowledge);
+    const recalled = await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall });
     const ctxBlock = recalled.block;
     const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
     // Everything the spend caps decide about this turn, before any call (./spend budgetTurn).
@@ -959,6 +966,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         grounding: turn.grounding(recalled.facts, gc.chars),
         // The excerpt length used, echoed only when asked for (apps/parity checks it).
         ...(gc.chars !== undefined ? { groundingChars: gc.chars } : {}),
+        // Echoed only when asked for (apps/parity checks that memory really was skipped).
+        ...(rc.asked ? { recall: rc.recall } : {}),
         proposed: proposed.map((p) => p.fullName),
         // eval: true, plus what the replay cost (costUsd, costByVendor, paidCalls) and
         // budgetBlocked when a paid tool was refused for budget (./spend TurnSpend).

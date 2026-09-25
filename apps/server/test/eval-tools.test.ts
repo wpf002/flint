@@ -5,6 +5,7 @@ import {
   GROUNDING_CHARS_MAX,
   GROUNDING_CHARS_MIN,
   parseGroundingCharsRequest,
+  parseRecallRequest,
   runDiscoveryTool,
   wiredToolNames,
   type DiscoveryAudit,
@@ -49,6 +50,22 @@ describe('groundingChars (eval-only longer tool excerpts)', () => {
     expect(evalGrounding([], entries).tools[0]!.excerpt).toHaveLength(TOOL_EXCERPT_CHARS);
     expect(evalGrounding([], entries, 4000).tools[0]!.excerpt).toHaveLength(4000);
     expect(evalGrounding([], entries, 16_000).tools[0]!.excerpt).toBe(long);
+  });
+});
+
+describe('recall (eval-only: answer without long-term memory)', () => {
+  it('is absent for normal traffic: memory is recalled as always, and nothing is echoed', () => {
+    expect(parseRecallRequest({ prompt: 'hi' })).toEqual({ ok: true, recall: true, asked: false });
+    expect(parseRecallRequest({ prompt: 'hi', eval: true, recall: null })).toEqual({ ok: true, recall: true, asked: false });
+  });
+
+  it('recall: false is accepted only with eval: true', () => {
+    expect(parseRecallRequest({ eval: true, recall: false })).toEqual({ ok: true, recall: false, asked: true });
+    expect(parseRecallRequest({ recall: false })).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('eval: true') });
+  });
+
+  it('must be a boolean', () => {
+    for (const bad of ['false', 0, 'no', {}]) expect(parseRecallRequest({ eval: true, recall: bad })).toMatchObject({ ok: false, status: 400 });
   });
 });
 
