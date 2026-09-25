@@ -16,10 +16,13 @@
  *  - at 100%: that vendor is not called at all. A frontier turn answers on the
  *    next brain whose vendor still has budget (the local brain at the end), and
  *    says so once per conversation per day; a spent search API returns a clear
- *    error naming the alternative, so the model routes around it; TTS returns a
- *    503 and the console speaks with the browser's voice.
+ *    error naming an alternative that still has budget (or, with none, saying
+ *    live search is off), so the model routes around it; TTS returns a 503 and
+ *    the console speaks with the browser's voice.
  *  - every decision is made BEFORE a call. A turn already streaming finishes,
  *    tool loop and all, whatever it costs.
+ *  - eval replays (apps/parity) are exempt and counted apart: their spend is
+ *    `eval`, reported back as the replay's cost, and never touches these caps.
  *
  * Kept out of index.ts so it is unit-testable (index.ts runs main() on import).
  */
