@@ -191,21 +191,26 @@ export interface SearchHit {
   rank: number;
 }
 
+export interface ParsedSearch {
+  hits: Omit<SearchHit, 'query' | 'rank'>[];
+  summary?: string;
+  /** The tool ran but couldn't search (no key, backend down): no evidence, and not a summary either. */
+  error?: string;
+}
+
 /** Pull results out of whatever a search tool returned (JSON text, objects, or prose with links). */
-export function parseSearchResult(raw: unknown): { hits: Omit<SearchHit, 'query' | 'rank'>[]; summary?: string } {
+export function parseSearchResult(raw: unknown): ParsedSearch {
   let value: unknown = raw;
-  if (value && typeof value === 'object' && (value as { isError?: boolean }).isError) return { hits: [] };
-  if (typeof value === 'string') {
-    const s = value.trim();
-    if (s.startsWith('{') || s.startsWith('[')) {
-      try {
-        value = JSON.parse(s);
-      } catch {
-        /* prose */
-      }
-    }
+  if (value && typeof value === 'object' && (value as { isError?: boolean }).isError) {
+    return { hits: [], error: errorText((value as { content?: unknown }).content) };
   }
+  value = parseJsonText(value);
   if (typeof value === 'string') return parseProse(value);
+  // A tool that answers normally with only an error, like Trident's perplexity_search
+  // without PERPLEXITY_API_KEY: {"error": "PERPLEXITY_API_KEY not set. ..."}.
+  if (isRecord(value) && str(value.error) && !Object.keys(value).some((k) => k !== 'error' && value[k] != null)) {
+    return { hits: [], error: str(value.error)!.slice(0, 200) };
+  }
 
   const hits: Omit<SearchHit, 'query' | 'rank'>[] = [];
   let summary: string | undefined;
@@ -235,7 +240,29 @@ export function parseSearchResult(raw: unknown): { hits: Omit<SearchHit, 'query'
   return { hits, ...(summary ? { summary } : {}) };
 }
 
-function parseProse(text: string): { hits: Omit<SearchHit, 'query' | 'rank'>[]; summary?: string } {
+function parseJsonText(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const s = value.trim();
+  if (!s.startsWith('{') && !s.startsWith('[')) return value;
+  try {
+    return JSON.parse(s) as unknown;
+  } catch {
+    return value; // prose
+  }
+}
+
+/** The message inside an MCP error result (plain text, or JSON with an `error` field). */
+function errorText(content: unknown): string {
+  const v = parseJsonText(content);
+  const text = isRecord(v) ? (str(v.error) ?? JSON.stringify(v)) : typeof v === 'string' ? v : JSON.stringify(v ?? 'error');
+  return text.replace(/\s+/g, ' ').trim().slice(0, 200) || 'error';
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function parseProse(text: string): ParsedSearch {
   const hits: Omit<SearchHit, 'query' | 'rank'>[] = [];
   const seen = new Set<string>();
   for (const m of text.matchAll(/\[([^\]]{1,200})\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>()"'\]]+)/g)) {
@@ -634,13 +661,18 @@ export async function deepResearch(question: string, deps: DeepResearchDeps): Pr
   const { queries, planner } = await planQueries(question, { ...deps, log }, now, limits);
 
   // 2. search, all queries x all engines, in parallel
-  const jobs: Array<Promise<{ q: number; res: ReturnType<typeof parseSearchResult> }>> = [];
+  const jobs: Array<Promise<{ q: number; res: ParsedSearch }>> = [];
   queries.forEach((query, q) => {
     for (const st of searchTools) {
       if (st.firstQueryOnly && q > 0) continue;
       jobs.push(
         withTimeout(call(st.name, st.args(query, limits.resultsPerQuery)), limits.searchTimeoutMs, st.name)
-          .then((raw) => ({ q, res: parseSearchResult(raw) }))
+          .then((raw) => {
+            const res = parseSearchResult(raw);
+            // e.g. no PERPLEXITY_API_KEY, or no search key and no SearXNG: the other engines carry on.
+            if (res.error) log(`[research] ${st.name} unavailable for "${query}": ${res.error}`);
+            return { q, res };
+          })
           .catch((err) => {
             log(`[research] ${st.name} failed for "${query}": ${errMsg(err)}`);
             return { q, res: { hits: [] } };
