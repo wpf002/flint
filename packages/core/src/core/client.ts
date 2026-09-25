@@ -156,6 +156,17 @@ export class Flint {
         yield event;
       }
 
+      // A refused turn is not an answer: keeping it would leave the question in
+      // history with an empty reply, and a caller that retries the turn on
+      // another model would find the question there twice.
+      if (!failure && sink.finalReason === 'refusal') {
+        failure = new FlintError(
+          makeAiError('validation', 'The model declined to answer (refusal); the turn was not saved.', {
+            retryable: false,
+          }),
+        );
+      }
+
       if (!failure && sink.finalReason !== 'error') {
         await this.memory.commitTurn({
           conversationId: input.conversationId,

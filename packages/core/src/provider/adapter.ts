@@ -48,8 +48,13 @@ export interface GenerateArgs {
    * shape rather than being asked for it in the prompt. Every provider here expresses
    * the same three states, so it belongs in the contract rather than in each adapter's
    * escape hatch.
+   *
+   * `none` forbids tool calls for this request while the conversation may still hold
+   * earlier tool calls and results (the tool loop's last, answer-only call). Each
+   * adapter honours it its own way: Anthropic and OpenAI keep the tools defined and
+   * send their `none` choice; an adapter with no such knob drops the tools.
    */
-  toolChoice?: 'auto' | 'required' | { name: string };
+  toolChoice?: 'auto' | 'required' | 'none' | { name: string };
   maxTokens?: number;
   /**
    * Optional prompt-cache breakpoints. Providers that don't cache (Ollama,

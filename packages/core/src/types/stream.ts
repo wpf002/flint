@@ -23,11 +23,18 @@ export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 /**
  * Why a generation terminated. Normalized across providers; the tool-call loop
  * is driven entirely by this (`tool_call` → run tools and continue).
+ *
+ * `refusal`: the provider stopped the turn on a policy decision (Anthropic's
+ * `stop_reason: "refusal"`, OpenAI's `refusal` field or `content_filter`). The
+ * text is usually empty or cut short, so it is not a completed answer: a chat
+ * turn that ends this way is not committed to memory, and a caller can try
+ * another model instead of showing the user nothing.
  */
 export const StreamDoneReason = z.enum([
   'complete',
   'tool_call',
   'max_tokens',
+  'refusal',
   'error',
 ]);
 export type StreamDoneReason = z.infer<typeof StreamDoneReason>;

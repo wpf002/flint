@@ -59,10 +59,24 @@ export interface ToolLoopParams {
 const DEFAULT_MAX_ITERATIONS = 6;
 
 /**
+ * What the model reads on the answer-only call after the loop runs out of
+ * iterations. A user-role note rather than an edit to `system`, so the system
+ * prompt (and its cache breakpoint) stays byte-identical; it is sent on that one
+ * call only and never lands in `responseMessages`, so it is never stored.
+ */
+export const TOOL_LIMIT_NOTE =
+  '[Note from the runtime, not from the user: the tool-call limit for this turn has been reached, so no more tools can be called. Answer the request now from the tool results above. If something is still unknown, say so in one line.]';
+
+/**
  * The tool-call loop. Lives in Flint, never in apps (locked invariant #3).
  * Yields normalized StreamEvents to the caller as they happen and drives the
  * model→tool→model cycle off `done.reason === 'tool_call'`. Exactly one
  * terminal event is yielded to the caller: a `done` (success) or `error`.
+ *
+ * If the model is still calling tools after `maxIterations` round-trips, the
+ * loop makes ONE more provider call with tool use forbidden and a note asking
+ * for an answer from the results so far. Only if that call also fails (or says
+ * nothing) does the turn end in an error.
  *
  * On any failure the loop yields an `error` event and stops WITHOUT marking
  * `sink.finalReason` to a terminal success — the caller uses that to keep the
@@ -78,51 +92,17 @@ export async function* runToolLoop(
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     const conversation = [...params.initialMessages, ...sink.responseMessages];
 
-    let attempt = 0;
-    let streamed: StreamOnceResult | undefined;
-
-    // Provider-call retry: only retry when NOTHING was forwarded this attempt
-    // (we can't un-yield partial text). Tool side effects are already in
-    // `responseMessages`, so re-streaming never re-runs a tool.
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      attempt++;
-      const forwarded = { content: false };
-      try {
-        streamed = yield* streamOnce(params, conversation, forwarded);
-        break;
-      } catch (err) {
-        const flintErr = isFlintError(err)
-          ? err
-          : new FlintError(makeAiError('internal', String(err), { retryable: false }));
-
-        emitError(params, flintErr);
-
-        const canRetry =
-          !forwarded.content &&
-          flintErr.retryable &&
-          attempt < params.retryPolicy.maxAttempts;
-
-        if (!canRetry) {
-          yield { type: 'error', error: flintErr.error };
-          return;
-        }
-
-        const backoff = Math.min(
-          params.retryPolicy.maxDelayMs,
-          params.retryPolicy.baseDelayMs * 2 ** (attempt - 1),
-        );
-        await delay(Math.floor(backoff * random()), params.signal);
-      }
+    const streamed = yield* callProvider(params, conversation, random, false);
+    if (streamed instanceof FlintError) {
+      yield { type: 'error', error: streamed.error };
+      return;
     }
-
-    if (!streamed) return; // unreachable; satisfies the type checker
 
     // Accumulate usage across iterations.
     sink.usage = addUsage(sink.usage, streamed.usage);
 
     if (streamed.reason !== 'tool_call') {
-      // Normal completion (or max_tokens): record assistant text, end the turn.
+      // Normal completion (or max_tokens / refusal): record assistant text, end the turn.
       sink.responseMessages.push(
         encodeAssistantText(newId('msg'), streamed.text, now()),
       );
@@ -157,9 +137,7 @@ export async function* runToolLoop(
         sink.responseMessages.push(encodeToolResult(newId('msg'), result, now()));
       }
     } catch (err) {
-      const flintErr = isFlintError(err)
-        ? err
-        : new FlintError(makeAiError('internal', String(err), { retryable: false }));
+      const flintErr = toFlintError(err);
       emitError(params, flintErr);
       yield { type: 'error', error: flintErr.error };
       return;
@@ -167,14 +145,95 @@ export async function* runToolLoop(
     // Loop again with the tool results appended.
   }
 
-  // Ran out of iterations — surface as an error; do not commit a partial turn.
-  const err = makeAiError(
-    'internal',
-    `Tool loop exceeded ${maxIterations} iterations without completing.`,
-    { retryable: false },
-  );
-  emitError(params, new FlintError(err));
-  yield { type: 'error', error: err };
+  yield* answerFromResults(params, sink, random, maxIterations);
+}
+
+/**
+ * Out of iterations: one last call with tool use forbidden, asking the model to
+ * answer from the tool results it already has. Only this call's own failure (or
+ * an empty answer) ends the turn in the error the loop used to throw outright.
+ */
+async function* answerFromResults(
+  params: ToolLoopParams,
+  sink: LoopSink,
+  random: () => number,
+  maxIterations: number,
+): AsyncGenerator<StreamEvent, void, void> {
+  const exceeded = `Tool loop exceeded ${maxIterations} iterations without completing.`;
+  const note: Message = { id: newId('msg'), role: 'user', content: TOOL_LIMIT_NOTE, timestamp: now() };
+  const conversation = [...params.initialMessages, ...sink.responseMessages, note];
+
+  const final = yield* callProvider(params, conversation, random, true);
+  if (final instanceof FlintError) {
+    // callProvider already reported the underlying error to the observer.
+    yield {
+      type: 'error',
+      error: { ...final.error, message: `${exceeded} The answer-only call also failed: ${final.error.message}` },
+    };
+    return;
+  }
+
+  sink.usage = addUsage(sink.usage, final.usage);
+  if (final.reason !== 'refusal' && final.text.trim().length === 0) {
+    const err = makeAiError('internal', `${exceeded} The answer-only call came back empty.`, {
+      retryable: false,
+    });
+    emitError(params, new FlintError(err));
+    yield { type: 'error', error: err };
+    return;
+  }
+
+  // A provider that ignored the `none` choice may still have asked for a tool:
+  // its calls were dropped (never run), and the text it wrote is the answer.
+  const reason: StreamDoneReason = final.reason === 'tool_call' ? 'complete' : final.reason;
+  sink.responseMessages.push(encodeAssistantText(newId('msg'), final.text, now()));
+  sink.finalReason = reason;
+  yield { type: 'done', reason, usage: sink.usage };
+}
+
+/**
+ * One provider call with the loop's retry policy. Retries only when NOTHING was
+ * forwarded this attempt (we can't un-yield partial text). Tool side effects are
+ * already in `responseMessages`, so re-streaming never re-runs a tool. Returns
+ * the streamed result, or the terminal error (already reported to the observer)
+ * for the caller to surface.
+ */
+async function* callProvider(
+  params: ToolLoopParams,
+  conversation: Message[],
+  random: () => number,
+  answerOnly: boolean,
+): AsyncGenerator<StreamEvent, StreamOnceResult | FlintError, void> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    attempt++;
+    const forwarded = { content: false };
+    try {
+      return yield* streamOnce(params, conversation, forwarded, answerOnly);
+    } catch (err) {
+      const flintErr = toFlintError(err);
+      emitError(params, flintErr);
+
+      const canRetry =
+        !forwarded.content &&
+        flintErr.retryable &&
+        attempt < params.retryPolicy.maxAttempts;
+      if (!canRetry) return flintErr;
+
+      const backoff = Math.min(
+        params.retryPolicy.maxDelayMs,
+        params.retryPolicy.baseDelayMs * 2 ** (attempt - 1),
+      );
+      await delay(Math.floor(backoff * random()), params.signal);
+    }
+  }
+}
+
+function toFlintError(err: unknown): FlintError {
+  return isFlintError(err)
+    ? err
+    : new FlintError(makeAiError('internal', String(err), { retryable: false }));
 }
 
 /**
@@ -215,9 +274,10 @@ async function* streamOnce(
   params: ToolLoopParams,
   conversation: Message[],
   forwarded: { content: boolean },
+  answerOnly = false,
 ): AsyncGenerator<StreamEvent, StreamOnceResult, void> {
   const startedAt = now();
-  emitRequest(params, conversation, 'tool-loop');
+  emitRequest(params, conversation, answerOnly ? 'tool-loop-answer' : 'tool-loop');
 
   let text = '';
   const toolCalls: ToolCall[] = [];
@@ -226,6 +286,9 @@ async function* streamOnce(
     model: params.model,
     messages: conversation,
     ...(params.tools.length > 0 ? { tools: params.tools } : {}),
+    // The answer-only call keeps the tools DEFINED (history holds tool calls,
+    // which Anthropic won't accept without them) but forbids using them.
+    ...(answerOnly && params.tools.length > 0 ? { toolChoice: 'none' as const } : {}),
     ...(params.system ? { system: params.system } : {}),
     ...(params.cache ? { cache: params.cache } : {}),
     ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
@@ -240,6 +303,9 @@ async function* streamOnce(
         yield event;
         break;
       case 'tool_call':
+        // On the answer-only call a tool request can't be honoured: drop it
+        // rather than show the caller a call that will never run.
+        if (answerOnly) break;
         toolCalls.push(event.call);
         forwarded.content = true;
         emitToolCallRequested(params, event.call);
@@ -308,7 +374,7 @@ async function executeTool(params: ToolLoopParams, call: ToolCall): Promise<Tool
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const result = await handler(target);
-      return { toolCallId: call.id, toolName: call.toolName, result, isError: false };
+      return { toolCallId: call.id, toolName: call.toolName, result, isError: reportsError(result) };
     } catch (err) {
       lastErr = err;
       if (attempt < maxAttempts) {
@@ -330,6 +396,16 @@ async function executeTool(params: ToolLoopParams, call: ToolCall): Promise<Tool
       { retryable: false, raw: lastErr },
     ),
   );
+}
+
+/**
+ * Whether a handler's return value is a soft failure. MCP tools (@flint/mcp)
+ * return `{ isError: true, content }` when the server reports an error, and
+ * built-in tools follow the same shape; that used to be recorded as a success,
+ * so the model and the action log both saw a failed call as `ok`.
+ */
+function reportsError(result: unknown): boolean {
+  return typeof result === 'object' && result !== null && (result as { isError?: unknown }).isError === true;
 }
 
 // --- observer dispatch (core never calls console.*; invariant #6) -----------

@@ -1,5 +1,15 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`public API surface > done reasons match the committed snapshot 1`] = `
+[
+  "complete",
+  "tool_call",
+  "max_tokens",
+  "refusal",
+  "error",
+]
+`;
+
 exports[`public API surface > matches the committed snapshot 1`] = `
 [
   "ActionLogObserver",

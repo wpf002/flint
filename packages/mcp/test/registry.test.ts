@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Flint } from '@flint/core';
+import { Flint, decodeToolResult } from '@flint/core';
 import type { ProviderAdapter, GenerateArgs, StreamEvent } from '@flint/core';
 import { McpRegistry, type RegistryOptions } from '../src/index.js';
 
@@ -152,5 +152,37 @@ describe('MCP tools through the Flint tool loop', () => {
     // The loop recorded a tool result in the produced messages.
     expect(messages.some((m) => m.role === 'tool_result')).toBe(true);
     await close();
+  });
+
+  it('an MCP error result reaches the loop as a failed tool call, not ok', async () => {
+    const server = new McpServer({ name: 'test', version: '1.0.0' });
+    server.registerTool(
+      'echo',
+      { description: 'Always fails.', inputSchema: { text: z.string() }, annotations: { readOnlyHint: true } },
+      async () => ({ isError: true, content: [{ type: 'text', text: 'invalid_grant: token expired' }] }),
+    );
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const registry = await McpRegistry.connect([{ name: 'test', transport: clientT }]);
+
+    // The shape @flint/mcp hands the loop for an MCP isError result.
+    expect(await tool(registry, 'test.echo').handler({ id: '0', toolName: 'test.echo', args: { text: 'x' } })).toEqual({
+      isError: true,
+      content: 'invalid_grant: token expired',
+    });
+
+    const outcomes: boolean[] = [];
+    const flint = new Flint({
+      provider: echoingProvider(),
+      defaultModel: 'm',
+      observer: { onToolResult: (e) => outcomes.push(e.isError) },
+    });
+    const { messages } = await flint.generate({ prompt: 'echo something', tools: registry.tools() });
+
+    expect(outcomes).toEqual([true]);
+    const result = decodeToolResult(messages.find((m) => m.role === 'tool_result')!);
+    expect(result.isError).toBe(true);
+    await registry.close();
+    await server.close();
   });
 });

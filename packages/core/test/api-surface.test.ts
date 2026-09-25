@@ -45,4 +45,20 @@ describe('public API surface', () => {
 
     expect(names).toMatchSnapshot();
   });
+
+  /**
+   * The done reasons are contract too: apps branch on them, and an exhaustive
+   * switch over them stops compiling when one is added. `refusal` was added on
+   * purpose (Anthropic's refusal stop used to be reported as `complete`).
+   */
+  it('done reasons match the committed snapshot', () => {
+    if (!existsSync(dts)) {
+      throw new Error(`dist/index.d.ts not found — run \`pnpm build\` before the surface test.`);
+    }
+    const source = readFileSync(dts, 'utf8');
+    const match = source.match(/declare const StreamDoneReason: z\.ZodEnum<\[([^\]]*)\]>/);
+    expect(match, 'expected the StreamDoneReason enum in index.d.ts').toBeTruthy();
+    const reasons = match![1]!.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+    expect(reasons).toMatchSnapshot();
+  });
 });
