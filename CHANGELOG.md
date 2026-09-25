@@ -3,6 +3,29 @@
 All notable changes to `@flint/core`. Under `0.x`, breaking changes are allowed
 but are called out explicitly here.
 
+## Unreleased
+
+### Added
+
+- **`refusal` done reason.** Anthropic's `stop_reason: "refusal"` and OpenAI's
+  `refusal` field / `content_filter` finish now end a stream with
+  `done.reason === 'refusal'` instead of `complete`. A chat turn that ends this
+  way is failed, not committed, so the question doesn't sit in history with an
+  empty reply. Additive, but an exhaustive `switch` over `StreamDoneReason`
+  needs the new case.
+- **`toolChoice: 'none'`** in `GenerateArgs`: tools stay defined, calling them
+  is forbidden (Anthropic `{type:'none'}`, OpenAI `'none'`; Ollama drops the tools).
+
+### Changed
+
+- **The tool loop no longer fails a turn at its iteration limit outright.** It
+  makes one more call with `toolChoice: 'none'` and a note asking for an answer
+  from the tool results so far; only if that call fails or comes back empty does
+  the turn end in the old "exceeded N iterations" error.
+- **A tool handler that returns `{ isError: true, ... }`** (what `@flint/mcp`
+  returns for an MCP error result) is now recorded as `ToolResult.isError`, so
+  the model gets `is_error` and observers see a failure instead of `ok`.
+
 ## 0.3.0 — Anthropic becomes optional
 
 Flint can now run with **zero Anthropic** at the dependency level — the payoff

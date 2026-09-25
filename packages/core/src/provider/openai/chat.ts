@@ -36,8 +36,9 @@ export interface ChatWire {
 }
 
 interface ChatChoice {
-  message?: { content?: string | null; tool_calls?: RawToolCall[] };
-  delta?: { content?: string | null; tool_calls?: RawDeltaToolCall[] };
+  /** `refusal` is set (and `content` null) when the model declines to answer. */
+  message?: { content?: string | null; refusal?: string | null; tool_calls?: RawToolCall[] };
+  delta?: { content?: string | null; refusal?: string | null; tool_calls?: RawDeltaToolCall[] };
   finish_reason?: string | null;
 }
 
@@ -121,7 +122,8 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
           ? encodeToolCallTurn(id, text, toolCalls, 0)
           : encodeAssistantText(id, text, 0);
 
-      return this.decorate({ message, usage, reason: mapFinishReason(choice?.finish_reason) }, raw);
+      const reason = choice?.message?.refusal ? 'refusal' : mapFinishReason(choice?.finish_reason);
+      return this.decorate({ message, usage, reason }, raw);
     } catch (err) {
       throw new FlintError(toAiError(err, this.wire.name));
     }
@@ -130,6 +132,9 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
     let usage: TokenUsage = { input: 0, output: 0 };
     let finish: string | null | undefined;
+    // The refusal text itself is not emitted: the reason carries the signal, and
+    // the caller decides what to tell the user.
+    let refused = false;
 
     // Tool calls arrive as fragments keyed by index and must be reassembled.
     const builders = new Map<number, { id: string; name: string; json: string }>();
@@ -155,6 +160,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
         if (choice.finish_reason) finish = choice.finish_reason;
 
         const delta = choice.delta;
+        if (delta?.refusal) refused = true;
         if (delta?.content) yield { type: 'text', delta: delta.content };
 
         for (const frag of delta?.tool_calls ?? []) {
@@ -187,7 +193,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       const suffix = this.streamSuffix(lastChunk);
       if (suffix) yield { type: 'text', delta: suffix };
 
-      yield { type: 'done', reason: mapFinishReason(finish), usage };
+      yield { type: 'done', reason: refused ? 'refusal' : mapFinishReason(finish), usage };
     } catch (err) {
       // Always terminate with exactly one done or error, never just stop.
       yield { type: 'error', error: toAiError(err, this.wire.name) };
@@ -219,6 +225,9 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       }),
       [this.wire.maxTokensField]: args.maxTokens ?? this.wire.defaultMaxTokens,
       ...(tools ? { tools } : {}),
+      // Only `none` is mapped (the tool loop's answer-only call); every other request
+      // is byte-identical to before.
+      ...(tools && args.toolChoice === 'none' ? { tool_choice: 'none' } : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
       ...this.wire.extraBody,
     };

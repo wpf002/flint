@@ -155,7 +155,8 @@ export class OllamaProvider implements ProviderAdapter {
     };
   }
 
-  async generate(args: GenerateArgs): Promise<GenerateResult> {
+  async generate(rawArgs: GenerateArgs): Promise<GenerateResult> {
+    const args = honourToolChoice(rawArgs);
     try {
       const { text, toolCalls, usage, doneReason } = await this.fetchFull(args);
       if (toolCalls.length > 0) {
@@ -167,7 +168,8 @@ export class OllamaProvider implements ProviderAdapter {
     }
   }
 
-  async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
+  async *stream(rawArgs: GenerateArgs): AsyncIterable<StreamEvent> {
+    const args = honourToolChoice(rawArgs);
     // The tool-DECISION pass (tools offered, no tool result in history yet) must
     // be reliable, so it's non-streamed with retry-on-empty. But once a tool has
     // run — or there were never any tools — the model is just writing prose, so
@@ -319,6 +321,18 @@ export class OllamaProvider implements ProviderAdapter {
     }
     return body;
   }
+}
+
+/**
+ * Ollama has no `tool_choice`, and it doesn't need tools defined to read tool
+ * calls and results already in the history. So `none` (the tool loop's
+ * answer-only call) is honoured by not offering the tools at all. Any other
+ * choice leaves the request exactly as it was.
+ */
+function honourToolChoice(args: GenerateArgs): GenerateArgs {
+  if (args.toolChoice !== 'none') return args;
+  const { tools: _tools, toolChoice: _choice, ...rest } = args;
+  return rest;
 }
 
 /** Read a web ReadableStream of bytes as newline-delimited JSON lines. */

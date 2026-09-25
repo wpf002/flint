@@ -169,8 +169,9 @@ export function mapFinishReason(finish: string | null | undefined): StreamDoneRe
       return 'tool_call';
     case 'length':
       return 'max_tokens';
-    // `content_filter` is not a clean completion, but it is a terminated turn with
-    // content the caller can inspect — the same treatment Anthropic's refusal gets.
+    // The provider's filter cut the turn: the same treatment Anthropic's refusal gets.
+    case 'content_filter':
+      return 'refusal';
     default:
       return 'complete';
   }

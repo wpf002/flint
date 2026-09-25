@@ -254,13 +254,18 @@ function markToolBreakpoint(tools: Tool[], cache: CacheHints | undefined): Tool[
   }
 }
 
-/** Map the canonical tool choice onto Anthropic's shape. */
+/**
+ * Map the canonical tool choice onto Anthropic's shape. `none` keeps the tools
+ * defined but forbids calling them: a request whose history holds tool_use /
+ * tool_result blocks must still define tools, so dropping them isn't an option.
+ */
 export function mapToolChoice(
-  choice: 'auto' | 'required' | { name: string } | undefined,
-): { type: 'auto' } | { type: 'any' } | { type: 'tool'; name: string } | undefined {
+  choice: 'auto' | 'required' | 'none' | { name: string } | undefined,
+): { type: 'auto' } | { type: 'any' } | { type: 'none' } | { type: 'tool'; name: string } | undefined {
   if (!choice) return undefined;
   if (choice === 'auto') return { type: 'auto' };
   if (choice === 'required') return { type: 'any' };
+  if (choice === 'none') return { type: 'none' };
   return { type: 'tool', name: toAnthropicToolName(choice.name) };
 }
 
@@ -275,9 +280,13 @@ export function mapStopReason(stop: string | null): StreamDoneReason {
     case 'max_tokens':
       return 'max_tokens';
     case 'refusal':
+      // The streaming classifiers stopped the turn. It used to be reported as
+      // `complete`, so an empty refused turn read as a finished answer and no
+      // fallback ever fired.
+      return 'refusal';
     case 'pause_turn':
-      // Neither is a clean completion nor a tool call; surface as complete and
-      // let the caller inspect content. (refusal carries its own message.)
+      // Not a clean completion nor a tool call; surface as complete and let the
+      // caller inspect content.
       return 'complete';
     default:
       return 'complete';
