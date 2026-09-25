@@ -197,6 +197,35 @@ describe('MemoryExtractor.run', () => {
     expect(state().totals.calls).toBe(4);
   });
 
+  it('waits while the spend gate is closed, and resumes when it opens', async () => {
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 3; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
+    let paused: string | undefined = "Claude (Anthropic) at 85% of today's $20.00 cap; background work waits";
+    const { b, calls } = brain(() => '[]');
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, { batchChars: 1, gate: () => paused });
+    expect(await ex.run()).toBe(0);
+    expect(calls).toHaveLength(0);
+    expect(existsWatermark(spath, 'c0')).toBe(false); // nothing skipped: the turns wait
+    paused = undefined;
+    await ex.run();
+    expect(calls).toHaveLength(3);
+  });
+
+  it('stops at the next batch when the gate closes mid-pass, keeping what it paid for', async () => {
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 3; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
+    const { b, calls } = brain(() => '[]');
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, {
+      batchChars: 1, // one turn per call
+      gate: () => (calls.length >= 1 ? 'at 80% of the cap' : undefined),
+    });
+    await ex.run();
+    expect(calls).toHaveLength(1);
+    expect(existsWatermark(spath, 'c0')).toBe(true);
+    expect(existsWatermark(spath, 'c1')).toBe(false);
+    expect(state().budget.calls).toBe(1);
+  });
+
   it('caps turns per pass and resumes where it stopped', async () => {
     const convs: Record<string, Turn[]> = {};
     for (let i = 0; i < 5; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];

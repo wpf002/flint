@@ -136,6 +136,14 @@ export interface ExtractorOptions {
   batchChars?: number;
   /** Conversations never mined — synthetic training-corpus traffic. */
   skipConversations?: RegExp;
+  /**
+   * Why optional frontier work must wait right now, or undefined to go ahead.
+   * The server passes the spend guard's check (paused at 80% of the Anthropic
+   * cap: extraction is background work, so it yields before Will's own turns
+   * do). Checked before EVERY call, so a pass that crosses the line mid-way
+   * stops at the next batch and keeps the progress it already paid for.
+   */
+  gate?: () => string | undefined;
   now?: () => number;
 }
 
@@ -149,6 +157,7 @@ export class MemoryExtractor {
   private readonly maxCallsPerDay: number;
   private readonly batchChars: number;
   private readonly skipConversations: RegExp;
+  private readonly gate: (() => string | undefined) | undefined;
   private readonly now: () => number;
   /** Whether the last pass left work queued (drives the faster backlog cadence). */
   private backlog = false;
@@ -172,6 +181,7 @@ export class MemoryExtractor {
     this.batchChars = opts.batchChars ?? env('FLINT_EXTRACT_BATCH_CHARS', 24_000);
     this.skipConversations =
       opts.skipConversations ?? new RegExp(process.env.FLINT_EXTRACT_SKIP_CONVERSATIONS ?? '^(bulk|grow|seed)-');
+    this.gate = opts.gate;
     this.now = opts.now ?? Date.now;
   }
 
@@ -238,6 +248,13 @@ export class MemoryExtractor {
       this.saveState(state);
       return 0;
     }
+    const paused = this.gate?.();
+    if (paused) {
+      console.error(`[memory-extract] paused (${paused}); ${pending.length} turn(s) queued`);
+      this.backlog = false; // nothing to do until the budget allows; base cadence
+      this.saveState(state);
+      return 0;
+    }
     if (state.budget.calls >= this.maxCallsPerDay) {
       console.error(`[memory-extract] daily budget spent (${state.budget.calls}/${this.maxCallsPerDay} calls); ${pending.length} turn(s) queued`);
       this.backlog = false; // nothing to do until tomorrow; base cadence
@@ -247,6 +264,7 @@ export class MemoryExtractor {
 
     let sent = 0;
     let idx = 0;
+    let gated: string | undefined;
     try {
       while (idx < pending.length) {
         // Assemble the next batch: skipped items ride along (they only move the
@@ -269,6 +287,8 @@ export class MemoryExtractor {
 
         if (toSend.length > 0) {
           if (state.budget.calls >= this.maxCallsPerDay) break;
+          gated = this.gate?.();
+          if (gated) break;
           const key = `${toSend[0]!.cid}@${toSend[0]!.at}`;
           state.budget.calls++;
           stats.calls++;
@@ -299,7 +319,7 @@ export class MemoryExtractor {
         this.saveState(state);
       }
     } finally {
-      this.backlog = idx < pending.length && state.budget.calls < this.maxCallsPerDay;
+      this.backlog = !gated && idx < pending.length && state.budget.calls < this.maxCallsPerDay;
       addStats(state.totals, stats);
       this.saveState(state);
     }
@@ -310,7 +330,7 @@ export class MemoryExtractor {
         `(skipped synthetic=${stats.skippedSynthetic} trivial=${stats.skippedTrivial} duplicate=${stats.skippedDuplicate}); ` +
         `${stats.candidates} candidate(s) → stored ${stats.stored}, superseded ${stats.superseded}, rejected ${rej}` +
         `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}; ${pending.length - idx} turn(s) still queued; ` +
-        `budget ${state.budget.calls}/${this.maxCallsPerDay} today`,
+        `budget ${state.budget.calls}/${this.maxCallsPerDay} today${gated ? `; paused (${gated})` : ''}`,
     );
     return stats.stored;
   }
