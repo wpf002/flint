@@ -19,7 +19,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ActionEntry } from '@flint/core';
 
-/** Longest tool-result excerpt returned (and so shown to the judge). */
+/**
+ * Longest tool-result excerpt returned (and so shown to the judge) by default.
+ * An eval request may ask for longer ones with `groundingChars` (./eval-tools):
+ * the Flint-tasks suite hands competitors the same data Flint read, and 800
+ * characters of a 50-row result is not the same data.
+ */
 export const TOOL_EXCERPT_CHARS = 800;
 
 export interface GroundingTool {
@@ -100,9 +105,13 @@ export class TurnLog {
     if (this.active > 0) this.entries.push(entry);
   }
 
-  /** The `grounding` of the eval response: `facts` (the recalled memory) and this turn's tool results. */
-  grounding(facts: readonly string[]): Grounding {
-    return evalGrounding(facts, this.entries);
+  /**
+   * The `grounding` of the eval response: `facts` (the recalled memory) and this
+   * turn's tool results, each cut to `maxChars` (default 800; an eval request's
+   * `groundingChars` asks for more, see ./eval-tools).
+   */
+  grounding(facts: readonly string[], maxChars = TOOL_EXCERPT_CHARS): Grounding {
+    return evalGrounding(facts, this.entries, maxChars);
   }
 }
 
@@ -142,17 +151,17 @@ function resultText(result: unknown): string {
   }
 }
 
-/** The tool results among `entries`, as grounding. */
-export function groundingTools(entries: readonly ActionEntry[]): GroundingTool[] {
+/** The tool results among `entries`, as grounding, each cut to `maxChars`. */
+export function groundingTools(entries: readonly ActionEntry[], maxChars = TOOL_EXCERPT_CHARS): GroundingTool[] {
   const out: GroundingTool[] = [];
   for (const e of entries) {
     if (e.type !== 'tool_result') continue;
-    out.push({ name: e.tool, isError: e.isError, excerpt: toolExcerpt(e.result) });
+    out.push({ name: e.tool, isError: e.isError, excerpt: toolExcerpt(e.result, maxChars) });
   }
   return out;
 }
 
 /** The `grounding` field of an eval /generate response. */
-export function evalGrounding(facts: readonly string[], turnEntries: readonly ActionEntry[]): Grounding {
-  return { memory: [...facts], tools: groundingTools(turnEntries) };
+export function evalGrounding(facts: readonly string[], turnEntries: readonly ActionEntry[], maxChars = TOOL_EXCERPT_CHARS): Grounding {
+  return { memory: [...facts], tools: groundingTools(turnEntries, maxChars) };
 }
