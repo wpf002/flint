@@ -32,13 +32,14 @@ async function transcribeAudio(buf: Buffer): Promise<string> {
  *  local voice client-side when no key is set. */
 const TTS_MODEL = process.env.FLINT_TTS_MODEL?.trim() || 'tts-1';
 const TTS_VOICE = process.env.FLINT_TTS_VOICE?.trim() || 'onyx';
+const TTS_MAX_CHARS = 4000;
 async function synthesizeSpeech(text: string): Promise<Buffer | null> {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) return null;
   const r = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: TTS_MODEL, voice: TTS_VOICE, input: text.slice(0, 4000), response_format: 'mp3' }),
+    body: JSON.stringify({ model: TTS_MODEL, voice: TTS_VOICE, input: text.slice(0, TTS_MAX_CHARS), response_format: 'mp3' }),
   });
   if (!r.ok) throw new Error(`tts HTTP ${r.status}`);
   return Buffer.from(await r.arrayBuffer());
@@ -50,6 +51,8 @@ import {
   InMemoryStore,
   ActionLogObserver,
   FlintError,
+  combineObservers,
+  vendorOfProvider,
   type ProviderAdapter,
   type Tool,
 } from '@flint/core';
@@ -74,6 +77,25 @@ import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
+import {
+  SpendLedger,
+  SpendGuard,
+  NoteOnce,
+  readCaps,
+  describeCaps,
+  spendObserver,
+  spendContext,
+  paidToolSpecs,
+  meterPaidTools,
+  planFrontier,
+  describePlan,
+  budgetNote,
+  budgetMediaError,
+  speakWithinBudget,
+  spendStatusTool,
+  pausable,
+  type FrontierPlan,
+} from './spend';
 import { TurnLog, recallContext, recordTurnEntry } from './grounding';
 import {
   parseAttachments,
@@ -201,7 +223,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
-import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, mediaChain } from './brains';
+import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -375,12 +397,23 @@ async function main(): Promise<void> {
   // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
   // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
   const actionLog = new ActionLogObserver(recordTurnEntry, 2000);
+  // Spend guard (./spend): every paid call lands in ~/.flint/spend/spend-YYYY-MM.jsonl,
+  // and FLINT_BUDGET_* caps degrade Flint as they are approached (never before).
+  // The notifications feed is built here so the guard can warn at 50/80/100%.
+  const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
+  const ledger = new SpendLedger({ dir: join(homedir(), '.flint', 'spend'), timeZone: USER_TZ, log: (m) => console.error(m) });
+  const caps = readCaps(process.env, (m) => console.error(`[spend] ${m}`));
+  const spend = new SpendGuard(ledger, caps, notes);
+  console.error(`[spend] caps: ${describeCaps(caps)}`);
+  spend.checkAll();
+  // Every Flint client shares this: the audit trail, plus one ledger row per paid provider pass.
+  const observer = combineObservers(actionLog, spendObserver(ledger));
   // Durable conversation memory — survives restarts/reboots/crashes (was RAM
   // only). Shared across both brains so a conversation stays coherent no matter
   // which one answers a given turn.
   const dataDir = join(homedir(), '.flint', 'memory');
   const memory = new PersistentStore(join(dataDir, 'conversations.json'));
-  const flint = new Flint({ provider, defaultModel: model, memory, observer: actionLog });
+  const flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -403,7 +436,7 @@ async function main(): Promise<void> {
   const localModels =
     provider.name === 'ollama'
       ? overridePersonaCache(process.env, (candidate, m, variant) =>
-          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory, observer: actionLog }), variant ?? styles.local),
+          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory, observer }), variant ?? styles.local),
         )
       : undefined;
 
@@ -432,8 +465,13 @@ async function main(): Promise<void> {
   // deep_research plans its queries with the frontier brain when there is one
   // (bare generate — no persona/style guide, a few hundred tokens); heuristics otherwise.
   let frontierFlint: Flint | undefined;
+  let plannerVendor: ReturnType<typeof vendorOfProvider>; // whose budget frontierFlint spends
+  // Perplexity / Tavily searches run in the MCP processes: metered per successful
+  // call here, and refused with a routable error once their vendor's cap is spent.
+  // deep_research gets the same wrapped tools, so its searches count too.
+  const mcpTools = meterPaidTools(registry?.tools() ?? [], { guard: spend, specs: paidToolSpecs(process.env) });
   const tools: Tool[] = [
-    ...(registry?.tools() ?? []),
+    ...mcpTools,
     rememberTool(knowledge),
     trainingStatusTool({
       brainDir: join(homedir(), '.flint', 'brain'),
@@ -441,14 +479,19 @@ async function main(): Promise<void> {
       serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel }),
     }),
     deepResearchTool({
-      tools: registry?.tools() ?? [],
+      tools: mcpTools,
       embedder,
-      complete: async (prompt) => {
-        if (!frontierFlint) throw new Error('no frontier brain');
-        return (await frontierFlint.generate({ prompt })).text;
-      },
+      // Planning is optional (heuristic queries are the fallback): it waits at 80% of the cap.
+      complete: pausable(
+        async (prompt) => {
+          if (!frontierFlint) throw new Error('no frontier brain');
+          return (await frontierFlint.generate({ prompt }, { context: spendContext('plan') })).text;
+        },
+        () => (plannerVendor ? spend.backgroundBlocked(plannerVendor) : undefined),
+      ),
     }),
     calculateTool(),
+    spendStatusTool(spend),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
@@ -465,7 +508,7 @@ async function main(): Promise<void> {
   let extractFlint: Flint | undefined; // bare frontier (no persona) for background jobs like memory extraction
   const flintOf = new Map<Persona, Flint>();
   const frontierPersonaFor = (fProvider: ProviderAdapter, fModel: string, variant: StyleVariant): Persona => {
-    const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer: actionLog });
+    const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer });
     // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
     // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
     // of the style guide. Everything before them is byte-identical on every
@@ -505,14 +548,15 @@ async function main(): Promise<void> {
     // Query planning is light work: give deep_research the routine tier's client.
     // Memory extraction is judgment work: the primary tier, bare (no persona).
     extractFlint = flintOf.get(brains.primary.persona);
-    frontierFlint = flintOf.get(brains.chain('routine')[0]?.persona ?? brains.primary.persona);
+    const planner = brains.chain('routine')[0] ?? brains.primary;
+    frontierFlint = flintOf.get(planner.persona);
+    plannerVendor = vendorOfProvider(planner.provider.name);
     console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
   }
 
-  // Proactivity — a notifications feed + a watcher that surfaces things unasked.
-  const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
+  // Proactivity — a notifications feed (built above) + a watcher that surfaces things unasked.
   new Watcher(notes, buildChecks(tools, knowledge)).start();
 
   // Long-term memory that actually grows. `remember` alone produced 9 facts in
@@ -521,16 +565,23 @@ async function main(): Promise<void> {
   // the bare frontier model with a curator prompt, not the persona (skips entirely
   // if none is configured), under a daily call cap, and writes through
   // KnowledgeStore, so dedupe, tombstones + the ephemeral filter still apply.
+  // Background work: it pauses at 80% of its vendor's spend cap (./spend).
+  const extractVendor = brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
   new MemoryExtractor(
     memory,
     knowledge,
-    () => extractFlint,
+    () => {
+      const f = extractFlint;
+      return f && { generate: (input: { system: string; prompt: string }) => f.generate(input, { context: spendContext('extract') }) };
+    },
     join(dataDir, 'extract-state.json'),
+    { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) },
   ).start();
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
+  const budgetNotes = new NoteOnce(() => ledger.period().day);
+  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -566,6 +617,10 @@ interface Ctx {
   actions: ActionQueue;
   notes: Notifications;
   training: TrainingLogger;
+  /** Spend caps (./spend): /spend, /speak, and the frontier plan for each turn. */
+  spend: SpendGuard;
+  /** The honest "running on my local brain" line, once per conversation per day. */
+  budgetNotes: NoteOnce;
 }
 
 /** Tool calls executed during a turn, pulled from the action log (for training capture). */
@@ -580,6 +635,19 @@ function toolsSince(ctx: Ctx, beforeLen: number): Array<{ tool: string; outcome?
 /** One line per tier fallback, with the AiError kind that caused it. */
 function logFallback(from: { label: string }, to: { label: string }, err: unknown): void {
   console.error(`[brain] ${from.label} failed (${describeError(err)}) — falling back to ${to.label}`);
+}
+
+/** One log line when the spend guard changed a turn's route (./spend). */
+function logPlan(plan: FrontierPlan<Persona>): void {
+  const line = describePlan(plan);
+  if (line) console.error(`[spend] ${line}`);
+}
+
+/** What a response says about the spend guard's effect on its turn (nothing when there was none). */
+function budgetFields(plan: FrontierPlan<Persona> | undefined): { budget?: 'degraded' | 'exhausted'; degradedFrom?: string } {
+  if (plan?.exhausted) return { budget: 'exhausted' };
+  if (plan?.degradedFrom) return { budget: 'degraded', degradedFrom: plan.degradedFrom };
+  return {};
 }
 
 /** Record a finished exchange (bounded ring buffer). */
@@ -717,6 +785,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 401, { error: 'unauthorized' });
   }
 
+  // Paid API spend today / this month per vendor, against the FLINT_BUDGET_* caps (./spend).
+  if (req.method === 'GET' && (url === '/spend' || url.startsWith('/spend?'))) {
+    return json(res, 200, ctx.spend.snapshot());
+  }
+
   if (req.method === 'GET' && url.startsWith('/actions')) {
     return json(res, 200, { actions: ctx.actionLog.actions().slice(-200) });
   }
@@ -739,15 +812,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
   }
 
-  // Voice output: neural TTS → mp3. 503 (no key) tells the client to use its
-  // local browser voice instead.
+  // Voice output: neural TTS → mp3. 503 (no key, or OpenAI's spend cap reached)
+  // tells the client to use its local browser voice instead.
   if (req.method === 'POST' && url === '/speak') {
     const body = await readJson(req);
     const text = String(body.text ?? '').trim();
     if (!text) return json(res, 400, { error: 'text required' });
     try {
-      const audio = await synthesizeSpeech(text);
-      if (!audio) return json(res, 503, { error: 'no tts key' });
+      const spoken = await speakWithinBudget(text, { guard: ctx.spend, model: TTS_MODEL, maxChars: TTS_MAX_CHARS, synth: synthesizeSpeech });
+      if (spoken.status === 'no-key') return json(res, 503, { error: 'no tts key' });
+      if (spoken.status === 'budget') return json(res, 503, { error: spoken.message, budget: true, fallback: 'browser' });
+      const audio = spoken.audio;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': audio.length });
       res.end(audio);
     } catch (e) {
@@ -798,17 +873,29 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const beforeLog = ctx.actionLog.actions().length;
     // This turn's own action-log entries (not a concurrent /chat's), for the eval response's `grounding`.
     const turn = new TurnLog();
+    // An eval replay's model calls are ledgered as `eval`: the parity harness's own daily budget covers them.
+    const callOpts = evalMode ? { context: spendContext('eval') } : undefined;
     const ask = (p: Persona) =>
-      turn.run(() => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }));
+      turn.run(() => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }, callOpts));
     // Every persona call goes through `answered`, so the eval echo names the style
     // guide of the persona whose answer this is (./style-variant echoStyle).
     const answered = echoStyle(ask);
     let out;
     let unanswered: Unanswered | undefined; // set when `out.text` is the honest message, not an answer
-    if (brain === 'frontier' && ctx.brains) {
+    // Which frontier brains may answer under the spend caps, decided before any call (./spend).
+    // Eval replays are exempt: the eval harness budgets them, and measures Flint as he runs uncapped.
+    const plan = brain === 'frontier' && ctx.brains ? planFrontier(ctx.brains, tier, ctx.spend, { exempt: evalMode, canRead: canReadMedia(mediaNeeds(attachments)) }) : undefined;
+    let note: string | undefined; // the honest line when the budget put this turn on the local brain
+    if (plan) logPlan(plan);
+    if (plan?.exhausted) {
+      if (!route.localFallback) return json(res, 422, { error: budgetMediaError(plan.exhausted) });
+      brain = 'local';
+      note = budgetNote(plan.exhausted); // /generate is one-shot: each answer says why
+    }
+    if (brain === 'frontier' && plan) {
       try {
         // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
-        const won = await answerWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
+        const won = await answerWithFallback(plan.chain, (b) => answered.ask(personas.frontier(b)), { onFallback: logFallback });
         out = won.result;
         unanswered = won.unanswered;
         answeredBy = won.brain.label;
@@ -834,7 +921,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // 'refusal' | 'empty' when `text` is the honest "no model answered" message, so apps/parity doesn't judge it.
         ...(unanswered ? { unanswered } : {}),
         brain,
-        ...(brain === 'frontier' ? { tier } : {}),
+        ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
         model: answeredBy,
         // The `think` the answering persona's Ollama client sends (not the request's
         // localThink), so apps/parity can tell the flag reached Ollama, as it does for `model`.
@@ -854,7 +941,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsUsed, usage: out.usage },
       Date.now(),
     );
-    return json(res, 200, { text: out.text, usage: out.usage, reason: out.reason, brain, ...(brain === 'frontier' ? { tier } : {}), model: answeredBy, pending: proposed });
+    return json(res, 200, {
+      text: note ? `${out.text}\n\n${note}` : out.text,
+      usage: out.usage,
+      reason: out.reason,
+      brain,
+      ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
+      ...budgetFields(plan),
+      model: answeredBy,
+      pending: proposed,
+    });
   }
 
   if (req.method === 'POST' && url === '/chat') {
@@ -877,6 +973,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = route.brain;
     const turns = brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
     const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
+    // Which frontier brains may answer under the spend caps, decided before anything streams (./spend).
+    const plan = brain === 'frontier' && ctx.brains ? planFrontier(ctx.brains, tier, ctx.spend, { canRead: canReadMedia(mediaNeeds(attachments)) }) : undefined;
+    let note: string | undefined; // the honest line, once per conversation per day
+    if (plan) logPlan(plan);
+    if (plan?.exhausted) {
+      if (!route.localFallback) return json(res, 422, { error: budgetMediaError(plan.exhausted) });
+      brain = 'local';
+      if (ctx.budgetNotes.take(conversationId)) note = budgetNote(plan.exhausted);
+    }
     let answeredBy = ctx.model;
     const ctxBlock = await contextFor(asText, ctx.knowledge);
     const beforeActions = ctx.actions.snapshotIds();
@@ -898,6 +1003,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         { signal: ac.signal },
       );
       for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers })) {
+        // The budget note rides just ahead of `done`: shown, but never stored as the answer.
+        if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
         if (ev.type === 'text') answer += ev.delta;
         // A provider error arrives as an event, not a throw. When another tier is
         // left to try and no text has gone out, throw it to the tier fallback.
@@ -906,13 +1013,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       }
     };
     try {
-      if (brain === 'frontier' && ctx.brains) {
+      if (brain === 'frontier' && plan) {
         try {
-          const chain = mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary);
+          const chain = plan.chain;
           const won = await runWithFallback(
             chain,
             async (b) => {
-              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier, model: b.label })}\n\n`);
+              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budgetFields(plan) })}\n\n`);
               try {
                 await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1); // last tier: errors as before, no answer → honest message
               } catch (err) {
@@ -935,7 +1042,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           }
         }
       } else {
-        res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budgetFields(plan) })}\n\n`);
         await pump(ctx.persona);
       }
       if (answer.trim()) {

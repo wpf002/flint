@@ -392,7 +392,10 @@ if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_fli
 var _ttsChain=Promise.resolve(),_ttsGen=0,_ttsAudio=null;
 function stopSpeech(){_ttsGen++;_ttsChain=Promise.resolve();try{if(_ttsAudio){_ttsAudio.pause();_ttsAudio=null;}}catch(e){}try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(e){}}
 function _localSpeak(clean){return new Promise(function(res){try{var u=new SpeechSynthesisUtterance(clean);var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;u.onend=u.onerror=function(){res();};window.speechSynthesis.speak(u);}catch(e){res();}});}
-function _neuralFetch(clean){return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean})}).then(function(r){if(!r.ok)throw new Error('no-tts');return r.blob();});}
+// A 503 (no TTS key, or OpenAI's spend cap reached) means the browser voice for a while:
+// skip the neural request for 10 minutes instead of asking again every sentence.
+var _ttsSkipUntil=0;
+function _neuralFetch(clean){if(Date.now()<_ttsSkipUntil)return Promise.reject(new Error('no-tts'));return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean})}).then(function(r){if(r.status===503)_ttsSkipUntil=Date.now()+600000;if(!r.ok)throw new Error('no-tts');return r.blob();});}
 // Speak a sentence AND reveal its text in sync — the words appear on screen the
 // instant Flint starts saying them. Audio for the next sentence is prefetched
 // while the current one plays, so there are no gaps. Sentences play in order.

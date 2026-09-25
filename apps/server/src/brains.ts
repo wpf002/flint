@@ -414,14 +414,24 @@ export function mediaOf<P>(b: BrainTier<P>): MediaFlags {
 }
 
 /**
+ * Which brains can read a turn's attachments, or undefined when the turn has
+ * no image / PDF (every brain can read text).
+ */
+export function canReadMedia<P>(needs: MediaFlags): ((b: BrainTier<P>) => boolean) | undefined {
+  if (!needs.image && !needs.pdf) return undefined;
+  return (b) => {
+    const m = mediaOf(b);
+    return (!needs.image || m.image === true) && (!needs.pdf || m.pdf === true);
+  };
+}
+
+/**
  * The fallback chain for a turn, minus tiers whose model can't read its
  * attachments. routeTurn already checked the primary can, so it's the floor.
  */
 export function mediaChain<P>(chain: BrainTier<P>[], needs: MediaFlags, primary: BrainTier<P>): BrainTier<P>[] {
-  if (!needs.image && !needs.pdf) return chain;
-  const able = chain.filter((b) => {
-    const m = mediaOf(b);
-    return (!needs.image || m.image) && (!needs.pdf || m.pdf);
-  });
+  const can = canReadMedia<P>(needs);
+  if (!can) return chain;
+  const able = chain.filter(can);
   return able.length > 0 ? able : [primary];
 }

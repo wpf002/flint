@@ -15,6 +15,7 @@ here; Railway has no GPU.
 | POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
 | POST | `/generate` (eval, style variant) | yes | `{ prompt, eval: true, styleVariant: "v2" }` | as above, answered with that style guide; `styleVariant` echoes the variant of the persona that answered, read from its own guide (not from the request). Unknown variant, or no `eval: true`: 400. `/health` lists the known ones as `styleVariants` (used by `apps/parity --flint-variant`) |
 | POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
+| GET | `/spend` | yes | — | Paid API spend today and this month per vendor, against the caps (see "Spend caps") |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
 
@@ -42,6 +43,90 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `PORT` | no | Injected by Railway. |
+
+## Spend caps
+
+Every paid call Flint makes is appended to `~/.flint/spend/spend-YYYY-MM.jsonl`, one
+JSON row per call: `{ ts, vendor, model, kind, usd, tokens? }`, where `kind` is `chat`,
+`extract` (memory extraction), `plan` (deep_research's query planner), `tts`,
+`tool-search` (Tavily), `tool-perplexity` or `eval` (a parity replay). Totals per
+vendor per day and per month (days end at midnight in `FLINT_USER_TZ`, default
+America/Chicago) are rebuilt from the current month's file on boot, so a restart never
+resets a cap.
+
+What is recorded, and how it is priced (the price table is `packages/core/src/pricing.ts`,
+shared with apps/parity):
+
+- **Frontier model calls** (Anthropic, and OpenAI / Perplexity when a tier uses them): one
+  row per provider pass, from the usage the provider reports. So every tool-loop
+  iteration, retry, answer-only call and fallback tier's attempt is its own row. A stream
+  that dies before it finishes reports no usage and is not counted. The local brain
+  (Ollama) is free and never recorded.
+- **Memory extraction and the research planner**: the same, tagged `extract` / `plan`.
+- **TTS** (`/speak`): per character sent, at the model's list price (`tts-1`: $15 / 1M).
+- **Perplexity and Tavily searches** run in the MCP processes, so their usage never reaches
+  the server: each SUCCESSFUL call of `trident.perplexity_search`, `web.web_search` or
+  `trident.web_search` is recorded at a per-call estimate, `FLINT_PERPLEXITY_USD_PER_CALL`
+  (default $0.008: sonar's $0.005 low-context fee plus ~1-3K tokens) and
+  `FLINT_TAVILY_USD_PER_CALL` (default $0.008, one credit; an advanced search is two).
+  deep_research's searches go through the same wrapped tools, so they count too.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `FLINT_BUDGET_ANTHROPIC_DAILY_USD` / `_MONTHLY_USD` | unset (no cap) | Claude spend caps |
+| `FLINT_BUDGET_OPENAI_DAILY_USD` / `_MONTHLY_USD` | unset | OpenAI (TTS, any OpenAI tier) |
+| `FLINT_BUDGET_PERPLEXITY_DAILY_USD` / `_MONTHLY_USD` | unset | `perplexity_search` (and a Perplexity tier) |
+| `FLINT_BUDGET_TAVILY_DAILY_USD` / `_MONTHLY_USD` | unset | `web_search` |
+| `FLINT_PERPLEXITY_USD_PER_CALL`, `FLINT_TAVILY_USD_PER_CALL` | $0.008 each | per-call estimates above |
+
+An unset cap is no cap: exactly what Flint did before. `0` is a real cap (the kill
+switch: never call that vendor). A value that isn't a dollar amount is logged and ignored.
+The boot log prints the caps in force (`[spend] caps: ...`).
+
+**Recommended values** (in `~/.flint/secrets.env` or the LaunchAgent's env; tune after a
+couple of weeks of `/spend`):
+
+```bash
+FLINT_BUDGET_ANTHROPIC_DAILY_USD=20     # roughly 150-400 Opus 5.5 turns; degrades at $16
+FLINT_BUDGET_ANTHROPIC_MONTHLY_USD=300
+FLINT_BUDGET_OPENAI_DAILY_USD=3         # TTS is ~$0.015 a spoken minute on tts-1
+FLINT_BUDGET_OPENAI_MONTHLY_USD=30
+FLINT_BUDGET_PERPLEXITY_DAILY_USD=1.50  # ~190 searches
+FLINT_BUDGET_PERPLEXITY_MONTHLY_USD=20
+FLINT_BUDGET_TAVILY_DAILY_USD=1         # ~125 basic searches
+FLINT_BUDGET_TAVILY_MONTHLY_USD=8       # = Tavily's 1,000 free credits; on a paid plan use credits x $0.008
+```
+
+**How Flint degrades** (a cap is the daily or the monthly one, whichever is closer to spent;
+every decision is made before a call, so a turn already streaming always finishes):
+
+| Level | Frontier (Claude) | Background work | Searches | Voice |
+| --- | --- | --- | --- | --- |
+| under 50% / 50% | unchanged | unchanged | unchanged | unchanged |
+| 80% | standard, hard and code questions answer on the **routine** tier (only when that is a different, cheaper brain; not when it can't read the turn's image/PDF) | memory extraction and research query planning wait (planning falls back to heuristic queries) | unchanged | unchanged |
+| 100% | Claude is not called. The next brain in the chain whose vendor has budget answers (e.g. an OpenAI `FLINT_TIER_LAST_RESORT`); with none left, the **local brain** answers, and the first such answer in each `/chat` conversation each day (every `/generate` answer) ends with `(Running on my local brain — today's Claude budget is spent.)` (or "this month's"); the note is shown, never stored as the answer. An image/PDF turn gets a 422 saying why instead of a blind answer | paused | the spent tool returns an error naming the alternative (`perplexity_search` → `web_search`; `web_search` → `perplexity_search` or `fetch_url` on a keyless search page), so the model routes around it | OpenAI spent: `/speak` returns 503 `{ budget: true, fallback: "browser" }` and the console speaks with the browser's voice |
+
+The same levels apply per vendor to any tier on that vendor. Responses say when the guard
+changed a turn: `/generate` adds `budget: "degraded" | "exhausted"` (and `degradedFrom`), and
+the `/chat` `meta` event carries the same fields.
+
+**Evals.** A parity replay (`/generate` with `eval: true`) is routed as if uncapped, and its
+model calls are recorded as `eval` rows that do NOT count toward these caps: the parity
+harness has its own shared daily budget (`PARITY_DAILY_BUDGET_USD`, apps/parity README) and
+prices Flint's answers into it, so each dollar sits under exactly one cap. Tool searches
+during an eval do count here (the harness can't see them).
+
+**Visibility.** `GET /spend` returns
+`{ timeZone, day, month, thresholds, vendors: { anthropic: { name, today: { usd, capUsd, pct, evalUsd, calls }, month: {...}, fraction, level, binding, effect }, openai, perplexity, tavily } }`.
+Flint can answer it himself through the read-only `spend_status` tool (appended by the tool
+router when a question is about spend, credits or budgets). The notifications feed (and the
+phone push, if `FLINT_NTFY_TOPIC` is set) gets one notice per vendor per cap per period at
+50%, 80% and 100%.
+
+**Not covered here:** anything that calls a paid API outside this server: the Python
+training scripts (`apps/train/mlx/bulk_seed.py`, `auto_grow.py`, `eval_judge.py` call
+Anthropic directly; their `/chat` traffic to Flint IS counted), apps/ask, apps/responder
+and trident's own tools other than its searches.
 
 **Model choice (the Railway tradeoff):** Railway can't run the local 14B model.
 Pick one — `ANTHROPIC_API_KEY` (fast, always-on, cloud-backed) **or** point
