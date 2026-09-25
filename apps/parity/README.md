@@ -667,6 +667,13 @@ loss or failure to answer 0), and the decision is on the per-prompt difference
 test, Δ (the change in strict win rate against GPT-5), and a seeded 90% bootstrap
 interval, pooled over the sets (each prompt once) and per set and category.
 
+**A Flint-tasks set keeps its privacy rules.** `run` sends each prompt to the competitor
+and Flint's answer to every judge, so from a Flint-tasks set (section 6) the gate uses
+only the prompts all of those vendors may see under that suite's default sharing:
+personal tasks go to Anthropic only, "stay local" tasks to nobody. With the default GPT-5
+competitor and panel that leaves the `public` and `systems` tasks; the rest are logged as
+withheld. The manifest check still hashes the whole file.
+
 **PROMOTE** (exit 0) needs all of: pooled p < 0.05, Δ ≥ +5 points, the interval's lower
 end > 0; Δ ≥ 0 on every set (Will's own tasks can't pay for textbook gains); no category
 with n ≥ 10 down more than 10 points; the answer rate down at most a point; the median
@@ -696,7 +703,8 @@ Output: `~/.flint/eval/gates/<candidate>-<ts>.json` (every check, the pooled and
 per-set numbers) and `.md`, a row in `gates/gate_history.csv`, and `--verdict-out`
 when given (the cycle keeps a copy in its own dir). Cost: about $4 of GPT-5 answers
 plus ~$0.04 per panel pair, two subjects, so ~$20 for 100 + a task set;
-`--budget-usd` (default 30) is split across the runs as they go. **It never
+`--budget-usd` (default 30) is split across the runs as they go, and each `run` reserves
+its share out of the shared daily eval budget (`PARITY_DAILY_BUDGET_USD`) like any other. **It never
 promotes**: a PROMOTE prints the commands (and records them as `promote`) that serve
 the candidate exactly as it was judged: `OLLAMA_MODEL`, `OLLAMA_THINK` set to its
 `--candidate-think` (removed if it had none), `FLINT_LOCAL_STYLE_VARIANT` if it had a
