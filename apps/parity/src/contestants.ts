@@ -5,6 +5,7 @@ import {
   OpenAiProvider,
   PerplexityProvider,
   decodeAssistantTurn,
+  parseBrainLabel,
   type ProviderAdapter,
   type TokenUsage,
 } from '@flint/core';
@@ -144,6 +145,42 @@ interface FlintGenerateResponse {
   proposed?: string[];
   eval?: boolean;
   error?: string;
+  /**
+   * What the replay's paid calls cost, as the server's spend ledger priced them:
+   * every model pass and fallback attempt, the research planner, paid searches.
+   * Sent with every eval response (errors and unanswered ones too) by a server
+   * with eval spend scopes; absent from older ones.
+   */
+  costUsd?: number;
+  /** Paid tools the server refused for budget during the replay (Flint's own cap for them is spent). */
+  budgetBlocked?: string[];
+}
+
+/** Attach what a failed call still cost, so the budget guard charges it (steps.ts answerOne). */
+export function withCost<E extends Error>(err: E, costUsd: number): E & { costUsd: number } {
+  return Object.assign(err, { costUsd });
+}
+
+/** The cost a failed call carries (withCost), if any. */
+export function costOfFailure(err: unknown): number | undefined {
+  const c = (err as { costUsd?: unknown } | null | undefined)?.costUsd;
+  return typeof c === 'number' && Number.isFinite(c) && c >= 0 ? c : undefined;
+}
+
+/**
+ * What one Flint replay cost. The server's own `costUsd` when it sends one (it
+ * covers every paid call of the turn, fallback attempts and searches too).
+ * Otherwise, from an older server, the answer's usage priced at the answering
+ * model's list price: `model` is a brain label (`anthropic:claude-opus-5-5`),
+ * split before pricing, since the whole label matches no row and would be
+ * priced at the unlisted rate (cache reads at $10/M instead of $0.20/M).
+ */
+export function flintReplayCost(body: Pick<FlintGenerateResponse, 'costUsd' | 'usage' | 'brain' | 'model'>, fallbackModel: string): number {
+  if (typeof body.costUsd === 'number' && Number.isFinite(body.costUsd) && body.costUsd >= 0) return body.costUsd;
+  if (!body.usage || body.brain === 'local') return 0;
+  const { provider, vendor, model } = parseBrainLabel(body.model ?? fallbackModel);
+  if (provider && !vendor) return 0; // a frontier tier on Ollama: free
+  return costOf(vendor ?? 'anthropic', model, body.usage);
 }
 
 /**
@@ -203,13 +240,14 @@ export function flintContestant(opts: {
   const styleVariant = opts.styleVariant;
   if (styleVariant !== undefined) assertStyleVariantName(styleVariant);
   const localOnly = opts.localOnly === true || localModel !== undefined;
+  // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
+  // re-send it: estimate generously. The local brain costs nothing.
+  const estimate = (p: EvalPrompt): number =>
+    localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 });
   return {
     name: flintContestantName({ localOnly, localModel, localThink, styleVariant }),
     model: `flint@${opts.url}`,
-    // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
-    // re-send it: estimate generously. The local brain costs nothing.
-    estimate: (p) =>
-      localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 }),
+    estimate,
     async answer(p, signal) {
       const r = await fetchWhileRestarting(
         () =>
@@ -235,51 +273,76 @@ export function flintContestant(opts: {
       // the same way. Stop, rather than record hundreds of "Flint failures" that
       // the strict tally would count as losses.
       if (r.status === 400) throw new FatalError(`flint rejected the request (HTTP 400: ${body.error ?? 'no body'})`);
-      if (!r.ok) throw new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}`);
+      // What this replay cost, answered or not: every failure below still charges it.
+      // A 5xx from a server that doesn't report cost may have spent: charge the estimate.
+      const spent = typeof body.costUsd !== 'number' && r.status >= 500 ? estimate(p) : flintReplayCost(body, opts.frontierModel);
+      const fail = (err: Error) => withCost(err, spent);
+      if (!r.ok) throw fail(new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}`));
       if (body.eval !== true && !opts.allowTrainingLog) {
-        throw new FatalError(
-          'the Flint server ignored eval:true (it predates eval mode), so this replay was just logged to the training corpus. ' +
-            'Deploy the server from this branch, or pass --allow-training-log to accept that.',
+        throw fail(
+          new FatalError(
+            'the Flint server ignored eval:true (it predates eval mode), so this replay was just logged to the training corpus. ' +
+              'Deploy the server from this branch, or pass --allow-training-log to accept that.',
+          ),
         );
       }
-      if (localOnly && body.brain !== 'local') throw new FatalError(`asked for localOnly but brain=${body.brain ?? '?'} answered`);
+      if (localOnly && body.brain !== 'local') throw fail(new FatalError(`asked for localOnly but brain=${body.brain ?? '?'} answered`));
       if (localModel !== undefined && body.model !== localModel) {
-        throw new FatalError(
-          `asked for localModel ${localModel} but the server answered with ${body.model ?? '?'} — it predates the local-model override, or ignored it`,
+        throw fail(
+          new FatalError(
+            `asked for localModel ${localModel} but the server answered with ${body.model ?? '?'} — it predates the local-model override, or ignored it`,
+          ),
         );
       }
       if (localThink !== undefined && body.localThink !== localThink) {
-        throw new FatalError(
-          `asked for localThink ${String(localThink)} but the server didn't echo it (got ${String(body.localThink)}) — it predates the think override, or ignored it`,
+        throw fail(
+          new FatalError(
+            `asked for localThink ${String(localThink)} but the server didn't echo it (got ${String(body.localThink)}) — it predates the think override, or ignored it`,
+          ),
         );
       }
       // The server's "no model answered" message is not an answer. A failure, as the
       // empty reply it replaced was: not judged, not a loss, retried on resume.
       if (body.unanswered) {
-        throw new Error(
-          `flint did not answer (unanswered=${body.unanswered}, reason=${body.reason ?? '?'}, model=${body.model ?? '?'}): it sent its fallback message, which is not judged`,
+        throw fail(
+          new Error(
+            `flint did not answer (unanswered=${body.unanswered}, reason=${body.reason ?? '?'}, model=${body.model ?? '?'}): it sent its fallback message, which is not judged`,
+          ),
+        );
+      }
+      // A paid search refused because Flint's own cap for it is spent: the answer was
+      // made without the search, so judging it would score a crippled Flint. A failure
+      // like `unanswered`: not judged, retried on resume (after the cap resets).
+      if (body.budgetBlocked && body.budgetBlocked.length > 0) {
+        throw fail(
+          new Error(
+            `flint answered without ${body.budgetBlocked.join(', ')} (refused: Flint's own spend cap for it is spent), so the answer is not judged`,
+          ),
         );
       }
       if (styleVariant !== undefined && body.styleVariant !== styleVariant) {
-        throw new FatalError(
-          `asked for styleVariant ${styleVariant} but the server answered with ${body.styleVariant ?? '(no styleVariant echoed)'} — it predates style variants, or ignored it`,
+        throw fail(
+          new FatalError(
+            `asked for styleVariant ${styleVariant} but the server answered with ${body.styleVariant ?? '(no styleVariant echoed)'} — it predates style variants, or ignored it`,
+          ),
         );
       }
       const grounding = parseGrounding(body.grounding);
       if (opts.requireGrounding && !grounding) {
-        throw new FatalError(
-          '--judge-grounding: the Flint server sent no `grounding` with its eval answer (it predates it), so the grounded judge would have nothing to show. Deploy the server with eval grounding first.',
+        throw fail(
+          new FatalError(
+            '--judge-grounding: the Flint server sent no `grounding` with its eval answer (it predates it), so the grounded judge would have nothing to show. Deploy the server with eval grounding first.',
+          ),
         );
       }
       const text = (body.text ?? '').trim();
-      if (!text) throw new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`);
+      if (!text) throw fail(new Error(`flint returned an empty answer (reason=${body.reason ?? '?'}, brain=${body.brain ?? '?'})`));
       const usage = body.usage;
       const model = body.model ?? opts.frontierModel;
-      const costUsd = usage && body.brain !== 'local' ? costOf('anthropic', model, usage) : 0;
       return {
         text,
         ...(usage ? { usage } : {}),
-        costUsd,
+        costUsd: spent,
         meta: {
           brain: body.brain,
           model,
