@@ -26,6 +26,14 @@ export interface TokenPrice {
 /** The vendors Flint pays by the token. */
 export type TokenVendor = 'anthropic' | 'openai' | 'perplexity';
 
+/**
+ * Who bills a priced call, the token vendors plus the ones only the parity eval
+ * calls. `google` is Gemini over its OpenAI-compatible endpoint and `amazon` is
+ * Bedrock (Nova); `compat` is any other OpenAI-compatible endpoint named with
+ * `--openai-compatible` (priced as UNLISTED unless its model is here).
+ */
+export type BillingVendor = TokenVendor | 'google' | 'amazon' | 'compat';
+
 /** Every vendor Flint pays at all: the token vendors, plus Tavily (per search credit). */
 export type PaidVendor = TokenVendor | 'tavily';
 
@@ -84,6 +92,15 @@ const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> 
   ['sonar-reasoning-pro', { input: 2, output: 8, cachedInput: 2, perRequest: 0.014 }], // [P]
   ['sonar-pro', { input: 3, output: 15, cachedInput: 3, perRequest: 0.014 }], // [P]
   ['sonar', { input: 1, output: 1, cachedInput: 1, perRequest: 0.012 }], // [P]
+  // Gemini, <=200K-token prompts (longer prompts cost more; the eval's don't get there).
+  ['gemini-2.5-flash-lite', { input: 0.1, output: 0.4, cachedInput: 0.025 }], // list price (verify)
+  ['gemini-2.5-flash', { input: 0.3, output: 2.5, cachedInput: 0.075 }], // list price (verify)
+  ['gemini-2.5-pro', { input: 1.25, output: 10, cachedInput: 0.31 }], // list price (verify)
+  // Amazon Nova on Bedrock, on-demand (a `us.` / `eu.` inference-profile prefix is ignored).
+  ['amazon.nova-premier', { input: 2.5, output: 12.5, cachedInput: 0.625 }], // list price (verify)
+  ['amazon.nova-pro', { input: 0.8, output: 3.2, cachedInput: 0.2 }], // list price (verify)
+  ['amazon.nova-lite', { input: 0.06, output: 0.24, cachedInput: 0.015 }], // list price (verify)
+  ['amazon.nova-micro', { input: 0.035, output: 0.14, cachedInput: 0.00875 }], // list price (verify)
 ];
 
 /** Deliberately pessimistic: at or above the dearest listed model on every axis. */
@@ -96,28 +113,41 @@ function matches(model: string, prefix: string): boolean {
   return next === '' || !/[0-9.]/.test(next);
 }
 
+/**
+ * The id prices are listed under: Gemini's OpenAI endpoint can say `models/gemini-...`,
+ * and a Bedrock cross-region inference profile is the model id behind a region
+ * prefix (`us.amazon.nova-premier-v1:0`).
+ */
+export function priceKey(model: string): string {
+  return model.replace(/^models\//, '').replace(/^(us|eu|apac|us-gov|global)\.(?=[a-z]+\.)/, '');
+}
+
 /** The per-token price of `model` (UNLISTED_PRICE when the table doesn't know it). */
 export function priceOf(model: string): TokenPrice {
-  return TOKEN_PRICES.find(([prefix]) => matches(model, prefix))?.[1] ?? UNLISTED_PRICE;
+  const key = priceKey(model);
+  return TOKEN_PRICES.find(([prefix]) => matches(key, prefix))?.[1] ?? UNLISTED_PRICE;
 }
 
 /** Whether the table has a real price for `model` (false: priced as UNLISTED_PRICE). */
 export function isListedModel(model: string): boolean {
-  return TOKEN_PRICES.some(([prefix]) => matches(model, prefix));
+  const key = priceKey(model);
+  return TOKEN_PRICES.some(([prefix]) => matches(key, prefix));
 }
 
 /**
  * Dollar cost of one call. The vendors count cached tokens differently:
- * Anthropic's `input` EXCLUDES cache reads/writes (they're reported beside it),
- * OpenAI's `input` INCLUDES the cached part. The core adapters pass both through
- * as-is, so the split happens here.
+ * Anthropic's (and Bedrock's) `input` EXCLUDES cache reads/writes (they're
+ * reported beside it), OpenAI's `input` INCLUDES the cached part. The core
+ * adapters pass both through as-is, so the split happens here.
  */
-export function costOf(vendor: TokenVendor, model: string, usage: TokenUsage): number {
+export function costOf(vendor: BillingVendor, model: string, usage: TokenUsage): number {
   const p = priceOf(model);
   const read = usage.cacheRead ?? 0;
   const write = usage.cacheWrite ?? 0;
   let inputCost: number;
-  if (vendor === 'anthropic') {
+  // Anthropic and Bedrock's Converse report cache reads/writes beside `input`;
+  // the OpenAI-shaped APIs (OpenAI, Gemini's endpoint, Perplexity) include them in it.
+  if (vendor === 'anthropic' || vendor === 'amazon') {
     inputCost = usage.input * p.input + read * p.cachedInput + write * (p.cacheWrite ?? p.input);
   } else {
     const cached = Math.min(read, usage.input);
@@ -132,7 +162,7 @@ export function costOf(vendor: TokenVendor, model: string, usage: TokenUsage): n
  * (thinking included). Errs high.
  */
 export function estimateCost(
-  vendor: TokenVendor,
+  vendor: BillingVendor,
   model: string,
   promptChars: number,
   opts: { overheadTokens?: number; expectedOutputTokens?: number } = {},

@@ -229,12 +229,12 @@ export function buildPromptSet(records: readonly TrainingRecord[], opts: BuildOp
 }
 
 /** Take n prompts round-robin across categories (id order within each), so a small --limit still spans categories. */
-export function takeBalanced(prompts: readonly EvalPrompt[], n: number): EvalPrompt[] {
-  const byCat = new Map<string, EvalPrompt[]>();
+export function takeBalanced<T extends { category: string }>(prompts: readonly T[], n: number): T[] {
+  const byCat = new Map<string, T[]>();
   for (const p of prompts) byCat.set(p.category, [...(byCat.get(p.category) ?? []), p]);
   const known = CATEGORIES as readonly string[];
-  const cats = [...CATEGORIES.filter((c) => byCat.has(c)), ...[...byCat.keys()].filter((c) => !known.includes(c))];
-  const out: EvalPrompt[] = [];
+  const cats = [...CATEGORIES.filter((c) => byCat.has(c)), ...[...byCat.keys()].filter((c) => !known.includes(c)).sort()];
+  const out: T[] = [];
   for (let i = 0; out.length < n; i++) {
     let any = false;
     for (const c of cats) {

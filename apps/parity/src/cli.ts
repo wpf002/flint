@@ -12,9 +12,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { AnthropicProvider, OpenAiProvider, type ProviderAdapter } from '@flint/core';
 import { BudgetGuard } from './budget.js';
 import { DailyEvalBudget, dailyLimitFrom } from './daily-budget.js';
+import { addVendorContestants, VENDOR_KEY_ENV, providerForVendor } from './compat.js';
 import {
   assertLocalModelName,
   claudeContestant,
@@ -51,6 +51,7 @@ import {
 } from './report.js';
 import { loadSecretsInto } from './secrets.js';
 import { answerOne, judgeOne, pairsToJudge, type JudgeSetup } from './steps.js';
+import { buildTasks, runTasks, tasksReport } from './tasks-cli.js';
 import { appendJsonl, pool, readJsonl, writeFileAtomic } from './util.js';
 
 const FLINT_HOME = join(homedir(), '.flint');
@@ -80,7 +81,10 @@ async function main(): Promise<void> {
   if (cmd === 'build-prompts') return buildPrompts(rest);
   if (cmd === 'run') return run(rest);
   if (cmd === 'report') return report(rest);
-  log('usage: tsx src/cli.ts <build-prompts|run|report> [flags]   (see apps/parity/README.md)');
+  if (cmd === 'build-tasks') return buildTasks(rest);
+  if (cmd === 'tasks') return runTasks(rest);
+  if (cmd === 'tasks-report') return tasksReport(rest);
+  log('usage: tsx src/cli.ts <build-prompts|run|report|build-tasks|tasks|tasks-report> [flags]   (see apps/parity/README.md)');
   process.exitCode = 2;
 }
 
@@ -150,6 +154,11 @@ async function run(argv: string[]): Promise<void> {
       'claude-model': { type: 'string', default: DEFAULTS.claudeModel },
       'openai-model': { type: 'string', default: DEFAULTS.openaiModel },
       'perplexity-model': { type: 'string', default: DEFAULTS.perplexityModel },
+      // Google / Amazon / other OpenAI-compatible frontier models (compat.ts). Opt in
+      // with --contestants ...,google,amazon; model ids are "verify before use".
+      'google-model': { type: 'string' },
+      'amazon-model': { type: 'string' },
+      'openai-compatible': { type: 'string', multiple: true },
       // No defaults here: a resumed run keeps its own judge (chooseJudge).
       'judge-model': { type: 'string' },
       'judge-panel': { type: 'string' },
@@ -217,10 +226,9 @@ async function run(argv: string[]): Promise<void> {
   const grounded = judge.grounded;
   if (judge.from === 'run') log(`judge: ${judgeModel}, the run's own (run.json); pass --judge-model or --judge-panel to use another`);
   if (grounded) log(`judge sees Flint's grounding (recalled memory + tool results): verdicts are kept under ${judgeModel}`);
-  const vendorKey = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY' } as const;
   if (!values['no-judge']) {
     for (const v of panelSpecs ? [...new Set(panelSpecs.map((p) => p.vendor))] : (['anthropic'] as const)) {
-      if (!process.env[vendorKey[v]]?.trim()) throw new Error(`the judge needs ${vendorKey[v]} (env or ~/.flint/secrets.env)`);
+      if (!process.env[VENDOR_KEY_ENV[v]]?.trim()) throw new Error(`the judge needs ${VENDOR_KEY_ENV[v]} (env or ~/.flint/secrets.env)`);
     }
   }
 
@@ -297,6 +305,21 @@ async function run(argv: string[]): Promise<void> {
   if (claudeKey) contestants.push(claudeContestant(claudeKey, values['claude-model']!, system, maxTokens));
   const pplxKey = need('perplexity', 'PERPLEXITY_API_KEY');
   if (pplxKey) contestants.push(perplexityContestant(pplxKey, values['perplexity-model']!, system, maxTokens));
+  // google, amazon and any --openai-compatible endpoint: only when named in --contestants.
+  contestants.push(
+    ...(await addVendorContestants({
+      wanted,
+      env: process.env,
+      system,
+      maxTokens,
+      googleModel: values['google-model'],
+      amazonModel: values['amazon-model'],
+      compatSpecs: values['openai-compatible'] ?? [],
+      notes,
+      log,
+      verifyModels: !judgeOnly,
+    })),
+  );
   if (!flint) throw new Error('parity needs flint in --contestants');
   const competitors = contestants.filter((c) => c !== flint);
   if (competitors.length === 0) throw new Error('no competitor has a key — nothing to compare Flint against');
@@ -415,12 +438,8 @@ async function run(argv: string[]): Promise<void> {
     judgmentKey({ promptId, competitor: comp.name, competitorModel: comp.model, judgeModel });
   for (const [k, j] of cachedJudgments(readJsonl<JudgmentRow>(judgmentsPath), judgeModel, subject)) judgments.set(k, j);
   if (!values['no-judge'] && !stopped()) {
-    const providerFor = (vendor: 'anthropic' | 'openai'): ProviderAdapter =>
-      vendor === 'anthropic'
-        ? new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY!.trim() })
-        : new OpenAiProvider({ apiKey: process.env.OPENAI_API_KEY!.trim() });
-    const panel: Panelist[] | undefined = panelSpecs?.map((p) => ({ ...p, provider: providerFor(p.vendor) }));
-    const setup: JudgeSetup = { judgeModel, model: judgeApiModel, grounded, panel, provider: panel ? undefined : providerFor('anthropic') };
+    const panel: Panelist[] | undefined = panelSpecs?.map((p) => ({ ...p, provider: providerForVendor(p.vendor) }));
+    const setup: JudgeSetup = { judgeModel, model: judgeApiModel, grounded, panel, provider: panel ? undefined : providerForVendor('anthropic') };
     const todo = pairsToJudge({
       prompts,
       flint,

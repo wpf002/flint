@@ -10,12 +10,15 @@
  */
 import type { ProviderAdapter, TokenUsage } from '@flint/core';
 import { groundedJudgeId, groundingChars, splitGroundedJudgeId, type FlintGrounding } from './grounding.js';
-import { flintIsA, judgePair, outcomeFor, type Outcome, type Verdict } from './judge.js';
+import { flintIsA, judgePair, outcomeFor, type JudgeExtras, type JudgePrompt, type Outcome, type Verdict } from './judge.js';
 import { costOf, estimateCost, type Vendor } from './pricing.js';
-import type { EvalPrompt } from './prompts.js';
 
-/** Vendors that can sit on the panel. */
-const PANEL_VENDORS = ['anthropic', 'openai'] as const;
+/**
+ * Vendors that can sit on the panel. Google (Gemini) and Amazon (Nova) come
+ * through compat.ts; each needs its key (VENDOR_KEY_ENV) and, for the model id,
+ * the same "verify before use" care as a contestant.
+ */
+export const PANEL_VENDORS = ['anthropic', 'openai', 'google', 'amazon'] as const;
 export type PanelVendor = (typeof PANEL_VENDORS)[number];
 
 export interface PanelistSpec {
@@ -163,7 +166,7 @@ export function verdictFor(outcome: Outcome, flintWasA: boolean): Verdict {
 /** The budget guard's pre-call estimate for one panelist's verdict on one pair. */
 export function panelistEstimate(p: PanelistSpec, promptChars: number): number {
   // Reasoning models spend hidden output tokens before the JSON; estimate high.
-  const expectedOutputTokens = p.vendor === 'openai' ? 3000 : 800;
+  const expectedOutputTokens = reasons(p) ? 3000 : 800;
   return estimateCost(p.vendor as Vendor, p.model, promptChars, { overheadTokens: 700, expectedOutputTokens });
 }
 
@@ -172,7 +175,12 @@ export function panelistEstimate(p: PanelistSpec, promptChars: number): number {
  * sized for a JSON reply would be eaten by the thinking and return nothing.
  */
 export function panelistMaxTokens(p: PanelistSpec, judgeMaxTokens: number): number {
-  return p.vendor === 'openai' ? Math.max(judgeMaxTokens, 16_384) : judgeMaxTokens;
+  return reasons(p) ? Math.max(judgeMaxTokens, 16_384) : judgeMaxTokens;
+}
+
+/** GPT-5-class and Gemini 2.5+ models think by default, and the thinking counts as output. */
+function reasons(p: PanelistSpec): boolean {
+  return p.vendor === 'openai' || p.vendor === 'google';
 }
 
 export type PanelResult =
@@ -190,7 +198,7 @@ export async function judgeWithPanel(opts: {
   panel: readonly Panelist[];
   reserve: (estimateUsd: number) => ((actualUsd: number) => void) | null;
   judgeMaxTokens: number;
-  prompt: EvalPrompt;
+  prompt: JudgePrompt;
   competitor: string;
   flintAnswer: string;
   competitorAnswer: string;
@@ -199,9 +207,12 @@ export async function judgeWithPanel(opts: {
   signal: AbortSignal;
   /** `--judge-grounding`: what Flint was grounded on, shown to every panelist. */
   grounding?: FlintGrounding | undefined;
+  /** Flint tasks: shared-context wording and the task rubric, for every panelist. */
+  extras?: JudgeExtras | undefined;
 }): Promise<PanelResult> {
   const { panel, prompt } = opts;
-  const chars = prompt.prompt.length + opts.flintAnswer.length + opts.competitorAnswer.length + groundingChars(opts.grounding);
+  const chars =
+    prompt.prompt.length + opts.flintAnswer.length + opts.competitorAnswer.length + groundingChars(opts.grounding) + (opts.extras?.rubric?.length ?? 0);
   const settles: Array<(actualUsd: number) => void> = [];
   for (const p of panel) {
     const s = opts.reserve(panelistEstimate(p, chars));
@@ -226,6 +237,7 @@ export async function judgeWithPanel(opts: {
           now: opts.now,
           signal: opts.signal,
           grounding: opts.grounding,
+          extras: opts.extras,
         });
         const costUsd = costOf(p.vendor, p.model, j.usage);
         settles[i]!(costUsd);

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   priceOf,
+  priceKey,
   isListedModel,
   costOf,
   estimateCost,
@@ -122,5 +123,24 @@ describe('spendPeriod', () => {
     // 2026-12-01 05:59Z is 23:59 on Nov 30 in Chicago (CST, UTC-6).
     expect(spendPeriod(Date.UTC(2026, 11, 1, 5, 59), 'America/Chicago')).toEqual({ day: '2026-11-30', month: '2026-11' });
     expect(spendPeriod(Date.UTC(2026, 11, 1, 6, 0), 'America/Chicago')).toEqual({ day: '2026-12-01', month: '2026-12' });
+  });
+});
+
+describe('the parity eval vendors (Gemini, Nova)', () => {
+  it('prices Gemini and Nova, behind any endpoint or inference-profile prefix', () => {
+    expect(priceOf('gemini-2.5-pro')).toMatchObject({ input: 1.25, output: 10 });
+    expect(priceOf('models/gemini-2.5-flash')).toMatchObject({ input: 0.3, output: 2.5 });
+    expect(priceOf('gemini-2.5-flash-lite')).toMatchObject({ input: 0.1, output: 0.4 });
+    expect(priceKey('us.amazon.nova-premier-v1:0')).toBe('amazon.nova-premier-v1:0');
+    expect(priceOf('us.amazon.nova-premier-v1:0')).toEqual(priceOf('amazon.nova-premier-v1:0'));
+    expect(isListedModel('us.amazon.nova-pro-v1:0')).toBe(true);
+    expect(priceOf('gemini-2.5')).toBe(UNLISTED_PRICE);
+    expect(priceOf('gemini-3-pro')).toBe(UNLISTED_PRICE);
+  });
+
+  it('splits Bedrock cache tokens like Anthropic, Gemini like OpenAI', () => {
+    const usage = { input: 1_000_000, output: 0, cacheRead: 1_000_000 };
+    expect(costOf('amazon', 'amazon.nova-pro-v1:0', usage)).toBeCloseTo(0.8 + 0.2, 9);
+    expect(costOf('google', 'gemini-2.5-pro', usage)).toBeCloseTo(0.31, 9);
   });
 });

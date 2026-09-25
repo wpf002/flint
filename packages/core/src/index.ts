@@ -99,6 +99,7 @@ export {
   PAID_VENDORS,
   UNLISTED_PRICE,
   priceOf,
+  priceKey,
   isListedModel,
   costOf,
   estimateCost,
@@ -110,7 +111,7 @@ export {
   PERPLEXITY_SEARCH_CALL_USD,
   spendPeriod,
 } from './pricing.js';
-export type { TokenPrice, TokenVendor, PaidVendor } from './pricing.js';
+export type { TokenPrice, TokenVendor, BillingVendor, PaidVendor } from './pricing.js';
 
 // --- memory -----------------------------------------------------------------
 export { InMemoryStore } from './memory/in-memory.js';
