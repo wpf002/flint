@@ -50,17 +50,26 @@ export function withMemory(base: string, facts: readonly string[]): string {
 /**
  * Recall the facts relevant to `message` and build the context block from them.
  * Recall is best-effort: if it throws, the turn gets `base` alone and no facts.
+ *
+ * `skip` (an eval request's `recall: false`, ./eval-tools): don't read long-term
+ * memory at all, so the turn has exactly the block it would have with nothing
+ * recalled. apps/parity tasks hands each frontier competitor the data Flint had;
+ * on a task whose point isn't memory, that data leaves memory out (it is Will's),
+ * so Flint must answer without it too, or the two didn't have the same data.
  */
 export async function recallContext(
   base: string,
   message: string,
   knowledge: { recall(query: string): Promise<string[]> },
+  opts: { skip?: boolean } = {},
 ): Promise<{ block: string; facts: string[] }> {
   let facts: string[] = [];
-  try {
-    facts = await knowledge.recall(message);
-  } catch {
-    /* memory recall is best-effort */
+  if (!opts.skip) {
+    try {
+      facts = await knowledge.recall(message);
+    } catch {
+      /* memory recall is best-effort */
+    }
   }
   return { block: withMemory(base, facts), facts };
 }

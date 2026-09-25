@@ -63,6 +63,21 @@ describe('context block (withMemory / recallContext)', () => {
     });
     expect(r).toEqual({ block: base, facts: [] });
   });
+
+  it('skip (eval recall: false) never reads memory, and the block is the no-memory block', async () => {
+    let asked = 0;
+    const knowledge = {
+      recall: async () => {
+        asked++;
+        return ['Will is going to UFC 330 with Mike'];
+      },
+    };
+    expect(await recallContext(base, 'Hey Flint, how is it going?', knowledge, { skip: true })).toEqual({ block: base, facts: [] });
+    expect(asked).toBe(0);
+    // Without it, recall runs as always.
+    expect((await recallContext(base, 'Hey Flint, how is it going?', knowledge)).facts).toEqual(['Will is going to UFC 330 with Mike']);
+    expect(asked).toBe(1);
+  });
 });
 
 describe('toolExcerpt', () => {
