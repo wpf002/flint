@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { isUnansweredMessage } from './unanswered';
 
 /** One captured interaction — a training example for Flint's own future brain. */
 export interface TrainingRecord {
@@ -39,6 +40,8 @@ export class TrainingLogger {
     const input = (rec.input ?? '').trim();
     const output = (rec.output ?? '').trim();
     if (!input || !output) return; // only keep complete pairs
+    // A canned "no model answered" message is not a teacher answer.
+    if (isUnansweredMessage(output)) return;
     const full: TrainingRecord = { ts, id: ++this.seq, ...rec, input, output };
     try {
       mkdirSync(dirname(this.path), { recursive: true });
