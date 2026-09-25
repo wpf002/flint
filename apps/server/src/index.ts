@@ -56,7 +56,6 @@ import {
 import {
   Persona,
   InMemoryLessonStore,
-  FLINT_STYLE_GUIDE,
   OllamaEmbedder,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
@@ -72,6 +71,7 @@ import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, resolveLocalPersona, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
+import { STYLE_VARIANTS, StyledPersonas, chooseStyles, parseStyleVariantRequest, readStyleDefaults, styleEcho, styleGuideFor, type StyleVariant } from './style-variant';
 import {
   parseAttachments,
   readJsonLimited,
@@ -389,24 +389,25 @@ async function main(): Promise<void> {
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
   const lessonStore = new InMemoryLessonStore();
-  const persona = new Persona(flint, {
-    name: 'Flint',
-    styleGuide: FLINT_STYLE_GUIDE,
-    lessonStore,
-  });
+  // Style guide per brain (./style-variant): FLINT_STYLE_VARIANT (frontier) and
+  // FLINT_LOCAL_STYLE_VARIANT (local), both "v1" (FLINT_STYLE_GUIDE) when unset.
+  const styles = readStyleDefaults(process.env, (m) => console.error(m));
+  const localPersonaFor = (f: Flint, variant: StyleVariant) =>
+    new Persona(f, {
+      name: 'Flint',
+      styleGuide: styleGuideFor(variant),
+      lessonStore,
+    });
+  const persona = localPersonaFor(flint, styles.local);
   // Eval-only local-model override (apps/parity --local-model / --local-think, see
   // local-model.ts): the same local persona, memory and action log, with a different
-  // default model. Built lazily per (model, think); never used by normal traffic.
+  // default model. Built lazily per (model, think, style variant); never used by normal traffic.
   // Candidates get their own Ollama client with a 16K context (evalOllamaOptions)
   // carrying that request's `think` (overridePersonaCache).
   const localModels =
     provider.name === 'ollama'
-      ? overridePersonaCache(process.env, (candidate, m) =>
-          new Persona(new Flint({ provider: candidate, defaultModel: m, memory, observer: actionLog }), {
-            name: 'Flint',
-            styleGuide: FLINT_STYLE_GUIDE,
-            lessonStore,
-          }),
+      ? overridePersonaCache(process.env, (candidate, m, variant) =>
+          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory, observer: actionLog }), variant ?? styles.local),
         )
       : undefined;
 
@@ -466,33 +467,40 @@ async function main(): Promise<void> {
   let frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   let extractFlint: Flint | undefined; // bare frontier (no persona) for background jobs like memory extraction
   const flintOf = new Map<Persona, Flint>();
+  const frontierPersonaFor = (fProvider: ProviderAdapter, fModel: string, variant: StyleVariant): Persona => {
+    const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer: actionLog });
+    // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
+    // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
+    // of the style guide. Everything before them is byte-identical on every
+    // request, so inside the cache's 5-minute window — a tool loop, a multi-turn
+    // chat, a bulk_seed burst — those thousands of input tokens are billed at the
+    // cache-read rate instead of full price, over and over. The per-turn context
+    // block (which carries the clock) stays outside the breakpoint, so nothing
+    // the model reads changes.
+    // Caching is Anthropic-only; every other adapter would ignore the hint anyway.
+    const fPersona = new Persona(fFlint, {
+      name: 'Flint',
+      styleGuide: styleGuideFor(variant),
+      lessonStore: new InMemoryLessonStore(),
+      ...(fProvider.name === 'anthropic'
+        ? { cache: { system: true, ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}) } }
+        : {}),
+    });
+    flintOf.set(fPersona, fFlint);
+    return fPersona;
+  };
   const brains = buildTiers<Persona>({
     env: process.env,
     factory: envProviderFactory(process.env),
     legacy: frontierCfg,
     log: (m) => console.error(m),
-    makePersona: (fProvider, fModel) => {
-      const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer: actionLog });
-      // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
-      // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
-      // of the style guide. Everything before them is byte-identical on every
-      // request, so inside the cache's 5-minute window — a tool loop, a multi-turn
-      // chat, a bulk_seed burst — those thousands of input tokens are billed at the
-      // cache-read rate instead of full price, over and over. The per-turn context
-      // block (which carries the clock) stays outside the breakpoint, so nothing
-      // the model reads changes.
-      // Caching is Anthropic-only; every other adapter would ignore the hint anyway.
-      const fPersona = new Persona(fFlint, {
-        name: 'Flint',
-        styleGuide: FLINT_STYLE_GUIDE,
-        lessonStore: new InMemoryLessonStore(),
-        ...(fProvider.name === 'anthropic'
-          ? { cache: { system: true, ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}) } }
-          : {}),
-      });
-      flintOf.set(fPersona, fFlint);
-      return fPersona;
-    },
+    makePersona: (fProvider, fModel) => frontierPersonaFor(fProvider, fModel, styles.frontier),
+  });
+  // Eval requests may name another style variant; built per (brain, variant) on first use.
+  const styled = new StyledPersonas<Persona>(styles, {
+    local: persona,
+    buildLocal: (v) => localPersonaFor(flint, v),
+    buildFrontier: frontierPersonaFor,
   });
   if (brains) {
     frontier = { persona: brains.primary.persona, model: brains.primary.label, media: mediaOf(brains.primary) };
@@ -525,7 +533,7 @@ async function main(): Promise<void> {
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
-  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
+  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -545,6 +553,8 @@ interface Ctx {
   persona: Persona;
   /** Eval-only local-model override personas; undefined when the local brain isn't Ollama. */
   localModels: LocalPersonaCache<OverridePersona<Persona>> | undefined;
+  /** Personas per style variant (eval `styleVariant`), and each brain's live default. */
+  styled: StyledPersonas<Persona>;
   provider: ProviderAdapter;
   model: string;
   tools: Tool[];
@@ -700,6 +710,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       localModelOverride: !!ctx.localModels,
       // ...and `localThink` (apps/parity --local-think).
       localThinkOverride: !!ctx.localModels,
+      // The `styleVariant`s /generate accepts (apps/parity --flint-variant).
+      styleVariants: STYLE_VARIANTS,
     });
   }
 
@@ -767,7 +779,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // `think` set. 400 unless eval + localOnly (and localThink only with localModel).
     const lm = parseLocalModelRequest(body);
     if (!lm.ok) return json(res, lm.status, { error: lm.error });
-    const local = resolveLocalPersona(lm.model, { persona: ctx.persona, model: ctx.model }, ctx.localModels, lm.think);
+    // Eval-only: answer with another style guide (apps/parity --flint-variant). 400
+    // unless eval: true and a known variant; without it each brain uses its live one.
+    const sv = parseStyleVariantRequest(body);
+    if (!sv.ok) return json(res, sv.status, { error: sv.error });
+    const style = chooseStyles(sv.variant, ctx.styled.defaults);
+    const local = resolveLocalPersona(lm.model, { persona: ctx.styled.local(style.local), model: ctx.model }, ctx.localModels, lm.think, style.local);
     if (!local.ok) return json(res, local.status, { error: local.error });
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
@@ -785,7 +802,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let out;
     if (brain === 'frontier' && ctx.brains) {
       try {
-        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => ask(b.persona), { onFallback: logFallback });
+        const won = await runWithFallback(mediaChain(ctx.brains.chain(tier), mediaNeeds(attachments), ctx.brains.primary), (b) => ask(ctx.styled.frontier(b, style.frontier)), { onFallback: logFallback });
         out = won.result;
         answeredBy = won.brain.label;
       } catch (err) {
@@ -813,6 +830,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // The `think` the answering persona's Ollama client sends (not the request's
         // localThink), so apps/parity can tell the flag reached Ollama, as it does for `model`.
         ...(local.think !== undefined ? { localThink: local.think } : {}),
+        // The style variant of the brain that answered (apps/parity checks it against --flint-variant).
+        styleVariant: styleEcho(brain, style),
         tools: toolsUsed,
         proposed: proposed.map((p) => p.fullName),
         eval: true,

@@ -209,6 +209,12 @@ describe('override personas per (model, think)', () => {
     expect(overrideKey('qwen3.8:27b', false)).toBe('qwen3.8:27b~nothink');
   });
 
+  it('keys the style variant apart too, and leaves the key alone without one', () => {
+    expect(overrideKey('qwen3.8:27b', undefined, 'v1')).toBe('qwen3.8:27b#v1');
+    expect(overrideKey('qwen3.8:27b', false, 'local-v1')).toBe('qwen3.8:27b~nothink#local-v1');
+    expect(overrideKey('qwen3.8:27b', true, undefined)).toBe('qwen3.8:27b~think');
+  });
+
   it('builds one persona per (model, think) and reuses it', () => {
     const made: Array<[string, boolean | undefined]> = [];
     const cache = new LocalPersonaCache((m, think) => {
@@ -303,6 +309,20 @@ describe('overridePersonaCache (what main() builds for bake-offs)', () => {
     expect(built).toBe(2);
     await cache.get('qwen3.8:27b', false).persona.generate({ model: 'qwen3.8:27b', messages: [hi] });
     expect(urls).toEqual(['http://studio:11434/api/chat']);
+  });
+
+  it('builds the persona with the style variant the turn resolved, one per variant', () => {
+    const variants: Array<string | undefined> = [];
+    const cache = overridePersonaCache({}, (_provider, model, variant) => (variants.push(variant), `${model}:${String(variant)}`));
+    const base = { persona: 'main', model: 'qwen2.5:7b' };
+    const v1 = resolveLocalPersona('muse-glimmer:30b', base, cache, false, 'v1');
+    const lv1 = resolveLocalPersona('muse-glimmer:30b', base, cache, false, 'local-v1');
+    expect(v1).toEqual({ ok: true, persona: 'muse-glimmer:30b:v1', model: 'muse-glimmer:30b', think: false });
+    expect(lv1).toEqual({ ok: true, persona: 'muse-glimmer:30b:local-v1', model: 'muse-glimmer:30b', think: false });
+    expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false, 'local-v1')).toEqual(lv1);
+    expect(variants).toEqual(['v1', 'local-v1']);
+    // No override: the base persona (already in the turn's variant), untouched.
+    expect(resolveLocalPersona(undefined, base, cache, false, 'local-v1')).toEqual({ ok: true, persona: 'main', model: 'qwen2.5:7b' });
   });
 });
 

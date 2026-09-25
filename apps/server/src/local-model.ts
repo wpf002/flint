@@ -19,6 +19,7 @@
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
 import { OllamaProvider, type OllamaProviderOptions } from '@flint/core';
+import type { StyleVariant } from './style-variant';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
 export const LOCAL_MODEL_RE = /^[a-z0-9._:\-/]+$/i;
@@ -106,35 +107,39 @@ export function evalOllamaOptions(env: Record<string, string | undefined>, think
 }
 
 /**
- * Cache key for one override. Model names can't contain `~` (LOCAL_MODEL_RE), so
- * the suffix is unambiguous; no `think` keeps the bare model name.
+ * Cache key for one override. Model names can't contain `~` or `#`
+ * (LOCAL_MODEL_RE), so the suffixes are unambiguous; no `think` and no style
+ * variant keeps the bare model name.
  */
-export function overrideKey(model: string, think: boolean | undefined): string {
-  return think === undefined ? model : `${model}~${think ? 'think' : 'nothink'}`;
+export function overrideKey(model: string, think: boolean | undefined, variant?: StyleVariant): string {
+  const base = think === undefined ? model : `${model}~${think ? 'think' : 'nothink'}`;
+  return variant === undefined ? base : `${base}#${variant}`;
 }
 
 /**
- * One persona per override (model, think), built on first use and reused after
- * that. Bounded (least-recently-used out) so a long bake-off across many
- * candidates can't grow it without limit; a persona is cheap to rebuild.
+ * One persona per override (model, think, style variant), built on first use and
+ * reused after that. Bounded (least-recently-used out) so a long bake-off across
+ * many candidates can't grow it without limit; a persona is cheap to rebuild.
+ * The variant (./style-variant) is the style guide the persona is built with;
+ * main() always passes one.
  */
 export class LocalPersonaCache<P> {
   private readonly byKey = new Map<string, P>();
 
   constructor(
-    private readonly make: (model: string, think: boolean | undefined) => P,
+    private readonly make: (model: string, think: boolean | undefined, variant: StyleVariant | undefined) => P,
     private readonly max = 8,
   ) {}
 
-  get(model: string, think?: boolean): P {
-    const key = overrideKey(model, think);
+  get(model: string, think?: boolean, variant?: StyleVariant): P {
+    const key = overrideKey(model, think, variant);
     const hit = this.byKey.get(key);
     if (hit !== undefined) {
       this.byKey.delete(key); // refresh recency
       this.byKey.set(key, hit);
       return hit;
     }
-    const p = this.make(model, think);
+    const p = this.make(model, think, variant);
     this.byKey.set(key, p);
     while (this.byKey.size > this.max) {
       const oldest = this.byKey.keys().next().value as string;
@@ -156,28 +161,29 @@ export interface OverridePersona<P> {
 }
 
 /**
- * The override cache main() builds: for each (model, think), `build` wraps a new
- * OllamaProvider made from evalOllamaOptions(env, think) in a persona. Each entry
- * records the `think` that provider was actually given, and /generate echoes that
- * (not the request), so apps/parity's echo check fails if the flag is lost on the
- * way to Ollama.
+ * The override cache main() builds: for each (model, think, variant), `build`
+ * wraps a new OllamaProvider made from evalOllamaOptions(env, think) in a persona
+ * with that variant's style guide. Each entry records the `think` that provider
+ * was actually given, and /generate echoes that (not the request), so
+ * apps/parity's echo check fails if the flag is lost on the way to Ollama.
  */
 export function overridePersonaCache<P>(
   env: Record<string, string | undefined>,
-  build: (provider: OllamaProvider, model: string) => P,
+  build: (provider: OllamaProvider, model: string, variant: StyleVariant | undefined) => P,
   opts: { fetch?: typeof fetch; max?: number } = {},
 ): LocalPersonaCache<OverridePersona<P>> {
-  return new LocalPersonaCache((model, think) => {
+  return new LocalPersonaCache((model, think, variant) => {
     const options: OllamaProviderOptions = { ...evalOllamaOptions(env, think), ...(opts.fetch ? { fetch: opts.fetch } : {}) };
-    return { persona: build(new OllamaProvider(options), model), think: options.think };
+    return { persona: build(new OllamaProvider(options), model, variant), think: options.think };
   }, opts.max);
 }
 
 /**
  * Which persona and model label answer a /generate turn. Without an override
- * it's the server's own local persona, exactly as before. With one, the cached
- * override persona for (model, think), or an error if this server's local brain
- * isn't Ollama (no cache was built). `think` in the result is what that persona's
+ * it's `base`: the server's own local persona (in the turn's style variant; the
+ * live one by default), exactly as before. With one, the cached override persona
+ * for (model, think, variant), or an error if this server's local brain isn't
+ * Ollama (no cache was built). `think` in the result is what that persona's
  * Ollama client sends, present only when it sends one: the eval answer's
  * `localThink` echo.
  */
@@ -186,9 +192,10 @@ export function resolveLocalPersona<P>(
   base: { persona: P; model: string },
   cache: LocalPersonaCache<OverridePersona<P>> | undefined,
   think?: boolean,
+  variant?: StyleVariant,
 ): { ok: true; persona: P; model: string; think?: boolean } | { ok: false; status: 422; error: string } {
   if (override === undefined) return { ok: true, persona: base.persona, model: base.model };
   if (!cache) return { ok: false, status: 422, error: "localModel needs an Ollama local brain, and this server's isn't one" };
-  const hit = cache.get(override, think);
+  const hit = cache.get(override, think, variant);
   return { ok: true, persona: hit.persona, model: override, ...(hit.think !== undefined ? { think: hit.think } : {}) };
 }
