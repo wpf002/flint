@@ -173,4 +173,24 @@ describe('answerOne charges what a failed call cost', () => {
     expect(r).toMatchObject({ kind: 'failed', row: { costUsd: 0.18 } });
     expect(g.settled).toEqual([0.18]);
   });
+
+  // Flint tasks: a server that ignores the eval overrides stops the run, but the
+  // replay it ran was still billed, so it still lands on the budget and the daily ledger.
+  it('end to end: a server that ignored groundingChars stops the run, and is charged its reported cost', async () => {
+    serverSays({ text: 'hi', reason: 'complete', usage: USAGE, costUsd: 0.42, groundingChars: 800 });
+    const g = guarded();
+    const r = await answerOne({ contestant: flint({ groundingChars: 4000 }), prompt, signal: new AbortController().signal, reserve: g.reserve });
+    expect(r.kind).toBe('fatal');
+    expect(g.settled).toEqual([0.42]);
+    expect(g.budget.spent).toBeCloseTo(0.42, 9);
+  });
+
+  it('end to end: a server that ignored recall: false stops the run, and is charged its reported cost', async () => {
+    serverSays({ text: 'hi', reason: 'complete', usage: USAGE, costUsd: 0.42, recall: true });
+    const g = guarded();
+    const r = await answerOne({ contestant: flint({ withholdMemory: () => true }), prompt, signal: new AbortController().signal, reserve: g.reserve });
+    expect(r.kind).toBe('fatal');
+    expect(g.settled).toEqual([0.42]);
+    expect(g.budget.spent).toBeCloseTo(0.42, 9);
+  });
 });

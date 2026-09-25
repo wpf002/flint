@@ -370,8 +370,10 @@ export function flintContestant(opts: {
         );
       }
       if (opts.groundingChars !== undefined && body.groundingChars !== opts.groundingChars) {
-        throw new FatalError(
-          `asked for groundingChars ${opts.groundingChars} but the server echoed ${String(body.groundingChars)} — it predates longer eval excerpts, or ignored them`,
+        throw fail(
+          new FatalError(
+            `asked for groundingChars ${opts.groundingChars} but the server echoed ${String(body.groundingChars)} — it predates longer eval excerpts, or ignored them`,
+          ),
         );
       }
       const grounding = parseGrounding(body.grounding, opts.groundingChars);
@@ -385,8 +387,10 @@ export function flintContestant(opts: {
       // Flint must not have read memory the competitors won't get: the head-to-head
       // (and the judges' "both had the same data") would be false.
       if (noRecall && (body.recall !== false || (grounding?.memory.length ?? 0) > 0)) {
-        throw new FatalError(
-          `asked for recall: false but the server ${body.recall !== false ? `didn't echo it (got ${String(body.recall)})` : `still recalled ${grounding!.memory.length} memory fact(s)`} — it predates the recall override, or ignored it`,
+        throw fail(
+          new FatalError(
+            `asked for recall: false but the server ${body.recall !== false ? `didn't echo it (got ${String(body.recall)})` : `still recalled ${grounding!.memory.length} memory fact(s)`} — it predates the recall override, or ignored it`,
+          ),
         );
       }
       const text = (body.text ?? '').trim();
