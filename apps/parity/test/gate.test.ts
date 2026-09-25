@@ -116,6 +116,16 @@ describe('the gate on fixture judgments', () => {
     expect(decideGate(fixtureInput({ manifest: 'not-required' })).verdict).toBe('PROMOTE');
   });
 
+  it('HOLDs a manifest whose build did not end ok, and REJECTs one the builder called CONTAMINATED', () => {
+    // Same sets, same sha, no overlap tallied: only the status differs from the PROMOTE fixture.
+    const noData = decideGate(fixtureInput({ manifest: { ...manifestAt('manifest.json'), status: 'NO_DATA' } }));
+    expect(noData.verdict).toBe('HOLD');
+    expect(noData.reasons).toEqual(['manifest status NO_DATA']);
+    const contaminated = decideGate(fixtureInput({ manifest: { ...manifestAt('manifest.json'), status: 'CONTAMINATED' } }));
+    expect(contaminated.verdict).toBe('REJECT');
+    expect(contaminated.checks.find((c) => c.id === 'contamination')?.ok).toBe(false);
+  });
+
   it('HOLDs when the measurement itself is suspect', () => {
     expect(decideGate(fixtureInput({ serverChanged: 'deployHead: "a" → "b"' })).reasons[0]).toMatch(/server changed/);
     expect(decideGate(fixtureInput({ runErrors: ['gate_prompts/candidate: stopped at the budget'] })).verdict).toBe('HOLD');
@@ -235,6 +245,52 @@ describe('REJECT rules', () => {
     const input = scenario([{ name: 'parity', n: 100, better: 12, worse: 3, cats: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l'] }]);
     expect(input.pooled.byCategory.a!.n).toBeLessThan(10);
     expect(failedIds(input).filter((id) => id.startsWith('category:'))).toEqual([]);
+  });
+
+  /** `tiny` has n prompts, `worse` of them worse and none better; knowledge carries a clean pooled gain (15 better). */
+  const withTinyCategory = (n: number, worse: number): GateInput => {
+    const b = new Map<string, PromptScore>();
+    const c = new Map<string, PromptScore>();
+    for (let i = 0; i < 100; i++) {
+      const cat = i < n ? 'tiny' : 'knowledge';
+      const id = `t${i}`;
+      const bs = i < worse ? 1 : 0;
+      const cs = i >= n && i < n + 15 ? 1 : 0;
+      b.set(id, { promptId: id, category: cat, score: bs as 0 | 1, failed: false });
+      c.set(id, { promptId: id, category: cat, score: cs as 0 | 1, failed: false });
+    }
+    const input = scenario([{ name: 'parity', n: 100, better: 12, worse: 3 }]);
+    input.pooled = pairScores(b, c, { resamples: 2000 });
+    return input;
+  };
+
+  it('a category under minCategoryN is not judged even when it drops more than 10 points', () => {
+    const input = withTinyCategory(5, 1);
+    expect(input.pooled.byCategory.tiny).toMatchObject({ n: 5, worse: 1 });
+    expect(input.pooled.byCategory.tiny!.delta).toBeCloseTo(-0.2);
+    expect(failedIds(input)).toEqual([]);
+    expect(decideGate(input).verdict).toBe('PROMOTE');
+  });
+
+  it('a category of exactly minCategoryN is judged', () => {
+    // -10 points is the limit itself: allowed.
+    expect(failedIds(withTinyCategory(10, 1))).toEqual([]);
+    // -20 points on n = 10: judged, and too much.
+    const input = withTinyCategory(10, 2);
+    expect(input.pooled.byCategory.tiny).toMatchObject({ n: 10, worse: 2 });
+    expect(failedIds(input)).toEqual(['category:tiny']);
+    expect(decideGate(input).verdict).toBe('REJECT');
+  });
+
+  it('a significant gain over the margin still fails when the interval reaches 0', () => {
+    const input = scenario([{ name: 'parity', n: 100, better: 12, worse: 3 }]);
+    expect(input.pooled.p).toBeLessThan(DEFAULT_THRESHOLDS.alpha);
+    expect(input.pooled.delta).toBeGreaterThanOrEqual(DEFAULT_THRESHOLDS.margin);
+    for (const lo of [0, -0.01]) {
+      input.pooled = { ...input.pooled, ci: [lo, 0.2] };
+      expect(failedIds(input)).toEqual(['interval']);
+      expect(decideGate(input).verdict).toBe('REJECT');
+    }
   });
 
   it('answering less often or much more slowly is a regression', () => {
