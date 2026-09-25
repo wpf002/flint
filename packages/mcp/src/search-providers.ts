@@ -269,8 +269,20 @@ export class WebSearch {
     return this.coolingDown() ? ['searxng', primary] : [primary, 'searxng'];
   }
 
-  async search(query: string, maxResults?: number): Promise<SearchOutcome> {
+  /**
+   * `keylessOnly`: search SearXNG alone and never touch the metered provider.
+   * Flint's spend guard sets it once the Tavily/Brave budget is spent, so a
+   * capped vendor turns into free search instead of no search. Only auto and
+   * searxng modes know where SearXNG is; the legacy keyed modes refuse it.
+   */
+  async search(query: string, maxResults?: number, opts: { keylessOnly?: boolean } = {}): Promise<SearchOutcome> {
     const n = Math.max(1, Math.min(Math.floor(maxResults ?? 5), 10));
+    if (opts.keylessOnly) {
+      if (this.config.mode !== 'auto' && this.config.mode !== 'searxng') {
+        return { ok: false, source: 'searxng', kind: 'config', error: 'keyless search needs SEARCH_PROVIDER=auto or searxng' };
+      }
+      return this.call('searxng', query, n);
+    }
     const order = this.plan();
     if (order.length === 0) return { ok: false, source: this.config.mode as KeyedBackend, kind: 'config', error: NO_KEY_MESSAGE };
 

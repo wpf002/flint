@@ -935,3 +935,65 @@ describe('TurnSpend', () => {
     expect(l.totals('tavily').day.usd).toBe(0);
   });
 });
+
+describe('meterPaidTools with a keyless-capable web_search (SearXNG fallback)', () => {
+  const specs = paidToolSpecs({});
+  function keylessSearch(result: unknown, seen: unknown[] = []): Tool {
+    return {
+      definition: {
+        name: 'web.web_search',
+        description: 'search',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' }, keyless: { type: 'boolean' } }, required: ['query'] },
+        idempotent: true,
+      },
+      handler: async (call) => {
+        seen.push(call.args);
+        return result;
+      },
+    };
+  }
+
+  it('bills a search only when the metered vendor answered it', async () => {
+    const l = ledgerAt({ now: NOON });
+    const g = new SpendGuard(l, caps());
+    const [tavily] = meterPaidTools([keylessSearch({ content: [{ type: 'text', text: '{"results":[],"source":"tavily"}' }] })], { guard: g, specs });
+    const [searxng] = meterPaidTools([keylessSearch({ content: [{ type: 'text', text: '{"results":[],"source":"searxng","fallback":{"from":"tavily","reason":"432"}}' }] })], { guard: g, specs });
+    const [legacy] = meterPaidTools([keylessSearch('{"answer":"x","results":[]}')], { guard: g, specs });
+    await tavily!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q' } });
+    await searxng!.handler({ id: '2', toolName: 'web.web_search', args: { query: 'q' } });
+    await legacy!.handler({ id: '3', toolName: 'web.web_search', args: { query: 'q' } });
+    // tavily + the unlabelled (older connector) result are billed; the SearXNG answer is free
+    expect(l.totals('tavily').day.calls).toBe(2);
+  });
+
+  it('at the Tavily cap: searches keyless instead of refusing, and bills nothing', async () => {
+    const l = ledgerAt({ now: NOON });
+    l.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.01 });
+    const g = new SpendGuard(l, caps({ tavily: { dailyUsd: 0.01 } }));
+    const seen: unknown[] = [];
+    const [t] = meterPaidTools([keylessSearch({ content: [{ type: 'text', text: '{"results":[{"title":"t"}],"source":"searxng"}' }] }, seen)], { guard: g, specs });
+    const out = (await t!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q' } })) as { isError?: boolean };
+    expect(out.isError).toBeUndefined();
+    expect(seen).toEqual([{ query: 'q', keyless: true }]);
+    expect(l.totals('tavily').day.calls).toBe(1); // only the pre-existing row
+  });
+
+  it('never lets the model set keyless itself, and hides it from the tool schema', async () => {
+    const l = ledgerAt({ now: NOON });
+    const seen: unknown[] = [];
+    const [t] = meterPaidTools([keylessSearch({ content: [{ type: 'text', text: '{"results":[],"source":"tavily"}' }] }, seen)], { guard: new SpendGuard(l, caps()), specs });
+    expect(Object.keys((t!.definition.inputSchema as { properties: object }).properties)).toEqual(['query']);
+    await t!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q', keyless: true } });
+    expect(seen).toEqual([{ query: 'q' }]);
+  });
+
+  it("a spent Perplexity still points at web_search when Tavily is spent too, because web_search stays keyless", async () => {
+    const l = ledgerAt({ now: NOON });
+    l.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.01 });
+    l.record({ vendor: 'tavily', model: 'search-basic', kind: 'tool-search', usd: 0.01 });
+    const g = new SpendGuard(l, caps({ perplexity: { dailyUsd: 0.01 }, tavily: { dailyUsd: 0.01 } }));
+    const [pplx] = meterPaidTools([stubTool('trident.perplexity_search', 'x'), keylessSearch('hits')], { guard: g, specs });
+    const r = (await pplx!.handler({ id: '1', toolName: 'trident.perplexity_search', args: { query: 'q' } })) as { content: string };
+    expect(r.content).toContain('web.web_search');
+  });
+});
