@@ -69,6 +69,15 @@ export class Persona {
     return this.config.name;
   }
 
+  /**
+   * The style guide this persona speaks with: the text its system prompt opens
+   * with on every call. Read-only; lets a caller tell which guide actually
+   * answered (the server's eval `styleVariant` echo) from the persona itself.
+   */
+  get styleGuide(): string {
+    return this.config.styleGuide;
+  }
+
   /** Memory-backed, streaming — the persona's voice + your retrieved writing. */
   async *chat(
     input: PersonaChatInput,

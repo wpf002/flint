@@ -6,14 +6,18 @@ import {
   STYLE_VARIANTS,
   StyledPersonas,
   chooseStyles,
+  echoStyle,
   parseStyleVariantRequest,
   readStyleDefaults,
-  styleEcho,
   styleGuideFor,
+  styleVariantOf,
+  turnPersonas,
   type StyleDefaults,
   type StyleVariant,
+  type TurnRequest,
 } from '../src/style-variant';
-import { LocalPersonaCache, resolveLocalPersona } from '../src/local-model';
+import { LocalPersonaCache, overridePersonaCache, resolveLocalPersona } from '../src/local-model';
+import { runWithFallback, type BrainTier } from '../src/brains';
 
 const V1: StyleDefaults = { frontier: 'v1', local: 'v1' };
 
@@ -99,40 +103,151 @@ describe('readStyleDefaults (FLINT_STYLE_VARIANT / FLINT_LOCAL_STYLE_VARIANT)', 
   });
 });
 
-describe('chooseStyles and styleEcho', () => {
+describe('chooseStyles', () => {
   const live: StyleDefaults = { frontier: 'v2', local: 'v1' };
 
   it("uses each brain's live default without a request", () => {
     expect(chooseStyles(undefined, live)).toEqual(live);
-    expect(styleEcho('frontier', chooseStyles(undefined, live))).toBe('v2');
-    expect(styleEcho('local', chooseStyles(undefined, live))).toBe('v1');
   });
 
   it('applies a requested variant to whichever brain answers, fallback included', () => {
-    const chosen = chooseStyles('local-v1', live);
-    expect(chosen).toEqual({ frontier: 'local-v1', local: 'local-v1' });
-    expect(styleEcho('frontier', chosen)).toBe('local-v1');
-    expect(styleEcho('local', chosen)).toBe('local-v1');
+    expect(chooseStyles('local-v1', live)).toEqual({ frontier: 'local-v1', local: 'local-v1' });
   });
 });
 
-/** A provider that records the system prompt of every call. */
-function capture(name = 'capture'): { provider: ProviderAdapter; systems: string[] } {
+describe('styleVariantOf: the variant a persona speaks with, from its own guide', () => {
+  it("maps each variant's guide back to its name", () => {
+    for (const v of STYLE_VARIANTS) expect(styleVariantOf({ styleGuide: styleGuideFor(v) })).toBe(v);
+  });
+
+  it('reads a real Persona', () => {
+    const f = new Flint({ provider: capture().provider, defaultModel: 'm' });
+    expect(styleVariantOf(new Persona(f, { name: 'Flint', styleGuide: FLINT_STYLE_GUIDE_V2 }))).toBe('v2');
+  });
+
+  it('names no variant for any other text, an edited guide included', () => {
+    const edited = FLINT_STYLE_GUIDE_V2.replace('A search there adds latency and thin sources, not accuracy.', 'A search there adds latency.');
+    expect(edited).not.toBe(FLINT_STYLE_GUIDE_V2);
+    for (const g of ['', 'You are Flint.', `${FLINT_STYLE_GUIDE} `, edited]) {
+      expect(styleVariantOf({ styleGuide: g })).toBeUndefined();
+    }
+  });
+});
+
+describe('echoStyle: the echo names the persona that answered, not the request', () => {
+  const guide = (v: StyleVariant) => ({ styleGuide: styleGuideFor(v) });
+
+  it('is undefined until a call has returned', async () => {
+    const e = echoStyle(async (_p: { styleGuide: string }) => 'ok');
+    expect(e.styleVariant()).toBeUndefined();
+    await e.ask(guide('v2'));
+    expect(e.styleVariant()).toBe('v2');
+  });
+
+  it('names the last persona whose call returned; one that threw (and fell back) does not count', async () => {
+    const e = echoStyle(async (p: { styleGuide: string }) => {
+      if (p.styleGuide === FLINT_STYLE_GUIDE_V2) throw new Error('down');
+      return 'ok';
+    });
+    await e.ask(guide('local-v1'));
+    await expect(e.ask(guide('v2'))).rejects.toThrow('down');
+    expect(e.styleVariant()).toBe('local-v1');
+  });
+
+  it('echoes v1 when a v2 turn is answered by a v1 persona (wiring that skips turnPersonas)', async () => {
+    // The request-derived echo this replaces said "v2" here, so apps/parity would
+    // have filed v1 answers under flint#v2 and its echo check could never fire.
+    const { styled, tier } = realServer(V1);
+    const turn = turnPersonas({ styleVariant: 'v2', localModel: undefined, localThink: undefined }, { styled, model: 'qwen2.5:7b', localModels: undefined });
+    if (!turn.ok) throw new Error(turn.error);
+    const e = echoStyle((p: Persona) => p.generate({ prompt: 'hi' }));
+    await e.ask(tier.persona); // bypass: the tier's own (live, v1) persona
+    expect(e.styleVariant()).toBe('v1');
+    await e.ask(turn.frontier(tier)); // the persona the turn chose
+    expect(e.styleVariant()).toBe('v2');
+    await e.ask(styled.local('v1')); // bypass on the local side
+    expect(e.styleVariant()).toBe('v1');
+    await e.ask(turn.local.persona);
+    expect(e.styleVariant()).toBe('v2');
+  });
+
+  it('names no variant for a persona whose guide is not a known one', async () => {
+    const e = echoStyle(async (_p: { styleGuide: string }) => 'ok');
+    await e.ask({ styleGuide: 'something else' });
+    expect(e.styleVariant()).toBeUndefined();
+  });
+});
+
+/** A provider that records the system prompt of every call; with `down.on`, every call throws (after recording). */
+function capture(name = 'capture'): { provider: ProviderAdapter; systems: string[]; down: { on: boolean } } {
   const systems: string[] = [];
+  const down = { on: false };
   const provider: ProviderAdapter = {
     name,
     getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 100_000, maxOutputTokens: 4096 }),
     estimateTokens: (m) => m.reduce((n, x) => n + x.content.length, 0),
     async generate(args: GenerateArgs) {
       systems.push(args.system ?? '');
-      return { message: { id: 'm', role: 'assistant' as const, content: 'ok', timestamp: 0 }, usage: { input: 1, output: 1 }, reason: 'complete' as const };
+      if (down.on) throw new Error(`${name} is down`);
+      return { message: { id: 'm', role: 'assistant' as const, content: `answer from ${name}`, timestamp: 0 }, usage: { input: 1, output: 1 }, reason: 'complete' as const };
     },
     async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
       systems.push(args.system ?? '');
-      yield { type: 'done', reason: 'complete', usage: { input: 0, output: 0 } };
+      if (down.on) throw new Error(`${name} is down`);
+      yield { type: 'text', delta: `answer from ${name}` };
+      yield { type: 'done', reason: 'complete', usage: { input: 1, output: 1 } };
     },
   };
-  return { provider, systems };
+  return { provider, systems, down };
+}
+
+/** An Ollama /api/chat stand-in (never the real one) that records each request's system message. */
+function captureOllama(): { fetch: typeof globalThis.fetch; systems: string[] } {
+  const systems: string[] = [];
+  const fetch = (async (_u: string, init: { body: string }) => {
+    const body = JSON.parse(init.body) as { model: string; messages: Array<{ role: string; content: string }> };
+    systems.push(body.messages.find((m) => m.role === 'system')?.content ?? '');
+    return new Response(
+      JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'answer from override' }, done: true, done_reason: 'stop', prompt_eval_count: 1, eval_count: 1 }),
+    );
+  }) as unknown as typeof globalThis.fetch;
+  return { fetch, systems };
+}
+
+/**
+ * The persona wiring main() builds, on capture providers: the local persona, two
+ * frontier tiers (each with its own persona in the frontier default), the
+ * StyledPersonas over them, and the eval local-model override cache over a fake
+ * Ollama fetch.
+ */
+function realServer(defaults: StyleDefaults) {
+  const local = capture('ollama');
+  const opus = capture('anthropic-opus');
+  const sonnet = capture('anthropic-sonnet');
+  const ollama = captureOllama();
+  const make = (f: Flint, v: StyleVariant) => new Persona(f, { name: 'Flint', styleGuide: styleGuideFor(v) });
+  const localFlint = new Flint({ provider: local.provider, defaultModel: 'qwen2.5:7b' });
+  const frontierPersona = (p: ProviderAdapter, m: string, v: StyleVariant) => make(new Flint({ provider: p, defaultModel: m }), v);
+  const brainOf = (c: ReturnType<typeof capture>, model: string): BrainTier<Persona> => ({
+    tier: 'standard',
+    provider: c.provider,
+    model,
+    label: `${c.provider.name}:${model}`,
+    persona: frontierPersona(c.provider, model, defaults.frontier),
+  });
+  const tier = brainOf(opus, 'claude-opus-5');
+  const chain = [tier, brainOf(sonnet, 'claude-sonnet-5')];
+  const styled = new StyledPersonas<Persona>(defaults, {
+    local: make(localFlint, defaults.local),
+    buildLocal: (v) => make(localFlint, v),
+    buildFrontier: frontierPersona,
+  });
+  const localModels = overridePersonaCache<Persona>(
+    {},
+    (candidate, m, v) => make(new Flint({ provider: candidate, defaultModel: m }), v ?? defaults.local),
+    { fetch: ollama.fetch },
+  );
+  return { styled, tier, chain, localModels, captured: { local, opus, sonnet, ollama } };
 }
 
 describe('StyledPersonas', () => {
@@ -221,5 +336,79 @@ describe('style variants on the eval local-model override personas', () => {
     expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false, turn('local-v1'))).toMatchObject({ ok: true, persona: 'muse-glimmer:30b:local-v1', think: false });
     expect(resolveLocalPersona('muse-glimmer:30b', base, cache, false, turn('local-v1'))).toMatchObject({ persona: 'muse-glimmer:30b:local-v1' });
     expect(made).toEqual(['muse-glimmer:30b/false/v1', 'muse-glimmer:30b/false/local-v1']);
+  });
+});
+
+describe('turnPersonas + echoStyle: one /generate turn end to end, on capture providers', () => {
+  type Path = 'frontier' | 'frontier-fallback' | 'local-fallback' | 'local' | 'local-model';
+  const PATHS: Path[] = ['frontier', 'frontier-fallback', 'local-fallback', 'local', 'local-model'];
+
+  /**
+   * Drives a turn the way /generate does (index.ts): choose the turn's personas,
+   * ask the frontier chain with fallback and the local persona if every tier
+   * fails, or ask the local persona; the echo is echoStyle's.
+   */
+  async function generate(defaults: StyleDefaults, styleVariant: StyleVariant | undefined, path: Path) {
+    const server = realServer(defaults);
+    const { opus, sonnet, local, ollama } = server.captured;
+    if (path === 'frontier-fallback' || path === 'local-fallback') opus.down.on = true;
+    if (path === 'local-fallback') sonnet.down.on = true;
+    const req: TurnRequest =
+      path === 'local-model'
+        ? { styleVariant, localModel: 'muse-glimmer:30b', localThink: false }
+        : { styleVariant, localModel: undefined, localThink: undefined };
+    const turn = turnPersonas(req, { styled: server.styled, model: 'qwen2.5:7b', localModels: server.localModels });
+    if (!turn.ok) throw new Error(turn.error);
+    const answered = echoStyle((p: Persona) => p.generate({ prompt: 'How do I run Postgres in Docker?', context: 'Today is Thursday.' }));
+    let out;
+    if (path === 'local' || path === 'local-model') {
+      out = await answered.ask(turn.local.persona);
+    } else {
+      try {
+        out = (await runWithFallback(server.chain, (b) => answered.ask(turn.frontier(b)))).result;
+      } catch {
+        out = await answered.ask(turn.local.persona);
+      }
+    }
+    const by = { frontier: opus, 'frontier-fallback': sonnet, 'local-fallback': local, local, 'local-model': ollama }[path];
+    return { echo: answered.styleVariant(), text: out.text, system: by.systems.at(-1) ?? '', turn };
+  }
+
+  const frontierAnswers = (path: Path) => path === 'frontier' || path === 'frontier-fallback';
+
+  for (const defaults of [V1, { frontier: 'v2', local: 'local-v1' }] as StyleDefaults[]) {
+    for (const requested of [undefined, ...STYLE_VARIANTS]) {
+      it.each(PATHS)(`defaults ${defaults.frontier}/${defaults.local}, styleVariant ${String(requested)}: the %s answer is in that guide and echoes it`, async (path) => {
+        const { echo, system, text } = await generate(defaults, requested, path);
+        const want = requested ?? (frontierAnswers(path) ? defaults.frontier : defaults.local);
+        // The path really was taken: the answer came from that provider.
+        const from = { frontier: 'anthropic-opus', 'frontier-fallback': 'anthropic-sonnet', 'local-fallback': 'ollama', local: 'ollama', 'local-model': 'override' }[path];
+        expect(text).toBe(`answer from ${from}`);
+        expect(echo).toBe(want);
+        // The system prompt the answering provider actually received opens with that guide, and no other.
+        expect(system.startsWith(styleGuideFor(want))).toBe(true);
+        for (const other of STYLE_VARIANTS.filter((v) => v !== want)) expect(system.startsWith(styleGuideFor(other))).toBe(false);
+      });
+    }
+  }
+
+  it('answers live traffic (no styleVariant, no localModel) with exactly the personas main() built', () => {
+    const server = realServer(V1);
+    const turn = turnPersonas({ styleVariant: undefined, localModel: undefined, localThink: undefined }, { styled: server.styled, model: 'qwen2.5:7b', localModels: server.localModels });
+    if (!turn.ok) throw new Error(turn.error);
+    expect(turn.frontier(server.tier)).toBe(server.tier.persona);
+    expect(turn.local).toEqual({ persona: server.styled.local('v1'), model: 'qwen2.5:7b' });
+    expect(server.styled.size).toBe(0);
+  });
+
+  it('reports the override model and the think its Ollama client sends', async () => {
+    const { turn } = await generate(V1, 'local-v1', 'local-model');
+    expect(turn.local).toMatchObject({ model: 'muse-glimmer:30b', think: false });
+  });
+
+  it("is a 422 for localModel when the server's local brain isn't Ollama", () => {
+    const server = realServer(V1);
+    const r = turnPersonas({ styleVariant: 'v2', localModel: 'muse-glimmer:30b', localThink: undefined }, { styled: server.styled, model: 'qwen2.5:7b', localModels: undefined });
+    expect(r).toMatchObject({ ok: false, status: 422 });
   });
 });

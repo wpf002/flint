@@ -52,6 +52,13 @@ describe('Persona', () => {
     expect(provider.lastSystem).toContain('STYLE_GUIDE_MARKER');
   });
 
+  it('exposes the style guide its system prompt opens with', async () => {
+    const { provider, persona } = setup();
+    expect(persona.styleGuide).toBe('STYLE_GUIDE_MARKER: write tersely.');
+    await persona.generate({ prompt: 'hello', context: 'It is Tuesday.' });
+    expect(provider.lastSystem?.startsWith(persona.styleGuide)).toBe(true);
+  });
+
   it('retrieves the user\'s relevant writing into the system prompt', async () => {
     const retriever = new InMemoryRetriever([
       { id: '1', text: 'I always sign off my emails with "cheers, Will".' },
