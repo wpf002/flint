@@ -14,6 +14,9 @@
  * Off by default: the server answers with it only when FLINT_LOCAL_STYLE_VARIANT is
  * local-v1, or for an eval request carrying styleVariant: "local-v1"
  * (apps/parity --flint-variant local-v1).
+ *
+ * Its text is pinned by sha256 (test/flint-variants.test.ts): answers cached as
+ * …#local-v1 mean this exact text, so a revision ships as a new variant (local-v2).
  */
 export const FLINT_LOCAL_STYLE_GUIDE = `You are Flint, Will's own AI, built by him and for him: his research-grade copilot — advisor, analyst, strategist, builder. Your job is usefulness, not validation.
 

@@ -12,19 +12,40 @@ import {
   FLINT_BANNED_PHRASES,
   isFlintStyleVariant,
 } from '../src/index.js';
+import type { FlintStyleVariant } from '../src/index.js';
 
 const GUIDES = [
   ['v2', FLINT_STYLE_GUIDE_V2],
   ['local-v1', FLINT_LOCAL_STYLE_GUIDE],
 ] as const;
 
-describe('FLINT_STYLE_GUIDE (v1) is frozen', () => {
-  it('is byte-identical to the text parity runs have measured as "v1"', () => {
-    // "v1" names this exact text in cached parity answers (flint#v1). Changing it
-    // silently would mix old and new answers under one name: add a new variant instead.
-    expect(createHash('sha256').update(FLINT_STYLE_GUIDE).digest('hex')).toBe(
-      '66145bd31d47d6e2292967b3ddff11af262b231222020ea5d6eb7cffbfe9716b',
-    );
+// Every variant's text, pinned. A variant name is what apps/parity puts in a
+// contestant's name (flint#v2, …#local-v1) and so in the cache key of every answer
+// and verdict: editing a guide in place would mix answers from two texts under one
+// label, and a resumed or repeated run couldn't tell. To revise a guide, add it as a
+// NEW variant (v3, local-v2) with its own pin; never change a hash below. The
+// Record type makes a new variant without a pin a type error.
+const PINNED: Record<FlintStyleVariant, string> = {
+  v1: '66145bd31d47d6e2292967b3ddff11af262b231222020ea5d6eb7cffbfe9716b',
+  v2: '8381fbe5d4f06a20bae6845bb67a12b4febb741f8035bb5e60ed6d4ac6745cb8',
+  'local-v1': 'd70a0243bbbdf27cbbd37bd6ff8d2e0fdf4a06010a3a122fff1e9f5664b07f71',
+};
+
+describe('every style variant is frozen', () => {
+  it.each(FLINT_STYLE_VARIANT_NAMES)('%s is byte-identical to its pinned text', (v) => {
+    expect(createHash('sha256').update(FLINT_STYLE_VARIANTS[v]).digest('hex')).toBe(PINNED[v]);
+  });
+
+  it('pins exactly the registered variants', () => {
+    expect(Object.keys(PINNED).sort()).toEqual([...FLINT_STYLE_VARIANT_NAMES].sort());
+  });
+
+  it('v1 is FLINT_STYLE_GUIDE, the text parity runs have measured as "v1"', () => {
+    expect(createHash('sha256').update(FLINT_STYLE_GUIDE).digest('hex')).toBe(PINNED.v1);
+  });
+
+  it('gives each variant its own text (the server names a persona\'s variant by its text)', () => {
+    expect(new Set(Object.values(FLINT_STYLE_VARIANTS)).size).toBe(FLINT_STYLE_VARIANT_NAMES.length);
   });
 });
 
@@ -108,6 +129,13 @@ describe.each(GUIDES)('%s: rules a)-f)', (_name, guide) => {
     expect(guide).toMatch(/"nobody,?"/);
     expect(guide).toMatch(/"always,?"/);
     expect(guide).toMatch(/Disagree hard when Will is wrong about his own plans/);
+    // No unscoped "disagree hard" anywhere else in the guide (v1's Calibration
+    // bullet had one): every line that asks for hard disagreement names Will's own
+    // plans, code and decisions as its scope.
+    expect(guide).not.toContain('Disagreement: hard. When Will is wrong');
+    const hard = guide.split('\n').filter((l) => /disagree/i.test(l) && /\bhard\b/i.test(l));
+    expect(hard.length).toBeGreaterThan(0);
+    for (const line of hard) expect(line, line.slice(0, 60)).toMatch(/(Will's|his) own plans, code (or|and) decisions/);
   });
 
   it("e) doesn't bring up its own training, engine or stats off-topic", () => {
@@ -130,6 +158,7 @@ describe('FLINT_STYLE_GUIDE_V2 changes only rules a)-f)', () => {
     'Be concise. Give the answer directly.', // b, c
     '- Confident by default.', // d
     '- Disagree hard when the user is wrong.', // d
+    '- Disagreement: hard.', // d
   ];
 
   it('keeps every other v1 line verbatim', () => {
