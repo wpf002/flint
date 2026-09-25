@@ -23,14 +23,17 @@ export interface AnswerResult {
   grounding?: FlintGrounding;
 }
 
+/** What a contestant is asked: parity's EvalPrompt and a Flint-tasks prompt both fit. */
+export type AskPrompt = Pick<EvalPrompt, 'id' | 'prompt'>;
+
 export interface Contestant {
-  /** Stable key: 'flint' | 'openai' | 'claude' | 'perplexity'. */
+  /** Stable key: 'flint' | 'openai' | 'claude' | 'perplexity' | 'google' | 'amazon' | a --openai-compatible name. */
   name: string;
   /** What actually answered, for the report. */
   model: string;
   /** Pre-call spend estimate for the budget guard. */
-  estimate(p: EvalPrompt): number;
-  answer(p: EvalPrompt, signal: AbortSignal): Promise<AnswerResult>;
+  estimate(p: AskPrompt): number;
+  answer(p: AskPrompt, signal: AbortSignal): Promise<AnswerResult>;
 }
 
 /**
@@ -137,6 +140,8 @@ interface FlintGenerateResponse {
   model?: string;
   /** Echo of the request's `localThink`, from a server that honoured it. */
   localThink?: boolean;
+  /** Echo of the request's `groundingChars` (Flint tasks), from a server that honoured it. */
+  groundingChars?: number;
   /** The style variant the answering persona used, from a server with style variants. */
   styleVariant?: string;
   /** What the turn was grounded on (recalled memory, tool results), from a server that reports it. */
@@ -230,6 +235,13 @@ export function flintContestant(opts: {
    * judge can't judge one without it. A server that doesn't send it stops the run.
    */
   requireGrounding?: boolean;
+  /**
+   * Flint tasks: ask for tool excerpts this long in `grounding` (the server's
+   * eval-only `groundingChars`), since competitors are handed that grounding as
+   * their data. A reply that doesn't echo it stops the run. Left out, the
+   * request is exactly as before (800-character excerpts).
+   */
+  groundingChars?: number;
   /** How long to keep retrying while the server is unreachable (a deploy restart). */
   restartWaitMs?: number;
 }): Contestant {
@@ -242,7 +254,7 @@ export function flintContestant(opts: {
   const localOnly = opts.localOnly === true || localModel !== undefined;
   // Flint's prompt carries the persona and a dozen tool schemas, and tool loops
   // re-send it: estimate generously. The local brain costs nothing.
-  const estimate = (p: EvalPrompt): number =>
+  const estimate = (p: AskPrompt): number =>
     localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 });
   return {
     name: flintContestantName({ localOnly, localModel, localThink, styleVariant }),
@@ -261,6 +273,7 @@ export function flintContestant(opts: {
               ...(localModel ? { localModel } : {}),
               ...(localThink !== undefined ? { localThink } : {}),
               ...(styleVariant !== undefined ? { styleVariant } : {}),
+              ...(opts.groundingChars !== undefined ? { groundingChars: opts.groundingChars } : {}),
             }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(opts.timeoutMs)]),
           }),
@@ -327,7 +340,12 @@ export function flintContestant(opts: {
           ),
         );
       }
-      const grounding = parseGrounding(body.grounding);
+      if (opts.groundingChars !== undefined && body.groundingChars !== opts.groundingChars) {
+        throw new FatalError(
+          `asked for groundingChars ${opts.groundingChars} but the server echoed ${String(body.groundingChars)} — it predates longer eval excerpts, or ignored them`,
+        );
+      }
+      const grounding = parseGrounding(body.grounding, opts.groundingChars);
       if (opts.requireGrounding && !grounding) {
         throw fail(
           new FatalError(
@@ -350,6 +368,7 @@ export function flintContestant(opts: {
           proposed: body.proposed ?? [],
           reason: body.reason,
           ...(body.styleVariant !== undefined ? { styleVariant: body.styleVariant } : {}),
+          ...(opts.groundingChars !== undefined ? { groundingChars: opts.groundingChars } : {}),
         },
         ...(grounding ? { grounding } : {}),
       };
@@ -516,6 +535,10 @@ export async function preflightFlint(opts: {
   localModel?: string | undefined;
   localThink?: boolean | undefined;
   styleVariant?: string | undefined;
+  /** Flint tasks: the tool-excerpt length the run will ask for (`groundingChars`). */
+  groundingChars?: number | undefined;
+  /** Flint tasks' builder: the server must have GET /eval/tools and POST /eval/tool. */
+  discovery?: boolean | undefined;
   fetchFn?: typeof fetch;
 }): Promise<Record<string, unknown>> {
   const { url } = opts;
@@ -535,6 +558,19 @@ export async function preflightFlint(opts: {
     throw new Error(`the Flint server at ${url} doesn't support --local-think (/health has no localThinkOverride). Deploy this branch first.`);
   }
   if (opts.styleVariant !== undefined) assertStyleVariantSupported(health, opts.styleVariant, url);
+  if (opts.groundingChars !== undefined) {
+    const max = health.groundingCharsMax;
+    if (typeof max !== 'number') {
+      throw new Error(
+        `the Flint server at ${url} can't send longer tool excerpts (/health has no groundingCharsMax), so competitors would get 800 characters of each tool result Flint read in full. ` +
+          'Deploy the server with eval groundingChars first, or pass --allow-short-context to run anyway (the report says so).',
+      );
+    }
+    if (opts.groundingChars > max) throw new Error(`--context-chars ${opts.groundingChars}: the Flint server at ${url} allows at most ${max}`);
+  }
+  if (opts.discovery && health.evalDiscovery !== true) {
+    throw new Error(`the Flint server at ${url} has no eval discovery (/health has no evalDiscovery). Deploy the server with it first, or pass --no-discover (templates that need it are skipped).`);
+  }
   return health;
 }
 

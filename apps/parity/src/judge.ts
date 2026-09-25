@@ -1,5 +1,5 @@
 import { decodeAssistantTurn, type ProviderAdapter, type TokenUsage } from '@flint/core';
-import { groundingBlock, type FlintGrounding } from './grounding.js';
+import { groundingBlock, sharedGroundingBlock, type FlintGrounding } from './grounding.js';
 import type { EvalPrompt } from './prompts.js';
 import { seededRng, seedFrom } from './util.js';
 
@@ -32,18 +32,40 @@ If they are genuinely equivalent in quality, or both fail equally, call it a TIE
 Reply with ONLY a JSON object, no prose before or after, no code fence:
 {"verdict": "A" | "B" | "TIE", "reason": "<one or two sentences>"}`;
 
+/** What the judge needs of a prompt: parity's EvalPrompt and a Flint-tasks prompt both fit. */
+export type JudgePrompt = Pick<EvalPrompt, 'id' | 'prompt'> & { category: string };
+
+/**
+ * Flint-tasks judging (apps/parity tasks) only; both absent for parity, whose
+ * judge message is unchanged.
+ */
+export interface JudgeExtras {
+  /** The grounding was handed to BOTH assistants (sharedGroundingBlock), not Flint's alone. */
+  shared?: boolean;
+  /** What a great answer to this task does, and any verified reference answer. */
+  rubric?: string;
+}
+
 /**
  * The judge's user message. With `grounding` (`--judge-grounding` only), the
  * context Flint had goes between the request and the answers; without it the
- * message is exactly what it has always been.
+ * message is exactly what it has always been. `extras` (Flint tasks) swaps in
+ * the shared-context wording and adds the task's rubric after the request.
  */
-export function judgeUserMessage(p: EvalPrompt, answerA: string, answerB: string, now: Date, grounding?: FlintGrounding): string {
+export function judgeUserMessage(p: JudgePrompt, answerA: string, answerB: string, now: Date, grounding?: FlintGrounding, extras?: JudgeExtras): string {
+  const context = grounding ? (extras?.shared ? sharedGroundingBlock(grounding) : groundingBlock(grounding)) : undefined;
   return [
     `Date of this evaluation: ${now.toISOString().slice(0, 10)}. Request category: ${p.category}.`,
     '',
     `<request>\n${p.prompt}\n</request>`,
     '',
-    ...(grounding ? [groundingBlock(grounding), ''] : []),
+    ...(extras?.rubric
+      ? [
+          `<task_rubric>\nWhat a great answer to this request does (use it to weigh correctness and usefulness; it is an answer key only where it says "Reference"):\n${extras.rubric}\n</task_rubric>`,
+          '',
+        ]
+      : []),
+    ...(context ? [context, ''] : []),
     `<answer_a>\n${answerA}\n</answer_a>`,
     '',
     `<answer_b>\n${answerB}\n</answer_b>`,
@@ -102,13 +124,15 @@ export async function judgePair(opts: {
   provider: ProviderAdapter;
   model: string;
   maxTokens: number;
-  prompt: EvalPrompt;
+  prompt: JudgePrompt;
   answerA: string;
   answerB: string;
   now: Date;
   signal: AbortSignal;
   /** `--judge-grounding`: what Flint was grounded on, shown to the judge. */
   grounding?: FlintGrounding | undefined;
+  /** Flint tasks: shared-context wording and the task rubric. */
+  extras?: JudgeExtras | undefined;
 }): Promise<JudgeCall> {
   const usage: TokenUsage = { input: 0, output: 0 };
   let lastErr: unknown;
@@ -121,7 +145,7 @@ export async function judgePair(opts: {
         {
           id: `judge-${opts.prompt.id}-${attempt}`,
           role: 'user',
-          content: judgeUserMessage(opts.prompt, opts.answerA, opts.answerB, opts.now, opts.grounding),
+          content: judgeUserMessage(opts.prompt, opts.answerA, opts.answerB, opts.now, opts.grounding, opts.extras),
           timestamp: Date.now(),
         },
       ],

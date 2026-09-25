@@ -49,6 +49,12 @@ export interface JudgmentRow {
   panel?: PanelVerdict[];
   /** Panel only: did every panelist give the same outcome? (false = a split, scored as a tie) */
   agreed?: boolean;
+  /** Flint tasks: the hash of the context both sides had; a verdict on another context is stale. */
+  contextSha?: string;
+  /** Flint tasks: the prompt's privacy class in this run. */
+  privacy?: string;
+  /** Flint tasks: panelists left out because the prompt is personal and their vendor isn't allowed. */
+  excludedJudges?: string[];
 }
 
 /** Resume-cache / report key for one judged pair (the judge is part of it). */

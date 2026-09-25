@@ -8,6 +8,11 @@ prompts. An LLM judge (one Claude model, or a cross-vendor panel with `--judge-p
 compares each pair blind, and the result gets a sign test so a coin flip doesn't read as
 progress.
 
+The corpus has almost none of Will's real work in it (no email, calendar or finance-system
+asks), so a second suite, **Flint tasks** (section 6), measures that directly: templated
+tasks on his own systems, where every frontier competitor is handed the same data Flint's
+tools retrieved, so the comparison is answer quality on identical data.
+
 Everything it writes lives under `~/.flint/eval/`:
 
 | path | what |
@@ -18,6 +23,9 @@ Everything it writes lives under `~/.flint/eval/`:
 | `runs/<ts>/report.md` | the report (`report-<subject>.md` for `flint-local`, each `--local-model` candidate, each `--local-think` variant and each `--flint-variant`; a `--judge-grounding` judge's is `report+grounded.md` / `report+grounded-<subject>.md`) |
 | `runs/<ts>/run.json` | the config the run started with |
 | `parity_history.csv` | one row per competitor per run, for the trend line |
+| `flint_tasks.jsonl` (+ `.meta.json`) | the Flint-tasks set, built from `tasks/flint-tasks.json` (section 6) |
+| `tasks/runs/<ts>/` | a Flint-tasks run: `tasks.jsonl` (its prompts), `answers.jsonl`, `judgments.jsonl`, `run.json`, `report+grounded.md` |
+| `flint_tasks_history.csv` | one row per competitor per Flint-tasks run, every row `suite=flint-tasks` (never mixed with `parity_history.csv`) |
 
 ## 1. Freeze the prompt set (once)
 
@@ -65,10 +73,14 @@ Contestants (`--contestants flint,openai,claude,perplexity`):
 | `openai` | `OpenAiProvider` from @flint/core | `gpt-5` | `--openai-model` / `PARITY_OPENAI_MODEL` |
 | `claude` | `AnthropicProvider` | `claude-opus-5` | `--claude-model` / `PARITY_CLAUDE_MODEL` |
 | `perplexity` | `PerplexityProvider` (skipped with a note if no key) | `sonar-pro` | `--perplexity-model` / `PARITY_PERPLEXITY_MODEL` |
+| `google` | Gemini's OpenAI-compatible endpoint (`src/compat.ts`); opt in with `--contestants ...,google` | `gemini-2.5-pro` (**verify before use**) | `--google-model` / `PARITY_GOOGLE_MODEL`, key `GEMINI_API_KEY` |
+| `amazon` | Bedrock Converse with a Bedrock API key as bearer token (`PARITY_AMAZON_API=openai` for Bedrock's OpenAI-compatible endpoint instead); opt in with `--contestants ...,amazon` | `us.amazon.nova-premier-v1:0` (**verify before use**) | `--amazon-model` / `PARITY_AMAZON_MODEL`, key `AWS_BEARER_TOKEN_BEDROCK`, region `AWS_REGION` (default `us-east-1`) |
+| any other | `--openai-compatible name=<n>,url=<base>,key=<ENV_VAR>,model=<id>` (repeatable; `field=max_completion_tokens`, `min-tokens=N` optional; https, or http to localhost) | — | the key is read from the named env var |
 | judge | `AnthropicProvider` | `claude-opus-5` (a resumed run keeps its own, see Resume) | `--judge-model` / `PARITY_JUDGE_MODEL` |
-| judge panel | `AnthropicProvider` + `OpenAiProvider` | off | `--judge-panel` / `PARITY_JUDGE_PANEL` (see below) |
+| judge panel | any of `anthropic`, `openai`, `google`, `amazon` | off | `--judge-panel` / `PARITY_JUDGE_PANEL` (see below) |
 
-Keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`) come from the
+Keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`, `GEMINI_API_KEY`,
+`AWS_BEARER_TOKEN_BEDROCK`) come from the
 environment or `~/.flint/secrets.env`, parsed the same way as the server's
 `loadSecrets`. Flint's bearer token comes from `$FLINT_TOKEN`, then `~/.flint/token`,
 then the `com.flint.server` launchd plist, and is never printed.
@@ -324,7 +336,15 @@ judge error, excluded from the tally and retried on resume, not a tie.
 - Budget: every panelist's call is reserved before any of them runs, and each is settled at
   its real cost. OpenAI panelists get `max(--judge-max-tokens, 16384)` output tokens, since
   GPT-5's reasoning counts against that cap. A pair costs about $0.04 for Opus 5.5 + GPT-5.
-- Supported panel providers: `anthropic`, `openai` (keys as above). At least two judges.
+- Supported panel providers: `anthropic`, `openai`, `google`, `amazon` (keys as above; e.g.
+  `anthropic:claude-opus-5-5,openai:gpt-5,google:<gemini id>`). At least two judges. Gemini,
+  like GPT-5, thinks before it answers, so it gets the same 16384-token judge cap.
+- **Default model ids for Google and Amazon are "verify before use"**: they were real when
+  written, and vendors retire and supersede models. For a frontier comparison pass each
+  vendor's current top model. `google` is checked against Gemini's model list (a free call)
+  and skipped with a note if the id isn't served; for Amazon, check with
+  `aws bedrock list-inference-profiles` (and enable model access in the region).
+- A vendor with no key is skipped with a note in the report, never silently.
 
 Re-judge an existing run with the panel, without re-answering anything:
 
@@ -444,6 +464,115 @@ By default the judge sees sources only. Tavily's synthesized `answer` is part of
 local model reads from `web_search`, and SearXNG rarely has one, so `--include-answer`
 measures that too.
 
+## 6. Flint tasks: Flint vs the frontier on Will's own work
+
+The parity set can't say how Flint does on Will's actual work: the corpus has 0 email /
+calendar / Drive and 0 finance-system prompts. The Flint-tasks suite is built for that, and
+for the question that matters: is Flint as good as what Anthropic, OpenAI, Google, Amazon
+and Perplexity ship, **on the same data**?
+
+- **Tasks.** `tasks/flint-tasks.json` holds 97 generic templates (no personal data) covering
+  the web, knowledge, coding, detection engineering, Gmail, Calendar, Drive, Vantage,
+  Bellwether, Meridian, Prophet, TDL, Nexus, Flint himself, long-term memory, cross-system
+  asks, safety and "stay local" routing. Each has a rubric (what a great answer does), a
+  privacy class, and the tools it needs.
+- **Flint answers end to end**, as in parity (eval `/generate`), and asks the server for
+  tool excerpts up to `--context-chars` (default 16000) instead of 800.
+- **Each competitor gets the same prompt plus the data Flint's tools retrieved**, labelled as
+  context (and as untrusted data): every tool result, and recalled memory for the tasks
+  whose point is memory. So the head-to-head isolates answer quality on identical data.
+  Competitors have no tools of their own (Perplexity still searches on its own).
+- **Tool selection is scored separately** (Flint only): did he call every system the task
+  needs (`need` groups, any tool in a group counts), did he write anything that wasn't asked
+  for (a failure), and extra calls (reported). "Stay local" tasks also check the local brain
+  answered. A tool-selection miss costs both sides the same data in the head-to-head, which
+  is why it is its own metric.
+- **The judge** (single, or the cross-vendor panel) always sees the shared context, told
+  that both sides had it, plus the task's rubric (and, where there is one, a verified
+  reference: the word problems' answers, the seeded bug, the hidden tests, today's date).
+  Generated code is never run.
+
+### Build the task set
+
+```bash
+pnpm --filter @flint/core --filter @flint/persona --filter @flint/mcp build
+pnpm --filter @flint/parity build-tasks --dry-run      # preview, writes nothing
+pnpm --filter @flint/parity build-tasks                # freeze ~/.flint/eval/flint_tasks.jsonl
+```
+
+Slots are filled from fixed public lists (news topics, assets, word problems with verified
+answers, code with seeded bugs) or by **read-only discovery** on the live server: a
+ticker Meridian tracks, a Bellwether industry, a TDL rule id, a Nexus thread. Discovery
+goes through `POST /eval/tool`, which runs only a fixed allowlist of list/summary reads
+(apps/server/src/eval-tools.ts). A template whose discovery failed is skipped with the
+reason (in the `.meta.json`), never filled with a guess. `--no-discover` builds without
+the server; `--slots file.json` (`{"meridian_ticker": ["NVDA"]}`) fills or overrides any
+source; `--per-template N` (1-5) gives slotted templates up to N distinct prompts;
+`--seed` picks the slot values (deterministic). The build also checks every expected tool
+against `GET /eval/tools` and lists the ones the server doesn't wire (their tasks would
+score as tool-selection misses). Like the parity set, it is never overwritten without
+`--rebuild`. Answers are always judged against what the tools returned in the same run,
+never a frozen expected answer, so the set stays valid as the data moves.
+
+### Run
+
+```bash
+pnpm --filter @flint/parity tasks --limit 20 --budget-usd 5          # smoke test, balanced across systems
+pnpm --filter @flint/parity tasks --budget-usd 80                   # the full set
+pnpm --filter @flint/parity tasks-report --run <ts>
+```
+
+Default contestants: `flint,openai,claude,perplexity,google,amazon` (each skipped with a
+note if its key is missing), with `claude-opus-5-5` (what Flint's own frontier runs on),
+`gpt-5` and `sonar-pro`. When a vendor ships a stronger model, pass it (`--claude-model`,
+`--openai-model`, `--google-model`, `--amazon-model`, or the `PARITY_*_MODEL` env vars):
+the suite is only as good a yardstick as the models it compares against. The default judge
+is the cross-vendor panel `anthropic:claude-opus-5-5,openai:gpt-5` (`--judge-model` for a
+single judge, `--judge-panel` for another panel, e.g. with `google:`). `--systems gmail,vantage` filters. Other flags as for `run`
+(`--run`, `--judge-only`, `--no-judge`, `--concurrency`, `--max-tokens`, ...). The order
+is: Flint answers every task first, then each competitor answers with Flint's context,
+then the pairs are judged. A competitor answer (and verdict) records the hash of the
+context it was given; if Flint's answer is redone, the competitor is asked again rather
+than judged on stale data. A resumed run keeps its own prompts (`tasks.jsonl`), judge,
+allowlist and context length.
+
+**Needs a server deployed with this branch** (`/health` has `groundingCharsMax` and
+`evalDiscovery`). `--allow-short-context` runs against an older server with 800-character
+excerpts, and the report says so at the top: competitors then see less than Flint did.
+
+### Privacy
+
+- `public` and `systems` tasks (web, knowledge, Vantage/Meridian/Bellwether/Prophet/TDL/
+  Nexus data) go to every competitor and judge.
+- `personal-comms` and `personal-finance` tasks (Gmail, Calendar, Drive, long-term memory,
+  watchlists, spending) go **only to vendors on the allowlist, Anthropic by default** (Flint's
+  own frontier brain is Claude, so it already sees them), as competitor context and as judge
+  input. `--share-personal-with openai,google,amazon,perplexity` extends it (per run, kept in
+  `run.json`). Without it, those tasks compare Flint with Claude only, and a panel judges
+  them with its Anthropic members only (the report counts those verdicts: expect some
+  self-preference there).
+- A task's class is **raised by what Flint actually called**: a web question where Flint
+  also read Gmail is personal for that run. A tool the table in `src/task-privacy.ts`
+  doesn't know counts as personal.
+- **Recalled memory** is personal: it is passed on only for tasks whose point is memory
+  (all personal-comms); on every other task it is withheld from competitors and judges.
+- The report lists every excluded (task, vendor) pair, as competitor and as judge.
+
+### Report
+
+`tasks/runs/<ts>/report+grounded.md`: answer rates; Flint's head-to-head against each
+competitor overall (sign test) and **per system**; the strict line (every task Flint failed
+is a loss against every competitor the task could go to, since a competitor can't be asked
+without Flint's data); tool-selection accuracy overall and per system with every miss;
+privacy exclusions; tasks where a tool result hit the excerpt limit; Flint failures.
+`flint_tasks_history.csv` gets one row per competitor per invocation that judged something
+new (`suite=flint-tasks`, with the strict win rate, tool-selection accuracy and allowlist).
+
+**Cost.** About 100 tasks: Flint's frontier answers (tool-heavy) about $10-15; each
+competitor about $2-5 (the context makes prompts long); a two-member panel with the context
+about $0.05-0.10 per pair, so $25-50 for five competitors. Budget $60-90 for the full set
+with every vendor, much less with `--limit` or fewer competitors.
+
 ## Caveats (read these before quoting a number)
 
 - **The competitors get no tools.** They answer through the raw APIs with the same
@@ -467,6 +596,17 @@ measures that too.
 ```bash
 pnpm --filter @flint/parity test        # no network
 ```
+
+Flint tasks (test/tasks*.test.ts, task-privacy, tool-selection, compat): the committed
+templates validate, carry no personal data and never class a task below its tools' data;
+seeded, per-template instantiation (discovery values, distinct slots, intersections, tuple
+fields, references, `--slots`, skips with reasons); discovery value extraction; the
+privacy classes, the allowlist and its report; the context a competitor gets and its
+hash; which competitor answers are bought and which pairs judged; the judge panel cut to
+allowed vendors, the shared-context judge prompt with the rubric (and parity's unchanged);
+strict accounting and the report; `groundingChars` on the Flint contestant and its
+preflight; the discovery client; tool-selection scoring; Gemini's wire, Bedrock Converse,
+model-list checks, skip notes, `--openai-compatible` parsing, pricing and panel vendors.
 
 The tests cover category tagging, trivial filtering, dedupe, determinism and
 stratification, strict judge parsing (with one retry), position randomization, the

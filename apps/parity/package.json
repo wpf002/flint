@@ -8,6 +8,9 @@
     "parity": "tsx src/cli.ts run",
     "report": "tsx src/cli.ts report",
     "search-compare": "tsx src/search-compare.ts",
+    "build-tasks": "tsx src/cli.ts build-tasks",
+    "tasks": "tsx src/cli.ts tasks",
+    "tasks-report": "tsx src/cli.ts tasks-report",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -6,12 +6,11 @@
  * failures are recorded.
  */
 import type { ProviderAdapter, TokenUsage } from '@flint/core';
-import { FatalError, costOfFailure, type Contestant } from './contestants.js';
-import { groundingChars } from './grounding.js';
-import { flintIsA, judgePair, outcomeFor } from './judge.js';
+import { FatalError, costOfFailure, type AskPrompt, type Contestant } from './contestants.js';
+import { groundingChars, type FlintGrounding } from './grounding.js';
+import { flintIsA, judgePair, outcomeFor, type JudgeExtras, type JudgePrompt } from './judge.js';
 import { judgeWithPanel, verdictFor, type Panelist } from './panel.js';
 import { costOf, estimateCost } from './pricing.js';
-import type { EvalPrompt } from './prompts.js';
 import type { AnswerRow, JudgmentRow } from './report.js';
 
 /** BudgetGuard.reserve: a settle function, or null when the budget refuses. */
@@ -36,7 +35,7 @@ export type AnswerStep =
 /** Ask one contestant one prompt, with its spend reserved first. */
 export async function answerOne(opts: {
   contestant: Contestant;
-  prompt: EvalPrompt;
+  prompt: AskPrompt;
   /** The run's signal: aborted when the run stops. */
   signal: AbortSignal;
   reserve: Reserve;
@@ -109,8 +108,8 @@ interface Named {
  * judging it "grounded" with nothing to show would put an ungrounded verdict
  * under the `+grounded` id. Those prompts come back in `ungrounded`.
  */
-export function pairsToJudge<C extends Named>(opts: {
-  prompts: readonly EvalPrompt[];
+export function pairsToJudge<C extends Named, P extends { id: string } = JudgePrompt>(opts: {
+  prompts: readonly P[];
   flint: Named;
   competitors: readonly C[];
   /** The cached successful answer of this contestant to this prompt. */
@@ -118,8 +117,8 @@ export function pairsToJudge<C extends Named>(opts: {
   /** Does this pair already have a verdict from this judge? */
   judged: (promptId: string, comp: C) => boolean;
   grounded: boolean;
-}): { pairs: Array<{ p: EvalPrompt; comp: C }>; ungrounded: Set<string> } {
-  const pairs: Array<{ p: EvalPrompt; comp: C }> = [];
+}): { pairs: Array<{ p: P; comp: C }>; ungrounded: Set<string> } {
+  const pairs: Array<{ p: P; comp: C }> = [];
   const ungrounded = new Set<string>();
   for (const p of opts.prompts) {
     const fa = opts.answer(p.id, opts.flint);
@@ -160,7 +159,7 @@ export type JudgeStep = { kind: 'judged'; row: JudgmentRow } | { kind: 'refused'
 export async function judgeOne(opts: {
   judge: JudgeSetup;
   subject: string;
-  prompt: EvalPrompt;
+  prompt: JudgePrompt;
   competitor: Named;
   flintAnswer: AnswerRow;
   competitorAnswer: AnswerRow;
@@ -169,12 +168,19 @@ export async function judgeOne(opts: {
   signal: AbortSignal;
   judgeMaxTokens: number;
   reserve: Reserve;
+  /**
+   * Flint tasks: the context both sides had (shown in place of Flint's own
+   * grounding) and the judge extras (shared-context wording, the task rubric).
+   * Absent for parity, whose judging is unchanged.
+   */
+  sharedGrounding?: FlintGrounding | undefined;
+  extras?: JudgeExtras | undefined;
 }): Promise<JudgeStep> {
   const { judge, prompt: p, competitor: comp, flintAnswer: fa, competitorAnswer: ca } = opts;
-  if (judge.grounded && !fa.grounding) {
+  if (judge.grounded && !fa.grounding && !opts.sharedGrounding) {
     throw new Error(`judging ${p.id} grounded, but its Flint answer has no grounding (pairsToJudge skips those)`);
   }
-  const grounding = judge.grounded ? fa.grounding : undefined;
+  const grounding = judge.grounded ? (opts.sharedGrounding ?? fa.grounding) : undefined;
   const aIsFlint = flintIsA(p.id, comp.name, opts.seed);
   const base = {
     subject: opts.subject,
@@ -199,6 +205,7 @@ export async function judgeOne(opts: {
       now: opts.now,
       signal: opts.signal,
       grounding,
+      extras: opts.extras,
     });
     if (r.kind === 'refused') return { kind: 'refused' };
     if (r.kind === 'error') return { kind: 'judged', row: { ...base, ok: false, error: r.error, panel: r.panel, costUsd: r.costUsd, ts: Date.now() } };
@@ -220,7 +227,7 @@ export async function judgeOne(opts: {
 
   if (!judge.provider) throw new Error('a single judge needs a provider');
   const [answerA, answerB] = aIsFlint ? [fa.text!, ca.text!] : [ca.text!, fa.text!];
-  const est = estimateCost('anthropic', judge.model, p.prompt.length + answerA.length + answerB.length + groundingChars(grounding), {
+  const est = estimateCost('anthropic', judge.model, p.prompt.length + answerA.length + answerB.length + groundingChars(grounding) + (opts.extras?.rubric?.length ?? 0), {
     overheadTokens: 700,
     expectedOutputTokens: 800,
   });
@@ -237,6 +244,7 @@ export async function judgeOne(opts: {
       now: opts.now,
       signal: opts.signal,
       grounding,
+      extras: opts.extras,
     });
     const cost = costOf('anthropic', judge.model, j.usage);
     settle(cost);
