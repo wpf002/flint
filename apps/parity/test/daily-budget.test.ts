@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, appendFileSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DailyEvalBudget, dailyLimitFrom, processAlive, type EvalLedgerRow } from '../src/daily-budget.js';
+import {
+  DailyEvalBudget,
+  dailyLimitFrom,
+  openSharedEvalBudget,
+  processAlive,
+  spendLedgerPath,
+  type EvalLedgerRow,
+} from '../src/daily-budget.js';
 import { BudgetGuard } from '../src/budget.js';
 
 const NOON = Date.UTC(2026, 8, 25, 17, 0); // 12:00 CDT
@@ -152,5 +159,55 @@ describe('dailyLimitFrom', () => {
   it('knows this process is alive and a nonsense pid is not', () => {
     expect(processAlive(process.pid)).toBe(true);
     expect(processAlive(2 ** 22 + 12_345)).toBe(false);
+  });
+});
+
+describe('openSharedEvalBudget (what run and tasks open before their first paid call)', () => {
+  const open = (budgetUsd: number, notes: string[] = [], logged: string[] = []) =>
+    openSharedEvalBudget({ run: 'tasks/20260925-run', budgetUsd, dailyLimitUsd: 25, ledgerPath: path, env: {}, log: (m) => logged.push(m), notes, now: () => NOON });
+
+  it("caps the invocation's guard at the grant and records every settled call in the shared ledger", () => {
+    const { budget, daily, clipped } = open(10);
+    expect(budget.limitUsd).toBe(10);
+    expect(clipped).toBe(false);
+    budget.reserve(0.5)!(0.4);
+    daily.close();
+    expect(rows().map((r) => [r.type, r.usd])).toEqual([
+      ['reserve', 10],
+      ['spend', 0.4],
+      ['release', 0],
+    ]);
+    expect(rows()[0]).toMatchObject({ run: 'tasks/20260925-run', day: '2026-09-25' });
+  });
+
+  it("is capped by what today's other evals left, and says so in the report notes", () => {
+    const t = { now: NOON };
+    const earlier = invocation(7, t, new Set());
+    earlier.open('earlier', 24);
+    earlier.spend(24);
+    earlier.close();
+    const notes: string[] = [];
+    const logged: string[] = [];
+    const { budget, daily, clipped } = open(10, notes, logged);
+    daily.close();
+    expect(budget.limitUsd).toBe(1);
+    expect(clipped).toBe(true);
+    expect(notes[0]).toMatch(/^Capped by the shared daily eval budget: .*capped at \$1\.00 instead of --budget-usd \$10\.00/);
+    expect(logged).toHaveLength(1);
+  });
+
+  it("refuses to start once today's budget is spent", () => {
+    const t = { now: NOON };
+    const earlier = invocation(7, t, new Set());
+    earlier.open('earlier', 25);
+    earlier.spend(25);
+    earlier.close();
+    expect(() => open(5)).toThrow(/shared eval budget is spent/);
+  });
+
+  it('finds the ledger from the flag, then PARITY_SPEND_LEDGER, then the eval dir', () => {
+    expect(spendLedgerPath('/x/flag.jsonl', { PARITY_SPEND_LEDGER: '/x/env.jsonl' }, '/e')).toBe('/x/flag.jsonl');
+    expect(spendLedgerPath(undefined, { PARITY_SPEND_LEDGER: ' /x/env.jsonl ' }, '/e')).toBe('/x/env.jsonl');
+    expect(spendLedgerPath(undefined, {}, '/e')).toBe('/e/spend-ledger.jsonl');
   });
 });

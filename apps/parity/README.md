@@ -533,6 +533,11 @@ pnpm --filter @flint/parity tasks --budget-usd 80                   # the full s
 pnpm --filter @flint/parity tasks-report --run <ts>
 ```
 
+Like `run`, `tasks` reserves its `--budget-usd` out of the **shared daily eval budget**
+(`PARITY_DAILY_BUDGET_USD`, see section 2) before its first paid call, and every Flint
+replay, competitor answer and judge call settles into the same ledger (`--spend-ledger`
+as for `run`). `build-tasks` and `tasks-report` make no paid calls.
+
 Default contestants: `flint,openai,claude,perplexity,google,amazon` (each skipped with a
 note if its key is missing). `--systems gmail,vantage` filters. Other flags as for `run`
 (`--run`, `--judge-only`, `--no-judge`, `--concurrency`, `--max-tokens`, ...). The order
