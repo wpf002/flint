@@ -54,8 +54,16 @@ const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> 
   ['claude-fable-5', { input: 10, output: 50, cachedInput: 1, cacheWrite: 12.5 }], // [A]
   ['claude-opus-5-5', { input: 4, output: 20, cachedInput: 0.2, cacheWrite: 5 }], // [A]
   ['claude-opus-5', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
+  // Opus 4 / 4.1 kept the old Opus price; Opus 4.5 cut it to a third. Each 4.x
+  // is listed on its own (no bare `claude-opus-4` row): a 4.x this table has
+  // never seen is priced HIGH, never as a cheaper sibling.
+  ['claude-opus-4-0', { input: 15, output: 75, cachedInput: 1.5, cacheWrite: 18.75 }], // Opus 4 alias, legacy list price
+  ['claude-opus-4-20250514', { input: 15, output: 75, cachedInput: 1.5, cacheWrite: 18.75 }], // Opus 4 snapshot
   ['claude-opus-4-1', { input: 15, output: 75, cachedInput: 1.5, cacheWrite: 18.75 }], // legacy list price (verify)
-  ['claude-opus-4', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A] 4.6 / 4.7 / 4.8
+  ['claude-opus-4-5', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
+  ['claude-opus-4-6', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
+  ['claude-opus-4-7', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
+  ['claude-opus-4-8', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
   ['claude-sonnet-5', { input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 }], // [A]
   ['claude-sonnet-4', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // [A] 4.6 (and 4.5)
   ['claude-haiku-4', { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 }], // [A] 4.5
@@ -146,6 +154,25 @@ export function vendorOfProvider(providerName: string): TokenVendor | undefined 
     default:
       return undefined;
   }
+}
+
+/** Provider names a brain label can start with (apps/server brains.ts: `${provider.name}:${model}`). */
+const LABEL_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'perplexity', 'ollama']);
+
+/**
+ * Split a brain label (`anthropic:claude-opus-5-5`, `openai:gpt-5`) into the
+ * vendor that bills it and the bare model the price table knows. A bare model
+ * name (`claude-opus-5-5`, or an Ollama tag like `qwen3:30b`) comes back as it
+ * is, with no vendor. Pricing the whole label would miss every row and fall
+ * through to UNLISTED_PRICE.
+ */
+export function parseBrainLabel(label: string): { vendor?: TokenVendor; provider?: string; model: string } {
+  const i = label.indexOf(':');
+  if (i <= 0) return { model: label };
+  const provider = label.slice(0, i);
+  if (!LABEL_PROVIDERS.has(provider)) return { model: label };
+  const vendor = vendorOfProvider(provider);
+  return { provider, model: label.slice(i + 1), ...(vendor ? { vendor } : {}) };
 }
 
 // ---------------------------------------------------------------------------
