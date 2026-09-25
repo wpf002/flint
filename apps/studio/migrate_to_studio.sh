@@ -1,6 +1,6 @@
 #!/bin/zsh
 # migrate_to_studio.sh — ONE COMMAND, run from your LAPTOP, to move Flint onto the
-# Mac Studio and start the roadmap that turns him into a real, owned 70B AI.
+# Mac Studio. (Done in 2026-09; kept for a rebuild or the next machine.)
 #
 # It does three things, in order:
 #   1. carries Flint's LIFE over  — memory, the banked training corpus, secrets,
@@ -8,8 +8,9 @@
 #   2. bootstraps the Studio       — toolchain, clones the repo, rebuilds the server,
 #      loads every agent, so Flint is LIVE on the new machine (still on the Claude
 #      teacher for now).
-#   3. starts the roadmap          — pulls the 70B and launches the overnight
-#      fine-tune, detached, plus the daily/weekly flywheel.
+#   3. runs the roadmap report     — where the local brain stands and what a
+#      training cycle would do (a dry run; it starts no training: the 72B
+#      fine-tune and the grow/retrain flywheel are retired, apps/train/mlx/HISTORY.md).
 #
 # PREREQ (do once, on the Studio — see docs/REMOTE_ACCESS.md):
 #   - Remote Login (SSH) = ON   (System Settings > General > Sharing)
@@ -86,7 +87,7 @@ say "1/3 sync ~/.flint  (memory + training corpus + secrets + brain harness/data
 if [ "$DRY" != 1 ]; then
   # Prove it actually landed. openrsync failing silently is exactly how this
   # would otherwise "succeed" with an empty ~/.flint on the Studio.
-  for must in secrets.env training/corpus.jsonl memory/knowledge.json brain/prepare_data.py; do
+  for must in secrets.env training/corpus.jsonl memory/knowledge.json brain; do
     ssh "${SSH_OPTS[@]}" "$STUDIO" "test -e \$HOME/.flint/$must" || {
       echo "  ✗ ~/.flint/$must is missing on the Studio after sync — aborting."; exit 1; }
   done
@@ -154,21 +155,20 @@ fi
 
 # ---- 3. start the roadmap -------------------------------------------------
 if [ "$ROADMAP" = 1 ]; then
-  say "3/3 start the roadmap (pull 70B + launch the overnight fine-tune, detached)"
+  say "3/3 roadmap report (starts no training)"
   if [ "$DRY" = 1 ]; then
     echo "  [dry] ssh zsh ~/flint/apps/studio/studio_roadmap.sh"
   else
     ssh "${SSH_OPTS[@]}" "$STUDIO" '/bin/zsh $HOME/flint/apps/studio/studio_roadmap.sh'
   fi
 else
-  echo "  (--no-roadmap: skipped training kickoff — run studio_roadmap.sh on the Studio when ready)"
+  echo "  (--no-roadmap: skipped the roadmap report — run studio_roadmap.sh on the Studio any time)"
 fi
 
-say "DONE — Flint is live on the Studio (Claude teacher for now)."
+say "DONE — Flint is live on the Studio."
 cat <<EOF
   Talk to him:     http://studio:8080
-  Watch training:  ssh $STUDIO 'tail -f ~/.flint/brain/upgrade.out'
-  When it finishes and evals well, SERVE the 70B and FLIP to primary:
-    docs/MAC_STUDIO_UPGRADE.md steps 3-4  (human-gated on the eval verdict —
-    that's the moment Flint becomes his own AI).
+  Local training:  apps/train/mlx/README.md (a candidate ships only if the parity
+                   gate shows it beats the live local model against GPT-5; the
+                   schedule ships disabled and promotion is always manual).
 EOF

@@ -85,6 +85,8 @@ if [ -d "$BRAIN" ] && [ ! -x "$BRAIN/.venv/bin/python" ]; then
   ( cd "$BRAIN" && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python mlx-lm datasets )
 fi
 [ -x "$BRAIN/.venv/bin/python" ] && ok "brain venv ready" || echo "  ! brain venv missing (did ~/.flint/brain sync over?)"
+# That venv's mlx-lm (0.31.3) can't load muse-glimmer. The training cycle uses its
+# own pinned venv, created on purpose by apps/train/mlx/setup_train_env.sh, not here.
 
 step "7b/9 clone + build trident (4 of Flint's tools come from it)"
 # ~/.flint/mcp.json runs trident's MCP server from
@@ -106,13 +108,13 @@ fi
 step "8/9 install agents that live in the repo but aren't running on the old Mac"
 # migrate_to_studio.sh rsyncs only the plists ALREADY INSTALLED on the laptop.
 # Several agents ship in the repo and are deliberately not running there —
-# com.flint.deploy (the git auto-pull that IS the Studio's whole update path) and
-# com.flint.grow (the daily corpus growth). Without this step they would simply
-# not exist on the Studio and nothing would say so.
+# com.flint.deploy (the git auto-pull that IS the Studio's whole update path).
+# Without this step they would simply not exist on the Studio and nothing would say so.
+# Not the training schedule: com.flint.retrain ships disabled and is enabled by
+# hand after a supervised cycle (apps/train/mlx/README.md "Scheduling"), and the
+# daily com.flint.grow is retired.
 for src in \
   "$REPO/apps/server/com.flint.deploy.plist" \
-  "$REPO/apps/train/mlx/com.flint.grow.plist" \
-  "$REPO/apps/train/mlx/com.flint.retrain.plist" \
   "$REPO/apps/studio/com.flint.backup.plist"; do
   [ -f "$src" ] || continue
   dst="$HOME/Library/LaunchAgents/$(basename "$src")"
@@ -130,6 +132,12 @@ UID_N="$(id -u)"
 # bootstrap into gui/$UID explicitly (install-server.sh's legacy `load -w` targets
 # the wrong domain over SSH); kickstart -k restarts it if it's already loaded.
 for p in "$HOME"/Library/LaunchAgents/com.flint.*.plist(N) "$HOME"/Library/LaunchAgents/com.nexus.*.plist(N); do
+  # Training jobs are never loaded as a side effect of a bootstrap: a transferred
+  # com.flint.retrain may still point at the retired ~/.flint/brain/retrain.sh,
+  # which unloads Ollama. Enabling training is a deliberate step (apps/train/mlx/README.md).
+  case "$(basename "$p" .plist)" in
+    com.flint.retrain|com.flint.grow) echo "  - skipped $(basename "$p") (training is enabled by hand)"; continue ;;
+  esac
   launchctl bootstrap "gui/$UID_N" "$p" 2>/dev/null || \
     launchctl kickstart -k "gui/$UID_N/$(basename "$p" .plist)" 2>/dev/null || true
   ok "loaded $(basename "$p")"
