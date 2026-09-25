@@ -40,7 +40,10 @@ EXIT_DUE, EXIT_ERROR, EXIT_NOT_DUE = 0, 2, 10
 TRAINED = {"PROMOTE", "REJECT", "HOLD", "NO_CANDIDATE", "PREEMPTED", "PACKAGE_FAILED", "GATE_ERROR"}
 # Results that count toward the kill switch.
 FAILED = {"REJECT", "NO_CANDIDATE"}
-RESULTS = TRAINED | {"NO_DATA", "DEFER", "ERROR", "CONTAMINATED"}
+# UNGATEABLE: the gate's free preflight would HOLD or REJECT any candidate from
+# this data (a prompt set missing, data guarded against another set version), so
+# nothing was trained. Like NO_DATA it neither starts the clock nor counts as a failure.
+RESULTS = TRAINED | {"NO_DATA", "DEFER", "ERROR", "CONTAMINATED", "UNGATEABLE"}
 
 
 def load_state(path: str) -> Dict[str, Any]:

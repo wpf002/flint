@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,6 +17,10 @@ import {
   parseSpent,
   planSetRuns,
   poolSets,
+  preflightChecks,
+  preflightExitCode,
+  preflightVerdict,
+  promotionCommands,
   renderGate,
   serverFingerprint,
   setOutcome,
@@ -294,6 +298,70 @@ describe('gate plumbing', () => {
   it('refuses a file that is not a build_data manifest', () => {
     expect(() => parseManifest('x.json', '{"status":"ok"}')).toThrow(/not a build_data.py manifest/);
   });
+
+  it('the free checks alone: PROCEED, HOLD, or REJECT for contamination first', () => {
+    const sets = [{ name: 'gate_prompts', path: join(FIX, 'gate_prompts.jsonl'), sha256: fixtureSha }];
+    const v = (over: Partial<Parameters<typeof preflightChecks>[0]>) => preflightVerdict(preflightChecks({ missingSets: [], manifest: manifestAt('manifest.json'), sets, ...over }));
+    expect(v({})).toEqual({ verdict: 'PROCEED', reasons: [] });
+    expect(v({ missingSets: ['/e/flint_tasks.jsonl'] }).verdict).toBe('HOLD');
+    expect(v({ manifest: manifestAt('manifest-stale.json') }).reasons.join(' ')).toMatch(/not guarded against this version/);
+    // Contamination outranks a missing set, as in decideGate.
+    expect(v({ manifest: manifestAt('manifest-contaminated.json'), missingSets: ['/e/x.jsonl'] }).verdict).toBe('REJECT');
+    expect([preflightExitCode('PROCEED'), preflightExitCode('REJECT'), preflightExitCode('HOLD')]).toEqual([0, 1, 3]);
+  });
+});
+
+describe('promotionCommands', () => {
+  const cmds = (think: boolean | undefined, variant?: string) =>
+    promotionCommands({ candidate: 'flint-muse:c20261001-0230', think, variant, flintUrl: 'http://127.0.0.1:8080/' });
+
+  it('reloads the edited plist (launchd re-reads it) and checks /health serves the candidate', () => {
+    const text = cmds(true).join('\n');
+    // kickstart restarts the definition launchd already holds: the old OLLAMA_MODEL.
+    expect(text).not.toMatch(/kickstart/);
+    expect(text).toContain('launchctl bootout gui/$(id -u)/com.flint.server');
+    expect(text).toContain('launchctl bootstrap gui/$(id -u) "$P"');
+    expect(text.indexOf('OLLAMA_MODEL')).toBeLessThan(text.indexOf('bootout'));
+    expect(text).toContain('Set :EnvironmentVariables:OLLAMA_MODEL flint-muse:c20261001-0230');
+    expect(text).toContain('curl -fsS -m 3 http://127.0.0.1:8080/health');
+    expect(text).toContain('[ "$M" = "flint-muse:c20261001-0230" ]');
+  });
+
+  it('serves the think flag and style variant it was judged with', () => {
+    expect(cmds(true).join('\n')).toContain('Add :EnvironmentVariables:OLLAMA_THINK string true');
+    expect(cmds(false).join('\n')).toContain('Add :EnvironmentVariables:OLLAMA_THINK string false');
+    // Judged with no think flag (the model's default): serve with none.
+    const none = cmds(undefined).join('\n');
+    expect(none).toContain('Delete :EnvironmentVariables:OLLAMA_THINK');
+    expect(none).not.toContain('Add :EnvironmentVariables:OLLAMA_THINK');
+    expect(none).not.toContain('FLINT_LOCAL_STYLE_VARIANT');
+    expect(cmds(true, 'v2').join('\n')).toContain('Add :EnvironmentVariables:FLINT_LOCAL_STYLE_VARIANT string v2');
+  });
+
+  // Runs only the PlistBuddy lines, against a scratch copy (never the real plist, never launchctl or curl).
+  it.runIf(existsSync('/usr/libexec/PlistBuddy'))('its plist edits work on a plist with and without the keys', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'promote-'));
+    const plist = join(dir, 'com.flint.server.plist');
+    const env = (extra: string) =>
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>com.flint.server</string>` +
+      `<key>EnvironmentVariables</key><dict><key>OLLAMA_MODEL</key><string>muse-glimmer:30b</string>${extra}</dict></dict></plist>\n`;
+    const read = (key: string) => spawnSync('/usr/libexec/PlistBuddy', ['-c', `Print :EnvironmentVariables:${key}`, plist], { encoding: 'utf8' });
+    const apply = (lines: string[]) => {
+      const edits = lines.filter((l) => l.startsWith('/usr/libexec/PlistBuddy'));
+      expect(edits.join('\n')).not.toMatch(/launchctl|curl/);
+      for (const line of edits) spawnSync('/bin/zsh', ['-fc', line], { env: { PATH: '/usr/bin:/bin', P: plist }, encoding: 'utf8' });
+    };
+    for (const extra of ['', '<key>OLLAMA_THINK</key><string>false</string>']) {
+      writeFileSync(plist, env(extra));
+      apply(cmds(true, 'v2'));
+      expect(read('OLLAMA_MODEL').stdout.trim()).toBe('flint-muse:c20261001-0230');
+      expect(read('OLLAMA_THINK').stdout.trim()).toBe('true');
+      expect(read('FLINT_LOCAL_STYLE_VARIANT').stdout.trim()).toBe('v2');
+      apply(cmds(undefined));
+      expect(read('OLLAMA_THINK').status).not.toBe(0);
+      expect(read('OLLAMA_MODEL').stdout.trim()).toBe('flint-muse:c20261001-0230');
+    }
+  });
 });
 
 // ---- the CLI end to end on the fixture run dir (no network: --decide-only)
@@ -319,9 +387,14 @@ describe('gate CLI --decide-only', () => {
     const files = readdirSync(r.out);
     expect(files.filter((f) => f.endsWith('.json'))).toHaveLength(1);
     expect(files).toContain('gate_history.csv');
-    const record = JSON.parse(readFileSync(join(r.out, files.find((f) => f.endsWith('.json'))!), 'utf8')) as { decision: { verdict: string } };
+    const record = JSON.parse(readFileSync(join(r.out, files.find((f) => f.endsWith('.json'))!), 'utf8')) as { decision: { verdict: string }; promote?: string[] };
     expect(record.decision.verdict).toBe('PROMOTE');
     expect(r.stdout).toContain('**Verdict: PROMOTE**');
+    // How to serve it as judged (--candidate-think on), kept in the record for cycle.sh and printed.
+    expect(record.promote).toEqual(promotionCommands({ candidate: 'flint-muse:c20261001-0230', think: true, flintUrl: 'http://127.0.0.1:8080' }));
+    expect(r.stderr).toContain('OLLAMA_THINK string true');
+    expect(r.stderr).toContain('launchctl bootout');
+    expect(r.stderr).not.toContain('kickstart');
   }, 60_000);
 
   it('HOLDs before scoring anything when the manifest was guarded against another set version', () => {
@@ -336,5 +409,40 @@ describe('gate CLI --decide-only', () => {
     const bad = run([...common, '--manifest', join(FIX, 'manifest-contaminated.json')]);
     expect(bad.status).toBe(1);
     expect(existsSync(join(bad.out, 'eval'))).toBe(false);
+  }, 60_000);
+});
+
+describe('gate CLI --preflight-only', () => {
+  const tsx = createRequire(import.meta.url).resolve('tsx/cli');
+  const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gate-cli.ts');
+  const run = (args: string[]) => {
+    const out = mkdtempSync(join(tmpdir(), 'gate-pre-'));
+    // No --candidate: a cycle asks this before it has one. The server URL goes nowhere: nothing may call it.
+    const r = spawnSync(process.execPath, [tsx, cli, '--preflight-only', '--out-dir', out, '--flint-url', 'http://127.0.0.1:9', ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, PARITY_DIR: join(out, 'eval'), FLINT_BRAIN_DIR: join(out, 'brain') },
+      timeout: 60_000,
+    });
+    const record = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as { preflight: boolean; decision: { verdict: string; reasons: string[] } };
+    return { ...r, out, record };
+  };
+  const sets = ['--sets', join(FIX, 'gate_prompts.jsonl')];
+
+  it('PROCEEDs (exit 0) on a clean manifest guarded against the same set, and writes nothing', () => {
+    const r = run([...sets, '--manifest', join(FIX, 'manifest.json')]);
+    expect(r.status).toBe(0);
+    expect(r.record).toMatchObject({ preflight: true, decision: { verdict: 'PROCEED', reasons: [] } });
+    expect(readdirSync(r.out)).toEqual([]);
+  }, 60_000);
+
+  it('HOLDs (exit 3) on a missing set or a stale manifest, REJECTs (exit 1) a contaminated one', () => {
+    const missing = run(['--sets', `${join(FIX, 'gate_prompts.jsonl')},${join(FIX, 'flint_tasks.jsonl')}`, '--no-manifest']);
+    expect([missing.status, missing.record.decision.verdict]).toEqual([3, 'HOLD']);
+    expect(missing.record.decision.reasons[0]).toMatch(/flint_tasks/);
+    const stale = run([...sets, '--manifest', join(FIX, 'manifest-stale.json')]);
+    expect([stale.status, stale.record.decision.verdict]).toEqual([3, 'HOLD']);
+    const bad = run([...sets, '--manifest', join(FIX, 'manifest-contaminated.json')]);
+    expect([bad.status, bad.record.decision.verdict]).toEqual([1, 'REJECT']);
+    for (const r of [missing, stale, bad]) expect(readdirSync(r.out)).toEqual([]);
   }, 60_000);
 });

@@ -173,6 +173,58 @@ export function preflightChecks(opts: {
   return checks;
 }
 
+/** What the free checks alone say: PROCEED (worth answering and judging), or the HOLD / REJECT any candidate would get. */
+export type PreflightVerdict = 'PROCEED' | 'HOLD' | 'REJECT';
+
+/**
+ * The verdict of the free checks alone, with the same precedence decideGate
+ * gives them (a fatal check REJECTs, then a failed hold check HOLDs). A cycle
+ * asks this before it trains: a candidate the gate would HOLD or REJECT
+ * unjudged isn't worth hours of GPU and a 17 GB model in Ollama.
+ */
+export function preflightVerdict(checks: readonly GateCheck[]): { verdict: PreflightVerdict; reasons: string[] } {
+  const fatal = checks.filter((c) => !c.ok && c.severity === 'fatal');
+  const hold = checks.filter((c) => !c.ok && c.severity === 'hold');
+  const deciding = fatal.length ? fatal : hold;
+  return { verdict: fatal.length ? 'REJECT' : hold.length ? 'HOLD' : 'PROCEED', reasons: deciding.map((c) => c.detail) };
+}
+
+/** Exit code for `gate --preflight-only`: 0 PROCEED, 1 REJECT, 3 HOLD (2 is an error), as exitCodeOf. */
+export function preflightExitCode(v: PreflightVerdict): number {
+  return v === 'PROCEED' ? 0 : v === 'REJECT' ? 1 : 3;
+}
+
+/**
+ * The commands that serve a PROMOTEd candidate exactly as it was gated. The gate
+ * never runs them; it prints them (and the cycle keeps them in gate.json).
+ *
+ * - The plist is edited, then launchd RE-READS it: bootout + bootstrap in the gui
+ *   domain. `launchctl kickstart -k` restarts the definition launchd already
+ *   holds and would bring the server back on the old model, with the new one
+ *   going live at the next auto-deploy instead (install-server.sh reloads).
+ * - OLLAMA_THINK is set to the think flag the candidate was judged with, or
+ *   removed when it was judged with none (the model's own default): the live
+ *   plist has none, and a fused candidate on Ollama's MLX engine may not share
+ *   the live model's default. FLINT_LOCAL_STYLE_VARIANT likewise, when the
+ *   candidate was judged under an explicit variant.
+ * - Then /health must report the candidate as the model.
+ */
+export function promotionCommands(opts: { candidate: string; think: boolean | undefined; variant?: string | undefined; flintUrl: string }): string[] {
+  const buddy = (cmd: string) => `/usr/libexec/PlistBuddy -c "${cmd}" "$P"`;
+  const setEnv = (key: string, value: string) =>
+    `${buddy(`Delete :EnvironmentVariables:${key}`)} 2>/dev/null; ${buddy(`Add :EnvironmentVariables:${key} string ${value}`)}`;
+  const health = `${opts.flintUrl.replace(/\/+$/, '')}/health`;
+  return [
+    'P=~/Library/LaunchAgents/com.flint.server.plist',
+    buddy(`Set :EnvironmentVariables:OLLAMA_MODEL ${opts.candidate}`),
+    opts.think === undefined ? `${buddy('Delete :EnvironmentVariables:OLLAMA_THINK')} 2>/dev/null` : setEnv('OLLAMA_THINK', String(opts.think)),
+    ...(opts.variant ? [setEnv('FLINT_LOCAL_STYLE_VARIANT', opts.variant)] : []),
+    'launchctl bootout gui/$(id -u)/com.flint.server; for i in {1..10}; do launchctl bootstrap gui/$(id -u) "$P" && break; sleep 1; done',
+    `for i in {1..20}; do M=$(curl -fsS -m 3 ${health} 2>/dev/null | plutil -extract model raw -o - - 2>/dev/null) && break; sleep 1; done; ` +
+      `[ "$M" = "${opts.candidate}" ] && echo "serving ${opts.candidate}" || echo "NOT serving ${opts.candidate} (/health says: \${M:-no answer}); see ~/.flint/logs/server.err.log"`,
+  ];
+}
+
 export function decideGate(input: GateInput): GateDecision {
   const t = input.thresholds;
   const checks: GateCheck[] = preflightChecks({ missingSets: input.missingSets, manifest: input.manifest, sets: input.sets });

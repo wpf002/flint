@@ -645,6 +645,8 @@ pnpm --filter @flint/parity gate --candidate flint-muse:c20261001-0230 --candida
   --manifest ~/.flint/brain/cycles/20261001-0230/data/manifest.json        # a trained candidate
 pnpm --filter @flint/parity gate --no-manifest --candidate qwen3.8:27b \
   --sets parity_prompts.jsonl:100                                          # a base swap
+pnpm --filter @flint/parity gate --preflight-only --sets parity_prompts.jsonl:100 \
+  --manifest ~/.flint/brain/cycles/20261001-0230/data/manifest.json        # the free checks only
 pnpm --filter @flint/parity gate --decide-only --runs parity_prompts=20260924-tiered \
   --sets parity_prompts.jsonl --no-manifest --candidate qwen3.8:27b \
   --baseline-subject flint-local@muse-glimmer:30b --candidate-subject flint-local@qwen3.8:27b \
@@ -675,8 +677,13 @@ every commit to main), a `run` stopped early, fewer than 50 paired prompts, more
 judge errors on a set, no manifest for a trained candidate, or a manifest whose training
 data was guarded against a different version of a set (sha256) than the one judging it.
 A manifest reporting any eval overlap is REJECTED outright. Missing sets and manifest
-problems are checked before anything is paid for. Exit 2 is an error (server down, a
-cycle training: the gate won't time models against a busy GPU).
+problems are checked before anything is paid for; `--preflight-only` runs just those
+checks (no server, model or paid call, nothing written), prints them as JSON and exits 0
+(PROCEED), 1 (REJECT) or 3 (HOLD); a training cycle asks it before it trains. Exit 2 is
+an error (server down, a cycle training: the gate won't time models against a busy
+GPU). Through `pnpm run` / `pnpm --filter` every failing exit arrives as 1, so a script
+that branches on HOLD vs REJECT runs `apps/parity/node_modules/.bin/tsx src/gate-cli.ts`
+(as cycle.sh does).
 
 Why those numbers: re-answering with the same model flips about 8 of 99 prompts
 (20260924-tiered), so a real change shows up as a lopsided better/worse count.
@@ -690,8 +697,12 @@ per-set numbers) and `.md`, a row in `gates/gate_history.csv`, and `--verdict-ou
 when given (the cycle keeps a copy in its own dir). Cost: about $4 of GPT-5 answers
 plus ~$0.04 per panel pair, two subjects, so ~$20 for 100 + a task set;
 `--budget-usd` (default 30) is split across the runs as they go. **It never
-promotes**: a PROMOTE prints the command that sets `OLLAMA_MODEL` and restarts the
-server, and running it is Will's call.
+promotes**: a PROMOTE prints the commands (and records them as `promote`) that serve
+the candidate exactly as it was judged: `OLLAMA_MODEL`, `OLLAMA_THINK` set to its
+`--candidate-think` (removed if it had none), `FLINT_LOCAL_STYLE_VARIANT` if it had a
+`--candidate-variant`, then a reload that makes launchd re-read the plist (`bootout` +
+`bootstrap`, not `kickstart -k`, which restarts the old definition) and a `/health`
+check that the candidate is the model. Running them is Will's call.
 
 `src/pool.ts` is the permanent train/eval split of conversations shared with
 apps/train/mlx/pool.py: a real-task set (`flint_tasks.jsonl`) must be built only from

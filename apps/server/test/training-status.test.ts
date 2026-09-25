@@ -142,6 +142,13 @@ describe('readTrainingStatus', () => {
     const r = parseRunLog('[2026-10-01 02:30] cycle 20261001-0230: profile=muse-glimmer-30b\n[2026-10-01 02:30] NO_DATA (see /x/manifest.json)\n', false);
     expect(r.phase).toBe('complete');
     expect(r.result).toEqual(['[2026-10-01 02:30] NO_DATA (see /x/manifest.json)']);
+    // The gate's free preflight stopping a cycle before any training is an ending too.
+    const u = parseRunLog(
+      '[2026-10-01 02:30] cycle 20261001-0230: profile=muse-glimmer-30b\n[2026-10-01 02:31] UNGATEABLE: the gate would HOLD this data\'s candidate unjudged (see /x/gate.json): nothing trained\n',
+      false,
+    );
+    expect(u.phase).toBe('complete');
+    expect(u.result?.[0]).toMatch(/UNGATEABLE/);
   });
 
   it('works on an empty brain dir', async () => {
