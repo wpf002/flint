@@ -348,6 +348,47 @@ id is the result.
 `pnpm --filter @flint/parity report --run <ts>` re-renders a report from the cached
 rows without calling anything.
 
+## search-compare: is keyless search good enough?
+
+`web_search` can fall back to a local SearXNG (`SEARCH_PROVIDER=auto`, see
+[packages/mcp/README.md](../../packages/mcp/README.md#web-search-metered-keyless-or-both)).
+Before leaning on it harder, measure it. For each prompt, `search-compare` takes the top 5
+from the metered provider and from SearXNG, through the same code `web_search` runs. A cheap
+judge then decides which **result set** better supports answering the prompt: relevance,
+authority, currency, coverage. The sets go in seeded-random A/B slots, and ties are allowed.
+
+```bash
+pnpm --filter @flint/parity search-compare --dry-run                   # prompts + worst-case spend, no calls
+pnpm --filter @flint/parity search-compare --limit 3 --budget-usd 0.25  # smoke
+pnpm --filter @flint/parity search-compare --budget-usd 1               # all research prompts (25 today, ≈ $0.43 worst case)
+pnpm --filter @flint/parity search-compare --query "..." --query "..."  # your own list
+```
+
+| flag | default | |
+| --- | --- | --- |
+| `--prompts` / `--category` | `~/.flint/eval/parity_prompts.jsonl` / `research` | read only; `--category all` for every prompt |
+| `--budget-usd` | `1` | hard cap on metered searches + judge; every paid call is reserved first |
+| `--judge-model` | `claude-haiku-4-5` (`SEARCH_COMPARE_JUDGE_MODEL`) | e.g. `claude-sonnet-5` |
+| `--provider` | from the key's config | `tavily` or `brave` |
+| `--search-cost-usd` | tavily `0.008`, brave `0.005` | per successful metered search; a rejected one (quota, bad key) is free |
+| `--searxng-url` | `$SEARXNG_URL` or `http://127.0.0.1:8888` | checked with `/healthz` before anything is spent |
+| `--results` / `--seed` / `--concurrency` | `5` / `1` / `2` | |
+| `--include-answer` | off | also show each engine's synthesized answer (Tavily's `answer`) to the judge |
+| `--out` | none | append the rows as JSONL |
+
+Keys come from `ANTHROPIC_API_KEY` (env or `~/.flint/secrets.env`) and `SEARCH_API_KEY`
+(env, else the `web` server's env in `~/.flint/mcp.json`, which is what Flint runs with).
+It only reads those files and never prints a key. The output is a per-prompt table (latency,
+shared URLs, winner, the judge's reason with the A/B layout) plus totals: wins, ties,
+forfeits, a sign test, mean latency, and spend split into searches and judge. A side that
+errors or finds nothing **forfeits** without a judge call. If the provider is over quota,
+every row is a SearXNG forfeit and the run costs nothing, which is itself the answer to
+"do we need the fallback".
+
+By default the judge sees sources only. Tavily's synthesized `answer` is part of what the
+local model reads from `web_search`, and SearXNG rarely has one, so `--include-answer`
+measures that too.
+
 ## Caveats (read these before quoting a number)
 
 - **The competitors get no tools.** They answer through the raw APIs with the same

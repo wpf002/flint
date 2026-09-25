@@ -48,6 +48,9 @@ importers:
       '@flint/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@flint/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
     devDependencies:
       '@types/node':
         specifier: ^20
