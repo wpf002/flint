@@ -7,7 +7,8 @@ import { FLINT_LOCAL_STYLE_GUIDE } from './flint-local.js';
  * FLINT_STYLE_VARIANT / FLINT_LOCAL_STYLE_VARIANT and an eval request's
  * `styleVariant` pick from, and that apps/parity puts in a contestant's name
  * (`flint#v2`). A name means one text: change a guide's rules under a NEW name,
- * or answers cached under the old one stop meaning what they say.
+ * or answers cached under the old one stop meaning what they say. (The one
+ * exception, 2026-09-25, revised all three in place; see test/flint-variants.test.ts.)
  *
  *  - v1: FLINT_STYLE_GUIDE, what Flint runs on today (frontier and local).
  *  - v2: FLINT_STYLE_GUIDE_V2, the frontier guide revised from parity run 20260924-tiered.

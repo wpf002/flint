@@ -23,12 +23,19 @@ const GUIDES = [
 // contestant's name (flint#v2, …#local-v1) and so in the cache key of every answer
 // and verdict: editing a guide in place would mix answers from two texts under one
 // label, and a resumed or repeated run couldn't tell. To revise a guide, add it as a
-// NEW variant (v3, local-v2) with its own pin; never change a hash below. The
+// NEW variant (v3, local-v2) with its own pin; don't change a hash below. The
 // Record type makes a new variant without a pin a type error.
+//
+// The one exception, deliberate: on 2026-09-25 all three were revised in place
+// (fix/conversation-behaviour). v1 and v2 are the live guides and told Flint his own
+// model retrains weekly and "gets sharper every week", which isn't true, and a new
+// name would not have reached Will without a config change. Previous pins: v1
+// 66145bd3…, v2 8381fbe5…, local-v1 d70a0243…. Parity answers cached before that
+// commit are from the old texts: start a new run rather than resuming one across it.
 const PINNED: Record<FlintStyleVariant, string> = {
-  v1: '66145bd31d47d6e2292967b3ddff11af262b231222020ea5d6eb7cffbfe9716b',
-  v2: '8381fbe5d4f06a20bae6845bb67a12b4febb741f8035bb5e60ed6d4ac6745cb8',
-  'local-v1': 'd70a0243bbbdf27cbbd37bd6ff8d2e0fdf4a06010a3a122fff1e9f5664b07f71',
+  v1: '4fc8866ce3b82095bf173b0806732f44f27917edd85219edfa3af64fdb96a73c',
+  v2: '12da7fe05fd4aef835dbe7d21796f91a00c107d7eb7d60c2d9e626f174395f52',
+  'local-v1': 'ec9ebc8a963c005190fc254c0ee1e3b4bf2609578774886a19cfed32c6449fe4',
 };
 
 describe('every style variant is frozen', () => {
@@ -138,12 +145,56 @@ describe.each(GUIDES)('%s: rules a)-f)', (_name, guide) => {
     for (const line of hard) expect(line, line.slice(0, 60)).toMatch(/(Will's|his) own plans, code (or|and) decisions/);
   });
 
-  it("e) doesn't bring up its own training, engine or stats off-topic", () => {
-    expect(guide).toMatch(/Don't bring up your own training, engine[^.]*unless the question is about you\./);
+  it("e) doesn't bring up its own training, engine or stats unless Will asks", () => {
+    expect(guide).toMatch(/Don't bring up your own training, engine[^.]*unless Will asks about them/);
+    // "How are you?" is literally a question about Flint; it's not a request for a status report.
+    expect(guide).not.toMatch(/unless the question is about you/);
   });
 
   it('f) computes derived numbers with the calculate tool', () => {
     expect(guide).toMatch(/Compute derived numbers[^\n]*powers, compounding[^\n]*ratios[^\n]*retries[^\n]*with the calculate tool, not in your head/);
+  });
+});
+
+// What Will saw on 2026-09-25: "How are you doing today Flint?" got an unrequested
+// training report plus a list of Flint's past mistakes; "I don't care about what you
+// got wrong" got the training pitch again. And every guide said his own model retrains
+// weekly, which it doesn't (fine-tuning is paused; no fine-tune has beaten its base).
+// Every variant, the live v1 and v2 included, carries these rules.
+const EVERY_GUIDE = FLINT_STYLE_VARIANT_NAMES.map((v) => [v, FLINT_STYLE_VARIANTS[v]] as const);
+
+describe.each(EVERY_GUIDE)('%s: honest about training, calibrated in conversation', (_name, guide) => {
+  it("a) doesn't claim a model that retrains or sharpens every week", () => {
+    for (const claim of [/sharper (every|each) week/i, /retrains? on/i, /brain in training/i, /trains toward taking that over/i, /training corpus has been absorbing/i]) {
+      expect(guide, String(claim)).not.toMatch(claim);
+    }
+  });
+
+  it('a) says what does carry over, what the local model is for, and that fine-tuning is paused', () => {
+    expect(guide).toMatch(/conversation log (that )?carr(y|ies) over between sessions/);
+    expect(guide).toMatch(/local (open model|brain is an open model)/);
+    expect(guide).toMatch(/private questions/);
+    expect(guide).toMatch(/outages/);
+    expect(guide).toContain('fine-tuning is paused until a candidate measurably beats');
+    // ...and his real training status is one tool call away when Will asks.
+    expect(guide).toMatch(/training_status/);
+  });
+
+  it('b) a greeting or small talk gets a short, warm reply, not a status report', () => {
+    expect(guide).toMatch(/A greeting or small talk[^.]*gets a short, warm reply in character/);
+    expect(guide).toContain('Running clean — what do you need?');
+    expect(guide).toMatch(/no status report,? (no )?training numbers,? (or|no) agenda unless (he|Will) asks/);
+  });
+
+  it("c) doesn't volunteer old mistakes, and drops what Will says he doesn't care about", () => {
+    expect(guide).toContain("Don't volunteer corrections of your past mistakes");
+    expect(guide).toMatch(/Will asks or (it|one) bears on what he's doing now/);
+    expect(guide).toMatch(/when he says he doesn't care about something, drop it/i);
+  });
+
+  it('d) still never invents personal facts about Will', () => {
+    expect(guide).toMatch(/State a personal fact about Will only if it is in your memory|Only state a personal fact about Will if it's actually in your memory/);
+    expect(guide).toMatch(/never invent|Never invent/);
   });
 });
 

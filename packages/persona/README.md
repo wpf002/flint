@@ -60,6 +60,15 @@ The server picks one per brain from `FLINT_STYLE_VARIANT` / `FLINT_LOCAL_STYLE_V
 by sha256 in `test/flint-variants.test.ts`. Revise a guide under a new name (`v3`,
 `local-v2`), or cached parity answers for the old name stop meaning what they say.
 
+The one exception (2026-09-25): all three were revised in place, because v1 and v2
+are live and told Flint his own model retrains weekly, which it doesn't. They now say
+what does carry over (memory and the conversation log), what the local open model is
+for (private questions, outages), and that fine-tuning is paused until a candidate
+measurably beats it; a greeting gets a short reply with no status report, old mistakes
+aren't volunteered, and what Will says he doesn't care about gets dropped. Don't resume
+a parity run (`--run`) started before that commit: its cached answers are from the
+old texts.
+
 ## Why it's a separate package
 
 `@flint/core` deliberately ships no personalization or retrieval (that's the
