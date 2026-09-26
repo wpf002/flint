@@ -64,6 +64,7 @@ import {
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { parseMcpConfig } from './mcp-config';
 import { PersistentStore } from './persistent-store';
+import { describeHistoryWindow, readHistoryWindow } from './history-window';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
@@ -410,9 +411,13 @@ async function main(): Promise<void> {
   const observer = combineObservers(actionLog, spendObserver(ledger));
   // Durable conversation memory — survives restarts/reboots/crashes (was RAM
   // only). Shared across both brains so a conversation stays coherent no matter
-  // which one answers a given turn.
+  // which one answers a given turn. Each turn is sent only the recent part of its
+  // conversation (FLINT_HISTORY_TURNS / FLINT_HISTORY_MAX_AGE_HOURS, ./history-window);
+  // everything stays stored, and older context comes back through memory recall.
   const dataDir = join(homedir(), '.flint', 'memory');
-  const memory = new PersistentStore(join(dataDir, 'conversations.json'));
+  const history = readHistoryWindow(process.env, (m) => console.error(m));
+  console.error(`[memory] chat history window: ${describeHistoryWindow(history)}`);
+  const memory = new PersistentStore(join(dataDir, 'conversations.json'), { history });
   const flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
@@ -1008,6 +1013,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // Router, recall, the Action Log and the training corpus see names, never file bodies.
     const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const selected = await ctx.router.select(asText);
+    // The history this turn will actually carry (windowed), not the whole stored thread.
     const turns = route.brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
     const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
     // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);

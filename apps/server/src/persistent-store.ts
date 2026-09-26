@@ -12,6 +12,7 @@ import {
   hasPayload,
   shedPayload,
 } from '@flint/core';
+import { windowTurns, type HistoryWindow } from './history-window';
 
 /**
  * How many of a conversation's most recent turns keep their attachment bodies
@@ -33,6 +34,17 @@ function shedTurn(t: Turn): Turn {
   return { ...t, messages: t.messages.map(shedMessage) };
 }
 
+export interface PersistentStoreOptions {
+  /**
+   * What `getMessages` hands the next turn: only the recent complete turns
+   * (./history-window). Omitted, it returns every complete turn, as before.
+   * `getTurns` is never windowed, and nothing stored is dropped.
+   */
+  history?: HistoryWindow;
+  /** Clock for the window's age limit. Injectable for tests. */
+  now?: () => number;
+}
+
 /**
  * Disk-backed MemoryStore — the fix for Flint forgetting everything on restart.
  * Same transactional contract as the in-memory reference impl (begin →
@@ -45,8 +57,15 @@ export class PersistentStore implements MemoryStore {
   readonly schemaVersion = SCHEMA_VERSION;
   private readonly conversations = new Map<string, Turn[]>();
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly history: HistoryWindow | undefined;
+  private readonly now: () => number;
 
-  constructor(private readonly path: string) {
+  constructor(
+    private readonly path: string,
+    opts: PersistentStoreOptions = {},
+  ) {
+    this.history = opts.history;
+    this.now = opts.now ?? Date.now;
     this.load();
   }
 
@@ -105,13 +124,18 @@ export class PersistentStore implements MemoryStore {
     return structuredClone(failed);
   }
 
+  /**
+   * The context for this conversation's next turn: its complete turns, only the
+   * recent ones when a history window is set. Every chat path (Flint.chat on any
+   * brain) reads history through here, so they all share the window.
+   */
   async getMessages(conversationId: string): Promise<Message[]> {
-    return (this.conversations.get(conversationId) ?? [])
-      .filter((t) => t.status === 'complete')
-      .flatMap((t) => t.messages)
-      .map((m) => structuredClone(m));
+    const complete = (this.conversations.get(conversationId) ?? []).filter((t) => t.status === 'complete');
+    const turns = this.history ? windowTurns(complete, this.history, this.now()) : complete;
+    return turns.flatMap((t) => t.messages).map((m) => structuredClone(m));
   }
 
+  /** Every turn, any status, never windowed: the memory extractor reads the full history here. */
   async getTurns(conversationId: string): Promise<Turn[]> {
     return (this.conversations.get(conversationId) ?? []).map((t) => structuredClone(t));
   }
