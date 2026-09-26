@@ -13,7 +13,9 @@ import {
   type ProviderFactory,
   mediaChain,
   type BrainTier,
+  LONG_CONVERSATION,
 } from '../src/brains';
+import { DEFAULT_HISTORY_TURNS } from '../src/history-window';
 
 /** A provider that is never called — tier resolution only needs a name. */
 function stubProvider(name: string): ProviderAdapter {
@@ -79,6 +81,16 @@ describe('classifyMessage', () => {
   it('never calls something routine deep in a thread or when tools are needed', () => {
     expect(classifyMessage('thanks', { turns: 40 })).toBe('standard');
     expect(classifyMessage("what's the weather", { toolsLikely: true })).toBe('standard');
+  });
+
+  it('sizes "deep in a thread" to what the history window can carry (complete turns, not messages)', () => {
+    // The default window sends at most 12 turns: a full one is a deep thread.
+    expect(LONG_CONVERSATION).toBeLessThanOrEqual(DEFAULT_HISTORY_TURNS);
+    expect(classifyMessage('ok so what about the second position then?', { turns: DEFAULT_HISTORY_TURNS })).toBe('standard');
+    expect(classifyMessage('ok, and the other one?', { turns: LONG_CONVERSATION })).toBe('standard');
+    // A greeting after a quiet stretch (nothing recent in the window) stays routine.
+    expect(classifyMessage('How are you doing today Flint?', { turns: 0 })).toBe('routine');
+    expect(classifyMessage('ok, and the other one?', { turns: LONG_CONVERSATION - 1 })).toBe('routine');
   });
 
   it('defaults to standard when unsure', () => {
