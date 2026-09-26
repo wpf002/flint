@@ -63,8 +63,8 @@ import {
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { parseMcpConfig } from './mcp-config';
-import { PersistentStore } from './persistent-store';
-import { describeHistoryWindow, readHistoryWindow } from './history-window';
+import { openConversationStore, type PersistentStore } from './persistent-store';
+import { withHistoryNote } from './history-window';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
 import { deepResearchTool } from './deep-research';
@@ -413,11 +413,9 @@ async function main(): Promise<void> {
   // only). Shared across both brains so a conversation stays coherent no matter
   // which one answers a given turn. Each turn is sent only the recent part of its
   // conversation (FLINT_HISTORY_TURNS / FLINT_HISTORY_MAX_AGE_HOURS, ./history-window);
-  // everything stays stored, and older context comes back through memory recall.
+  // everything stays stored, and a turn whose conversation has older turns is told so.
   const dataDir = join(homedir(), '.flint', 'memory');
-  const history = readHistoryWindow(process.env, (m) => console.error(m));
-  console.error(`[memory] chat history window: ${describeHistoryWindow(history)}`);
-  const memory = new PersistentStore(join(dataDir, 'conversations.json'), { history });
+  const memory = openConversationStore(join(dataDir, 'conversations.json'), process.env, (m) => console.error(m));
   const flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
@@ -1013,8 +1011,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // Router, recall, the Action Log and the training corpus see names, never file bodies.
     const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const selected = await ctx.router.select(asText);
-    // The history this turn will actually carry (windowed), not the whole stored thread.
-    const turns = route.brain === 'frontier' && ctx.brains?.tiered ? (await ctx.memory.getMessages(conversationId).catch(() => [])).length : 0;
+    // The history this turn will actually carry (windowed), not the whole stored thread:
+    // its complete turns size the "deep thread" rule, and the ones left out get a context line.
+    const history = ctx.memory.historyStats(conversationId);
+    const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
     const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
     // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
     // the honest note once per conversation per day.
@@ -1033,7 +1033,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (plan) logPlan(plan);
     let brain = budget.brain;
     let answeredBy = ctx.model;
-    const ctxBlock = await contextFor(asText, ctx.knowledge);
+    const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
 

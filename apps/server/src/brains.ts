@@ -62,7 +62,11 @@ export const FALLBACK: Record<Tier, readonly Tier[]> = {
 // classification
 
 export interface ClassifyContext {
-  /** Messages already in this conversation (0 for a fresh one or /generate). */
+  /**
+   * Complete turns of history this message is sent with (the windowed history,
+   * ./history-window; 0 for a fresh conversation or /generate). Turns, not
+   * messages: a tool call adds messages to a turn, not context worth more.
+   */
   turns?: number;
   /** The tool router appended non-core tools — the question needs to DO things. */
   toolsLikely?: boolean;
@@ -99,7 +103,13 @@ const ROUTINE_RE =
 
 const LONG_MESSAGE = 800; // chars — long asks are rarely routine and often hard
 const SHORT_MESSAGE = 80; // chars — the ceiling for a routine one-liner
-const LONG_CONVERSATION = 30; // messages — deep threads carry context worth the stronger brain
+/**
+ * Complete turns: a deep thread carries context worth the stronger brain. It was
+ * 30 messages of the whole stored thread; the history window (12 turns / 48h by
+ * default) never sends more than 24 messages for a tool-free thread, so the rule
+ * is sized to what the window can hold: 8 of its 12 turns.
+ */
+export const LONG_CONVERSATION = 8;
 
 /**
  * Sort a frontier-bound message into a tier. Deliberately cheap and

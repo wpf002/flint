@@ -7,10 +7,12 @@ import type { Turn } from '@flint/core';
  * message re-sent all of it: 37 turns, mistakes Flint had already owned up to
  * included, so "how are you?" came back with a status report and a list of old
  * errors, and every frontier pass paid for the whole thread again. Only the
- * most recent complete turns are sent now; anything older reaches Flint the way
- * facts always have, through long-term memory recall (./knowledge), which the
- * memory extractor fills from the FULL stored history (getTurns, unwindowed).
- * Nothing is deleted: the window decides what is sent, not what is kept.
+ * most recent complete turns are sent now. Nothing is deleted: the window decides
+ * what is sent, not what is kept, and the memory extractor still reads the FULL
+ * stored history (getTurns, unwindowed). It keeps only durable facts about Will,
+ * though, not what was said or decided in a thread, so the older turns themselves
+ * don't come back. When some are left out, the turn's context says so
+ * (historyNote), and the persona tells Flint not to reconstruct them.
  */
 export interface HistoryWindow {
   /** At most this many of the most recent complete turns. */
@@ -23,6 +25,12 @@ export const DEFAULT_HISTORY_TURNS = 12;
 export const DEFAULT_HISTORY_MAX_AGE_HOURS = 48;
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/** 12 turns / 48h: what a PersistentStore windows to unless it is told otherwise. */
+export const DEFAULT_HISTORY_WINDOW: Readonly<HistoryWindow> = Object.freeze({
+  maxTurns: DEFAULT_HISTORY_TURNS,
+  maxAgeMs: DEFAULT_HISTORY_MAX_AGE_HOURS * HOUR_MS,
+});
 
 /**
  * FLINT_HISTORY_TURNS (default 12) and FLINT_HISTORY_MAX_AGE_HOURS (default 48);
@@ -50,9 +58,13 @@ export function readHistoryWindow(
   };
 }
 
-/** "12 turns / 48h", for the boot log. */
+function hours(w: HistoryWindow): number {
+  return Math.round((w.maxAgeMs / HOUR_MS) * 100) / 100;
+}
+
+/** "last 12 turn(s) within 48h", for the boot log. */
 export function describeHistoryWindow(w: HistoryWindow): string {
-  return `last ${w.maxTurns} turn(s) within ${Math.round((w.maxAgeMs / HOUR_MS) * 100) / 100}h`;
+  return `last ${w.maxTurns} turn(s) within ${hours(w)}h`;
 }
 
 /**
@@ -65,4 +77,35 @@ export function windowTurns(turns: readonly Turn[], window: HistoryWindow, now: 
   const since = now - window.maxAgeMs;
   const recent = turns.filter((t) => t.status === 'complete' && t.createdAt >= since);
   return recent.slice(-window.maxTurns);
+}
+
+/** What the next message of a conversation carries, counted in complete turns. */
+export interface HistoryStats {
+  /** Complete turns the next message is sent with. */
+  sent: number;
+  /** Complete turns that are stored but that the window leaves out. */
+  leftOut: number;
+  /** The window that decided it; null when the store sends every complete turn. */
+  window: HistoryWindow | null;
+}
+
+/**
+ * One context line for a turn whose conversation has turns the window left out,
+ * so the model knows there is more it can't see instead of filling the gap in.
+ * Empty when nothing was left out.
+ */
+export function historyNote(stats: HistoryStats): string {
+  if (stats.leftOut <= 0 || !stats.window) return '';
+  const n = stats.leftOut;
+  return (
+    `[Conversation history — not a user message: ${n} earlier turn${n === 1 ? '' : 's'} of this conversation ` +
+    `${n === 1 ? 'is' : 'are'} not shown to you (you see at most the last ${stats.window.maxTurns} turn(s) from the past ${hours(stats.window)}h). ` +
+    `If Will refers to something that isn't here or in your long-term memory, say it isn't in front of you; don't reconstruct it.]`
+  );
+}
+
+/** A turn's context block, with the history note appended when the window left turns out. */
+export function withHistoryNote(block: string, stats: HistoryStats): string {
+  const note = historyNote(stats);
+  return note ? `${block}\n${note}` : block;
 }

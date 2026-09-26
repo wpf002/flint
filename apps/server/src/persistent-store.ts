@@ -12,7 +12,14 @@ import {
   hasPayload,
   shedPayload,
 } from '@flint/core';
-import { windowTurns, type HistoryWindow } from './history-window';
+import {
+  DEFAULT_HISTORY_WINDOW,
+  describeHistoryWindow,
+  readHistoryWindow,
+  windowTurns,
+  type HistoryStats,
+  type HistoryWindow,
+} from './history-window';
 
 /**
  * How many of a conversation's most recent turns keep their attachment bodies
@@ -37,12 +44,30 @@ function shedTurn(t: Turn): Turn {
 export interface PersistentStoreOptions {
   /**
    * What `getMessages` hands the next turn: only the recent complete turns
-   * (./history-window). Omitted, it returns every complete turn, as before.
+   * (./history-window). Omitted, it is DEFAULT_HISTORY_WINDOW (12 turns / 48h),
+   * so a store built without options can't quietly go back to re-sending a whole
+   * thread; `null` sends every complete turn (the behaviour before the window).
    * `getTurns` is never windowed, and nothing stored is dropped.
    */
-  history?: HistoryWindow;
+  history?: HistoryWindow | null;
   /** Clock for the window's age limit. Injectable for tests. */
   now?: () => number;
+}
+
+/**
+ * The server's conversation store: windowed by FLINT_HISTORY_TURNS /
+ * FLINT_HISTORY_MAX_AGE_HOURS (./history-window readHistoryWindow), with the
+ * window it chose in the log.
+ */
+export function openConversationStore(
+  path: string,
+  env: Record<string, string | undefined>,
+  log: (msg: string) => void = () => {},
+  now?: () => number,
+): PersistentStore {
+  const history = readHistoryWindow(env, log);
+  log(`[memory] chat history window: ${describeHistoryWindow(history)}`);
+  return new PersistentStore(path, { history, ...(now ? { now } : {}) });
 }
 
 /**
@@ -57,14 +82,14 @@ export class PersistentStore implements MemoryStore {
   readonly schemaVersion = SCHEMA_VERSION;
   private readonly conversations = new Map<string, Turn[]>();
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly history: HistoryWindow | undefined;
+  private readonly history: HistoryWindow | null;
   private readonly now: () => number;
 
   constructor(
     private readonly path: string,
     opts: PersistentStoreOptions = {},
   ) {
-    this.history = opts.history;
+    this.history = opts.history === undefined ? { ...DEFAULT_HISTORY_WINDOW } : opts.history;
     this.now = opts.now ?? Date.now;
     this.load();
   }
@@ -126,13 +151,33 @@ export class PersistentStore implements MemoryStore {
 
   /**
    * The context for this conversation's next turn: its complete turns, only the
-   * recent ones when a history window is set. Every chat path (Flint.chat on any
-   * brain) reads history through here, so they all share the window.
+   * recent ones unless the window is off (`history: null`). Every chat path
+   * (Flint.chat on any brain) reads history through here, so they all share it.
    */
   async getMessages(conversationId: string): Promise<Message[]> {
-    const complete = (this.conversations.get(conversationId) ?? []).filter((t) => t.status === 'complete');
-    const turns = this.history ? windowTurns(complete, this.history, this.now()) : complete;
-    return turns.flatMap((t) => t.messages).map((m) => structuredClone(m));
+    return this.windowed(this.completeTurns(conversationId))
+      .flatMap((t) => t.messages)
+      .map((m) => structuredClone(m));
+  }
+
+  /**
+   * How many complete turns the conversation's next message carries, and how many
+   * the window leaves out: the /chat handler sizes the tier classifier's "deep
+   * thread" rule with `sent`, and tells the model about `leftOut` (./history-window
+   * withHistoryNote).
+   */
+  historyStats(conversationId: string): HistoryStats {
+    const complete = this.completeTurns(conversationId);
+    const sent = this.windowed(complete).length;
+    return { sent, leftOut: complete.length - sent, window: this.history ? { ...this.history } : null };
+  }
+
+  private completeTurns(conversationId: string): Turn[] {
+    return (this.conversations.get(conversationId) ?? []).filter((t) => t.status === 'complete');
+  }
+
+  private windowed(complete: Turn[]): Turn[] {
+    return this.history ? windowTurns(complete, this.history, this.now()) : complete;
   }
 
   /** Every turn, any status, never windowed: the memory extractor reads the full history here. */

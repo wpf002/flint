@@ -29,6 +29,8 @@ afterEach(() => {
   dir = undefined;
 });
 
+// The turns here are timestamped 0..n (1970), so these stores turn the history
+// window off (`history: null`): the default 48h window would send none of them.
 describe('PersistentStore attachment retention', () => {
   it('shedMessage drops bodies, keeps metadata, and leaves plain messages untouched', () => {
     const plain = userMsg(1, false);
@@ -38,7 +40,7 @@ describe('PersistentStore attachment retention', () => {
 
   it('keeps bodies only on the most recent turns in RAM', async () => {
     dir = mkdtempSync(join(tmpdir(), 'flint-store-'));
-    const store = new PersistentStore(join(dir, 'c.json'));
+    const store = new PersistentStore(join(dir, 'c.json'), { history: null });
     const n = ATTACHMENT_RETAIN_TURNS + 2;
     for (let i = 0; i < n; i++) await turn(store, i);
     const users = (await store.getMessages('c')).filter((m) => m.role === 'user');
@@ -52,7 +54,7 @@ describe('PersistentStore attachment retention', () => {
     vi.useFakeTimers();
     dir = mkdtempSync(join(tmpdir(), 'flint-store-'));
     const path = join(dir, 'c.json');
-    const store = new PersistentStore(path);
+    const store = new PersistentStore(path, { history: null });
     await turn(store, 1);
     vi.advanceTimersByTime(1000);
     const disk = readFileSync(path, 'utf8');
@@ -62,7 +64,7 @@ describe('PersistentStore attachment retention', () => {
     const [u] = await store.getMessages('c');
     expect(u!.attachments?.[0]?.data).toBe(IMG.data);
     // And a reload restores the metadata-only form cleanly.
-    const reloaded = new PersistentStore(path);
+    const reloaded = new PersistentStore(path, { history: null });
     const [r] = await reloaded.getMessages('c');
     expect(r!.attachments).toEqual([{ kind: 'image', mediaType: 'image/png', name: 'a.png', bytes: 8 }]);
   });

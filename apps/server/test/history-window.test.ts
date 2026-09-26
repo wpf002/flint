@@ -8,11 +8,14 @@ import {
   DEFAULT_HISTORY_MAX_AGE_HOURS,
   DEFAULT_HISTORY_TURNS,
   describeHistoryWindow,
+  historyNote,
   readHistoryWindow,
   windowTurns,
+  withHistoryNote,
   type HistoryWindow,
 } from '../src/history-window';
-import { PersistentStore } from '../src/persistent-store';
+import { PersistentStore, openConversationStore } from '../src/persistent-store';
+import { classifyMessage } from '../src/brains';
 import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 
@@ -150,18 +153,52 @@ describe('PersistentStore with a history window', () => {
     await fill(store, [NOW - 1000 * HOUR, NOW - 500 * HOUR, NOW - 60_000]);
     expect(await store.getMessages('console')).toHaveLength(2);
     expect(await store.getTurns('console')).toHaveLength(3);
-    // Flush the debounced snapshot, then read it back with no window.
+    // Flush the debounced snapshot, then read it back with the window off.
     await new Promise((r) => setTimeout(r, 450));
-    const reloaded = new PersistentStore(path);
+    const reloaded = new PersistentStore(path, { history: null });
     expect(await reloaded.getTurns('console')).toHaveLength(3);
     expect(userTexts(await reloaded.getMessages('console'))).toHaveLength(3);
   });
 
-  it('without a window it returns the full history, as before', async () => {
+  it('with the window turned off (history: null) it returns the full history', async () => {
     dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
-    const store = new PersistentStore(join(dir, 'c.json'));
+    const store = new PersistentStore(join(dir, 'c.json'), { history: null });
     await fill(store, [1, 2, 3]); // 1970 timestamps: an age window would drop them all
     expect(userTexts(await store.getMessages('console'))).toHaveLength(3);
+    expect(store.historyStats('console')).toEqual({ sent: 3, leftOut: 0, window: null });
+  });
+
+  // The window reaches production only through the store the server builds. A store
+  // built without options, or by openConversationStore from an empty env, must still
+  // window: dropping the option can't quietly go back to re-sending the whole thread.
+  it('windows to 12 turns / 48h by default, with no options at all', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
+    const store = new PersistentStore(join(dir, 'c.json'), { now: () => NOW });
+    // 30 turns in the last hour, then 5 from three days ago before them.
+    await fill(store, [
+      ...Array.from({ length: 5 }, (_, i) => NOW - 72 * HOUR + i * 60_000),
+      ...Array.from({ length: 30 }, (_, i) => NOW - HOUR + i * 60_000),
+    ]);
+    expect(userTexts(await store.getMessages('console'))).toEqual(
+      Array.from({ length: 12 }, (_, i) => `question number ${23 + i} about the watchlist`),
+    );
+    expect(store.historyStats('console')).toEqual({ sent: 12, leftOut: 23, window: { maxTurns: 12, maxAgeMs: 48 * HOUR } });
+  });
+
+  it("openConversationStore: the server's store, windowed by env (defaults when unset)", async () => {
+    dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
+    const logs: string[] = [];
+    const times = [NOW - 72 * HOUR, ...Array.from({ length: 14 }, (_, i) => NOW - HOUR + i * 60_000)];
+
+    const byDefault = openConversationStore(join(dir, 'a.json'), {}, (m) => logs.push(m), () => NOW);
+    await fill(byDefault, times);
+    expect(byDefault.historyStats('console')).toEqual({ sent: 12, leftOut: 3, window: { maxTurns: 12, maxAgeMs: 48 * HOUR } });
+    expect(logs).toContain('[memory] chat history window: last 12 turn(s) within 48h');
+
+    const tuned = openConversationStore(join(dir, 'b.json'), { FLINT_HISTORY_TURNS: '4', FLINT_HISTORY_MAX_AGE_HOURS: '100' }, () => {}, () => NOW);
+    await fill(tuned, times);
+    expect(userTexts(await tuned.getMessages('console'))).toHaveLength(4);
+    expect(tuned.historyStats('console')).toMatchObject({ sent: 4, leftOut: 11 });
   });
 
   it('the memory extractor still reads every stored turn, old ones included', async () => {
@@ -220,5 +257,85 @@ describe('PersistentStore with a history window', () => {
     const turns = await store.getTurns('console');
     expect(turns).toHaveLength(5);
     expect(turns.at(-1)?.status).toBe('complete');
+  });
+});
+
+// Will, on Monday: "what did you recommend Friday about the crossbar sizing?" Friday's
+// turns are past the window, and the memory extractor keeps only durable facts about
+// Will, so the model can't see them. It has to be told they exist, or it fills the gap in.
+describe('the context says when earlier turns were left out', () => {
+  const stats = (sent: number, leftOut: number, window: HistoryWindow | null = WIN) => ({ sent, leftOut, window });
+
+  it('says how many, and not to reconstruct them', () => {
+    const note = historyNote(stats(0, 37));
+    expect(note).toMatch(/^\[Conversation history — not a user message: 37 earlier turns of this conversation are not shown to you/);
+    expect(note).toContain('at most the last 12 turn(s) from the past 48h');
+    expect(note).toMatch(/say it isn't in front of you; don't reconstruct it\.\]$/);
+    expect(historyNote(stats(12, 1))).toContain('1 earlier turn of this conversation is not shown');
+  });
+
+  it('adds nothing when every stored turn was sent, or the window is off', () => {
+    expect(historyNote(stats(5, 0))).toBe('');
+    expect(historyNote(stats(40, 0, null))).toBe('');
+    expect(withHistoryNote('[Context — …]', stats(5, 0))).toBe('[Context — …]');
+  });
+
+  it("is appended to the turn's context block, after what was already there", () => {
+    const block = withHistoryNote('[Context — now]\n[Long-term memory — …]', stats(2, 35));
+    expect(block.split('\n')).toHaveLength(3);
+    expect(block.startsWith('[Context — now]\n[Long-term memory — …]\n[Conversation history')).toBe(true);
+  });
+
+  it('a store reports the left-out turns for the console after a quiet stretch', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
+    try {
+      const store = new PersistentStore(join(dir, 'c.json'), { history: WIN, now: () => NOW });
+      for (const [i, at] of [NOW - 5 * 24 * HOUR, NOW - 4 * 24 * HOUR, NOW - 3 * 24 * HOUR].entries()) {
+        await store.beginTurn({ conversationId: 'console', turnId: `t${i}`, userMessage: { id: `u${i}`, role: 'user', content: 'crossbar sizing?', timestamp: at }, createdAt: at });
+        await store.commitTurn({ conversationId: 'console', turnId: `t${i}`, responseMessages: [{ id: `a${i}`, role: 'assistant', content: 'Size down.', timestamp: at }], usage: { input: 1, output: 1 }, updatedAt: at });
+      }
+      const s = store.historyStats('console');
+      expect(s).toMatchObject({ sent: 0, leftOut: 3 });
+      expect(withHistoryNote('[Context]', s)).toContain('3 earlier turns of this conversation are not shown to you');
+      expect(store.historyStats('never-seen')).toMatchObject({ sent: 0, leftOut: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The tier classifier's "deep thread" rule reads the history the turn carries. Counted
+// in messages against the old 30-message bar, a windowed thread (at most 24 messages
+// tool-free) could never be deep again, and a follow-up in an active thread went routine.
+describe('the deep-thread rule, fed from the windowed history', () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  async function thread(times: number[]): Promise<PersistentStore> {
+    dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
+    const store = new PersistentStore(join(dir, 'c.json'), { history: WIN, now: () => NOW });
+    for (const [i, at] of times.entries()) {
+      await store.beginTurn({ conversationId: 'console', turnId: `t${i}`, userMessage: { id: `u${i}`, role: 'user', content: `step ${i}`, timestamp: at }, createdAt: at });
+      await store.commitTurn({ conversationId: 'console', turnId: `t${i}`, responseMessages: [{ id: `a${i}`, role: 'assistant', content: `ok ${i}`, timestamp: at }], usage: { input: 1, output: 1 }, updatedAt: at });
+    }
+    return store;
+  }
+
+  it('an active thread keeps a short follow-up at standard', async () => {
+    // 40 tool-free turns in the last hour.
+    const store = await thread(Array.from({ length: 40 }, (_, i) => NOW - HOUR + i * 60_000));
+    const { sent } = store.historyStats('console');
+    expect(sent).toBe(12);
+    expect(classifyMessage('ok so what about the second position then?', { turns: sent })).toBe('standard');
+  });
+
+  it('a greeting after a quiet stretch stays routine', async () => {
+    const store = await thread(Array.from({ length: 40 }, (_, i) => NOW - 10 * 24 * HOUR + i * 60_000));
+    const { sent } = store.historyStats('console');
+    expect(sent).toBe(0);
+    expect(classifyMessage('How are you doing today Flint?', { turns: sent })).toBe('routine');
   });
 });
