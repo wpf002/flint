@@ -93,6 +93,7 @@ describe('readTrainingStatus', () => {
       corpus: () => ({ total: 793, teacher: 755, student: 38 }),
       serving: () => ({ local: 'ollama:qwen2.5:7b', frontier: 'anthropic:claude-sonnet-4-6' }),
       isRunning: async () => true,
+      trainingJobs: async () => undefined,
     });
     expect(s.latestRun?.phase).toBe('training');
     expect(s.latestRun?.kind).toMatch(/70B/);
@@ -123,6 +124,7 @@ describe('readTrainingStatus', () => {
       corpus: () => ({ total: 900, teacher: 800, student: 100 }),
       serving: () => ({ local: 'ollama:muse-glimmer:30b' }),
       isRunning: async () => false,
+      trainingJobs: async () => undefined,
     });
     expect(s.latestRun?.kind).toMatch(/training cycle/);
     expect(s.latestRun?.phase).toBe('complete');
@@ -158,6 +160,7 @@ describe('readTrainingStatus', () => {
       corpus: () => ({ total: 0, teacher: 0, student: 0 }),
       serving: () => ({ local: 'ollama:flint-70b' }),
       isRunning: async () => false,
+      trainingJobs: async () => undefined,
     });
     expect(s.latestRun).toBeNull();
     expect(s.recentEvals).toEqual([]);

@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isUnansweredMessage } from './unanswered';
+import { CorpusTally, type CorpusBreakdown } from './corpus-sources';
 
 /** One captured interaction — a training example for Flint's own future brain. */
 export interface TrainingRecord {
@@ -31,6 +32,8 @@ export class TrainingLogger {
   private seq = 0;
   private frontier = 0;
   private local = 0;
+  /** Where the rows came from and who wrote the answers (./corpus-sources). */
+  private readonly tally = new CorpusTally();
 
   constructor(private readonly path: string) {
     this.bootstrapCount();
@@ -48,13 +51,14 @@ export class TrainingLogger {
       appendFileSync(this.path, JSON.stringify(full) + '\n', 'utf8');
       if (rec.brain === 'frontier') this.frontier++;
       else this.local++;
+      this.tally.add(full);
     } catch (err) {
       console.error('[training] failed to append record:', err);
     }
   }
 
-  stats(): { total: number; teacher: number; student: number; path: string } {
-    return { total: this.frontier + this.local, teacher: this.frontier, student: this.local, path: this.path };
+  stats(): { total: number; teacher: number; student: number; path: string; breakdown: CorpusBreakdown } {
+    return { total: this.frontier + this.local, teacher: this.frontier, student: this.local, path: this.path, breakdown: this.tally.snapshot() };
   }
 
   /** Count existing records on boot so the corpus survives restarts. */
@@ -70,6 +74,7 @@ export class TrainingLogger {
           if (typeof r.id === 'number' && r.id > maxId) maxId = r.id;
           if (r.brain === 'frontier') this.frontier++;
           else this.local++;
+          this.tally.add(r);
         } catch {
           /* skip malformed line */
         }
