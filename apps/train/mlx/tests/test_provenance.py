@@ -1,12 +1,27 @@
+import json
+import os
 import unittest
 
-import _path  # noqa: F401
+from _path import SERVER_FIXTURES
 
 from provenance import judge_target, prompt_origin, teacher_of_corpus_row
 
 SELF = ["muse-glimmer", "flint-muse"]
 TEACHERS = {"qwen3.8:27b": "apache-2.0", "some-model:1b": "llama-community"}
 VERIFIED = {"passed": True, "verified": ["calculate-agrees"]}
+
+# The server's training_status counts corpus rows with a port of these rules
+# (apps/server/src/corpus-sources.ts); both are checked against this fixture.
+with open(os.path.join(SERVER_FIXTURES, "corpus-provenance.json")) as _f:
+    CORPUS_FIXTURE = json.load(_f)
+
+# corpus-sources.ts TargetRefusal -> the provenance.py reasons it stands for. The
+# port can't tell the two self-sample reasons apart: that takes the profile's base.
+REFUSAL_REASONS = {
+    "frontier-vendor-output": {"frontier-vendor-output"},
+    "unknown-provenance": {"unknown-provenance"},
+    "local-unverified": {"self-sample-unverified", "self-sample-from-another-model"},
+}
 
 
 class TargetPolicy(unittest.TestCase):
@@ -82,6 +97,25 @@ class TargetPolicy(unittest.TestCase):
         self.assertEqual(prompt_origin("grow_20260801_4"), "frontier-generated")
         self.assertEqual(prompt_origin("seed-12"), "will-or-repo")
         self.assertEqual(prompt_origin("console"), "will-or-repo")
+
+
+class CorpusRowsMatchTheServerPort(unittest.TestCase):
+    """training_status's corpus counts (corpus-sources.ts) must be what this module decides."""
+
+    def test_every_fixture_row_is_refused_for_the_ported_reason(self):
+        for case in CORPUS_FIXTURE["corpus"] + CORPUS_FIXTURE["edge"]:
+            with self.subTest(**case):
+                row = {k: v for k, v in case.items() if k not in ("refusal", "vendorPrompt")}
+                v = judge_target(teacher_of_corpus_row(row), SELF, TEACHERS)
+                self.assertFalse(v.ok)
+                self.assertIn(v.reason, REFUSAL_REASONS[case["refusal"]])
+                self.assertEqual(prompt_origin(row["conversationId"]) == "frontier-generated", case["vendorPrompt"])
+
+    def test_a_frontier_brain_row_is_refused_even_when_its_model_is_a_permitted_teacher(self):
+        # qwen3.8:27b is an apache-2.0 teacher above, but a corpus row can't say it
+        # was sampled as one: brain=frontier is kind "frontier", not "open-weight".
+        v = judge_target(teacher_of_corpus_row({"brain": "frontier", "model": "ollama:qwen3.8:27b"}), SELF, TEACHERS)
+        self.assertEqual(v.reason, "unknown-provenance")
 
 
 if __name__ == "__main__":

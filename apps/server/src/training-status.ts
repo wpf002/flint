@@ -215,9 +215,34 @@ async function readTrainingJobs(): Promise<Record<string, JobState> | undefined>
   }
 }
 
+/** What TrainingLogger.stats() (and GET /training) reports. `teacher`/`student` are its old names for frontier/local answers. */
+export interface CorpusStats {
+  total: number;
+  teacher: number;
+  student: number;
+  breakdown?: CorpusBreakdown;
+}
+
+/**
+ * The corpus as training_status shows it. The logger's `teacher`/`student` are
+ * renamed for what they are, who answered: Flint once read "789 teacher, 38
+ * student" as 789 examples to learn from, and training v2 uses none of them as a
+ * target. When the breakdown is known it leads, with the eligible count first.
+ */
+export function corpusView(c: CorpusStats) {
+  const b = c.breakdown;
+  return {
+    ...(b ? { eligibleTargets: b.eligibleTargets, promptsForSampling: b.promptsForSampling } : {}),
+    total: c.total,
+    frontierAnswers: c.teacher,
+    localAnswers: c.student,
+    ...(b ? { breakdown: b } : {}),
+  };
+}
+
 export interface TrainingStatusDeps {
   brainDir: string;
-  corpus: () => { total: number; teacher: number; student: number; breakdown?: CorpusBreakdown };
+  corpus: () => CorpusStats;
   /** What is answering right now (the local provider + model, and frontier). */
   serving: () => { local: string; frontier?: string | undefined };
   /** Injectable for tests. */
@@ -260,7 +285,7 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
   // step 3). Anything else means the trained adapters exist on disk but aren't live.
   const serving = deps.serving();
   const fineTunedServing = /flint/i.test(serving.local);
-  const corpus = deps.corpus();
+  const corpus = corpusView(deps.corpus());
   const trainingJobs = await (deps.trainingJobs ?? readTrainingJobs)();
 
   return {
@@ -271,8 +296,8 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
     recentEvals: evals,
     evalNote:
       'recentEvals are from the retired pipeline, which compared a fine-tune with its own base (never with a frontier model); kept for the record. signal=NOISE means the gap was within coin-flip range.',
-    corpus,
     ...(corpus.breakdown ? { corpusNote: corpusNote(corpus.breakdown) } : {}),
+    corpus,
     ...(trainingJobs ? { trainingJobs } : {}),
     adaptersOnDisk: adapters,
     servingNow: { ...serving, fineTunedServing },
@@ -338,7 +363,7 @@ export function trainingStatusTool(deps: TrainingStatusDeps): Tool {
     definition: {
       name: 'training_status',
       description:
-        "Flint's own training: the live or latest training cycle (phase, loss, ETA), its gate verdict against GPT-5, the corpus (how much is Will's own chats vs synthetic, and how much any training could use under the vendors' terms), whether the old training jobs are scheduled, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
+        "Flint's own training: the live or latest training cycle (phase, loss, ETA), its gate verdict against GPT-5, the corpus (how much is Will's own chats vs synthetic; none of its answers can be a training target, only its prompts can be re-answered), whether the old training jobs are scheduled, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
       inputSchema: { type: 'object', properties: {} },
       idempotent: true,
     },
