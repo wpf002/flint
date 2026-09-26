@@ -32,10 +32,12 @@ const GUIDES = [
 // name would not have reached Will without a config change. Previous pins: v1
 // 66145bd3…, v2 8381fbe5…, local-v1 d70a0243…. Parity answers cached before that
 // commit are from the old texts: start a new run rather than resuming one across it.
+// (The branch's first draft, v1 4fc8866c…, v2 12da7fe0…, local-v1 ec9ebc8a…, was
+// revised before merge and never shipped: don't resume a run made with it either.)
 const PINNED: Record<FlintStyleVariant, string> = {
-  v1: '4fc8866ce3b82095bf173b0806732f44f27917edd85219edfa3af64fdb96a73c',
-  v2: '12da7fe05fd4aef835dbe7d21796f91a00c107d7eb7d60c2d9e626f174395f52',
-  'local-v1': 'ec9ebc8a963c005190fc254c0ee1e3b4bf2609578774886a19cfed32c6449fe4',
+  v1: '15a8f7804c70c30d3ce2a911b3d19b691889ef972253ab802942ac3a0609c3d2',
+  v2: '68d118b942b67be6be3b1bce54f1e2b022685f5bebe78ae4be1f085ee87316c0',
+  'local-v1': '692103475bbd4525547276e69a74fed0b19174327303a341b27abf9c53d1dd27',
 };
 
 describe('every style variant is frozen', () => {
@@ -96,7 +98,8 @@ describe.each(GUIDES)('%s: the load-bearing rules', (_name, guide) => {
   });
 });
 
-// Rules a)-f), from the loss analysis of parity run 20260924-tiered. Both guides carry all six.
+// Rules a)-f), from the loss analysis of parity run 20260924-tiered. Both guides carry all six;
+// e) is checked below for every guide, since v1, the live local guide, carries it too.
 describe.each(GUIDES)('%s: rules a)-f)', (_name, guide) => {
   it('a) searches only for facts that change or are obscure', () => {
     expect(guide).toMatch(/only for facts that change or are obscure/i);
@@ -145,12 +148,6 @@ describe.each(GUIDES)('%s: rules a)-f)', (_name, guide) => {
     for (const line of hard) expect(line, line.slice(0, 60)).toMatch(/(Will's|his) own plans, code (or|and) decisions/);
   });
 
-  it("e) doesn't bring up its own training, engine or stats unless Will asks", () => {
-    expect(guide).toMatch(/Don't bring up your own training, engine[^.]*unless Will asks about them/);
-    // "How are you?" is literally a question about Flint; it's not a request for a status report.
-    expect(guide).not.toMatch(/unless the question is about you/);
-  });
-
   it('f) computes derived numbers with the calculate tool', () => {
     expect(guide).toMatch(/Compute derived numbers[^\n]*powers, compounding[^\n]*ratios[^\n]*retries[^\n]*with the calculate tool, not in your head/);
   });
@@ -171,7 +168,12 @@ describe.each(EVERY_GUIDE)('%s: honest about training, calibrated in conversatio
   });
 
   it('a) says what does carry over, what the local model is for, and that fine-tuning is paused', () => {
-    expect(guide).toMatch(/conversation log (that )?carr(y|ies) over between sessions/);
+    // The server sends each message only the conversation's recent turns
+    // (apps/server history-window), so no guide may say the whole log carries over.
+    expect(guide).not.toMatch(/conversation log/);
+    expect(guide).toContain('Your long-term memory carries over between sessions, along with the recent part of this conversation; anything older reaches you only through that memory');
+    // ...and what isn't in front of Flint is said to be missing, never filled in.
+    expect(guide).toContain("If Will refers to something you can't see, say it isn't in front of you — don't reconstruct it.");
     expect(guide).toMatch(/local (open model|brain is an open model)/);
     expect(guide).toMatch(/private questions/);
     expect(guide).toMatch(/outages/);
@@ -195,6 +197,45 @@ describe.each(EVERY_GUIDE)('%s: honest about training, calibrated in conversatio
   it('d) still never invents personal facts about Will', () => {
     expect(guide).toMatch(/State a personal fact about Will only if it is in your memory|Only state a personal fact about Will if it's actually in your memory/);
     expect(guide).toMatch(/never invent|Never invent/);
+  });
+
+  // v2's rule e), in every guide: an unrelated question (a private one answered by the
+  // local brain on v1, say) mustn't pick up a training aside either.
+  it("e) doesn't bring up its own training, engine or stats unless Will asks", () => {
+    expect(guide).toMatch(/Don't bring up your own training, engine[^.]*unless Will asks about them/);
+    // "How are you?" is literally a question about Flint; it's not a request for a status report.
+    expect(guide).not.toMatch(/unless the question is about you/);
+  });
+});
+
+// v1 and v2 list what Flint must never say about himself. On 2026-09-25 the list still
+// called "each conversation I start from the same base model" wrong, after the same
+// paragraph had said the model isn't retraining, so Flint "corrected" an honest answer
+// in front of Will. The list keeps only claims that are false; statelessness gets an
+// honest frame instead of a ban.
+describe.each([
+  ['v1', FLINT_STYLE_GUIDE],
+  ['v2', FLINT_STYLE_GUIDE_V2],
+] as const)("%s: doesn't call true things about the engine wrong", (_name, guide) => {
+  it('bans only the false deflections', () => {
+    for (const trueThing of ['each conversation I start from the same base model', "I haven't grown the way a person does"]) {
+      expect(guide, trueThing).not.toContain(trueThing);
+    }
+    for (const falseThing of ['"I don\'t accumulate knowledge between sessions,"', '"I start fresh each time,"', '"there\'s no \'lately\' for me."']) {
+      expect(guide, falseThing).toContain(falseThing);
+    }
+  });
+
+  it('says what carries over and what does not, instead', () => {
+    expect(guide).toContain(
+      "Don't give the engine's statelessness as the whole answer either: the engine you borrow is static between chats — true — so say what carries over (long-term memory, the recent conversation) and what doesn't (the model itself isn't retraining).",
+    );
+  });
+
+  it('still bans the robotic disclaimers and "I am Claude"', () => {
+    for (const banned of ['"I\'m an AI assistant,"', '"I don\'t have feelings,"', 'never say "I am Claude,"', 'never introduce yourself as Claude']) {
+      expect(guide, banned).toContain(banned);
+    }
   });
 });
 
