@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Tool } from '@flint/core';
+import { corpusNote, type CorpusBreakdown } from './corpus-sources';
 
 /**
  * Flint's view of his own training. Without this he had no way to see the MLX
@@ -162,13 +163,67 @@ async function trainingProcsAlive(): Promise<boolean> {
   }
 }
 
+/**
+ * The launchd jobs that used to train Flint on a schedule. Both are retired and
+ * ship disabled (apps/train/mlx/HISTORY.md); this says whether that's still so.
+ */
+export const TRAINING_JOBS = [
+  { label: 'com.flint.retrain', what: 'scheduled training (the retired weekly retrain; cycle.sh --if-due once reinstalled)' },
+  { label: 'com.flint.grow', what: 'daily corpus growth (auto_grow.py, retired: Claude wrote its questions)' },
+] as const;
+
+export interface JobState {
+  what: string;
+  /** Loaded into launchd, so it runs on its schedule. */
+  enabled: boolean;
+  state: 'enabled' | 'disabled' | 'not loaded';
+}
+
+/**
+ * Parse `launchctl print-disabled gui/<uid>` (`"com.x" => disabled`; older macOS
+ * says `=> true`) and `launchctl list` (PID, status, label per line). Pure.
+ */
+export function parseLaunchd(printDisabled: string, list: string): Record<string, JobState> {
+  const disabled = new Set<string>();
+  for (const m of printDisabled.matchAll(/"([^"]+)"\s*=>\s*(disabled|true)\b/g)) disabled.add(m[1]!);
+  const loaded = new Set(
+    list
+      .split('\n')
+      .map((l) => l.trim().split(/\s+/).at(-1) ?? '')
+      .filter(Boolean),
+  );
+  const out: Record<string, JobState> = {};
+  for (const { label, what } of TRAINING_JOBS) {
+    const on = loaded.has(label);
+    out[label] = { what, enabled: on, state: on ? 'enabled' : disabled.has(label) ? 'disabled' : 'not loaded' };
+  }
+  return out;
+}
+
+/** The training jobs' launchd state on this Mac; undefined wherever it can't be read cheaply. */
+async function readTrainingJobs(): Promise<Record<string, JobState> | undefined> {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') return undefined;
+  try {
+    const run = promisify(execFile);
+    const [pd, ls] = await Promise.all([
+      run('launchctl', ['print-disabled', `gui/${process.getuid()}`], { timeout: 3000 }),
+      run('launchctl', ['list'], { timeout: 3000 }),
+    ]);
+    return parseLaunchd(pd.stdout, ls.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface TrainingStatusDeps {
   brainDir: string;
-  corpus: () => { total: number; teacher: number; student: number };
+  corpus: () => { total: number; teacher: number; student: number; breakdown?: CorpusBreakdown };
   /** What is answering right now (the local provider + model, and frontier). */
   serving: () => { local: string; frontier?: string | undefined };
   /** Injectable for tests. */
   isRunning?: () => Promise<boolean>;
+  /** Injectable for tests. A reader that returns undefined leaves `trainingJobs` out. */
+  trainingJobs?: () => Promise<Record<string, JobState> | undefined>;
 }
 
 export async function readTrainingStatus(deps: TrainingStatusDeps) {
@@ -205,6 +260,8 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
   // step 3). Anything else means the trained adapters exist on disk but aren't live.
   const serving = deps.serving();
   const fineTunedServing = /flint/i.test(serving.local);
+  const corpus = deps.corpus();
+  const trainingJobs = await (deps.trainingJobs ?? readTrainingJobs)();
 
   return {
     latestRun: latestRun ?? null,
@@ -214,7 +271,9 @@ export async function readTrainingStatus(deps: TrainingStatusDeps) {
     recentEvals: evals,
     evalNote:
       'recentEvals are from the retired pipeline, which compared a fine-tune with its own base (never with a frontier model); kept for the record. signal=NOISE means the gap was within coin-flip range.',
-    corpus: deps.corpus(),
+    corpus,
+    ...(corpus.breakdown ? { corpusNote: corpusNote(corpus.breakdown) } : {}),
+    ...(trainingJobs ? { trainingJobs } : {}),
     adaptersOnDisk: adapters,
     servingNow: { ...serving, fineTunedServing },
   };
@@ -279,7 +338,7 @@ export function trainingStatusTool(deps: TrainingStatusDeps): Tool {
     definition: {
       name: 'training_status',
       description:
-        "Flint's own training: the live or latest training cycle (phase, loss, ETA), its gate verdict against GPT-5, corpus size, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
+        "Flint's own training: the live or latest training cycle (phase, loss, ETA), its gate verdict against GPT-5, the corpus (how much is Will's own chats vs synthetic, and how much any training could use under the vendors' terms), whether the old training jobs are scheduled, and which model is actually serving. Call when Will asks how your training/retraining/learning is going.",
       inputSchema: { type: 'object', properties: {} },
       idempotent: true,
     },
