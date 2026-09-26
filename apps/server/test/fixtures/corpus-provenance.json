@@ -1,0 +1,28 @@
+{
+  "_comment": "Shared contract between apps/server/src/corpus-sources.ts and apps/train/mlx/provenance.py (test/corpus-sources.test.ts, tests/test_provenance.py). Each row is a corpus.jsonl row as the server writes it. refusal: why training v2 won't use its answer as a target (local-unverified = provenance.py self-sample-unverified or self-sample-from-another-model). vendorPrompt: provenance.py prompt_origin says a vendor model wrote the question. `corpus` is also the fixture corpus the TS breakdown tests count; `edge` adds cases that aren't in it.",
+  "corpus": [
+    { "conversationId": "console", "brain": "frontier", "model": "anthropic:claude-opus-5-5", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "console", "brain": "local", "model": "muse-glimmer:30b", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "c1783820981374", "brain": "frontier", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "c1783820981374", "brain": "local", "model": "qwen2.5:7b", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "default", "brain": "frontier", "model": "ollama:qwen3.8:27b", "refusal": "unknown-provenance", "vendorPrompt": false },
+    { "conversationId": "w0", "brain": "frontier", "model": "", "refusal": "unknown-provenance", "vendorPrompt": false },
+    { "conversationId": "seed-1", "brain": "frontier", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "seed-2", "brain": "local", "model": "qwen2.5:3b", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "bulk-12", "brain": "frontier", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": true },
+    { "conversationId": "bulk-13", "brain": "frontier", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": true },
+    { "conversationId": "grow-3", "brain": "frontier", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": true },
+    { "conversationId": "verify-2", "brain": "local", "model": "qwen2.5:7b", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "generate", "brain": "frontier", "model": "openai:gpt-5", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "generate", "brain": "local", "model": "muse-glimmer:30b", "refusal": "local-unverified", "vendorPrompt": false }
+  ],
+  "edge": [
+    { "conversationId": "console", "brain": "frontier", "model": "mlx-community/Muse-Glimmer-30B-4bit", "refusal": "unknown-provenance", "vendorPrompt": false },
+    { "conversationId": "console", "brain": "frontier", "model": "perplexity:sonar-pro", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "console", "brain": "local", "model": "claude-sonnet-4-6", "refusal": "frontier-vendor-output", "vendorPrompt": false },
+    { "conversationId": "console", "brain": "local", "model": "", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "console", "model": "muse-glimmer:30b", "refusal": "local-unverified", "vendorPrompt": false },
+    { "conversationId": "grow_20260801_4", "brain": "local", "model": "muse-glimmer:30b", "refusal": "local-unverified", "vendorPrompt": true },
+    { "conversationId": "Bulk-7", "brain": "frontier", "model": "gpt-5", "refusal": "frontier-vendor-output", "vendorPrompt": true }
+  ]
+}

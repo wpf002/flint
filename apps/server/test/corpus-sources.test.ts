@@ -1,30 +1,23 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CorpusTally, corpusNote, corpusSourceOf, isVendorWritten } from '../src/corpus-sources';
+import { CorpusTally, corpusNote, corpusSourceOf, corpusTargetRefusal, isVendorWrittenPrompt, type TargetRefusal } from '../src/corpus-sources';
 import { TrainingLogger } from '../src/training';
-import { parseLaunchd, readTrainingStatus } from '../src/training-status';
+import { corpusView, parseLaunchd, readTrainingStatus } from '../src/training-status';
 
-// A fixture corpus in the shape the server writes (./training TrainingRecord).
-const ROWS = [
-  { conversationId: 'console', brain: 'frontier', model: 'anthropic:claude-opus-5-5' },
-  { conversationId: 'console', brain: 'local', model: 'muse-glimmer:30b' },
-  { conversationId: 'c1783820981374', brain: 'frontier', model: 'claude-sonnet-4-6' },
-  { conversationId: 'c1783820981374', brain: 'local', model: 'qwen2.5:7b' },
-  // a local big model configured as the frontier (FLINT_FRONTIER_*): open weights, not a vendor
-  { conversationId: 'default', brain: 'frontier', model: 'ollama:qwen3.8:27b' },
-  // a frontier row from before model labels: the frontier was always Claude then
-  { conversationId: 'w0', brain: 'frontier', model: '' },
-  { conversationId: 'seed-1', brain: 'frontier', model: 'claude-sonnet-4-6' },
-  { conversationId: 'seed-2', brain: 'local', model: 'qwen2.5:3b' },
-  { conversationId: 'bulk-12', brain: 'frontier', model: 'claude-sonnet-4-6' },
-  { conversationId: 'bulk-13', brain: 'frontier', model: 'claude-sonnet-4-6' },
-  { conversationId: 'grow-3', brain: 'frontier', model: 'claude-sonnet-4-6' },
-  { conversationId: 'verify-2', brain: 'local', model: 'qwen2.5:7b' },
-  { conversationId: 'generate', brain: 'frontier', model: 'openai:gpt-5' },
-  { conversationId: 'generate', brain: 'local', model: 'muse-glimmer:30b' },
-].map((r, i) => ({ ts: 1_780_000_000_000 + i, id: i + 1, input: `question ${i}`, output: `answer ${i}`, tools: [], ...r }));
+// Corpus rows in the shape the server writes (./training TrainingRecord), with what
+// training v2's provenance.py decides for each. apps/train/mlx/tests/test_provenance.py
+// checks the same file against provenance.py itself, so the port can't drift from it.
+interface Case {
+  conversationId: string;
+  brain?: string;
+  model: string;
+  refusal: TargetRefusal;
+  vendorPrompt: boolean;
+}
+const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/corpus-provenance.json', import.meta.url), 'utf8')) as { corpus: Case[]; edge: Case[] };
+const ROWS = FIXTURE.corpus.map(({ refusal: _r, vendorPrompt: _v, ...r }, i) => ({ ts: 1_780_000_000_000 + i, id: i + 1, input: `question ${i}`, output: `answer ${i}`, tools: [], ...r }));
 
 function fixtureCorpus(dir: string): string {
   const path = join(dir, 'corpus.jsonl');
@@ -48,24 +41,19 @@ describe('corpusSourceOf', () => {
   });
 });
 
-describe('isVendorWritten (provenance.py FRONTIER_VENDOR)', () => {
-  it("flags a frontier vendor's model, labelled or bare", () => {
-    for (const model of ['anthropic:claude-opus-5-5', 'claude-sonnet-4-6', 'openai:gpt-5', 'gpt-5', 'o3', 'o4-mini', 'perplexity:sonar-pro', 'sonar', 'gemini-2.5-pro', 'google:gemini-2.5', 'xai:grok-4']) {
-      expect(isVendorWritten({ brain: 'frontier', model }), model).toBe(true);
-    }
+describe('corpusTargetRefusal (provenance.py teacher_of_corpus_row + judge_target)', () => {
+  it.each([...FIXTURE.corpus, ...FIXTURE.edge])('$conversationId $brain $model → $refusal', (c) => {
+    expect(corpusTargetRefusal(c)).toBe(c.refusal);
+    expect(isVendorWrittenPrompt(c.conversationId)).toBe(c.vendorPrompt);
   });
 
-  it('passes an open model, wherever it answered', () => {
-    for (const model of ['muse-glimmer:30b', 'qwen2.5:7b', 'ollama:qwen3.8:27b', 'mlx-community/Muse-Glimmer-30B-4bit', 'ollama:gpt-oss:20b']) {
-      expect(isVendorWritten({ brain: 'local', model }), model).toBe(false);
-      expect(isVendorWritten({ brain: 'frontier', model }), model).toBe(false);
-    }
+  it('refuses a frontier-brain answer even from an open model: the row is kind "frontier", never "open-weight"', () => {
+    expect(corpusTargetRefusal({ brain: 'frontier', model: 'ollama:qwen3.8:27b' })).toBe('unknown-provenance');
+    expect(corpusTargetRefusal({ brain: 'frontier', model: '' })).toBe('unknown-provenance');
   });
 
-  it('treats an unlabelled frontier row as Claude, and an unlabelled local row as the local model', () => {
-    expect(isVendorWritten({ brain: 'frontier', model: '' })).toBe(true);
-    expect(isVendorWritten({ brain: 'frontier' })).toBe(true);
-    expect(isVendorWritten({ brain: 'local' })).toBe(false);
+  it('checks for a vendor model first, whatever the brain', () => {
+    expect(corpusTargetRefusal({ brain: 'local', model: 'anthropic:claude-opus-5-5' })).toBe('frontier-vendor-output');
   });
 });
 
@@ -76,7 +64,7 @@ describe('the corpus breakdown', () => {
     dir = undefined;
   });
 
-  it('TrainingLogger counts a fixture corpus by origin and by who wrote the answer', () => {
+  it('TrainingLogger counts a fixture corpus by origin, by why each answer is refused, and by usable prompt', () => {
     dir = mkdtempSync(join(tmpdir(), 'flint-corpus-'));
     const s = new TrainingLogger(fixtureCorpus(dir)).stats();
     expect(s.total).toBe(14); // the torn line is skipped
@@ -84,9 +72,10 @@ describe('the corpus breakdown', () => {
       sources: { conversations: 6, seed: 2, bulk: 2, grow: 1, verify: 1, generate: 2 },
       realConversations: 6,
       synthetic: 8,
-      vendorWritten: 8,
-      openModelAnswers: 6,
-      openModelAnswersInConversations: 3,
+      eligibleTargets: 0,
+      refusedTargets: { 'frontier-vendor-output': 7, 'unknown-provenance': 2, 'local-unverified': 5 },
+      promptsForSampling: 11, // every row but bulk-12, bulk-13, grow-3
+      promptsForSamplingFromChats: 6,
     });
   });
 
@@ -99,11 +88,12 @@ describe('the corpus breakdown', () => {
     logger.log({ conversationId: 'console', brain: 'local', model: 'muse-glimmer:30b', input: 'hi', output: '  ', tools: [] }, 3);
     const b = logger.stats().breakdown;
     expect(b.realConversations).toBe(8);
-    expect(b.vendorWritten).toBe(9);
-    expect(b.openModelAnswersInConversations).toBe(4);
+    expect(b.eligibleTargets).toBe(0);
+    expect(b.refusedTargets).toEqual({ 'frontier-vendor-output': 8, 'unknown-provenance': 2, 'local-unverified': 6 });
+    expect(b.promptsForSamplingFromChats).toBe(8);
   });
 
-  it("training_status reports the breakdown and says plainly that vendor answers aren't trainable", async () => {
+  it('training_status leads with what can be trained on (nothing), then why', async () => {
     dir = mkdtempSync(join(tmpdir(), 'flint-corpus-'));
     const logger = new TrainingLogger(fixtureCorpus(dir));
     const s = await readTrainingStatus({
@@ -113,23 +103,48 @@ describe('the corpus breakdown', () => {
       isRunning: async () => false,
       trainingJobs: async () => undefined,
     });
-    expect(s.corpus.total).toBe(14);
-    expect(s.corpus.breakdown?.realConversations).toBe(6);
     const note = s.corpusNote ?? '';
-    expect(note).toContain("Of 14 corpus rows, 6 come from Will's own chats; the other 8 are synthetic");
+    // The answer first: no corpus answer is a target; only prompts can be re-answered.
+    expect(note.startsWith("0 of 14 corpus answers can be used as training targets today; at most 11 prompts (6 from Will's own chats) could be re-answered by a permitted teacher.")).toBe(true);
+    expect(note).toContain("Of the 14 rows, 6 come from Will's own chats; the other 8 are synthetic");
     expect(note).toContain('seed/bulk/grow/verify: 6, one-shot /generate calls: 2');
-    expect(note).toMatch(/never uses a Claude- or GPT-written answer as a target/);
-    expect(note).toMatch(/eligible pool is real, human-written or open-model data only/);
-    expect(note).toContain("8 of these answers were written by a frontier vendor's model and are excluded");
-    expect(note).toContain("6 were written by an open model (3 of them in Will's own chats)");
+    expect(note).toContain("7 were written by a frontier vendor's model (Claude, GPT), and the vendors' terms bar using their outputs as training targets");
+    expect(note).toContain('2 are other frontier-brain answers, which it refuses as unknown provenance');
+    expect(note).toContain('5 are local-model answers, which count only after passing a verifiable check that corpus rows never record');
+    // No wording that frames an open model's frontier-brain answer as usable, or a vendor's answer as a teacher's.
+    expect(note).not.toMatch(/eligible pool|written by an open model/);
     // the job state couldn't be read: the field is left out, not guessed
     expect(s).not.toHaveProperty('trainingJobs');
+  });
+
+  it('training_status names the answer counts for who answered, not "teacher"/"student", and leads the corpus with the eligible count', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'flint-corpus-'));
+    const logger = new TrainingLogger(fixtureCorpus(dir));
+    const s = await readTrainingStatus({
+      brainDir: dir,
+      corpus: () => logger.stats(),
+      serving: () => ({ local: 'ollama:muse-glimmer:30b' }),
+      isRunning: async () => false,
+      trainingJobs: async () => undefined,
+    });
+    expect(Object.keys(s.corpus)).toEqual(['eligibleTargets', 'promptsForSampling', 'total', 'frontierAnswers', 'localAnswers', 'breakdown']);
+    expect(s.corpus).toMatchObject({ eligibleTargets: 0, promptsForSampling: 11, total: 14, frontierAnswers: 9, localAnswers: 5 });
+    expect(JSON.stringify(s)).not.toMatch(/"(teacher|student)"/);
+    // The note comes before the numbers it explains.
+    const keys = Object.keys(s);
+    expect(keys.indexOf('corpusNote')).toBeLessThan(keys.indexOf('corpus'));
+    // GET /training (TrainingLogger.stats) keeps its old keys: the change there is additive.
+    expect(logger.stats()).toMatchObject({ total: 14, teacher: 9, student: 5 });
+  });
+
+  it('without a breakdown the corpus view is just the renamed counts', () => {
+    expect(corpusView({ total: 3, teacher: 2, student: 1 })).toEqual({ total: 3, frontierAnswers: 2, localAnswers: 1 });
   });
 
   it('an empty corpus reads as zeros', () => {
     const b = new CorpusTally().snapshot();
     expect(b.realConversations + b.synthetic).toBe(0);
-    expect(corpusNote(b)).toContain('Of 0 corpus rows, 0 come from');
+    expect(corpusNote(b)).toMatch(/^0 of 0 corpus answers can be used as training targets today; at most 0 prompts/);
   });
 });
 
