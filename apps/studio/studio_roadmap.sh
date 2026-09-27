@@ -21,7 +21,9 @@ MLX="$REPO/apps/train/mlx"
 export PATH="$HOME/.flint-ollama:/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 
 echo "== local brain"
-curl -s -m 5 http://127.0.0.1:8080/health | /usr/bin/python3 -c 'import json,sys; h=json.load(sys.stdin); print(f"   serving: {h.get(\"provider\")}:{h.get(\"model\")}")' 2>/dev/null \
+# No f-string here: backslash-escaped quotes inside one are a SyntaxError, so this
+# line failed every run and printed "server not answering" while Flint was up.
+curl -s -m 5 http://127.0.0.1:8080/health | /usr/bin/python3 -c 'import json,sys; h=json.load(sys.stdin); print("   serving: %s:%s" % (h.get("provider"), h.get("model")))' 2>/dev/null \
   || echo "   ! server not answering on :8080"
 
 echo "== scheduled training (com.flint.retrain)"
