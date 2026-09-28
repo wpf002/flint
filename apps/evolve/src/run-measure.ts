@@ -3,12 +3,14 @@ import { costOf } from '@flint/core';
 import {
   CSV_HEADER,
   fixedSubset,
+  judgeReplyText,
   readVerdict,
   toCsv,
   toRow,
   todayIsA,
   type Answer,
   type DailyRow,
+  type JudgeResponse,
   type Prompt,
   type Verdict,
 } from './measure.js';
@@ -20,6 +22,8 @@ export interface MeasureOpts {
   flintToken: string;
   anthropicKey: string;
   judgeModel: string;
+  /** Sent as `output_config.effort`; empty sends none, for a judge model without effort. */
+  judgeEffort: string;
   promptsPath: string;
   baselinePath: string;
   csvPath: string;
@@ -29,6 +33,13 @@ export interface MeasureOpts {
   config: string;
   now: string;
 }
+
+/**
+ * Room for the judge's thinking as well as its one-word verdict. Opus 5.5
+ * always thinks and the thinking counts toward max_tokens; at 8 the thinking
+ * used all of it and no verdict was ever written. 4096 is the parity judge's.
+ */
+const JUDGE_MAX_TOKENS = 4096;
 
 const JUDGE_SYSTEM =
   'You are a strict evaluator. Compare two answers to the same question and decide which is better overall — more accurate, clear, well-structured and genuinely useful. Ignore length unless it hurts quality. Reply with EXACTLY one token: A, B, or TIE.';
@@ -67,7 +78,8 @@ async function askFlint(o: MeasureOpts, p: Prompt): Promise<Answer> {
 async function judge(o: MeasureOpts, question: string, a: string, b: string): Promise<{ reply: string; cost: number }> {
   const body = {
     model: o.judgeModel,
-    max_tokens: 8,
+    max_tokens: JUDGE_MAX_TOKENS,
+    ...(o.judgeEffort ? { output_config: { effort: o.judgeEffort } } : {}),
     system: JUDGE_SYSTEM,
     messages: [{ role: 'user', content: `Question:\n${question}\n\nAnswer A:\n${a}\n\nAnswer B:\n${b}\n\nWhich is better? Reply A, B, or TIE.` }],
   };
@@ -78,12 +90,15 @@ async function judge(o: MeasureOpts, question: string, a: string, b: string): Pr
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(`judge HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
-  const d = (await res.json()) as {
-    content?: Array<{ text?: string }>;
-    usage?: { input_tokens: number; output_tokens: number };
-  };
+  const d = (await res.json()) as JudgeResponse & { usage?: { input_tokens: number; output_tokens: number } };
   const usage = { input: d.usage?.input_tokens ?? 0, output: d.usage?.output_tokens ?? 0 };
-  return { reply: d.content?.[0]?.text ?? '', cost: costOf('anthropic', o.judgeModel, usage) };
+  const cost = costOf('anthropic', o.judgeModel, usage);
+  try {
+    return { reply: judgeReplyText(d), cost };
+  } catch (err) {
+    // The judge was paid for even when it gave no verdict.
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { costUsd: cost });
+  }
 }
 
 export interface MeasureResult {
@@ -92,6 +107,8 @@ export interface MeasureResult {
   n: number;
   costUsd: number;
   stoppedEarly?: string;
+  /** Prompts that produced no verdict, each with why. They are in no column of the row. */
+  unscored?: string[];
 }
 
 export async function measure(o: MeasureOpts): Promise<MeasureResult> {
@@ -129,6 +146,7 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     .map((id) => byId.get(id))
     .filter((p): p is Prompt => p !== undefined);
   const verdicts: Verdict[] = [];
+  const unscored: string[] = [];
   let stoppedEarly: string | undefined;
 
   for (const p of prompts) {
@@ -149,8 +167,11 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
       const r = await judge(o, p.prompt, isA ? today.text : base, isA ? base : today.text);
       spent += r.cost;
       verdicts.push(readVerdict(r.reply, isA));
-    } catch {
-      /* a failed prompt is left out of the tally rather than counted as a loss */
+    } catch (err) {
+      // A failed prompt is left out of the tally rather than counted as a loss,
+      // and named, so a run that scored nothing cannot pass for a quiet night.
+      spent += (err as { costUsd?: number }).costUsd ?? 0;
+      unscored.push(`${p.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -160,5 +181,12 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     writeFileSync(o.csvPath, `${CSV_HEADER}\n`, 'utf8');
   }
   appendFileSync(o.csvPath, `${toCsv(row)}\n`, 'utf8');
-  return { kind: 'measured', row, n: verdicts.length, costUsd: spent, ...(stoppedEarly ? { stoppedEarly } : {}) };
+  return {
+    kind: 'measured',
+    row,
+    n: verdicts.length,
+    costUsd: spent,
+    ...(stoppedEarly ? { stoppedEarly } : {}),
+    ...(unscored.length ? { unscored } : {}),
+  };
 }
