@@ -22,12 +22,15 @@ import { runWithFallback, type BrainTier } from '../src/brains';
 const V1: StyleDefaults = { frontier: 'v1', local: 'v1' };
 
 describe('the known variants', () => {
-  it('are v1, v2 and local-v1, each its own guide (what /health reports)', () => {
-    expect(STYLE_VARIANTS).toEqual(['v1', 'v2', 'local-v1']);
+  it('are v1, v2, local-v1 and local-v2, each its own guide (what /health reports)', () => {
+    expect(STYLE_VARIANTS).toEqual(['v1', 'v2', 'local-v1', 'local-v2']);
     expect(DEFAULT_STYLE_VARIANT).toBe('v1');
     expect(styleGuideFor('v1')).toBe(FLINT_STYLE_GUIDE);
     expect(styleGuideFor('v2')).toBe(FLINT_STYLE_GUIDE_V2);
     expect(styleGuideFor('local-v1')).toBe(FLINT_LOCAL_STYLE_GUIDE);
+    // local-v2 is local-v1 with the shared constitution in place of its own
+    // values list: the local brain was the only surface running without it.
+    expect(styleGuideFor('local-v2')).toContain('Your constitution');
   });
 });
 
@@ -98,7 +101,7 @@ describe('readStyleDefaults (FLINT_STYLE_VARIANT / FLINT_LOCAL_STYLE_VARIANT)', 
     const logs: string[] = [];
     expect(readStyleDefaults({ FLINT_STYLE_VARIANT: 'V2', FLINT_LOCAL_STYLE_VARIANT: 'local' }, (m) => logs.push(m))).toEqual(V1);
     expect(logs).toHaveLength(2);
-    expect(logs[0]).toMatch(/FLINT_STYLE_VARIANT="V2" is not one of v1, v2, local-v1; frontier uses v1/);
+    expect(logs[0]).toMatch(/FLINT_STYLE_VARIANT="V2" is not one of v1, v2, local-v1, local-v2; frontier uses v1/);
     expect(logs[1]).toMatch(/FLINT_LOCAL_STYLE_VARIANT="local" is not one of .*; local uses v1/);
   });
 });

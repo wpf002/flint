@@ -34,10 +34,21 @@ const GUIDES = [
 // commit are from the old texts: start a new run rather than resuming one across it.
 // (The branch's first draft, v1 4fc8866c…, v2 12da7fe0…, local-v1 ec9ebc8a…, was
 // revised before merge and never shipped: don't resume a run made with it either.)
+// Second deliberate in-place revision, 2026-09-28: the constitution gained
+// Articles VIII-XII (agency, data, memory, principals, oversight) and hard
+// constraints H5-H7, and v1/v2 interpolate CONSTITUTION_CORE, so their text
+// changed with it. Shipping the acting rules under new names would have left
+// the LIVE guides without them, which is the whole point of the change.
+// Previous pins: v1 15a8f780…, v2 68d118b9…. Parity answers cached before this
+// commit are from the old texts: start a new run rather than resuming across it.
 const PINNED: Record<FlintStyleVariant, string> = {
-  v1: '15a8f7804c70c30d3ce2a911b3d19b691889ef972253ab802942ac3a0609c3d2',
-  v2: '68d118b942b67be6be3b1bce54f1e2b022685f5bebe78ae4be1f085ee87316c0',
+  v1: 'c54dd9b7cf21cab5081563b16d15a9a0157fe6dc5b164078e247a43a4b5d7805',
+  v2: '5599c487665ee4c0d134ea60a406e4adfe6fe0ad0e4283204a46ecf4712cd3c7',
   'local-v1': '692103475bbd4525547276e69a74fed0b19174327303a341b27abf9c53d1dd27',
+  // local-v2 = local-v1 with its own VALUES list replaced by the shared
+  // CONSTITUTION_CORE. Pinned from birth: it interpolates the constitution, so
+  // editing a principle changes this text and this test says so out loud.
+  'local-v2': 'b2938a3f6e944846c53a9f933aec85fce6e71c5387ffd3a22514b058326d6458',
 };
 
 describe('every style variant is frozen', () => {
@@ -60,7 +71,7 @@ describe('every style variant is frozen', () => {
 
 describe('the style variant registry', () => {
   it('names each guide', () => {
-    expect(FLINT_STYLE_VARIANT_NAMES).toEqual(['v1', 'v2', 'local-v1']);
+    expect(FLINT_STYLE_VARIANT_NAMES).toEqual(['v1', 'v2', 'local-v1', 'local-v2']);
     expect(FLINT_STYLE_VARIANTS.v1).toBe(FLINT_STYLE_GUIDE);
     expect(FLINT_STYLE_VARIANTS.v2).toBe(FLINT_STYLE_GUIDE_V2);
     expect(FLINT_STYLE_VARIANTS['local-v1']).toBe(FLINT_LOCAL_STYLE_GUIDE);
@@ -68,7 +79,7 @@ describe('the style variant registry', () => {
 
   it('knows only its own names, exactly', () => {
     for (const v of FLINT_STYLE_VARIANT_NAMES) expect(isFlintStyleVariant(v)).toBe(true);
-    for (const v of ['V2', ' v2', 'v2 ', 'v3', 'local', 'local-v2', '', 'toString', '__proto__', 'constructor', 2, null, undefined, {}]) {
+    for (const v of ['V2', ' v2', 'v2 ', 'v3', 'local', 'local-v3', 'LOCAL-V2', '', 'toString', '__proto__', 'constructor', 2, null, undefined, {}]) {
       expect(isFlintStyleVariant(v), JSON.stringify(v)).toBe(false);
     }
   });

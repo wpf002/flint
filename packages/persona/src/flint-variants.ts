@@ -1,6 +1,7 @@
 import { FLINT_STYLE_GUIDE } from './flint.js';
 import { FLINT_STYLE_GUIDE_V2 } from './flint-v2.js';
 import { FLINT_LOCAL_STYLE_GUIDE } from './flint-local.js';
+import { FLINT_LOCAL_STYLE_GUIDE_V2 } from './flint-local-v2.js';
 
 /**
  * Flint's style guides by variant name — the names the server's
@@ -13,11 +14,13 @@ import { FLINT_LOCAL_STYLE_GUIDE } from './flint-local.js';
  *  - v1: FLINT_STYLE_GUIDE, what Flint runs on today (frontier and local).
  *  - v2: FLINT_STYLE_GUIDE_V2, the frontier guide revised from parity run 20260924-tiered.
  *  - local-v1: FLINT_LOCAL_STYLE_GUIDE, a compact guide for 27-30B local models.
+ *  - local-v2: local-v1 with the shared CONSTITUTION_CORE in place of its own values list.
  */
 export const FLINT_STYLE_VARIANTS = {
   v1: FLINT_STYLE_GUIDE,
   v2: FLINT_STYLE_GUIDE_V2,
   'local-v1': FLINT_LOCAL_STYLE_GUIDE,
+  'local-v2': FLINT_LOCAL_STYLE_GUIDE_V2,
 } as const satisfies Record<string, string>;
 
 export type FlintStyleVariant = keyof typeof FLINT_STYLE_VARIANTS;
