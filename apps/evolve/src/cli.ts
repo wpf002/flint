@@ -7,6 +7,17 @@ import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog }
 import { allCatalogs } from './vendors.js';
 import { measure } from './run-measure.js';
 import { allowance, dayOf, record, spentToday } from './ledger.js';
+import { decide, parseCandidate, screen, tierEnvVar } from './promote.js';
+import {
+  applyCandidate,
+  defaultRestart,
+  makeWaitHealthy,
+  recoverIfNeeded,
+  revertCandidate,
+  settleCandidate,
+  type TryIo,
+} from './run-try.js';
+import type { DailyRow } from './measure.js';
 
 /**
  * `evolve discover` — stage 1 of the nightly loop.
@@ -126,11 +137,30 @@ function flintToken(env: NodeJS.ProcessEnv): string {
   throw new Error('no Flint token: set FLINT_TOKEN, or ~/.flint/token');
 }
 
+/** Run one measurement and return its row, or throw. Shared by `measure` and `try`. */
+async function measureOnce(env: NodeJS.ProcessEnv): Promise<DailyRow> {
+  const res = await measureWith(env);
+  if (res.kind === 'baseline-created') throw new Error('no baseline existed; run `evolve measure` once first');
+  return res.row!;
+}
+
 async function runMeasure(): Promise<number> {
   const env = { ...process.env };
   loadSecrets(join(FLINT_HOME, 'secrets.env'), env);
   mkdirSync(STATE_DIR, { recursive: true });
+  const res = await measureWith(env);
+  if (res.kind === 'baseline-created') {
+    console.log(`baseline created from ${res.n} answer(s), $${res.costUsd.toFixed(4)}. Tomorrow's run scores against it.`);
+    return 0;
+  }
+  const r = res.row!;
+  console.log(`${r.ts}  n=${r.n}  ${r.wins}-${r.losses}-${r.ties}  rate=${r.winRate.toFixed(3)}  ${r.signal}  $${r.costUsd.toFixed(4)}`);
+  if (res.stoppedEarly) console.log(`  stopped early: ${res.stoppedEarly}`);
+  console.log(`  -> ${DAILY_CSV}`);
+  return r.signal === 'WORSE' ? 2 : 0;
+}
 
+async function measureWith(env: NodeJS.ProcessEnv) {
   const key = env.ANTHROPIC_API_KEY?.trim();
   if (!key) throw new Error('measure needs ANTHROPIC_API_KEY (the judge)');
   const tiers = tiersFrom(env);
@@ -143,10 +173,7 @@ async function runMeasure(): Promise<number> {
   const already = spentToday(ledgerPath, day);
   const daily = Number(env.PARITY_DAILY_BUDGET_USD ?? '10');
   const budget = allowance({ ownCap: Number(env.EVOLVE_BUDGET_USD ?? '0.50'), dailyBudget: daily, alreadySpent: already });
-  if (budget <= 0) {
-    console.log(`skipped: the shared daily budget of $${daily.toFixed(2)} is spent ($${already.toFixed(2)} today).`);
-    return 0;
-  }
+  if (budget <= 0) throw new Error(`the shared daily budget of $${daily.toFixed(2)} is spent ($${already.toFixed(2)} today)`);
 
   const res = await measure({
     flintUrl: env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
@@ -172,19 +199,97 @@ async function runMeasure(): Promise<number> {
       usd: res.costUsd,
     });
   }
-  if (res.kind === 'baseline-created') {
-    console.log(`baseline created from ${res.n} answer(s), $${res.costUsd.toFixed(4)}. Tomorrow's run scores against it.`);
+  return res;
+}
+
+/** The most recent row in daily.csv, which is the incumbent's standing score. */
+function lastRow(path: string): DailyRow | undefined {
+  if (!existsSync(path)) return undefined;
+  const lines = readFileSync(path, 'utf8').trim().split('\n').slice(1).filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (!last) return undefined;
+  // config is quoted and may contain commas, so split on commas outside quotes.
+  const f = last.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+  if (f.length < 9) return undefined;
+  return {
+    ts: f[0]!,
+    config: (f[1] ?? '').replace(/^"|"$/g, ''),
+    n: Number(f[2]),
+    wins: Number(f[3]),
+    losses: Number(f[4]),
+    ties: Number(f[5]),
+    winRate: Number(f[6]),
+    signal: f[7] as DailyRow['signal'],
+    costUsd: Number(f[8]),
+  };
+}
+
+async function runTry(spec: string): Promise<number> {
+  const env = { ...process.env };
+  loadSecrets(join(FLINT_HOME, 'secrets.env'), env);
+  mkdirSync(STATE_DIR, { recursive: true });
+
+  const cand = parseCandidate(spec);
+  if (!cand) throw new Error(`bad candidate '${spec}'; expected e.g. hard=openai:gpt-5.6-sol`);
+
+  const url = env.FLINT_URL?.trim() || 'http://127.0.0.1:8080';
+  const io: TryIo = {
+    secretsPath: join(FLINT_HOME, 'secrets.env'),
+    rollbackPath: join(STATE_DIR, 'rollback.json'),
+    restart: defaultRestart,
+    waitHealthy: makeWaitHealthy(url),
+  };
+
+  // Always first: a previous run may have died mid-test.
+  const recovered = await recoverIfNeeded(io);
+  if (recovered) console.log(recovered);
+
+  const catalogs = await allCatalogs(env);
+  const gate = screen(cand, catalogs);
+  if (!gate.ok) {
+    console.log(`refused: ${gate.reason}`);
+    return 1;
+  }
+
+  const incumbent = lastRow(DAILY_CSV);
+  console.log(`trying ${tierEnvVar(cand.tier)}=${cand.provider}:${cand.model} (incumbent ${incumbent ? incumbent.winRate.toFixed(3) : 'unscored'})`);
+
+  await applyCandidate(io, cand, new Date().toISOString());
+  let candidateRow: DailyRow | undefined;
+  try {
+    const r = await measureOnce(env);
+    candidateRow = r;
+  } catch (err) {
+    console.error('measuring the candidate failed; rolling back:', err instanceof Error ? err.message : err);
+    await revertCandidate(io);
+    return 1;
+  }
+
+  const d = decide({ candidate: candidateRow, incumbent });
+  if (!d.ok) {
+    await revertCandidate(io);
+    console.log(`rolled back: ${d.reason}`);
+    return 1;
+  }
+  if (d.action === 'keep') {
+    settleCandidate(io);
+    console.log(`KEPT ${cand.provider}:${cand.model} — ${d.why}`);
     return 0;
   }
-  const r = res.row!;
-  console.log(`${r.ts}  n=${r.n}  ${r.wins}-${r.losses}-${r.ties}  rate=${r.winRate.toFixed(3)}  ${r.signal}  $${r.costUsd.toFixed(4)}`);
-  if (res.stoppedEarly) console.log(`  stopped early: ${res.stoppedEarly}`);
-  console.log(`  -> ${DAILY_CSV}`);
-  return r.signal === 'WORSE' ? 2 : 0;
+  await revertCandidate(io);
+  console.log(`rolled back — ${d.why}`);
+  return 0;
 }
 
 const cmd = process.argv[2];
-if (cmd === 'measure') {
+if (cmd === 'try') {
+  runTry(process.argv[3] ?? '')
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      console.error('try failed:', err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
+} else if (cmd === 'measure') {
   runMeasure()
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
@@ -199,6 +304,6 @@ if (cmd === 'measure') {
       process.exit(1);
     });
 } else {
-  console.error('usage: evolve <discover|measure>');
+  console.error('usage: evolve <discover|measure|try hard=provider:model>');
   process.exit(1);
 }

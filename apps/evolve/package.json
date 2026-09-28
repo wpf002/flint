@@ -7,7 +7,8 @@
     "discover": "tsx src/cli.ts discover",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "measure": "tsx src/cli.ts measure"
+    "measure": "tsx src/cli.ts measure",
+    "try": "tsx src/cli.ts try"
   },
   "dependencies": {
     "@flint/core": "workspace:*"
