@@ -8,6 +8,7 @@ import { allCatalogs } from './vendors.js';
 import { measure } from './run-measure.js';
 import { allowance, dayOf, record, spentToday } from './ledger.js';
 import { decide, parseCandidate, screen, tierEnvVar } from './promote.js';
+import { probe } from './probe.js';
 import {
   applyCandidate,
   defaultRestart,
@@ -251,14 +252,26 @@ async function runTry(spec: string): Promise<number> {
     return 1;
   }
 
+  // A vendor's model list is not proof it answers: OpenAI still lists
+  // gpt-5.2-codex after deprecating it. One token settles it for a fraction of
+  // a cent, before Flint is reconfigured and a measurement is paid for.
+  const live = await probe({ provider: cand.provider, model: cand.model, env });
+  if (!live.ok) {
+    console.log(`refused: ${cand.provider}:${cand.model} did not answer a one-token probe — ${live.detail}`);
+    return 1;
+  }
+
   const incumbent = lastRow(DAILY_CSV);
   console.log(`trying ${tierEnvVar(cand.tier)}=${cand.provider}:${cand.model} (incumbent ${incumbent ? incumbent.winRate.toFixed(3) : 'unscored'})`);
 
   await applyCandidate(io, cand, new Date().toISOString());
   let candidateRow: DailyRow | undefined;
   try {
-    const r = await measureOnce(env);
-    candidateRow = r;
+    // The env was read before the swap, so its tier values are the incumbent's.
+    // Labelling the candidate's score with the incumbent's config is exactly the
+    // mislabelling that recording config beside score is meant to prevent.
+    const candEnv = { ...env, [tierEnvVar(cand.tier)]: `${cand.provider}:${cand.model}` };
+    candidateRow = await measureOnce(candEnv);
   } catch (err) {
     console.error('measuring the candidate failed; rolling back:', err instanceof Error ? err.message : err);
     await revertCandidate(io);

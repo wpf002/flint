@@ -101,3 +101,22 @@ describe('decide', () => {
     expect(decide({ candidate: row(0.7, 'BETTER'), incumbent: undefined })).toMatchObject({ action: 'keep' });
   });
 });
+
+// --- probe ------------------------------------------------------------------
+import { probe } from '../src/probe';
+
+describe('probe', () => {
+  it('refuses a provider it has no probe for, rather than assuming', async () => {
+    const r = await probe({ provider: 'mystery', model: 'x', env: {} });
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain('no probe');
+  });
+
+  it('refuses when the provider has no key', async () => {
+    for (const p of ['openai', 'anthropic', 'google']) {
+      const r = await probe({ provider: p, model: 'x', env: {} });
+      expect(r.ok).toBe(false);
+      expect(r.detail).toContain('no ');
+    }
+  });
+});
