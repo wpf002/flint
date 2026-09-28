@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nightly measurement at 04:00, after discovery at 03:30. SPENDS MONEY: Flint
+     answers a fixed prompt set and a judge compares each answer to the frozen
+     baseline. Bounded twice — its own EVOLVE_BUDGET_USD, and whatever is left of
+     the shared daily ledger the parity harness also writes to. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.evolve-measure</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "$HOME/flint" &amp;&amp; pnpm --filter @flint/evolve measure</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/willfoti/.nvm/versions/node/v24.15.0/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>EVOLVE_PROMPTS</key><string>8</string>
+    <key>EVOLVE_BUDGET_USD</key><string>0.50</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/willfoti/.flint/evolve/measure.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/willfoti/.flint/evolve/measure.err.log</string>
+</dict>
+</plist>

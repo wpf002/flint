@@ -97,3 +97,30 @@ describe('toCsv', () => {
     expect(CSV_HEADER.split(',').length).toBe(line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).length);
   });
 });
+
+// --- shared ledger ---------------------------------------------------------
+import { allowance, dayOf } from '../src/ledger';
+
+describe('allowance', () => {
+  it('uses its own cap when the day has room', () => {
+    expect(allowance({ ownCap: 0.5, dailyBudget: 10, alreadySpent: 1 })).toBe(0.5);
+  });
+
+  // The reason this module exists: a heavy parity day must shrink the nightly
+  // measure, not run alongside it under a second, independent ceiling.
+  it('is limited by what the shared day has left', () => {
+    expect(allowance({ ownCap: 0.5, dailyBudget: 10, alreadySpent: 9.8 })).toBeCloseTo(0.2, 5);
+  });
+
+  it('is zero, never negative, once the day is spent', () => {
+    expect(allowance({ ownCap: 0.5, dailyBudget: 10, alreadySpent: 10 })).toBe(0);
+    expect(allowance({ ownCap: 0.5, dailyBudget: 10, alreadySpent: 12 })).toBe(0);
+  });
+});
+
+describe('dayOf', () => {
+  it('stamps the local calendar day', () => {
+    expect(dayOf(new Date(2026, 8, 28, 23, 30))).toBe('2026-09-28');
+    expect(dayOf(new Date(2026, 0, 5, 0, 1))).toBe('2026-01-05');
+  });
+});

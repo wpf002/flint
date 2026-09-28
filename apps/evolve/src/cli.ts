@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog } from './discover.js';
 import { allCatalogs } from './vendors.js';
 import { measure } from './run-measure.js';
+import { allowance, dayOf, record, spentToday } from './ledger.js';
 
 /**
  * `evolve discover` — stage 1 of the nightly loop.
@@ -134,8 +135,18 @@ async function runMeasure(): Promise<number> {
   if (!key) throw new Error('measure needs ANTHROPIC_API_KEY (the judge)');
   const tiers = tiersFrom(env);
   const config = tiers.map((t) => `${t.tier}=${t.provider}:${t.model}`).join(',') || 'legacy-frontier';
-  const budget = Number(env.EVOLVE_BUDGET_USD ?? '0.60');
-  const n = Number(env.EVOLVE_PROMPTS ?? '20');
+  const n = Number(env.EVOLVE_PROMPTS ?? '8');
+  // One ceiling for everything that spends: evolve's own cap, bounded by what
+  // is left of the shared daily budget the parity harness already tracks.
+  const ledgerPath = env.EVOLVE_LEDGER?.trim() || join(FLINT_HOME, 'eval', 'spend-ledger.jsonl');
+  const day = dayOf(new Date());
+  const already = spentToday(ledgerPath, day);
+  const daily = Number(env.PARITY_DAILY_BUDGET_USD ?? '10');
+  const budget = allowance({ ownCap: Number(env.EVOLVE_BUDGET_USD ?? '0.50'), dailyBudget: daily, alreadySpent: already });
+  if (budget <= 0) {
+    console.log(`skipped: the shared daily budget of $${daily.toFixed(2)} is spent ($${already.toFixed(2)} today).`);
+    return 0;
+  }
 
   const res = await measure({
     flintUrl: env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
@@ -151,6 +162,16 @@ async function runMeasure(): Promise<number> {
     now: new Date().toISOString().replace('T', ' ').slice(0, 16),
   });
 
+  if (res.costUsd > 0) {
+    record(ledgerPath, {
+      type: 'spend',
+      id: `evolve#${process.pid}#${Date.now()}`,
+      run: 'evolve-measure',
+      pid: process.pid,
+      day,
+      usd: res.costUsd,
+    });
+  }
   if (res.kind === 'baseline-created') {
     console.log(`baseline created from ${res.n} answer(s), $${res.costUsd.toFixed(4)}. Tomorrow's run scores against it.`);
     return 0;
