@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CSV_HEADER, fixedSubset, readVerdict, signalOf, toCsv, toRow, todayIsA } from '../src/measure';
+import { CSV_HEADER, fixedSubset, judgeReplyText, readVerdict, signalOf, toCsv, toRow, todayIsA } from '../src/measure';
 
 const P = (id: string) => ({ id, prompt: `q-${id}` });
 
@@ -122,5 +122,29 @@ describe('dayOf', () => {
   it('stamps the local calendar day', () => {
     expect(dayOf(new Date(2026, 8, 28, 23, 30))).toBe('2026-09-28');
     expect(dayOf(new Date(2026, 0, 5, 0, 1))).toBe('2026-01-05');
+  });
+});
+
+describe('judgeReplyText', () => {
+  // Opus 5.5 always thinks, and the thinking comes back ahead of the text.
+  // Reading only the first block read the thinking and scored every pair a tie.
+  it('reads the verdict after a thinking block', () => {
+    const res = { content: [{ type: 'thinking' }, { type: 'text', text: 'B' }], stop_reason: 'end_turn' };
+    expect(judgeReplyText(res)).toBe('B');
+    expect(readVerdict(judgeReplyText(res), true)).toBe('baseline');
+  });
+
+  it('throws, rather than yielding a tie, when the thinking used every token', () => {
+    const res = { content: [{ type: 'thinking' }], stop_reason: 'max_tokens' };
+    expect(() => judgeReplyText(res)).toThrow(/no verdict.*max_tokens/);
+  });
+
+  it('throws on a refusal even if some text came back', () => {
+    const res = { content: [{ type: 'text', text: 'A' }], stop_reason: 'refusal' };
+    expect(() => judgeReplyText(res)).toThrow(/refused/);
+  });
+
+  it('still reads a plain text reply', () => {
+    expect(judgeReplyText({ content: [{ type: 'text', text: ' TIE ' }], stop_reason: 'end_turn' })).toBe('TIE');
   });
 });

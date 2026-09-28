@@ -117,6 +117,32 @@ export function toCsv(r: DailyRow): string {
   ].join(',');
 }
 
+/** The parts of a Messages API response the judge reads. */
+export interface JudgeResponse {
+  content?: Array<{ type?: string; text?: string }>;
+  stop_reason?: string | null;
+}
+
+/**
+ * The judge's reply text, or a throw when there is no verdict to read.
+ *
+ * Opus 5.5 always thinks, and its thinking comes back as blocks AHEAD of the
+ * text, so the verdict is not the first block. Reading `content[0]` read the
+ * thinking, found no text, and scored every pair a tie: all 16 pairs judged on
+ * 2026-09-28 came back ties. A reply with no text (cut off, refused) throws so
+ * the pair is left out and reported, never quietly counted as a tie.
+ */
+export function judgeReplyText(res: JudgeResponse): string {
+  if (res.stop_reason === 'refusal') throw new Error('the judge refused');
+  const text = (res.content ?? [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join('')
+    .trim();
+  if (!text) throw new Error(`the judge gave no verdict (stop_reason ${res.stop_reason ?? 'unknown'})`);
+  return text;
+}
+
 /**
  * Parse the judge's one-word reply into a verdict, given which side was today.
  *
