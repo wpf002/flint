@@ -11,7 +11,7 @@ import { BudgetLedger, describeBudget } from './budget.js';
 import { exportThread } from './export.js';
 import { probeSandbox } from './remote-sandbox.js';
 import { anthropicReviewer, type ReviewScreens } from './visual-review.js';
-import { dueToday, openStandup, promptFrom } from './standup.js';
+import { dueToday, openStandup, promptFrom, STANDUP_LOOKBACK_MS, workedSince } from './standup.js';
 import { beat, type Heartbeat } from './heartbeat.js';
 
 /** Days since the epoch, for anything that should rotate daily rather than randomly. */
@@ -91,6 +91,21 @@ async function holdStandup(participants: Participant[], log: (line: string) => v
   const opener = order[day % order.length]!;
   const second = order[(day + 1) % order.length]!;
 
+  /*
+   * Only when there was work to talk about. The standup on 2026-09-28 opened on a day
+   * nothing had happened; its one real turn said exactly that and asked to close, and
+   * that refused close is what cost $3 in repeated replies. A standup with no work
+   * under it is paid overhead with nothing to say. Skipped counts as held, so it is not
+   * reconsidered every round for the rest of the day.
+   */
+  const listing = await opener
+    .call<{ threads: Array<{ goal: string; updatedAt?: string }> }>('thread_list', { mine: false, status: 'ANY', limit: 50 })
+    .catch(() => null);
+  if (listing && !workedSince(listing.threads, Date.now() - STANDUP_LOOKBACK_MS)) {
+    log('standup skipped: no work in the last day to talk about. Treating today as held.');
+    return true;
+  }
+
   const signal = await opener
     .call<{ silent: string[]; imbalance: number }>('participation', { days: 7 })
     .catch(() => ({ silent: [] as string[], imbalance: 0 }));
@@ -159,8 +174,9 @@ async function connectAll(cfg: ResponderConfig): Promise<Participant[]> {
       // knows to clear it. Picking it up here is what lets the recheck loop do that.
       await participant.adoptHealth().catch(() => {});
       connected.push(participant);
-      const budget = participant.budget ? `, spent ${describeBudget(participant.budget, book.spent(p.slug))}` : '';
-      log(`connected ${p.slug} (${p.provider}/${p.model}${budget})`);
+      // A budget left in the config would otherwise read as still in force.
+      const ignored = p.budget ? '; its dollar budget is ignored, nothing rests on one now' : '';
+      log(`connected ${p.slug} (${p.provider}/${p.model}, spent ${describeBudget(null, book.spent(p.slug))}${ignored})`);
     } catch (err) {
       // One bad token should not ground the others. The rest of the space still works.
       log(`could not connect ${p.slug}: ${describe(err)}`);

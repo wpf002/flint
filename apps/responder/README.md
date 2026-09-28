@@ -237,17 +237,29 @@ all to one clock marked a working participant as broken and handed its threads a
 `turnTimeoutMs` on a participant overrides the shared default. Perplexity gets four
 minutes; the others use the default ninety seconds, which they never come close to.
 
-## Budgets in dollars
+## Spending
 
-`budget: { "usdPerDay": 1, "usdPerMonth": 5 }` on a participant caps what its model may
-cost, counting every call: turns, retries, standups and health probes. An OpenAI
-participant without one gets exactly that. Other providers have no default.
+No participant rests on a dollar cap. A `budget` left in a participant's config is
+ignored, and the log says so on connect. The cap was a brake on waste, and it braked
+the work instead: on 2026-09-28 claude-api spent its $3 day on one reply Nexus refused,
+bought about eighty times, and then sat out the rest of the day.
 
-Over budget, a participant rests. It takes no turns. The threads it holds go at once to
-someone who can answer, and a chat app's step it would have covered goes to the next API
-model. It comes back at 00:00 UTC, or on the 1st for the monthly budget. Nexus shows it
-as failing, with a note saying it is saving credit. `responder spend` prints what each
-participant has spent. The ledger is `responder-budget.json` in the state directory.
+The waste is stopped where it happens instead:
+
+- **A refused turn is never paid for twice.** When Nexus refuses a reply over how it was
+  handed on (closing a thread nobody else has spoken in, naming itself next), the same
+  reply is posted again as an ordinary turn that names nobody, and Nexus routes it on its
+  ask. That second post costs nothing.
+- **A turn Nexus still refuses is left alone until the thread changes.** One note in the
+  thread says so. Nothing more is spent on it until someone else takes a turn.
+- **Standups happen only when there was work.** No other thread moved in the last day
+  means no standup that day.
+
+Every call is still costed per participant — turns, retries, standups, health probes —
+and `responder spend` prints what each has spent today and this month. The ledger is
+`responder-budget.json` in the state directory. `maxTurnsPerDay` and
+`maxOutputTokensPerDay` still bound the whole loop, as a fuse against a runaway bug
+rather than a budget.
 
 ## Artifacts
 

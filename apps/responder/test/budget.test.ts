@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BudgetLedger, OPENAI_BUDGET, budgetOf, costOf, describeBudget } from '../src/budget.js';
+import { BudgetLedger, budgetOf, costOf, describeBudget, type Budget } from '../src/budget.js';
 
 /* GPT spent two $10 blocks of OpenAI credit in a week of builds, about $0.05 a turn. */
 
@@ -17,6 +17,9 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const day = (iso: string): Date => new Date(`${iso}T12:00:00Z`);
+
+/** The ledger still knows how to measure against a cap, though nothing passes one now. */
+const CAPPED: Budget = { usdPerDay: 1, usdPerMonth: 5 };
 
 describe('costOf', () => {
   it("prices a gpt-5 turn at OpenAI's rates", () => {
@@ -40,17 +43,14 @@ describe('costOf', () => {
 });
 
 describe('budgetOf', () => {
-  it('gives an OpenAI participant the default budget', () => {
-    expect(budgetOf({ provider: 'openai' })).toEqual(OPENAI_BUDGET);
-  });
-
-  it('gives the others none unless configured', () => {
-    expect(budgetOf({ provider: 'anthropic' })).toBeNull();
-    expect(budgetOf({ provider: 'anthropic', budget: { usdPerDay: 3 } })).toEqual({ usdPerDay: 3, usdPerMonth: 0 });
-  });
-
-  it('lets config override either half of the default', () => {
-    expect(budgetOf({ provider: 'openai', budget: { usdPerMonth: 10 } })).toEqual({ usdPerDay: 1, usdPerMonth: 10 });
+  /*
+   * On 2026-09-28 a $3 day cap stopped claude-api after it had spent the $3 on one
+   * refused reply bought eighty times. The cap kept nothing; it only added an outage.
+   */
+  it('gives no participant a dollar cap, whatever its config says', () => {
+    expect(budgetOf({ provider: 'openai' })).toBeNull();
+    expect(budgetOf({ provider: 'anthropic', budget: { usdPerDay: 3 } })).toBeNull();
+    expect(budgetOf({ provider: 'openai', budget: { usdPerMonth: 10 } })).toBeNull();
   });
 });
 
@@ -58,17 +58,17 @@ describe('BudgetLedger', () => {
   it('rests a participant once its day is spent, and says until when', () => {
     const book = BudgetLedger.open(path, day('2026-09-19'));
     book.charge('gpt-api', 0.6, day('2026-09-19'));
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-09-19'))).toBeNull();
+    expect(book.over('gpt-api', CAPPED, day('2026-09-19'))).toBeNull();
 
     book.charge('gpt-api', 0.45, day('2026-09-19'));
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-09-19'))).toBe("used today's $1.00 budget ($1.05 spent); back at 00:00 UTC");
+    expect(book.over('gpt-api', CAPPED, day('2026-09-19'))).toBe("used today's $1.00 budget ($1.05 spent); back at 00:00 UTC");
   });
 
   it('starts a new day fresh but keeps counting the month', () => {
     const book = BudgetLedger.open(path, day('2026-09-19'));
     book.charge('gpt-api', 1.2, day('2026-09-19'));
 
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-09-20'))).toBeNull();
+    expect(book.over('gpt-api', CAPPED, day('2026-09-20'))).toBeNull();
     expect(book.spent('gpt-api', day('2026-09-20'))).toEqual({ today: 0, month: 1.2 });
   });
 
@@ -76,8 +76,8 @@ describe('BudgetLedger', () => {
     const book = BudgetLedger.open(path, day('2026-09-19'));
     for (const d of ['2026-09-19', '2026-09-20', '2026-09-21', '2026-09-22', '2026-09-23']) book.charge('gpt-api', 1, day(d));
 
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-09-24'))).toBe("used this month's $5.00 budget ($5.00 spent); back on 2026-10-01 UTC");
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-10-01'))).toBeNull();
+    expect(book.over('gpt-api', CAPPED, day('2026-09-24'))).toBe("used this month's $5.00 budget ($5.00 spent); back on 2026-10-01 UTC");
+    expect(book.over('gpt-api', CAPPED, day('2026-10-01'))).toBeNull();
   });
 
   it('survives a restart, since a redeploy restarts the process', () => {
@@ -90,11 +90,15 @@ describe('BudgetLedger', () => {
     const book = BudgetLedger.open(path, day('2026-09-19'));
     book.charge('claude-api', 40, day('2026-09-19'));
 
-    expect(book.over('gpt-api', OPENAI_BUDGET, day('2026-09-19'))).toBeNull();
+    expect(book.over('gpt-api', CAPPED, day('2026-09-19'))).toBeNull();
     expect(book.over('claude-api', null, day('2026-09-19'))).toBeNull();
   });
 
+  it('describes what is spent when there is no cap', () => {
+    expect(describeBudget(null, { today: 0.25, month: 1.5 })).toBe('$0.25 today, $1.50 this month');
+  });
+
   it('describes what is spent against what is allowed', () => {
-    expect(describeBudget(OPENAI_BUDGET, { today: 0.25, month: 1.5 })).toBe('$0.25 of $1.00 today, $1.50 of $5.00 this month');
+    expect(describeBudget(CAPPED, { today: 0.25, month: 1.5 })).toBe('$0.25 of $1.00 today, $1.50 of $5.00 this month');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dueToday, isStandupGoal, openStandup, promptFor, promptFrom, standupGoal, STANDUP_ASK } from '../src/standup.js';
+import { dueToday, isStandupGoal, openStandup, promptFor, promptFrom, standupGoal, STANDUP_ASK, workedSince } from '../src/standup.js';
 
 /*
  * The standup exists because the participants only ever meet inside work threads, so
@@ -155,5 +155,26 @@ describe('isStandupGoal', () => {
 
   it('does not match an ordinary goal that mentions a standup', () => {
     expect(isStandupGoal('Write the standup template')).toBe(false);
+  });
+});
+
+describe('whether there is anything to stand up about', () => {
+  const since = Date.parse('2026-09-27T00:00:00Z');
+  const standup = { goal: 'Standup for 2026-09-27: how this group is working, and what should change', updatedAt: '2026-09-27T12:00:00Z' };
+
+  /*
+   * The standup on 2026-09-28 opened on a day nothing had happened. Its one real turn said
+   * so and asked to close, and that refused close cost $3 in repeated replies.
+   */
+  it('is nothing when only a standup moved', () => {
+    expect(workedSince([standup], since)).toBe(false);
+  });
+
+  it('is something when another thread moved in the window', () => {
+    expect(workedSince([standup, { goal: 'Build the ledger page', updatedAt: '2026-09-27T09:00:00Z' }], since)).toBe(true);
+  });
+
+  it('does not count work from before the window', () => {
+    expect(workedSince([{ goal: 'Build the ledger page', updatedAt: '2026-09-25T09:00:00Z' }], since)).toBe(false);
   });
 });

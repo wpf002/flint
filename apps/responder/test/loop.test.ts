@@ -1632,3 +1632,86 @@ describe('a participant resting on its budget', () => {
     expect(gpt.calls.some((c) => c.tool === 'thread_reassign')).toBe(false);
   });
 });
+
+describe('a turn Nexus refuses', () => {
+  const INVALID = (message: string): Error =>
+    new Error(`nexus.thread_append failed for 'claude-api': ${JSON.stringify({ error: 'INVALID', message }, null, 2)}`);
+
+  const standup = (): FakeThread[] => [
+    { threadId: 't0', goal: 'Standup for 2026-09-28: how this group is working, and what should change', turns: 1, yourTurn: true },
+  ];
+
+  /*
+   * On 2026-09-28 claude-api closed a standup nobody else had spoken in. Nexus refused the
+   * close, the reply was thrown away and bought again, about eighty times, until a $3
+   * budget stopped it. The reply was fine; only the close was not.
+   */
+  it('posts a refused close again as an ordinary turn, without paying for another reply', async () => {
+    const f = fake('claude-api', standup(), { content: 'nothing happened', summary: 'no-op', done: true });
+    const refusesClose = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'thread_append' && args.done === true) {
+          f.calls.push({ tool, args });
+          throw INVALID('You are the first to speak here, so you cannot close it.');
+        }
+        return f.participant.call(tool, args);
+      },
+    } as unknown as Participant;
+
+    const result = await tick([refusesClose], limits(), silent, new Map());
+
+    const appends = f.calls.filter((c) => c.tool === 'thread_append');
+    expect(f.generations).toBe(1);
+    expect(appends).toHaveLength(2);
+    expect(appends[1]!.args).toMatchObject({ done: false, content: 'nothing happened' });
+    expect(appends[1]!.args.next).toBeUndefined();
+    expect(appends[1]!.args.ask).toEqual(expect.any(String));
+    expect(result.turnsTaken).toBe(1);
+  });
+
+  it('leaves a turn Nexus still refuses alone until someone else moves the thread', async () => {
+    const thr = standup();
+    const f = fake('claude-api', thr, { content: 'nothing happened', summary: 'no-op', done: true });
+    const refusesAll = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'thread_append') {
+          f.calls.push({ tool, args });
+          throw INVALID('This thread is closed.');
+        }
+        return f.participant.call(tool, args);
+      },
+    } as unknown as Participant;
+    const failures = new Map<string, number>();
+
+    for (let round = 0; round < 5; round += 1) await tick([refusesAll], limits(), silent, failures);
+
+    expect(f.generations).toBe(1);
+    const notes = f.calls.filter((c) => c.tool === 'thread_note');
+    expect(notes).toHaveLength(1);
+    expect(String(notes[0]!.args.content)).toContain('no more credit goes into it');
+
+    thr[0]!.turns = 2;
+    await tick([refusesAll], limits(), silent, failures);
+
+    expect(f.generations).toBe(2);
+  });
+
+  it('still retries a provider failure, which may clear on its own', async () => {
+    const f = fake('claude-api', standup(), { content: 'x', summary: 'y', next: 'other', ask: 'a' });
+    const flaky = {
+      ...f.participant,
+      call: async (tool: string, args: Record<string, unknown> = {}) => {
+        if (tool === 'thread_append') throw new Error('socket hang up');
+        return f.participant.call(tool, args);
+      },
+    } as unknown as Participant;
+    const failures = new Map<string, number>();
+
+    await tick([flaky], limits(), silent, failures);
+    await tick([flaky], limits(), silent, failures);
+
+    expect(f.generations).toBe(2);
+  });
+});

@@ -49,6 +49,14 @@ export function isStandupGoal(goal: string): boolean {
   return /^Standup for \d{4}-\d{2}-\d{2}:/.test(goal);
 }
 
+/** How far back a standup looks for work worth talking about. */
+export const STANDUP_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** Whether any thread other than a standup moved after `since` (epoch ms). */
+export function workedSince(threads: Array<{ goal: string; updatedAt?: string }>, since: number): boolean {
+  return threads.some((t) => !isStandupGoal(t.goal) && t.updatedAt !== undefined && Date.parse(t.updatedAt) > since);
+}
+
 /** True when today's standup has not been held. */
 export function dueToday(today: string, lastHeld: string | null): boolean {
   return lastHeld !== today;

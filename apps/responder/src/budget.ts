@@ -4,16 +4,11 @@ import type { TokenUsage } from '@flint/core';
 import type { ParticipantConfig } from './config.js';
 
 /*
- * What one participant may spend, in dollars.
+ * What each participant spends, in dollars.
  *
- * The token cap in spend.ts bounds the whole loop. It cannot say "GPT has had its share".
- * OpenAI credit is prepaid in $10 blocks, and GPT used two of them in a week of builds at
- * about $0.05 a turn. The cap has to be per participant and in dollars, because that is
- * how the bill is charged.
- *
- * A participant over its budget rests. It takes no turns, the threads it holds go to
- * someone who can answer, and nobody hands it anything until the day or month turns over.
- * The build carries on without it rather than stopping.
+ * Recorded per participant and in dollars, because that is how the bill is charged: the
+ * token cap in spend.ts bounds the whole loop and cannot say who spent what. It no longer
+ * stops anyone — see budgetOf below.
  */
 
 /** Dollars per million tokens. */
@@ -61,20 +56,17 @@ export interface Budget {
 }
 
 /*
- * OpenAI's default. At about $0.05 a turn, $1 a day is some 20 GPT turns, a whole build;
- * $5 a month makes a $10 top-up last at least two months. Claude (API) takes the turns
- * GPT would have taken once either runs out.
+ * No participant rests on a dollar cap any more, whatever its config says.
+ *
+ * The cap was a brake on waste, and it braked the work instead. On 2026-09-28 claude-api
+ * spent its $3 on about eighty copies of one reply that Nexus refused, then sat out the
+ * rest of the day — the money was gone either way, and the cap only added the outage.
+ * The waste is now stopped where it happened: a refused turn is never paid for twice
+ * (see appendOrSalvage in loop.ts). The ledger still records what each participant
+ * spends, so `responder spend` can say where the money went.
  */
-export const OPENAI_BUDGET: Budget = { usdPerDay: 1, usdPerMonth: 5 };
-
-/** A participant's budget: what its config says, else its provider's default, else none. */
-export function budgetOf(cfg: Pick<ParticipantConfig, 'provider' | 'budget'>): Budget | null {
-  const fallback = cfg.provider === 'openai' ? OPENAI_BUDGET : null;
-  if (!cfg.budget) return fallback;
-  return {
-    usdPerDay: cfg.budget.usdPerDay ?? fallback?.usdPerDay ?? 0,
-    usdPerMonth: cfg.budget.usdPerMonth ?? fallback?.usdPerMonth ?? 0,
-  };
+export function budgetOf(_cfg: Pick<ParticipantConfig, 'provider' | 'budget'>): Budget | null {
+  return null;
 }
 
 interface Book {
@@ -163,7 +155,7 @@ export class BudgetLedger {
 }
 
 export function describeBudget(budget: Budget | null, spent: { today: number; month: number }): string {
-  if (!budget) return `${usd(spent.today)} today, ${usd(spent.month)} this month, no budget`;
+  if (!budget) return `${usd(spent.today)} today, ${usd(spent.month)} this month`;
   const part = (amount: number, cap: number, period: string) =>
     cap > 0 ? `${usd(amount)} of ${usd(cap)} ${period}` : `${usd(amount)} ${period}`;
   return `${part(spent.today, budget.usdPerDay, 'today')}, ${part(spent.month, budget.usdPerMonth, 'this month')}`;

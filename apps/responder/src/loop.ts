@@ -444,6 +444,17 @@ async function runJob(
   // Went over its budget earlier this round. The thread moves to someone else next round.
   if (job.participant.resting) return { taken: false, closed: false, tokensOut: 0 };
 
+  /*
+   * Nexus refused this participant's last paid turn here, even salvaged. Asking again
+   * would buy the same reply and the same refusal, so nothing is spent on this thread
+   * until it changes: someone else takes a turn, and the turn count moves.
+   */
+  const refusedAt = failures.get(refusedKey(job));
+  if (refusedAt !== undefined) {
+    if (refusedAt === job.turns) return { taken: false, closed: false, tokensOut: 0 };
+    failures.delete(refusedKey(job));
+  }
+
   // A thread that keeps failing is rested rather than hammered. The counter decays, so
   // it comes back on its own once the cause has had time to clear.
   const failed = failures.get(job.threadId) ?? 0;
@@ -487,6 +498,27 @@ async function runJob(
     failures.delete(job.threadId);
     return { taken, closed: false, tokensOut };
   } catch (err) {
+    if (err instanceof RefusedTurn) {
+      failures.set(refusedKey(job), job.turns);
+      failures.delete(job.threadId);
+      // Said once, in the thread, because a thread nobody is attempting looks exactly like
+      // one nobody has reached yet.
+      await job.participant
+        .call('thread_note', {
+          threadId: job.threadId,
+          content:
+            `Nexus refused ${job.participant.slug}'s turn here: ${err.message} ` +
+            'It will not be tried again until the thread changes, so no more credit goes into it.',
+        })
+        .catch(() => undefined);
+      return {
+        taken: false,
+        closed: false,
+        tokensOut: 0,
+        error: `${job.participant.slug}: Nexus refused the turn on ${short(job.threadId)} — ${err.message} Left until the thread changes.`,
+      };
+    }
+
     const now = failed + 1;
     failures.set(job.threadId, now);
 
@@ -1039,7 +1071,7 @@ async function takeTurn(
   if (refused) log(`[${p.slug}] tried to close ${short(job.threadId)}. Kept open: ${refused}${toApp ? ` Handed to ${toApp}.` : ''}`);
   if (handedEarly) log(`[${p.slug}] handed ${short(job.threadId)} to ${reply.next} while it was blocked; kept with the builders: ${blocker}`);
 
-  const appended = await p.call<{ seq: number; next: string | null; routedBy?: string }>('thread_append', {
+  const appended = await appendOrSalvage(p, {
     threadId: job.threadId,
     content: reply.content,
     summary: reply.summary,
@@ -1051,7 +1083,7 @@ async function takeTurn(
     // and cannot measure this itself.
     tokensIn: spent.input,
     tokensOut: spent.output + reviewTokens,
-  });
+  }, log);
 
   /*
    * Two kinds of proposal never reach a person's review queue.
@@ -1208,6 +1240,78 @@ async function takeTurn(
  * A note rather than a turn: nothing was contributed and the floor must not move, or a
  * participant that is merely unavailable would lose its place to the backoff.
  */
+/**
+ * A turn Nexus refused after the reply was already paid for.
+ *
+ * Kept apart from a provider failure because waiting cannot help it: asking the model
+ * again buys the same reply, and Nexus refuses it for the same reason.
+ */
+export class RefusedTurn extends Error {}
+
+/** The rule Nexus cited, when a call failed on one of Nexus's own rules; null otherwise. */
+export function refusedByNexus(err: unknown): string | null {
+  const text = err instanceof Error ? err.message : String(err);
+  if (!/"error":\s*"INVALID"/.test(text)) return null;
+  const cited = /"message":\s*("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
+  try {
+    return cited ? (JSON.parse(cited) as string) : 'Nexus refused the turn.';
+  } catch {
+    return 'Nexus refused the turn.';
+  }
+}
+
+/** Handed on with this when a salvaged turn had no ask of its own, so Nexus can route it. */
+const CARRY_ON = 'Carry this on from here, or close it if there is nothing more to add.';
+
+interface AppendBody {
+  threadId: string;
+  next?: string;
+  ask?: string;
+  done: boolean;
+  [field: string]: unknown;
+}
+
+/**
+ * Posts a turn, and never pays twice for one Nexus refuses over how it was handed on.
+ *
+ * On 2026-09-28 claude-api answered a standup nobody else had spoken in and closed it.
+ * Nexus refuses a close from a thread's only speaker, the whole paid reply was thrown
+ * away, and the loop asked the model again — about eighty times, every half hour, until
+ * its budget ran out. The reply was fine; only closing, or naming itself next, was not.
+ * So it is posted again as an ordinary turn, naming nobody, and Nexus routes it on its
+ * ask. That second post costs nothing. A turn still refused after that is a RefusedTurn,
+ * which runJob sets aside until the thread changes.
+ */
+async function appendOrSalvage(
+  p: Participant,
+  body: AppendBody,
+  log: Log,
+): Promise<{ seq: number; next: string | null; routedBy?: string }> {
+  try {
+    return await p.call('thread_append', body);
+  } catch (err) {
+    const why = refusedByNexus(err);
+    if (!why) throw err;
+    if (!body.done && !body.next) throw new RefusedTurn(why);
+
+    log(
+      `[${p.slug}] Nexus refused its turn on ${short(body.threadId)}: ${why} ` +
+        `Posted it without ${body.done ? 'closing' : `naming ${body.next}`} instead of paying for another.`,
+    );
+    const { next: _dropped, ...rest } = body;
+    try {
+      return await p.call('thread_append', { ...rest, done: false, ask: body.ask ?? clipAsk(CARRY_ON) });
+    } catch (again) {
+      const still = refusedByNexus(again);
+      if (still) throw new RefusedTurn(still);
+      throw again;
+    }
+  }
+}
+
+/** Where runJob remembers a turn Nexus refused, per participant and thread. */
+const refusedKey = (job: Waiting): string => `refused:${job.participant.slug}:${job.threadId}`;
+
 async function rest(job: Waiting, rounds: number): Promise<void> {
   await job.participant.call('thread_note', {
     threadId: job.threadId,
