@@ -1,0 +1,20 @@
+{
+  "name": "@flint/evolve",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "discover": "tsx src/cli.ts discover",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@flint/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
