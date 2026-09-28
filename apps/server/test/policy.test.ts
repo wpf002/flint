@@ -110,6 +110,51 @@ describe('isSafeTool — auto-approval gate', () => {
     }
   });
 
+  // REGRESSION GUARD (2026-09-26). Each of these carried a read segment
+  // (load / check / report / top / read) next to an action and auto-approved.
+  it('a read segment does not launder a write or a money move', () => {
+    for (const t of [
+      'bank.load_funds',
+      'load_card',
+      'wallet.top_up',
+      'topup_balance',
+      'bot.check_and_rebalance',
+      'get_and_send',
+      'fetch_then_delete',
+      'check_in',
+      'check_out',
+      'store.checkout',
+      'gmail.report_spam',
+      'report_user',
+      'gmail.mark_read',
+      'gmail.mark_as_read',
+      'list_refunds_and_issue',
+      'get_payout',
+      'view_invoice_and_pay',
+      'recent_bets',
+      'best_swap',
+      'latest_stake',
+      'bloomberg.orders',
+      'fill_order',
+    ]) {
+      expect(isSafeTool(t), `${t} must NOT auto-approve`).toBe(false);
+    }
+  });
+
+  it('still auto-approves reads of trading data in <read>_<noun> shape', () => {
+    for (const t of [
+      'crossbar.get_positions',
+      'hive.list_orders',
+      'crossbar.recent_trades',
+      'bloomberg.get_balance',
+      'vantage.top_scores',
+      'bellwether.latest_digest',
+      'get_market_status',
+    ]) {
+      expect(isSafeTool(t), `${t} should auto-approve`).toBe(true);
+    }
+  });
+
   it('a dangerous word in the NAMESPACE is caught too', () => {
     expect(isSafeTool('execute.trade')).toBe(false);
     expect(isSafeTool('broker.buy')).toBe(false);

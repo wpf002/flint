@@ -102,12 +102,62 @@ export function routeTurn(opts: {
 export const READ_SEGMENTS = new Set([
   'search', 'list', 'read', 'get', 'fetch', 'lookup', 'find', 'query', 'view',
   'show', 'describe', 'inspect', 'count', 'summary', 'summarize', 'summarise',
-  'digest', 'report', 'status', 'health', 'check', 'forecast', 'predict',
+  'digest', 'status', 'health', 'forecast', 'predict',
   'score', 'scores', 'rank', 'rankings', 'compare', 'recent', 'latest',
   'upcoming', 'history', 'detail', 'details', 'snapshot', 'coverage', 'bias',
   'quote', 'quotes', 'signal', 'signals', 'top', 'best', 'recommend',
-  'recommendations', 'info', 'stats', 'metrics', 'peek', 'browse', 'load',
+  'recommendations', 'info', 'stats', 'metrics', 'peek', 'browse',
+  // Removed, each because it is also an action verb and let a write through:
+  //   'load'   -> load_funds, load_card
+  //   'report' -> report_spam, report_user
+  //   'check'  -> check_in, check_out (a purchase), check_and_rebalance
 ]);
+
+/**
+ * Segments that move or commit money. Any one of them denies the tool, EVEN
+ * WHEN a read segment is present, because the read verb proves nothing about
+ * the rest of the name: `bank.load_funds`, `top_up` and `check_and_rebalance`
+ * all carried a read segment and auto-approved before this set existed.
+ *
+ * Deliberately broad. It will deny a few genuine reads (`get_funding_rate`,
+ * `list_charges`); those queue for one tap. The asymmetry is the same one
+ * isSafeTool is built on.
+ *
+ * Matched per segment, never as a substring: `market` must not hit `mark`,
+ * and `balance` (a read noun: `get_balance`) is not in here.
+ */
+export const MONEY_SEGMENTS = new Set([
+  'fund', 'funds', 'funding', 'topup', 'rebalance', 'rebalancing',
+  'payout', 'payouts', 'payment', 'payments', 'payee', 'refund', 'refunds',
+  'charge', 'charges', 'invoice', 'invoices', 'debit', 'credit', 'credits',
+  'loan', 'loans', 'borrow', 'lend', 'repay', 'stake', 'unstake', 'staking',
+  'swap', 'bridge', 'mint', 'wager', 'bet', 'bets', 'donate', 'donation',
+  'allocate', 'allocation', 'hedge', 'short', 'margin', 'collateral',
+  'redeem', 'cashout', 'checkout', 'purchase', 'order', 'orders', 'trade',
+  'trades', 'position', 'positions',
+]);
+
+/**
+ * Money nouns that are ALSO the object of ordinary reads (`list_orders`,
+ * `get_positions`, `recent_trades`). For these the read is allowed only when a
+ * read verb is the FIRST segment of the tool name, i.e. the name is shaped
+ * like `<read>_<noun>`. `bank.orders` or `fill_order` still deny.
+ */
+const READABLE_MONEY = new Set(['order', 'orders', 'trade', 'trades', 'position', 'positions']);
+
+/**
+ * Segments that act on the outside world but were missing from WRITE_TOOL.
+ * Matched per segment for the same reason as MONEY_SEGMENTS: `mark` must not
+ * hit `market`, `label` must not hit a read of labels unless it is the verb.
+ */
+export const WRITE_SEGMENTS = new Set([
+  'mark', 'flag', 'label', 'unlabel', 'spam', 'star', 'unstar', 'pin', 'unpin',
+  'snooze', 'mute', 'unmute', 'block', 'unblock', 'follow', 'unfollow', 'like',
+  'react', 'vote', 'rsvp', 'accept', 'decline', 'forward', 'import', 'sync',
+]);
+
+/** Joining words mean a compound action: `check_and_rebalance`, `fetch_then_send`. */
+const COMPOUND_SEGMENTS = new Set(['and', 'then']);
 
 /** Split a tool name into comparable segments: `gcal.list_events` -> [gcal, list, events]. */
 export function segmentsOf(tool: string): string[] {
@@ -156,5 +206,22 @@ export function isSafeTool(tool: string): boolean {
   if (WRITE_TOOL.test(tool)) return false;
   const segs = segmentsOf(tool);
   if (segs.length === 0) return false;
+
+  // The tool's own name, without its server namespace: `hive.list_orders` -> [list, orders].
+  const dot = tool.lastIndexOf('.');
+  const own = dot >= 0 ? segmentsOf(tool.slice(dot + 1)) : segs;
+
+  if (segs.some((s) => COMPOUND_SEGMENTS.has(s))) return false;
+  // `top` is a read (`top_scores`) except in `top_up`, which adds money.
+  if (segs.some((s, i) => s === 'top' && segs[i + 1] === 'up')) return false;
+  if (segs.some((s) => WRITE_SEGMENTS.has(s))) return false;
+
+  for (const s of segs) {
+    if (!MONEY_SEGMENTS.has(s)) continue;
+    // A readable money noun passes only in `<read>_<noun>` shape.
+    if (READABLE_MONEY.has(s) && own.length > 0 && READ_SEGMENTS.has(own[0]!)) continue;
+    return false;
+  }
+
   return segs.some((s) => READ_SEGMENTS.has(s));
 }
