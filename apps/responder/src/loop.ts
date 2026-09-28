@@ -1203,8 +1203,14 @@ async function takeTurn(
      * offered to them rather than left where only its author can see it. An offer, not
      * a push: the recipient decides whether to keep it, which is the rule the whole
      * handoff mechanism exists to enforce.
+     *
+     * Only to a participant that answers on its own. A chat app reads its inbox only when
+     * a person asks it to, so an offer to one just sat until it lapsed: of the thirteen
+     * open on 2026-09-28, ten were to ChatGPT, Claude or Perplexity, the oldest a
+     * fortnight old. The fact is kept either way, in this participant's own memory above.
      */
-    if (appended.next) {
+    const takesOffers = state.participants.find((c) => c.slug === appended.next)?.answers_on_its_own === true;
+    if (appended.next && takesOffers) {
       await p
         .call('handoff', {
           to: appended.next,

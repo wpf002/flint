@@ -367,19 +367,59 @@ describe('facts travelling between participants', () => {
    * rather than pushing it is the rule the whole handoff mechanism exists to enforce.
    */
   it('offers a remembered fact onward to whoever speaks next', async () => {
-    const f = fake('claude', threads(1), {
-      content: 'work',
-      summary: 'did work',
-      next: 'gpt',
-      ask: 'next bit',
-      remember: ['The queue is Redis Streams.'],
-    });
+    const f = fake(
+      'claude',
+      threads(1),
+      {
+        content: 'work',
+        summary: 'did work',
+        next: 'gpt',
+        ask: 'next bit',
+        remember: ['The queue is Redis Streams.'],
+      },
+      {
+        participants: [
+          { slug: 'claude', label: 'Claude', good_at: 'testing', answers_on_its_own: true },
+          { slug: 'gpt', label: 'GPT', good_at: 'code', answers_on_its_own: true },
+        ],
+      },
+    );
 
     await tick([f.participant], limits(), silent);
 
     const sent = f.calls.find((c) => c.tool === 'handoff')!;
     expect(sent.args.to).toBe('gpt');
     expect(sent.args.content).toBe('The queue is Redis Streams.');
+  });
+
+  /*
+   * A chat app reads its inbox only when a person asks it to. Of the thirteen offers open
+   * on 2026-09-28, ten were to one, the oldest a fortnight old and none ever answered.
+   */
+  it('offers nothing to a chat app, and keeps the fact itself', async () => {
+    const f = fake(
+      'claude',
+      threads(1),
+      {
+        content: 'work',
+        summary: 'did work',
+        next: 'chatgpt',
+        ask: 'review this',
+        remember: ['The queue is Redis Streams.'],
+      },
+      {
+        participants: [
+          { slug: 'claude', label: 'Claude', good_at: 'testing', answers_on_its_own: true },
+          { slug: 'chatgpt', label: 'ChatGPT', good_at: 'review', answers_on_its_own: false },
+        ],
+      },
+    );
+
+    await tick([f.participant], limits(), silent);
+
+    expect(f.calls.find((c) => c.tool === 'thread_append')?.args.next).toBe('chatgpt');
+    expect(f.calls.some((c) => c.tool === 'handoff')).toBe(false);
+    expect(f.calls.some((c) => c.tool === 'remember')).toBe(true);
   });
 
   it('offers nothing onward when nobody was nominated', async () => {

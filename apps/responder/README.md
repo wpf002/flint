@@ -183,6 +183,10 @@ nominee. It is an offer and not a push — the recipient sees it with their next
 decides whether to keep it, which is the rule the handoff mechanism exists to enforce.
 Anything not accepted stays pending and lapses.
 
+Only a nominee that answers on its own is offered anything. A chat app reads its inbox
+only when a person asks it to, so offers to one just sat until they lapsed. The fact is
+still kept in the author's own memory.
+
 ## Why GPT gets a schema and the others get a prompt
 
 Where a provider can enforce the reply shape, the responder makes it. OpenAI takes the
