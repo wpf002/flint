@@ -1,0 +1,133 @@
+/**
+ * Stage 2 of the nightly loop: put a number on "is Flint better than he was".
+ *
+ * The design question was what to measure against. Measuring against yesterday
+ * compounds drift — a slow slide looks flat because each night only compares to
+ * the night before. So this compares against a FROZEN BASELINE: the first
+ * night's answers are stored once and every later night is judged against those
+ * same answers, on the same prompts. The score is then an absolute line you can
+ * read across weeks, not a series of unrelated numbers.
+ *
+ * Night 1 costs only Flint's own answers (no judging: there is nothing to
+ * compare to yet). Every night after costs Flint's answers plus one judgment
+ * per prompt.
+ */
+
+export interface Prompt {
+  id: string;
+  prompt: string;
+  category?: string;
+}
+
+export interface Answer {
+  promptId: string;
+  text: string;
+  costUsd: number;
+}
+
+export type Verdict = 'today' | 'baseline' | 'tie';
+
+export interface DailyRow {
+  ts: string;
+  /** What Flint was configured as, so a score always has its config beside it. */
+  config: string;
+  n: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  /** Wins / (wins + losses), ties excluded. 0.5 means no change since baseline. */
+  winRate: number;
+  signal: 'BETTER' | 'WORSE' | 'NOISE';
+  costUsd: number;
+}
+
+/**
+ * The subset measured on NIGHT ONE only. Sorting by id and taking the first N is
+ * deterministic for a fixed pool, but it is NOT stable against additions: a new
+ * prompt whose id sorts earlier displaces one. That is why the baseline records
+ * the ids it froze, and every later night measures exactly those — see measure()
+ * in run-measure.ts. Do not use this to pick the set on a later night.
+ */
+export function fixedSubset(prompts: Prompt[], n: number): Prompt[] {
+  return [...prompts].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, n);
+}
+
+/**
+ * Which side today's answer is shown as. Derived from the prompt id so it is
+ * stable across nights (the same prompt always sits in the same position), but
+ * varied across prompts so a judge that favours position A cannot sway the run.
+ */
+export function todayIsA(promptId: string): boolean {
+  let h = 0;
+  for (const ch of promptId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 2 === 0;
+}
+
+/**
+ * Is a win/loss split distinguishable from a coin flip? Same two-sigma rule the
+ * parity harness uses, so the two report the same way. Ties are excluded: they
+ * carry no directional information.
+ */
+export function signalOf(wins: number, losses: number): DailyRow['signal'] {
+  const decisive = wins + losses;
+  if (decisive < 4) return 'NOISE';
+  const sd = Math.sqrt(decisive) / 2;
+  const edge = Math.abs(wins - decisive / 2);
+  if (edge < 2 * sd) return 'NOISE';
+  return wins > losses ? 'BETTER' : 'WORSE';
+}
+
+export function toRow(opts: {
+  ts: string;
+  config: string;
+  verdicts: Verdict[];
+  costUsd: number;
+}): DailyRow {
+  const wins = opts.verdicts.filter((v) => v === 'today').length;
+  const losses = opts.verdicts.filter((v) => v === 'baseline').length;
+  const ties = opts.verdicts.filter((v) => v === 'tie').length;
+  const decisive = wins + losses;
+  return {
+    ts: opts.ts,
+    config: opts.config,
+    n: opts.verdicts.length,
+    wins,
+    losses,
+    ties,
+    winRate: decisive === 0 ? 0.5 : wins / decisive,
+    signal: signalOf(wins, losses),
+    costUsd: opts.costUsd,
+  };
+}
+
+export const CSV_HEADER = 'ts,config,n,wins,losses,ties,win_rate,signal,cost_usd';
+
+export function toCsv(r: DailyRow): string {
+  // The config can contain commas (several tiers), so it is quoted.
+  return [
+    r.ts,
+    `"${r.config.replace(/"/g, '""')}"`,
+    r.n,
+    r.wins,
+    r.losses,
+    r.ties,
+    r.winRate.toFixed(3),
+    r.signal,
+    r.costUsd.toFixed(4),
+  ].join(',');
+}
+
+/**
+ * Parse the judge's one-word reply into a verdict, given which side was today.
+ *
+ * Only a BARE verdict token counts. Matching anything merely starting with the
+ * letter scored "Both are good" as a win for B, inventing a result out of a
+ * judge that had declined to pick one. Anything unrecognised is a tie, which
+ * costs the run a data point instead of a wrong one.
+ */
+export function readVerdict(reply: string, todayWasA: boolean): Verdict {
+  const first = reply.trim().toUpperCase().split(/[\s,.:;!]+/)[0] ?? '';
+  if (first === 'A') return todayWasA ? 'today' : 'baseline';
+  if (first === 'B') return todayWasA ? 'baseline' : 'today';
+  return 'tie';
+}

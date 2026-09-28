@@ -2,8 +2,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog } from './discover.js';
 import { allCatalogs } from './vendors.js';
+import { measure } from './run-measure.js';
 
 /**
  * `evolve discover` — stage 1 of the nightly loop.
@@ -18,6 +20,8 @@ const STATE_DIR = join(FLINT_HOME, 'evolve');
 const SNAPSHOT = join(STATE_DIR, 'catalog.json');
 const LOG = join(STATE_DIR, 'discover.log');
 const REPORT = join(STATE_DIR, 'report.md');
+const BASELINE = join(STATE_DIR, 'baseline.json');
+const DAILY_CSV = join(STATE_DIR, 'daily.csv');
 
 /** Read `KEY=value` lines the way the server's loadSecrets does. */
 function loadSecrets(path: string, env: NodeJS.ProcessEnv): void {
@@ -98,8 +102,75 @@ async function discover(): Promise<number> {
   return high > 0 ? 2 : 0;
 }
 
+/** Flint's bearer token: env, then ~/.flint/token, then the launchd plist. Never printed. */
+function flintToken(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env.FLINT_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  const file = join(FLINT_HOME, 'token');
+  if (existsSync(file)) {
+    const t = readFileSync(file, 'utf8').trim();
+    if (t) return t;
+  }
+  const plist = join(homedir(), 'Library', 'LaunchAgents', 'com.flint.server.plist');
+  if (existsSync(plist)) {
+    try {
+      const t = execFileSync('/usr/bin/plutil', ['-extract', 'EnvironmentVariables.FLINT_TOKEN', 'raw', plist], {
+        encoding: 'utf8',
+      }).trim();
+      if (t) return t;
+    } catch {
+      /* fall through to the error below */
+    }
+  }
+  throw new Error('no Flint token: set FLINT_TOKEN, or ~/.flint/token');
+}
+
+async function runMeasure(): Promise<number> {
+  const env = { ...process.env };
+  loadSecrets(join(FLINT_HOME, 'secrets.env'), env);
+  mkdirSync(STATE_DIR, { recursive: true });
+
+  const key = env.ANTHROPIC_API_KEY?.trim();
+  if (!key) throw new Error('measure needs ANTHROPIC_API_KEY (the judge)');
+  const tiers = tiersFrom(env);
+  const config = tiers.map((t) => `${t.tier}=${t.provider}:${t.model}`).join(',') || 'legacy-frontier';
+  const budget = Number(env.EVOLVE_BUDGET_USD ?? '0.60');
+  const n = Number(env.EVOLVE_PROMPTS ?? '20');
+
+  const res = await measure({
+    flintUrl: env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
+    flintToken: flintToken(env),
+    anthropicKey: key,
+    judgeModel: env.EVOLVE_JUDGE_MODEL?.trim() || 'claude-opus-5-5',
+    promptsPath: env.EVOLVE_PROMPTS_PATH?.trim() || join(FLINT_HOME, 'eval', 'parity_prompts.jsonl'),
+    baselinePath: BASELINE,
+    csvPath: DAILY_CSV,
+    n,
+    budgetUsd: budget,
+    config,
+    now: new Date().toISOString().replace('T', ' ').slice(0, 16),
+  });
+
+  if (res.kind === 'baseline-created') {
+    console.log(`baseline created from ${res.n} answer(s), $${res.costUsd.toFixed(4)}. Tomorrow's run scores against it.`);
+    return 0;
+  }
+  const r = res.row!;
+  console.log(`${r.ts}  n=${r.n}  ${r.wins}-${r.losses}-${r.ties}  rate=${r.winRate.toFixed(3)}  ${r.signal}  $${r.costUsd.toFixed(4)}`);
+  if (res.stoppedEarly) console.log(`  stopped early: ${res.stoppedEarly}`);
+  console.log(`  -> ${DAILY_CSV}`);
+  return r.signal === 'WORSE' ? 2 : 0;
+}
+
 const cmd = process.argv[2];
-if (cmd === 'discover') {
+if (cmd === 'measure') {
+  runMeasure()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      console.error('measure failed:', err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
+} else if (cmd === 'discover') {
   discover()
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
@@ -107,6 +178,6 @@ if (cmd === 'discover') {
       process.exit(1);
     });
 } else {
-  console.error('usage: evolve discover');
+  console.error('usage: evolve <discover|measure>');
   process.exit(1);
 }

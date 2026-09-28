@@ -6,7 +6,8 @@
   "scripts": {
     "discover": "tsx src/cli.ts discover",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "measure": "tsx src/cli.ts measure"
   },
   "dependencies": {
     "@flint/core": "workspace:*"
