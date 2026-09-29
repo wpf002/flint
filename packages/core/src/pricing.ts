@@ -44,6 +44,8 @@ export const PAID_VENDORS: readonly PaidVendor[] = ['anthropic', 'openai', 'perp
  *  [A] Anthropic list prices, claude-api reference (models table cached
  *      2026-06-24; Opus 5.5 / Fable 5.1 cache-read rates from its models notes).
  *      Cache writes are the 5-minute TTL (1.25x input); reads 0.1x unless noted.
+ *  [S] https://platform.claude.com/docs/en/models/sonnet-5-5/overview, fetched
+ *      2026-09-29 (Sonnet 5.5, released 2026-09-28).
  *  [O] https://developers.openai.com/api/docs/pricing, fetched 2026-09-25.
  *  [P] https://docs.perplexity.ai/getting-started/pricing, fetched 2026-09-25.
  *      `perRequest` is the HIGH search-context fee on purpose: the default is
@@ -72,6 +74,9 @@ const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> 
   ['claude-opus-4-6', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
   ['claude-opus-4-7', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
   ['claude-opus-4-8', { input: 5, output: 25, cachedInput: 0.5, cacheWrite: 6.25 }], // [A]
+  // Listed on its own even though it costs what Sonnet 5 does: the prefix rule
+  // would otherwise hand it Sonnet 5's row, and a price change would go unseen.
+  ['claude-sonnet-5-5', { input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 }], // [S]
   ['claude-sonnet-5', { input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 }], // [A]
   ['claude-sonnet-4', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // [A] 4.6 (and 4.5)
   ['claude-haiku-4', { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 }], // [A] 4.5

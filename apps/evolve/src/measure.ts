@@ -117,6 +117,53 @@ export function toCsv(r: DailyRow): string {
   ].join(',');
 }
 
+/** The judge declined to rule. Distinct from a failure: another judge may rule. */
+export class JudgeRefused extends Error {
+  constructor() {
+    super('the judge refused');
+    this.name = 'JudgeRefused';
+  }
+}
+
+export interface Judgment {
+  reply: string;
+  costUsd: number;
+  /** The model that gave the verdict. */
+  judge: string;
+}
+
+/**
+ * Judge with `primary`, and ask `fallback` only when `primary` refuses.
+ *
+ * Opus 5.5's safety classifiers refuse some ordinary questions: it refused an
+ * aging-biology prompt (telomeres, p53, PGC-1α) on 2026-09-29, and it will
+ * refuse the same prompt every night, so that prompt was lost for good. A
+ * fallback that only ever sees the primary's refusals judges the same prompts
+ * each night, which keeps nights comparable. Any other failure is not retried,
+ * and money spent on a refused call still counts (`costUsd` on the error).
+ */
+export async function judgeWithFallback(
+  call: (model: string) => Promise<{ reply: string; costUsd: number }>,
+  primary: string,
+  fallback: string,
+): Promise<Judgment> {
+  try {
+    const r = await call(primary);
+    return { ...r, judge: primary };
+  } catch (err) {
+    if (!(err instanceof JudgeRefused) || !fallback || fallback === primary) throw err;
+    const spent = (err as { costUsd?: number }).costUsd ?? 0;
+    try {
+      const r = await call(fallback);
+      return { reply: r.reply, costUsd: spent + r.costUsd, judge: fallback };
+    } catch (err2) {
+      const e = err2 instanceof Error ? err2 : new Error(String(err2));
+      e.message = `${primary} refused, then ${fallback}: ${e.message}`;
+      throw Object.assign(e, { costUsd: spent + ((err2 as { costUsd?: number }).costUsd ?? 0) });
+    }
+  }
+}
+
 /** The parts of a Messages API response the judge reads. */
 export interface JudgeResponse {
   content?: Array<{ type?: string; text?: string }>;
@@ -133,7 +180,7 @@ export interface JudgeResponse {
  * the pair is left out and reported, never quietly counted as a tie.
  */
 export function judgeReplyText(res: JudgeResponse): string {
-  if (res.stop_reason === 'refusal') throw new Error('the judge refused');
+  if (res.stop_reason === 'refusal') throw new JudgeRefused();
   const text = (res.content ?? [])
     .filter((b) => b.type === 'text')
     .map((b) => b.text ?? '')

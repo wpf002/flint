@@ -142,6 +142,7 @@ function flintToken(env: NodeJS.ProcessEnv): string {
 async function measureOnce(env: NodeJS.ProcessEnv): Promise<DailyRow> {
   const res = await measureWith(env);
   if (res.kind === 'baseline-created') throw new Error('no baseline existed; run `evolve measure` once first');
+  if (res.fallbackJudged) console.log(`  ${res.fallbackJudged.length} prompt(s) judged by the fallback, first: ${res.fallbackJudged[0]}`);
   if (res.unscored) console.log(`  ${res.unscored.length} prompt(s) not scored, first: ${res.unscored[0]}`);
   return res.row!;
 }
@@ -158,6 +159,10 @@ async function runMeasure(): Promise<number> {
   const r = res.row!;
   console.log(`${r.ts}  n=${r.n}  ${r.wins}-${r.losses}-${r.ties}  rate=${r.winRate.toFixed(3)}  ${r.signal}  $${r.costUsd.toFixed(4)}`);
   if (res.stoppedEarly) console.log(`  stopped early: ${res.stoppedEarly}`);
+  if (res.fallbackJudged) {
+    console.log(`  ${res.fallbackJudged.length} prompt(s) judged by the fallback after a refusal:`);
+    for (const f of res.fallbackJudged) console.log(`    ${f}`);
+  }
   if (res.unscored) {
     console.log(`  ${res.unscored.length} prompt(s) not scored:`);
     for (const u of res.unscored) console.log(`    ${u}`);
@@ -188,6 +193,9 @@ async function measureWith(env: NodeJS.ProcessEnv) {
     judgeModel: env.EVOLVE_JUDGE_MODEL?.trim() || 'claude-opus-5-5',
     // Low effort: the judge picks A, B or TIE, and its thinking is billed as output.
     judgeEffort: env.EVOLVE_JUDGE_EFFORT?.trim() ?? 'low',
+    // Asked only when the primary refuses. Opus 5.5's safety classifiers are
+    // wider than earlier models', so another model can rule on what it declines.
+    judgeFallbackModel: env.EVOLVE_JUDGE_FALLBACK_MODEL?.trim() ?? 'claude-sonnet-5',
     promptsPath: env.EVOLVE_PROMPTS_PATH?.trim() || join(FLINT_HOME, 'eval', 'parity_prompts.jsonl'),
     baselinePath: BASELINE,
     csvPath: DAILY_CSV,
