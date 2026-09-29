@@ -157,9 +157,13 @@ export async function judgeWithFallback(
       const r = await call(fallback);
       return { reply: r.reply, costUsd: spent + r.costUsd, judge: fallback };
     } catch (err2) {
-      const e = err2 instanceof Error ? err2 : new Error(String(err2));
-      e.message = `${primary} refused, then ${fallback}: ${e.message}`;
-      throw Object.assign(e, { costUsd: spent + ((err2 as { costUsd?: number }).costUsd ?? 0) });
+      // A new error, never the caught one edited: a fetch timeout rejects with a
+      // DOMException whose `message` cannot be set, and setting it threw a
+      // TypeError that lost the refused call's cost and the real reason.
+      const why = err2 instanceof Error ? err2.message : String(err2);
+      throw Object.assign(new Error(`${primary} refused, then ${fallback}: ${why}`, { cause: err2 }), {
+        costUsd: spent + ((err2 as { costUsd?: number }).costUsd ?? 0),
+      });
     }
   }
 }

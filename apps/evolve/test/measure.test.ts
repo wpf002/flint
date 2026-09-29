@@ -203,6 +203,17 @@ describe('judgeWithFallback', () => {
     await expect(judgeWithFallback(async () => { throw refuse(0.004); }, 'claude-opus-5-5', '')).rejects.toBeInstanceOf(JudgeRefused);
   });
 
+  // A fetch timeout rejects with a DOMException, whose message is read-only.
+  it('when the fallback times out, keeps the refused call\'s cost and says what happened', async () => {
+    const call = async (m: string) => {
+      if (m === 'claude-opus-5-5') throw refuse(0.05);
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    };
+    const err = await judgeWithFallback(call, 'claude-opus-5-5', 'claude-sonnet-5').catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/claude-opus-5-5 refused, then claude-sonnet-5: .*timeout/);
+    expect((err as { costUsd: number }).costUsd).toBeCloseTo(0.05, 6);
+  });
+
   it('when the fallback also fails, says so and carries the cost of both', async () => {
     const err = await judgeWithFallback(async () => { throw refuse(0.004); }, 'claude-opus-5-5', 'claude-sonnet-5').catch((e: unknown) => e);
     expect((err as Error).message).toMatch(/claude-opus-5-5 refused, then claude-sonnet-5: the judge refused/);
