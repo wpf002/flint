@@ -55,6 +55,31 @@ describe('priceOf', () => {
     expect(isListedModel('gpt-5.3')).toBe(false);
     expect(isListedModel('claude-opus-5-5')).toBe(true);
   });
+
+  // Anthropic steps versions with a dash, and a bare `claude-sonnet-5` prefix
+  // used to price `claude-sonnet-5-5` (and any future 5-x) as Sonnet 5.
+  it('does not price a new Claude version as its sibling', () => {
+    for (const m of ['claude-opus-5-6', 'claude-sonnet-5-6', 'claude-fable-5-2', 'claude-sonnet-6-1', 'claude-haiku-4-6']) {
+      expect(priceOf(m)).toBe(UNLISTED_PRICE);
+      expect(isListedModel(m)).toBe(false);
+    }
+  });
+
+  it('still prices dated snapshots and aliases of a known Claude model', () => {
+    const sonnet4 = { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 };
+    for (const m of ['claude-sonnet-4-0', 'claude-sonnet-4-20250514', 'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929', 'claude-sonnet-4-6']) {
+      expect(priceOf(m)).toEqual(sonnet4);
+    }
+    const haiku45 = { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 };
+    expect(priceOf('claude-haiku-4-5')).toEqual(haiku45);
+    expect(priceOf('claude-haiku-4-5-20251001')).toEqual(haiku45);
+  });
+
+  it('still treats a long number after a dash as a date, not a version', () => {
+    expect(priceOf('gpt-5-2025-08-07').input).toBe(1.25);
+    expect(priceOf('gpt-4o-2024-08-06').input).toBe(2.5);
+    expect(priceOf('us.amazon.nova-premier-v1:0').input).toBe(2.5);
+  });
 });
 
 describe('costOf', () => {

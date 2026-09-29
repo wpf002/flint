@@ -53,11 +53,14 @@ export const PAID_VENDORS: readonly PaidVendor[] = ['anthropic', 'openai', 'perp
  *      request. Sonar Deep Research bills per search query instead; $0.50 is a
  *      deliberately high stand-in (verify).
  *
- * Matching: longest prefix first, and a prefix only matches when the model name
- * continues with something other than a digit or a dot. So `gpt-5` prices
- * `gpt-5-2025-08-07` but NOT `gpt-5.5` (which costs 4x more), and a model this
- * table has never seen falls through to UNLISTED_PRICE instead of borrowing a
- * cheaper sibling's rate.
+ * Matching: longest prefix first, and a prefix only matches a variant of the
+ * same model, never a different version. OpenAI and Google mark a version with
+ * a dot (`gpt-5` is not `gpt-5.5`, which costs 4x more); Anthropic marks it with
+ * a dash and a one- or two-digit number (`claude-opus-5` is not
+ * `claude-opus-5-5`). A dated snapshot (`gpt-5-2025-08-07`,
+ * `claude-haiku-4-5-20251001`) or a named variant (`-mini`, `-v1:0`) still
+ * matches. A model this table has never seen falls through to UNLISTED_PRICE
+ * instead of borrowing a sibling's rate.
  */
 const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> = [
   ['claude-fable-5-1', { input: 10, output: 50, cachedInput: 0.25, cacheWrite: 12.5 }], // [A]
@@ -78,8 +81,12 @@ const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> 
   // would otherwise hand it Sonnet 5's row, and a price change would go unseen.
   ['claude-sonnet-5-5', { input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 }], // [S]
   ['claude-sonnet-5', { input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 }], // [A]
-  ['claude-sonnet-4', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // [A] 4.6 (and 4.5)
-  ['claude-haiku-4', { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 }], // [A] 4.5
+  // Each Sonnet 4.x on its own row: one `claude-sonnet-4` row used to price them all.
+  ['claude-sonnet-4-6', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // [A]
+  ['claude-sonnet-4-5', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // [A]
+  ['claude-sonnet-4-0', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // Sonnet 4 alias, legacy list price
+  ['claude-sonnet-4', { input: 3, output: 15, cachedInput: 0.3, cacheWrite: 3.75 }], // Sonnet 4 snapshot (claude-sonnet-4-20250514)
+  ['claude-haiku-4-5', { input: 1, output: 5, cachedInput: 0.1, cacheWrite: 1.25 }], // [A]
   ['gpt-5.6', { input: 4, output: 20, cachedInput: 0.4 }], // [O] gpt-5.6-sol
   ['gpt-5.5', { input: 5, output: 30, cachedInput: 0.5 }], // [O]
   ['gpt-5.4', { input: 2.5, output: 15, cachedInput: 0.25 }], // [O]
@@ -111,11 +118,18 @@ const TOKEN_PRICES: ReadonlyArray<readonly [prefix: string, price: TokenPrice]> 
 /** Deliberately pessimistic: at or above the dearest listed model on every axis. */
 export const UNLISTED_PRICE: TokenPrice = { input: 10, output: 50, cachedInput: 10, cacheWrite: 12.5, perRequest: 0.02 };
 
-/** Whether `model` is `prefix` or a variant of it (never a different version: `gpt-5` is not `gpt-5.5`). */
+/**
+ * Whether `model` is `prefix` or a variant of it, never a different version:
+ * `gpt-5` is not `gpt-5.5`, and `claude-sonnet-5` is not `claude-sonnet-5-5`.
+ * A dash and a one- or two-digit number is Anthropic's version step; a longer
+ * number after a dash is a date (`-20251001`, `-0613`), which is a variant.
+ */
 function matches(model: string, prefix: string): boolean {
   if (!model.startsWith(prefix)) return false;
-  const next = model.charAt(prefix.length);
-  return next === '' || !/[0-9.]/.test(next);
+  const rest = model.slice(prefix.length);
+  if (rest === '') return true;
+  if (/^[0-9.]/.test(rest)) return false;
+  return !/^-[0-9]{1,2}(?![0-9])/.test(rest);
 }
 
 /**
