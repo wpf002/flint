@@ -19,6 +19,7 @@ describe('priceOf', () => {
     expect(priceOf('claude-opus-5-5')).toMatchObject({ input: 4, output: 20, cachedInput: 0.2, cacheWrite: 5 });
     expect(priceOf('claude-opus-5')).toMatchObject({ input: 5, output: 25 });
     expect(priceOf('claude-sonnet-5')).toMatchObject({ input: 2, output: 10 });
+    expect(priceOf('claude-sonnet-5-5')).toEqual({ input: 2, output: 10, cachedInput: 0.2, cacheWrite: 2.5 });
     expect(priceOf('claude-sonnet-4-6')).toMatchObject({ input: 3, output: 15 });
     expect(priceOf('claude-haiku-4-5')).toMatchObject({ input: 1, output: 5 });
     expect(priceOf('gpt-5')).toMatchObject({ input: 1.25, output: 10 });

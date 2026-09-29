@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { CSV_HEADER, fixedSubset, judgeReplyText, readVerdict, signalOf, toCsv, toRow, todayIsA } from '../src/measure';
+import {
+  CSV_HEADER,
+  JudgeRefused,
+  fixedSubset,
+  judgeReplyText,
+  judgeWithFallback,
+  readVerdict,
+  signalOf,
+  toCsv,
+  toRow,
+  todayIsA,
+} from '../src/measure';
 
 const P = (id: string) => ({ id, prompt: `q-${id}` });
 
@@ -141,10 +152,60 @@ describe('judgeReplyText', () => {
 
   it('throws on a refusal even if some text came back', () => {
     const res = { content: [{ type: 'text', text: 'A' }], stop_reason: 'refusal' };
-    expect(() => judgeReplyText(res)).toThrow(/refused/);
+    expect(() => judgeReplyText(res)).toThrow(JudgeRefused);
   });
 
   it('still reads a plain text reply', () => {
     expect(judgeReplyText({ content: [{ type: 'text', text: ' TIE ' }], stop_reason: 'end_turn' })).toBe('TIE');
+  });
+});
+
+describe('judgeWithFallback', () => {
+  const refuse = (costUsd: number) => Object.assign(new JudgeRefused(), { costUsd });
+
+  it('uses the primary when it rules, and never asks the fallback', async () => {
+    const asked: string[] = [];
+    const r = await judgeWithFallback(
+      async (m) => (asked.push(m), { reply: 'A', costUsd: 0.01 }),
+      'claude-opus-5-5',
+      'claude-sonnet-5',
+    );
+    expect(r).toEqual({ reply: 'A', costUsd: 0.01, judge: 'claude-opus-5-5' });
+    expect(asked).toEqual(['claude-opus-5-5']);
+  });
+
+  // The 2026-09-29 run lost an aging-biology prompt to an Opus 5.5 refusal.
+  it('asks the fallback after a refusal and bills both calls', async () => {
+    const r = await judgeWithFallback(
+      async (m) => {
+        if (m === 'claude-opus-5-5') throw refuse(0.004);
+        return { reply: 'B', costUsd: 0.002 };
+      },
+      'claude-opus-5-5',
+      'claude-sonnet-5',
+    );
+    expect(r.reply).toBe('B');
+    expect(r.judge).toBe('claude-sonnet-5');
+    expect(r.costUsd).toBeCloseTo(0.006, 6);
+  });
+
+  it('does not retry a failure that is not a refusal', async () => {
+    const asked: string[] = [];
+    const call = async (m: string) => {
+      asked.push(m);
+      throw Object.assign(new Error('judge HTTP 529: overloaded'), { costUsd: 0 });
+    };
+    await expect(judgeWithFallback(call, 'claude-opus-5-5', 'claude-sonnet-5')).rejects.toThrow(/529/);
+    expect(asked).toEqual(['claude-opus-5-5']);
+  });
+
+  it('with no fallback configured, a refusal stays a refusal', async () => {
+    await expect(judgeWithFallback(async () => { throw refuse(0.004); }, 'claude-opus-5-5', '')).rejects.toBeInstanceOf(JudgeRefused);
+  });
+
+  it('when the fallback also fails, says so and carries the cost of both', async () => {
+    const err = await judgeWithFallback(async () => { throw refuse(0.004); }, 'claude-opus-5-5', 'claude-sonnet-5').catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/claude-opus-5-5 refused, then claude-sonnet-5: the judge refused/);
+    expect((err as { costUsd: number }).costUsd).toBeCloseTo(0.008, 6);
   });
 });

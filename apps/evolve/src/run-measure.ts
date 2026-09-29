@@ -4,6 +4,7 @@ import {
   CSV_HEADER,
   fixedSubset,
   judgeReplyText,
+  judgeWithFallback,
   readVerdict,
   toCsv,
   toRow,
@@ -24,6 +25,8 @@ export interface MeasureOpts {
   judgeModel: string;
   /** Sent as `output_config.effort`; empty sends none, for a judge model without effort. */
   judgeEffort: string;
+  /** Asked only when `judgeModel` refuses; empty means no fallback. */
+  judgeFallbackModel: string;
   promptsPath: string;
   baselinePath: string;
   csvPath: string;
@@ -75,9 +78,9 @@ async function askFlint(o: MeasureOpts, p: Prompt): Promise<Answer> {
   return { promptId: p.id, text, costUsd: cost };
 }
 
-async function judge(o: MeasureOpts, question: string, a: string, b: string): Promise<{ reply: string; cost: number }> {
+async function judge(o: MeasureOpts, model: string, question: string, a: string, b: string): Promise<{ reply: string; costUsd: number }> {
   const body = {
-    model: o.judgeModel,
+    model,
     max_tokens: JUDGE_MAX_TOKENS,
     ...(o.judgeEffort ? { output_config: { effort: o.judgeEffort } } : {}),
     system: JUDGE_SYSTEM,
@@ -92,9 +95,9 @@ async function judge(o: MeasureOpts, question: string, a: string, b: string): Pr
   if (!res.ok) throw new Error(`judge HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
   const d = (await res.json()) as JudgeResponse & { usage?: { input_tokens: number; output_tokens: number } };
   const usage = { input: d.usage?.input_tokens ?? 0, output: d.usage?.output_tokens ?? 0 };
-  const cost = costOf('anthropic', o.judgeModel, usage);
+  const cost = costOf('anthropic', model, usage);
   try {
-    return { reply: judgeReplyText(d), cost };
+    return { reply: judgeReplyText(d), costUsd: cost };
   } catch (err) {
     // The judge was paid for even when it gave no verdict.
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { costUsd: cost });
@@ -109,6 +112,8 @@ export interface MeasureResult {
   stoppedEarly?: string;
   /** Prompts that produced no verdict, each with why. They are in no column of the row. */
   unscored?: string[];
+  /** Prompts the fallback judged because the primary judge refused, with the judge used. */
+  fallbackJudged?: string[];
 }
 
 export async function measure(o: MeasureOpts): Promise<MeasureResult> {
@@ -147,6 +152,7 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     .filter((p): p is Prompt => p !== undefined);
   const verdicts: Verdict[] = [];
   const unscored: string[] = [];
+  const fallbackJudged: string[] = [];
   let stoppedEarly: string | undefined;
 
   for (const p of prompts) {
@@ -164,8 +170,13 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
         break;
       }
       const isA = todayIsA(p.id);
-      const r = await judge(o, p.prompt, isA ? today.text : base, isA ? base : today.text);
-      spent += r.cost;
+      const r = await judgeWithFallback(
+        (model) => judge(o, model, p.prompt, isA ? today.text : base, isA ? base : today.text),
+        o.judgeModel,
+        o.judgeFallbackModel,
+      );
+      spent += r.costUsd;
+      if (r.judge !== o.judgeModel) fallbackJudged.push(`${p.id}: ${r.judge}`);
       verdicts.push(readVerdict(r.reply, isA));
     } catch (err) {
       // A failed prompt is left out of the tally rather than counted as a loss,
@@ -188,5 +199,6 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     costUsd: spent,
     ...(stoppedEarly ? { stoppedEarly } : {}),
     ...(unscored.length ? { unscored } : {}),
+    ...(fallbackJudged.length ? { fallbackJudged } : {}),
   };
 }
