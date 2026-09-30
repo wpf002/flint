@@ -12,6 +12,8 @@
  */
 import { classifyMessage, LONG_CONVERSATION, type Tier } from '@flint/core';
 
+export type Outcome = 'answered' | 'unanswered' | 'empty' | 'error' | 'aborted';
+
 export interface RouteRecord {
   /** Which endpoint answered: the app's /chat or the one-shot /generate. */
   path: 'chat' | 'generate';
@@ -27,9 +29,11 @@ export interface RouteRecord {
   planTier?: string;
   /** Frontier or the local brain, after any fallback to local. */
   brain: string;
-  /** The brain that answered, `provider:model` for the frontier. */
-  answeredBy: string;
-  outcome: 'answered' | 'unanswered' | 'empty' | 'error';
+  /** The brain that answered (`provider:model` for the frontier). Only when the outcome is `answered`. */
+  answeredBy?: string;
+  /** The last brain tried, when none answered: an error, an empty reply, the honest message, a hang-up. */
+  tried?: string;
+  outcome: Outcome;
   /** Tiers that refused or came back empty before the one that answered (/chat). */
   declined?: number;
   ms: number;
@@ -52,6 +56,34 @@ export function movedBy(
   if (ctx.appended.length > 0) why.push('tools');
   if ((ctx.turns ?? 0) >= LONG_CONVERSATION) why.push('deep thread');
   return why.join('+') || undefined;
+}
+
+/**
+ * How a /chat turn ended. A provider failure reaches /chat as a streamed error
+ * event, not a throw, so `streamErrored` counts as much as `failed`: without it,
+ * Ollama being down or every tier failing was logged as `empty`.
+ */
+export function chatOutcome(t: {
+  aborted: boolean;
+  failed: boolean;
+  streamErrored: boolean;
+  gaveUp: boolean;
+  answer: string;
+}): Outcome {
+  if (t.aborted) return 'aborted';
+  if (t.failed || t.streamErrored) return 'error';
+  if (t.gaveUp) return 'unanswered';
+  return t.answer.trim() ? 'answered' : 'empty';
+}
+
+/**
+ * Who to name. The last brain tried is the one that answered only when the
+ * outcome is `answered`; otherwise it is only `tried`, so counting `answeredBy`
+ * never credits a failure to a brain (or to the local model that never ran).
+ */
+export function attribution(outcome: Outcome, lastTried: string | undefined): { answeredBy?: string; tried?: string } {
+  if (!lastTried) return {};
+  return outcome === 'answered' ? { answeredBy: lastTried } : { tried: lastTried };
 }
 
 /** The log line, JSON after the tag. Scores are rounded; they are compared with a 0.55 floor. */

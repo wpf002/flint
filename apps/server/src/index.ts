@@ -71,7 +71,7 @@ import { deepResearchTool } from './deep-research';
 import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
-import { movedBy, routeLine, type RouteRecord } from './route-log';
+import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './route-log';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
@@ -900,7 +900,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let answeredBy = local.model;
     // The [route] line (./route-log): tier, what moved it, who answered. Never the prompt.
     const moved = movedBy(prompt, tier, { appended: scored.appended });
-    const logRoute = (outcome: RouteRecord['outcome']) =>
+    let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
+    const logRoute = (outcome: Outcome) =>
       console.error(
         routeLine({
           path: 'generate',
@@ -909,7 +910,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           appended: scored.appended,
           ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
           brain,
-          answeredBy,
+          ...attribution(outcome, lastTried),
           outcome,
           ms: Date.now() - started,
           ...(evalMode ? { eval: true } : {}),
@@ -941,12 +942,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       if (brain === 'frontier' && plan) {
         try {
           // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
-          const won = await answerWithFallback(plan.chain, (b) => answered.ask(personas.frontier(b)), { signal: abort.signal, onFallback: logFallback });
+          const won = await answerWithFallback(
+            plan.chain,
+            (b) => {
+              lastTried = b.label;
+              return answered.ask(personas.frontier(b));
+            },
+            { signal: abort.signal, onFallback: logFallback },
+          );
           out = won.result;
           unanswered = won.unanswered;
           answeredBy = won.brain.label;
         } catch (err) {
-          if (abort.signal.aborted) return; // the client is gone: nothing to answer
+          if (abort.signal.aborted) {
+            logRoute('aborted');
+            return; // the client is gone: nothing to answer
+          }
           // An image/PDF turn has no honest fallback — the local brain can't see it.
           if (!route.localFallback) {
             logRoute('error');
@@ -959,13 +970,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           }
           console.error('[brain] frontier failed, falling back to local:', err);
           brain = 'local';
+          lastTried = local.model;
           out = await answered.ask(local.persona);
         }
       } else {
+        lastTried = local.model;
         out = await answered.ask(local.persona);
       }
     } catch (err) {
-      if (abort.signal.aborted) return;
+      if (abort.signal.aborted) {
+        logRoute('aborted');
+        return;
+      }
       logRoute('error');
       // An eval replay says what it cost even when it fails, so apps/parity can charge it.
       if (evalMode) return json(res, 500, { error: `flint failed: ${String(err)}`, ...evalFields() });
@@ -1064,7 +1080,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = budget.brain;
     let answeredBy = ctx.model;
     let failed = false;
+    let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
     let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
+    let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
     const moved = movedBy(message, tier, { appended: scored.appended, turns });
     const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
     const beforeActions = ctx.actions.snapshotIds();
@@ -1092,6 +1110,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // A provider error arrives as an event, not a throw. When another tier is
         // left to try and no text has gone out, throw it to the tier fallback.
         if (recoverable && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
+        if (ev.type === 'error') streamErrored = true; // passed on to the client, so the turn failed
         res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
     };
@@ -1102,6 +1121,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           const won = await runWithFallback(
             chain,
             async (b) => {
+              lastTried = b.label;
               res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields })}\n\n`);
               try {
                 await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1); // last tier: errors as before, no answer → honest message
@@ -1118,6 +1138,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           if (answer.length === 0 && route.localFallback && !ac.signal.aborted && !budget.localRefusal) {
             console.error('[brain] frontier failed pre-output, falling back to local:', err);
             brain = 'local';
+            lastTried = ctx.model;
             res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
             await pump(ctx.persona);
           } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
@@ -1127,6 +1148,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           }
         }
       } else {
+        lastTried = ctx.model;
         res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields })}\n\n`);
         await pump(ctx.persona);
       }
@@ -1144,6 +1166,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
     }
     // The [route] line (./route-log): tier, what moved it, who answered. Never the message.
+    const outcome = chatOutcome({ aborted: ac.signal.aborted, failed, streamErrored, gaveUp, answer });
     console.error(
       routeLine({
         path: 'chat',
@@ -1153,8 +1176,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         turns,
         ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
         brain,
-        answeredBy,
-        outcome: failed ? 'error' : gaveUp ? 'unanswered' : answer.trim() ? 'answered' : 'empty',
+        ...attribution(outcome, lastTried),
+        outcome,
         ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
         ms: Date.now() - started,
       }),
