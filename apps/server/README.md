@@ -159,8 +159,10 @@ server log (`~/.flint/server.err.log` on the Studio): the tier it was sorted int
 moved it off the tier its words alone get (`movedBy`: `tools` when the router appended a
 tool, `deep thread` past `LONG_CONVERSATION` turns), each appended tool with its similarity
 score against the 0.55 floor, the tier the spend plan actually ran when a budget stepped it
-down (`planTier`), who answered (`answeredBy`), how many tiers declined first (`declined`),
-the outcome and the time taken. It never holds the message, the conversation or anything
+down (`planTier`), who answered (`answeredBy`, only when the outcome is `answered`; otherwise
+`tried` names the last brain asked), how many tiers declined first (`declined`), the outcome
+(`answered`, `unanswered` for the honest no-answer message, `empty`, `error`, `aborted` when the
+client hung up) and the time taken. It never holds the message, the conversation or anything
 the user wrote.
 
 ```
