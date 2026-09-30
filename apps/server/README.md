@@ -156,9 +156,9 @@ just env.
 
 Every message answered through `/chat` or `/generate` writes one `[route]` line to the
 server log (`~/.flint/server.err.log` on the Studio): the tier it was sorted into, what
-moved it off the tier its words alone get (`movedBy`: `tools` when the router appended a
-tool, `deep thread` past `LONG_CONVERSATION` turns), each appended tool with its similarity
-score against the 0.55 floor, the tier the spend plan actually ran when a budget stepped it
+moved it off the tier its words alone get (`movedBy`: `tools` when an appended tool is a
+confident match, `deep thread` past `LONG_CONVERSATION` turns), each appended tool with its
+similarity score, the tier the spend plan actually ran when a budget stepped it
 down (`planTier`), who answered (`answeredBy`, only when the outcome is `answered`; otherwise
 `tried` names the last brain asked), how many tiers declined first (`declined`), the outcome
 (`answered`, `unanswered` for the honest no-answer message, `empty`, `error`, `aborted` when the
@@ -168,6 +168,13 @@ the user wrote.
 ```
 [route] {"ts":"2026-09-30T14:00:00.000Z","path":"chat","tier":"standard","movedBy":"tools","appended":[{"name":"gcal_upcoming","score":0.561}],"turns":2,"brain":"frontier","answeredBy":"anthropic:claude-opus-5-5","outcome":"answered","ms":1840}
 ```
+
+Tools are offered above the router's floor (`FLINT_TOOL_FLOOR`, 0.55), but a tool only moves
+a routine one-liner to the standard tier when it scores at least `FLINT_TIER_TOOL_SCORE`
+(default 0.65). On 2026-09-30, unrelated tools just over the floor reached greetings
+(`spend_status` at 0.602 for "How are you doing today Flint?") and sent them to Opus. A real
+ask can score as low (0.603 for "How much have I spent on Claude today?"), so the floor stays
+low and the tool is still offered; only the tier waits for a clear match.
 
 To count tiers: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r .tier | sort | uniq -c`.
 

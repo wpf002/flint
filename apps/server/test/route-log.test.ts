@@ -5,18 +5,18 @@ import { attribution, chatOutcome, movedBy, routeLine, type RouteRecord } from '
 describe('movedBy', () => {
   // 2026-09-30: greetings sent to test the routine tier were answered by Opus 5.5,
   // and nothing in the log said whether the tool router had moved them.
-  it('names appended tools as what moved a routine one-liner to standard', () => {
-    expect(movedBy('hi Flint', 'standard', { appended: [{ name: 'weather', score: 0.61 }] })).toBe('tools');
+  it('names a confident tool match as what moved a routine one-liner to standard', () => {
+    expect(movedBy('hi Flint', 'standard', { toolsLikely: true })).toBe('tools');
   });
 
   it('names a deep thread, and both when both apply', () => {
-    expect(movedBy('thanks', 'standard', { appended: [], turns: LONG_CONVERSATION })).toBe('deep thread');
-    expect(movedBy('thanks', 'standard', { appended: [{ name: 'x', score: 0.6 }], turns: LONG_CONVERSATION })).toBe('tools+deep thread');
+    expect(movedBy('thanks', 'standard', { toolsLikely: false, turns: LONG_CONVERSATION })).toBe('deep thread');
+    expect(movedBy('thanks', 'standard', { toolsLikely: true, turns: LONG_CONVERSATION })).toBe('tools+deep thread');
   });
 
   it('is undefined when the words alone give the same tier', () => {
-    expect(movedBy('hi Flint', 'routine', { appended: [] })).toBeUndefined();
-    expect(movedBy('Explain the birthday paradox.', 'standard', { appended: [{ name: 'x', score: 0.6 }] })).toBeUndefined();
+    expect(movedBy('hi Flint', 'routine', { toolsLikely: false })).toBeUndefined();
+    expect(movedBy('Explain the birthday paradox.', 'standard', { toolsLikely: true })).toBeUndefined();
   });
 });
 

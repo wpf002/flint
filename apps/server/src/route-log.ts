@@ -42,18 +42,15 @@ export interface RouteRecord {
 
 /**
  * Why context moved a message off the tier its words alone would get, or
- * undefined when it did not. Only the routine rule reads context: appended
- * tools (the question needs to DO things) or a deep thread send a routine
- * one-liner to standard.
+ * undefined when it did not. Only the routine rule reads context: a confident
+ * tool match (the router's toolsLikely: the question needs to DO things) or a
+ * deep thread send a routine one-liner to standard. An append below the tier
+ * score is offered but moves nothing, so it is not a reason.
  */
-export function movedBy(
-  message: string,
-  tier: Tier,
-  ctx: { appended: readonly unknown[]; turns?: number },
-): string | undefined {
+export function movedBy(message: string, tier: Tier, ctx: { toolsLikely: boolean; turns?: number }): string | undefined {
   if (classifyMessage(message) === tier) return undefined;
   const why: string[] = [];
-  if (ctx.appended.length > 0) why.push('tools');
+  if (ctx.toolsLikely) why.push('tools');
   if ((ctx.turns ?? 0) >= LONG_CONVERSATION) why.push('deep thread');
   return why.join('+') || undefined;
 }

@@ -880,7 +880,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
     const recalled = await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall });
     const ctxBlock = recalled.block;
-    const tier = classifyMessage(prompt, { toolsLikely: routed.length > ctx.router.coreLength });
+    const toolsLikely = ctx.router.toolsLikely(scored.appended);
+    const tier = classifyMessage(prompt, { toolsLikely });
     // Everything the spend caps decide about this turn, before any call (./spend budgetTurn).
     // Eval replays are exempt (the eval harness budgets them) and their calls are tagged `eval`.
     const budget = budgetTurn({
@@ -899,7 +900,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let brain = budget.brain;
     let answeredBy = local.model;
     // The [route] line (./route-log): tier, what moved it, who answered. Never the prompt.
-    const moved = movedBy(prompt, tier, { appended: scored.appended });
+    const moved = movedBy(prompt, tier, { toolsLikely });
     let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
     const logRoute = (outcome: Outcome) =>
       console.error(
@@ -1061,7 +1062,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // its complete turns size the "deep thread" rule, and the ones left out get a context line.
     const history = ctx.memory.historyStats(conversationId);
     const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
-    const tier = classifyMessage(message, { turns, toolsLikely: selected.length > ctx.router.coreLength });
+    const toolsLikely = ctx.router.toolsLikely(scored.appended);
+    const tier = classifyMessage(message, { turns, toolsLikely });
     // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
     // the honest note once per conversation per day.
     const budget = budgetTurn({
@@ -1083,7 +1085,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
     let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
     let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
-    const moved = movedBy(message, tier, { appended: scored.appended, turns });
+    const moved = movedBy(message, tier, { toolsLikely, turns });
     const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;

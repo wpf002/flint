@@ -6,9 +6,34 @@ export interface Embedder {
   embed(texts: string[]): Promise<number[][]>;
 }
 
+/**
+ * How close an appended tool must be before it says the message needs to DO
+ * things, which moves a routine one-liner to the standard tier. Higher than the
+ * append floor on purpose. Measured 2026-09-30 on 504 real messages and 25 tool
+ * asks (nomic-embed-text): at the 0.55 floor, unrelated tools reached greetings
+ * ("How are you doing today Flint?" -> spend_status 0.602) and sent 5 of the 12
+ * routine one-liners to Opus, none of which used the tool; a real ask can score
+ * as low as that ("How much have I spent on Claude today?" -> spend_status
+ * 0.603), so the floor itself stays low and the tool is still OFFERED. Only the
+ * tier move waits for a clear match, e.g. the Nexus thread asks at 0.84.
+ */
+export const DEFAULT_TIER_TOOL_SCORE = 0.65;
+
+/** FLINT_TIER_TOOL_SCORE, or the default when unset or not a score in [0, 1] (reported via `warn`). */
+export function parseTierToolScore(raw: string | undefined, warn: (msg: string) => void = () => {}): number {
+  const s = raw?.trim();
+  if (!s) return DEFAULT_TIER_TOOL_SCORE;
+  const n = Number(s);
+  if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+  warn(`[router] FLINT_TIER_TOOL_SCORE="${s}" is not a score from 0 to 1; using ${DEFAULT_TIER_TOOL_SCORE}`);
+  return DEFAULT_TIER_TOOL_SCORE;
+}
+
 export interface RouterOptions {
   maxAppend?: number;
   floor?: number;
+  /** An appended tool at or above this moves a routine one-liner to standard (see DEFAULT_TIER_TOOL_SCORE). */
+  tierScore?: number;
   /** Minimum gap between attempts to embed the rest tools after a failure. */
   retryMs?: number;
   now?: () => number;
@@ -40,6 +65,7 @@ export class ToolRouter {
     private readonly embedder: Embedder,
     private readonly maxAppend: number,
     private readonly floor: number,
+    private readonly tierScore: number,
     private readonly retryMs: number,
     private readonly now: () => number,
   ) {}
@@ -52,6 +78,7 @@ export class ToolRouter {
   ): Promise<ToolRouter> {
     const maxAppend = Math.max(0, opts.maxAppend ?? Number(process.env.FLINT_TOOL_APPEND ?? 4));
     const floor = opts.floor ?? Number(process.env.FLINT_TOOL_FLOOR ?? 0.55);
+    const tierScore = opts.tierScore ?? parseTierToolScore(process.env.FLINT_TIER_TOOL_SCORE, (m) => console.error(m));
     const byName = new Map(tools.map((t) => [t.definition.name, t] as const));
     const core: Tool[] = [];
     for (const n of coreNames) {
@@ -69,12 +96,13 @@ export class ToolRouter {
       embedder,
       maxAppend,
       floor,
+      tierScore,
       opts.retryMs ?? 60_000,
       opts.now ?? Date.now,
     );
     await router.ensureVectors();
     console.error(
-      `[router] core=${finalCore.length} (cached) + up to ${maxAppend} of ${finalRest.length} by relevance (floor ${floor})`,
+      `[router] core=${finalCore.length} (cached) + up to ${maxAppend} of ${finalRest.length} by relevance (floor ${floor}; a tier move needs ${tierScore})`,
     );
     return router;
   }
@@ -87,6 +115,15 @@ export class ToolRouter {
    */
   get coreLength(): number {
     return this.core.length;
+  }
+
+  /**
+   * Whether the appended tools say the message needs to DO things: one at or
+   * above the tier score, not merely over the append floor. classifyMessage's
+   * `toolsLikely`, which moves a routine one-liner to the standard tier.
+   */
+  toolsLikely(appended: ReadonlyArray<{ score: number }>): boolean {
+    return appended.some((a) => a.score >= this.tierScore);
   }
 
   /** Whether appends are live (the rest tools have vectors). */
