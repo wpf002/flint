@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { costOf } from '@flint/core';
+import { tierReach } from './promote.js';
 import {
   CSV_HEADER,
   fixedSubset,
@@ -76,6 +77,27 @@ export function measuredPrompts(promptsPath: string, baselinePath: string): Prom
   return Object.keys(stored.answers)
     .map((id) => byId.get(id))
     .filter((p): p is Prompt => p !== undefined);
+}
+
+/**
+ * For discover's report: how many measured prompts reach each tier. The report
+ * is extra to discovery, which needs neither file, so a missing prompt pool or
+ * a damaged baseline skips the section (`skipped` says why) instead of costing
+ * the night its report and snapshot.
+ */
+export function reachReport(
+  tiers: readonly string[],
+  promptsPath: string,
+  baselinePath: string,
+): { reach: Array<{ tier: string; reachable: number; total: number }>; skipped?: string } {
+  try {
+    const measured = measuredPrompts(promptsPath, baselinePath);
+    if (!measured) return { reach: [] };
+    const texts = measured.map((p) => p.prompt);
+    return { reach: tiers.map((tier) => ({ tier, ...tierReach(tier, texts) })) };
+  } catch (err) {
+    return { reach: [], skipped: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Ask Flint, in eval mode so the turn never lands in the training corpus. */

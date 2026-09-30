@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog } from './discover.js';
 import { allCatalogs } from './vendors.js';
-import { measure, measuredPrompts, type MeasureResult } from './run-measure.js';
+import { measure, measuredPrompts, reachReport, type MeasureResult } from './run-measure.js';
 import { allowance, dayOf, record, spentToday } from './ledger.js';
 import { decide, parseCandidate, screen, tierEnvVar, tierReach } from './promote.js';
 import { probe } from './probe.js';
@@ -120,8 +120,12 @@ async function discover(): Promise<number> {
 
   const findings = analyse({ tiers, catalogs, ...(previous ? { previous } : {}) });
   const when = new Date().toISOString().replace('T', ' ').slice(0, 16);
-  const measured = measuredPrompts(promptsPathFrom(env), BASELINE)?.map((p) => p.prompt);
-  const reach: Reach[] = measured ? tiers.map((t) => ({ tier: t.tier, ...tierReach(t.tier, measured) })) : [];
+  const { reach, skipped } = reachReport(
+    tiers.map((t) => t.tier),
+    promptsPathFrom(env),
+    BASELINE,
+  );
+  if (skipped) console.error(`discover: left out what evolve try can measure (${skipped})`);
 
   writeFileSync(REPORT, render(findings, catalogs, tiers, when, reach), 'utf8');
   // Only snapshot vendors we actually reached, so an outage can't look like
