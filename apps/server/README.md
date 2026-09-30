@@ -166,7 +166,7 @@ client hung up) and the time taken. It never holds the message, the conversation
 the user wrote.
 
 ```
-[route] {"ts":"2026-09-30T14:00:00.000Z","path":"chat","tier":"standard","movedBy":"tools","appended":[{"name":"gcal_upcoming","score":0.561}],"turns":2,"brain":"frontier","answeredBy":"anthropic:claude-opus-5-5","outcome":"answered","ms":1840}
+[route] {"ts":"2026-09-30T14:00:00.000Z","path":"chat","tier":"standard","movedBy":"tools","appended":[{"name":"nexus.thread_list","score":0.843}],"turns":2,"brain":"frontier","answeredBy":"anthropic:claude-opus-5-5","outcome":"answered","ms":1840}
 ```
 
 Tools are offered above the router's floor (`FLINT_TOOL_FLOOR`, 0.55), but a tool only moves
