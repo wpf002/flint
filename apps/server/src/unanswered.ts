@@ -136,7 +136,13 @@ export async function answerWithFallback<P, T extends ReplyLike>(
  */
 export async function* guardAnswer(
   events: AsyncIterable<StreamEvent>,
-  opts: { recoverable: boolean; tried: number; noAnswers: Unanswered[] },
+  opts: {
+    recoverable: boolean;
+    tried: number;
+    noAnswers: Unanswered[];
+    /** Told when this tier's reply is the honest message rather than an answer (the route log). */
+    onUnanswered?: (why: Unanswered) => void;
+  },
 ): AsyncGenerator<StreamEvent, void, void> {
   let text = '';
   let usedTools = false;
@@ -153,6 +159,7 @@ export async function* guardAnswer(
           throw new NoAnswer(why);
         }
         const alike = opts.noAnswers.filter((w) => w === why).length + 1; // + this one
+        opts.onUnanswered?.(why);
         yield { type: 'text', delta: unansweredMessage(why, opts.tried, alike) };
       }
     }

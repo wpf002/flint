@@ -59,4 +59,16 @@ describe('ToolRouter', () => {
     expect(router.appendsReady).toBe(true);
     expect(router.coreLength).toBe(1);
   });
+
+  // The route log records what was appended and how close it came to the floor.
+  it('selectScored returns what select does, plus each append\'s score', async () => {
+    const { state, embedder } = fakeEmbedder();
+    state.up = true;
+    const router = await ToolRouter.build(tools, embedder, ['remember'], { maxAppend: 4, floor: 0.5 });
+    const scored = await router.selectScored('forecast please');
+    expect(scored.tools.map((t) => t.definition.name)).toEqual((await router.select('forecast please')).map((t) => t.definition.name));
+    expect(scored.appended).toEqual([{ name: 'prophet.forecast', score: 1 }]);
+    expect(await router.selectScored('hello there')).toEqual({ tools: [tools[0]], appended: [] });
+  });
 });
+

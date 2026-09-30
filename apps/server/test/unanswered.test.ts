@@ -209,6 +209,17 @@ describe('guardAnswer (/chat)', () => {
     expect(out).toEqual([{ type: 'text', delta: unansweredMessage('refusal', 2) }, done('refusal')]);
   });
 
+  // The route log marks such a turn `unanswered`: its text is the honest message, not an answer.
+  it('tells onUnanswered when the reply is the honest message, and only then', async () => {
+    const told: Unanswered[] = [];
+    const onUnanswered = (w: Unanswered) => told.push(w);
+    await collect(guardAnswer(play([done('refusal')]), { recoverable: false, tried: 2, noAnswers: ['refusal'], onUnanswered }));
+    expect(told).toEqual(['refusal']);
+    await collect(guardAnswer(play([{ type: 'text', delta: 'Hello.' }, done()]), { recoverable: false, tried: 1, noAnswers: [], onUnanswered }));
+    await expect(collect(guardAnswer(play([done('refusal')]), { recoverable: true, tried: 1, noAnswers: [], onUnanswered }))).rejects.toBeInstanceOf(NoAnswer);
+    expect(told).toEqual(['refusal']);
+  });
+
   it('does not say every model declined when an earlier tier errored instead', async () => {
     // Tier 1 failed with an error (not tallied); only this, the 2nd, refused.
     const out = await collect(guardAnswer(play([done('refusal')]), { recoverable: false, tried: 2, noAnswers: [] }));

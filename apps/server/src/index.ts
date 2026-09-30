@@ -71,6 +71,7 @@ import { deepResearchTool } from './deep-research';
 import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
+import { movedBy, routeLine, type RouteRecord } from './route-log';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
@@ -835,6 +836,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   }
 
   if (req.method === 'POST' && url === '/generate') {
+    const started = Date.now();
     const read = await readJsonLimited(req, MAX_BODY_BYTES);
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
     const body = read.body;
@@ -872,7 +874,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
-    const routed = await ctx.router.select(asText);
+    const scored = await ctx.router.selectScored(asText);
+    const routed = scored.tools;
     const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
     const recalled = await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall });
@@ -895,6 +898,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (plan) logPlan(plan);
     let brain = budget.brain;
     let answeredBy = local.model;
+    // The [route] line (./route-log): tier, what moved it, who answered. Never the prompt.
+    const moved = movedBy(prompt, tier, { appended: scored.appended });
+    const logRoute = (outcome: RouteRecord['outcome']) =>
+      console.error(
+        routeLine({
+          path: 'generate',
+          tier,
+          ...(moved ? { movedBy: moved } : {}),
+          appended: scored.appended,
+          ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
+          brain,
+          answeredBy,
+          outcome,
+          ms: Date.now() - started,
+          ...(evalMode ? { eval: true } : {}),
+        }),
+      );
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     // This turn's own action-log entries (not a concurrent /chat's), for the eval response's `grounding`.
@@ -928,9 +948,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         } catch (err) {
           if (abort.signal.aborted) return; // the client is gone: nothing to answer
           // An image/PDF turn has no honest fallback — the local brain can't see it.
-          if (!route.localFallback) return json(res, 502, { error: `frontier failed: ${String(err)}`, ...evalFields() });
+          if (!route.localFallback) {
+            logRoute('error');
+            return json(res, 502, { error: `frontier failed: ${String(err)}`, ...evalFields() });
+          }
           // Nor does a turn whose local brain is a paid model with its budget spent.
-          if (budget.localRefusal) return json(res, 503, { error: `frontier failed: ${String(err)}. ${budget.localRefusal}`, ...evalFields() });
+          if (budget.localRefusal) {
+            logRoute('error');
+            return json(res, 503, { error: `frontier failed: ${String(err)}. ${budget.localRefusal}`, ...evalFields() });
+          }
           console.error('[brain] frontier failed, falling back to local:', err);
           brain = 'local';
           out = await answered.ask(local.persona);
@@ -940,10 +966,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       }
     } catch (err) {
       if (abort.signal.aborted) return;
+      logRoute('error');
       // An eval replay says what it cost even when it fails, so apps/parity can charge it.
       if (evalMode) return json(res, 500, { error: `flint failed: ${String(err)}`, ...evalFields() });
       throw err;
     }
+    logRoute(unanswered ? 'unanswered' : out.text.trim() ? 'answered' : 'empty');
     const toolsUsed = toolsSince(ctx, beforeLog);
     const proposed = ctx.actions.newSince(beforeActions);
     if (evalMode) {
@@ -995,6 +1023,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   }
 
   if (req.method === 'POST' && url === '/chat') {
+    const started = Date.now();
     const read = await readJsonLimited(req, MAX_BODY_BYTES);
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
     const body = read.body;
@@ -1010,7 +1039,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if ('error' in route) return json(res, 422, { error: route.error });
     // Router, recall, the Action Log and the training corpus see names, never file bodies.
     const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
-    const selected = await ctx.router.select(asText);
+    const scored = await ctx.router.selectScored(asText);
+    const selected = scored.tools;
     // The history this turn will actually carry (windowed), not the whole stored thread:
     // its complete turns size the "deep thread" rule, and the ones left out get a context line.
     const history = ctx.memory.historyStats(conversationId);
@@ -1033,6 +1063,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (plan) logPlan(plan);
     let brain = budget.brain;
     let answeredBy = ctx.model;
+    let failed = false;
+    let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
+    const moved = movedBy(message, tier, { appended: scored.appended, turns });
     const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
@@ -1052,7 +1085,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
         { signal: ac.signal },
       );
-      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers })) {
+      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
         // The budget note rides just ahead of `done`: shown, but never stored as the answer.
         if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
         if (ev.type === 'text') answer += ev.delta;
@@ -1107,8 +1140,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const proposed = ctx.actions.newSince(beforeActions);
       if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
     } catch (err) {
+      failed = true;
       res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
     }
+    // The [route] line (./route-log): tier, what moved it, who answered. Never the message.
+    console.error(
+      routeLine({
+        path: 'chat',
+        tier,
+        ...(moved ? { movedBy: moved } : {}),
+        appended: scored.appended,
+        turns,
+        ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
+        brain,
+        answeredBy,
+        outcome: failed ? 'error' : gaveUp ? 'unanswered' : answer.trim() ? 'answered' : 'empty',
+        ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
+        ms: Date.now() - started,
+      }),
+    );
     res.end();
     return;
   }
