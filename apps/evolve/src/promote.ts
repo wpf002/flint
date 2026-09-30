@@ -1,4 +1,4 @@
-import { isListedModel } from '@flint/core';
+import { classifyMessage, isListedModel } from '@flint/core';
 import type { DailyRow } from './measure.js';
 import type { VendorCatalog } from './discover.js';
 import { isServed } from './discover.js';
@@ -54,6 +54,25 @@ export function screen(c: Candidate, catalogs: VendorCatalog[]): Refusal | { ok:
 }
 
 /**
+ * How many measured prompts Flint could send to `tier`.
+ *
+ * A candidate is swapped into ONE tier, and Flint picks a tier per message
+ * (classifyMessage). A tier no measured prompt is sent to never answers during
+ * the measurement: the run scores the incumbent tiers and can only come back as
+ * noise. The routine tier takes greetings and one-liners, and on 2026-09-29 none
+ * of the 8 measured prompts was one, so `try routine=...` would have spent about
+ * $0.50 to learn nothing. A prompt counts if it reaches the tier with or without
+ * the tool router's `toolsLikely` (which only ever moves routine to standard),
+ * so this never undercounts; /generate sends no history, so turns are 0.
+ */
+export function tierReach(tier: string, prompts: readonly string[]): { reachable: number; total: number } {
+  const reachable = prompts.filter(
+    (p) => classifyMessage(p, { toolsLikely: false }) === tier || classifyMessage(p, { toolsLikely: true }) === tier,
+  ).length;
+  return { reachable, total: prompts.length };
+}
+
+/**
  * Keep the candidate only on a real, better signal.
  *
  * `candidate` and `incumbent` are both scored against the SAME frozen baseline,
@@ -66,9 +85,19 @@ export function decide(opts: {
   incumbent: DailyRow | undefined;
   /** How much better the candidate must be, in win rate. */
   margin?: number;
+  /**
+   * How many of the measured answers the candidate itself gave. 0 means the
+   * score is the incumbent tiers' and says nothing about the candidate, however
+   * it came out; undefined skips the check.
+   */
+  candidateAnswers?: number;
 }): Decision {
   const { candidate, incumbent } = opts;
   const margin = opts.margin ?? 0.05;
+
+  if (opts.candidateAnswers === 0) {
+    return { ok: true, action: 'rollback', why: 'no measured answer came from the candidate, so the score is not its own' };
+  }
 
   if (candidate.signal === 'NOISE') {
     return { ok: true, action: 'rollback', why: `candidate scored ${candidate.winRate.toFixed(3)} but the signal is NOISE` };
