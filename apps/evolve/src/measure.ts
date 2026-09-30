@@ -23,6 +23,8 @@ export interface Answer {
   promptId: string;
   text: string;
   costUsd: number;
+  /** The brain Flint says answered, `provider:model` (e.g. `anthropic:claude-opus-5-5`). */
+  model?: string;
 }
 
 export type Verdict = 'today' | 'baseline' | 'tie';

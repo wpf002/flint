@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog } from './discover.js';
 import { allCatalogs } from './vendors.js';
-import { measure } from './run-measure.js';
+import { measure, measuredPrompts, type MeasureResult } from './run-measure.js';
 import { allowance, dayOf, record, spentToday } from './ledger.js';
-import { decide, parseCandidate, screen, tierEnvVar } from './promote.js';
+import { decide, parseCandidate, screen, tierEnvVar, tierReach } from './promote.js';
 import { probe } from './probe.js';
 import {
   applyCandidate,
@@ -36,6 +36,17 @@ const REPORT = join(STATE_DIR, 'report.md');
 const BASELINE = join(STATE_DIR, 'baseline.json');
 const DAILY_CSV = join(STATE_DIR, 'daily.csv');
 
+/** The prompt pool the baseline's ids point into. */
+function promptsPathFrom(env: NodeJS.ProcessEnv): string {
+  return env.EVOLVE_PROMPTS_PATH?.trim() || join(FLINT_HOME, 'eval', 'parity_prompts.jsonl');
+}
+
+interface Reach {
+  tier: string;
+  reachable: number;
+  total: number;
+}
+
 /** Read `KEY=value` lines the way the server's loadSecrets does. */
 function loadSecrets(path: string, env: NodeJS.ProcessEnv): void {
   if (!existsSync(path)) return;
@@ -61,7 +72,7 @@ function tiersFrom(env: NodeJS.ProcessEnv): TierConfig[] {
   return out.sort((a, b) => a.tier.localeCompare(b.tier));
 }
 
-function render(findings: Finding[], catalogs: VendorCatalog[], tiers: TierConfig[], when: string): string {
+function render(findings: Finding[], catalogs: VendorCatalog[], tiers: TierConfig[], when: string, reach: Reach[] = []): string {
   const L: string[] = [`# Flint discovery — ${when}`, ''];
   L.push('## Tiers in use', '');
   for (const t of tiers) L.push(`- ${t.tier}: \`${t.provider}:${t.model}\``);
@@ -75,6 +86,16 @@ function render(findings: Finding[], catalogs: VendorCatalog[], tiers: TierConfi
     L.push('Nothing to act on. Every tier points at a model its vendor still serves, and nothing newer shipped.');
   } else {
     for (const f of findings) L.push(`- **${f.severity}** (${f.kind}) — ${f.detail}`);
+  }
+  if (reach.length > 0) {
+    L.push('', '## What `evolve try` can measure', '');
+    for (const r of reach) {
+      L.push(
+        r.reachable === 0
+          ? `- ${r.tier}: none of the ${r.total} measured questions is sent to this tier, so a swap here cannot be measured (\`evolve try\` refuses it)`
+          : `- ${r.tier}: ${r.reachable} of ${r.total} measured questions`,
+      );
+    }
   }
   L.push('', '_Stage 1 spends nothing: these are free model-list calls._', '');
   return L.join('\n');
@@ -99,8 +120,10 @@ async function discover(): Promise<number> {
 
   const findings = analyse({ tiers, catalogs, ...(previous ? { previous } : {}) });
   const when = new Date().toISOString().replace('T', ' ').slice(0, 16);
+  const measured = measuredPrompts(promptsPathFrom(env), BASELINE)?.map((p) => p.prompt);
+  const reach: Reach[] = measured ? tiers.map((t) => ({ tier: t.tier, ...tierReach(t.tier, measured) })) : [];
 
-  writeFileSync(REPORT, render(findings, catalogs, tiers, when), 'utf8');
+  writeFileSync(REPORT, render(findings, catalogs, tiers, when, reach), 'utf8');
   // Only snapshot vendors we actually reached, so an outage can't look like
   // every model being removed tomorrow.
   const snap: Record<string, string[]> = { ...(previous ?? {}) };
@@ -110,7 +133,7 @@ async function discover(): Promise<number> {
   const high = findings.filter((f) => f.severity === 'high').length;
   appendFileSync(LOG, `${when} findings=${findings.length} high=${high}\n`, 'utf8');
 
-  console.log(render(findings, catalogs, tiers, when));
+  console.log(render(findings, catalogs, tiers, when, reach));
   // Exit 2 when something is actively broken, so a wrapper can alert on it.
   return high > 0 ? 2 : 0;
 }
@@ -138,13 +161,13 @@ function flintToken(env: NodeJS.ProcessEnv): string {
   throw new Error('no Flint token: set FLINT_TOKEN, or ~/.flint/token');
 }
 
-/** Run one measurement and return its row, or throw. Shared by `measure` and `try`. */
-async function measureOnce(env: NodeJS.ProcessEnv): Promise<DailyRow> {
+/** Run one measurement against an existing baseline, or throw. Used by `try`. */
+async function measureOnce(env: NodeJS.ProcessEnv): Promise<MeasureResult & { row: DailyRow }> {
   const res = await measureWith(env);
-  if (res.kind === 'baseline-created') throw new Error('no baseline existed; run `evolve measure` once first');
+  if (res.kind === 'baseline-created' || !res.row) throw new Error('no baseline existed; run `evolve measure` once first');
   if (res.fallbackJudged) console.log(`  ${res.fallbackJudged.length} prompt(s) judged by the fallback, first: ${res.fallbackJudged[0]}`);
   if (res.unscored) console.log(`  ${res.unscored.length} prompt(s) not scored, first: ${res.unscored[0]}`);
-  return res.row!;
+  return { ...res, row: res.row };
 }
 
 async function runMeasure(): Promise<number> {
@@ -196,7 +219,7 @@ async function measureWith(env: NodeJS.ProcessEnv) {
     // Asked only when the primary refuses. Opus 5.5's safety classifiers are
     // wider than earlier models', so another model can rule on what it declines.
     judgeFallbackModel: env.EVOLVE_JUDGE_FALLBACK_MODEL?.trim() ?? 'claude-sonnet-5',
-    promptsPath: env.EVOLVE_PROMPTS_PATH?.trim() || join(FLINT_HOME, 'eval', 'parity_prompts.jsonl'),
+    promptsPath: promptsPathFrom(env),
     baselinePath: BASELINE,
     csvPath: DAILY_CSV,
     n,
@@ -260,6 +283,22 @@ async function runTry(spec: string): Promise<number> {
   const recovered = await recoverIfNeeded(io);
   if (recovered) console.log(recovered);
 
+  // Free and local, so before anything that costs: the measurement asks the
+  // baseline's prompts, and a tier none of them is sent to never answers.
+  const measured = measuredPrompts(promptsPathFrom(env), BASELINE);
+  if (!measured) {
+    console.log('refused: there is no baseline yet; run `evolve measure` once first. Nothing was spent.');
+    return 1;
+  }
+  const reach = tierReach(cand.tier, measured.map((p) => p.prompt));
+  if (reach.reachable === 0) {
+    console.log(
+      `refused: none of the ${reach.total} measured questions is sent to the ${cand.tier} tier, so a measurement cannot see ${cand.provider}:${cand.model}. Nothing was spent.`,
+    );
+    return 1;
+  }
+  console.log(`${reach.reachable} of ${reach.total} measured questions reach the ${cand.tier} tier`);
+
   const catalogs = await allCatalogs(env);
   const gate = screen(cand, catalogs);
   if (!gate.ok) {
@@ -281,19 +320,31 @@ async function runTry(spec: string): Promise<number> {
 
   await applyCandidate(io, cand, new Date().toISOString());
   let candidateRow: DailyRow | undefined;
+  let answeredBy: Record<string, number> | undefined;
   try {
     // The env was read before the swap, so its tier values are the incumbent's.
     // Labelling the candidate's score with the incumbent's config is exactly the
     // mislabelling that recording config beside score is meant to prevent.
     const candEnv = { ...env, [tierEnvVar(cand.tier)]: `${cand.provider}:${cand.model}` };
-    candidateRow = await measureOnce(candEnv);
+    const res = await measureOnce(candEnv);
+    candidateRow = res.row;
+    answeredBy = res.answeredBy;
   } catch (err) {
     console.error('measuring the candidate failed; rolling back:', err instanceof Error ? err.message : err);
     await revertCandidate(io);
     return 1;
   }
 
-  const d = decide({ candidate: candidateRow, incumbent });
+  const label = `${cand.provider}:${cand.model}`;
+  if (answeredBy) {
+    const by = Object.entries(answeredBy).map(([m, n]) => `${m} x${n}`).join(', ') || 'nothing';
+    console.log(`  answered by: ${by}`);
+  }
+  const d = decide({
+    candidate: candidateRow,
+    incumbent,
+    ...(answeredBy ? { candidateAnswers: answeredBy[label] ?? 0 } : {}),
+  });
   if (!d.ok) {
     await revertCandidate(io);
     console.log(`rolled back: ${d.reason}`);

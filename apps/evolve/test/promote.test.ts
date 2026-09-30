@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decide, parseCandidate, screen, tierEnvVar } from '../src/promote';
+import { decide, parseCandidate, screen, tierEnvVar, tierReach } from '../src/promote';
 import type { DailyRow } from '../src/measure';
 
 const row = (winRate: number, signal: DailyRow['signal']): DailyRow => ({
@@ -118,5 +118,60 @@ describe('probe', () => {
       expect(r.ok).toBe(false);
       expect(r.detail).toContain('no ');
     }
+  });
+});
+
+// The 8 questions the frozen baseline measured on 2026-09-29.
+const MEASURED = [
+  'Explain the birthday paradox.',
+  'How did the enclosure movement in England displace rural populations and feed early industrialization?',
+  'What are the odds the Astros make the playoffs?',
+  'Describe the mechanistic relationship between telomere shortening, p53-mediated repression of PGC-1α and PGC-1β, and the resulting mitochondrial dysfunction observed in aging tissues?',
+  'What are the trade-offs between blue-green deployments and canary releases in terms of rollback speed and blast radius?',
+  'What is the difference between weather and climate?',
+  'How does quantum tunneling allow electrons to pass through energy barriers they classically cannot overcome?',
+  'What is the difference between cross-validation and a train-test split for model evaluation?',
+];
+
+describe('tierReach', () => {
+  // `try routine=anthropic:claude-sonnet-5-5` would have paid ~$0.50 for a
+  // measurement Sonnet 5.5 never answered a single question of.
+  it('finds that no measured question reaches the routine or code tier', () => {
+    expect(tierReach('routine', MEASURED)).toEqual({ reachable: 0, total: 8 });
+    expect(tierReach('code', MEASURED)).toEqual({ reachable: 0, total: 8 });
+    expect(tierReach('standard', MEASURED)).toEqual({ reachable: 7, total: 8 });
+    expect(tierReach('hard', MEASURED)).toEqual({ reachable: 1, total: 8 });
+  });
+
+  it('counts greetings and one-liners for the routine tier', () => {
+    expect(tierReach('routine', ['How are you doing today Flint?', 'thanks!', 'Explain the birthday paradox.'])).toEqual({
+      reachable: 2,
+      total: 3,
+    });
+  });
+
+  // The tool router can move a routine one-liner to standard, and evolve can't
+  // know which way it will go, so the prompt counts for both: never undercount.
+  it('counts a prompt the tool router could move for both tiers it might land in', () => {
+    expect(tierReach('routine', ["what's the weather"]).reachable).toBe(1);
+    expect(tierReach('standard', ["what's the weather"]).reachable).toBe(1);
+  });
+
+  it('finds nothing for a tier no message is classified into', () => {
+    expect(tierReach('last_resort', MEASURED).reachable).toBe(0);
+    expect(tierReach('routine', [])).toEqual({ reachable: 0, total: 0 });
+  });
+});
+
+describe('decide, when the candidate never answered', () => {
+  it('rolls back even a BETTER score the candidate did not produce', () => {
+    const d = decide({ candidate: row(0.9, 'BETTER'), incumbent: row(0.5, 'NOISE'), candidateAnswers: 0 });
+    expect(d).toMatchObject({ ok: true, action: 'rollback' });
+    expect(d.ok && d.why).toMatch(/no measured answer came from the candidate/);
+  });
+
+  it('decides as before once the candidate answered anything', () => {
+    expect(decide({ candidate: row(0.9, 'BETTER'), incumbent: row(0.5, 'NOISE'), candidateAnswers: 1 })).toMatchObject({ action: 'keep' });
+    expect(decide({ candidate: row(0.9, 'BETTER'), incumbent: row(0.5, 'NOISE') })).toMatchObject({ action: 'keep' });
   });
 });

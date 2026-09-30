@@ -141,3 +141,7 @@ export { OpenAiProvider, OpenAiCompatibleProvider, openAiCapabilities } from './
 export type { OpenAiProviderOptions, ChatWire } from './provider/openai/index.js';
 export { PerplexityProvider, perplexityCapabilities } from './provider/perplexity/index.js';
 export type { PerplexityProviderOptions } from './provider/perplexity/index.js';
+
+// Frontier tier classification (shared by the server's brain picker and evolve).
+export { classifyMessage, LONG_CONVERSATION, TIERS } from './tiers.js';
+export type { ClassifyContext, Tier } from './tiers.js';

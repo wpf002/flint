@@ -47,7 +47,7 @@ const JUDGE_MAX_TOKENS = 4096;
 const JUDGE_SYSTEM =
   'You are a strict evaluator. Compare two answers to the same question and decide which is better overall — more accurate, clear, well-structured and genuinely useful. Ignore length unless it hurts quality. Reply with EXACTLY one token: A, B, or TIE.';
 
-function readPrompts(path: string): Prompt[] {
+export function readPrompts(path: string): Prompt[] {
   const out: Prompt[] = [];
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     if (!line.trim()) continue;
@@ -59,6 +59,23 @@ function readPrompts(path: string): Prompt[] {
     }
   }
   return out;
+}
+
+/**
+ * The prompts the frozen baseline measures, in its order, or undefined when no
+ * baseline exists yet. Exactly what `measure` asks; evolve try reads it to see
+ * which tiers a measurement can reach before it spends anything.
+ */
+export function measuredPrompts(promptsPath: string, baselinePath: string): Prompt[] | undefined {
+  if (!existsSync(baselinePath)) return undefined;
+  const stored = JSON.parse(readFileSync(baselinePath, 'utf8')) as { answers: Record<string, string> };
+  // Measure exactly what the baseline froze. Re-deriving the subset from the
+  // pool would silently drop a measured prompt the moment a new one sorting
+  // earlier was added, changing the denominator without changing the config.
+  const byId = new Map(readPrompts(promptsPath).map((p) => [p.id, p]));
+  return Object.keys(stored.answers)
+    .map((id) => byId.get(id))
+    .filter((p): p is Prompt => p !== undefined);
 }
 
 /** Ask Flint, in eval mode so the turn never lands in the training corpus. */
@@ -75,7 +92,7 @@ async function askFlint(o: MeasureOpts, p: Prompt): Promise<Answer> {
   if (!text) throw new Error('flint returned an empty answer');
   // Flint's own spend is reported by the server; this is the eval's view of it.
   const cost = d.usage && d.model ? costOf('anthropic', d.model.replace(/^anthropic:/, ''), d.usage) : 0;
-  return { promptId: p.id, text, costUsd: cost };
+  return { promptId: p.id, text, costUsd: cost, ...(d.model ? { model: d.model } : {}) };
 }
 
 async function judge(o: MeasureOpts, model: string, question: string, a: string, b: string): Promise<{ reply: string; costUsd: number }> {
@@ -114,6 +131,8 @@ export interface MeasureResult {
   unscored?: string[];
   /** Prompts the fallback judged because the primary judge refused, with the judge used. */
   fallbackJudged?: string[];
+  /** Which brain answered today's prompts, `provider:model` -> count. */
+  answeredBy?: Record<string, number>;
 }
 
 export async function measure(o: MeasureOpts): Promise<MeasureResult> {
@@ -143,13 +162,8 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
 
   // ---- every later night: answer again, judge today against the baseline.
   const stored = JSON.parse(readFileSync(o.baselinePath, 'utf8')) as { answers: Record<string, string> };
-  // Measure exactly what the baseline froze. Re-deriving the subset from the
-  // pool would silently drop a measured prompt the moment a new one sorting
-  // earlier was added, changing the denominator without changing the config.
-  const byId = new Map(pool.map((p) => [p.id, p]));
-  const prompts = Object.keys(stored.answers)
-    .map((id) => byId.get(id))
-    .filter((p): p is Prompt => p !== undefined);
+  const prompts = measuredPrompts(o.promptsPath, o.baselinePath) ?? [];
+  const answeredBy: Record<string, number> = {};
   const verdicts: Verdict[] = [];
   const unscored: string[] = [];
   const fallbackJudged: string[] = [];
@@ -165,6 +179,8 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     try {
       const today = await askFlint(o, p);
       spent += today.costUsd;
+      const by = today.model ?? 'unknown';
+      answeredBy[by] = (answeredBy[by] ?? 0) + 1;
       if (over()) {
         stoppedEarly = `budget of $${o.budgetUsd.toFixed(2)} reached`;
         break;
@@ -200,5 +216,6 @@ export async function measure(o: MeasureOpts): Promise<MeasureResult> {
     ...(stoppedEarly ? { stoppedEarly } : {}),
     ...(unscored.length ? { unscored } : {}),
     ...(fallbackJudged.length ? { fallbackJudged } : {}),
+    answeredBy,
   };
 }
