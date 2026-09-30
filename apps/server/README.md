@@ -152,6 +152,23 @@ Pick one — `ANTHROPIC_API_KEY` (fast, always-on, cloud-backed) **or** point
 `OLLAMA_HOST` at a rented GPU box running your model. Swappable any time; it's
 just env.
 
+## Route log
+
+Every message answered through `/chat` or `/generate` writes one `[route]` line to the
+server log (`~/.flint/server.err.log` on the Studio): the tier it was sorted into, what
+moved it off the tier its words alone get (`movedBy`: `tools` when the router appended a
+tool, `deep thread` past `LONG_CONVERSATION` turns), each appended tool with its similarity
+score against the 0.55 floor, the tier the spend plan actually ran when a budget stepped it
+down (`planTier`), who answered (`answeredBy`), how many tiers declined first (`declined`),
+the outcome and the time taken. It never holds the message, the conversation or anything
+the user wrote.
+
+```
+[route] {"ts":"2026-09-30T14:00:00.000Z","path":"chat","tier":"standard","movedBy":"tools","appended":[{"name":"gcal_upcoming","score":0.561}],"turns":2,"brain":"frontier","answeredBy":"anthropic:claude-opus-5-5","outcome":"answered","ms":1840}
+```
+
+To count tiers: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r .tier | sort | uniq -c`.
+
 ## Tools / integrations
 
 If `MCP_CONFIG` is set, the server connects those MCP servers and exposes their

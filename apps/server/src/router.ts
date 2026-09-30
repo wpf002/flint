@@ -124,22 +124,35 @@ export class ToolRouter {
 
   /** The stable core, plus any rest-tools the message clearly needs. */
   async select(message: string): Promise<Tool[]> {
-    if (this.maxAppend === 0 || this.rest.length === 0) return this.core;
+    return (await this.selectScored(message)).tools;
+  }
+
+  /**
+   * `select`, plus each appended tool's similarity score, for the route log: an
+   * append is what moves a routine one-liner to the standard tier, and the
+   * score against the floor says whether it was a clear match or a near miss.
+   */
+  async selectScored(message: string): Promise<{ tools: Tool[]; appended: Array<{ name: string; score: number }> }> {
+    const none = { tools: this.core, appended: [] };
+    if (this.maxAppend === 0 || this.rest.length === 0) return none;
     await this.ensureVectors();
-    if (!this.appendsReady) return this.core;
+    if (!this.appendsReady) return none;
     let qv: number[];
     try {
       qv = (await this.embedder.embed([message.slice(0, 2000)]))[0] ?? [];
     } catch {
-      return this.core;
+      return none;
     }
-    if (qv.length === 0) return this.core;
+    if (qv.length === 0) return none;
     const appends = this.rest
       .map((t, i) => ({ t, score: cosineSimilarity(qv, this.restVectors[i] ?? []) }))
       .filter((x) => x.score >= this.floor)
       .sort((a, b) => b.score - a.score)
-      .slice(0, this.maxAppend)
-      .map((x) => x.t);
-    return appends.length > 0 ? [...this.core, ...appends] : this.core;
+      .slice(0, this.maxAppend);
+    if (appends.length === 0) return none;
+    return {
+      tools: [...this.core, ...appends.map((x) => x.t)],
+      appended: appends.map((x) => ({ name: x.t.definition.name, score: x.score })),
+    };
   }
 }
