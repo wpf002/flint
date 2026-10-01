@@ -13,7 +13,10 @@ export function ensureScopedTokens(dir: string): Array<{ name: string; token: st
   chmodSync(dir, 0o700);
   return SCOPED_CLIENTS.map(({ name, scope }) => {
     const file = join(dir, `${name}.token`);
-    if (!existsSync(file)) writeFileSync(file, `${randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
+    // Missing, empty or cut short (a half-written file): a fresh one. A blank token
+    // would leave this client's scope silently off while it fell back to FLINT_TOKEN.
+    const current = existsSync(file) ? readFileSync(file, 'utf8').trim() : '';
+    if (!/^[0-9a-f]{64}$/.test(current)) writeFileSync(file, `${randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
     chmodSync(file, 0o600);
     return { name, scope, token: readFileSync(file, 'utf8').trim() };
   });
