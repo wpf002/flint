@@ -68,6 +68,8 @@ import { gateBuiltins, tierGate, type TierEvent } from './tier-gate';
 import { withTurnTaint } from './turn-taint';
 import { Approvals, ApprovalError } from './approvals';
 import { pgApproverStore } from './approver-store';
+import { startInternal, type ExternalSpend } from './internal';
+import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
 import { withHistoryNote } from './history-window';
@@ -685,6 +687,32 @@ async function main(): Promise<void> {
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
   const budgetNotes = new NoteOnce(() => ledger.period().day);
+  // The runtime's calls back into the server (./internal): [::1]:8081 only, with
+  // the token install-runtime.sh writes; the server keeps just its digest.
+  let externalSpend: ExternalSpend | undefined;
+  const internalTokenFile = join(homedir(), '.flint', 'tokens', 'internal.token');
+  const internalSha = (() => {
+    let cached: string | undefined;
+    return () => {
+      if (cached) return cached;
+      try {
+        const t = readFileSync(internalTokenFile, 'utf8').trim();
+        cached = /^[0-9a-f]{64}$/.test(t) ? createHash('sha256').update(t).digest('hex') : undefined;
+      } catch {
+        cached = undefined;
+      }
+      return cached;
+    };
+  })();
+  startInternal({
+    tokenSha256: internalSha,
+    notify: (title, body) => notes.push(title, body, 'runtime', `rt:${Date.now()}`),
+    spendExternal: (t) => {
+      externalSpend = t;
+    },
+  }).on('error', (err) => console.error(`[internal] listener failed: ${err.message}`));
+  void externalSpend;
+
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals }))));
   // Bind loopback only: the device app reaches it via localhost and remote
