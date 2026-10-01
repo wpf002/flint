@@ -42,6 +42,8 @@ removable.
 ---
 
 ## Phase 7 — Home base: hosting & independence (Q2, Q10)
+> **Superseded (2026-10-01)** by the Machine plan: the Mac Studio is the home base, and the always-on runtime (`apps/runtime`, P1–P2) plus off-box resilience (P7) replace this phase.
+
 **Goal:** Flint always-on, reachable from anywhere, fully yours.
 **Build:** stand up a dedicated machine — **recommended: a Mac mini you own**
 (model + service co-located, no cloud bill, no GPU-rental). Alternatives: Fly.io

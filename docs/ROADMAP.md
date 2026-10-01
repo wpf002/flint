@@ -37,6 +37,8 @@ set; checkpoints on irreversible steps; per-step retries honoring idempotency.
 compounds) — autonomous on reversible steps, human-in-loop on irreversible ones.
 *DoD:* a real 5+ step task across apps, pausing only at irreversible steps, fully logged.
 
+> **Superseded (2026-10-01)** by the Machine plan's P1 world model and ledger (`apps/runtime`): durable, versioned state in Postgres, with Nexus as long-term memory.
+
 **Phase 3 — Memory / context.** The real persistence behind core's memory
 interface; retrieval over your data, conversations, project state, preferences.
 Postgres + pgvector; embeddings behind a Flint-style interface. Crown-jewel data
