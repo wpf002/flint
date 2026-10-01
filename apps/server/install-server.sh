@@ -106,13 +106,39 @@ launchctl load -w "$AGENTS/$PLIST"
 # server already exposes rather than assuming the reload worked.
 PORT_N="${PORT:-8080}"
 echo "verifying http://localhost:$PORT_N/health ..."
+up=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -fsS -m 3 "http://localhost:$PORT_N/health" >/dev/null 2>&1; then
-    curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo
-    echo "done. server bundled, reloaded and answering on :$PORT_N."
-    exit 0
-  fi
+  if curl -fsS -m 3 "http://localhost:$PORT_N/health" >/dev/null 2>&1; then up=1; break; fi
   sleep 1
 done
-echo "✗ server did NOT come up on :$PORT_N — check $DATA/logs/server.err.log"
-exit 1
+if [ "$up" != 1 ]; then
+  echo "✗ server did NOT come up on :$PORT_N — check $DATA/logs/server.err.log"
+  exit 1
+fi
+curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo
+
+# ---- TAILNET: only `tailscale serve` may reach Flint ---------------------------
+# Flint listens on ::1 (apps/server/src/access.ts): this Mac's userspace tailscaled
+# forwards any tailnet peer's connection to 127.0.0.1:<port> raw, so nothing of
+# Flint's may answer there, and serve must proxy to http://localhost:$PORT_N (not
+# http://[::1]:..., which tailscale 1.102 saves as http://::1:... and then fails).
+if curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT_N/health" 2>/dev/null; then
+  echo "✗ WARNING: Flint answers on 127.0.0.1:$PORT_N, where tailnet peers are forwarded raw. Is BIND_HOST set?"
+fi
+TS_BIN="$(command -v tailscale || true)"
+TS_SOCK="${FLINT_TS_SOCKET:-$DATA/tailscaled.sock}"
+if [ -n "$TS_BIN" ] && [ -S "$TS_SOCK" ]; then
+  want="http://localhost:$PORT_N"
+  have="$("$TS_BIN" --socket "$TS_SOCK" serve status --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{try{const w=Object.entries(JSON.parse(s).Web||{}).find(([k])=>k.endsWith(":443"));process.stdout.write(w?.[1]?.Handlers?.["/"]?.Proxy??"")}catch{}})')"
+  if [ -n "$have" ] && [ "$have" != "$want" ]; then
+    if "$TS_BIN" --socket "$TS_SOCK" serve --bg "$want" >/dev/null 2>&1; then
+      echo "tailnet: serve now proxies to $want (was $have)"
+    else
+      echo "✗ tailnet: could not point serve at $want (it proxies to $have); remote access may be down"
+    fi
+  elif [ "$have" = "$want" ]; then
+    echo "tailnet: serve proxies to $want"
+  fi
+fi
+echo "done. server bundled, reloaded and answering on :$PORT_N."
+exit 0

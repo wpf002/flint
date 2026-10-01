@@ -147,6 +147,22 @@ export function resolveFlintToken(opts: { env: NodeJS.ProcessEnv; tokenFile: str
   return undefined;
 }
 
+/**
+ * Flint's URL as it appears in its contestant key (`flint@<url>`). Every loopback
+ * spelling is one Flint: the default moved from http://127.0.0.1:8080 to
+ * http://localhost:8080 when Flint started listening on ::1 (#34), and runs already
+ * on disk are keyed by the old form, so a resumed run must find its answers.
+ */
+export function flintKeyUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) u.hostname = '127.0.0.1';
+    return u.href.replace(/\/$/, '');
+  } catch {
+    return url;
+  }
+}
+
 interface FlintGenerateResponse {
   text?: string;
   usage?: TokenUsage;
@@ -287,7 +303,7 @@ export function flintContestant(opts: {
     localOnly ? 0 : estimateCost('anthropic', opts.frontierModel, p.prompt.length, { overheadTokens: 12_000, expectedOutputTokens: 1500 });
   return {
     name: flintContestantName({ localOnly, localModel, localThink, styleVariant }),
-    model: `flint@${opts.url}`,
+    model: `flint@${flintKeyUrl(opts.url)}`,
     estimate,
     async answer(p, signal) {
       const noRecall = opts.withholdMemory?.(p) === true;
