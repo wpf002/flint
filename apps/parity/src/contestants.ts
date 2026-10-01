@@ -126,7 +126,17 @@ export function perplexityContestant(apiKey: string, model: string, system: stri
  * ~/.flint/token, then the launchd plist the server runs from (what the Python
  * scripts in apps/train/mlx read). Never printed.
  */
-export function resolveFlintToken(opts: { env: NodeJS.ProcessEnv; tokenFile: string; plist: string }): string | undefined {
+export function resolveFlintToken(opts: {
+  env: NodeJS.ProcessEnv;
+  tokenFile: string;
+  plist: string;
+  /** parity's own eval-only token (~/.flint/tokens/parity.token), preferred when present. */
+  scopedFile?: string;
+}): string | undefined {
+  if (opts.scopedFile && existsSync(opts.scopedFile)) {
+    const t = readFileSync(opts.scopedFile, 'utf8').trim();
+    if (t) return t;
+  }
   const fromEnv = opts.env.FLINT_TOKEN?.trim();
   if (fromEnv) return fromEnv;
   if (existsSync(opts.tokenFile)) {

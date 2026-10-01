@@ -14,7 +14,9 @@ import numpy as np
 import sounddevice as sd
 
 FLINT_URL   = os.environ.get("FLINT_URL", "http://localhost:8080")  # Flint listens on ::1
-FLINT_TOKEN = os.environ.get("FLINT_TOKEN") or subprocess.check_output(
+# voice's own token (chat and speech only), made by the server; then FLINT_TOKEN.
+_SCOPED = os.path.expanduser("~/.flint/tokens/voice.token")
+FLINT_TOKEN = (open(_SCOPED).read().strip() if os.path.exists(_SCOPED) else None) or os.environ.get("FLINT_TOKEN") or subprocess.check_output(
     ["/usr/libexec/PlistBuddy","-c","Print :EnvironmentVariables:FLINT_TOKEN",
      os.path.expanduser("~/Library/LaunchAgents/com.flint.server.plist")]).decode().strip()
 WAKE_WORDS  = [w.strip().lower() for w in os.environ.get("WAKE_WORDS","hey flint,flint,okay flint").split(",")]

@@ -72,7 +72,8 @@ import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
 import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './route-log';
-import { allowedTailnetUser, bindHost, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
+import { ensureScopedTokens } from './scoped-tokens';
+import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
@@ -121,12 +122,10 @@ import {
  *   POST /chat     → { conversationId, message } → SSE stream of StreamEvents
  */
 
-const TOKEN: string = process.env.FLINT_TOKEN?.trim() ?? '';
-if (!TOKEN) {
-  // Fail closed: never expose Flint unauthenticated.
-  console.error('FLINT_TOKEN is required (the bearer token clients must send). Refusing to start.');
-  process.exit(1);
-}
+/** FLINT_TOKEN, read in main() after ~/.flint/secrets.env loads, so it may live there. */
+let TOKEN = '';
+/** The scoped clients' tokens (./access, ./scoped-tokens), made in main(). */
+let SCOPED: ReadonlyArray<{ name: string; token: string; scope: Exclude<Scope, 'full'> }> = [];
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -417,6 +416,14 @@ async function contextFor(message: string, knowledge: KnowledgeStore): Promise<s
 
 async function main(): Promise<void> {
   loadSecrets(); // pull ANTHROPIC_API_KEY (and friends) from ~/.flint/secrets.env
+  TOKEN = process.env.FLINT_TOKEN?.trim() ?? '';
+  if (!TOKEN) {
+    // Fail closed: never expose Flint unauthenticated.
+    console.error('FLINT_TOKEN is required (the plist or ~/.flint/secrets.env). Refusing to start.');
+    process.exit(1);
+  }
+  SCOPED = ensureScopedTokens(join(homedir(), '.flint', 'tokens'));
+  console.error(`[access] scoped tokens: ${SCOPED.map((t) => `${t.name}=${t.scope}`).join(', ')} (~/.flint/tokens)`);
   TAILNET_USER = allowedTailnetUser(process.env);
   console.error(
     TAILNET_USER
@@ -820,9 +827,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     });
   }
 
-  // Auth for everything else, in constant time (./access).
-  if (!bearerMatches(req.headers.authorization, TOKEN)) {
+  // Auth for everything else, in constant time, and what the token may reach (./access).
+  const scope = bearerScope(req.headers.authorization, { full: TOKEN, scoped: SCOPED });
+  if (!scope) {
     return json(res, 401, { error: 'unauthorized' });
+  }
+  if (!scopeAllows(scope, req.method ?? 'GET', url)) {
+    return json(res, 403, { error: 'this token may not call that' });
   }
 
   // Paid API spend today / this month per vendor, against the FLINT_BUDGET_* caps (./spend).
@@ -892,6 +903,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // must not leave write proposals in the approval queue. The answer itself is
     // produced exactly as a normal turn would be.
     const evalMode = body.eval === true;
+    // An eval-scoped token (evolve, parity) asks eval questions only: never a turn
+    // that is logged as training data or can propose actions (./access).
+    if (scope === 'eval' && !evalMode) return json(res, 403, { error: 'this token may only make eval calls' });
     // Eval-only: answer with a different Ollama model (bake-offs), optionally with
     // `think` set. 400 unless eval + localOnly (and localThink only with localModel).
     const lm = parseLocalModelRequest(body);
