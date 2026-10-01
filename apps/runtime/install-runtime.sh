@@ -125,8 +125,9 @@ ENVF="$DATA/runtime.env"
   echo "SERVER_INTERNAL_URL=http://[::1]:8081"
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.
-  plutil -p "$AGENTS/com.flint.server.plist" 2>/dev/null | sed -nE 's/^ *"(FLINT_BUDGET_[A-Z]+_(DAILY|MONTHLY)_USD)" => "([0-9.]+)"$/\1=\3/p'
-  TS_URL="$(cat "$DATA/tailscale-url.txt" 2>/dev/null | head -1)"
+  # (|| true: under pipefail a missing plist or file must not stop the install.)
+  { plutil -p "$AGENTS/com.flint.server.plist" 2>/dev/null | sed -nE 's/^ *"(FLINT_BUDGET_[A-Z]+_(DAILY|MONTHLY)_USD)" => "([0-9.]+)"$/\1=\3/p'; } || true
+  TS_URL="$(head -1 "$DATA/tailscale-url.txt" 2>/dev/null || true)"
   if [ -n "$TS_URL" ]; then
     echo "FLINT_RP_ID=$(print -r -- "$TS_URL" | sed -E 's#^https://##; s#[:/].*$##')"
     echo "FLINT_RP_ORIGINS=$(print -r -- "$TS_URL" | sed -E 's#^(https://[^/]+).*$#\1#')"
