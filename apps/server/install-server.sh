@@ -63,9 +63,11 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
 # "deployed", and the live connector kept the old code. Rebuild every bundle that
 # is installed AND has its source here, before the reload respawns them. Nothing
 # new is installed. A new bundle replaces the old one only if it builds AND starts
-# and lists its tools (connector-smoke.mjs): one that builds can still die at
-# startup, and the server's /health would not notice its tools were gone. The
-# replaced bundle is kept as <name>.mjs.prev.
+# and lists its tools (connector-smoke.mjs, started the way the server starts it,
+# with its mcp.json command, args, cwd and env): one that builds can still die at
+# startup, and the server's /health would not notice its tools were gone. A build
+# identical to the installed bundle is left alone, so <name>.mjs.prev keeps the
+# bundle from before the last REAL change rather than a copy of the live one.
 echo "rebuilding installed connectors from source..."
 for bundle in "$DATA"/connectors/*-server.mjs(N); do
   name="${bundle:t:r}"
@@ -75,7 +77,10 @@ for bundle in "$DATA"/connectors/*-server.mjs(N); do
   if "$ESBUILD" "$src" --bundle --platform=node --format=esm --target=node20 \
        --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
        --outfile="$next" --log-level=error; then
-    if smoke=$(node "$REPO/apps/server/connector-smoke.mjs" "$next" 10000 2>&1); then
+    if cmp -s "$next" "$bundle"; then
+      rm -f "$next"
+      echo "  = $name unchanged"
+    elif smoke=$(node "$REPO/apps/server/connector-smoke.mjs" "$next" 10000 "$bundle" "${MCP_CONFIG:-$DATA/mcp.json}" 2>&1); then
       cp -p "$bundle" "$bundle.prev" 2>/dev/null || echo "  (could not keep $name.mjs.prev)"
       mv -f "$next" "$bundle"
       echo "  ✓ $name ($smoke)"

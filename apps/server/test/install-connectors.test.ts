@@ -16,7 +16,7 @@ if(m.id===1)process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:1,result:{prot
 if(m.id===2)process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'t',inputSchema:{type:'object'}}]}})+'\\n');}
 buf=buf.slice(buf.lastIndexOf('\\n')+1)});`;
 
-function deploy(sources: Record<string, string>, installed: string[]) {
+function deploy(sources: Record<string, string>, installed: string[], mcp?: (data: string) => object) {
   const root = mkdtempSync(join(tmpdir(), 'install-'));
   const repo = join(root, 'repo');
   const data = join(root, 'data');
@@ -26,9 +26,16 @@ function deploy(sources: Record<string, string>, installed: string[]) {
   cpSync(join(REPO, 'apps', 'server', 'connector-smoke.mjs'), join(repo, 'apps', 'server', 'connector-smoke.mjs'));
   for (const [name, src] of Object.entries(sources)) writeFileSync(join(repo, 'packages', 'mcp', 'connectors', `${name}.ts`), src);
   for (const name of installed) writeFileSync(join(data, 'connectors', `${name}.mjs`), 'old bundle');
-  const r = spawnSync('/bin/zsh', ['-c', `set -e\nREPO=${repo}\nDATA=${data}\nESBUILD=${ESBUILD}\n${LOOP}\necho END`], { encoding: 'utf8' });
+  if (mcp) writeFileSync(join(data, 'mcp.json'), JSON.stringify(mcp(data)));
+  const loop = () => spawnSync('/bin/zsh', ['-c', `set -e\nREPO=${repo}\nDATA=${data}\nESBUILD=${ESBUILD}\n${LOOP}\necho END`], { encoding: 'utf8' });
+  const r = loop();
   const read = (f: string) => readFileSync(join(data, 'connectors', f), 'utf8');
-  return { out: r.stdout + r.stderr, status: r.status, files: readdirSync(join(data, 'connectors')).sort(), read };
+  const files = () => readdirSync(join(data, 'connectors')).sort();
+  const again = () => {
+    const r2 = loop();
+    return { out: r2.stdout + r2.stderr, status: r2.status, files: files() };
+  };
+  return { out: r.stdout + r.stderr, status: r.status, files: files(), read, again };
 }
 
 // Review of #33: auto-deploy never rebuilt the connectors, so a connector fix
@@ -62,4 +69,24 @@ describe('install-server.sh connector rebuild', () => {
     expect(r.files).toEqual(['hive-server.mjs', 'legacy-server.mjs']);
     expect(r.out).toMatch(/END/);
   });
+
+  // Third review of #33: every deploy rebuilt every connector and overwrote .prev
+  // with the live bundle, so the last-known-good copy lasted one more push.
+  it('leaves an unchanged connector alone, so .prev keeps the bundle from before the last real change', () => {
+    const r = deploy({ 'web-server': WORKING }, ['web-server']);
+    expect(r.read('web-server.mjs.prev')).toBe('old bundle');
+    const r2 = r.again();
+    expect(r2.out).toMatch(/= web-server unchanged/);
+    expect(r.read('web-server.mjs.prev')).toBe('old bundle');
+    expect(r2.files).toEqual(['web-server.mjs', 'web-server.mjs.prev']);
+  });
+
+  it("test-starts a connector with its mcp.json env, as the server would start it", () => {
+    const needsEnv = `if (process.env.TDL_DIR !== '/data/tdl') throw new Error('TDL_DIR not set');\n${WORKING}`;
+    const r = deploy({ 'tdl-server': needsEnv }, ['tdl-server'], (data) => ({
+      servers: [{ name: 'tdl', command: process.execPath, args: [join(data, 'connectors', 'tdl-server.mjs')], env: { TDL_DIR: '/data/tdl' } }],
+    }));
+    expect(r.out).toMatch(/✓ tdl-server \(1 tools as tdl\)/);
+  });
 });
+
