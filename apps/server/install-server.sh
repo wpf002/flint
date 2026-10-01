@@ -54,6 +54,28 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
   --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
   --outfile="$DATA/server.mjs"
 
+# ---- connectors --------------------------------------------------------------
+# The MCP connectors run from their own bundles in $DATA/connectors, and this
+# script never rebuilt them: a connector fix (the fetch_url guard, #33) merged,
+# "deployed", and the live connector kept the old code. Rebuild every bundle that
+# is installed AND has its source here, before the reload respawns them. Nothing
+# new is installed. A bundle that fails to build is kept as it was, and says so.
+echo "rebuilding installed connectors from source..."
+for bundle in "$DATA"/connectors/*-server.mjs(N); do
+  name="${bundle:t:r}"
+  src="$REPO/packages/mcp/connectors/$name.ts"
+  [ -f "$src" ] || { echo "  = $name: no source in this repo, kept"; continue; }
+  if "$ESBUILD" "$src" --bundle --platform=node --format=esm --target=node20 \
+       --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
+       --outfile="$bundle.new" --log-level=error; then
+    mv -f "$bundle.new" "$bundle"
+    echo "  ✓ $name"
+  else
+    rm -f "$bundle.new"
+    echo "  ✗ $name failed to build; the old bundle stays"
+  fi
+done
+
 echo "deploying console -> $DATA/console.html ..."
 cp "$REPO/apps/console/index.html" "$DATA/console.html"
 

@@ -16,8 +16,13 @@
  */
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
 
-/** A URL the guard will not fetch, and why. */
+/**
+ * A URL the guard will not fetch on POLICY grounds (a private or local target, a
+ * scheme other than http(s)). A fetch that merely failed (DNS, too many
+ * redirects) is a plain Error, so a tool can say "refused" only when it was.
+ */
 export class UrlRefused extends Error {
   constructor(reason: string) {
     super(reason);
@@ -48,12 +53,90 @@ export type Resolve = (host: string) => Promise<string[]>;
 
 const resolveAll: Resolve = async (host) => (await lookup(host, { all: true, verbatim: true })).map((r) => r.address);
 
+/** This machine's own addresses, and the /64 of each of its global IPv6 networks. */
+export interface LocalAddresses {
+  exact: Set<string>;
+  v6Prefixes: Set<string>;
+}
+
+/** The eight hextets of an IPv6 address, zone id dropped, or undefined. */
+function hextets(addr: string): string[] | undefined {
+  const a = addr.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  if (!a.includes(':')) return undefined;
+  const [head, tail] = a.split('::') as [string, string | undefined];
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
+  if (t.length && t[t.length - 1]!.includes('.')) return undefined; // embedded IPv4: handled by isPrivateHost
+  const fill = tail !== undefined ? Array(8 - h.length - t.length).fill('0') : [];
+  const all = [...h, ...fill, ...t].map((x) => x.padStart(4, '0'));
+  return all.length === 8 ? all : undefined;
+}
+
+const prefix64 = (addr: string): string | undefined => hextets(addr)?.slice(0, 4).join(':');
+
+/**
+ * Read from the interfaces each time (addresses change: temporary IPv6, Wi-Fi).
+ * A public IPv6 address of this Mac, or a neighbour on its /64, is as local as
+ * 127.0.0.1 to a service bound to `::`, though no address range says so.
+ */
+export function localAddresses(): LocalAddresses {
+  const exact = new Set<string>();
+  const v6Prefixes = new Set<string>();
+  for (const list of Object.values(networkInterfaces())) {
+    for (const i of list ?? []) {
+      const addr = i.address.toLowerCase().replace(/%.*$/, '');
+      exact.add(addr);
+      if (i.family === 'IPv6' && !i.internal && !/^fe80/.test(addr)) {
+        const p = prefix64(addr);
+        if (p) v6Prefixes.add(p);
+      }
+    }
+  }
+  return { exact, v6Prefixes };
+}
+
+function isThisNetwork(addr: string, local: LocalAddresses): boolean {
+  const a = addr.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  if (local.exact.has(a)) return true;
+  const p = prefix64(a);
+  return p !== undefined && local.v6Prefixes.has(p);
+}
+
+export interface GuardOptions {
+  resolve?: Resolve;
+  signal?: AbortSignal;
+  /** This host's addresses; injected in tests. */
+  local?: () => LocalAddresses;
+}
+
+/** `p`, or the signal's reason as soon as it aborts. */
+function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
  * The URL, parsed, if it is http(s) to a public host whose every DNS address is
- * public; otherwise throws UrlRefused. WHATWG URL parsing normalises numeric
- * hosts first (`http://2130706433/` and `http://0x7f.1/` both become 127.0.0.1).
+ * public and not this machine or its network; otherwise throws UrlRefused (a DNS
+ * failure is a plain Error). WHATWG URL parsing normalises numeric hosts first
+ * (`http://2130706433/` and `http://0x7f.1/` both become 127.0.0.1).
  */
-export async function assertPublicUrl(raw: string | URL, resolve: Resolve = resolveAll): Promise<URL> {
+export async function assertPublicUrl(raw: string | URL, resolve: Resolve = resolveAll, opts: GuardOptions = {}): Promise<URL> {
+  const local = (opts.local ?? localAddresses)();
   let u: URL;
   try {
     u = typeof raw === 'string' ? new URL(raw) : raw;
@@ -62,26 +145,44 @@ export async function assertPublicUrl(raw: string | URL, resolve: Resolve = reso
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new UrlRefused('only http(s) URLs are fetched');
   const host = u.hostname;
-  if (isPrivateHost(host)) throw new UrlRefused(`${host} is a private or local address`);
+  if (isPrivateHost(host) || isThisNetwork(host, local)) throw new UrlRefused(`${host} is a private or local address`);
   if (isIP(host.replace(/^\[|\]$/g, '')) === 0) {
     let addrs: string[];
     try {
-      addrs = await resolve(host);
-    } catch {
-      throw new UrlRefused(`${host} did not resolve`);
+      addrs = await abortable(resolve(host), opts.signal);
+    } catch (e) {
+      if (opts.signal?.aborted) throw e;
+      throw new Error(`${host} did not resolve`);
     }
-    if (addrs.length === 0) throw new UrlRefused(`${host} did not resolve`);
-    const bad = addrs.find((a) => isPrivateHost(a));
-    if (bad) throw new UrlRefused(`${host} resolves to a private or local address`);
+    if (addrs.length === 0) throw new Error(`${host} did not resolve`);
+    if (addrs.some((a) => isPrivateHost(a) || isThisNetwork(a, local))) {
+      throw new UrlRefused(`${host} resolves to a private or local address`);
+    }
   }
   return u;
 }
 
 export interface GuardedFetchOptions {
+  /** Default 20, as fetch's own. Each hop is checked, so a higher cap costs no safety. */
   maxRedirects?: number;
   resolve?: Resolve;
   /** Injected in tests. */
   fetchImpl?: typeof fetch;
+  local?: () => LocalAddresses;
+}
+
+/**
+ * A Location header with raw UTF-8 bytes arrives as latin1 text. Decode it the way
+ * fetch's own redirect handling does, or `new URL` percent-encodes each byte and
+ * the next hop asks for a mangled path.
+ */
+export function decodeLocation(location: string): string {
+  if (!/[\u0080-\u00ff]/.test(location)) return location;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(location, 'latin1'));
+  } catch {
+    return location;
+  }
 }
 
 /**
@@ -90,13 +191,17 @@ export interface GuardedFetchOptions {
  */
 export async function guardedFetch(url: string, init: RequestInit = {}, opts: GuardedFetchOptions = {}): Promise<Response> {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const max = opts.maxRedirects ?? 5;
-  let current = await assertPublicUrl(url, opts.resolve);
+  const max = opts.maxRedirects ?? 20;
+  const signal = init.signal ?? undefined;
+  const guard: GuardOptions = { ...(signal ? { signal } : {}), ...(opts.local ? { local: opts.local } : {}) };
+  let current = await assertPublicUrl(url, opts.resolve, guard);
   for (let hop = 0; ; hop++) {
+    signal?.throwIfAborted();
     const res = await fetchImpl(current, { ...init, redirect: 'manual' });
     const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
     if (!location) return res;
-    if (hop >= max) throw new UrlRefused(`more than ${max} redirects`);
-    current = await assertPublicUrl(new URL(location, current), opts.resolve);
+    await res.body?.cancel().catch(() => {}); // not read; free the connection
+    if (hop >= max) throw new Error(`more than ${max} redirects`);
+    current = await assertPublicUrl(new URL(decodeLocation(location), current), opts.resolve, guard);
   }
 }
