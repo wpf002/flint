@@ -26,6 +26,7 @@ CI never hits the live API.
 | `memory-transaction` | a failed turn leaves no orphaned user message |
 | `error-normalization` | provider errors map to the correct `AiError.kind` |
 | `idempotency` | a non-idempotent tool failure is not auto-retried |
+| `ollama-format` | responseFormat on Ollama `format`: the JSON is the text, a forced tool is its call, a reply cut off at `num_predict` is `max_tokens` |
 
 ## Refreshing cassettes (live run)
 

@@ -35,6 +35,46 @@ export function jsonProvider(chunk: OllamaChunk): ProviderAdapter {
   return new OllamaProvider({ fetch: fakeFetch });
 }
 
+/**
+ * A whole non-streamed /api/chat body as Ollama sends it: the model, timings and
+ * a thinking model's `thinking` too, not only the fields the adapter reads, so a
+ * field it should ignore is in front of it.
+ */
+export interface OllamaChatCassette {
+  model: string;
+  created_at: string;
+  message: { role: 'assistant'; content: string; thinking?: string };
+  done: true;
+  done_reason: 'stop' | 'length';
+  total_duration: number;
+  load_duration: number;
+  prompt_eval_count: number;
+  prompt_eval_duration: number;
+  eval_count: number;
+  eval_duration: number;
+}
+
+/**
+ * A provider whose /api/chat replays these bodies in order (the last repeats),
+ * recording each request body so a test can check what was sent.
+ */
+export function cassetteProvider(responses: OllamaChatCassette[]): {
+  provider: ProviderAdapter;
+  requests: Array<Record<string, unknown>>;
+} {
+  const requests: Array<Record<string, unknown>> = [];
+  let i = 0;
+  const fakeFetch = (async (_url: string, init?: { body?: string }) => {
+    requests.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
+    const body = responses[Math.min(i++, responses.length - 1)];
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+  }) as unknown as typeof fetch;
+  return { provider: new OllamaProvider({ fetch: fakeFetch }), requests };
+}
+
 /** A provider whose /api/chat fails with the given HTTP status. */
 export function httpErrorProvider(status: number, body = 'error'): ProviderAdapter {
   const fakeFetch = (async () => new Response(body, { status })) as unknown as typeof fetch;

@@ -11,7 +11,8 @@ import { FlintError } from '../../types/error.js';
 import { decodeAssistantTurn, encodeAssistantText, encodeToolCallTurn } from '../../core/encoding.js';
 import { newId } from '../../core/util.js';
 import { ollamaCapabilities } from './capabilities.js';
-import { OllamaHttpError, toAiError } from './errors.js';
+import { OllamaFormatError, OllamaHttpError, toAiError } from './errors.js';
+import { responseFormatName } from '../response-format.js';
 import { mapMessages, mapDoneReason } from './mapping.js';
 
 export interface OllamaProviderOptions {
@@ -328,8 +329,14 @@ export class OllamaProvider implements ProviderAdapter {
    * Ollama's `format` constrains the reply to a JSON schema. It serves both
    * responseFormat (the JSON is the reply's text) and a forced tool (`toolChoice:
    * {name}`, which Ollama has no knob for): the tool's input schema is the
-   * format, and the JSON comes back as that tool's call. A reply that is not
-   * valid JSON is retried twice before it is an error.
+   * format, and the JSON comes back as that tool's call. A whole reply that is
+   * not valid JSON is retried twice before it is an error.
+   *
+   * A reply cut off at num_predict (`done_reason: "length"`) is not retried: the
+   * same request would be cut off again. It is reported the way a text turn
+   * reports it, reason `max_tokens` with the partial text, so the caller can give
+   * it more room. A reply that parses is whole even when Ollama says `length` (a
+   * model under `format` can pad the JSON with whitespace up to the cap).
    */
   private async structured(args: GenerateArgs, s: Structured): Promise<GenerateResult> {
     const { tools: _t, toolChoice: _c, responseFormat: _r, ...rest } = args;
@@ -351,6 +358,9 @@ export class OllamaProvider implements ProviderAdapter {
       try {
         value = JSON.parse(lastText);
       } catch {
+        if (chunk.done_reason === 'length') {
+          return { message: encodeAssistantText(newId('msg'), lastText, 0), usage, reason: 'max_tokens' };
+        }
         continue;
       }
       if (s.tool) {
@@ -359,7 +369,10 @@ export class OllamaProvider implements ProviderAdapter {
       }
       return { message: encodeAssistantText(newId('msg'), JSON.stringify(value), 0), usage, reason: 'complete' };
     }
-    throw new OllamaHttpError(502, `the model did not return valid JSON for ${s.tool ?? args.responseFormat?.name ?? 'the format'} (${lastText.slice(0, 80)})`);
+    // Only the reply's length goes in the message: its text is the model's, and
+    // error messages end up in logs.
+    const target = s.tool ?? (args.responseFormat ? responseFormatName(args.responseFormat) : 'the format');
+    throw new OllamaFormatError(`the model did not return valid JSON for ${target} in 3 tries (last reply: ${lastText.length} chars)`);
   }
 
   // --- internals ------------------------------------------------------------

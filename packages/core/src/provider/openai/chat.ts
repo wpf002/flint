@@ -8,6 +8,7 @@ import { encodeAssistantText, encodeToolCallTurn } from '../../core/encoding.js'
 import { newId } from '../../core/util.js';
 import { OpenAiHttpError, toAiError } from './errors.js';
 import { fromOpenAiToolName, mapFinishReason, mapMessages, mapTools, parseArgs } from './mapping.js';
+import { responseFormatName } from '../response-format.js';
 
 /**
  * The chat-completions wire format, as spoken by OpenAI and by everyone who cloned
@@ -123,7 +124,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
           : encodeAssistantText(id, text, 0);
 
       const reason = choice?.message?.refusal ? 'refusal' : mapFinishReason(choice?.finish_reason);
-      return this.decorate({ message, usage, reason }, raw);
+      return this.decorate({ message, usage, reason }, raw, args);
     } catch (err) {
       throw new FlintError(toAiError(err, this.wire.name));
     }
@@ -190,7 +191,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
         };
       }
 
-      const suffix = this.streamSuffix(lastChunk);
+      const suffix = this.streamSuffix(lastChunk, args);
       if (suffix) yield { type: 'text', delta: suffix };
 
       yield { type: 'done', reason: refused ? 'refusal' : mapFinishReason(finish), usage };
@@ -204,18 +205,22 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
    * Hook for a compatible endpoint to fold its own non-standard response fields into
    * the result. Default is identity: the shared engine models exactly the fields the
    * chat-completions API defines, and anything beyond that is the subclass's business.
+   * `args` is the request, so a hook can leave a constrained reply (responseFormat),
+   * whose text must stay exactly the JSON, alone.
    */
-  protected decorate(result: GenerateResult, _raw: unknown): GenerateResult {
+  protected decorate(result: GenerateResult, _raw: unknown, _args?: GenerateArgs): GenerateResult {
     return result;
   }
 
   /** Text appended as a final delta before `done`, for the streaming counterpart. */
-  protected streamSuffix(_lastChunk: unknown): string | undefined {
+  protected streamSuffix(_lastChunk: unknown, _args?: GenerateArgs): string | undefined {
     return undefined;
   }
 
   private buildBody(args: GenerateArgs, stream: boolean): Record<string, unknown> {
-    const tools = this.wire.supportsTools ? mapTools(args.tools) : undefined;
+    // responseFormat replaces the caller's tools (see GenerateArgs.responseFormat):
+    // offered both, the model may answer with a tool call and no JSON at all.
+    const tools = this.wire.supportsTools && !args.responseFormat ? mapTools(args.tools) : undefined;
     const caps = this.wire.capabilities(args.model);
     return {
       model: args.model,
@@ -232,7 +237,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       // must list every property as required and forbid extras, which callers'
       // schemas need not.
       ...(args.responseFormat
-        ? { response_format: { type: 'json_schema', json_schema: { name: args.responseFormat.name, schema: args.responseFormat.schema, strict: false } } }
+        ? { response_format: { type: 'json_schema', json_schema: { name: responseFormatName(args.responseFormat), schema: args.responseFormat.schema, strict: false } } }
         : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
       ...this.wire.extraBody,

@@ -60,6 +60,11 @@ export interface GenerateArgs {
    * Ollama sends it as `format`, OpenAI as `response_format`, and Anthropic as a
    * forced tool whose input becomes the text. Unset, every request is
    * byte-identical to one made before this field existed.
+   *
+   * It replaces `tools` and `toolChoice` for the call: no caller tool is offered
+   * on any provider, so the reply is never a tool call with no JSON in it. A
+   * reply cut off by `maxTokens` ends with reason `max_tokens` (not an error, and
+   * not retried), and its text need not be the whole JSON.
    */
   responseFormat?: ResponseFormat;
   maxTokens?: number;
@@ -75,7 +80,11 @@ export interface GenerateArgs {
 /** A JSON shape the reply must take (see GenerateArgs.responseFormat). */
 export interface ResponseFormat {
   type: 'json_schema';
-  /** A short identifier: letters, digits, `_` and `-`. */
+  /**
+   * A short identifier: 1 to 64 letters, digits, `_` and `-`, with no `__`. It
+   * only labels the schema, so any other name is sent as `respond` on every
+   * provider rather than rejected by one of them.
+   */
   name: string;
   schema: Record<string, unknown>;
 }
