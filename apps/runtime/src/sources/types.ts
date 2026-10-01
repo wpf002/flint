@@ -37,6 +37,8 @@ export interface SourceRun {
   cursor?: { cursor: string; etag: string | null };
   /** fetch limited to this source's endpoint list (policy/egress.ts). */
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  /** Keys of this source's live entities of a kind (to notice what disappeared from a listing). */
+  known?: (kind: string) => Promise<string[]>;
 }
 
 export interface Source {

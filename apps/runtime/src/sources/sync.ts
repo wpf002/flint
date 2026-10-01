@@ -45,7 +45,9 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
 
   let result;
   try {
-    result = await source.run({ ...run, cursor: { cursor: cursor.cursor, etag: cursor.etag } });
+    const known = async (kind: string) =>
+      (await db.entity.findMany({ where: { kind, status: 'active', sources: { some: { source: source.name } } }, select: { key: true }, take: 5000 })).map((e) => e.key);
+    result = await source.run({ ...run, cursor: { cursor: cursor.cursor, etag: cursor.etag }, known });
   } catch (err) {
     const message = redact(err instanceof Error ? err.message : String(err)).slice(0, 500);
     await db.sourceCursor.update({ where: { source: source.name }, data: { lastError: message, consecutiveFailures: { increment: 1 } } });
