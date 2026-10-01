@@ -1,0 +1,217 @@
+/**
+ * The runtime's HTTP API (plan 3.0.1): loopback only, not in `tailscale serve`.
+ * Every route but /health names the one scope it needs; a caller's token grants
+ * scopes (config.ts). Bodies over 64 KB are refused with 413, invalid input with
+ * 400 (zod), and errors never echo internals: the reply carries a reference, the
+ * log the detail.
+ */
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import { z, ZodError } from 'zod';
+import { safeName, type WebAuthnRelyingParty } from '@flint/policy';
+import type { Config, RuntimeScope } from './config.js';
+import type { Db } from './db.js';
+import { callerFor, type Caller } from './auth.js';
+import { AuditIn, AuditQuery, AuditRefused, appendAudit, listAudit } from './governance/audit.js';
+import { claim } from './governance/counters.js';
+import {
+  CompleteProposal,
+  CreateProposal,
+  Refused,
+  approveProposal,
+  claimProposal,
+  completeProposal,
+  createProposal,
+  listProposals,
+  rejectProposal,
+} from './governance/proposals.js';
+import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
+import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
+import { hasNul } from './jsonsize.js';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    caller?: Caller;
+  }
+}
+
+export const BODY_LIMIT = 64 * 1024;
+
+export interface AppDeps {
+  db: Db;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'>;
+  logger?: boolean;
+}
+
+const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
+
+export function buildApp(deps: AppDeps): FastifyInstance {
+  const app = Fastify({
+    bodyLimit: BODY_LIMIT,
+    logger: deps.logger
+      ? { level: 'info', redact: { paths: ['req.headers.authorization', 'req.headers.cookie'], censor: '[redacted]' } }
+      : false,
+  });
+  const { db, config } = deps;
+  const rp: WebAuthnRelyingParty | undefined = config.rp;
+  // BigInt columns (AuditEntry.seq, BackupRun.bytes) have no JSON form of their own.
+  app.setReplySerializer((payload) => JSON.stringify(payload, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)));
+
+  /** Route guard: the caller must hold this scope. */
+  const need = (scope: RuntimeScope) => async (req: FastifyRequest, reply: FastifyReply) => {
+    const caller = callerFor(req.headers.authorization, config.tokens);
+    if (!caller) return reply.code(401).send({ error: 'unauthorized' });
+    if (!caller.scopes.has(scope)) return reply.code(403).send({ error: `this token does not have the ${scope} scope` });
+    req.caller = caller;
+  };
+  const actor = (req: FastifyRequest) => `client:${req.caller?.name ?? 'unknown'}`;
+
+  // Postgres refuses U+0000; refuse it here as bad input (400), not as a crash (500).
+  app.addHook('preValidation', async (req, reply) => {
+    if (req.body !== undefined && hasNul(req.body)) return reply.code(400).send({ error: 'invalid input: contains a NUL character' });
+  });
+
+  app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, req, reply) => {
+    if (err instanceof ZodError) return reply.code(400).send({ error: 'invalid input', issues: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+    if (err instanceof Refused) return reply.code(err.status).send({ error: err.message });
+    if (err instanceof Invalid || err instanceof AuditRefused) return reply.code(400).send({ error: err.message });
+    if (err.statusCode === 413 || err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') return reply.code(413).send({ error: 'body too large' });
+    if (err.statusCode && err.statusCode >= 400 && err.statusCode < 500) return reply.code(err.statusCode).send({ error: 'bad request' });
+    const ref = `err${Date.now().toString(36)}`;
+    req.log.error({ ref, err }, 'request failed');
+    return reply.code(500).send({ error: 'internal error', ref });
+  });
+
+  app.get('/health', async () => {
+    let dbOk = false;
+    try {
+      await db.$queryRaw`SELECT 1`;
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+    return { ok: dbOk, db: dbOk ? 'up' : 'down' };
+  });
+
+  // ---- audit ------------------------------------------------------------------
+  app.post('/v1/audit', { preHandler: need('audit') }, async (req) => {
+    const entries = z.array(AuditIn).min(1).max(100).parse(req.body);
+    return { written: await appendAudit(db, entries) };
+  });
+  // Read-only chat calls are counted, never rows (plan 3.0.7).
+  app.post('/v1/audit/rollup', { preHandler: need('audit') }, async (req) => {
+    const rows = z
+      .array(
+        z
+          .object({
+            day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            action: z.string().min(1).max(200),
+            context: z.enum(['chat', 'autonomous', 'console', 'deploy']),
+            n: z.number().int().min(1).max(1_000_000),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(500)
+      .parse(req.body);
+    for (const r of rows) {
+      await db.auditRollup.upsert({
+        where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
+        create: { day: r.day, action: r.action, context: r.context, count: r.n },
+        update: { count: { increment: r.n } },
+      });
+    }
+    return { counted: rows.length };
+  });
+  app.get('/v1/audit', { preHandler: need('audit') }, async (req) => {
+    return { entries: await listAudit(db, AuditQuery.parse(req.query)) };
+  });
+
+  // ---- proposals ----------------------------------------------------------------
+  app.post('/v1/proposals', { preHandler: need('proposals') }, async (req, reply) => {
+    const created = await createProposal(db, CreateProposal.parse(req.body), actor(req));
+    return reply.code(201).send(created);
+  });
+  app.get('/v1/proposals', { preHandler: need('proposals') }, async (req) => {
+    const q = z
+      .object({ status: z.enum(['pending', 'approved', 'executing', 'executed', 'failed', 'rejected', 'expired']).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) })
+      .strict()
+      .parse(req.query);
+    return { proposals: await listProposals(db, q.status, q.limit) };
+  });
+  app.post('/v1/proposals/:id/approve', { preHandler: need('proposals') }, async (req) => {
+    const { id } = Id.parse(req.params);
+    const { approvalId } = z.object({ approvalId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict().parse(req.body);
+    await approveProposal(db, id, approvalId, rp, actor(req));
+    return { ok: true };
+  });
+  app.post('/v1/proposals/:id/reject', { preHandler: need('proposals') }, async (req) => {
+    const { id } = Id.parse(req.params);
+    const body = z.object({ approvalId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/).optional(), error: z.string().max(2000).optional() }).strict().parse(req.body ?? {});
+    await rejectProposal(db, id, { ...(body.approvalId ? { approvalId: body.approvalId } : {}), ...(body.error ? { error: body.error } : {}) }, rp, actor(req));
+    return { ok: true };
+  });
+  app.post('/v1/proposals/:id/claim', { preHandler: need('proposals') }, async (req) => {
+    const { id } = Id.parse(req.params);
+    const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
+    if (p && INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is carried out by the runtime: use /run`);
+    return claimProposal(db, id, rp, config.tz, actor(req));
+  });
+  // Approved actions the runtime carries out itself (turning a source on, a signed policy change).
+  app.post('/v1/proposals/:id/run', { preHandler: need('proposals') }, async (req) => {
+    const { id } = Id.parse(req.params);
+    return runInternal(db, id, rp, config.tz, actor(req));
+  });
+  // A tool's result can be large (a fetched page): this route takes up to 1 MB and truncates what it stores.
+  app.post('/v1/proposals/:id/complete', { preHandler: need('proposals'), bodyLimit: 1024 * 1024 }, async (req) => {
+    const { id } = Id.parse(req.params);
+    await completeProposal(db, id, CompleteProposal.parse(req.body), actor(req));
+    return { ok: true };
+  });
+
+  // ---- caps -----------------------------------------------------------------------
+  app.post('/v1/counters/claim', { preHandler: need('counters') }, async (req, reply) => {
+    const b = z
+      .object({ action: z.string().min(1).max(200), limit: z.number().int().min(0).max(100000), period: z.enum(['day', 'week']) })
+      .strict()
+      .parse(req.body);
+    const n = await claim(db, b.action, { limit: b.limit, period: b.period }, config.tz);
+    if (n === null) return reply.code(429).send({ error: 'cap reached', limit: b.limit });
+    return { count: n };
+  });
+
+  // ---- world (read) -------------------------------------------------------------------
+  // "World now" never carries tainted text: a tainted name is rendered kind#id.
+  app.get('/v1/world/now', { preHandler: need('world:read') }, async () => {
+    const services = await db.entity.findMany({ where: { kind: 'service', status: 'active' }, orderBy: { key: 'asc' }, take: 100 });
+    const counts = await db.entity.groupBy({ by: ['kind', 'status'], _count: { _all: true } });
+    return {
+      services: services.map((s) => ({ id: s.id, name: safeName(s), health: (s.state as { health?: string }).health ?? 'unknown', lastObservedAt: s.lastObservedAt })),
+      counts: counts.map((c) => ({ kind: c.kind, status: c.status, n: c._count._all })),
+    };
+  });
+  // Reading one entity returns its tainted fields too, marked, so the reader
+  // (chat) can taint its turn (plan 3.0.3).
+  app.get('/v1/world/entities/:id', { preHandler: need('world:read') }, async (req, reply) => {
+    const { id } = Id.parse(req.params);
+    const e = await db.entity.findUnique({ where: { id }, include: { sources: { select: { source: true, lastSyncedAt: true } } } });
+    if (!e || e.status === 'forgotten') return reply.code(404).send({ error: 'no such entity' });
+    return { entity: e, tainted: e.taintedPaths.length > 0 };
+  });
+
+  // ---- ledger -----------------------------------------------------------------------
+  app.post('/v1/ledger/predictions', { preHandler: need('ledger') }, async (req, reply) => {
+    const p = await emitPrediction(db, EmitPrediction.parse(req.body), actor(req));
+    return reply.code(201).send({ id: p.id, claim: p.claim, resolveBy: p.resolveBy });
+  });
+  app.get('/v1/ledger/open', { preHandler: need('ledger') }, async (req) => {
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).strict().parse(req.query);
+    return { predictions: await db.prediction.findMany({ where: { status: 'open' }, orderBy: { resolveBy: 'asc' }, take: q.limit }) };
+  });
+  app.get('/v1/ledger/calibration', { preHandler: need('ledger') }, async () => {
+    const latest = await db.calibrationSnapshot.findFirst({ orderBy: { windowEnd: 'desc' }, select: { windowEnd: true } });
+    if (!latest) return { snapshots: [] };
+    return { snapshots: await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } }) };
+  });
+
+  return app;
+}

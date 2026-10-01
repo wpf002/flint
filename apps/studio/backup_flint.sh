@@ -24,6 +24,7 @@ EXCLUDES=(
   --exclude './brain/adapters70b.run*' --exclude './*.log' --exclude './brain/*.log'
   --exclude './tailscaled.sock' --exclude './server.mjs' --exclude './ask.mjs'
   --exclude './*.log.[0-9]*'       # rotated logs (rotate_logs below)
+  --exclude './runtime/releases'   # runtime bundles, ~100 MB each, rebuilt by install-runtime.sh
 )
 # Offsite only. bsdtar's * crosses '/', so './*.x' matches at any depth: no
 # './*token*' here, it would take the adapters' tokenizer files with it.
@@ -36,6 +37,7 @@ SECRETS=(
   --exclude './nexus-responder.*'  # participant tokens and vendor API keys
   --exclude './legion'             # helper scripts with inline credentials
   --exclude './tokens'             # per-client token files
+  --exclude './enroll-code'        # the one-time code for registering an approval key
 )
 
 # Optional: encrypt the offsite copy to an age public key whose private half lives

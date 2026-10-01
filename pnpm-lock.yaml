@@ -151,6 +151,9 @@ importers:
       fastify:
         specifier: ^5.12.0
         version: 5.12.5
+      pg:
+        specifier: ^8.13.0
+        version: 8.22.0
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -161,9 +164,6 @@ importers:
       '@types/pg':
         specifier: ^8.11.0
         version: 8.20.0
-      pg:
-        specifier: ^8.13.0
-        version: 8.22.0
       prisma:
         specifier: 6.19.3
         version: 6.19.3(typescript@5.9.3)

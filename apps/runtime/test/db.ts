@@ -26,9 +26,11 @@ const PRISMA = join(RUNTIME, 'node_modules', '.bin', 'prisma');
 function fromSecrets(): Record<string, string> {
   const file = join(homedir(), '.flint', 'secrets.env');
   if (!existsSync(file)) return {};
-  const want = new Set(['FLINT_DB_TEST_OWNER_URL', 'FLINT_DB_TEST_URL', 'FLINT_DB_APPROVER_URL']);
+  const want = new Set(['FLINT_DB_TEST_OWNER_URL', 'FLINT_DB_TEST_URL', 'FLINT_DB_APPROVER_URL', 'FLINT_DB_BACKUP_URL', 'FLINT_DB_RESTORE_URL']);
   const out: Record<string, string> = {};
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
+  const backupEnv = join(homedir(), '.flint', 'backup.env');
+  const lines = readFileSync(file, 'utf8').split('\n').concat(existsSync(backupEnv) ? readFileSync(backupEnv, 'utf8').split('\n') : []);
+  for (const line of lines) {
     const m = line.match(/^(?:export\s+)?([A-Z_]+)=(.*)$/);
     if (m && want.has(m[1]!)) out[m[1]!] = m[2]!.trim().replace(/^["']|["']$/g, '');
   }
@@ -46,6 +48,9 @@ export interface TestUrls {
   owner: string;
   app: string;
   approver: string;
+  /** flint_backup on flint_test, and flint_restore (CREATEDB only), when configured. */
+  backup?: string;
+  restore?: string;
 }
 
 export function testUrls(): TestUrls | undefined {
@@ -58,11 +63,14 @@ export function testUrls(): TestUrls | undefined {
   for (const u of [owner, app, approverBase]) {
     if (new URL(u).pathname !== '/flint_test') throw new Error('runtime tests only ever touch the flint_test database');
   }
-  return { owner, app, approver: approverBase };
+  const backup = env.FLINT_DB_TEST_BACKUP_URL ?? (file.FLINT_DB_BACKUP_URL && withDatabase(file.FLINT_DB_BACKUP_URL, 'flint_test'));
+  const restore = env.FLINT_DB_TEST_RESTORE_URL ?? file.FLINT_DB_RESTORE_URL;
+  return { owner, app, approver: approverBase, ...(backup ? { backup } : {}), ...(restore ? { restore } : {}) };
 }
 
 export const URLS = testUrls();
-if (!URLS && process.env.FLINT_CI) throw new Error('CI must provide the flint_test database (see test/global-setup.ts)');
+// In CI and in the deploy gate (FLINT_REQUIRE_DB), a missing database is a failure, never a silent skip.
+if (!URLS && (process.env.FLINT_CI || process.env.FLINT_REQUIRE_DB)) throw new Error('the flint_test database is required here (see test/db.ts)');
 /** `describe.skipIf(NO_DB)` for database tests. */
 export const NO_DB = !URLS;
 
