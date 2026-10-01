@@ -46,8 +46,14 @@ const SECRET_VALUE: ReadonlyArray<[RegExp, string]> = [
   [/\bAIza[0-9A-Za-z_-]{35}\b/g, REDACTED],
   [/\btvly-[A-Za-z0-9_-]{10,}/g, REDACTED],
   [/\bpplx-[A-Za-z0-9]{16,}/g, REDACTED],
-  // user:password@ in a connection URL keeps the user and drops the password.
-  [/\b([a-z][a-z0-9+.-]*:\/\/[^:/?#\s@]+):[^@/?#\s]+@/gi, `$1:${REDACTED}@`],
+  // user:password@ in a connection URL keeps the user and drops the password. The
+  // lookbehind and the bounded scheme keep this linear: an unanchored
+  // `[a-z][a-z0-9+.-]*://` retried from every offset of `a.a.a.a...` was quadratic.
+  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/[^:/?#\s@]{0,256}):[^@/?#\s]{1,1024}@/gi, `$1:${REDACTED}@`],
+  // Basic auth, and credentials passed as query parameters or header lines.
+  [/\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}/g, `Basic ${REDACTED}`],
+  [/([?&](?:api[_-]?key|apikey|access[_-]?token|token|key|secret|password|auth)=)[^&#\s]+/gi, `$1${REDACTED}`],
+  [/\b((?:x-)?api-key|x-auth-token|authorization)(\s*[:=]\s*)[^\s"',;]{8,}/gi, `$1$2${REDACTED}`],
 ];
 
 export interface RedactOptions {
@@ -88,10 +94,31 @@ export function redact<T>(value: T, opts: RedactOptions = {}): T {
       if (v instanceof Uint8Array) return `[${v.byteLength} bytes]`;
       const out: Record<string, unknown> = {};
       for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-        const credential = isSecretKey(k) && ((typeof x === 'string' && x !== '') || x instanceof Uint8Array);
-        out[k] = credential ? REDACTED : go(x, depth + 1);
+        if (!isSecretKey(k)) out[k] = go(x, depth + 1);
+        else if (typeof x === 'string') out[k] = x === '' ? x : REDACTED;
+        else if (x !== null && typeof x === 'object') out[k] = scrub(x, depth + 1);
+        else out[k] = x; // a number or boolean under a credential word is a count or a flag
       }
       return out;
+    } finally {
+      seen.delete(v);
+    }
+  };
+  /**
+   * Everything under a credential-named key: every string and byte array is
+   * replaced, however deep (`credentials: {user, pass}`, `tokens: [...]`,
+   * `set-cookie: [...]`); numbers and booleans are kept (`tokens: {input: 5}`).
+   */
+  const scrub = (v: unknown, depth: number): unknown => {
+    if (typeof v === 'string') return v === '' ? v : REDACTED;
+    if (v instanceof Uint8Array) return REDACTED;
+    if (v === null || typeof v !== 'object') return v;
+    if (depth >= maxDepth) return '[too deep]';
+    if (seen.has(v)) return '[circular]';
+    seen.add(v);
+    try {
+      if (Array.isArray(v)) return v.map((x) => scrub(x, depth + 1));
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, scrub(x, depth + 1)]));
     } finally {
       seen.delete(v);
     }

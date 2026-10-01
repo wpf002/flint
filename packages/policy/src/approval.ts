@@ -60,7 +60,7 @@ export function p256Key(spki: Uint8Array): KeyObject | undefined {
   }
 }
 
-/** Is this payload still within its expiry, and was it signed for this subject and decision? */
+/** Is this payload still within its expiry? (The subject and decision are matched by the caller, against the row being approved.) */
 export function payloadCurrent(payload: ApprovalPayload, now: Date = new Date()): Verified {
   const exp = Date.parse(payload.expiresAt);
   if (!Number.isFinite(exp)) return no('expiresAt is not a date');
@@ -144,7 +144,12 @@ export function verifyWebAuthnAssertion(opts: {
   authenticatorData: Uint8Array;
   clientDataJson: Uint8Array;
   signature: Uint8Array;
-  storedSignCount: number;
+  /**
+   * The credential's last counter, for clone detection when an approval is first
+   * recorded. Omit it to re-verify a stored assertion (the runtime, before it
+   * executes): the counter was checked when it was recorded.
+   */
+  storedSignCount?: number;
   rp: WebAuthnRelyingParty;
 }): Verified {
   const key = p256Key(opts.publicKeySpki);
@@ -154,7 +159,8 @@ export function verifyWebAuthnAssertion(opts: {
   const ad = checkAuthData(opts.authenticatorData, opts.rp, false);
   if (!ad.ok) return ad;
   const count = ad.signCount ?? 0;
-  if ((count !== 0 || opts.storedSignCount !== 0) && count <= opts.storedSignCount) return no('the signature counter did not increase');
+  const stored = opts.storedSignCount;
+  if (stored !== undefined && (count !== 0 || stored !== 0) && count <= stored) return no('the signature counter did not increase');
   const signed = Buffer.concat([Buffer.from(opts.authenticatorData), sha256(opts.clientDataJson)]);
   try {
     return verify('sha256', signed, key, Buffer.from(opts.signature)) ? { ok: true, signCount: count } : no('bad signature');

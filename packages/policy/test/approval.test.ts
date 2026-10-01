@@ -124,6 +124,13 @@ describe('passkey assertions', () => {
     expect(verifyWebAuthnAssertion({ ...base, storedSignCount: 5, ...assertion(k.privateKey, challenge, { count: 6 }) })).toEqual({ ok: true, signCount: 6 });
   });
 
+  it('a re-verify (no stored counter) accepts the recorded assertion again', () => {
+    const a = assertion(k.privateKey, challenge, { count: 7 });
+    expect(verifyWebAuthnAssertion({ ...base, storedSignCount: 6, ...a })).toEqual({ ok: true, signCount: 7 });
+    const { storedSignCount: _drop, ...noCounter } = base;
+    expect(verifyWebAuthnAssertion({ ...noCounter, ...a })).toEqual({ ok: true, signCount: 7 });
+  });
+
   it('refuse a tampered authenticatorData', () => {
     const a = assertion(k.privateKey, challenge);
     const ad = Buffer.from(a.authenticatorData);

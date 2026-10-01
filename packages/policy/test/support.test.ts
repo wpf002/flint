@@ -70,6 +70,29 @@ describe('redact', () => {
     expect(JSON.stringify(redact(root, { maxDepth: 3 }))).toContain('[too deep]');
   });
 
+  it('everything under a credential key is scrubbed, arrays and objects included, counts kept', () => {
+    expect(redact({ tokens: ['f00dfeedcafebeef', 'abcdef0123456789'], cookies: ['session=8f3a9c2e1b7d'], credentials: { user: 'will', pass: 'hunter2hunter2' } })).toEqual({
+      tokens: [REDACTED, REDACTED],
+      cookies: [REDACTED],
+      credentials: { user: REDACTED, pass: REDACTED },
+    });
+    expect(redact({ headers: { 'set-cookie': ['sid=abc; HttpOnly'] } })).toEqual({ headers: { 'set-cookie': [REDACTED] } });
+    expect(redact({ tokens: { input: 1200, output: 300 } })).toEqual({ tokens: { input: 1200, output: 300 } });
+  });
+
+  it('catches Basic auth, credentials in query strings and header lines', () => {
+    const s = redactString('Authorization: Basic d2lsbDpodW50ZXIy and https://api.example.com/x?api_key=abcd1234efgh5678&q=1 and X-Api-Key: abcd1234efgh5678ijkl and redis://:s3cretpassw0rd@127.0.0.1:6379/0');
+    expect(s).not.toMatch(/d2lsbDpodW50ZXIy|abcd1234efgh5678|s3cretpassw0rd/);
+    expect(s).toContain('&q=1');
+  });
+
+  it('runs in linear time on adversarial input', () => {
+    const t = Date.now();
+    redactString('a.'.repeat(128_000));
+    redact({ result: { content: [{ text: 'a:'.repeat(64_000) + '//'.repeat(1000) }] } });
+    expect(Date.now() - t).toBeLessThan(500);
+  });
+
   it('isSecretKey splits camelCase, snake and kebab case', () => {
     for (const k of ['token', 'refresh_token', 'apiKey', 'api_key', 'x-api-key', 'sessionId', 'Authorization', 'cookie']) expect(isSecretKey(k), k).toBe(true);
     for (const k of ['key', 'author', 'monkey', 'keyboard', 'name', 'outcome']) expect(isSecretKey(k), k).toBe(false);
@@ -133,6 +156,11 @@ describe('self-modification allowlist', () => {
       'packages/mcp/connectors/../src/client.ts',
       'packages/mcp/test/connectors/../../src/gate.ts',
       '/etc/passwd',
+      'apps/runtime/src/sources/Registry.ts',
+      'apps/runtime/src/sources/INDEX.ts',
+      'packages/mcp/connectors/Computer-Use-Server.ts',
+      'docs/Security.md',
+      'docs/caf\u00e9.md',
       'packages\\mcp\\connectors\\x.ts',
       '',
     ]) expect(selfmodPathAllowed(p), p).toBe(false);

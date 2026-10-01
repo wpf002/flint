@@ -25,11 +25,16 @@ const ALLOWED: ReadonlyArray<RegExp> = [
 
 /**
  * Whether Flint may change this repo-relative path. Absolute paths, `..`,
- * backslashes, empty segments and anything outside the list are refused.
+ * backslashes, empty segments, non-ASCII and anything outside the list are
+ * refused. Matching is on the LOWERCASED path: the Mac's file system is
+ * case-insensitive, so `Registry.ts` IS `registry.ts` there.
+ *
+ * This is a lexical check. Whoever writes the files (P6) must also refuse a
+ * path that crosses a symlink in the working tree.
  */
 export function selfmodPathAllowed(path: string): boolean {
-  if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')) return false;
-  const p = path.startsWith('./') ? path.slice(2) : path;
+  if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0') || /[^\x21-\x7e]/.test(path)) return false;
+  const p = (path.startsWith('./') ? path.slice(2) : path).toLowerCase();
   if (p.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) return false;
   return ALLOWED.some((re) => re.test(p));
 }

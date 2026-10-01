@@ -25,7 +25,7 @@
  * called `ledger` exposing `void` is the key `mcp:ledger.void`, never the code
  * table's `ledger.void`.
  */
-import { NEVER_AUTO, isSafeTool, segmentsOf } from './tool-safety.js';
+import { MONEY_SEGMENTS, NEVER_AUTO, isSafeTool, segmentsOf } from './tool-safety.js';
 import { selfmodPathAllowed } from './selfmod-paths.js';
 
 export type Tier = 'alone' | 'approval' | 'forbidden';
@@ -135,15 +135,18 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
 /** Step 5: servers whose `readOnlyHint` is believed. Any other server's hint is ignored. */
 export const TRUSTED_READONLY: ReadonlySet<string> = new Set(['runtime', 'nexus', 'web', 'github-observer']);
 
-/** MCP tools (as `server.tool`) that send a request somewhere Flint does not control. */
-export const EGRESS_TOOLS: ReadonlySet<string> = new Set([
-  'web.fetch_url', 'web.web_search', 'web.search', 'trident.api_fetch',
-]);
-/** Servers every tool of which is egress. */
-const EGRESS_SERVERS: ReadonlySet<string> = new Set(['perplexity', 'web']);
-/** Name segments that mean a request leaves the box. */
+/**
+ * MCP servers whose tools stay inside Will's own systems: the runtime on this
+ * Mac, and Nexus (his memory service). Every OTHER server's tools count as
+ * network egress, because any of them can carry text to a third party (a search
+ * query is enough: `trident.web_search` sends it to a vendor). Deny by default:
+ * a new server is egress until it is added here in a reviewed change.
+ */
+export const INTERNAL_SERVERS: ReadonlySet<string> = new Set(['runtime', 'nexus']);
+/** Name segments that mean a request leaves the box, even on an internal server. */
 const EGRESS_SEGMENTS: ReadonlySet<string> = new Set([
   'fetch', 'url', 'http', 'https', 'request', 'download', 'browse', 'crawl', 'scrape', 'webhook', 'research', 'perplexity',
+  'web', 'send', 'post', 'upload', 'email', 'mail', 'notify', 'publish', 'share',
 ]);
 
 /** Step 1 name lists. */
@@ -167,6 +170,8 @@ export interface PolicyRow {
   pattern: string;
   tier: Tier;
   dailyCap?: number | null;
+  /** What the promotion covers ({endpoints}, {series}, {namespaces}). A scoped row promotes only when ctx.scopeAllows says this call is inside it. */
+  scope?: unknown;
   active: boolean;
   expiresAt: Date | string;
 }
@@ -184,6 +189,8 @@ export interface TierContext {
   pool?: string;
   /** ActionPolicy rows; inactive and expired ones are ignored here. */
   policies?: readonly PolicyRow[];
+  /** Is this call inside a row's scope? Without it, a scoped row never promotes (it may still tighten). */
+  scopeAllows?: (scope: unknown) => boolean;
   now?: Date;
 }
 
@@ -222,13 +229,27 @@ export function patternMatches(pattern: string, key: string): boolean {
   return key.startsWith(pattern.slice(0, -1));
 }
 
+/**
+ * The words of a name, splitting camelCase as well as punctuation:
+ * `github.mergePullRequest` -> [github, merge, pull, request]. The forbidden
+ * rules use this; isSafeTool keeps its own (stricter) segmenting.
+ */
+export function wordsOf(name: string): string[] {
+  return segmentsOf(name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2'));
+}
+
 /** Step 1. The reason it is forbidden, or undefined. */
 export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | 'paths' | 'pool'>): string | undefined {
   const name = ctx.mcp ? `${ctx.mcp.server}.${ctx.mcp.tool}` : action;
-  const segs = segmentsOf(name);
-  if (NEVER_AUTO.test(name)) return 'trades and money movement are never run (NEVER_AUTO)';
+  const segs = wordsOf(name);
+  // NEVER_AUTO on the raw name and on its snake_case form (placeOrder -> place_order).
+  if (NEVER_AUTO.test(name) || NEVER_AUTO.test(segs.join('_'))) return 'trades and money movement are never run (NEVER_AUTO)';
   if (!ctx.mcp && FORBIDDEN_ACTIONS.has(action)) return `${action} is forbidden`;
-  if (segs.includes('merge') && (ctx.mcp || !MERGE_EXEMPT.has(action))) return 'Flint never merges; Will does';
+  // Any merge an MCP tool can do is a code or record merge Will makes himself;
+  // a substring match catches `automerge` and `squashmerge` too.
+  if (ctx.mcp ? /merge/i.test(ctx.mcp.tool) || /merge/i.test(ctx.mcp.server) : segs.includes('merge') && !MERGE_EXEMPT.has(action)) {
+    return 'Flint never merges; Will does';
+  }
   if (ctx.pool && /trad|broker|exchange/i.test(ctx.pool)) return `pool ${ctx.pool} trades`;
   if (!ctx.mcp && action.startsWith('policy.') && action !== 'policy.change') return 'policy is changed only through policy.change';
   if (!ctx.mcp && action.startsWith('selfmod.')) {
@@ -245,12 +266,11 @@ export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | '
   return undefined;
 }
 
-/** Network egress: a request leaves the box. */
+/** Network egress: a request leaves the box (or may: an unknown server counts). */
 export function isEgress(action: string, mcp?: McpFacts): boolean {
   if (!mcp) return CODE_TABLE[action]?.egress === true;
-  const full = `${mcp.server}.${mcp.tool}`;
-  if (EGRESS_TOOLS.has(full) || EGRESS_SERVERS.has(mcp.server)) return true;
-  return segmentsOf(mcp.tool).some((s) => EGRESS_SEGMENTS.has(s));
+  if (!INTERNAL_SERVERS.has(mcp.server)) return true;
+  return wordsOf(mcp.tool).some((s) => EGRESS_SEGMENTS.has(s));
 }
 
 /** Writes anything. An MCP tool is a write unless its name proves it is a read and it is not marked destructive. */
@@ -259,6 +279,12 @@ export function isWrite(action: string, mcp?: McpFacts): boolean {
   if (mcp.destructiveHint) return true;
   if (mcp.readOnlyHint && TRUSTED_READONLY.has(mcp.server)) return false;
   return !isSafeTool(`${mcp.server}.${mcp.tool}`);
+}
+
+/** Any money word in the name (camelCase split), or a NEVER_AUTO match. */
+export function touchesMoney(name: string): boolean {
+  const words = wordsOf(name);
+  return NEVER_AUTO.test(name) || NEVER_AUTO.test(words.join('_')) || words.some((w) => MONEY_SEGMENTS.has(w) || w === 'swap' || w === 'trade');
 }
 
 const live = (p: PolicyRow, now: Date): boolean => p.active && new Date(p.expiresAt).getTime() > now.getTime();
@@ -272,6 +298,9 @@ function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> &
       return { tier: 'alone', rule: 'mcp-trusted-readonly', reason: `${server} is trusted and marks ${tool} read-only`, promotable: false };
     }
     if (isSafeTool(`${server}.${tool}`)) return { tier: 'alone', rule: 'mcp-safe-name', reason: 'the name proves a read', promotable: false };
+    // A name that touches money (a trade, a payment, an order) stays APPROVAL
+    // whatever a policy row says: `mcp:hive.*` ALONE must not reach `hive.open_position`.
+    if (touchesMoney(`${server}.${tool}`)) return { tier: 'approval', rule: 'mcp', reason: 'it may move money', promotable: false };
     return { tier: 'approval', rule: 'mcp', reason: 'a tool that may write', promotable: true };
   }
   const entry = CODE_TABLE[action];
@@ -296,8 +325,10 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const why = forbiddenReason(action, ctx);
   if (why) return { tier: 'forbidden', rule: 'forbidden', reason: why, key };
 
-  // 2a. Autonomous: the closed list, and never an MCP tool.
-  if (ctx.context === 'autonomous') {
+  // 2a. Autonomous: the closed list, and never an MCP tool. Any context that is
+  // not exactly chat or console is treated as autonomous (fail closed).
+  const autonomous = ctx.context !== 'chat' && ctx.context !== 'console';
+  if (autonomous) {
     if (ctx.mcp) return { tier: 'forbidden', rule: 'autonomous', reason: 'no MCP tool runs autonomously', key };
     if (!AUTONOMOUS_ACTIONS.has(action)) return { tier: 'forbidden', rule: 'autonomous', reason: `${action} is not an autonomous action`, key };
   }
@@ -314,7 +345,7 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
 
   // 2b. The floor a tainted chat turn, or personal data headed off the box, sets.
   const egress = isEgress(action, ctx.mcp);
-  const tainted = ctx.tainted && ctx.context !== 'autonomous' && (egress || isWrite(action, ctx.mcp));
+  const tainted = ctx.tainted && !autonomous && (egress || isWrite(action, ctx.mcp));
   const sensitive = egress && (ctx.sensitivity === 'personal' || ctx.sensitivity === 'financial');
   const floored = tainted || sensitive;
 
@@ -322,18 +353,23 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   // APPROVAL entry, and never below a step-2 floor.
   const rows = (ctx.policies ?? []).filter((p) => live(p, now) && patternMatches(p.pattern, key));
   const tightest = rows.reduce<PolicyRow | undefined>((t, p) => (!t || RANK[p.tier] > RANK[t.tier] ? p : t), undefined);
+  // A scoped row promotes only inside its scope, and only when the caller can tell.
+  const inScope = (p: PolicyRow): boolean => p.scope == null || ctx.scopeAllows?.(p.scope) === true;
+  const promoters = rows.filter((p) => p.tier === 'alone' && inScope(p));
   if (tightest && RANK[tightest.tier] > RANK[decision.tier]) {
     decision = { ...decision, tier: tightest.tier, rule: 'policy', reason: `ActionPolicy ${tightest.pattern}`, policyPattern: tightest.pattern };
-  } else if (tightest && tightest.tier === 'alone' && decision.tier === 'approval' && base.promotable && !floored) {
-    const cap = tightest.dailyCap != null && tightest.dailyCap >= 0
-      ? { limit: Math.min(tightest.dailyCap, decision.cap?.limit ?? Infinity), period: decision.cap?.period ?? 'day' as const }
-      : decision.cap;
+  } else if (tightest?.tier === 'alone' && promoters.length > 0 && decision.tier === 'approval' && base.promotable && !floored) {
+    // Every matching row's cap applies, whatever order the rows came in: the lowest wins.
+    const caps = promoters.map((p) => p.dailyCap).filter((c): c is number => c != null && c >= 0);
+    const limit = Math.min(...caps, decision.cap?.limit ?? Infinity);
+    const cap: Cap | undefined = Number.isFinite(limit) ? { limit, period: decision.cap?.period ?? 'day' } : undefined;
+    const first = promoters[0]!;
     decision = {
       ...decision,
       tier: 'alone',
       rule: 'policy',
-      reason: `promoted by ActionPolicy ${tightest.pattern}`,
-      policyPattern: tightest.pattern,
+      reason: `promoted by ActionPolicy ${first.pattern}`,
+      policyPattern: first.pattern,
       ...(cap ? { cap } : {}),
     };
   }

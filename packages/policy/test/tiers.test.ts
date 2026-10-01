@@ -202,3 +202,56 @@ describe('steps 4 to 6', () => {
     expect(resolveTier('frobnicate', { ...chat, policies: [row('frobnicate', 'alone')], now: NOW }).tier).toBe('approval');
   });
 });
+
+// Regressions from the PR #37 review.
+describe('review fixes', () => {
+  it('a tainted turn floors egress on ANY non-internal server (trident.web_search), not just `web`', () => {
+    for (const [server, tool] of [['trident', 'web_search'], ['brave-search', 'brave_web_search'], ['trident', 'gdrive_search'], ['newserver', 'get_thing']]) {
+      expect(resolveTier('x', { ...chat, tainted: true, mcp: mcp(server!, tool!) }).tier, `${server}.${tool}`).toBe('approval');
+    }
+    // Internal servers stay as they were for reads.
+    expect(resolveTier('x', { ...chat, tainted: true, mcp: mcp('nexus', 'recall', { readOnlyHint: true }) }).tier).toBe('alone');
+    expect(resolveTier('x', { ...chat, tainted: true, mcp: mcp('runtime', 'world_now', { readOnlyHint: true }) }).tier).toBe('alone');
+  });
+
+  it('camelCase and joined names cannot dodge the merge, person and NEVER_AUTO rules', () => {
+    for (const [server, tool] of [['github', 'mergePullRequest'], ['github', 'automerge'], ['github', 'squashMerge'], ['crm', 'lookupPerson'], ['github', 'getPersonByEmail'], ['broker', 'placeOrder'], ['broker', 'executeTrade']]) {
+      const d = resolveTier('x', { ...chat, mcp: mcp(server!, tool!), policies: [row(`mcp:${server}.*`, 'alone')], now: NOW });
+      expect(d.tier, `${server}.${tool}`).toBe('forbidden');
+    }
+  });
+
+  it('a wildcard promotion never reaches a tool that may move money', () => {
+    const policies = [row('mcp:hive.*', 'alone'), row('mcp:dex.*', 'alone'), row('mcp:bank.*', 'alone')];
+    for (const [server, tool] of [['hive', 'open_position'], ['hive', 'place_trade'], ['hive', 'market_order'], ['dex', 'swap'], ['bank', 'fund_account'], ['hive', 'openPosition']]) {
+      expect(resolveTier('x', { ...chat, mcp: mcp(server!, tool!), policies, now: NOW }).tier, `${server}.${tool}`).toBe('approval');
+    }
+    // An ordinary write on the same server is still promotable.
+    expect(resolveTier('x', { ...chat, mcp: mcp('hive', 'restart_worker'), policies, now: NOW }).tier).toBe('alone');
+  });
+
+  it('every matching row\'s cap applies, whatever order the rows come in', () => {
+    const a = row('world.*', 'alone');
+    const b = row('world.entity.write', 'alone', { dailyCap: 5 });
+    for (const policies of [[a, b], [b, a]]) {
+      expect(resolveTier('world.entity.write', { ...auto, policies, now: NOW }).cap).toEqual({ limit: 5, period: 'day' });
+    }
+  });
+
+  it('a scoped row promotes only when the caller confirms the call is inside its scope', () => {
+    const scoped = [row('mcp:gcal.*', 'alone', { scope: { calendars: ['work'] } })];
+    const ctx = { ...chat, mcp: mcp('gcal', 'create_event'), policies: scoped, now: NOW };
+    expect(resolveTier('x', ctx).tier).toBe('approval');
+    expect(resolveTier('x', { ...ctx, scopeAllows: () => false }).tier).toBe('approval');
+    expect(resolveTier('x', { ...ctx, scopeAllows: () => true }).tier).toBe('alone');
+    // A scoped row still tightens, in or out of scope.
+    expect(resolveTier('calculate', { ...chat, policies: [row('calculate', 'forbidden', { scope: { x: 1 } })], now: NOW }).tier).toBe('forbidden');
+  });
+
+  it('any context other than chat or console is held to the autonomous rules', () => {
+    const odd = { context: 'job' as unknown as 'chat', tainted: false };
+    expect(resolveTier('calculate', odd).tier).toBe('forbidden');
+    expect(resolveTier('x', { ...odd, mcp: mcp('nexus', 'recall', { readOnlyHint: true }) }).tier).toBe('forbidden');
+  });
+});
+

@@ -2,6 +2,9 @@
   "$schema": "https://turbo.build/schema.json",
   "envMode": "loose",
   "agentGuidance": false,
+  "globalDependencies": [
+    "tsconfig.base.json"
+  ],
   "tasks": {
     "build": {
       "dependsOn": [
@@ -19,7 +22,8 @@
     },
     "test": {
       "dependsOn": [
-        "^build"
+        "^build",
+        "build"
       ],
       "outputs": [],
       "cache": false

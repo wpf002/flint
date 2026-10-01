@@ -9,7 +9,8 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @flint/core build \
  && pnpm --filter @flint/persona build \
- && pnpm --filter @flint/mcp build
+ && pnpm --filter @flint/mcp build \
+ && pnpm --filter @flint/policy build
 
 # Railway injects PORT; the server reads it. FLINT_TOKEN + a provider are
 # required at runtime (set them in the Railway service variables).
