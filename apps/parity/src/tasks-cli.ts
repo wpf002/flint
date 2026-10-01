@@ -100,7 +100,7 @@ const ROLE_ENV: Record<ModelRole | 'claude-base', string> = {
 };
 
 const DEFAULTS = {
-  flintUrl: process.env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
+  flintUrl: process.env.FLINT_URL?.trim() || 'http://localhost:8080',
   flintFrontierModel: process.env.PARITY_FLINT_PRICE_MODEL?.trim() || 'claude-sonnet-4-6',
 };
 

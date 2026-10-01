@@ -69,7 +69,7 @@ Contestants (`--contestants flint,openai,claude,perplexity`):
 
 | name | how | default model | flag / env |
 | --- | --- | --- | --- |
-| `flint` | `POST /generate` on the running server with `eval: true` | whatever the server routes to | `--flint-url` / `FLINT_URL` (default `http://127.0.0.1:8080`) |
+| `flint` | `POST /generate` on the running server with `eval: true` | whatever the server routes to | `--flint-url` / `FLINT_URL` (default `http://localhost:8080`; Flint listens on `::1`) |
 | `openai` | `OpenAiProvider` from @flint/core | `gpt-5` | `--openai-model` / `PARITY_OPENAI_MODEL` |
 | `claude` | `AnthropicProvider` | `claude-opus-5` | `--claude-model` / `PARITY_CLAUDE_MODEL` |
 | `perplexity` | `PerplexityProvider` (skipped with a note if no key) | `sonar-pro` | `--perplexity-model` / `PARITY_PERPLEXITY_MODEL` |

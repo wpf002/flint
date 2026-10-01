@@ -105,10 +105,10 @@ launchctl load -w "$AGENTS/$PLIST"
 # A bundle that builds can still fail to boot. Poll the health endpoint the
 # server already exposes rather than assuming the reload worked.
 PORT_N="${PORT:-8080}"
-echo "verifying http://127.0.0.1:$PORT_N/health ..."
+echo "verifying http://localhost:$PORT_N/health ..."
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -fsS -m 3 "http://127.0.0.1:$PORT_N/health" >/dev/null 2>&1; then
-    curl -fsS -m 3 "http://127.0.0.1:$PORT_N/health"; echo
+  if curl -fsS -m 3 "http://localhost:$PORT_N/health" >/dev/null 2>&1; then
+    curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo
     echo "done. server bundled, reloaded and answering on :$PORT_N."
     exit 0
   fi

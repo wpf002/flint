@@ -13,7 +13,7 @@ import os, sys, json, subprocess, tempfile, time, urllib.request, wave
 import numpy as np
 import sounddevice as sd
 
-FLINT_URL   = os.environ.get("FLINT_URL", "http://127.0.0.1:8080")
+FLINT_URL   = os.environ.get("FLINT_URL", "http://localhost:8080")  # Flint listens on ::1
 FLINT_TOKEN = os.environ.get("FLINT_TOKEN") or subprocess.check_output(
     ["/usr/libexec/PlistBuddy","-c","Print :EnvironmentVariables:FLINT_TOKEN",
      os.path.expanduser("~/Library/LaunchAgents/com.flint.server.plist")]).decode().strip()

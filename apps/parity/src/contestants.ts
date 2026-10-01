@@ -169,6 +169,8 @@ interface FlintGenerateResponse {
   proposed?: string[];
   eval?: boolean;
   error?: string;
+  /** Matches the server's log line for a failure (it no longer echoes the cause, #34). */
+  ref?: string;
   /**
    * What the replay's paid calls cost, as the server's spend ledger priced them:
    * every model pass and fallback attempt, the research planner, paid searches.
@@ -319,7 +321,8 @@ export function flintContestant(opts: {
       // A 5xx from a server that doesn't report cost may have spent: charge the estimate.
       const spent = typeof body.costUsd !== 'number' && r.status >= 500 ? estimate(p) : flintReplayCost(body, opts.frontierModel);
       const fail = (err: Error) => withCost(err, spent);
-      if (!r.ok) throw fail(new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}`));
+      // `ref` ties the failure to the server's log line; the server no longer echoes the cause (#34).
+      if (!r.ok) throw fail(new Error(`flint HTTP ${r.status}: ${body.error ?? 'no body'}${body.ref ? ` (server log ref=${body.ref})` : ''}`));
       if (body.eval !== true && !opts.allowTrainingLog) {
         throw fail(
           new FatalError(
