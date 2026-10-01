@@ -1,0 +1,60 @@
+# PENDING: GitHub refuses a push that adds anything under .github/workflows/
+# unless the pushing token has the `workflow` scope, and the gh login here has
+# only `repo`. Once Will runs `gh auth refresh -h github.com -s workflow`, this
+# file moves to .github/workflows/ci.yml unchanged.
+#
+# CI for every pull request and every push to main (Machine plan 3.0.10).
+#
+# The repo is public, so this workflow runs untrusted code from forks. It is
+# therefore `pull_request` (never `pull_request_target`), it has read-only
+# permissions, and it uses no secrets at all: nothing here could leak one.
+# Third-party actions are pinned to a commit, not a movable tag.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        # A throwaway container that exists for this job only; trust auth means
+        # there is no password to store anywhere.
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FLINT_CI: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      # Some server tests drive the deploy scripts, which are zsh.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run build
+      - run: pnpm turbo run typecheck
+      - run: pnpm turbo run test

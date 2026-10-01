@@ -14,8 +14,8 @@ AGENTS="$HOME/Library/LaunchAgents"
 PLIST="com.flint.server.plist"
 mkdir -p "$DATA" "$AGENTS"
 
-echo "building @flint/core + @flint/persona + @flint/mcp..."
-# ALL THREE. apps/server imports @flint/mcp (src/index.ts, src/actions.ts) and
+echo "building @flint/core + @flint/persona + @flint/mcp + @flint/policy..."
+# ALL FOUR. apps/server imports @flint/mcp (src/index.ts, src/actions.ts) and
 # packages/mcp resolves through its dist/, which is gitignored — so on a FRESH
 # CLONE (i.e. the Mac Studio) skipping this build makes both the typecheck gate
 # and esbuild fail with "Cannot find module @flint/mcp", and Flint never starts.
@@ -23,6 +23,8 @@ echo "building @flint/core + @flint/persona + @flint/mcp..."
 pnpm --filter @flint/core build >/dev/null
 pnpm --filter @flint/persona build >/dev/null
 pnpm --filter @flint/mcp build >/dev/null
+# isSafeTool and the tier engine live here (moved out of apps/server in P1).
+pnpm --filter @flint/policy build >/dev/null
 
 # ---- GATE: never deploy a broken Flint -----------------------------------
 # (runs AFTER the workspace build — the server typechecks against their dist
@@ -37,6 +39,9 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   pnpm --filter server typecheck || { echo "✗ typecheck failed — NOT deploying"; exit 1; }
   echo "gate: server policy tests (brain routing + auto-approval)..."
   pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
+  echo "gate: policy typecheck + tests (isSafeTool, the tier engine, approval signatures)..."
+  pnpm --filter @flint/policy typecheck || { echo "✗ policy typecheck failed — NOT deploying"; exit 1; }
+  pnpm --filter @flint/policy test || { echo "✗ policy tests failed — NOT deploying"; exit 1; }
   echo "gate: persona tests (voice + constitution in the prompt)..."
   pnpm --filter @flint/persona test || { echo "✗ persona tests failed — NOT deploying"; exit 1; }
   echo "gate: mcp typecheck + tests (connectors, the fetch_url guard, the approval policy)..."
