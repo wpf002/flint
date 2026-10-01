@@ -198,10 +198,14 @@ const TAINT_META = 'flint/tainted';
  * call that cannot succeed.
  */
 function predictionRefusal(req: GateRequest): string | undefined {
-  if (req.server !== 'runtime' || req.tool !== 'ledger_record_prediction' || !turnTainted()) return undefined;
+  if (req.server !== 'runtime' || req.tool !== 'ledger_record_prediction') return undefined;
   const args = req.args && typeof req.args === 'object' ? (req.args as Record<string, unknown>) : {};
-  if (ClaimTemplate.safeParse(args.template).success) return undefined;
-  return `This turn read text from outside, so a prediction must use one of the ledger's claim templates, filled exactly: ${CLAIM_TEMPLATE_HELP} It was not recorded.`;
+  // A template that is given must be a real one, tainted turn or not: the ledger would refuse it after Will approved.
+  if (args.template === undefined && !turnTainted()) return undefined;
+  const t = ClaimTemplate.safeParse(args.template);
+  if (t.success) return undefined;
+  const why = args.template === undefined ? 'no template was given' : t.error.issues.map((i) => `${i.path.join('.') || 'template'}: ${i.message}`).join('; ').slice(0, 300);
+  return `${turnTainted() ? 'This turn read text from outside, so a' : 'A'} prediction's template must be one of the ledger's claim templates, filled exactly (${why}). ${CLAIM_TEMPLATE_HELP} It was not recorded.`;
 }
 
 /** The MCP client's gate. */
@@ -219,8 +223,8 @@ export function tierGate(opts: TierGateOptions): Gate {
       const refused = predictionRefusal(req);
       if (refused) {
         // A refusal, recorded like every other.
-        const d = resolveTier(req.fullName, { context: 'chat', tainted: true, mcp, policies: opts.policies?.() ?? [] });
-        event(opts, req.fullName, { ...d, tier: 'forbidden', rule: 'tainted', reason: 'a prediction from a tainted turn must use a claim template' }, mcp, 'denied');
+        const d = resolveTier(req.fullName, { context: 'chat', tainted: turnTainted(), mcp, policies: opts.policies?.() ?? [] });
+        event(opts, req.fullName, { ...d, tier: 'forbidden', rule: 'forbidden', reason: 'a prediction needs a valid claim template' }, mcp, 'denied');
         return { allow: false, message: refused };
       }
       const g = await gateCall(opts, {

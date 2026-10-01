@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { CLAIM_TEMPLATE_HELP, ClaimTemplate } from '@flint/policy';
+import { CLAIM_TEMPLATE_HELP, ClaimTemplate, entityRef } from '@flint/policy';
 
 const BASE = process.env.FLINT_RUNTIME_URL ?? 'http://[::1]:8090';
 const TOKEN_FILE = join(homedir(), '.flint', 'tokens', 'runtime-mcp.token');
@@ -66,7 +66,12 @@ export function buildServer(call = runtimeCall): McpServer {
   server.registerTool(
     'world_now',
     { description: "What Flint's world model says right now: each service's health and how many entities of each kind it tracks. Never contains text from outside.", inputSchema: {}, annotations: readOnly },
-    async () => text({ ...((await call('/v1/world/now')) as object), tainted: false }),
+    async () => {
+      // Each service with the `ref` a prediction's template names it by.
+      const r = (await call('/v1/world/now')) as { services?: Array<Record<string, unknown>> } & Record<string, unknown>;
+      const services = (r.services ?? []).map((sv) => (typeof sv.id === 'string' ? { ...sv, ref: entityRef('service', sv.id) } : sv));
+      return text({ ...r, services, tainted: false });
+    },
   );
 
   server.registerTool(
@@ -81,7 +86,8 @@ export function buildServer(call = runtimeCall): McpServer {
       const r = (await call(`/v1/world/entities/${id}`)) as { entity?: Record<string, unknown>; tainted?: boolean };
       const e = r.entity ?? {};
       const pick = ['id', 'kind', 'key', 'name', 'status', 'state', 'taintedPaths', 'version', 'lastObservedAt'];
-      return text({ entity: Object.fromEntries(pick.filter((k) => k in e).map((k) => [k, e[k]])), tainted: r.tainted !== false });
+      const ref = typeof e.kind === 'string' && typeof e.id === 'string' ? { ref: entityRef(e.kind, e.id) } : {};
+      return text({ entity: { ...Object.fromEntries(pick.filter((k) => k in e).map((k) => [k, e[k]])), ...ref }, tainted: r.tainted !== false });
     },
   );
 

@@ -8,7 +8,8 @@ describe('runtime connector', () => {
     const calls: Array<{ path: string; body?: unknown }> = [];
     const server = buildServer(async (path, init = {}) => {
       calls.push({ path, ...(init.body !== undefined ? { body: init.body } : {}) });
-      if (path.startsWith('/v1/world/entities/')) return { entity: { id: 'e1', name: 'issue#1' }, tainted: true };
+      if (path.startsWith('/v1/world/entities/')) return { entity: { id: 'enmuq2v0lqfymz24ehza', kind: 'issue', name: 'issue#1', sources: ['x'] }, tainted: true };
+      if (path === '/v1/world/now') return { services: [{ id: 'enmuq2v0lqfymz24ehza', name: 'api', health: 'ok' }], counts: [] };
       return { ok: true };
     });
     const [c, s] = InMemoryTransport.createLinkedPair();
@@ -21,6 +22,12 @@ describe('runtime connector', () => {
     expect(tools.find((t) => t.name === 'ledger_record_prediction')?.annotations?.readOnlyHint).toBeUndefined();
     const ent = await client.callTool({ name: 'world_entity', arguments: { id: 'e1' } });
     expect(JSON.stringify(ent)).toContain('\\"tainted\\": true');
+    // Each entity comes with the ref a template names it by (and no raw sources list).
+    const entBody = JSON.parse((ent.content as Array<{ text: string }>)[0]!.text) as { entity: Record<string, unknown> };
+    expect(entBody.entity).toMatchObject({ ref: 'issue#24ehza' });
+    expect(entBody.entity.sources).toBeUndefined();
+    const now = await client.callTool({ name: 'world_now', arguments: {} });
+    expect(JSON.parse((now.content as Array<{ text: string }>)[0]!.text).services[0]).toMatchObject({ ref: 'service#24ehza' });
     await client.callTool({ name: 'ledger_record_prediction', arguments: { claim: 'c', probability: 0.7, domain: 'services', type: 'event_occurs', resolutionCriteria: 'r', resolveBy: '2026-10-08T00:00:00Z' } });
     expect(calls.at(-1)).toMatchObject({ path: '/v1/ledger/predictions', body: { method: 'model_reasoning', resolver: 'will', evidence: [] } });
     const bad = await client.callTool({ name: 'world_entity', arguments: { id: '../../admin' } });

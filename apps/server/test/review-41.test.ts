@@ -175,7 +175,13 @@ describe('runtime results and the gate', () => {
     expect(await withTurnTaint(() => recorded.check(req), { sources: ['mcp:web'] })).toMatchObject({ allow: false, message: expect.stringMatching(/claim templates.*service_healthy/) });
     const guessed = { ...req, args: { template: { id: 'deploy_success', params: { service: 'api' } } } };
     expect(await withTurnTaint(() => recorded.check(guessed), { sources: ['mcp:web'] })).toMatchObject({ allow: false });
-    expect(events.map((e) => [e.status, e.decision.rule])).toEqual([['denied', 'tainted'], ['denied', 'tainted']]);
+    expect(events.map((e) => [e.status, e.decision.rule])).toEqual([['denied', 'forbidden'], ['denied', 'forbidden']]);
+    // The refusal says what was wrong, and how an entity is named.
+    const long = { ...req, args: { template: { id: 'service_healthy', params: { entity: 'service#enmuq2v0lqfymz24ehza' } } } };
+    expect(await withTurnTaint(() => recorded.check(long), { sources: ['mcp:web'] })).toMatchObject({ allow: false, message: expect.stringMatching(/params\.entity.*last 6 characters/s) });
+    // An invalid template is refused in an untainted turn too; free text there is fine.
+    expect((await withTurnTaint(() => recorded.check(long))).allow).toBe(false);
+    expect((await withTurnTaint(() => recorded.check(req))).allow).toBe(true);
   });
 
   it('a promoted action\'s cap is claimed first: used up is refused, unknown asks Will', async () => {
