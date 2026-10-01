@@ -173,7 +173,7 @@
     <label for="enrollcode">Enrolment code (run <code>pnpm --filter @flint/runtime enroll</code> on the Mac)</label>
     <input id="enrollcode" type="password" autocomplete="off" placeholder="one-time code">
     <input id="enrolllabel" type="text" autocomplete="off" placeholder="name this key, e.g. iPhone">
-    <div class="row"><button class="ghost" onclick="enrollPasskey()">Add a passkey on this device</button></div>
+    <div class="row"><button class="ghost" id="enrollpk" onclick="enrollPasskey()">Add a passkey on this device</button><button class="ghost" id="enrollse" style="display:none" onclick="enrollEnclave()">Add Touch ID approval key</button></div>
   </div>
   <div id="enrollmsg" class="log" style="display:none"></div>
   <label for="tokin">Access token (only on a device Flint doesn't sign in for you)</label>
@@ -281,7 +281,7 @@ applyLO();
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
   var card=document.createElement('div');card.className='propose';
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
-  card.innerHTML='<div class="pt">Flint wants to run <b>'+esc(a.fullName)+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">'+(canPasskey()?'Approve with passkey':'Approve')+'</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
+  card.innerHTML='<div class="pt">Flint wants to run <b>'+esc(a.fullName)+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">'+(canEnclave()?'Approve with Touch ID':canPasskey()?'Approve with passkey':'Approve')+'</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
   card.querySelector('.ok').onclick=function(){approveAction(a.id,card);};
   card.querySelector('.no').onclick=function(){rejectAction(a.id,card);};
   host.appendChild(card);});document.getElementById('transcript').scrollTop=9e9;}
@@ -292,12 +292,35 @@ function b64u(buf){var b=new Uint8Array(buf),s='';for(var i=0;i<b.length;i++)s+=
 function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
 function passkeysHere(){return !!(window.PublicKeyCredential&&location.protocol==='https:');}
 function canPasskey(){return passkeysHere()&&!!CREDS&&CREDS.some(function(c){return c.factor==='webauthn';});}
+/* The Mac app's Touch ID key (Secure Enclave), through its flintApproval bridge. */
+var SE_ID=null;
+function enclave(){return window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.flintApproval;}
+function se(op,args){return enclave().postMessage(Object.assign({op:op},args||{}));}
+function seIdOf(pub){return crypto.subtle.digest('SHA-256',unb64u(pub)).then(function(h){return 'se_'+Array.prototype.map.call(new Uint8Array(h),function(b){return ('0'+b.toString(16)).slice(-2);}).join('').slice(0,32);});}
+function canEnclave(){return !!enclave()&&!!SE_ID&&!!CREDS&&CREDS.some(function(c){return c.credentialId===SE_ID;});}
+function loadEnclave(){if(!enclave())return;se('status').then(function(st){if(!st||!st.hasKey)return null;return se('publicKey').then(function(r){return seIdOf(r.publicKey);});}).then(function(id){SE_ID=id;}).catch(function(){});}
+function enrollEnclave(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'Touch ID (Mac)';
+  postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
+    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as Flint approval key'}).then(function(sg){
+      return postJson('/approvals/enroll/finish',{challengeId:b.challengeId,factor:'secure_enclave',publicKey:pk.publicKey,signature:sg.signature}).then(function(){return seIdOf(pk.publicKey);});});});
+  }).then(function(id){SE_ID=id;document.getElementById('enrollcode').value='';enrollMsg('✓ Touch ID approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
+function enclaveDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+    return se('sign',{challenge:b.challenge,reason:(decision==='approve'?'approve ':'reject ')+b.payload.action}).then(function(sg){
+      return postJson('/approvals/finish',{challengeId:b.challengeId,credentialId:SE_ID,signature:sg.signature});});
+  }).then(function(d){showDecision(d,decision,r,row);}).catch(function(e){row.style.opacity=1;r.style.display='block';r.textContent='✗ '+(e.message||e);r.style.color='var(--orange)';});}
+function showDecision(d,decision,r,row){r.style.display='block';row.style.display='none';
+  if(decision==='reject'){r.textContent='dismissed (signed)';return;}
+  var a=d.action||{};if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
+  else{r.textContent='✗ '+(a.error||'failed');r.style.color='var(--orange)';}}
 function loadCreds(){if(!TOKEN)return;fetch(BASE+'/approvals/credentials',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
   var el=document.getElementById('creds');var box=document.getElementById('enrollbox');
   if(!d){CREDS=null;el.textContent='approvals are one-tap (no approval key store)';box.style.display='none';return;}
   CREDS=d.credentials||[];
   el.textContent=CREDS.length?CREDS.map(function(c){return '🔑 '+c.label+' ('+(c.factor==='webauthn'?'passkey':'Touch ID')+')';}).join('\n'):'no approval key yet';
-  box.style.display=passkeysHere()?'block':'none';}).catch(function(){});}
+  box.style.display=(passkeysHere()||enclave())?'block':'none';
+  document.getElementById('enrollpk').style.display=passkeysHere()?'':'none';
+  document.getElementById('enrollse').style.display=enclave()?'':'none';}).catch(function(){});}
 function enrollMsg(t,bad){var m=document.getElementById('enrollmsg');m.style.display='block';m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
 function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});}
 function enrollPasskey(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'passkey';
@@ -319,7 +342,7 @@ function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var ro
     var a=d.action||{};if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
     else{r.textContent='✗ '+(a.error||'failed');r.style.color='var(--orange)';}
   }).catch(function(e){row.style.opacity=1;r.style.display='block';r.textContent='✗ '+e.message;r.style.color='var(--orange)';});}
-function approveAction(id,card){if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+function approveAction(id,card){if(canEnclave())return enclaveDecide(id,'approve',card);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){
     var a=d.action||{};r.style.display='block';row.style.display='none';
     if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
@@ -537,6 +560,7 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 })();
 
 refresh();
+loadEnclave();
 if(!TOKEN) setTimeout(openSettings,400); else loadCreds();
 </script>
 </body>
