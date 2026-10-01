@@ -107,7 +107,7 @@ function toFlintTool(
       if (!decision.allow) return { approved: false, message: decision.message };
       let raw: unknown;
       try {
-        raw = await client.callTool({ name, arguments: (decision.args ?? call.args ?? {}) as Record<string, unknown> });
+        raw = await client.callTool({ name, arguments: (call.args ?? {}) as Record<string, unknown>, ...(decision.meta ? { _meta: decision.meta } : {}) });
       } catch (err) {
         // A failure's text reaches the model too, so the gate sees it like a result.
         options.gate.onResult?.(req, { isError: true, content: err instanceof Error ? err.message : String(err) });

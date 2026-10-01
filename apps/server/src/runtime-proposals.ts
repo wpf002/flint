@@ -17,6 +17,7 @@
  */
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type { Runtime } from './audit-sink';
 
 export interface ProposalIn {
@@ -47,7 +48,7 @@ export interface RuntimeProposal {
   expiresAt: string;
 }
 
-export type Proposed = { id: string } | { spooled: true } | { refused: string };
+export type Proposed = { id: string } | { spooled: true; spoolId: string } | { refused: string };
 export type Outcome = { ok: boolean; result?: Record<string, unknown>; error?: string };
 
 export class RuntimeError extends Error {
@@ -64,6 +65,8 @@ export interface RuntimeProposalsOptions {
   spoolDir: string;
   fetchImpl?: typeof fetch;
   log?: (m: string) => void;
+  /** A spooled proposal the runtime refused when it got there (for the audit trail: it was recorded as queued). */
+  onRefused?: (p: { action: string; spoolId?: string; tainted: boolean; reason: string }) => void;
 }
 
 /** A 4xx is the runtime's answer (refused, not found, wrong state); anything else may be retried. */
@@ -110,9 +113,10 @@ export class RuntimeProposals {
       if (isAnswer(err)) return { refused: (err as Error).message };
       // A timeout may mean it landed; the replay files it again and the runtime
       // answers with the same proposal.
-      appendFileSync(this.spool, `${JSON.stringify({ ...p, spooledAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+      const spoolId = randomBytes(8).toString('hex');
+      appendFileSync(this.spool, `${JSON.stringify({ ...p, spooledAt: new Date().toISOString(), spoolId })}\n`, { mode: 0o600 });
       this.o.log?.(`[proposals] runtime unreachable; spooled ${p.action} (pending, unsynced)`);
-      return { spooled: true };
+      return { spooled: true, spoolId };
     }
   }
 
@@ -128,7 +132,7 @@ export class RuntimeProposals {
     return this.replaying;
   }
 
-  private async drain(file: string, send: (line: string) => Promise<void>, what: string): Promise<number> {
+  private async drain(file: string, send: (line: string) => Promise<void>, what: string, refused?: (line: string, reason: string) => void): Promise<number> {
     const sending = `${file}.sending`;
     if (!existsSync(sending)) {
       if (!existsSync(file)) return 0;
@@ -142,8 +146,11 @@ export class RuntimeProposals {
         await send(line);
         sent++;
       } catch (err) {
-        if (isAnswer(err) || err instanceof SyntaxError) this.o.log?.(`[proposals] the runtime refused a spooled ${what}: ${err instanceof Error ? err.message : String(err)}`);
-        else keep.push(line);
+        if (isAnswer(err) || err instanceof SyntaxError) {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.o.log?.(`[proposals] the runtime refused a spooled ${what}: ${reason}`);
+          refused?.(line, reason);
+        } else keep.push(line);
       }
     }
     if (keep.length) appendFileSync(file, `${keep.join('\n')}\n`, { mode: 0o600 });
@@ -153,9 +160,16 @@ export class RuntimeProposals {
 
   private async doReplay(): Promise<number> {
     const proposals = await this.drain(this.spool, async (line) => {
-      const { spooledAt: _s, ...body } = JSON.parse(line) as ProposalIn & { spooledAt?: string };
+      const { spooledAt: _s, spoolId: _i, ...body } = JSON.parse(line) as ProposalIn & { spooledAt?: string; spoolId?: string };
       await this.call('POST', '/v1/proposals', body);
-    }, 'proposal');
+    }, 'proposal', (line, reason) => {
+      try {
+        const p = JSON.parse(line) as ProposalIn & { spoolId?: string };
+        this.o.onRefused?.({ action: String(p.action).slice(0, 200), ...(p.spoolId ? { spoolId: p.spoolId } : {}), tainted: p.tainted === true, reason });
+      } catch {
+        // an unreadable line was already logged
+      }
+    });
     const outcomes = await this.drain(this.outcomes, async (line) => {
       const { id, outcome } = JSON.parse(line) as { id: string; outcome: Outcome };
       await this.call('POST', `/v1/proposals/${encodeURIComponent(id)}/complete`, outcome);
@@ -201,24 +215,27 @@ export class RuntimeProposals {
 
   /**
    * Report how an execution ended, whatever it takes: retried twice, then
-   * spooled for the replay. Returns whether the runtime has it now.
+   * spooled for the replay. If the runtime refuses an ok result (too large,
+   * unstorable), the bare fact that it ran is sent instead. Says where the
+   * outcome is now.
    */
-  async completeDurably(id: string, outcome: Outcome): Promise<boolean> {
+  async completeDurably(id: string, outcome: Outcome): Promise<'recorded' | 'spooled' | 'refused'> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.complete(id, outcome);
-        return true;
+        return 'recorded';
       } catch (err) {
         if (isAnswer(err)) {
+          if (outcome.ok && outcome.result !== undefined) return this.completeDurably(id, { ok: true });
           this.o.log?.(`[proposals] the runtime would not record how ${id} ended: ${(err as Error).message}`);
-          return false;
+          return 'refused';
         }
         if (attempt < 2) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
       }
     }
     appendFileSync(this.outcomes, `${JSON.stringify({ id, outcome, spooledAt: new Date().toISOString() })}\n`, { mode: 0o600 });
     this.o.log?.(`[proposals] runtime unreachable; spooled how ${id} ended`);
-    return false;
+    return 'spooled';
   }
 
   /** Approved actions the runtime carries out itself (turning a source on, a policy change). */

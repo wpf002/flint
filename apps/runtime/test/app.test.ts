@@ -252,7 +252,8 @@ describe.skipIf(NO_DB)('runtime API', () => {
       const args = { source: 'launchd', k: Math.random() };
       const created = (await call('POST', '/v1/proposals', proposal('world.sync.launchd', args))).json();
       await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: 'world.sync.launchd', argsDigest: created.argsDigest }) });
-      expect((await call('POST', `/v1/proposals/${created.id}/claim`, {})).statusCode).toBe(200);
+      const claimed = await call('POST', `/v1/proposals/${created.id}/claim`, {});
+      expect(claimed.statusCode, claimed.body).toBe(200);
       expect(await sweepExecuting(db, new Date())).toBe(0); // not yet
       expect(await sweepExecuting(db, new Date(Date.now() + 2 * 3600_000))).toBeGreaterThanOrEqual(1);
       const p = (await call('GET', `/v1/proposals/${created.id}`)).json().proposal;
@@ -261,6 +262,38 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect(trail.find((e) => e.kind === 'action')).toMatchObject({ outcome: 'failed', inputs: { outcomeUnknown: true } });
       const open = await owner(`SELECT count(*)::int AS n FROM audit_open_intents WHERE "correlationId" = $1`, [created.id]);
       expect(open.rows[0].n).toBe(0);
+      // It reports after all: the true outcome is recorded, correlated, and nothing is lost.
+      expect((await call('POST', `/v1/proposals/${created.id}/complete`, { ok: true, result: { synced: 1 } })).statusCode).toBe(200);
+      const after = (await call('GET', `/v1/audit?correlationId=${created.id}`)).json().entries as Array<{ kind: string; outcome: string; inputs: Record<string, unknown> }>;
+      expect(after.find((e) => e.inputs.lateReport === true)).toMatchObject({ kind: 'action', outcome: 'ok' });
+    });
+
+    it('args are stored exactly as proposed (a long float through the ORM came back a digit short, and the claim then refused it)', async () => {
+      for (let i = 0; i < 40; i++) {
+        const v = Math.random();
+        const created = (await call('POST', '/v1/proposals', proposal('world.sync.spend', { source: 'spend', v }))).json();
+        const r = await owner(`SELECT args::text AS t FROM "Proposal" WHERE id = $1`, [created.id]);
+        expect(JSON.parse(r.rows[0].t).v).toBe(v);
+        expect(created.argsDigest).toBe(digestOf({ source: 'spend', v }));
+      }
+    });
+
+    it('a rollup batch is counted once, however often it is resent', async () => {
+      const day = new Date().toISOString().slice(0, 10);
+      const action = `rollup.test.${Math.random().toString(36).slice(2, 8)}`;
+      const batch = { batchId: 'ab'.repeat(16), rows: [{ day, action, context: 'chat', n: 3 }] };
+      expect((await call('POST', '/v1/audit/rollup', batch)).json()).toEqual({ counted: 1 });
+      expect((await call('POST', '/v1/audit/rollup', batch)).json()).toEqual({ counted: 0, duplicate: true });
+      const r = await owner(`SELECT count FROM "AuditRollup" WHERE day = $1 AND action = $2`, [day, action]);
+      expect(r.rows[0].count).toBe(3);
+      // The first format (a bare array) still counts.
+      expect((await call('POST', '/v1/audit/rollup', [{ day, action, context: 'chat', n: 1 }])).statusCode).toBe(200);
+    });
+
+    it('an entry the audit trigger refuses is a 400 (set aside by the server), not a 500 (resent forever)', async () => {
+      const r = await call('POST', '/v1/audit', [{ id: `au${Date.now().toString(36)}x`, at: new Date().toISOString(), actor: 'will:console', context: 'console', kind: 'approval', action: 'approval.enroll', inputs: { approvalId: null }, outcome: 'ok' }]);
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toMatch(/audit refused/);
     });
   });
 

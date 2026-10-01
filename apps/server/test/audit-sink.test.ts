@@ -88,6 +88,6 @@ describe('AuditSink', () => {
     await sink.flush();
     up = true;
     await sink.flush();
-    expect(sent).toEqual([[{ day: new Date().toISOString().slice(0, 10), action: 'web.web_search', context: 'chat', n: 2 }]]);
+    expect(sent).toEqual([{ batchId: expect.stringMatching(/^[0-9a-f]{32}$/), rows: [{ day: new Date().toISOString().slice(0, 10), action: 'web.web_search', context: 'chat', n: 2 }] }]);
   });
 });

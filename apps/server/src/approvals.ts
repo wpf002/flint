@@ -65,6 +65,8 @@ export interface ApproverStore {
   addApproval(a: NewApproval): Promise<void>;
   setSignCount(credentialId: string, n: number): Promise<void>;
   revoke(credentialId: string): Promise<void>;
+  /** In one transaction: add `add` (when given) and revoke `revoke`; all or nothing. */
+  replace(add: (Omit<Credential, 'revokedAt' | 'signCount'> & { signCount: number; enrolledVia: string }) | undefined, revoke: readonly string[]): Promise<void>;
 }
 
 export class ApprovalError extends Error {
@@ -90,6 +92,8 @@ interface Registered {
 
 /** The args digest an approval of a new credential signs: the new key itself. */
 export const keyDigest = (publicKey: Buffer) => createHash('sha256').update(publicKey).digest('hex');
+/** The subject an approval of a new credential names: a fixed-length reference (credential ids run to 1023 bytes). */
+export const credentialRef = (credentialId: string) => createHash('sha256').update(credentialId).digest('hex');
 
 export interface EnrolEvent {
   credentialId: string;
@@ -264,7 +268,7 @@ export class Approvals {
     const p = this.peekEnroll(body.challengeId);
     const key = this.registered(p, body);
     return this.begin({
-      subjectType: 'credential', subjectId: key.credentialId, decision: 'approve', action: 'approval.enroll', argsDigest: keyDigest(key.publicKey),
+      subjectType: 'credential', subjectId: credentialRef(key.credentialId), decision: 'approve', action: 'approval.enroll', argsDigest: keyDigest(key.publicKey),
       fields: { label: p.label, factor: key.factor },
     });
   }
@@ -314,14 +318,20 @@ export class Approvals {
     const key = this.registered(p, body);
     const code = this.enrollCode();
     const codeStands = !!code && Approvals.hashOf(code.code) === p.codeHash;
-    const live = (await this.o.store.credentials()).filter((c) => !c.revokedAt);
-    const add = (enrolledVia: string) => this.o.store.addCredential({ credentialId: key.credentialId, factor: key.factor, publicKey: key.publicKey, label: p.label, signCount: key.signCount, enrolledVia });
+    const all = await this.o.store.credentials();
+    const live = all.filter((c) => !c.revokedAt);
+    const known = all.find((c) => c.credentialId === key.credentialId);
+    const record = (enrolledVia: string) => ({ credentialId: key.credentialId, factor: key.factor, publicKey: key.publicKey, label: p.label, signCount: key.signCount, enrolledVia });
+    const add = (enrolledVia: string) => this.o.store.addCredential(record(enrolledVia));
+    if (known?.revokedAt) throw new ApprovalError(409, 'that key was revoked: make a new one on this device ("Replace this Mac\'s key", or a new passkey)');
     let event: EnrolEvent;
     if (codeStands && code.replace) {
-      // The new key first: if it cannot be added, nothing is revoked.
-      await add('enroll_code_replace');
-      for (const c of live) await this.o.store.revoke(c.credentialId);
-      event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code_replace', revoked: live.map((c) => c.credentialId) };
+      // This key becomes the only one: added (unless it is already enrolled) and every other revoked, in one transaction.
+      const others = live.filter((c) => c.credentialId !== key.credentialId).map((c) => c.credentialId);
+      await this.o.store.replace(known ? undefined : record('enroll_code_replace'), others);
+      event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code_replace', revoked: others };
+    } else if (known) {
+      throw new ApprovalError(409, 'that key is already enrolled');
     } else if (codeStands && live.length === 0) {
       await add('enroll_code');
       event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code', revoked: [] };
@@ -360,7 +370,7 @@ export class Approvals {
     if (!a) throw new ApprovalError(403, "a further credential needs an existing credential's approval");
     this.enrolApprovals.delete(id as string);
     if (a.expires <= this.now().getTime()) throw new ApprovalError(409, 'that approval expired');
-    if (a.payload.subjectId !== key.credentialId || a.payload.argsDigest !== keyDigest(key.publicKey) || a.payload.decision !== 'approve') {
+    if (a.payload.subjectId !== credentialRef(key.credentialId) || a.payload.argsDigest !== keyDigest(key.publicKey) || a.payload.decision !== 'approve') {
       throw new ApprovalError(403, 'that approval was for something else');
     }
     return a.approvalId;

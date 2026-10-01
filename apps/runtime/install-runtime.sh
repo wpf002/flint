@@ -131,7 +131,9 @@ if [ ! -f "$CONNECTOR" ]; then
   if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node20 \
        --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
        --outfile="$CONNECTOR" --log-level=error; then
-    echo "runtime: built the runtime MCP connector ($CONNECTOR); add it to ~/.flint/mcp.json to use it"
+    echo "runtime: built the runtime MCP connector. To use it, add this to the \"servers\" list in ~/.flint/mcp.json"
+    echo "  (the name must be \"runtime\": the tier engine and the taint rules know it by that name):"
+    echo "  {\"name\": \"runtime\", \"command\": \"$(command -v node)\", \"args\": [\"$CONNECTOR\"]}"
   else
     echo "runtime: could not build the runtime MCP connector (the runtime itself is unaffected)"
   fi

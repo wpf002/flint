@@ -62,11 +62,11 @@ export interface GateRequest {
 
 /** Run it, or not (with the message the model sees instead of a result). */
 /**
- * Allowed (optionally with the arguments the call must run with: the app may
- * add a field the model cannot be trusted to set, never drop one), or refused
+ * Allowed (optionally with request metadata the app sets for the server, sent
+ * as the MCP request's `_meta`, where the model cannot reach it), or refused
  * with the message the model sees.
  */
-export type GateDecision = { allow: true; args?: Record<string, unknown> } | { allow: false; message: string };
+export type GateDecision = { allow: true; meta?: Record<string, unknown> } | { allow: false; message: string };
 
 /**
  * The app's decision for every call, before it runs, and a look at every result

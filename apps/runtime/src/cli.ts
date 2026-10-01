@@ -36,21 +36,28 @@ async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty |
   }
   // APPROVAL: run an approved proposal for it, or file one (one a day) and wait.
   const day = now.toISOString().slice(0, 10);
-  const approved = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'approved' }, orderBy: { createdAt: 'desc' } });
+  const approved = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'approved', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
+  let refused: string | undefined;
   if (approved) {
-    const c = await claimProposal(db, approved.id, rp, tz, 'runtime');
-    return { go: true, proposalId: c.id, why: 'approved by Will' };
+    try {
+      const c = await claimProposal(db, approved.id, rp, tz, 'runtime');
+      return { go: true, proposalId: c.id, why: 'approved by Will' };
+    } catch (err) {
+      // Expired a moment ago, re-verification failed, a cap: say so, and ask again below.
+      refused = err instanceof Error ? err.message : String(err);
+    }
   }
-  const pending = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'pending' } });
+  const pending = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'pending', expiresAt: { gt: now } } });
   if (!pending) {
     await createProposal(db, {
       kind: 'tool_call', origin: `runtime:${cmd}`, templateId: `nightly.${cmd}`, action, args: { day },
       argsProvenance: { day: { source: 'template', ref: `nightly.${cmd}`, tainted: false } },
-      tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 24 * 60,
+      // Long enough for the next night's run to find it once Will has approved it.
+      tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 47 * 60,
       reason: `nightly ${cmd}: waiting for approval until this action is promoted`,
     }, 'runtime');
   }
-  return { go: false, why: 'waiting for Will to approve (or promote) it' };
+  return { go: false, why: refused ? `the approved proposal could not be claimed (${refused}); asked again` : 'waiting for Will to approve (or promote) it' };
 }
 
 /**
@@ -124,7 +131,12 @@ async function main(): Promise<void> {
       ok = false;
       error = err instanceof Error ? err.message : String(err);
     }
-    if (proposalId) await completeProposal(db, proposalId, { ok, ...(error ? { error } : {}), result: detail }, actor);
+    if (proposalId) {
+      // Recording the proposal's end must not cost the job's own audit row or the failure notice.
+      await completeProposal(db, proposalId, { ok, ...(error ? { error } : {}), result: detail }, actor).catch((err: unknown) =>
+        console.error(`${action}: could not complete its proposal: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
     await appendAudit(db, [{ actor, context, kind: 'action', action, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs: detail, ...(error ? { reasoning: error.slice(0, 1000) } : {}), ...(proposalId ? { correlationId: proposalId } : {}) }]);
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
     if (!ok) {

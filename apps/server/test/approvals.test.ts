@@ -29,6 +29,10 @@ function memoryStore() {
       const c = creds.find((x) => x.credentialId === id);
       if (c && !c.revokedAt) c.revokedAt = new Date();
     },
+    replace: async (add, revoke) => {
+      if (add) creds.push({ ...add, revokedAt: null });
+      for (const c of creds) if (revoke.includes(c.credentialId) && !c.revokedAt) c.revokedAt = new Date();
+    },
   };
   return { store, creds, approvals };
 }

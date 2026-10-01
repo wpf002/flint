@@ -15,6 +15,8 @@ export class TurnTaint {
   readonly sources = new Set<string>();
   /** An eval replay (apps/parity, evolve): nothing it asks for is ever queued or proposed. */
   eval = false;
+  /** When tainted by its history: the time of the newest untrusted read behind it (./conversation-taint). */
+  historyOrigin: number | undefined;
   /**
    * One-time allowances for exact calls Will approved, valid only inside the
    * scope that runs that approval (a concurrent turn cannot spend them).
@@ -38,6 +40,19 @@ export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[
   for (const a of seed.allow ?? []) t.allowances.add(a);
   t.eval = seed.eval === true;
   return scope.run(t, fn);
+}
+
+/** This turn's history carries untrusted text read at `origin`: it is tainted from here on. */
+export function taintFromHistory(origin: number): void {
+  const t = scope.getStore();
+  if (!t) return;
+  t.sources.add('history');
+  t.historyOrigin = Math.max(t.historyOrigin ?? 0, origin);
+}
+
+/** The newest untrusted read this turn's history carried, if any. */
+export function historyOrigin(): number | undefined {
+  return scope.getStore()?.historyOrigin;
 }
 
 /** This turn is an eval replay. */

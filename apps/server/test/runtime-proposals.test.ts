@@ -39,7 +39,7 @@ describe('RuntimeProposals', () => {
     const base = { kind: 'tool_call' as const, origin: 'chat:abc', args: { a: 1 }, argsProvenance: { a: { source: 'model' as const, tainted: true } }, tainted: true };
     expect(await p.propose({ ...base, action: 'mcp:gcal.create_event' })).toEqual({ id: 'pr1' });
     rt.setUp(false);
-    expect(await p.propose({ ...base, action: 'mcp:gcal.delete_event' })).toEqual({ spooled: true });
+    expect(await p.propose({ ...base, action: 'mcp:gcal.delete_event' })).toEqual({ spooled: true, spoolId: expect.stringMatching(/^[0-9a-f]{16}$/) });
     expect(p.unsynced()).toBe(1);
     expect(statSync(join(dir, 'proposals.jsonl')).mode & 0o777).toBe(0o600);
     expect(await p.replay()).toBe(0); // still down: kept

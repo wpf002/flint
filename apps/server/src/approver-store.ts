@@ -52,6 +52,25 @@ export function pgApproverStore(url: string, log: (m: string) => void = () => {}
     async revoke(credentialId) {
       await pool.query('UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1 AND "revokedAt" IS NULL', [credentialId]);
     },
+    async replace(add, revoke) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        if (add) {
+          await client.query(
+            'INSERT INTO "ApprovalCredential" (id, "credentialId", factor, "publicKey", label, "signCount", "enrolledVia") VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [`ac${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, add.credentialId, add.factor, add.publicKey, add.label, add.signCount, add.enrolledVia],
+          );
+        }
+        for (const id of revoke) await client.query('UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1 AND "revokedAt" IS NULL', [id]);
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
     close: () => pool.end(),
   };
 }

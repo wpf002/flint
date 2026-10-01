@@ -25,13 +25,19 @@ describe('runtime connector', () => {
     expect(calls.at(-1)).toMatchObject({ path: '/v1/ledger/predictions', body: { method: 'model_reasoning', resolver: 'will', evidence: [] } });
     const bad = await client.callTool({ name: 'world_entity', arguments: { id: '../../admin' } });
     expect(bad.isError).toBe(true);
-    // The server sets `tainted` from the turn; it reaches the ledger as a boolean.
-    await client.callTool({ name: 'ledger_record_prediction', arguments: { claim: 'c', probability: 0.7, domain: 'services', type: 'event_occurs', resolutionCriteria: 'r', resolveBy: '2026-10-08T00:00:00Z', tainted: true } });
+    // Taint comes from the server's _meta, never from the model; without it, tainted.
+    const args = { claim: 'c', probability: 0.7, domain: 'services', type: 'event_occurs', resolutionCriteria: 'r', resolveBy: '2026-10-08T00:00:00Z' };
+    await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, tainted: false } });
     expect(calls.at(-1)).toMatchObject({ body: { tainted: true } });
+    await client.callTool({ name: 'ledger_record_prediction', arguments: args, _meta: { 'flint/tainted': false } });
+    expect(calls.at(-1)).toMatchObject({ body: { tainted: false } });
+    await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, claim: undefined, template: { id: 'service_healthy', params: { entity: 'x' } } }, _meta: { 'flint/tainted': true } });
+    expect(calls.at(-1)).toMatchObject({ body: { tainted: true, template: { id: 'service_healthy' } } });
     await client.close();
   });
 
   it('a result too large for chat becomes a marker, and the marker says tainted (what was cut is unknown)', () => {
+    expect(MAX_RESULT_CHARS).toBeLessThanOrEqual(8000);
     const big = text({ rows: 'x'.repeat(MAX_RESULT_CHARS) });
     const parsed = JSON.parse(big.content[0]!.text) as Record<string, unknown>;
     expect(parsed).toMatchObject({ truncated: true, tainted: true });

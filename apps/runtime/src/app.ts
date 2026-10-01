@@ -38,6 +38,18 @@ declare module 'fastify' {
 
 export const BODY_LIMIT = 64 * 1024;
 
+/** A database trigger or check refusing a row (23514 check_violation, 42501 insufficient_privilege). */
+export function dbRefused(err: unknown): boolean {
+  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+  const codes = [e.code, e.meta?.code].map(String);
+  return codes.some((c) => c === '23514' || c === '42501') || (typeof e.message === 'string' && /code: "(23514|42501)"/.test(e.message));
+}
+/** The trigger's own words (they name the rule, never a value). */
+const dbMessage = (err: unknown) => {
+  const m = String((err as { message?: unknown }).message ?? '').match(/message: "([^"]{1,200})"/);
+  return m ? m[1] : 'a database rule';
+};
+
 export interface AppDeps {
   db: Db;
   config: Pick<Config, 'tokens' | 'rp' | 'tz'>;
@@ -97,11 +109,18 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // ---- audit ------------------------------------------------------------------
   app.post('/v1/audit', { preHandler: need('audit') }, async (req) => {
     const entries = z.array(AuditIn).min(1).max(100).parse(req.body);
-    return { written: await appendAudit(db, entries) };
+    try {
+      return { written: await appendAudit(db, entries) };
+    } catch (err) {
+      // The audit trigger refusing an entry is the caller's input (400), so the
+      // server sets that entry aside instead of resending the batch forever.
+      if (dbRefused(err)) throw new AuditRefused(`the audit refused an entry: ${dbMessage(err)}`);
+      throw err;
+    }
   });
   // Read-only chat calls are counted, never rows (plan 3.0.7).
   app.post('/v1/audit/rollup', { preHandler: need('audit') }, async (req) => {
-    const rows = z
+    const Rows = z
       .array(
         z
           .object({
@@ -113,10 +132,18 @@ export function buildApp(deps: AppDeps): FastifyInstance {
           .strict(),
       )
       .min(1)
-      .max(500)
-      .parse(req.body);
+      .max(500);
+    // A batch with an id is counted once, however often it is resent (its reply lost).
+    const body = z.union([Rows, z.object({ batchId: z.string().regex(/^[0-9a-f]{32}$/), rows: Rows }).strict()]).parse(req.body);
+    const rows = Array.isArray(body) ? body : body.rows;
+    const batchId = Array.isArray(body) ? undefined : body.batchId;
     // All or nothing: a batch that fails partway is not half counted (and then counted again on retry).
-    await db.$transaction(async (tx) => {
+    const counted = await db.$transaction(async (tx) => {
+      if (batchId) {
+        await tx.auditRollupBatch.deleteMany({ where: { at: { lt: new Date(Date.now() - 7 * 86_400_000) } } });
+        const fresh = await tx.auditRollupBatch.createMany({ data: [{ id: batchId }], skipDuplicates: true });
+        if (fresh.count === 0) return false;
+      }
       for (const r of rows) {
         await tx.auditRollup.upsert({
           where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
@@ -124,8 +151,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
           update: { count: { increment: r.n } },
         });
       }
+      return true;
     });
-    return { counted: rows.length };
+    return counted ? { counted: rows.length } : { counted: 0, duplicate: true };
   });
   app.get('/v1/audit', { preHandler: need('audit') }, async (req) => {
     return { entries: await listAudit(db, AuditQuery.parse(req.query)) };

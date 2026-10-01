@@ -89,7 +89,6 @@ function event(opts: TierGateOptions, name: string, d: TierDecision, mcp: Mcp, s
  * message the model sees when it does not run.
  */
 async function needsApproval(opts: TierGateOptions, d: TierDecision, call: Call, mcp: Mcp): Promise<string | undefined> {
-  if (opts.queue.allowed(call)) return undefined;
   // An eval replay: nothing it asks for may ever become approvable.
   if (isEvalTurn()) return `${queued(call.fullName, d)} (eval replay: not queued)`;
   if (!opts.proposals) {
@@ -114,7 +113,11 @@ async function needsApproval(opts: TierGateOptions, d: TierDecision, call: Call,
     event(opts, call.fullName, { ...d, tier: 'forbidden', reason: p.refused }, mcp, 'denied');
     return `Flint may not run '${call.fullName}': ${p.refused}. It was not executed.`;
   }
-  if ('spooled' in p) return `${queued(call.fullName, d)} (pending, unsynced: the runtime is down)`;
+  if ('spooled' in p) {
+    // The runtime records it when the spool reaches it; until then this is the record.
+    event(opts, call.fullName, d, mcp, 'queued', `spool:${p.spoolId}`);
+    return `${queued(call.fullName, d)} (pending, unsynced: the runtime is down)`;
+  }
   // The runtime recorded the decision, correlated with this proposal.
   noteProposal({ id: p.id, fullName: call.fullName, args, tainted });
   return `${queued(call.fullName, d)} (proposal ${p.id})`;
@@ -132,6 +135,11 @@ async function gateCall(opts: TierGateOptions, call: Call, mcp?: Mcp): Promise<{
     event(opts, call.fullName, d, mcp, 'denied');
     return { run: false, message: refusal(call.fullName, d) };
   }
+  // Will approved exactly this call: it runs on his approval (its cap was taken
+  // when the runtime claimed it), recorded by whoever ran the approval.
+  if (opts.queue.allowed(call)) return { run: true };
+  // An eval replay changes nothing, promoted or not.
+  if (isEvalTurn() && isWrite(call.fullName, mcp)) return { run: false, message: `'${call.fullName}' was not executed (eval replay: it would change something)` };
   if (d.tier === 'alone' && d.cap) {
     // A promoted action's cap is claimed before it runs; if the runtime cannot
     // say, the call goes to Will instead (fail closed).
@@ -181,13 +189,19 @@ export function runtimeResultTainted(result: unknown): boolean {
   }
 }
 
-/** Calls that run with a field the server sets from the turn, whatever the model sent. */
-function withTurnFields(req: GateRequest): Record<string, unknown> | undefined {
-  if (req.server === 'runtime' && req.tool === 'ledger_record_prediction') {
-    const args = req.args && typeof req.args === 'object' && !Array.isArray(req.args) ? (req.args as Record<string, unknown>) : {};
-    return { ...args, tainted: turnTainted() || args.tainted === true };
-  }
-  return undefined;
+/** What every MCP call carries in `_meta`: whether the turn is tainted (the runtime connector stores it with a prediction). */
+const TAINT_META = 'flint/tainted';
+
+/**
+ * A prediction worded in a tainted turn must use a claim template (the ledger
+ * refuses tainted free text): refused here, before Will is asked to approve a
+ * call that cannot succeed.
+ */
+function predictionRefusal(req: GateRequest): string | undefined {
+  if (req.server !== 'runtime' || req.tool !== 'ledger_record_prediction' || !turnTainted()) return undefined;
+  const args = req.args && typeof req.args === 'object' ? (req.args as Record<string, unknown>) : {};
+  if (args.template && typeof args.template === 'object') return undefined;
+  return "This turn read text from outside, so a prediction must use a claim template (template: {id, params}), not free text. It was not recorded.";
 }
 
 /** The MCP client's gate. */
@@ -202,14 +216,15 @@ export function tierGate(opts: TierGateOptions): Gate {
         ...(req.annotations.readOnlyHint ? { readOnlyHint: true } : {}),
         ...(req.annotations.destructiveHint ? { destructiveHint: true } : {}),
       };
+      const refused = predictionRefusal(req);
+      if (refused) return { allow: false, message: refused };
       const g = await gateCall(opts, {
         server: req.server, tool: req.tool, fullName: req.fullName, action: `mcp:${req.server}.${req.tool}`, args: req.args,
         destructive: !!req.annotations.destructiveHint, ...(req.annotations.readOnlyHint ? { readOnlyHint: true } : {}),
       }, mcp);
       if (!g.run) return { allow: false, message: g.message };
       if (g.correlationId) acting.set(req, g.correlationId);
-      const args = withTurnFields(req);
-      return args ? { allow: true, args } : { allow: true };
+      return { allow: true, meta: { [TAINT_META]: turnTainted() } };
     },
     onResult(req: GateRequest, result: unknown) {
       // Only the runtime is Flint's own code, and it says when what it returns

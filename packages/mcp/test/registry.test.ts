@@ -219,13 +219,21 @@ describe('McpRegistry gate', () => {
     await close();
   });
 
-  it('runs with the args the gate sets (a field the model cannot be trusted with), and shows the gate a failure too', async () => {
+  it('sends the metadata the gate sets as the request\'s _meta (where the model cannot reach), and shows the gate a failure too', async () => {
     const results: unknown[] = [];
-    const { registry, executed, close } = await setup({
-      gate: { check: (req) => ({ allow: true, ...(req.tool === 'delete_thing' ? { args: { id: 'set-by-gate' } } : {}) }), onResult: (_r, x) => results.push(x) },
-    });
+    const metas: unknown[] = [];
+    const server = new McpServer({ name: 'm', version: '1.0.0' });
+    server.registerTool('peek', { description: 'p', inputSchema: { x: z.string() } }, async (_a, extra) => (metas.push(extra._meta), { content: [{ type: 'text', text: 'ok' }] }));
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const reg = await McpRegistry.connect([{ name: 'm', transport: ct }], { gate: { check: () => ({ allow: true, meta: { 'flint/tainted': true } }) } });
+    await tool(reg, 'm.peek').handler({ id: '0', toolName: 'm.peek', args: { x: 'a', _meta: { 'flint/tainted': false } } });
+    expect(metas[0]).toMatchObject({ 'flint/tainted': true });
+    await reg.close();
+    await server.close();
+    const { registry, executed, close } = await setup({ gate: { check: () => ({ allow: true }), onResult: (_r, x) => results.push(x) } });
     await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'from-model' } });
-    expect(executed).toEqual(['delete:set-by-gate']);
+    expect(executed).toEqual(['delete:from-model']);
     // A call that fails in the transport: its error text reaches the model, so the gate sees it.
     const echo = tool(registry, 'test.echo');
     await close();

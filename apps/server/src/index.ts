@@ -65,7 +65,7 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { AuditSink, runtimeFromDisk } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
 import { RuntimePolicies, capClaimer } from './runtime-link';
-import { markEval, markTainted, taintSources, turnProposals, withTurnTaint } from './turn-taint';
+import { historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, withTurnTaint } from './turn-taint';
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
@@ -464,8 +464,13 @@ async function main(): Promise<void> {
   // everything stays stored, and a turn whose conversation has older turns is told so.
   const dataDir = join(homedir(), '.flint', 'memory');
   const memory = openConversationStore(join(dataDir, 'conversations.json'), process.env, (m) => console.error(m));
-  // Which stored turns read untrusted text, so a later turn that carries them starts tainted (./conversation-taint).
+  // Which stored turns carry untrusted text, so a later turn handed them starts tainted (./conversation-taint):
+  // checked when the history is read, so a turn that committed meanwhile is not missed.
   const convTaint = new ConversationTaint(join(dataDir, 'taint.json'), (m) => console.error(m));
+  memory.onHistory = (cid, ids) => {
+    const origin = convTaint.origin(cid, ids, Date.now(), memory.historyStats(cid).window?.maxAgeMs ?? Infinity);
+    if (origin !== undefined) taintFromHistory(origin);
+  };
   const flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
@@ -508,8 +513,10 @@ async function main(): Promise<void> {
   const actions = new ActionQueue(isSafeTool);
   // The audit trail's server end (./audit-sink): spooled locally, shipped to the
   // runtime once it is installed. Every tier decision lands here (Machine plan 3.0.7).
-  // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default.
-  const runtimeLink = runtimeFromDisk(homedir(), process.env.FLINT_RUNTIME_URL);
+  // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
+  // (and not blank) it also turns on runtime mode below.
+  const runtimeUrl = process.env.FLINT_RUNTIME_URL?.trim() || undefined;
+  const runtimeLink = runtimeFromDisk(homedir(), runtimeUrl);
   const audit = new AuditSink({
     spoolDir: join(homedir(), '.flint', 'spool'),
     runtime: runtimeLink,
@@ -531,6 +538,7 @@ async function main(): Promise<void> {
       audit.count(d.key, 'chat');
       return;
     }
+    // A write about to run is its intent: on disk first, or it does not run (the throw refuses the call).
     audit.record({
       actor: 'flint',
       context: 'chat',
@@ -543,7 +551,7 @@ async function main(): Promise<void> {
       outcome: e.status === 'denied' ? 'denied' : 'pending',
       tainted: e.tainted,
       ...(e.correlationId ? { correlationId: e.correlationId } : {}),
-    });
+    }, e.status === 'acting');
   };
   const onOutcome = (o: TierOutcome) => {
     audit.record({
@@ -557,8 +565,15 @@ async function main(): Promise<void> {
   // Runtime mode (rollout day 4+, FLINT_RUNTIME_URL set): approval-tier calls
   // become runtime proposals, spooled while the runtime is down, and approving
   // needs Will's signature. Unset: the RAM queue, as before.
-  const proposals = process.env.FLINT_RUNTIME_URL
-    ? new RuntimeProposals({ runtime: runtimeLink, spoolDir: join(homedir(), '.flint', 'spool'), log: (m) => console.error(m) })
+  const proposals = runtimeUrl
+    ? new RuntimeProposals({
+        runtime: runtimeLink, spoolDir: join(homedir(), '.flint', 'spool'), log: (m) => console.error(m),
+        // A call queued while the runtime was down, then refused when it got there.
+        onRefused: (p) => audit.record({
+          actor: 'flint', context: 'chat', kind: 'decision', action: p.action, tier: 'forbidden', decision: 'deny', outcome: 'denied',
+          inputs: { spooled: true }, reasoning: p.reason.slice(0, 1000), tainted: p.tainted, ...(p.spoolId ? { correlationId: `spool:${p.spoolId}` } : {}),
+        }),
+      })
     : undefined;
   if (proposals) setInterval(() => void proposals.replay().catch(() => {}), 30_000).unref();
   const tierOpts = {
@@ -573,12 +588,19 @@ async function main(): Promise<void> {
         store: pgApproverStore(process.env.FLINT_DB_APPROVER_URL, (m) => console.error(m)),
         enrollCodeFile: join(homedir(), '.flint', 'enroll-code'),
         ...rpFromDisk(),
-        onEnrolled: (e) =>
+        // A key added (and any revoked with it), within the audit's rules: an 'action'
+        // (only a real Approval may be an 'approval' entry), short references, not raw ids.
+        onEnrolled: (e) => {
+          const ref = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 16);
           audit.record({
-            actor: 'will:console', context: 'console', kind: 'approval', action: 'approval.enroll', decision: 'act', outcome: 'ok',
-            inputs: { credentialId: e.credentialId, factor: e.factor, via: e.via, approvalId: e.approvalId ?? null, revoked: e.revoked.join(',').slice(0, 500) || null },
-            correlationId: `credential:${e.credentialId}`.slice(0, 200),
-          }),
+            actor: 'will:console', context: 'console', kind: 'action', action: 'approval.enroll', decision: 'act', outcome: 'ok',
+            inputs: {
+              key: ref(e.credentialId), factor: e.factor, via: e.via, approvalId: e.approvalId ?? null,
+              revokedCount: e.revoked.length, revoked: e.revoked.map(ref).join(',').slice(0, 200) || null,
+            },
+            correlationId: `key:${ref(e.credentialId)}`,
+          });
+        },
       })
     : undefined;
   const specs = loadMcpSpecs();
@@ -1238,8 +1260,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // The history this turn will actually carry (windowed), not the whole stored thread:
     // its complete turns size the "deep thread" rule, and the ones left out get a context line.
     const history = ctx.memory.historyStats(conversationId);
-    // Text an earlier turn read from outside is still in this turn's history: it starts tainted.
-    if (ctx.convTaint.anyTainted(conversationId, ctx.memory.windowTurnIds(conversationId))) markTainted('history');
+    // (The history is checked for untrusted text when the model is handed it: memory.onHistory.)
     const turnsBefore = new Set(ctx.memory.turnIds(conversationId));
     const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
     const toolsLikely = ctx.router.toolsLikely(scored.appended);
@@ -1366,8 +1387,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         ms: Date.now() - started,
       }),
     );
-    // What this turn itself read (not its history) marks it for the turns after it.
-    if (taintSources().some((s) => s !== 'history')) ctx.convTaint.mark(conversationId, ctx.memory.turnIds(conversationId).filter((id) => !turnsBefore.has(id)));
+    // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
+    if (turnTainted()) {
+      const own = taintSources().some((s) => s !== 'history');
+      ctx.convTaint.mark(conversationId, ctx.memory.turnIds(conversationId).filter((id) => !turnsBefore.has(id)), own ? Date.now() : (historyOrigin() ?? Date.now()));
+    }
     res.end();
     return;
   }

@@ -9,7 +9,10 @@
  *    it cannot be written, record() throws: the caller runs nothing.
  *  - Read-only chat tool calls are only counted (AuditRollup), never rows; the
  *    counts are kept in ~/.flint/spool/rollups.json until shipped, so a restart
- *    or a runtime that is down loses none.
+ *    or a runtime that is down loses none. Each batch is taken out of the
+ *    counts and kept as "in flight" (on disk) with an id before it is sent; a
+ *    batch whose reply was lost is resent with the same id, and the runtime
+ *    counts an id once.
  *  - A shipper renames the spool aside (so appends go to a fresh file), posts it
  *    to the runtime in batches of 100, and deletes it once every batch is in.
  *    The runtime ignores an entry it already has (same id and time), so a
@@ -20,6 +23,8 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+
+type RollupRow = { day: string; action: string; context: string; n: number };
 import { redact } from '@flint/policy';
 
 export interface AuditRecord {
@@ -66,6 +71,8 @@ export class AuditSink {
   private readonly rollupFile: string;
   private readonly max: number;
   private rollups = new Map<string, number>();
+  /** The batch sent and not yet acknowledged, resent under the same id. */
+  private inflight: { id: string; rows: RollupRow[] } | undefined;
   private rollupSave: ReturnType<typeof setTimeout> | undefined;
   private flushing: Promise<void> | undefined;
   private dropped = 0;
@@ -80,9 +87,14 @@ export class AuditSink {
     this.max = opts.maxBytes ?? 20 * 1024 * 1024;
     try {
       if (existsSync(this.rollupFile)) {
-        for (const [k, n] of Object.entries(JSON.parse(readFileSync(this.rollupFile, 'utf8')) as Record<string, unknown>)) {
+        const saved = JSON.parse(readFileSync(this.rollupFile, 'utf8')) as { counts?: Record<string, unknown>; inflight?: { id?: unknown; rows?: unknown } } & Record<string, unknown>;
+        // (The first format was the counts alone.)
+        const counts = saved.counts && typeof saved.counts === 'object' ? saved.counts : saved;
+        for (const [k, n] of Object.entries(counts)) {
           if (typeof n === 'number' && Number.isInteger(n) && n > 0) this.rollups.set(k, n);
         }
+        const f = saved.inflight;
+        if (f && typeof f.id === 'string' && /^[0-9a-f]{32}$/.test(f.id) && Array.isArray(f.rows)) this.inflight = { id: f.id, rows: f.rows as RollupRow[] };
       }
     } catch {
       this.opts.log?.('[audit] rollups.json is unreadable; starting the counts afresh');
@@ -95,7 +107,7 @@ export class AuditSink {
     this.rollupSave = undefined;
     try {
       const tmp = `${this.rollupFile}.tmp`;
-      writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.rollups)), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ counts: Object.fromEntries(this.rollups), ...(this.inflight ? { inflight: this.inflight } : {}) }), { mode: 0o600 });
       renameSync(tmp, this.rollupFile);
     } catch (err) {
       this.opts.log?.(`[audit] could not save the rollup counts: ${err instanceof Error ? err.message : String(err)}`);
@@ -201,24 +213,25 @@ export class AuditSink {
       }
       rmSync(this.shipping, { force: true });
     }
-    if (this.rollups.size) {
-      // The runtime takes at most 500 rows a batch, each batch all or nothing.
-      const rows = [...this.rollups].map(([k, n]) => {
-        const [day, action, context] = k.split('\u0000') as [string, string, string];
-        return { key: k, row: { day, action, context, n } };
-      });
-      for (let i = 0; i < rows.length; i += 500) {
-        const chunk = rows.slice(i, i + 500);
-        const r = await post('/v1/audit/rollup', chunk.map((c) => c.row));
-        if (r === 'retry') break;
-        if (r === 'refused') this.opts.log?.(`[audit] the runtime refused ${chunk.length} rollup counts; dropped`);
-        // Shipped (or never shippable): subtract what was sent, keeping counts added meanwhile.
-        for (const c of chunk) {
-          const left = (this.rollups.get(c.key) ?? 0) - c.row.n;
-          if (left > 0) this.rollups.set(c.key, left);
-          else this.rollups.delete(c.key);
-        }
+    // Read counts: the batch in flight first (same id: counted once), then new ones,
+    // at most 500 rows a batch (the runtime's limit), each all or nothing.
+    for (let round = 0; round < 20 && (this.inflight || this.rollups.size); round++) {
+      if (!this.inflight) {
+        const chunk = [...this.rollups].slice(0, 500);
+        for (const [k] of chunk) this.rollups.delete(k);
+        this.inflight = {
+          id: randomBytes(16).toString('hex'),
+          rows: chunk.map(([k, n]) => {
+            const [day, action, context] = k.split('\u0000') as [string, string, string];
+            return { day, action, context, n };
+          }),
+        };
+        this.saveRollups();
       }
+      const r = await post('/v1/audit/rollup', { batchId: this.inflight.id, rows: this.inflight.rows });
+      if (r === 'retry') return;
+      if (r === 'refused') this.opts.log?.(`[audit] the runtime refused ${this.inflight.rows.length} rollup counts; dropped`);
+      this.inflight = undefined;
       this.saveRollups();
     }
   }
@@ -232,7 +245,9 @@ export class AuditSink {
 }
 
 /** The runtime's address and the server's token for it, once install-runtime.sh has run. */
-export function runtimeFromDisk(home: string, url: string = 'http://[::1]:8090'): () => Runtime | undefined {
+export function runtimeFromDisk(home: string, configured?: string): () => Runtime | undefined {
+  // Blank is not set: the loopback default.
+  const url = configured?.trim() || 'http://[::1]:8090';
   const file = join(home, '.flint', 'tokens', 'runtime.token');
   return () => {
     try {

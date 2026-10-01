@@ -138,25 +138,15 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
       select: { id: true, expiresAt: true },
     });
     if (same) return { id: same.id, argsDigest, expiresAt: same.expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: true };
-    const row = await tx.proposal.create({
-      data: {
-        id,
-        kind: input.kind,
-        origin: input.origin,
-        action: input.action,
-        templateId: input.templateId ?? null,
-        args: input.args as Prisma.InputJsonObject,
-        argsDigest,
-        argsProvenance: input.argsProvenance as Prisma.InputJsonObject,
-        tainted: input.tainted,
-        sensitivity: input.sensitivity,
-        destructive: input.destructive,
-        consequential: input.consequential,
-        reason: input.reason ? redact(input.reason) : null,
-        estCostUsd: input.estCostUsd ?? null,
-        expiresAt,
-      },
-    });
+    // Written as the exact JSON text (Postgres reads numbers exactly). Through the
+    // ORM a long float can be stored a digit short, and the args would then no
+    // longer match the digest Will signs: the claim refuses them.
+    await tx.$executeRaw`
+      INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, consequential, reason, "estCostUsd", "expiresAt")
+      VALUES (${id}, ${input.kind}, ${input.origin}, ${input.action}, ${input.templateId ?? null}, ${JSON.stringify(input.args)}::jsonb, ${argsDigest},
+              ${JSON.stringify(input.argsProvenance)}::jsonb, ${input.tainted}, ${input.sensitivity}, ${input.destructive}, ${input.consequential},
+              ${input.reason ? redact(input.reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
+    const row = { id, action: input.action, argsDigest };
     await appendAudit(tx, [{
       actor, context, kind: 'decision', action: input.action, tier: decision.tier, decision: 'queue', outcome: 'pending',
       inputs: auditInputs(row, { rule: decision.rule }), correlationId: row.id, tainted: input.tainted,
@@ -238,7 +228,10 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
     if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
       return fail(`refused to execute: the approval no longer verifies (${v.ok ? 'it covers different args' : v.reason})`, 403);
     }
-    if (p.args === null || digestOf(p.args) !== p.argsDigest) return fail('refused to execute: the args do not match their digest', 409);
+    // The args as stored, read as text (exact), are what is checked and what runs.
+    const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;
+    const args = stored?.t ? (JSON.parse(stored.t) as Record<string, unknown>) : null;
+    if (args === null || digestOf(args) !== p.argsDigest) return fail('refused to execute: the args do not match their digest', 409);
     const decision = await tierOf(tx, p, now);
     if (decision.tier === 'forbidden') return fail(`refused to execute: forbidden: ${decision.reason}`, 409);
     if (decision.cap) {
@@ -251,7 +244,7 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
       actor, context: contextOf(p.origin), kind: 'intent', action: p.action, tier: decision.tier, decision: 'act', outcome: 'pending',
       inputs: auditInputs(p), correlationId: id, tainted: p.tainted,
     }], now);
-    return { claimed: { id, action: p.action, args: p.args as Record<string, unknown>, argsDigest: p.argsDigest } } as const;
+    return { claimed: { id, action: p.action, args, argsDigest: p.argsDigest } } as const;
   });
   if ('refused' in out) throw out.refused;
   return out.claimed;
@@ -267,9 +260,20 @@ export const CompleteProposal = z
   .strict();
 
 /** Record how an execution ended; the intent's outcome is a new audit entry with the same correlation id. */
-export async function completeProposal(db: Db, id: string, body: z.infer<typeof CompleteProposal>, actor: string, now = new Date()) {
+export const GIVEN_UP = 'no completion was reported: outcome unknown';
+
+export async function completeProposal(db: Db, id: string, body: z.infer<typeof CompleteProposal>, actor: string, now = new Date()): Promise<{ late?: true }> {
   const p = await db.proposal.findUnique({ where: { id } });
   if (!p) throw new Refused(404, 'no such proposal');
+  if (p.status === 'failed' && p.error === GIVEN_UP) {
+    // The sweep gave up on it, and now it reports: the record says how it really
+    // ended, correlated with it (the proposal itself stays as the sweep left it).
+    await appendAudit(db, [{
+      actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: body.ok ? 'ok' : 'failed',
+      inputs: auditInputs(p, { lateReport: true }), reasoning: `reported after it was given up on: it ${body.ok ? 'completed' : 'failed'}`, correlationId: id, tainted: p.tainted,
+    }]);
+    return { late: true };
+  }
   if (p.status !== 'executing') throw new Refused(409, `the proposal is ${p.status}`);
   let result: Prisma.InputJsonObject | undefined;
   if (body.result) {
@@ -297,6 +301,7 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
       ...(body.error && p.sensitivity === 'ops' && !p.tainted ? { reasoning: redact(body.error).slice(0, 1000) } : {}),
     }], now);
   });
+  return {};
 }
 
 /** Pending and approved proposals past their expiry become expired, each one audited. Returns how many. */
@@ -325,20 +330,22 @@ export async function expireProposals(db: Db, now = new Date()): Promise<number>
  * audited as such: whether the action happened is not known, and the record
  * says so rather than guessing.
  */
-export async function sweepExecuting(db: Db, now = new Date(), olderThanMs = 60 * 60_000): Promise<number> {
+export async function sweepExecuting(db: Db, now = new Date(), olderThanMs = 60 * 60_000, jobsOlderThanMs = 6 * 60 * 60_000): Promise<number> {
   const stuck = await db.proposal.findMany({ where: { status: 'executing' }, select: { id: true, action: true, argsDigest: true, origin: true, tainted: true } });
   let n = 0;
   for (const p of stuck) {
     const intent = await db.auditEntry.findFirst({ where: { correlationId: p.id, kind: 'intent' }, orderBy: { at: 'desc' }, select: { at: true } });
-    if (intent && now.getTime() - intent.at.getTime() < olderThanMs) continue;
+    // A runtime job (a backup, a restore drill) can run long, or the Mac can sleep through it.
+    const limit = p.origin.startsWith('runtime:') ? jobsOlderThanMs : olderThanMs;
+    if (intent && now.getTime() - intent.at.getTime() < limit) continue;
     // `now` decides what is overdue; what is written carries the time it is written.
     await db.$transaction(async (tx) => {
-      const r = await tx.proposal.updateMany({ where: { id: p.id, status: 'executing' }, data: { status: 'failed', executedAt: new Date(), error: 'no completion was reported: outcome unknown' } });
+      const r = await tx.proposal.updateMany({ where: { id: p.id, status: 'executing' }, data: { status: 'failed', executedAt: new Date(), error: GIVEN_UP } });
       if (r.count === 0) return;
       n += 1;
       await appendAudit(tx, [{
         actor: 'runtime', context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: 'failed',
-        inputs: auditInputs(p, { outcomeUnknown: true }), reasoning: 'no completion was reported within the hour: whether it ran is unknown', correlationId: p.id, tainted: p.tainted,
+        inputs: auditInputs(p, { outcomeUnknown: true }), reasoning: 'no completion was reported in time: whether it ran is unknown', correlationId: p.id, tainted: p.tainted,
       }]);
     });
   }

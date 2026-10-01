@@ -335,7 +335,8 @@ function enrollEnclave(){var code=document.getElementById('enrollcode').value.tr
       return finishEnrolment(b,reg,label).then(function(){return seIdOf(pk.publicKey);});});});
   }).then(function(id){SE_ID=id;document.getElementById('enrollcode').value='';enrollMsg('✓ Touch ID approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
 /* A fingerprint change makes this Mac's key unusable: make a new one (Touch ID or password), then enrol it with a code from `enroll --replace` (or another key's approval). */
-function resetEnclave(){if(!confirm("Replace this Mac's approval key? The old one stops working. Then enrol the new one with a code from: pnpm --filter @flint/runtime enroll --replace"))return;
+function resetEnclave(){/* No confirm(): the app's web view has no dialog for it. Touch ID (or the password) is the confirmation. */
+  enrollMsg("Replacing this Mac's key: confirm with Touch ID or your password…");
   se('reset').then(function(){SE_ID=null;enrollMsg('New key made on this Mac. Enter a code and press "Add Touch ID approval key".');}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
 function enclaveDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){

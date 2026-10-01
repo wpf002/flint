@@ -39,8 +39,12 @@ export async function runtimeCall(path: string, init: { method?: 'GET' | 'POST';
   return data;
 }
 
-/** What a tool may put into the model's context; past it, a marker (and, not knowing what was cut, tainted). */
-export const MAX_RESULT_CHARS = 32_000;
+/**
+ * What a tool may put into the model's context (in line with the web
+ * connector's fetch_url); past it, a marker (and, not knowing what was cut,
+ * tainted).
+ */
+export const MAX_RESULT_CHARS = 8_000;
 export const text = (v: unknown) => {
   const t = JSON.stringify(v, null, 2);
   const out = t.length <= MAX_RESULT_CHARS ? t : JSON.stringify({ truncated: true, chars: t.length, note: 'too large to show in chat; ask for less', tainted: true });
@@ -64,13 +68,28 @@ export function buildServer(call = runtimeCall): McpServer {
       inputSchema: { id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) },
       annotations: readOnly,
     },
-    async ({ id }) => text(await call(`/v1/world/entities/${id}`)),
+    async ({ id }) => {
+      // Only what the model needs; never the raw sources list.
+      const r = (await call(`/v1/world/entities/${id}`)) as { entity?: Record<string, unknown>; tainted?: boolean };
+      const e = r.entity ?? {};
+      const pick = ['id', 'kind', 'key', 'name', 'status', 'state', 'taintedPaths', 'version', 'lastObservedAt'];
+      return text({ entity: Object.fromEntries(pick.filter((k) => k in e).map((k) => [k, e[k]])), tainted: r.tainted !== false });
+    },
   );
 
   server.registerTool(
     'ledger_open',
-    { description: "Flint's open predictions, soonest to resolve first.", inputSchema: { limit: z.number().int().min(1).max(50).optional() }, annotations: readOnly },
-    async ({ limit }) => text(await call(`/v1/ledger/open?limit=${limit ?? 20}`)),
+    { description: "Flint's open predictions, soonest to resolve first.", inputSchema: { limit: z.number().int().min(1).max(20).optional() }, annotations: readOnly },
+    async ({ limit }) => {
+      const r = (await call(`/v1/ledger/open?limit=${limit ?? 10}`)) as { predictions?: Array<Record<string, unknown>> };
+      const pick = ['id', 'claim', 'probability', 'domain', 'type', 'resolveBy', 'status', 'tainted'];
+      return text({
+        predictions: (r.predictions ?? []).map((p) => ({
+          ...Object.fromEntries(pick.filter((k) => k in p).map((k) => [k, p[k]])),
+          evidence: Array.isArray(p.evidence) ? p.evidence.length : 0,
+        })),
+      });
+    },
   );
 
   server.registerTool(
@@ -85,25 +104,30 @@ export function buildServer(call = runtimeCall): McpServer {
       description:
         'Record a prediction in the ledger so it can be scored later. Needs a probability between 0.05 and 0.95, how it will be resolved, and a resolve-by date within 180 days.',
       inputSchema: {
-        claim: z.string().min(1).max(300),
+        claim: z.string().min(1).max(300).optional(),
+        // After reading text from outside, a prediction must use one of the ledger's claim templates.
+        template: z.object({ id: z.string().min(1).max(60), params: z.record(z.string(), z.union([z.string().max(120), z.number().finite()])) }).optional(),
         probability: z.number().min(0.05).max(0.95),
         domain: z.enum(['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation']),
         type: z.enum(['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept']),
         resolutionCriteria: z.string().min(1).max(1000),
         resolveBy: z.string().datetime({ offset: true }),
         evidence: z.array(z.object({ kind: z.string().max(40), ref: z.string().max(200), note: z.string().max(200).optional() })).max(20).optional(),
-        // Set by Flint's server from the turn (it overwrites whatever the model sends): a
-        // prediction worded in a turn that read untrusted text is stored as tainted.
-        tainted: z.boolean().optional(),
       },
     },
-    async (a) =>
-      text(
+    async (a, extra) => {
+      if (!a.claim && !a.template) return { isError: true, content: [{ type: 'text' as const, text: 'give a claim, or a template with its params' }] };
+      // Whether the turn read text from outside comes from Flint's server, in the
+      // request's _meta, never from the model; without it, assume it did.
+      const flag = (extra?._meta as Record<string, unknown> | undefined)?.['flint/tainted'];
+      const tainted = flag !== false;
+      return text(
         await call('/v1/ledger/predictions', {
           method: 'POST',
-          body: { ...a, method: 'model_reasoning', resolver: 'will', evidence: a.evidence ?? [], tainted: a.tainted === true },
+          body: { ...a, method: 'model_reasoning', resolver: 'will', evidence: a.evidence ?? [], tainted },
         }),
-      ),
+      );
+    },
   );
 
   return server;

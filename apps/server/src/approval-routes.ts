@@ -274,27 +274,46 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   }
   let result: unknown;
   let outcome: ProposalOutcome;
+  // The tool's own words, for the console card only: the runtime gets the class.
+  let detail: string | undefined;
   try {
     result = await withTurnTaint(() => tool.handler({ id: `call_${id}`, toolName: fullName, args: claimed.args }), {
       allow: [keyOf(server, toolName, claimed.args)],
       sources: proposal.tainted ? ['proposal'] : [],
     });
     const o = outcomeOf(result);
-    let value: unknown = null;
-    try {
-      value = JSON.parse(JSON.stringify(result ?? null));
-    } catch {
-      value = '[result could not be serialised]';
+    if (o.ok) outcome = { ok: true, result: { value: storable(result) } };
+    else {
+      detail = o.detail;
+      outcome = { ok: false, error: o.error };
     }
-    outcome = o.ok ? { ok: true, result: { value } } : { ok: false, error: o.detail.slice(0, 2000) };
   } catch (err) {
-    outcome = { ok: false, error: (err instanceof Error ? err.message : String(err)).slice(0, 2000) };
+    detail = err instanceof Error ? err.message : String(err);
+    outcome = { ok: false, error: `the tool threw (${err instanceof Error ? err.name : 'error'})` };
   }
-  const recorded = await p.completeDurably(id, outcome);
+  const where = await p.completeDurably(id, outcome);
   if (outcome.ok) ctx.notes.push('Action done', `${fullName} ✓`, 'action', `act:${id}`);
+  const note =
+    where === 'spooled' ? 'the runtime will be told how it ended once it answers'
+    : where === 'refused' ? 'the runtime did not record how it ended; it will mark it "outcome unknown"'
+    : undefined;
   return {
     id, fullName, status: outcome.ok ? 'done' : 'error',
-    ...(result !== undefined ? { result } : {}), ...(outcome.ok ? {} : { error: outcome.error }),
-    ...(recorded ? {} : { note: 'it ran; the runtime will be told how it ended once it answers' }),
+    ...(result !== undefined ? { result } : {}), ...(outcome.ok ? {} : { error: (detail ?? outcome.error ?? 'failed').slice(0, 2000) }),
+    ...(note ? { note } : {}),
   };
+}
+
+/** Lone surrogates and NULs become storable text (Postgres refuses both). */
+const clean = (v: string) => v.replace(/\u0000/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+
+/** A tool's result as the runtime can store it: every string clean, and past 15 KB only its size. */
+export function storable(result: unknown): unknown {
+  let json: string;
+  try {
+    json = JSON.stringify(result ?? null, (_k, v: unknown) => (typeof v === 'string' ? clean(v) : typeof v === 'bigint' ? v.toString() : v));
+  } catch {
+    return '[the result could not be serialised]';
+  }
+  return json.length <= 15_000 ? JSON.parse(json) : { truncated: true, chars: json.length };
 }
