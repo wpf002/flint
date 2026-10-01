@@ -14,11 +14,31 @@ export interface GitOptions {
   deploy?: { path: string; log: string };
 }
 
-/** The sha of the last "deployed <sha>" line of auto_deploy.sh's log. */
+/**
+ * What auto_deploy.sh's log says about `head`, from its own lines:
+ *   "<ts> deployed <sha>"                 the server deployed it      -> success
+ *   "<ts> up to date (<sha>)"             a quiet tick on it          -> success
+ *   "<ts> server deploy FAILED at <sha>"  the gate or reload failed   -> failed
+ *   "<ts> new code <a> -> <sha> ..."      started, no outcome yet     -> deploying
+ * ("runtime deployed <sha>" is the runtime's, not the server's.)
+ */
+export function deployStatus(log: string, head: string): 'success' | 'failed' | 'deploying' | 'unknown' {
+  const lines = log.trimEnd().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes(head)) continue;
+    if (new RegExp(`^\\S+ \\S+ deployed ${head}\\s*$`).test(line) || line.includes(`up to date (${head})`)) return 'success';
+    if (line.includes(`server deploy FAILED at ${head}`)) return 'failed';
+    if (new RegExp(`new code \\S+ -> ${head}\\b`).test(line)) return 'deploying';
+  }
+  return 'unknown';
+}
+
+/** The sha of the last "deployed <sha>" line (kept for callers that want it). */
 export function lastDeployed(log: string): string | undefined {
   const lines = log.trimEnd().split('\n');
-  for (let i = lines.length - 1; i >= 0 && i >= lines.length - 400; i--) {
-    const m = / deployed ([0-9a-f]{40})\s*$/.exec(lines[i]!);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\S+ \S+ deployed ([0-9a-f]{40})\s*$/.exec(lines[i]!);
     if (m) return m[1];
   }
   return undefined;
@@ -44,14 +64,13 @@ export function gitSource(o: GitOptions): Source {
         const head = (await o.run('/usr/bin/git', ['-C', o.deploy.path, 'rev-parse', 'HEAD'])).trim();
         let log = '';
         try {
-          log = readFileSync(o.deploy.log, 'utf8').slice(-64 * 1024);
+          log = readFileSync(o.deploy.log, 'utf8').slice(-512 * 1024);
         } catch {
           log = '';
         }
-        const deployed = lastDeployed(log);
         observations.push({
           type: 'deployment.status', kind: 'deployment', key: 'deployment:studio:flint', name: 'flint on the Studio', sensitivity: 'ops', externalId: 'studio:flint',
-          state: { target: 'studio', status: deployed === head ? 'success' : deployed ? 'deploying' : 'unknown', sha: head },
+          state: { target: 'studio', status: deployStatus(log, head), sha: head },
         });
       }
       return { observations, metrics: [] };

@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { digestOf, redact, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
+import { jsonbBytes } from '../jsonsize.js';
 import { claim } from './counters.js';
 import { reverifyApproval } from './approvals.js';
 
@@ -44,7 +45,7 @@ export const CreateProposal = z
     origin: z.string().regex(/^(chat:[A-Za-z0-9_-]{1,80}|runtime:[a-z0-9_.-]{1,60}|console|cli)$/),
     action: z.string().min(1).max(200).regex(/^[A-Za-z0-9_.:-]+$/),
     templateId: z.string().max(80).optional(),
-    args: z.record(z.string(), z.unknown()).refine((a) => Buffer.byteLength(JSON.stringify(a)) <= 65536, 'args are over 64 KB'),
+    args: z.record(z.string(), z.unknown()).refine((a) => jsonbBytes(a) <= 65536, 'args are over 64 KB'),
     argsProvenance: Provenance,
     tainted: z.boolean().default(false),
     sensitivity: z.enum(['ops', 'personal', 'financial']).default('ops'),
@@ -107,6 +108,12 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 
 /** Record a proposal. A FORBIDDEN action is refused (409) and the refusal audited. */
 export async function createProposal(db: Db, input: CreateProposal, actor: string, now = new Date()) {
+  // A policy change is checked against the database's rules before Will is asked to sign it.
+  if (input.action === 'policy.change') {
+    const { PolicyArgs } = await import('./internal.js');
+    const ok = PolicyArgs.safeParse(input.args);
+    if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  }
   const argsDigest = digestOf(input.args);
   const decision = await tierOf(db, { ...input }, now, input.readOnlyHint);
   const id = `pr${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
@@ -255,9 +262,11 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
   if (p.status !== 'executing') throw new Refused(409, `the proposal is ${p.status}`);
   let result: Prisma.InputJsonObject | undefined;
   if (body.result) {
+    // Measured as the database measures it (jsonb text), with room to spare: an
+    // action that ran must be recorded as having run, however large its result.
     const r = redact(body.result);
-    const text = JSON.stringify(r);
-    result = (Buffer.byteLength(text) <= 16384 ? r : { truncated: true, bytes: Buffer.byteLength(text) }) as Prisma.InputJsonObject;
+    const size = jsonbBytes(r);
+    result = (size <= 15000 ? r : { truncated: true, bytes: size }) as Prisma.InputJsonObject;
   }
   await db.$transaction(async (tx) => {
     await tx.proposal.update({
@@ -272,7 +281,9 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
     await appendAudit(tx, [{
       actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: body.ok ? 'ok' : 'failed',
       inputs: auditInputs(p), correlationId: id, tainted: p.tainted, ...(body.costUsd !== undefined ? { costUsd: body.costUsd } : {}),
-      ...(body.error ? { reasoning: redact(body.error).slice(0, 1000) } : {}),
+      // The audit keeps no PERSONAL free text (plan 3.0.5): for personal, financial or
+      // tainted work the error's words stay in Proposal.error (which retention clears).
+      ...(body.error && p.sensitivity === 'ops' && !p.tainted ? { reasoning: redact(body.error).slice(0, 1000) } : {}),
     }], now);
   });
 }

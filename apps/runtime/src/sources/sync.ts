@@ -56,12 +56,19 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
 
   for (const o of result.observations) {
     const hash = stateHash({ name: o.name, state: o.state, ...(o.status ? { status: o.status } : {}), taintedPaths: o.taintedPaths ?? [] });
-    const sourceRef = `${o.externalId}@${hash}`.slice(0, 500);
+    // The event names the change: the state, and the version it would replace.
+    // The same observation again (a restart) is the same event; the same state
+    // coming back later (down, ok, down) is a new one.
+    const current = await db.entity.findUnique({ where: { kind_key: { kind: o.kind, key: o.key } }, select: { version: true, stateHash: true } });
+    const changes = !current || current.stateHash !== hash;
+    const sourceRef = `${o.externalId}@${hash}#${current?.version ?? 0}`.slice(0, 500);
     const tainted = (o.taintedPaths ?? []).length > 0;
     const payload = { kind: o.kind, key: o.key, name: o.name, state: o.state, status: o.status ?? 'active' };
     let outcome: Applied;
     try {
       outcome = await db.$transaction(async (tx) => {
+        // Nothing changed: no event, just "seen again".
+        if (!changes) return applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now });
         const inserted = await tx.sourceEvent.createMany({
           data: [{
             id: `se${run.now.getTime().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
@@ -94,8 +101,12 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   for (const m of result.metrics) {
     let entityId: string | null = null;
     if (m.series.entityKey) {
-      entityId = (await db.entity.findUnique({ where: { kind_key: m.series.entityKey }, select: { id: true } }))?.id ?? null;
+      const e = await db.entity.findUnique({ where: { kind_key: m.series.entityKey }, select: { id: true, status: true } });
+      entityId = e?.id ?? null;
     }
+    const existingSeries = await db.metricSeries.findUnique({ where: { key: m.series.key }, select: { description: true } });
+    // A series whose entity was forgotten takes no more points.
+    if (existingSeries?.description === '[forgotten]') continue;
     await db.metricSeries.upsert({
       where: { key: m.series.key },
       create: { key: m.series.key, entityId, unit: m.series.unit, freq: m.series.freq, sensitivity: m.series.sensitivity, description: m.series.description },

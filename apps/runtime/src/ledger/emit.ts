@@ -16,12 +16,21 @@ export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'ca
 export const TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept'] as const;
 const HORIZON_MS = 180 * 86400_000;
 
-/** Fixed claim templates for predictions made from tainted inputs. Only ids and numbers fill them. */
+/** An entity reference a template may name: kind#shortId, never a title. */
+const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
+/**
+ * Fixed claim templates for predictions made from tainted inputs. Each has its
+ * own schema: only entity refs, series keys, an operator and numbers fill them,
+ * so a stranger's words can never become a claim Flint makes.
+ */
 export const CLAIM_TEMPLATES = {
-  service_healthy: (p: { entity: string }) => `${p.entity} reports healthy at the resolve time`,
-  deploy_succeeds: (p: { entity: string }) => `the next deployment of ${p.entity} succeeds`,
-  threshold: (p: { series: string; op: 'above' | 'below'; value: number }) => `${p.series} is ${p.op} ${p.value} at the resolve time`,
-  closed_by: (p: { entity: string }) => `${p.entity} is closed by the resolve time`,
+  service_healthy: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `${p.entity} reports healthy at the resolve time` },
+  deploy_succeeds: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `the next deployment of ${p.entity} succeeds` },
+  threshold: {
+    params: z.object({ series: z.string().regex(/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/).max(80), op: z.enum(['above', 'below']), value: z.number().finite() }).strict(),
+    render: (p: { series: string; op: string; value: number }) => `${p.series} is ${p.op} ${p.value} at the resolve time`,
+  },
+  closed_by: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `${p.entity} is closed by the resolve time` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
 
@@ -71,6 +80,10 @@ export function validatePrediction(p: EmitPrediction, now = new Date()): string[
     why.push('a conditional prediction names its recommendation, and only it does');
   }
   if (p.tainted && !p.template) why.push('a prediction from tainted inputs uses a claim template');
+  if (p.template) {
+    const ok = CLAIM_TEMPLATES[p.template.id].params.safeParse(p.template.params);
+    if (!ok.success) why.push(`template ${p.template.id}: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(', ')}`);
+  }
   if (!p.claim && !p.template) why.push('missing claim');
   return why;
 }
@@ -78,8 +91,8 @@ export function validatePrediction(p: EmitPrediction, now = new Date()): string[
 /** The claim as it will be stored: the template's rendering when there is one. */
 export function renderClaim(p: EmitPrediction): string {
   if (p.template) {
-    const fn = CLAIM_TEMPLATES[p.template.id] as (params: Record<string, unknown>) => string;
-    return fn(p.template.params).slice(0, 300);
+    const t = CLAIM_TEMPLATES[p.template.id];
+    return (t.render as (x: unknown) => string)(t.params.parse(p.template.params)).slice(0, 300);
   }
   return p.claim!;
 }

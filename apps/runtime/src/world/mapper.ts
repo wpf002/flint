@@ -10,6 +10,7 @@
  *    forget is never recreated (the database refuses it too).
  *  - People are never created in P1.
  */
+import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { digestOf, mergeTaintedPaths } from '@flint/policy';
 import type { Tx } from '../db.js';
@@ -65,6 +66,12 @@ export async function applyObservation(tx: Tx, o: Observation): Promise<Applied>
 
   const existing = await tx.entity.findUnique({ where: { kind_key: { kind: o.kind, key: o.key } } });
   if (existing?.status === 'forgotten' || existing?.status === 'merged') return 'skipped';
+  // A record Will asked Flint to forget is skipped quietly, every time (the
+  // database would refuse to re-attach it anyway).
+  const suppressed = await tx.suppressedKey.findUnique({
+    where: { source_externalIdHash: { source: o.source, externalIdHash: createHash('sha256').update(o.externalId).digest('hex') } },
+  });
+  if (suppressed) return 'skipped';
 
   if (!existing) {
     const id = `en${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;

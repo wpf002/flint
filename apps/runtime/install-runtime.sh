@@ -51,8 +51,9 @@ pnpm --filter @flint/policy build >/dev/null
 if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: runtime typecheck + tests (scratch database flint_test)..."
   pnpm --filter @flint/runtime typecheck || die "runtime typecheck failed — NOT deploying the runtime"
-  FLINT_DB_TEST_OWNER_URL="$(secret FLINT_DB_TEST_OWNER_URL)" FLINT_DB_TEST_URL="$(secret FLINT_DB_TEST_URL)" \
-    pnpm --filter @flint/runtime test || die "runtime tests failed — NOT deploying the runtime"
+  # The tests read the scratch database's URLs themselves (secrets.env, backup.env);
+  # FLINT_REQUIRE_DB makes a missing database a failure, never a silent skip.
+  FLINT_REQUIRE_DB=1 pnpm --filter @flint/runtime test || die "runtime tests failed — NOT deploying the runtime"
 fi
 
 OWNER_URL="$(secret FLINT_DB_OWNER_URL)"
@@ -65,12 +66,13 @@ PENDING="$(cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma 
 if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been applied|following migration"; then
   echo "runtime: migrations pending; dumping first..."
   PG_DUMP=/opt/homebrew/opt/postgresql@17/bin/pg_dump
-  node -e '
-    const u = new URL(process.argv[1]);
+  # The URL (it carries a password) goes through the environment, never argv.
+  BU="$BACKUP_URL" node -e '
+    const u = new URL(process.env.BU);
     process.stdout.write([u.hostname.replace(/^\[|\]$/g, ""), u.port || "5432", decodeURIComponent(u.username), u.pathname.slice(1)].join("\n"));
-  ' "$BACKUP_URL" | { read -r H; read -r P; read -r U; read -r D;
+  ' | { read -r H; read -r P; read -r U; read -r D;
     DUMP="$HOME/FlintBackups/pre-migrate/$SHA.dump"
-    PGPASSWORD="$(node -e 'process.stdout.write(decodeURIComponent(new URL(process.argv[1]).password))' "$BACKUP_URL")" \
+    PGPASSWORD="$(BU="$BACKUP_URL" node -e 'process.stdout.write(decodeURIComponent(new URL(process.env.BU).password))')" \
       "$PG_DUMP" -Fc -h "$H" -p "$P" -U "$U" -d "$D" -f "$DUMP.partial" && mv "$DUMP.partial" "$DUMP" && chmod 600 "$DUMP"; } \
     || die "pre-migrate dump failed — NOT migrating"
 
@@ -115,8 +117,11 @@ ENVF="$DATA/runtime.env"
 {
   echo "DATABASE_URL=$APP_URL"
   echo "RUNTIME_PORT=$PORT"
-  echo "RUNTIME_TOKENS=server:$TOKEN_SHA:events|audit|proposals|world:read|ledger|counters"
-  echo "FLINT_TZ=${FLINT_TZ:-America/New_York}"
+  # ${...}: a bare "$TOKEN_SHA:e..." is zsh's :e modifier and would eat the digest.
+  echo "RUNTIME_TOKENS=server:${TOKEN_SHA}:events|audit|proposals|world:read|ledger|counters"
+  # The server's days and months (FLINT_USER_TZ, default America/Chicago): the spend source must agree.
+  echo "FLINT_TZ=$(plutil -extract EnvironmentVariables.FLINT_USER_TZ raw "$AGENTS/com.flint.server.plist" 2>/dev/null || echo America/Chicago)"
+  echo "RUNTIME_GIT_SHA=${SHA}"
   echo "SERVER_INTERNAL_URL=http://[::1]:8081"
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.

@@ -26,9 +26,10 @@ const local = (tz: string, at: Date) => {
 };
 
 export function level(spent: { day: number; month: number }, cap: { dailyUsd?: number; monthlyUsd?: number } = {}): 'normal' | '50' | '80' | '100' {
+  // A $0 cap is the server's kill switch: it counts as already spent (as the server's fractionOf does).
   const fr = Math.max(
-    cap.dailyUsd !== undefined ? (cap.dailyUsd === 0 ? (spent.day > 0 ? Infinity : 0) : spent.day / cap.dailyUsd) : 0,
-    cap.monthlyUsd !== undefined ? (cap.monthlyUsd === 0 ? (spent.month > 0 ? Infinity : 0) : spent.month / cap.monthlyUsd) : 0,
+    cap.dailyUsd !== undefined ? (cap.dailyUsd <= 0 ? Infinity : spent.day / cap.dailyUsd) : 0,
+    cap.monthlyUsd !== undefined ? (cap.monthlyUsd <= 0 ? Infinity : spent.month / cap.monthlyUsd) : 0,
   );
   return fr >= 1 ? '100' : fr >= 0.8 ? '80' : fr >= 0.5 ? '50' : 'normal';
 }

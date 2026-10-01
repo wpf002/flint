@@ -94,7 +94,7 @@ describe('git', () => {
     mkdirSync(join(dir, 'flint'));
     mkdirSync(join(dir, 'deploy'));
     const head = 'b'.repeat(40);
-    writeFileSync(join(dir, 'deploy.log'), `t deployed ${head}\n`);
+    writeFileSync(join(dir, 'deploy.log'), `2026-10-01 10:40:10 deployed ${head}\n`);
     const run = async (_cmd: string, args: readonly string[]) => (args.includes('--abbrev-ref') ? 'main\n' : `${head}\n`);
     const r = await gitSource({ run, repos: [{ name: 'flint', path: join(dir, 'flint') }, { name: 'missing', path: join(dir, 'nope') }], deploy: { path: join(dir, 'deploy'), log: join(dir, 'deploy.log') } }).run(runAt(new Date()) as SourceRun);
     expect(r.observations.map((o) => [o.key, o.state])).toEqual([

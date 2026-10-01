@@ -6,6 +6,7 @@
  */
 import { z } from 'zod';
 import { redact } from '@flint/policy';
+import { jsonbBytes } from '../jsonsize.js';
 import { Prisma } from '@prisma/client';
 import type { Db, Tx } from '../db.js';
 
@@ -13,7 +14,7 @@ const Scalar = z.union([z.string().max(200), z.number().finite(), z.boolean(), z
 const Inputs = z
   .record(z.string().max(64), z.union([Scalar, z.array(Scalar).max(50)]))
   .refine((o) => Object.keys(o).length <= 40, 'too many inputs')
-  .refine((o) => Buffer.byteLength(JSON.stringify(o)) <= 16384, 'inputs are over 16 KB');
+  .refine((o) => jsonbBytes(o) <= 16384, 'inputs are over 16 KB');
 
 export const AuditIn = z
   .object({
@@ -29,7 +30,7 @@ export const AuditIn = z
     reasoning: z.string().max(1000).optional(),
     decision: z.enum(['act', 'log', 'escalate', 'queue', 'deny']).optional(),
     outcome: z.enum(['pending', 'ok', 'denied', 'failed', 'skipped']),
-    outcomeDetail: z.record(z.string().max(64), z.unknown()).refine((o) => Buffer.byteLength(JSON.stringify(o)) <= 16384, 'outcomeDetail is over 16 KB').optional(),
+    outcomeDetail: z.record(z.string().max(64), z.unknown()).refine((o) => jsonbBytes(o) <= 16384, 'outcomeDetail is over 16 KB').optional(),
     correlationId: z.string().max(100).optional(),
     costUsd: z.number().nonnegative().max(1000).optional(),
     tainted: z.boolean().optional(),

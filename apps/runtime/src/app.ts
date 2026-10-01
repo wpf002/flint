@@ -26,6 +26,7 @@ import {
 } from './governance/proposals.js';
 import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
+import { hasNul } from './jsonsize.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -63,6 +64,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     req.caller = caller;
   };
   const actor = (req: FastifyRequest) => `client:${req.caller?.name ?? 'unknown'}`;
+
+  // Postgres refuses U+0000; refuse it here as bad input (400), not as a crash (500).
+  app.addHook('preValidation', async (req, reply) => {
+    if (req.body !== undefined && hasNul(req.body)) return reply.code(400).send({ error: 'invalid input: contains a NUL character' });
+  });
 
   app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: 'invalid input', issues: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
@@ -155,7 +161,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     const { id } = Id.parse(req.params);
     return runInternal(db, id, rp, config.tz, actor(req));
   });
-  app.post('/v1/proposals/:id/complete', { preHandler: need('proposals') }, async (req) => {
+  // A tool's result can be large (a fetched page): this route takes up to 1 MB and truncates what it stores.
+  app.post('/v1/proposals/:id/complete', { preHandler: need('proposals'), bodyLimit: 1024 * 1024 }, async (req) => {
     const { id } = Id.parse(req.params);
     await completeProposal(db, id, CompleteProposal.parse(req.body), actor(req));
     return { ok: true };

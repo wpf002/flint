@@ -69,7 +69,8 @@ export function testUrls(): TestUrls | undefined {
 }
 
 export const URLS = testUrls();
-if (!URLS && process.env.FLINT_CI) throw new Error('CI must provide the flint_test database (see test/global-setup.ts)');
+// In CI and in the deploy gate (FLINT_REQUIRE_DB), a missing database is a failure, never a silent skip.
+if (!URLS && (process.env.FLINT_CI || process.env.FLINT_REQUIRE_DB)) throw new Error('the flint_test database is required here (see test/db.ts)');
 /** `describe.skipIf(NO_DB)` for database tests. */
 export const NO_DB = !URLS;
 

@@ -54,7 +54,9 @@ const Env = z.object({
   FLINT_RP_ID: z.string().regex(/^[a-z0-9.-]+$/).optional(),
   FLINT_RP_ORIGINS: z.string().optional(),
   /** Calendar days for daily caps. */
-  FLINT_TZ: z.string().default('America/New_York'),
+  FLINT_TZ: z.string().optional(),
+  /** The server's zone variable; the runtime's days and months must match the server's. */
+  FLINT_USER_TZ: z.string().optional(),
   HOME: z.string().min(1),
   /** The server's internal listener and the runtime's token for it (notify, spend-external). */
   SERVER_INTERNAL_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
@@ -121,7 +123,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: e.RUNTIME_PORT,
     tokens,
     ...(e.FLINT_RP_ID && origins.length ? { rp: { rpId: e.FLINT_RP_ID, origins } } : {}),
-    tz: e.FLINT_TZ,
+    tz: e.FLINT_TZ?.trim() || e.FLINT_USER_TZ?.trim() || 'America/Chicago',
     home: e.HOME,
     ...(e.SERVER_INTERNAL_URL && e.SERVER_INTERNAL_TOKEN ? { server: { url: e.SERVER_INTERNAL_URL, token: e.SERVER_INTERNAL_TOKEN } } : {}),
     healthExtra,

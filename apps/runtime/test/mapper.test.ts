@@ -66,7 +66,8 @@ describe.skipIf(NO_DB)('world mapper', () => {
       ]);
     });
     await withClient(URLS!.app, (c) => c.query(`SELECT forget_entity($1, 'apm1')`, [e.id]));
-    // The old key no longer names it (it was rekeyed), and the same external id is refused.
-    await expect(apply(obs({ key: 'service:launchd:forgetme', externalId: 'gui/501/forgetme' }))).rejects.toThrow(/stays forgotten/);
+    // The old key no longer names it (it was rekeyed), and the same external id is skipped, quietly, every time.
+    expect(await apply(obs({ key: 'service:launchd:forgetme', externalId: 'gui/501/forgetme' }))).toBe('skipped');
+    expect(await db.entity.count({ where: { key: 'service:launchd:forgetme' } })).toBe(0);
   });
 });
