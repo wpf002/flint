@@ -282,6 +282,27 @@ BEGIN
 END;
 $$;
 
+-- What a writer may not choose on insert: the sequence number (always the next
+-- one), a time outside [now - 31 days, now + 5 minutes] (the server's spool
+-- replays entries up to 30 days old), or an approval entry that names no real
+-- Approval. The writer can still lie in a new row; it cannot rewrite the order,
+-- the past, or claim Will approved what he did not.
+CREATE FUNCTION audit_insert_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  NEW."seq" := nextval(pg_get_serial_sequence('public."AuditEntry"', 'seq'));
+  IF NEW."at" < clock_timestamp() - interval '31 days' OR NEW."at" > clock_timestamp() + interval '5 minutes' THEN
+    RAISE EXCEPTION 'audit: an entry must be from the last 31 days' USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW."kind" = 'approval' AND NOT EXISTS (SELECT 1 FROM "Approval" a WHERE a."id" = NEW."inputs"->>'approvalId' AND a."decision" = 'approve') THEN
+    RAISE EXCEPTION 'audit: an approval entry must name a real approval' USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "AuditEntry_insert_guard" BEFORE INSERT ON "AuditEntry"
+  FOR EACH ROW EXECUTE FUNCTION audit_insert_guard();
+
 CREATE TRIGGER "AuditEntry_append_only" BEFORE UPDATE OR DELETE ON "AuditEntry"
   FOR EACH ROW EXECUTE FUNCTION guard_append_only('reasoning', 'outcomeDetail', '@redactedAt');
 CREATE TRIGGER "AuditEntry_no_truncate" BEFORE TRUNCATE ON "AuditEntry"
@@ -587,8 +608,10 @@ CREATE TRIGGER "ActionPolicy_history" AFTER UPDATE ON "ActionPolicy"
 -- ---- Daily caps -------------------------------------------------------------------
 -- Claim one slot under a cap, atomically, at decision time. Returns the new
 -- count, or NULL when the cap is already reached (or is 0).
+-- SECURITY DEFINER: flint_app has no write access to ActionCounter at all, so a
+-- cap can only be claimed through here, never reset (PR #38 adversarial check).
 CREATE FUNCTION claim_action(p_action text, p_period text, p_cap integer) RETURNS integer
-LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   c integer;
 BEGIN
@@ -673,7 +696,7 @@ WHERE i."kind" = 'intent'
 -- flint_owner owns everything (it runs the migrations). flint_app is the
 -- runtime: it cannot create approvals, write history, or edit the audit trail.
 -- flint_approver is the server's approval path and touches nothing else.
-REVOKE ALL ON FUNCTION guard_append_only(), approval_consume_once(), approval_insert_check(), approval_credential_guard(),
+REVOKE ALL ON FUNCTION audit_insert_guard(), guard_append_only(), approval_consume_once(), approval_insert_check(), approval_credential_guard(),
   proposal_insert_check(), proposal_transition(), action_policy_matches_approval(), action_policy_update_guard(), row_history(),
   consume_approval(text, text, text, text, text, text), claim_action(text, text, integer), ensure_partitions(integer),
   drop_audit_partition(text, text) FROM PUBLIC;
@@ -684,7 +707,7 @@ GRANT USAGE ON SCHEMA public TO flint_app, flint_approver;
 GRANT SELECT ON "ApprovalCredential", "Approval", "ActionPolicy", "ActionCounter", "Proposal", "AuditEntry", "AuditRollup", "RowChange", audit_open_intents TO flint_app;
 GRANT UPDATE ("consumedAt") ON "Approval" TO flint_app;
 GRANT INSERT, UPDATE ("active") ON "ActionPolicy" TO flint_app;
-GRANT INSERT, UPDATE ON "ActionCounter", "AuditRollup" TO flint_app;
+GRANT INSERT, UPDATE ON "AuditRollup" TO flint_app;
 GRANT INSERT, UPDATE ON "Proposal" TO flint_app;
 GRANT INSERT ON "AuditEntry" TO flint_app;
 GRANT USAGE ON SEQUENCE "AuditEntry_seq_seq" TO flint_app;

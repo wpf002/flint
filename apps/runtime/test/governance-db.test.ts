@@ -281,13 +281,12 @@ describe.skipIf(NO_DB)('governance in the database', () => {
       const recent = (await owner(`SELECT to_char(now(), 'YYYY-MM') AS m`)).rows[0].m as string;
       expect((await pgError(app(`SELECT drop_audit_partition($1, 'nope')`, [recent]))).message).toMatch(/kept for 24 months/);
       expect((await pgError(app(`SELECT drop_audit_partition('2020-01', 'nope')`))).message).toMatch(/no matching/);
-      // A real, attached partition with a row in it.
+      // A real, attached partition. (Rows that old can no longer be written at all:
+      // audit_insert_guard refuses anything older than 31 days.)
       await owner(`CREATE TABLE flint_part."AuditEntry_2020_01" PARTITION OF "AuditEntry" FOR VALUES FROM ('2020-01-01T00:00:00Z') TO ('2020-02-01T00:00:00Z')`);
-      await owner(`INSERT INTO "AuditEntry" (id, at, actor, context, kind, action, inputs, outcome) VALUES ($1, '2020-01-15T00:00:00Z', 'x', 'chat', 'action', 'old', '{}', 'ok')`, [id('au')]);
       const a = await approval('partition_drop', '2020-01', { action: 'maintenance.partition_drop' });
       await app(`SELECT drop_audit_partition('2020-01', $1)`, [a]);
       expect((await owner(`SELECT to_regclass('flint_part."AuditEntry_2020_01"') AS t`)).rows[0].t).toBeNull();
-      expect((await owner(`SELECT count(*)::int AS n FROM "AuditEntry" WHERE action = 'old'`)).rows[0].n).toBe(0);
       expect((await pgError(app(`SELECT drop_audit_partition('2020-01', $1)`, [a]))).message).toMatch(/no matching/);
     });
 
@@ -308,6 +307,25 @@ describe.skipIf(NO_DB)('governance in the database', () => {
         await c.query('ROLLBACK');
         expect(err).toMatch(/no matching/);
       });
+    });
+  });
+
+  describe('integrity against a compromised runtime role', () => {
+    it('a cap cannot be reset: ActionCounter is reachable only through claim_action()', async () => {
+      const action = id('cap');
+      await app(`SELECT claim_action($1, '2026-10-01', 1)`, [action]);
+      expect((await pgError(app(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1`, [action]))).message).toMatch(/permission denied/);
+      expect((await pgError(app(`INSERT INTO "ActionCounter" (action, day, count) VALUES ($1, '2026-10-02', 0)`, [action]))).message).toMatch(/permission denied/);
+      expect((await app(`SELECT claim_action($1, '2026-10-01', 1) AS n`, [action])).rows[0].n).toBeNull();
+    });
+
+    it('an audit insert cannot pick its sequence, backdate itself, or invent an approval', async () => {
+      expect((await pgError(app(`INSERT INTO "AuditEntry" (id, at, actor, context, kind, action, inputs, outcome) VALUES ($1, '2020-01-01T00:00:00Z', 'will', 'console', 'action', 'x', '{}', 'ok')`, [id('au')]))).message).toMatch(/last 31 days/);
+      expect((await pgError(app(`INSERT INTO "AuditEntry" (id, actor, context, kind, action, inputs, outcome) VALUES ($1, 'will', 'console', 'approval', 'policy.change', '{"approvalId":"forged"}', 'ok')`, [id('au')]))).message).toMatch(/real approval/);
+      const aid = id('au');
+      await app(`INSERT INTO "AuditEntry" (id, seq, actor, context, kind, action, inputs, outcome) VALUES ($1, 999999999, 'flint', 'chat', 'action', 'x', '{}', 'ok')`, [aid]);
+      const seq = Number((await app(`SELECT seq FROM "AuditEntry" WHERE id = $1`, [aid])).rows[0].seq);
+      expect(seq).toBeLessThan(999999999);
     });
   });
 
