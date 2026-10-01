@@ -74,8 +74,13 @@ is used nowhere until you add `"SEARCH_KEY_PROVIDER": "tavily"` or `"brave"`; th
 connector's startup line in the server log says so. Every `web_search` result now says which backend answered (`"source"`), plus a
 `"fallback"` reason when SearXNG stood in (all the knobs are in
 [packages/mcp/README.md](../../packages/mcp/README.md#web-search-metered-keyless-or-both)).
-The connector runs from a bundle, and auto-deploy rebuilds only `server.mjs`. So after
-pulling this change, rebuild the bundle once and restart Flint:
+The connector runs from its own bundle in `~/.flint/connectors/`. Auto-deploy
+(`apps/server/install-server.sh`) rebuilds every installed `*-server.mjs` that has
+source in `packages/mcp/connectors/`, test-starts it (`apps/server/connector-smoke.mjs`:
+it must list its tools), and only then swaps it in, keeping the old one as
+`<name>.mjs.prev`. A connector that fails to build or start keeps its old bundle,
+and the deploy log says so. A manual build is needed only to install a connector
+for the first time:
 
 ```
 ESBUILD="$(find ~/flint/node_modules/.pnpm -path '*esbuild*/bin/esbuild' -type f | head -1)"

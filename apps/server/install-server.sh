@@ -39,6 +39,9 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
   echo "gate: persona tests (voice + constitution in the prompt)..."
   pnpm --filter @flint/persona test || { echo "✗ persona tests failed — NOT deploying"; exit 1; }
+  echo "gate: mcp typecheck + tests (connectors, the fetch_url guard, the approval policy)..."
+  pnpm --filter @flint/mcp typecheck || { echo "✗ mcp typecheck failed — NOT deploying"; exit 1; }
+  pnpm --filter @flint/mcp test || { echo "✗ mcp tests failed — NOT deploying"; exit 1; }
   # NOTE: @flint/core is NOT gated on yet — 3 contract tests in
   # test/contracts/ollama.test.ts assert the OLD prompted-JSON tool path that was
   # replaced by native function-calling. They need a real contract decision, not
@@ -59,19 +62,29 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
 # script never rebuilt them: a connector fix (the fetch_url guard, #33) merged,
 # "deployed", and the live connector kept the old code. Rebuild every bundle that
 # is installed AND has its source here, before the reload respawns them. Nothing
-# new is installed. A bundle that fails to build is kept as it was, and says so.
+# new is installed. A new bundle replaces the old one only if it builds AND starts
+# and lists its tools (connector-smoke.mjs): one that builds can still die at
+# startup, and the server's /health would not notice its tools were gone. The
+# replaced bundle is kept as <name>.mjs.prev.
 echo "rebuilding installed connectors from source..."
 for bundle in "$DATA"/connectors/*-server.mjs(N); do
   name="${bundle:t:r}"
   src="$REPO/packages/mcp/connectors/$name.ts"
   [ -f "$src" ] || { echo "  = $name: no source in this repo, kept"; continue; }
+  next="${bundle%.mjs}.new.mjs"   # must end in .mjs: node won't run a .new file, and *-server.mjs won't match it
   if "$ESBUILD" "$src" --bundle --platform=node --format=esm --target=node20 \
        --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
-       --outfile="$bundle.new" --log-level=error; then
-    mv -f "$bundle.new" "$bundle"
-    echo "  ✓ $name"
+       --outfile="$next" --log-level=error; then
+    if smoke=$(node "$REPO/apps/server/connector-smoke.mjs" "$next" 10000 2>&1); then
+      cp -p "$bundle" "$bundle.prev" 2>/dev/null || echo "  (could not keep $name.mjs.prev)"
+      mv -f "$next" "$bundle"
+      echo "  ✓ $name ($smoke)"
+    else
+      rm -f "$next"
+      echo "  ✗ $name built but did not start ($smoke); the old bundle stays"
+    fi
   else
-    rm -f "$bundle.new"
+    rm -f "$next"
     echo "  ✗ $name failed to build; the old bundle stays"
   fi
 done
