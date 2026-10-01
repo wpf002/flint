@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,7 +19,20 @@ function fakeConnector(name: string, tools: number): string {
   );
   return f;
 }
-const run = (bundle: string, ms = 5000) => spawnSync(process.execPath, [SMOKE, bundle, String(ms)], { encoding: 'utf8' });
+const run = (bundle: string, ms = 5000, extra: string[] = [], env: NodeJS.ProcessEnv = process.env) =>
+  spawnSync(process.execPath, [SMOKE, bundle, String(ms), ...extra], { encoding: 'utf8', env });
+
+/** A connector that starts only when `check` (a JS expression) holds, else throws `why`. */
+function picky(name: string, check: string, why: string): string {
+  const f = fakeConnector(name, 1);
+  writeFileSync(f, `if (!(${check})) throw new Error(${JSON.stringify(why)});\n` + readFileSync(f, 'utf8'));
+  return f;
+}
+function config(entries: object[]): string {
+  const f = join(dir, `mcp-${Math.random().toString(36).slice(2)}.json`);
+  writeFileSync(f, JSON.stringify({ servers: entries }));
+  return f;
+}
 
 // Review of #33: a connector that builds can still die at startup, and the
 // server's /health would not notice its tools were gone. Deploy swaps a rebuilt
@@ -52,4 +65,49 @@ describe('connector-smoke.mjs', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/listed no tools/);
   });
+
+  // Third review of #33: the server starts a connector with its mcp.json command,
+  // args, cwd and env; a smoke that didn't would pass a bundle that only breaks
+  // under its real config, and fail one that needs its config to start.
+  it('starts it the way the server would: mcp.json env, args and cwd', () => {
+    const installed = join(dir, 'installed', 'needy-server.mjs');
+    const work = join(dir, 'work');
+    mkdirSync(work, { recursive: true });
+    // argv: [node, bundle, --flag]; cwd compared by real path (macOS tmp is a symlink).
+    const candidate = picky('needy.new.mjs', `process.env.NEEDED === 'yes' && process.cwd() === ${JSON.stringify(realpathSync(work))} && process.argv[2] === '--flag'`, 'missing config');
+    const cfg = config([{ name: 'needy', command: process.execPath, args: [installed, '--flag'], env: { NEEDED: 'yes' }, cwd: work }]);
+    const r = run(candidate, 5000, [installed, cfg]);
+    expect(r.stderr).toBe('');
+    expect(r.stdout.trim()).toBe('1 tools as needy');
+    expect(run(candidate).status).toBe(1); // without its entry it can't start
+  });
+
+  it('catches a bundle that breaks only under its real config', () => {
+    const installed = join(dir, 'installed', 'web-server.mjs');
+    const candidate = picky('envy.new.mjs', `process.env.SEARCH_PROVIDER !== 'auto'`, 'auto config parse bug');
+    const cfg = config([{ name: 'web', command: process.execPath, args: [installed], env: { SEARCH_PROVIDER: 'auto' } }]);
+    const r = run(candidate, 5000, [installed, cfg]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/exited 1 before listing tools as web: .*auto config parse bug/);
+  });
+
+  it("fills ${NAME} from the environment, and passes nothing else of the deploy's", () => {
+    const installed = join(dir, 'installed', 'filled-server.mjs');
+    const candidate = picky('filled.new.mjs', `process.env.TOKEN_FROM_ENV === 'abc' && process.env.LEAKY === undefined`, 'env not as the server sets it');
+    const cfg = config([{ name: 'filled', command: process.execPath, args: [installed], env: { TOKEN_FROM_ENV: '${FLINT_TEST_TOKEN}' } }]);
+    const r = run(candidate, 5000, [installed, cfg], { ...process.env, FLINT_TEST_TOKEN: 'abc', LEAKY: '1' });
+    expect(r.stdout.trim()).toBe('1 tools as filled');
+  });
+
+  it('reports a connector that dies at once by its own exit, not an EPIPE', () => {
+    const f = join(dir, 'quick-exit.mjs');
+    writeFileSync(f, 'console.error("Error: no database"); process.exit(3);');
+    for (let i = 0; i < 5; i++) {
+      const r = run(f);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/exited 3 before listing tools: Error: no database/);
+      expect(r.stderr).not.toMatch(/EPIPE/);
+    }
+  });
 });
+
