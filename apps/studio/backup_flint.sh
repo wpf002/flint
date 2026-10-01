@@ -39,10 +39,17 @@ SECRETS=(
 )
 
 # Optional: encrypt the offsite copy to an age public key whose private half lives
-# OFF this Mac (`age-keygen` elsewhere; restore with `age -d -i key.txt`). Set, the
-# offsite copy is <name>.tar.gz.age; set but `age` missing, no offsite copy is
-# written at all rather than a plaintext one.
+# OFF this Mac (`age-keygen` elsewhere; restore with `age -d -i key.txt`). Put the
+# public key (age1...) in ~/.flint/backup-age-recipient, or FLINT_BACKUP_AGE_RECIPIENT.
+# Set, the offsite copy is <name>.tar.gz.age; set but `age` not found, no offsite
+# copy is written at all rather than a plaintext one.
 AGE_RECIPIENT="${FLINT_BACKUP_AGE_RECIPIENT:-}"
+[ -z "$AGE_RECIPIENT" ] && [ -f "$SRC/backup-age-recipient" ] && AGE_RECIPIENT="$(tr -d '[:space:]' < "$SRC/backup-age-recipient")"
+# launchd runs this with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which has no Homebrew,
+# so look where age is installed too. FLINT_AGE_BIN, when set, is the only answer.
+if [ -n "${FLINT_AGE_BIN+x}" ]; then AGE_BIN="$FLINT_AGE_BIN"
+else AGE_BIN="$(command -v age || true)"; for c in /opt/homebrew/bin/age /usr/local/bin/age; do [ -z "$AGE_BIN" ] && [ -x "$c" ] && AGE_BIN="$c"; done
+fi
 
 prune() { # dir keep
   ls -1t "$1"/flint-*.tar.gz 2>/dev/null | tail -n +$(( $2 + 1 )) | while read -r f; do rm -f "$f"; done
@@ -93,11 +100,21 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   # rm -f on a name that was never written offsite is harmless.
   [ -f "$MANIFEST" ] || ls -1tr "$LOCAL" | grep -E '^flint-.*\.tar\.gz$' | grep -vxF "flint-$TS.tar.gz" > "$MANIFEST" || true
   if [ -n "$AGE_RECIPIENT" ]; then
-    if command -v age >/dev/null 2>&1; then
+    if [ -n "$AGE_BIN" ] && [ -x "$AGE_BIN" ]; then
       name="flint-$TS.tar.gz.age"
-      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | age -r "$AGE_RECIPIENT" -o "$OFFSITE/$name"
+      # Both sides must succeed: zsh's set -e sees only the last command of a pipe,
+      # and age would happily encrypt a truncated tar stream.
+      set +e
+      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | "$AGE_BIN" -r "$AGE_RECIPIENT" -o "$OFFSITE/$name"
+      st=("${pipestatus[@]}")
+      set -e
+      if [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ]; then
+        rm -f "$OFFSITE/$name"
+        echo "$(date '+%F %T') offsite FAILED: tar exited ${st[1]}, age ${st[2]}; nothing recorded" >&2
+        name=""
+      fi
     else
-      echo "$(date '+%F %T') offsite SKIPPED: FLINT_BACKUP_AGE_RECIPIENT is set but age is not installed (no plaintext copy written)" >&2
+      echo "$(date '+%F %T') offsite SKIPPED: an age recipient is set but age was not found (PATH=$PATH, /opt/homebrew/bin, /usr/local/bin); no plaintext copy written" >&2
       name=""
     fi
   else

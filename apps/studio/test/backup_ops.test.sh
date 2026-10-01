@@ -37,19 +37,30 @@ check "said so" 'print -r -- "$out" | grep -q "rotated ollama.err.log (21 MB)"'
 latest=$(ls -t "$fx/local"/flint-*.tar.gz | head -1)
 check "rotated logs are not backed up" '! tar -tzf "$latest" | grep -q "\.log\.1\.gz"'
 
-# 4. Age: encrypted offsite copy when a recipient is set and age exists...
+# 4. Age, run the way launchd runs it: PATH=/usr/bin:/bin:/usr/sbin:/sbin (no Homebrew),
+#    the recipient from ~/.flint/backup-age-recipient, age found outside PATH.
+mkdir -p "$fx/brew"
 print -r -- '#!/bin/sh
 # fake age: -r <recipient> -o <out>, reads stdin
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
-{ echo "age-encryption.org/v1 (fake)"; cat; } > "$out"' > "$fx/bin/age"; chmod +x "$fx/bin/age"
-run FLINT_BACKUP_TS=20261001-0004 FLINT_BACKUP_AGE_RECIPIENT=age1testrecipient >/dev/null
-check "offsite copy is .age" 'ls "$fx/icloud/FlintBackups" | grep -q "\.tar\.gz\.age$"'
+{ echo "age-encryption.org/v1 (fake)"; cat; } > "$out"' > "$fx/brew/age"; chmod +x "$fx/brew/age"
+print -r -- 'age1testrecipient' > "$fx/home/.flint/backup-age-recipient"
+LAUNCHD_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+run FLINT_BACKUP_TS=20261001-0004 FLINT_AGE_BIN="$fx/brew/age" PATH=$LAUNCHD_PATH >/dev/null
+check "offsite copy is .age under launchd's PATH" 'ls "$fx/icloud/FlintBackups" | grep -q "\.tar\.gz\.age$"'
 check "it went through age" 'head -c 28 "$(ls -t "$fx/icloud/FlintBackups"/*.age | head -1)" | grep -q "age-encryption.org/v1"'
-# ...and NO offsite copy (rather than a plaintext one) when age is missing.
-rm "$fx/bin/age"; before=$(ls "$fx/icloud/FlintBackups" | wc -l | tr -d ' ')
-run FLINT_BACKUP_TS=20261001-0005 FLINT_BACKUP_AGE_RECIPIENT=age1testrecipient PATH="$fx/bin:/usr/bin:/bin" >/dev/null || true
+# ...a failing age leaves nothing behind and records nothing...
+print -r -- '#!/bin/sh
+exit 3' > "$fx/brew/age-broken"; chmod +x "$fx/brew/age-broken"
+before=$(ls "$fx/icloud/FlintBackups" | wc -l | tr -d ' '); lines=$(wc -l < "$fx/manifest.txt" | tr -d ' ')
+run FLINT_BACKUP_TS=20261001-0006 FLINT_AGE_BIN="$fx/brew/age-broken" PATH=$LAUNCHD_PATH >/dev/null || true
+check "a failed age run leaves no file" '[ "$(ls "$fx/icloud/FlintBackups" | wc -l | tr -d " ")" = "$before" ]'
+check "and records nothing" '[ "$(wc -l < "$fx/manifest.txt" | tr -d " ")" = "$lines" ]'
+check "and says so" 'grep -q "offsite FAILED: tar exited 0, age 3" "$fx/err.log"'
+# ...and NO offsite copy (rather than a plaintext one) when age is not found.
+run FLINT_BACKUP_TS=20261001-0005 FLINT_AGE_BIN=/nonexistent/age PATH=$LAUNCHD_PATH >/dev/null || true
 check "no plaintext fallback" '[ "$(ls "$fx/icloud/FlintBackups" | wc -l | tr -d " ")" = "$before" ]'
-check "and it said why" 'grep -q "offsite SKIPPED: FLINT_BACKUP_AGE_RECIPIENT is set but age is not installed" "$fx/err.log"'
+check "and it said why" 'grep -q "offsite SKIPPED: an age recipient is set but age was not found" "$fx/err.log"'
 
 (( fail )) && exit 1
 print "ok: prune (no head -n 0), rotation, and age-only offsite all behave"
