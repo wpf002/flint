@@ -11,7 +11,8 @@
   "dependencies": {
     "@flint/core": "workspace:*",
     "@flint/mcp": "workspace:*",
-    "@flint/persona": "workspace:*"
+    "@flint/persona": "workspace:*",
+    "@flint/policy": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20",

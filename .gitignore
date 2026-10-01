@@ -12,3 +12,4 @@ coverage/
 *.tgz
 __pycache__/
 *.pyc
+.turbo/

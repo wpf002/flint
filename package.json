@@ -3,14 +3,15 @@
   "private": true,
   "packageManager": "pnpm@9.12.0",
   "scripts": {
-    "build": "pnpm -r build",
-    "test": "pnpm -r test",
+    "build": "turbo run build",
+    "test": "turbo run test",
     "test:contracts": "pnpm --filter @flint/core test:contracts",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "turbo run typecheck",
     "registry:start": "verdaccio --config .verdaccio/config.yaml --listen 4873",
     "publish:local": "pnpm --filter @flint/core publish --registry http://localhost:4873 --no-git-checks"
   },
   "devDependencies": {
+    "turbo": "^2.5.0",
     "typescript": "^5.6.0",
     "verdaccio": "^5.32.0"
   }
