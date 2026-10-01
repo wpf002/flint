@@ -72,7 +72,7 @@ import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
 import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './route-log';
-import { allowedTailnetUser, bearerMatches, consoleGetsToken, requestVia, tailnetAllowed } from './access';
+import { DEFAULT_BIND_HOST, allowedTailnetUser, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
@@ -615,7 +615,9 @@ async function main(): Promise<void> {
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
-  const HOST = process.env.BIND_HOST?.trim() || '127.0.0.1';
+  // ::1, not 127.0.0.1 (./access DEFAULT_BIND_HOST): this Mac's userspace tailscaled
+  // forwards any tailnet peer's connection to 127.0.0.1:<port>, headers and all.
+  const HOST = process.env.BIND_HOST?.trim() || DEFAULT_BIND_HOST;
   server.listen(PORT, HOST, () => console.error(`Flint listening on ${HOST}:${PORT} (provider=${provider.name}, model=${model})`));
 }
 
@@ -734,7 +736,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // DNS-rebinding guard: an attacker can point a hostname at 127.0.0.1 to make
   // their page same-origin with us. Only serve requests addressed to a host we
   // expect (loopback, or the tailnet name Flint is reached by).
-  const host = (req.headers.host ?? '').split(':')[0]?.toLowerCase() ?? '';
+  const host = hostName(req.headers.host);
   if (host && !ALLOWED_HOSTS.test(host)) {
     return json(res, 403, { error: 'bad host' });
   }

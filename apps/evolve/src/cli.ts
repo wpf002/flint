@@ -214,7 +214,7 @@ async function measureWith(env: NodeJS.ProcessEnv) {
   if (budget <= 0) throw new Error(`the shared daily budget of $${daily.toFixed(2)} is spent ($${already.toFixed(2)} today)`);
 
   const res = await measure({
-    flintUrl: env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
+    flintUrl: env.FLINT_URL?.trim() || 'http://localhost:8080',
     flintToken: flintToken(env),
     anthropicKey: key,
     judgeModel: env.EVOLVE_JUDGE_MODEL?.trim() || 'claude-opus-5-5',
@@ -275,7 +275,7 @@ async function runTry(spec: string): Promise<number> {
   const cand = parseCandidate(spec);
   if (!cand) throw new Error(`bad candidate '${spec}'; expected e.g. hard=openai:gpt-5.6-sol`);
 
-  const url = env.FLINT_URL?.trim() || 'http://127.0.0.1:8080';
+  const url = env.FLINT_URL?.trim() || 'http://localhost:8080';
   const io: TryIo = {
     secretsPath: join(FLINT_HOME, 'secrets.env'),
     rollbackPath: join(STATE_DIR, 'rollback.json'),

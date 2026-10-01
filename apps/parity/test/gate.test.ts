@@ -463,7 +463,7 @@ describe('gate CLI --decide-only', () => {
     expect(record.decision.verdict).toBe('PROMOTE');
     expect(r.stdout).toContain('**Verdict: PROMOTE**');
     // How to serve it as judged (--candidate-think on), kept in the record for cycle.sh and printed.
-    expect(record.promote).toEqual(promotionCommands({ candidate: 'flint-muse:c20261001-0230', think: true, flintUrl: 'http://127.0.0.1:8080' }));
+    expect(record.promote).toEqual(promotionCommands({ candidate: 'flint-muse:c20261001-0230', think: true, flintUrl: 'http://localhost:8080' }));
     expect(r.stderr).toContain('OLLAMA_THINK string true');
     expect(r.stderr).toContain('launchctl bootout');
     expect(r.stderr).not.toContain('kickstart');

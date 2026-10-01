@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allowedTailnetUser, bearerMatches, consoleGetsToken, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
+import { DEFAULT_BIND_HOST, allowedTailnetUser, bearerMatches, consoleGetsToken, hostName, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
 
 const local = { remoteAddress: '127.0.0.1', headers: { host: 'localhost:8080' } };
 /** What `tailscale serve` delivers: it also connects from 127.0.0.1, with the tailnet name and the login. */
@@ -76,3 +76,22 @@ describe('bearerMatches', () => {
     }
   });
 });
+
+// Review of #34: userspace tailscaled forwards peers to 127.0.0.1 raw, so Flint
+// listens where that forward cannot reach.
+describe('where Flint listens', () => {
+  it('is IPv6 loopback, never 127.0.0.1', () => {
+    expect(DEFAULT_BIND_HOST).toBe('::1');
+  });
+});
+
+describe('hostName', () => {
+  it('takes the host from a Host header, IPv6 brackets included', () => {
+    expect(hostName('localhost:8080')).toBe('localhost');
+    expect(hostName('[::1]:8080')).toBe('[::1]');
+    expect(hostName('[::1]')).toBe('[::1]');
+    expect(hostName('Flint-1.Tail7ed2c3.TS.net')).toBe('flint-1.tail7ed2c3.ts.net');
+    expect(hostName(undefined)).toBe('');
+  });
+});
+

@@ -67,7 +67,7 @@ const DEFAULTS = {
   /** Empty = single judge (--judge-model). */
   judgePanel: process.env.PARITY_JUDGE_PANEL?.trim() || '',
   ollamaHost: process.env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434',
-  flintUrl: process.env.FLINT_URL?.trim() || 'http://127.0.0.1:8080',
+  flintUrl: process.env.FLINT_URL?.trim() || 'http://localhost:8080',
   flintFrontierModel: process.env.PARITY_FLINT_PRICE_MODEL?.trim() || 'claude-sonnet-4-6',
 };
 

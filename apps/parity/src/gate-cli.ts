@@ -160,7 +160,7 @@ async function main(): Promise<number> {
       'judge-panel': { type: 'string' },
       'judge-model': { type: 'string' },
       'budget-usd': { type: 'string', default: '30' },
-      'flint-url': { type: 'string', default: process.env.FLINT_URL?.trim() || 'http://127.0.0.1:8080' },
+      'flint-url': { type: 'string', default: process.env.FLINT_URL?.trim() || 'http://localhost:8080' },
       margin: { type: 'string' },
       alpha: { type: 'string' },
       'min-paired': { type: 'string' },

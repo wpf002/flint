@@ -23,8 +23,10 @@ Now the Studio has a stable name on your private network (e.g. `studio`), reacha
 from your laptop/phone anywhere — no port-forwarding, encrypted.
 
 ## 3. From your laptop
-- **Talk to Flint (UI):** open `http://studio:8080` (or the Tailscale URL). Same
-  console you use now.
+- **Talk to Flint (UI):** open the Tailscale URL (`https://<name>.<tailnet>.ts.net`,
+  from `tailscale serve`). Same console you use now. Not `http://studio:8080`:
+  Flint listens on `::1` only, so the tailnet reaches it through serve, which
+  vouches for your login (apps/server/src/access.ts).
 - **Reprogram Flint (code):** `ssh willfoti@studio` — then edit the repo and run
   `./apps/server/install-server.sh` to rebuild/redeploy. Or point Claude Code /
   VS Code Remote-SSH at `willfoti@studio` and work as if you were sitting at it.

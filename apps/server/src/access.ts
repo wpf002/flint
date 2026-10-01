@@ -6,13 +6,19 @@
  * the reasoning that Flint is only reachable over the private tailnet. The
  * 2026-09-30 audit found that this handed the token to every device and login on
  * the tailnet, and to anything that could make Flint fetch its own page (the
- * fetch_url hole, closed in #33). The server listens on 127.0.0.1 only, so a
- * request comes either from this Mac directly or through `tailscale serve`,
- * which connects from 127.0.0.1 as well, so the source address alone can't tell
- * them apart. What serve does add, for tailnet users, is `Tailscale-User-Login`,
- * and it strips that header from what clients send, so it cannot be spoofed over
- * the tailnet (https://tailscale.com/kb/1312/serve). Tagged devices and Funnel get
- * no identity at all.
+ * fetch_url hole, closed in #33). A request reaches Flint either from this Mac or
+ * through `tailscale serve`, which also connects from loopback, so the source
+ * address alone can't tell them apart. What serve does add, for tailnet users, is
+ * `Tailscale-User-Login`, and it strips that header from what clients send, so it
+ * cannot be spoofed THROUGH SERVE (https://tailscale.com/kb/1312/serve). Tagged
+ * devices and Funnel get no identity at all.
+ *
+ * That only holds if serve is the only way in. This Mac's tailscaled runs with
+ * --tun=userspace-networking, and in that mode it forwards a tailnet peer's TCP
+ * connection to any port serve doesn't own straight to 127.0.0.1:<port>, raw, with
+ * whatever headers the peer chose (wgengine/netstack: dialIP = ipv4Loopback). So
+ * Flint listens on ::1 (DEFAULT_BIND_HOST), which that forward never dials, and
+ * serve points at http://[::1]:8080. The review of #34 found this.
  *
  * Rules:
  *  - The token is injected into the console only for a direct request from this
@@ -30,6 +36,22 @@ export type Via = 'local' | 'tailnet';
 export interface RequestFacts {
   remoteAddress: string | undefined;
   headers: Record<string, string | string[] | undefined>;
+}
+
+/**
+ * Where the server listens: IPv6 loopback, which userspace tailscaled's forward of
+ * peer connections (to 127.0.0.1 only) cannot reach. Clients use `localhost`.
+ */
+export const DEFAULT_BIND_HOST = '::1';
+
+/** The host part of a Host header, lowercased: `localhost:8080` -> localhost, `[::1]:8080` -> [::1]. */
+export function hostName(header: string | undefined): string {
+  const h = (header ?? '').trim().toLowerCase();
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']');
+    return end > 0 ? h.slice(0, end + 1) : h;
+  }
+  return h.split(':')[0] ?? '';
 }
 
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
