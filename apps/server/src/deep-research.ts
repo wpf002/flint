@@ -1,5 +1,6 @@
 import type { Tool } from '@flint/core';
 import { cosineSimilarity } from '@flint/persona';
+import { guardedFetch, isPrivateHost } from '@flint/mcp';
 
 /**
  * deep_research — Perplexity-grade research as a built-in tool. One call does
@@ -351,33 +352,17 @@ export function selectDistinct(hits: SearchHit[], max: number): SearchHit[] {
 
 // ---------------------------------------------------------------- fetch + extract
 
-/** Loopback, private, link-local, CGNAT/Tailscale and .local hosts — never fetched. */
-export function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.ts.net')) return true;
-  if (!h.includes('.') && !h.includes(':')) return true; // bare intranet names
-  if (h.includes(':')) return h === '::1' || h === '::' || /^(fc|fd|fe80)/.test(h) || h.startsWith('::ffff:');
-  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return false;
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  return (
-    a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)
-  );
-}
+// The private-host check is shared with web.fetch_url (@flint/mcp url-guard).
+export { isPrivateHost };
 
 /** Default page fetcher: http(s) only, public hosts only, streamed with a hard byte cap. */
 export async function defaultFetchPage(url: string, opts: { signal: AbortSignal; maxBytes: number }): Promise<FetchedPage> {
-  const u = new URL(url);
-  if (!/^https?:$/.test(u.protocol)) throw new Error('not http(s)');
-  if (isPrivateHost(u.hostname)) throw new Error('private host');
-  const res = await fetch(u, {
+  // Public hosts only, checked by DNS and on every redirect hop BEFORE it is
+  // requested (it used to check only where a followed redirect ended up).
+  const res = await guardedFetch(url, {
     signal: opts.signal,
-    redirect: 'follow',
     headers: { 'user-agent': 'Mozilla/5.0 (compatible; FlintBot/1.0)', accept: 'text/html,text/plain;q=0.9,*/*;q=0.5' },
   });
-  // A redirect could land on a private host; refuse to read it.
-  if (res.url && isPrivateHost(new URL(res.url).hostname)) throw new Error('redirected to private host');
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const contentType = res.headers.get('content-type') ?? '';
   if (contentType && !/text\/|html|xml|json/i.test(contentType)) throw new Error(`unsupported ${contentType}`);

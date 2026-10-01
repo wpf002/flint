@@ -44,7 +44,9 @@ export class ActionQueue {
 
   /** The MCP approver. Safe → run. Write → execute IF pre-approved, else queue. */
   approver = (req: ApprovalRequest): boolean => {
-    if (this.isSafe(req.tool)) return true;
+    // The WHOLE `server.tool` name: isSafeTool is written for it (a namespace can
+    // carry the dangerous word, `execute.trade`), and was handed the bare tool.
+    if (this.isSafe(`${req.server}.${req.tool}`)) return true;
     const key = keyOf(req.server, req.tool, req.args);
     if (this.preApproved.has(key)) {
       this.preApproved.delete(key);
