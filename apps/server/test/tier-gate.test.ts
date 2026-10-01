@@ -49,7 +49,7 @@ async function setup(taintFloor = true) {
     { gate: tierGate(opts) },
   );
   const tool = (name: string) => registry.tools().find((t) => t.definition.name === name)!;
-  const call = (name: string, args: Record<string, unknown>) => tool(name).handler({ id: name, name, args });
+  const call = (name: string, args: Record<string, unknown>) => tool(name).handler({ id: name, toolName: name, args });
   return { ran, queue, events, call, opts, registry, close: () => registry.close() };
 }
 
@@ -146,10 +146,10 @@ describe('built-in tools', () => {
     const ran: string[] = [];
     const queue = new ActionQueue(isSafeTool);
     const [remember] = gateBuiltins([builtin('remember', ran)], { queue });
-    await withTurnTaint(() => remember!.handler({ id: '1', name: 'remember', args: { fact: 'a' } }));
+    await withTurnTaint(() => remember!.handler({ id: '1', toolName: 'remember', args: { fact: 'a' } }));
     const r = (await withTurnTaint(async () => {
       markTainted('mcp:web');
-      return remember!.handler({ id: '2', name: 'remember', args: { fact: 'b' } });
+      return remember!.handler({ id: '2', toolName: 'remember', args: { fact: 'b' } });
     })) as { approved: boolean };
     expect(ran).toEqual(['remember']);
     expect(r.approved).toBe(false);
@@ -161,9 +161,9 @@ describe('built-in tools', () => {
     const queue = new ActionQueue(isSafeTool);
     const [research, remember] = gateBuiltins([builtin('deep_research', ran, true), builtin('remember', ran)], { queue });
     await withTurnTaint(async () => {
-      await research!.handler({ id: '1', name: 'deep_research', args: { q: 'x' } });
+      await research!.handler({ id: '1', toolName: 'deep_research', args: { q: 'x' } });
       expect(turnTainted()).toBe(true);
-      await remember!.handler({ id: '2', name: 'remember', args: { fact: 'from the web' } });
+      await remember!.handler({ id: '2', toolName: 'remember', args: { fact: 'from the web' } });
     });
     expect(ran).toEqual(['deep_research']);
     expect(queue.list().map((p) => p.fullName)).toEqual(['remember']);
@@ -174,7 +174,7 @@ describe('built-in tools', () => {
     const [calc] = gateBuiltins([builtin('calculate', ran)], { queue: new ActionQueue(isSafeTool) });
     await withTurnTaint(async () => {
       markTainted('mcp:web');
-      await calc!.handler({ id: '1', name: 'calculate', args: {} });
+      await calc!.handler({ id: '1', toolName: 'calculate', args: {} });
     });
     expect(ran).toEqual(['calculate']);
   });

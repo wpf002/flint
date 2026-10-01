@@ -191,7 +191,7 @@ describe('MCP tools through the Flint tool loop', () => {
 // and every result; with no gate, nothing changes (the tests above).
 describe('McpRegistry gate', () => {
   it('is asked for read-only tools too, with the annotations and args, and sees the result', async () => {
-    const seen: Array<{ fullName: string; readOnly?: boolean; args: unknown }> = [];
+    const seen: Array<{ fullName: string; readOnly: boolean | undefined; args: unknown }> = [];
     const results: unknown[] = [];
     const { registry, close } = await setup({
       gate: {
@@ -199,7 +199,7 @@ describe('McpRegistry gate', () => {
         onResult: (_req, r) => results.push(r),
       },
     });
-    await tool(registry, 'test.echo').handler({ id: '1', name: 'test.echo', args: { text: 'hi' } });
+    await tool(registry, 'test.echo').handler({ id: '1', toolName: 'test.echo', args: { text: 'hi' } });
     expect(seen).toEqual([{ fullName: 'test.echo', readOnly: true, args: { text: 'hi' } }]);
     expect(results).toHaveLength(1);
     await close();
@@ -212,16 +212,16 @@ describe('McpRegistry gate', () => {
       autoApprove: 'all',
       approver: () => true,
     });
-    const r = await tool(registry, 'test.delete_thing').handler({ id: '1', name: 'test.delete_thing', args: { id: 'x' } });
+    const r = await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'x' } });
     expect(r).toEqual({ approved: false, message: 'no: delete_thing' });
     expect(executed).toEqual([]);
-    expect(await tool(registry, 'test.echo').handler({ id: '2', name: 'test.echo', args: { text: 'hi' } })).toEqual({ approved: false, message: 'no: echo' });
+    expect(await tool(registry, 'test.echo').handler({ id: '2', toolName: 'test.echo', args: { text: 'hi' } })).toEqual({ approved: false, message: 'no: echo' });
     await close();
   });
 
   it('a gate that throws denies (fail closed)', async () => {
     const { registry, executed, close } = await setup({ gate: { check: () => { throw new Error('boom'); } } });
-    const r = (await tool(registry, 'test.delete_thing').handler({ id: '1', name: 'test.delete_thing', args: { id: 'x' } })) as { approved: boolean };
+    const r = (await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'x' } })) as { approved: boolean };
     expect(r.approved).toBe(false);
     expect(executed).toEqual([]);
     await close();

@@ -66,14 +66,14 @@ describe('the gate in runtime mode', () => {
     const [r] = gateBuiltins([remember(ran)], { queue, proposals });
     const out = (await withTurnTaint(async () => {
       markTainted('mcp:web');
-      return r!.handler({ id: '1', name: 'remember', args: { fact: 'x' } });
+      return r!.handler({ id: '1', toolName: 'remember', args: { fact: 'x' } });
     })) as { approved: boolean; message: string };
     expect(out.message).toMatch(/proposal pr1/);
     expect(rt.filed[0]).toMatchObject({ action: 'remember', origin: expect.stringMatching(/^chat:[0-9a-f]{16}$/), tainted: true, args: { fact: 'x' } });
     rt.setUp(false);
     const down = (await withTurnTaint(async () => {
       markTainted('mcp:web');
-      return r!.handler({ id: '2', name: 'remember', args: { fact: 'y' } });
+      return r!.handler({ id: '2', toolName: 'remember', args: { fact: 'y' } });
     })) as { message: string };
     expect(down.message).toMatch(/pending, unsynced/);
     expect(ran).toEqual([]);
@@ -89,9 +89,9 @@ describe('the gate in runtime mode', () => {
     queue.allowOnce('flint', 'remember', { fact: 'approved' });
     await withTurnTaint(async () => {
       markTainted('mcp:web');
-      await r!.handler({ id: '1', name: 'remember', args: { fact: 'other' } });
-      await r!.handler({ id: '2', name: 'remember', args: { fact: 'approved' } });
-      await r!.handler({ id: '3', name: 'remember', args: { fact: 'approved' } });
+      await r!.handler({ id: '1', toolName: 'remember', args: { fact: 'other' } });
+      await r!.handler({ id: '2', toolName: 'remember', args: { fact: 'approved' } });
+      await r!.handler({ id: '3', toolName: 'remember', args: { fact: 'approved' } });
     });
     expect(ran).toEqual([{ fact: 'approved' }]);
   });
