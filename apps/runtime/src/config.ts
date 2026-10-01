@@ -66,7 +66,7 @@ const Env = z.object({
   GITHUB_APP_INSTALLATION_ID: z.string().regex(/^\d{1,15}$/).optional(),
   GITHUB_APP_KEY_PATH: z.string().optional(),
   GITHUB_OWNER: z.string().regex(/^[A-Za-z0-9-]{1,39}$/).default('wpf002'),
-  /** Nexus, read-only, for the nexus source. */
+  /** Nexus, for the nexus source: a namespace token (Nexus has no scopes yet); the source only reads. */
   NEXUS_MCP_URL: z.string().url().refine((u) => u.startsWith('https://'), 'must be https').optional(),
   NEXUS_READ_TOKEN: z.string().min(16).optional(),
   /** Health endpoints off the box: `name=https://host/path,...` (Railway services). */

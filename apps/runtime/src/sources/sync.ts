@@ -18,7 +18,8 @@ import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { activePolicies } from '../governance/proposals.js';
 import { applyObservation, stateHash, type Applied } from '../world/mapper.js';
-import type { Source, SourceRun } from './types.js';
+import { wellFormedDeep } from './text.js';
+import type { Known, Source, SourceRun } from './types.js';
 
 export interface SyncSummary {
   source: string;
@@ -45,8 +46,9 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
 
   let result;
   try {
-    const known = async (kind: string) =>
-      (await db.entity.findMany({ where: { kind, status: 'active', sources: { some: { source: source.name } } }, select: { key: true }, take: 5000 })).map((e) => e.key);
+    const known = async (kind: string): Promise<Known[]> =>
+      (await db.entity.findMany({ where: { kind, status: 'active', sources: { some: { source: source.name } } }, select: { key: true, name: true, state: true, taintedPaths: true }, take: 5000 }))
+        .map((e) => ({ key: e.key, name: e.name, state: (e.state ?? {}) as Record<string, unknown>, taintedPaths: e.taintedPaths }));
     result = await source.run({ ...run, cursor: { cursor: cursor.cursor, etag: cursor.etag }, known });
   } catch (err) {
     const message = redact(err instanceof Error ? err.message : String(err)).slice(0, 500);
@@ -56,7 +58,9 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   }
   summary.ran = true;
 
-  for (const o of result.observations) {
+  for (const raw of result.observations) {
+    // A NUL or half an emoji from outside would make the item unwritable on every run.
+    const o = wellFormedDeep(raw);
     const hash = stateHash({ name: o.name, state: o.state, ...(o.status ? { status: o.status } : {}), taintedPaths: o.taintedPaths ?? [] });
     // The event names the change: the state, and the version it would replace.
     // The same observation again (a restart) is the same event; the same state
@@ -121,11 +125,21 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     summary.metrics += 1;
   }
 
+  // Parts of the run that failed, and observations that did not apply, are this run's error.
+  const partErrors = (result.errors ?? []).map((e) => redact(e).slice(0, 300));
+  const problems = [...partErrors, ...(summary.failed ? [`${summary.failed} observation(s) failed to apply`] : [])];
+  summary.failed += partErrors.length;
+  const lastError = problems.length ? problems.join('; ').slice(0, 500) : null;
+  if (lastError) summary.reason = lastError;
   await db.sourceCursor.update({
     where: { source: source.name },
     data: {
-      lastOkAt: run.now, lastError: null, consecutiveFailures: 0,
-      ...(result.cursor !== undefined ? { cursor: result.cursor } : {}), ...(result.etag !== undefined ? { etag: result.etag } : {}),
+      lastOkAt: run.now, lastError, ...(problems.length ? { consecutiveFailures: { increment: 1 } } : { consecutiveFailures: 0 }),
+      // The cursor moves only when every observation applied: otherwise a 304
+      // next time would hide the change that failed, until something else changed.
+      ...(summary.failed === partErrors.length
+        ? { ...(result.cursor !== undefined ? { cursor: result.cursor } : {}), ...(result.etag !== undefined ? { etag: result.etag } : {}) }
+        : {}),
     },
   });
   const changed = summary.created + summary.updated > 0 || summary.failed > 0;
@@ -133,6 +147,7 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     await appendAudit(db, [{
       actor: `sync:${source.name}`, context: 'autonomous', kind: 'sync', action, tier: tier.tier, decision: 'act', outcome: summary.failed ? 'failed' : 'ok',
       inputs: { created: summary.created, updated: summary.updated, unchanged: summary.unchanged, skipped: summary.skipped, failed: summary.failed, metrics: summary.metrics },
+      ...(lastError ? { reasoning: lastError } : {}),
     }], run.now);
   } else {
     const day = localDay(tz, run.now);
