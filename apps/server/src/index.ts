@@ -62,6 +62,10 @@ import {
   OllamaEmbedder,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
+import { digestOf } from '@flint/policy';
+import { AuditSink, runtimeFromDisk } from './audit-sink';
+import { gateBuiltins, tierGate, type TierEvent } from './tier-gate';
+import { withTurnTaint } from './turn-taint';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
 import { withHistoryNote } from './history-window';
@@ -410,8 +414,9 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
 
 /** Build the per-request context block, injecting any long-term memory that's
  *  relevant to this message so Flint "remembers" without bloating the prompt. */
-async function contextFor(message: string, knowledge: KnowledgeStore): Promise<string> {
-  return (await recallContext(userContext(), message, knowledge)).block;
+async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string }> {
+  const r = await recallContext(userContext(), message, knowledge);
+  return { block: r.block, mode: r.mode };
 }
 
 async function main(): Promise<void> {
@@ -492,8 +497,40 @@ async function main(): Promise<void> {
   // captured as a proposal for one-tap approval (see ActionQueue). This is what
   // turns Flint from an oracle into an assistant, without losing the safety rail.
   const actions = new ActionQueue(isSafeTool);
+  // The audit trail's server end (./audit-sink): spooled locally, shipped to the
+  // runtime once it is installed. Every tier decision lands here (Machine plan 3.0.7).
+  const audit = new AuditSink({
+    spoolDir: join(homedir(), '.flint', 'spool'),
+    runtime: runtimeFromDisk(homedir()),
+    secrets: () => [TOKEN, ...SCOPED.map((t) => t.token)],
+    ...(process.env.FLINT_TZ ? { tz: process.env.FLINT_TZ } : {}),
+    log: (m) => console.error(m),
+  });
+  audit.start();
+  // Every tool call goes through the tier engine (./tier-gate). Policy rows come
+  // from the runtime once Will has signed a promotion table; until then, none.
+  const onDecision = (e: TierEvent) => {
+    const { decision: d } = e;
+    if (d.tier === 'alone' && !e.write) {
+      audit.count(d.key, 'chat');
+      return;
+    }
+    audit.record({
+      actor: 'flint',
+      context: 'chat',
+      kind: 'decision',
+      action: d.key,
+      tier: d.tier,
+      inputs: { rule: d.rule, tainted: e.tainted, taintedBy: e.taintedBy.join(',').slice(0, 200) || null },
+      reasoning: d.reason,
+      decision: d.tier === 'forbidden' ? 'deny' : d.tier === 'approval' ? 'queue' : 'act',
+      outcome: d.tier === 'forbidden' ? 'denied' : d.tier === 'approval' ? 'pending' : 'ok',
+      tainted: e.tainted,
+    });
+  };
+  const tierOpts = { queue: actions, onDecision, taintFloor: process.env.FLINT_TAINT_FLOOR !== '0' };
   const specs = loadMcpSpecs();
-  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: actions.approver }) : undefined;
+  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { gate: tierGate(tierOpts) }) : undefined;
   // The seed of Flint's OWN brain: every interaction is captured as a training
   // example (frontier answers = the teacher to distill from). Independence is
   // built here, a little each day — see docs/INDEPENDENCE.md.
@@ -511,6 +548,7 @@ async function main(): Promise<void> {
   const mcpTools = meterPaidTools(registry?.tools() ?? [], { guard: spend, specs: paidToolSpecs(process.env) });
   const tools: Tool[] = [
     ...mcpTools,
+    ...gateBuiltins([
     rememberTool(knowledge),
     trainingStatusTool({
       brainDir: join(homedir(), '.flint', 'brain'),
@@ -531,6 +569,7 @@ async function main(): Promise<void> {
     }),
     calculateTool(),
     spendStatusTool(spend),
+    ], tierOpts),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
@@ -620,7 +659,8 @@ async function main(): Promise<void> {
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
   const budgetNotes = new NoteOnce(() => ledger.period().day);
-  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes })));
+  // One request is one turn, with its own taint state (./turn-taint).
+  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit }))));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -656,6 +696,7 @@ interface Ctx {
   memory: PersistentStore;
   knowledge: KnowledgeStore;
   actions: ActionQueue;
+  audit: AuditSink;
   notes: Notifications;
   training: TrainingLogger;
   /** Spend caps (./spend): /spend, /speak, and the frontier plan for each turn. */
@@ -967,6 +1008,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...attribution(outcome, lastTried),
           outcome,
+          recall: recalled.mode,
           ms: Date.now() - started,
           ...(evalMode ? { eval: true } : {}),
         }),
@@ -1140,7 +1182,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
     let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
     const moved = movedBy(message, tier, { toolsLikely, turns });
-    const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
+    const recalled = await contextFor(asText, ctx.knowledge);
+    const ctxBlock = withHistoryNote(recalled.block, history);
     const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
 
@@ -1235,6 +1278,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         ...attribution(outcome, lastTried),
         outcome,
         ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
+        recall: recalled.mode,
         ms: Date.now() - started,
       }),
     );
@@ -1272,7 +1316,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
     const body = read.body;
     const id = String(body.id ?? '');
+    const pending = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
+    let argsDigest: string | null = null;
+    try {
+      argsDigest = pending ? digestOf(pending.args ?? null) : null;
+    } catch {
+      argsDigest = null;
+    }
+    // The intent is on disk before the action runs (plan 3.0.7).
+    if (pending) {
+      ctx.audit.record({ actor: 'will:console', context: 'console', kind: 'intent', action: pending.fullName, decision: 'act', outcome: 'pending', inputs: { proposal: id, argsDigest }, correlationId: `act:${id}` }, true);
+    }
     const result = await ctx.actions.approve(id, ctx.tools);
+    if (pending && result) {
+      ctx.audit.record({
+        actor: 'will:console', context: 'console', kind: 'action', action: result.fullName, decision: 'act',
+        outcome: result.status === 'done' ? 'ok' : 'failed', inputs: { proposal: id, argsDigest },
+        ...(result.error ? { reasoning: result.error.slice(0, 1000) } : {}), correlationId: `act:${id}`,
+      });
+    }
     if (!result) return json(res, 404, { error: 'no such proposal' });
     if (result.status === 'done') ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
     return json(res, 200, { action: result });
@@ -1281,7 +1343,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
     const body = read.body;
-    return json(res, 200, { ok: ctx.actions.reject(String(body.id ?? '')) });
+    const rid = String(body.id ?? '');
+    const rejected = ctx.actions.list().find((a) => a.id === rid);
+    const ok = ctx.actions.reject(rid);
+    if (ok && rejected) ctx.audit.record({ actor: 'will:console', context: 'console', kind: 'rejection', action: rejected.fullName, decision: 'deny', outcome: 'denied', inputs: { proposal: rid } });
+    return json(res, 200, { ok });
   }
 
   // Training corpus stats — the growing seed of Flint's own brain.

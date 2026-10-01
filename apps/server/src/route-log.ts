@@ -38,6 +38,8 @@ export interface RouteRecord {
   declined?: number;
   ms: number;
   eval?: boolean;
+  /** How memory recall ran: semantic, lexical (embedder failed), timeout, none, skipped or error. The pre-P2 baseline. */
+  recall?: string;
 }
 
 /**

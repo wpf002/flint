@@ -49,7 +49,37 @@ export interface ApprovalRequest {
 /** App-supplied gate. Return true to allow a guarded tool to execute. */
 export type Approver = (req: ApprovalRequest) => boolean | Promise<boolean>;
 
+/** What the gate sees for EVERY tool call, read-only ones included. */
+export interface GateRequest {
+  server: string;
+  tool: string;
+  /** The name the model called (`server.tool` unless namespacing is off). */
+  fullName: string;
+  /** The server's own annotations, as sent (only as trustworthy as the server). */
+  annotations: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean };
+  args: unknown;
+}
+
+/** Run it, or not (with the message the model sees instead of a result). */
+export type GateDecision = { allow: true } | { allow: false; message: string };
+
+/**
+ * The app's decision for every call, before it runs, and a look at every result
+ * after (the server marks a turn tainted when a result carries untrusted text).
+ */
+export interface Gate {
+  check(req: GateRequest): GateDecision | Promise<GateDecision>;
+  onResult?(req: GateRequest, result: unknown): void;
+}
+
 export interface RegistryOptions {
+  /**
+   * Called before EVERY tool runs, read-only ones included, and given each
+   * result. When set it replaces `approver` and `autoApprove`: the app decides
+   * everything (Flint's server uses @flint/policy's resolveTier). Unset, the
+   * client behaves exactly as before.
+   */
+  gate?: Gate;
   /**
    * Called before any GUARDED (non-read-only) tool runs. If absent, guarded
    * tools are DENIED by default — fail-safe, "until trust is earned per-tool".

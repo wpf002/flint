@@ -69,6 +69,9 @@ function jaccard(a: string[], b: string[]): number {
   return inter / (A.size + B.size - inter);
 }
 
+/** How a recall found its facts. */
+export type RecallMode = 'semantic' | 'lexical' | 'timeout' | 'none';
+
 /** Resolve `p`, or throw after `ms`. The embedder has no timeout of its own, and
  *  a wedged Ollama (e.g. mid training run) must not hang every chat turn. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -180,17 +183,28 @@ export class KnowledgeStore {
 
   /** The facts most relevant to `query`, most-relevant first. */
   async recall(query: string, k = Number(process.env.FLINT_MEMORY_K ?? 5)): Promise<string[]> {
+    return (await this.recallWithMode(query, k)).facts;
+  }
+
+  /**
+   * recall, plus how it was done, for the [route] line: `semantic` (embeddings),
+   * `lexical` (the embedder failed), `timeout` (it did not answer in time) or
+   * `none` (no facts, or nothing to look for).
+   */
+  async recallWithMode(query: string, k = Number(process.env.FLINT_MEMORY_K ?? 5)): Promise<{ facts: string[]; mode: RecallMode }> {
     const facts = this.active();
-    if (facts.length === 0 || !query.trim()) return [];
+    if (facts.length === 0 || !query.trim()) return { facts: [], mode: 'none' };
 
     let qv: number[] = [];
+    let mode: RecallMode = 'semantic';
     try {
       qv = (await withTimeout(this.embedder.embed([query.slice(0, 2000)]), this.embedTimeoutMs))[0] ?? [];
-    } catch {
+    } catch (err) {
       qv = [];
+      mode = err instanceof Error && /^timed out after/.test(err.message) ? 'timeout' : 'lexical';
     }
 
-    if (qv.length === 0) return this.lexical(query, facts, k); // embedder down → lexical, never nothing
+    if (qv.length === 0) return { facts: this.lexical(query, facts, k), mode: mode === 'semantic' ? 'lexical' : mode }; // embedder down → lexical, never nothing
 
     // Embedder is up: opportunistically heal facts stored while it was down.
     if (facts.some((f) => f.vector.length === 0)) void this.reembedMissing();
@@ -212,7 +226,7 @@ export class KnowledgeStore {
       out.push(f.text);
       if (out.length >= k) break;
     }
-    return out;
+    return { facts: out, mode: 'semantic' };
   }
 
   /** Embed facts that have no vector (stored while the embedder was down). */

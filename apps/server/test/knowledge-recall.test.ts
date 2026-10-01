@@ -174,3 +174,30 @@ describe('KnowledgeStore quality + supersede', () => {
     expect(await reloaded.recall('dallas')).toEqual(['Will lives in Dallas, Texas.']);
   });
 });
+
+// The [route] line's recall field: how memory was found (Machine plan P1 criterion 11).
+describe('recallWithMode', () => {
+  it('reports semantic, lexical, timeout and none', async () => {
+    const { KnowledgeStore } = await import('../src/knowledge');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'flint-kn-'));
+    let mode: 'up' | 'down' | 'hang' = 'up';
+    const embedder = {
+      async embed(texts: string[]) {
+        if (mode === 'down') throw new Error('ollama down');
+        if (mode === 'hang') return new Promise<number[][]>(() => {});
+        return texts.map(() => [1, 0, 0]);
+      },
+    };
+    const store = new KnowledgeStore(join(dir, 'k.json'), embedder as never, 0.3, 20);
+    expect((await store.recallWithMode('anything')).mode).toBe('none');
+    await store.add('Will prefers short answers', 'test');
+    expect((await store.recallWithMode('short answers')).mode).toBe('semantic');
+    mode = 'down';
+    expect((await store.recallWithMode('short answers')).mode).toBe('lexical');
+    mode = 'hang';
+    expect((await store.recallWithMode('short answers')).mode).toBe('timeout');
+  });
+});

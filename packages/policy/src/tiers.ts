@@ -347,6 +347,13 @@ function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> &
 
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {
+  // The runtime's own chat tools (world_now, ledger_open, ...) are Flint's
+  // actions served over MCP: they take their code-table entry, not the
+  // trusted-read-only rule, so they stay at APPROVAL until Will promotes them.
+  if (ctx.mcp?.server === 'runtime' && Object.prototype.hasOwnProperty.call(CODE_TABLE, ctx.mcp.tool)) {
+    const { mcp: _mcp, ...rest } = ctx;
+    return resolveTier(ctx.mcp.tool, rest);
+  }
   const key = actionKey(action, ctx.mcp);
   const now = ctx.now ?? new Date();
 

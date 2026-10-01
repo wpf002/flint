@@ -72,6 +72,25 @@ export class ActionQueue {
     return false;
   };
 
+  /**
+   * The tier engine already decided this call needs approval (tier-gate.ts):
+   * run it only if Will approved this exact call, otherwise capture it as a
+   * proposal. Unlike `approver`, it never runs a call on the strength of its name.
+   */
+  requestApproval(req: { server: string; tool: string; fullName: string; args: unknown; destructive: boolean }): boolean {
+    const key = keyOf(req.server, req.tool, req.args);
+    if (this.preApproved.has(key)) {
+      this.preApproved.delete(key);
+      return true;
+    }
+    const existing = [...this.pending.values()].find((p) => p.status === 'pending' && keyOf(p.server, p.tool, p.args) === key);
+    if (!existing) {
+      const id = `act${++this.seq}`;
+      this.pending.set(id, { id, server: req.server, tool: req.tool, fullName: req.fullName, args: req.args, destructive: req.destructive, ts: Date.now(), status: 'pending' });
+    }
+    return false;
+  }
+
   /** Pending proposals created since a snapshot of ids (for per-turn surfacing). */
   snapshotIds(): Set<string> {
     return new Set(this.pending.keys());
