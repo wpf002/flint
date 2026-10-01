@@ -65,6 +65,13 @@ describe('conversation taint', () => {
     expect(new ConversationTaint(file).origin('c', ['t1'], Date.now(), 48 * H)).toBeDefined();
   });
 
+  it('no mark is ever dropped to keep the file small: the extractor relies on every one', () => {
+    const t = new ConversationTaint(join(tmp(), 'taint.json'));
+    t.mark('default', ['X'], 1);
+    for (let i = 0; i < 700; i++) t.mark('default', [`h${i}`], 1);
+    expect(t.isTainted('default', 'X')).toBe(true);
+  });
+
   it('an unreadable record fails closed, and is left for Will to look at', () => {
     const file = join(tmp(), 'taint.json');
     writeFileSync(file, '{not json');
@@ -159,11 +166,16 @@ describe('runtime results and the gate', () => {
     // Untainted: the call carries tainted false in its _meta (the model's own field is ignored by the connector).
     expect(await withTurnTaint(() => gate.check(req))).toEqual({ allow: true, meta: { 'flint/tainted': false } });
     // Approved from a tainted turn and run on its allowance, with a template: tainted.
-    const templated = { ...req, args: { template: { id: 'service_healthy', params: {} } } };
+    const templated = { ...req, args: { template: { id: 'service_healthy', params: { entity: 'service#abc123' } } } };
     const run = await withTurnTaint(() => gate.check(templated), { sources: ['proposal'], allow: [keyOf('runtime', 'ledger_record_prediction', templated.args)] });
     expect(run).toEqual({ allow: true, meta: { 'flint/tainted': true } });
-    // Free text from a tainted turn is refused before anyone is asked to approve it.
-    expect(await withTurnTaint(() => gate.check(req), { sources: ['mcp:web'] })).toMatchObject({ allow: false, message: expect.stringMatching(/claim template/) });
+    // Free text (or a template that is not one) from a tainted turn is refused before anyone is asked to approve it, and recorded.
+    const events: TierEvent[] = [];
+    const recorded = tierGate({ queue: new ActionQueue(isSafeTool), policies: promote, claimCap: async () => 'ok', onDecision: (e) => events.push(e) });
+    expect(await withTurnTaint(() => recorded.check(req), { sources: ['mcp:web'] })).toMatchObject({ allow: false, message: expect.stringMatching(/claim templates.*service_healthy/) });
+    const guessed = { ...req, args: { template: { id: 'deploy_success', params: { service: 'api' } } } };
+    expect(await withTurnTaint(() => recorded.check(guessed), { sources: ['mcp:web'] })).toMatchObject({ allow: false });
+    expect(events.map((e) => [e.status, e.decision.rule])).toEqual([['denied', 'tainted'], ['denied', 'tainted']]);
   });
 
   it('a promoted action\'s cap is claimed first: used up is refused, unknown asks Will', async () => {
@@ -306,6 +318,20 @@ describe('audit sink', () => {
     expect(ids.size).toBe(3);
     expect(total).toBe(1201 + 1 + 1);
     expect(JSON.parse(readFileSync(join(dir, 'rollups.json'), 'utf8'))).toEqual({ counts: {} });
+  });
+
+  it('a runtime older than batch ids gets the bare rows (and nothing is dropped)', async () => {
+    const bodies: unknown[] = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      const b = JSON.parse(String(init.body)) as unknown;
+      bodies.push(b);
+      return Array.isArray(b) ? new Response('{}', { status: 200 }) : new Response('{}', { status: 400 });
+    }) as typeof fetch;
+    const sink = new AuditSink({ spoolDir: tmp(), runtime: () => RT, fetchImpl });
+    sink.count('web.search', 'chat');
+    await sink.flush();
+    expect(bodies).toHaveLength(2);
+    expect(Array.isArray(bodies[1])).toBe(true);
   });
 
   it('a batch whose reply was lost is resent with the same id, even after a restart', async () => {

@@ -22,7 +22,7 @@
  * it off, an injected web page can steer a fetch or a write again).
  */
 import { randomBytes } from 'node:crypto';
-import { isWrite, resolveTier, type PolicyRow, type TierDecision } from '@flint/policy';
+import { CLAIM_TEMPLATE_HELP, ClaimTemplate, isWrite, resolveTier, type PolicyRow, type TierDecision } from '@flint/policy';
 import type { Gate, GateRequest } from '@flint/mcp';
 import type { Tool } from '@flint/core';
 import { outcomeOf, type ActionQueue } from './actions';
@@ -200,8 +200,8 @@ const TAINT_META = 'flint/tainted';
 function predictionRefusal(req: GateRequest): string | undefined {
   if (req.server !== 'runtime' || req.tool !== 'ledger_record_prediction' || !turnTainted()) return undefined;
   const args = req.args && typeof req.args === 'object' ? (req.args as Record<string, unknown>) : {};
-  if (args.template && typeof args.template === 'object') return undefined;
-  return "This turn read text from outside, so a prediction must use a claim template (template: {id, params}), not free text. It was not recorded.";
+  if (ClaimTemplate.safeParse(args.template).success) return undefined;
+  return `This turn read text from outside, so a prediction must use one of the ledger's claim templates, filled exactly: ${CLAIM_TEMPLATE_HELP} It was not recorded.`;
 }
 
 /** The MCP client's gate. */
@@ -217,7 +217,12 @@ export function tierGate(opts: TierGateOptions): Gate {
         ...(req.annotations.destructiveHint ? { destructiveHint: true } : {}),
       };
       const refused = predictionRefusal(req);
-      if (refused) return { allow: false, message: refused };
+      if (refused) {
+        // A refusal, recorded like every other.
+        const d = resolveTier(req.fullName, { context: 'chat', tainted: true, mcp, policies: opts.policies?.() ?? [] });
+        event(opts, req.fullName, { ...d, tier: 'forbidden', rule: 'tainted', reason: 'a prediction from a tainted turn must use a claim template' }, mcp, 'denied');
+        return { allow: false, message: refused };
+      }
       const g = await gateCall(opts, {
         server: req.server, tool: req.tool, fullName: req.fullName, action: `mcp:${req.server}.${req.tool}`, args: req.args,
         destructive: !!req.annotations.destructiveHint, ...(req.annotations.readOnlyHint ? { readOnlyHint: true } : {}),

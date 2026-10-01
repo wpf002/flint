@@ -14,51 +14,13 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveTier, type WebAuthnRelyingParty } from '@flint/policy';
 import { loadBackupConfig } from './config.js';
-import { createDb, type Db } from './db.js';
+import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { activePolicies, claimProposal, completeProposal, createProposal } from './governance/proposals.js';
-import { claim } from './governance/counters.js';
+import { ACTION, gate, type Command } from './backup/nightly.js';
+import { completeProposal } from './governance/proposals.js';
 import { dumpDatabase, encryptTo, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { notifyWill } from './notify.js';
-
-type Command = 'backup' | 'offsite' | 'drill';
-const ACTION: Record<Command, string> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
-
-async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<{ go: boolean; proposalId?: string; why: string }> {
-  const action = ACTION[cmd];
-  const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), now });
-  if (t.tier === 'forbidden') return { go: false, why: `forbidden: ${t.reason}` };
-  if (t.tier === 'alone') {
-    if (t.cap && (await claim(db, t.key, t.cap, tz, now)) === null) return { go: false, why: `the ${t.cap.period}ly cap is reached` };
-    return { go: true, why: 'promoted' };
-  }
-  // APPROVAL: run an approved proposal for it, or file one (one a day) and wait.
-  const day = now.toISOString().slice(0, 10);
-  const approved = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'approved', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
-  let refused: string | undefined;
-  if (approved) {
-    try {
-      const c = await claimProposal(db, approved.id, rp, tz, 'runtime');
-      return { go: true, proposalId: c.id, why: 'approved by Will' };
-    } catch (err) {
-      // Expired a moment ago, re-verification failed, a cap: say so, and ask again below.
-      refused = err instanceof Error ? err.message : String(err);
-    }
-  }
-  const pending = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'pending', expiresAt: { gt: now } } });
-  if (!pending) {
-    await createProposal(db, {
-      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: `nightly.${cmd}`, action, args: { day },
-      argsProvenance: { day: { source: 'template', ref: `nightly.${cmd}`, tainted: false } },
-      // Long enough for the next night's run to find it once Will has approved it.
-      tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 47 * 60,
-      reason: `nightly ${cmd}: waiting for approval until this action is promoted`,
-    }, 'runtime');
-  }
-  return { go: false, why: refused ? `the approved proposal could not be claimed (${refused}); asked again` : 'waiting for Will to approve (or promote) it' };
-}
 
 /**
  * `enroll`: a one-time code for registering Will's approval key in the console

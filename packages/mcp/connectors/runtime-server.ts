@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { CLAIM_TEMPLATE_HELP, ClaimTemplate } from '@flint/policy';
 
 const BASE = process.env.FLINT_RUNTIME_URL ?? 'http://[::1]:8090';
 const TOKEN_FILE = join(homedir(), '.flint', 'tokens', 'runtime-mcp.token');
@@ -45,6 +46,13 @@ export async function runtimeCall(path: string, init: { method?: 'GET' | 'POST';
  * tainted).
  */
 export const MAX_RESULT_CHARS = 8_000;
+/** The most rows (from the front) whose result fits MAX_RESULT_CHARS, built with `wrap`. */
+export function fitRows<T>(rows: T[], wrap: (shown: T[], more: number) => unknown): unknown {
+  let n = rows.length;
+  while (n > 0 && JSON.stringify(wrap(rows.slice(0, n), rows.length - n), null, 2).length > MAX_RESULT_CHARS) n--;
+  return wrap(rows.slice(0, n), rows.length - n);
+}
+
 export const text = (v: unknown) => {
   const t = JSON.stringify(v, null, 2);
   const out = t.length <= MAX_RESULT_CHARS ? t : JSON.stringify({ truncated: true, chars: t.length, note: 'too large to show in chat; ask for less', tainted: true });
@@ -83,12 +91,12 @@ export function buildServer(call = runtimeCall): McpServer {
     async ({ limit }) => {
       const r = (await call(`/v1/ledger/open?limit=${limit ?? 10}`)) as { predictions?: Array<Record<string, unknown>> };
       const pick = ['id', 'claim', 'probability', 'domain', 'type', 'resolveBy', 'status', 'tainted'];
-      return text({
-        predictions: (r.predictions ?? []).map((p) => ({
-          ...Object.fromEntries(pick.filter((k) => k in p).map((k) => [k, p[k]])),
-          evidence: Array.isArray(p.evidence) ? p.evidence.length : 0,
-        })),
-      });
+      const rows = (r.predictions ?? []).map((p) => ({
+        ...Object.fromEntries(pick.filter((k) => k in p).map((k) => [k, p[k]])),
+        evidence: Array.isArray(p.evidence) ? p.evidence.length : 0,
+      }));
+      // As many as fit (each row keeps its own taint mark), and how many more there are.
+      return text(fitRows(rows, (shown, more) => ({ predictions: shown, ...(more ? { more } : {}) })));
     },
   );
 
@@ -102,11 +110,12 @@ export function buildServer(call = runtimeCall): McpServer {
     'ledger_record_prediction',
     {
       description:
-        'Record a prediction in the ledger so it can be scored later. Needs a probability between 0.05 and 0.95, how it will be resolved, and a resolve-by date within 180 days.',
+        'Record a prediction in the ledger so it can be scored later. Needs a probability between 0.05 and 0.95, how it will be resolved, and a resolve-by date within 180 days. ' +
+        'Give the claim in your own words, OR (required once the conversation has read anything from outside: a web page, an issue, a thread) a template: ' +
+        CLAIM_TEMPLATE_HELP,
       inputSchema: {
         claim: z.string().min(1).max(300).optional(),
-        // After reading text from outside, a prediction must use one of the ledger's claim templates.
-        template: z.object({ id: z.string().min(1).max(60), params: z.record(z.string(), z.union([z.string().max(120), z.number().finite()])) }).optional(),
+        template: ClaimTemplate.optional().describe(`One of the ledger's claim templates: ${CLAIM_TEMPLATE_HELP}`),
         probability: z.number().min(0.05).max(0.95),
         domain: z.enum(['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation']),
         type: z.enum(['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept']),

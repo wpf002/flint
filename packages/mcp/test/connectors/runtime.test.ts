@@ -31,8 +31,33 @@ describe('runtime connector', () => {
     expect(calls.at(-1)).toMatchObject({ body: { tainted: true } });
     await client.callTool({ name: 'ledger_record_prediction', arguments: args, _meta: { 'flint/tainted': false } });
     expect(calls.at(-1)).toMatchObject({ body: { tainted: false } });
-    await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, claim: undefined, template: { id: 'service_healthy', params: { entity: 'x' } } }, _meta: { 'flint/tainted': true } });
+    await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, claim: undefined, template: { id: 'service_healthy', params: { entity: 'service#abc123' } } }, _meta: { 'flint/tainted': true } });
     expect(calls.at(-1)).toMatchObject({ body: { tainted: true, template: { id: 'service_healthy' } } });
+    // The model sees the real templates in the tool's schema and description.
+    const pred = tools.find((t) => t.name === 'ledger_record_prediction')!;
+    expect(JSON.stringify(pred.inputSchema)).toContain('deploy_succeeds');
+    expect(pred.description).toContain('closed_by');
+    // A guessed template is refused by the connector before any call.
+    const n = calls.length;
+    const guessed = await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, template: { id: 'deploy_success', params: { service: 'api' } } } });
+    expect(guessed.isError).toBe(true);
+    expect(calls).toHaveLength(n);
+    await client.close();
+  });
+
+  it('open predictions: as many rows as fit, each keeping its own taint mark, and how many more', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}`, claim: 'c'.repeat(300), probability: 0.6, domain: 'services', type: 'event_occurs', resolveBy: '2026-11-01', status: 'open', tainted: i % 2 === 0, evidence: [{}, {}] }));
+    const server = buildServer(async () => ({ predictions: rows }));
+    const [c, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const client = new Client({ name: 't', version: '1' });
+    await client.connect(c);
+    const r = await client.callTool({ name: 'ledger_open', arguments: { limit: 20 } });
+    const body = JSON.parse((r.content as Array<{ text: string }>)[0]!.text) as { predictions: Array<{ tainted: boolean }>; more?: number; truncated?: boolean };
+    expect(body.truncated).toBeUndefined();
+    expect(body.predictions.length).toBeGreaterThan(0);
+    expect(body.predictions.length + (body.more ?? 0)).toBe(20);
+    expect(body.predictions[0]!.tainted).toBe(true);
     await client.close();
   });
 

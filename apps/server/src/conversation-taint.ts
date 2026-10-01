@@ -15,11 +15,11 @@
  * ends (fail closed). The memory extractor skips every turn recorded here.
  *
  * Stored at ~/.flint/memory/taint.json (0600), rewritten atomically on change.
+ * Nothing is dropped to keep it small (about 40 bytes a turn): the extractor
+ * relies on every mark, of any age.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-
-const MAX_PER_CONVERSATION = 500;
 
 export class ConversationTaint {
   /** conversation -> turn id -> origin (ms). */
@@ -66,7 +66,6 @@ export class ConversationTaint {
     if (turnIds.length === 0) return;
     const m = this.turns.get(conversationId) ?? new Map<string, number>();
     for (const id of turnIds) m.set(id, Math.max(m.get(id) ?? 0, origin));
-    while (m.size > MAX_PER_CONVERSATION) m.delete(m.keys().next().value as string);
     this.turns.set(conversationId, m);
     // An unreadable file is left as it is, so every restart stays fail-closed until Will looks at it.
     if (this.unreadable) return;

@@ -38,11 +38,14 @@ declare module 'fastify' {
 
 export const BODY_LIMIT = 64 * 1024;
 
-/** A database trigger or check refusing a row (23514 check_violation, 42501 insufficient_privilege). */
+/**
+ * A database trigger or check refusing a row for what it contains (23514
+ * check_violation). A privilege fault (42501) is the runtime's own problem, not
+ * the caller's input: it stays a 500, so the caller keeps the entry and retries.
+ */
 export function dbRefused(err: unknown): boolean {
   const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
-  const codes = [e.code, e.meta?.code].map(String);
-  return codes.some((c) => c === '23514' || c === '42501') || (typeof e.message === 'string' && /code: "(23514|42501)"/.test(e.message));
+  return [e.code, e.meta?.code].map(String).includes('23514') || (typeof e.message === 'string' && /code: "23514"/.test(e.message));
 }
 /** The trigger's own words (they name the rule, never a value). */
 const dbMessage = (err: unknown) => {

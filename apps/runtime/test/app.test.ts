@@ -290,6 +290,14 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect((await call('POST', '/v1/audit/rollup', [{ day, action, context: 'chat', n: 1 }])).statusCode).toBe(200);
     });
 
+    it('only a refusal for what an entry contains is the caller\'s fault; a privilege fault stays a 500', async () => {
+      const { dbRefused } = await import('../src/app');
+      expect(dbRefused({ code: '23514' })).toBe(true);
+      expect(dbRefused({ message: 'ConnectorError ... code: "23514", message: "audit: x"' })).toBe(true);
+      expect(dbRefused({ code: '42501' })).toBe(false);
+      expect(dbRefused({ message: 'code: "42501"' })).toBe(false);
+    });
+
     it('an entry the audit trigger refuses is a 400 (set aside by the server), not a 500 (resent forever)', async () => {
       const r = await call('POST', '/v1/audit', [{ id: `au${Date.now().toString(36)}x`, at: new Date().toISOString(), actor: 'will:console', context: 'console', kind: 'approval', action: 'approval.enroll', inputs: { approvalId: null }, outcome: 'ok' }]);
       expect(r.statusCode).toBe(400);

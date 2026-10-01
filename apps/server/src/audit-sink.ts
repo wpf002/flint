@@ -228,7 +228,9 @@ export class AuditSink {
         };
         this.saveRollups();
       }
-      const r = await post('/v1/audit/rollup', { batchId: this.inflight.id, rows: this.inflight.rows });
+      let r = await post('/v1/audit/rollup', { batchId: this.inflight.id, rows: this.inflight.rows });
+      // A runtime older than batch ids takes the bare rows (a 400 committed nothing, so this cannot double count).
+      if (r === 'refused') r = await post('/v1/audit/rollup', this.inflight.rows);
       if (r === 'retry') return;
       if (r === 'refused') this.opts.log?.(`[audit] the runtime refused ${this.inflight.rows.length} rollup counts; dropped`);
       this.inflight = undefined;
