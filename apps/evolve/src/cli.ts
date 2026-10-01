@@ -144,6 +144,12 @@ async function discover(): Promise<number> {
 
 /** Flint's bearer token: env, then ~/.flint/token, then the launchd plist. Never printed. */
 function flintToken(env: NodeJS.ProcessEnv): string {
+  // evolve's own token (eval calls only), made by the server in ~/.flint/tokens.
+  const scoped = join(FLINT_HOME, 'tokens', 'evolve.token');
+  if (existsSync(scoped)) {
+    const t = readFileSync(scoped, 'utf8').trim();
+    if (t) return t;
+  }
   const fromEnv = env.FLINT_TOKEN?.trim();
   if (fromEnv) return fromEnv;
   const file = join(FLINT_HOME, 'token');

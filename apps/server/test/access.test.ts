@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_BIND_HOST, allowedTailnetUser, bindHost, bearerMatches, consoleGetsToken, hostName, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
+import { DEFAULT_BIND_HOST, SCOPED_CLIENTS, allowedTailnetUser, bearerScope, bindHost, scopeAllows, bearerMatches, consoleGetsToken, hostName, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
 
 const local = { remoteAddress: '127.0.0.1', headers: { host: 'localhost:8080' } };
 /** What `tailscale serve` delivers: it also connects from 127.0.0.1, with the tailnet name and the login. */
@@ -110,6 +110,46 @@ describe('hostName', () => {
     expect(hostName('[::1]')).toBe('[::1]');
     expect(hostName('Flint-1.Tail7ed2c3.TS.net')).toBe('flint-1.tail7ed2c3.ts.net');
     expect(hostName(undefined)).toBe('');
+  });
+});
+
+// #36: evolve, parity and voice used the all-powerful FLINT_TOKEN.
+describe('scoped tokens', () => {
+  const tokens = { full: 'full-tok', scoped: [{ token: 'eval-tok', scope: 'eval' as const }, { token: 'voice-tok', scope: 'voice' as const }] };
+
+  it('tells which scope a bearer carries', () => {
+    expect(bearerScope('Bearer full-tok', tokens)).toBe('full');
+    expect(bearerScope('Bearer eval-tok', tokens)).toBe('eval');
+    expect(bearerScope('Bearer voice-tok', tokens)).toBe('voice');
+    expect(bearerScope('Bearer nope', tokens)).toBeUndefined();
+    expect(bearerScope(undefined, tokens)).toBeUndefined();
+    // An empty scoped token never matches an empty bearer.
+    expect(bearerScope('Bearer ', { full: 'full-tok', scoped: [{ token: '', scope: 'eval' }] })).toBeUndefined();
+  });
+
+  it('lets an eval token reach only /generate and the eval discovery routes', () => {
+    expect(scopeAllows('eval', 'POST', '/generate')).toBe(true);
+    expect(scopeAllows('eval', 'GET', '/eval/tools')).toBe(true);
+    expect(scopeAllows('eval', 'POST', '/eval/tool')).toBe(true);
+    for (const [m, u] of [['POST', '/chat'], ['GET', '/spend'], ['POST', '/proposals/approve'], ['GET', '/actions'], ['POST', '/speak'], ['GET', '/generate']]) {
+      expect(scopeAllows('eval', m!, u!), `${m} ${u}`).toBe(false);
+    }
+  });
+
+  it('lets a voice token reach only chat and speech', () => {
+    for (const u of ['/chat', '/speak', '/transcribe']) expect(scopeAllows('voice', 'POST', u)).toBe(true);
+    for (const [m, u] of [['POST', '/generate'], ['POST', '/proposals/approve'], ['GET', '/spend'], ['GET', '/notifications']]) {
+      expect(scopeAllows('voice', m!, u!), `${m} ${u}`).toBe(false);
+    }
+  });
+
+  it('lets the full token reach everything, query strings included', () => {
+    expect(scopeAllows('full', 'POST', '/proposals/approve')).toBe(true);
+    expect(scopeAllows('eval', 'GET', '/eval/tools?x=1')).toBe(true);
+  });
+
+  it('names the clients that get one', () => {
+    expect(SCOPED_CLIENTS.map((c) => `${c.name}:${c.scope}`)).toEqual(['evolve:eval', 'parity:eval', 'voice:voice']);
   });
 });
 

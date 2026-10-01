@@ -58,3 +58,22 @@ describe('parseMcpConfig', () => {
     expect(parseMcpConfig('{ nope').problems[0]).toMatch(/not valid JSON/);
   });
 });
+
+// #36: a connector's env gets `${NAME}` filled too, so the web connector's search
+// key can live in ~/.flint/secrets.env instead of mcp.json.
+describe('stdio env placeholders', () => {
+  it('fills ${NAME} in a connector env from the environment', () => {
+    const { specs, problems } = parseMcpConfig(
+      JSON.stringify({ servers: [{ name: 'web', command: 'node', args: ['web.mjs'], env: { SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: '${TAVILY_API_KEY}' } }] }),
+      { TAVILY_API_KEY: 'tvly-x' },
+    );
+    expect(problems).toEqual([]);
+    expect(specs[0]).toMatchObject({ transport: 'stdio', env: { SEARCH_PROVIDER: 'auto', SEARCH_API_KEY: 'tvly-x' } });
+  });
+
+  it('skips a connector whose placeholder is not set, saying which', () => {
+    const { specs, problems } = parseMcpConfig(JSON.stringify({ servers: [{ name: 'web', command: 'node', env: { SEARCH_API_KEY: '${TAVILY_API_KEY}' } }] }), {});
+    expect(specs).toEqual([]);
+    expect(problems).toEqual(['web: TAVILY_API_KEY not set in the environment, skipped']);
+  });
+});

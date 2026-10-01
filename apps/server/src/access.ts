@@ -111,3 +111,51 @@ const digest = (s: string): Buffer => createHash('sha256').update(s).digest();
 export function bearerMatches(authorization: string | undefined, token: string): boolean {
   return timingSafeEqual(digest(authorization ?? ''), digest(`Bearer ${token}`));
 }
+
+// ---------------------------------------------------------------------------
+// Scoped tokens
+//
+// FLINT_TOKEN can do everything Flint can, and evolve, parity and voice all used
+// it (read out of the server plist, at that). Each now gets its own token in
+// ~/.flint/tokens/<name>.token (0600), made at startup when missing, that reaches
+// only what that client calls: a leaked eval token can ask eval questions, not
+// chat (which can act) or approve anything.
+
+export type Scope = 'full' | 'eval' | 'voice';
+
+/** The scoped clients and what each may do. */
+export const SCOPED_CLIENTS: ReadonlyArray<{ name: string; scope: Exclude<Scope, 'full'> }> = [
+  { name: 'evolve', scope: 'eval' },
+  { name: 'parity', scope: 'eval' },
+  { name: 'voice', scope: 'voice' },
+];
+
+/**
+ * Which scope this Authorization header carries, or undefined. Every token is
+ * compared (in constant time) whatever matched, so timing says nothing about which.
+ */
+export function bearerScope(
+  authorization: string | undefined,
+  tokens: { full: string; scoped: ReadonlyArray<{ token: string; scope: Exclude<Scope, 'full'> }> },
+): Scope | undefined {
+  let found: Scope | undefined = bearerMatches(authorization, tokens.full) ? 'full' : undefined;
+  for (const t of tokens.scoped) {
+    const hit = !!t.token && bearerMatches(authorization, t.token);
+    if (hit && !found) found = t.scope;
+  }
+  return found;
+}
+
+/**
+ * May a token of this scope make this request? `eval` reaches /generate (and
+ * /generate itself refuses it unless the body says eval: true) and the eval
+ * discovery routes; `voice` reaches chat and speech.
+ */
+export function scopeAllows(scope: Scope, method: string, url: string): boolean {
+  if (scope === 'full') return true;
+  const path = url.split('?')[0];
+  if (scope === 'eval') {
+    return (method === 'POST' && (path === '/generate' || path === '/eval/tool')) || (method === 'GET' && path === '/eval/tools');
+  }
+  return method === 'POST' && (path === '/chat' || path === '/speak' || path === '/transcribe');
+}

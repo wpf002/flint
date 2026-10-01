@@ -89,13 +89,23 @@ export function parseMcpConfig(text: string, env: Record<string, string | undefi
     }
 
     if (typeof raw.command === 'string') {
+      // `${NAME}` is filled in a connector's env as in an http server's headers, so a
+      // key (the web connector's search key) can live in ~/.flint/secrets.env, not here.
+      const missing = new Set<string>();
+      const envFilled = strings(raw.env)
+        ? Object.fromEntries(Object.entries(raw.env).map(([k, v]) => [k, fill(v, env, missing)]))
+        : undefined;
+      if (missing.size > 0) {
+        problems.push(`${name}: ${[...missing].join(', ')} not set in the environment, skipped`);
+        return;
+      }
       specs.push({
         name,
         transport: 'stdio',
         command: raw.command,
         ...(Array.isArray(raw.args) && raw.args.every((a) => typeof a === 'string') ? { args: raw.args as string[] } : {}),
         ...(typeof raw.cwd === 'string' ? { cwd: raw.cwd } : {}),
-        ...(strings(raw.env) ? { env: raw.env } : {}),
+        ...(envFilled ? { env: envFilled } : {}),
       });
       return;
     }

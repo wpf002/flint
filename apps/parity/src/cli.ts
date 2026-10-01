@@ -270,6 +270,7 @@ async function run(argv: string[]): Promise<void> {
       : resolveFlintToken({
           env: process.env,
           tokenFile: join(FLINT_HOME, 'token'),
+    scopedFile: join(FLINT_HOME, 'tokens', 'parity.token'),
           plist: join(homedir(), 'Library', 'LaunchAgents', 'com.flint.server.plist'),
         });
     if (!token) throw new Error('no Flint token: set FLINT_TOKEN (or ~/.flint/token)');

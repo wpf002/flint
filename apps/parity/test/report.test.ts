@@ -87,5 +87,10 @@ describe('secrets + token', () => {
     expect(resolveFlintToken({ env: { FLINT_TOKEN: 'from-env' }, tokenFile, plist })).toBe('from-env');
     expect(resolveFlintToken({ env: {}, tokenFile, plist })).toBe('from-file');
     expect(resolveFlintToken({ env: {}, tokenFile: join(dir, 'nope'), plist })).toBeUndefined();
+    // parity's own eval-only token wins when the server has made one (#36).
+    const scopedFile = join(dir, 'parity.token');
+    writeFileSync(scopedFile, 'scoped\n');
+    expect(resolveFlintToken({ env: { FLINT_TOKEN: 'from-env' }, tokenFile, plist, scopedFile })).toBe('scoped');
+    expect(resolveFlintToken({ env: { FLINT_TOKEN: 'from-env' }, tokenFile, plist, scopedFile: join(dir, 'none') })).toBe('from-env');
   });
 });

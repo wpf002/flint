@@ -133,6 +133,7 @@ const flintToken = (): string | undefined =>
   resolveFlintToken({
     env: process.env,
     tokenFile: join(FLINT_HOME, 'token'),
+    scopedFile: join(FLINT_HOME, 'tokens', 'parity.token'),
     plist: join(homedir(), 'Library', 'LaunchAgents', 'com.flint.server.plist'),
   });
 
