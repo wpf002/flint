@@ -4,22 +4,19 @@
  * reports; it NEVER places an order or moves money (no write tools exist here,
  * by design).
  *
- *   CROSSBAR_DATABASE_URL=postgres://crossbar:crossbar@localhost:5433/crossbar \
+ *   CROSSBAR_DATABASE_URL=postgres://<user>:<password>@localhost:5433/crossbar \
  *     tsx packages/mcp/connectors/crossbar-server.ts
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import pg from 'pg';
+import { dbFromEnv } from '../src/db.js';
 
-const pool = new pg.Pool({
-  connectionString:
-    process.env.CROSSBAR_DATABASE_URL ?? 'postgres://crossbar:crossbar@localhost:5433/crossbar',
-  max: 4,
-});
+// No URL, no connection: the tools say what to set (../src/db).
+const db = dbFromEnv('CROSSBAR_DATABASE_URL');
 
 async function q(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
-  return (await pool.query(sql, params)).rows as Record<string, unknown>[];
+  return db.q(sql, params);
 }
 function text(v: unknown) {
   return { content: [{ type: 'text' as const, text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] };

@@ -2,22 +2,19 @@
  * Bellwether connector — read-only MCP server over Bellwether's live Postgres
  * (24/7 market-intelligence signals with provenance). All tools are read-only.
  *
- *   BELLWETHER_DATABASE_URL=postgres://bellwether:bellwether@localhost:5432/bellwether \
+ *   BELLWETHER_DATABASE_URL=postgres://<user>:<password>@localhost:5432/bellwether \
  *     tsx packages/mcp/connectors/bellwether-server.ts
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import pg from 'pg';
+import { dbFromEnv } from '../src/db.js';
 
-const pool = new pg.Pool({
-  connectionString:
-    process.env.BELLWETHER_DATABASE_URL ?? 'postgres://bellwether:bellwether@localhost:5432/bellwether',
-  max: 4,
-});
+// No URL, no connection: the tools say what to set (../src/db).
+const db = dbFromEnv('BELLWETHER_DATABASE_URL');
 
 async function q(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
-  return (await pool.query(sql, params)).rows as Record<string, unknown>[];
+  return db.q(sql, params);
 }
 function text(v: unknown) {
   return { content: [{ type: 'text' as const, text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] };

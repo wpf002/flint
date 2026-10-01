@@ -22,6 +22,9 @@ if [ "$before" != "$after" ]; then
   # anything actually wrong with the code.
   pnpm install --frozen-lockfile >/dev/null 2>&1 || pnpm install >/dev/null 2>&1 || \
     echo "$(date '+%F %T') WARNING: pnpm install failed; build may fail"
+  # The gate is never skipped unattended: FLINT_SKIP_TESTS is for a person at the
+  # keyboard, not for a timer that deploys whatever lands on main.
+  unset FLINT_SKIP_TESTS
   ./apps/server/install-server.sh
   echo "$(date '+%F %T') deployed $after"
 else

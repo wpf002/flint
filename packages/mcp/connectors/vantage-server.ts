@@ -4,23 +4,19 @@
  * — add_to_watchlist — which is NON-readonly so Flint's safety gate checkpoints
  * it (the roadmap's "one safe write": non-financial, reversible).
  *
- *   VANTAGE_DATABASE_URL=postgres://vantage:vantage@localhost:5434/vantage \
+ *   VANTAGE_DATABASE_URL=postgres://<user>:<password>@localhost:5434/vantage \
  *     tsx packages/mcp/connectors/vantage-server.ts
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import pg from 'pg';
+import { dbFromEnv } from '../src/db.js';
 
-const pool = new pg.Pool({
-  connectionString:
-    process.env.VANTAGE_DATABASE_URL ?? 'postgres://vantage:vantage@localhost:5434/vantage',
-  max: 4,
-});
+// No URL, no connection: the tools say what to set (../src/db).
+const db = dbFromEnv('VANTAGE_DATABASE_URL');
 
 async function q<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-  const res = await pool.query(sql, params);
-  return res.rows as T[];
+  return db.q<T>(sql, params);
 }
 
 function text(value: unknown) {

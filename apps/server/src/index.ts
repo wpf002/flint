@@ -383,7 +383,9 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
   // Market signals: ping on new market-intelligence signals (newest few, once
   // each). recent_signals works with no args; latest_digest would require an
   // industry id, so this is the better proactive source.
-  if (byName.has('bellwether.recent_signals')) {
+  // Opt-in (FLINT_WATCH_SIGNALS=1): Bellwether's database is not on this Mac, so the
+  // check failed silently every 30 minutes (2026-09-30 audit).
+  if (process.env.FLINT_WATCH_SIGNALS === '1' && byName.has('bellwether.recent_signals')) {
     checks.push(async () => {
       const text = await call('bellwether.recent_signals', { limit: 5 });
       if (!text) return [];
