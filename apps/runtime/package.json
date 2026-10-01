@@ -8,18 +8,22 @@
     "start": "tsx src/index.ts",
     "typecheck": "prisma generate >/dev/null && tsc --noEmit",
     "test": "prisma generate >/dev/null && vitest run",
-    "generate": "prisma generate"
+    "generate": "prisma generate",
+    "backup": "tsx src/cli.ts backup",
+    "drill": "tsx src/cli.ts drill",
+    "enroll": "tsx src/cli.ts enroll",
+    "offsite": "tsx src/cli.ts offsite"
   },
   "dependencies": {
     "@flint/policy": "workspace:*",
     "@prisma/client": "6.19.3",
     "fastify": "^5.12.0",
+    "pg": "^8.13.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20",
     "@types/pg": "^8.11.0",
-    "pg": "^8.13.0",
     "prisma": "6.19.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
