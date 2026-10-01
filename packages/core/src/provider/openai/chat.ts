@@ -228,6 +228,12 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       // Only `none` is mapped (the tool loop's answer-only call); every other request
       // is byte-identical to before.
       ...(tools && args.toolChoice === 'none' ? { tool_choice: 'none' } : {}),
+      // responseFormat: OpenAI's own structured output. Not strict: a strict schema
+      // must list every property as required and forbid extras, which callers'
+      // schemas need not.
+      ...(args.responseFormat
+        ? { response_format: { type: 'json_schema', json_schema: { name: args.responseFormat.name, schema: args.responseFormat.schema, strict: false } } }
+        : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
       ...this.wire.extraBody,
     };

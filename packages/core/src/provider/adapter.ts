@@ -55,6 +55,13 @@ export interface GenerateArgs {
    * send their `none` choice; an adapter with no such knob drops the tools.
    */
   toolChoice?: 'auto' | 'required' | 'none' | { name: string };
+  /**
+   * Constrain the reply to JSON matching `schema`: the reply's text IS that JSON.
+   * Ollama sends it as `format`, OpenAI as `response_format`, and Anthropic as a
+   * forced tool whose input becomes the text. Unset, every request is
+   * byte-identical to one made before this field existed.
+   */
+  responseFormat?: ResponseFormat;
   maxTokens?: number;
   /**
    * Optional prompt-cache breakpoints. Providers that don't cache (Ollama,
@@ -63,6 +70,14 @@ export interface GenerateArgs {
    */
   cache?: CacheHints;
   signal?: AbortSignal;
+}
+
+/** A JSON shape the reply must take (see GenerateArgs.responseFormat). */
+export interface ResponseFormat {
+  type: 'json_schema';
+  /** A short identifier: letters, digits, `_` and `-`. */
+  name: string;
+  schema: Record<string, unknown>;
 }
 
 /** Result of a single-shot generation. */
