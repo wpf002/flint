@@ -72,6 +72,7 @@ import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
 import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './route-log';
+import { allowedTailnetUser, bearerMatches, consoleGetsToken, requestVia, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue, type PendingAction } from './actions';
@@ -120,7 +121,7 @@ import {
  *   POST /chat     → { conversationId, message } → SSE stream of StreamEvents
  */
 
-const TOKEN = process.env.FLINT_TOKEN?.trim();
+const TOKEN: string = process.env.FLINT_TOKEN?.trim() ?? '';
 if (!TOKEN) {
   // Fail closed: never expose Flint unauthenticated.
   console.error('FLINT_TOKEN is required (the bearer token clients must send). Refusing to start.');
@@ -139,6 +140,25 @@ const PORT = Number(process.env.PORT ?? 8080);
 const ALLOWED_HOSTS = process.env.FLINT_ALLOWED_HOSTS?.trim()
   ? new RegExp(process.env.FLINT_ALLOWED_HOSTS.trim(), 'i')
   : /^(localhost|127\.0\.0\.1|\[?::1\]?|0\.0\.0\.0|[a-z0-9-]+|.*\.ts\.net|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+)$/i;
+
+/**
+ * The Tailscale login whose devices may use Flint over the tailnet and get the
+ * console's token injected (./access). Unset: tailnet requests still work with
+ * the token, but the console page no longer carries it (paste it in Settings).
+ */
+let TAILNET_USER: string | undefined; // read in main(), after ~/.flint/secrets.env is loaded
+
+/** Small JSON bodies (approvals, speech text); attachments go through MAX_BODY_BYTES. */
+const SMALL_JSON_BYTES = 64 * 1024;
+/** Recorded voice notes for /transcribe. */
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
+/** Log an error with a short reference, and return the reference for the client. */
+function errorRef(tag: string, err: unknown): string {
+  const ref = Math.random().toString(36).slice(2, 8);
+  console.error(`[${tag}] ref=${ref}`, err);
+  return ref;
+}
 
 function buildProvider(): { provider: ProviderAdapter; model: string } {
   const ollamaModel = process.env.OLLAMA_MODEL?.trim();
@@ -395,6 +415,12 @@ async function contextFor(message: string, knowledge: KnowledgeStore): Promise<s
 
 async function main(): Promise<void> {
   loadSecrets(); // pull ANTHROPIC_API_KEY (and friends) from ~/.flint/secrets.env
+  TAILNET_USER = allowedTailnetUser(process.env);
+  console.error(
+    TAILNET_USER
+      ? '[access] tailnet: only FLINT_TAILNET_USER may use Flint, and gets the console token'
+      : '[access] FLINT_TAILNET_USER unset: the console carries its token only for this Mac; tailnet devices paste it in Settings',
+  );
   const { provider, model } = buildProvider();
   // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
   // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
@@ -713,15 +739,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 403, { error: 'bad host' });
   }
 
-  // Serve the console UI. We inject the bearer token so the installed app (Mac
-  // dock / iPhone home screen) opens already authenticated — no URL, no sign-in.
-  // This is safe because Flint is only reachable over the private tailnet.
+  // Who is asking (./access). Over the tailnet, only FLINT_TAILNET_USER once it is set.
+  const facts = { remoteAddress: req.socket.remoteAddress, headers: req.headers };
+  if (!tailnetAllowed(facts, TAILNET_USER)) {
+    return json(res, 403, { error: 'this Tailscale login may not use Flint' });
+  }
+
+  // Serve the console UI. The bearer token is injected only for this Mac (the
+  // desktop app) and for FLINT_TAILNET_USER's devices, so the installed app opens
+  // already authenticated; anyone else gets the page without it (./access).
   if (req.method === 'GET' && (url === '/' || url.startsWith('/console'))) {
     if (!existsSync(CONSOLE_PATH)) return json(res, 404, { error: 'console not built' });
-    const html = readFileSync(CONSOLE_PATH, 'utf8').replace(
-      '</head>',
-      `<script>window.__FLINT_TOKEN__=${JSON.stringify(TOKEN)}</script></head>`,
-    );
+    const page = readFileSync(CONSOLE_PATH, 'utf8');
+    const html = consoleGetsToken(facts, TAILNET_USER)
+      ? page.replace('</head>', `<script>window.__FLINT_TOKEN__=${JSON.stringify(TOKEN)}</script></head>`)
+      : page;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
     return;
@@ -784,8 +816,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     });
   }
 
-  // Auth for everything else.
-  if (req.headers.authorization !== `Bearer ${TOKEN}`) {
+  // Auth for everything else, in constant time (./access).
+  if (!bearerMatches(req.headers.authorization, TOKEN)) {
     return json(res, 401, { error: 'unauthorized' });
   }
 
@@ -807,19 +839,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // Voice input: the app records mic audio and posts it here; we transcribe with
   // whisper.cpp and hand back the text (the client then sends it as a chat).
   if (req.method === 'POST' && url === '/transcribe') {
-    const buf = await readRawBody(req);
+    const raw = await readRawLimited(req, MAX_AUDIO_BYTES);
+    if (raw.tooLarge) return json(res, 413, { error: 'audio too large' });
+    const buf = raw.body;
     if (!buf.length) return json(res, 400, { error: 'no audio' });
     try {
       return json(res, 200, { text: await transcribeAudio(buf) });
     } catch (e) {
-      return json(res, 500, { error: `transcription failed: ${String(e)}` });
+      return json(res, 500, { error: 'transcription failed', ref: errorRef('transcribe', e) });
     }
   }
 
   // Voice output: neural TTS → mp3. 503 (no key, or OpenAI's spend cap reached)
   // tells the client to use its local browser voice instead.
   if (req.method === 'POST' && url === '/speak') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     const text = String(body.text ?? '').trim();
     if (!text) return json(res, 400, { error: 'text required' });
     try {
@@ -830,7 +866,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': audio.length });
       res.end(audio);
     } catch (e) {
-      return json(res, 502, { error: `tts failed: ${String(e)}` });
+      return json(res, 502, { error: 'tts failed', ref: errorRef('speak', e) });
     }
     return;
   }
@@ -962,12 +998,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // An image/PDF turn has no honest fallback — the local brain can't see it.
           if (!route.localFallback) {
             logRoute('error');
-            return json(res, 502, { error: `frontier failed: ${String(err)}`, ...evalFields() });
+            return json(res, 502, { error: 'frontier failed', ref: errorRef('generate', err), ...evalFields() });
           }
           // Nor does a turn whose local brain is a paid model with its budget spent.
           if (budget.localRefusal) {
             logRoute('error');
-            return json(res, 503, { error: `frontier failed: ${String(err)}. ${budget.localRefusal}`, ...evalFields() });
+            return json(res, 503, { error: `frontier failed. ${budget.localRefusal}`, ref: errorRef('generate', err), ...evalFields() });
           }
           console.error('[brain] frontier failed, falling back to local:', err);
           brain = 'local';
@@ -985,7 +1021,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       }
       logRoute('error');
       // An eval replay says what it cost even when it fails, so apps/parity can charge it.
-      if (evalMode) return json(res, 500, { error: `flint failed: ${String(err)}`, ...evalFields() });
+      if (evalMode) return json(res, 500, { error: 'flint failed', ref: errorRef('generate', err), ...evalFields() });
       throw err;
     }
     logRoute(unanswered ? 'unanswered' : out.text.trim() ? 'answered' : 'empty');
@@ -1214,7 +1250,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, { proposals: ctx.actions.list() });
   }
   if (req.method === 'POST' && url === '/proposals/approve') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     const id = String(body.id ?? '');
     const result = await ctx.actions.approve(id, ctx.tools);
     if (!result) return json(res, 404, { error: 'no such proposal' });
@@ -1222,7 +1260,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, { action: result });
   }
   if (req.method === 'POST' && url === '/proposals/reject') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     return json(res, 200, { ok: ctx.actions.reject(String(body.id ?? '')) });
   }
 
@@ -1236,7 +1276,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, { items: ctx.notes.list(), unread: ctx.notes.unreadCount() });
   }
   if (req.method === 'POST' && url === '/notifications/read') {
-    const body = await readJson(req);
+    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    const body = read.body;
     const id = body.id ? String(body.id) : '';
     if (id) ctx.notes.markRead(id);
     else ctx.notes.markAllRead();
@@ -1252,25 +1294,19 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function readRawBody(req: IncomingMessage): Promise<Buffer> {
+/** A raw body up to maxBytes; past that it is drained, not kept, and reported tooLarge. */
+function readRawLimited(req: IncomingMessage, maxBytes: number): Promise<{ tooLarge: true } | { tooLarge: false; body: Buffer }> {
   return new Promise((resolve) => {
+    const declared = Number(req.headers['content-length'] ?? NaN);
+    let over = Number.isFinite(declared) && declared > maxBytes;
+    let size = 0;
     const chunks: Buffer[] = [];
-    req.on('data', (c) => chunks.push(c as Buffer));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
-
-function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (c) => (data += c));
-    req.on('end', () => {
-      try {
-        resolve(data ? (JSON.parse(data) as Record<string, unknown>) : {});
-      } catch {
-        resolve({});
-      }
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) over = true;
+      if (!over) chunks.push(c);
     });
+    req.on('end', () => resolve(over ? { tooLarge: true } : { tooLarge: false, body: Buffer.concat(chunks) }));
   });
 }
 

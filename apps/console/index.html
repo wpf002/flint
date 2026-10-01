@@ -167,7 +167,9 @@
   <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
   <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
   <div class="log" id="log" style="display:none"></div>
-  <div class="row"><button onclick="closeSettings()">Close</button></div>
+  <label for="tokin">Access token (only on a device Flint doesn't sign in for you)</label>
+  <input id="tokin" type="password" autocomplete="off" placeholder="paste the token from ~/.flint/token">
+  <div class="row"><button class="ghost" onclick="saveToken()">Save token</button><button onclick="closeSettings()">Close</button></div>
 </div></div>
 
 <div id="notifs" onclick="if(event.target===this)closeNotifs()"><div class="card">
@@ -185,10 +187,16 @@
 
 <script>
 /* ---------- config ---------- */
-// Same-origin by default (the app is served BY Flint), and the token is injected
-// by the server so the app opens already authenticated — no URL, no sign-in.
+// Same-origin by default (the app is served BY Flint). The server injects the token
+// for this Mac and for your own tailnet login; a token it injects is current, so it
+// wins over a stored one (a rotated token used to lose to the stale stored copy
+// forever) and is stored. Elsewhere, paste the token in Settings.
 var BASE = localStorage.getItem('flint_url') || '';
-var TOKEN = localStorage.getItem('flint_token') || (window.__FLINT_TOKEN__ || '');
+var TOKEN = window.__FLINT_TOKEN__ || localStorage.getItem('flint_token') || '';
+if (window.__FLINT_TOKEN__) localStorage.setItem('flint_token', window.__FLINT_TOKEN__);
+/* A token the server rejects is forgotten, so Settings asks for the current one. */
+function tokenRejected(){localStorage.removeItem('flint_token');TOKEN='';openSettings();}
+function saveToken(){var el=document.getElementById('tokin');var v=(el.value||'').trim();if(!v)return;localStorage.setItem('flint_token',v);TOKEN=v;el.value='';closeSettings();}
 var convId = 'console';
 function newChat(){
   stopSpeech();
@@ -298,7 +306,7 @@ function send(speakBack){
   var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};document.getElementById('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY,attachments:atts.map(function(a){return {name:a.name,type:a.type,data:a.data};})})})
   .then(function(res){
-    if(res.status===401){body.textContent='[unauthorized — set your token]';openSettings();return;}
+    if(res.status===401){body.textContent='[unauthorized — paste the current token in Settings]';tokenRejected();return;}
     /* Refusals (bad file, too large, Local-only + image) come back as JSON, not a stream. */
     if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent='['+((d&&d.error)||('error '+res.status))+']';document.getElementById('think').textContent='';setTalk(0);});}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
