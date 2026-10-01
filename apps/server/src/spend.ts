@@ -381,8 +381,18 @@ export function effectOf(vendor: PaidVendor, level: BudgetLevel): string {
  * crossed, and it raises a notification once per vendor, cap, period and
  * threshold.
  */
+/** Background work stops when the unified vendor total (the runtime's view) reaches this share of Flint's cap (plan 3.0.8). */
+export const UNIFIED_BACKGROUND_STOP = 0.7;
+
+/** Vendor totals the runtime pushes (/internal/spend-external): every account's spend, not only Flint's. */
+export interface ExternalTotals {
+  asOf: string;
+  vendors: Record<string, { dayUsd: number; monthUsd: number; estimate?: boolean }>;
+}
+
 export class SpendGuard {
   private readonly notified = new Set<string>();
+  private external: ExternalTotals | undefined;
 
   constructor(
     readonly ledger: SpendLedger,
@@ -428,10 +438,23 @@ export class SpendGuard {
    * planning) must wait: it stops at 80% of a cap, leaving the rest for Will's
    * own questions. Undefined when it may run.
    */
-  backgroundBlocked(vendor: PaidVendor): string | undefined {
+  backgroundBlocked(vendor: PaidVendor, at = Date.now()): string | undefined {
     const s = this.status(vendor);
-    if (!atLeast(s.level, 'degrade')) return undefined;
-    return `${s.name} at ${Math.round(s.fraction * 100)}% of ${capPhrase(s)}; background work waits`;
+    if (atLeast(s.level, 'degrade')) return `${s.name} at ${Math.round(s.fraction * 100)}% of ${capPhrase(s)}; background work waits`;
+    // The unified view: the vendor's whole spend (other apps too) against Flint's cap.
+    const ext = this.external?.vendors[vendor];
+    const fresh = this.external && at - Date.parse(this.external.asOf) <= 2 * 3600_000;
+    if (ext && fresh) {
+      const caps = this.caps[vendor] ?? {};
+      const fraction = Math.max(fractionOf(ext.dayUsd, caps.dailyUsd), fractionOf(ext.monthUsd, caps.monthlyUsd));
+      if (fraction >= UNIFIED_BACKGROUND_STOP) return `${s.name} at ${Math.round(fraction * 100)}% of Flint's cap across every account; background work waits`;
+    }
+    return undefined;
+  }
+
+  /** The runtime's unified totals (the background stop rule only; chat is unaffected). */
+  setExternal(t: ExternalTotals): void {
+    this.external = t;
   }
 
   snapshot(at?: number): SpendSnapshot {

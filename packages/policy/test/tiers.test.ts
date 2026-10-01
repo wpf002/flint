@@ -7,6 +7,7 @@ import {
   CODE_TABLE,
   AUTONOMOUS_ACTIONS,
   SOURCES,
+  RUNTIME_CHAT_TOOLS,
   type PolicyRow,
   type TierContext,
 } from '../src/tiers';
@@ -316,6 +317,18 @@ describe('the runtime\'s own chat tools', () => {
     expect(resolveTier('runtime.ledger_record_prediction', { ...chat, mcp: mcp('runtime', 'ledger_record_prediction') }).cap).toEqual({ limit: 10, period: 'day' });
     // An unknown runtime tool still goes through the MCP rules.
     expect(resolveTier('runtime.other', { ...chat, mcp: mcp('runtime', 'list_things', { readOnlyHint: true }) }).rule).toBe('mcp-trusted-readonly');
+  });
+
+  it('only the connector\'s own tools are mapped: a code-table name on a server called runtime is still an MCP tool', () => {
+    // remember is ALONE in code; as a runtime MCP tool it is not.
+    const remember = resolveTier('runtime.remember', { ...chat, mcp: mcp('runtime', 'remember', { destructiveHint: true }) });
+    expect(remember).toMatchObject({ tier: 'approval', key: 'mcp:runtime.remember' });
+    expect(resolveTier('runtime.world.entity.write', { ...chat, mcp: mcp('runtime', 'world.entity.write') }).key).toBe('mcp:runtime.world.entity.write');
+    // No MCP tool runs autonomously, the runtime's included.
+    expect(resolveTier('runtime.world_now', { context: 'autonomous', tainted: false, mcp: mcp('runtime', 'world_now', { readOnlyHint: true }) }).tier).toBe('forbidden');
+    // A destructive hint keeps the MCP rules.
+    expect(resolveTier('runtime.ledger_record_prediction', { ...chat, mcp: mcp('runtime', 'ledger_record_prediction', { destructiveHint: true }), policies: [row('ledger_record_prediction', 'alone')], now: NOW }).tier).toBe('approval');
+    for (const t of RUNTIME_CHAT_TOOLS) expect(CODE_TABLE).toHaveProperty([t]);
   });
 });
 

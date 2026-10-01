@@ -66,6 +66,8 @@ export interface PassStats {
   skippedSynthetic: number;
   skippedTrivial: number;
   skippedDuplicate: number;
+  /** Turns that read untrusted text (./conversation-taint): never mined for facts. */
+  skippedTainted: number;
   turnsSent: number;
   calls: number;
   unparseable: number;
@@ -81,6 +83,7 @@ function emptyStats(): PassStats {
     skippedSynthetic: 0,
     skippedTrivial: 0,
     skippedDuplicate: 0,
+    skippedTainted: 0,
     turnsSent: 0,
     calls: 0,
     unparseable: 0,
@@ -120,7 +123,7 @@ interface Item {
   at: number;
   /** Non-empty when this turn is sent to the model. */
   chunk: string;
-  skip?: 'synthetic' | 'trivial' | 'duplicate';
+  skip?: 'synthetic' | 'trivial' | 'duplicate' | 'tainted';
 }
 
 export interface ExtractorOptions {
@@ -144,6 +147,12 @@ export interface ExtractorOptions {
    * stops at the next batch and keeps the progress it already paid for.
    */
   gate?: () => string | undefined;
+  /**
+   * Did this turn read untrusted text (a web page, a Nexus thread, mail)? Such a
+   * turn is never mined: a fact lifted from it would come back through recall
+   * into later, untainted turns (Machine plan 3.0.3).
+   */
+  isTainted?: (conversationId: string, turnId: string) => boolean;
   now?: () => number;
 }
 
@@ -158,6 +167,7 @@ export class MemoryExtractor {
   private readonly batchChars: number;
   private readonly skipConversations: RegExp;
   private readonly gate: (() => string | undefined) | undefined;
+  private readonly isTainted: (conversationId: string, turnId: string) => boolean;
   private readonly now: () => number;
   /** Whether the last pass left work queued (drives the faster backlog cadence). */
   private backlog = false;
@@ -182,6 +192,7 @@ export class MemoryExtractor {
     this.skipConversations =
       opts.skipConversations ?? new RegExp(process.env.FLINT_EXTRACT_SKIP_CONVERSATIONS ?? '^(bulk|grow|seed)-');
     this.gate = opts.gate;
+    this.isTainted = opts.isTainted ?? (() => false);
     this.now = opts.now ?? Date.now;
   }
 
@@ -327,7 +338,7 @@ export class MemoryExtractor {
     const rej = Object.entries(stats.rejected).map(([k, v]) => `${k}=${v}`).join(' ') || 'none';
     console.error(
       `[memory-extract] v${EXTRACT_VERSION} pass: sent ${stats.turnsSent} turn(s) in ${stats.calls} call(s) ` +
-        `(skipped synthetic=${stats.skippedSynthetic} trivial=${stats.skippedTrivial} duplicate=${stats.skippedDuplicate}); ` +
+        `(skipped synthetic=${stats.skippedSynthetic} trivial=${stats.skippedTrivial} duplicate=${stats.skippedDuplicate} tainted=${stats.skippedTainted}); ` +
         `${stats.candidates} candidate(s) → stored ${stats.stored}, superseded ${stats.superseded}, rejected ${rej}` +
         `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}; ${pending.length - idx} turn(s) still queued; ` +
         `budget ${state.budget.calls}/${this.maxCallsPerDay} today${gated ? `; paused (${gated})` : ''}`,
@@ -352,15 +363,18 @@ export class MemoryExtractor {
           const norm = user.toLowerCase().replace(/[^a-z0-9 ]+/g, '').replace(/\s+/g, ' ').trim();
           let skip: Item['skip'];
           if (this.skipConversations.test(cid)) skip = 'synthetic';
+          else if (this.isTainted(cid, t.id)) skip = 'tainted';
           else if (norm.split(' ').filter(Boolean).length < 3) skip = 'trivial';
           else if (seenUser.has(norm)) skip = 'duplicate';
           if (skip === 'synthetic') stats.skippedSynthetic++;
           else if (skip === 'trivial') stats.skippedTrivial++;
           else if (skip === 'duplicate') stats.skippedDuplicate++;
+          else if (skip === 'tainted') stats.skippedTainted++;
           else seenUser.add(norm);
           // The user's words carry the facts; the answer and the previous turn
           // are context, clipped so one long reply can't crowd out the batch.
-          const before = prev
+          // A tainted previous turn is not context either.
+          const before = prev && !this.isTainted(cid, prev.id)
             ? `(earlier in this conversation — WILL: ${clip(prev.messages.find((m) => m.role === 'user')?.content ?? '', 300)} / ASSISTANT: ${clip(prev.messages.filter((m) => m.role === 'assistant').map((m) => m.content).join(' '), 300)})\n`
             : '';
           items.push(

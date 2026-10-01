@@ -61,7 +61,12 @@ export interface GateRequest {
 }
 
 /** Run it, or not (with the message the model sees instead of a result). */
-export type GateDecision = { allow: true } | { allow: false; message: string };
+/**
+ * Allowed (optionally with the arguments the call must run with: the app may
+ * add a field the model cannot be trusted to set, never drop one), or refused
+ * with the message the model sees.
+ */
+export type GateDecision = { allow: true; args?: Record<string, unknown> } | { allow: false; message: string };
 
 /**
  * The app's decision for every call, before it runs, and a look at every result

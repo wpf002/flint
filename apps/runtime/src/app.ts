@@ -14,6 +14,7 @@ import { callerFor, type Caller } from './auth.js';
 import { AuditIn, AuditQuery, AuditRefused, appendAudit, listAudit } from './governance/audit.js';
 import { claim } from './governance/counters.js';
 import {
+  activePolicies,
   CompleteProposal,
   CreateProposal,
   Refused,
@@ -21,6 +22,7 @@ import {
   claimProposal,
   completeProposal,
   createProposal,
+  getProposal,
   listProposals,
   rejectProposal,
 } from './governance/proposals.js';
@@ -113,13 +115,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       .min(1)
       .max(500)
       .parse(req.body);
-    for (const r of rows) {
-      await db.auditRollup.upsert({
-        where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
-        create: { day: r.day, action: r.action, context: r.context, count: r.n },
-        update: { count: { increment: r.n } },
-      });
-    }
+    // All or nothing: a batch that fails partway is not half counted (and then counted again on retry).
+    await db.$transaction(async (tx) => {
+      for (const r of rows) {
+        await tx.auditRollup.upsert({
+          where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
+          create: { day: r.day, action: r.action, context: r.context, count: r.n },
+          update: { count: { increment: r.n } },
+        });
+      }
+    });
     return { counted: rows.length };
   });
   app.get('/v1/audit', { preHandler: need('audit') }, async (req) => {
@@ -137,6 +142,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       .strict()
       .parse(req.query);
     return { proposals: await listProposals(db, q.status, q.limit) };
+  });
+  app.get('/v1/proposals/:id', { preHandler: need('proposals') }, async (req, reply) => {
+    const { id } = Id.parse(req.params);
+    const p = await getProposal(db, id);
+    if (!p) return reply.code(404).send({ error: 'no such proposal' });
+    return { proposal: p };
+  });
+  // The live ActionPolicy rows, for the server's chat gate (it cannot read the database).
+  app.get('/v1/policies', { preHandler: need('proposals') }, async () => {
+    return { policies: await activePolicies(db) };
   });
   app.post('/v1/proposals/:id/approve', { preHandler: need('proposals') }, async (req) => {
     const { id } = Id.parse(req.params);

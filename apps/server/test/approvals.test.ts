@@ -6,10 +6,10 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Approvals, ApprovalError, type ApproverStore, type Credential, type NewApproval } from '../src/approvals';
+import { Approvals, ApprovalError, keyDigest, rpFromDisk, type ApproverStore, type Credential, type NewApproval } from '../src/approvals';
 
 const rp = { rpId: 'flint.tail1234.ts.net', origins: ['https://flint.tail1234.ts.net'] };
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest();
@@ -24,6 +24,10 @@ function memoryStore() {
     setSignCount: async (id, n) => {
       const c = creds.find((x) => x.credentialId === id)!;
       c.signCount = Math.max(c.signCount, n);
+    },
+    revoke: async (id) => {
+      const c = creds.find((x) => x.credentialId === id);
+      if (c && !c.revokedAt) c.revokedAt = new Date();
     },
   };
   return { store, creds, approvals };
@@ -163,12 +167,74 @@ describe('approvals', () => {
     writeFileSync(codeFile, 'qrst-uvwx-yz12-3456\n');
     const se = enclave();
     const b = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow(/existing credential/);
-    const b2 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    const newId = `se_${createHash('sha256').update(Buffer.from(se.publicKey, 'base64url')).digest('hex').slice(0, 32)}`;
-    const ok = approvals.begin({ subjectType: 'credential', subjectId: newId, decision: 'approve', action: 'approval.enroll', argsDigest: 'b'.repeat(64) });
-    await approvals.finishEnroll({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b2.challenge), approval: { challengeId: ok.challengeId, ...first.assert(ok.challenge) } });
+    expect(b.needsApproval).toBe(true);
+    const reg = { challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) };
+    // The approval names the new credential and, as its args digest, the new key.
+    const ap = await approvals.beginEnrollApproval(reg);
+    expect(ap.payload).toMatchObject({ subjectType: 'credential', action: 'approval.enroll', argsDigest: keyDigest(Buffer.from(se.publicKey, 'base64url')), fields: { label: 'Touch ID', factor: 'secure_enclave' } });
+    // Any device with an existing key sees it waiting, and signs it there.
+    expect(approvals.pendingEnrolApprovals().map((p) => p.challengeId)).toEqual([ap.challengeId]);
+    expect(approvals.enrolApproved(ap.challengeId)).toBe(false);
+    await approvals.finishEnrolApproval({ challengeId: ap.challengeId, ...first.assert(ap.challenge) });
+    expect(approvals.enrolApproved(ap.challengeId)).toBe(true);
+    await approvals.finishEnroll({ ...reg, approval: { challengeId: ap.challengeId } });
     expect(mem.creds.map((c) => c.enrolledVia)).toEqual(['enroll_code', expect.stringMatching(/^approval:ap/)]);
+    expect(existsSync(codeFile)).toBe(false);
+  });
+
+  it('without that approval, or with one for another key, the second credential is refused', async () => {
+    const first = await enrolled();
+    writeFileSync(codeFile, 'qrst-uvwx-yz12-3456\n');
+    const se = enclave();
+    const b = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
+    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow(/existing credential/);
+    // An approval for a different key (same id spoofed is impossible: the id is derived from the key) does not carry over.
+    const other = enclave();
+    const b2 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'other' });
+    const ap = await approvals.beginEnrollApproval({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: other.publicKey, signature: other.sign(b2.challenge) });
+    await approvals.finishEnrolApproval({ challengeId: ap.challengeId, ...first.assert(ap.challenge) });
+    const b3 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
+    await expect(approvals.finishEnroll({ challengeId: b3.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b3.challenge), approval: { challengeId: ap.challengeId } })).rejects.toThrow(/something else/);
+    expect(mem.creds).toHaveLength(1);
+  });
+
+  it('one code cannot enrol two keys: whether a key exists is decided when an enrolment finishes', async () => {
+    const pk = passkey();
+    const se = enclave();
+    // Two enrolments begun with the same code before either finishes (two devices, a double click).
+    const a = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'phone' });
+    const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'Touch ID' });
+    expect(a.needsApproval).toBe(false);
+    const results = await Promise.allSettled([
+      approvals.finishEnroll({ challengeId: a.challengeId, ...pk.register(a.challenge) }),
+      approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(mem.creds.map((c) => c.enrolledVia)).toEqual(['enroll_code']);
+  });
+
+  it('a replace code (enroll --replace) registers the new key and revokes every other', async () => {
+    await enrolled();
+    writeFileSync(codeFile, 'rplc-0000-1111-2222 replace\n');
+    const se = enclave();
+    const b = await approvals.beginEnroll({ code: 'rplc-0000-1111-2222', label: 'new Touch ID' });
+    expect(b.needsApproval).toBe(false);
+    const events: unknown[] = [];
+    const ap2 = new Approvals({ store: mem.store, rp, enrollCodeFile: codeFile, now: () => now, onEnrolled: (e) => events.push(e) });
+    const b2 = await ap2.beginEnroll({ code: 'rplc-0000-1111-2222', label: 'new Touch ID' });
+    await ap2.finishEnroll({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b2.challenge) });
+    expect(mem.creds.map((c) => [c.enrolledVia, !!c.revokedAt])).toEqual([['enroll_code', true], ['enroll_code_replace', false]]);
+    expect(events).toEqual([expect.objectContaining({ via: 'enroll_code_replace', revoked: [mem.creds[0]!.credentialId] })]);
+    expect(await ap2.hasCredentials()).toBe(true);
+  });
+
+  it('the relying party keeps the port, takes every origin, and the rp id is the host', () => {
+    expect(rpFromDisk({ FLINT_RP_ORIGINS: 'https://flint.tail1234.ts.net:8443/, https://Other.ts.net' }, '/nowhere').rp).toEqual({ rpId: 'flint.tail1234.ts.net', origins: ['https://flint.tail1234.ts.net:8443', 'https://other.ts.net'] });
+    expect(rpFromDisk({ FLINT_RP_ORIGINS: 'http://insecure.example' }, '/nowhere').rp).toBeUndefined();
+    const home = mkdtempSync(join(tmpdir(), 'flint-rp-'));
+    mkdirSync(join(home, '.flint'));
+    writeFileSync(join(home, '.flint', 'tailscale-url.txt'), 'https://studio.tail1234.ts.net/\n');
+    expect(rpFromDisk({}, home).rp).toEqual({ rpId: 'studio.tail1234.ts.net', origins: ['https://studio.tail1234.ts.net'] });
   });
 
   it('refuses a payload that is not one (bad digest)', () => {

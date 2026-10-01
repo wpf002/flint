@@ -113,12 +113,35 @@ if ! grep -qE '^[0-9a-f]{64}$' "$INTERNAL_FILE" 2>/dev/null; then
   ( umask 077; openssl rand -hex 32 > "$INTERNAL_FILE" )
 fi
 chmod 600 "$INTERNAL_FILE"
+# The runtime MCP connector's own token (packages/mcp/connectors/runtime-server.ts):
+# world:read and ledger only, never the server's grant. Its bundle is built here
+# once; install-server.sh keeps it current after that. Adding `runtime` to
+# ~/.flint/mcp.json stays Will's step (its tools ask for approval until he
+# promotes them, so it is not switched on behind his back).
+MCP_TOKEN_FILE="$DATA/tokens/runtime-mcp.token"
+if ! grep -qE '^[0-9a-f]{64}$' "$MCP_TOKEN_FILE" 2>/dev/null; then
+  ( umask 077; openssl rand -hex 32 > "$MCP_TOKEN_FILE" )
+fi
+chmod 600 "$MCP_TOKEN_FILE"
+MCP_TOKEN_SHA="$(tr -d '\n' < "$MCP_TOKEN_FILE" | shasum -a 256 | cut -d' ' -f1)"
+CONNECTOR="$DATA/connectors/runtime-server.mjs"
+if [ ! -f "$CONNECTOR" ]; then
+  ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
+  mkdir -p "$DATA/connectors"
+  if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node20 \
+       --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
+       --outfile="$CONNECTOR" --log-level=error; then
+    echo "runtime: built the runtime MCP connector ($CONNECTOR); add it to ~/.flint/mcp.json to use it"
+  else
+    echo "runtime: could not build the runtime MCP connector (the runtime itself is unaffected)"
+  fi
+fi
 ENVF="$DATA/runtime.env"
 {
   echo "DATABASE_URL=$APP_URL"
   echo "RUNTIME_PORT=$PORT"
   # ${...}: a bare "$TOKEN_SHA:e..." is zsh's :e modifier and would eat the digest.
-  echo "RUNTIME_TOKENS=server:${TOKEN_SHA}:events|audit|proposals|world:read|ledger|counters"
+  echo "RUNTIME_TOKENS=server:${TOKEN_SHA}:events|audit|proposals|world:read|ledger|counters,runtime-mcp:${MCP_TOKEN_SHA}:world:read|ledger"
   # The server's days and months (FLINT_USER_TZ, default America/Chicago): the spend source must agree.
   echo "FLINT_TZ=$(plutil -extract EnvironmentVariables.FLINT_USER_TZ raw "$AGENTS/com.flint.server.plist" 2>/dev/null || echo America/Chicago)"
   echo "RUNTIME_GIT_SHA=${SHA}"

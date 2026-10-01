@@ -21,8 +21,11 @@ function config(url: string): pg.PoolConfig {
   };
 }
 
-export function pgApproverStore(url: string): ApproverStore & { close(): Promise<void> } {
+export function pgApproverStore(url: string, log: (m: string) => void = () => {}): ApproverStore & { close(): Promise<void> } {
   const pool = new pg.Pool(config(url));
+  // An idle client's connection dropping (Postgres restarting) is an 'error'
+  // event; unhandled, it would take the whole chat server down.
+  pool.on('error', (err) => log(`[approvals] database connection lost: ${err.message}`));
   return {
     async credentials() {
       const r = await pool.query<{ credentialId: string; factor: Credential['factor']; publicKey: Buffer; label: string; signCount: number; revokedAt: Date | null }>(
@@ -45,6 +48,9 @@ export function pgApproverStore(url: string): ApproverStore & { close(): Promise
     },
     async setSignCount(credentialId, n) {
       await pool.query('UPDATE "ApprovalCredential" SET "signCount" = $2 WHERE "credentialId" = $1 AND "signCount" < $2', [credentialId, n]);
+    },
+    async revoke(credentialId) {
+      await pool.query('UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1 AND "revokedAt" IS NULL', [credentialId]);
     },
     close: () => pool.end(),
   };

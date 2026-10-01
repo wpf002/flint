@@ -127,6 +127,17 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
   }
   const expiresAt = new Date(now.getTime() + input.ttlMinutes * 60_000);
   return db.$transaction(async (tx) => {
+    // The same call proposed again while the first is still pending (a retried
+    // turn, a replayed spool, a timeout after the first one landed, Will asking
+    // twice) is the same proposal: one card, one approval, one run. The lock
+    // makes two concurrent filings of one call agree on which row that is.
+    await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`proposal:${input.action}:${argsDigest}`}))) AS l`;
+    const same = await tx.proposal.findFirst({
+      where: { action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now } },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, expiresAt: true },
+    });
+    if (same) return { id: same.id, argsDigest, expiresAt: same.expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: true };
     const row = await tx.proposal.create({
       data: {
         id,
@@ -150,7 +161,7 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
       actor, context, kind: 'decision', action: input.action, tier: decision.tier, decision: 'queue', outcome: 'pending',
       inputs: auditInputs(row, { rule: decision.rule }), correlationId: row.id, tainted: input.tainted,
     }]);
-    return { id: row.id, argsDigest, expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason };
+    return { id: row.id, argsDigest, expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: false };
   });
 }
 
@@ -304,6 +315,39 @@ export async function expireProposals(db: Db, now = new Date()): Promise<number>
     });
   }
   return n;
+}
+
+/**
+ * Executions that never reported back. A claim moves a proposal to executing
+ * and writes its intent; if nothing completes it (the server died mid-tool, or
+ * lost the runtime and could not report), it would stay executing forever with
+ * its intent open. After `olderThanMs` it is failed as "outcome unknown", and
+ * audited as such: whether the action happened is not known, and the record
+ * says so rather than guessing.
+ */
+export async function sweepExecuting(db: Db, now = new Date(), olderThanMs = 60 * 60_000): Promise<number> {
+  const stuck = await db.proposal.findMany({ where: { status: 'executing' }, select: { id: true, action: true, argsDigest: true, origin: true, tainted: true } });
+  let n = 0;
+  for (const p of stuck) {
+    const intent = await db.auditEntry.findFirst({ where: { correlationId: p.id, kind: 'intent' }, orderBy: { at: 'desc' }, select: { at: true } });
+    if (intent && now.getTime() - intent.at.getTime() < olderThanMs) continue;
+    // `now` decides what is overdue; what is written carries the time it is written.
+    await db.$transaction(async (tx) => {
+      const r = await tx.proposal.updateMany({ where: { id: p.id, status: 'executing' }, data: { status: 'failed', executedAt: new Date(), error: 'no completion was reported: outcome unknown' } });
+      if (r.count === 0) return;
+      n += 1;
+      await appendAudit(tx, [{
+        actor: 'runtime', context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: 'failed',
+        inputs: auditInputs(p, { outcomeUnknown: true }), reasoning: 'no completion was reported within the hour: whether it ran is unknown', correlationId: p.id, tainted: p.tainted,
+      }]);
+    });
+  }
+  return n;
+}
+
+/** One proposal, as the console's card shows it. */
+export function getProposal(db: Db, id: string) {
+  return db.proposal.findUnique({ where: { id } });
 }
 
 /** What the console's approval card shows: the full args, where each came from, and the tainted banner. */

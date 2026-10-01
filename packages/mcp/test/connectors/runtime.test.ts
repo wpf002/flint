@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { buildServer } from '../../connectors/runtime-server.js';
+import { MAX_RESULT_CHARS, buildServer, text } from '../../connectors/runtime-server.js';
 
 describe('runtime connector', () => {
   it('serves the five tools; world reads are read-only, recording a prediction is not', async () => {
@@ -25,6 +25,16 @@ describe('runtime connector', () => {
     expect(calls.at(-1)).toMatchObject({ path: '/v1/ledger/predictions', body: { method: 'model_reasoning', resolver: 'will', evidence: [] } });
     const bad = await client.callTool({ name: 'world_entity', arguments: { id: '../../admin' } });
     expect(bad.isError).toBe(true);
+    // The server sets `tainted` from the turn; it reaches the ledger as a boolean.
+    await client.callTool({ name: 'ledger_record_prediction', arguments: { claim: 'c', probability: 0.7, domain: 'services', type: 'event_occurs', resolutionCriteria: 'r', resolveBy: '2026-10-08T00:00:00Z', tainted: true } });
+    expect(calls.at(-1)).toMatchObject({ body: { tainted: true } });
     await client.close();
+  });
+
+  it('a result too large for chat becomes a marker, and the marker says tainted (what was cut is unknown)', () => {
+    const big = text({ rows: 'x'.repeat(MAX_RESULT_CHARS) });
+    const parsed = JSON.parse(big.content[0]!.text) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ truncated: true, tainted: true });
+    expect(JSON.parse(text({ a: 1 }).content[0]!.text)).toEqual({ a: 1 });
   });
 });

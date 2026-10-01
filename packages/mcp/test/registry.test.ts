@@ -219,6 +219,20 @@ describe('McpRegistry gate', () => {
     await close();
   });
 
+  it('runs with the args the gate sets (a field the model cannot be trusted with), and shows the gate a failure too', async () => {
+    const results: unknown[] = [];
+    const { registry, executed, close } = await setup({
+      gate: { check: (req) => ({ allow: true, ...(req.tool === 'delete_thing' ? { args: { id: 'set-by-gate' } } : {}) }), onResult: (_r, x) => results.push(x) },
+    });
+    await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'from-model' } });
+    expect(executed).toEqual(['delete:set-by-gate']);
+    // A call that fails in the transport: its error text reaches the model, so the gate sees it.
+    const echo = tool(registry, 'test.echo');
+    await close();
+    await expect(echo.handler({ id: '2', toolName: 'test.echo', args: { text: 'x' } })).rejects.toThrow();
+    expect(results.at(-1)).toMatchObject({ isError: true });
+  });
+
   it('a gate that throws denies (fail closed)', async () => {
     const { registry, executed, close } = await setup({ gate: { check: () => { throw new Error('boom'); } } });
     const r = (await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'x' } })) as { approved: boolean };

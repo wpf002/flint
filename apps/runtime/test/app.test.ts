@@ -224,6 +224,46 @@ describe.skipIf(NO_DB)('runtime API', () => {
     });
   });
 
+  describe('review of the server integration (PR #41)', () => {
+    it('the same call proposed again while the first is pending is that proposal: one card, one approval', async () => {
+      const args = { source: 'git', n: Math.random() };
+      const first = (await call('POST', '/v1/proposals', proposal('world.sync.git', args))).json();
+      expect(first.deduped).toBe(false);
+      const again = (await call('POST', '/v1/proposals', proposal('world.sync.git', args))).json();
+      expect(again).toMatchObject({ id: first.id, deduped: true });
+      // Ten at once (a replayed spool racing a retry) still agree on one row.
+      const racing = await Promise.all(Array.from({ length: 10 }, () => call('POST', '/v1/proposals', proposal('world.sync.git', { ...args, race: true }))));
+      expect(new Set(racing.map((r) => r.json().id)).size).toBe(1);
+      // A tainted filing of the same call is its own card.
+      const tainted = (await call('POST', '/v1/proposals', { ...proposal('world.sync.git', args), tainted: true })).json();
+      expect(tainted.id).not.toBe(first.id);
+    });
+
+    it('one proposal by id; the live policy rows', async () => {
+      const created = (await call('POST', '/v1/proposals', proposal('world.sync.health', { source: 'health', k: Math.random() }))).json();
+      expect((await call('GET', `/v1/proposals/${created.id}`)).json().proposal).toMatchObject({ id: created.id, status: 'pending', origin: 'console' });
+      expect((await call('GET', '/v1/proposals/prnope')).statusCode).toBe(404);
+      expect((await call('GET', '/v1/proposals/prnope', undefined, AUDIT_ONLY)).statusCode).toBe(403);
+      expect((await call('GET', '/v1/policies')).json()).toEqual({ policies: expect.any(Array) });
+    });
+
+    it('an execution that never reports back is failed as outcome unknown after an hour, and audited so', async () => {
+      const { sweepExecuting } = await import('../src/governance/proposals');
+      const args = { source: 'launchd', k: Math.random() };
+      const created = (await call('POST', '/v1/proposals', proposal('world.sync.launchd', args))).json();
+      await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: 'world.sync.launchd', argsDigest: created.argsDigest }) });
+      expect((await call('POST', `/v1/proposals/${created.id}/claim`, {})).statusCode).toBe(200);
+      expect(await sweepExecuting(db, new Date())).toBe(0); // not yet
+      expect(await sweepExecuting(db, new Date(Date.now() + 2 * 3600_000))).toBeGreaterThanOrEqual(1);
+      const p = (await call('GET', `/v1/proposals/${created.id}`)).json().proposal;
+      expect(p).toMatchObject({ status: 'failed', error: expect.stringMatching(/outcome unknown/) });
+      const trail = (await call('GET', `/v1/audit?correlationId=${created.id}`)).json().entries as Array<{ kind: string; outcome: string; inputs: Record<string, unknown> }>;
+      expect(trail.find((e) => e.kind === 'action')).toMatchObject({ outcome: 'failed', inputs: { outcomeUnknown: true } });
+      const open = await owner(`SELECT count(*)::int AS n FROM audit_open_intents WHERE "correlationId" = $1`, [created.id]);
+      expect(open.rows[0].n).toBe(0);
+    });
+  });
+
   it('proposals stay consistent under concurrent claims', async () => {
     const created = (await call('POST', '/v1/proposals', proposal())).json();
     await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest }) });

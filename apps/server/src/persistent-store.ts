@@ -172,6 +172,16 @@ export class PersistentStore implements MemoryStore {
     return { sent, leftOut: complete.length - sent, window: this.history ? { ...this.history } : null };
   }
 
+  /** The ids of the turns the next message carries (the window), oldest first. */
+  windowTurnIds(conversationId: string): string[] {
+    return this.windowed(this.completeTurns(conversationId)).map((t) => t.id);
+  }
+
+  /** The ids of every turn held for a conversation, any status. */
+  turnIds(conversationId: string): string[] {
+    return (this.conversations.get(conversationId) ?? []).map((t) => t.id);
+  }
+
   private completeTurns(conversationId: string): Turn[] {
     return (this.conversations.get(conversationId) ?? []).filter((t) => t.status === 'complete');
   }

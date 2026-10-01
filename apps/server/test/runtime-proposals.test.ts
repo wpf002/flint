@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Tool } from '@flint/core';
 import { RuntimeProposals } from '../src/runtime-proposals';
-import { ActionQueue } from '../src/actions';
+import { ActionQueue, keyOf } from '../src/actions';
 import { isSafeTool } from '../src/policy';
 import { gateBuiltins } from '../src/tier-gate';
 import { markTainted, withTurnTaint } from '../src/turn-taint';
@@ -86,12 +86,19 @@ describe('the gate in runtime mode', () => {
     const queue = new ActionQueue(isSafeTool);
     const proposals = new RuntimeProposals({ runtime: () => ({ url: 'http://[::1]:8090', token: 't' }), spoolDir: mkdtempSync(join(tmpdir(), 'flint-rp-')), fetchImpl: rt.fetchImpl });
     const [r] = gateBuiltins([remember(ran)], { queue, proposals });
-    queue.allowOnce('flint', 'remember', { fact: 'approved' });
+    // The allowance lives only in the scope that runs the approval.
+    await withTurnTaint(
+      async () => {
+        await r!.handler({ id: '1', toolName: 'remember', args: { fact: 'other' } });
+        await r!.handler({ id: '2', toolName: 'remember', args: { fact: 'approved' } });
+        await r!.handler({ id: '3', toolName: 'remember', args: { fact: 'approved' } });
+      },
+      { sources: ['mcp:web'], allow: [keyOf('flint', 'remember', { fact: 'approved' })] },
+    );
+    // A concurrent turn cannot spend it.
     await withTurnTaint(async () => {
       markTainted('mcp:web');
-      await r!.handler({ id: '1', toolName: 'remember', args: { fact: 'other' } });
-      await r!.handler({ id: '2', toolName: 'remember', args: { fact: 'approved' } });
-      await r!.handler({ id: '3', toolName: 'remember', args: { fact: 'approved' } });
+      await r!.handler({ id: '4', toolName: 'remember', args: { fact: 'approved' } });
     });
     expect(ran).toEqual([{ fact: 'approved' }]);
   });

@@ -4,16 +4,20 @@
  * holds SERVER_INTERNAL_TOKEN; the server keeps only its sha256 (the token file
  * is written by install-runtime.sh as ~/.flint/tokens/internal.token, and its
  * digest read here at startup). Routes:
- *   POST /internal/notify          {title, body}            a notification for Will
- *   POST /internal/spend-external  {asOf, vendors: {...}}   unified spend totals (plan 3.0.8)
+ *   POST /internal/notify          {title, body}            a notification for Will: redacted, kept in
+ *                                                           the console; the phone only gets a ping
+ *   POST /internal/spend-external  {asOf, vendors: {...}}   unified spend totals (plan 3.0.8), for the
+ *                                                           background stop rule
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { redactString } from '@flint/policy';
 
 export interface InternalDeps {
   /** sha256 hex of the runtime's token; undefined = the listener refuses everything. */
   tokenSha256: () => string | undefined;
-  notify: (title: string, body: string) => void;
+  /** Stored ('stored'), already there ('duplicate'), or not storable ('refused'). */
+  notify: (title: string, body: string) => 'stored' | 'duplicate' | 'refused';
   spendExternal: (totals: ExternalSpend) => void;
 }
 
@@ -58,11 +62,12 @@ export function internalHandler(deps: InternalDeps) {
     }
     const url = (req.url ?? '').split('?')[0];
     if (url === '/internal/notify') {
-      const title = typeof b.title === 'string' ? b.title.slice(0, 80) : '';
-      const text = typeof b.body === 'string' ? b.body.slice(0, 500) : '';
+      const title = typeof b.title === 'string' ? redactString(b.title).slice(0, 80) : '';
+      const text = typeof b.body === 'string' ? redactString(b.body).slice(0, 500) : '';
       if (!title) return send(res, 400, { error: 'title required' });
-      deps.notify(title, text);
-      return send(res, 200, { ok: true });
+      const r = deps.notify(title, text);
+      if (r === 'refused') return send(res, 422, { error: 'not a notification Flint shows (a raw payload?)' });
+      return send(res, 200, { ok: true, stored: r === 'stored' });
     }
     if (url === '/internal/spend-external') {
       const vendors = b.vendors;

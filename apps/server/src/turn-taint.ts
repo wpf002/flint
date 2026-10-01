@@ -13,9 +13,16 @@ import { randomBytes } from 'node:crypto';
 
 export class TurnTaint {
   readonly sources = new Set<string>();
+  /** An eval replay (apps/parity, evolve): nothing it asks for is ever queued or proposed. */
+  eval = false;
+  /**
+   * One-time allowances for exact calls Will approved, valid only inside the
+   * scope that runs that approval (a concurrent turn cannot spend them).
+   */
+  readonly allowances = new Set<string>();
   /** Names this turn as a proposal's origin (`chat:<id>`). */
   readonly id = randomBytes(8).toString('hex');
-  /** Runtime proposals this turn filed, for the console's approval cards. */
+  /** Proposals this turn filed (RAM queue or runtime), for the console's approval cards. */
   readonly proposed: Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> = [];
   get tainted(): boolean {
     return this.sources.size > 0;
@@ -24,9 +31,29 @@ export class TurnTaint {
 
 const scope = new AsyncLocalStorage<TurnTaint>();
 
-/** Run `fn` as one turn with its own taint state. */
-export function withTurnTaint<T>(fn: () => T): T {
-  return scope.run(new TurnTaint(), fn);
+/** Run `fn` as one turn with its own taint state, optionally starting from what it carries. */
+export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[]; eval?: boolean; allow?: readonly string[] } = {}): T {
+  const t = new TurnTaint();
+  for (const s of seed.sources ?? []) t.sources.add(s);
+  for (const a of seed.allow ?? []) t.allowances.add(a);
+  t.eval = seed.eval === true;
+  return scope.run(t, fn);
+}
+
+/** This turn is an eval replay. */
+export function markEval(): void {
+  const t = scope.getStore();
+  if (t) t.eval = true;
+}
+
+/** Is this turn an eval replay? */
+export function isEvalTurn(): boolean {
+  return scope.getStore()?.eval ?? false;
+}
+
+/** Spend this turn's one-time allowance for `key`, if it has one. Outside a turn, none. */
+export function takeAllowance(key: string): boolean {
+  return scope.getStore()?.allowances.delete(key) ?? false;
 }
 
 /** Mark the current turn as having read untrusted text from `source`. Outside a turn, nothing. */
@@ -39,12 +66,13 @@ export function turnTainted(): boolean {
   return scope.getStore()?.tainted ?? false;
 }
 
-/** Note a runtime proposal this turn filed. */
+/** Note a proposal this turn filed (once per id). */
 export function noteProposal(p: { id: string; fullName: string; args: unknown; tainted: boolean }): void {
-  scope.getStore()?.proposed.push({ ...p, status: 'pending' });
+  const t = scope.getStore();
+  if (t && !t.proposed.some((x) => x.id === p.id)) t.proposed.push({ ...p, status: 'pending' });
 }
 
-/** The runtime proposals this turn filed. */
+/** The proposals this turn filed. */
 export function turnProposals(): Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> {
   return [...(scope.getStore()?.proposed ?? [])];
 }

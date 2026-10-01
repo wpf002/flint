@@ -55,6 +55,24 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
       case "publicKey":
         let key = try load() ?? create()
         replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
+      case "reset":
+        // The key is bound to the current fingerprints (.biometryCurrentSet), so a
+        // fingerprint change makes it unusable. Will replaces it here, after Touch
+        // ID or his password; the new key still has to be enrolled (an existing
+        // key's approval, or a replace code from `enroll --replace`).
+        let ctx = LAContext()
+        ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "replace Flint's approval key on this Mac") { ok, _ in
+          DispatchQueue.main.async {
+            guard ok else { return replyHandler(nil, "not confirmed") }
+            do {
+              try? FileManager.default.removeItem(at: self.file)
+              let key = try self.create()
+              replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
+            } catch {
+              replyHandler(nil, "approval key: \(error.localizedDescription)")
+            }
+          }
+        }
       case "sign":
         guard let c = body["challenge"] as? String, let challenge = ApprovalKey.unb64url(c), challenge.count == 32 else {
           return replyHandler(nil, "bad challenge")

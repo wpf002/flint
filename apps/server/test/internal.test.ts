@@ -10,7 +10,7 @@ describe('internal listener', () => {
   it('listens on ::1 only, needs the runtime\'s token, and takes notify and spend-external', async () => {
     const notes: string[] = [];
     let spend: ExternalSpend | undefined;
-    const s = startInternal({ tokenSha256: () => sha, notify: (t, b) => notes.push(`${t}: ${b}`), spendExternal: (x) => (spend = x) }, 0);
+    const s = startInternal({ tokenSha256: () => sha, notify: (t, b) => (notes.push(`${t}: ${b}`), 'stored'), spendExternal: (x) => (spend = x) }, 0);
     await new Promise((r) => s.once('listening', r));
     const addr = s.address() as AddressInfo;
     expect(addr.address).toBe('::1');
@@ -26,7 +26,7 @@ describe('internal listener', () => {
   });
 
   it('refuses everything when no token is configured', async () => {
-    const s = startInternal({ tokenSha256: () => undefined, notify: () => {}, spendExternal: () => {} }, 0);
+    const s = startInternal({ tokenSha256: () => undefined, notify: () => 'stored', spendExternal: () => {} }, 0);
     await new Promise((r) => s.once('listening', r));
     const r = await fetch(`http://[::1]:${(s.address() as AddressInfo).port}/internal/notify`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(r.status).toBe(401);

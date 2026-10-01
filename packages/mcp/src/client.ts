@@ -105,7 +105,15 @@ function toFlintTool(
         decision = { allow: false as const, message: `Action '${fullName}' could not be checked; not executed.` };
       }
       if (!decision.allow) return { approved: false, message: decision.message };
-      const result = mapResult(await client.callTool({ name, arguments: (call.args ?? {}) as Record<string, unknown> }));
+      let raw: unknown;
+      try {
+        raw = await client.callTool({ name, arguments: (decision.args ?? call.args ?? {}) as Record<string, unknown> });
+      } catch (err) {
+        // A failure's text reaches the model too, so the gate sees it like a result.
+        options.gate.onResult?.(req, { isError: true, content: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+      const result = mapResult(raw);
       options.gate.onResult?.(req, result);
       return result;
     }

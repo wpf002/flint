@@ -9,9 +9,14 @@
  * the digest of its exact args, an expiry and a nonce.
  *
  *   enroll: a one-time code from ~/.flint/enroll-code (written by
- *           `pnpm --filter @flint/runtime enroll`) registers the first
- *           credential; any further one also needs an existing credential's
- *           approval.
+ *           `pnpm --filter @flint/runtime enroll`) starts every enrolment. It
+ *           registers a credential on its own only while none is enrolled
+ *           (decided when the enrolment finishes); any further one needs an
+ *           existing credential's signature over exactly the new key.
+ *           `enroll --replace` writes a code that revokes every enrolled
+ *           credential and registers the new one: the recovery when the only
+ *           key is lost (a fingerprint change kills a Touch ID key). Whoever
+ *           can write ~/.flint is Will (plan 3.0.2's boundary).
  *   approve: begin() builds the payload and a challenge; finish() verifies the
  *           signature and records the Approval as flint_approver, the only role
  *           that can. The runtime verifies again before anything executes.
@@ -20,6 +25,8 @@
  */
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   ApprovalPayload,
   challengeOf,
@@ -57,6 +64,7 @@ export interface ApproverStore {
   addCredential(c: Omit<Credential, 'revokedAt' | 'signCount'> & { signCount: number; enrolledVia: string }): Promise<void>;
   addApproval(a: NewApproval): Promise<void>;
   setSignCount(credentialId: string, n: number): Promise<void>;
+  revoke(credentialId: string): Promise<void>;
 }
 
 export class ApprovalError extends Error {
@@ -69,8 +77,27 @@ export class ApprovalError extends Error {
 }
 
 type Pending =
-  | { kind: 'enroll'; challenge: Buffer; label: string; expires: number; viaCode: boolean }
+  | { kind: 'enroll'; challenge: Buffer; label: string; expires: number; codeHash: string }
   | { kind: 'approve'; challenge: Buffer; payload: ApprovalPayload; expires: number };
+
+/** What an enrolment registers: the key Will's approval must name. */
+interface Registered {
+  credentialId: string;
+  factor: Credential['factor'];
+  publicKey: Buffer;
+  signCount: number;
+}
+
+/** The args digest an approval of a new credential signs: the new key itself. */
+export const keyDigest = (publicKey: Buffer) => createHash('sha256').update(publicKey).digest('hex');
+
+export interface EnrolEvent {
+  credentialId: string;
+  factor: Credential['factor'];
+  via: 'enroll_code' | 'enroll_code_replace' | 'approval';
+  approvalId?: string;
+  revoked: string[];
+}
 
 const b64url = (b: Buffer) => b.toString('base64url');
 const fromB64 = (s: unknown, what: string): Buffer => {
@@ -111,11 +138,17 @@ export interface ApprovalsOptions {
   enrollCodeFile: string;
   now?: () => Date;
   ttlMs?: number;
+  /** Every credential enrolled (and any revoked with it), for the audit trail. */
+  onEnrolled?: (e: EnrolEvent) => void;
 }
 
 export class Approvals {
   private readonly pending = new Map<string, Pending>();
   private readonly ttl: number;
+  /** Enrolments finish one at a time: "is any key enrolled yet?" and the insert must not interleave. */
+  private enrolling: Promise<unknown> = Promise.resolve();
+  /** New keys an existing one has signed for (approval challenge id -> the recorded approval), until the new device finishes. */
+  private readonly enrolApprovals = new Map<string, { approvalId: string; payload: ApprovalPayload; expires: number }>();
 
   constructor(private readonly o: ApprovalsOptions) {
     this.ttl = o.ttlMs ?? 5 * 60_000;
@@ -144,10 +177,16 @@ export class Approvals {
     return p;
   }
 
-  private enrollCode(): string | undefined {
+  /** The code in ~/.flint/enroll-code, and whether it is a replace code. */
+  private enrollCode(): { code: string; replace: boolean } | undefined {
     if (!existsSync(this.o.enrollCodeFile)) return undefined;
-    const c = readFileSync(this.o.enrollCodeFile, 'utf8').trim();
-    return /^[A-Za-z0-9-]{12,64}$/.test(c) ? c : undefined;
+    const [code = '', mode = ''] = readFileSync(this.o.enrollCodeFile, 'utf8').trim().split(/\s+/);
+    if (!/^[A-Za-z0-9-]{12,64}$/.test(code)) return undefined;
+    return { code, replace: mode === 'replace' };
+  }
+
+  private static hashOf(code: string): string {
+    return createHash('sha256').update(code).digest('hex');
   }
 
   /** Who may approve right now (for the console: which credentials to offer). */
@@ -155,22 +194,29 @@ export class Approvals {
     return (await this.o.store.credentials()).filter((c) => !c.revokedAt).map(({ credentialId, factor, label }) => ({ credentialId, factor, label }));
   }
 
+  /** Has Will enrolled any key? Then the console token alone approves nothing. */
+  async hasCredentials(): Promise<boolean> {
+    return (await this.o.store.credentials()).some((c) => !c.revokedAt);
+  }
+
   /**
-   * Start enrolling a credential. The first needs the one-time code; later ones
-   * need the code too, and finishEnroll() also wants an existing credential's
-   * signature over the new key.
+   * Start enrolling a credential. Every enrolment needs the one-time code; once
+   * a key is enrolled, finishEnroll() also wants an existing credential's
+   * signature over the new key (beginEnrollApproval).
    */
-  async beginEnroll(body: { code?: unknown; label?: unknown }): Promise<{ challengeId: string; challenge: string; rp?: { id: string }; user: { id: string; name: string } }> {
+  async beginEnroll(body: { code?: unknown; label?: unknown }): Promise<{ challengeId: string; challenge: string; rp?: { id: string }; user: { id: string; name: string }; needsApproval: boolean }> {
     const label = typeof body.label === 'string' ? body.label.trim().slice(0, 100) : '';
     if (!label) throw new ApprovalError(400, 'label required');
     const code = this.enrollCode();
-    if (!code || typeof body.code !== 'string' || !same(body.code.trim(), code)) {
+    if (!code || typeof body.code !== 'string' || !same(body.code.trim(), code.code)) {
       throw new ApprovalError(403, 'the enrolment code is missing or wrong (run: pnpm --filter @flint/runtime enroll)');
     }
-    const existing = (await this.o.store.credentials()).filter((c) => !c.revokedAt);
     const challenge = randomBytes(32);
-    const challengeId = this.put({ kind: 'enroll', challenge, label, expires: this.now().getTime() + this.ttl, viaCode: existing.length === 0 });
+    const challengeId = this.put({ kind: 'enroll', challenge, label, expires: this.now().getTime() + this.ttl, codeHash: Approvals.hashOf(code.code) });
+    // A replace code, or no key yet: the code is enough. Otherwise an existing key must sign for the new one.
+    const needsApproval = !code.replace && (await this.hasCredentials());
     return {
+      needsApproval,
       challengeId,
       challenge: b64url(challenge),
       ...(this.o.rp ? { rp: { id: this.o.rp.rpId } } : {}),
@@ -178,47 +224,116 @@ export class Approvals {
     };
   }
 
-  /**
-   * Finish enrolling: a passkey registration (attestation "none"), or a Secure
-   * Enclave public key with a signature over the challenge (proof it holds the
-   * key). The code is spent on success.
-   */
-  async finishEnroll(body: Record<string, unknown>): Promise<{ credentialId: string }> {
-    const p = this.take(body.challengeId, 'enroll') as Extract<Pending, { kind: 'enroll' }>;
-    let credentialId: string;
-    let publicKey: Buffer;
-    let signCount = 0;
-    let factor: Credential['factor'];
+  /** The key an enrolment registers: a passkey registration (attestation "none"), or a Secure Enclave key that signed the challenge. */
+  private registered(p: Extract<Pending, { kind: 'enroll' }>, body: Record<string, unknown>): Registered {
     if (body.factor === 'secure_enclave') {
-      factor = 'secure_enclave';
-      publicKey = fromB64(body.publicKey, 'publicKey');
+      const publicKey = fromB64(body.publicKey, 'publicKey');
       if (!p256Key(publicKey)) throw new ApprovalError(400, 'not a P-256 public key');
       const v = verifySecureEnclave({ publicKeySpki: publicKey, challenge: p.challenge, signature: fromB64(body.signature, 'signature') });
       if (!v.ok) throw new ApprovalError(403, `the key did not sign the challenge: ${v.reason}`);
-      credentialId = `se_${createHash('sha256').update(publicKey).digest('hex').slice(0, 32)}`;
-    } else {
-      factor = 'webauthn';
-      if (!this.o.rp) throw new ApprovalError(409, 'passkeys need FLINT_RP_ID and FLINT_RP_ORIGINS (the tailnet HTTPS origin)');
-      const r = verifyWebAuthnRegistration({
-        challenge: p.challenge,
-        authenticatorData: body.authenticatorData !== undefined ? fromB64(body.authenticatorData, 'authenticatorData') : authDataFromAttestation(fromB64(body.attestationObject, 'attestationObject')),
-        clientDataJson: fromB64(body.clientDataJSON, 'clientDataJSON'),
-        rp: this.o.rp,
-      });
-      if (!r.ok) throw new ApprovalError(403, `the passkey registration did not verify: ${r.reason}`);
-      credentialId = r.credentialId;
-      publicKey = r.publicKeySpki;
-      signCount = r.signCount;
+      return { factor: 'secure_enclave', publicKey, signCount: 0, credentialId: `se_${createHash('sha256').update(publicKey).digest('hex').slice(0, 32)}` };
     }
-    if (!p.viaCode) {
-      // A second credential: an existing one must have approved this exact key.
-      const approvalId = await this.verifyApprovalOf({ subjectType: 'credential', subjectId: credentialId, action: 'approval.enroll' }, body.approval);
-      await this.o.store.addCredential({ credentialId, factor, publicKey, label: p.label, signCount, enrolledVia: `approval:${approvalId}` });
+    if (!this.o.rp) throw new ApprovalError(409, 'passkeys need FLINT_RP_ID and FLINT_RP_ORIGINS (the tailnet HTTPS origin)');
+    const r = verifyWebAuthnRegistration({
+      challenge: p.challenge,
+      authenticatorData: body.authenticatorData !== undefined ? fromB64(body.authenticatorData, 'authenticatorData') : authDataFromAttestation(fromB64(body.attestationObject, 'attestationObject')),
+      clientDataJson: fromB64(body.clientDataJSON, 'clientDataJSON'),
+      rp: this.o.rp,
+    });
+    if (!r.ok) throw new ApprovalError(403, `the passkey registration did not verify: ${r.reason}`);
+    return { factor: 'webauthn', publicKey: r.publicKeySpki, signCount: r.signCount, credentialId: r.credentialId };
+  }
+
+  private peekEnroll(id: unknown): Extract<Pending, { kind: 'enroll' }> {
+    if (typeof id !== 'string') throw new ApprovalError(400, 'challengeId required');
+    const p = this.pending.get(id);
+    if (!p || p.kind !== 'enroll') throw new ApprovalError(404, 'no such challenge');
+    if (p.expires <= this.now().getTime()) throw new ApprovalError(409, 'the challenge expired');
+    return p;
+  }
+
+  /**
+   * A further credential: the approval an existing one must sign, naming the
+   * new credential and (as its args digest) the new key itself. Takes the same
+   * registration finishEnroll will, and does not use up the enrolment. Any
+   * device with an existing key can sign it (pendingEnrolApprovals,
+   * finishEnrolApproval): a passkey on the phone is approved with the Mac's
+   * Touch ID key, and the other way round.
+   */
+  async beginEnrollApproval(body: Record<string, unknown>) {
+    const p = this.peekEnroll(body.challengeId);
+    const key = this.registered(p, body);
+    return this.begin({
+      subjectType: 'credential', subjectId: key.credentialId, decision: 'approve', action: 'approval.enroll', argsDigest: keyDigest(key.publicKey),
+      fields: { label: p.label, factor: key.factor },
+    });
+  }
+
+  /** New keys waiting for an existing key's approval (for the console of any enrolled device). */
+  pendingEnrolApprovals(): Array<{ challengeId: string; challenge: string; payload: ApprovalPayload }> {
+    const t = this.now().getTime();
+    return [...this.pending].flatMap(([challengeId, p]) =>
+      p.kind === 'approve' && p.payload.subjectType === 'credential' && p.payload.action === 'approval.enroll' && p.expires > t
+        ? [{ challengeId, challenge: b64url(p.challenge), payload: p.payload }]
+        : [],
+    );
+  }
+
+  /** An existing key signs for a new one; the new device then finishes with this approval. */
+  async finishEnrolApproval(body: Record<string, unknown>): Promise<{ approvalId: string }> {
+    const p = this.take(body.challengeId, 'approve') as Extract<Pending, { kind: 'approve' }>;
+    if (p.payload.subjectType !== 'credential' || p.payload.action !== 'approval.enroll') throw new ApprovalError(409, 'that is not a new key waiting for approval');
+    const approvalId = await this.verifyAndRecord(p.payload, p.challenge, body);
+    for (const [k, v] of this.enrolApprovals) if (v.expires <= this.now().getTime()) this.enrolApprovals.delete(k);
+    this.enrolApprovals.set(String(body.challengeId), { approvalId, payload: p.payload, expires: p.expires });
+    return { approvalId };
+  }
+
+  /** Has the new key waiting under this approval challenge been approved yet? */
+  enrolApproved(challengeId: unknown): boolean {
+    return typeof challengeId === 'string' && this.enrolApprovals.has(challengeId);
+  }
+
+  /**
+   * Finish enrolling. Which path applies is decided now, not when the enrolment
+   * began, and one enrolment finishes at a time:
+   *  - a replace code (still the one this enrolment began with): every enrolled
+   *    credential is revoked and the new one registered;
+   *  - no credential enrolled and the code still there: the code registers it;
+   *  - otherwise an existing credential must have signed for exactly this key.
+   * The code is spent on success.
+   */
+  finishEnroll(body: Record<string, unknown>): Promise<{ credentialId: string }> {
+    const run = this.enrolling.then(() => this.doFinishEnroll(body));
+    this.enrolling = run.catch(() => {});
+    return run;
+  }
+
+  private async doFinishEnroll(body: Record<string, unknown>): Promise<{ credentialId: string }> {
+    const p = this.take(body.challengeId, 'enroll') as Extract<Pending, { kind: 'enroll' }>;
+    const key = this.registered(p, body);
+    const code = this.enrollCode();
+    const codeStands = !!code && Approvals.hashOf(code.code) === p.codeHash;
+    const live = (await this.o.store.credentials()).filter((c) => !c.revokedAt);
+    const add = (enrolledVia: string) => this.o.store.addCredential({ credentialId: key.credentialId, factor: key.factor, publicKey: key.publicKey, label: p.label, signCount: key.signCount, enrolledVia });
+    let event: EnrolEvent;
+    if (codeStands && code.replace) {
+      // The new key first: if it cannot be added, nothing is revoked.
+      await add('enroll_code_replace');
+      for (const c of live) await this.o.store.revoke(c.credentialId);
+      event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code_replace', revoked: live.map((c) => c.credentialId) };
+    } else if (codeStands && live.length === 0) {
+      await add('enroll_code');
+      event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code', revoked: [] };
     } else {
-      await this.o.store.addCredential({ credentialId, factor, publicKey, label: p.label, signCount, enrolledVia: 'enroll_code' });
+      if (live.length === 0) throw new ApprovalError(403, 'the enrolment code was used or replaced: run `pnpm --filter @flint/runtime enroll` again');
+      const approvalId = this.approvalOfKey(key, body.approval);
+      await add(`approval:${approvalId}`);
+      event = { credentialId: key.credentialId, factor: key.factor, via: 'approval', approvalId, revoked: [] };
     }
-    rmSync(this.o.enrollCodeFile, { force: true });
-    return { credentialId };
+    if (codeStands) rmSync(this.o.enrollCodeFile, { force: true });
+    this.o.onEnrolled?.(event);
+    return { credentialId: key.credentialId };
   }
 
   /** Start an approval: the payload Will will see and sign, and its challenge. */
@@ -238,14 +353,17 @@ export class Approvals {
     return { approvalId, payload: p.payload };
   }
 
-  private async verifyApprovalOf(expected: { subjectType: SubjectType; subjectId: string; action: string }, raw: unknown): Promise<string> {
-    if (!raw || typeof raw !== 'object') throw new ApprovalError(403, 'a further credential needs an existing credential\'s approval');
-    const a = raw as Record<string, unknown>;
-    const p = this.take(a.challengeId, 'approve') as Extract<Pending, { kind: 'approve' }>;
-    if (p.payload.subjectType !== expected.subjectType || p.payload.subjectId !== expected.subjectId || p.payload.action !== expected.action || p.payload.decision !== 'approve') {
+  /** The approval an existing key gave for exactly this new key (finishEnrolApproval), used once. */
+  private approvalOfKey(key: Registered, raw: unknown): string {
+    const id = raw && typeof raw === 'object' ? (raw as { challengeId?: unknown }).challengeId : undefined;
+    const a = typeof id === 'string' ? this.enrolApprovals.get(id) : undefined;
+    if (!a) throw new ApprovalError(403, "a further credential needs an existing credential's approval");
+    this.enrolApprovals.delete(id as string);
+    if (a.expires <= this.now().getTime()) throw new ApprovalError(409, 'that approval expired');
+    if (a.payload.subjectId !== key.credentialId || a.payload.argsDigest !== keyDigest(key.publicKey) || a.payload.decision !== 'approve') {
       throw new ApprovalError(403, 'that approval was for something else');
     }
-    return this.verifyAndRecord(p.payload, p.challenge, a);
+    return a.approvalId;
   }
 
   private async verifyAndRecord(payload: ApprovalPayload, challenge: Buffer, body: Record<string, unknown>): Promise<string> {
@@ -273,4 +391,31 @@ export class Approvals {
     });
     return id;
   }
+}
+
+/**
+ * The passkey relying party: the tailnet HTTPS origin `tailscale serve` gives
+ * the console (~/.flint/tailscale-url.txt), or FLINT_RP_ID / FLINT_RP_ORIGINS.
+ */
+export function rpFromDisk(env: Record<string, string | undefined> = process.env, home = homedir()): { rp?: { rpId: string; origins: string[] } } {
+  let raw = env.FLINT_RP_ORIGINS?.trim();
+  if (!raw) {
+    try {
+      raw = readFileSync(join(home, '.flint', 'tailscale-url.txt'), 'utf8').trim().split('\n')[0];
+    } catch {
+      raw = undefined;
+    }
+  }
+  // Every origin, scheme host AND port (what a browser puts in clientDataJSON),
+  // the way install-runtime.sh gives them to the runtime.
+  const origins = (raw ?? '').split(',').flatMap((o) => {
+    try {
+      const u = new URL(o.trim());
+      return u.protocol === 'https:' && /^[a-z0-9.-]+$/i.test(u.hostname) ? [u.origin.toLowerCase()] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (origins.length === 0) return {};
+  return { rp: { rpId: env.FLINT_RP_ID?.trim().toLowerCase() || new URL(origins[0]!).hostname, origins: [...new Set(origins)] } };
 }

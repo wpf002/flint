@@ -39,7 +39,13 @@ export async function runtimeCall(path: string, init: { method?: 'GET' | 'POST';
   return data;
 }
 
-const text = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
+/** What a tool may put into the model's context; past it, a marker (and, not knowing what was cut, tainted). */
+export const MAX_RESULT_CHARS = 32_000;
+export const text = (v: unknown) => {
+  const t = JSON.stringify(v, null, 2);
+  const out = t.length <= MAX_RESULT_CHARS ? t : JSON.stringify({ truncated: true, chars: t.length, note: 'too large to show in chat; ask for less', tainted: true });
+  return { content: [{ type: 'text' as const, text: out }] };
+};
 const readOnly = { readOnlyHint: true };
 
 export function buildServer(call = runtimeCall): McpServer {
@@ -86,13 +92,16 @@ export function buildServer(call = runtimeCall): McpServer {
         resolutionCriteria: z.string().min(1).max(1000),
         resolveBy: z.string().datetime({ offset: true }),
         evidence: z.array(z.object({ kind: z.string().max(40), ref: z.string().max(200), note: z.string().max(200).optional() })).max(20).optional(),
+        // Set by Flint's server from the turn (it overwrites whatever the model sends): a
+        // prediction worded in a turn that read untrusted text is stored as tainted.
+        tainted: z.boolean().optional(),
       },
     },
     async (a) =>
       text(
         await call('/v1/ledger/predictions', {
           method: 'POST',
-          body: { ...a, method: 'model_reasoning', resolver: 'will', evidence: a.evidence ?? [] },
+          body: { ...a, method: 'model_reasoning', resolver: 'will', evidence: a.evidence ?? [], tainted: a.tainted === true },
         }),
       ),
   );
