@@ -42,6 +42,9 @@ removable.
 ---
 
 ## Phase 7 — Home base: hosting & independence (Q2, Q10)
+*Superseded by the Machine plan, P1: the Studio runs the runtime (`com.flint.runtime`)
+beside the server and Ollama, with local Postgres 17, nightly backups and restore drills.*
+
 **Goal:** Flint always-on, reachable from anywhere, fully yours.
 **Build:** stand up a dedicated machine — **recommended: a Mac mini you own**
 (model + service co-located, no cloud bill, no GPU-rental). Alternatives: Fly.io
