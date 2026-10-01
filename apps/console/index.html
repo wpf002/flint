@@ -167,6 +167,15 @@
   <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
   <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
   <div class="log" id="log" style="display:none"></div>
+  <div class="seg">Approval key</div>
+  <div id="creds" class="log" style="display:block">—</div>
+  <div id="enrollbox" style="display:none">
+    <label for="enrollcode">Enrolment code (run <code>pnpm --filter @flint/runtime enroll</code> on the Mac)</label>
+    <input id="enrollcode" type="password" autocomplete="off" placeholder="one-time code">
+    <input id="enrolllabel" type="text" autocomplete="off" placeholder="name this key, e.g. iPhone">
+    <div class="row"><button class="ghost" onclick="enrollPasskey()">Add a passkey on this device</button></div>
+  </div>
+  <div id="enrollmsg" class="log" style="display:none"></div>
   <label for="tokin">Access token (only on a device Flint doesn't sign in for you)</label>
   <input id="tokin" type="password" autocomplete="off" placeholder="paste the token from ~/.flint/token">
   <div class="row"><button class="ghost" onclick="saveToken()">Save token</button><button onclick="closeSettings()">Close</button></div>
@@ -204,7 +213,7 @@ function newChat(){
   document.getElementById('transcript').innerHTML = '';
   var inp = document.getElementById('input'); inp.value = ''; inp.focus();
 }
-function openSettings(){document.getElementById('settings').style.display='flex';}
+function openSettings(){document.getElementById('settings').style.display='flex';loadCreds();}
 function closeSettings(){document.getElementById('settings').style.display='none';}
 function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
 
@@ -272,12 +281,45 @@ applyLO();
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
   var card=document.createElement('div');card.className='propose';
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
-  card.innerHTML='<div class="pt">Flint wants to run <b>'+a.fullName+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">Approve</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
+  card.innerHTML='<div class="pt">Flint wants to run <b>'+esc(a.fullName)+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">'+(canPasskey()?'Approve with passkey':'Approve')+'</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
   card.querySelector('.ok').onclick=function(){approveAction(a.id,card);};
   card.querySelector('.no').onclick=function(){rejectAction(a.id,card);};
   host.appendChild(card);});document.getElementById('transcript').scrollTop=9e9;}
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
-function approveAction(id,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+/* ---------- Will's approval key (passkey on the tailnet HTTPS origin) ---------- */
+var CREDS=null;
+function b64u(buf){var b=new Uint8Array(buf),s='';for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+function passkeysHere(){return !!(window.PublicKeyCredential&&location.protocol==='https:');}
+function canPasskey(){return passkeysHere()&&!!CREDS&&CREDS.some(function(c){return c.factor==='webauthn';});}
+function loadCreds(){if(!TOKEN)return;fetch(BASE+'/approvals/credentials',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+  var el=document.getElementById('creds');var box=document.getElementById('enrollbox');
+  if(!d){CREDS=null;el.textContent='approvals are one-tap (no approval key store)';box.style.display='none';return;}
+  CREDS=d.credentials||[];
+  el.textContent=CREDS.length?CREDS.map(function(c){return '🔑 '+c.label+' ('+(c.factor==='webauthn'?'passkey':'Touch ID')+')';}).join('\n'):'no approval key yet';
+  box.style.display=passkeysHere()?'block':'none';}).catch(function(){});}
+function enrollMsg(t,bad){var m=document.getElementById('enrollmsg');m.style.display='block';m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
+function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});}
+function enrollPasskey(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'passkey';
+  postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
+    return navigator.credentials.create({publicKey:{challenge:unb64u(b.challenge),rp:{id:b.rp.id,name:'Flint'},user:{id:unb64u(b.user.id),name:'will',displayName:'Will'},
+      pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{userVerification:'required',residentKey:'preferred'},attestation:'none',timeout:60000}})
+    .then(function(c){var resp=c.response;var body={challengeId:b.challengeId,clientDataJSON:b64u(resp.clientDataJSON)};
+      if(resp.getAuthenticatorData)body.authenticatorData=b64u(resp.getAuthenticatorData());else body.attestationObject=b64u(resp.attestationObject);
+      return postJson('/approvals/enroll/finish',body);});
+  }).then(function(){document.getElementById('enrollcode').value='';enrollMsg('✓ approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+e.message,true);});}
+/* Will signs this exact action and its args with the passkey; the server and the runtime verify it. */
+function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+    var allow=CREDS.filter(function(c){return c.factor==='webauthn';}).map(function(c){return {type:'public-key',id:unb64u(c.credentialId)};});
+    return navigator.credentials.get({publicKey:{challenge:unb64u(b.challenge),rpId:location.hostname,allowCredentials:allow,userVerification:'required',timeout:60000}})
+    .then(function(a){return postJson('/approvals/finish',{challengeId:b.challengeId,credentialId:b64u(a.rawId),authenticatorData:b64u(a.response.authenticatorData),clientDataJSON:b64u(a.response.clientDataJSON),signature:b64u(a.response.signature)});});
+  }).then(function(d){r.style.display='block';row.style.display='none';
+    if(decision==='reject'){r.textContent='dismissed (signed)';return;}
+    var a=d.action||{};if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
+    else{r.textContent='✗ '+(a.error||'failed');r.style.color='var(--orange)';}
+  }).catch(function(e){row.style.opacity=1;r.style.display='block';r.textContent='✗ '+e.message;r.style.color='var(--orange)';});}
+function approveAction(id,card){if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){
     var a=d.action||{};r.style.display='block';row.style.display='none';
     if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
@@ -495,7 +537,7 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 })();
 
 refresh();
-if(!TOKEN) setTimeout(openSettings,400);
+if(!TOKEN) setTimeout(openSettings,400); else loadCreds();
 </script>
 </body>
 </html>

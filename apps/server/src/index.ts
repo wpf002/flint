@@ -66,6 +66,8 @@ import { digestOf } from '@flint/policy';
 import { AuditSink, runtimeFromDisk } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent } from './tier-gate';
 import { withTurnTaint } from './turn-taint';
+import { Approvals, ApprovalError } from './approvals';
+import { pgApproverStore } from './approver-store';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
 import { withHistoryNote } from './history-window';
@@ -220,6 +222,24 @@ function buildFrontierProvider(): { provider: ProviderAdapter; model: string } |
  * plist (world-readable) and out of git (the file is under ~/.flint, not the
  * repo). chmod 600 it.
  */
+/**
+ * The passkey relying party: the tailnet HTTPS origin `tailscale serve` gives
+ * the console (~/.flint/tailscale-url.txt), or FLINT_RP_ID / FLINT_RP_ORIGINS.
+ */
+function rpFromDisk(): { rp?: { rpId: string; origins: string[] } } {
+  let origin = process.env.FLINT_RP_ORIGINS?.split(',')[0]?.trim();
+  if (!origin) {
+    try {
+      origin = readFileSync(join(homedir(), '.flint', 'tailscale-url.txt'), 'utf8').trim().split('\n')[0];
+    } catch {
+      origin = undefined;
+    }
+  }
+  const m = origin ? /^(https:\/\/([a-z0-9.-]+))(?::\d+)?\/?$/i.exec(origin.replace(/\/$/, '')) : null;
+  if (!m) return {};
+  return { rp: { rpId: process.env.FLINT_RP_ID?.trim() || m[2]!.toLowerCase(), origins: [m[1]!.toLowerCase()] } };
+}
+
 function loadSecrets(): void {
   const path = join(homedir(), '.flint', 'secrets.env');
   if (!existsSync(path)) return;
@@ -529,6 +549,12 @@ async function main(): Promise<void> {
     });
   };
   const tierOpts = { queue: actions, onDecision, taintFloor: process.env.FLINT_TAINT_FLOOR !== '0' };
+  // Will's approval factor (./approvals): passkeys on the tailnet HTTPS origin,
+  // or the desktop app's Secure Enclave key. Needs the flint_approver database
+  // role; without it, approvals stay one-tap as before.
+  const approvals = process.env.FLINT_DB_APPROVER_URL
+    ? new Approvals({ store: pgApproverStore(process.env.FLINT_DB_APPROVER_URL), enrollCodeFile: join(homedir(), '.flint', 'enroll-code'), ...rpFromDisk() })
+    : undefined;
   const specs = loadMcpSpecs();
   const registry = specs.length > 0 ? await McpRegistry.connect(specs, { gate: tierGate(tierOpts) }) : undefined;
   // The seed of Flint's OWN brain: every interaction is captured as a training
@@ -660,7 +686,7 @@ async function main(): Promise<void> {
   const convos: Convo[] = [];
   const budgetNotes = new NoteOnce(() => ledger.period().day);
   // One request is one turn, with its own taint state (./turn-taint).
-  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit }))));
+  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals }))));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -697,6 +723,7 @@ interface Ctx {
   knowledge: KnowledgeStore;
   actions: ActionQueue;
   audit: AuditSink;
+  approvals: Approvals | undefined;
   notes: Notifications;
   training: TrainingLogger;
   /** Spend caps (./spend): /spend, /speak, and the frontier plan for each turn. */
@@ -1338,6 +1365,67 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!result) return json(res, 404, { error: 'no such proposal' });
     if (result.status === 'done') ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
     return json(res, 200, { action: result });
+  }
+  // ---- Will's approval factor (./approvals) ------------------------------------
+  if (url.startsWith('/approvals/')) {
+    if (!ctx.approvals) return json(res, 501, { error: 'approvals need the flint_approver database role (FLINT_DB_APPROVER_URL)' });
+    const ap = ctx.approvals;
+    try {
+      if (req.method === 'GET' && url === '/approvals/credentials') return json(res, 200, { credentials: await ap.credentials() });
+      if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+      const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+      if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+      const body = read.body as Record<string, unknown>;
+      if (url === '/approvals/enroll/begin') return json(res, 200, await ap.beginEnroll(body));
+      if (url === '/approvals/enroll/finish') return json(res, 200, await ap.finishEnroll(body));
+      if (url === '/approvals/begin') {
+        // A proposal in the RAM queue: what Will signs is its exact action and args.
+        const id = String(body.proposalId ?? '');
+        const decision = body.decision === 'reject' ? 'reject' : 'approve';
+        const p = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
+        if (!p) return json(res, 404, { error: 'no such pending proposal' });
+        let argsDigest: string;
+        try {
+          argsDigest = digestOf(p.args ?? null);
+        } catch {
+          return json(res, 409, { error: 'these args cannot be signed (no canonical form)' });
+        }
+        return json(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.fullName, argsDigest }));
+      }
+      if (url === '/approvals/finish') {
+        const { approvalId, payload } = await ap.finish(body);
+        const id = payload.subjectId;
+        const p = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
+        if (!p) return json(res, 409, { error: 'the proposal is no longer pending', approvalId });
+        // The args must still be exactly what was signed.
+        let digest = '';
+        try {
+          digest = digestOf(p.args ?? null);
+        } catch {
+          digest = '';
+        }
+        if (payload.subjectType !== 'proposal' || payload.action !== p.fullName || payload.argsDigest !== digest) {
+          return json(res, 409, { error: 'the signed approval does not match the proposal', approvalId });
+        }
+        if (payload.decision === 'reject') {
+          ctx.actions.reject(id);
+          ctx.audit.record({ actor: 'will:passkey', context: 'console', kind: 'rejection', action: p.fullName, decision: 'deny', outcome: 'denied', inputs: { proposal: id, approvalId } });
+          return json(res, 200, { ok: true, approvalId });
+        }
+        ctx.audit.record({ actor: 'will:passkey', context: 'console', kind: 'intent', action: p.fullName, decision: 'act', outcome: 'pending', inputs: { proposal: id, approvalId, argsDigest: digest }, correlationId: `act:${id}` }, true);
+        const result = await ctx.actions.approve(id, ctx.tools);
+        ctx.audit.record({
+          actor: 'will:passkey', context: 'console', kind: 'action', action: p.fullName, decision: 'act', outcome: result?.status === 'done' ? 'ok' : 'failed',
+          inputs: { proposal: id, approvalId, argsDigest: digest }, ...(result?.error ? { reasoning: result.error.slice(0, 1000) } : {}), correlationId: `act:${id}`,
+        });
+        if (result?.status === 'done') ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
+        return json(res, 200, { action: result, approvalId });
+      }
+      return json(res, 404, { error: 'not found' });
+    } catch (err) {
+      if (err instanceof ApprovalError) return json(res, err.status, { error: err.message });
+      return json(res, 500, { error: 'approval failed', ref: errorRef('approvals', err) });
+    }
   }
   if (req.method === 'POST' && url === '/proposals/reject') {
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
