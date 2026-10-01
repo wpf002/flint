@@ -155,7 +155,19 @@ const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 /** The one `merge` that is not a code merge: joining two world entities. */
 const MERGE_EXEMPT: ReadonlySet<string> = new Set(['world.entity.merge']);
-const PERSON_SEGMENTS: ReadonlySet<string> = new Set(['person', 'persons', 'people', 'whois']);
+/** About people: `findPeople`, `peoplesearch`, `whoIs`; not `personal_notes`. Matched on the lowercased name without separators. */
+const PERSON = /person(?!al)|people|whois/;
+/**
+ * NEVER_AUTO false positives, each reviewed: the word matches but nothing moves
+ * money. `withdraw_handoff` retracts a Nexus handoff.
+ */
+const NEVER_AUTO_EXEMPT: ReadonlySet<string> = new Set(['nexus.withdraw_handoff']);
+/** Joined forms of NEVER_AUTO's multi-word entries (`placeorder`), matched without separators. */
+const NEVER_AUTO_JOINED = /placeorder|closeposition|cancelorder|modifyorder|sendmoney|wiremoney|paynow|paybill|payinvoice/;
+/** A merge of code or records: the verb `merge` as a word, or a joined form. Not `merged` (a read of merged PRs) or `emergency`. */
+const MERGE_JOINED = /automerge|squashmerge|rebasemerge|mergepr|mergepull|mergebranch|mergerequest/;
+/** Longer names are refused outright: they bound the work every rule below does. */
+export const MAX_NAME = 256;
 /** Self-modification actions that carry the files they touch. */
 const SELFMOD_PATH_ACTIONS: ReadonlySet<string> = new Set(['selfmod.attempt', 'selfmod.open_pr']);
 
@@ -235,19 +247,29 @@ export function patternMatches(pattern: string, key: string): boolean {
  * rules use this; isSafeTool keeps its own (stricter) segmenting.
  */
 export function wordsOf(name: string): string[] {
-  return segmentsOf(name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2'));
+  // Linear: each pass looks at one boundary at a time (the old `([A-Z]+)([A-Z][a-z])`
+  // backtracked across a whole run of capitals).
+  return segmentsOf(name.slice(0, MAX_NAME).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z])(?=[A-Z][a-z])/g, '$1_'));
+}
+
+/** The name lowercased with every separator removed: `place_Order` -> `placeorder`. */
+const joined = (name: string) => name.slice(0, MAX_NAME).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** NEVER_AUTO, also in camelCase, joined and `pay_`/`wire_` forms; minus the reviewed exemptions. */
+export function neverAuto(name: string): boolean {
+  if (NEVER_AUTO_EXEMPT.has(name)) return false;
+  const words = wordsOf(name);
+  return NEVER_AUTO.test(name) || NEVER_AUTO.test(words.join(' ')) || words.includes('pay') || words.includes('wire') || NEVER_AUTO_JOINED.test(joined(name));
 }
 
 /** Step 1. The reason it is forbidden, or undefined. */
 export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | 'paths' | 'pool'>): string | undefined {
   const name = ctx.mcp ? `${ctx.mcp.server}.${ctx.mcp.tool}` : action;
+  if (name.length > MAX_NAME) return `the name is over ${MAX_NAME} characters`;
   const segs = wordsOf(name);
-  // NEVER_AUTO on the raw name and on its snake_case form (placeOrder -> place_order).
-  if (NEVER_AUTO.test(name) || NEVER_AUTO.test(segs.join('_'))) return 'trades and money movement are never run (NEVER_AUTO)';
+  if (neverAuto(name)) return 'trades and money movement are never run (NEVER_AUTO)';
   if (!ctx.mcp && FORBIDDEN_ACTIONS.has(action)) return `${action} is forbidden`;
-  // Any merge an MCP tool can do is a code or record merge Will makes himself;
-  // a substring match catches `automerge` and `squashmerge` too.
-  if (ctx.mcp ? /merge/i.test(ctx.mcp.tool) || /merge/i.test(ctx.mcp.server) : segs.includes('merge') && !MERGE_EXEMPT.has(action)) {
+  if ((segs.includes('merge') || MERGE_JOINED.test(joined(name))) && (ctx.mcp || !MERGE_EXEMPT.has(action))) {
     return 'Flint never merges; Will does';
   }
   if (ctx.pool && /trad|broker|exchange/i.test(ctx.pool)) return `pool ${ctx.pool} trades`;
@@ -262,7 +284,7 @@ export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | '
       return `${action} is not a self-modification action`;
     }
   }
-  if (segs.some((s) => PERSON_SEGMENTS.has(s))) return 'no collection on people';
+  if (PERSON.test(joined(name))) return 'no collection on people';
   return undefined;
 }
 
@@ -281,10 +303,16 @@ export function isWrite(action: string, mcp?: McpFacts): boolean {
   return !isSafeTool(`${mcp.server}.${mcp.tool}`);
 }
 
-/** Any money word in the name (camelCase split), or a NEVER_AUTO match. */
+/**
+ * Might this tool move money? Deliberately broad (a substring of the joined
+ * name): a false positive only means a tool stays one tap away, never that it
+ * runs alone.
+ */
+const MONEY_JOINED = /pay|wire|money|fund|order|position|trade|swap|transfer|withdraw|deposit|buy|sell|wager|loan|bridge|checkout|purchase|invoice|refund|charge|wallet|crypto|usdc|btc/;
 export function touchesMoney(name: string): boolean {
-  const words = wordsOf(name);
-  return NEVER_AUTO.test(name) || NEVER_AUTO.test(words.join('_')) || words.some((w) => MONEY_SEGMENTS.has(w) || w === 'swap' || w === 'trade');
+  if (neverAuto(name)) return true;
+  if (wordsOf(name).some((w) => MONEY_SEGMENTS.has(w))) return true;
+  return MONEY_JOINED.test(joined(name));
 }
 
 const live = (p: PolicyRow, now: Date): boolean => p.active && new Date(p.expiresAt).getTime() > now.getTime();
@@ -293,14 +321,15 @@ const live = (p: PolicyRow, now: Date): boolean => p.active && new Date(p.expire
 function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> & { promotable: boolean } {
   if (ctx.mcp) {
     const { server, tool, readOnlyHint, destructiveHint } = ctx.mcp;
-    if (destructiveHint) return { tier: 'approval', rule: 'mcp', reason: `${server} marks ${tool} destructive`, promotable: true };
+    const money = touchesMoney(`${server}.${tool}`);
+    // A name that touches money (a trade, a payment, an order) stays APPROVAL
+    // whatever a policy row says: `mcp:hive.*` ALONE must not reach `hive.open_position`.
+    if (destructiveHint) return { tier: 'approval', rule: 'mcp', reason: `${server} marks ${tool} destructive`, promotable: !money };
     if (readOnlyHint && TRUSTED_READONLY.has(server)) {
       return { tier: 'alone', rule: 'mcp-trusted-readonly', reason: `${server} is trusted and marks ${tool} read-only`, promotable: false };
     }
     if (isSafeTool(`${server}.${tool}`)) return { tier: 'alone', rule: 'mcp-safe-name', reason: 'the name proves a read', promotable: false };
-    // A name that touches money (a trade, a payment, an order) stays APPROVAL
-    // whatever a policy row says: `mcp:hive.*` ALONE must not reach `hive.open_position`.
-    if (touchesMoney(`${server}.${tool}`)) return { tier: 'approval', rule: 'mcp', reason: 'it may move money', promotable: false };
+    if (money) return { tier: 'approval', rule: 'mcp', reason: 'it may move money', promotable: false };
     return { tier: 'approval', rule: 'mcp', reason: 'a tool that may write', promotable: true };
   }
   const entry = CODE_TABLE[action];
@@ -345,7 +374,9 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
 
   // 2b. The floor a tainted chat turn, or personal data headed off the box, sets.
   const egress = isEgress(action, ctx.mcp);
-  const tainted = ctx.tainted && !autonomous && (egress || isWrite(action, ctx.mcp));
+  // Only a context of exactly 'autonomous' (whose actions are a closed list) skips
+  // the taint floor; an unknown context gets both rule sets.
+  const tainted = ctx.tainted && ctx.context !== 'autonomous' && (egress || isWrite(action, ctx.mcp));
   const sensitive = egress && (ctx.sensitivity === 'personal' || ctx.sensitivity === 'financial');
   const floored = tainted || sensitive;
 

@@ -46,14 +46,17 @@ const SECRET_VALUE: ReadonlyArray<[RegExp, string]> = [
   [/\bAIza[0-9A-Za-z_-]{35}\b/g, REDACTED],
   [/\btvly-[A-Za-z0-9_-]{10,}/g, REDACTED],
   [/\bpplx-[A-Za-z0-9]{16,}/g, REDACTED],
-  // user:password@ in a connection URL keeps the user and drops the password. The
-  // lookbehind and the bounded scheme keep this linear: an unanchored
-  // `[a-z][a-z0-9+.-]*://` retried from every offset of `a.a.a.a...` was quadratic.
-  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/[^:/?#\s@]{0,256}):[^@/?#\s]{1,1024}@/gi, `$1:${REDACTED}@`],
-  // Basic auth, and credentials passed as query parameters or header lines.
-  [/\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}/g, `Basic ${REDACTED}`],
-  [/([?&](?:api[_-]?key|apikey|access[_-]?token|token|key|secret|password|auth)=)[^&#\s]+/gi, `$1${REDACTED}`],
-  [/\b((?:x-)?api-key|x-auth-token|authorization)(\s*[:=]\s*)[^\s"',;]{8,}/gi, `$1$2${REDACTED}`],
+  // user:password@ in a connection URL keeps the user and drops the password,
+  // up to the LAST @ (URL parsers split there; a password may contain @). The
+  // bounded scheme keeps this linear; the lookbehind only stops a match from
+  // starting inside a word.
+  [/(?<![a-z0-9])([a-z][a-z0-9+.-]{0,31}:\/\/[^:/?#\s@]{0,256}):[^/?#\s]{1,1024}@/gi, `$1:${REDACTED}@`],
+  // Header-shaped credentials, in plain text or JSON: `Authorization: Token x`,
+  // `"x-api-key": "x"`, with or without a scheme word.
+  [/\b((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|x-access-token)(["']?\s*[:=]\s*["']?\s*)(?:(?:basic|bearer|token|bot|digest|apikey)\s+)?[^\s"',;]{6,}/gi, `$1$2${REDACTED}`],
+  // Credentials passed as query parameters (OAuth, presigned URLs). Named ones
+  // only: `?key=en-US` is not a secret.
+  [/([?&](?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|token|secret|password|passwd|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature)=)[^&#\s]{6,}/gi, `$1${REDACTED}`],
 ];
 
 export interface RedactOptions {
@@ -93,8 +96,10 @@ export function redact<T>(value: T, opts: RedactOptions = {}): T {
       if (v instanceof Date) return v.toISOString();
       if (v instanceof Uint8Array) return `[${v.byteLength} bytes]`;
       const out: Record<string, unknown> = {};
-      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-        if (!isSecretKey(k)) out[k] = go(x, depth + 1);
+      for (const [rawKey, x] of Object.entries(v as Record<string, unknown>)) {
+        // A key can carry a credential too (`{ "Bearer sk-...": 1 }`).
+        const k = redactString(rawKey, secrets);
+        if (!isSecretKey(rawKey)) out[k] = go(x, depth + 1);
         else if (typeof x === 'string') out[k] = x === '' ? x : REDACTED;
         else if (x !== null && typeof x === 'object') out[k] = scrub(x, depth + 1);
         else out[k] = x; // a number or boolean under a credential word is a count or a flag
@@ -112,13 +117,14 @@ export function redact<T>(value: T, opts: RedactOptions = {}): T {
   const scrub = (v: unknown, depth: number): unknown => {
     if (typeof v === 'string') return v === '' ? v : REDACTED;
     if (v instanceof Uint8Array) return REDACTED;
+    if (v instanceof Date) return v.toISOString(); // a timestamp is not a secret
     if (v === null || typeof v !== 'object') return v;
     if (depth >= maxDepth) return '[too deep]';
     if (seen.has(v)) return '[circular]';
     seen.add(v);
     try {
       if (Array.isArray(v)) return v.map((x) => scrub(x, depth + 1));
-      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, scrub(x, depth + 1)]));
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [redactString(k, secrets), scrub(x, depth + 1)]));
     } finally {
       seen.delete(v);
     }

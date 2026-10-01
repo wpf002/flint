@@ -86,6 +86,29 @@ describe('redact', () => {
     expect(s).toContain('&q=1');
   });
 
+  it('round 2: dates kept, passwords with @ and after punctuation, no prose redaction, more header and query forms, keys', () => {
+    const when = new Date('2026-10-01T12:00:00Z');
+    expect(redact({ tokenExpiresAt: when, credential: { createdAt: when } })).toEqual({ tokenExpiresAt: '2026-10-01T12:00:00.000Z', credential: { createdAt: '2026-10-01T12:00:00.000Z' } });
+    expect(redactString('...postgres://flint:s3cret@db:5432/flint')).toBe('...postgres://flint:[redacted]@db:5432/flint');
+    expect(redactString('postgres://flint:p@ssw0rd-secret@db.internal:5432/flint')).toBe('postgres://flint:[redacted]@db.internal:5432/flint');
+    for (const prose of ['web_search query: Basic Instinct cast list', 'https://x.example/?key=en-US', 'uploads?key=uploads/2026/report.pdf']) {
+      expect(redactString(prose)).toBe(prose);
+    }
+    for (const leak of [
+      'Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b',
+      'authorization: basic dXNlcjpwYXNzd29yZA==',
+      '{"headers":{"x-api-key":"abcd1234efgh5678ijkl"}}',
+      'grant_type=refresh_token&refresh_token=1//0gAbCdEfGh&client_secret=GOCSPX-AbCdEfGh123',
+      'https://s3.example.com/o?X-Amz-Credential=AKIDEXAMPLE&X-Amz-Signature=deadbeefdeadbeef',
+    ]) {
+      expect(redactString(leak), leak).toMatch(/\[redacted\]/);
+      expect(redactString(leak)).not.toMatch(/9944b0|dXNlcjpw|abcd1234efgh|0gAbCd|GOCSPX|deadbeefdeadbeef/);
+    }
+    const tok = 'FLINTTOKEN-0123456789abcdef';
+    expect(Object.keys(redact({ tokens: { [tok]: 'voice' } }, { secrets: [tok] }) as Record<string, object>).join()).not.toContain(tok);
+    expect(JSON.stringify(redact({ map: { [`x ${tok}`]: 1 } }, { secrets: [tok] }))).not.toContain(tok);
+  });
+
   it('runs in linear time on adversarial input', () => {
     const t = Date.now();
     redactString('a.'.repeat(128_000));

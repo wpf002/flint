@@ -47,17 +47,26 @@ function uses(path: string, isHit: (n: ts.Node) => boolean): boolean {
   return found;
 }
 
-const isProcess = (e: ts.Node) => ts.isIdentifier(e) && e.text === 'process';
-/** `process.env`, `process['env']`, and `const { env } = process`. */
+/** `process`, `(process)`, `globalThis.process`, `global.process`. */
+const isProcess = (e: ts.Node): boolean => {
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (ts.isIdentifier(e)) return e.text === 'process';
+  return ts.isPropertyAccessExpression(e) && e.name.text === 'process' && ts.isIdentifier(e.expression) && ['globalThis', 'global'].includes(e.expression.text);
+};
+const PROCESS_MODULES = new Set(['process', 'node:process']);
+/**
+ * Any way to reach the environment: `process.env`, `process['env']`,
+ * destructuring or aliasing `process`, or importing `node:process` at all.
+ */
 const processEnv = (n: ts.Node): boolean =>
   (ts.isPropertyAccessExpression(n) && isProcess(n.expression) && n.name.text === 'env') ||
-  (ts.isElementAccessExpression(n) && isProcess(n.expression) && ts.isStringLiteralLike(n.argumentExpression) && n.argumentExpression.text === 'env') ||
-  (ts.isVariableDeclaration(n) && !!n.initializer && isProcess(n.initializer) && ts.isObjectBindingPattern(n.name) &&
-    n.name.elements.some((el) => (el.propertyName ?? el.name).getText() === 'env'));
+  (ts.isElementAccessExpression(n) && isProcess(n.expression)) ||
+  ((ts.isVariableDeclaration(n) || ts.isBinaryExpression(n)) && !!(ts.isVariableDeclaration(n) ? n.initializer : n.right) && isProcess((ts.isVariableDeclaration(n) ? n.initializer : n.right)!)) ||
+  (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && PROCESS_MODULES.has(n.moduleSpecifier.text)) ||
+  (ts.isCallExpression(n) && n.expression.getText() === 'require' && n.arguments.some((a) => ts.isStringLiteralLike(a) && PROCESS_MODULES.has(a.text)));
 const UNSAFE_SQL = new Set(['$queryRawUnsafe', '$executeRawUnsafe']);
-/** `.$queryRawUnsafe(...)`, `['$executeRawUnsafe']`. */
-const unsafeSql = (n: ts.Node): boolean =>
-  (ts.isIdentifier(n) && UNSAFE_SQL.has(n.text)) || (ts.isStringLiteralLike(n) && UNSAFE_SQL.has(n.text) && ts.isElementAccessExpression(n.parent));
+/** `.$queryRawUnsafe(...)`, or the name as a string anywhere (`db[m]` with `m = '$queryRawUnsafe'`). */
+const unsafeSql = (n: ts.Node): boolean => (ts.isIdentifier(n) || ts.isStringLiteralLike(n)) && UNSAFE_SQL.has(n.text);
 
 const hits = (paths: string[], isHit: (n: ts.Node) => boolean) => paths.filter((p) => uses(p, isHit)).map(rel);
 
@@ -65,8 +74,11 @@ const hits = (paths: string[], isHit: (n: ts.Node) => boolean) => paths.filter((
  * Secrets are reachable only through a `${{ }}` expression, so any expression
  * naming the secrets context is a use (`secrets.X`, `toJSON(secrets)`).
  */
-const badWorkflow = (text: string) =>
-  /\$\{\{[^}]*\bsecrets\b/.test(text) || /pull_request_target/.test(text.replace(/(^|\s)#.*$/gm, '$1'));
+const badWorkflow = (text: string) => {
+  const code = text.replace(/^\s*#.*$/gm, '');
+  const expressions = code.match(/\$\{\{[\s\S]*?\}\}/g) ?? [];
+  return expressions.some((e) => /\bsecrets\b/.test(e)) || /^\s*secrets\s*:/m.test(code) || /pull_request_target/.test(code);
+};
 
 const sources = [
   ...readdirSync(join(ROOT, 'apps')).flatMap((a) => files(join(ROOT, 'apps', a, 'src'), CODE)),
@@ -114,6 +126,12 @@ describe('forbidden APIs', () => {
       comment: tmp('comment', '// process.env is read in config.ts\nexport const s = "process.env";\n'),
       sql: tmp('sql', 'declare const db: any;\ndb.$queryRawUnsafe("x");\n'),
       sqlIndex: tmp('sqli', "declare const db: any;\ndb['$executeRawUnsafe']('x');\n"),
+      sqlVar: tmp('sqlv', "declare const db: any;\nconst m = '$queryRawUnsafe';\ndb[m]('x');\n"),
+      envImport: tmp('envm', "import { env } from 'node:process';\nexport default env;\n"),
+      envGlobal: tmp('envg', 'export const t = globalThis.process.env.X;\n'),
+      envParen: tmp('envp', 'export const t = (process).env;\n'),
+      envAlias: tmp('enva', 'const p = process;\nexport const t = p.env;\n'),
+      exitOnly: tmp('exit', 'process.exitCode = 1;\nprocess.on("SIGTERM", () => {});\n'),
     };
     try {
       expect(uses(samples.env, processEnv)).toBe(true);
@@ -122,6 +140,11 @@ describe('forbidden APIs', () => {
       expect(uses(samples.comment, processEnv)).toBe(false);
       expect(uses(samples.sql, unsafeSql)).toBe(true);
       expect(uses(samples.sqlIndex, unsafeSql)).toBe(true);
+      expect(uses(samples.sqlVar, unsafeSql)).toBe(true);
+      for (const k of ['envImport', 'envGlobal', 'envParen', 'envAlias'] as const) expect(uses(samples[k], processEnv), k).toBe(true);
+      expect(uses(samples.exitOnly, processEnv)).toBe(false);
+      expect(badWorkflow("env:\n  T: ${{ format('{0}', secrets.X) }}\n")).toBe(true);
+      expect(badWorkflow('jobs:\n  call:\n    uses: ./.github/workflows/x.yml\n    secrets: inherit\n')).toBe(true);
       expect(badWorkflow('env:\n  ALL: ${{ toJSON(secrets) }}\n')).toBe(true);
       expect(badWorkflow('on:\n  pull_request_target:\n')).toBe(true);
       expect(badWorkflow('# no secrets here; not pull_request_target\nrun: echo ${{ github.sha }}\n')).toBe(false);

@@ -255,3 +255,56 @@ describe('review fixes', () => {
   });
 });
 
+// Regressions from the verification pass on the review fixes.
+describe('review fixes, round 2', () => {
+  it('a destructive hint does not make a money tool promotable', () => {
+    const d = resolveTier('x', { ...chat, mcp: mcp('hive', 'open_position', { destructiveHint: true }), policies: [row('mcp:hive.*', 'alone')], now: NOW });
+    expect(d.tier).toBe('approval');
+  });
+
+  it('joined, camelCase and pay_/wire_ money names are forbidden or stay one tap away', () => {
+    const policies = [row('mcp:bank.*', 'alone'), row('mcp:shop.*', 'alone'), row('mcp:broker.*', 'alone'), row('mcp:wallet.*', 'alone')];
+    for (const [server, tool] of [['bank', 'payNow'], ['bank', 'pay_now'], ['bank', 'paynow'], ['bank', 'pay_bill'], ['bank', 'wireMoney'], ['bank', 'wire_money'], ['shop', 'placeorder'], ['broker', 'closeposition'], ['broker', 'cancelorder'], ['broker', 'modifyorder'], ['bank', 'send_money']]) {
+      expect(resolveTier('x', { ...chat, mcp: mcp(server!, tool!), policies, now: NOW }).tier, `${server}.${tool}`).toBe('forbidden');
+    }
+    for (const [server, tool] of [['wallet', 'send_eth'], ['wallet', 'sendCrypto'], ['bank', 'payload_upload']]) {
+      expect(resolveTier('x', { ...chat, mcp: mcp(server!, tool!), policies, now: NOW }).tier, `${server}.${tool}`).toBe('approval');
+    }
+  });
+
+  it('people in any spelling are forbidden; "personal" is not a person', () => {
+    for (const tool of ['findpeople', 'peoplesearch', 'personlookup', 'whoIs', 'getWhoIs', 'WhoIs']) {
+      expect(resolveTier('x', { ...chat, mcp: mcp('crm', tool) }).tier, tool).toBe('forbidden');
+    }
+    expect(resolveTier('x', { ...chat, mcp: mcp('notes', 'list_personal_notes') }).tier).toBe('alone');
+  });
+
+  it('an unknown context keeps the taint floor', () => {
+    for (const action of ['backup.offsite', 'world.entity.write', 'ledger.prediction.record']) {
+      const d = resolveTier(action, { context: 'voice' as unknown as 'chat', tainted: true, policies: [row(action, 'alone')], now: NOW });
+      expect(d.tier, action).toBe('approval');
+    }
+  });
+
+  it('only the merge verb is forbidden: reads of merged PRs and "emergency" are fine', () => {
+    expect(resolveTier('x', { ...chat, mcp: mcp('github-observer', 'list_merged_prs', { readOnlyHint: true }) }).tier).toBe('alone');
+    // Not forbidden. (isSafeTool's WRITE_TOOL still sees `merge` inside it, so it asks first, as before.)
+    expect(resolveTier('x', { ...chat, mcp: mcp('weather', 'get_emergency_alerts') }).tier).toBe('approval');
+    expect(resolveTier('x', { ...chat, mcp: mcp('github', 'automerge') }).tier).toBe('forbidden');
+    expect(resolveTier('x', { ...chat, mcp: mcp('github', 'merge') }).tier).toBe('forbidden');
+  });
+
+  it('nexus.withdraw_handoff is a reviewed NEVER_AUTO exemption: approval, not forbidden', () => {
+    expect(resolveTier('x', { ...chat, mcp: mcp('nexus', 'withdraw_handoff') }).tier).toBe('approval');
+    expect(resolveTier('x', { ...chat, mcp: mcp('bank', 'withdraw_funds') }).tier).toBe('forbidden');
+  });
+
+  it('over-long names are refused, and judging a huge one is fast', () => {
+    const huge = 'A'.repeat(65_536);
+    const t = Date.now();
+    expect(resolveTier('x', { ...chat, mcp: mcp('evil', huge) }).tier).toBe('forbidden');
+    expect(resolveTier(huge, chat).tier).toBe('forbidden');
+    expect(Date.now() - t).toBeLessThan(200);
+  });
+});
+
