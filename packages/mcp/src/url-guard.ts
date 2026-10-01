@@ -148,8 +148,11 @@ export async function assertPublicUrl(raw: string | URL, resolve: Resolve = reso
   if (isPrivateHost(host) || isThisNetwork(host, local)) throw new UrlRefused(`${host} is a private or local address`);
   if (isIP(host.replace(/^\[|\]$/g, '')) === 0) {
     let addrs: string[];
+    // Before the lookup starts: a lookup started and then abandoned would reject
+    // later with nobody listening, and an unhandled rejection kills the process.
+    opts.signal?.throwIfAborted();
     try {
-      addrs = await abortable(resolve(host), opts.signal);
+      addrs = await abortable((opts.resolve ?? resolve)(host), opts.signal);
     } catch (e) {
       if (opts.signal?.aborted) throw e;
       throw new Error(`${host} did not resolve`);

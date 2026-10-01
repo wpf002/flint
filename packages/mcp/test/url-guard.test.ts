@@ -51,6 +51,22 @@ describe('assertPublicUrl', () => {
     expect((await assertPublicUrl('http://[2600:1702:5590:6aa1::1]/', publicDns, { local })).hostname).toBe('[2600:1702:5590:6aa1::1]');
   });
 
+  // Review of #33: a lookup started on an already-aborted signal was abandoned,
+  // and its later rejection had no listener; Node exits on that.
+  it('does not start a lookup when the signal is already aborted', async () => {
+    let looked = false;
+    const resolve = async () => {
+      looked = true;
+      throw new Error('ENOTFOUND');
+    };
+    await expect(assertPublicUrl('https://nx.example/', resolve, { signal: AbortSignal.abort(new Error('gone')) })).rejects.toThrow(/gone/);
+    expect(looked).toBe(false);
+  });
+
+  it('uses the resolver passed in its options', async () => {
+    await expect(assertPublicUrl('https://evil.example/', undefined, { resolve: async () => ['127.0.0.1'] })).rejects.toBeInstanceOf(UrlRefused);
+  });
+
   it('gives up on a DNS lookup when the caller aborts', async () => {
     const never = () => new Promise<string[]>(() => {});
     const ac = new AbortController();
