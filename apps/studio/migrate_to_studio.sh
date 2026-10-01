@@ -167,7 +167,7 @@ fi
 
 say "DONE — Flint is live on the Studio."
 cat <<EOF
-  Talk to him:     http://studio:8080
+  Talk to him:     https://<studio>.<tailnet>.ts.net (tailscale serve; Flint listens on ::1)
   Local training:  apps/train/mlx/README.md (a candidate ships only if the parity
                    gate shows it beats the live local model against GPT-5; the
                    schedule ships disabled and promotion is always manual).

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_BIND_HOST, allowedTailnetUser, bearerMatches, consoleGetsToken, hostName, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
+import { DEFAULT_BIND_HOST, allowedTailnetUser, bindHost, bearerMatches, consoleGetsToken, hostName, requestVia, tailnetAllowed, tailnetLogin } from '../src/access';
 
 const local = { remoteAddress: '127.0.0.1', headers: { host: 'localhost:8080' } };
 /** What `tailscale serve` delivers: it also connects from 127.0.0.1, with the tailnet name and the login. */
@@ -80,8 +80,26 @@ describe('bearerMatches', () => {
 // Review of #34: userspace tailscaled forwards peers to 127.0.0.1 raw, so Flint
 // listens where that forward cannot reach.
 describe('where Flint listens', () => {
-  it('is IPv6 loopback, never 127.0.0.1', () => {
+  it('is IPv6 loopback unless BIND_HOST says otherwise', () => {
     expect(DEFAULT_BIND_HOST).toBe('::1');
+    expect(bindHost({})).toBe('::1');
+    expect(bindHost({ BIND_HOST: '  ' })).toBe('::1');
+    expect(bindHost({ BIND_HOST: '0.0.0.0' })).toBe('0.0.0.0');
+  });
+
+  // What the bind buys: the userspace-tailscaled forward dials 127.0.0.1, and a
+  // server on ::1 refuses it outright. This is the OS behaviour the fix relies on.
+  it('a server on the default host refuses 127.0.0.1 and answers on localhost', async () => {
+    const { createServer } = await import('node:http');
+    const srv = createServer((_q, r) => r.end('ok'));
+    await new Promise<void>((ok) => srv.listen(0, bindHost({}), ok));
+    const port = (srv.address() as { port: number }).port;
+    try {
+      await expect(fetch(`http://127.0.0.1:${port}/`)).rejects.toThrow();
+      expect(await (await fetch(`http://localhost:${port}/`)).text()).toBe('ok');
+    } finally {
+      srv.close();
+    }
   });
 });
 

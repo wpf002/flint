@@ -18,7 +18,8 @@
  * connection to any port serve doesn't own straight to 127.0.0.1:<port>, raw, with
  * whatever headers the peer chose (wgengine/netstack: dialIP = ipv4Loopback). So
  * Flint listens on ::1 (DEFAULT_BIND_HOST), which that forward never dials, and
- * serve points at http://[::1]:8080. The review of #34 found this.
+ * serve points at http://localhost:8080 (tailscale 1.102 mangles an [::1] target;
+ * localhost resolves to ::1). The review of #34 found this.
  *
  * Rules:
  *  - The token is injected into the console only for a direct request from this
@@ -43,6 +44,11 @@ export interface RequestFacts {
  * peer connections (to 127.0.0.1 only) cannot reach. Clients use `localhost`.
  */
 export const DEFAULT_BIND_HOST = '::1';
+
+/** BIND_HOST, or ::1. index.ts listens on exactly this. */
+export function bindHost(env: Record<string, string | undefined>): string {
+  return env.BIND_HOST?.trim() || DEFAULT_BIND_HOST;
+}
 
 /** The host part of a Host header, lowercased: `localhost:8080` -> localhost, `[::1]:8080` -> [::1]. */
 export function hostName(header: string | undefined): string {

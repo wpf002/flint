@@ -145,5 +145,5 @@ done
 
 echo; echo "== health check"
 sleep 3
-curl -s -m 5 http://127.0.0.1:8080/health || echo "  ! server not up yet — see ~/.flint/logs/server.err.log"
+curl -s -m 5 http://localhost:8080/health || echo "  ! server not up yet — see ~/.flint/logs/server.err.log"
 echo; echo "== BOOTSTRAP COMPLETE — Flint is live on the Studio (Claude teacher). =="
