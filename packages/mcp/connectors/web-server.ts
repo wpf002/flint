@@ -29,6 +29,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { WebSearch, describeSearchConfig, searchConfigFromEnv, toToolPayload } from '../src/search-providers.js';
+import { UrlRefused, guardedFetch } from '../src/url-guard.js';
 
 function text(v: unknown) {
   return { content: [{ type: 'text' as const, text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] };
@@ -70,9 +71,10 @@ server.registerTool(
     annotations: readOnly,
   },
   async ({ url, maxChars }) => {
-    if (!/^https?:\/\//i.test(url)) return err('url must be http(s).');
     try {
-      const res = await fetch(url, { headers: { 'user-agent': 'FlintBot/1.0' }, signal: AbortSignal.timeout(20_000) });
+      // Public hosts only, every redirect hop checked: this tool runs without
+      // approval, so it must not reach Flint's own console or the LAN (../src/url-guard).
+      const res = await guardedFetch(url, { headers: { 'user-agent': 'FlintBot/1.0' }, signal: AbortSignal.timeout(20_000) });
       if (!res.ok) return err(`HTTP ${res.status} fetching ${url}`);
       const ct = res.headers.get('content-type') ?? '';
       const raw = await res.text();
@@ -80,6 +82,7 @@ server.registerTool(
       const cap = Math.max(500, Math.min(maxChars ?? 8000, 20_000));
       return text(body.length > cap ? body.slice(0, cap) + '…[truncated]' : body);
     } catch (e) {
+      if (e instanceof UrlRefused) return err(`refused: ${e.message}`);
       return err(`fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   },

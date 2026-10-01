@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { judgeBrain, isSafeTool, routeTurn } from '../src/policy';
+import { ActionQueue } from '../src/actions';
 
 describe('judgeBrain', () => {
   it('falls back to local when no frontier is configured', () => {
@@ -195,3 +196,29 @@ describe('routeTurn (attachments)', () => {
     expect(r2).toHaveProperty('error');
   });
 });
+
+// The audit found the approver handing isSafeTool the bare tool name, so a
+// dangerous word in the server namespace (`execute.trade`) was never seen.
+describe('ActionQueue approver — judges the full server.tool name', () => {
+  const req = (server: string, tool: string) => ({ server, tool, args: {}, safety: 'guarded' as const, destructive: false });
+
+  it('denies a read-shaped tool on a server whose name is an action', () => {
+    const q = new ActionQueue(isSafeTool);
+    expect(isSafeTool('list_items')).toBe(true); // the bare name alone looks safe
+    expect(q.approver(req('execute', 'list_items'))).toBe(false);
+    expect(q.list().map((p) => p.fullName)).toEqual(['execute.list_items']);
+  });
+
+  it('still runs a read on an ordinary server without approval', () => {
+    const q = new ActionQueue(isSafeTool);
+    expect(q.approver(req('trident', 'gdrive_search'))).toBe(true);
+    expect(q.list()).toEqual([]);
+  });
+
+  it('passes the name it judged to isSafe', () => {
+    const seen: string[] = [];
+    new ActionQueue((t) => (seen.push(t), false)).approver(req('nexus', 'thread_append'));
+    expect(seen).toEqual(['nexus.thread_append']);
+  });
+});
+

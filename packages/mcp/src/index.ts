@@ -15,6 +15,9 @@
 export { McpRegistry } from './registry.js';
 export { connectServer } from './client.js';
 export { policyApprover } from './policy.js';
+// Outbound-URL guard for tools that fetch what the model asks for (web.fetch_url, deep_research).
+export { UrlRefused, assertPublicUrl, guardedFetch, isPrivateHost } from './url-guard.js';
+export type { GuardedFetchOptions, Resolve } from './url-guard.js';
 export type { AutonomyPolicy } from './policy.js';
 export type { ConnectedServer } from './client.js';
 export type {
