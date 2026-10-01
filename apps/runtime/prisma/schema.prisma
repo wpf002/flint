@@ -1,0 +1,439 @@
+// Flint runtime: governance, world model and prediction ledger (Machine plan P1).
+//
+// Conventions (plan 3.0.5):
+//  - No Prisma enums. Every closed set is a String with a CHECK in the migration
+//    SQL; a CHECK can be dropped and re-added in down.sql, an enum value cannot.
+//  - Every DateTime is timestamptz(3); every id is a cuid.
+//  - Triggers, CHECKs, grants and partitions are hand-written in the migrations.
+//    The comment on each model says which ones guard it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// p1_governance
+
+model ApprovalCredential {
+  id           String     @id @default(cuid())
+  credentialId String     @unique
+  factor       String // CHECK webauthn|secure_enclave
+  publicKey    Bytes // SPKI P-256
+  label        String
+  signCount    Int        @default(0)
+  enrolledVia  String // "enroll_code" | "approval:<id>"
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  revokedAt    DateTime?  @db.Timestamptz(3)
+  approvals    Approval[]
+}
+
+/// INSERT: flint_approver only. flint_app may set consumedAt once (approval_consume_once).
+model Approval {
+  id                String             @id @default(cuid())
+  subjectType       String // CHECK proposal|goal|plan|task|policy|forget|void|correction|credential|partition_drop
+  subjectId         String
+  decision          String // CHECK approve|reject
+  payload           Json // the exact canonical object signed
+  challenge         String // sha256(canonical(payload)), hex
+  credentialId      String
+  credential        ApprovalCredential @relation(fields: [credentialId], references: [credentialId], onDelete: Restrict)
+  authenticatorData Bytes? // webauthn only
+  clientDataJson    Bytes? // webauthn only
+  signature         Bytes
+  note              String? // <= 500
+  createdAt         DateTime           @default(now()) @db.Timestamptz(3)
+  expiresAt         DateTime           @db.Timestamptz(3)
+  consumedAt        DateTime?          @db.Timestamptz(3)
+  policies          ActionPolicy[]
+
+  @@index([subjectType, subjectId])
+}
+
+/// Promotion rows. INSERT is checked against the approved policy proposal (action_policy_matches_approval).
+model ActionPolicy {
+  id         String    @id @default(cuid())
+  pattern    String
+  tier       String // CHECK alone|approval|forbidden
+  dailyCap   Int?
+  scope      Json?
+  reason     String
+  approvalId String
+  approval   Approval  @relation(fields: [approvalId], references: [id], onDelete: Restrict)
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt  DateTime  @db.Timestamptz(3)
+
+  @@index([pattern, active])
+}
+
+/// Atomic caps, claimed at decision time.
+model ActionCounter {
+  action String
+  day    String // YYYY-MM-DD, or YYYY-Www for weekly caps, in FLINT_TZ
+  count  Int    @default(0)
+
+  @@id([action, day])
+}
+
+/// Guarded by proposal_transition.
+model Proposal {
+  id             String    @id @default(cuid())
+  kind           String // CHECK tool_call|goal|plan|rule|policy|task|pr|spend|forget|void
+  origin         String // "chat:<conversationId>" | "runtime:<job>" | "console" | "cli"
+  action         String
+  templateId     String? // required when origin is runtime
+  args           Json? // nulled by retention; <= 64 KB
+  argsDigest     String
+  argsProvenance Json // {<arg>: {source, ref?, tainted}}
+  tainted        Boolean   @default(false)
+  sensitivity    String    @default("ops") // CHECK ops|personal|financial
+  destructive    Boolean   @default(false)
+  consequential  Boolean   @default(false)
+  reason         String?
+  estCostUsd     Decimal?  @db.Decimal(10, 4)
+  status         String    @default("pending") // CHECK pending|approved|executing|executed|failed|rejected|expired
+  expiresAt      DateTime  @db.Timestamptz(3)
+  approvalId     String?   @unique
+  executedAt     DateTime? @db.Timestamptz(3)
+  result         Json? // redacted, <= 16 KB
+  error          String?
+  argsPurgedAt   DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@index([status, expiresAt])
+  @@index([origin])
+}
+
+/// Partitioned by month on "at" (partitions in schema flint_part); append-only.
+model AuditEntry {
+  id            String    @default(cuid())
+  at            DateTime  @default(now()) @db.Timestamptz(3)
+  seq           BigInt    @default(autoincrement())
+  actor         String
+  context       String // CHECK chat|autonomous|console|deploy
+  kind          String // CHECK intent|decision|action|approval|rejection|spend|policy|sync|escalation|health|forget|error
+  action        String
+  tier          String?
+  inputs        Json // ids and hashes only; <= 16 KB
+  reasoning     String? // <= 1,000
+  decision      String? // CHECK act|log|escalate|queue|deny
+  outcome       String // CHECK pending|ok|denied|failed|skipped
+  outcomeDetail Json?
+  correlationId String?
+  costUsd       Decimal?  @db.Decimal(10, 4)
+  tainted       Boolean   @default(false)
+  redactedAt    DateTime? @db.Timestamptz(3)
+
+  @@id([id, at])
+  @@index([kind, at])
+  @@index([action, at])
+  @@index([correlationId])
+}
+
+model AuditRollup {
+  day     String
+  action  String
+  context String
+  count   Int    @default(0)
+
+  @@id([day, action, context])
+}
+
+/// Append-only; written by row_history().
+model RowChange {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now()) @db.Timestamptz(3)
+  tableName String
+  rowId     String
+  actor     String
+  changed   Json? // {col: [old, new]}; NULL once redacted by a forget
+  @@index([tableName, rowId, at])
+}
+
+// ---------------------------------------------------------------------------
+// p1_world
+
+model Entity {
+  id             String          @id @default(cuid())
+  kind           String // CHECK service|repo|deployment|account|project|thread|pull_request|issue|ci_run|commitment|deadline|organization|person
+  key            String
+  name           String
+  state          Json
+  stateHash      String
+  version        Int             @default(1)
+  status         String          @default("active") // CHECK active|archived|merged|forgotten
+  sensitivity    String          @default("ops")
+  taintedPaths   String[]        @default([])
+  confidence     Float?
+  mergedIntoId   String?
+  firstSeenAt    DateTime        @default(now()) @db.Timestamptz(3)
+  lastObservedAt DateTime        @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(3)
+  versions       EntityVersion[]
+  sources        EntitySource[]
+  outgoing       Relation[]      @relation("RelFrom")
+  incoming       Relation[]      @relation("RelTo")
+  predictions    Prediction[]
+
+  @@unique([kind, key])
+  @@index([kind, status, updatedAt])
+}
+
+/// Append-only (guard_append_only: state, patch).
+model EntityVersion {
+  id            String   @id @default(cuid())
+  entityId      String
+  entity        Entity   @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  version       Int
+  changeKind    String // CHECK created|updated|archived|restored|merged|corrected|forgotten
+  state         Json?
+  patch         Json?
+  actor         String
+  sourceEventId String? // plain reference; SourceEvent rows age out
+  tainted       Boolean  @default(false)
+  validFrom     DateTime @db.Timestamptz(3)
+  recordedAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([entityId, version])
+  @@index([entityId, validFrom])
+  @@index([sourceEventId])
+}
+
+/// relation_close_only: only validTo may change, only from NULL.
+model Relation {
+  id            String    @id @default(cuid())
+  type          String // CHECK owns|depends_on|runs|deploys|of_repo|has_thread|has_pr|has_issue|committed_to|due_for|member_of|attends|blocks
+  fromId        String
+  from          Entity    @relation("RelFrom", fields: [fromId], references: [id], onDelete: Restrict)
+  toId          String
+  to            Entity    @relation("RelTo", fields: [toId], references: [id], onDelete: Restrict)
+  attrs         Json?
+  confidence    Float?
+  tainted       Boolean   @default(false)
+  validFrom     DateTime  @db.Timestamptz(3)
+  validTo       DateTime? @db.Timestamptz(3)
+  sourceEventId String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([fromId, type, validTo])
+  @@index([toId, type, validTo])
+  @@index([sourceEventId])
+}
+
+model EntitySource {
+  id           String   @id @default(cuid())
+  entityId     String
+  entity       Entity   @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  source       String // launchd|health|git|spend|github|railway|nexus|google
+  externalId   String
+  namespace    String?
+  accountOwner String // CHECK = 'will'
+  firstSeenAt  DateTime @default(now()) @db.Timestamptz(3)
+  lastSyncedAt DateTime @db.Timestamptz(3)
+
+  @@unique([source, externalId])
+  @@index([entityId])
+}
+
+/// Mutable inbox; retention nulls payloads and deletes rows at 13 months.
+model SourceEvent {
+  id          String    @id @default(cuid())
+  source      String
+  sourceRef   String
+  type        String
+  occurredAt  DateTime  @db.Timestamptz(3)
+  receivedAt  DateTime  @default(now()) @db.Timestamptz(3)
+  sensitivity String
+  tainted     Boolean   @default(false)
+  payload     Json? // <= 16 KB
+  payloadHash String
+  status      String    @default("received") // CHECK received|applied|ignored|failed|dead
+  attempts    Int       @default(0)
+  lastError   String? // <= 500, redacted
+  processedAt DateTime? @db.Timestamptz(3)
+
+  @@unique([source, sourceRef])
+  @@index([status, receivedAt])
+  @@index([source, occurredAt])
+}
+
+/// Turning a source on needs an approved world.source.enable proposal (source_enable_guard).
+model SourceCursor {
+  source              String    @id
+  cursor              String
+  etag                String?
+  enabled             Boolean   @default(false)
+  lastOkAt            DateTime? @db.Timestamptz(3)
+  lastError           String?
+  consecutiveFailures Int       @default(0)
+  updatedAt           DateTime  @updatedAt @db.Timestamptz(3)
+}
+
+model SuppressedKey {
+  source         String
+  externalIdHash String
+  approvalId     String
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([source, externalIdHash])
+}
+
+model MetricSeries {
+  key           String        @id
+  entityId      String?
+  unit          String
+  freq          String // CHECK raw|D|W|M
+  sensitivity   String
+  offBoxAllowed Boolean       @default(false)
+  description   String
+  createdAt     DateTime      @default(now()) @db.Timestamptz(3)
+  points        MetricPoint[]
+}
+
+model MetricPoint {
+  seriesKey String
+  series    MetricSeries @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
+  at        DateTime     @db.Timestamptz(3)
+  value     Float
+
+  @@id([seriesKey, at])
+}
+
+model BackupRun {
+  id              String    @id @default(cuid())
+  kind            String // CHECK pg_dump_flint|flint_tar|nexus_railway_dump
+  location        String // CHECK local|icloud
+  path            String
+  bytes           BigInt?
+  sha256          String?
+  encrypted       Boolean
+  status          String // CHECK ok|failed
+  startedAt       DateTime  @db.Timestamptz(3)
+  finishedAt      DateTime? @db.Timestamptz(3)
+  restoreTestedAt DateTime? @db.Timestamptz(3)
+  restoreOk       Boolean?
+  restoreDetail   Json?
+
+  @@index([kind, startedAt])
+}
+
+// ---------------------------------------------------------------------------
+// p1_ledger
+
+/// prediction_guard: only status, supersededAt, lateSupersession and voidApprovalId change.
+model Prediction {
+  id                        String          @id @default(cuid())
+  claim                     String // <= 300
+  kind                      String          @default("binary") // CHECK binary|interval
+  probability               Float?
+  method                    String // CHECK model_reasoning|prophet|rule|base_rate|human
+  model                     String?
+  modelConfig               Json?
+  domain                    String // CHECK services|deploys|spend|repos|projects|calendar|goals|assets|selfmod|triage|recommendation
+  type                      String // CHECK event_occurs|deadline_met|threshold_cross|trend|relevance|task_meets_bar|effect_given_accept
+  evidence                  Json
+  resolutionCriteria        String
+  resolver                  String // CHECK auto_world|auto_metric|will|conditional
+  resolverSpec              Json?
+  conditionRecommendationId String?
+  resolveBy                 DateTime        @db.Timestamptz(3)
+  subjectEntityId           String?
+  subjectEntity             Entity?         @relation(fields: [subjectEntityId], references: [id], onDelete: Restrict)
+  supersedesId              String?         @unique
+  supersedes                Prediction?     @relation("Supersede", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy              Prediction?     @relation("Supersede")
+  supersededAt              DateTime?       @db.Timestamptz(3)
+  lateSupersession          Boolean         @default(false)
+  status                    String          @default("open") // CHECK open|resolved|expired|superseded|condition_unmet|void
+  voidApprovalId            String?
+  tainted                   Boolean         @default(false)
+  createdBy                 String
+  createdAt                 DateTime        @default(now()) @db.Timestamptz(3)
+  resolution                Resolution?
+  recommendation            Recommendation? @relation("RecPrediction")
+
+  @@index([status, resolveBy])
+  @@index([domain, type, createdAt])
+  @@index([subjectEntityId])
+}
+
+/// Append-only; resolution_leak_guard checks eventAt >= the prediction's createdAt.
+model Resolution {
+  id           String                 @id @default(cuid())
+  predictionId String                 @unique
+  prediction   Prediction             @relation(fields: [predictionId], references: [id], onDelete: Restrict)
+  outcome      Boolean?
+  outcomeValue Float?
+  eventAt      DateTime               @db.Timestamptz(3)
+  resolvedAt   DateTime               @default(now()) @db.Timestamptz(3)
+  resolvedBy   String // CHECK auto_world|auto_metric|will
+  evidence     Json?
+  brier        Float?
+  corrections  ResolutionCorrection[]
+}
+
+/// Append-only; needs an approved correction Approval.
+model ResolutionCorrection {
+  id           String     @id @default(cuid())
+  resolutionId String
+  resolution   Resolution @relation(fields: [resolutionId], references: [id], onDelete: Restrict)
+  outcome      Boolean?
+  outcomeValue Float?
+  reason       String
+  approvalId   String
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+}
+
+model Recommendation {
+  id             String     @id @default(cuid())
+  templateId     String
+  params         Json
+  domain         String
+  type           String // CHECK tool_call|goal|plan_change|task_dispatch|pr|escalation_action
+  text           String?
+  rationale      String? // <= 300
+  expectedEffect String? // <= 300
+  predictionId   String     @unique
+  prediction     Prediction @relation("RecPrediction", fields: [predictionId], references: [id], onDelete: Restrict)
+  proposalId     String?    @unique
+  status         String     @default("proposed") // CHECK proposed|accepted|rejected|expired|superseded
+  decidedAt      DateTime?  @db.Timestamptz(3)
+  approvalId     String?
+  effectObserved Boolean?
+  outcomeAt      DateTime?  @db.Timestamptz(3)
+  outcomeNote    String? // <= 300
+  tainted        Boolean    @default(false)
+  createdBy      String
+  createdAt      DateTime   @default(now()) @db.Timestamptz(3)
+
+  @@index([domain, status, createdAt])
+}
+
+model CalibrationSnapshot {
+  id              String   @id @default(cuid())
+  computedAt      DateTime @default(now()) @db.Timestamptz(3)
+  windowStart     DateTime @db.Timestamptz(3)
+  windowEnd       DateTime @db.Timestamptz(3)
+  domain          String
+  type            String
+  method          String
+  n               Int
+  nOpen           Int
+  nExpired        Int
+  nConditionUnmet Int
+  nVoid           Int
+  nLateSuperseded Int
+  brier           Float
+  baseRate        Float
+  brierSkill      Float?
+  reliability     Json
+  unresolvedRate  Float
+
+  @@unique([windowEnd, domain, type, method])
+}

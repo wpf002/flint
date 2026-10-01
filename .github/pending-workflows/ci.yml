@@ -43,6 +43,9 @@ jobs:
           --health-retries 10
     env:
       FLINT_CI: '1'
+      # The runtime's database tests make their roles and flint_test in this
+      # container (apps/runtime/test/global-setup.ts), never anywhere else.
+      FLINT_DB_CI_ADMIN_URL: postgres://postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
