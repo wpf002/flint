@@ -31,7 +31,7 @@ pnpm --filter @flint/mcp build >/dev/null
 # typechecks and the highest-consequence logic still behaves — the routing that
 # decides whether a message leaves the machine, and the gate that decides
 # whether a tool runs without asking. Set FLINT_SKIP_TESTS=1 to bypass in an
-# emergency (and then go fix what you skipped).
+# emergency, by hand only (auto_deploy.sh clears it), and then fix what you skipped.
 if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: typechecking..."
   pnpm --filter server typecheck || { echo "✗ typecheck failed — NOT deploying"; exit 1; }
@@ -42,10 +42,15 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: mcp typecheck + tests (connectors, the fetch_url guard, the approval policy)..."
   pnpm --filter @flint/mcp typecheck || { echo "✗ mcp typecheck failed — NOT deploying"; exit 1; }
   pnpm --filter @flint/mcp test || { echo "✗ mcp tests failed — NOT deploying"; exit 1; }
-  # NOTE: @flint/core is NOT gated on yet — 3 contract tests in
-  # test/contracts/ollama.test.ts assert the OLD prompted-JSON tool path that was
-  # replaced by native function-calling. They need a real contract decision, not
-  # a rewrite-to-green. Run `pnpm --filter @flint/core test` to see them.
+  # @flint/core: the provider adapters, pricing and the tier rules every brain
+  # call goes through. (Its Ollama contract tests, once stale, pass again.)
+  echo "gate: core tests (providers, pricing, tiers)..."
+  pnpm --filter @flint/core test || { echo "✗ core tests failed — NOT deploying"; exit 1; }
+  # The nightly backup runs straight from this checkout, so its tests gate too.
+  echo "gate: backup tests (offsite excludes, pruning, rotation, encryption)..."
+  for t in "$REPO"/apps/studio/test/*.test.sh(N); do
+    zsh "$t" || { echo "✗ $t failed — NOT deploying"; exit 1; }
+  done
 fi
 
 echo "bundling server -> $DATA/server.mjs ..."

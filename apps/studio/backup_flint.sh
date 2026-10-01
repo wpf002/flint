@@ -16,13 +16,14 @@ KEEP_OFFSITE="${FLINT_BACKUP_KEEP_OFFSITE:-7}"
 # folder, so a glob there matches nothing and offsite pruning silently never ran.
 # Offsite snapshots are tracked here instead, one filename per line, oldest first.
 MANIFEST="${FLINT_BACKUP_MANIFEST:-$SRC/offsite-backups.txt}"
-TS=$(date +%Y%m%d-%H%M)
+TS="${FLINT_BACKUP_TS:-$(date +%Y%m%d-%H%M)}"   # tests set it, rather than wait a minute between runs
 
 EXCLUDES=(
   --exclude './models' --exclude './brain/.venv' --exclude './brain/data'
   --exclude './brain/__pycache__' --exclude './brain/adapters*/0*_adapters.safetensors'
   --exclude './brain/adapters70b.run*' --exclude './*.log' --exclude './brain/*.log'
   --exclude './tailscaled.sock' --exclude './server.mjs' --exclude './ask.mjs'
+  --exclude './*.log.[0-9]*'       # rotated logs (rotate_logs below)
 )
 # Offsite only. bsdtar's * crosses '/', so './*.x' matches at any depth: no
 # './*token*' here, it would take the adapters' tokenizer files with it.
@@ -37,8 +38,11 @@ SECRETS=(
   --exclude './tokens'             # per-client token files
 )
 
-# test/backup_excludes.test.sh sources this file for the two arrays alone.
-[ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
+# Optional: encrypt the offsite copy to an age public key whose private half lives
+# OFF this Mac (`age-keygen` elsewhere; restore with `age -d -i key.txt`). Set, the
+# offsite copy is <name>.tar.gz.age; set but `age` missing, no offsite copy is
+# written at all rather than a plaintext one.
+AGE_RECIPIENT="${FLINT_BACKUP_AGE_RECIPIENT:-}"
 
 prune() { # dir keep
   ls -1t "$1"/flint-*.tar.gz 2>/dev/null | tail -n +$(( $2 + 1 )) | while read -r f; do rm -f "$f"; done
@@ -46,14 +50,35 @@ prune() { # dir keep
 
 prune_offsite() { # by name from the manifest; never lists $OFFSITE
   local total=$(wc -l < "$MANIFEST" | tr -d ' ') kept="$MANIFEST.tmp" name
+  local drop=$(( total > KEEP_OFFSITE ? total - KEEP_OFFSITE : 0 ))
   : > "$kept"
-  head -n $(( total > KEEP_OFFSITE ? total - KEEP_OFFSITE : 0 )) "$MANIFEST" | while read -r name; do
-    rm -f "$OFFSITE/$name" 2>/dev/null || { echo "$(date '+%F %T') offsite prune FAILED: $name" >&2; echo "$name" >> "$kept"; }
-  done
+  # macOS head rejects -n 0 ("illegal line count"), which aborted every prune
+  # while there was nothing to drop.
+  if [ "$drop" -gt 0 ]; then
+    head -n "$drop" "$MANIFEST" | while read -r name; do
+      rm -f "$OFFSITE/$name" 2>/dev/null || { echo "$(date '+%F %T') offsite prune FAILED: $name" >&2; echo "$name" >> "$kept"; }
+    done
+  fi
   tail -n "$KEEP_OFFSITE" "$MANIFEST" >> "$kept"
   mv "$kept" "$MANIFEST"
 }
 
+rotate_logs() { # dir: any *.log over 20 MB becomes <log>.1.gz (keeping 3); copy-truncate, as writers hold it open
+  local f size
+  for f in "$1"/*.log(N); do
+    size=$(stat -f %z "$f" 2>/dev/null || echo 0)
+    [ "$size" -gt $(( 20 * 1024 * 1024 )) ] || continue
+    [ -f "$f.2.gz" ] && mv -f "$f.2.gz" "$f.3.gz"
+    [ -f "$f.1.gz" ] && mv -f "$f.1.gz" "$f.2.gz"
+    cp -p "$f" "$f.1" && : > "$f" && gzip -f "$f.1"
+    echo "$(date '+%F %T') rotated $(basename "$f") ($(( size / 1048576 )) MB)"
+  done
+}
+
+# test/backup_excludes.test.sh sources this file for the arrays and functions alone.
+[ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
+
+rotate_logs "$SRC"
 mkdir -p "$LOCAL"; chmod 700 "$LOCAL"
 tar -czf "$LOCAL/flint-$TS.tar.gz" -C "$SRC" "${EXCLUDES[@]}" .
 chmod 600 "$LOCAL/flint-$TS.tar.gz"
@@ -67,10 +92,23 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   # copies are written in the same run as local ones, under the same name, and
   # rm -f on a name that was never written offsite is harmless.
   [ -f "$MANIFEST" ] || ls -1tr "$LOCAL" | grep -E '^flint-.*\.tar\.gz$' | grep -vxF "flint-$TS.tar.gz" > "$MANIFEST" || true
-  tar -czf "$OFFSITE/flint-$TS.tar.gz" -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" .
-  echo "flint-$TS.tar.gz" >> "$MANIFEST"
-  prune_offsite
-  echo "$(date '+%F %T') offsite $(du -h "$OFFSITE/flint-$TS.tar.gz" | cut -f1)  $OFFSITE/flint-$TS.tar.gz"
+  if [ -n "$AGE_RECIPIENT" ]; then
+    if command -v age >/dev/null 2>&1; then
+      name="flint-$TS.tar.gz.age"
+      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | age -r "$AGE_RECIPIENT" -o "$OFFSITE/$name"
+    else
+      echo "$(date '+%F %T') offsite SKIPPED: FLINT_BACKUP_AGE_RECIPIENT is set but age is not installed (no plaintext copy written)" >&2
+      name=""
+    fi
+  else
+    name="flint-$TS.tar.gz"
+    tar -czf "$OFFSITE/$name" -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" .
+  fi
+  if [ -n "$name" ]; then
+    echo "$name" >> "$MANIFEST"
+    prune_offsite
+    echo "$(date '+%F %T') offsite $(du -h "$OFFSITE/$name" | cut -f1)  $OFFSITE/$name"
+  fi
 else
   echo "$(date '+%F %T') offsite skipped: $(dirname "$OFFSITE") not present"
 fi
