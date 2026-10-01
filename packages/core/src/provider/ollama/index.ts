@@ -8,7 +8,7 @@ import type { StreamEvent, TokenUsage } from '../../types/stream.js';
 import type { ToolCall } from '../../types/tool.js';
 import type { ModelCapabilities } from '../../types/capabilities.js';
 import { FlintError } from '../../types/error.js';
-import { encodeAssistantText, encodeToolCallTurn } from '../../core/encoding.js';
+import { decodeAssistantTurn, encodeAssistantText, encodeToolCallTurn } from '../../core/encoding.js';
 import { newId } from '../../core/util.js';
 import { ollamaCapabilities } from './capabilities.js';
 import { OllamaHttpError, toAiError } from './errors.js';
@@ -157,6 +157,14 @@ export class OllamaProvider implements ProviderAdapter {
   }
 
   async generate(rawArgs: GenerateArgs): Promise<GenerateResult> {
+    const structured = structuredOf(rawArgs);
+    if (structured) {
+      try {
+        return await this.structured(rawArgs, structured);
+      } catch (err) {
+        throw new FlintError(toAiError(err));
+      }
+    }
     const args = honourToolChoice(rawArgs);
     try {
       const { text, toolCalls, usage, doneReason } = await this.fetchFull(args, rawArgs.tools ?? []);
@@ -170,6 +178,21 @@ export class OllamaProvider implements ProviderAdapter {
   }
 
   async *stream(rawArgs: GenerateArgs): AsyncIterable<StreamEvent> {
+    // A constrained reply (responseFormat, or a forced tool) is one JSON value:
+    // nothing to show before it is whole, so it is generated in one piece.
+    const structured = structuredOf(rawArgs);
+    if (structured) {
+      try {
+        const r = await this.structured(rawArgs, structured);
+        const turn = decodeAssistantTurn(r.message);
+        for (const call of turn.toolCalls) yield { type: 'tool_call', call };
+        if (turn.text) yield { type: 'text', delta: turn.text };
+        yield { type: 'done', reason: r.reason, usage: r.usage };
+      } catch (err) {
+        yield { type: 'error', error: toAiError(err) };
+      }
+      return;
+    }
     const args = honourToolChoice(rawArgs);
     // The tool-DECISION pass (tools offered, no tool result in history yet) must
     // be reliable, so it's non-streamed with retry-on-empty. But once a tool has
@@ -301,6 +324,44 @@ export class OllamaProvider implements ProviderAdapter {
     }
   }
 
+  /**
+   * Ollama's `format` constrains the reply to a JSON schema. It serves both
+   * responseFormat (the JSON is the reply's text) and a forced tool (`toolChoice:
+   * {name}`, which Ollama has no knob for): the tool's input schema is the
+   * format, and the JSON comes back as that tool's call. A reply that is not
+   * valid JSON is retried twice before it is an error.
+   */
+  private async structured(args: GenerateArgs, s: Structured): Promise<GenerateResult> {
+    const { tools: _t, toolChoice: _c, responseFormat: _r, ...rest } = args;
+    let lastText = '';
+    let usage: TokenUsage = { input: 0, output: 0 };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const body = { ...this.buildBody(rest as GenerateArgs, false), format: s.schema };
+      const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        ...(args.signal ? { signal: args.signal } : {}),
+      });
+      if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
+      const chunk = (await resp.json()) as OllamaChatChunk;
+      usage = { input: usage.input + (chunk.prompt_eval_count ?? 0), output: usage.output + (chunk.eval_count ?? 0) };
+      lastText = (chunk.message?.content ?? '').trim();
+      let value: unknown;
+      try {
+        value = JSON.parse(lastText);
+      } catch {
+        continue;
+      }
+      if (s.tool) {
+        const call: ToolCall = { id: newId('toolu'), toolName: s.tool, args: value };
+        return { message: encodeToolCallTurn(newId('msg'), '', [call], 0), usage, reason: 'tool_call' };
+      }
+      return { message: encodeAssistantText(newId('msg'), JSON.stringify(value), 0), usage, reason: 'complete' };
+    }
+    throw new OllamaHttpError(502, `the model did not return valid JSON for ${s.tool ?? args.responseFormat?.name ?? 'the format'} (${lastText.slice(0, 80)})`);
+  }
+
   // --- internals ------------------------------------------------------------
 
   private buildBody(args: GenerateArgs, stream: boolean): Record<string, unknown> {
@@ -345,6 +406,23 @@ function honourToolChoice(args: GenerateArgs): GenerateArgs {
   if (args.toolChoice !== 'none') return args;
   const { tools: _tools, toolChoice: _choice, ...rest } = args;
   return rest;
+}
+
+interface Structured {
+  schema: Record<string, unknown>;
+  /** Set when a forced tool is being called; the JSON is its input. */
+  tool?: string;
+}
+
+/** responseFormat, or `toolChoice: {name}` naming a supplied tool; otherwise undefined. */
+function structuredOf(args: GenerateArgs): Structured | undefined {
+  if (args.responseFormat) return { schema: args.responseFormat.schema };
+  const choice = args.toolChoice;
+  if (choice && typeof choice === 'object') {
+    const t = args.tools?.find((x) => x.name === choice.name);
+    if (t) return { schema: t.inputSchema as Record<string, unknown>, tool: t.name };
+  }
+  return undefined;
 }
 
 /** Read a web ReadableStream of bytes as newline-delimited JSON lines. */
