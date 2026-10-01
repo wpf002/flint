@@ -205,9 +205,11 @@ ALTER TABLE "CalibrationSnapshot"
 -- A prediction is made now (createdAt cannot be backdated past its own event)
 -- and starts open.
 CREATE FUNCTION prediction_insert_check() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
-  NEW."createdAt" := now();
+  -- The wall clock, not the transaction start: a transaction held open must not
+  -- backdate a prediction past the events it is about.
+  NEW."createdAt" := clock_timestamp();
   IF NEW."status" <> 'open' OR NEW."supersededAt" IS NOT NULL OR NEW."voidApprovalId" IS NOT NULL OR NEW."lateSupersession" THEN
     RAISE EXCEPTION 'a prediction starts open';
   END IF;
@@ -221,7 +223,7 @@ CREATE TRIGGER "Prediction_insert_check" BEFORE INSERT ON "Prediction"
 -- when that happens late: within 48 hours of its resolveBy, or in the last 10%
 -- of its horizon (a forecaster who revises only at the end gets no credit).
 CREATE FUNCTION prediction_supersede() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   old "Prediction"%ROWTYPE;
 BEGIN
@@ -245,17 +247,18 @@ CREATE TRIGGER "Prediction_supersede" AFTER INSERT ON "Prediction"
 -- the last three once; voiding needs Will's approval. A forget may replace the
 -- words, never the numbers.
 CREATE FUNCTION prediction_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   forgetting boolean := current_user = 'flint_owner' AND coalesce(current_setting('flint.forget_approval', true), '') <> '';
   mutable text[] := ARRAY['status', 'supersededAt', 'lateSupersession', 'voidApprovalId'];
-  words text[] := ARRAY['claim', 'evidence', 'resolutionCriteria'];
+  words text[] := ARRAY['claim', 'evidence', 'resolutionCriteria', 'resolverSpec', 'modelConfig'];
 BEGIN
   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'predictions are never deleted' USING ERRCODE = 'insufficient_privilege';
   END IF;
   IF forgetting AND (to_jsonb(NEW) - words) = (to_jsonb(OLD) - words) THEN
-    IF NEW."claim" <> '[forgotten]' OR NEW."evidence" <> '[]'::jsonb OR NEW."resolutionCriteria" <> '[forgotten]' THEN
+    IF NEW."claim" <> '[forgotten]' OR NEW."evidence" <> '[]'::jsonb OR NEW."resolutionCriteria" <> '[forgotten]'
+       OR NEW."resolverSpec" IS NOT NULL OR NEW."modelConfig" IS NOT NULL THEN
       RAISE EXCEPTION 'prediction %: a forget only blanks the words', OLD."id";
     END IF;
     RETURN NEW;
@@ -322,7 +325,7 @@ CREATE TRIGGER "Prediction_no_truncate" BEFORE TRUNCATE ON "Prediction"
 -- is recorded. Binary predictions get their Brier score here, so it cannot
 -- disagree with the probability. A superseded prediction is still scored.
 CREATE FUNCTION resolution_leak_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   p "Prediction"%ROWTYPE;
 BEGIN
@@ -330,7 +333,7 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'resolution: no prediction %', NEW."predictionId";
   END IF;
-  NEW."resolvedAt" := now();
+  NEW."resolvedAt" := clock_timestamp();
   IF NEW."eventAt" < p."createdAt" THEN
     RAISE EXCEPTION 'resolution %: the event (%) precedes the prediction (%), which would leak', p."id", NEW."eventAt", p."createdAt"
       USING ERRCODE = 'check_violation';
@@ -362,7 +365,7 @@ CREATE TRIGGER "Resolution_leak_guard" BEFORE INSERT ON "Resolution"
   FOR EACH ROW EXECUTE FUNCTION resolution_leak_guard();
 
 CREATE FUNCTION resolution_close_prediction() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   UPDATE "Prediction" SET "status" = 'resolved' WHERE "id" = NEW."predictionId" AND "status" = 'open';
   RETURN NULL;
@@ -377,18 +380,30 @@ CREATE TRIGGER "Resolution_no_truncate" BEFORE TRUNCATE ON "Resolution"
   FOR EACH STATEMENT EXECUTE FUNCTION guard_append_only();
 
 -- A correction is an approved, append-only note against a resolution.
+-- Will signs the corrected outcome itself (payload.fields.outcome, outcomeValue
+-- and reason), so an approval for one correction cannot carry another.
 CREATE FUNCTION resolution_correction_check() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+  f jsonb;
 BEGIN
-  NEW."createdAt" := now();
+  NEW."createdAt" := clock_timestamp();
+  SELECT a."payload"->'fields' INTO f FROM "Approval" a WHERE a."id" = NEW."approvalId";
+  IF f IS NULL
+     OR coalesce(f->'outcome', 'null'::jsonb) IS DISTINCT FROM coalesce(to_jsonb(NEW."outcome"), 'null'::jsonb)
+     OR coalesce(f->'outcomeValue', 'null'::jsonb) IS DISTINCT FROM coalesce(to_jsonb(NEW."outcomeValue"), 'null'::jsonb)
+     OR f->>'reason' IS DISTINCT FROM NEW."reason" THEN
+    RAISE EXCEPTION 'correction: the approval was signed for a different correction' USING ERRCODE = 'insufficient_privilege';
+  END IF;
   PERFORM consume_approval(NEW."approvalId", 'correction', NEW."resolutionId", 'approve', 'ledger.resolution.correct', NULL);
   RETURN NEW;
 END;
 $$;
+
 CREATE TRIGGER "ResolutionCorrection_approval" BEFORE INSERT ON "ResolutionCorrection"
   FOR EACH ROW EXECUTE FUNCTION resolution_correction_check();
 CREATE TRIGGER "ResolutionCorrection_append_only" BEFORE UPDATE OR DELETE ON "ResolutionCorrection"
-  FOR EACH ROW EXECUTE FUNCTION guard_append_only();
+  FOR EACH ROW EXECUTE FUNCTION guard_append_only('reason');
 CREATE TRIGGER "ResolutionCorrection_no_truncate" BEFORE TRUNCATE ON "ResolutionCorrection"
   FOR EACH STATEMENT EXECUTE FUNCTION guard_append_only();
 
@@ -396,7 +411,7 @@ CREATE TRIGGER "ResolutionCorrection_no_truncate" BEFORE TRUNCATE ON "Resolution
 -- What was recommended never changes. It is decided once; its outcome is
 -- recorded once; its words may be cleared (retention, forget), never rewritten.
 CREATE FUNCTION recommendation_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   fixed text[] := ARRAY['id', 'templateId', 'params', 'domain', 'type', 'predictionId', 'tainted', 'createdBy', 'createdAt'];
   k text;

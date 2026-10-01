@@ -291,7 +291,7 @@ CREATE TRIGGER "EntityVersion_no_truncate" BEFORE TRUNCATE ON "EntityVersion"
 -- and once forgotten it stays forgotten. Only forget_entity() changes its key or
 -- makes it forgotten.
 CREATE FUNCTION entity_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   forgetting boolean := current_user = 'flint_owner' AND coalesce(current_setting('flint.forget_approval', true), '') <> '';
 BEGIN
@@ -310,12 +310,42 @@ BEGIN
   IF NEW."status" = 'forgotten' OR NEW."key" <> OLD."key" THEN
     RAISE EXCEPTION 'entity %: only forget_entity() forgets or rekeys', OLD."id" USING ERRCODE = 'insufficient_privilege';
   END IF;
+  -- A merge is world.entity.merge: APPROVAL with the passkey, never promoted. It
+  -- happens only while that approved proposal executes, into a live entity, and
+  -- it is permanent (only a forget changes a merged entity again).
+  IF OLD."status" = 'merged' THEN
+    RAISE EXCEPTION 'entity % was merged', OLD."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NEW."status" = 'merged' OR NEW."mergedIntoId" IS DISTINCT FROM OLD."mergedIntoId" THEN
+    IF NEW."status" <> 'merged' OR NEW."mergedIntoId" IS NULL OR NEW."mergedIntoId" = OLD."id"
+       OR NOT EXISTS (SELECT 1 FROM "Entity" t WHERE t."id" = NEW."mergedIntoId" AND t."status" = 'active')
+       OR NOT EXISTS (
+         SELECT 1 FROM "Proposal" p
+         WHERE p."action" = 'world.entity.merge' AND p."status" = 'executing' AND p."approvalId" IS NOT NULL
+           AND p."args"->>'from' = OLD."id" AND p."args"->>'into' = NEW."mergedIntoId"
+       ) THEN
+      RAISE EXCEPTION 'entity %: a merge needs an approved world.entity.merge into a live entity', OLD."id" USING ERRCODE = 'insufficient_privilege';
+    END IF;
+  END IF;
   IF NEW."version" < OLD."version" THEN
     RAISE EXCEPTION 'entity %: the version cannot go down', OLD."id";
   END IF;
   RETURN NEW;
 END;
 $$;
+-- An entity is born active or archived: never merged or forgotten from the start.
+CREATE FUNCTION entity_insert_check() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NEW."status" NOT IN ('active', 'archived') OR NEW."mergedIntoId" IS NOT NULL THEN
+    RAISE EXCEPTION 'entity %: a new entity is active or archived', NEW."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "Entity_insert_check" BEFORE INSERT ON "Entity"
+  FOR EACH ROW EXECUTE FUNCTION entity_insert_check();
+
 CREATE TRIGGER "Entity_guard" BEFORE UPDATE OR DELETE ON "Entity"
   FOR EACH ROW EXECUTE FUNCTION entity_guard();
 CREATE TRIGGER "Entity_no_truncate" BEFORE TRUNCATE ON "Entity"
@@ -325,7 +355,7 @@ CREATE TRIGGER "Entity_no_truncate" BEFORE TRUNCATE ON "Entity"
 -- A relation is closed, never edited: only validTo changes, only from NULL. A
 -- forget may also clear its attrs.
 CREATE FUNCTION relation_close_only() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   forgetting boolean := current_user = 'flint_owner' AND coalesce(current_setting('flint.forget_approval', true), '') <> '';
 BEGIN
@@ -353,8 +383,13 @@ CREATE TRIGGER "Relation_no_truncate" BEFORE TRUNCATE ON "Relation"
 -- Turning a source on is an approval (plan P1 rollout): it happens only while an
 -- approved world.source.enable proposal for that source is being executed.
 CREATE FUNCTION source_enable_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
+  -- A cursor belongs to one source for good: renaming an enabled one would turn
+  -- on another source under the first one's approval (PR #38 review).
+  IF TG_OP = 'UPDATE' AND NEW."source" <> OLD."source" THEN
+    RAISE EXCEPTION 'source cursor %: the source never changes', OLD."source" USING ERRCODE = 'insufficient_privilege';
+  END IF;
   IF NEW."enabled" AND (TG_OP = 'INSERT' OR NOT OLD."enabled") THEN
     IF NOT EXISTS (
       SELECT 1 FROM "Proposal" p
@@ -373,7 +408,7 @@ CREATE TRIGGER "SourceCursor_enable_guard" BEFORE INSERT OR UPDATE ON "SourceCur
 
 -- A sync never recreates what Will asked Flint to forget.
 CREATE FUNCTION entity_source_suppressed() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM "SuppressedKey" s
              WHERE s."source" = NEW."source" AND s."externalIdHash" = encode(sha256(convert_to(NEW."externalId", 'UTF8')), 'hex')) THEN
@@ -409,9 +444,14 @@ BEGIN
   PERFORM set_config('flint.forget_approval', p_approval, true);
   h := encode(sha256(convert_to(e."kind" || ':' || e."key", 'UTF8')), 'hex');
 
+  -- Its events: the ones versions and relations point at, and every event a
+  -- source recorded under one of its external ids (`<externalId>@<hash>`), which
+  -- includes the no-change repeats that never made a version.
   SELECT coalesce(array_agg(DISTINCT x), '{}') INTO events FROM (
     SELECT "sourceEventId" AS x FROM "EntityVersion" WHERE "entityId" = p_entity AND "sourceEventId" IS NOT NULL
     UNION SELECT "sourceEventId" FROM "Relation" WHERE ("fromId" = p_entity OR "toId" = p_entity) AND "sourceEventId" IS NOT NULL
+    UNION SELECT ev."id" FROM "SourceEvent" ev JOIN "EntitySource" es ON es."entityId" = p_entity AND es."source" = ev."source"
+      WHERE left(ev."sourceRef", length(es."externalId") + 1) = es."externalId" || '@'
   ) s;
 
   -- 11. Never recreated by a sync.
@@ -424,7 +464,7 @@ BEGIN
   -- 1. The entity becomes a tombstone.
   UPDATE "Entity" SET "name" = 'forgotten:' || left(h, 16), "key" = 'forgotten:' || h, "state" = '{}'::jsonb,
     "stateHash" = encode(sha256(convert_to('{}', 'UTF8')), 'hex'), "status" = 'forgotten', "taintedPaths" = '{}',
-    "confidence" = NULL, "version" = e."version" + 1, "lastObservedAt" = now()
+    "confidence" = NULL, "mergedIntoId" = NULL, "version" = e."version" + 1, "lastObservedAt" = now()
   WHERE "id" = p_entity;
 
   -- 2. Every version loses its content; a tombstone version is appended.
@@ -434,7 +474,7 @@ BEGIN
   VALUES ('ev' || replace(gen_random_uuid()::text, '-', ''), p_entity, e."version" + 1, 'forgotten', 'forget:' || p_approval, now());
 
   -- 3. External ids become hashes.
-  UPDATE "EntitySource" SET "externalId" = 'forgotten:' || encode(sha256(convert_to("externalId", 'UTF8')), 'hex')
+  UPDATE "EntitySource" SET "externalId" = 'forgotten:' || encode(sha256(convert_to("externalId", 'UTF8')), 'hex'), "namespace" = NULL
   WHERE "entityId" = p_entity AND "externalId" NOT LIKE 'forgotten:%';
   GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('sources', n);
 
@@ -443,8 +483,12 @@ BEGIN
   GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('relations', n);
 
   -- 5. The raw events it came from.
-  UPDATE "SourceEvent" SET "payload" = NULL WHERE "id" = ANY (events) AND "payload" IS NOT NULL;
+  UPDATE "SourceEvent" SET "payload" = NULL, "lastError" = NULL,
+    "sourceRef" = CASE WHEN "sourceRef" LIKE 'forgotten:%' THEN "sourceRef" ELSE 'forgotten:' || encode(sha256(convert_to("sourceRef", 'UTF8')), 'hex') END
+  WHERE "id" = ANY (events) AND ("payload" IS NOT NULL OR "lastError" IS NOT NULL OR "sourceRef" NOT LIKE 'forgotten:%');
   GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('sourceEvents', n);
+  UPDATE "MetricSeries" SET "description" = '[forgotten]' WHERE "entityId" = p_entity AND "description" <> '[forgotten]';
+  GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('metricSeries', n);
 
   -- 6. Audit entries about it keep their ids and outcome, lose their text.
   UPDATE "AuditEntry" SET "reasoning" = NULL, "outcomeDetail" = NULL, "redactedAt" = now()
@@ -453,12 +497,16 @@ BEGIN
 
   -- 7, 8, 9. The ledger keeps probabilities and outcomes (calibration needs them), not the words.
   IF to_regclass('public."Prediction"') IS NOT NULL THEN
-    EXECUTE 'UPDATE "Prediction" SET "claim" = ''[forgotten]'', "evidence" = ''[]''::jsonb, "resolutionCriteria" = ''[forgotten]''
+    EXECUTE 'UPDATE "Prediction" SET "claim" = ''[forgotten]'', "evidence" = ''[]''::jsonb, "resolutionCriteria" = ''[forgotten]'',
+               "resolverSpec" = NULL, "modelConfig" = NULL
              WHERE "subjectEntityId" = $1 AND "claim" <> ''[forgotten]''' USING p_entity;
     GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('predictions', n);
     EXECUTE 'UPDATE "Resolution" SET "evidence" = NULL
              WHERE "predictionId" IN (SELECT "id" FROM "Prediction" WHERE "subjectEntityId" = $1) AND "evidence" IS NOT NULL' USING p_entity;
     GET DIAGNOSTICS n = ROW_COUNT; counts := counts || jsonb_build_object('resolutions', n);
+    EXECUTE 'UPDATE "ResolutionCorrection" SET "reason" = ''[forgotten]''
+             WHERE "resolutionId" IN (SELECT r."id" FROM "Resolution" r JOIN "Prediction" p ON p."id" = r."predictionId" WHERE p."subjectEntityId" = $1)
+               AND "reason" <> ''[forgotten]''' USING p_entity;
     EXECUTE 'UPDATE "Recommendation" SET "text" = NULL, "rationale" = NULL, "expectedEffect" = NULL, "outcomeNote" = NULL
              WHERE "predictionId" IN (SELECT "id" FROM "Prediction" WHERE "subjectEntityId" = $1)
                AND ("text" IS NOT NULL OR "rationale" IS NOT NULL OR "expectedEffect" IS NOT NULL OR "outcomeNote" IS NOT NULL)' USING p_entity;
@@ -484,7 +532,7 @@ END;
 $$;
 
 -- ---- Grants -----------------------------------------------------------------------------
-REVOKE ALL ON FUNCTION entity_guard(), relation_close_only(), source_enable_guard(), entity_source_suppressed(),
+REVOKE ALL ON FUNCTION entity_insert_check(), entity_guard(), relation_close_only(), source_enable_guard(), entity_source_suppressed(),
   forget_entity(text, text) FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE ON "Entity", "Relation", "EntitySource", "SourceCursor", "MetricSeries", "BackupRun" TO flint_app;

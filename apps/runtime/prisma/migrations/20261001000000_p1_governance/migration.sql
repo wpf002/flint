@@ -178,6 +178,17 @@ ALTER TABLE "ActionPolicy" ADD CONSTRAINT "ActionPolicy_approvalId_fkey" FOREIGN
 -- Hand-written below this line.
 -- ===========================================================================
 
+-- Every function below pins search_path to public, pg_temp. Without that, a
+-- caller could put a TEMP table named "Approval" ahead of the real one and the
+-- guards would read the fake (PR #38 review). flint_app also loses TEMP on this
+-- database: it has no need for temporary tables at all.
+DO $$
+BEGIN
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM flint_app, flint_approver, flint_backup', current_database());
+END;
+$$;
+
 -- Audit partitions live in their own schema so Prisma's drift check never sees them.
 CREATE SCHEMA flint_part;
 
@@ -247,7 +258,7 @@ ALTER TABLE "AuditRollup"
 -- column listed as '@name' may instead be set once, from NULL. DELETE and
 -- TRUNCATE are always refused.
 CREATE FUNCTION guard_append_only() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   o jsonb;
   n jsonb;
@@ -284,7 +295,7 @@ CREATE TRIGGER "RowChange_no_truncate" BEFORE TRUNCATE ON "RowChange"
 -- An Approval is written once (by flint_approver, after the server verified the
 -- signature) and then only its consumedAt may be set, once.
 CREATE FUNCTION approval_consume_once() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'approvals are never deleted' USING ERRCODE = 'insufficient_privilege';
@@ -306,7 +317,7 @@ CREATE TRIGGER "Approval_no_truncate" BEFORE TRUNCATE ON "Approval"
 -- A new Approval must come from a live credential, expire when its payload says,
 -- and not already be consumed.
 CREATE FUNCTION approval_insert_check() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM "ApprovalCredential" c WHERE c."credentialId" = NEW."credentialId" AND c."revokedAt" IS NULL) THEN
     RAISE EXCEPTION 'approval: credential is unknown or revoked' USING ERRCODE = 'insufficient_privilege';
@@ -329,7 +340,7 @@ CREATE TRIGGER "Approval_insert_check" BEFORE INSERT ON "Approval"
 -- A credential's id, key and factor never change; its counter only rises; it is
 -- revoked once and stays revoked.
 CREATE FUNCTION approval_credential_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'credentials are revoked, never deleted' USING ERRCODE = 'insufficient_privilege';
@@ -357,7 +368,7 @@ CREATE TRIGGER "ApprovalCredential_no_truncate" BEFORE TRUNCATE ON "ApprovalCred
 -- be used twice even by concurrent transactions. Raises otherwise.
 CREATE FUNCTION consume_approval(p_approval text, p_subject_type text, p_subject_id text, p_decision text, p_action text, p_args_digest text)
 RETURNS void
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   a "Approval"%ROWTYPE;
 BEGIN
@@ -385,7 +396,7 @@ $$;
 -- which this consumes. What was proposed never changes; args only become NULL,
 -- by retention once terminal, or by a forget.
 CREATE FUNCTION proposal_insert_check() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NEW."status" <> 'pending' OR NEW."approvalId" IS NOT NULL OR NEW."executedAt" IS NOT NULL
      OR NEW."result" IS NOT NULL OR NEW."error" IS NOT NULL OR NEW."argsPurgedAt" IS NOT NULL OR NEW."args" IS NULL THEN
@@ -398,7 +409,7 @@ CREATE TRIGGER "Proposal_insert_check" BEFORE INSERT ON "Proposal"
   FOR EACH ROW EXECUTE FUNCTION proposal_insert_check();
 
 CREATE FUNCTION proposal_transition() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   forgetting boolean := current_user = 'flint_owner' AND coalesce(current_setting('flint.forget_approval', true), '') <> '';
   fixed text[] := ARRAY['id', 'kind', 'origin', 'action', 'templateId', 'argsDigest', 'argsProvenance', 'tainted',
@@ -494,7 +505,7 @@ CREATE TRIGGER "Proposal_no_truncate" BEFORE TRUNCATE ON "Proposal"
 -- exactly these fields, for at most 180 days. Afterwards it can only be switched
 -- off; every change is kept in RowChange.
 CREATE FUNCTION action_policy_matches_approval() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   a "Approval"%ROWTYPE;
   p "Proposal"%ROWTYPE;
@@ -531,7 +542,7 @@ CREATE TRIGGER "ActionPolicy_matches_approval" BEFORE INSERT ON "ActionPolicy"
   FOR EACH ROW EXECUTE FUNCTION action_policy_matches_approval();
 
 CREATE FUNCTION action_policy_update_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'policy rows are switched off, never deleted' USING ERRCODE = 'insufficient_privilege';
@@ -577,7 +588,7 @@ CREATE TRIGGER "ActionPolicy_history" AFTER UPDATE ON "ActionPolicy"
 -- Claim one slot under a cap, atomically, at decision time. Returns the new
 -- count, or NULL when the cap is already reached (or is 0).
 CREATE FUNCTION claim_action(p_action text, p_period text, p_cap integer) RETURNS integer
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   c integer;
 BEGIN

@@ -281,9 +281,33 @@ describe.skipIf(NO_DB)('governance in the database', () => {
       const recent = (await owner(`SELECT to_char(now(), 'YYYY-MM') AS m`)).rows[0].m as string;
       expect((await pgError(app(`SELECT drop_audit_partition($1, 'nope')`, [recent]))).message).toMatch(/kept for 24 months/);
       expect((await pgError(app(`SELECT drop_audit_partition('2020-01', 'nope')`))).message).toMatch(/no matching/);
+      // A real, attached partition with a row in it.
+      await owner(`CREATE TABLE flint_part."AuditEntry_2020_01" PARTITION OF "AuditEntry" FOR VALUES FROM ('2020-01-01T00:00:00Z') TO ('2020-02-01T00:00:00Z')`);
+      await owner(`INSERT INTO "AuditEntry" (id, at, actor, context, kind, action, inputs, outcome) VALUES ($1, '2020-01-15T00:00:00Z', 'x', 'chat', 'action', 'old', '{}', 'ok')`, [id('au')]);
       const a = await approval('partition_drop', '2020-01', { action: 'maintenance.partition_drop' });
       await app(`SELECT drop_audit_partition('2020-01', $1)`, [a]);
+      expect((await owner(`SELECT to_regclass('flint_part."AuditEntry_2020_01"') AS t`)).rows[0].t).toBeNull();
+      expect((await owner(`SELECT count(*)::int AS n FROM "AuditEntry" WHERE action = 'old'`)).rows[0].n).toBe(0);
       expect((await pgError(app(`SELECT drop_audit_partition('2020-01', $1)`, [a]))).message).toMatch(/no matching/);
+    });
+
+    it('a TEMP table cannot stand in for a governance table (search_path is pinned; flint_app has no TEMP)', async () => {
+      expect((await pgError(app(`CREATE TEMP TABLE "Approval" (LIKE public."Approval")`))).message).toMatch(/permission denied/);
+      // The owner can make temp tables; the guards still read the real ones.
+      const p = await proposal();
+      await withClient(URLS!.owner, async (c) => {
+        await c.query('BEGIN');
+        await c.query('SET LOCAL search_path = pg_temp, public');
+        await c.query(`CREATE TEMP TABLE "ApprovalCredential" (LIKE public."ApprovalCredential") ON COMMIT DROP`);
+        await c.query(`CREATE TEMP TABLE "Approval" (LIKE public."Approval") ON COMMIT DROP`);
+        await c.query(`INSERT INTO pg_temp."ApprovalCredential" (id, "credentialId", factor, "publicKey", label, "enrolledVia", "createdAt", "signCount") VALUES ('f', 'fakecred', 'webauthn', '\\x00', 'fake', 'x', now(), 0)`);
+        await c.query(`INSERT INTO pg_temp."Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt", "createdAt") VALUES ('forged', 'proposal', $1, 'approve', $2, $3, 'fakecred', '\\x01', now() + interval '5 minutes', now())`, [
+          p, JSON.stringify({ argsDigest: DIGEST, action: 'world.sync.github' }), HEX('c'),
+        ]);
+        const err = await c.query(`UPDATE public."Proposal" SET status = 'approved', "approvalId" = 'forged' WHERE id = $1`, [p]).then(() => null, (e: Error) => e.message);
+        await c.query('ROLLBACK');
+        expect(err).toMatch(/no matching/);
+      });
     });
   });
 
