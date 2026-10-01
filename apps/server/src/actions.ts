@@ -72,6 +72,16 @@ export class ActionQueue {
     return false;
   };
 
+  /** Let exactly this call through once (an approval Will signed, executed by the server). */
+  allowOnce(server: string, tool: string, args: unknown): void {
+    this.preApproved.add(keyOf(server, tool, args));
+  }
+
+  /** Was exactly this call allowed once? Uses the allowance up. */
+  takeAllowance(server: string, tool: string, args: unknown): boolean {
+    return this.preApproved.delete(keyOf(server, tool, args));
+  }
+
   /**
    * The tier engine already decided this call needs approval (tier-gate.ts):
    * run it only if Will approved this exact call, otherwise capture it as a

@@ -65,10 +65,11 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { digestOf } from '@flint/policy';
 import { AuditSink, runtimeFromDisk } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent } from './tier-gate';
-import { withTurnTaint } from './turn-taint';
+import { turnProposals, withTurnTaint } from './turn-taint';
 import { Approvals, ApprovalError } from './approvals';
 import { pgApproverStore } from './approver-store';
 import { startInternal, type ExternalSpend } from './internal';
+import { RuntimeProposals, RuntimeError } from './runtime-proposals';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
@@ -550,7 +551,15 @@ async function main(): Promise<void> {
       tainted: e.tainted,
     });
   };
-  const tierOpts = { queue: actions, onDecision, taintFloor: process.env.FLINT_TAINT_FLOOR !== '0' };
+  // Runtime mode (rollout day 4+, FLINT_RUNTIME_URL set): approval-tier calls
+  // become runtime proposals, spooled while the runtime is down, and approving
+  // needs Will's signature. Unset: the RAM queue, as before.
+  const runtimeToken = runtimeFromDisk(homedir(), process.env.FLINT_RUNTIME_URL);
+  const proposals = process.env.FLINT_RUNTIME_URL
+    ? new RuntimeProposals({ runtime: runtimeToken, spoolDir: join(homedir(), '.flint', 'spool'), log: (m) => console.error(m) })
+    : undefined;
+  if (proposals) setInterval(() => void proposals.replay().catch(() => {}), 30_000).unref();
+  const tierOpts = { queue: actions, onDecision, taintFloor: process.env.FLINT_TAINT_FLOOR !== '0', ...(proposals ? { proposals } : {}) };
   // Will's approval factor (./approvals): passkeys on the tailnet HTTPS origin,
   // or the desktop app's Secure Enclave key. Needs the flint_approver database
   // role; without it, approvals stay one-tap as before.
@@ -714,7 +723,7 @@ async function main(): Promise<void> {
   void externalSpend;
 
   // One request is one turn, with its own taint state (./turn-taint).
-  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals }))));
+  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals }))));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -752,6 +761,7 @@ interface Ctx {
   actions: ActionQueue;
   audit: AuditSink;
   approvals: Approvals | undefined;
+  proposals: RuntimeProposals | undefined;
   notes: Notifications;
   training: TrainingLogger;
   /** Spend caps (./spend): /spend, /speak, and the frontier plan for each turn. */
@@ -1141,10 +1151,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
     logRoute(unanswered ? 'unanswered' : out.text.trim() ? 'answered' : 'empty');
     const toolsUsed = toolsSince(ctx, beforeLog);
-    const proposed = ctx.actions.newSince(beforeActions);
+    const proposed = [...ctx.actions.newSince(beforeActions), ...turnProposals()];
     if (evalMode) {
       // Nothing an eval replay proposes should ever be approvable.
-      for (const p of proposed) ctx.actions.reject(p.id);
+      for (const p of proposed) {
+        // RAM-queue ids reject locally; a runtime proposal is rejected in the runtime.
+        if (!ctx.actions.reject(p.id) && ctx.proposals) void ctx.proposals.reject(p.id).catch(() => {});
+      }
       return json(res, 200, {
         text: out.text,
         usage: out.usage,
@@ -1313,7 +1326,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           Date.now(),
         );
       }
-      const proposed = ctx.actions.newSince(beforeActions);
+      const proposed = [...ctx.actions.newSince(beforeActions), ...turnProposals()];
       if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
     } catch (err) {
       failed = true;
@@ -1364,7 +1377,32 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
 
   // Proposed actions awaiting one-tap approval (writes Flint wanted to make).
   if (req.method === 'GET' && url.startsWith('/proposals')) {
+    if (ctx.proposals) {
+      try {
+        const list = await ctx.proposals.list('pending');
+        return json(res, 200, {
+          proposals: list.map((p) => ({ id: p.id, fullName: p.action.replace(/^mcp:/, ''), args: p.args, tainted: p.tainted, provenance: p.argsProvenance, status: 'pending', ts: Date.parse(p.createdAt) })),
+          unsynced: ctx.proposals.unsynced(),
+          signed: true,
+        });
+      } catch {
+        return json(res, 200, { proposals: [], unsynced: ctx.proposals.unsynced(), runtime: 'down', signed: true });
+      }
+    }
     return json(res, 200, { proposals: ctx.actions.list() });
+  }
+  if (req.method === 'POST' && url === '/proposals/approve' && ctx.proposals) {
+    return json(res, 403, { error: 'approvals now need your approval key: use "Approve with passkey"' });
+  }
+  if (req.method === 'POST' && url === '/proposals/reject' && ctx.proposals) {
+    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
+    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    try {
+      await ctx.proposals.reject(String(read.body.id ?? ''));
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, err instanceof RuntimeError ? err.status : 502, { error: err instanceof Error ? err.message : 'reject failed' });
+    }
   }
   if (req.method === 'POST' && url === '/proposals/approve') {
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
@@ -1406,6 +1444,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const body = read.body as Record<string, unknown>;
       if (url === '/approvals/enroll/begin') return json(res, 200, await ap.beginEnroll(body));
       if (url === '/approvals/enroll/finish') return json(res, 200, await ap.finishEnroll(body));
+      if (url === '/approvals/begin' && ctx.proposals) {
+        // A runtime proposal: Will signs its action and the args digest the runtime computed.
+        const id = String(body.proposalId ?? '');
+        const decision = body.decision === 'reject' ? 'reject' : 'approve';
+        const p = await ctx.proposals.get(id);
+        if (!p || p.status !== 'pending') return json(res, 404, { error: 'no such pending proposal' });
+        return json(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted } }));
+      }
+      if (url === '/approvals/finish' && ctx.proposals) {
+        const { approvalId, payload } = await ap.finish(body);
+        const id = payload.subjectId;
+        if (payload.decision === 'reject') {
+          await ctx.proposals.reject(id, approvalId);
+          return json(res, 200, { ok: true, approvalId });
+        }
+        await ctx.proposals.approve(id, approvalId);
+        return json(res, 200, { action: await executeApproved(ctx, id), approvalId });
+      }
       if (url === '/approvals/begin') {
         // A proposal in the RAM queue: what Will signs is its exact action and args.
         const id = String(body.proposalId ?? '');
@@ -1452,6 +1508,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       return json(res, 404, { error: 'not found' });
     } catch (err) {
       if (err instanceof ApprovalError) return json(res, err.status, { error: err.message });
+      if (err instanceof RuntimeError) return json(res, err.status >= 500 ? 502 : err.status, { error: err.message });
       return json(res, 500, { error: 'approval failed', ref: errorRef('approvals', err) });
     }
   }
@@ -1486,6 +1543,47 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   }
 
   return json(res, 404, { error: 'not found' });
+}
+
+/**
+ * Run a proposal Will has approved in the runtime: the runtime's own actions it
+ * carries out itself; a tool call is claimed (signature re-verified, cap taken,
+ * intent written), run here with a one-time allowance for exactly those args,
+ * and completed.
+ */
+async function executeApproved(ctx: Ctx, id: string): Promise<{ id: string; fullName: string; status: 'done' | 'error'; result?: unknown; error?: string }> {
+  const p = ctx.proposals!;
+  const claimed = await p.claim(id).catch(async (err) => {
+    if (err instanceof RuntimeError && err.status === 409 && /use \/run/.test(err.message)) return undefined;
+    throw err;
+  });
+  if (!claimed) {
+    const r = await p.run(id);
+    return { id, fullName: 'runtime action', status: 'done', result: r };
+  }
+  const m = /^mcp:([A-Za-z0-9_-]+)\.(.+)$/.exec(claimed.action);
+  const server = m ? m[1]! : 'flint';
+  const toolName = m ? m[2]! : claimed.action;
+  const fullName = m ? `${server}.${toolName}` : claimed.action;
+  const tool = ctx.tools.find((t) => t.definition.name === fullName);
+  if (!tool) {
+    await p.complete(id, { ok: false, error: `${fullName} is not wired` });
+    return { id, fullName, status: 'error', error: `${fullName} is not wired` };
+  }
+  ctx.actions.allowOnce(server, toolName, claimed.args);
+  try {
+    const result = await withTurnTaint(() => tool.handler({ id: `call_${id}`, toolName: fullName, args: claimed.args }));
+    const ok = !(result && typeof result === 'object' && (result as { approved?: boolean }).approved === false);
+    await p.complete(id, ok ? { ok, result: { value: JSON.parse(JSON.stringify(result ?? null)) } } : { ok, error: String((result as { message?: string }).message ?? 'not executed') });
+    if (ok) ctx.notes.push('Action done', `${fullName} ✓`, 'action', `act:${id}`);
+    return { id, fullName, status: ok ? 'done' : 'error', result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await p.complete(id, { ok: false, error: msg.slice(0, 2000) }).catch(() => {});
+    return { id, fullName, status: 'error', error: msg };
+  } finally {
+    ctx.actions.takeAllowance(server, toolName, claimed.args);
+  }
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {

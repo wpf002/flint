@@ -9,9 +9,14 @@
  * without Will seeing it first.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomBytes } from 'node:crypto';
 
 export class TurnTaint {
   readonly sources = new Set<string>();
+  /** Names this turn as a proposal's origin (`chat:<id>`). */
+  readonly id = randomBytes(8).toString('hex');
+  /** Runtime proposals this turn filed, for the console's approval cards. */
+  readonly proposed: Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> = [];
   get tainted(): boolean {
     return this.sources.size > 0;
   }
@@ -32,6 +37,21 @@ export function markTainted(source: string): void {
 /** Has the current turn read untrusted text? Outside a turn, false. */
 export function turnTainted(): boolean {
   return scope.getStore()?.tainted ?? false;
+}
+
+/** Note a runtime proposal this turn filed. */
+export function noteProposal(p: { id: string; fullName: string; args: unknown; tainted: boolean }): void {
+  scope.getStore()?.proposed.push({ ...p, status: 'pending' });
+}
+
+/** The runtime proposals this turn filed. */
+export function turnProposals(): Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> {
+  return [...(scope.getStore()?.proposed ?? [])];
+}
+
+/** The current turn's id, for a proposal's origin. */
+export function turnId(): string {
+  return scope.getStore()?.id ?? 'none';
 }
 
 /** What tainted the current turn (for the approval card and the audit trail). */

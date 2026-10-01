@@ -167,7 +167,7 @@ export class AuditSink {
 }
 
 /** The runtime's address and the server's token for it, once install-runtime.sh has run. */
-export function runtimeFromDisk(home: string, url = 'http://[::1]:8090'): () => Runtime | undefined {
+export function runtimeFromDisk(home: string, url: string = 'http://[::1]:8090'): () => Runtime | undefined {
   const file = join(home, '.flint', 'tokens', 'runtime.token');
   return () => {
     try {
