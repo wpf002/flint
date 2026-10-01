@@ -24,10 +24,21 @@ EXCLUDES=(
   --exclude './brain/adapters70b.run*' --exclude './*.log' --exclude './brain/*.log'
   --exclude './tailscaled.sock' --exclude './server.mjs' --exclude './ask.mjs'
 )
+# Offsite only. bsdtar's * crosses '/', so './*.x' matches at any depth: no
+# './*token*' here, it would take the adapters' tokenizer files with it.
 SECRETS=(
   --exclude './secrets.env' --exclude './*.env' --exclude './token'
   --exclude './*token*.txt' --exclude './tailscaled.state*' --exclude './tailscale'
+  # Found in every offsite archive on 2026-09-30, keys and tokens in plaintext:
+  --exclude './*.bak*'             # secrets.env.bak*, plist and mcp.json backups, at any depth
+  --exclude './mcp.json*'          # the search API key and the Nexus bearer token
+  --exclude './nexus-responder.*'  # participant tokens and vendor API keys
+  --exclude './legion'             # helper scripts with inline credentials
+  --exclude './tokens'             # per-client token files
 )
+
+# test/backup_excludes.test.sh sources this file for the two arrays alone.
+[ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
 
 prune() { # dir keep
   ls -1t "$1"/flint-*.tar.gz 2>/dev/null | tail -n +$(( $2 + 1 )) | while read -r f; do rm -f "$f"; done
