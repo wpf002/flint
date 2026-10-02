@@ -38,7 +38,7 @@ export const stricter = (a: Tier, b: Tier): Tier => (RANK[a] >= RANK[b] ? a : b)
 
 export interface Cap {
   limit: number;
-  period: 'day' | 'week';
+  period: 'hour' | 'day' | 'week';
 }
 
 export interface CodeEntry {
@@ -50,6 +50,13 @@ export interface CodeEntry {
   egress?: boolean;
   /** Changes something (anything but a read). */
   write?: boolean;
+  /**
+   * At APPROVAL, an autonomous run of it happens in SHADOW: it computes and
+   * records only Flint's own rows (a decision, a health check, a digest kept in
+   * the console) and delivers nothing (Machine plan P2 rollout: "decisions are
+   * recorded, nothing is delivered"). Promoted, it runs for real.
+   */
+  shadow?: boolean;
   note?: string;
 }
 
@@ -89,6 +96,10 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   ledger_open: approval({ write: false }),
   ledger_calibration: approval({ write: false }),
   ledger_record_prediction: approval({ cap: { limit: 10, period: 'day' } }),
+  // The front door to triage (P2): reads; acknowledging and dismissing are console buttons only.
+  inbox_recent: approval({ write: false }),
+  escalations_open: approval({ write: false }),
+  explain_decision: approval({ write: false }),
   // Backups (P1).
   'backup.local': approval({ cap: { limit: 1, period: 'day' } }),
   'restore.drill': approval({ cap: { limit: 1, period: 'week' }, note: 'into a scratch database' }),
@@ -97,6 +108,18 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'maintenance.retention': approval({ note: 'nulls payloads and args past their retention' }),
   'maintenance.partitions': approval({ note: 'creates audit partitions; dropping one is partition_drop' }),
   'maintenance.partition_drop': fixed({ note: 'drops an audit month; needs a partition_drop approval' }),
+  // Triage, surfacing and self-health (P2). Triage, health and the digest run in
+  // shadow at APPROVAL; delivery to Will needs notify.* promoted.
+  'triage.rule': approval({ write: false, shadow: true, note: 'code rules, then Will\'s signed rules' }),
+  'triage.local_model': approval({ write: false, shadow: true, cap: { limit: 120, period: 'hour' }, note: 'the local model only; one at a time, yields to chat' }),
+  'notify.inapp': approval({ note: 'a note in the console' }),
+  'notify.banner': approval({ note: 'a banner in the console' }),
+  'notify.push': approval({ cap: { limit: 3, period: 'day' }, egress: true, note: 'a content-free ping; critical rules bypass the cap and are still counted' }),
+  'health.check': approval({ write: false, shadow: true }),
+  'health.report': approval({ write: false, shadow: true }),
+  'digest.daily': approval({ shadow: true, note: 'template only, 07:30' }),
+  'runtime.frontier.complete': fixed({ egress: true, note: 'stays APPROVAL; its spend kind is capped at $0' }),
+  'triage.rule.create': fixed({ note: 'a triage rule is policy' }),
   // Policy. Never promotable: a rule change always needs Will's signature.
   'policy.change': fixed(),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
@@ -130,7 +153,20 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'backup.offsite',
   'maintenance.retention',
   'maintenance.partitions',
+  'triage.rule',
+  'triage.local_model',
+  'notify.inapp',
+  'notify.banner',
+  'notify.push',
+  'health.check',
+  'health.report',
+  'digest.daily',
 ]);
+
+/** Does an autonomous run of this action, at APPROVAL, happen in shadow (record only)? */
+export function runsInShadow(action: string): boolean {
+  return Object.prototype.hasOwnProperty.call(CODE_TABLE, action) && CODE_TABLE[action]!.shadow === true;
+}
 
 /** Step 5: servers whose `readOnlyHint` is believed. Any other server's hint is ignored. */
 export const TRUSTED_READONLY: ReadonlySet<string> = new Set(['runtime', 'nexus', 'web', 'github-observer']);
@@ -352,6 +388,7 @@ function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> &
  */
 export const RUNTIME_CHAT_TOOLS: ReadonlySet<string> = new Set([
   'world_now', 'world_entity', 'world_search', 'world_history', 'ledger_open', 'ledger_calibration', 'ledger_record_prediction',
+  'inbox_recent', 'escalations_open', 'explain_decision',
 ]);
 
 /** Decide the tier of one action. Pure: same inputs, same answer. */

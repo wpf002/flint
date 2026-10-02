@@ -12,3 +12,4 @@ export * from './canonical.js';
 export * from './approval.js';
 export * from './selfmod-paths.js';
 export * from './claims.js';
+export * from './wire.js';
