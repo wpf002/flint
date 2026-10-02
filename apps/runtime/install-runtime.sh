@@ -180,10 +180,25 @@ PLIST
 chmod 600 "$AGENTS/$LABEL.plist.new"
 mv "$AGENTS/$LABEL.plist.new" "$AGENTS/$LABEL.plist"
 
+# (Re)start the agent. `bootout` returns before the old agent is gone, and a
+# bootstrap that lands too soon fails with "5: Input/output error": wait for it
+# to unload, then try a few times. A failure returns non-zero instead of ending
+# the script, so the rollback below still runs (it did not, on 2026-10-02, and
+# the runtime stayed down until it was started by hand).
+restart_agent() {
+  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+  for i in {1..40}; do launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1 || break; sleep 0.25; done
+  for i in 1 2 3 4 5; do
+    launchctl bootstrap "gui/$UID" "$AGENTS/$LABEL.plist" 2>/dev/null && return 0
+    sleep 2
+  done
+  echo "✗ runtime: launchctl bootstrap kept failing" >&2
+  return 1
+}
+
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
-launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID" "$AGENTS/$LABEL.plist"
+restart_agent || true
 
 for i in {1..30}; do
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
@@ -197,6 +212,7 @@ done
 echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   ln -sfn "$PREV" "$RT/current"
-  launchctl kickstart -k "gui/$UID/$LABEL" || true
+  # Loaded or not (a failed bootstrap leaves it unloaded): the same restart.
+  restart_agent || echo "✗ runtime: the previous release did not start either; start it with: launchctl bootstrap gui/$UID $AGENTS/$LABEL.plist" >&2
 fi
 exit 1
