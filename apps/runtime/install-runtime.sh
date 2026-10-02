@@ -241,10 +241,14 @@ restart_agent() {
 
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
-restart_agent || deploy_event runtime restart failed "$SHA"
+# A failed restart is one incident: recorded once, straight to the rollback (no health
+# poll, which would only fail too and record a second failure for the same sha).
+RESTARTED=1
+restart_agent || { deploy_event runtime restart failed "$SHA"; RESTARTED=0; }
 
 DEPLOY_STAGE=health
 for i in {1..30}; do
+  [ "$RESTARTED" = 1 ] || break
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
     echo "runtime: $SHA is up on [::1]:$PORT"
     DEPLOY_STAGE=
@@ -260,11 +264,15 @@ for i in {1..30}; do
   fi
   sleep 1
 done
-echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
-# Recorded before the rollback, not by the trap after it: the line marks when the
-# check failed, and is written even if the rollback is cut short.
 DEPLOY_STAGE=
-deploy_event runtime health failed "$SHA"
+if [ "$RESTARTED" = 1 ]; then
+  echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
+  # Recorded before the rollback, not by the trap after it: the line marks when the
+  # check failed, and is written even if the rollback is cut short.
+  deploy_event runtime health failed "$SHA"
+else
+  echo "✗ runtime $SHA did not start; going back to ${PREV:-nothing}"
+fi
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   ln -sfn "$PREV" "$RT/current"
   # Loaded or not (a failed bootstrap leaves it unloaded): the same restart.

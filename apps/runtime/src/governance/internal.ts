@@ -80,17 +80,29 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       if (p.templateId !== 'knowledge.link') throw new Refused(409, 'the runtime writes only the knowledge.link relation');
       const link = ACTION_TEMPLATES['knowledge.link'].params.parse(claimed.args);
       if ((await db.entity.count({ where: { id: { in: [link.fromId, link.toId] }, status: 'active' } })) !== 2) throw new Refused(409, 'one of the two is no longer in the world model');
-      const rel = await db.relation.create({
-        data: { type: link.type, fromId: link.fromId, toId: link.toId, attrs: { knowledgeId: link.knowledgeId }, tainted: true, validFrom: new Date() },
-      });
-      await completeProposal(db, id, { ok: true, result: { relationId: rel.id } }, actor);
-      return { relationId: rel.id };
+      const open = { type: link.type, fromId: link.fromId, toId: link.toId, validTo: null };
+      let rel = await db.relation.findFirst({ where: open, select: { id: true } });
+      let existed = !!rel;
+      if (!rel) {
+        try {
+          rel = await db.relation.create({ data: { type: link.type, fromId: link.fromId, toId: link.toId, attrs: { knowledgeId: link.knowledgeId }, tainted: true, validFrom: new Date() }, select: { id: true } });
+        } catch (err) {
+          // Written by someone else between the look and the write: the link is there, which is what was asked.
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+          rel = await db.relation.findFirstOrThrow({ where: open, select: { id: true } });
+          existed = true;
+        }
+      }
+      await completeProposal(db, id, { ok: true, result: { relationId: rel.id, ...(existed ? { existed: true } : {}) } }, actor);
+      return { relationId: rel.id, ...(existed ? { existed: true } : {}) };
     }
     if (claimed.action === 'triage.rule.create') {
       const why = refuseRule(claimed.args);
       if (why) throw new Refused(400, `invalid triage rule: ${why}`);
       const { rule } = RuleCreateArgs.parse(claimed.args);
       const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
+      // A name taken since it was proposed (another rule signed first).
+      if (await db.triageRule.findUnique({ where: { name: rule.name }, select: { id: true } })) throw new Refused(400, `a triage rule named ${rule.name} exists`);
       // The predicate as exact JSON: the database compares it with the signed one.
       await db.$executeRaw`
         INSERT INTO "TriageRule" (id, name, source, "eventType", predicate, action, lane, priority, "perSenderDailyCap", "createdBy", "approvalId")
@@ -120,6 +132,12 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     const ref = `err${Date.now().toString(36)}`;
     console.error(`[runtime] ${ref} running ${claimed.action} failed:`, err);
     await completeProposal(db, id, { ok: false, error: `could not carry it out (${ref})` }, actor).catch(() => {});
-    throw err instanceof Refused ? err : new Refused(409, `could not carry it out (${ref})`);
+    if (err instanceof Refused) throw err;
+    // The database refusing what was signed (a CHECK, a name taken) is the input's fault: a 400.
+    const code = String((err as { code?: unknown; meta?: { code?: unknown } }).code ?? (err as { meta?: { code?: unknown } }).meta?.code ?? '');
+    if (['P2002', '23505', '23514'].includes(code) || /code: "(23505|23514)"/.test(String((err as { message?: unknown }).message ?? ''))) {
+      throw new Refused(400, `the database refused it as signed (${ref})`);
+    }
+    throw new Refused(409, `could not carry it out (${ref})`);
   }
 }

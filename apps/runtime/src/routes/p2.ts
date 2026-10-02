@@ -13,7 +13,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, LANES, ServerEventBatch, TriageRecent, type ServerEvent } from '@flint/policy';
+import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, LANES, ServerEventBatchIn, TriageRecent, type ServerEvent } from '@flint/policy';
 import type { Config, RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import type { Bus } from '../bus.js';
@@ -23,6 +23,7 @@ import { markProcessed, recordEvent, triageEnqueue } from '../events/record.js';
 import { triageEligible } from '../triage/facts.js';
 import { fieldFreeTitle } from '../templates/escalations.js';
 import { healthReport } from '../health/checks.js';
+import { clip } from '../sources/text.js';
 import { p2Report } from '../report/exit.js';
 
 export interface P2Deps {
@@ -53,9 +54,14 @@ async function entitiesOf(db: Db, events: ReadonlyArray<{ id: string; payload: u
   return byEvent;
 }
 
+/** An answer that broke the contract on the way out: the runtime's bug (a 500), never the caller's input. */
+export class Unanswerable extends Error {}
+
 /** The answer, checked against the contract on the way out: a row that does not fit is a bug, never a leak. */
 function out<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
-  return schema.parse(value);
+  const r = schema.safeParse(value);
+  if (!r.success) throw new Unanswerable(`an answer broke ${r.error.issues.length} rule(s) of its contract`);
+  return r.data;
 }
 
 export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
@@ -63,7 +69,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
 
   // ---- the server's events --------------------------------------------------------------
   app.post('/v1/events', { preHandler: need('events') }, async (req) => {
-    const batch = ServerEventBatch.parse(req.body);
+    const batch = ServerEventBatchIn.parse(req.body);
     const bus = d.config.triage ? d.bus() : undefined;
     const enqueue = bus ? triageEnqueue(bus as Bus) : undefined;
     let accepted = 0;
@@ -108,7 +114,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
         return {
           id: r.id, at: r.createdAt.toISOString(), lane: r.lane, action: r.action, decidedBy: r.decidedBy, ruleName: r.ruleName, relevance: r.relevance, reasonCode: r.reasonCode,
           source: ev?.source ?? 'unknown', eventType: ev?.type ?? 'unknown',
-          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: Array.from(e.name).slice(0, 300).join('') } : null,
+          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: clip(e.name, 300) } : null,
           reasoning: r.reasoning, feedback: r.feedback, tainted: r.tainted, sensitivity: r.sensitivity,
           escalation: x
             ? { id: x.id, templateId: x.templateId, title: x.title ?? fieldFreeTitle(x.templateId), body: x.body, status: x.status, channels: x.channels, tainted: x.tainted, createdAt: x.createdAt.toISOString() }

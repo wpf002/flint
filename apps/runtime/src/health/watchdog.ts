@@ -28,6 +28,7 @@ export interface Raised {
   type: string;
   /** Names the occurrence: the same one raised again is the same event. */
   ref: string;
+  /** When it was seen to hold: a watchdog condition is current when raised (its start is in its ref and payload). */
   occurredAt: Date;
   payload: Record<string, string | number>;
 }
@@ -39,8 +40,11 @@ const WATCHED = /^service:(launchd:com\.(flint|nexus)\.[A-Za-z0-9._-]+|endpoint:
 
 /** Down, as each kind of service says it. Undefined: this state says nothing (a periodic agent). */
 export function isDown(key: string, state: unknown): boolean | undefined {
-  const s = (state ?? {}) as { health?: unknown; running?: unknown };
+  const s = (state ?? {}) as { health?: unknown; running?: unknown; loaded?: unknown; disabled?: unknown };
   if (key.startsWith('service:endpoint:')) return s.health === undefined ? undefined : s.health === 'down';
+  // An agent that is not loaded, or is disabled, was put away on purpose: that says nothing. (A Flint
+  // server booted out is still caught: its health endpoint goes down.)
+  if (s.loaded === false || s.disabled === true) return undefined;
   return typeof s.running === 'boolean' ? !s.running : undefined;
 }
 
@@ -58,20 +62,20 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
     }
     if (!since || now.getTime() - since.getTime() < DOWN_AFTER_MS) continue;
     out.push({
-      type: 'service.down_30m', ref: `${e.id}:${since.toISOString()}`, occurredAt: new Date(since.getTime() + DOWN_AFTER_MS),
+      type: 'service.down_30m', ref: `${e.id}:${since.toISOString()}`, occurredAt: now,
       payload: { entityId: e.id, downMinutes: Math.floor((now.getTime() - since.getTime()) / 60_000) },
     });
   }
 
   const backup = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { id: true, startedAt: true } });
   if (backup && now.getTime() - backup.startedAt.getTime() > BACKUP_STALE_MS) {
-    out.push({ type: 'backup.stale', ref: `after:${backup.id}`, occurredAt: new Date(backup.startedAt.getTime() + BACKUP_STALE_MS), payload: { hoursSince: Math.floor((now.getTime() - backup.startedAt.getTime()) / 3_600_000) } });
+    out.push({ type: 'backup.stale', ref: `after:${backup.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - backup.startedAt.getTime()) / 3_600_000) } });
   }
 
   const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreOk: true, restoreTestedAt: true, restoreDetail: true } });
   if (drill?.restoreOk === false) {
     const mismatches = (drill.restoreDetail as { mismatches?: unknown } | null)?.mismatches;
-    out.push({ type: 'drill.failed', ref: drill.id, occurredAt: drill.restoreTestedAt!, payload: { mismatches: Array.isArray(mismatches) ? mismatches.length : 0 } });
+    out.push({ type: 'drill.failed', ref: drill.id, occurredAt: now, payload: { mismatches: Array.isArray(mismatches) ? mismatches.length : 0 } });
   }
 
   const day = localDay(config.tz, now);

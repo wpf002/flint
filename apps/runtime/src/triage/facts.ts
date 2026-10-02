@@ -39,22 +39,23 @@ export function sourceTime(at: string | Date | null | undefined, now: Date): Dat
 }
 
 /**
- * The facts of one applied event: the entity a sync's EntityVersion names, or
+ * The facts of one applied event: the entity a sync's EntityVersion names (in
+ * the state that version recorded), or
  * (for an event the runtime or server raised) the one in payload.entityId. A
  * forgotten entity is no entity. Undefined when the event is gone or was not
  * applied.
  */
-export async function loadFacts(db: Db, eventId: string): Promise<EventFacts | undefined> {
+export async function loadFacts(db: Db, eventId: string, now = new Date()): Promise<EventFacts | undefined> {
   const ev = await db.sourceEvent.findUnique({ where: { id: eventId } });
   if (!ev || ev.status !== 'applied') return undefined;
   const payload = ev.payload && typeof ev.payload === 'object' && !Array.isArray(ev.payload) ? (ev.payload as Record<string, unknown>) : {};
   const version = await db.entityVersion.findFirst({ where: { sourceEventId: eventId }, orderBy: { version: 'desc' }, include: { entity: true } });
   const raisedFor = typeof payload.entityId === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(payload.entityId) ? payload.entityId : undefined;
   const e = version?.entity ?? (raisedFor ? await db.entity.findUnique({ where: { id: raisedFor } }) : null);
+  // The state this event produced (its version's snapshot), not whatever the entity is by the time triage runs.
+  const state = (version?.state ?? e?.state ?? {}) as Record<string, unknown>;
   const entity: FactsEntity | undefined =
-    e && e.status !== 'forgotten'
-      ? { id: e.id, kind: e.kind, key: e.key, name: e.name, state: (e.state ?? {}) as Record<string, unknown>, taintedPaths: e.taintedPaths, status: e.status }
-      : undefined;
+    e && e.status !== 'forgotten' ? { id: e.id, kind: e.kind, key: e.key, name: e.name, state, taintedPaths: e.taintedPaths, status: e.status } : undefined;
   return {
     eventId: ev.id,
     source: ev.source,
@@ -67,5 +68,6 @@ export async function loadFacts(db: Db, eventId: string): Promise<EventFacts | u
     ...(entity ? { entity } : {}),
     created: version?.changeKind === 'created',
     backfill: isBackfill(ev),
+    late: now.getTime() - ev.receivedAt.getTime() > BACKFILL_AGE_MS,
   };
 }

@@ -41,12 +41,32 @@ export function combine(hits: readonly Verdict[]): Verdict {
 
 export async function decide(f: EventFacts, d: TriageDeps): Promise<Decision> {
   let crit = criticalVerdict(f);
-  // The server's threshold and the watchdog's reading are one cap: the second is logged, not escalated again.
-  const vendor = crit?.template?.id === 'vendor_cap' ? crit.template.fields.vendor : undefined;
-  if (crit && typeof vendor === 'string' && (await d.code.vendorCapEscalated?.(vendor, f.occurredAt))) {
-    const { template: _t, ...rest } = crit;
-    crit = { ...rest, action: 'log', lane: 'relevant', critical: false };
+  // One condition told twice (the server's threshold and the watchdog's reading of one cap; a failed
+  // migration's deploy event and its marker): the second is logged, not escalated again.
+  const once = crit?.template ? ONCE[crit.template.id] : undefined;
+  const key = once ? crit!.template!.fields[once.field] : undefined;
+  if (crit && once && typeof key === 'string' && (await d.code.escalatedRecently?.(crit.template!.id, once.field, key, once.withinMs, f.occurredAt))) {
+    crit = logged(crit);
   }
+  const decided = await decideRules(f, d, crit);
+  // Old news (backfill, or triaged a day after it arrived) is recorded and seen, never escalated.
+  if ('defer' in decided || decided.action !== 'escalate' || !(f.backfill || f.late)) return decided;
+  return logged(decided);
+}
+
+/** An escalation made a relevant-lane log: no template, no ping, no cap bypass. */
+function logged(v: Verdict): Verdict {
+  const { template: _t, perDay: _p, ...rest } = v;
+  return { ...rest, action: 'log', lane: 'relevant', critical: false };
+}
+
+/** Critical templates told once per this field over this window. */
+const ONCE: Record<string, { field: string; withinMs: number }> = {
+  vendor_cap: { field: 'vendor', withinMs: 24 * 3_600_000 },
+  migrate_failed: { field: 'sha', withinMs: 30 * 24 * 3_600_000 },
+};
+
+async function decideRules(f: EventFacts, d: TriageDeps, crit: Verdict | undefined): Promise<Decision> {
   if (!d.rulesAllowed) return crit ?? quietLog('fallback:skipped');
   const hits: Verdict[] = crit ? [crit] : [];
   const code = await codeVerdict(f, d.code);
@@ -57,7 +77,7 @@ export async function decide(f: EventFacts, d: TriageDeps): Promise<Decision> {
     if (v) hits.push(v);
   }
   if (hits.length) return combine(hits);
-  if (f.backfill) return quietLog('fallback:backfill');
+  if (f.backfill || f.late) return quietLog('fallback:backfill');
   if (!needsJudgement(f)) return quietLog('default');
   if (!d.judge) return quietLog(`fallback:${d.noJudge ?? 'unavailable'}`);
   const j = await d.judge(f);

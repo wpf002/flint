@@ -138,7 +138,9 @@ describe('deploy events from the install scripts', () => {
     expect(at('DEPLOY_STAGE=migrate')).toBeLessThan(at('prisma migrate deploy)'));
     expect(at('prisma migrate deploy)')).toBeLessThan(at('DEPLOY_STAGE=restart'));
     expect(at('DEPLOY_STAGE=restart')).toBeLessThan(at('"$ESBUILD" "$RT_SRC/src/index.ts"'));
-    expect(at('restart_agent || deploy_event runtime restart failed "$SHA"')).toBeLessThan(at('DEPLOY_STAGE=health'));
+    expect(at('restart_agent || { deploy_event runtime restart failed "$SHA"; RESTARTED=0; }')).toBeLessThan(at('DEPLOY_STAGE=health'));
+    // A failed restart skips the health poll: one incident, one line.
+    expect(at('[ "$RESTARTED" = 1 ] || break')).toBeGreaterThan(at('DEPLOY_STAGE=health'));
     expect(at('DEPLOY_STAGE=health')).toBeLessThan(at('/health" 2>/dev/null'));
     expect(at('/health" 2>/dev/null')).toBeLessThan(at('deploy_event runtime deploy ok "$SHA"'));
     expect(at('deploy_event runtime health failed "$SHA"')).toBeLessThan(at('ln -sfn "$PREV" "$RT/current"'));

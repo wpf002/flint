@@ -66,6 +66,15 @@ export const RouteErrorEvent = z
 export const ServerEvent = z.discriminatedUnion('type', [ChatTurnEvent, SpendThresholdEvent, RouteErrorEvent]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 export const ServerEventBatch = z.object({ events: z.array(ServerEvent).min(1).max(50) }).strict();
+/**
+ * What the runtime reads: the same events, with a field it does not know yet
+ * dropped instead of refused. The server deploys first, so a newer server's
+ * new optional field must not get every event of its type set aside by an
+ * older runtime; dropping keeps the ids-enums-numbers-only rule.
+ */
+export const ServerEventBatchIn = z
+  .object({ events: z.array(z.discriminatedUnion('type', [ChatTurnEvent.strip(), SpendThresholdEvent.strip(), RouteErrorEvent.strip()])).min(1).max(50) })
+  .strip();
 
 export const NOTIFY_CHANNELS = ['inapp', 'banner', 'push'] as const;
 export type NotifyChannel = (typeof NOTIFY_CHANNELS)[number];

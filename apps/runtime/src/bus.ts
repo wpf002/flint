@@ -74,12 +74,15 @@ export async function startBus(databaseUrl: string, log: (m: string) => void): P
     max: 4,
   });
   boss.on('error', (err: Error) => log(`[bus] ${err.message.slice(0, 300)}`));
-  await boss.start();
-  const have = new Set((await boss.getQueues()).map((q) => q.name));
-  const missing = [...ALL_QUEUES, ...PGBOSS_QUEUES].filter((q) => !have.has(q));
-  if (missing.length) {
+  try {
+    await boss.start();
+    const have = new Set((await boss.getQueues()).map((q) => q.name));
+    const missing = [...ALL_QUEUES, ...PGBOSS_QUEUES].filter((q) => !have.has(q));
+    if (missing.length) throw new Error(`the job queue is missing queues the migration makes: ${missing.join(', ').slice(0, 300)}`);
+  } catch (err) {
+    // A start that failed part-way has timers and a pool running: stop them, or each retry leaks another.
     await boss.stop({ graceful: false }).catch(() => {});
-    throw new Error(`the job queue is missing queues the migration makes: ${missing.join(', ').slice(0, 300)}`);
+    throw err;
   }
   return { boss, stop: () => boss.stop({ graceful: true, timeout: 15_000 }) };
 }

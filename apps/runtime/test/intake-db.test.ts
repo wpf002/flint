@@ -15,8 +15,10 @@ import { syncOnce } from '../src/sources/sync';
 import { createProposal, approveProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { triageEnqueue, type Enqueue } from '../src/events/record';
-import { reconcile, RECONCILE_LIMIT } from '../src/triage/reconcile';
+import { reconcile, sweepEvents, RECONCILE_LIMIT } from '../src/triage/reconcile';
 import { isBackfill, sourceTime } from '../src/triage/facts';
+import { raise } from '../src/health/watchdog';
+import { processEvent } from '../src/triage/worker';
 import type { Source, SourceName, SourceObservation, SourceRun } from '../src/sources/types';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
@@ -139,6 +141,25 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     expect(await triageJobs()).toBe(250);
   });
 
+  it('old news is never an escalation: a critical event triaged a day after it arrived is logged in the relevant lane', async () => {
+    const [id] = await raise(db, [{ type: 'backup.stale', ref: 'late-one', occurredAt: new Date(), payload: { hoursSince: 40 } }], new Date());
+    await owner(`UPDATE "SourceEvent" SET "receivedAt" = "receivedAt" - interval '2 days', "occurredAt" = "occurredAt" - interval '2 days' WHERE id = $1`, [id]);
+    expect(await processEvent({ eventId: id! }, { db, config: { tz: 'UTC' }, bus: { boss: { send: async () => null } } as never, load: async () => 'proceed' })).toBe('decided');
+    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } })).toMatchObject({ action: 'log', lane: 'relevant', critical: false, decidedBy: 'code:backup.stale' });
+    expect(await db.escalation.count()).toBe(0);
+  });
+
+  it('a note the server never took is sent again; one waiting is not sent twice', async () => {
+    const [ev] = await raise(db, [{ type: 'backup.stale', ref: 'undelivered', occurredAt: new Date(), payload: { hoursSince: 40 } }], new Date());
+    const tenAgo = new Date(Date.now() - 10 * 60_000);
+    await db.triageDecision.create({ data: { id: 'tdundeliv1', sourceEventId: ev!, action: 'escalate', lane: 'relevant', decidedBy: 'code:backup.stale', critical: true, shadow: false, sensitivity: 'ops', createdAt: tenAgo } });
+    await db.escalation.create({ data: { id: 'esundeliv1', triageDecisionId: 'tdundeliv1', templateId: 'backup_stale', fields: { hoursSince: 40 }, title: 'Backups have stopped', body: 'x', channels: ['inapp'], sensitivity: 'ops', createdAt: tenAgo } });
+    await db.escalationDelivery.create({ data: { id: 'edundeliv1', escalationId: 'esundeliv1', channel: 'inapp', status: 'pending', createdAt: tenAgo } });
+    expect((await reconcile(db, bus)).redelivered).toBe(1);
+    expect((await owner(`SELECT data FROM pgboss.job WHERE name = 'deliver'`)).rows).toEqual([{ data: { escalationId: 'esundeliv1' } }]);
+    expect((await reconcile(db, bus)).redelivered).toBe(0);
+  });
+
   it('failed → dead after 5 attempts', async () => {
     const src = fakeSource('launchd', () => [service('com.flint.poison', true)]);
     const boom: Enqueue = async () => {
@@ -147,13 +168,24 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     for (let i = 0; i < 5; i++) await syncOnce(db, src, runAt(new Date()), 'UTC', boom);
     const ev = await db.sourceEvent.findFirstOrThrow({ where: { source: 'launchd', sourceRef: { startsWith: 'com.flint.poison@' } } });
     expect(ev).toMatchObject({ status: 'failed', attempts: 5 });
-    expect((await reconcile(db, bus)).dead).toBe(1);
+    expect((await sweepEvents(db)).dead).toBe(1);
     expect((await db.sourceEvent.findUniqueOrThrow({ where: { id: ev.id } })).status).toBe('dead');
     const audit = await db.auditEntry.findFirstOrThrow({ where: { action: 'events.dead' } });
     expect(audit.inputs).toMatchObject({ count: 1, sources: ['launchd'] });
     // Dead stays dead: a later run does not take it back.
     await syncOnce(db, src, runAt(new Date()), 'UTC', boom);
     expect(await db.sourceEvent.findUniqueOrThrow({ where: { id: ev.id } })).toMatchObject({ status: 'dead', attempts: 5 });
+  });
+
+  it('a failed event the same thing has since moved past is dead', async () => {
+    let running = true;
+    const src = fakeSource('launchd', () => [service('com.flint.moved', running)]);
+    await syncOnce(db, src, runAt(new Date()), 'UTC', async () => { throw new Error('once'); });
+    const failed = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: { startsWith: 'com.flint.moved@' }, status: 'failed' } });
+    running = false;
+    await syncOnce(db, src, runAt(new Date()), 'UTC');
+    expect((await sweepEvents(db)).dead).toBe(1);
+    expect((await db.sourceEvent.findUniqueOrThrow({ where: { id: failed.id } })).status).toBe('dead');
   });
 
   it('occurredAt = source change time', async () => {
@@ -173,5 +205,13 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     const closed = await db.sourceEvent.findFirstOrThrow({ where: { source: 'github', sourceRef: { startsWith: 'issue:wpf002/flint#1@' } }, orderBy: { receivedAt: 'desc' } });
     expect(closed.payload).not.toHaveProperty('backfill');
     expect(isBackfill(closed)).toBe(false);
+  });
+
+  it('a bot-opened PR applies through the world model, and the source stays healthy', async () => {
+    const bot: SourceObservation = { type: 'pull_request.state', kind: 'pull_request', key: 'pull_request:github:wpf002/flint#99', name: 'Bump x', sensitivity: 'ops', externalId: 'pull_request:wpf002/flint#99', taintedPaths: ['name', 'state.title'], state: { number: 99, state: 'open', title: 'Bump x', byBot: true } };
+    const s = await syncOnce(db, fakeSource('github', () => [bot]), runAt(new Date()), 'UTC', enqueue);
+    expect(s.failed).toBe(0);
+    expect((await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: { startsWith: 'pull_request:wpf002/flint#99@' } } })).status).toBe('applied');
+    expect((await db.sourceCursor.findUniqueOrThrow({ where: { source: 'github' } })).consecutiveFailures).toBe(0);
   });
 });

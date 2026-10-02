@@ -181,4 +181,15 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
     expect(await db.auditEntry.findFirstOrThrow({ where: { correlationId: q.id } })).toMatchObject({ outcome: 'skipped', tier: 'forbidden' });
     expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: loud } })).toMatchObject({ action: 'escalate', critical: true, decidedBy: 'code:backup.stale' });
   });
+
+  it('each event is decided on the state it recorded: a run in progress, then failed, is one ci_failing', async () => {
+    const run = (status: string, conclusion: string | null): SourceObservation => ({ type: 'ci_run.state', kind: 'ci_run', key: 'ci_run:github:wpf002/flint:latest', name: 'wpf002/flint CI', sensitivity: 'ops', externalId: 'ci_run:wpf002/flint:latest', state: { workflow: 'ci', status, conclusion, sha: 'c'.repeat(40) } });
+    await syncOnce(db, fakeSource('github', () => [run('in_progress', null)]), runAt(new Date()), 'UTC');
+    await syncOnce(db, fakeSource('github', () => [run('completed', 'failure')]), runAt(new Date()), 'UTC');
+    const evs = await db.sourceEvent.findMany({ where: { type: 'ci_run.state' }, orderBy: { receivedAt: 'asc' } });
+    expect(evs).toHaveLength(2);
+    // The first is triaged only after the second has applied: it still sees "in progress".
+    for (const e of evs) await processEvent({ eventId: e.id }, deps());
+    expect(await db.escalation.count({ where: { templateId: 'ci_failing' } })).toBe(1);
+  });
 });

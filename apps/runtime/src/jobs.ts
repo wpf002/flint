@@ -13,7 +13,7 @@ import { ALL_QUEUES, cronFor, type Bus } from './bus.js';
 import { runLocked } from './scheduler.js';
 import type { Registered } from './sources/registry.js';
 import { triageEnqueue } from './events/record.js';
-import { reconcile } from './triage/reconcile.js';
+import { reconcile, sweepEvents } from './triage/reconcile.js';
 import { processEvent, TriageJob } from './triage/worker.js';
 import { deliver } from './surface/deliver.js';
 import { expireEscalations } from './surface/expire.js';
@@ -104,7 +104,7 @@ export function triageJobs(ctx: JobContext): JobSpec[] {
       cron: '*/5 * * * *',
       handler: async () => {
         const r = await reconcile(ctx.db, ctx.bus);
-        if (r.resent || r.dead) ctx.log(`reconcile: ${r.resent} re-sent, ${r.dead} dead`);
+        if (r.resent || r.redelivered) ctx.log(`reconcile: ${r.resent} event(s) and ${r.redelivered} note(s) sent again`);
       },
     },
   ];
@@ -140,9 +140,10 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
       cron: '15 9 * * 1',
       missed: 'once',
       handler: async () => {
+        if (!(await mayRun(ctx, 'health.check'))) return;
         const now = new Date();
         const drill = (await checkComponents({ db: ctx.db, config: ctx.config, now, sources: [] })).filter((c) => c.component === 'restore_drill');
-        await ctx.db.healthCheck.createMany({ data: drill.map((c) => ({ component: c.component, status: c.status, detail: c.detail ?? null, at: now })) });
+        await recordChecks(ctx.db, drill, now);
       },
     },
     {
@@ -164,8 +165,14 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
         const now = new Date();
         const g = await cardGate(ctx.db, { action: 'maintenance.retention', job: 'retention', templateId: 'nightly.retention' }, ctx.config.tz, ctx.config.rp, now);
         if (!g.go) return void ctx.log(`retention: not run (${g.why})`);
-        const counts = await runRetention(ctx.db, ctx.config.tz, now, g.proposalId);
-        if (g.proposalId) await completeProposal(ctx.db, g.proposalId, { ok: true, result: counts }, 'runtime');
+        try {
+          const counts = await runRetention(ctx.db, ctx.config.tz, now, g.proposalId);
+          if (g.proposalId) await completeProposal(ctx.db, g.proposalId, { ok: true, result: counts }, 'runtime');
+        } catch (err) {
+          // Its outcome is known: failed (runRetention audited what it had done). The card says so too.
+          if (g.proposalId) await completeProposal(ctx.db, g.proposalId, { ok: false, error: failureClass(err) }, 'runtime').catch(() => {});
+          throw err;
+        }
       },
     },
     {
@@ -178,9 +185,11 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
     {
       queue: 'expire.escalations',
       cron: '7 * * * *',
+      // Hourly housekeeping: open escalations past their time, and events that will never apply.
       handler: async () => {
         const n = await expireEscalations(ctx.db);
-        if (n) ctx.log(`expired ${n} escalation(s)`);
+        const { dead } = await sweepEvents(ctx.db);
+        if (n || dead) ctx.log(`expired ${n} escalation(s); ${dead} event(s) dead`);
       },
     },
   ];

@@ -181,7 +181,9 @@ ALTER TABLE "Escalation"
   ADD CONSTRAINT "Escalation_body_check" CHECK ("body" IS NULL OR char_length("body") <= 500),
   ADD CONSTRAINT "Escalation_channels_check" CHECK ("channels" <@ ARRAY['inapp', 'banner', 'push']::text[]),
   ADD CONSTRAINT "Escalation_fields_check" CHECK (jsonb_typeof("fields") = 'object' AND octet_length("fields"::text) <= 4096),
-  ADD CONSTRAINT "Escalation_sensitivity_check" CHECK ("sensitivity" IN ('ops', 'personal', 'financial'));
+  ADD CONSTRAINT "Escalation_sensitivity_check" CHECK ("sensitivity" IN ('ops', 'personal', 'financial')),
+  -- Marked purged means purged: retention and forget skip a purged row, so its text must be gone.
+  ADD CONSTRAINT "Escalation_purged_check" CHECK ("contentPurgedAt" IS NULL OR ("body" IS NULL AND "fields" = '{}'::jsonb));
 
 ALTER TABLE "EscalationDelivery"
   ADD CONSTRAINT "EscalationDelivery_channel_check" CHECK ("channel" IN ('inapp', 'banner', 'push')),

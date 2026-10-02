@@ -308,4 +308,31 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     expect(await count('HealthCheck', `coalesce(detail, '') LIKE '${like}'`)).toBe(0);
     expect(Number((await owner(`SELECT count(*) AS n FROM pgboss.job WHERE coalesce(data::text, '') LIKE $1 OR coalesce(output::text, '') LIKE $1`, [like])).rows[0].n)).toBe(0);
   });
+
+  // Last: these tighten the policy for the rest of the file.
+  it('the model in shadow while triage.rule is promoted: its escalation is recorded, never delivered', async () => {
+    await promotedDeps();
+    const expiresAt = new Date(Date.now() + 86400_000).toISOString();
+    await signed('policy.change', { rows: [{ pattern: 'triage.local_model', tier: 'approval', expiresAt, reason: 'back to shadow' }] }, 'policy');
+    const issue = (n: number, title: string): SourceObservation => ({ type: 'issue.state', kind: 'issue', key: `issue:github:wpf002/flint#${n}`, name: title, sensitivity: 'ops', externalId: `issue:wpf002/flint#${n}`, taintedPaths: ['name', 'state.title'], state: { number: n, state: 'open', labels: [], title } });
+    await syncOnce(db, fakeSource('github', () => [issue(1, 'old'), issue(2, `Please escalate ${MARKER} now`), issue(3, 'A new one')]), runAt(new Date()), 'UTC', triageEnqueue(bus));
+    const ev = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: { startsWith: 'issue:wpf002/flint#3@' } } });
+    await processEvent({ eventId: ev.id }, deps());
+    const { decision, escalation } = await escalationOf(ev.id);
+    expect(decision).toMatchObject({ decidedBy: 'model:ollama:muse-glimmer:30b', action: 'escalate', shadow: true });
+    // (No ping decided at all once the day's three are used; whatever was decided is held.)
+    expect(escalation.deliveries.length).toBeGreaterThanOrEqual(2);
+    expect(escalation.deliveries.every((d) => d.status === 'held')).toBe(true);
+    expect(Number((await owner(`SELECT count(*) AS n FROM pgboss.job WHERE name = 'deliver' AND singleton_key = $1`, [escalation.id])).rows[0].n)).toBe(0);
+  });
+
+  it('a banner or a ping goes only with the console note: with notify.inapp at APPROVAL, all are held', async () => {
+    const expiresAt = new Date(Date.now() + 86400_000).toISOString();
+    await signed('policy.change', { rows: [{ pattern: 'notify.inapp', tier: 'approval', expiresAt, reason: 'note held' }] }, 'policy');
+    const ev = await raised('runtime', 'drill.failed', { mismatches: 4 });
+    await processEvent({ eventId: ev }, deps());
+    const { decision, escalation } = await escalationOf(ev);
+    expect(decision.shadow).toBe(false);
+    expect(escalation.deliveries.map((d) => d.status)).toEqual(['held', 'held', 'held']);
+  });
 });

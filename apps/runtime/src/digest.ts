@@ -57,6 +57,23 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
 
 export type DigestOutcome = 'delivered' | 'recorded' | 'already' | 'failed' | 'skipped';
 
+/**
+ * An earlier day's digest whose delivery began and never ended (the server
+ * was down past the job's retries): it is not sent a day late. Its intent
+ * gets its outcome, failed, so no intent is left open.
+ */
+async function closeStaleDigests(db: Db, today: string, now: Date): Promise<void> {
+  const open = await db.$queryRaw<Array<{ ref: string }>>`
+    SELECT i."correlationId" AS ref FROM "AuditEntry" i
+    WHERE i.kind = 'intent' AND i.action = 'digest.daily' AND i."correlationId" <> ${today} AND i.at > ${new Date(now.getTime() - 31 * 86_400_000)}
+      AND NOT EXISTS (SELECT 1 FROM "AuditEntry" o WHERE o."correlationId" = i."correlationId" AND o.kind <> 'intent' AND o.outcome <> 'pending')`;
+  if (!open.length) return;
+  await appendAudit(db, open.map((o) => ({
+    actor: 'runtime:digest', context: 'autonomous' as const, kind: 'action' as const, action: 'digest.daily', decision: 'act' as const, outcome: 'failed' as const,
+    correlationId: o.ref, inputs: { day: o.ref.slice('digest:'.length, 'digest:'.length + 10), delivered: false, reason: 'not delivered that day' },
+  })), now);
+}
+
 export async function runDigest(
   db: Db,
   config: Pick<Config, 'tz' | 'server'>,
@@ -70,6 +87,7 @@ export async function runDigest(
   const deliver = digestTier === 'alone' && tier('notify.inapp') === 'alone';
   const d = await buildDigest(db, config.tz, now);
   const ref = `digest:${d.day}`;
+  await closeStaleDigests(db, ref, now);
   // The day's claim and the intent, together: a second run that day finds the claim taken.
   const first = await db.$transaction(async (tx) => {
     if ((await claim(tx, 'digest.daily', { limit: 1, period: 'day' }, config.tz, now)) === null) return false;

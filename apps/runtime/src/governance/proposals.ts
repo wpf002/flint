@@ -120,6 +120,9 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
     const why = refuseRule(input.args);
     if (why) throw new Refused(400, `invalid triage rule: ${why}`);
     if (input.kind !== 'rule') throw new Refused(400, 'a triage rule is proposed as kind rule');
+    // Names are unique, and a switched-off rule is never switched back on: a new rule needs a new name.
+    const name = (input.args as { rule: { name: string } }).rule.name;
+    if (await db.triageRule.findUnique({ where: { name }, select: { id: true } })) throw new Refused(400, `a triage rule named ${name} exists (switched-off rules keep their names): choose another name`);
   }
   const argsDigest = digestOf(input.args);
   const decision = await tierOf(db, { ...input }, now, input.readOnlyHint);

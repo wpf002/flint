@@ -158,10 +158,12 @@ export interface Rendered {
 /** A name fit to show: not tainted, short, printable. Otherwise the ref. */
 export function displayName(e: { id: string; kind: string; name: string; taintedPaths: readonly string[] }): string {
   const name = safeName(e);
-  return Array.from(name).length <= 60 && !/[\p{Cc}\p{Cf}<>]/u.test(name) ? name : `${e.kind}#${e.id.slice(-6)}`;
+  // Measured in UTF-16 units, as the wire contract measures (a code-point count can pass and the contract fail).
+  return name.length <= 60 && !/[\p{Cc}\p{Cf}<>]/u.test(name) ? name : `${e.kind}#${e.id.slice(-6)}`;
 }
 
-const clip = (s: string, n: number) => Array.from(s).slice(0, n).join('');
+/** At most n UTF-16 units, never half a surrogate pair: within the wire's limit and the database's. */
+const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n).replace(/[\uD800-\uDBFF]$/, ''));
 
 /**
  * Render a template. Throws only on fields that are not the template's (the

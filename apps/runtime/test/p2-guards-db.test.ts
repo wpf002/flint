@@ -214,6 +214,18 @@ describe.skipIf(NO_DB)('P2 guards in the database', () => {
     });
   });
 
+  it('marked purged means purged: the mark alone, or a purged row with its text, is refused (23514)', async () => {
+    const esid = await escalation(await decision(await event()));
+    expect((await pgError(app(`UPDATE "Escalation" SET "contentPurgedAt" = now() WHERE id = $1`, [esid]))).code).toBe('23514');
+    const did = await decision(await event());
+    const e = await pgError(app(
+      `INSERT INTO "Escalation" (id, "triageDecisionId", "templateId", fields, title, body, channels, sensitivity, "contentPurgedAt")
+       VALUES ($1, $2, 'backup_stale', '{"hoursSince":40}', 't', 'b', '{}', 'ops', now())`, [id('es'), did]));
+    expect(e.code).toBe('23514');
+    // A real purge passes.
+    await app(`UPDATE "Escalation" SET title = 'Backups have stopped', body = NULL, fields = '{}', "contentPurgedAt" = now() WHERE id = $1`, [esid]);
+  });
+
   it('every RAISE in a P2 function names its SQLSTATE', async () => {
     const fns = await owner(`
       SELECT p.proname, p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace

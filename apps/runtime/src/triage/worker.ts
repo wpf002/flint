@@ -71,8 +71,8 @@ export function codeContext(db: Db): CodeRuleContext {
         WHERE d."decidedBy" = 'code:route.error_burst' AND d.action = 'escalate' AND e."occurredAt" >= ${since}`;
       return Number(n[0]?.n ?? 0) > 0;
     },
-    async vendorCapEscalated(vendor, at) {
-      const n = await db.escalation.count({ where: { templateId: 'vendor_cap', createdAt: { gt: new Date(at.getTime() - 24 * 3_600_000) }, fields: { path: ['vendor'], equals: vendor } } });
+    async escalatedRecently(templateId, field, value, withinMs, at) {
+      const n = await db.escalation.count({ where: { templateId, createdAt: { gt: new Date(at.getTime() - withinMs) }, fields: { path: [field], equals: value } } });
       return n > 0;
     },
   };
@@ -81,9 +81,9 @@ export function codeContext(db: Db): CodeRuleContext {
 export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outcome> {
   const { db, config } = d;
   if (await db.triageDecision.findUnique({ where: { sourceEventId: job.eventId }, select: { id: true } })) return 'exists';
-  const f = await loadFacts(db, job.eventId);
-  if (!f) return 'gone';
   const now = d.now?.() ?? new Date();
+  const f = await loadFacts(db, job.eventId, now);
+  if (!f) return 'gone';
   const policies = await activePolicies(db, now);
   const rules = standing('triage.rule', f.tainted, policies, now);
   const model = standing('triage.local_model', f.tainted, policies, now);
@@ -120,6 +120,8 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
   }
   const byModel = decision.decidedBy.startsWith('model:') || /^fallback:(invalid|unavailable|capped|deferred)$/.test(decision.decidedBy);
   const filed = await fileAction(db, f, decision, { alone: rules.tier === 'alone', now, tz: config.tz });
-  const recorded = await recordDecision(db, f, decision, { shadow: rules.shadow, tier: byModel ? model.tier : rules.tier, tz: config.tz, now, policies, bus: d.bus, ...filed });
+  // The model's verdict is in shadow while triage.local_model is, whatever triage.rule's standing.
+  const shadow = rules.shadow || (byModel && model.shadow);
+  const recorded = await recordDecision(db, f, decision, { shadow, tier: byModel ? model.tier : rules.tier, tz: config.tz, now, policies, bus: d.bus, ...filed });
   return recorded ? 'decided' : 'exists';
 }

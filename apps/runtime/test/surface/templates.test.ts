@@ -66,4 +66,12 @@ describe('escalation templates', () => {
     expect(displayName({ ...e, name: 'a‮b', taintedPaths: [] })).toBe('service#abc123');
     expect(displayName({ ...e, name: '<b>x</b>', taintedPaths: [] })).toBe('service#abc123');
   });
+
+  it('clips in UTF-16 units, as the wire counts, never splitting a pair', () => {
+    const emoji = '🚀'.repeat(30); // 60 UTF-16 units: a clean name, at the limit
+    const r = render('rule_match', { rule: 'r'.repeat(80), source: 'github', eventType: 'issue.state', entity: 'issue#abc123' }, { 'issue#abc123': emoji });
+    expect(r.title.length).toBeLessThanOrEqual(80);
+    expect(/[\uD800-\uDBFF]$/.test(r.title)).toBe(false);
+    expect(displayName({ id: 'cent0000abc123', kind: 'service', name: '🚀'.repeat(31), taintedPaths: [] })).toBe('service#abc123');
+  });
 });

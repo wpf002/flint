@@ -80,8 +80,8 @@ export interface CodeRuleContext {
   routeErrorsIn10m(at: Date): Promise<number>;
   /** A burst was already escalated in this outage (since the last 30 quiet minutes). */
   burstEscalatedThisOutage(at: Date): Promise<boolean>;
-  /** This vendor's cap was already escalated in the last day (the server and the watchdog both see it). */
-  vendorCapEscalated?(vendor: string, at: Date): Promise<boolean>;
+  /** An escalation of this template with this field value was made within the window before `at`. */
+  escalatedRecently?(templateId: string, field: string, value: string, withinMs: number, at: Date): Promise<boolean>;
 }
 
 export const ROUTE_ERROR_BURST = 5;

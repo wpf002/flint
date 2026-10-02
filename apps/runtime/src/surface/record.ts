@@ -40,9 +40,10 @@ export interface SurfaceContext {
   policies: readonly PolicyRow[];
   /** Sends the deliver job inside the transaction. */
   bus?: Pick<Bus, 'boss'>;
-  /** An `act` verdict: the proposal filed for it, or the template it would have filed in shadow. */
+  /** An `act` verdict: the proposal filed for it, the template it would have filed in shadow, or the refusal. */
   proposalId?: string;
   wouldPropose?: string;
+  proposalRefused?: number;
 }
 
 export const newDecisionId = (now: Date) => `td${now.getTime().toString(36)}${randomBytes(5).toString('hex')}`;
@@ -123,10 +124,13 @@ async function predictions(tx: Tx, f: EventFacts, by: Date, c: SurfaceContext): 
 /** Which channels an escalation goes to, and which of them are delivered now. */
 async function channels(tx: Tx, v: Verdict, c: SurfaceContext): Promise<Array<{ channel: NotifyChannel; deliver: boolean; counted?: number; overCap?: boolean }>> {
   const out: Array<{ channel: NotifyChannel; deliver: boolean; counted?: number; overCap?: boolean }> = [];
-  for (const ch of ['inapp', 'banner'] as const) out.push({ channel: ch, deliver: !c.shadow && standing(`notify.${ch}`, c).alone });
+  // The server always stores the console note with a banner or a ping, so those go only when the note does.
+  const inapp = !c.shadow && standing('notify.inapp', c).alone;
+  out.push({ channel: 'inapp', deliver: inapp });
+  out.push({ channel: 'banner', deliver: inapp && standing('notify.banner', c).alone });
   const push = standing('notify.push', c);
   const cap = push.cap ?? { limit: 3, period: 'day' as const };
-  if (!c.shadow && push.alone) {
+  if (inapp && push.alone) {
     const n = await claim(tx, 'notify.push', cap, c.tz, c.now);
     if (n !== null) out.push({ channel: 'push', deliver: true, counted: n });
     else if (v.critical) {
@@ -222,6 +226,7 @@ export async function recordDecision(db: Db, f: EventFacts, v: Verdict, c: Surfa
           ...(verdict !== v ? { capped: v.perDay?.key ?? true } : {}),
           ...(c.proposalId ? { proposalId: c.proposalId } : {}),
           ...(c.wouldPropose ? { wouldPropose: c.wouldPropose } : {}),
+          ...(c.proposalRefused ? { proposalRefused: c.proposalRefused } : {}),
           ...surfaced,
         },
       }], c.now);

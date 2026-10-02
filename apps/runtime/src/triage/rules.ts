@@ -13,6 +13,7 @@
  */
 import { z } from 'zod';
 import { isPathTainted, SOURCES } from '@flint/policy';
+import { jsonbBytes } from '../jsonsize.js';
 import type { Action, EventFacts, Lane, Verdict } from './verdict.js';
 
 const OPS = ['eq', 'neq', 'in', 'has', 'gt', 'lt', 'exists'] as const;
@@ -92,6 +93,8 @@ export function ruleProblems(r: RuleArgs): string[] {
   if (r.action === 'escalate' && r.lane !== 'relevant') problems.push('an escalation is in the relevant lane');
   if (r.action === 'ignore' && r.lane !== 'quiet') problems.push('an ignored event is in the quiet lane');
   if (r.perSenderDailyCap !== null && !SENDER_PATHS[r.source]) problems.push(`${r.source} has no structural sender for a per-sender cap`);
+  // The database's own limit, measured its way: refused here, before Will is asked to sign.
+  if (jsonbBytes(r.predicate) > 4096) problems.push('the predicate is over 4 KB');
   return problems;
 }
 

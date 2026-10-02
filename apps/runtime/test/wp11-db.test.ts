@@ -103,6 +103,15 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     await owner(`DELETE FROM "ActionCounter" WHERE action = 'digest.daily'`);
     expect(await runDigest(db, config, new Date(now.getTime() + 1000), async () => ({ status: 'refused', code: 422 }))).toBe('failed');
     expect(await db.auditEntry.count({ where: { action: 'digest.daily', outcome: 'failed' } })).toBe(1);
+    // A day whose delivery never ended (the server down past the retries) is closed the next day, not sent late.
+    await expect(runDigest(db, config, new Date(now.getTime() - DAY), async () => ({ status: 'retry', why: 'unreachable' }))).rejects.toThrow(/retrying/);
+    await owner(`DELETE FROM "ActionCounter" WHERE action = 'digest.daily'`);
+    const posted: string[] = [];
+    expect(await runDigest(db, config, now, async (req) => (posted.push(req.ref ?? ''), { status: 'stored', pinged: false }))).toBe('delivered');
+    // Only today's: yesterday's is closed as failed, not sent a day late.
+    expect(posted).toEqual([sent[0]!.ref]);
+    expect(Number((await owner(`SELECT count(*) AS n FROM audit_open_intents WHERE action = 'digest.daily'`)).rows[0].n)).toBe(0);
+    expect(await db.auditEntry.count({ where: { action: 'digest.daily', kind: 'action', outcome: 'failed', inputs: { path: ['reason'], equals: 'not delivered that day' } } })).toBe(1);
   });
   async function appendOk(action: string) {
     const { appendAudit } = await import('../src/governance/audit');

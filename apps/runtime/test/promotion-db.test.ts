@@ -49,9 +49,11 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     expect(patterns).not.toContain('world.sync.knowledge');
     expect(patterns).toHaveLength(P2_PROMOTIONS.length - 1);
     expect(t.rows.find((r) => r.pattern === 'notify.push')).toMatchObject({ dailyCap: 3, tier: 'alone' });
-    expect(t.rows.every((r) => /^P2 shadow week: [\d.]+ relevant a day; precision (n\/a|\d+%) over \d+ marked$/.test(r.reason))).toBe(true);
-    // Filing it again is the same card.
-    const again = await promotionTable(db, { drop: ['world.sync.knowledge'] });
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+    expect(card.reason).toMatch(/The shadow week: [\d.]+ relevant a day; precision (n\/a|\d+%) over \d+ marked\.$/);
+    // Filing it again, later and after more decisions, is the same card.
+    await shadowDecision(1);
+    const again = await promotionTable(db, { drop: ['world.sync.knowledge'], now: new Date(Date.now() + 90_000) });
     expect(again).toMatchObject({ proposalId: t.proposalId, deduped: true });
 
     // Signed, the database takes every row, and the actions resolve to ALONE.

@@ -39,6 +39,8 @@ export interface EventFacts {
   /** This event created its entity. */
   created: boolean;
   backfill: boolean;
+  /** Triaged more than a day after it arrived (triage was off, or its job waited): old news, never an escalation. */
+  late: boolean;
 }
 
 export interface Template {

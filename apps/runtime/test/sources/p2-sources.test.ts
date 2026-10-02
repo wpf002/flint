@@ -189,4 +189,40 @@ describe.skipIf(NO_DB)('P2 sources on flint_test', () => {
     await expect(signed('world.relation.write', { ...args, knowledgeId: 'k2' }, 'tool_call', q.id)).rejects.toThrow(/knowledge\.link/);
     expect(await withClient(urls.owner, (c) => c.query(`SELECT count(*)::int AS n FROM "Relation"`)).then((r) => r.rows[0].n)).toBe(1);
   });
+
+  it('one failed migration, told by its deploy event and by its marker, is one escalation', async () => {
+    const shaX = 'e'.repeat(40);
+    writeFileSync(join(home, '.flint', 'deploy-events.jsonl'), line({ id: 'c'.repeat(32), stage: 'migrate', sha: shaX }));
+    await syncOnce(db, deploySource({ file: join(home, '.flint', 'deploy-events.jsonl') }), run(undefined, new Date()), 'UTC');
+    const { raise } = await import('../../src/health/watchdog');
+    await raise(db, [{ type: 'migrate.failed', ref: shaX, occurredAt: new Date(), payload: { sha: shaX } }], new Date());
+    const evs = await db.sourceEvent.findMany({ where: { type: 'migrate.failed', OR: [{ sourceRef: { contains: shaX } }] } });
+    expect(evs).toHaveLength(2);
+    for (const e of evs) await processEvent({ eventId: e.id }, deps());
+    expect(await db.escalation.count({ where: { templateId: 'migrate_failed', fields: { path: ['sha'], equals: shaX.slice(0, 12) } } })).toBe(1);
+  });
+
+  it('a link that exists already is not proposed again, and an approved duplicate completes without a second row', async () => {
+    const rel = await db.relation.findFirstOrThrow();
+    const ev = await db.$transaction(async (tx) => {
+      const { recordEvent, markProcessed } = await import('../../src/events/record');
+      const id = (await recordEvent(tx, { source: 'knowledge', sourceRef: 'fact:k77', type: 'knowledge.fact', occurredAt: new Date(), sensitivity: 'ops', tainted: true, payload: { knowledgeId: 'k77', entityIds: [rel.fromId, rel.toId], relation: rel.type, fromId: rel.fromId, toId: rel.toId } }, new Date()))!;
+      await markProcessed(tx, id, 'applied', new Date());
+      return id;
+    });
+    await processEvent({ eventId: ev }, deps());
+    const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev } });
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: d.id } })).inputs).not.toHaveProperty('wouldPropose');
+    // Approved anyway (filed before the link existed): done, the same relation.
+    const args = { type: rel.type, fromId: rel.fromId, toId: rel.toId, knowledgeId: 'k78' };
+    const p = await createProposal(db, { kind: 'tool_call', origin: 'runtime:triage', action: 'world.relation.write', templateId: 'knowledge.link', args, argsProvenance: { type: { source: 'event', tainted: true } }, tainted: true, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'runtime:triage');
+    expect(await signed('world.relation.write', args, 'tool_call', p.id)).toEqual({ relationId: rel.id, existed: true });
+    expect(await db.relation.count()).toBe(1);
+  });
+
+  it('a rule whose name is taken, or whose predicate is over 4 KB, is refused before Will is asked', async () => {
+    const { ruleProblems, RuleArgs } = await import('../../src/triage/rules');
+    const big = RuleArgs.parse({ name: 'big', source: 'github', eventType: 'issue.state', createdBy: 'will', action: 'log', lane: 'quiet', predicate: { any: Array.from({ length: 10 }, () => ({ path: 'entity.state.labels', op: 'in', value: Array.from({ length: 20 }, (_, i) => `${'x'.repeat(100)}${i}`) })) } });
+    expect(ruleProblems(big).join()).toMatch(/over 4 KB/);
+  });
 });

@@ -31,6 +31,21 @@ const TERMINAL = ['executed', 'failed', 'rejected', 'expired'];
 
 export async function runRetention(db: Db, tz: string, now = new Date(), correlationId?: string): Promise<Record<string, number>> {
   const n: Record<string, number> = {};
+  try {
+    await steps(db, tz, now, n);
+  } catch (err) {
+    // What was already cleared stays cleared: say how much, and that the run failed.
+    await appendAudit(db, [{
+      actor: 'runtime:retention', context: 'autonomous', kind: 'action', action: 'maintenance.retention', decision: 'act', outcome: 'failed',
+      inputs: { ...n, failure: err instanceof Error ? err.name.slice(0, 60) : 'error' }, ...(correlationId ? { correlationId } : {}),
+    }], now).catch(() => {});
+    throw err;
+  }
+  await appendAudit(db, [{ actor: 'runtime:retention', context: 'autonomous', kind: 'action', action: 'maintenance.retention', decision: 'act', outcome: 'ok', inputs: n, ...(correlationId ? { correlationId } : {}) }], now);
+  return n;
+}
+
+async function steps(db: Db, tz: string, now: Date, n: Record<string, number>): Promise<void> {
   const exec = (q: Prisma.Sql) => db.$executeRaw(q);
 
   n.eventPayloads = await exec(Prisma.sql`
@@ -67,9 +82,6 @@ export async function runRetention(db: Db, tz: string, now = new Date(), correla
   n.metricsRolledUp = await rollupMetrics(db, tz, cutoff);
   n.metricPoints = await exec(Prisma.sql`
     DELETE FROM "MetricPoint" p USING "MetricSeries" s WHERE p."seriesKey" = s.key AND s.freq = 'raw' AND p.at < ${cutoff}`);
-
-  await appendAudit(db, [{ actor: 'runtime:retention', context: 'autonomous', kind: 'action', action: 'maintenance.retention', decision: 'act', outcome: 'ok', inputs: n, ...(correlationId ? { correlationId } : {}) }], now);
-  return n;
 }
 
 /** The series key a component's daily health share goes in. */

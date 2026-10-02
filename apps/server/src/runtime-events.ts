@@ -203,10 +203,15 @@ export class RuntimeEvents {
     renameSync(tmp, this.sending);
   }
 
-  private setAside(e: unknown, why: string): void {
+  private setAside(e: unknown, why: string, kind = 'other'): void {
     if (this.size(this.rejected) < REJECTED_MAX) appendFileSync(this.rejected, `${JSON.stringify(e)}\n`, { mode: 0o600 });
-    this.opts.log?.(`[events] ${why}; kept in events.rejected.jsonl`);
+    // Once per kind: a runtime refusing a whole type would otherwise log a line per event.
+    this.setAsideCount += 1;
+    this.logOnce(`aside:${kind}`, `[events] ${why}; kept in events.rejected.jsonl (later ones of this kind are counted, not logged)`);
   }
+
+  /** Events set aside since the server started. */
+  setAsideCount = 0;
 
   private async doFlush(): Promise<void> {
     const rt = this.opts.runtime();
@@ -247,7 +252,7 @@ export class RuntimeEvents {
           const one = await this.post(rt, [batch[i]!]);
           if (one === 'retry') return this.keep(events.slice(i));
           if (one === 'older') return this.keep([]);
-          if (one === 'refused') this.setAside(batch[i], `the runtime refused event ${batch[i]!.id} (${batch[i]!.type})`);
+          if (one === 'refused') this.setAside(batch[i], `the runtime refused event ${batch[i]!.id} (${batch[i]!.type})`, `refused:${batch[i]!.type}`);
         }
       }
       events = events.slice(batch.length);

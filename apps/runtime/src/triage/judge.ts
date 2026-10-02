@@ -46,7 +46,7 @@ export const DATA_CLIP = 200;
  * (a bot's PR, Flint's own included, is not news), never backfill.
  */
 export function needsJudgement(f: EventFacts): boolean {
-  if (f.backfill || !f.created || !f.entity) return false;
+  if (f.backfill || f.late || !f.created || !f.entity) return false;
   const e = f.entity;
   if (f.source === 'github') return (e.kind === 'issue' || e.kind === 'pull_request') && e.state.byBot !== true;
   if (f.source === 'nexus') return e.kind === 'thread';
