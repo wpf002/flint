@@ -158,5 +158,10 @@ describe('deploy events from the install scripts', () => {
     expect(at('\nDEPLOY_STAGE=\n')).toBeLessThan(at('echo "bundling server'));
     expect(at('verifying http://localhost')).toBeLessThan(at('deploy_event server deploy ok "$SHA"'));
     expect(at('deploy_event server deploy ok "$SHA"')).toBeLessThan(at('# ---- TAILNET'));
+    // A bundle that does not come up: recorded, then the one that was running goes back.
+    expect(at('cp -p "$DATA/server.mjs" "$DATA/server.mjs.prev"')).toBeLessThan(at('echo "bundling server'));
+    expect(at('did NOT come up')).toBeLessThan(at('deploy_event server health failed "$SHA"'));
+    expect(at('deploy_event server health failed "$SHA"')).toBeLessThan(at('cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"'));
+    expect(at('cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"')).toBeLessThan(at('deploy_event server deploy ok "$SHA"'));
   });
 });

@@ -84,6 +84,8 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
 fi
 DEPLOY_STAGE=
 
+# The bundle running now, kept: a new one that does not come up is replaced by it.
+[ -f "$DATA/server.mjs" ] && cp -p "$DATA/server.mjs" "$DATA/server.mjs.prev"
 echo "bundling server -> $DATA/server.mjs ..."
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
 # NOTE: @anthropic-ai/sdk is bundled IN (no --external) — the server is the
@@ -149,6 +151,14 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 if [ "$up" != 1 ]; then
   echo "✗ server did NOT come up on :$PORT_N — check $DATA/logs/server.err.log"
+  deploy_event server health failed "$SHA"
+  # Back to the bundle that was running (plan 3.0.6): Flint stays up on the old code.
+  if [ -f "$DATA/server.mjs.prev" ]; then
+    echo "  going back to the previous bundle"
+    cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"
+    launchctl unload "$AGENTS/$PLIST" 2>/dev/null || true
+    launchctl load -w "$AGENTS/$PLIST" || echo "✗ the previous bundle did not load either; load it with: launchctl load -w $AGENTS/$PLIST"
+  fi
   exit 1
 fi
 curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo

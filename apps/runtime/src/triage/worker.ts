@@ -119,7 +119,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
     decision = quietLog('fallback:deferred');
   }
   const byModel = decision.decidedBy.startsWith('model:') || /^fallback:(invalid|unavailable|capped|deferred)$/.test(decision.decidedBy);
-  const filed = await fileAction(db, f, decision, { alone: rules.tier === 'alone', now });
+  const filed = await fileAction(db, f, decision, { alone: rules.tier === 'alone', now, tz: config.tz });
   const recorded = await recordDecision(db, f, decision, { shadow: rules.shadow, tier: byModel ? model.tier : rules.tier, tz: config.tz, now, policies, bus: d.bus, ...filed });
   return recorded ? 'decided' : 'exists';
 }

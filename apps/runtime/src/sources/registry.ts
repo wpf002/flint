@@ -16,6 +16,9 @@ import type { Source } from './types.js';
 import { GITHUB_API, githubSource } from './github.js';
 import { RAILWAY_API, railwaySource } from './railway.js';
 import { nexusSource } from './nexus.js';
+import { deploySource } from './deploy.js';
+import { knowledgeSource } from './knowledge.js';
+import { nexusInboxSource } from './nexus-inbox.js';
 
 /** The loopback health endpoints. Flint listens on ::1 (apps/server/src/access.ts). */
 export const LOCAL_HEALTH: readonly HealthTarget[] = [
@@ -72,7 +75,20 @@ export function registry(config: Config, db: Db): Registered[] {
       ? [{ source: railwaySource({ projects: config.railway }), endpoints: [{ origin: new URL(RAILWAY_API).origin, pathPrefix: '/graphql/v2', methods: ['POST'] as const }] }]
       : []),
     ...(config.nexus
-      ? [{ source: nexusSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] }]
+      ? [
+          { source: nexusSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] },
+          { source: nexusInboxSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] },
+        ]
       : []),
+    // P2's event-only sources: local files, no network.
+    { source: deploySource({ file: join(config.home, '.flint', 'deploy-events.jsonl') }), endpoints: [] },
+    {
+      source: knowledgeSource({
+        file: join(config.home, '.flint', 'memory', 'knowledge.json'),
+        // What a fact may name: repos and services, never a person.
+        things: async () => db.entity.findMany({ where: { kind: { in: ['repo', 'service'] }, status: 'active' }, select: { id: true, kind: true, name: true }, take: 2000 }),
+      }),
+      endpoints: [],
+    },
   ].map((r) => ({ source: r.source, endpoints: r.endpoints.map((e) => ({ ...e, methods: [...e.methods] })) }));
 }

@@ -144,7 +144,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
 
   it('shadow: an act is not filed; its audit says what would have been', async () => {
     const issueId = (await db.entity.findFirstOrThrow({ where: { key: 'issue:github:wpf002/flint#1' } })).id;
-    const ev = await raised('knowledge', 'knowledge.fact', { kind: 'link', relation: 'relates_to', fromId: serviceId, toId: issueId, knowledgeId: 'k:1' });
+    const ev = await raised('knowledge', 'knowledge.fact', { knowledgeId: 'k1', entityIds: [serviceId, issueId], relation: 'runs', fromId: serviceId, toId: issueId });
     await processEvent({ eventId: ev }, deps());
     const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev } });
     expect(d).toMatchObject({ action: 'act', decidedBy: 'code:knowledge.fact' });
@@ -201,7 +201,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
   it('promoted: an act files one template proposal (the same fact again is the same proposal); unknown ids file nothing', async () => {
     await promotedDeps();
     const issueId = (await db.entity.findFirstOrThrow({ where: { key: 'issue:github:wpf002/flint#1' } })).id;
-    const fact = { kind: 'link', relation: 'depends_on', fromId: issueId, toId: serviceId, knowledgeId: 'k:2' };
+    const fact = { knowledgeId: 'k2', entityIds: [issueId, serviceId], relation: 'depends_on', fromId: issueId, toId: serviceId };
     const a = await raised('knowledge', 'knowledge.fact', fact);
     const b = await raised('knowledge', 'knowledge.fact', fact);
     for (const ev of [a, b]) await processEvent({ eventId: ev }, deps());
@@ -212,7 +212,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
       const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev } });
       expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: d.id } })).inputs).toMatchObject({ proposalId: filed[0]!.id });
     }
-    const ghost = await raised('knowledge', 'knowledge.fact', { ...fact, toId: 'cnosuchentity1', knowledgeId: 'k:3' });
+    const ghost = await raised('knowledge', 'knowledge.fact', { ...fact, toId: 'cnosuchentity1', knowledgeId: 'k3' });
     await processEvent({ eventId: ghost }, deps());
     expect(await db.proposal.count({ where: { origin: 'runtime:triage' } })).toBe(1);
   });

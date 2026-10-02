@@ -57,11 +57,12 @@ describe('critical code rules', () => {
     expect(await codeVerdict(f, { routeErrorsIn10m: async () => 9, burstEscalatedThisOutage: async () => true })).toMatchObject({ action: 'log', lane: 'quiet' });
   });
 
-  it('a handoff escalates once per sender a day; a knowledge fact acts', async () => {
+  it('a handoff escalates once per sender a day; a knowledge fact acts only with a relation', async () => {
     const h = await codeVerdict(facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', payload: { namespace: 'trident' } }), noCode);
     expect(h).toMatchObject({ action: 'escalate', perDay: { key: 'notify.handoff:trident', limit: 1 }, template: { id: 'handoff_unaccepted', fields: { namespace: 'trident' } } });
     const bad = await codeVerdict(facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', payload: { namespace: 'Robert"); DROP' } }), noCode);
     expect(bad?.perDay?.key).toBe('notify.handoff:unknown');
-    expect(await codeVerdict(facts({ source: 'knowledge', type: 'knowledge.fact' }), noCode)).toMatchObject({ action: 'act', lane: 'quiet' });
+    expect(await codeVerdict(facts({ source: 'knowledge', type: 'knowledge.fact', payload: { relation: 'runs', fromId: 'a1', toId: 'b2' } }), noCode)).toMatchObject({ action: 'act', lane: 'quiet' });
+    expect(await codeVerdict(facts({ source: 'knowledge', type: 'knowledge.fact', payload: { entityIds: ['a1'] } }), noCode)).toMatchObject({ action: 'log', lane: 'quiet' });
   });
 });

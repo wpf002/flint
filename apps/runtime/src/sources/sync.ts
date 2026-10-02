@@ -107,6 +107,25 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     summary[outcome] += 1;
   }
 
+  // Event-only sources: each event applied with its triage job; nothing enters the world model.
+  for (const e of result.events ?? []) {
+    const event: EventIn = { source: source.name, ...e, occurredAt: sourceTime(e.occurredAt, run.now) };
+    try {
+      const id = await db.$transaction(async (tx) => {
+        const id = await recordEvent(tx, event, run.now);
+        if (!id) return null;
+        await markProcessed(tx, id, 'applied', run.now);
+        if (enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, id);
+        return id;
+      });
+      if (id) summary.created += 1;
+      else summary.unchanged += 1;
+    } catch (err) {
+      summary.failed += 1;
+      await recordFailure(db, event, err, run.now).catch(() => {});
+    }
+  }
+
   for (const m of result.metrics) {
     let entityId: string | null = null;
     if (m.series.entityKey) {

@@ -40,10 +40,10 @@ describe('triage rules', () => {
   });
 
   it('per-sender cap: only on a structural sender, keyed per rule and sender', () => {
-    const r = db({ source: 'nexus_inbox', eventType: 'handoff.received', perSenderDailyCap: 2, action: 'escalate', lane: 'relevant' });
-    expect(ruleVerdict(r, facts({ source: 'nexus_inbox', type: 'handoff.received', payload: { namespace: 'trident' } }))?.perDay).toEqual({ key: 'triage.sender:r1:trident', limit: 2 });
-    expect(ruleVerdict(r, facts({ source: 'nexus_inbox', type: 'handoff.received', tainted: true, payload: { namespace: 'trident' } }))?.perDay).toEqual({ key: 'triage.sender:r1:unknown', limit: 2 });
-    expect(ruleProblems(args({ source: 'nexus_inbox', eventType: 'handoff.received', predicate: { all: [{ path: 'payload.kind', op: 'exists' }] }, perSenderDailyCap: 2 }))).toEqual([]);
+    const r = db({ source: 'nexus_inbox', eventType: 'handoff.unaccepted_24h', perSenderDailyCap: 2, action: 'escalate', lane: 'relevant' });
+    expect(ruleVerdict(r, facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', payload: { namespace: 'trident' } }))?.perDay).toEqual({ key: 'triage.sender:r1:trident', limit: 2 });
+    expect(ruleVerdict(r, facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', tainted: true, payload: { namespace: 'trident' } }))?.perDay).toEqual({ key: 'triage.sender:r1:unknown', limit: 2 });
+    expect(ruleProblems(args({ source: 'nexus_inbox', eventType: 'handoff.unaccepted_24h', predicate: { all: [{ path: 'payload.hours', op: 'gt', value: 48 }] }, perSenderDailyCap: 2 }))).toEqual([]);
   });
 
   it('a DB escalate renders rule_match with refs, never a name', async () => {

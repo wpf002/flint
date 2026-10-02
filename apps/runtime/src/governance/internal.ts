@@ -12,8 +12,9 @@ import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { Refused, claimProposal, completeProposal } from './proposals.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
+import { ACTION_TEMPLATES } from '../templates/actions.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create']);
+export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write']);
 
 /**
  * A triage rule is policy (kind `rule`): its predicate may read only the
@@ -72,6 +73,18 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await db.sourceCursor.upsert({ where: { source }, create: { source, cursor: '', enabled: true }, update: { enabled: true } });
       await completeProposal(db, id, { ok: true, result: { source, enabled: true } }, actor);
       return { source, enabled: true };
+    }
+    if (claimed.action === 'world.relation.write') {
+      // Only the link a knowledge fact proposed (template knowledge.link), between two things that are still here.
+      const p = await db.proposal.findUniqueOrThrow({ where: { id }, select: { templateId: true, tainted: true } });
+      if (p.templateId !== 'knowledge.link') throw new Refused(409, 'the runtime writes only the knowledge.link relation');
+      const link = ACTION_TEMPLATES['knowledge.link'].params.parse(claimed.args);
+      if ((await db.entity.count({ where: { id: { in: [link.fromId, link.toId] }, status: 'active' } })) !== 2) throw new Refused(409, 'one of the two is no longer in the world model');
+      const rel = await db.relation.create({
+        data: { type: link.type, fromId: link.fromId, toId: link.toId, attrs: { knowledgeId: link.knowledgeId }, tainted: true, validFrom: new Date() },
+      });
+      await completeProposal(db, id, { ok: true, result: { relationId: rel.id } }, actor);
+      return { relationId: rel.id };
     }
     if (claimed.action === 'triage.rule.create') {
       const why = refuseRule(claimed.args);

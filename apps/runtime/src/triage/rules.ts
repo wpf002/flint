@@ -58,9 +58,8 @@ export const RULE_PATHS: Readonly<Record<string, readonly string[]>> = {
   'deploy:restart.failed': ['payload.component'],
   'deploy:health.failed': ['payload.component'],
   'deploy:deploy.ok': ['payload.component'],
-  'nexus_inbox:handoff.received': ['payload.namespace', 'payload.kind'],
-  'nexus_inbox:handoff.unaccepted_24h': ['payload.namespace', 'payload.kind'],
-  'knowledge:knowledge.fact': ['payload.kind'],
+  'nexus_inbox:handoff.unaccepted_24h': ['payload.namespace', 'payload.kind', 'payload.hours'],
+  'knowledge:knowledge.fact': ['payload.relation'],
 };
 const WILDCARD_PATHS = ENTITY;
 

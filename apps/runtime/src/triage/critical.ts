@@ -14,7 +14,8 @@
  *  - a failed restart or health check after a deploy (it rolled back): escalate;
  *  - more than 5 server route errors in 10 minutes: escalate once per outage;
  *  - a Nexus handoff to Flint unaccepted for 24 h: escalate, once per sender a day;
- *  - a knowledge fact: act (it becomes a link proposal, never a person);
+ *  - a knowledge fact naming two things and a relation: act (a link
+ *    proposal, never a person); any other: log;
  *  - a source's circuit opening: logged in the relevant lane (closing: quietly).
  *
  * Fields are typed: refs, enums, numbers and hex SHAs. A raised event carries
@@ -112,7 +113,9 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
   if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
   if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };
   if (name === 'knowledge:knowledge.fact') {
-    return { action: 'act', lane: 'quiet', decidedBy: 'code:knowledge.fact', ruleName: 'knowledge.fact', critical: false };
+    // Two things and a relation between them: propose the link. Anything else is only logged.
+    const linked = typeof f.payload.relation === 'string' && typeof f.payload.fromId === 'string' && typeof f.payload.toId === 'string';
+    return { action: linked ? 'act' : 'log', lane: 'quiet', decidedBy: 'code:knowledge.fact', ruleName: 'knowledge.fact', critical: false };
   }
   return undefined;
 }
