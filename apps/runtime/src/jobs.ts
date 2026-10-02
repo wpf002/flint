@@ -17,6 +17,12 @@ import { reconcile } from './triage/reconcile.js';
 import { processEvent, TriageJob } from './triage/worker.js';
 import { deliver } from './surface/deliver.js';
 import { expireEscalations } from './surface/expire.js';
+import { checkComponents, recordChecks } from './health/checks.js';
+import { raise, watchdog } from './health/watchdog.js';
+import { circuitAllows, circuitEvents } from './health/circuits.js';
+import { pushSpend } from './spend/push.js';
+import { resolveTier, runsInShadow } from '@flint/policy';
+import { activePolicies } from './governance/proposals.js';
 import { z } from 'zod';
 
 const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
@@ -47,8 +53,16 @@ export function syncJobs(ctx: JobContext): JobSpec[] {
     queue: `sync.${r.source.name}`,
     cron: cronFor(r.source.cadenceMs),
     handler: async () => {
-      const s = await runLocked(ctx.db, r, ctx.config.tz, new Date(), enqueue);
-      if (s?.failed || (s && !s.ran && s.reason && !s.reason.startsWith('not enabled'))) ctx.log(`sync ${r.source.name}: ${s.reason ?? `${s.failed} failed`}`, s);
+      const now = new Date();
+      const cursor = () => ctx.db.sourceCursor.findUnique({ where: { source: r.source.name }, select: { consecutiveFailures: true, lastOkAt: true, updatedAt: true } });
+      const before = await cursor();
+      // An open circuit: skipped, but for one try every 6 cadences.
+      if (!circuitAllows(before, r.source.cadenceMs, now)) return;
+      const s = await runLocked(ctx.db, r, ctx.config.tz, now, enqueue);
+      if (s?.failed || (s && !s.ran && s.reason && !s.reason.startsWith('not enabled'))) ctx.log(`sync ${r.source.name}: ${s.reason ?? `${s.failed} failed`}`, { failed: s.failed });
+      if (s?.ran) await raise(ctx.db, circuitEvents(r.source.name, before, await cursor(), new Date()), new Date(), enqueue);
+      // The server's unified spend view, fresh after each spend sync.
+      if (r.source.name === 'spend' && s?.ran && !s.failed && (await pushSpend(ctx.config)) === 'failed') ctx.log('pushing the spend view to the server failed');
     },
   }));
 }
@@ -91,9 +105,41 @@ export function triageJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/** May an autonomous action run now: promoted, or in shadow at APPROVAL. */
+async function mayRun(ctx: JobContext, action: string): Promise<boolean> {
+  const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(ctx.db) });
+  return t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action));
+}
+
 /** Housekeeping that runs whether triage is on or not. */
 export function housekeepingJobs(ctx: JobContext): JobSpec[] {
+  const enqueue = ctx.config.triage ? triageEnqueue(ctx.bus) : undefined;
+  const sources = ctx.sources.map((r) => ({ name: r.source.name, cadenceMs: r.source.cadenceMs }));
   return [
+    {
+      // Every 5 minutes: the checks, then the watchdog raises what is critical.
+      queue: 'health',
+      cron: '*/5 * * * *',
+      handler: async () => {
+        if (!(await mayRun(ctx, 'health.check'))) return;
+        const now = new Date();
+        const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources });
+        await recordChecks(ctx.db, checks, now);
+        const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now), now, enqueue);
+        if (raised.length) ctx.log(`watchdog raised ${raised.length} event(s)`);
+      },
+    },
+    {
+      // Weekly: the restore drill's age on its own, in case the 5-minute run is wedged.
+      queue: 'drill.check',
+      cron: '15 9 * * 1',
+      missed: 'once',
+      handler: async () => {
+        const now = new Date();
+        const drill = (await checkComponents({ db: ctx.db, config: ctx.config, now, sources: [] })).filter((c) => c.component === 'restore_drill');
+        await ctx.db.healthCheck.createMany({ data: drill.map((c) => ({ component: c.component, status: c.status, detail: c.detail ?? null, at: now })) });
+      },
+    },
     {
       queue: 'expire.escalations',
       cron: '7 * * * *',

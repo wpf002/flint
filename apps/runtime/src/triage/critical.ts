@@ -14,7 +14,8 @@
  *  - a failed restart or health check after a deploy (it rolled back): escalate;
  *  - more than 5 server route errors in 10 minutes: escalate once per outage;
  *  - a Nexus handoff to Flint unaccepted for 24 h: escalate, once per sender a day;
- *  - a knowledge fact: act (it becomes a link proposal, never a person).
+ *  - a knowledge fact: act (it becomes a link proposal, never a person);
+ *  - a source's circuit opening: logged in the relevant lane (closing: quietly).
  *
  * Fields are typed: refs, enums, numbers and hex SHAs. A raised event carries
  * its entity's id, never its name.
@@ -105,6 +106,9 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
       perDay: { key: `notify.handoff:${ns ?? 'unknown'}`, limit: 1 },
     };
   }
+  // A source failing 5 times in a row: in the relevant lane, no ping; its recovery quietly.
+  if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
+  if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };
   if (name === 'knowledge:knowledge.fact') {
     return { action: 'act', lane: 'quiet', decidedBy: 'code:knowledge.fact', ruleName: 'knowledge.fact', critical: false };
   }

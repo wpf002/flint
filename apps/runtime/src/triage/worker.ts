@@ -111,7 +111,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
       return 'deferred';
     }
     // Chat has been busy for ten minutes: decide without the model, and say so.
-    await db.healthCheck.create({ data: { component: 'triage', status: 'degraded', detail: `an event waited ${MAX_DEFERRALS} times for chat to finish; decided by rules alone`, at: now } });
+    await db.healthCheck.create({ data: { component: 'triage.deferral', status: 'degraded', detail: `an event waited ${MAX_DEFERRALS} times for chat to finish; decided by rules alone`, at: now } });
     decision = quietLog('fallback:deferred');
   }
   const byModel = decision.decidedBy.startsWith('model:') || /^fallback:(invalid|unavailable|capped|deferred)$/.test(decision.decidedBy);
