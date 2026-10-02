@@ -50,12 +50,14 @@ export async function recordEvent(tx: Tx, e: EventIn, now: Date): Promise<string
 /**
  * The same condition seen again while it still holds (a watchdog condition, a
  * handoff still pending): its event, if not yet decided, is as fresh as this
- * sighting, so triage never takes a condition that holds now for old news.
+ * sighting, with this sighting's reading, so triage never takes a condition
+ * that holds now for old news.
  * Returns the id when it was refreshed (its triage job may then be sent).
  */
-export async function refreshUndecided(tx: Tx, source: string, sourceRef: string, now: Date): Promise<string | null> {
+export async function refreshUndecided(tx: Tx, source: string, sourceRef: string, now: Date, payload: Record<string, unknown>): Promise<string | null> {
+  // The latest reading too (how long it has been down, how old the backup is), as exact JSON, hashed as written.
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    UPDATE "SourceEvent" e SET "receivedAt" = ${now}, "occurredAt" = ${now}
+    UPDATE "SourceEvent" e SET "receivedAt" = ${now}, "occurredAt" = ${now}, payload = ${JSON.stringify(payload)}::jsonb, "payloadHash" = ${digestOf(payload)}
     WHERE e.source = ${source} AND e."sourceRef" = ${sourceRef.slice(0, 500)} AND e.status = 'applied'
       AND NOT EXISTS (SELECT 1 FROM "TriageDecision" d WHERE d."sourceEventId" = e.id)
     RETURNING e.id`;

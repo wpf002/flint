@@ -20,7 +20,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { localDay, localDayBounds } from '@flint/policy';
 import type { Config } from '../config.js';
-import type { Db } from '../db.js';
+import type { Db, Tx } from '../db.js';
 import { markProcessed, recordEvent, refreshUndecided, type Enqueue } from '../events/record.js';
 import { faultAt } from '../config.js';
 
@@ -43,8 +43,9 @@ export function isDown(key: string, state: unknown): boolean | undefined {
   const s = (state ?? {}) as { health?: unknown; running?: unknown; loaded?: unknown; disabled?: unknown };
   if (key.startsWith('service:endpoint:')) return s.health === undefined ? undefined : s.health === 'down';
   // A disabled agent was put away on purpose: that says nothing. One that is merely not loaded (a
-  // bootstrap that kept failing) is down.
-  if (s.disabled === true) return undefined;
+  // bootstrap that kept failing) is down. A state that does not say (written before the source
+  // read `launchctl print-disabled`) says nothing either.
+  if (s.disabled !== false) return undefined;
   return typeof s.running === 'boolean' ? !s.running : undefined;
 }
 
@@ -97,8 +98,24 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
   return out;
 }
 
-/** Store raised conditions as applied runtime events (once per ref), each with its triage job; returns the new ids. */
-export async function raise(db: Db, raised: readonly Raised[], now: Date, enqueue?: Enqueue): Promise<string[]> {
+/** The event's decision escalated and every one of its deliveries was held (shadow, or notify.* not promoted). */
+async function heldOnly(tx: Tx, sourceRef: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ held: boolean }>>`
+    SELECT bool_and(d.status = 'held') AS held FROM "SourceEvent" e
+    JOIN "TriageDecision" t ON t."sourceEventId" = e.id
+    JOIN "Escalation" x ON x."triageDecisionId" = t.id
+    JOIN "EscalationDelivery" d ON d."escalationId" = x.id
+    WHERE e.source = 'runtime' AND e."sourceRef" = ${sourceRef}`;
+  return rows[0]?.held === true;
+}
+
+/**
+ * Store raised conditions as applied runtime events (once per ref), each with
+ * its triage job; returns the new ids. `retell`: triage and the console note
+ * are promoted now, so a condition still holding whose only escalation was
+ * held is told once more.
+ */
+export async function raise(db: Db, raised: readonly Raised[], now: Date, enqueue?: Enqueue, retell = false): Promise<string[]> {
   const ids: string[] = [];
   for (const r of raised) {
     const id = await db.$transaction(async (tx) => {
@@ -106,8 +123,17 @@ export async function raise(db: Db, raised: readonly Raised[], now: Date, enqueu
       const id = await recordEvent(tx, { source: 'runtime', sourceRef, type: r.type, occurredAt: r.occurredAt, sensitivity: 'ops', tainted: false, payload: r.payload }, now);
       if (!id) {
         // Seen before and still holding: if it is still undecided (triage was off), it is current, not old news.
-        const again = await refreshUndecided(tx, 'runtime', sourceRef, now);
+        const again = await refreshUndecided(tx, 'runtime', sourceRef, now, r.payload);
         if (again && enqueue) await enqueue(tx, again);
+        // Decided only in shadow (nothing delivered) and promoted since: told once more, as its own occurrence.
+        if (!again && retell && (await heldOnly(tx, sourceRef))) {
+          const told = await recordEvent(tx, { source: 'runtime', sourceRef: `${sourceRef}:retold`, type: r.type, occurredAt: now, sensitivity: 'ops', tainted: false, payload: r.payload }, now);
+          if (told) {
+            await markProcessed(tx, told, 'applied', now);
+            if (enqueue) await enqueue(tx, told);
+          }
+          return told;
+        }
         return null;
       }
       await markProcessed(tx, id, 'applied', now);

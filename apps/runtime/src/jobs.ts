@@ -110,6 +110,13 @@ export function triageJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/** Triage and the console note are promoted: escalations are delivered, not held. */
+async function promoted(ctx: JobContext): Promise<boolean> {
+  const policies = await activePolicies(ctx.db);
+  const alone = (a: string) => resolveTier(a, { context: 'autonomous', tainted: false, policies }).tier === 'alone';
+  return ctx.config.triage && alone('triage.rule') && alone('notify.inapp');
+}
+
 /** May an autonomous action run now: promoted, or in shadow at APPROVAL. */
 async function mayRun(ctx: JobContext, action: string): Promise<boolean> {
   const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(ctx.db) });
@@ -130,7 +137,7 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
         const now = new Date();
         const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources });
         await recordChecks(ctx.db, checks, now);
-        const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now), now, enqueue);
+        const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now), now, enqueue, await promoted(ctx));
         if (raised.length) ctx.log(`watchdog raised ${raised.length} event(s)`);
       },
     },

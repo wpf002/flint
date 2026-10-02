@@ -116,7 +116,7 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
         const id = await recordEvent(tx, event, run.now);
         if (!id) {
           if (current) {
-            const again = await refreshUndecided(tx, source.name, e.sourceRef, run.now);
+            const again = await refreshUndecided(tx, source.name, e.sourceRef, run.now, e.payload);
             if (again && enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, again);
           }
           return null;

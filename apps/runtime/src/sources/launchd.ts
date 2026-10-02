@@ -46,7 +46,7 @@ export function launchdSource(o: LaunchdOptions): Source {
   return {
     name: 'launchd',
     cadenceMs: 2 * 60_000,
-    async run() {
+    async run(r) {
       const listed = parseLaunchctlList(await o.run('/bin/launchctl', ['list']));
       // Disabled with `launchctl disable` (the plist may say nothing): put away, not failed.
       const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
@@ -78,10 +78,20 @@ export function launchdSource(o: LaunchdOptions): Source {
             loaded: !!l,
             ...(p?.periodic ? {} : { running: !!l?.pid }),
             lastExit: l?.status ?? null,
-            ...(p?.disabled ? { disabled: true } : {}),
+            // Always said, so "not disabled" is known, not assumed: only a disabled agent is put away on purpose.
+            disabled: !!p?.disabled,
           },
         };
       });
+      // An agent of ours with neither a plist nor a listing is gone: archived as last known, not left "down".
+      if (r.known) {
+        for (const k of await r.known('service')) {
+          if (!k.key.startsWith('service:launchd:')) continue;
+          const label = k.key.slice('service:launchd:'.length);
+          if (labels.has(label) || !ours(label)) continue;
+          observations.push({ type: 'service.status', kind: 'service', key: k.key, name: k.name, sensitivity: 'ops', externalId: label, taintedPaths: k.taintedPaths, state: k.state, status: 'archived' });
+        }
+      }
       return { observations, metrics: [] };
     },
   };

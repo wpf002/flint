@@ -155,8 +155,9 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     const holding = { type: 'backup.stale', ref: 'still-holding', occurredAt: new Date(), payload: { hoursSince: 40 } };
     const [id] = await raise(db, [holding], new Date());
     await owner(`UPDATE "SourceEvent" SET "receivedAt" = "receivedAt" - interval '2 days', "occurredAt" = "occurredAt" - interval '2 days' WHERE id = $1`, [id]);
-    // Triage back on: the watchdog sees it again, and sends its job.
-    expect(await raise(db, [holding], new Date(), enqueue)).toEqual([]);
+    // Triage back on: the watchdog sees it again (an older backup by now), and sends its job.
+    expect(await raise(db, [{ ...holding, payload: { hoursSince: 90 } }], new Date(), enqueue)).toEqual([]);
+    expect((await db.sourceEvent.findUniqueOrThrow({ where: { id: id! } })).payload).toEqual({ hoursSince: 90 });
     expect((await jobsFor(id!)).length).toBe(1);
     await processEvent({ eventId: id! }, { db, config: { tz: 'UTC' }, bus: { boss: { send: async () => null } } as never, load: async () => 'proceed' });
     expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } })).toMatchObject({ action: 'escalate', critical: true });
@@ -226,5 +227,17 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     expect(s.failed).toBe(0);
     expect((await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: { startsWith: 'pull_request:wpf002/flint#99@' } } })).status).toBe('applied');
     expect((await db.sourceCursor.findUniqueOrThrow({ where: { source: 'github' } })).consecutiveFailures).toBe(0);
+  });
+
+  it('a late watchdog event whose condition still holds escalates even when its job runs before the watchdog', async () => {
+    const at = new Date(Date.now() - 40 * 3_600_000);
+    await owner(`INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt") VALUES ('bkrecheck', 'pg_dump_flint', 'local', '/x', false, 'ok', $1)`, [at]);
+    const { watchdog } = await import('../src/health/watchdog');
+    const cond = (await watchdog(db, { home: '/nonexistent', tz: 'UTC' }, new Date())).find((r) => r.type === 'backup.stale')!;
+    expect(cond.ref).toBe('after:bkrecheck');
+    const [id] = await raise(db, [cond], new Date());
+    await owner(`UPDATE "SourceEvent" SET "receivedAt" = "receivedAt" - interval '2 days' WHERE id = $1`, [id]);
+    await processEvent({ eventId: id! }, { db, config: { tz: 'UTC', home: '/nonexistent' }, bus: { boss: { send: async () => null } } as never, load: async () => 'proceed' });
+    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } })).toMatchObject({ action: 'escalate', critical: true });
   });
 });

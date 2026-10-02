@@ -21,6 +21,8 @@ import { claim } from '../governance/counters.js';
 import { recordDecision } from '../surface/record.js';
 import { fileAction } from '../surface/act.js';
 import { loadFacts } from './facts.js';
+import { watchdog } from '../health/watchdog.js';
+import { refreshUndecided } from '../events/record.js';
 import { judge } from './judge.js';
 import { chatLoad, type Load } from './load.js';
 import { decide } from './triage.js';
@@ -36,7 +38,7 @@ export const MAX_DEFERRALS = 40;
 
 export interface WorkerDeps {
   db: Db;
-  config: Pick<Config, 'tz' | 'server' | 'ollama'>;
+  config: Pick<Config, 'tz' | 'server' | 'ollama'> & Partial<Pick<Config, 'home'>>;
   bus: Pick<Bus, 'boss'>;
   /** For the tests: the load check and the model's fetch. */
   load?: () => Promise<Load>;
@@ -53,7 +55,7 @@ function standing(action: string, tainted: boolean, policies: Awaited<ReturnType
 }
 
 /** The non-critical code rules' reads. */
-export function codeContext(db: Db): CodeRuleContext {
+export function codeContext(db: Db, delivering = false): CodeRuleContext {
   return {
     async routeErrorsIn10m(at) {
       return db.sourceEvent.count({ where: { source: 'server', type: 'route.error', occurredAt: { gt: new Date(at.getTime() - 10 * 60_000), lte: at } } });
@@ -72,7 +74,13 @@ export function codeContext(db: Db): CodeRuleContext {
       return Number(n[0]?.n ?? 0) > 0;
     },
     async escalatedRecently(templateId, field, value, withinMs, at) {
-      const n = await db.escalation.count({ where: { templateId, createdAt: { gt: new Date(at.getTime() - withinMs) }, fields: { path: [field], equals: value } } });
+      // While escalations are delivered, told means a delivery that was not held; in shadow, recorded is enough.
+      const n = await db.escalation.count({
+        where: {
+          templateId, createdAt: { gt: new Date(at.getTime() - withinMs) }, fields: { path: [field], equals: value },
+          ...(delivering ? { deliveries: { some: { status: { not: 'held' } } } } : {}),
+        },
+      });
       return n > 0;
     },
   };
@@ -84,6 +92,16 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
   const now = d.now?.() ?? new Date();
   const f = await loadFacts(db, job.eventId, now);
   if (!f) return 'gone';
+  // A watchdog condition that waited a day to be decided: if it still holds now, it is not old news,
+  // whichever of this job and the next health run came first.
+  if (f.late && f.source === 'runtime' && config.home !== undefined) {
+    const ev = await db.sourceEvent.findUnique({ where: { id: job.eventId }, select: { sourceRef: true } });
+    const still = (await watchdog(db, { home: config.home, tz: config.tz }, now)).find((r) => `${r.type}:${r.ref}` === ev?.sourceRef);
+    if (still) {
+      await db.$transaction((tx) => refreshUndecided(tx, 'runtime', ev!.sourceRef, now, still.payload));
+      Object.assign(f, { late: false, payload: still.payload });
+    }
+  }
   const policies = await activePolicies(db, now);
   const rules = standing('triage.rule', f.tainted, policies, now);
   const model = standing('triage.local_model', f.tainted, policies, now);
@@ -92,7 +110,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
   const ollama = config.ollama;
   let decision = await decide(f, {
     rules: dbRules,
-    code: codeContext(db),
+    code: codeContext(db, !rules.shadow && standing('notify.inapp', false, policies, now).tier === 'alone'),
     rulesAllowed: rules.may,
     ...(ollama && model.may
       ? {

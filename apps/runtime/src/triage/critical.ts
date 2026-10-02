@@ -80,7 +80,11 @@ export interface CodeRuleContext {
   routeErrorsIn10m(at: Date): Promise<number>;
   /** A burst was already escalated in this outage (since the last 30 quiet minutes). */
   burstEscalatedThisOutage(at: Date): Promise<boolean>;
-  /** An escalation of this template with this field value was made within the window before `at`. */
+  /**
+   * An escalation of this template with this field value was made within the
+   * window before `at`. Once escalations are delivered, only one that was
+   * (not held) counts: a shadow escalation told nobody.
+   */
   escalatedRecently?(templateId: string, field: string, value: string, withinMs: number, at: Date): Promise<boolean>;
 }
 

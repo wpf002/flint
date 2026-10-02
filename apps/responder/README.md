@@ -153,7 +153,9 @@ cp scripts/com.nexus.responder.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nexus.responder.plist
 ```
 
-Stop it with `launchctl bootout gui/$(id -u)/com.nexus.responder`. Output goes to
+Stop it with `launchctl disable gui/$(id -u)/com.nexus.responder` and then
+`launchctl bootout gui/$(id -u)/com.nexus.responder` (disabled first, so the
+runtime's watchdog knows it was stopped on purpose, not that it failed). Output goes to
 `~/.flint/logs/nexus-responder.log`.
 
 ### The cap that matters once it is supervised

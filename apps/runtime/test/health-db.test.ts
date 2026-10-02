@@ -68,7 +68,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
   let config: Config;
   let home: string;
   const owner = (sql: string, params: unknown[] = []) => withClient(urls.owner, (c) => c.query(sql, params));
-  const svc = (running: boolean, lastExit = 0): SourceObservation => ({ type: 'service.status', kind: 'service', key: 'service:launchd:com.flint.watched', name: 'com.flint.watched', sensitivity: 'ops', externalId: 'com.flint.watched', state: { managedBy: 'launchd', loaded: true, running, lastExit } });
+  const svc = (running: boolean, lastExit = 0): SourceObservation => ({ type: 'service.status', kind: 'service', key: 'service:launchd:com.flint.watched', name: 'com.flint.watched', sensitivity: 'ops', externalId: 'com.flint.watched', state: { managedBy: 'launchd', loaded: true, running, lastExit, disabled: false } });
   const launchd = (o: () => SourceObservation[]): Source => ({ name: 'launchd', cadenceMs: 2 * MIN, run: async () => ({ observations: o(), metrics: [] }) });
 
   beforeAll(async () => {
@@ -171,10 +171,21 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
   it('a disabled agent is never "down"; one that is merely not loaded (a failed bootstrap) is', async () => {
     const t0 = new Date(Date.now() - 2 * 3_600_000);
     const parked = (label: string, extra: Record<string, unknown>): SourceObservation => ({ type: 'service.status', kind: 'service', key: `service:launchd:${label}`, name: label, sensitivity: 'ops', externalId: label, state: { managedBy: 'launchd', running: false, lastExit: null, ...extra } });
-    await syncOnce(db, launchd(() => [parked('com.nexus.ui', { loaded: false, disabled: true }), parked('com.flint.stuck', { loaded: false })]), runAt(t0), 'UTC');
+    await syncOnce(db, launchd(() => [parked('com.nexus.ui', { loaded: false, disabled: true }), parked('com.flint.stuck', { loaded: false, disabled: false }), parked('com.flint.unsaid', { loaded: false })]), runAt(t0), 'UTC');
     const id = async (key: string) => (await db.entity.findFirstOrThrow({ where: { key } })).id;
     const raised = (await watchdog(db, config, new Date())).filter((r) => r.type === 'service.down_30m').map((r) => r.payload.entityId);
     expect(raised).not.toContain(await id('service:launchd:com.nexus.ui'));
     expect(raised).toContain(await id('service:launchd:com.flint.stuck'));
+    // A state written before the source said whether it was disabled says nothing.
+    expect(raised).not.toContain(await id('service:launchd:com.flint.unsaid'));
+  });
+
+  it('the launchd source archives an agent of ours that is neither listed nor installed', async () => {
+    const { launchdSource } = await import('../src/sources/launchd');
+    const dir = mkdtempSync(join(tmpdir(), 'agents-'));
+    const run = async (cmd: string, args: readonly string[]) => (cmd.endsWith('launchctl') ? (args[0] === 'list' ? 'PID\tStatus\tLabel\n' : '') : '{}');
+    const known = async () => [{ key: 'service:launchd:com.flint.gone', name: 'com.flint.gone', state: { managedBy: 'launchd', loaded: true, running: true, lastExit: 0, disabled: false }, taintedPaths: [] }];
+    const r = await launchdSource({ run, agentsDir: dir, prefixes: ['com.flint.'] }).run({ now: new Date(), signal: new AbortController().signal, fetch: async () => new Response(null), known });
+    expect(r.observations).toMatchObject([{ key: 'service:launchd:com.flint.gone', status: 'archived' }]);
   });
 });

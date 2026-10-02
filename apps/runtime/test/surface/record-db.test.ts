@@ -109,6 +109,15 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     expect(rec).toMatchObject({ type: 'escalation_action', prediction: { resolver: 'conditional', conditionRecommendationId: rec.id, probability: 0.8 } });
   });
 
+  let heldRef = '';
+  it('shadow: a watchdog condition decided now is held (it is told again after promotion, below)', async () => {
+    const { raise } = await import('../../src/health/watchdog');
+    const [id] = await raise(db, [{ type: 'drill.failed', ref: 'held-drill', occurredAt: new Date(), payload: { mismatches: 1 } }], new Date());
+    heldRef = 'drill.failed:held-drill';
+    await processEvent({ eventId: id! }, deps());
+    expect((await escalationOf(id!)).escalation.deliveries.every((d) => d.status === 'held')).toBe(true);
+  });
+
   it('no entity → no prediction; the escalation is still made', async () => {
     const ev = await raised('runtime', 'service.down_30m', { downMinutes: 35 });
     await processEvent({ eventId: ev }, deps());
@@ -215,6 +224,19 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     const ghost = await raised('knowledge', 'knowledge.fact', { ...fact, toId: 'cnosuchentity1', knowledgeId: 'k3' });
     await processEvent({ eventId: ghost }, deps());
     expect(await db.proposal.count({ where: { origin: 'runtime:triage' } })).toBe(1);
+  });
+
+  it('promoted: a condition still holding whose only escalation was held is told once more', async () => {
+    await promotedDeps();
+    const { raise } = await import('../../src/health/watchdog');
+    const cond = { type: 'drill.failed', ref: 'held-drill', occurredAt: new Date(), payload: { mismatches: 1 } };
+    const [retold] = await raise(db, [cond], new Date(), undefined, true);
+    expect(retold).toBeTruthy();
+    expect((await db.sourceEvent.findUniqueOrThrow({ where: { id: retold! } })).sourceRef).toBe(`${heldRef}:retold`);
+    await processEvent({ eventId: retold! }, deps());
+    expect((await escalationOf(retold!)).escalation.deliveries.some((d) => d.status === 'pending')).toBe(true);
+    // Once: seen again, nothing more.
+    expect(await raise(db, [cond], new Date(), undefined, true)).toEqual([]);
   });
 
   it('a critical ping over the cap is sent and counted (4); the next non-critical one gets no ping', async () => {

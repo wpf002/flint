@@ -55,8 +55,8 @@ describe('launchd', () => {
     const r = await launchdSource({ run, agentsDir: dir, prefixes: ['com.flint.'] }).run(runAt(new Date()) as SourceRun);
     const byKey = Object.fromEntries(r.observations.map((o) => [o.key, o.state]));
     expect(Object.keys(byKey).sort()).toEqual(['service:launchd:com.flint.deploy', 'service:launchd:com.flint.retired', 'service:launchd:com.flint.searxng', 'service:launchd:com.flint.server']);
-    expect(byKey['service:launchd:com.flint.server']).toEqual({ managedBy: 'launchd', loaded: true, running: true, lastExit: -15 });
-    expect(byKey['service:launchd:com.flint.deploy']).toEqual({ managedBy: 'launchd', loaded: true, lastExit: 0 });
+    expect(byKey['service:launchd:com.flint.server']).toEqual({ managedBy: 'launchd', loaded: true, running: true, lastExit: -15, disabled: false });
+    expect(byKey['service:launchd:com.flint.deploy']).toEqual({ managedBy: 'launchd', loaded: true, lastExit: 0, disabled: false });
     expect(byKey['service:launchd:com.flint.retired']).toEqual({ managedBy: 'launchd', loaded: false, running: false, lastExit: null, disabled: true });
   });
 });
