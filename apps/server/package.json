@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "route-baseline": "tsx scripts/route-baseline.ts"
   },
   "dependencies": {
     "@flint/core": "workspace:*",

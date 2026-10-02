@@ -35,7 +35,8 @@ export const ChatTurnEvent = z
     tainted: z.boolean(),
     // For the "chat unaffected" measures (P2 exit 6); optional, so an older server's events still pass.
     tier: z.enum(['routine', 'standard', 'hard', 'code']).optional(),
-    recall: z.enum(['semantic', 'lexical', 'timeout', 'none']).optional(),
+    // How memory recall went (the [route] line's): lexical, timeout and error are its fallbacks.
+    recall: z.enum(['semantic', 'lexical', 'timeout', 'error', 'none', 'skipped']).optional(),
     // Each part only when the server measured it (World now is sent only when it was added).
     ctxTokens: z.object({ world: z.number().int().min(0).max(100_000).optional(), recall: z.number().int().min(0).max(100_000).optional(), history: z.number().int().min(0).max(1_000_000).optional() }).strict().optional(),
   })

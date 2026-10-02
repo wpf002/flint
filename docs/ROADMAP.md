@@ -48,7 +48,9 @@ Postgres + pgvector; embeddings behind a Flint-style interface. Crown-jewel data
 Largely integration, not research. Can be pulled earlier; it front-ends 1–3.
 *DoD:* spoken command executes a Phase 1/2 action and speaks back.
 
-**Phase 5 — Proactive.** Scheduler + event bus + watchers; "watch X, when Y, do
+**Phase 5 — Proactive.** *Superseded by the Machine plan's P2 (the always-on
+runtime in `apps/runtime`: sources, triage, templated escalations, the daily
+digest, self-health). Kept here for the record.* Scheduler + event bus + watchers; "watch X, when Y, do
 Z"; morning brief; threshold alerts on app signals.
 *Honest ceiling:* predefined triggers solvable now; open-ended "notice what I
 didn't ask" is not — it invents false alarms. Ship deterministic cases; treat

@@ -5,7 +5,7 @@
  *
  *  - p2.chat.p95_ms: the 95th percentile of chat turn time;
  *  - p2.chat.recall_fallback_rate: the share of turns whose recall fell back
- *    to lexical or timed out (of the turns that recalled at all);
+ *    (lexical, a timeout, an error) of the turns that recalled at all;
  *  - p2.ctx_tokens.world, p2.ctx_tokens.recall: the context blocks' mean size;
  *  - p2.lane.relevant, p2.lane.quiet: decisions per lane;
  *  - p2.latency.median_s: from a polled source's change to the world model
@@ -15,6 +15,9 @@
 import { Prisma } from '@prisma/client';
 import { localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from './db.js';
+
+/** Recall that did not run as designed: the embedder failed, it timed out, or it errored. */
+export const RECALL_FALLBACKS: ReadonlySet<string> = new Set(['lexical', 'timeout', 'error']);
 
 /** Sources Flint polls (the latency criterion is theirs). */
 export const POLLED = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus'];
@@ -40,7 +43,8 @@ export async function dayMeasures(db: Db, start: Date, end: Date): Promise<Recor
   const turns = (await db.sourceEvent.findMany({ where: { source: 'server', type: 'chat.turn', occurredAt: { gte: start, lt: end }, payload: { not: Prisma.DbNull } }, select: { payload: true } }))
     .map((e) => (e.payload ?? {}) as { ms?: unknown; recall?: unknown; ctxTokens?: { world?: unknown; recall?: unknown } });
   const ms = turns.map((t) => t.ms).filter((x): x is number => typeof x === 'number');
-  const recalled = turns.map((t) => t.recall).filter((x): x is string => typeof x === 'string' && x !== 'none');
+  // Turns that recalled at all; of them, the ones that fell back (as the server's baseline counts them).
+  const recalled = turns.map((t) => t.recall).filter((x): x is string => typeof x === 'string' && x !== 'none' && x !== 'skipped');
   const tokens = (k: 'world' | 'recall') => turns.map((t) => t.ctxTokens?.[k]).filter((x): x is number => typeof x === 'number');
   const lanes = await db.triageDecision.groupBy({ by: ['lane'], where: { createdAt: { gte: start, lt: end } }, _count: { _all: true } });
   const lane = (l: string) => lanes.find((x) => x.lane === l)?._count._all ?? 0;
@@ -50,7 +54,7 @@ export async function dayMeasures(db: Db, start: Date, end: Date): Promise<Recor
     WHERE e.source = ANY (${POLLED}::text[]) AND e."receivedAt" >= ${start} AND e."receivedAt" < ${end}`;
   return {
     'p2.chat.p95_ms': percentile(ms, 0.95),
-    'p2.chat.recall_fallback_rate': recalled.length ? recalled.filter((r) => r === 'lexical' || r === 'timeout').length / recalled.length : null,
+    'p2.chat.recall_fallback_rate': recalled.length ? recalled.filter((r) => RECALL_FALLBACKS.has(r)).length / recalled.length : null,
     'p2.ctx_tokens.world': mean(tokens('world')),
     'p2.ctx_tokens.recall': mean(tokens('recall')),
     'p2.lane.relevant': lane('relevant'),

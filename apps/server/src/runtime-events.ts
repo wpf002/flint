@@ -87,7 +87,7 @@ export function chatTurnEvent(t: {
 }
 
 const TIERS = ['routine', 'standard', 'hard', 'code'] as const;
-const RECALL = ['semantic', 'lexical', 'timeout', 'none'] as const;
+const RECALL = ['semantic', 'lexical', 'timeout', 'error', 'none', 'skipped'] as const;
 
 /**
  * Which route a request was, as the wire names it; undefined for the lanes
