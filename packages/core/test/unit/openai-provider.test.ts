@@ -53,6 +53,16 @@ describe('OpenAiProvider.generate', () => {
     expect(calls[0]!.headers.authorization).toBe('Bearer k');
   });
 
+  it('sends responseFormat as response_format (json_schema), and nothing when it is unset', async () => {
+    const { fn, calls } = stubFetch(completion);
+    const provider = new OpenAiProvider({ apiKey: 'k', fetch: fn });
+    const schema = { type: 'object', properties: { a: { type: 'string' } } };
+    await provider.generate({ model: 'gpt-5', messages: [user('hi')], responseFormat: { type: 'json_schema', name: 'thing', schema } });
+    expect(calls[0]!.body.response_format).toEqual({ type: 'json_schema', json_schema: { name: 'thing', schema, strict: false } });
+    await provider.generate({ model: 'gpt-5', messages: [user('hi')] });
+    expect('response_format' in calls[1]!.body).toBe(false);
+  });
+
   // Cached prompt tokens cost a tenth as much. A budget that counted them at full price
   // would rest a participant long before its credit was actually spent.
   it('reports the cached part of the prompt separately', async () => {

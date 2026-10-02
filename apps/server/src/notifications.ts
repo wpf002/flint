@@ -53,8 +53,12 @@ export class Notifications {
     if (changed) this.save();
   }
 
-  /** Add a notification (deduped by signature) and fan out to OS + phone. */
-  push(title: string, body: string, kind: string, dedupe?: string): Notification | undefined {
+  /**
+   * Add a notification (deduped by signature) and fan out to OS + phone.
+   * `phone: 'ping'` sends the phone a content-free nudge instead of the words
+   * (ntfy topics are public by name: what came from elsewhere stays in the console).
+   */
+  push(title: string, body: string, kind: string, dedupe?: string, opts: { phone?: 'full' | 'ping' } = {}): Notification | undefined {
     // Safety net: never surface a raw JSON blob as a notification — a check
     // should format human-readable text, not dump a tool payload.
     if (/^\s*[{[]/.test(body)) return undefined;
@@ -66,7 +70,8 @@ export class Notifications {
     if (this.items.length > 300) this.items.length = 300;
     this.save();
     this.deliverOS(title, body);
-    this.deliverPhone(title, body);
+    if (opts.phone === 'ping') this.deliverPhone('Flint', 'Something needs a look in the console.');
+    else this.deliverPhone(title, body);
     return n;
   }
 

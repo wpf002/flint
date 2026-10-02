@@ -345,6 +345,15 @@ function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> &
   return { tier: 'approval', rule: 'unknown', reason: `${action} is not in the code table`, promotable: false };
 }
 
+/**
+ * The runtime connector's chat tools (packages/mcp/connectors/runtime-server.ts):
+ * Flint's own actions served over MCP. Only these take their code-table entry;
+ * any other tool on a server called `runtime` goes through the MCP rules.
+ */
+export const RUNTIME_CHAT_TOOLS: ReadonlySet<string> = new Set([
+  'world_now', 'world_entity', 'world_search', 'world_history', 'ledger_open', 'ledger_calibration', 'ledger_record_prediction',
+]);
+
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const key = actionKey(action, ctx.mcp);
@@ -360,6 +369,14 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   if (autonomous) {
     if (ctx.mcp) return { tier: 'forbidden', rule: 'autonomous', reason: 'no MCP tool runs autonomously', key };
     if (!AUTONOMOUS_ACTIONS.has(action)) return { tier: 'forbidden', rule: 'autonomous', reason: `${action} is not an autonomous action`, key };
+  }
+
+  // The runtime's own chat tools take their code-table entry, not the trusted
+  // read-only rule, so they stay at APPROVAL until Will promotes them. A
+  // destructive hint keeps the MCP rules (which always ask).
+  if (ctx.mcp?.server === 'runtime' && RUNTIME_CHAT_TOOLS.has(ctx.mcp.tool) && !ctx.mcp.destructiveHint) {
+    const { mcp: _mcp, ...rest } = ctx;
+    return resolveTier(ctx.mcp.tool, rest);
   }
 
   // 4-6. The base tier.

@@ -1,4 +1,4 @@
-import type { GenerateResult } from '../adapter.js';
+import type { GenerateArgs, GenerateResult } from '../adapter.js';
 import { OpenAiCompatibleProvider } from '../openai/chat.js';
 import { perplexityCapabilities } from './capabilities.js';
 
@@ -37,6 +37,10 @@ const HEADING = 'Sources:';
  * rather than dropped or exposed as a vendor-specific field — that keeps each claim
  * next to what backs it, which is the part that matters when another participant
  * reads the answer and has to decide whether to trust it.
+ *
+ * The exception is a constrained reply (responseFormat): its text IS the JSON, and
+ * a sources block after it would stop it parsing. The reply has nowhere else to
+ * carry them, so they are left off.
  */
 export class PerplexityProvider extends OpenAiCompatibleProvider {
   private readonly citations: boolean;
@@ -57,13 +61,15 @@ export class PerplexityProvider extends OpenAiCompatibleProvider {
     this.citations = opts.citations ?? true;
   }
 
-  protected override decorate(result: GenerateResult, raw: unknown): GenerateResult {
+  protected override decorate(result: GenerateResult, raw: unknown, args?: GenerateArgs): GenerateResult {
+    if (args?.responseFormat) return result;
     const block = this.sourcesBlock(raw, result.message.content);
     if (!block) return result;
     return { ...result, message: { ...result.message, content: result.message.content + block } };
   }
 
-  protected override streamSuffix(lastChunk: unknown): string | undefined {
+  protected override streamSuffix(lastChunk: unknown, args?: GenerateArgs): string | undefined {
+    if (args?.responseFormat) return undefined;
     return this.sourcesBlock(lastChunk, '');
   }
 

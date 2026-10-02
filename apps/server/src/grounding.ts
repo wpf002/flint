@@ -60,18 +60,21 @@ export function withMemory(base: string, facts: readonly string[]): string {
 export async function recallContext(
   base: string,
   message: string,
-  knowledge: { recall(query: string): Promise<string[]> },
+  knowledge: { recall(query: string): Promise<string[]>; recallWithMode?(query: string): Promise<{ facts: string[]; mode: string }> },
   opts: { skip?: boolean } = {},
-): Promise<{ block: string; facts: string[] }> {
+): Promise<{ block: string; facts: string[]; mode: string }> {
   let facts: string[] = [];
+  let mode = opts.skip ? 'skipped' : 'none';
   if (!opts.skip) {
     try {
-      facts = await knowledge.recall(message);
+      if (knowledge.recallWithMode) ({ facts, mode } = await knowledge.recallWithMode(message));
+      else facts = await knowledge.recall(message);
     } catch {
       /* memory recall is best-effort */
+      mode = 'error';
     }
   }
-  return { block: withMemory(base, facts), facts };
+  return { block: withMemory(base, facts), facts, mode };
 }
 
 /**

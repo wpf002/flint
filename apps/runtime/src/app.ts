@@ -14,6 +14,7 @@ import { callerFor, type Caller } from './auth.js';
 import { AuditIn, AuditQuery, AuditRefused, appendAudit, listAudit } from './governance/audit.js';
 import { claim } from './governance/counters.js';
 import {
+  activePolicies,
   CompleteProposal,
   CreateProposal,
   Refused,
@@ -21,6 +22,7 @@ import {
   claimProposal,
   completeProposal,
   createProposal,
+  getProposal,
   listProposals,
   rejectProposal,
 } from './governance/proposals.js';
@@ -35,6 +37,21 @@ declare module 'fastify' {
 }
 
 export const BODY_LIMIT = 64 * 1024;
+
+/**
+ * A database trigger or check refusing a row for what it contains (23514
+ * check_violation). A privilege fault (42501) is the runtime's own problem, not
+ * the caller's input: it stays a 500, so the caller keeps the entry and retries.
+ */
+export function dbRefused(err: unknown): boolean {
+  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+  return [e.code, e.meta?.code].map(String).includes('23514') || (typeof e.message === 'string' && /code: "23514"/.test(e.message));
+}
+/** The trigger's own words (they name the rule, never a value). */
+const dbMessage = (err: unknown) => {
+  const m = String((err as { message?: unknown }).message ?? '').match(/message: "([^"]{1,200})"/);
+  return m ? m[1] : 'a database rule';
+};
 
 export interface AppDeps {
   db: Db;
@@ -95,11 +112,18 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // ---- audit ------------------------------------------------------------------
   app.post('/v1/audit', { preHandler: need('audit') }, async (req) => {
     const entries = z.array(AuditIn).min(1).max(100).parse(req.body);
-    return { written: await appendAudit(db, entries) };
+    try {
+      return { written: await appendAudit(db, entries) };
+    } catch (err) {
+      // The audit trigger refusing an entry is the caller's input (400), so the
+      // server sets that entry aside instead of resending the batch forever.
+      if (dbRefused(err)) throw new AuditRefused(`the audit refused an entry: ${dbMessage(err)}`);
+      throw err;
+    }
   });
   // Read-only chat calls are counted, never rows (plan 3.0.7).
   app.post('/v1/audit/rollup', { preHandler: need('audit') }, async (req) => {
-    const rows = z
+    const Rows = z
       .array(
         z
           .object({
@@ -111,16 +135,28 @@ export function buildApp(deps: AppDeps): FastifyInstance {
           .strict(),
       )
       .min(1)
-      .max(500)
-      .parse(req.body);
-    for (const r of rows) {
-      await db.auditRollup.upsert({
-        where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
-        create: { day: r.day, action: r.action, context: r.context, count: r.n },
-        update: { count: { increment: r.n } },
-      });
-    }
-    return { counted: rows.length };
+      .max(500);
+    // A batch with an id is counted once, however often it is resent (its reply lost).
+    const body = z.union([Rows, z.object({ batchId: z.string().regex(/^[0-9a-f]{32}$/), rows: Rows }).strict()]).parse(req.body);
+    const rows = Array.isArray(body) ? body : body.rows;
+    const batchId = Array.isArray(body) ? undefined : body.batchId;
+    // All or nothing: a batch that fails partway is not half counted (and then counted again on retry).
+    const counted = await db.$transaction(async (tx) => {
+      if (batchId) {
+        await tx.auditRollupBatch.deleteMany({ where: { at: { lt: new Date(Date.now() - 7 * 86_400_000) } } });
+        const fresh = await tx.auditRollupBatch.createMany({ data: [{ id: batchId }], skipDuplicates: true });
+        if (fresh.count === 0) return false;
+      }
+      for (const r of rows) {
+        await tx.auditRollup.upsert({
+          where: { day_action_context: { day: r.day, action: r.action, context: r.context } },
+          create: { day: r.day, action: r.action, context: r.context, count: r.n },
+          update: { count: { increment: r.n } },
+        });
+      }
+      return true;
+    });
+    return counted ? { counted: rows.length } : { counted: 0, duplicate: true };
   });
   app.get('/v1/audit', { preHandler: need('audit') }, async (req) => {
     return { entries: await listAudit(db, AuditQuery.parse(req.query)) };
@@ -137,6 +173,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       .strict()
       .parse(req.query);
     return { proposals: await listProposals(db, q.status, q.limit) };
+  });
+  app.get('/v1/proposals/:id', { preHandler: need('proposals') }, async (req, reply) => {
+    const { id } = Id.parse(req.params);
+    const p = await getProposal(db, id);
+    if (!p) return reply.code(404).send({ error: 'no such proposal' });
+    return { proposal: p };
+  });
+  // The live ActionPolicy rows, for the server's chat gate (it cannot read the database).
+  app.get('/v1/policies', { preHandler: need('proposals') }, async () => {
+    return { policies: await activePolicies(db) };
   });
   app.post('/v1/proposals/:id/approve', { preHandler: need('proposals') }, async (req) => {
     const { id } = Id.parse(req.params);

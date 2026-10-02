@@ -1,3 +1,4 @@
+import { responseFormatAsTool, toolResultAsText, toolStreamAsText } from '../response-format.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
   ProviderAdapter,
@@ -93,6 +94,9 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   async generate(args: GenerateArgs): Promise<GenerateResult> {
+    // responseFormat: a forced tool whose input is the reply (./response-format).
+    const forced = responseFormatAsTool(args);
+    if (forced) return toolResultAsText(await this.generate(forced.args), forced.tool);
     const { system, messages } = mapMessages(args.messages, args.system, args.cache);
     const tools = mapTools(args.tools, args.cache);
     const toolChoice = mapToolChoice(args.toolChoice);
@@ -148,6 +152,11 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 
   async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
+    const forced = responseFormatAsTool(args);
+    if (forced) {
+      yield* toolStreamAsText(this.stream(forced.args), forced.tool);
+      return;
+    }
     const { system, messages } = mapMessages(args.messages, args.system, args.cache);
     const tools = mapTools(args.tools, args.cache);
     const toolChoice = mapToolChoice(args.toolChoice);

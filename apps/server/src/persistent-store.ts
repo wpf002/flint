@@ -155,10 +155,14 @@ export class PersistentStore implements MemoryStore {
    * (Flint.chat on any brain) reads history through here, so they all share it.
    */
   async getMessages(conversationId: string): Promise<Message[]> {
-    return this.windowed(this.completeTurns(conversationId))
-      .flatMap((t) => t.messages)
-      .map((m) => structuredClone(m));
+    const turns = this.windowed(this.completeTurns(conversationId));
+    // Exactly the turns handed to the model, at the moment they are (./conversation-taint).
+    this.onHistory?.(conversationId, turns.map((t) => t.id));
+    return turns.flatMap((t) => t.messages).map((m) => structuredClone(m));
   }
+
+  /** Called with the ids of the turns getMessages hands out (the server checks them for taint). */
+  onHistory: ((conversationId: string, turnIds: string[]) => void) | undefined;
 
   /**
    * How many complete turns the conversation's next message carries, and how many
@@ -170,6 +174,16 @@ export class PersistentStore implements MemoryStore {
     const complete = this.completeTurns(conversationId);
     const sent = this.windowed(complete).length;
     return { sent, leftOut: complete.length - sent, window: this.history ? { ...this.history } : null };
+  }
+
+  /** The ids of the turns the next message carries (the window), oldest first. */
+  windowTurnIds(conversationId: string): string[] {
+    return this.windowed(this.completeTurns(conversationId)).map((t) => t.id);
+  }
+
+  /** The ids of every turn held for a conversation, any status. */
+  turnIds(conversationId: string): string[] {
+    return (this.conversations.get(conversationId) ?? []).map((t) => t.id);
   }
 
   private completeTurns(conversationId: string): Turn[] {

@@ -62,6 +62,17 @@ import {
   OllamaEmbedder,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
+import { AuditSink, runtimeFromDisk } from './audit-sink';
+import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
+import { RuntimePolicies, capClaimer } from './runtime-link';
+import { historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, withTurnTaint } from './turn-taint';
+import { ConversationTaint } from './conversation-taint';
+import { Approvals, rpFromDisk } from './approvals';
+import { approvalRoutes } from './approval-routes';
+import { pgApproverStore } from './approver-store';
+import { startInternal } from './internal';
+import { RuntimeProposals } from './runtime-proposals';
+import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
 import { withHistoryNote } from './history-window';
@@ -76,7 +87,7 @@ import { ensureScopedTokens } from './scoped-tokens';
 import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
-import { ActionQueue, type PendingAction } from './actions';
+import { ActionQueue } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
@@ -410,8 +421,9 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
 
 /** Build the per-request context block, injecting any long-term memory that's
  *  relevant to this message so Flint "remembers" without bloating the prompt. */
-async function contextFor(message: string, knowledge: KnowledgeStore): Promise<string> {
-  return (await recallContext(userContext(), message, knowledge)).block;
+async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string }> {
+  const r = await recallContext(userContext(), message, knowledge);
+  return { block: r.block, mode: r.mode };
 }
 
 async function main(): Promise<void> {
@@ -452,6 +464,13 @@ async function main(): Promise<void> {
   // everything stays stored, and a turn whose conversation has older turns is told so.
   const dataDir = join(homedir(), '.flint', 'memory');
   const memory = openConversationStore(join(dataDir, 'conversations.json'), process.env, (m) => console.error(m));
+  // Which stored turns carry untrusted text, so a later turn handed them starts tainted (./conversation-taint):
+  // checked when the history is read, so a turn that committed meanwhile is not missed.
+  const convTaint = new ConversationTaint(join(dataDir, 'taint.json'), (m) => console.error(m));
+  memory.onHistory = (cid, ids) => {
+    const origin = convTaint.origin(cid, ids, Date.now(), memory.historyStats(cid).window?.maxAgeMs ?? Infinity);
+    if (origin !== undefined) taintFromHistory(origin);
+  };
   const flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
@@ -492,8 +511,100 @@ async function main(): Promise<void> {
   // captured as a proposal for one-tap approval (see ActionQueue). This is what
   // turns Flint from an oracle into an assistant, without losing the safety rail.
   const actions = new ActionQueue(isSafeTool);
+  // The audit trail's server end (./audit-sink): spooled locally, shipped to the
+  // runtime once it is installed. Every tier decision lands here (Machine plan 3.0.7).
+  // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
+  // (and not blank) it also turns on runtime mode below.
+  const runtimeUrl = process.env.FLINT_RUNTIME_URL?.trim() || undefined;
+  const runtimeLink = runtimeFromDisk(homedir(), runtimeUrl);
+  const audit = new AuditSink({
+    spoolDir: join(homedir(), '.flint', 'spool'),
+    runtime: runtimeLink,
+    secrets: () => [TOKEN, ...SCOPED.map((t) => t.token)],
+    // Will's day, as the runtime counts it (FLINT_TZ, else the server's FLINT_USER_TZ).
+    tz: process.env.FLINT_TZ?.trim() || process.env.FLINT_USER_TZ?.trim() || 'America/Chicago',
+    log: (m) => console.error(m),
+  });
+  audit.start();
+  // launchd stops the server with SIGTERM: the counts are saved on the way out.
+  process.on('exit', () => audit.saveRollups());
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => process.exit(0));
+  // Every tool call goes through the tier engine (./tier-gate). What it decided
+  // goes to the audit trail: refusals, calls queued for Will, ALONE writes (as
+  // pending, then their real outcome); reads are counted.
+  const onDecision = (e: TierEvent) => {
+    const { decision: d } = e;
+    if (e.status === 'read') {
+      audit.count(d.key, 'chat');
+      return;
+    }
+    // A write about to run is its intent: on disk first, or it does not run (the throw refuses the call).
+    audit.record({
+      actor: 'flint',
+      context: 'chat',
+      kind: 'decision',
+      action: d.key,
+      tier: d.tier,
+      inputs: { rule: d.rule, tainted: e.tainted, taintedBy: e.taintedBy.join(',').slice(0, 200) || null },
+      reasoning: d.reason,
+      decision: e.status === 'denied' ? 'deny' : e.status === 'queued' ? 'queue' : 'act',
+      outcome: e.status === 'denied' ? 'denied' : 'pending',
+      tainted: e.tainted,
+      ...(e.correlationId ? { correlationId: e.correlationId } : {}),
+    }, e.status === 'acting');
+  };
+  const onOutcome = (o: TierOutcome) => {
+    audit.record({
+      actor: 'flint', context: 'chat', kind: 'action', action: o.key, decision: 'act', outcome: o.ok ? 'ok' : 'failed',
+      inputs: {}, ...(o.error ? { reasoning: o.error } : {}), correlationId: o.correlationId,
+    });
+  };
+  // The ActionPolicy rows Will signed, and cap claims, from the runtime (./runtime-link).
+  const policyRows = new RuntimePolicies({ runtime: runtimeLink, file: join(homedir(), '.flint', 'spool', 'policies.json'), log: (m) => console.error(m) });
+  policyRows.start();
+  // Runtime mode (rollout day 4+, FLINT_RUNTIME_URL set): approval-tier calls
+  // become runtime proposals, spooled while the runtime is down, and approving
+  // needs Will's signature. Unset: the RAM queue, as before.
+  const proposals = runtimeUrl
+    ? new RuntimeProposals({
+        runtime: runtimeLink, spoolDir: join(homedir(), '.flint', 'spool'), log: (m) => console.error(m),
+        // A call queued while the runtime was down, then refused when it got there.
+        onRefused: (p) => audit.record({
+          actor: 'flint', context: 'chat', kind: 'decision', action: p.action, tier: 'forbidden', decision: 'deny', outcome: 'denied',
+          inputs: { spooled: true }, reasoning: p.reason.slice(0, 1000), tainted: p.tainted, ...(p.spoolId ? { correlationId: `spool:${p.spoolId}` } : {}),
+        }),
+      })
+    : undefined;
+  if (proposals) setInterval(() => void proposals.replay().catch(() => {}), 30_000).unref();
+  const tierOpts = {
+    queue: actions, onDecision, onOutcome, policies: () => policyRows.current(), claimCap: capClaimer(runtimeLink),
+    taintFloor: process.env.FLINT_TAINT_FLOOR !== '0', ...(proposals ? { proposals } : {}),
+  };
+  // Will's approval factor (./approvals): passkeys on the tailnet HTTPS origin,
+  // or the desktop app's Secure Enclave key. Needs the flint_approver database
+  // role; without it, approvals stay one-tap as before.
+  const approvals = process.env.FLINT_DB_APPROVER_URL
+    ? new Approvals({
+        store: pgApproverStore(process.env.FLINT_DB_APPROVER_URL, (m) => console.error(m)),
+        enrollCodeFile: join(homedir(), '.flint', 'enroll-code'),
+        ...rpFromDisk(),
+        // A key added (and any revoked with it), within the audit's rules: an 'action'
+        // (only a real Approval may be an 'approval' entry), short references, not raw ids.
+        onEnrolled: (e) => {
+          const ref = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 16);
+          audit.record({
+            actor: 'will:console', context: 'console', kind: 'action', action: 'approval.enroll', decision: 'act', outcome: 'ok',
+            inputs: {
+              key: ref(e.credentialId), factor: e.factor, via: e.via, approvalId: e.approvalId ?? null,
+              revokedCount: e.revoked.length, revoked: e.revoked.map(ref).join(',').slice(0, 200) || null,
+            },
+            correlationId: `key:${ref(e.credentialId)}`,
+          });
+        },
+      })
+    : undefined;
   const specs = loadMcpSpecs();
-  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { approver: actions.approver }) : undefined;
+  const registry = specs.length > 0 ? await McpRegistry.connect(specs, { gate: tierGate(tierOpts) }) : undefined;
   // The seed of Flint's OWN brain: every interaction is captured as a training
   // example (frontier answers = the teacher to distill from). Independence is
   // built here, a little each day — see docs/INDEPENDENCE.md.
@@ -511,6 +622,7 @@ async function main(): Promise<void> {
   const mcpTools = meterPaidTools(registry?.tools() ?? [], { guard: spend, specs: paidToolSpecs(process.env) });
   const tools: Tool[] = [
     ...mcpTools,
+    ...gateBuiltins([
     rememberTool(knowledge),
     trainingStatusTool({
       brainDir: join(homedir(), '.flint', 'brain'),
@@ -531,6 +643,7 @@ async function main(): Promise<void> {
     }),
     calculateTool(),
     spendStatusTool(spend),
+    ], tierOpts),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
@@ -614,13 +727,40 @@ async function main(): Promise<void> {
       return f && { generate: (input: { system: string; prompt: string }) => f.generate(input, { context: spendContext('extract') }) };
     },
     join(dataDir, 'extract-state.json'),
-    { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) },
+    { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined), isTainted: (cid, tid) => convTaint.isTainted(cid, tid) },
   ).start();
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
   const budgetNotes = new NoteOnce(() => ledger.period().day);
-  const server = createServer(safeHandler((req, res) => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes })));
+  // The runtime's calls back into the server (./internal): [::1]:8081 only, with
+  // the token install-runtime.sh writes; the server keeps just its digest.
+  const internalTokenFile = join(homedir(), '.flint', 'tokens', 'internal.token');
+  const internalSha = (() => {
+    let cached: string | undefined;
+    return () => {
+      if (cached) return cached;
+      try {
+        const t = readFileSync(internalTokenFile, 'utf8').trim();
+        cached = /^[0-9a-f]{64}$/.test(t) ? createHash('sha256').update(t).digest('hex') : undefined;
+      } catch {
+        cached = undefined;
+      }
+      return cached;
+    };
+  })();
+  startInternal({
+    tokenSha256: internalSha,
+    // The runtime's words stay in the console; the phone gets a content-free ping.
+    notify: (title, body) => {
+      if (/^\s*[{[]/.test(body)) return 'refused';
+      return notes.push(title, body, 'runtime', `rt:${Date.now()}`, { phone: 'ping' }) ? 'stored' : 'duplicate';
+    },
+    spendExternal: (t) => spend.setExternal(t),
+  }).on('error', (err) => console.error(`[internal] listener failed: ${err.message}`));
+
+  // One request is one turn, with its own taint state (./turn-taint).
+  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint }))));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -654,8 +794,12 @@ interface Ctx {
   frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   brains: BrainSet<Persona> | undefined;
   memory: PersistentStore;
+  convTaint: ConversationTaint;
   knowledge: KnowledgeStore;
   actions: ActionQueue;
+  audit: AuditSink;
+  approvals: Approvals | undefined;
+  proposals: RuntimeProposals | undefined;
   notes: Notifications;
   training: TrainingLogger;
   /** Spend caps (./spend): /spend, /speak, and the frontier plan for each turn. */
@@ -906,6 +1050,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // An eval-scoped token (evolve, parity) asks eval questions only: never a turn
     // that is logged as training data or can propose actions (./access).
     if (scope === 'eval' && !evalMode) return json(res, 403, { error: 'this token may only make eval calls' });
+    // Nothing an eval replay asks for is ever queued or proposed (./turn-taint, ./tier-gate).
+    if (evalMode) markEval();
     // Eval-only: answer with a different Ollama model (bake-offs), optionally with
     // `think` set. 400 unless eval + localOnly (and localThink only with localModel).
     const lm = parseLocalModelRequest(body);
@@ -967,11 +1113,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...attribution(outcome, lastTried),
           outcome,
+          recall: recalled.mode,
           ms: Date.now() - started,
           ...(evalMode ? { eval: true } : {}),
         }),
       );
-    const beforeActions = ctx.actions.snapshotIds();
     const beforeLog = ctx.actionLog.actions().length;
     // This turn's own action-log entries (not a concurrent /chat's), for the eval response's `grounding`.
     const turn = new TurnLog();
@@ -1044,10 +1190,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
     logRoute(unanswered ? 'unanswered' : out.text.trim() ? 'answered' : 'empty');
     const toolsUsed = toolsSince(ctx, beforeLog);
-    const proposed = ctx.actions.newSince(beforeActions);
+    // An eval replay proposed nothing (and must not claim, or reject, another turn's proposals).
+    const proposed = evalMode ? [] : turnProposals();
     if (evalMode) {
-      // Nothing an eval replay proposes should ever be approvable.
-      for (const p of proposed) ctx.actions.reject(p.id);
       return json(res, 200, {
         text: out.text,
         usage: out.usage,
@@ -1115,6 +1260,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // The history this turn will actually carry (windowed), not the whole stored thread:
     // its complete turns size the "deep thread" rule, and the ones left out get a context line.
     const history = ctx.memory.historyStats(conversationId);
+    // (The history is checked for untrusted text when the model is handed it: memory.onHistory.)
+    const turnsBefore = new Set(ctx.memory.turnIds(conversationId));
     const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
     const toolsLikely = ctx.router.toolsLikely(scored.appended);
     const tier = classifyMessage(message, { turns, toolsLikely });
@@ -1140,8 +1287,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
     let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
     const moved = movedBy(message, tier, { toolsLikely, turns });
-    const ctxBlock = withHistoryNote(await contextFor(asText, ctx.knowledge), history);
-    const beforeActions = ctx.actions.snapshotIds();
+    const recalled = await contextFor(asText, ctx.knowledge);
+    const ctxBlock = withHistoryNote(recalled.block, history);
     const beforeLog = ctx.actionLog.actions().length;
 
     res.writeHead(200, {
@@ -1215,7 +1362,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           Date.now(),
         );
       }
-      const proposed = ctx.actions.newSince(beforeActions);
+      // This turn's own proposals only (a concurrent turn's are its own).
+      const proposed = turnProposals();
       if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
     } catch (err) {
       failed = true;
@@ -1235,9 +1383,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         ...attribution(outcome, lastTried),
         outcome,
         ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
+        recall: recalled.mode,
         ms: Date.now() - started,
       }),
     );
+    // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
+    if (turnTainted()) {
+      const own = taintSources().some((s) => s !== 'history');
+      ctx.convTaint.mark(conversationId, ctx.memory.turnIds(conversationId).filter((id) => !turnsBefore.has(id)), own ? Date.now() : (historyOrigin() ?? Date.now()));
+    }
     res.end();
     return;
   }
@@ -1263,26 +1417,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, out.status, out.body);
   }
 
-  // Proposed actions awaiting one-tap approval (writes Flint wanted to make).
-  if (req.method === 'GET' && url.startsWith('/proposals')) {
-    return json(res, 200, { proposals: ctx.actions.list() });
-  }
-  if (req.method === 'POST' && url === '/proposals/approve') {
-    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
-    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
-    const body = read.body;
-    const id = String(body.id ?? '');
-    const result = await ctx.actions.approve(id, ctx.tools);
-    if (!result) return json(res, 404, { error: 'no such proposal' });
-    if (result.status === 'done') ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
-    return json(res, 200, { action: result });
-  }
-  if (req.method === 'POST' && url === '/proposals/reject') {
-    const read = await readJsonLimited(req, SMALL_JSON_BYTES);
-    if (read.tooLarge) return json(res, 413, { error: 'request too large' });
-    const body = read.body;
-    return json(res, 200, { ok: ctx.actions.reject(String(body.id ?? '')) });
-  }
+  // Proposals, approvals and approval keys (./approval-routes).
+  if (await approvalRoutes(req, res, url, { ...ctx, errorRef })) return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {

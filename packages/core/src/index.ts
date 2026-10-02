@@ -75,6 +75,7 @@ export type {
 export type {
   ProviderAdapter,
   GenerateArgs,
+  ResponseFormat,
   GenerateResult,
   CacheHints,
 } from './provider/adapter.js';

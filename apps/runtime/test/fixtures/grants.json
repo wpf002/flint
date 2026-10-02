@@ -1,5 +1,6 @@
 [
   "flint_app CONNECT database",
+  "flint_app DELETE public.AuditRollupBatch",
   "flint_app DELETE public.MetricPoint",
   "flint_app DELETE public.SourceEvent",
   "flint_app EXECUTE claim_action",
@@ -10,6 +11,7 @@
   "flint_app INSERT public.ActionPolicy",
   "flint_app INSERT public.AuditEntry",
   "flint_app INSERT public.AuditRollup",
+  "flint_app INSERT public.AuditRollupBatch",
   "flint_app INSERT public.BackupRun",
   "flint_app INSERT public.CalibrationSnapshot",
   "flint_app INSERT public.Entity",
@@ -31,6 +33,7 @@
   "flint_app SELECT public.ApprovalCredential",
   "flint_app SELECT public.AuditEntry",
   "flint_app SELECT public.AuditRollup",
+  "flint_app SELECT public.AuditRollupBatch",
   "flint_app SELECT public.BackupRun",
   "flint_app SELECT public.CalibrationSnapshot",
   "flint_app SELECT public.Entity",

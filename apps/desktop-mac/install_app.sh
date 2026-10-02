@@ -15,7 +15,7 @@ trap 'rm -rf "$WORK"' EXIT
 APP="$WORK/Flint.app"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -o "$APP/Contents/MacOS/flint" "$DIR/flint.swift" -framework Cocoa -framework WebKit
+swiftc -O -o "$APP/Contents/MacOS/flint" "$DIR/flint.swift" -framework Cocoa -framework WebKit -framework CryptoKit -framework LocalAuthentication
 cp "$DIR/Info.plist" "$APP/Contents/Info.plist"
 cp "$DIR/flint.icns" "$APP/Contents/Resources/flint.icns"
 IDENTITY="${FLINT_SIGN_IDENTITY:-Flint Dev}"

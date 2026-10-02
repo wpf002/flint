@@ -167,6 +167,17 @@
   <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
   <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
   <div class="log" id="log" style="display:none"></div>
+  <div class="seg">Approval key</div>
+  <div id="creds" class="log" style="display:block">—</div>
+  <div id="enrollbox" style="display:none">
+    <label for="enrollcode">Enrolment code (run <code>pnpm --filter @flint/runtime enroll</code> on the Mac)</label>
+    <input id="enrollcode" type="password" autocomplete="off" placeholder="one-time code">
+    <input id="enrolllabel" type="text" autocomplete="off" placeholder="name this key, e.g. iPhone">
+    <div class="row"><button class="ghost" id="enrollpk" onclick="enrollPasskey()">Add a passkey on this device</button><button class="ghost" id="enrollse" style="display:none" onclick="enrollEnclave()">Add Touch ID approval key</button><button class="ghost" id="resetse" style="display:none" onclick="resetEnclave()">Replace this Mac's key</button></div>
+  </div>
+  <div id="enrollmsg" class="log" style="display:none"></div>
+  <div id="keyapprovals" class="log" style="display:none"></div>
+  <div id="waiting" class="log" style="display:none"></div>
   <label for="tokin">Access token (only on a device Flint doesn't sign in for you)</label>
   <input id="tokin" type="password" autocomplete="off" placeholder="paste the token from ~/.flint/token">
   <div class="row"><button class="ghost" onclick="saveToken()">Save token</button><button onclick="closeSettings()">Close</button></div>
@@ -204,7 +215,7 @@ function newChat(){
   document.getElementById('transcript').innerHTML = '';
   var inp = document.getElementById('input'); inp.value = ''; inp.focus();
 }
-function openSettings(){document.getElementById('settings').style.display='flex';}
+function openSettings(){document.getElementById('settings').style.display='flex';loadCreds();}
 function closeSettings(){document.getElementById('settings').style.display='none';}
 function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
 
@@ -272,17 +283,115 @@ applyLO();
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
   var card=document.createElement('div');card.className='propose';
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
-  card.innerHTML='<div class="pt">Flint wants to run <b>'+a.fullName+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">Approve</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
+  card.innerHTML='<div class="pt">Flint wants to run <b>'+esc(a.fullName)+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">'+(canEnclave()?'Approve with Touch ID':canPasskey()?'Approve with passkey':'Approve')+'</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
   card.querySelector('.ok').onclick=function(){approveAction(a.id,card);};
   card.querySelector('.no').onclick=function(){rejectAction(a.id,card);};
   host.appendChild(card);});document.getElementById('transcript').scrollTop=9e9;}
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
-function approveAction(id,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
-  fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){
-    var a=d.action||{};r.style.display='block';row.style.display='none';
-    if(a.status==='done'){var res=a.result;var ok=!(res&&res.isError);r.textContent=ok?'✓ done':'✗ '+(res&&res.content||'failed');r.style.color=ok?'var(--gold)':'var(--orange)';}
-    else{r.textContent='✗ '+(a.error||'failed');r.style.color='var(--orange)';}
-  }).catch(function(){r.style.display='block';r.textContent='✗ connection failed';r.style.color='var(--orange)';});}
+/* ---------- Will's approval key (passkey on the tailnet HTTPS origin) ---------- */
+var CREDS=null;
+function b64u(buf){var b=new Uint8Array(buf),s='';for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+function passkeysHere(){return !!(window.PublicKeyCredential&&location.protocol==='https:');}
+function canPasskey(){return passkeysHere()&&!!CREDS&&CREDS.some(function(c){return c.factor==='webauthn';});}
+/* The Mac app's Touch ID key (Secure Enclave), through its flintApproval bridge. */
+var SE_ID=null;
+function enclave(){return window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.flintApproval;}
+function se(op,args){return enclave().postMessage(Object.assign({op:op},args||{}));}
+function seIdOf(pub){return crypto.subtle.digest('SHA-256',unb64u(pub)).then(function(h){return 'se_'+Array.prototype.map.call(new Uint8Array(h),function(b){return ('0'+b.toString(16)).slice(-2);}).join('').slice(0,32);});}
+function canEnclave(){return !!enclave()&&!!SE_ID&&!!CREDS&&CREDS.some(function(c){return c.credentialId===SE_ID;});}
+function loadEnclave(){if(!enclave())return;se('status').then(function(st){if(!st||!st.hasKey)return null;return se('publicKey').then(function(r){return seIdOf(r.publicKey);});}).then(function(id){SE_ID=id;}).catch(function(){});}
+/* How an approval ended: done, still approved (a cap was reached, or a runtime job runs it), or failed. Text only, never HTML. */
+function showOutcome(d,r,row){r.style.display='block';var a=(d&&d.action)||{};
+  if(d&&d.error&&!d.action){r.textContent='✗ '+d.error;r.style.color='var(--orange)';row.style.opacity=1;return;}
+  row.style.display='none';
+  if(a.status==='done'){r.textContent='✓ done'+(a.note?' ('+a.note+')':'');r.style.color='var(--gold)';}
+  else if(a.status==='approved'){r.textContent='⏳ '+(a.note||'approved; not run yet');r.style.color='var(--gold)';}
+  else{r.textContent='✗ '+(a.error||'failed')+(a.note?' ('+a.note+')':'');r.style.color='var(--orange)';}}
+function showDecision(d,decision,r,row){if(decision==='reject'){r.style.display='block';row.style.display='none';r.textContent='dismissed (signed)';return;}showOutcome(d,r,row);}
+function failed(e,r,row){row.style.opacity=1;r.style.display='block';r.textContent='✗ '+(e.message||e);r.style.color='var(--orange)';}
+/* Sign a challenge with this device's approval key: Touch ID on the Mac, else a passkey. */
+function signWithMyKey(b,reason){
+  if(canEnclave())return se('sign',{challenge:b.challenge,reason:reason}).then(function(sg){return {credentialId:SE_ID,signature:sg.signature};});
+  if(!canPasskey())return Promise.reject(new Error('no approval key on this device'));
+  var allow=CREDS.filter(function(c){return c.factor==='webauthn';}).map(function(c){return {type:'public-key',id:unb64u(c.credentialId)};});
+  return navigator.credentials.get({publicKey:{challenge:unb64u(b.challenge),rpId:location.hostname,allowCredentials:allow,userVerification:'required',timeout:60000}})
+    .then(function(a){return {credentialId:b64u(a.rawId),authenticatorData:b64u(a.response.authenticatorData),clientDataJSON:b64u(a.response.clientDataJSON),signature:b64u(a.response.signature)};});}
+/* A new key on this device: registered with the code; if a key is already enrolled, one of them (on any device) must approve it. */
+function finishEnrolment(b,reg,label){
+  if(!b.needsApproval)return postJson('/approvals/enroll/finish',reg);
+  return postJson('/approvals/enroll/approve-begin',reg).then(function(ap){
+    enrollMsg('Approve "'+label+'" with an approval key you already have (Touch ID on the Mac, or a passkey): open Settings there. Waiting…');
+    var tries=0;
+    return new Promise(function(resolve,reject){(function poll(){
+      fetch(BASE+'/approvals/enroll/approved?challengeId='+encodeURIComponent(ap.challengeId),{headers:auth()}).then(function(r){return r.json();}).then(function(d){
+        if(d.approved)return resolve(postJson('/approvals/enroll/finish',Object.assign({},reg,{approval:{challengeId:ap.challengeId}})));
+        if(++tries>90)return reject(new Error('not approved within the time limit; start again'));
+        setTimeout(poll,3000);}).catch(reject);})();});});}
+function enrollEnclave(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'Touch ID (Mac)';
+  postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
+    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as Flint approval key'}).then(function(sg){
+      var reg={challengeId:b.challengeId,factor:'secure_enclave',publicKey:pk.publicKey,signature:sg.signature};
+      return finishEnrolment(b,reg,label).then(function(){return seIdOf(pk.publicKey);});});});
+  }).then(function(id){SE_ID=id;document.getElementById('enrollcode').value='';enrollMsg('✓ Touch ID approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
+/* A fingerprint change makes this Mac's key unusable: make a new one (Touch ID or password), then enrol it with a code from `enroll --replace` (or another key's approval). */
+function resetEnclave(){/* No confirm(): the app's web view has no dialog for it. Touch ID (or the password) is the confirmation. */
+  enrollMsg("Replacing this Mac's key: confirm with Touch ID or your password…");
+  se('reset').then(function(){SE_ID=null;enrollMsg('New key made on this Mac. Enter a code and press "Add Touch ID approval key".');}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
+function enclaveDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+    return se('sign',{challenge:b.challenge,reason:(decision==='approve'?'approve ':'reject ')+b.payload.action}).then(function(sg){
+      return postJson('/approvals/finish',{challengeId:b.challengeId,credentialId:SE_ID,signature:sg.signature});});
+  }).then(function(d){showDecision(d,decision,r,row);}).catch(function(e){failed(e,r,row);});}
+function loadCreds(){if(!TOKEN)return;fetch(BASE+'/approvals/credentials',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+  var el=document.getElementById('creds');var box=document.getElementById('enrollbox');
+  if(!d){CREDS=null;el.textContent='approvals are one-tap (no approval key store)';box.style.display='none';return;}
+  CREDS=d.credentials||[];
+  el.textContent=CREDS.length?CREDS.map(function(c){return '🔑 '+c.label+' ('+(c.factor==='webauthn'?'passkey':'Touch ID')+')';}).join('\n'):'no approval key yet';
+  box.style.display=(passkeysHere()||enclave())?'block':'none';
+  document.getElementById('enrollpk').style.display=passkeysHere()?'':'none';
+  document.getElementById('enrollse').style.display=enclave()?'':'none';
+  document.getElementById('resetse').style.display=enclave()?'':'none';
+  loadKeyApprovals();loadWaiting();}).catch(function(){});}
+/* New keys (on another device) waiting for this device's approval. */
+function loadKeyApprovals(){var el=document.getElementById('keyapprovals');
+  if(!(canEnclave()||canPasskey())){el.style.display='none';return;}
+  fetch(BASE+'/approvals/enroll/pending',{headers:auth()}).then(function(r){return r.ok?r.json():{pending:[]};}).then(function(d){
+    el.innerHTML='';var list=d.pending||[];el.style.display=list.length?'block':'none';
+    list.forEach(function(p){var row=document.createElement('div');var t=document.createElement('span');
+      var f=p.payload.fields||{};t.textContent='New key waiting: '+(f.label||'?')+' ('+(f.factor==='webauthn'?'passkey':'Touch ID')+') ';
+      var ok=document.createElement('button');ok.className='ghost';ok.textContent='Approve this key';
+      ok.onclick=function(){ok.disabled=true;signWithMyKey(p,'approve a new Flint approval key: '+(f.label||'')).then(function(sig){
+        return postJson('/approvals/enroll/approve-finish',Object.assign({challengeId:p.challengeId},sig));}).then(function(){t.textContent='✓ approved: '+(f.label||'');ok.remove();})
+        .catch(function(e){ok.disabled=false;t.textContent='✗ '+(e.message||e)+' ';});};
+      row.appendChild(t);row.appendChild(ok);el.appendChild(row);});}).catch(function(){});}
+/* Approved actions that have not run yet (a cap was reached, the runtime did not answer): run them now. */
+function loadWaiting(){var el=document.getElementById('waiting');
+  fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():{proposals:[]};}).then(function(d){
+    var list=(d.proposals||[]).filter(function(p){return p.status==='approved';});el.innerHTML='';el.style.display=list.length?'block':'none';
+    list.forEach(function(p){var row=document.createElement('div');var t=document.createElement('span');t.textContent='Approved, not run: '+p.fullName+' ';
+      var go=document.createElement('button');go.className='ghost';go.textContent='Run now';
+      go.onclick=function(){go.disabled=true;postJson('/proposals/run',{id:p.id}).then(function(x){var a=x.action||{};t.textContent=(a.status==='done'?'✓ ':a.status==='approved'?'⏳ ':'✗ ')+p.fullName+' '+(a.note||a.error||'');go.remove();})
+        .catch(function(e){go.disabled=false;t.textContent='✗ '+(e.message||e)+' ';});};
+      row.appendChild(t);row.appendChild(go);el.appendChild(row);});}).catch(function(){});}
+function enrollMsg(t,bad){var m=document.getElementById('enrollmsg');m.style.display='block';m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
+function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});}
+function enrollPasskey(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'passkey';
+  postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
+    return navigator.credentials.create({publicKey:{challenge:unb64u(b.challenge),rp:{id:b.rp.id,name:'Flint'},user:{id:unb64u(b.user.id),name:'will',displayName:'Will'},
+      pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{userVerification:'required',residentKey:'preferred'},attestation:'none',timeout:60000}})
+    .then(function(c){var resp=c.response;var reg={challengeId:b.challengeId,clientDataJSON:b64u(resp.clientDataJSON)};
+      if(resp.getAuthenticatorData)reg.authenticatorData=b64u(resp.getAuthenticatorData());else reg.attestationObject=b64u(resp.attestationObject);
+      return finishEnrolment(b,reg,label);});
+  }).then(function(){document.getElementById('enrollcode').value='';enrollMsg('✓ approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+e.message,true);});}
+/* Will signs this exact action and its args with the passkey; the server and the runtime verify it. */
+function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+    return signWithMyKey(b,'').then(function(sig){return postJson('/approvals/finish',Object.assign({challengeId:b.challengeId},sig));});
+  }).then(function(d){showDecision(d,decision,r,row);}).catch(function(e){failed(e,r,row);});}
+function approveAction(id,card){if(canEnclave())return enclaveDecide(id,'approve',card);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){showOutcome(d,r,row);})
+  .catch(function(){failed(new Error('connection failed'),r,row);});}
 function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';var r=card.querySelector('.res');r.style.display='block';r.textContent='dismissed';}
 
 /* ---------- notifications (proactive) ---------- */
@@ -495,7 +604,8 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 })();
 
 refresh();
-if(!TOKEN) setTimeout(openSettings,400);
+loadEnclave();
+if(!TOKEN) setTimeout(openSettings,400); else loadCreds();
 </script>
 </body>
 </html>

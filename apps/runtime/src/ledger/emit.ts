@@ -10,27 +10,23 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { CLAIM_TEMPLATE_PARAMS } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 
 export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation'] as const;
 export const TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept'] as const;
 const HORIZON_MS = 180 * 86400_000;
 
-/** An entity reference a template may name: kind#shortId, never a title. */
-const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 /**
- * Fixed claim templates for predictions made from tainted inputs. Each has its
- * own schema: only entity refs, series keys, an operator and numbers fill them,
- * so a stranger's words can never become a claim Flint makes.
+ * Fixed claim templates for predictions made from tainted inputs: their params'
+ * schemas are shared (@flint/policy claims.ts), so the chat gate and the
+ * runtime connector check the same rules this does.
  */
 export const CLAIM_TEMPLATES = {
-  service_healthy: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `${p.entity} reports healthy at the resolve time` },
-  deploy_succeeds: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `the next deployment of ${p.entity} succeeds` },
-  threshold: {
-    params: z.object({ series: z.string().regex(/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/).max(80), op: z.enum(['above', 'below']), value: z.number().finite() }).strict(),
-    render: (p: { series: string; op: string; value: number }) => `${p.series} is ${p.op} ${p.value} at the resolve time`,
-  },
-  closed_by: { params: z.object({ entity: Ref }).strict(), render: (p: { entity: string }) => `${p.entity} is closed by the resolve time` },
+  service_healthy: { params: CLAIM_TEMPLATE_PARAMS.service_healthy, render: (p: { entity: string }) => `${p.entity} reports healthy at the resolve time` },
+  deploy_succeeds: { params: CLAIM_TEMPLATE_PARAMS.deploy_succeeds, render: (p: { entity: string }) => `the next deployment of ${p.entity} succeeds` },
+  threshold: { params: CLAIM_TEMPLATE_PARAMS.threshold, render: (p: { series: string; op: string; value: number }) => `${p.series} is ${p.op} ${p.value} at the resolve time` },
+  closed_by: { params: CLAIM_TEMPLATE_PARAMS.closed_by, render: (p: { entity: string }) => `${p.entity} is closed by the resolve time` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
 

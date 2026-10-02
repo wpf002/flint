@@ -1,11 +1,102 @@
 import Cocoa
 import WebKit
+import CryptoKit
+import LocalAuthentication
 
 let FLINT_URL = "http://localhost:8080"
+
+/// Will's approval key on this Mac (Machine plan 3.0.2): a P-256 key inside the
+/// Secure Enclave that signs only after Touch ID. The private key never leaves
+/// the enclave; what is stored in ~/.flint/approval-key.se is the enclave's
+/// encrypted handle, usable by this Mac's enclave alone. The console reaches it
+/// through the `flintApproval` script handler, which answers only pages from
+/// FLINT_URL, and every Touch ID prompt says what is being approved.
+final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
+  let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".flint/approval-key.se")
+
+  static func b64url(_ d: Data) -> String {
+    d.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+  }
+  static func unb64url(_ s: String) -> Data? {
+    var t = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    while t.count % 4 != 0 { t += "=" }
+    return Data(base64Encoded: t)
+  }
+
+  func load(_ ctx: LAContext? = nil) throws -> SecureEnclave.P256.Signing.PrivateKey? {
+    guard let blob = try? Data(contentsOf: file) else { return nil }
+    return try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: ctx)
+  }
+
+  func create() throws -> SecureEnclave.P256.Signing.PrivateKey {
+    var err: Unmanaged<CFError>?
+    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet], &err) else {
+      throw err!.takeRetainedValue() as Error
+    }
+    let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try key.dataRepresentation.write(to: file, options: [.atomic])
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    return key
+  }
+
+  func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage,
+                             replyHandler: @escaping (Any?, String?) -> Void) {
+    // Only the Flint console may ask.
+    let origin = message.frameInfo.securityOrigin
+    guard let flint = URL(string: FLINT_URL), origin.protocol == flint.scheme, origin.host == flint.host, origin.port == (flint.port ?? 0) else {
+      return replyHandler(nil, "not allowed from this page")
+    }
+    guard let body = message.body as? [String: Any], let op = body["op"] as? String else { return replyHandler(nil, "bad request") }
+    do {
+      switch op {
+      case "status":
+        replyHandler(["available": SecureEnclave.isAvailable, "hasKey": FileManager.default.fileExists(atPath: file.path)], nil)
+      case "publicKey":
+        let key = try load() ?? create()
+        replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
+      case "reset":
+        // The key is bound to the current fingerprints (.biometryCurrentSet), so a
+        // fingerprint change makes it unusable. Will replaces it here, after Touch
+        // ID or his password; the new key still has to be enrolled (an existing
+        // key's approval, or a replace code from `enroll --replace`).
+        let ctx = LAContext()
+        ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "replace Flint's approval key on this Mac") { ok, _ in
+          DispatchQueue.main.async {
+            guard ok else { return replyHandler(nil, "not confirmed") }
+            do {
+              try? FileManager.default.removeItem(at: self.file)
+              let key = try self.create()
+              replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
+            } catch {
+              replyHandler(nil, "approval key: \(error.localizedDescription)")
+            }
+          }
+        }
+      case "sign":
+        guard let c = body["challenge"] as? String, let challenge = ApprovalKey.unb64url(c), challenge.count == 32 else {
+          return replyHandler(nil, "bad challenge")
+        }
+        let what = (body["reason"] as? String).map { String($0.prefix(140)) } ?? "approve an action"
+        let ctx = LAContext()
+        ctx.localizedReason = what
+        guard let key = try load(ctx) else { return replyHandler(nil, "no approval key on this Mac yet") }
+        // CryptoKit hashes with SHA-256 and signs: what the server's verifySecureEnclave checks.
+        let sig = try key.signature(for: challenge)
+        replyHandler(["signature": ApprovalKey.b64url(sig.derRepresentation)], nil)
+      default:
+        replyHandler(nil, "unknown op")
+      }
+    } catch {
+      replyHandler(nil, "approval key: \(error.localizedDescription)")
+    }
+  }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
   var window: NSWindow!
   var web: WKWebView!
+  let approvalKey = ApprovalKey()
 
   func applicationDidFinishLaunching(_ note: Notification) {
     buildMenu()
@@ -22,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     window.center()
 
     let cfg = WKWebViewConfiguration()
+    cfg.userContentController.addScriptMessageHandler(approvalKey, contentWorld: .page, name: "flintApproval")
     web = WKWebView(frame: frame, configuration: cfg)
     web.navigationDelegate = self
     web.uiDelegate = self

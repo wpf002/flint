@@ -3,7 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Tool, ToolDefinition, ToolHandler, ToolCall } from '@flint/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { McpServerSpec, RegistryOptions, ToolSafety } from './types.js';
+import type { GateRequest, McpServerSpec, RegistryOptions, ToolSafety } from './types.js';
 
 /** A connected MCP server: its tools mapped to Flint tools, plus a closer. */
 export interface ConnectedServer {
@@ -86,6 +86,37 @@ function toFlintTool(
   };
 
   const handler: ToolHandler = async (call: ToolCall) => {
+    if (options.gate) {
+      const req: GateRequest = {
+        server,
+        tool: name,
+        fullName,
+        annotations: {
+          ...(annotations?.readOnlyHint !== undefined ? { readOnlyHint: annotations.readOnlyHint } : {}),
+          ...(annotations?.destructiveHint !== undefined ? { destructiveHint: annotations.destructiveHint } : {}),
+          ...(annotations?.idempotentHint !== undefined ? { idempotentHint: annotations.idempotentHint } : {}),
+        },
+        args: call.args,
+      };
+      let decision;
+      try {
+        decision = await options.gate.check(req);
+      } catch {
+        decision = { allow: false as const, message: `Action '${fullName}' could not be checked; not executed.` };
+      }
+      if (!decision.allow) return { approved: false, message: decision.message };
+      let raw: unknown;
+      try {
+        raw = await client.callTool({ name, arguments: (call.args ?? {}) as Record<string, unknown>, ...(decision.meta ? { _meta: decision.meta } : {}) });
+      } catch (err) {
+        // A failure's text reaches the model too, so the gate sees it like a result.
+        options.gate.onResult?.(req, { isError: true, content: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+      const result = mapResult(raw);
+      options.gate.onResult?.(req, result);
+      return result;
+    }
     const autoOk = safety === 'safe' || options.autoApprove === 'all';
     if (!autoOk) {
       const approved = options.approver

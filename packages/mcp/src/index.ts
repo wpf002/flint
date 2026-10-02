@@ -26,6 +26,9 @@ export type {
   Approver,
   ApprovalRequest,
   ToolSafety,
+  Gate,
+  GateDecision,
+  GateRequest,
 } from './types.js';
 // The `web` connector's search backends (Tavily / Brave / keyless SearXNG), shared
 // so evals like apps/parity's search-compare see exactly what web_search sees.

@@ -1,0 +1,154 @@
+/**
+ * Runtime connector: Flint's own world model and prediction ledger, over the
+ * runtime's loopback API (Machine plan P1, "runtime added to mcp.json").
+ *
+ *   tsx packages/mcp/connectors/runtime-server.ts
+ *
+ * It reads its token from ~/.flint/tokens/runtime-mcp.token (written by
+ * apps/runtime/install-runtime.sh, scopes world:read and ledger only). These
+ * tools are Flint's own actions served over MCP: the tier engine gives them
+ * their code-table entries (APPROVAL until Will promotes them), and a result
+ * that carries text someone else wrote says `"tainted": true`, which taints
+ * the turn that read it.
+ */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { CLAIM_TEMPLATE_HELP, ClaimTemplate, entityRef } from '@flint/policy';
+
+const BASE = process.env.FLINT_RUNTIME_URL ?? 'http://[::1]:8090';
+const TOKEN_FILE = join(homedir(), '.flint', 'tokens', 'runtime-mcp.token');
+
+function token(): string {
+  const t = readFileSync(TOKEN_FILE, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/.test(t)) throw new Error('the runtime connector token is missing (run apps/runtime/install-runtime.sh)');
+  return t;
+}
+
+export async function runtimeCall(path: string, init: { method?: 'GET' | 'POST'; body?: unknown } = {}, fetchImpl: typeof fetch = fetch): Promise<unknown> {
+  const r = await fetchImpl(`${BASE}${path}`, {
+    method: init.method ?? 'GET',
+    headers: { authorization: `Bearer ${token()}`, ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!r.ok) throw new Error(String(data.error ?? `runtime HTTP ${r.status}`));
+  return data;
+}
+
+/**
+ * What a tool may put into the model's context (in line with the web
+ * connector's fetch_url); past it, a marker (and, not knowing what was cut,
+ * tainted).
+ */
+export const MAX_RESULT_CHARS = 8_000;
+/** The most rows (from the front) whose result fits MAX_RESULT_CHARS, built with `wrap`. */
+export function fitRows<T>(rows: T[], wrap: (shown: T[], more: number) => unknown): unknown {
+  let n = rows.length;
+  while (n > 0 && JSON.stringify(wrap(rows.slice(0, n), rows.length - n), null, 2).length > MAX_RESULT_CHARS) n--;
+  return wrap(rows.slice(0, n), rows.length - n);
+}
+
+export const text = (v: unknown) => {
+  const t = JSON.stringify(v, null, 2);
+  const out = t.length <= MAX_RESULT_CHARS ? t : JSON.stringify({ truncated: true, chars: t.length, note: 'too large to show in chat; ask for less', tainted: true });
+  return { content: [{ type: 'text' as const, text: out }] };
+};
+const readOnly = { readOnlyHint: true };
+
+export function buildServer(call = runtimeCall): McpServer {
+  const server = new McpServer({ name: 'runtime', version: '1.0.0' });
+
+  server.registerTool(
+    'world_now',
+    { description: "What Flint's world model says right now: each service's health and how many entities of each kind it tracks. Never contains text from outside.", inputSchema: {}, annotations: readOnly },
+    async () => {
+      // Each service with the `ref` a prediction's template names it by.
+      const r = (await call('/v1/world/now')) as { services?: Array<Record<string, unknown>> } & Record<string, unknown>;
+      const services = (r.services ?? []).map((sv) => (typeof sv.id === 'string' ? { ...sv, ref: entityRef('service', sv.id) } : sv));
+      return text({ ...r, services, tainted: false });
+    },
+  );
+
+  server.registerTool(
+    'world_entity',
+    {
+      description: 'One entity in the world model by id, with its current state. If any of its text came from outside (an issue title, a Nexus note), the result says tainted: true.',
+      inputSchema: { id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) },
+      annotations: readOnly,
+    },
+    async ({ id }) => {
+      // Only what the model needs; never the raw sources list.
+      const r = (await call(`/v1/world/entities/${id}`)) as { entity?: Record<string, unknown>; tainted?: boolean };
+      const e = r.entity ?? {};
+      const pick = ['id', 'kind', 'key', 'name', 'status', 'state', 'taintedPaths', 'version', 'lastObservedAt'];
+      const ref = typeof e.kind === 'string' && typeof e.id === 'string' ? { ref: entityRef(e.kind, e.id) } : {};
+      return text({ entity: { ...Object.fromEntries(pick.filter((k) => k in e).map((k) => [k, e[k]])), ...ref }, tainted: r.tainted !== false });
+    },
+  );
+
+  server.registerTool(
+    'ledger_open',
+    { description: "Flint's open predictions, soonest to resolve first.", inputSchema: { limit: z.number().int().min(1).max(20).optional() }, annotations: readOnly },
+    async ({ limit }) => {
+      const r = (await call(`/v1/ledger/open?limit=${limit ?? 10}`)) as { predictions?: Array<Record<string, unknown>> };
+      const pick = ['id', 'claim', 'probability', 'domain', 'type', 'resolveBy', 'status', 'tainted'];
+      const rows = (r.predictions ?? []).map((p) => ({
+        ...Object.fromEntries(pick.filter((k) => k in p).map((k) => [k, p[k]])),
+        evidence: Array.isArray(p.evidence) ? p.evidence.length : 0,
+      }));
+      // As many as fit (each row keeps its own taint mark), and how many more there are.
+      return text(fitRows(rows, (shown, more) => ({ predictions: shown, ...(more ? { more } : {}) })));
+    },
+  );
+
+  server.registerTool(
+    'ledger_calibration',
+    { description: "How well calibrated Flint's predictions have been: Brier score, skill and reliability per domain.", inputSchema: {}, annotations: readOnly },
+    async () => text(await call('/v1/ledger/calibration')),
+  );
+
+  server.registerTool(
+    'ledger_record_prediction',
+    {
+      description:
+        'Record a prediction in the ledger so it can be scored later. Needs a probability between 0.05 and 0.95, how it will be resolved, and a resolve-by date within 180 days. ' +
+        'Give the claim in your own words, OR (required once the conversation has read anything from outside: a web page, an issue, a thread) a template: ' +
+        CLAIM_TEMPLATE_HELP,
+      inputSchema: {
+        claim: z.string().min(1).max(300).optional(),
+        template: ClaimTemplate.optional().describe(`One of the ledger's claim templates: ${CLAIM_TEMPLATE_HELP}`),
+        probability: z.number().min(0.05).max(0.95),
+        domain: z.enum(['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation']),
+        type: z.enum(['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept']),
+        resolutionCriteria: z.string().min(1).max(1000),
+        resolveBy: z.string().datetime({ offset: true }),
+        evidence: z.array(z.object({ kind: z.string().max(40), ref: z.string().max(200), note: z.string().max(200).optional() })).max(20).optional(),
+      },
+    },
+    async (a, extra) => {
+      if (!a.claim && !a.template) return { isError: true, content: [{ type: 'text' as const, text: 'give a claim, or a template with its params' }] };
+      // Whether the turn read text from outside comes from Flint's server, in the
+      // request's _meta, never from the model; without it, assume it did.
+      const flag = (extra?._meta as Record<string, unknown> | undefined)?.['flint/tainted'];
+      const tainted = flag !== false;
+      return text(
+        await call('/v1/ledger/predictions', {
+          method: 'POST',
+          body: { ...a, method: 'model_reasoning', resolver: 'will', evidence: a.evidence ?? [], tainted },
+        }),
+      );
+    },
+  );
+
+  return server;
+}
+
+// Run as a stdio MCP server unless imported (tests).
+if (process.argv[1] && /runtime-server\.(ts|mjs|js)$/.test(process.argv[1])) {
+  await buildServer().connect(new StdioServerTransport());
+}

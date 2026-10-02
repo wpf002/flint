@@ -5,7 +5,7 @@
 import { loadRuntimeConfig } from './config.js';
 import { createDb } from './db.js';
 import { buildApp } from './app.js';
-import { expireProposals } from './governance/proposals.js';
+import { expireProposals, sweepExecuting } from './governance/proposals.js';
 import { registry } from './sources/registry.js';
 import { startScheduler } from './scheduler.js';
 
@@ -19,6 +19,7 @@ async function main(): Promise<void> {
   // bounded by the database: expiring proposals Will did not decide in time.
   const tick = setInterval(() => {
     expireProposals(db).catch((err: unknown) => app.log.error({ err }, 'expiring proposals failed'));
+    sweepExecuting(db).catch((err: unknown) => app.log.error({ err }, 'sweeping stuck executions failed'));
   }, 60_000);
   tick.unref();
   const stopSync = startScheduler(db, registry(config, db), config.tz, (msg, extra) => app.log.warn(extra ?? {}, msg));

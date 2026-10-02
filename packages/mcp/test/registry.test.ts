@@ -186,3 +186,66 @@ describe('MCP tools through the Flint tool loop', () => {
     await server.close();
   });
 });
+
+// The seam (Machine plan P1): a gate sees EVERY call, read-only ones included,
+// and every result; with no gate, nothing changes (the tests above).
+describe('McpRegistry gate', () => {
+  it('is asked for read-only tools too, with the annotations and args, and sees the result', async () => {
+    const seen: Array<{ fullName: string; readOnly: boolean | undefined; args: unknown }> = [];
+    const results: unknown[] = [];
+    const { registry, close } = await setup({
+      gate: {
+        check: (req) => (seen.push({ fullName: req.fullName, readOnly: req.annotations.readOnlyHint, args: req.args }), { allow: true }),
+        onResult: (_req, r) => results.push(r),
+      },
+    });
+    await tool(registry, 'test.echo').handler({ id: '1', toolName: 'test.echo', args: { text: 'hi' } });
+    expect(seen).toEqual([{ fullName: 'test.echo', readOnly: true, args: { text: 'hi' } }]);
+    expect(results).toHaveLength(1);
+    await close();
+  });
+
+  it('a denial stops the call (read-only or not) and the model gets the message', async () => {
+    const { registry, executed, close } = await setup({
+      gate: { check: (req) => ({ allow: false, message: `no: ${req.tool}` }) },
+      // The gate replaces approver and autoApprove; this must not let anything through.
+      autoApprove: 'all',
+      approver: () => true,
+    });
+    const r = await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'x' } });
+    expect(r).toEqual({ approved: false, message: 'no: delete_thing' });
+    expect(executed).toEqual([]);
+    expect(await tool(registry, 'test.echo').handler({ id: '2', toolName: 'test.echo', args: { text: 'hi' } })).toEqual({ approved: false, message: 'no: echo' });
+    await close();
+  });
+
+  it('sends the metadata the gate sets as the request\'s _meta (where the model cannot reach), and shows the gate a failure too', async () => {
+    const results: unknown[] = [];
+    const metas: unknown[] = [];
+    const server = new McpServer({ name: 'm', version: '1.0.0' });
+    server.registerTool('peek', { description: 'p', inputSchema: { x: z.string() } }, async (_a, extra) => (metas.push(extra._meta), { content: [{ type: 'text', text: 'ok' }] }));
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const reg = await McpRegistry.connect([{ name: 'm', transport: ct }], { gate: { check: () => ({ allow: true, meta: { 'flint/tainted': true } }) } });
+    await tool(reg, 'm.peek').handler({ id: '0', toolName: 'm.peek', args: { x: 'a', _meta: { 'flint/tainted': false } } });
+    expect(metas[0]).toMatchObject({ 'flint/tainted': true });
+    await reg.close();
+    await server.close();
+    const { registry, executed, close } = await setup({ gate: { check: () => ({ allow: true }), onResult: (_r, x) => results.push(x) } });
+    await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'from-model' } });
+    expect(executed).toEqual(['delete:from-model']);
+    // A call that fails in the transport: its error text reaches the model, so the gate sees it.
+    const echo = tool(registry, 'test.echo');
+    await close();
+    await expect(echo.handler({ id: '2', toolName: 'test.echo', args: { text: 'x' } })).rejects.toThrow();
+    expect(results.at(-1)).toMatchObject({ isError: true });
+  });
+
+  it('a gate that throws denies (fail closed)', async () => {
+    const { registry, executed, close } = await setup({ gate: { check: () => { throw new Error('boom'); } } });
+    const r = (await tool(registry, 'test.delete_thing').handler({ id: '1', toolName: 'test.delete_thing', args: { id: 'x' } })) as { approved: boolean };
+    expect(r.approved).toBe(false);
+    expect(executed).toEqual([]);
+    await close();
+  });
+});

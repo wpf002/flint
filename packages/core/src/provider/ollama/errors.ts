@@ -11,6 +11,12 @@ export function toAiError(err: unknown): AiError {
     return makeAiError('timeout', 'Request aborted', { retryable: false, raw: err });
   }
 
+  // A reply that never fit the requested `format`: the server is up and answered,
+  // so this is neither an outage nor worth the caller retrying the same request.
+  if (err instanceof OllamaFormatError) {
+    return makeAiError('validation', err.message, { retryable: false, raw: err });
+  }
+
   // Our own HTTP wrapper (below) carries a status code.
   if (err instanceof OllamaHttpError) {
     return fromStatus(err.status, err.message, err);
@@ -72,5 +78,13 @@ export class OllamaHttpError extends Error {
     super(message);
     this.name = 'OllamaHttpError';
     this.status = status;
+  }
+}
+
+/** The model's reply never parsed as the JSON its `format` asked for (see OllamaProvider). */
+export class OllamaFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OllamaFormatError';
   }
 }

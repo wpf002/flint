@@ -102,6 +102,7 @@ exports[`public API surface > matches the committed snapshot 1`] = `
   "type ProviderAdapter",
   "type RequestEvent",
   "type ResponseEvent",
+  "type ResponseFormat",
   "type RetryPolicy",
   "type StreamEvent",
   "type Tier",

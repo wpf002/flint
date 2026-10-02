@@ -61,7 +61,7 @@ describe('context block (withMemory / recallContext)', () => {
         throw new Error('embedder down');
       },
     });
-    expect(r).toEqual({ block: base, facts: [] });
+    expect(r).toEqual({ block: base, facts: [], mode: 'error' });
   });
 
   it('skip (eval recall: false) never reads memory, and the block is the no-memory block', async () => {
@@ -72,7 +72,7 @@ describe('context block (withMemory / recallContext)', () => {
         return ['Will is going to UFC 330 with Mike'];
       },
     };
-    expect(await recallContext(base, 'Hey Flint, how is it going?', knowledge, { skip: true })).toEqual({ block: base, facts: [] });
+    expect(await recallContext(base, 'Hey Flint, how is it going?', knowledge, { skip: true })).toEqual({ block: base, facts: [], mode: 'skipped' });
     expect(asked).toBe(0);
     // Without it, recall runs as always.
     expect((await recallContext(base, 'Hey Flint, how is it going?', knowledge)).facts).toEqual(['Will is going to UFC 330 with Mike']);
