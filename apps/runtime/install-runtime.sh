@@ -32,6 +32,31 @@ secret() { # one key from secrets.env, quotes stripped
 }
 die() { echo "✗ $*"; exit 1; }
 
+# Deploy events (DeployEvent in packages/policy/src/wire.ts): one JSON line per
+# failed stage or finished deploy in ~/.flint/deploy-events.jsonl (0600), read
+# by the runtime's `deploy` source. Ids and enums only, never log text. Writing
+# it can never fail the install: errexit is off inside, and it always returns 0.
+# (The same function is in install-server.sh; a test keeps the two identical.)
+deploy_event() { # <server|runtime> <gate|migrate|restart|health|deploy> <ok|failed> <sha>
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local dir="$HOME/.flint" id at
+  [[ $1 == (server|runtime) && $2 == (gate|migrate|restart|health|deploy) && $3 == (ok|failed) && $4 =~ '^[0-9a-f]{40}$' ]] || return 0
+  id="$(openssl rand -hex 16 2>/dev/null)"
+  [[ $id =~ '^[0-9a-f]{32}$' ]] || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  [[ $at =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]] || return 0
+  { mkdir -p -m 700 "$dir" && chmod 700 "$dir"; } 2>/dev/null || return 0
+  ( umask 077; print -r -- "{\"id\":\"$id\",\"at\":\"$at\",\"component\":\"$1\",\"stage\":\"$2\",\"outcome\":\"$3\",\"sha\":\"$4\"}" >> "$dir/deploy-events.jsonl" ) 2>/dev/null || return 0
+  chmod 600 "$dir/deploy-events.jsonl" 2>/dev/null
+  return 0
+}
+# A failure is recorded under the stage it happened in: DEPLOY_STAGE moves on
+# as the install does, and is emptied once a stage's failure has been recorded
+# by hand (or the deploy finished). The step-2 skip exits 0 and records nothing.
+DEPLOY_STAGE=gate
+trap '[ $? = 0 ] || [ -z "$DEPLOY_STAGE" ] || deploy_event runtime "$DEPLOY_STAGE" failed "$SHA"' EXIT
+
 # 1. every migration is reversible
 for dir in "$RT_SRC"/prisma/migrations/*/(N); do
   [ -f "$dir/migration.sql" ] || continue
@@ -62,6 +87,7 @@ APP_URL="$(secret FLINT_DB_URL)"
 [ -n "$OWNER_URL" ] && [ -n "$BACKUP_URL" ] && [ -n "$APP_URL" ] || die "FLINT_DB_OWNER_URL, FLINT_DB_BACKUP_URL and FLINT_DB_URL must be in secrets.env"
 
 # 4. pre-migrate dump (only when a migration is pending)
+DEPLOY_STAGE=migrate
 PENDING="$(cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma migrate status 2>&1 || true)"
 if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been applied|following migration"; then
   echo "runtime: migrations pending; dumping first..."
@@ -84,7 +110,8 @@ if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been ap
   fi
 fi
 
-# 6. bundle the release
+# 6. bundle the release (a failure from here until the agent is started is a failed restart)
+DEPLOY_STAGE=restart
 REL="$RT/releases/$SHA"
 rm -rf "$REL.partial" && mkdir -p "$REL.partial/node_modules"
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
@@ -209,11 +236,14 @@ restart_agent() {
 
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
-restart_agent || true
+restart_agent || deploy_event runtime restart failed "$SHA"
 
+DEPLOY_STAGE=health
 for i in {1..30}; do
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
     echo "runtime: $SHA is up on [::1]:$PORT"
+    DEPLOY_STAGE=
+    deploy_event runtime deploy ok "$SHA"
     # Keep the three newest releases, and any named in ~/.flint/runtime/pinned
     # (one release sha per line: a known-good one to roll back to).
     ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do
@@ -226,6 +256,10 @@ for i in {1..30}; do
   sleep 1
 done
 echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
+# Recorded before the rollback, not by the trap after it: the line marks when the
+# check failed, and is written even if the rollback is cut short.
+DEPLOY_STAGE=
+deploy_event runtime health failed "$SHA"
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   ln -sfn "$PREV" "$RT/current"
   # Loaded or not (a failed bootstrap leaves it unloaded): the same restart.
