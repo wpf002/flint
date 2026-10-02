@@ -40,7 +40,13 @@ export function combine(hits: readonly Verdict[]): Verdict {
 }
 
 export async function decide(f: EventFacts, d: TriageDeps): Promise<Decision> {
-  const crit = criticalVerdict(f);
+  let crit = criticalVerdict(f);
+  // The server's threshold and the watchdog's reading are one cap: the second is logged, not escalated again.
+  const vendor = crit?.template?.id === 'vendor_cap' ? crit.template.fields.vendor : undefined;
+  if (crit && typeof vendor === 'string' && (await d.code.vendorCapEscalated?.(vendor, f.occurredAt))) {
+    const { template: _t, ...rest } = crit;
+    crit = { ...rest, action: 'log', lane: 'relevant', critical: false };
+  }
   if (!d.rulesAllowed) return crit ?? quietLog('fallback:skipped');
   const hits: Verdict[] = crit ? [crit] : [];
   const code = await codeVerdict(f, d.code);

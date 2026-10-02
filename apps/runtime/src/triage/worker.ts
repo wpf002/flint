@@ -71,6 +71,10 @@ export function codeContext(db: Db): CodeRuleContext {
         WHERE d."decidedBy" = 'code:route.error_burst' AND d.action = 'escalate' AND e."occurredAt" >= ${since}`;
       return Number(n[0]?.n ?? 0) > 0;
     },
+    async vendorCapEscalated(vendor, at) {
+      const n = await db.escalation.count({ where: { templateId: 'vendor_cap', createdAt: { gt: new Date(at.getTime() - 24 * 3_600_000) }, fields: { path: ['vendor'], equals: vendor } } });
+      return n > 0;
+    },
   };
 }
 

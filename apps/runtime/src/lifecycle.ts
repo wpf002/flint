@@ -57,6 +57,7 @@ export async function run(db: Db, config: Config, status: RuntimeStatus, log: (m
       const b = await startBusFn(config.databaseUrl, log);
       if (stopping) return void (await b.stop().catch(() => {}));
       bus = b;
+      status.bus = b;
       const ctx = { db, config, bus: b, sources: registry(config, db), log };
       await startJobs(ctx, (opts.jobs ?? jobSpecs)(ctx));
       status.problems.delete('bus');
@@ -66,6 +67,7 @@ export async function run(db: Db, config: Config, status: RuntimeStatus, log: (m
       if (bus) {
         const b = bus;
         bus = undefined;
+        delete status.bus;
         await b.stop().catch(() => {});
       }
       const wait = backoffMs(attempt);
@@ -87,6 +89,7 @@ export async function run(db: Db, config: Config, status: RuntimeStatus, log: (m
       clearInterval(tick);
       // Running jobs get 15 s to finish; one that does not is released (its
       // lease runs out and it runs again), never run twice at once.
+      delete status.bus;
       await bus?.stop().catch((err: unknown) => log(`bus stop failed: ${failureClass(err)}`));
       await instance.stop(reason).catch((err: unknown) => log(`marking the instance stopped failed: ${failureClass(err)}`));
     })());

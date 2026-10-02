@@ -29,6 +29,8 @@ import {
 import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
+import { registerP2Routes } from './routes/p2.js';
+import type { Bus } from './bus.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -59,6 +61,8 @@ export interface RuntimeStatus {
   problems: Set<string>;
   /** When the bus last started: the health job is overdue 10 minutes after it. */
   busStartedAt: Date | null;
+  /** The bus while it runs (pushed events send their triage jobs through it). */
+  bus?: Pick<Bus, 'boss'>;
 }
 
 /** The health job runs every 5 minutes; twice that without a run means the bus is wedged. */
@@ -66,7 +70,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage'>>;
   logger?: boolean;
   status?: RuntimeStatus;
 }
@@ -253,6 +257,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return {
       services: services.map((s) => ({ id: s.id, name: safeName(s), health: (s.state as { health?: string }).health ?? 'unknown', lastObservedAt: s.lastObservedAt })),
       counts: counts.map((c) => ({ kind: c.kind, status: c.status, n: c._count._all })),
+      // P2: escalations still waiting on Will (an older server ignores the field).
+      openEscalations: await db.escalation.count({ where: { status: 'open' } }),
     };
   });
   // Reading one entity returns its tainted fields too, marked, so the reader
@@ -278,6 +284,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (!latest) return { snapshots: [] };
     return { snapshots: await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } }) };
   });
+
+  registerP2Routes(app, { db, config: { triage: config.triage ?? false }, need, bus: () => deps.status?.bus });
 
   return app;
 }
