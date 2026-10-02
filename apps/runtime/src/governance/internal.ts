@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { Refused, claimProposal, completeProposal } from './proposals.js';
+import { dbRefused } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
 
@@ -133,11 +134,12 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     console.error(`[runtime] ${ref} running ${claimed.action} failed:`, err);
     await completeProposal(db, id, { ok: false, error: `could not carry it out (${ref})` }, actor).catch(() => {});
     if (err instanceof Refused) throw err;
-    // The database refusing what was signed (a CHECK, a name taken) is the input's fault: a 400.
-    const code = String((err as { code?: unknown; meta?: { code?: unknown } }).code ?? (err as { meta?: { code?: unknown } }).meta?.code ?? '');
-    if (['P2002', '23505', '23514'].includes(code) || /code: "(23505|23514)"/.test(String((err as { message?: unknown }).message ?? ''))) {
-      throw new Refused(400, `the database refused it as signed (${ref})`);
-    }
+    // The database refusing what was signed is the input's fault, a 400: a CHECK (23514, wherever Prisma
+    // puts it: a raw query's SQLSTATE is in meta.code), or a rule's name taken by one signed just before.
+    const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+    const codes = [e.code, e.meta?.code].map(String);
+    const refusedInput = dbRefused(err) || (claimed.action === 'triage.rule.create' && (codes.includes('23505') || codes.includes('P2002') || /Code: `23505`/.test(String(e.message ?? ''))));
+    if (refusedInput) throw new Refused(400, `the database refused it as signed (${ref})`);
     throw new Refused(409, `could not carry it out (${ref})`);
   }
 }

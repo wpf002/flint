@@ -23,6 +23,9 @@ const At = z.string().datetime({ offset: true });
 /** A tool or route name as it appears in chat (`server.tool`), never free text. */
 const Name = z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/);
 
+// Each part only when the server measured it (World now is sent only when it was added).
+const CtxTokens = z.object({ world: z.number().int().min(0).max(100_000).optional(), recall: z.number().int().min(0).max(100_000).optional(), history: z.number().int().min(0).max(1_000_000).optional() });
+
 export const ChatTurnEvent = z
   .object({
     id: Id,
@@ -37,8 +40,7 @@ export const ChatTurnEvent = z
     tier: z.enum(['routine', 'standard', 'hard', 'code']).optional(),
     // How memory recall went (the [route] line's): lexical, timeout and error are its fallbacks.
     recall: z.enum(['semantic', 'lexical', 'timeout', 'error', 'none', 'skipped']).optional(),
-    // Each part only when the server measured it (World now is sent only when it was added).
-    ctxTokens: z.object({ world: z.number().int().min(0).max(100_000).optional(), recall: z.number().int().min(0).max(100_000).optional(), history: z.number().int().min(0).max(1_000_000).optional() }).strict().optional(),
+    ctxTokens: CtxTokens.strict().optional(),
   })
   .strict();
 
@@ -73,7 +75,12 @@ export const ServerEventBatch = z.object({ events: z.array(ServerEvent).min(1).m
  * older runtime; dropping keeps the ids-enums-numbers-only rule.
  */
 export const ServerEventBatchIn = z
-  .object({ events: z.array(z.discriminatedUnion('type', [ChatTurnEvent.strip(), SpendThresholdEvent.strip(), RouteErrorEvent.strip()])).min(1).max(50) })
+  .object({
+    events: z
+      .array(z.discriminatedUnion('type', [ChatTurnEvent.extend({ ctxTokens: CtxTokens.strip().optional() }).strip(), SpendThresholdEvent.strip(), RouteErrorEvent.strip()]))
+      .min(1)
+      .max(50),
+  })
   .strip();
 
 export const NOTIFY_CHANNELS = ['inapp', 'banner', 'push'] as const;

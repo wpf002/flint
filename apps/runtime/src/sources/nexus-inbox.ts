@@ -48,7 +48,8 @@ export function nexusInboxSource(o: { url: string; token: string }): Source & { 
         const events: RaisedEvent[] = pending
           .filter((h) => r.now.getTime() - h.createdAt.getTime() >= UNACCEPTED_AFTER_MS)
           .map((h) => ({
-            sourceRef: `handoff:${h.id}:unaccepted_24h`, type: 'handoff.unaccepted_24h', occurredAt: new Date(h.createdAt.getTime() + UNACCEPTED_AFTER_MS),
+            // Seen pending now: a condition that holds, not a past change (its age is in `hours`).
+            sourceRef: `handoff:${h.id}:unaccepted_24h`, type: 'handoff.unaccepted_24h', occurredAt: r.now, current: true,
             // An id and a slug are Nexus's structure, not anyone's words.
             sensitivity: 'ops', tainted: false,
             payload: { handoffId: h.id, kind: 'handoff', hours: Math.floor((r.now.getTime() - h.createdAt.getTime()) / 3_600_000), ...(h.slug ? { namespace: h.slug } : {}) },

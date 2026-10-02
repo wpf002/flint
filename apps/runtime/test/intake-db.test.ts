@@ -145,8 +145,21 @@ describe.skipIf(NO_DB)('event intake (flint_test, real bus)', () => {
     const [id] = await raise(db, [{ type: 'backup.stale', ref: 'late-one', occurredAt: new Date(), payload: { hoursSince: 40 } }], new Date());
     await owner(`UPDATE "SourceEvent" SET "receivedAt" = "receivedAt" - interval '2 days', "occurredAt" = "occurredAt" - interval '2 days' WHERE id = $1`, [id]);
     expect(await processEvent({ eventId: id! }, { db, config: { tz: 'UTC' }, bus: { boss: { send: async () => null } } as never, load: async () => 'proceed' })).toBe('decided');
-    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } })).toMatchObject({ action: 'log', lane: 'relevant', critical: false, decidedBy: 'code:backup.stale' });
+    const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } });
+    expect(d).toMatchObject({ action: 'log', lane: 'relevant', critical: false, decidedBy: 'code:backup.stale' });
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: d.id } })).inputs).toMatchObject({ late: true, downgraded: 'late' });
     expect(await db.escalation.count()).toBe(0);
+  });
+
+  it('a condition that still holds is never old news: re-raised, its undecided event is fresh again, and escalates', async () => {
+    const holding = { type: 'backup.stale', ref: 'still-holding', occurredAt: new Date(), payload: { hoursSince: 40 } };
+    const [id] = await raise(db, [holding], new Date());
+    await owner(`UPDATE "SourceEvent" SET "receivedAt" = "receivedAt" - interval '2 days', "occurredAt" = "occurredAt" - interval '2 days' WHERE id = $1`, [id]);
+    // Triage back on: the watchdog sees it again, and sends its job.
+    expect(await raise(db, [holding], new Date(), enqueue)).toEqual([]);
+    expect((await jobsFor(id!)).length).toBe(1);
+    await processEvent({ eventId: id! }, { db, config: { tz: 'UTC' }, bus: { boss: { send: async () => null } } as never, load: async () => 'proceed' });
+    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: id! } })).toMatchObject({ action: 'escalate', critical: true });
   });
 
   it('a note the server never took is sent again; one waiting is not sent twice', async () => {

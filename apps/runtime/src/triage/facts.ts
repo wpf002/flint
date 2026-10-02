@@ -69,5 +69,6 @@ export async function loadFacts(db: Db, eventId: string, now = new Date()): Prom
     created: version?.changeKind === 'created',
     backfill: isBackfill(ev),
     late: now.getTime() - ev.receivedAt.getTime() > BACKFILL_AGE_MS,
+    current: !!version && !!e && version.version === e.version,
   };
 }

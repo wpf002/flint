@@ -119,6 +119,8 @@ describe('the nexus_inbox source', () => {
       ['handoff:hx:unaccepted_24h', { handoffId: 'hx', kind: 'handoff', hours: 26 }],
     ]);
     expect(JSON.stringify(r.events)).not.toMatch(/SECRET/);
+    // Seen pending now: a condition that holds, refreshed while it does.
+    expect(r.events!.every((e) => e.current === true && e.occurredAt.getTime() === NOW.getTime())).toBe(true);
     expect(() => parseInbox(reply({ count: 0 }))).toThrow(/no handoffs list/);
   });
 });

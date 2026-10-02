@@ -42,6 +42,8 @@ export interface RaisedEvent {
   tainted: boolean;
   /** Ids, enums and numbers: no text. */
   payload: Record<string, string | number | boolean | string[]>;
+  /** A condition that holds now (a handoff still pending): seen again, its undecided event is refreshed. */
+  current?: boolean;
 }
 
 export interface SyncResult {

@@ -13,7 +13,7 @@ import { NO_DB, freshDb, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { runtimeEnv } from '../src/config';
-import { parseLaunchctlList, launchdSource } from '../src/sources/launchd';
+import { parseLaunchctlList, parsePrintDisabled, launchdSource } from '../src/sources/launchd';
 import { healthSource, verdict } from '../src/sources/health';
 import { gitSource, lastDeployed } from '../src/sources/git';
 import { evalToday, level, spendSource, totals } from '../src/sources/spend';
@@ -304,5 +304,13 @@ describe.skipIf(NO_DB)('sync engine (flint_test)', () => {
     const other: Source = { ...fake, name: 'github' as Source['name'] };
     expect((await syncOnce(db, other, runAt(new Date()), 'UTC')).ran).toBe(false);
     expect(s.failed).toBe(1);
+  });
+});
+
+describe('launchctl print-disabled', () => {
+  it('reads the labels put away on purpose', () => {
+    const out = 'disabled services = {\n\t\t"com.nexus.ui" => disabled\n\t\t"com.flint.ollama" => enabled\n\t\t"com.old.thing" => true\n\t}\n';
+    expect([...parsePrintDisabled(out)].sort()).toEqual(['com.nexus.ui', 'com.old.thing']);
+    expect(parsePrintDisabled('')).toEqual(new Set());
   });
 });

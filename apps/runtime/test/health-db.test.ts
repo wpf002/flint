@@ -168,13 +168,13 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     expect((await watchdog(db, config, now)).filter((r) => r.type === 'vendor.cap_100')).toEqual([]);
   });
 
-  it('an agent that is not loaded, or is disabled, is never "down"', async () => {
+  it('a disabled agent is never "down"; one that is merely not loaded (a failed bootstrap) is', async () => {
     const t0 = new Date(Date.now() - 2 * 3_600_000);
     const parked = (label: string, extra: Record<string, unknown>): SourceObservation => ({ type: 'service.status', kind: 'service', key: `service:launchd:${label}`, name: label, sensitivity: 'ops', externalId: label, state: { managedBy: 'launchd', running: false, lastExit: null, ...extra } });
-    await syncOnce(db, launchd(() => [parked('com.nexus.ui', { loaded: false }), parked('com.flint.old', { loaded: true, disabled: true })]), runAt(t0), 'UTC');
-    const ids = (await db.entity.findMany({ where: { key: { in: ['service:launchd:com.nexus.ui', 'service:launchd:com.flint.old'] } }, select: { id: true } })).map((e) => e.id);
-    expect(ids).toHaveLength(2);
+    await syncOnce(db, launchd(() => [parked('com.nexus.ui', { loaded: false, disabled: true }), parked('com.flint.stuck', { loaded: false })]), runAt(t0), 'UTC');
+    const id = async (key: string) => (await db.entity.findFirstOrThrow({ where: { key } })).id;
     const raised = (await watchdog(db, config, new Date())).filter((r) => r.type === 'service.down_30m').map((r) => r.payload.entityId);
-    for (const id of ids) expect(raised).not.toContain(id);
+    expect(raised).not.toContain(await id('service:launchd:com.nexus.ui'));
+    expect(raised).toContain(await id('service:launchd:com.flint.stuck'));
   });
 });

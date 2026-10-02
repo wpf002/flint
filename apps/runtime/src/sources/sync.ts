@@ -21,7 +21,7 @@ import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { activePolicies } from '../governance/proposals.js';
 import { applyObservation, stateHash, type Applied } from '../world/mapper.js';
-import { markProcessed, recordEvent, recordFailure, type Enqueue, type EventIn } from '../events/record.js';
+import { markProcessed, recordEvent, recordFailure, refreshUndecided, type Enqueue, type EventIn } from '../events/record.js';
 import { sourceTime, triageEligible } from '../triage/facts.js';
 import { wellFormedDeep } from './text.js';
 import { faultAt } from '../config.js';
@@ -109,12 +109,18 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   }
 
   // Event-only sources: each event applied with its triage job; nothing enters the world model.
-  for (const e of result.events ?? []) {
+  for (const { current, ...e } of result.events ?? []) {
     const event: EventIn = { source: source.name, ...e, occurredAt: sourceTime(e.occurredAt, run.now) };
     try {
       const id = await db.$transaction(async (tx) => {
         const id = await recordEvent(tx, event, run.now);
-        if (!id) return null;
+        if (!id) {
+          if (current) {
+            const again = await refreshUndecided(tx, source.name, e.sourceRef, run.now);
+            if (again && enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, again);
+          }
+          return null;
+        }
         await markProcessed(tx, id, 'applied', run.now);
         if (enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, id);
         return id;

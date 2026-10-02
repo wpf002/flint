@@ -192,4 +192,22 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
     for (const e of evs) await processEvent({ eventId: e.id }, deps());
     expect(await db.escalation.count({ where: { templateId: 'ci_failing' } })).toBe(1);
   });
+
+  it('a critical state still current is told even as backfill; one already past is only logged', async () => {
+    const run = (sha: string, conclusion: string): SourceObservation => ({ type: 'ci_run.state', kind: 'ci_run', key: 'ci_run:github:wpf002/nexus:latest', name: 'x', sensitivity: 'ops', externalId: 'ci_run:x', state: { workflow: 'ci', status: 'completed', conclusion, sha } });
+    // Backfill marks come from occurredAt older than a day at receipt.
+    const old = new Date(Date.now() - 3 * 86_400_000).toISOString();
+    const flint = (sha: string, conclusion: string, changedAt?: string): SourceObservation => ({ ...run(sha, conclusion), key: 'ci_run:github:wpf002/flint:latest', externalId: 'ci_run:wpf002/flint:latest', ...(changedAt ? { changedAt } : {}) });
+    await syncOnce(db, fakeSource('github', () => [flint('d'.repeat(40), 'failure', old)]), runAt(new Date()), 'UTC');
+    const e1 = await db.sourceEvent.findFirstOrThrow({ where: { type: 'ci_run.state' }, orderBy: { receivedAt: 'desc' } });
+    await processEvent({ eventId: e1.id }, deps());
+    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: e1.id } })).toMatchObject({ action: 'escalate', critical: true });
+    // Two backfill changes, the first no longer current: it is only logged.
+    const before = new Set((await db.sourceEvent.findMany({ where: { type: 'ci_run.state' }, select: { id: true } })).map((e) => e.id));
+    await syncOnce(db, fakeSource('github', () => [flint('e'.repeat(40), 'failure', old)]), runAt(new Date()), 'UTC');
+    const e2 = (await db.sourceEvent.findMany({ where: { type: 'ci_run.state' } })).find((e) => !before.has(e.id));
+    await syncOnce(db, fakeSource('github', () => [flint('f'.repeat(40), 'success', old)]), runAt(new Date()), 'UTC');
+    await processEvent({ eventId: e2!.id }, deps());
+    expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: e2!.id } })).toMatchObject({ action: 'log', lane: 'relevant', critical: false });
+  });
 });

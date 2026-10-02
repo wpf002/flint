@@ -18,20 +18,20 @@ import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { actionFor } from '../templates/actions.js';
 import type { EventFacts, Verdict } from '../triage/verdict.js';
 
-export async function fileAction(db: Db, f: EventFacts, v: Verdict, o: { alone: boolean; now: Date; tz: string }): Promise<{ proposalId?: string; wouldPropose?: string; proposalRefused?: number }> {
+export async function fileAction(db: Db, f: EventFacts, v: Verdict, o: { alone: boolean; now: Date; tz: string }): Promise<{ proposalId?: string; wouldPropose?: string; proposalRefused?: number; actionSkipped?: 'link_exists' | 'entity_gone' | 'capped' }> {
   if (v.action !== 'act') return {};
   const a = actionFor(f);
   if (!a) return {};
   const ids = [a.params.fromId, a.params.toId].filter((x): x is string => typeof x === 'string');
-  if ((await db.entity.count({ where: { id: { in: ids }, status: 'active' } })) !== ids.length) return {};
+  if ((await db.entity.count({ where: { id: { in: ids }, status: 'active' } })) !== ids.length) return { actionSkipped: 'entity_gone' };
   // Linked already (by a source, or an earlier fact): nothing to ask Will.
-  if (a.action === 'world.relation.write' && (await db.relation.findFirst({ where: { type: a.params.type as string, fromId: a.params.fromId as string, toId: a.params.toId as string, validTo: null }, select: { id: true } }))) return {};
+  if (a.action === 'world.relation.write' && (await db.relation.findFirst({ where: { type: a.params.type as string, fromId: a.params.fromId as string, toId: a.params.toId as string, validTo: null }, select: { id: true } }))) return { actionSkipped: 'link_exists' };
   if (!o.alone) return { wouldPropose: a.templateId };
   // The same card waiting already (this event's job running again): that one, and no second slot of the day.
   const same = await db.proposal.findFirst({ where: { action: a.action, argsDigest: digestOf(a.params), status: 'pending', expiresAt: { gt: o.now } }, select: { id: true } });
   if (same) return { proposalId: same.id };
   // A day's worth of these, filed; past it, the decision is recorded and nothing more.
-  if ((await claim(db, `propose.${a.templateId}`, { limit: ACTION_TEMPLATES[a.templateId].perDay, period: 'day' }, o.tz, o.now)) === null) return {};
+  if ((await claim(db, `propose.${a.templateId}`, { limit: ACTION_TEMPLATES[a.templateId].perDay, period: 'day' }, o.tz, o.now)) === null) return { actionSkipped: 'capped' };
   try {
     const p = await createProposal(db, {
       kind: 'tool_call', origin: 'runtime:triage', action: a.action, templateId: a.templateId, args: a.params,

@@ -41,6 +41,8 @@ export interface EventFacts {
   backfill: boolean;
   /** Triaged more than a day after it arrived (triage was off, or its job waited): old news, never an escalation. */
   late: boolean;
+  /** The state this event recorded is still the entity's state: a critical condition in it still holds. */
+  current: boolean;
 }
 
 export interface Template {
@@ -65,6 +67,8 @@ export interface Verdict {
   critical: boolean;
   /** At most `limit` a day per key (`notify.handoff:<namespace>`, `triage.sender:<rule>:<slug>`); past it, logged quietly. */
   perDay?: { key: string; limit: number };
+  /** Why an escalation was logged instead: old news, or a condition already told. */
+  downgraded?: 'late' | 'backfill' | 'told_once';
 }
 
 export const quietLog = (decidedBy: string, extra: Partial<Verdict> = {}): Verdict => ({ action: 'log', lane: 'quiet', decidedBy, critical: false, ...extra });

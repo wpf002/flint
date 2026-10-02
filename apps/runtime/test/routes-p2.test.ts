@@ -108,6 +108,10 @@ describe.skipIf(NO_DB)('runtime P2 routes', () => {
     const err = { id: id32(), type: 'route.error', at: new Date().toISOString(), route: 'chat', status: 502 };
     expect((await call('POST', '/v1/events', { events: [turn, err] })).json()).toEqual({ accepted: 2, duplicates: 0 });
     expect((await call('POST', '/v1/events', { events: [turn, err] })).json()).toEqual({ accepted: 0, duplicates: 2 });
+    // A newer server's field, top-level or inside ctxTokens, is dropped, not refused.
+    const newer = { ...chatTurn(), tools: [], tier: 'routine', futureField: 1, ctxTokens: { world: 10, futureTokens: 3 } };
+    expect((await call('POST', '/v1/events', { events: [newer] })).json()).toEqual({ accepted: 1, duplicates: 0 });
+    expect((await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: newer.id } })).payload).not.toHaveProperty('futureField');
     expect(await db.sourceEvent.count({ where: { source: 'server', sourceRef: { in: [turn.id, err.id] } } })).toBe(2);
     const jobs = (await owner(`SELECT data FROM pgboss.job WHERE name = 'triage'`)).rows.map((r) => r.data.eventId);
     const errEvent = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: err.id } });

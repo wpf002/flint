@@ -47,6 +47,21 @@ export async function recordEvent(tx: Tx, e: EventIn, now: Date): Promise<string
   return rows[0]?.id ?? null;
 }
 
+/**
+ * The same condition seen again while it still holds (a watchdog condition, a
+ * handoff still pending): its event, if not yet decided, is as fresh as this
+ * sighting, so triage never takes a condition that holds now for old news.
+ * Returns the id when it was refreshed (its triage job may then be sent).
+ */
+export async function refreshUndecided(tx: Tx, source: string, sourceRef: string, now: Date): Promise<string | null> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    UPDATE "SourceEvent" e SET "receivedAt" = ${now}, "occurredAt" = ${now}
+    WHERE e.source = ${source} AND e."sourceRef" = ${sourceRef.slice(0, 500)} AND e.status = 'applied'
+      AND NOT EXISTS (SELECT 1 FROM "TriageDecision" d WHERE d."sourceEventId" = e.id)
+    RETURNING e.id`;
+  return rows[0]?.id ?? null;
+}
+
 /** The event was applied (or the world model skipped it): it is done, one attempt more. */
 export async function markProcessed(tx: Tx, id: string, status: 'applied' | 'ignored', now: Date): Promise<void> {
   await tx.$executeRaw`UPDATE "SourceEvent" SET status = ${status}, "processedAt" = ${now}, attempts = attempts + 1 WHERE id = ${id}`;

@@ -34,6 +34,13 @@ export function parseLaunchctlList(out: string): Map<string, Listed> {
   return m;
 }
 
+/** Labels `launchctl print-disabled` lists as disabled: put away on purpose (`launchctl disable`). */
+export function parsePrintDisabled(out: string): Set<string> {
+  const off = new Set<string>();
+  for (const m of out.matchAll(/^\s*"([^"]{1,200})"\s*=>\s*(disabled|true)\s*$/gm)) off.add(m[1]!);
+  return off;
+}
+
 export function launchdSource(o: LaunchdOptions): Source {
   const ours = (label: string) => o.prefixes.some((p) => label.startsWith(p));
   return {
@@ -41,15 +48,18 @@ export function launchdSource(o: LaunchdOptions): Source {
     cadenceMs: 2 * 60_000,
     async run() {
       const listed = parseLaunchctlList(await o.run('/bin/launchctl', ['list']));
+      // Disabled with `launchctl disable` (the plist may say nothing): put away, not failed.
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      const off = uid === undefined ? new Set<string>() : await o.run('/bin/launchctl', ['print-disabled', `gui/${uid}`]).then(parsePrintDisabled, () => new Set<string>());
       const plists = new Map<string, { periodic: boolean; disabled: boolean }>();
       for (const f of readdirSync(o.agentsDir).filter((f) => f.endsWith('.plist'))) {
         const label = f.slice(0, -'.plist'.length);
         if (!ours(label)) continue;
         try {
           const j = JSON.parse(await o.run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(o.agentsDir, f)])) as Record<string, unknown>;
-          plists.set(label, { periodic: 'StartInterval' in j || 'StartCalendarInterval' in j, disabled: j.Disabled === true });
+          plists.set(label, { periodic: 'StartInterval' in j || 'StartCalendarInterval' in j, disabled: j.Disabled === true || off.has(label) });
         } catch {
-          plists.set(label, { periodic: false, disabled: false });
+          plists.set(label, { periodic: false, disabled: off.has(label) });
         }
       }
       const labels = new Set([...[...listed.keys()].filter(ours), ...plists.keys()]);

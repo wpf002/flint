@@ -40,15 +40,8 @@ declare module 'fastify' {
 
 export const BODY_LIMIT = 64 * 1024;
 
-/**
- * A database trigger or check refusing a row for what it contains (23514
- * check_violation). A privilege fault (42501) is the runtime's own problem, not
- * the caller's input: it stays a 500, so the caller keeps the entry and retries.
- */
-export function dbRefused(err: unknown): boolean {
-  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
-  return [e.code, e.meta?.code].map(String).includes('23514') || (typeof e.message === 'string' && /code: "23514"/.test(e.message));
-}
+export { dbRefused } from './dbcodes.js';
+import { dbRefused } from './dbcodes.js';
 /** The trigger's own words (they name the rule, never a value). */
 const dbMessage = (err: unknown) => {
   const m = String((err as { message?: unknown }).message ?? '').match(/message: "([^"]{1,200})"/);

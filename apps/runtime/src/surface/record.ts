@@ -40,10 +40,11 @@ export interface SurfaceContext {
   policies: readonly PolicyRow[];
   /** Sends the deliver job inside the transaction. */
   bus?: Pick<Bus, 'boss'>;
-  /** An `act` verdict: the proposal filed for it, the template it would have filed in shadow, or the refusal. */
+  /** An `act` verdict: the proposal filed for it, the template it would have filed in shadow, the refusal, or why nothing was filed. */
   proposalId?: string;
   wouldPropose?: string;
   proposalRefused?: number;
+  actionSkipped?: 'link_exists' | 'entity_gone' | 'capped';
 }
 
 export const newDecisionId = (now: Date) => `td${now.getTime().toString(36)}${randomBytes(5).toString('hex')}`;
@@ -218,7 +219,9 @@ export async function recordDecision(db: Db, f: EventFacts, v: Verdict, c: Surfa
         // Ids, enums and numbers: never the event's text or the model's words.
         inputs: {
           eventId: f.eventId, source: f.source, type: f.type, triageAction: verdict.action, lane: verdict.lane, decidedBy: verdict.decidedBy,
-          critical: verdict.critical, shadow: c.shadow, backfill: f.backfill,
+          critical: verdict.critical, shadow: c.shadow, backfill: f.backfill, late: f.late,
+          ...(verdict.downgraded ? { downgraded: verdict.downgraded } : {}),
+          ...(c.actionSkipped ? { actionSkipped: c.actionSkipped } : {}),
           ...(verdict.ruleName ? { ruleName: verdict.ruleName } : {}),
           ...(verdict.relevance !== undefined ? { relevance: verdict.relevance } : {}),
           ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),

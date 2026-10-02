@@ -46,18 +46,21 @@ export async function decide(f: EventFacts, d: TriageDeps): Promise<Decision> {
   const once = crit?.template ? ONCE[crit.template.id] : undefined;
   const key = once ? crit!.template!.fields[once.field] : undefined;
   if (crit && once && typeof key === 'string' && (await d.code.escalatedRecently?.(crit.template!.id, once.field, key, once.withinMs, f.occurredAt))) {
-    crit = logged(crit);
+    crit = logged(crit, 'told_once');
   }
   const decided = await decideRules(f, d, crit);
-  // Old news (backfill, or triaged a day after it arrived) is recorded and seen, never escalated.
   if ('defer' in decided || decided.action !== 'escalate' || !(f.backfill || f.late)) return decided;
-  return logged(decided);
+  // Old news (backfill, or triaged a day after it arrived) is recorded and seen, never escalated;
+  // except a critical condition the entity is still in (CI still failing when its source is first read).
+  // A watchdog condition or a pending handoff is refreshed while it holds, so it is never old news.
+  if (decided.critical && f.current) return decided;
+  return logged(decided, f.late ? 'late' : 'backfill');
 }
 
 /** An escalation made a relevant-lane log: no template, no ping, no cap bypass. */
-function logged(v: Verdict): Verdict {
+function logged(v: Verdict, why: NonNullable<Verdict['downgraded']>): Verdict {
   const { template: _t, perDay: _p, ...rest } = v;
-  return { ...rest, action: 'log', lane: 'relevant', critical: false };
+  return { ...rest, action: 'log', lane: 'relevant', critical: false, downgraded: why };
 }
 
 /** Critical templates told once per this field over this window. */

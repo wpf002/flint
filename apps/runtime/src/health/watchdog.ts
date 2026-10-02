@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { localDay, localDayBounds } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
-import { markProcessed, recordEvent, type Enqueue } from '../events/record.js';
+import { markProcessed, recordEvent, refreshUndecided, type Enqueue } from '../events/record.js';
 import { faultAt } from '../config.js';
 
 export interface Raised {
@@ -42,9 +42,9 @@ const WATCHED = /^service:(launchd:com\.(flint|nexus)\.[A-Za-z0-9._-]+|endpoint:
 export function isDown(key: string, state: unknown): boolean | undefined {
   const s = (state ?? {}) as { health?: unknown; running?: unknown; loaded?: unknown; disabled?: unknown };
   if (key.startsWith('service:endpoint:')) return s.health === undefined ? undefined : s.health === 'down';
-  // An agent that is not loaded, or is disabled, was put away on purpose: that says nothing. (A Flint
-  // server booted out is still caught: its health endpoint goes down.)
-  if (s.loaded === false || s.disabled === true) return undefined;
+  // A disabled agent was put away on purpose: that says nothing. One that is merely not loaded (a
+  // bootstrap that kept failing) is down.
+  if (s.disabled === true) return undefined;
   return typeof s.running === 'boolean' ? !s.running : undefined;
 }
 
@@ -102,8 +102,14 @@ export async function raise(db: Db, raised: readonly Raised[], now: Date, enqueu
   const ids: string[] = [];
   for (const r of raised) {
     const id = await db.$transaction(async (tx) => {
-      const id = await recordEvent(tx, { source: 'runtime', sourceRef: `${r.type}:${r.ref}`, type: r.type, occurredAt: r.occurredAt, sensitivity: 'ops', tainted: false, payload: r.payload }, now);
-      if (!id) return null;
+      const sourceRef = `${r.type}:${r.ref}`;
+      const id = await recordEvent(tx, { source: 'runtime', sourceRef, type: r.type, occurredAt: r.occurredAt, sensitivity: 'ops', tainted: false, payload: r.payload }, now);
+      if (!id) {
+        // Seen before and still holding: if it is still undecided (triage was off), it is current, not old news.
+        const again = await refreshUndecided(tx, 'runtime', sourceRef, now);
+        if (again && enqueue) await enqueue(tx, again);
+        return null;
+      }
       await markProcessed(tx, id, 'applied', now);
       if (enqueue) await enqueue(tx, id);
       return id;
