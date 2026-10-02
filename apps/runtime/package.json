@@ -20,6 +20,7 @@
     "@prisma/client": "6.19.3",
     "fastify": "^5.12.0",
     "pg": "^8.13.0",
+    "pg-boss": "12.35.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {

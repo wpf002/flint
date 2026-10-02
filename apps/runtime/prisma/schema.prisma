@@ -56,17 +56,17 @@ model Approval {
 
 /// Promotion rows. INSERT is checked against the approved policy proposal (action_policy_matches_approval).
 model ActionPolicy {
-  id         String    @id @default(cuid())
+  id         String   @id @default(cuid())
   pattern    String
   tier       String // CHECK alone|approval|forbidden
   dailyCap   Int?
   scope      Json?
   reason     String
   approvalId String
-  approval   Approval  @relation(fields: [approvalId], references: [id], onDelete: Restrict)
-  active     Boolean   @default(true)
-  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
-  expiresAt  DateTime  @db.Timestamptz(3)
+  approval   Approval @relation(fields: [approvalId], references: [id], onDelete: Restrict)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt  DateTime @db.Timestamptz(3)
 
   @@index([pattern, active])
 }
@@ -161,6 +161,7 @@ model RowChange {
   rowId     String
   actor     String
   changed   Json? // {col: [old, new]}; NULL once redacted by a forget
+
   @@index([tableName, rowId, at])
 }
 
@@ -251,20 +252,21 @@ model EntitySource {
 
 /// Mutable inbox; retention nulls payloads and deletes rows at 13 months.
 model SourceEvent {
-  id          String    @id @default(cuid())
+  id          String          @id @default(cuid())
   source      String
   sourceRef   String
   type        String
-  occurredAt  DateTime  @db.Timestamptz(3)
-  receivedAt  DateTime  @default(now()) @db.Timestamptz(3)
+  occurredAt  DateTime        @db.Timestamptz(3)
+  receivedAt  DateTime        @default(now()) @db.Timestamptz(3)
   sensitivity String
-  tainted     Boolean   @default(false)
+  tainted     Boolean         @default(false)
   payload     Json? // <= 16 KB
   payloadHash String
-  status      String    @default("received") // CHECK received|applied|ignored|failed|dead
-  attempts    Int       @default(0)
+  status      String          @default("received") // CHECK received|applied|ignored|failed|dead
+  attempts    Int             @default(0)
   lastError   String? // <= 500, redacted
-  processedAt DateTime? @db.Timestamptz(3)
+  processedAt DateTime?       @db.Timestamptz(3)
+  decision    TriageDecision?
 
   @@unique([source, sourceRef])
   @@index([status, receivedAt])
@@ -444,4 +446,114 @@ model CalibrationSnapshot {
   unresolvedRate  Float
 
   @@unique([windowEnd, domain, type, method])
+}
+
+// ---- P2: triage, surfacing and runtime health ---------------------------------------
+
+/// A triage rule is policy: inserted only as the exact rule of an approved
+/// triage.rule.create proposal being executed; afterwards only switched off.
+/// Critical rules are code, never rows.
+model TriageRule {
+  id                String   @id @default(cuid())
+  name              String   @unique
+  source            String
+  eventType         String
+  predicate         Json // {all|any: [{path, op, value}]}; structural paths only
+  action            String // CHECK ignore|log|act|escalate
+  lane              String // CHECK quiet|relevant
+  priority          Int      @default(100)
+  perSenderDailyCap Int?
+  enabled           Boolean  @default(true)
+  createdBy         String // CHECK will|flint
+  approvalId        String
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+}
+
+/// What triage decided about one applied event; only Will's label is added later.
+model TriageDecision {
+  id                    String      @id @default(cuid())
+  sourceEventId         String      @unique
+  sourceEvent           SourceEvent @relation(fields: [sourceEventId], references: [id], onDelete: Restrict)
+  action                String // CHECK ignore|log|act|escalate
+  lane                  String // CHECK quiet|relevant
+  relevance             Float?
+  reasonCode            String?
+  ruleName              String?
+  decidedBy             String // code:<rule> | rule:<name> | model:ollama:<model> | fallback:<why> | default
+  critical              Boolean     @default(false)
+  /// Decided while triage ran in shadow (nothing was delivered or filed).
+  shadow                Boolean     @default(true)
+  reasoning             String? // <= 500; purged at 7 d for personal/tainted
+  modelMs               Int?
+  relevancePredictionId String?     @unique
+  feedback              String? // CHECK should_escalate|should_be_quiet|ok
+  feedbackAt            DateTime?   @db.Timestamptz(3)
+  tainted               Boolean     @default(false)
+  sensitivity           String
+  createdAt             DateTime    @default(now()) @db.Timestamptz(3)
+  escalation            Escalation?
+
+  @@index([lane, createdAt])
+}
+
+/// A note for Will, rendered from a template; probability text only from its Prediction row.
+model Escalation {
+  id               String               @id @default(cuid())
+  triageDecisionId String               @unique
+  triageDecision   TriageDecision       @relation(fields: [triageDecisionId], references: [id], onDelete: Restrict)
+  templateId       String
+  fields           Json // typed template params
+  title            String? // <= 80; the field-free title once purged
+  body             String? // <= 500
+  predictionId     String?
+  recommendationId String?
+  channels         String[] // inapp|banner|push (push is content-free)
+  status           String               @default("open") // CHECK open|acked|dismissed|acted|expired
+  actedAuditId     String?
+  useful           Boolean?
+  tainted          Boolean              @default(false)
+  sensitivity      String
+  contentPurgedAt  DateTime?            @db.Timestamptz(3)
+  createdAt        DateTime             @default(now()) @db.Timestamptz(3)
+  ackedAt          DateTime?            @db.Timestamptz(3)
+  deliveries       EscalationDelivery[]
+
+  @@index([status, createdAt])
+}
+
+/// The outbox: one row per channel an escalation goes out on. held = its notify action is not promoted.
+model EscalationDelivery {
+  id           String     @id @default(cuid())
+  escalationId String
+  escalation   Escalation @relation(fields: [escalationId], references: [id], onDelete: Restrict)
+  channel      String // CHECK inapp|banner|push
+  status       String     @default("pending") // CHECK pending|sent|failed|held
+  attempts     Int        @default(0)
+  lastError    String? // a class, never a tool's words
+  sentAt       DateTime?  @db.Timestamptz(3)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+
+  @@unique([escalationId, channel])
+  @@index([status, createdAt])
+}
+
+model RuntimeInstance {
+  id         String    @id @default(cuid())
+  gitSha     String
+  startedAt  DateTime  @default(now()) @db.Timestamptz(3)
+  lastBeatAt DateTime  @db.Timestamptz(3)
+  stoppedAt  DateTime? @db.Timestamptz(3)
+  stopReason String?
+
+  @@index([lastBeatAt])
+}
+
+model HealthCheck {
+  id        String   @id @default(cuid())
+  component String
+  status    String // CHECK ok|degraded|down|unknown|disabled
+  detail    String? // <= 300, redacted
+  at        DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([component, at])
 }
