@@ -13,6 +13,9 @@ import { healthSource, type HealthTarget } from './health.js';
 import { gitSource } from './git.js';
 import { spendSource } from './spend.js';
 import type { Source } from './types.js';
+import { GITHUB_API, githubSource } from './github.js';
+import { RAILWAY_API, railwaySource } from './railway.js';
+import { nexusSource } from './nexus.js';
 
 /** The loopback health endpoints. Flint listens on ::1 (apps/server/src/access.ts). */
 export const LOCAL_HEALTH: readonly HealthTarget[] = [
@@ -55,5 +58,21 @@ export function registry(config: Config, db: Db): Registered[] {
       source: spendSource({ dir: join(config.home, '.flint', 'spend'), evalCsv: join(config.home, '.flint', 'evolve', 'daily.csv'), caps: config.caps, tz: config.tz }),
       endpoints: [],
     },
-  ];
+    // The three below exist only once Will has created their credentials.
+    ...(config.github
+      ? [{
+          source: githubSource({ appId: config.github.appId, installationId: config.github.installationId, privateKeyPath: config.github.keyPath, owner: config.github.owner, repos: ['flint', 'nexus', 'trident', 'helm'] }),
+          endpoints: [
+            { origin: GITHUB_API, pathPrefix: `/repos/${config.github.owner}/`, methods: ['GET'] as const },
+            { origin: GITHUB_API, pathPrefix: `/app/installations/${config.github.installationId}/access_tokens`, methods: ['POST'] as const },
+          ],
+        }]
+      : []),
+    ...(Object.keys(config.railway).length
+      ? [{ source: railwaySource({ projects: config.railway }), endpoints: [{ origin: new URL(RAILWAY_API).origin, pathPrefix: '/graphql/v2', methods: ['POST'] as const }] }]
+      : []),
+    ...(config.nexus
+      ? [{ source: nexusSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] }]
+      : []),
+  ].map((r) => ({ source: r.source, endpoints: r.endpoints.map((e) => ({ ...e, methods: [...e.methods] })) }));
 }

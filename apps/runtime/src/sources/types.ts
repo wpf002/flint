@@ -29,6 +29,20 @@ export interface SyncResult {
   metrics: MetricObservation[];
   cursor?: string;
   etag?: string;
+  /**
+   * Parts that failed while the rest succeeded (one repo of four, say). The run
+   * still applies what it got; these are recorded as the source's last error
+   * and count as a failure, so a part that keeps failing reaches the watchdog.
+   */
+  errors?: string[];
+}
+
+/** One of this source's live entities, as the world model has it now. */
+export interface Known {
+  key: string;
+  name: string;
+  state: Record<string, unknown>;
+  taintedPaths: string[];
 }
 
 export interface SourceRun {
@@ -37,6 +51,8 @@ export interface SourceRun {
   cursor?: { cursor: string; etag: string | null };
   /** fetch limited to this source's endpoint list (policy/egress.ts). */
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  /** This source's live entities of a kind (to notice what disappeared from a listing, and close it as it was). */
+  known?: (kind: string) => Promise<Known[]>;
 }
 
 export interface Source {

@@ -61,6 +61,14 @@ const Env = z.object({
   /** The server's internal listener and the runtime's token for it (notify, spend-external). */
   SERVER_INTERNAL_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   SERVER_INTERNAL_TOKEN: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The GitHub App flint-observer (Will creates it): id, installation and the private key's path. */
+  GITHUB_APP_ID: z.string().regex(/^\d{1,12}$/).optional(),
+  GITHUB_APP_INSTALLATION_ID: z.string().regex(/^\d{1,15}$/).optional(),
+  GITHUB_APP_KEY_PATH: z.string().optional(),
+  GITHUB_OWNER: z.string().regex(/^[A-Za-z0-9-]{1,39}$/).default('wpf002'),
+  /** Nexus, for the nexus source: a namespace token (Nexus has no scopes yet); the source only reads. */
+  NEXUS_MCP_URL: z.string().url().refine((u) => u.startsWith('https://'), 'must be https').optional(),
+  NEXUS_READ_TOKEN: z.string().min(16).optional(),
   /** Health endpoints off the box: `name=https://host/path,...` (Railway services). */
   HEALTH_EXTRA: z.string().optional(),
   FLINT_BUDGET_ANTHROPIC_DAILY_USD: z.coerce.number().nonnegative().optional(),
@@ -83,6 +91,9 @@ export interface Config {
   home: string;
   healthExtra: Array<{ name: string; url: string }>;
   server?: { url: string; token: string };
+  github?: { appId: string; installationId: string; keyPath: string; owner: string };
+  railway: Record<string, string>;
+  nexus?: { url: string; token: string };
   caps: Record<'anthropic' | 'openai' | 'perplexity' | 'tavily', { dailyUsd?: number; monthlyUsd?: number }>;
 }
 
@@ -126,6 +137,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     tz: e.FLINT_TZ?.trim() || e.FLINT_USER_TZ?.trim() || 'America/Chicago',
     home: e.HOME,
     ...(e.SERVER_INTERNAL_URL && e.SERVER_INTERNAL_TOKEN ? { server: { url: e.SERVER_INTERNAL_URL, token: e.SERVER_INTERNAL_TOKEN } } : {}),
+    ...(e.GITHUB_APP_ID && e.GITHUB_APP_INSTALLATION_ID && e.GITHUB_APP_KEY_PATH
+      ? { github: { appId: e.GITHUB_APP_ID, installationId: e.GITHUB_APP_INSTALLATION_ID, keyPath: e.GITHUB_APP_KEY_PATH, owner: e.GITHUB_OWNER } }
+      : {}),
+    // RAILWAY_TOKEN_<PROJECT>: one project token per Railway project.
+    railway: Object.fromEntries(
+      Object.entries(env)
+        .filter(([k, v]) => /^RAILWAY_TOKEN_[A-Z0-9_]{1,40}$/.test(k) && typeof v === 'string' && /^[A-Za-z0-9-]{16,200}$/.test(v))
+        .map(([k, v]) => [k.slice('RAILWAY_TOKEN_'.length).toLowerCase(), v as string]),
+    ),
+    ...(e.NEXUS_MCP_URL && e.NEXUS_READ_TOKEN ? { nexus: { url: e.NEXUS_MCP_URL, token: e.NEXUS_READ_TOKEN } } : {}),
     healthExtra,
     caps: {
       anthropic: cap(e.FLINT_BUDGET_ANTHROPIC_DAILY_USD, e.FLINT_BUDGET_ANTHROPIC_MONTHLY_USD),

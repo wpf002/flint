@@ -247,6 +247,55 @@ describe.skipIf(NO_DB)('sync engine (flint_test)', () => {
     expect((await db.sourceCursor.findUniqueOrThrow({ where: { source: 'launchd' } })).consecutiveFailures).toBe(0);
   });
 
+  it('partial errors and unapplied observations are the run\'s error, and the cursor moves only when everything applied', async () => {
+    await db.sourceCursor.update({ where: { source: 'launchd' }, data: { cursor: 'c0', consecutiveFailures: 0 } });
+    let out: { cursor: string; errors?: string[]; bad?: boolean } = { cursor: 'c1', errors: ['repo x: HTTP 404'], bad: true };
+    const partial: Source = {
+      name: 'launchd',
+      cadenceMs: 1,
+      async run() {
+        return {
+          observations: out.bad ? [{ type: 'service.status', kind: 'service', key: 'service:launchd:bad', name: 'bad', sensitivity: 'ops', externalId: 'bad', state: { managedBy: 'nope' } }] : [],
+          metrics: [], cursor: out.cursor, ...(out.errors ? { errors: out.errors } : {}),
+        };
+      },
+    };
+    const s = await syncOnce(db, partial, runAt(new Date()), 'UTC');
+    expect(s.failed).toBe(2);
+    let c = await db.sourceCursor.findUniqueOrThrow({ where: { source: 'launchd' } });
+    expect(c).toMatchObject({ cursor: 'c0', consecutiveFailures: 1 });
+    expect(c.lastError).toMatch(/repo x: HTTP 404; 1 observation\(s\) failed to apply/);
+    expect(await db.auditEntry.findFirst({ where: { action: 'world.sync.launchd', outcome: 'failed', reasoning: { contains: 'repo x' } } })).not.toBeNull();
+
+    out = { cursor: 'c1', errors: ['repo x: HTTP 404'] };
+    await syncOnce(db, partial, runAt(new Date()), 'UTC');
+    c = await db.sourceCursor.findUniqueOrThrow({ where: { source: 'launchd' } });
+    expect(c).toMatchObject({ cursor: 'c1', consecutiveFailures: 2 });
+
+    out = { cursor: 'c2' };
+    await syncOnce(db, partial, runAt(new Date()), 'UTC');
+    c = await db.sourceCursor.findUniqueOrThrow({ where: { source: 'launchd' } });
+    expect(c).toMatchObject({ cursor: 'c2', consecutiveFailures: 0, lastError: null });
+  });
+
+  it('known() hands a source its live entities as stored; outside text with half an emoji or a NUL is still stored', async () => {
+    let seen: Awaited<ReturnType<NonNullable<SourceRun['known']>>> = [];
+    const odd: Source = {
+      name: 'launchd',
+      cadenceMs: 1,
+      async run(r) {
+        seen = await r.known!('service');
+        return { observations: [{ type: 'service.status', kind: 'service', key: 'service:launchd:odd', name: 'odd \uD83D\u0000name', sensitivity: 'ops', externalId: 'odd', state: { managedBy: 'launchd' }, taintedPaths: ['name'] }], metrics: [] };
+      },
+    };
+    const s = await syncOnce(db, odd, runAt(new Date()), 'UTC');
+    expect(s.failed).toBe(0);
+    expect((await db.entity.findUniqueOrThrow({ where: { kind_key: { kind: 'service', key: 'service:launchd:odd' } } })).name).toBe('odd \uFFFDname');
+    expect(seen.find((k) => k.key === 'service:launchd:com.flint.test')).toMatchObject({ name: 'com.flint.test', state: expect.objectContaining({ managedBy: 'launchd' }), taintedPaths: [] });
+    await syncOnce(db, odd, runAt(new Date()), 'UTC');
+    expect(seen.find((k) => k.key === 'service:launchd:odd')).toMatchObject({ taintedPaths: ['name'] });
+  });
+
   it('a forbidden source never runs, enabled or not', async () => {
     const forbidden: Source = { ...fake, name: 'launchd', run: async () => { throw new Error('must not run'); } };
     const s = await syncOnce(db, forbidden, { ...runAt(new Date()) }, 'UTC');

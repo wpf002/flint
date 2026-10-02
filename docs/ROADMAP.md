@@ -37,7 +37,8 @@ set; checkpoints on irreversible steps; per-step retries honoring idempotency.
 compounds) — autonomous on reversible steps, human-in-loop on irreversible ones.
 *DoD:* a real 5+ step task across apps, pausing only at irreversible steps, fully logged.
 
-**Phase 3 — Memory / context.** The real persistence behind core's memory
+**Phase 3 — Memory / context.** *(Superseded by the Machine plan, P1: the runtime's
+world model, versions and audit in local Postgres 17 under `apps/runtime`.)* The real persistence behind core's memory
 interface; retrieval over your data, conversations, project state, preferences.
 Postgres + pgvector; embeddings behind a Flint-style interface. Crown-jewel data
 — encrypt at rest, scope access.
