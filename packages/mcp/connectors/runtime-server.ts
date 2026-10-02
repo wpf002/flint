@@ -90,7 +90,7 @@ const readOnly = { readOnlyHint: true };
  * shown, and true for an answer that failed its wire schema (fail closed: what
  * it held is unknown, so the server's gate taints the turn).
  */
-export const failure = (error: string, tainted: boolean) => ({
+const failure = (error: string, tainted: boolean) => ({
   isError: true,
   content: [{ type: 'text' as const, text: JSON.stringify({ error, tainted }) }],
 });
