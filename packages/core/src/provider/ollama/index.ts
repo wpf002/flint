@@ -353,7 +353,7 @@ export class OllamaProvider implements ProviderAdapter {
       if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
       const chunk = (await resp.json()) as OllamaChatChunk;
       usage = { input: usage.input + (chunk.prompt_eval_count ?? 0), output: usage.output + (chunk.eval_count ?? 0) };
-      lastText = (chunk.message?.content ?? '').trim();
+      lastText = withoutTurnEnd(chunk.message?.content ?? '');
       let value: unknown;
       try {
         value = JSON.parse(lastText);
@@ -597,3 +597,13 @@ async function safeText(resp: Response): Promise<string> {
 }
 
 export { ollamaCapabilities } from './capabilities.js';
+
+/**
+ * The reply without the end-of-turn tokens a model with no stop parameters
+ * lets through (muse-glimmer under `format` ends its JSON with `<|eot|>`):
+ * trailing `<|name|>` tokens and whitespace only, so the JSON itself is never
+ * touched.
+ */
+export function withoutTurnEnd(text: string): string {
+  return text.trim().replace(/(?:\s*<\|[A-Za-z0-9_]{1,32}\|>)+$/, '').trim();
+}
