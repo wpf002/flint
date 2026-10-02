@@ -213,3 +213,21 @@ export const DecisionExplained = z
     tainted: z.boolean(),
   })
   .strict();
+
+/**
+ * One line of ~/.flint/deploy-events.jsonl (0600), appended by the install
+ * scripts and read by the runtime's `deploy` source: a stage that failed (the
+ * gate, the migration, the restart, the health check), or a deploy that
+ * finished. Ids make a line read twice the same event.
+ */
+export const DeployEvent = z
+  .object({
+    id: Id,
+    at: At,
+    component: z.enum(['server', 'runtime']),
+    stage: z.enum(['gate', 'migrate', 'restart', 'health', 'deploy']),
+    outcome: z.enum(['ok', 'failed']),
+    sha: z.string().regex(/^[0-9a-f]{40}$/),
+  })
+  .strict();
+export type DeployEvent = z.infer<typeof DeployEvent>;
