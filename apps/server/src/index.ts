@@ -62,16 +62,21 @@ import {
   OllamaEmbedder,
 } from '@flint/persona';
 import { McpRegistry, type McpServerSpec } from '@flint/mcp';
-import { AuditSink, runtimeFromDisk } from './audit-sink';
+import { AuditSink, runtimeFromDisk, type Runtime } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
 import { RuntimePolicies, capClaimer } from './runtime-link';
-import { historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, withTurnTaint } from './turn-taint';
+import { currentTurn, historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
 import { pgApproverStore } from './approver-store';
 import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
+import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
+import { WorldNow, estimateTokens } from './world-now';
+import { inboxRoutes } from './inbox-routes';
+import { ChatLoad } from './chat-load';
+import { CompleteGate, type BackgroundFrontier } from './background-complete';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
@@ -98,6 +103,8 @@ import {
   NoteOnce,
   readCaps,
   describeCaps,
+  readKindCaps,
+  describeKindCaps,
   spendObserver,
   spendContext,
   paidToolSpecs,
@@ -450,10 +457,24 @@ async function main(): Promise<void> {
   // and FLINT_BUDGET_* caps degrade Flint as they are approached (never before).
   // The notifications feed is built here so the guard can warn at 50/80/100%.
   const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
+  // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
+  // (and not blank) it also turns on runtime mode below. One link for everything
+  // that talks to the runtime (audit, policies, events, World now, the lanes).
+  const runtimeUrl = process.env.FLINT_RUNTIME_URL?.trim() || undefined;
+  const runtimeLink = runtimeFromDisk(homedir(), runtimeUrl);
+  // What the server tells the runtime's triage (./runtime-events): ids, enums and numbers, never text.
+  const events = new RuntimeEvents({ runtime: runtimeLink, spoolDir: join(homedir(), '.flint', 'spool'), log: (m) => console.error(m) });
+  events.start();
   const ledger = new SpendLedger({ dir: join(homedir(), '.flint', 'spend'), timeZone: USER_TZ, log: (m) => console.error(m) });
   const caps = readCaps(process.env, (m) => console.error(`[spend] ${m}`));
-  const spend = new SpendGuard(ledger, caps, notes);
+  // A threshold notice newly raised (never the boot re-check of one already raised) is also an event.
+  const spend = new SpendGuard(ledger, caps, notes, {
+    onThreshold: (t) => void events.push({ type: 'spend.threshold', id: thresholdEventId(t.key), vendor: t.vendor, level: t.level, period: t.period }),
+  });
   console.error(`[spend] caps: ${describeCaps(caps)}`);
+  // The background kinds the runtime may spend through /internal/complete: $0 until raised.
+  const kindCaps = readKindCaps(process.env, (m) => console.error(`[spend] ${m}`));
+  console.error(`[spend] background kinds: ${describeKindCaps(kindCaps)}`);
   spend.checkAll();
   // Every Flint client shares this: the audit trail, plus one ledger row per paid provider pass.
   const observer = combineObservers(actionLog, spendObserver(ledger));
@@ -513,10 +534,6 @@ async function main(): Promise<void> {
   const actions = new ActionQueue(isSafeTool);
   // The audit trail's server end (./audit-sink): spooled locally, shipped to the
   // runtime once it is installed. Every tier decision lands here (Machine plan 3.0.7).
-  // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
-  // (and not blank) it also turns on runtime mode below.
-  const runtimeUrl = process.env.FLINT_RUNTIME_URL?.trim() || undefined;
-  const runtimeLink = runtimeFromDisk(homedir(), runtimeUrl);
   const audit = new AuditSink({
     spoolDir: join(homedir(), '.flint', 'spool'),
     runtime: runtimeLink,
@@ -616,6 +633,7 @@ async function main(): Promise<void> {
   // (bare generate — no persona/style guide, a few hundred tokens); heuristics otherwise.
   let frontierFlint: Flint | undefined;
   let plannerVendor: ReturnType<typeof vendorOfProvider>; // whose budget frontierFlint spends
+  let backgroundFrontier: BackgroundFrontier | undefined; // what /internal/complete calls, once Will raises a kind cap
   // Perplexity / Tavily searches run in the MCP processes: metered per successful
   // call here, and refused with a routable error once their vendor's cap is spent.
   // deep_research gets the same wrapped tools, so its searches count too.
@@ -703,6 +721,19 @@ async function main(): Promise<void> {
     const planner = brains.chain('routine')[0] ?? brains.primary;
     frontierFlint = flintOf.get(planner.persona);
     plannerVendor = vendorOfProvider(planner.provider.name);
+    // The runtime's background calls (/internal/complete) are light work too: the routine tier,
+    // bare (no persona, no tools), metered by the spend observer under the call's kind.
+    if (frontierFlint) {
+      const f = frontierFlint;
+      backgroundFrontier = {
+        vendor: plannerVendor,
+        model: planner.model,
+        generate: async (input, o) => {
+          const out = await f.generate(input, { context: spendContext(o.kind), maxTokens: o.maxTokens, signal: o.signal });
+          return { text: out.text, usage: out.usage };
+        },
+      };
+    }
     console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
@@ -749,18 +780,32 @@ async function main(): Promise<void> {
       return cached;
     };
   })();
+  // /chat turns in flight (POST /internal/load): the runtime's triage yields to them.
+  const chatLoad = new ChatLoad();
+  // The runtime's metered frontier calls (./background-complete): every kind $0 until Will raises it.
+  const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, frontier: () => backgroundFrontier, log: (m) => console.error(m) });
   startInternal({
     tokenSha256: internalSha,
-    // The runtime's words stay in the console; the phone gets a content-free ping.
-    notify: (title, body) => {
-      if (/^\s*[{[]/.test(body)) return 'refused';
-      return notes.push(title, body, 'runtime', `rt:${Date.now()}`, { phone: 'ping' }) ? 'stored' : 'duplicate';
-    },
+    // The runtime's words stay in the console; the phone only ever gets the content-free ping.
+    notify: (n) => notes.push(n.title, n.body, 'runtime', n.dedupe, { channels: n.channels }),
     spendExternal: (t) => spend.setExternal(t),
+    chatInFlight: () => chatLoad.inFlight,
+    complete: (body) => completeGate.handle(body),
   }).on('error', (err) => console.error(`[internal] listener failed: ${err.message}`));
+  // "World now" in frontier chat context (./world-now); FLINT_WORLD_NOW=0 leaves it out.
+  const worldNow = process.env.FLINT_WORLD_NOW?.trim() === '0' ? undefined : new WorldNow({ runtime: runtimeLink });
 
   // One request is one turn, with its own taint state (./turn-taint).
-  const server = createServer(safeHandler((req, res) => withTurnTaint(() => handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint }))));
+  const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
+    // A 5xx answer is a route.error event for the runtime (an eval replay's is not; nor is
+    // the lanes proxy's, whose 5xx is the runtime's own failure: routeOf names none).
+    const turn = currentTurn();
+    const route = routeOf(req.url ?? '/');
+    res.once('finish', () => {
+      if (res.statusCode >= 500 && res.statusCode <= 599 && route && !turn?.eval) events.push({ type: 'route.error', route, status: res.statusCode });
+    });
+    return handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, chatLoad, runtime: runtimeLink });
+  })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
   // the LAN can hit it directly — the only door in is the private tailnet.
@@ -806,6 +851,14 @@ interface Ctx {
   spend: SpendGuard;
   /** The honest "running on my local brain" line, once per conversation per day. */
   budgetNotes: NoteOnce;
+  /** What the server tells the runtime (./runtime-events). */
+  events: RuntimeEvents;
+  /** The "World now" block for frontier chat turns; undefined when FLINT_WORLD_NOW=0. */
+  worldNow: WorldNow | undefined;
+  /** /chat turns in flight, for the runtime's triage (./chat-load). */
+  chatLoad: ChatLoad;
+  /** The runtime link main() builds (the lanes, ./inbox-routes). */
+  runtime: () => Runtime | undefined;
 }
 
 /** Tool calls executed during a turn, pulled from the action log (for training capture). */
@@ -1253,147 +1306,163 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // Image/PDF turns must reach a frontier that can see them — or be refused, never answered blind.
     const route = routeTurn({ message, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in route) return json(res, 422, { error: route.error });
-    // Router, recall, the Action Log and the training corpus see names, never file bodies.
-    const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
-    const scored = await ctx.router.selectScored(asText);
-    const selected = scored.tools;
-    // The history this turn will actually carry (windowed), not the whole stored thread:
-    // its complete turns size the "deep thread" rule, and the ones left out get a context line.
-    const history = ctx.memory.historyStats(conversationId);
-    // (The history is checked for untrusted text when the model is handed it: memory.onHistory.)
-    const turnsBefore = new Set(ctx.memory.turnIds(conversationId));
-    const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
-    const toolsLikely = ctx.router.toolsLikely(scored.appended);
-    const tier = classifyMessage(message, { turns, toolsLikely });
-    // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
-    // the honest note once per conversation per day.
-    const budget = budgetTurn({
-      brains: ctx.brains,
-      tier,
-      guard: ctx.spend,
-      route,
-      localProvider: ctx.provider.name,
-      localModel: ctx.model,
-      canRead: canReadMedia(mediaNeeds(attachments)),
-      once: { notes: ctx.budgetNotes, conversationId },
-    });
-    if (!budget.ok) return json(res, budget.status, { error: budget.error });
-    const { plan, note } = budget;
-    if (plan) logPlan(plan);
-    let brain = budget.brain;
-    let answeredBy = ctx.model;
-    let failed = false;
-    let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
-    let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
-    let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
-    const moved = movedBy(message, tier, { toolsLikely, turns });
-    const recalled = await contextFor(asText, ctx.knowledge);
-    const ctxBlock = withHistoryNote(recalled.block, history);
-    const beforeLog = ctx.actionLog.actions().length;
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-    const ac = new AbortController();
-    res.on('close', () => ac.abort());
-    let answer = '';
-    const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
-    // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
-    const pump = async (persona: Persona, recoverable = false, tried?: number) => {
-      const events = persona.chat(
-        { conversationId, message, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
-        { signal: ac.signal },
-      );
-      for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
-        // The budget note rides just ahead of `done`: shown, but never stored as the answer.
-        if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
-        if (ev.type === 'text') answer += ev.delta;
-        // A provider error arrives as an event, not a throw. When another tier is
-        // left to try and no text has gone out, throw it to the tier fallback.
-        if (recoverable && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
-        if (ev.type === 'error') streamErrored = true; // passed on to the client, so the turn failed
-        res.write(`data: ${JSON.stringify(ev)}\n\n`);
-      }
-    };
-    try {
-      if (brain === 'frontier' && plan) {
-        try {
-          const chain = plan.chain;
-          const won = await runWithFallback(
-            chain,
-            async (b) => {
-              lastTried = b.label;
-              res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields })}\n\n`);
-              try {
-                await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1); // last tier: errors as before, no answer → honest message
-              } catch (err) {
-                if (answer.length > 0) throw new NoFallback(err); // text already streamed
-                throw err;
-              }
-            },
-            { signal: ac.signal, onFallback: logFallback },
-          );
-          answeredBy = won.brain.label;
-        } catch (err) {
-          // Only safe to fall back if nothing was streamed yet, and (a paid local brain) its budget isn't spent.
-          if (answer.length === 0 && route.localFallback && !ac.signal.aborted && !budget.localRefusal) {
-            console.error('[brain] frontier failed pre-output, falling back to local:', err);
-            brain = 'local';
-            lastTried = ctx.model;
-            res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
-            await pump(ctx.persona);
-          } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
-            throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        lastTried = ctx.model;
-        res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields })}\n\n`);
-        await pump(ctx.persona);
-      }
-      if (answer.trim()) {
-        recordConvo(ctx.convos, asText, answer);
-        ctx.training.log(
-          { conversationId, brain, model: answeredBy, input: asText, output: answer, tools: toolsSince(ctx, beforeLog) },
-          Date.now(),
-        );
-      }
-      // This turn's own proposals only (a concurrent turn's are its own).
-      const proposed = turnProposals();
-      if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
-    } catch (err) {
-      failed = true;
-      res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
-    }
-    // The [route] line (./route-log): tier, what moved it, who answered. Never the message.
-    const outcome = chatOutcome({ aborted: ac.signal.aborted, failed, streamErrored, gaveUp, answer });
-    console.error(
-      routeLine({
-        path: 'chat',
+    // From here until the turn ends, however it ends, it is a chat turn in flight
+    // (POST /internal/load): the runtime's triage leaves the local model to it.
+    return ctx.chatLoad.run(async () => {
+      // Router, recall, the Action Log and the training corpus see names, never file bodies.
+      const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
+      const scored = await ctx.router.selectScored(asText);
+      const selected = scored.tools;
+      // The history this turn will actually carry (windowed), not the whole stored thread:
+      // its complete turns size the "deep thread" rule, and the ones left out get a context line.
+      const history = ctx.memory.historyStats(conversationId);
+      // (The history is checked for untrusted text when the model is handed it: memory.onHistory.)
+      const turnsBefore = new Set(ctx.memory.turnIds(conversationId));
+      const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
+      const toolsLikely = ctx.router.toolsLikely(scored.appended);
+      const tier = classifyMessage(message, { turns, toolsLikely });
+      // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
+      // the honest note once per conversation per day.
+      const budget = budgetTurn({
+        brains: ctx.brains,
         tier,
-        ...(moved ? { movedBy: moved } : {}),
-        appended: scored.appended,
-        turns,
-        ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
-        brain,
-        ...attribution(outcome, lastTried),
-        outcome,
-        ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
-        recall: recalled.mode,
-        ms: Date.now() - started,
-      }),
-    );
-    // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
-    if (turnTainted()) {
-      const own = taintSources().some((s) => s !== 'history');
-      ctx.convTaint.mark(conversationId, ctx.memory.turnIds(conversationId).filter((id) => !turnsBefore.has(id)), own ? Date.now() : (historyOrigin() ?? Date.now()));
-    }
-    res.end();
-    return;
+        guard: ctx.spend,
+        route,
+        localProvider: ctx.provider.name,
+        localModel: ctx.model,
+        canRead: canReadMedia(mediaNeeds(attachments)),
+        once: { notes: ctx.budgetNotes, conversationId },
+      });
+      if (!budget.ok) return json(res, budget.status, { error: budget.error });
+      const { plan, note } = budget;
+      if (plan) logPlan(plan);
+      let brain = budget.brain;
+      let answeredBy = ctx.model;
+      let failed = false;
+      let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
+      let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
+      let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
+      const moved = movedBy(message, tier, { toolsLikely, turns });
+      // "World now" (./world-now), fetched alongside recall, for frontier turns only: a local
+      // turn's prompt is already at its limit with ~42 tool schemas (more text there and the
+      // local model starts coming back empty, as the voice-exemplar note in main() records).
+      const [recalled, world] = await Promise.all([
+        contextFor(asText, ctx.knowledge),
+        brain === 'frontier' && plan && ctx.worldNow ? ctx.worldNow.block() : Promise.resolve(''),
+      ]);
+      const ctxBlock = withHistoryNote(recalled.block, history);
+      // It rides in the persona context (the system prompt's per-turn suffix): never stored in
+      // the history, so the memory extractor never reads it, and a local fallback goes without.
+      const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
+      const beforeLog = ctx.actionLog.actions().length;
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      const ac = new AbortController();
+      res.on('close', () => ac.abort());
+      let answer = '';
+      const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
+      // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
+      const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
+        const events = persona.chat(
+          { conversationId, message, context, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
+          { signal: ac.signal },
+        );
+        for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
+          // The budget note rides just ahead of `done`: shown, but never stored as the answer.
+          if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
+          if (ev.type === 'text') answer += ev.delta;
+          // A provider error arrives as an event, not a throw. When another tier is
+          // left to try and no text has gone out, throw it to the tier fallback.
+          if (recoverable && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
+          if (ev.type === 'error') streamErrored = true; // passed on to the client, so the turn failed
+          res.write(`data: ${JSON.stringify(ev)}\n\n`);
+        }
+      };
+      try {
+        if (brain === 'frontier' && plan) {
+          try {
+            const chain = plan.chain;
+            const won = await runWithFallback(
+              chain,
+              async (b) => {
+                lastTried = b.label;
+                res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields })}\n\n`);
+                try {
+                  await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: errors as before, no answer → honest message
+                } catch (err) {
+                  if (answer.length > 0) throw new NoFallback(err); // text already streamed
+                  throw err;
+                }
+              },
+              { signal: ac.signal, onFallback: logFallback },
+            );
+            answeredBy = won.brain.label;
+          } catch (err) {
+            // Only safe to fall back if nothing was streamed yet, and (a paid local brain) its budget isn't spent.
+            if (answer.length === 0 && route.localFallback && !ac.signal.aborted && !budget.localRefusal) {
+              console.error('[brain] frontier failed pre-output, falling back to local:', err);
+              brain = 'local';
+              lastTried = ctx.model;
+              res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+              await pump(ctx.persona);
+            } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
+              throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          lastTried = ctx.model;
+          res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields })}\n\n`);
+          await pump(ctx.persona);
+        }
+        if (answer.trim()) {
+          recordConvo(ctx.convos, asText, answer);
+          ctx.training.log(
+            { conversationId, brain, model: answeredBy, input: asText, output: answer, tools: toolsSince(ctx, beforeLog) },
+            Date.now(),
+          );
+        }
+        // This turn's own proposals only (a concurrent turn's are its own).
+        const proposed = turnProposals();
+        if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
+      } catch (err) {
+        failed = true;
+        res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
+      }
+      // The [route] line (./route-log): tier, what moved it, who answered. Never the message.
+      const outcome = chatOutcome({ aborted: ac.signal.aborted, failed, streamErrored, gaveUp, answer });
+      console.error(
+        routeLine({
+          path: 'chat',
+          tier,
+          ...(moved ? { movedBy: moved } : {}),
+          appended: scored.appended,
+          turns,
+          ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
+          brain,
+          ...attribution(outcome, lastTried),
+          outcome,
+          ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
+          recall: recalled.mode,
+          ...(world ? { ctxTokens: { world: estimateTokens(world) } } : {}),
+          ms: Date.now() - started,
+        }),
+      );
+      // The turn, for the runtime's triage (./runtime-events): brain, outcome, tool names, time, taint.
+      ctx.events.push(chatTurnEvent({ brain, outcome, tools: turnTools(), ms: Date.now() - started, tainted: turnTainted() }));
+      // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
+      if (turnTainted()) {
+        const own = taintSources().some((s) => s !== 'history');
+        ctx.convTaint.mark(conversationId, ctx.memory.turnIds(conversationId).filter((id) => !turnsBefore.has(id)), own ? Date.now() : (historyOrigin() ?? Date.now()));
+      }
+      res.end();
+      return;
+    });
   }
 
   // Eval-only discovery for apps/parity tasks (./eval-tools): the wired tool names, and
@@ -1419,6 +1488,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
 
   // Proposals, approvals and approval keys (./approval-routes).
   if (await approvalRoutes(req, res, url, { ...ctx, errorRef })) return;
+
+  // The runtime's lanes, its health report, and Will's labels, acks and dismissals (./inbox-routes).
+  if (await inboxRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {
