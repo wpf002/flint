@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ServerEventBatch, type ServerEvent } from '@flint/policy';
 import type { Tool } from '@flint/core';
+import { ChatTurnEvent } from '@flint/policy';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId, type EventDraft } from '../src/runtime-events';
 import { ActionQueue } from '../src/actions';
 import { isSafeTool } from '../src/policy';
@@ -202,6 +203,16 @@ describe('what the events say', () => {
     expect((e as { tools: string[] }).tools).toHaveLength(30);
     expect((e as { tools: string[] }).tools[0]).toBe('web.web_search');
     expect(chatTurnEvent({ brain: 'local', outcome: 'aborted', tools: [], ms: -5, tainted: false })).toMatchObject({ brain: 'local', outcome: 'aborted', ms: 0 });
+  });
+
+  it('a chat turn carries its tier, how recall went and World now\'s size, each only when known and valid', () => {
+    const full = chatTurnEvent({ brain: 'frontier', outcome: 'answered', tools: [], ms: 10, tainted: false, tier: 'hard', recall: 'lexical', worldTokens: 212.4 });
+    expect(full).toMatchObject({ tier: 'hard', recall: 'lexical', ctxTokens: { world: 212 } });
+    expect(ChatTurnEvent.safeParse({ ...full, id: 'a'.repeat(32), at: new Date().toISOString() }).success).toBe(true);
+    const bare = chatTurnEvent({ brain: 'local', outcome: 'answered', tools: [], ms: 10, tainted: false, tier: 'bogus', recall: 'psychic' });
+    expect(bare).not.toHaveProperty('tier');
+    expect(bare).not.toHaveProperty('recall');
+    expect(bare).not.toHaveProperty('ctxTokens');
   });
 
   it("routes are named as the wire names them; the lanes proxy's (the runtime's own failures) are not reported", () => {

@@ -792,8 +792,9 @@ async function main(): Promise<void> {
     chatInFlight: () => chatLoad.inFlight,
     complete: (body) => completeGate.handle(body),
   }).on('error', (err) => console.error(`[internal] listener failed: ${err.message}`));
-  // "World now" in frontier chat context (./world-now); FLINT_WORLD_NOW=0 leaves it out.
-  const worldNow = process.env.FLINT_WORLD_NOW?.trim() === '0' ? undefined : new WorldNow({ runtime: runtimeLink });
+  // "World now" in frontier chat context (./world-now). It adds tokens to every
+  // frontier turn, so it is off until Will turns it on (FLINT_WORLD_NOW=1).
+  const worldNow = process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow({ runtime: runtimeLink }) : undefined;
 
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
@@ -853,7 +854,7 @@ interface Ctx {
   budgetNotes: NoteOnce;
   /** What the server tells the runtime (./runtime-events). */
   events: RuntimeEvents;
-  /** The "World now" block for frontier chat turns; undefined when FLINT_WORLD_NOW=0. */
+  /** The "World now" block for frontier chat turns; undefined unless FLINT_WORLD_NOW=1. */
   worldNow: WorldNow | undefined;
   /** /chat turns in flight, for the runtime's triage (./chat-load). */
   chatLoad: ChatLoad;
@@ -1454,7 +1455,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         }),
       );
       // The turn, for the runtime's triage (./runtime-events): brain, outcome, tool names, time, taint.
-      ctx.events.push(chatTurnEvent({ brain, outcome, tools: turnTools(), ms: Date.now() - started, tainted: turnTainted() }));
+      ctx.events.push(chatTurnEvent({
+        brain, outcome, tools: turnTools(), ms: Date.now() - started, tainted: turnTainted(),
+        tier: plan?.tier ?? tier, recall: recalled.mode, ...(world ? { worldTokens: estimateTokens(world) } : {}),
+      }));
       // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
       if (turnTainted()) {
         const own = taintSources().some((s) => s !== 'history');

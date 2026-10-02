@@ -28,6 +28,10 @@ describe('index.ts wiring', () => {
     expect(generate).not.toContain('chatLoad');
   });
 
+  it('World now is off unless FLINT_WORLD_NOW=1 (it costs tokens on every frontier turn)', () => {
+    expect(src).toContain("process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow(");
+  });
+
   it('asks for World now only for a planned frontier turn, and hands it only to the frontier tiers', () => {
     expect(generate).not.toMatch(/worldNow|frontierCtx/);
     expect(chat).toContain("brain === 'frontier' && plan && ctx.worldNow ? ctx.worldNow.block()");

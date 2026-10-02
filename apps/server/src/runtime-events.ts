@@ -59,8 +59,20 @@ export function thresholdEventId(key: string): string {
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,100}$/;
 
 /** A finished /chat turn as an event: route-log's outcome on the wire's terms, tool names only. */
-export function chatTurnEvent(t: { brain: string; outcome: Outcome; tools: readonly string[]; ms: number; tainted: boolean }): EventDraft {
+export function chatTurnEvent(t: {
+  brain: string;
+  outcome: Outcome;
+  tools: readonly string[];
+  ms: number;
+  tainted: boolean;
+  /** For the "chat unaffected" measures: the turn's tier, how recall went, World now's size. */
+  tier?: string;
+  recall?: string;
+  worldTokens?: number;
+}): EventDraft {
   const outcome = t.outcome === 'error' ? 'failed' : t.outcome;
+  const tier = TIERS.find((x) => x === t.tier);
+  const recall = RECALL.find((x) => x === t.recall);
   return {
     type: 'chat.turn',
     brain: t.brain === 'frontier' ? 'frontier' : 'local',
@@ -68,8 +80,14 @@ export function chatTurnEvent(t: { brain: string; outcome: Outcome; tools: reado
     tools: [...new Set(t.tools.filter((n) => TOOL_NAME.test(n)))].slice(0, 30),
     ms: Math.min(3_600_000, Math.max(0, Math.round(t.ms))),
     tainted: t.tainted,
+    ...(tier ? { tier } : {}),
+    ...(recall ? { recall } : {}),
+    ...(t.worldTokens !== undefined && Number.isFinite(t.worldTokens) ? { ctxTokens: { world: Math.min(100_000, Math.max(0, Math.round(t.worldTokens))) } } : {}),
   };
 }
+
+const TIERS = ['routine', 'standard', 'hard', 'code'] as const;
+const RECALL = ['semantic', 'lexical', 'timeout', 'none'] as const;
 
 /**
  * Which route a request was, as the wire names it; undefined for the lanes
