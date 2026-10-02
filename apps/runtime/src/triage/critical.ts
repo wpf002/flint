@@ -26,7 +26,7 @@ const num = (v: unknown, lo: number, hi: number, dflt: number) => (typeof v === 
 const sha = (v: unknown) => (typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v) ? v.slice(0, 12) : null);
 const pick = <T extends string>(v: unknown, of: readonly T[]): T | null => (of as readonly unknown[]).includes(v) ? (v as T) : null;
 const VENDORS = ['anthropic', 'openai', 'perplexity', 'tavily'] as const;
-const STAGES = ['gate', 'migrate', 'restart', 'health'] as const;
+const STAGES = ['gate', 'restart', 'health'] as const;
 /** CI on flint's own default branch: the github source's latest push run. */
 const FLINT_CI = /^ci_run:github:[A-Za-z0-9_.-]{1,100}\/flint:latest$/;
 
@@ -48,7 +48,9 @@ const CRITICAL: Record<string, Rule> = {
     return f.payload.level === 'exhausted' && vendor ? { id: 'vendor_cap', fields: { vendor } } : undefined;
   },
   'deploy:gate.failed': (f) => deployFailed(f, 'gate'),
-  'deploy:migrate.failed': (f) => deployFailed(f, 'migrate'),
+  'deploy:migrate.failed': (f) => ({ id: 'migrate_failed', fields: { component: f.payload.component === 'runtime' ? 'runtime' : 'server', sha: sha(f.payload.sha) } }),
+  // The watchdog's own reading of ~/.flint/runtime/migrate-failed.
+  'runtime:migrate.failed': (f) => ({ id: 'migrate_failed', fields: { component: 'runtime', sha: sha(f.payload.sha) } }),
   'github:ci_run.state': (f) => {
     const e = f.entity;
     if (!e || !FLINT_CI.test(e.key) || e.state.status !== 'completed' || e.state.conclusion !== 'failure') return undefined;
@@ -68,7 +70,7 @@ export function criticalVerdict(f: EventFacts): Verdict | undefined {
 }
 
 /** The ids of the critical templates (they bypass the push cap). */
-export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'ci_failing']);
+export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'migrate_failed', 'ci_failing']);
 
 /** What the non-critical code rules need from the database. */
 export interface CodeRuleContext {
@@ -98,7 +100,7 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
     const ns = typeof f.payload.namespace === 'string' && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(f.payload.namespace) ? f.payload.namespace : null;
     return {
       action: 'escalate', lane: 'relevant', decidedBy: 'code:handoff.unaccepted_24h', ruleName: 'handoff.unaccepted_24h', critical: false,
-      template: { id: 'handoff', fields: { handoff: refOf(f), namespace: ns } },
+      template: { id: 'handoff_unaccepted', fields: { handoff: refOf(f), namespace: ns } },
       // Once per sender a day; without a clean sender, once a day for all of them.
       perDay: { key: `notify.handoff:${ns ?? 'unknown'}`, limit: 1 },
     };

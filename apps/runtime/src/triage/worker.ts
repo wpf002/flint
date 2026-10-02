@@ -18,7 +18,8 @@ import type { Db } from '../db.js';
 import { QUEUES, type Bus } from '../bus.js';
 import { activePolicies } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
-import { recordDecision } from '../surface/decision.js';
+import { recordDecision } from '../surface/record.js';
+import { fileAction } from '../surface/act.js';
 import { loadFacts } from './facts.js';
 import { judge } from './judge.js';
 import { chatLoad, type Load } from './load.js';
@@ -114,6 +115,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
     decision = quietLog('fallback:deferred');
   }
   const byModel = decision.decidedBy.startsWith('model:') || /^fallback:(invalid|unavailable|capped|deferred)$/.test(decision.decidedBy);
-  const recorded = await recordDecision(db, f, decision, { shadow: rules.shadow, tier: byModel ? model.tier : rules.tier, tz: config.tz, now });
+  const filed = await fileAction(db, f, decision, { alone: rules.tier === 'alone', now });
+  const recorded = await recordDecision(db, f, decision, { shadow: rules.shadow, tier: byModel ? model.tier : rules.tier, tz: config.tz, now, policies, bus: d.bus, ...filed });
   return recorded ? 'decided' : 'exists';
 }

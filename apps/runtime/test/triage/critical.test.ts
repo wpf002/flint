@@ -14,7 +14,8 @@ describe('critical code rules', () => {
       [{ source: 'runtime', type: 'vendor.cap_100', payload: { vendor: 'openai' } }, undefined, 'vendor_cap', { vendor: 'openai' }],
       [{ source: 'server', type: 'spend.threshold', payload: { vendor: 'anthropic', level: 'exhausted', period: 'day' } }, undefined, 'vendor_cap', { vendor: 'anthropic' }],
       [{ source: 'deploy', type: 'gate.failed', payload: { component: 'runtime', sha: 'a'.repeat(40) } }, undefined, 'deploy_failed', { component: 'runtime', stage: 'gate', sha: 'aaaaaaaaaaaa' }],
-      [{ source: 'deploy', type: 'migrate.failed', payload: { component: 'server', sha: 'nope' } }, undefined, 'deploy_failed', { component: 'server', stage: 'migrate', sha: null }],
+      [{ source: 'deploy', type: 'migrate.failed', payload: { component: 'server', sha: 'nope' } }, undefined, 'migrate_failed', { component: 'server', sha: null }],
+      [{ source: 'runtime', type: 'migrate.failed', payload: { sha: 'd'.repeat(40) } }, undefined, 'migrate_failed', { component: 'runtime', sha: 'dddddddddddd' }],
       [{ source: 'github', type: 'ci_run.state' }, { kind: 'ci_run', key: 'ci_run:github:wpf002/flint:latest', state: { status: 'completed', conclusion: 'failure', sha: 'b'.repeat(40) } }, 'ci_failing', { run: 'ci_run#abc123', sha: 'bbbbbbbbbbbb' }],
     ];
     for (const [over, entity, id, fields] of cases) {
@@ -58,7 +59,7 @@ describe('critical code rules', () => {
 
   it('a handoff escalates once per sender a day; a knowledge fact acts', async () => {
     const h = await codeVerdict(facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', payload: { namespace: 'trident' } }), noCode);
-    expect(h).toMatchObject({ action: 'escalate', perDay: { key: 'notify.handoff:trident', limit: 1 }, template: { id: 'handoff', fields: { namespace: 'trident' } } });
+    expect(h).toMatchObject({ action: 'escalate', perDay: { key: 'notify.handoff:trident', limit: 1 }, template: { id: 'handoff_unaccepted', fields: { namespace: 'trident' } } });
     const bad = await codeVerdict(facts({ source: 'nexus_inbox', type: 'handoff.unaccepted_24h', payload: { namespace: 'Robert"); DROP' } }), noCode);
     expect(bad?.perDay?.key).toBe('notify.handoff:unknown');
     expect(await codeVerdict(facts({ source: 'knowledge', type: 'knowledge.fact' }), noCode)).toMatchObject({ action: 'act', lane: 'quiet' });

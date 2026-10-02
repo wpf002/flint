@@ -15,6 +15,11 @@ import type { Registered } from './sources/registry.js';
 import { triageEnqueue } from './events/record.js';
 import { reconcile } from './triage/reconcile.js';
 import { processEvent, TriageJob } from './triage/worker.js';
+import { deliver } from './surface/deliver.js';
+import { expireEscalations } from './surface/expire.js';
+import { z } from 'zod';
+
+const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 
 export interface JobContext {
   db: Db;
@@ -66,6 +71,16 @@ export function triageJobs(ctx: JobContext): JobSpec[] {
       },
     },
     {
+      // One escalation's notes; the queue retries with backoff, then dead-letters.
+      queue: 'deliver',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = DeliverJob.safeParse(job.data);
+          if (data.success) await deliver(ctx.db, ctx.config, data.data.escalationId);
+        }
+      },
+    },
+    {
       queue: 'reconcile',
       cron: '*/5 * * * *',
       handler: async () => {
@@ -76,9 +91,23 @@ export function triageJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/** Housekeeping that runs whether triage is on or not. */
+export function housekeepingJobs(ctx: JobContext): JobSpec[] {
+  return [
+    {
+      queue: 'expire.escalations',
+      cron: '7 * * * *',
+      handler: async () => {
+        const n = await expireEscalations(ctx.db);
+        if (n) ctx.log(`expired ${n} escalation(s)`);
+      },
+    },
+  ];
+}
+
 /** The job set this runtime runs. */
 export function jobSpecs(ctx: JobContext): JobSpec[] {
-  return [...syncJobs(ctx), ...triageJobs(ctx)];
+  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx)];
 }
 
 /** `TypeError`, `PrismaClientKnownRequestError P2002`, `Error ECONNREFUSED`: what failed, not what it said. */
