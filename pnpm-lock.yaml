@@ -142,6 +142,9 @@ importers:
 
   apps/runtime:
     dependencies:
+      '@flint/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@flint/policy':
         specifier: workspace:*
         version: link:../../packages/policy

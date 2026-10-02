@@ -70,8 +70,10 @@ if [ -f "$RT/migrate-failed" ] && grep -qx "$SHA" "$RT/migrate-failed"; then
 fi
 
 # 3. gate
-echo "runtime: building @flint/policy and the Prisma client..."
+echo "runtime: building @flint/policy, @flint/core and the Prisma client..."
 pnpm --filter @flint/policy build >/dev/null
+# Triage asks the local model through @flint/core/ollama (the Ollama provider alone).
+pnpm --filter @flint/core build >/dev/null
 (cd "$RT_SRC" && ./node_modules/.bin/prisma generate >/dev/null)
 if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: runtime typecheck + tests (scratch database flint_test)..."
@@ -181,6 +183,9 @@ ENVF="$DATA/runtime.env"
   OLLAMA_MODEL_V="$(plutil -extract EnvironmentVariables.OLLAMA_MODEL raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
   if print -r -- "$OLLAMA_HOST_V" | grep -qE '^http://(\[::1\]|127\.0\.0\.1|localhost):[0-9]+$'; then echo "OLLAMA_URL=$OLLAMA_HOST_V"; fi
   if print -r -- "$OLLAMA_MODEL_V" | grep -qE '^[A-Za-z0-9._:/-]{1,80}$'; then echo "FLINT_TRIAGE_MODEL=$OLLAMA_MODEL_V"; fi
+  # The same num_ctx as chat: a different one makes Ollama reload the model under it.
+  OLLAMA_CTX_V="$(plutil -extract EnvironmentVariables.OLLAMA_NUM_CTX raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  if print -r -- "$OLLAMA_CTX_V" | grep -qE '^[0-9]{3,6}$'; then echo "OLLAMA_NUM_CTX=$OLLAMA_CTX_V"; fi
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.
   # (|| true: under pipefail a missing plist or file must not stop the install.)

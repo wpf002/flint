@@ -15,6 +15,7 @@
     "offsite": "tsx src/cli.ts offsite"
   },
   "dependencies": {
+    "@flint/core": "workspace:*",
     "@flint/policy": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@prisma/client": "6.19.3",

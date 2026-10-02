@@ -41,13 +41,16 @@ describe('install-runtime.sh', () => {
   });
 
   it('writes the triage model settings only when they are loopback and well-formed', () => {
-    const block = between('OLLAMA_HOST_V="$(', 'FLINT_TRIAGE_MODEL=$OLLAMA_MODEL_V"; fi');
-    const run = (host: string, model: string) => {
-      const body = block.replace(/OLLAMA_HOST_V="\$\(plutil[^\n]*/, `OLLAMA_HOST_V='${host}'`).replace(/OLLAMA_MODEL_V="\$\(plutil[^\n]*/, `OLLAMA_MODEL_V='${model}'`);
+    const block = between('OLLAMA_HOST_V="$(', 'OLLAMA_NUM_CTX=$OLLAMA_CTX_V"; fi');
+    const run = (host: string, model: string, ctx: string) => {
+      const body = block
+        .replace(/OLLAMA_HOST_V="\$\(plutil[^\n]*/, `OLLAMA_HOST_V='${host}'`)
+        .replace(/OLLAMA_MODEL_V="\$\(plutil[^\n]*/, `OLLAMA_MODEL_V='${model}'`)
+        .replace(/OLLAMA_CTX_V="\$\(plutil[^\n]*/, `OLLAMA_CTX_V='${ctx}'`);
       return zsh(body).stdout;
     };
-    expect(run('http://127.0.0.1:11434', 'muse-glimmer:30b')).toBe('OLLAMA_URL=http://127.0.0.1:11434\nFLINT_TRIAGE_MODEL=muse-glimmer:30b\n');
-    expect(run('http://10.0.0.2:11434', 'a b')).toBe('');
+    expect(run('http://127.0.0.1:11434', 'muse-glimmer:30b', '16384')).toBe('OLLAMA_URL=http://127.0.0.1:11434\nFLINT_TRIAGE_MODEL=muse-glimmer:30b\nOLLAMA_NUM_CTX=16384\n');
+    expect(run('http://10.0.0.2:11434', 'a b', '16k; rm')).toBe('');
   });
 
   it('pruning keeps the newest three, the new release and any pinned one', () => {

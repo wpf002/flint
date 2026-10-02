@@ -109,6 +109,20 @@ describe('github', () => {
     expect(Object.values(GITHUB_PERMISSIONS).every((p) => p === 'read')).toBe(true);
   });
 
+  it('marks what a bot opened (never who), and takes the change time from GitHub', async () => {
+    const g = fakeGithub();
+    g.set(`${g.R}/pulls?state=open&per_page=100`, [
+      { number: 12, title: 'a person', state: 'open', user: { login: 'stranger', type: 'User' }, updated_at: '2026-10-01T09:30:00Z' },
+      { number: 13, title: 'Bump x', state: 'open', user: { login: 'dependabot[bot]', type: 'Bot' } },
+    ]);
+    const r = await src().run(run(g.fetch));
+    const byKey = Object.fromEntries(r.observations.map((o) => [o.key, o]));
+    expect(byKey['pull_request:github:wpf002/flint#12']!.state).not.toHaveProperty('byBot');
+    expect(byKey['pull_request:github:wpf002/flint#12']!.changedAt).toBe('2026-10-01T09:30:00Z');
+    expect(byKey['pull_request:github:wpf002/flint#13']!.state).toMatchObject({ byBot: true });
+    expect(JSON.stringify(r.observations)).not.toMatch(/stranger|dependabot/);
+  });
+
   it('sends ETags back and treats 304 as "nothing changed"', async () => {
     const g = fakeGithub();
     const first = await src().run(run(g.fetch));

@@ -14,6 +14,7 @@ import { runLocked } from './scheduler.js';
 import type { Registered } from './sources/registry.js';
 import { triageEnqueue } from './events/record.js';
 import { reconcile } from './triage/reconcile.js';
+import { processEvent, TriageJob } from './triage/worker.js';
 
 export interface JobContext {
   db: Db;
@@ -51,6 +52,19 @@ export function syncJobs(ctx: JobContext): JobSpec[] {
 export function triageJobs(ctx: JobContext): JobSpec[] {
   if (!ctx.config.triage) return [];
   return [
+    {
+      // One event at a time: the model runs one call at a time, and yields to chat.
+      queue: 'triage',
+      work: { batchSize: 1, localConcurrency: 1 },
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = TriageJob.safeParse(job.data);
+          // A job that is not {eventId} is nobody's: it completes and does nothing.
+          if (!data.success) continue;
+          await processEvent(data.data, { db: ctx.db, config: ctx.config, bus: ctx.bus });
+        }
+      },
+    },
     {
       queue: 'reconcile',
       cron: '*/5 * * * *',

@@ -1,6 +1,6 @@
 /**
  * Actions the runtime carries out itself once Will has approved them: turning a
- * source on, and applying a signed policy change. Each goes through
+ * source on, applying a signed policy change, and adding a triage rule. Each goes through
  * claimProposal (re-verification, tier, cap, intent) and then completes, so the
  * audit trail reads the same as any other approved action. The database checks
  * the effect too: a cursor turns on only under an executing enable proposal,
@@ -11,8 +11,25 @@ import { z } from 'zod';
 import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { Refused, claimProposal, completeProposal } from './proposals.js';
+import { RuleArgs, ruleProblems } from '../triage/rules.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change']);
+export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create']);
+
+/**
+ * A triage rule is policy (kind `rule`): its predicate may read only the
+ * structural fields allowlisted for its source and event type, checked before
+ * Will is asked to sign it. The database inserts it only as the exact rule of
+ * the signed proposal being executed.
+ */
+export const RuleCreateArgs = z.object({ rule: RuleArgs }).strict();
+
+/** Why a proposed rule may not exist, or undefined when it may. */
+export function refuseRule(args: unknown): string | undefined {
+  const parsed = RuleCreateArgs.safeParse(args);
+  if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ').slice(0, 500);
+  const problems = ruleProblems(parsed.data.rule);
+  return problems.length ? problems.join('; ').slice(0, 500) : undefined;
+}
 
 const EnableArgs = z.object({ source: z.enum(SOURCES) }).strict();
 /**
@@ -55,6 +72,19 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await db.sourceCursor.upsert({ where: { source }, create: { source, cursor: '', enabled: true }, update: { enabled: true } });
       await completeProposal(db, id, { ok: true, result: { source, enabled: true } }, actor);
       return { source, enabled: true };
+    }
+    if (claimed.action === 'triage.rule.create') {
+      const why = refuseRule(claimed.args);
+      if (why) throw new Refused(400, `invalid triage rule: ${why}`);
+      const { rule } = RuleCreateArgs.parse(claimed.args);
+      const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
+      // The predicate as exact JSON: the database compares it with the signed one.
+      await db.$executeRaw`
+        INSERT INTO "TriageRule" (id, name, source, "eventType", predicate, action, lane, priority, "perSenderDailyCap", "createdBy", "approvalId")
+        VALUES (${`tr${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`}, ${rule.name}, ${rule.source}, ${rule.eventType},
+                ${JSON.stringify(rule.predicate)}::jsonb, ${rule.action}, ${rule.lane}, ${rule.priority}, ${rule.perSenderDailyCap}, ${rule.createdBy}, ${approvalId})`;
+      await completeProposal(db, id, { ok: true, result: { rule: rule.name } }, actor);
+      return { rule: rule.name };
     }
     const { rows } = PolicyArgs.parse(claimed.args);
     const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;

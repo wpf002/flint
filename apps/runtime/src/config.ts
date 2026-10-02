@@ -81,6 +81,8 @@ const Env = z.object({
   /** The local model triage asks (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
+  /** The server's num_ctx: a different one makes Ollama reload the model chat is using. */
+  OLLAMA_NUM_CTX: z.coerce.number().int().min(512).max(262_144).optional(),
   /** The deployed commit (install-runtime.sh writes it). */
   RUNTIME_GIT_SHA: z.string().optional(),
   FLINT_BUDGET_ANTHROPIC_DAILY_USD: z.coerce.number().nonnegative().optional(),
@@ -110,7 +112,7 @@ export interface Config {
   /** P2 triage runs (else the sources run and nothing is triaged). */
   triage: boolean;
   /** The local model triage asks; absent, triage is rules only. */
-  ollama?: { url: string; model: string };
+  ollama?: { url: string; model: string; numCtx?: number };
   gitSha: string;
 }
 
@@ -172,7 +174,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       tavily: cap(e.FLINT_BUDGET_TAVILY_DAILY_USD, e.FLINT_BUDGET_TAVILY_MONTHLY_USD),
     },
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
-    ...(e.FLINT_TRIAGE_MODEL ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL } } : {}),
+    ...(e.FLINT_TRIAGE_MODEL
+      ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
+      : {}),
     gitSha: e.RUNTIME_GIT_SHA && /^[0-9a-f]{40}$/.test(e.RUNTIME_GIT_SHA) ? e.RUNTIME_GIT_SHA : 'dev',
   };
 }

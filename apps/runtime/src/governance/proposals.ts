@@ -114,6 +114,13 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
     const ok = PolicyArgs.safeParse(input.args);
     if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   }
+  // So is a triage rule, against its source's allowlisted fields; and it is policy (kind `rule`).
+  if (input.action === 'triage.rule.create') {
+    const { refuseRule } = await import('./internal.js');
+    const why = refuseRule(input.args);
+    if (why) throw new Refused(400, `invalid triage rule: ${why}`);
+    if (input.kind !== 'rule') throw new Refused(400, 'a triage rule is proposed as kind rule');
+  }
   const argsDigest = digestOf(input.args);
   const decision = await tierOf(db, { ...input }, now, input.readOnlyHint);
   const id = `pr${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`;

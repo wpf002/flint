@@ -70,6 +70,9 @@ const Item = z.object({
   pull_request: z.unknown().optional(),
   labels: z.array(z.union([z.object({ name: z.string() }), z.string()])).optional(),
   updated_at: z.string().optional(),
+  // Read only for whether a bot opened it (Flint's own app, dependabot), never who;
+  // any shape is accepted, so an odd user never drops the item.
+  user: z.unknown().optional(),
 });
 type Item = z.infer<typeof Item>;
 const Milestone = z.object({ number: z.number().int().positive(), title: z.string(), due_on: z.string().nullable() });
@@ -183,9 +186,11 @@ export function githubSource(o: GithubOptions): Source & { endpoints: string[] }
 
         const issueLike = (kind: 'pull_request' | 'issue', it: Item): SourceObservation => {
           const title = clip(it.title, 120);
+          // Only when true: an item a person opened keeps the state (and hash) it had.
+          const byBot = (it.user as { type?: unknown } | null | undefined)?.type === 'Bot' ? { byBot: true } : {};
           const state = kind === 'pull_request'
-            ? { number: it.number, state: it.merged_at ? 'merged' : it.state === 'open' ? 'open' : 'closed', ...(it.draft !== undefined ? { draft: it.draft } : {}), title }
-            : { number: it.number, state: it.state === 'open' ? 'open' : 'closed', labels: (it.labels ?? []).map((l) => clip(typeof l === 'string' ? l : l.name, 120)).slice(0, 20), title };
+            ? { number: it.number, state: it.merged_at ? 'merged' : it.state === 'open' ? 'open' : 'closed', ...(it.draft !== undefined ? { draft: it.draft } : {}), title, ...byBot }
+            : { number: it.number, state: it.state === 'open' ? 'open' : 'closed', labels: (it.labels ?? []).map((l) => clip(typeof l === 'string' ? l : l.name, 120)).slice(0, 20), title, ...byBot };
           return {
             type: `${kind}.state`, kind, key: `${kind}:github:${full}#${it.number}`, name: clip(it.title, 300) || `${kind}#${it.number}`, sensitivity: 'ops',
             externalId: `${kind}:${full}#${it.number}`, taintedPaths: ['name', 'state.title'],
