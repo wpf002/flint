@@ -22,6 +22,7 @@ import { localDay, localDayBounds } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
 import { markProcessed, recordEvent, type Enqueue } from '../events/record.js';
+import { faultAt } from '../config.js';
 
 export interface Raised {
   type: string;
@@ -103,7 +104,10 @@ export async function raise(db: Db, raised: readonly Raised[], now: Date, enqueu
       if (enqueue) await enqueue(tx, id);
       return id;
     });
-    if (id) ids.push(id);
+    if (id) {
+      ids.push(id);
+      faultAt('after_event');
+    }
   }
   return ids;
 }

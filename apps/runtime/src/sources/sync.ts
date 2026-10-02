@@ -24,6 +24,7 @@ import { applyObservation, stateHash, type Applied } from '../world/mapper.js';
 import { markProcessed, recordEvent, recordFailure, type Enqueue, type EventIn } from '../events/record.js';
 import { sourceTime, triageEligible } from '../triage/facts.js';
 import { wellFormedDeep } from './text.js';
+import { faultAt } from '../config.js';
 import type { Known, Source, SourceRun } from './types.js';
 
 export interface SyncSummary {
@@ -118,8 +119,10 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
         if (enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, id);
         return id;
       });
-      if (id) summary.created += 1;
-      else summary.unchanged += 1;
+      if (id) {
+        summary.created += 1;
+        faultAt('after_event');
+      } else summary.unchanged += 1;
     } catch (err) {
       summary.failed += 1;
       await recordFailure(db, event, err, run.now).catch(() => {});

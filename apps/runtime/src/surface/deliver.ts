@@ -12,7 +12,7 @@
  *    retries it with backoff.
  *  - An escalation already dismissed, acted on or expired is not delivered.
  */
-import type { Config } from '../config.js';
+import { faultAt, type Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { notifyServer, type NotifyOutcome } from '../notify.js';
@@ -43,6 +43,7 @@ export async function deliver(
     return 'withdrawn';
   }
   const r = await post({ title: e.title ?? fieldFreeTitle(e.templateId), body: e.body ?? '', channels, ref: e.id });
+  faultAt('after_notify');
   if (r.status === 'retry') {
     await db.escalationDelivery.updateMany({ where: { escalationId: e.id, status: 'pending' }, data: { attempts: { increment: 1 }, lastError: `not delivered yet: ${r.why}`.slice(0, 200) } });
     throw new Error(`the server did not take escalation ${e.id} (${r.why}); retrying`);

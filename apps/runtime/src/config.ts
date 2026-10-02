@@ -258,3 +258,13 @@ export function loadBackupConfig(): BackupConfig {
     tools: { pgDump, pgRestore, ...(age ? { age } : {}) },
   };
 }
+
+/**
+ * The crash harness's fault point (test/p2-crash.test.ts): the process kills
+ * itself (SIGKILL, as `kill -9` would) on reaching the named point. Read only
+ * here, and only when NODE_ENV is `test`: a deployed runtime never has one.
+ */
+export type FaultPoint = 'after_event' | 'after_decision' | 'after_notify';
+export function faultAt(point: FaultPoint): void {
+  if (process.env.NODE_ENV === 'test' && process.env.FLINT_TEST_FAULT === point) process.kill(process.pid, 'SIGKILL');
+}

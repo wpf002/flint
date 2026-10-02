@@ -28,6 +28,7 @@ import { claim } from '../governance/counters.js';
 import { emitPrediction } from '../ledger/emit.js';
 import { displayName, fieldFreeTitle, isTemplateId, phrase, render, type Rendered } from '../templates/escalations.js';
 import type { EventFacts, Verdict } from '../triage/verdict.js';
+import { faultAt } from '../config.js';
 
 export interface SurfaceContext {
   /** Recorded only: triage is not promoted. */
@@ -145,7 +146,7 @@ export async function recordDecision(db: Db, f: EventFacts, v: Verdict, c: Surfa
   const escalating = v.action === 'escalate' && !!v.template;
   const rendered = escalating ? words(f, v, c) : undefined;
   try {
-    return await db.$transaction(async (tx) => {
+    const done = await db.$transaction(async (tx) => {
       let verdict = v;
       if (v.perDay) {
         // Past the day's limit for this sender (or this handoff), the match is logged quietly.
@@ -226,6 +227,9 @@ export async function recordDecision(db: Db, f: EventFacts, v: Verdict, c: Surfa
       }], c.now);
       return { id, verdict, ...(escalationId ? { escalationId } : {}) };
     });
+    // The decision, its audit, the escalation, its intents and its deliver job: all committed.
+    faultAt('after_decision');
+    return done;
   } catch (err) {
     // Decided already (a retried or duplicate job): the first decision stands.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && String(err.meta?.target ?? '').includes('sourceEventId')) return undefined;
