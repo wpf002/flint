@@ -1,6 +1,6 @@
 /**
  * railway: the latest deployment of every service in Will's Railway projects
- * (nexus, Prophet), every 10 minutes (Machine plan P1 sources).
+ * (nexus, Prophet), every 5 minutes (Machine plan P1 sources; P2 halved it).
  *
  *  - Auth: one Railway PROJECT token per project, sent as Project-Access-Token.
  *    A project token is NOT read-only (Railway has no read-only token): it can
@@ -55,16 +55,18 @@ const STATUS: Record<string, 'building' | 'deploying' | 'success' | 'failed' | '
   DEPLOYING: 'deploying', SUCCESS: 'success', FAILED: 'failed', CRASHED: 'crashed', REMOVED: 'removed', REMOVING: 'removed', SLEEPING: 'success', SKIPPED: 'unknown',
 };
 
+const DEPLOY_STEPS: ReadonlySet<string> = new Set(['building', 'deploying', 'success', 'failed']);
+
 const ProjectToken = z.object({ projectToken: z.object({ projectId: z.string().min(1).max(100), environmentId: z.string().min(1).max(100) }) });
 const Services = z.object({ project: z.object({ services: z.object({ edges: z.array(z.object({ node: z.object({ id: z.string().min(1).max(100), name: z.string() }) })) }) }) });
 const Deployments = z.object({
-  deployments: z.object({ edges: z.array(z.object({ node: z.object({ status: z.string(), meta: z.object({ commitHash: z.string().optional() }).passthrough().nullable().optional() }) })) }),
+  deployments: z.object({ edges: z.array(z.object({ node: z.object({ status: z.string(), createdAt: z.string().optional(), meta: z.object({ commitHash: z.string().optional() }).passthrough().nullable().optional() }) })) }),
 });
 
 export function railwaySource(o: RailwayOptions): Source & { endpoints: string[] } {
   return {
     name: 'railway',
-    cadenceMs: 10 * 60_000,
+    cadenceMs: 5 * 60_000,
     endpoints: [RAILWAY_API],
     async run(r: SourceRun): Promise<SyncResult> {
       const gql = async <T>(token: string, query: string, shape: z.ZodType<T>, variables: Record<string, string> = {}): Promise<T> => {
@@ -99,10 +101,14 @@ export function railwaySource(o: RailwayOptions): Source & { endpoints: string[]
             const dep = d.deployments.edges[0]?.node;
             if (!dep) continue;
             const sha = dep.meta?.commitHash && /^[0-9a-f]{7,64}$/.test(dep.meta.commitHash) ? dep.meta.commitHash : undefined;
+            const status = STATUS[dep.status] ?? 'unknown';
             found.push({
               type: 'deployment.railway', kind: 'deployment', key: `deployment:railway:${svc.id}`, name: `${name} deploy`, sensitivity: 'ops',
               externalId: `railway:deployment-of:${svc.id}`,
-              state: { target: 'railway', status: STATUS[dep.status] ?? 'unknown', ...(sha ? { sha } : {}) },
+              state: { target: 'railway', status, ...(sha ? { sha } : {}) },
+              // A deploy's own steps happen near its creation; a crash, a removal or
+              // an unknown status can come any time after, so those are "now".
+              ...(dep.createdAt && DEPLOY_STEPS.has(status) ? { changedAt: dep.createdAt } : {}),
             });
           }
           observations.push(...found);

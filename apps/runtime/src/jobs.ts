@@ -12,6 +12,8 @@ import type { Db } from './db.js';
 import { ALL_QUEUES, cronFor, type Bus } from './bus.js';
 import { runLocked } from './scheduler.js';
 import type { Registered } from './sources/registry.js';
+import { triageEnqueue } from './events/record.js';
+import { reconcile } from './triage/reconcile.js';
 
 export interface JobContext {
   db: Db;
@@ -33,19 +35,36 @@ export interface JobSpec {
 
 /** The world sources, one queue each, run under the same advisory lock as before. */
 export function syncJobs(ctx: JobContext): JobSpec[] {
+  // Triage off: the sources keep running, and nothing is queued for triage.
+  const enqueue = ctx.config.triage ? triageEnqueue(ctx.bus) : undefined;
   return ctx.sources.map((r) => ({
     queue: `sync.${r.source.name}`,
     cron: cronFor(r.source.cadenceMs),
     handler: async () => {
-      const s = await runLocked(ctx.db, r, ctx.config.tz);
+      const s = await runLocked(ctx.db, r, ctx.config.tz, new Date(), enqueue);
       if (s?.failed || (s && !s.ran && s.reason && !s.reason.startsWith('not enabled'))) ctx.log(`sync ${r.source.name}: ${s.reason ?? `${s.failed} failed`}`, s);
     },
   }));
 }
 
+/** Triage's own jobs, only while it is on. */
+export function triageJobs(ctx: JobContext): JobSpec[] {
+  if (!ctx.config.triage) return [];
+  return [
+    {
+      queue: 'reconcile',
+      cron: '*/5 * * * *',
+      handler: async () => {
+        const r = await reconcile(ctx.db, ctx.bus);
+        if (r.resent || r.dead) ctx.log(`reconcile: ${r.resent} re-sent, ${r.dead} dead`);
+      },
+    },
+  ];
+}
+
 /** The job set this runtime runs. */
 export function jobSpecs(ctx: JobContext): JobSpec[] {
-  return [...syncJobs(ctx)];
+  return [...syncJobs(ctx), ...triageJobs(ctx)];
 }
 
 /** `TypeError`, `PrismaClientKnownRequestError P2002`, `Error ECONNREFUSED`: what failed, not what it said. */

@@ -22,7 +22,12 @@ export interface MetricObservation {
   value: number;
 }
 
-export type SourceObservation = Omit<Observation, 'source' | 'actor' | 'observedAt' | 'sourceEventId'> & { type: string; sensitivity: 'ops' | 'personal' | 'financial' };
+export type SourceObservation = Omit<Observation, 'source' | 'actor' | 'observedAt' | 'sourceEventId'> & {
+  type: string;
+  sensitivity: 'ops' | 'personal' | 'financial';
+  /** When the source says this changed (an issue's updated_at); absent, the sync's own time. */
+  changedAt?: string | Date;
+};
 
 export interface SyncResult {
   observations: SourceObservation[];
