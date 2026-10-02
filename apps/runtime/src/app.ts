@@ -217,7 +217,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // ---- caps -----------------------------------------------------------------------
   app.post('/v1/counters/claim', { preHandler: need('counters') }, async (req, reply) => {
     const b = z
-      .object({ action: z.string().min(1).max(200), limit: z.number().int().min(0).max(100000), period: z.enum(['day', 'week']) })
+      .object({ action: z.string().min(1).max(200), limit: z.number().int().min(0).max(100000), period: z.enum(['hour', 'day', 'week']) })
       .strict()
       .parse(req.body);
     const n = await claim(db, b.action, { limit: b.limit, period: b.period }, config.tz);

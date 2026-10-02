@@ -18,7 +18,9 @@ describe('P2 tiers', () => {
       expect(AUTONOMOUS_ACTIONS.has(a)).toBe(true);
     }
     expect(['triage.rule', 'triage.local_model', 'health.check', 'health.report', 'digest.daily'].every(runsInShadow)).toBe(true);
-    expect(['notify.inapp', 'notify.banner', 'notify.push', 'ledger.prediction.record'].some(runsInShadow)).toBe(false);
+    expect(['notify.inapp', 'notify.banner', 'notify.push'].some(runsInShadow)).toBe(false);
+    // A prediction is Flint's own row, recorded with the decision that made it.
+    expect(runsInShadow('ledger.prediction.record')).toBe(true);
     expect(CODE_TABLE['triage.local_model']!.cap).toEqual({ limit: 120, period: 'hour' });
     expect(CODE_TABLE['notify.push']!.cap).toEqual({ limit: 3, period: 'day' });
   });

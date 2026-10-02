@@ -61,7 +61,8 @@ export interface CodeEntry {
 }
 
 /** The world-model sources. Each `world.sync.<source>` reaches only its own endpoints. */
-export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus'] as const;
+/** The world-model sources; deploy, knowledge and nexus_inbox (P2) only raise events. */
+export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox'] as const;
 export type Source = (typeof SOURCES)[number];
 
 const approval = (extra: Partial<CodeEntry> = {}): CodeEntry => ({ tier: 'approval', promotable: true, write: true, ...extra });
@@ -82,7 +83,8 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'world.entity.merge': fixed({ note: 'stays APPROVAL (passkey)' }),
   'world.forget': fixed({ note: 'stays APPROVAL (passkey)' }),
   // Ledger (P1).
-  'ledger.prediction.record': approval({ cap: { limit: 50, period: 'day' } }),
+  // In shadow at APPROVAL: a prediction is Flint's own row, recorded with the decision that made it.
+  'ledger.prediction.record': approval({ cap: { limit: 50, period: 'day' }, shadow: true }),
   'ledger.resolve.auto': approval({ note: 'world or metric resolution; cannot VOID' }),
   'ledger.expire': approval({ note: 'marks predictions past resolveBy as expired' }),
   'ledger.calibration.snapshot': approval(),

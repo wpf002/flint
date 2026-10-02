@@ -33,6 +33,10 @@ export const ChatTurnEvent = z
     tools: z.array(Name).max(30),
     ms: z.number().int().min(0).max(3_600_000),
     tainted: z.boolean(),
+    // For the "chat unaffected" measures (P2 exit 6); optional, so an older server's events still pass.
+    tier: z.enum(['routine', 'standard', 'hard', 'code']).optional(),
+    recall: z.enum(['semantic', 'lexical', 'timeout', 'none']).optional(),
+    ctxTokens: z.object({ world: z.number().int().min(0).max(100_000), recall: z.number().int().min(0).max(100_000), history: z.number().int().min(0).max(1_000_000) }).strict().optional(),
   })
   .strict();
 
