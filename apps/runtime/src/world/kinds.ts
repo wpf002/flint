@@ -42,8 +42,9 @@ export const STATE: Record<string, z.ZodTypeAny> = {
       level: z.enum(['normal', '50', '80', '100']),
     })
     .strict(),
-  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(['open', 'closed', 'merged']), draft: z.boolean().optional(), title: short.optional() }).strict(),
-  issue: z.object({ number: z.number().int().positive(), state: z.enum(['open', 'closed']), labels: z.array(short).max(20).optional(), title: short.optional() }).strict(),
+  // byBot: a bot opened it (P2: never judged by the model); present only when true.
+  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(['open', 'closed', 'merged']), draft: z.boolean().optional(), title: short.optional(), byBot: z.literal(true).optional() }).strict(),
+  issue: z.object({ number: z.number().int().positive(), state: z.enum(['open', 'closed']), labels: z.array(short).max(20).optional(), title: short.optional(), byBot: z.literal(true).optional() }).strict(),
   ci_run: z.object({ workflow: short, status: z.enum(['queued', 'in_progress', 'completed']), conclusion: z.enum(['success', 'failure', 'cancelled', 'skipped', 'timed_out', 'neutral', 'action_required']).nullable().optional(), sha: sha.optional() }).strict(),
   project: z.object({ status: z.enum(['active', 'archived']).optional() }).strict(),
   thread: z.object({ status: z.enum(['open', 'archived']).optional(), project: short.optional() }).strict(),

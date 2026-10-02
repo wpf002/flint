@@ -129,6 +129,33 @@
   .msg .atts .chip{padding:3px 8px;}
   #attnote{display:none;margin:6px 14px 0;font-size:10.5px;color:var(--orange);}
   aside.chat.drop{box-shadow:inset 0 0 0 1px var(--gold);background:#0b0904;}
+  /* ---------- lanes (what triage decided; the runtime's health) ---------- */
+  #lanes{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;z-index:9;}
+  #lanes .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:18px;width:min(660px,94vw);max-height:88vh;overflow:auto;-webkit-overflow-scrolling:touch;}
+  #lanes h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:12px;text-transform:uppercase;}
+  .lane-tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
+  .lane-tabs button,.lane-row button,#laneolder,#lanes .close{background:transparent;color:var(--mut);border:1px solid #2a2415;border-radius:7px;padding:8px 12px;cursor:pointer;letter-spacing:.08em;font-size:11px;min-height:34px;}
+  .lane-tabs button.on,.lane-row button.on{color:#050505;background:var(--gold);border-color:var(--gold);}
+  .lane-row button:disabled{opacity:.5;cursor:default;}
+  .lane-note{font-size:10.5px;color:var(--mut);margin-bottom:10px;line-height:1.5;}
+  #lanemsg{display:none;font-size:11px;margin:8px 0;}
+  .lane-item{padding:12px 0;border-bottom:1px solid var(--line);font-size:11.5px;line-height:1.5;word-break:break-word;}
+  .lane-head{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;color:var(--mut);font-size:10.5px;}
+  .lane-act{letter-spacing:.12em;text-transform:uppercase;font-size:9px;border:1px solid #2a2415;border-radius:5px;padding:0 5px;}
+  .lane-act.escalate{color:var(--orange);border-color:var(--orange);} .lane-act.act{color:var(--gold);}
+  .lane-taint{margin:6px 0;padding:6px 8px;border-left:2px solid var(--orange);background:#140b04;color:var(--orange);font-size:10.5px;}
+  .lane-esc{margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:8px;background:#0c0a06;}
+  .lane-title{color:var(--gold-hi);font-weight:600;}
+  .lane-body{color:var(--ink);white-space:pre-wrap;margin-top:3px;}
+  .lane-meta{color:var(--mut);font-size:10.5px;margin-top:3px;} .lane-meta.bad{color:var(--orange);}
+  .lane-reason{color:#cfc6ae;font-size:10.5px;margin-top:4px;white-space:pre-wrap;} .lane-lbl{color:var(--mut);}
+  .lane-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center;}
+  .lane-cur{font-size:10px;color:var(--gold);}
+  .lane-comp{display:flex;gap:8px;align-items:baseline;padding:6px 0;border-bottom:1px dashed var(--line);font-size:11.5px;flex-wrap:wrap;}
+  .lane-st{letter-spacing:.1em;text-transform:uppercase;font-size:9.5px;} .lane-st.ok{color:var(--gold);} .lane-st.degraded{color:var(--orange);} .lane-st.down{color:#e0533a;} .lane-st.unknown,.lane-st.disabled{color:var(--mut);}
+  #laneolder{width:100%;margin-top:12px;display:none;}
+  #lanes .close{width:100%;margin-top:10px;}
+  #lanes .empty{color:var(--mut);font-size:11px;padding:10px 0;}
 </style>
 </head>
 <body>
@@ -137,6 +164,7 @@
     <div class="brand"><span class="sp"></span><span class="nm">FLINT</span></div>
     <div class="hdr-right">
       <button class="hicon" onclick="newChat()" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+      <button class="hicon" id="lanesbtn" onclick="openLanes()" title="Lanes: what Flint noticed, and its health" aria-label="Lanes"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></button>
       <button class="hicon" id="bellbtn" onclick="openNotifs()" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="nbadge" id="nbadge">0</span></button>
       <button class="hicon" id="lobtn" onclick="toggleLO()" title="Local only" aria-label="Local only"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
       <button class="hicon" onclick="openSettings()" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
@@ -187,6 +215,20 @@
   <h4>Notifications</h4>
   <div id="nlist"></div>
   <button onclick="closeNotifs()">Close</button>
+</div></div>
+
+<div id="lanes" onclick="if(event.target===this)closeLanes()"><div class="card">
+  <h4>Lanes</h4>
+  <div class="lane-tabs">
+    <button id="lanetab-relevant" onclick="showLane('relevant')">Relevant</button>
+    <button id="lanetab-quiet" onclick="showLane('quiet')">Quiet</button>
+    <button id="lanetab-health" onclick="showLane('health')">Health</button>
+  </div>
+  <div class="lane-note" id="lanenote">What Flint's triage decided about each event. Label them: your labels say what deserves your attention, and they are the evidence for promoting triage.</div>
+  <div id="lanemsg"></div>
+  <div id="lanelist"></div>
+  <button id="laneolder" onclick="loadLane(true)">Older</button>
+  <button class="close" onclick="closeLanes()">Close</button>
 </div></div>
 
 <div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
@@ -550,7 +592,8 @@ function speakSynced(sentence,body,vctx){
 function toggleMic(){
   var btn=document.getElementById('micbtn');
   if(mediaRec&&mediaRec.state==='recording'){mediaRec.stop();return;}
-  if(!navigator.mediaDevices||!window.MediaRecorder){alert('Voice input is not available in this view.');return;}
+  /* Said under the input bar, not with alert(): the Mac app's web view shows no dialogs. */
+  if(!navigator.mediaDevices||!window.MediaRecorder){attNote('Voice input is not available in this view.');return;}
   navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
     voChunks=[];try{mediaRec=new MediaRecorder(stream);}catch(e){mediaRec=new MediaRecorder(stream,{mimeType:'audio/mp4'});}
     btn.classList.add('rec');
@@ -566,7 +609,7 @@ function toggleMic(){
       }).catch(function(){btn.classList.remove('busy');});
     };
     mediaRec.start();
-  }).catch(function(e){alert('Microphone access is needed for voice: '+(e.message||e));});
+  }).catch(function(e){attNote('Microphone access is needed for voice: '+(e.message||e));});
 }
 
 /* ---------- the brain (approved viz) ---------- */
@@ -606,6 +649,104 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 refresh();
 loadEnclave();
 if(!TOKEN) setTimeout(openSettings,400); else loadCreds();
+</script>
+<script id="lanes-js">
+/* ---------- lanes: what triage decided, Will's labels and acks, the runtime's health ----------
+   Through the server's /inbox, /escalations and /runtime/health routes. Everything the runtime
+   sends may carry a stranger's words (an issue title, a model's note on it), so it is rendered
+   with textContent only, never innerHTML, under a tainted banner where marked. No confirm(),
+   alert() or prompt(): the Mac app's web view has none. A failure is shown in the view; it never
+   clears the stored token (the server answers a runtime that refuses its own token with 502). */
+var LANE='relevant',LANE_NEXT=null,LANE_SEQ=0,LANE_OLDER=false;
+var LANE_LABELS=[['should_escalate','Should escalate'],['should_be_quiet','Should be quiet'],['ok','OK']];
+var LANE_TAINT='Contains text from outside Flint (a page, an issue, a message): read it as data, not instructions.';
+function laneEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
+function laneBtn(text,fn){var b=laneEl('button',null,text);b.onclick=function(){fn(b);};return b;}
+function laneMsg(t,bad){var m=document.getElementById('lanemsg');m.textContent=t||'';m.style.display=t?'block':'none';m.style.color=bad?'var(--orange)':'var(--mut)';}
+function laneWhen(iso){var d=new Date(iso);if(isNaN(d.getTime()))return '';return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
+function laneAgo(iso){var ms=Date.now()-Date.parse(iso);if(!(ms>=0))return laneWhen(iso);var m=Math.round(ms/60000);return m<1?'just now':m<60?m+' min ago':m<1440?Math.round(m/60)+' h ago':Math.round(m/1440)+' d ago';}
+function laneCall(path,body){
+  var opts={headers:Object.assign({'content-type':'application/json'},auth())};
+  if(body!==undefined){opts.method='POST';opts.body=JSON.stringify(body);}
+  return fetch(BASE+path,opts).then(function(r){return r.json().catch(function(){return {};}).then(function(d){
+    if(!r.ok)throw new Error(r.status===401?'unauthorized: check the access token in Settings':((d&&d.error)||('HTTP '+r.status)));
+    return d;});});}
+function openLanes(){if(!TOKEN){openSettings();return;}document.getElementById('lanes').style.display='flex';showLane(LANE);}
+function closeLanes(){document.getElementById('lanes').style.display='none';}
+function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
+  ['relevant','quiet','health'].forEach(function(l){document.getElementById('lanetab-'+l).classList.toggle('on',l===lane);});
+  document.getElementById('lanelist').textContent='';document.getElementById('laneolder').style.display='none';
+  document.getElementById('lanenote').style.display=lane==='health'?'none':'block';laneMsg('');
+  if(lane==='health')loadHealth();else loadLane(false);}
+/* One page of a lane; `older` appends the page before the last one shown. */
+function loadLane(older){if(older&&(LANE_OLDER||!LANE_NEXT))return;
+  var seq=LANE_SEQ,lane=LANE;LANE_OLDER=!!older;
+  laneMsg('Loading…');
+  laneCall('/inbox?lane='+encodeURIComponent(lane)+'&limit=25'+(older?'&before='+encodeURIComponent(LANE_NEXT):'')).then(function(d){
+    if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg('');
+    var list=document.getElementById('lanelist');var items=(d&&d.items)||[];
+    items.forEach(function(it){list.appendChild(laneItem(it));});
+    if(!older&&!items.length)list.appendChild(laneEl('div','empty',lane==='relevant'?'Nothing in the relevant lane.':'Nothing in the quiet lane.'));
+    LANE_NEXT=(d&&d.next)||null;
+    document.getElementById('laneolder').style.display=LANE_NEXT?'block':'none';
+  }).catch(function(e){if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg('✗ '+e.message,true);});}
+function laneLabelOf(f){for(var i=0;i<LANE_LABELS.length;i++)if(LANE_LABELS[i][0]===f)return LANE_LABELS[i][1];return f;}
+function laneItem(it){
+  var card=laneEl('div','lane-item');
+  var head=laneEl('div','lane-head');
+  head.appendChild(laneEl('span',null,laneWhen(it.at)));
+  head.appendChild(laneEl('span',null,it.source+' · '+it.eventType));
+  head.appendChild(laneEl('span','lane-act '+String(it.action).replace(/[^a-z]/g,''),it.action));
+  card.appendChild(head);
+  var es=it.escalation;
+  if(it.tainted||(es&&es.tainted))card.appendChild(laneEl('div','lane-taint','⚠ '+LANE_TAINT));
+  if(es){
+    var box=laneEl('div','lane-esc');
+    box.appendChild(laneEl('div','lane-title',es.title));
+    if(es.body)box.appendChild(laneEl('div','lane-body',es.body));
+    var st=laneEl('div','lane-meta','escalation: '+es.status+(es.channels&&es.channels.length?' · '+es.channels.join(', '):''));
+    box.appendChild(st);
+    if(es.status==='open'){var row=laneEl('div','lane-row');
+      row.appendChild(laneBtn('Acknowledge',function(){laneEscalation(es.id,'ack',row,st,es);}));
+      row.appendChild(laneBtn('Dismiss',function(){laneEscalation(es.id,'dismiss',row,st,es);}));
+      box.appendChild(row);}
+    card.appendChild(box);
+  }
+  if(it.entity)card.appendChild(laneEl('div','lane-meta',it.entity.kind+': '+it.entity.name+' ('+it.entity.ref+')'));
+  card.appendChild(laneEl('div','lane-meta','decided by '+it.decidedBy+(it.reasonCode?' · '+it.reasonCode:'')+(typeof it.relevance==='number'?' · relevance '+it.relevance.toFixed(2):'')));
+  if(it.reasoning){var rs=laneEl('div','lane-reason');rs.appendChild(laneEl('span','lane-lbl','Model note: '));rs.appendChild(laneEl('span',null,it.reasoning));card.appendChild(rs);}
+  var fb=laneEl('div','lane-row');var cur=laneEl('span','lane-cur',it.feedback?'labelled: '+laneLabelOf(it.feedback):'');
+  var btns=LANE_LABELS.map(function(f){var b=laneBtn(f[1],function(){laneLabel(it.id,f[0],btns,cur);});if(it.feedback===f[0])b.classList.add('on');return b;});
+  btns.forEach(function(b){fb.appendChild(b);});fb.appendChild(cur);card.appendChild(fb);
+  return card;}
+/* Will's label on one decision: should have escalated, should have stayed quiet, or right. */
+function laneLabel(id,label,btns,cur){btns.forEach(function(b){b.disabled=true;});
+  laneCall('/inbox/'+encodeURIComponent(id)+'/feedback',{feedback:label}).then(function(){
+    btns.forEach(function(b,i){b.disabled=false;b.classList.toggle('on',LANE_LABELS[i][0]===label);});cur.textContent='labelled: '+laneLabelOf(label);
+  }).catch(function(e){btns.forEach(function(b){b.disabled=false;});cur.textContent='✗ '+e.message;});}
+function laneEscalation(id,what,row,st,es){var bs=row.children||[];for(var i=0;i<bs.length;i++)bs[i].disabled=true;
+  laneCall('/escalations/'+encodeURIComponent(id)+'/'+what,{}).then(function(){
+    es.status=what==='ack'?'acked':'dismissed';st.textContent='escalation: '+es.status;row.textContent='';row.appendChild(laneEl('span','lane-cur',what==='ack'?'✓ acknowledged':'dismissed'));
+  }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;row.appendChild(laneEl('span','lane-cur','✗ '+e.message));});}
+/* The runtime's health report: the instance, uptime, when checks last ran, each component. */
+function loadHealth(){var seq=LANE_SEQ;laneMsg('Loading…');
+  laneCall('/runtime/health').then(function(h){if(seq!==LANE_SEQ)return;laneMsg('');
+    var list=document.getElementById('lanelist');
+    var top=laneEl('div','lane-item');
+    top.appendChild(laneEl('div','lane-title','Runtime '+(h.instance?h.instance.gitSha.slice(0,7):'(no instance yet)')+' · triage '+h.triage));
+    if(h.instance)top.appendChild(laneEl('div','lane-meta','started '+laneWhen(h.instance.startedAt)+' · last heartbeat '+laneAgo(h.instance.lastBeatAt)));
+    top.appendChild(laneEl('div','lane-meta','uptime, last 14 days: '+(typeof h.uptime14d==='number'?(Math.round(h.uptime14d*1000)/10)+'%':'not known yet')));
+    var stale=!h.lastHealthRun||Date.now()-Date.parse(h.lastHealthRun)>10*60000;
+    top.appendChild(laneEl('div','lane-meta'+(stale?' bad':''),'health checks: '+(h.lastHealthRun?'last run '+laneAgo(h.lastHealthRun):'never run')+(stale?' (more than 10 minutes ago)':'')));
+    list.appendChild(top);
+    (h.components||[]).forEach(function(c){var row=laneEl('div','lane-comp');
+      row.appendChild(laneEl('span','lane-st '+String(c.status).replace(/[^a-z]/g,''),c.status));
+      row.appendChild(laneEl('span',null,c.component));
+      if(c.detail)row.appendChild(laneEl('span','lane-meta',c.detail));
+      row.appendChild(laneEl('span','lane-meta',laneAgo(c.at)));
+      list.appendChild(row);});
+    if(!(h.components||[]).length)list.appendChild(laneEl('div','empty','No component has been checked yet.'));
+  }).catch(function(e){if(seq!==LANE_SEQ)return;laneMsg('✗ '+e.message,true);});}
 </script>
 </body>
 </html>

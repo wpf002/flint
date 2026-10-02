@@ -40,6 +40,8 @@ export interface RouteRecord {
   eval?: boolean;
   /** How memory recall ran: semantic, lexical (embedder failed), timeout, none, skipped or error. The pre-P2 baseline. */
   recall?: string;
+  /** Estimated tokens each context block added to the frontier's prompt (plan 3.0.8: chat overhead is measured), e.g. {world: 120}. */
+  ctxTokens?: Record<string, number>;
 }
 
 /**

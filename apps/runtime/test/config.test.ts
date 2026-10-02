@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { loadConfig, parseTokens } from '../src/config';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig, loadRuntimeConfig, parseTokens } from '../src/config';
 
 const DB = 'postgresql://flint_app:x@[::1]:5432/flint';
 const HOME = '/Users/test';
@@ -48,5 +51,68 @@ describe('runtime config', () => {
   it('passkey origins must be https', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_RP_ID: 'flint.example.ts.net', FLINT_RP_ORIGINS: 'http://flint.example.ts.net' })).toThrow(/https/);
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RP_ID: 'flint.example.ts.net', FLINT_RP_ORIGINS: 'https://flint.example.ts.net' }).rp).toEqual({ rpId: 'flint.example.ts.net', origins: ['https://flint.example.ts.net'] });
+  });
+
+  it('triage is off unless set to on; blank values mean the defaults', () => {
+    expect(loadConfig({ DATABASE_URL: DB, HOME }).triage).toBe(false);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: '' }).triage).toBe(false);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: 'yes' }).triage).toBe(false);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: ' On ' }).triage).toBe(true);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_TZ: '', FLINT_USER_TZ: '' }).tz).toBe('America/Chicago');
+    expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_TZ: 'Not/AZone' })).toThrow(/time zone/);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_TZ: 'Europe/Berlin' }).tz).toBe('Europe/Berlin');
+  });
+
+  it('the triage model is on loopback only, and absent without a model', () => {
+    expect(loadConfig({ DATABASE_URL: DB, HOME }).ollama).toBeUndefined();
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'muse-glimmer:30b' }).ollama).toEqual({ url: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b' });
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'm', OLLAMA_URL: 'http://[::1]:11434' }).ollama?.url).toBe('http://[::1]:11434');
+    for (const bad of ['http://10.0.0.5:11434', 'https://ollama.example.com', 'http://127.0.0.1.evil.example:11434', 'http://localhost:11434/api']) {
+      expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'm', OLLAMA_URL: bad })).toThrow(/OLLAMA_URL/);
+    }
+    expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'a model; rm -rf' })).toThrow(/FLINT_TRIAGE_MODEL/);
+  });
+
+  it('the git sha is a full sha or dev', () => {
+    expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'f'.repeat(40) }).gitSha).toBe('f'.repeat(40));
+    expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'nope' }).gitSha).toBe('dev');
+  });
+
+  describe('runtime.env, then runtime.override.env, then the process environment', () => {
+    const saved = { ...process.env };
+    afterEach(() => {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+    });
+    const home = () => {
+      const h = mkdtempSync(join(tmpdir(), 'rt-config-'));
+      mkdirSync(join(h, '.flint'), { mode: 0o700 });
+      writeFileSync(join(h, '.flint', 'runtime.env'), `DATABASE_URL=${DB}\nFLINT_RUNTIME_TRIAGE=off\nFLINT_TZ=America/Denver\n`, { mode: 0o600 });
+      process.env.HOME = h;
+      delete process.env.RUNTIME_ENV_FILE;
+      delete process.env.DATABASE_URL;
+      delete process.env.FLINT_RUNTIME_TRIAGE;
+      delete process.env.FLINT_TZ;
+      return h;
+    };
+
+    it('the override survives a redeploy and wins over runtime.env', () => {
+      const h = home();
+      expect(loadRuntimeConfig().triage).toBe(false);
+      writeFileSync(join(h, '.flint', 'runtime.override.env'), 'FLINT_RUNTIME_TRIAGE=on\n', { mode: 0o600 });
+      const c = loadRuntimeConfig();
+      expect(c.triage).toBe(true);
+      expect(c.tz).toBe('America/Denver');
+      process.env.FLINT_RUNTIME_TRIAGE = 'off';
+      expect(loadRuntimeConfig().triage).toBe(false);
+    });
+
+    it('an override others can read is refused', () => {
+      const h = home();
+      const f = join(h, '.flint', 'runtime.override.env');
+      writeFileSync(f, 'FLINT_RUNTIME_TRIAGE=on\n');
+      chmodSync(f, 0o644);
+      expect(() => loadRuntimeConfig()).toThrow(/chmod 600/);
+    });
   });
 });

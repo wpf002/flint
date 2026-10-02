@@ -50,6 +50,12 @@ describe('routeLine', () => {
       ['answeredBy', 'appended', 'brain', 'movedBy', 'ms', 'outcome', 'path', 'tier', 'ts', 'turns'].sort(),
     );
   });
+
+  // Plan 3.0.8: what each context block adds to a frontier prompt is measured, as a count.
+  it('carries the context blocks\' token estimates when there are any', () => {
+    const parsed = JSON.parse(routeLine({ ...rec, ctxTokens: { world: 118 } }).slice('[route] '.length));
+    expect(parsed.ctxTokens).toEqual({ world: 118 });
+  });
 });
 
 describe('chatOutcome', () => {

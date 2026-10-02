@@ -11,14 +11,20 @@
  *  - Runs that changed something, and failures, are audit entries; runs that
  *    changed nothing are counted in AuditRollup, so the audit trail stays
  *    readable (plan 3.0.7).
+ *  - P2: an event happened when the source says it changed (else now); the
+ *    events of a source's first successful run are marked backfill; and with
+ *    triage on, each applied event's triage job is sent in the transaction
+ *    that applied it.
  */
-import { Prisma } from '@prisma/client';
-import { digestOf, redact, resolveTier } from '@flint/policy';
+import { redact, resolveTier } from '@flint/policy';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { activePolicies } from '../governance/proposals.js';
 import { applyObservation, stateHash, type Applied } from '../world/mapper.js';
+import { markProcessed, recordEvent, recordFailure, refreshUndecided, type Enqueue, type EventIn } from '../events/record.js';
+import { sourceTime, triageEligible } from '../triage/facts.js';
 import { wellFormedDeep } from './text.js';
+import { faultAt } from '../config.js';
 import type { Known, Source, SourceRun } from './types.js';
 
 export interface SyncSummary {
@@ -36,7 +42,7 @@ export interface SyncSummary {
 const localDay = (tz: string, at: Date) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
 
-export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cursor'>, tz: string): Promise<SyncSummary> {
+export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cursor'>, tz: string, enqueue?: Enqueue): Promise<SyncSummary> {
   const action = `world.sync.${source.name}`;
   const summary: SyncSummary = { source: source.name, ran: false, created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0, metrics: 0 };
   const tier = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(db, run.now), now: run.now });
@@ -58,50 +64,75 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   }
   summary.ran = true;
 
+  // The world as it already was: everything a source's first good run reports.
+  const backfill = !cursor.lastOkAt;
   for (const raw of result.observations) {
     // A NUL or half an emoji from outside would make the item unwritable on every run.
-    const o = wellFormedDeep(raw);
+    // (The time is taken out first: a Date is not plain data.)
+    const { changedAt, ...rest } = raw;
+    const o = wellFormedDeep(rest);
     const hash = stateHash({ name: o.name, state: o.state, ...(o.status ? { status: o.status } : {}), taintedPaths: o.taintedPaths ?? [] });
     // The event names the change: the state, and the version it would replace.
     // The same observation again (a restart) is the same event; the same state
     // coming back later (down, ok, down) is a new one.
     const current = await db.entity.findUnique({ where: { kind_key: { kind: o.kind, key: o.key } }, select: { version: true, stateHash: true } });
     const changes = !current || current.stateHash !== hash;
-    const sourceRef = `${o.externalId}@${hash}#${current?.version ?? 0}`.slice(0, 500);
-    const tainted = (o.taintedPaths ?? []).length > 0;
-    const payload = { kind: o.kind, key: o.key, name: o.name, state: o.state, status: o.status ?? 'active' };
+    const event: EventIn = {
+      source: source.name,
+      sourceRef: `${o.externalId}@${hash}#${current?.version ?? 0}`.slice(0, 500),
+      type: o.type,
+      occurredAt: sourceTime(changedAt, run.now),
+      sensitivity: o.sensitivity,
+      tainted: (o.taintedPaths ?? []).length > 0,
+      payload: { kind: o.kind, key: o.key, name: o.name, state: o.state, status: o.status ?? 'active', ...(backfill ? { backfill: true } : {}) },
+    };
     let outcome: Applied;
     try {
       outcome = await db.$transaction(async (tx) => {
         // Nothing changed: no event, just "seen again".
         if (!changes) return applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now });
-        const inserted = await tx.sourceEvent.createMany({
-          data: [{
-            id: `se${run.now.getTime().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
-            source: source.name, sourceRef, type: o.type, occurredAt: run.now, sensitivity: o.sensitivity, tainted,
-            payload: payload as Prisma.InputJsonObject, payloadHash: digestOf(payload),
-          }],
-          skipDuplicates: true,
-        });
-        const event = await tx.sourceEvent.findUniqueOrThrow({ where: { source_sourceRef: { source: source.name, sourceRef } } });
-        const applied = await applyObservation(tx, {
-          ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now,
-          ...(inserted.count ? { sourceEventId: event.id } : {}),
-        });
-        if (inserted.count) {
-          await tx.sourceEvent.update({ where: { id: event.id }, data: { status: applied === 'skipped' ? 'ignored' : 'applied', processedAt: run.now, attempts: 1 } });
+        const id = await recordEvent(tx, event, run.now);
+        const applied = await applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now, ...(id ? { sourceEventId: id } : {}) });
+        if (id) {
+          const status = applied === 'skipped' ? 'ignored' : 'applied';
+          await markProcessed(tx, id, status, run.now);
+          if (enqueue && triageEligible(source.name, o.type, status)) await enqueue(tx, id);
         }
         return applied;
       });
     } catch (err) {
       summary.failed += 1;
-      await db.sourceEvent.updateMany({
-        where: { source: source.name, sourceRef, status: 'received' },
-        data: { status: 'failed', attempts: { increment: 1 }, lastError: redact(err instanceof Error ? err.message : String(err)).slice(0, 500) },
-      });
+      await recordFailure(db, event, err, run.now).catch(() => {});
       continue;
     }
     summary[outcome] += 1;
+  }
+
+  // Event-only sources: each event applied with its triage job; nothing enters the world model.
+  for (const { current, ...e } of result.events ?? []) {
+    const event: EventIn = { source: source.name, ...e, occurredAt: sourceTime(e.occurredAt, run.now) };
+    try {
+      const id = await db.$transaction(async (tx) => {
+        const id = await recordEvent(tx, event, run.now);
+        if (!id) {
+          if (current) {
+            const again = await refreshUndecided(tx, source.name, e.sourceRef, run.now, e.payload);
+            if (again && enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, again);
+          }
+          return null;
+        }
+        await markProcessed(tx, id, 'applied', run.now);
+        if (enqueue && triageEligible(source.name, e.type, 'applied')) await enqueue(tx, id);
+        return id;
+      });
+      if (id) {
+        summary.created += 1;
+        faultAt('after_event');
+      } else summary.unchanged += 1;
+    } catch (err) {
+      summary.failed += 1;
+      await recordFailure(db, event, err, run.now).catch(() => {});
+    }
   }
 
   for (const m of result.metrics) {

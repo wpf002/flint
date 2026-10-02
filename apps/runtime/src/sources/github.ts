@@ -1,6 +1,6 @@
 /**
  * github: open PRs, open issues, milestones and the latest CI run of each of
- * Will's repos, every 10 minutes (Machine plan P1 sources).
+ * Will's repos, every 5 minutes (Machine plan P1 sources; P2 halved it).
  *
  *  - Auth: the GitHub App `flint-observer`, read-only: Metadata, Issues, Pull
  *    requests, Actions. Its private key stays in a file; the source signs a
@@ -69,12 +69,16 @@ const Item = z.object({
   merged_at: z.string().nullable().optional(),
   pull_request: z.unknown().optional(),
   labels: z.array(z.union([z.object({ name: z.string() }), z.string()])).optional(),
+  updated_at: z.string().optional(),
+  // Read only for whether a bot opened it (Flint's own app, dependabot), never who;
+  // any shape is accepted, so an odd user never drops the item.
+  user: z.unknown().optional(),
 });
 type Item = z.infer<typeof Item>;
 const Milestone = z.object({ number: z.number().int().positive(), title: z.string(), due_on: z.string().nullable() });
 const Repo = z.object({ default_branch: z.string().min(1).max(255) });
 const Runs = z.object({
-  workflow_runs: z.array(z.object({ name: z.string().nullable().optional(), status: z.string().nullable(), conclusion: z.string().nullable(), head_sha: z.string() })),
+  workflow_runs: z.array(z.object({ name: z.string().nullable().optional(), status: z.string().nullable(), conclusion: z.string().nullable(), head_sha: z.string(), updated_at: z.string().optional() })),
 });
 
 // ---- the cursor -------------------------------------------------------------------------
@@ -104,7 +108,8 @@ export function githubSource(o: GithubOptions): Source & { endpoints: string[] }
   let token: { value: string; expires: number } | undefined;
   return {
     name: 'github',
-    cadenceMs: 10 * 60_000,
+    // ETags make an unchanged listing a 304 that costs no rate limit.
+    cadenceMs: 5 * 60_000,
     endpoints: [GITHUB_API],
     async run(r: SourceRun): Promise<SyncResult> {
       const now = o.now?.() ?? r.now;
@@ -181,13 +186,16 @@ export function githubSource(o: GithubOptions): Source & { endpoints: string[] }
 
         const issueLike = (kind: 'pull_request' | 'issue', it: Item): SourceObservation => {
           const title = clip(it.title, 120);
+          // Only when true: an item a person opened keeps the state (and hash) it had.
+          const byBot = (it.user as { type?: unknown } | null | undefined)?.type === 'Bot' ? { byBot: true } : {};
           const state = kind === 'pull_request'
-            ? { number: it.number, state: it.merged_at ? 'merged' : it.state === 'open' ? 'open' : 'closed', ...(it.draft !== undefined ? { draft: it.draft } : {}), title }
-            : { number: it.number, state: it.state === 'open' ? 'open' : 'closed', labels: (it.labels ?? []).map((l) => clip(typeof l === 'string' ? l : l.name, 120)).slice(0, 20), title };
+            ? { number: it.number, state: it.merged_at ? 'merged' : it.state === 'open' ? 'open' : 'closed', ...(it.draft !== undefined ? { draft: it.draft } : {}), title, ...byBot }
+            : { number: it.number, state: it.state === 'open' ? 'open' : 'closed', labels: (it.labels ?? []).map((l) => clip(typeof l === 'string' ? l : l.name, 120)).slice(0, 20), title, ...byBot };
           return {
             type: `${kind}.state`, kind, key: `${kind}:github:${full}#${it.number}`, name: clip(it.title, 300) || `${kind}#${it.number}`, sensitivity: 'ops',
             externalId: `${kind}:${full}#${it.number}`, taintedPaths: ['name', 'state.title'],
             state, ...(state.state === 'open' ? {} : { status: 'archived' as const }),
+            ...(it.updated_at ? { changedAt: it.updated_at } : {}),
           };
         };
         /** Something gone from GitHub: closed, as it was last known. */
@@ -261,6 +269,7 @@ export function githubSource(o: GithubOptions): Source & { endpoints: string[] }
             if (run) {
               found.push({
                 type: 'ci_run.state', kind: 'ci_run', key: `ci_run:github:${full}:latest`, name: `${full} CI`, sensitivity: 'ops', externalId: `ci_run:${full}:latest`,
+                ...(run.updated_at ? { changedAt: run.updated_at } : {}),
                 state: {
                   workflow: clip(run.name ?? 'ci', 120) || 'ci',
                   status: run.status === 'in_progress' || run.status === 'completed' ? run.status : 'queued',

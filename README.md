@@ -262,13 +262,15 @@ first, LoRA fine-tune only if needed) is written up in
   own; everything else is refused and queued in `~/.flint/overnight-report.md`
   for your review. Destructive actions are never auto-approved; there's a per-run
   action cap. Configure `~/.flint/autonomy.json` (`{"allow":["vantage.add_to_watchlist"]}`)
-  and `~/.flint/overnight-task.txt`. `install-nightly.sh` schedules it at 02:00.
+  and `~/.flint/overnight-task.txt`. Run it by hand: the old nightly schedule
+  (`install-nightly.sh`) is retired; the runtime (`apps/runtime`) is what runs
+  on its own now.
   **Voice setup (one-time, all local):** `brew install whisper-cpp sox`, then
   download a model to `~/.flint/models/ggml-base.en.bin` (from
   huggingface.co/ggerganov/whisper.cpp). `ask voice` runs the live mic loop;
   `ask voice <audiofile>` processes one clip. STT = whisper.cpp, TTS = macOS `say`.
-  `install-nightly.sh` schedules both: nightly reflection (03:00) and the
-  morning brief (07:00) via launchd. The brief lands in `~/.flint/brief-latest.md`.
+  The scheduled reflection and morning brief are retired: the runtime's 07:30
+  digest (in the console) replaces the brief.
 
   **Watch triggers (`ask watch`):** deterministic threshold alerts over live tool
   data — no LLM in the firing decision. Define them in `~/.flint/triggers.json`:
@@ -279,9 +281,6 @@ first, LoRA fine-tune only if needed) is written up in
   **Semantic memory (opt-in):** `ollama pull nomic-embed-text`, then set
   `FLINT_EMBED_MODEL=nomic-embed-text` to retrieve your writing/voice by meaning
   (embeddings + cosine) instead of keyword. Falls back to keyword if unset.
-  Automate the nightly reflection (macOS launchd): `apps/ask/install-nightly.sh`
-  bundles `ask` to `~/.flint/` (outside `~/Documents`, which TCC blocks for
-  background agents) and installs a 03:00 LaunchAgent. Re-run after code changes.
 
   **MCP tools (Phase 1):** drop a `~/.flint/mcp.json` listing your apps' MCP
   servers and `ask` exposes their tools to Flint, gated by the safety rail

@@ -94,7 +94,7 @@ Is SearXNG good enough to lean on? Measure it on Will's research prompts before 
 further: `pnpm --filter @flint/parity search-compare --budget-usd 1` (see
 [../parity/README.md](../parity/README.md#search-compare-is-keyless-search-good-enough)).
 
-To remove it: `launchctl bootout gui/$UID/com.flint.searxng`, then delete
+To remove it: `launchctl disable gui/$UID/com.flint.searxng` and `launchctl bootout gui/$UID/com.flint.searxng`, then delete
 `~/Library/LaunchAgents/com.flint.searxng.plist` and `~/searxng`.
 
 ## What it carries over

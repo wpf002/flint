@@ -20,6 +20,10 @@ here; Railway has no GPU.
 | POST | `/eval/tool` | yes | `{ eval: true, name, args? }` | `{ ok, name, isError, text }`: runs ONE tool from a fixed read-only discovery allowlist (`DISCOVERY_TOOLS` in src/eval-tools.ts: `meridian.list_tickers`, `vantage.top_scores`, `bellwether.list_industries`, …) to fill apps/parity task slots. Any other tool is a 403 before any handler runs, so it can't write or create a proposal; 404 if the tool isn't wired, 502 if it throws. Audited in the action log |
 | POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
 | GET | `/spend` | yes | — | Paid API spend today and this month per vendor, against the caps (see "Spend caps") |
+| GET | `/inbox?lane=relevant\|quiet&before=<ISO>&limit=1..100` | yes | — | A page of the runtime's triage decisions, newest first (`InboxPage` in @flint/policy: `{ items, next }`; `next` is the `before` of the older page). See "The runtime's lanes" |
+| POST | `/inbox/:id/feedback` | yes | `{ feedback: "should_escalate" \| "should_be_quiet" \| "ok" }` | `{ ok: true }`: Will's label on a decision |
+| POST | `/escalations/:id/ack`, `/escalations/:id/dismiss` | yes | — | `{ ok: true }` |
+| GET | `/runtime/health` | yes | — | The runtime's health report (`HealthReport`) |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
 
@@ -47,6 +51,8 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_HISTORY_TURNS` / `FLINT_HISTORY_MAX_AGE_HOURS` | no | How much of a `/chat` conversation each new message carries: the last `FLINT_HISTORY_TURNS` complete turns (default 12) that started within `FLINT_HISTORY_MAX_AGE_HOURS` (default 48), whichever leaves fewer. Every turn stays stored in `~/.flint/memory/conversations.json`, and the memory extractor still reads all of them, but it keeps only durable facts about Will: what was said or decided in an older turn doesn't come back. So when turns are left out, the turn's context says how many, and the persona tells Flint to say so rather than reconstruct them. The tier classifier's "deep thread" rule counts the turns sent (8 or more). `0` means no earlier turns; anything that isn't a number >= 0 is logged and ignored (the default). |
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
+| `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
+| `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
 | `PORT` | no | Injected by Railway. |
 
 ## Spend caps
@@ -90,6 +96,20 @@ shared with apps/parity):
 An unset cap is no cap: exactly what Flint did before. `0` is a real cap (the kill
 switch: never call that vendor). A value that isn't a dollar amount is logged and ignored.
 The boot log prints the caps in force (`[spend] caps: ...`).
+
+**Background kinds** (Machine plan 3.0.8). The runtime holds no vendor keys; when it wants a
+frontier call it asks the server's internal listener (`POST /internal/complete`, `[::1]:8081`),
+under one of four kinds, each with its own caps:
+`FLINT_BUDGET_KIND_<RUNTIME|REVIEW|DISPATCH|SELFMOD>_DAILY_USD` / `_MONTHLY_USD`. Unlike a vendor
+cap, **unset is $0**: background spend is off until both periods are raised (the boot log prints
+them as `[spend] background kinds: ...`). A call is refused (402 with a `reason`) when its kind's
+spend plus the call's estimate would pass either cap (`kind_cap`), when its vendor is at 80% of
+Flint's own cap (`vendor_cap`), or on the runtime's unified view of the vendor (every account's
+spend): missing (`unified_missing`), older than 2 h (`unified_stale`), at 70% of Flint's cap
+(`unified_70`), or when Flint has no cap for that vendor to hold it against (`vendor_uncapped`).
+Otherwise a durable audit intent is written first (if it can't be, nothing runs), the call is
+made on the routine tier with no tools, metered in the ledger under its kind, and its outcome
+audited with the cost. One call at a time; every refusal is audited.
 
 **Recommended values** (in `~/.flint/secrets.env` or the LaunchAgent's env; tune after a
 couple of weeks of `/spend`):
@@ -138,9 +158,10 @@ timeout, a stopped run) cancels the turn, as `/chat` does, so an abandoned repla
 **Visibility.** `GET /spend` returns
 `{ timeZone, day, month, thresholds, vendors: { anthropic: { name, today: { usd, capUsd, pct, evalUsd, calls }, month: {...}, fraction, level, binding, effect }, openai, perplexity, tavily } }`.
 Flint can answer it himself through the read-only `spend_status` tool (appended by the tool
-router when a question is about spend, credits or budgets). The notifications feed (and the
-phone push, if `FLINT_NTFY_TOPIC` is set) gets one notice per vendor per cap per period at
-50%, 80% and 100%.
+router when a question is about spend, credits or budgets). The notifications feed gets one
+notice per vendor per cap per period at 50%, 80% and 100% (the phone, if `FLINT_NTFY_TOPIC`
+is set, gets only the content-free ping), and the runtime gets a `spend.threshold` event for
+each notice that is new (never for one re-raised at boot).
 
 **Not covered here:** anything that calls a paid API outside this server: the Python
 training scripts (`apps/train/mlx/bulk_seed.py`, `auto_grow.py`, `eval_judge.py` call
@@ -177,6 +198,36 @@ ask can score as low (0.603 for "How much have I spent on Claude today?"), so th
 low and the tool is still offered; only the tier waits for a clear match.
 
 To count tiers: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r .tier | sort | uniq -c`.
+
+A frontier `/chat` turn that carried the "World now" block also has `ctxTokens: { world: n }`,
+the block's estimated tokens (plan 3.0.8: chat overhead is measured).
+
+## The runtime's lanes
+
+With the runtime installed (`~/.flint/tokens/runtime.token`), the server and the runtime talk
+both ways (Machine plan P2):
+
+- **Events** (src/runtime-events.ts): each `/chat` turn's brain, outcome, tool names, time and
+  taint (`chat.turn`), each new spend threshold notice (`spend.threshold`) and each 5xx answer
+  (`route.error`) go to the runtime's `POST /v1/events`: ids, enums and numbers only, never
+  text, and nothing for an eval replay. They are spooled in `~/.flint/spool/events.jsonl`
+  (0600, 2 MB) and shipped every 15 s, so a runtime that is down loses nothing.
+- **World now** (src/world-now.ts): frontier `/chat` turns get a short block from the runtime's
+  `GET /v1/world/now` in their per-turn context: each service by its ref (`service#24ehza`, and
+  its name when it is a plain identifier) and health, counts, open escalations. At most 1,600
+  characters and 400 tokens, 300 ms to answer, cached 30 s, never older than 5 minutes, never
+  any text marked tainted, never stored in the conversation. Local turns go without (their
+  prompt is already at its limit).
+- **Internal listener** (`[::1]:8081`, the runtime's token): `/internal/notify` (a note in the
+  console; `channels` adds a banner and the content-free phone ping, always with the in-app
+  note; a resent `ref` is a duplicate), `/internal/load` (`/chat` turns in flight: triage
+  yields to them), `/internal/complete` (see "Spend caps"), `/internal/spend-external`.
+- **The console's Lanes view** (the tray icon): the relevant and quiet lanes page by page,
+  each decision with its escalation, its tainted banner and three labels (should escalate,
+  should be quiet, OK), Acknowledge and Dismiss on an open escalation, and the runtime's health
+  report. Through the routes in the table above (src/inbox-routes.ts), which check what the
+  console sends and what the runtime answers against @flint/policy's wire contracts; a runtime
+  that refuses the server's token is a 502, never a 401.
 
 ## Tools / integrations
 

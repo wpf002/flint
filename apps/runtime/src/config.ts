@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { zoneFrom } from '@flint/policy';
 
 export const SCOPES = ['events', 'audit', 'proposals', 'world:read', 'ledger', 'mcp', 'counters'] as const;
 export type RuntimeScope = (typeof SCOPES)[number];
@@ -71,6 +72,19 @@ const Env = z.object({
   NEXUS_READ_TOKEN: z.string().min(16).optional(),
   /** Health endpoints off the box: `name=https://host/path,...` (Railway services). */
   HEALTH_EXTRA: z.string().optional(),
+  /**
+   * Triage (P2): `on` to run it; anything else, blank included, is off (the
+   * sources keep running). Off by default: it is turned on, in
+   * runtime.override.env, once the chat baseline it is measured against exists.
+   */
+  FLINT_RUNTIME_TRIAGE: z.string().optional(),
+  /** The local model triage asks (Ollama), on loopback only. */
+  OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
+  FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
+  /** The server's num_ctx: a different one makes Ollama reload the model chat is using. */
+  OLLAMA_NUM_CTX: z.coerce.number().int().min(512).max(262_144).optional(),
+  /** The deployed commit (install-runtime.sh writes it). */
+  RUNTIME_GIT_SHA: z.string().optional(),
   FLINT_BUDGET_ANTHROPIC_DAILY_USD: z.coerce.number().nonnegative().optional(),
   FLINT_BUDGET_ANTHROPIC_MONTHLY_USD: z.coerce.number().nonnegative().optional(),
   FLINT_BUDGET_OPENAI_DAILY_USD: z.coerce.number().nonnegative().optional(),
@@ -95,6 +109,11 @@ export interface Config {
   railway: Record<string, string>;
   nexus?: { url: string; token: string };
   caps: Record<'anthropic' | 'openai' | 'perplexity' | 'tavily', { dailyUsd?: number; monthlyUsd?: number }>;
+  /** P2 triage runs (else the sources run and nothing is triaged). */
+  triage: boolean;
+  /** The local model triage asks; absent, triage is rules only. */
+  ollama?: { url: string; model: string; numCtx?: number };
+  gitSha: string;
 }
 
 /** `name=https://host/path` pairs; https only, no credentials in the URL. */
@@ -134,7 +153,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: e.RUNTIME_PORT,
     tokens,
     ...(e.FLINT_RP_ID && origins.length ? { rp: { rpId: e.FLINT_RP_ID, origins } } : {}),
-    tz: e.FLINT_TZ?.trim() || e.FLINT_USER_TZ?.trim() || 'America/Chicago',
+    tz: zoneFrom(e.FLINT_TZ, e.FLINT_USER_TZ),
     home: e.HOME,
     ...(e.SERVER_INTERNAL_URL && e.SERVER_INTERNAL_TOKEN ? { server: { url: e.SERVER_INTERNAL_URL, token: e.SERVER_INTERNAL_TOKEN } } : {}),
     ...(e.GITHUB_APP_ID && e.GITHUB_APP_INSTALLATION_ID && e.GITHUB_APP_KEY_PATH
@@ -154,6 +173,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       perplexity: cap(e.FLINT_BUDGET_PERPLEXITY_DAILY_USD, e.FLINT_BUDGET_PERPLEXITY_MONTHLY_USD),
       tavily: cap(e.FLINT_BUDGET_TAVILY_DAILY_USD, e.FLINT_BUDGET_TAVILY_MONTHLY_USD),
     },
+    triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
+    ...(e.FLINT_TRIAGE_MODEL
+      ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
+      : {}),
+    gitSha: e.RUNTIME_GIT_SHA && /^[0-9a-f]{40}$/.test(e.RUNTIME_GIT_SHA) ? e.RUNTIME_GIT_SHA : 'dev',
   };
 }
 
@@ -174,10 +198,17 @@ export function runtimeEnv(file: string, base: Record<string, string | undefined
   return { ...out, ...base };
 }
 
-/** The config the service runs with: ~/.flint/runtime.env (or RUNTIME_ENV_FILE) under the process environment. */
+/**
+ * The config the service runs with: ~/.flint/runtime.env (or RUNTIME_ENV_FILE),
+ * then ~/.flint/runtime.override.env (Will's settings, e.g. FLINT_RUNTIME_TRIAGE;
+ * every deploy rewrites runtime.env, never this), then the process environment.
+ * Both files must be readable only by their owner.
+ */
 export function loadRuntimeConfig(): Config {
-  const file = process.env.RUNTIME_ENV_FILE ?? join(process.env.HOME ?? '', '.flint', 'runtime.env');
-  return loadConfig(runtimeEnv(file));
+  const home = process.env.HOME ?? '';
+  const file = process.env.RUNTIME_ENV_FILE ?? join(home, '.flint', 'runtime.env');
+  const override = join(home, '.flint', 'runtime.override.env');
+  return loadConfig({ ...runtimeEnv(file, {}), ...runtimeEnv(override, {}), ...process.env });
 }
 
 /**
@@ -226,4 +257,14 @@ export function loadBackupConfig(): BackupConfig {
     ...(B.data.FLINT_OFFSITE_DIR ? { offsiteDir: B.data.FLINT_OFFSITE_DIR } : {}),
     tools: { pgDump, pgRestore, ...(age ? { age } : {}) },
   };
+}
+
+/**
+ * The crash harness's fault point (test/p2-crash.test.ts): the process kills
+ * itself (SIGKILL, as `kill -9` would) on reaching the named point. Read only
+ * here, and only when NODE_ENV is `test`: a deployed runtime never has one.
+ */
+export type FaultPoint = 'after_event' | 'after_decision' | 'after_notify';
+export function faultAt(point: FaultPoint): void {
+  if (process.env.NODE_ENV === 'test' && process.env.FLINT_TEST_FAULT === point) process.kill(process.pid, 'SIGKILL');
 }

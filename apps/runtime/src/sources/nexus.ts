@@ -1,5 +1,5 @@
 /**
- * nexus: Will's open Nexus threads, every 10 minutes (Machine plan P1 sources).
+ * nexus: Will's open Nexus threads, every 5 minutes (Machine plan P1 sources).
  *
  *  - Reached as an MCP client over Streamable HTTP, through the source's
  *    endpoint-scoped fetch: only the Nexus URL, no redirects. The token
@@ -30,6 +30,7 @@ interface ThreadRow {
   threadId: string;
   goal: string;
   status: string;
+  updatedAt?: unknown;
 }
 
 export const NEXUS_LIST_LIMIT = 50;
@@ -67,13 +68,14 @@ export function threadObservation(t: ThreadRow): SourceObservation {
     type: 'thread.state', kind: 'thread', key: `thread:nexus:${t.threadId}`, name: clip(t.goal, 300) || 'thread',
     sensitivity: 'ops', externalId: `thread:${t.threadId}`, taintedPaths: ['name'],
     state: { status: open ? 'open' : 'archived' }, ...(open ? {} : { status: 'archived' as const }),
+    ...(typeof t.updatedAt === 'string' ? { changedAt: t.updatedAt.slice(0, 40) } : {}),
   };
 }
 
 export function nexusSource(o: NexusOptions): Source & { endpoints: string[] } {
   return {
     name: 'nexus',
-    cadenceMs: 10 * 60_000,
+    cadenceMs: 5 * 60_000,
     endpoints: [o.url],
     async run(r: SourceRun): Promise<SyncResult> {
       const client = new Client({ name: 'flint-runtime', version: '1.0.0' });

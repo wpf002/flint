@@ -5,7 +5,7 @@
  */
 import type { Observation } from '../world/mapper.js';
 
-export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus';
+export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox';
 
 export interface SeriesDef {
   key: string;
@@ -22,11 +22,34 @@ export interface MetricObservation {
   value: number;
 }
 
-export type SourceObservation = Omit<Observation, 'source' | 'actor' | 'observedAt' | 'sourceEventId'> & { type: string; sensitivity: 'ops' | 'personal' | 'financial' };
+export type SourceObservation = Omit<Observation, 'source' | 'actor' | 'observedAt' | 'sourceEventId'> & {
+  type: string;
+  sensitivity: 'ops' | 'personal' | 'financial';
+  /** When the source says this changed (an issue's updated_at); absent, the sync's own time. */
+  changedAt?: string | Date;
+};
+
+/**
+ * An event an event-only source raises (P2: deploy, knowledge, nexus_inbox):
+ * a SourceEvent and nothing in the world model. Its sourceRef names the
+ * occurrence, so the same one read again is a duplicate.
+ */
+export interface RaisedEvent {
+  sourceRef: string;
+  type: string;
+  occurredAt: Date;
+  sensitivity: 'ops' | 'personal' | 'financial';
+  tainted: boolean;
+  /** Ids, enums and numbers: no text. */
+  payload: Record<string, string | number | boolean | string[]>;
+  /** A condition that holds now (a handoff still pending): seen again, its undecided event is refreshed. */
+  current?: boolean;
+}
 
 export interface SyncResult {
   observations: SourceObservation[];
   metrics: MetricObservation[];
+  events?: RaisedEvent[];
   cursor?: string;
   etag?: string;
   /**

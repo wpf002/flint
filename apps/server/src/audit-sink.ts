@@ -40,6 +40,8 @@ export interface AuditRecord {
   decision?: 'act' | 'log' | 'escalate' | 'queue' | 'deny';
   outcome: 'pending' | 'ok' | 'denied' | 'failed' | 'skipped';
   correlationId?: string;
+  /** What a metered call cost (kind 'spend'). */
+  costUsd?: number;
   tainted?: boolean;
 }
 

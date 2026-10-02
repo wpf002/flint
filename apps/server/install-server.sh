@@ -13,6 +13,31 @@ DATA="$HOME/.flint"
 AGENTS="$HOME/Library/LaunchAgents"
 PLIST="com.flint.server.plist"
 mkdir -p "$DATA" "$AGENTS"
+SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+
+# Deploy events (DeployEvent in packages/policy/src/wire.ts): one JSON line per
+# failed stage or finished deploy in ~/.flint/deploy-events.jsonl (0600), read
+# by the runtime's `deploy` source. Ids and enums only, never log text. Writing
+# it can never fail the install: errexit is off inside, and it always returns 0.
+# (The same function is in apps/runtime/install-runtime.sh; a test keeps the two identical.)
+deploy_event() { # <server|runtime> <gate|migrate|restart|health|deploy> <ok|failed> <sha>
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local dir="$HOME/.flint" id at
+  [[ $1 == (server|runtime) && $2 == (gate|migrate|restart|health|deploy) && $3 == (ok|failed) && $4 =~ '^[0-9a-f]{40}$' ]] || return 0
+  id="$(openssl rand -hex 16 2>/dev/null)"
+  [[ $id =~ '^[0-9a-f]{32}$' ]] || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  [[ $at =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]] || return 0
+  { mkdir -p -m 700 "$dir" && chmod 700 "$dir"; } 2>/dev/null || return 0
+  ( umask 077; print -r -- "{\"id\":\"$id\",\"at\":\"$at\",\"component\":\"$1\",\"stage\":\"$2\",\"outcome\":\"$3\",\"sha\":\"$4\"}" >> "$dir/deploy-events.jsonl" ) 2>/dev/null || return 0
+  chmod 600 "$dir/deploy-events.jsonl" 2>/dev/null
+  return 0
+}
+# The server records a failed gate (the workspace build counts: nothing deploys
+# without it) and a finished deploy. Past the gate, DEPLOY_STAGE is empty.
+DEPLOY_STAGE=gate
+trap '[ $? = 0 ] || [ -z "$DEPLOY_STAGE" ] || deploy_event server "$DEPLOY_STAGE" failed "$SHA"' EXIT
 
 echo "building @flint/core + @flint/persona + @flint/mcp + @flint/policy..."
 # ALL FOUR. apps/server imports @flint/mcp (src/index.ts, src/actions.ts) and
@@ -57,7 +82,10 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
     zsh "$t" || { echo "✗ $t failed — NOT deploying"; exit 1; }
   done
 fi
+DEPLOY_STAGE=
 
+# The bundle running now, kept: a new one that does not come up is replaced by it.
+[ -f "$DATA/server.mjs" ] && cp -p "$DATA/server.mjs" "$DATA/server.mjs.prev"
 echo "bundling server -> $DATA/server.mjs ..."
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
 # NOTE: @anthropic-ai/sdk is bundled IN (no --external) — the server is the
@@ -123,9 +151,18 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 if [ "$up" != 1 ]; then
   echo "✗ server did NOT come up on :$PORT_N — check $DATA/logs/server.err.log"
+  deploy_event server health failed "$SHA"
+  # Back to the bundle that was running (plan 3.0.6): Flint stays up on the old code.
+  if [ -f "$DATA/server.mjs.prev" ]; then
+    echo "  going back to the previous bundle"
+    cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"
+    launchctl unload "$AGENTS/$PLIST" 2>/dev/null || true
+    launchctl load -w "$AGENTS/$PLIST" || echo "✗ the previous bundle did not load either; load it with: launchctl load -w $AGENTS/$PLIST"
+  fi
   exit 1
 fi
 curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo
+deploy_event server deploy ok "$SHA"
 
 # ---- TAILNET: only `tailscale serve` may reach Flint ---------------------------
 # Flint listens on ::1 (apps/server/src/access.ts): this Mac's userspace tailscaled

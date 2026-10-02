@@ -13,6 +13,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./ollama": {
+      "types": "./dist/ollama.d.ts",
+      "import": "./dist/ollama.js",
+      "require": "./dist/ollama.cjs"
     }
   },
   "files": [
@@ -30,7 +35,7 @@
     "access": "restricted"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "rm -rf dist && tsup",
     "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

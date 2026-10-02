@@ -5,7 +5,7 @@
  * card approved any time before the next run (a 25-hour night included) is
  * claimed by it; older pending cards are withdrawn.
  */
-import { resolveTier, type WebAuthnRelyingParty } from '@flint/policy';
+import { localDay, resolveTier, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
@@ -14,7 +14,23 @@ export type Command = 'backup' | 'offsite' | 'drill';
 export const ACTION: Record<Command, string> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
 
 export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<{ go: boolean; proposalId?: string; why: string }> {
-  const action = ACTION[cmd];
+  return cardGate(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
+}
+
+/**
+ * The nightly card for any job that runs at APPROVAL until promoted (backups,
+ * the drill, retention): run under the cap once promoted; otherwise run on a
+ * card Will approved, or offer tonight's card and wait.
+ */
+export async function cardGate(
+  db: Db,
+  job: { action: string; job: string; templateId: string },
+  tz: string,
+  rp: WebAuthnRelyingParty | undefined,
+  now: Date,
+): Promise<{ go: boolean; proposalId?: string; why: string }> {
+  const { action } = job;
+  const cmd = job.job;
   const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), now });
   if (t.tier === 'forbidden') return { go: false, why: `forbidden: ${t.reason}` };
   if (t.tier === 'alone') {
@@ -22,7 +38,8 @@ export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelying
     return { go: true, why: 'promoted' };
   }
   // APPROVAL: run an approved proposal for it, or file one (one a day) and wait.
-  const day = now.toISOString().slice(0, 10);
+  // Flint's day, not UTC's: a card offered at 23:30 Chicago time is that night's.
+  const day = localDay(tz, now);
   const approved = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'approved', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
   let refused: string | undefined;
   if (approved) {
@@ -41,8 +58,8 @@ export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelying
   const tonight = pending.find((p) => (p.args as { day?: unknown } | null)?.day === day);
   if (!tonight) {
     await createProposal(db, {
-      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: `nightly.${cmd}`, action, args: { day },
-      argsProvenance: { day: { source: 'template', ref: `nightly.${cmd}`, tainted: false } },
+      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { day },
+      argsProvenance: { day: { source: 'template', ref: job.templateId, tainted: false } },
       tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 26 * 60,
       reason: `nightly ${cmd}: waiting for approval until this action is promoted`,
     }, 'runtime');

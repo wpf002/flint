@@ -26,7 +26,7 @@ export interface ArgProvenance {
 
 /** Sources whose free text is always tainted (plan 3.0.3). */
 export const TAINTED_SOURCES: ReadonlySet<string> = new Set([
-  'nexus', 'web', 'github', 'railway', 'calendar', 'mail', 'google',
+  'nexus', 'nexus_inbox', 'knowledge', 'web', 'github', 'railway', 'calendar', 'mail', 'google',
 ]);
 
 /** Whether any argument of a proposal is tainted. */
