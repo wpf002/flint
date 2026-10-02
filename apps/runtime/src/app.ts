@@ -53,10 +53,22 @@ const dbMessage = (err: unknown) => {
   return m ? m[1] : 'a database rule';
 };
 
+/** What the process knows about itself that the database does not (index.ts keeps it). */
+export interface RuntimeStatus {
+  /** Parts not working: `bus` while pg-boss is not started. */
+  problems: Set<string>;
+  /** When the bus last started: the health job is overdue 10 minutes after it. */
+  busStartedAt: Date | null;
+}
+
+/** The health job runs every 5 minutes; twice that without a run means the bus is wedged. */
+export const HEALTH_RUN_STALE_MS = 10 * 60_000;
+
 export interface AppDeps {
   db: Db;
   config: Pick<Config, 'tokens' | 'rp' | 'tz'>;
   logger?: boolean;
+  status?: RuntimeStatus;
 }
 
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
@@ -98,6 +110,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return reply.code(500).send({ error: 'internal error', ref });
   });
 
+  // `ok` is the database alone (install-runtime.sh polls it); `degraded` names
+  // the parts that are not working, never why.
   app.get('/health', async () => {
     let dbOk = false;
     try {
@@ -106,7 +120,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     } catch {
       dbOk = false;
     }
-    return { ok: dbOk, db: dbOk ? 'up' : 'down' };
+    const degraded = [...(deps.status?.problems ?? [])].sort();
+    const since = deps.status?.busStartedAt;
+    if (dbOk && since && Date.now() - since.getTime() > HEALTH_RUN_STALE_MS) {
+      const last = await db.healthCheck.findFirst({ orderBy: { at: 'desc' }, select: { at: true } }).catch(() => null);
+      if (!last || Date.now() - last.at.getTime() > HEALTH_RUN_STALE_MS) degraded.push('health-overdue');
+    }
+    return { ok: dbOk, db: dbOk ? 'up' : 'down', degraded };
   });
 
   // ---- audit ------------------------------------------------------------------

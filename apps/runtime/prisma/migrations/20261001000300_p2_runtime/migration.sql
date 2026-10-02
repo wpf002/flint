@@ -863,12 +863,16 @@ SELECT pgboss.create_queue('triage', '{"policy":"stately","retryLimit":3,"retryD
 SELECT pgboss.create_queue('deliver', '{"policy":"stately","retryLimit":5,"retryDelay":30,"retryBackoff":true,"expireInSeconds":120,"deadLetter":"dead"}'::jsonb);
 SELECT pgboss.create_queue(q, '{"policy":"singleton","retryLimit":2,"retryDelay":60,"expireInSeconds":900,"deadLetter":"dead"}'::jsonb)
   FROM unnest(ARRAY['health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations']) AS q;
+-- pg-boss's own queue for cron sends (its timekeeper makes it at start otherwise).
+SELECT pgboss.create_queue('__pgboss__send-it', '{"policy":"standard"}'::jsonb);
 
 -- ---- pg-boss's grants: data only ---------------------------------------------------------------
 REVOKE ALL ON SCHEMA pgboss FROM PUBLIC;
 GRANT USAGE ON SCHEMA pgboss TO flint_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgboss TO flint_app;
--- Its schema version and its async-migration ledger are written by migrations only.
+-- Its schema version and its async-migration ledger are written by migrations
+-- only; the supervisor and the cron pass stamp their run times on the version row.
 REVOKE INSERT, UPDATE, DELETE ON pgboss.version, pgboss.bam FROM flint_app;
+GRANT UPDATE (cron_on, flow_on, monitor_backoff_on) ON pgboss.version TO flint_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgboss TO flint_app;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgboss TO flint_app;

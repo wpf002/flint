@@ -75,7 +75,7 @@ describe.skipIf(NO_DB)('runtime API', () => {
   describe('the door', () => {
     it('/health needs no token and says the database is up', async () => {
       const r = await app.inject({ method: 'GET', url: '/health' });
-      expect(r.json()).toEqual({ ok: true, db: 'up' });
+      expect(r.json()).toEqual({ ok: true, db: 'up', degraded: [] });
     });
 
     it('401 without a token or with a wrong one', async () => {

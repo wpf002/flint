@@ -88,7 +88,7 @@ fi
 REL="$RT/releases/$SHA"
 rm -rf "$REL.partial" && mkdir -p "$REL.partial/node_modules"
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
-"$ESBUILD" "$RT_SRC/src/index.ts" --bundle --platform=node --format=esm --target=node20 \
+"$ESBUILD" "$RT_SRC/src/index.ts" --bundle --platform=node --format=esm --target=node22 \
   --external:@prisma/client --external:.prisma \
   --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
   --outfile="$REL.partial/runtime.mjs" >/dev/null
@@ -128,7 +128,7 @@ CONNECTOR="$DATA/connectors/runtime-server.mjs"
 if [ ! -f "$CONNECTOR" ]; then
   ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
   mkdir -p "$DATA/connectors"
-  if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node20 \
+  if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node22 \
        --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
        --outfile="$CONNECTOR" --log-level=error; then
     echo "runtime: built the runtime MCP connector. To use it, add this to the \"servers\" list in ~/.flint/mcp.json"
@@ -148,6 +148,12 @@ ENVF="$DATA/runtime.env"
   echo "FLINT_TZ=$(plutil -extract EnvironmentVariables.FLINT_USER_TZ raw "$AGENTS/com.flint.server.plist" 2>/dev/null || echo America/Chicago)"
   echo "RUNTIME_GIT_SHA=${SHA}"
   echo "SERVER_INTERNAL_URL=http://[::1]:8081"
+  # Triage's local model: the server's Ollama and model (one model loaded, not
+  # two), on loopback only. Switching triage on is Will's, in runtime.override.env.
+  OLLAMA_HOST_V="$(plutil -extract EnvironmentVariables.OLLAMA_HOST raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  OLLAMA_MODEL_V="$(plutil -extract EnvironmentVariables.OLLAMA_MODEL raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  if print -r -- "$OLLAMA_HOST_V" | grep -qE '^http://(\[::1\]|127\.0\.0\.1|localhost):[0-9]+$'; then echo "OLLAMA_URL=$OLLAMA_HOST_V"; fi
+  if print -r -- "$OLLAMA_MODEL_V" | grep -qE '^[A-Za-z0-9._:/-]{1,80}$'; then echo "FLINT_TRIAGE_MODEL=$OLLAMA_MODEL_V"; fi
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.
   # (|| true: under pipefail a missing plist or file must not stop the install.)
@@ -159,6 +165,10 @@ ENVF="$DATA/runtime.env"
   fi
 } > "$ENVF.new"
 chmod 600 "$ENVF.new" && mv "$ENVF.new" "$ENVF"
+# Will's own settings (FLINT_RUNTIME_TRIAGE=on, ...) live in runtime.override.env:
+# never written here, only kept readable by its owner alone (the runtime refuses
+# to start on one others can read).
+[ -f "$DATA/runtime.override.env" ] && chmod 600 "$DATA/runtime.override.env"
 
 # The LaunchAgent: node on the current release; no secrets in the plist.
 NODE="$(command -v node)"
@@ -173,6 +183,7 @@ cat > "$AGENTS/$LABEL.plist.new" <<PLIST
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
   <key>StandardOutPath</key><string>$DATA/runtime.out.log</string>
   <key>StandardErrorPath</key><string>$DATA/runtime.err.log</string>
 </dict></plist>
@@ -203,8 +214,13 @@ restart_agent || true
 for i in {1..30}; do
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
     echo "runtime: $SHA is up on [::1]:$PORT"
-    # Keep the three newest releases.
-    ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do [ "$old" = "$REL" ] || rm -rf "$old"; done
+    # Keep the three newest releases, and any named in ~/.flint/runtime/pinned
+    # (one release sha per line: a known-good one to roll back to).
+    ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do
+      [ "$old" = "$REL" ] && continue
+      [ -f "$RT/pinned" ] && grep -qxF "$(basename "$old")" "$RT/pinned" && continue
+      rm -rf "$old"
+    done
     exit 0
   fi
   sleep 1
