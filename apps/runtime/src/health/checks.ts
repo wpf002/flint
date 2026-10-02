@@ -98,8 +98,12 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const retention = await db.auditEntry.findFirst({ where: { action: 'maintenance.retention', kind: 'action' }, orderBy: { at: 'desc' }, select: { at: true, outcome: true } });
   out.push(
     !retention
-      ? { component: 'retention', status: 'unknown', detail: 'has not run' }
-      : { component: 'retention', status: retention.outcome === 'ok' && retention.at > ago(36 * 3_600_000) ? 'ok' : 'degraded', detail: `last run ${Math.round((now.getTime() - retention.at.getTime()) / 3_600_000)} h ago` },
+      ? { component: 'retention', status: 'unknown', detail: 'has not run (waits for its nightly card until promoted)' }
+      : (() => {
+          const ok = retention.outcome === 'ok' && retention.at > ago(36 * 3_600_000);
+          // At APPROVAL it waits for Will's nightly card: overdue until he approves or promotes it.
+          return { component: 'retention', status: ok ? ('ok' as const) : ('degraded' as const), detail: `${ok ? '' : 'overdue: '}last run ${Math.round((now.getTime() - retention.at.getTime()) / 3_600_000)} h ago` };
+        })(),
   );
 
   const marker = join(d.config.home, '.flint', 'runtime', 'migrate-failed');

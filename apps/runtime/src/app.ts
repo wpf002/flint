@@ -70,7 +70,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home'>>;
   logger?: boolean;
   status?: RuntimeStatus;
 }
@@ -285,7 +285,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return { snapshots: await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } }) };
   });
 
-  registerP2Routes(app, { db, config: { triage: config.triage ?? false }, need, bus: () => deps.status?.bus });
+  registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
 
   return app;
 }

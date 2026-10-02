@@ -23,10 +23,11 @@ import { markProcessed, recordEvent, triageEnqueue } from '../events/record.js';
 import { triageEligible } from '../triage/facts.js';
 import { fieldFreeTitle } from '../templates/escalations.js';
 import { healthReport } from '../health/checks.js';
+import { p2Report } from '../report/exit.js';
 
 export interface P2Deps {
   db: Db;
-  config: Pick<Config, 'triage'>;
+  config: Pick<Config, 'triage'> & Partial<Pick<Config, 'tz' | 'home'>>;
   need: (scope: RuntimeScope) => (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
   /** The bus, once it has started: events pushed before it are triaged by reconcile. */
   bus: () => Pick<Bus, 'boss'> | undefined;
@@ -158,6 +159,9 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
   }
 
   app.get('/v1/health/report', { preHandler: need('events') }, async () => healthReport(db, d.config));
+
+  // P2's exit criteria, measured now: numbers and verdicts only.
+  app.get('/v1/p2/report', { preHandler: need('world:read') }, async () => p2Report(db, { tz: d.config.tz ?? 'America/Chicago', home: d.config.home ?? '' }));
 
   // ---- the model's projections (the runtime connector) ---------------------------------
   const Limit = z.object({ limit: z.coerce.number().int().min(1).max(20).default(10) }).strict();

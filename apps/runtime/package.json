@@ -12,7 +12,8 @@
     "backup": "tsx src/cli.ts backup",
     "drill": "tsx src/cli.ts drill",
     "enroll": "tsx src/cli.ts enroll",
-    "offsite": "tsx src/cli.ts offsite"
+    "offsite": "tsx src/cli.ts offsite",
+    "p2-report": "tsx src/cli.ts p2-report"
   },
   "dependencies": {
     "@flint/core": "workspace:*",

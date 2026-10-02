@@ -21,6 +21,11 @@ import { checkComponents, recordChecks } from './health/checks.js';
 import { raise, watchdog } from './health/watchdog.js';
 import { circuitAllows, circuitEvents } from './health/circuits.js';
 import { pushSpend } from './spend/push.js';
+import { runDigest } from './digest.js';
+import { runRetention } from './retention.js';
+import { runRollups } from './rollup.js';
+import { cardGate } from './backup/nightly.js';
+import { completeProposal } from './governance/proposals.js';
 import { resolveTier, runsInShadow } from '@flint/policy';
 import { activePolicies } from './governance/proposals.js';
 import { z } from 'zod';
@@ -139,6 +144,36 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
         const drill = (await checkComponents({ db: ctx.db, config: ctx.config, now, sources: [] })).filter((c) => c.component === 'restore_drill');
         await ctx.db.healthCheck.createMany({ data: drill.map((c) => ({ component: c.component, status: c.status, detail: c.detail ?? null, at: now })) });
       },
+    },
+    {
+      // 07:30 local: the previous day, once (a digest missed while down is sent when back).
+      queue: 'digest',
+      cron: '30 7 * * *',
+      missed: 'once',
+      handler: async () => {
+        const r = await runDigest(ctx.db, ctx.config);
+        if (r === 'failed') ctx.log('the digest was refused by the server');
+      },
+    },
+    {
+      // 03:10 local: retention clears and deletes, so it runs on Will's nightly card until promoted.
+      queue: 'retention',
+      cron: '10 3 * * *',
+      missed: 'once',
+      handler: async () => {
+        const now = new Date();
+        const g = await cardGate(ctx.db, { action: 'maintenance.retention', job: 'retention', templateId: 'nightly.retention' }, ctx.config.tz, ctx.config.rp, now);
+        if (!g.go) return void ctx.log(`retention: not run (${g.why})`);
+        const counts = await runRetention(ctx.db, ctx.config.tz, now, g.proposalId);
+        if (g.proposalId) await completeProposal(ctx.db, g.proposalId, { ok: true, result: counts }, 'runtime');
+      },
+    },
+    {
+      // 03:20 local: yesterday's P2 measures, before retention takes the payloads they come from.
+      queue: 'rollup',
+      cron: '20 3 * * *',
+      missed: 'once',
+      handler: async () => void (await runRollups(ctx.db, ctx.config.tz)),
     },
     {
       queue: 'expire.escalations',
