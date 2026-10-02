@@ -4,21 +4,38 @@
  * holds SERVER_INTERNAL_TOKEN; the server keeps only its sha256 (the token file
  * is written by install-runtime.sh as ~/.flint/tokens/internal.token, and its
  * digest read here at startup). Routes:
- *   POST /internal/notify          {title, body}            a notification for Will: redacted, kept in
- *                                                           the console; the phone only gets a ping
+ *   POST /internal/notify          NotifyRequest            a note for Will, redacted and kept in the
+ *                                                           console; `channels` adds a banner and a
+ *                                                           content-free phone ping (both always with the
+ *                                                           in-app note; omitted: all three, as in P1);
+ *                                                           `ref` makes a resent note a duplicate
+ *   POST /internal/load            {}                       {chatInFlight}: triage yields to chat
+ *   POST /internal/complete        InternalCompleteRequest  a metered frontier call under a background
+ *                                                           spend kind (./background-complete)
  *   POST /internal/spend-external  {asOf, vendors: {...}}   unified spend totals (plan 3.0.8), for the
  *                                                           background stop rule
+ * The request and answer shapes are @flint/policy's wire contracts, which the
+ * runtime validates too.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
-import { redactString } from '@flint/policy';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { LoadResponse, NotifyRequest, NotifyResponse, redactString, type NotifyChannel } from '@flint/policy';
+import { noteChannels, type PushResult } from './notifications';
+import type { CompleteResult } from './background-complete';
 
 export interface InternalDeps {
   /** sha256 hex of the runtime's token; undefined = the listener refuses everything. */
   tokenSha256: () => string | undefined;
-  /** Stored ('stored'), already there ('duplicate'), or not storable ('refused'). */
-  notify: (title: string, body: string) => 'stored' | 'duplicate' | 'refused';
+  /**
+   * Keep a note for Will, deduped on `dedupe`, sent on `channels` (already
+   * resolved: never a banner or ping without the in-app note).
+   */
+  notify: (n: { title: string; body: string; channels: NotifyChannel[]; dedupe: string }) => PushResult;
   spendExternal: (totals: ExternalSpend) => void;
+  /** /chat turns running now (./chat-load). */
+  chatInFlight: () => number;
+  /** POST /internal/complete (./background-complete). */
+  complete: (body: unknown) => Promise<CompleteResult>;
 }
 
 export interface ExternalSpend {
@@ -26,7 +43,8 @@ export interface ExternalSpend {
   vendors: Record<string, { dayUsd: number; monthUsd: number; estimate?: boolean }>;
 }
 
-const MAX = 16 * 1024;
+/** Bodies up to 256 KB: a complete request carries up to 40k characters of prompt, JSON-escaped. */
+const MAX = 256 * 1024;
 
 function authorized(req: IncomingMessage, sha: string | undefined): boolean {
   const m = /^Bearer ([A-Za-z0-9._~+/=-]{16,512})$/.exec(req.headers.authorization ?? '');
@@ -50,24 +68,40 @@ const send = (res: ServerResponse, status: number, b: unknown) => {
   res.end(JSON.stringify(b));
 };
 
+/** At most `n` UTF-16 units, never splitting a surrogate pair. */
+const clip = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, /[\uD800-\uDBFF]/.test(s[n - 1] ?? '') ? n - 1 : n));
+
 export function internalHandler(deps: InternalDeps) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!authorized(req, deps.tokenSha256())) return send(res, 401, { error: 'unauthorized' });
     if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
     let b: Record<string, unknown>;
     try {
-      b = (await body(req)) as Record<string, unknown>;
+      const parsed = await body(req);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return send(res, 400, { error: 'bad body' });
+      b = parsed as Record<string, unknown>;
     } catch {
       return send(res, 400, { error: 'bad body' });
     }
     const url = (req.url ?? '').split('?')[0];
     if (url === '/internal/notify') {
-      const title = typeof b.title === 'string' ? redactString(b.title).slice(0, 80) : '';
-      const text = typeof b.body === 'string' ? redactString(b.body).slice(0, 500) : '';
-      if (!title) return send(res, 400, { error: 'title required' });
-      const r = deps.notify(title, text);
-      if (r === 'refused') return send(res, 422, { error: 'not a notification Flint shows (a raw payload?)' });
-      return send(res, 200, { ok: true, stored: r === 'stored' });
+      const n = NotifyRequest.safeParse(b);
+      if (!n.success) return send(res, 400, { error: 'not a notification (title, body, channels, ref)' });
+      // A raw payload is not a note: the console shows words, not a tool's JSON.
+      if (/^\s*[{[]/.test(n.data.body)) return send(res, 422, { error: 'not a notification Flint shows (a raw payload?)' });
+      const title = clip(redactString(n.data.title), 80);
+      const text = clip(redactString(n.data.body), 500);
+      // A resent note (the runtime's retry after a timeout) is the same note; without a ref, every note is new.
+      const dedupe = n.data.ref ? `rt:${n.data.ref}` : `rt:${Date.now()}:${randomBytes(6).toString('hex')}`;
+      // Omitted channels: what a P1 runtime's note always got (in-app, banner, ping).
+      const r = deps.notify({ title, body: text, channels: noteChannels(n.data.channels), dedupe });
+      if (r.status === 'refused') return send(res, 422, { error: 'not a notification Flint shows (a raw payload?)' });
+      return send(res, 200, NotifyResponse.parse({ ok: true, stored: r.status === 'stored', pinged: r.pinged }));
+    }
+    if (url === '/internal/load') return send(res, 200, LoadResponse.parse({ chatInFlight: Math.max(0, Math.trunc(deps.chatInFlight())) }));
+    if (url === '/internal/complete') {
+      const r = await deps.complete(b);
+      return send(res, r.status, r.body);
     }
     if (url === '/internal/spend-external') {
       const vendors = b.vendors;
