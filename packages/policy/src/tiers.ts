@@ -60,9 +60,12 @@ export interface CodeEntry {
   note?: string;
 }
 
-/** The world-model sources. Each `world.sync.<source>` reaches only its own endpoints. */
-/** The world-model sources; deploy, knowledge and nexus_inbox (P2) only raise events. */
-export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox'] as const;
+/**
+ * The world-model sources. Each `world.sync.<source>` reaches only its own
+ * endpoints. deploy, knowledge and nexus_inbox (P2) only raise events;
+ * google_calendar (P2.5) reads Will's primary calendar, read-only.
+ */
+export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox', 'google_calendar'] as const;
 export type Source = (typeof SOURCES)[number];
 
 const approval = (extra: Partial<CodeEntry> = {}): CodeEntry => ({ tier: 'approval', promotable: true, write: true, ...extra });

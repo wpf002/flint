@@ -5,7 +5,7 @@
  */
 import type { Observation } from '../world/mapper.js';
 
-export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox';
+export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox' | 'google_calendar';
 
 export interface SeriesDef {
   key: string;
@@ -27,6 +27,13 @@ export type SourceObservation = Omit<Observation, 'source' | 'actor' | 'observed
   sensitivity: 'ops' | 'personal' | 'financial';
   /** When the source says this changed (an issue's updated_at); absent, the sync's own time. */
   changedAt?: string | Date;
+  /**
+   * Untrusted text about the entity that is kept OUT of the world model (P2.5:
+   * a calendar event's title). It goes to EntityText, refreshed while the entity
+   * is seen and deleted 7 days after it last was; never into the name, the
+   * state, a version or the event payload, which outlive that.
+   */
+  texts?: { title?: string };
 };
 
 /**
