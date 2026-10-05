@@ -24,7 +24,7 @@
     --ring:rgba(243,221,142,.16);--hair:rgba(232,227,210,.10);--hair2:rgba(232,227,210,.18);--user:rgba(232,227,210,.07);--code:rgba(232,227,210,.08);--scrim:rgba(0,0,0,.6);
     --shadow:0 0 0 1px var(--ring),0 1px 1px rgba(0,0,0,.2),0 8px 16px -4px rgba(0,0,0,.4),0 24px 32px -8px rgba(0,0,0,.5);
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;
-    --side:260px;--hdr:52px;
+    --side:260px;--hdr:52px;--orb-hero:clamp(220px,44vh,460px);--band-scale:.35;
     color-scheme:dark;
   }
   *{box-sizing:border-box;margin:0;}
@@ -37,16 +37,14 @@
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
   svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none;display:block;}
 
-  /* ---------- the window: sidebar | (header over) orb stage + chat ---------- */
+  /* ---------- the window: sidebar | main (the header over the chat, Flint's orb at the top of it) ---------- */
   #app{display:grid;grid-template-columns:0 minmax(0,1fr);height:100vh;height:100dvh;}
   #app.side-open{grid-template-columns:var(--side) minmax(0,1fr);}
-  .main{grid-column:2;position:relative;display:grid;grid-template-columns:minmax(0,clamp(320px,50%,680px)) minmax(0,1fr);min-width:0;min-height:0;}
-  #app.side-open .main{grid-template-columns:minmax(0,clamp(300px,44%,520px)) minmax(0,1fr);}
+  .main{grid-column:2;position:relative;display:flex;min-width:0;min-height:0;}
 
   /* header: a drag region; the Mac's traffic lights sit over its top-left */
-  .top{position:absolute;top:0;left:0;right:0;height:var(--hdr);display:flex;align-items:center;gap:12px;padding:0 16px 0 78px;z-index:5;-webkit-app-region:drag;transition:box-shadow .2s;}
+  .top{position:absolute;top:0;left:0;right:0;height:var(--hdr);display:flex;align-items:center;gap:12px;padding:0 16px 0 78px;z-index:5;-webkit-app-region:drag;}
   #app.side-open .top{padding-left:16px;}
-  .top.scrolled{box-shadow:inset 0 -1px 0 var(--hair);}
   .top button,.top .brand{-webkit-app-region:no-drag;}
   .grp{display:flex;align-items:center;gap:4px;}
   .trail{margin-left:auto;display:flex;align-items:center;gap:8px;}
@@ -66,13 +64,6 @@
   .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,#ffb14a 55%,#7a4a10);box-shadow:0 0 16px #ffb14a;}
   .brand .nm{color:var(--gold-hi);letter-spacing:.42em;font:700 18px/1 "SF Mono",ui-monospace,Menlo,monospace;}
 
-  /* the small orb: Flint's glow in the header wherever its stage cannot stand */
-  .miniorb{display:none;width:14px;height:14px;border-radius:50%;flex:none;background:radial-gradient(circle at 40% 35%,#fff4cf,#ffb14a 55%,#7a4a10);box-shadow:0 0 14px #ffb14a,0 0 4px #ffd27a;animation:breathe 3s ease-in-out infinite;}
-  body.talking .miniorb{animation:breathe .9s ease-in-out infinite;}
-  @keyframes breathe{0%,100%{transform:scale(.85);opacity:.8}50%{transform:scale(1.05);opacity:1}}
-  @media (max-width:1100px){#app.side-open .miniorb{display:block;}}
-  @media (max-width:900px){.main:not(.empty) .miniorb{display:block;}}
-
   /* ---------- sidebar: past chats ---------- */
   .side{grid-row:1;grid-column:1;background:var(--s0);display:flex;flex-direction:column;min-height:0;overflow:hidden;padding:var(--hdr) 8px 12px;}
   #app:not(.side-open) .side{visibility:hidden;}
@@ -91,15 +82,23 @@
   .side-foot:hover{background:var(--s3);color:var(--t1);}
   .side-foot svg.i{width:16px;height:16px;}
 
-  /* ---------- the orb's stage ---------- */
-  .stage{position:relative;grid-column:1;min-width:0;min-height:0;}
-  #brainwrap{position:absolute;inset:var(--hdr) 0 0 0;}
+  /* ---------- Flint's orb: at the top of the chat, above everything ----------
+     A new chat centers it over "How can I help?"; in a conversation it keeps a band
+     above the messages, which scroll below it. Nothing is ever drawn over it. It is always
+     drawn full size (460px tall, glow included) and scaled whole to its stage (--orb-k, from
+     fitOrb), so it looks the same at every size rather than its particles crowding a smaller sphere. */
+  .stage{position:relative;flex:none;height:calc(460px * var(--band-scale));overflow:hidden;}
+  .main.empty .stage{height:var(--orb-hero);margin-top:auto;}
+  #brainwrap{position:absolute;top:0;left:50%;width:760px;height:460px;margin-left:-380px;transform:scale(var(--orb-k,var(--band-scale)));transform-origin:50% 0;}
   #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
   .think{display:none;}
 
   /* ---------- chat ---------- */
-  .chat{grid-column:2;position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;}
-  #transcript{flex:1;overflow:auto;padding:calc(var(--hdr) + 24px) 24px 140px;scroll-padding-bottom:140px;}
+  .chat{flex:1;position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;padding-top:var(--hdr);}
+  .main.empty .chat{padding-bottom:140px;}
+  /* The messages fade out under the orb's band rather than stopping at a hard edge. */
+  #transcript{flex:1;overflow:auto;padding:24px 24px 140px;scroll-padding-bottom:140px;-webkit-mask-image:linear-gradient(to bottom,transparent,#000 24px);mask-image:linear-gradient(to bottom,transparent,#000 24px);}
+  .main.empty #transcript{display:none;}
   .thread-col{max-width:640px;margin:0 auto;}
   .msg{margin-top:32px;font-size:16px;line-height:24px;}
   .msg:first-child{margin-top:0;}
@@ -126,8 +125,7 @@
   .msg .atts img{max-width:180px;max-height:140px;border-radius:12px;display:block;}
 
   /* empty state */
-  .empty-state{position:absolute;inset:var(--hdr) 0 140px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:0 32px;text-align:center;pointer-events:none;}
-  .empty-state>*{pointer-events:auto;}
+  .empty-state{display:flex;flex-direction:column;align-items:center;gap:16px;padding:0 32px;margin-bottom:auto;text-align:center;}
   .empty-state h1{font-size:24px;line-height:32px;font-weight:500;letter-spacing:-.01em;color:var(--t1);}
   .starters{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;}
   .starter{height:28px;padding:0 12px;border-radius:14px;background:var(--s2);color:var(--t2);font-weight:500;}
@@ -161,8 +159,9 @@
   .lopill svg.i{width:12px;height:12px;stroke-width:2;}
 
   /* ---------- panels (modal on the Mac, a sheet on the phone) ---------- */
-  /* A panel covers the chat side only: --stage-edge is where the orb's stage ends (0 when it is not beside the chat). */
-  .overlay{position:fixed;top:0;right:0;bottom:0;left:var(--stage-edge,0px);background:var(--scrim);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:56px 16px;}
+  /* A panel covers the window, and the orb steps away under it, so no text is ever over it. */
+  body.panel-open .stage{visibility:hidden;}
+  .overlay{position:fixed;inset:0;background:var(--scrim);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:56px 16px;}
   .overlay.open{display:flex;}
   .modal{width:min(640px,100%);max-height:min(720px,calc(100vh - 112px));display:flex;flex-direction:column;background:var(--s1);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;}
   .modal.narrow{width:min(480px,100%);}
@@ -266,17 +265,9 @@
   .frow .fsh{margin:16px 0 4px 8px;}
 
   /* ---------- narrower windows and the phone ---------- */
-  @media (max-width:1100px){#app.side-open .main{grid-template-columns:0 minmax(0,1fr);} #app.side-open .stage{display:none;}}
-  @media (max-width:900px){
-    .main{grid-template-columns:0 minmax(0,1fr);} .stage{display:none;}
-    .main.empty .stage{display:block;position:absolute;inset:var(--hdr) 0 auto 0;height:38vh;z-index:0;}
-    .main.empty .empty-state{inset:calc(var(--hdr) + 38vh) 0 140px 0;justify-content:flex-start;}
-    .main.empty .stage #brainwrap{inset:0;}
-    body.panel-open .stage{visibility:hidden;}
-    .brand{display:none;}
-  }
+  @media (max-width:900px){.brand{display:none;}}
   @media (max-width:600px){
-    :root{--hdr:calc(44px + env(safe-area-inset-top,0px));}
+    :root{--hdr:calc(44px + env(safe-area-inset-top,0px));--orb-hero:clamp(180px,32vh,300px);--band-scale:.26;}
     html,body{font-size:15px;line-height:20px;}
     .top{padding:env(safe-area-inset-top,0px) 4px 0;}
     .ib{width:44px;height:44px;} svg.i{width:22px;height:22px;}
@@ -287,7 +278,7 @@
     .trow{height:44px;line-height:44px;font-size:17px;} .search{height:40px;} .search input,.field{font-size:16px;}
     .seg button{height:36px;} .xb{width:44px;height:44px;} .starter{height:36px;padding:0 14px;}
     .mb{padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));}
-    #transcript{padding:calc(var(--hdr) + 16px) 16px 150px;}
+    #transcript{padding:16px 16px 150px;}
     .msg{font-size:17px;line-height:24px;}
     .dock{padding:0 16px calc(12px + env(safe-area-inset-bottom,0px));}
     #input{font-size:17px;}
@@ -339,17 +330,16 @@
         <button class="ib" id="sidebtn" onclick="toggleSidebar()" aria-label="Toggle Sidebar" data-tip="Toggle Sidebar ⌘B"><svg class="i"><use href="#i-side"/></svg></button>
         <button class="ib" onclick="newChat()" aria-label="New Chat" data-tip="New Chat ⌘N"><svg class="i"><use href="#i-new"/></svg></button>
       </div>
-      <span class="miniorb" aria-hidden="true"></span>
       <span class="ctitle" id="ctitle"></span>
       <div class="trail">
         <button class="ib" id="apprbtn" onclick="openApprovals()" aria-label="Approvals" data-tip="Approvals"><svg class="i"><use href="#i-shield"/></svg><span class="badge" id="apprbadge" hidden></span></button>
         <button class="ib" id="bellbtn" onclick="openNotifs()" aria-label="Activity" data-tip="Activity"><svg class="i"><use href="#i-bell"/></svg><span class="udot" id="nbadge" hidden></span></button>
       </div>
     </header>
-    <div class="stage" id="stage">
-      <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
-    </div>
     <section class="chat" id="chat">
+      <div class="stage" id="stage">
+        <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
+      </div>
       <div id="transcript"><div class="thread-col" id="thread"></div></div>
       <div class="empty-state" id="emptystate">
         <h1>How can I help?</h1>
@@ -413,7 +403,7 @@
 <div class="overlay" id="activity" onclick="if(event.target===this)closeActivity()"><div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="actttl">
   <div class="mh"><h2 id="actttl">Activity</h2><button class="ghost" id="markread" onclick="markAllRead()">Mark All as Read</button><button class="xb" onclick="closeActivity()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
   <div class="mb">
-    <div class="seg"><button id="acttab-notifications" class="on" onclick="actShow('notifications')">Notifications</button><button id="lanetab-relevant" onclick="actShow('relevant')">Relevant</button><button id="lanetab-quiet" onclick="actShow('quiet')">Quiet</button></div>
+    <div class="seg"><button id="acttab-notifications" class="on" onclick="actShow('notifications')">Notifications</button><button id="lanetab-relevant" onclick="actShow('relevant')">Important</button><button id="lanetab-quiet" onclick="actShow('quiet')">Other</button></div>
     <div class="err" id="lanemsg" hidden></div>
     <div id="nlist"></div>
     <div id="lanelist"></div>
@@ -444,7 +434,7 @@ function svgi(name){var s=document.createElementNS('http://www.w3.org/2000/svg',
 /* ---------- the window: sidebar, title, empty state, panels ---------- */
 var SIDE_KEY='flint_side';
 function sideWanted(){if(window.innerWidth<=600)return false;try{var v=localStorage.getItem(SIDE_KEY);if(v==='1')return true;if(v==='0')return false;}catch(e){}return window.innerWidth>=1100;}
-function setSidebar(open,keep){$('app').classList.toggle('side-open',open);$('sidebtn').classList.toggle('on',open);if(typeof syncStageEdge==='function')syncStageEdge();if(keep&&window.innerWidth>600){try{localStorage.setItem(SIDE_KEY,open?'1':'0');}catch(e){}}}
+function setSidebar(open,keep){$('app').classList.toggle('side-open',open);$('sidebtn').classList.toggle('on',open);if(keep&&window.innerWidth>600){try{localStorage.setItem(SIDE_KEY,open?'1':'0');}catch(e){}}}
 /* Only Will's own toggles are remembered; until then it follows the window's width. */
 function toggleSidebar(){setSidebar(!$('app').classList.contains('side-open'),true);}
 setSidebar(sideWanted());
@@ -452,7 +442,10 @@ function setTitle(t){$('ctitle').textContent=t||'';}
 /* The empty state (orb, greeting, starters) shows until the first message. */
 /* The thread's box, made again if anything ever removed it. */
 function threadEl(){var th=$('thread');if(!th){th=el('div','thread-col');th.id='thread';$('transcript').appendChild(th);}return th;}
-function syncEmpty(){var empty=!threadEl().children.length;$('main').classList.toggle('empty',empty);$('emptystate').hidden=!empty;$('input').placeholder=empty?'Ask Flint':'Reply';}
+/* Scale the full-size orb to its stage: the new-chat hero or the band above a conversation. */
+function fitOrb(){var h=$('stage').clientHeight;if(h)document.documentElement.style.setProperty('--orb-k',String(Math.min(1,h/460)));}
+if(window.ResizeObserver)new ResizeObserver(fitOrb).observe($('stage'));else window.addEventListener('resize',fitOrb);
+function syncEmpty(){var empty=!threadEl().children.length;$('main').classList.toggle('empty',empty);$('emptystate').hidden=!empty;$('input').placeholder=empty?'Ask Flint':'Reply';fitOrb();}
 function newChat(){
   stopSpeech();
   convId = 'c' + Date.now();
@@ -461,11 +454,7 @@ function newChat(){
 }
 var PANELS=['approvals','settings','activity'];
 function panelOpen(){return PANELS.some(function(id){return $(id).classList.contains('open');});}
-function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);document.body.classList.toggle('panel-open',panelOpen());syncStageEdge();}
-/* Where the orb's stage ends, when it stands beside the chat: panels open to its right and never cover it. */
-function stageBeside(){var st=$('stage');if(!st||window.innerWidth<=900)return 0;var r=st.getBoundingClientRect();return r.width>0&&getComputedStyle(st).display!=='none'?Math.round(r.right):0;}
-function syncStageEdge(){document.documentElement.style.setProperty('--stage-edge',stageBeside()+'px');}
-window.addEventListener('resize',syncStageEdge);
+function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);document.body.classList.toggle('panel-open',panelOpen());}
 function openSettings(){showPanel('settings',true);loadCreds();loadHealth();refresh();syncAccess();}
 function closeSettings(){showPanel('settings',false);}
 /* The app's menu bar and keyboard shortcuts land here. */
@@ -480,8 +469,6 @@ document.addEventListener('keydown',function(e){
   else if(e.shiftKey&&(e.key==='l'||e.key==='L')){e.preventDefault();toggleLO();}
   else if(!e.shiftKey&&e.key===','){e.preventDefault();openSettings();}
 });
-/* The header's hairline appears once the conversation scrolls under it. */
-$('transcript').addEventListener('scroll',function(){$('top').classList.toggle('scrolled',this.scrollTop>4);});
 
 /* ---------- live data ---------- */
 function refresh(){
@@ -842,14 +829,13 @@ function toggleMic(){
 
 /* ---------- the brain (approved viz) ----------
    Flint's orb, unchanged: ~520 particles with their neighbour lines, the warm glow and core.
-   It fills its own stage beside the chat, below the header: no text is ever drawn over it
-   (panels open to its right; on a narrow window it steps away while a panel is open, and
-   rests then). One still frame under Reduce Motion. */
-var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;document.body.classList.toggle('talking',!!v);}
+   It stands at the top of the chat, below the header: no text is ever drawn over it (it
+   steps away while a panel is open, and rests then). One still frame under Reduce Motion. */
+var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 (function(){
   var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
   var still=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.25;if(still&&W&&H)requestAnimationFrame(frame);}
+  function size(){DPR=Math.min(window.devicePixelRatio||1,2);W=cvs.clientWidth;H=cvs.clientHeight;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.25;if(still&&W&&H)requestAnimationFrame(frame);}
   size();window.addEventListener('resize',size);
   // Refit whenever the canvas box changes size — e.g. the transcript growing
   // underneath shrinks the brain area; without this the viz gets clipped.
@@ -860,7 +846,7 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;document.body.classL
   var flares=[],t0=performance.now();
   function rot(p,ay,ax){var x=p.sx*p.rad,y=p.sy*p.rad,z=p.sz*p.rad;var cy1=Math.cos(ay),sy1=Math.sin(ay),x1=x*cy1-z*sy1,z1=x*sy1+z*cy1;var cx1=Math.cos(ax),sx1=Math.sin(ax),y1=y*cx1-z1*sx1,z2=y*sx1+z1*cx1;var fov=2.6,sc=fov/(fov+z2);return{X:cx+x1*R*sc,Y:cy+y1*R*sc,z:z2};}
   function frame(now){
-    if(!still&&typeof panelOpen==='function'&&panelOpen()&&!stageBeside()){requestAnimationFrame(frame);return;}
+    if(!still&&typeof panelOpen==='function'&&panelOpen()){requestAnimationFrame(frame);return;}
     var t=still?2:(now-t0)/1000;
     /* Working: thinking, writing, or still speaking a reply aloud. */
     var speaking=(typeof _ttsAudio!=='undefined'&&!!_ttsAudio)||(typeof _ttsQueued!=='undefined'&&_ttsQueued>0)||(window.speechSynthesis&&speechSynthesis.speaking);
@@ -889,7 +875,7 @@ function starters(n){var box=$('starters');box.textContent='';
   if(n>0)add('Review '+n+' Approval'+(n===1?'':'s'),openApprovals);
   add('Summarize Today',function(){$('input').value='Summarize my day so far.';send();});
   add('Plan Tomorrow',function(){$('input').value='Help me plan tomorrow.';send();});}
-starters(0);syncEmpty();syncStageEdge();if(window.ResizeObserver)new ResizeObserver(syncStageEdge).observe($('stage'));refresh();loadEnclave();
+starters(0);syncEmpty();refresh();loadEnclave();
 if(!TOKEN) setTimeout(openSettings,400); else {loadCreds();loadThreads();}
 </script>
 <script id="lanes-js">
@@ -901,7 +887,8 @@ if(!TOKEN) setTimeout(openSettings,400); else {loadCreds();loadThreads();}
    confirm(), alert() or prompt(): the Mac app's web view has none. A failure is shown in the view;
    it never clears the stored token (the server answers a runtime that refuses its own token with 502). */
 var LANE='relevant',LANE_NEXT=null,LANE_SEQ=0,LANE_OLDER=false,ACT_TAB='notifications';
-var LANE_LABELS=[['should_escalate','Should Escalate'],['should_be_quiet','Should Be Quiet'],['ok','Correct']];
+/* Will's call on Flint's: in Important, Correct or Not Important; in Other, Correct or Important. */
+var LANE_LABELS=[['should_escalate','Important'],['should_be_quiet','Not Important'],['ok','Correct']];
 function laneEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function laneBtn(text,fn){var b=laneEl('button','ghost',text);b.onclick=function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();fn(b);};return b;}
 function laneMsg(t,bad){if(t&&bad&&typeof errText==='function')t=errText(t);var m=document.getElementById('lanemsg');m.textContent=t||'';m.hidden=!t;m.style.color=bad?'var(--orange)':'var(--t3)';}
@@ -967,11 +954,12 @@ function loadLane(older){if(older&&(LANE_OLDER||!LANE_NEXT))return;
     if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg('');
     var list=document.getElementById('lanelist');var items=(d&&d.items)||[];
     items.forEach(function(it){list.appendChild(laneItem(it));});
-    if(!older&&!items.length)list.appendChild(laneEmpty(lane==='relevant'?'Nothing Relevant':'Nothing Quiet',''));
+    if(!older&&!items.length)list.appendChild(laneEmpty(lane==='relevant'?'Nothing Important':'Nothing Else',''));
     LANE_NEXT=(d&&d.next)||null;
     document.getElementById('laneolder').hidden=!LANE_NEXT;
   }).catch(function(e){if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg(e.message,true);});}
 function laneLabelOf(f){for(var i=0;i<LANE_LABELS.length;i++)if(LANE_LABELS[i][0]===f)return LANE_LABELS[i][1];return f;}
+var SOURCE_NAMES={github:'GitHub',imessage:'iMessage'};
 function laneWords(s){return String(s||'').replace(/[_.]+/g,' ').trim();}
 /* A row: what happened (an escalation's title, the thing it is about, or the event), then where and when;
    the rest (its text, the model's note) opens on click; labels show on hover. */
@@ -981,7 +969,7 @@ function laneItem(it){
   row.appendChild(laneEl('span','ud'+(es&&es.status==='open'?'':' read')));
   var fx=laneEl('span','fx');
   fx.appendChild(laneEl('b',null,es?es.title:it.entity?it.entity.name:titleCase(laneWords(it.eventType))));
-  var sub=[titleCase(laneWords(it.source)),laneWords(it.eventType),titleCase(laneWords(it.action))].filter(Boolean).join(' · ');
+  var sub=[SOURCE_NAMES[it.source]||titleCase(laneWords(it.source)),laneWords(it.eventType)].filter(Boolean).join(' · ');
   fx.appendChild(laneEl('span',null,sub));
   if(it.tainted||(es&&es.tainted)){var o=laneEl('span','outside');o.appendChild(laneEl('i'));o.appendChild(document.createTextNode('Outside Text'));fx.appendChild(o);}
   var more=laneEl('span','more');more.hidden=true;
@@ -994,7 +982,8 @@ function laneItem(it){
   if(es&&es.status==='open'){
     acts.appendChild(laneBtn('Acknowledge',function(b){laneEscalation(es.id,'ack',acts,es,b);}));
     acts.appendChild(laneBtn('Dismiss',function(b){laneEscalation(es.id,'dismiss',acts,es,b);}));}
-  var btns=LANE_LABELS.map(function(f){var b=laneBtn(f[1],function(){laneLabel(it.id,f[0],btns);});if(it.feedback===f[0])b.classList.add('on');return b;});
+  var offer=LANE_LABELS.filter(function(f){return f[0]==='ok'||f[0]===(it.lane==='quiet'?'should_escalate':'should_be_quiet')||it.feedback===f[0];});
+  var btns=offer.map(function(f){var b=laneBtn(f[1],function(){laneLabel(it.id,f[0],btns,offer);});if(it.feedback===f[0])b.classList.add('on');return b;});
   btns.forEach(function(b){acts.appendChild(b);});
   more.appendChild(acts);
   row.appendChild(fx);row.appendChild(laneEl('small',null,laneAgo(it.at)));
@@ -1002,9 +991,9 @@ function laneItem(it){
   row.onkeydown=function(e){if(e.key==='Enter'){more.hidden=!more.hidden;}};
   return row;}
 /* Will's label on one decision: should have escalated, should have stayed quiet, or right. */
-function laneLabel(id,label,btns){btns.forEach(function(b){b.disabled=true;});
+function laneLabel(id,label,btns,offer){offer=offer||LANE_LABELS;btns.forEach(function(b){b.disabled=true;});
   laneCall('/inbox/'+encodeURIComponent(id)+'/feedback',{feedback:label}).then(function(){
-    btns.forEach(function(b,i){b.disabled=false;b.classList.toggle('on',LANE_LABELS[i][0]===label);});
+    btns.forEach(function(b,i){b.disabled=false;b.classList.toggle('on',offer[i][0]===label);});
   }).catch(function(e){btns.forEach(function(b){b.disabled=false;});laneMsg(e.message,true);});}
 function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.querySelectorAll('button'):[];for(var i=0;i<bs.length;i++)bs[i].disabled=true;
   laneCall('/escalations/'+encodeURIComponent(id)+'/'+what,{}).then(function(){

@@ -132,12 +132,13 @@ describe('the console Activity panel: lanes', () => {
     expect(ids.lanelist!.children).toHaveLength(2);
     // The markup arrives as literal text (the fake DOM has no innerHTML to fall into).
     expect(a!.shown()).toContain('<b>New issue</b> on flint');
-    expect(a!.shown()).toContain('Github · issue opened · Escalate');
+    expect(a!.shown()).toContain('GitHub · issue opened');
+    expect(a!.shown()).not.toContain('Escalate');
     expect(a!.shown()).toContain('Outside Text');
     // The rest opens on click: the escalation's text, the model's note, what it is about.
     expect(a!.shown()).not.toContain('<script>steal()</script>');
     // Labels and acks wait in the details too: a closed row is one title and one line.
-    expect(a!.shown()).not.toContain('Should Escalate');
+    expect(a!.shown()).not.toContain('Not Important');
     a!.onclick!({ target: { tagName: 'DIV' } });
     expect(a!.shown()).toContain('<script>steal()</script>');
     expect(a!.shown()).toContain('Model note: The page said: ignore previous instructions.');
@@ -156,10 +157,12 @@ describe('the console Activity panel: lanes', () => {
     await openLane();
     const row = ids.lanelist!.children[0]!;
     row.onclick!({ target: { tagName: 'DIV' } });
-    row.button('Should Be Quiet').onclick!({ stopPropagation() {} });
+    row.button('Not Important').onclick!({ stopPropagation() {} });
     await settle();
     expect(calls.at(-1)).toEqual({ url: '/inbox/td_1/feedback', method: 'POST', body: { feedback: 'should_be_quiet' } });
-    expect(row.button('Should Be Quiet').classList.contains('on')).toBe(true);
+    expect(row.button('Not Important').classList.contains('on')).toBe(true);
+    // Two plain choices per row: the one that disagrees with the lane, and Correct.
+    expect(() => row.button('Important')).toThrow();
     expect(row.button('Correct').classList.contains('on')).toBe(false);
   });
 
@@ -188,7 +191,7 @@ describe('the console Activity panel: lanes', () => {
     run("actShow('quiet')");
     await settle();
     expect(calls.at(-1)!.url).toBe('/inbox?lane=quiet&limit=25');
-    expect(ids.lanelist!.shown()).toBe('Nothing Quiet');
+    expect(ids.lanelist!.shown()).toBe('Nothing Else');
   });
 
   it("shows a failure in the view and keeps the token (a runtime's refusal is the server's 502)", async () => {
