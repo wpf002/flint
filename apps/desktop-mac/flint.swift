@@ -13,8 +13,26 @@ let FLINT_URL = "http://localhost:8080"
 /// encrypted handle, usable by this Mac's enclave alone. The console reaches it
 /// through the `flintApproval` script handler, which answers only pages from
 /// FLINT_URL, and every Touch ID prompt says what is being approved.
+///
+/// One prompt approves a run of cards: the authenticated context is reused, with no
+/// prompt, for 5 minutes after it was authenticated, then invalidated. A sign that
+/// carries `fresh: true` (outside text, money) always prompts on its own.
+///
+/// Bridge (postMessage → reply):
+///   {op:"status"}    → {available, hasKey, method: "touchid" | "password"}
+///   {op:"publicKey"} → {publicKey}   (makes the key on first use)
+///   {op:"reset"}     → {publicKey}   (after a prompt; drops the reused context)
+///   {op:"sign", challenge: b64url(32 bytes), reason?, fresh?} → {signature}
 final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
+  typealias Reply = (Any?, String?) -> Void
   let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".flint/approval-key.se")
+  /// How long one prompt keeps approving, from when it was answered.
+  static let reuseFor: TimeInterval = 300
+  /// The authenticated context and when it was authenticated, and the timer that drops it.
+  private var session: (ctx: LAContext, at: Date)?
+  private var sessionExpiry: Timer?
+  /// Signs waiting on the prompt in flight, so cards approved together share it.
+  private var waiting: [(challenge: Data, reply: Reply)]?
 
   static func b64url(_ d: Data) -> String {
     d.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -42,6 +60,77 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
     return key
   }
 
+  /// Touch ID when it can be used now (paired, a finger enrolled), else the Mac's password.
+  static func method() -> String {
+    LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) ? "touchid" : "password"
+  }
+
+  /// The reused context while it is younger than reuseFor; past that it is dropped.
+  private func liveSession() -> LAContext? {
+    guard let s = session else { return nil }
+    let age = Date().timeIntervalSince(s.at)
+    if age >= 0 && age < ApprovalKey.reuseFor { return s.ctx }
+    dropSession()
+    return nil
+  }
+
+  private func keep(_ ctx: LAContext) {
+    dropSession()
+    // From here on it only signs silently: should it ever need to ask again, the sign
+    // fails and a new prompt, with that card's reason, is shown instead.
+    ctx.interactionNotAllowed = true
+    session = (ctx, Date())
+    sessionExpiry = Timer.scheduledTimer(withTimeInterval: ApprovalKey.reuseFor, repeats: false) { [weak self] _ in
+      self?.dropSession()
+    }
+  }
+
+  private func dropSession() {
+    sessionExpiry?.invalidate()
+    sessionExpiry = nil
+    session?.ctx.invalidate()
+    session = nil
+  }
+
+  /// CryptoKit hashes with SHA-256 and signs: what the server's verifySecureEnclave checks.
+  private func signature(for challenge: Data, _ ctx: LAContext) throws -> [String: Any] {
+    guard let key = try load(ctx) else {
+      throw NSError(domain: "Flint", code: 1, userInfo: [NSLocalizedDescriptionKey: "no approval key on this Mac yet"])
+    }
+    return ["signature": ApprovalKey.b64url(try key.signature(for: challenge).derRepresentation)]
+  }
+
+  /// Signs with the reused context when there is one (no prompt), else prompts once and
+  /// keeps that context. A `fresh` sign never reuses, and replaces the kept context
+  /// only when it succeeds.
+  func sign(_ challenge: Data, reason: String, fresh: Bool, reply: @escaping Reply) {
+    guard FileManager.default.fileExists(atPath: file.path) else { return reply(nil, "no approval key on this Mac yet") }
+    if !fresh, let ctx = liveSession() {
+      do { return reply(try signature(for: challenge, ctx), nil) } catch { dropSession() }  // invalidated: prompt once instead
+    }
+    if !fresh {
+      if waiting != nil { waiting!.append((challenge, reply)); return }
+      waiting = [(challenge, reply)]
+    }
+    let ctx = LAContext()
+    ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
+      DispatchQueue.main.async {
+        let batch: [(challenge: Data, reply: Reply)]
+        if fresh { batch = [(challenge, reply)] } else { batch = self.waiting ?? []; self.waiting = nil }
+        guard ok else {
+          ctx.invalidate()
+          return batch.forEach { $0.reply(nil, "not confirmed") }
+        }
+        var signed = false
+        for w in batch {
+          do { w.reply(try self.signature(for: w.challenge, ctx), nil); signed = true }
+          catch { w.reply(nil, "approval key: \(error.localizedDescription)") }
+        }
+        if signed { self.keep(ctx) } else { ctx.invalidate() }
+      }
+    }
+  }
+
   func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage,
                              replyHandler: @escaping (Any?, String?) -> Void) {
     // Only the Flint console may ask.
@@ -53,7 +142,8 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
     do {
       switch op {
       case "status":
-        replyHandler(["available": SecureEnclave.isAvailable, "hasKey": FileManager.default.fileExists(atPath: file.path)], nil)
+        replyHandler(["available": SecureEnclave.isAvailable, "hasKey": FileManager.default.fileExists(atPath: file.path),
+                      "method": ApprovalKey.method()], nil)
       case "publicKey":
         let key = try load() ?? create()
         replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
@@ -61,6 +151,7 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
         // A lost or unwanted key is replaced here, after Touch ID or Will's
         // password; the new key still has to be enrolled (an existing key's
         // approval, or a replace code from `enroll --replace`).
+        dropSession()
         let ctx = LAContext()
         ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "replace Flint's approval key on this Mac") { ok, _ in
           DispatchQueue.main.async {
@@ -78,13 +169,10 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
         guard let c = body["challenge"] as? String, let challenge = ApprovalKey.unb64url(c), challenge.count == 32 else {
           return replyHandler(nil, "bad challenge")
         }
-        let what = (body["reason"] as? String).map { String($0.prefix(140)) } ?? "approve an action"
-        let ctx = LAContext()
-        ctx.localizedReason = what
-        guard let key = try load(ctx) else { return replyHandler(nil, "no approval key on this Mac yet") }
-        // CryptoKit hashes with SHA-256 and signs: what the server's verifySecureEnclave checks.
-        let sig = try key.signature(for: challenge)
-        replyHandler(["signature": ApprovalKey.b64url(sig.derRepresentation)], nil)
+        // An empty reason would make the prompt throw: the default says what it is for.
+        let given = (body["reason"] as? String).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(140)) } ?? ""
+        let what = given.isEmpty ? "approve an action" : given
+        sign(challenge, reason: what, fresh: (body["fresh"] as? Bool) == true, reply: replyHandler)
       default:
         replyHandler(nil, "unknown op")
       }
@@ -202,15 +290,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
   func buildMenu() {
     let main = NSMenu()
-    let appItem = NSMenuItem(); main.addItem(appItem)
-    let app = NSMenu()
+    func menu(_ title: String) -> NSMenu {
+      let item = NSMenuItem(); main.addItem(item)
+      let m = NSMenu(title: title); item.submenu = m
+      return m
+    }
+    // A command the console carries out (window.flintCommand), by name.
+    func command(_ m: NSMenu, _ title: String, _ name: String, _ key: String, shift: Bool = false) {
+      let item = m.addItem(withTitle: title, action: #selector(pageCommand(_:)), keyEquivalent: key)
+      item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
+      item.representedObject = name
+      item.target = self
+    }
+    let app = menu("Flint")
     app.addItem(withTitle: "About Flint", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-    app.addItem(.separator())
-    app.addItem(withTitle: "Reload", action: #selector(reloadFlint), keyEquivalent: "r")
+    command(app, "Settings…", "openSettings", ",")
     app.addItem(.separator())
     app.addItem(withTitle: "Hide Flint", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
     app.addItem(withTitle: "Quit Flint", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-    appItem.submenu = app
+    let file = menu("File")
+    command(file, "New Chat", "newChat", "n")
     // Edit menu so cut/copy/paste/select-all work in the chat box.
     let editItem = NSMenuItem(); main.addItem(editItem)
     let edit = NSMenu(title: "Edit")
@@ -222,9 +321,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
     edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     editItem.submenu = edit
+    let view = menu("View")
+    command(view, "Toggle Sidebar", "toggleSidebar", "b")
+    let reload = view.addItem(withTitle: "Reload", action: #selector(reloadFlint), keyEquivalent: "r")
+    reload.target = self
+    let win = menu("Window")
+    command(win, "Approvals", "openApprovals", "a", shift: true)
+    command(win, "Activity", "openActivity", "n", shift: true)
+    command(win, "Local Only", "toggleLocalOnly", "l", shift: true)
     NSApp.mainMenu = main
   }
   @objc func reloadFlint() { web.reload() }
+  /// Hands a menu command to the page, bringing the window back first if it was minimized.
+  @objc func pageCommand(_ item: NSMenuItem) {
+    guard let name = item.representedObject as? String, let web = web else { return }
+    window.makeKeyAndOrderFront(nil)
+    web.evaluateJavaScript("window.flintCommand&&window.flintCommand('\(name)')", completionHandler: nil)
+  }
 
   // Grant the web view microphone access so in-app voice works (the app holds
   // the NSMicrophoneUsageDescription; macOS still prompts once at the OS level).

@@ -80,6 +80,7 @@ import { CompleteGate, type BackgroundFrontier } from './background-complete';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
+import { listThreads, readThread } from './threads';
 import { withHistoryNote } from './history-window';
 import { KnowledgeStore, rememberTool } from './knowledge';
 import { trainingStatusTool } from './training-status';
@@ -1058,6 +1059,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // question/answer the user can click to re-read.
   if (req.method === 'GET' && url.startsWith('/conversations')) {
     return json(res, 200, { conversations: ctx.convos.slice(-100) });
+  }
+
+  // Chat history for the console's sidebar, from the conversation store (./threads):
+  // the threads newest first, then one thread's turns (text only, no attachment bodies).
+  if (req.method === 'GET' && (url === '/threads' || url.startsWith('/threads?'))) {
+    return json(res, 200, { threads: await listThreads(ctx.memory) });
+  }
+  if (req.method === 'GET' && url.startsWith('/threads/')) {
+    const thread = await readThread(ctx.memory, url.slice('/threads/'.length).split('?')[0] ?? '');
+    return json(res, thread.status, thread.body);
   }
 
   // Voice input: the app records mic audio and posts it here; we transcribe with
