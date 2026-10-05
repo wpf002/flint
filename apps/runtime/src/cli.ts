@@ -5,8 +5,9 @@
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
- *   pnpm --filter @flint/runtime promotion-table [--drop <pattern>]...
- *                                                    file P2's promotion table for Will to sign
+ *   pnpm --filter @flint/runtime p25-report           P2.5's exit criteria, measured now (JSON)
+ *   pnpm --filter @flint/runtime promotion-table [--phase p2|p25] [--drop <pattern>]...
+ *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
  *                                                    P2.5); needs no database
  *
@@ -22,7 +23,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
-import { promotionTable } from './governance/promotion.js';
+import { p25Report } from './report/p25.js';
+import { promotionTable, type Phase } from './governance/promotion.js';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, gate, type Command } from './backup/nightly.js';
@@ -69,10 +71,13 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'google-login') return loginToGoogle();
   if (process.argv[2] === 'promotion-table') {
     const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
+    const at = process.argv.indexOf('--phase');
+    const phase = at === -1 ? 'p2' : process.argv[at + 1];
+    if (phase !== 'p2' && phase !== 'p25') throw new Error('promotion-table: --phase is p2 or p25');
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      const t = await promotionTable(db, { drop });
+      const t = await promotionTable(db, { phase: phase as Phase, drop });
       console.log(`${t.deduped ? 'already filed' : 'filed'}: proposal ${t.proposalId}, ${t.rows.length} rows to ALONE until ${t.rows[0]!.expiresAt}`);
       for (const r of t.rows) console.log(`  ${r.pattern}${r.dailyCap ? ` (cap ${r.dailyCap}/day)` : ''}`);
       console.log('Sign it in the console (Approvals) with your key, or let it expire.');
@@ -81,18 +86,18 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (process.argv[2] === 'p2-report') {
+  if (process.argv[2] === 'p2-report' || process.argv[2] === 'p25-report') {
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      console.log(JSON.stringify(await p2Report(db, config), null, 2));
+      console.log(JSON.stringify(process.argv[2] === 'p2-report' ? await p2Report(db, config) : await p25Report(db, config), null, 2));
     } finally {
       await db.$disconnect();
     }
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | google-login | p2-report | promotion-table [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | google-login | p2-report | p25-report | promotion-table [--phase p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
