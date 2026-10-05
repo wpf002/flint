@@ -158,7 +158,7 @@ describe('update_app.sh installs while Flint.app is open', () => {
 
   beforeEach(() => {
     repo = join(tmp, 'repo');
-    dest = join(tmp, 'Applications', 'Flint.app');
+    dest = join(tmp, 'Applications', 'Flint-test.app');
     state = join(tmp, 'state');
     bin = join(tmp, 'bin');
     said = join(tmp, 'notifications');
@@ -172,10 +172,11 @@ describe('update_app.sh installs while Flint.app is open', () => {
     git(tmp, 'init', '-q', '-b', 'main', repo);
     git(repo, 'add', '-A');
     git(repo, 'commit', '-q', '-m', 'App v1');
-    // The app "running": a process whose command line is the installed binary.
-    mkdirSync(join(dest, 'Contents', 'MacOS'), { recursive: true });
-    copyFileSync('/bin/sleep', join(dest, 'Contents', 'MacOS', 'flint'));
-    fake = spawn(join(dest, 'Contents', 'MacOS', 'flint'), ['30'], { stdio: 'ignore' });
+    // The app "running": a process whose command line reads as the installed binary.
+    // Only its name: no bundle is made on disk and nothing is copied into one, since
+    // macOS kills a system binary run from inside an app bundle and then tells Will
+    // that "Flint" is damaged.
+    fake = spawn('/bin/sleep', ['30'], { argv0: join(dest, 'Contents', 'MacOS', 'flint'), stdio: 'ignore' });
     script(join(bin, 'osascript'), `echo "$2" >> "${said}"`);
   });
   afterEach(() => {
