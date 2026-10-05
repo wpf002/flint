@@ -304,14 +304,14 @@ describe('google_calendar: mapping events', () => {
       ev('d3', { summary: 'Visa expires', ...allDay('2026-10-08', '2026-10-09') }),
     ]);
     expect(r.errors).toEqual([]);
-    // The event names its entity only: the date and time a note says are worked out when triage decides.
+    // The event names its entity and the time it is for: the date and time a note says are worked out when triage decides.
     const c = (id: string, startsAt: string): RaisedEvent => ({
       sourceRef: `upcoming:${id}:${startsAt}`, type: 'commitment.upcoming', occurredAt: NOW, sensitivity: 'personal', tainted: false, current: true,
-      payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}` },
+      payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}`, at: startsAt },
     });
     const d = (id: string, dueOn: string): RaisedEvent => ({
       sourceRef: `upcoming:${id}:${dueOn}`, type: 'deadline.upcoming', occurredAt: NOW, sensitivity: 'personal', tainted: false, current: true,
-      payload: { entityKind: 'deadline', entityKey: `deadline:google_calendar:${id}` },
+      payload: { entityKind: 'deadline', entityKey: `deadline:google_calendar:${id}`, at: dueOn },
     });
     expect(r.events).toEqual([
       c('u2', '2026-10-05T14:46:00.000Z'),
@@ -419,7 +419,7 @@ describe('google_calendar: the source', () => {
     const { url, method, headers, signal } = g.seen[0]!;
     expect(`${url.origin}${url.pathname}`).toBe(`${GOOGLE_API}${CALENDAR_EVENTS_PATH}`);
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      timeMin: '2026-10-05T15:00:00.000Z', timeMax: '2026-10-19T15:00:00.000Z', singleEvents: 'true', orderBy: 'startTime', showDeleted: 'false', maxResults: '250',
+      timeMin: '2026-10-05T15:00:00.000Z', timeMax: '2026-10-19T15:00:00.000Z', singleEvents: 'true', orderBy: 'startTime', showDeleted: 'true', maxResults: '250',
       fields: 'items(id,status,summary,start,end,attendees(email,displayName,self,responseStatus,resource,organizer),organizer(self),eventType,updated,recurringEventId),nextPageToken',
     });
     expect(method).toBe('GET');
@@ -501,6 +501,13 @@ describe('google_calendar: the source', () => {
     expect(res.warnings![0]).toMatch(/item 1 .*start\.dateTime/);
   });
 
+  it('an event renamed into a deadline (or out of one) archives its old kind, even in a listing that is not whole', async () => {
+    const g = fakeGoogle({ '': { items: [ev('rn1', { summary: 'Report due' }), ev('rn2', { summary: 'Coffee' }), ev('bad', { start: { dateTime: 'soon' } })] } });
+    const res = await source().run(runOf(g.fetch, { known: [knownAhead('rn1'), { ...knownDeadline('rn2'), state: { dueOn: '2026-10-09', source: 'google_calendar' } }, knownAhead('other')] }));
+    expect(res.observations.filter((o) => o.status === 'archived').map((o) => o.key)).toEqual(['commitment:google_calendar:rn1', 'deadline:google_calendar:rn2']);
+    expect(res.warnings).toHaveLength(1);
+  });
+
   it('a failed page fails the whole run, never quoting the token', async () => {
     for (const [pages, message] of [
       [{ '': 401 }, 'google calendar answered 401'],
@@ -555,6 +562,6 @@ describe('google_calendar: the source', () => {
   it('raises the upcoming events with the observations', async () => {
     const g = fakeGoogle({ '': { items: [ev('soon', { attendees: [me], ...timed(at(30 * MIN), at(90 * MIN)) })] } });
     const res = await source().run(runOf(g.fetch));
-    expect(res.events!.map((e) => [e.type, e.sourceRef, e.payload])).toEqual([['commitment.upcoming', 'upcoming:soon:2026-10-05T15:30:00.000Z', { entityKind: 'commitment', entityKey: 'commitment:google_calendar:soon' }]]);
+    expect(res.events!.map((e) => [e.type, e.sourceRef, e.payload])).toEqual([['commitment.upcoming', 'upcoming:soon:2026-10-05T15:30:00.000Z', { entityKind: 'commitment', entityKey: 'commitment:google_calendar:soon', at: '2026-10-05T15:30:00.000Z' }]]);
   });
 });

@@ -237,7 +237,7 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
   it('the report: the calendar ahead, the token date, and people from nowhere else', async () => {
     mkdirSync(join(home, '.flint', 'google'), { recursive: true });
     writeFileSync(join(home, '.flint', 'google', 'token.json'), JSON.stringify({ refreshToken: 'SECRET-REFRESH', scopes: [], obtainedAt: new Date(Date.now() - 31 * DAY).toISOString(), clientId: 'x' }), { mode: 0o600 });
-    const r = await p25Report(db, { home });
+    const r = await p25Report(db, { home, tz: 'UTC' });
     const c = (n: number) => r.criteria.find((x) => x.n === n)!;
     expect(c(1).values).toMatchObject({ enabled: true });
     expect(c(1).values.commitments).toBeGreaterThan(0);
@@ -252,9 +252,9 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/days of calendar syncs/);
     // A first sync eight days ago is not a week lived: every one of the last seven days needs a good sync.
     await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 8 * DAY));
-    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/does not count yet: \d of the last 7 days/);
-    // Quiet good runs, one each day (AuditRollup's days are the zone's: UTC here), and a sync in the last hour.
-    const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - i * DAY).toISOString().slice(0, 10));
+    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/does not count yet: \d of the 7 days before today/);
+    // Quiet good runs on each of the 7 days before today (AuditRollup's days are the zone's: UTC here), and a sync in the last hour.
+    const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - (i + 1) * DAY).toISOString().slice(0, 10));
     await db.auditRollup.createMany({ data: days.map((day) => ({ day, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 })), skipDuplicates: true });
     await owner(`UPDATE "AuditRollup" SET count = count + 1 WHERE action = 'world.sync.google_calendar'`);
     await owner(`UPDATE "SourceCursor" SET "lastOkAt" = now() WHERE source = 'google_calendar'`);

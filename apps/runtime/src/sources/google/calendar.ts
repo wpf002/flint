@@ -273,7 +273,8 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
         state: { dueOn, source: SOURCE }, sensitivity: 'personal', taintedPaths: [], ...changedAt, ...texts,
       });
       // The day and time are worked out again when triage decides (the note says them then, from the entity).
-      if (dayOf(dueOn)) events.push(upcoming(`upcoming:${id}:${dueOn}`, 'deadline.upcoming', { entityKind: 'deadline', entityKey: key }));
+      // `at`: the time this heads-up is for (a clean value, not Google's text); triage tells it only while it still holds.
+      if (dayOf(dueOn)) events.push(upcoming(`upcoming:${id}:${dueOn}`, 'deadline.upcoming', { entityKind: 'deadline', entityKey: key, at: dueOn }));
       return;
     }
 
@@ -308,7 +309,7 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
 
     const t = start.getTime();
     if (response !== 'needs_action' && t > now - UPCOMING_SINCE_MS && t <= now + UPCOMING_WITHIN_MS) {
-      events.push(upcoming(`upcoming:${id}:${span.startsAt}`, 'commitment.upcoming', { entityKind: 'commitment', entityKey: key }));
+      events.push(upcoming(`upcoming:${id}:${span.startsAt}`, 'commitment.upcoming', { entityKind: 'commitment', entityKey: key, at: span.startsAt }));
     }
   });
 
@@ -355,7 +356,8 @@ export function googleCalendarSource(opts: CalendarOpts): Source {
       const query = {
         timeMin: r.now.toISOString(),
         timeMax: new Date(r.now.getTime() + o.windowDays * 86_400_000).toISOString(),
-        singleEvents: 'true', orderBy: 'startTime', showDeleted: 'false', maxResults: String(PAGE_SIZE), fields: FIELDS,
+        // showDeleted: a cancelled event comes back as `cancelled` (known gone) instead of silently missing.
+        singleEvents: 'true', orderBy: 'startTime', showDeleted: 'true', maxResults: String(PAGE_SIZE), fields: FIELDS,
       };
       const items: unknown[] = [];
       let pageToken: string | undefined;
@@ -395,7 +397,9 @@ export function googleCalendarSource(opts: CalendarOpts): Source {
             const id = k.key.slice(prefix.length);
             if (!EVENT_ID.test(id)) continue;
             const ended = kind === 'commitment' ? typeof k.state.endsAt === 'string' && Date.parse(k.state.endsAt) <= r.now.getTime() : typeof k.state.dueOn === 'string' && k.state.dueOn < today;
-            if (!whole && !gone.has(id) && !ended) continue;
+            // Listed this run as the other kind (renamed into a deadline, or out of one): the same event, so this one is gone.
+            const renamed = listed.has(`${kind === 'commitment' ? 'deadline' : 'commitment'}:${SOURCE}:${id}`);
+            if (!whole && !gone.has(id) && !ended && !renamed) continue;
             observations.push({
               type: `${kind}.state`, kind, key: k.key, name: k.name, state: k.state, status: 'archived',
               externalId: `${kind === 'commitment' ? 'event' : 'deadline'}:${id}`, sensitivity: 'personal', taintedPaths: [],

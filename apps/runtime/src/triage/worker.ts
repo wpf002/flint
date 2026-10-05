@@ -59,6 +59,9 @@ export function codeContext(db: Db, delivering = false, now?: Date, tz?: string)
   return {
     ...(now ? { now } : {}),
     ...(tz ? { tz } : {}),
+    async laterHeadsUp(entityId, type, receivedAt) {
+      return (await db.sourceEvent.count({ where: { type, receivedAt: { gt: receivedAt }, payload: { path: ['entityId'], equals: entityId } } })) > 0;
+    },
     async routeErrorsIn10m(at) {
       return db.sourceEvent.count({ where: { source: 'server', type: 'route.error', occurredAt: { gt: new Date(at.getTime() - 10 * 60_000), lte: at } } });
     },

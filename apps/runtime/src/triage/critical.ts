@@ -92,11 +92,19 @@ export interface CodeRuleContext {
   /** When triage decides, and Flint's zone: a heads-up is worked out then, not when its event was read. */
   now?: Date;
   tz?: string;
+  /** A heads-up for the same entity was raised after this one (the event moved, and moved again): that one tells it. */
+  laterHeadsUp?(entityId: string, type: string, receivedAt: Date): Promise<boolean>;
 }
 
 /** A heads-up is given from a day before its event to a quarter of an hour after it starts. */
 export const UPCOMING_WITHIN_MS = 24 * 3_600_000;
 export const UPCOMING_SINCE_MS = 15 * 60_000;
+
+/** The day after a YYYY-MM-DD day. */
+function nextDay(d: string): string {
+  const [y, m, n] = d.split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, n + 1)).toISOString().slice(0, 10);
+}
 
 /** The local day (YYYY-MM-DD) and time (HH:mm) of an instant in tz. */
 function wallClock(tz: string, at: Date): { day: string; time: string } {
@@ -113,19 +121,26 @@ function wallClock(tz: string, at: Date): { day: string; time: string } {
  * Anything later than that is logged quietly: a heads-up for what has passed
  * would be false.
  */
-function calendarUpcoming(f: EventFacts, ctx: CodeRuleContext): Verdict {
+async function calendarUpcoming(f: EventFacts, ctx: CodeRuleContext): Promise<Verdict> {
   const quiet: Verdict = { action: 'log', lane: 'quiet', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming.stale', critical: false };
+  const moved: Verdict = { ...quiet, ruleName: 'calendar.upcoming.moved' };
   const e = f.entity;
   const item = refOf(f);
   if (!e || e.status !== 'active' || !item || !ctx.now || !ctx.tz) return quiet;
   const now = ctx.now.getTime();
+  // Raised for a time the event no longer has, or followed by a newer heads-up for it: that one tells it.
+  const raisedFor = typeof f.payload.at === 'string' ? f.payload.at : undefined;
+  const current = f.type === 'deadline.upcoming' ? e.state.dueOn : e.state.startsAt;
+  if (raisedFor !== undefined && raisedFor !== current) return moved;
+  if (await ctx.laterHeadsUp?.(e.id, f.type, f.receivedAt)) return moved;
   let fields: { item: string; kind: 'commitment' | 'deadline'; date: string; time: string | null; until: string };
   if (f.type === 'deadline.upcoming') {
     const dueOn = e.state.dueOn;
     if (e.kind !== 'deadline' || typeof dueOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dueOn)) return quiet;
-    const b = localDayBounds(ctx.tz, dueOn);
-    if (b.end.getTime() <= now || b.start.getTime() > now + UPCOMING_WITHIN_MS) return quiet;
-    fields = { item, kind: 'deadline', date: dueOn, time: null, until: b.end.toISOString() };
+    // Due today or tomorrow, by local day (as the source raised it): a 25-hour day must not put tomorrow out of reach.
+    const today = wallClock(ctx.tz, ctx.now).day;
+    if (dueOn < today || dueOn > nextDay(today)) return quiet;
+    fields = { item, kind: 'deadline', date: dueOn, time: null, until: localDayBounds(ctx.tz, dueOn).end.toISOString() };
   } else {
     const at = typeof e.state.startsAt === 'string' ? Date.parse(e.state.startsAt) : NaN;
     if (e.kind !== 'commitment' || !Number.isFinite(at) || at < now - UPCOMING_SINCE_MS || at > now + UPCOMING_WITHIN_MS) return quiet;

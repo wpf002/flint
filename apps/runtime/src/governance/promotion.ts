@@ -14,7 +14,7 @@
  *    signed rows carry a fixed one.
  *  - Filing the same table again is the same card: a waiting one is reused.
  */
-import { CODE_TABLE, localDay } from '@flint/policy';
+import { CODE_TABLE, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -94,15 +94,18 @@ const PHASES: Record<Phase, {
     evidence: 'calendar syncs',
     // The calendar's first audited sync: the source has been running since.
     first: async (db) => (await db.auditEntry.findFirst({ where: { action: 'world.sync.google_calendar', outcome: 'ok' }, orderBy: { at: 'asc' }, select: { at: true } }))?.at,
-    // Every one of the last 7 local days had a good sync (one that changed something is an ok audit
-    // entry; a quiet one is counted in AuditRollup), and the source synced in the last hour.
+    // Each of the 7 whole local days before today had a good sync (one that changed something is an ok
+    // audit entry; a quiet one is counted in AuditRollup), and the source synced in the last hour (today).
+    // Days are calendar dates, stepped back one at a time: a 23- or 25-hour day is still one day.
     covered: async (db, now, tz) => {
-      const since = new Date(now.getTime() - 8 * DAY);
+      const want: string[] = [];
+      for (let d = previousDay(localDay(tz, now)); want.length < SHADOW_DAYS; d = previousDay(d)) want.push(d);
+      const since = localDayBounds(tz, want[want.length - 1]!).start;
       const days = new Set<string>();
-      for (const a of await db.auditEntry.findMany({ where: { action: 'world.sync.google_calendar', outcome: 'ok', at: { gt: since } }, select: { at: true } })) days.add(localDay(tz, a.at));
-      for (const r of await db.auditRollup.findMany({ where: { action: 'world.sync.google_calendar', count: { gt: 0 }, day: { gte: localDay(tz, since) } }, select: { day: true } })) days.add(r.day);
-      const missing = Array.from({ length: SHADOW_DAYS }, (_, i) => localDay(tz, new Date(now.getTime() - i * DAY))).filter((d) => !days.has(d));
-      if (missing.length) return `${SHADOW_DAYS - missing.length} of the last ${SHADOW_DAYS} days had a good calendar sync (none on ${missing.join(', ')})`;
+      for (const a of await db.auditEntry.findMany({ where: { action: 'world.sync.google_calendar', outcome: 'ok', at: { gte: since } }, select: { at: true } })) days.add(localDay(tz, a.at));
+      for (const r of await db.auditRollup.findMany({ where: { action: 'world.sync.google_calendar', count: { gt: 0 }, day: { gte: want[want.length - 1]! } }, select: { day: true } })) days.add(r.day);
+      const missing = want.filter((d) => !days.has(d));
+      if (missing.length) return `${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today had a good calendar sync (none on ${missing.join(', ')})`;
       const last = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { lastOkAt: true } }))?.lastOkAt;
       if (!last || now.getTime() - last.getTime() > 3_600_000) return 'the calendar has not synced in the last hour';
       return undefined;

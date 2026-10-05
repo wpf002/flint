@@ -29,6 +29,9 @@ import { expireEscalations } from '../src/surface/expire';
 import { emailHash, personExternalId, personKey } from '../src/world/people';
 import { offerPeople } from '../src/world/person-create';
 import { mapEvents } from '../src/sources/google/calendar';
+import { promotionTable } from '../src/governance/promotion';
+import { p25Report } from '../src/report/p25';
+import { appendAudit } from '../src/governance/audit';
 import type { RaisedEvent, Source, SourceObservation, SourceRun, SyncResult } from '../src/sources/types';
 import type { Bus } from '../src/bus';
 
@@ -60,7 +63,7 @@ const person = (email: string, name = 'Someone'): SourceObservation => {
 };
 const upcoming = (id: string, startsAt: string): RaisedEvent => ({
   sourceRef: `upcoming:${id}:${startsAt}`, type: 'commitment.upcoming', occurredAt: new Date(), sensitivity: 'personal', tainted: false, current: true,
-  payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}` },
+  payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}`, at: startsAt },
 });
 const calendar = (r: Partial<SyncResult>): Source => ({ name: 'google_calendar', cadenceMs: 300_000, run: async () => ({ observations: [], metrics: [], ...r }) });
 
@@ -158,11 +161,10 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
   });
 
   it('a heads-up is worked out when triage decides: logged when its event has passed or left the calendar', async () => {
-    const soon = T0 + HOUR;
-    await syncOnce(db, calendar({ observations: [commitment('h1', { startsIn: HOUR })], events: [upcoming('h1', iso(soon))] }), run(), 'UTC');
-    const ev = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: `upcoming:h1:${iso(soon)}` } });
-    // Decided two hours late (the bus was down): the event started 1 h ago.
-    await withClient(urls.owner, (c) => c.query(`UPDATE "Entity" SET state = jsonb_set(state, '{startsAt}', to_jsonb($2::text)) WHERE key = $1`, ['commitment:google_calendar:h1', iso(Date.now() - HOUR)]));
+    // Decided late (the bus was down): by the time triage runs, the event started an hour ago.
+    const past = T0 - HOUR;
+    await syncOnce(db, calendar({ observations: [commitment('h1', { startsIn: -HOUR })], events: [upcoming('h1', iso(past))] }), run(), 'UTC');
+    const ev = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: `upcoming:h1:${iso(past)}` } });
     await processEvent({ eventId: ev.id }, deps());
     expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev.id }, include: { escalation: true } })).toMatchObject({ action: 'log', ruleName: 'calendar.upcoming.stale', escalation: null });
     // Left the calendar (archived) before triage decided.
@@ -230,5 +232,95 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
     expect((await db.entityText.findFirstOrThrow({ where: { entityId: e.id } })).text).toBe('Interview at Acme');
     await syncOnce(db, viaAdapter(undefined), run(now), 'UTC');
     expect(await db.entityText.count({ where: { entityId: e.id } })).toBe(0);
+  });
+
+  it('heads-ups still waiting when the event moves, and moves back, give one note, for the time that holds', async () => {
+    const at14 = T0 + 6 * HOUR;
+    const at10 = T0 + 2 * HOUR;
+    const raise = (start: number) => syncOnce(db, calendar({ observations: [commitment('pm', { startsIn: start - T0 })], events: [upcoming('pm', iso(start))] }), run(), 'UTC');
+    // Triage is behind: three raises (14:00, 10:00, back to 14:00) before any is decided.
+    await raise(at14);
+    await raise(at10);
+    await raise(at14);
+    const evs = await db.sourceEvent.findMany({ where: { sourceRef: { startsWith: 'upcoming:pm:' } }, orderBy: { receivedAt: 'asc' } });
+    expect(evs.map((e) => e.sourceRef)).toEqual([`upcoming:pm:${iso(at14)}`, `upcoming:pm:${iso(at10)}`, `upcoming:pm:${iso(at14)}:r1`]);
+    for (const e of evs) await processEvent({ eventId: e.id }, deps());
+    const ds = await db.triageDecision.findMany({ where: { sourceEventId: { in: evs.map((e) => e.id) } }, include: { escalation: true } });
+    expect(ds.filter((d) => d.action === 'escalate')).toHaveLength(1);
+    expect(ds.find((d) => d.action === 'escalate')!.sourceEventId).toBe(evs[2]!.id);
+    expect(ds.filter((d) => d.ruleName === 'calendar.upcoming.moved')).toHaveLength(2);
+    // Read again: the told occurrence stays the one; nothing more is raised.
+    await raise(at14);
+    expect(await db.sourceEvent.count({ where: { sourceRef: { startsWith: 'upcoming:pm:' } } })).toBe(3);
+  });
+
+  it('a heads-up passed over (decided late) is raised again for the same time, a bounded number of times', async () => {
+    const at = T0 + 3 * HOUR;
+    const shown = () => syncOnce(db, calendar({ observations: [commitment('lt', { startsIn: 3 * HOUR })], events: [upcoming('lt', iso(at))] }), run(), 'UTC');
+    await shown();
+    const first = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: `upcoming:lt:${iso(at)}` } });
+    // Off the calendar when triage got to it (so: logged), then back at the same time: told after all.
+    await syncOnce(db, calendar({ observations: [commitment('lt', { startsIn: 3 * HOUR, status: 'archived' })] }), run(), 'UTC');
+    await processEvent({ eventId: first.id }, deps());
+    expect((await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: first.id } })).action).toBe('log');
+    await shown();
+    const again = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: `upcoming:lt:${iso(at)}:r1` } });
+    await processEvent({ eventId: again.id }, deps());
+    expect((await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: again.id } })).action).toBe('escalate');
+  });
+
+  it('forgetting one kind of a renamed event forgets the other kind already made, and its title', async () => {
+    const due = iso(T0 + 3 * DAY).slice(0, 10);
+    await syncOnce(db, calendar({ observations: [commitment('sb')] }), run(), 'UTC');
+    // Renamed into a deadline while another item was set aside: both kinds exist (the old kind is archived as renamed).
+    await syncOnce(db, calendar({ observations: [deadline('sb', due)], warnings: ['google calendar: item 9 set aside'] }), run(), 'UTC');
+    const c = (await entity('commitment', 'commitment:google_calendar:sb'))!;
+    const d = (await entity('deadline', 'deadline:google_calendar:sb'))!;
+    await forget(d.id);
+    const after = await db.entity.findUniqueOrThrow({ where: { id: c.id }, include: { versions: true, sources: true } });
+    expect(after.status).toBe('forgotten');
+    expect(after.key).toMatch(/^forgotten:/);
+    expect(after.versions.filter((v) => v.state !== null || v.patch !== null)).toEqual([]);
+    expect(after.versions.some((v) => v.changeKind === 'forgotten')).toBe(true);
+    expect(after.sources.every((x) => x.externalId.startsWith('forgotten:'))).toBe(true);
+    expect(await db.entityText.count({ where: { entityId: { in: [c.id, d.id] } } })).toBe(0);
+    // Neither kind comes back.
+    await syncOnce(db, calendar({ observations: [commitment('sb'), deadline('sb', due)] }), run(), 'UTC');
+    expect(await entity('commitment', 'commitment:google_calendar:sb')).toBeNull();
+    expect(await entity('deadline', 'deadline:google_calendar:sb')).toBeNull();
+  });
+
+  it('a warning is audited when it starts and when it ends, not on every run', async () => {
+    const count = () => db.auditEntry.count({ where: { action: 'world.sync.google_calendar', kind: 'sync' } });
+    await syncOnce(db, calendar({ observations: [commitment('wa')] }), run(), 'UTC');
+    await syncOnce(db, calendar({ observations: [commitment('wa')] }), run(), 'UTC');
+    const before = await count();
+    const w = calendar({ observations: [commitment('wa')], warnings: ['google calendar: item 2 set aside'] });
+    await syncOnce(db, w, run(), 'UTC');
+    await syncOnce(db, w, run(), 'UTC');
+    await syncOnce(db, w, run(), 'UTC');
+    expect(await count()).toBe(before + 1);
+    await syncOnce(db, calendar({ observations: [commitment('wa')] }), run(), 'UTC');
+    expect(await count()).toBe(before + 2);
+  });
+
+  it('the promotion gate counts calendar days, not 24-hour steps, in a DST week', async () => {
+    // Thu 2026-11-04 00:30 CDT... CST (05:30Z the 4th is 23:30 CST on the 3rd): the 7 days before are Oct 27 to Nov 2.
+    const now = new Date('2026-11-04T05:30:00Z');
+    await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 9 * DAY));
+    const days = ['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02'];
+    await db.auditRollup.createMany({ data: days.map((day) => ({ day, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 })), skipDuplicates: true });
+    await expect(promotionTable(db, { phase: 'p25', now, tz: 'America/Chicago' })).rejects.toThrow(/6 of the 7 days before today .*none on 2026-10-27/);
+    await db.auditRollup.createMany({ data: [{ day: '2026-10-27', action: 'world.sync.google_calendar', context: 'autonomous', count: 1 }], skipDuplicates: true });
+    await expect(promotionTable(db, { phase: 'p25', now, tz: 'America/Chicago' })).rejects.toThrow(/not synced in the last hour/);
+  });
+
+  it("the report counts a deadline due on Will's day, whatever the UTC date", async () => {
+    // 19:00 CST on Nov 30 is 01:00Z on Dec 1: a deadline due Nov 30 is due today, locally.
+    await syncOnce(db, calendar({ observations: [deadline('rp', '2026-11-30')] }), run(), 'UTC');
+    const r = await p25Report(db, { home: '/nonexistent', tz: 'America/Chicago' }, new Date('2026-12-01T01:00:00Z'));
+    expect(r.criteria.find((c) => c.n === 1)!.values.deadlines).toBeGreaterThanOrEqual(1);
+    const utc = await p25Report(db, { home: '/nonexistent', tz: 'UTC' }, new Date('2026-12-01T01:00:00Z'));
+    expect((r.criteria.find((c) => c.n === 1)!.values.deadlines as number) - (utc.criteria.find((c) => c.n === 1)!.values.deadlines as number)).toBe(1);
   });
 });

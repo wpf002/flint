@@ -218,7 +218,8 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
         : {}),
     },
   });
-  const changed = summary.created + summary.updated > 0 || summary.failed > 0;
+  // A change in what the source says went wrong (items set aside, or that ending) is audited once, not every run.
+  const changed = summary.created + summary.updated > 0 || summary.failed > 0 || (lastError ?? null) !== (cursor.lastError ?? null);
   if (changed) {
     await appendAudit(db, [{
       actor: `sync:${source.name}`, context: 'autonomous', kind: 'sync', action, tier: tier.tier, decision: 'act', outcome: summary.failed ? 'failed' : 'ok',
@@ -253,6 +254,8 @@ async function withEntity(db: Db, e: Omit<RaisedEvent, 'current'>): Promise<Omit
 /** Heads-ups (the calendar): one per occurrence of an event at a time. */
 const UPCOMING: ReadonlySet<string> = new Set(['commitment.upcoming', 'deadline.upcoming']);
 const AGAIN = /:r\d+$/;
+/** How often one time is raised again after triage passed over it: a bound, never a loop. */
+const MAX_AGAIN = 5;
 
 /**
  * A heads-up's source names the event and its time (`upcoming:<id>:<when>`),
@@ -267,8 +270,14 @@ async function occurrence(db: Db, source: string, e: Omit<RaisedEvent, 'current'
   const event = `${parts[0]}:${parts[1]}:`;
   const last = await db.sourceEvent.findFirst({ where: { source, type: e.type, sourceRef: { startsWith: event } }, orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }], select: { sourceRef: true } });
   if (!last) return e;
-  // The time last raised still holds: the same occurrence (a duplicate, or a refresh while undecided).
-  if (last.sourceRef.replace(AGAIN, '') === e.sourceRef) return { ...e, sourceRef: last.sourceRef };
+  // The time last raised still holds: the same occurrence (a duplicate, or a refresh while undecided), unless
+  // triage passed over it without telling Will (it had moved, or was decided late), when it is raised again.
+  if (last.sourceRef.replace(AGAIN, '') === e.sourceRef) {
+    const told = await db.triageDecision.findFirst({ where: { sourceEvent: { source, sourceRef: last.sourceRef } }, select: { action: true } });
+    const again = await db.sourceEvent.count({ where: { source, sourceRef: { startsWith: `${e.sourceRef}:r` } } });
+    if (!told || told.action === 'escalate' || again >= MAX_AGAIN) return { ...e, sourceRef: last.sourceRef };
+    return { ...e, sourceRef: `${e.sourceRef}:r${again + 1}`.slice(0, 500) };
+  }
   // It moved: a time not raised before is simply new; one raised before is raised again.
   if (!(await db.sourceEvent.count({ where: { source, sourceRef: e.sourceRef } }))) return e;
   const n = await db.sourceEvent.count({ where: { source, sourceRef: { startsWith: `${e.sourceRef}:r` } } });

@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
+import { localDay } from '@flint/policy';
 import { percentile } from '../rollup.js';
 import type { Criterion } from './exit.js';
 
@@ -29,7 +30,7 @@ function tokenObtainedAt(home: string): Date | undefined {
   }
 }
 
-export async function p25Report(db: Db, config: Pick<Config, 'home'>, now = new Date()): Promise<{ at: string; criteria: Criterion[] }> {
+export async function p25Report(db: Db, config: Pick<Config, 'home' | 'tz'>, now = new Date()): Promise<{ at: string; criteria: Criterion[] }> {
   const out: Criterion[] = [];
   const cursor = await db.sourceCursor.findUnique({ where: { source: SOURCE } });
 
@@ -39,7 +40,7 @@ export async function p25Report(db: Db, config: Pick<Config, 'home'>, now = new 
     SELECT e.kind, count(*)::int AS n FROM "Entity" e
     WHERE e.kind IN ('commitment', 'deadline') AND e.status = 'active' AND e.state->>'source' = ${SOURCE}
       AND coalesce(e.state->>'startsAt', e.state->>'dueOn') <= ${horizon}
-      AND coalesce(e.state->>'endsAt', e.state->>'dueOn') >= ${now.toISOString().slice(0, 10)}
+      AND ((e.kind = 'deadline' AND e.state->>'dueOn' >= ${localDay(config.tz, now)}) OR (e.kind = 'commitment' AND e.state->>'endsAt' > ${now.toISOString()}))
     GROUP BY e.kind`;
   const count = (k: string) => ahead.find((r) => r.kind === k)?.n ?? 0;
   const lags = (await db.metricPoint.findMany({ where: { seriesKey: LAG_SERIES, at: { gt: new Date(now.getTime() - 7 * DAY) } }, select: { value: true } })).map((p) => p.value);
