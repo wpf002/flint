@@ -133,10 +133,56 @@ export async function migrateUp(owner: string): Promise<void> {
   if (r.code !== 0) throw new Error(`prisma migrate deploy failed:\n${r.stdout}\n${r.stderr}`);
 }
 
-/** An empty, fully migrated flint_test. */
+/**
+ * What the migrations' down.sql left behind: objects the migration owner made
+ * in flint_test under another branch's migrations (a feature branch's tests and
+ * the deploy gate share the database; on 2026-10-04 a branch's leftovers failed
+ * main's gate). Statements in order: owned schemas other than public, then the
+ * public schema's owned relations, routines and types, never an extension's.
+ */
+const LEFTOVERS_SQL = `
+  SELECT 'schema' AS kind, n.nspname AS name, format('DROP SCHEMA IF EXISTS %I CASCADE', n.nspname) AS stmt, 0 AS ord
+    FROM pg_namespace n
+   WHERE n.nspowner = current_user::regrole AND n.nspname <> 'public'
+  UNION ALL
+  SELECT CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'S' THEN 'sequence' ELSE 'table' END, c.relname,
+         format('DROP %s IF EXISTS public.%I CASCADE',
+                CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END, c.relname), 1
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND c.relowner = current_user::regrole
+     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('e', 'a', 'i'))
+  UNION ALL
+  SELECT 'routine', p.oid::regprocedure::text, format('DROP ROUTINE IF EXISTS %s CASCADE', p.oid::regprocedure), 2
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proowner = current_user::regrole
+     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  UNION ALL
+  SELECT 'type', t.typname, format('DROP TYPE IF EXISTS public.%I CASCADE', t.typname), 3
+    FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+   WHERE n.nspname = 'public' AND t.typowner = current_user::regrole AND t.typtype IN ('e', 'd', 'r', 'c')
+     AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c'))
+     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  ORDER BY ord, name`;
+
+/** Drop what the migrations' down.sql left behind (LEFTOVERS_SQL), and name it. */
+export async function dropLeftovers(owner: string): Promise<string[]> {
+  return withClient(owner, async (c) => {
+    const { rows } = await c.query<{ kind: string; name: string; stmt: string }>(LEFTOVERS_SQL);
+    for (const r of rows) await c.query(r.stmt);
+    return rows.map((r) => `${r.kind} ${r.name}`);
+  });
+}
+
+/**
+ * An empty, fully migrated flint_test, whoever used it last. The round-trip
+ * test calls migrateDown alone, so a down.sql that misses its own objects
+ * still fails there; here anything left over is dropped and named.
+ */
 export async function freshDb(): Promise<TestUrls> {
   if (!URLS) throw new Error('no test database');
   await migrateDown(URLS.owner);
+  const left = await dropLeftovers(URLS.owner);
+  if (left.length) console.warn(`[freshDb] dropped what down.sql left behind (another branch's migrations?): ${left.join(', ')}`);
   await migrateUp(URLS.owner);
   return URLS;
 }
