@@ -25,6 +25,7 @@ import { fieldFreeTitle } from '../templates/escalations.js';
 import { healthReport } from '../health/checks.js';
 import { clip } from '../sources/text.js';
 import { p2Report } from '../report/exit.js';
+import { p25Report } from '../report/p25.js';
 
 export interface P2Deps {
   db: Db;
@@ -168,6 +169,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
 
   // P2's exit criteria, measured now: numbers and verdicts only.
   app.get('/v1/p2/report', { preHandler: need('world:read') }, async () => p2Report(db, { tz: d.config.tz ?? 'America/Chicago', home: d.config.home ?? '' }));
+  app.get('/v1/p25/report', { preHandler: need('world:read') }, async () => p25Report(db, { home: d.config.home ?? '' }));
 
   // ---- the model's projections (the runtime connector) ---------------------------------
   const Limit = z.object({ limit: z.coerce.number().int().min(1).max(20).default(10) }).strict();

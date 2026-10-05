@@ -8,6 +8,7 @@
  *  | Proposal args and result | NULL 30 d after it ended | 7 d |
  *  | Escalation text, TriageDecision.reasoning, Recommendation text | 90 d | 7 d |
  *  | HealthCheck, MetricPoint (raw) | daily rollup, then deleted after 30 whole days | same |
+ *  | EntityText (a calendar title, P2.5; always tainted) | n/a | deleted 7 d after it was last seen |
  *
  *  - A proposal ages from when it ended (executed, or its expiry: the latest
  *    a rejected one can have ended), never from when it was made.
@@ -70,6 +71,8 @@ async function steps(db: Db, tz: string, now: Date, n: Record<string, number>): 
       WHERE "contentPurgedAt" IS NULL AND "templateId" = ${id}
         AND ("createdAt" < ${ago(90, now)} OR ("createdAt" < ${ago(7, now)} AND (tainted OR sensitivity IN ('personal', 'financial'))))`);
   }
+  // Untrusted text kept outside the world model: refreshed while its entity is seen, gone a week after.
+  n.entityTexts = await exec(Prisma.sql`DELETE FROM "EntityText" WHERE "observedAt" < ${ago(7, now)}`);
   n.recommendationText = await exec(Prisma.sql`
     UPDATE "Recommendation" SET text = NULL, rationale = NULL, "expectedEffect" = NULL
     WHERE (text IS NOT NULL OR rationale IS NOT NULL OR "expectedEffect" IS NOT NULL)

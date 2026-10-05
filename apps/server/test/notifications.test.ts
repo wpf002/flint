@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Notifications, PHONE_PING, noteChannels } from '../src/notifications';
+import { Notifications, PHONE_PING, noteChannels, watcherEnabled } from '../src/notifications';
 import { SpendGuard, SpendLedger, type ThresholdNotice } from '../src/spend';
 
 function feed(topic: string | null = 'my-topic') {
@@ -139,5 +139,12 @@ describe('channels and what push() reports', () => {
     expect(notes.push('t', 'b', 'x')).toEqual({ status: 'stored', pinged: true });
     await settle();
     expect(notes.list()).toHaveLength(1);
+  });
+});
+
+describe('the Watcher switch (P2.5: the runtime has the calendar)', () => {
+  it('FLINT_WATCHER=off, in any case or spacing, or 0/false/no, turns it off; anything else leaves it on', () => {
+    for (const v of ['off', 'OFF', ' off ', 'Off', '0', 'false', 'FALSE', 'no']) expect(watcherEnabled({ FLINT_WATCHER: v }), v).toBe(false);
+    for (const v of [undefined, '', ' ', 'on', '1', 'true', 'yes', 'offline']) expect(watcherEnabled({ FLINT_WATCHER: v }), String(v)).toBe(true);
   });
 });

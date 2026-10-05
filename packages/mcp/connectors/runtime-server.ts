@@ -151,7 +151,7 @@ export function buildServer(call = runtimeCall): McpServer {
   server.registerTool(
     'world_entity',
     {
-      description: 'One entity in the world model by id, with its current state. If any of its text came from outside (an issue title, a Nexus note), the result says tainted: true.',
+      description: 'One entity in the world model by id, with its current state (and, for a calendar event, its title). If any of its text came from outside (an issue title, a Nexus note, a calendar title), the result says tainted: true.',
       inputSchema: { id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) },
       annotations: readOnly,
     },
@@ -159,7 +159,7 @@ export function buildServer(call = runtimeCall): McpServer {
       // Only what the model needs; never the raw sources list.
       const r = (await call(`/v1/world/entities/${id}`)) as { entity?: Record<string, unknown>; tainted?: boolean };
       const e = r.entity ?? {};
-      const pick = ['id', 'kind', 'key', 'name', 'status', 'state', 'taintedPaths', 'version', 'lastObservedAt'];
+      const pick = ['id', 'kind', 'key', 'name', 'status', 'state', 'texts', 'taintedPaths', 'version', 'lastObservedAt'];
       const ref = typeof e.kind === 'string' && typeof e.id === 'string' ? { ref: entityRef(e.kind, e.id) } : {};
       return text({ entity: { ...Object.fromEntries(pick.filter((k) => k in e).map((k) => [k, e[k]])), ...ref }, tainted: r.tainted !== false });
     },

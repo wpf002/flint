@@ -1,6 +1,7 @@
 /**
  * Actions the runtime carries out itself once Will has approved them: turning a
- * source on, applying a signed policy change, and adding a triage rule. Each goes through
+ * source on, applying a signed policy change, adding a triage rule, writing a
+ * proposed link, and creating the people on a calendar card (P2.5). Each goes through
  * claimProposal (re-verification, tier, cap, intent) and then completes, so the
  * audit trail reads the same as any other approved action. The database checks
  * the effect too: a cursor turns on only under an executing enable proposal,
@@ -14,8 +15,9 @@ import { Refused, claimProposal, completeProposal } from './proposals.js';
 import { dbRefused } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
+import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write']);
+export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create']);
 
 /**
  * A triage rule is policy (kind `rule`): its predicate may read only the
@@ -96,6 +98,14 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       }
       await completeProposal(db, id, { ok: true, result: { relationId: rel.id, ...(existed ? { existed: true } : {}) } }, actor);
       return { relationId: rel.id, ...(existed ? { existed: true } : {}) };
+    }
+    if (claimed.action === 'world.person.create') {
+      // Only the calendar's card, and only the people PersonGuard still allows (checked again inside).
+      const p = await db.proposal.findUniqueOrThrow({ where: { id }, select: { templateId: true } });
+      if (p.templateId !== PERSON_TEMPLATE) throw new Refused(409, `the runtime creates people only from the ${PERSON_TEMPLATE} card`);
+      const done = await createPeople(db, claimed.args, new Date(), actor);
+      await completeProposal(db, id, { ok: true, result: done }, actor);
+      return done;
     }
     if (claimed.action === 'triage.rule.create') {
       const why = refuseRule(claimed.args);

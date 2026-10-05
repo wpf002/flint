@@ -16,7 +16,9 @@
  *  - a Nexus handoff to Flint unaccepted for 24 h: escalate, once per sender a day;
  *  - a knowledge fact naming two things and a relation: act (a link
  *    proposal, never a person); any other: log;
- *  - a source's circuit opening: logged in the relevant lane (closing: quietly).
+ *  - a source's circuit opening: logged in the relevant lane (closing: quietly);
+ *  - an event or deadline on Will's calendar within a day (P2.5): escalate,
+ *    once per event and start, with its time and never its title.
  *
  * Fields are typed: refs, enums, numbers and hex SHAs. A raised event carries
  * its entity's id, never its name.
@@ -116,6 +118,17 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
   // A source failing 5 times in a row: in the relevant lane, no ping; its recovery quietly.
   if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
   if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };
+  if (name === 'google_calendar:commitment.upcoming' || name === 'google_calendar:deadline.upcoming') {
+    // The heads-up the Watcher used to give, once per event and start time (the source's own key).
+    const day = pick(f.payload.day, ['today', 'tomorrow'] as const);
+    const time = typeof f.payload.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(f.payload.time) ? f.payload.time : null;
+    const item = refOf(f);
+    if (!day || !item) return { action: 'log', lane: 'quiet', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false };
+    return {
+      action: 'escalate', lane: 'relevant', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false,
+      template: { id: 'calendar_upcoming', fields: { item, kind: f.type === 'deadline.upcoming' ? 'deadline' : 'commitment', day, time } },
+    };
+  }
   if (name === 'knowledge:knowledge.fact') {
     // Two things and a relation between them: propose the link. Anything else is only logged.
     const linked = typeof f.payload.relation === 'string' && typeof f.payload.fromId === 'string' && typeof f.payload.toId === 'string';

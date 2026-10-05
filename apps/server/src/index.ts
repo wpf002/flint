@@ -94,7 +94,7 @@ import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bea
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
-import { Notifications, Watcher, type Check } from './notifications';
+import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
@@ -742,7 +742,9 @@ async function main(): Promise<void> {
   }
 
   // Proactivity — a notifications feed (built above) + a watcher that surfaces things unasked.
-  new Watcher(notes, buildChecks(tools, knowledge)).start();
+  // FLINT_WATCHER=off once the runtime's calendar source is live (P2.5): it owns the calendar.
+  if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();
+  else console.error('[watch] proactive watcher off (FLINT_WATCHER=off): the runtime has the calendar');
 
   // Long-term memory that actually grows. `remember` alone produced 9 facts in
   // 1,421 turns, because it only fires when the model elects to call it; this

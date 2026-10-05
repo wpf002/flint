@@ -13,6 +13,11 @@ const EDGES: Record<TemplateId, unknown[]> = {
   ci_failing: [{ run: 'ci_run#abc123', sha: 'f'.repeat(40) }, { run: null, sha: null }],
   route_errors: [{ count: 6, minutes: 10 }, { count: 1_000_000, minutes: 60 }],
   handoff_unaccepted: [{ handoff: 'handoff#abc123', namespace: 'trident' }, { handoff: null, namespace: null }],
+  calendar_upcoming: [
+    { item: 'commitment#abc123', kind: 'commitment', day: 'today', time: '00:00' },
+    { item: 'commitment#abc123', kind: 'commitment', day: 'tomorrow', time: null },
+    { item: 'deadline#abc123', kind: 'deadline', day: 'today', time: '23:59' },
+  ],
   new_item: (['issue', 'pull_request', 'thread'] as const).flatMap((kind) => REASON_CODES.map((reasonCode) => ({ kind, item: `${kind}#abc123`, reasonCode }))),
   rule_match: [{ rule: 'r'.repeat(80), source: 'github', eventType: 'issue.state', entity: 'issue#abc123' }, { rule: 'a', source: 'server', eventType: 'route.error', entity: null }],
 };

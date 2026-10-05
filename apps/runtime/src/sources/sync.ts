@@ -15,6 +15,11 @@
  *    events of a source's first successful run are marked backfill; and with
  *    triage on, each applied event's triage job is sent in the transaction
  *    that applied it.
+ *  - P2.5: an observation's untrusted text (a calendar title) goes to
+ *    EntityText, never into the world model or the event; a person is never
+ *    applied here but offered to world.person.create (PersonGuard); a raised
+ *    event may name its entity by kind and key, and is dropped when that
+ *    entity is not active (a forgotten event raises nothing).
  */
 import { redact, resolveTier } from '@flint/policy';
 import type { Db } from '../db.js';
@@ -25,7 +30,13 @@ import { markProcessed, recordEvent, recordFailure, refreshUndecided, type Enque
 import { sourceTime, triageEligible } from '../triage/facts.js';
 import { wellFormedDeep } from './text.js';
 import { faultAt } from '../config.js';
-import type { Known, Source, SourceRun } from './types.js';
+import { offerPeople } from '../world/person-create.js';
+import { clip } from './text.js';
+import type { Known, RaisedEvent, Source, SourceObservation, SourceRun } from './types.js';
+import type { Tx } from '../db.js';
+
+/** Sources whose every observation is PERSONAL, whatever the adapter says (Will's calendar). */
+const PERSONAL_SOURCES: ReadonlySet<string> = new Set(['google_calendar']);
 
 export interface SyncSummary {
   source: string;
@@ -66,11 +77,18 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
 
   // The world as it already was: everything a source's first good run reports.
   const backfill = !cursor.lastOkAt;
+  const people: SourceObservation[] = [];
   for (const raw of result.observations) {
+    // A person is never applied by a sync: it is offered to world.person.create below.
+    if (raw.kind === 'person') {
+      people.push(raw);
+      continue;
+    }
     // A NUL or half an emoji from outside would make the item unwritable on every run.
-    // (The time is taken out first: a Date is not plain data.)
-    const { changedAt, ...rest } = raw;
-    const o = wellFormedDeep(rest);
+    // (The time is taken out first: a Date is not plain data; the text too: it never enters the world model.)
+    const { changedAt, texts: rawTexts, ...rest } = raw;
+    const o = wellFormedDeep({ ...rest, ...(PERSONAL_SOURCES.has(source.name) ? { sensitivity: 'personal' as const } : {}) });
+    const texts = rawTexts ? wellFormedDeep(rawTexts) : undefined;
     const hash = stateHash({ name: o.name, state: o.state, ...(o.status ? { status: o.status } : {}), taintedPaths: o.taintedPaths ?? [] });
     // The event names the change: the state, and the version it would replace.
     // The same observation again (a restart) is the same event; the same state
@@ -90,9 +108,14 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     try {
       outcome = await db.$transaction(async (tx) => {
         // Nothing changed: no event, just "seen again".
-        if (!changes) return applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now });
+        if (!changes) {
+          const applied = await applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now });
+          if (texts && applied !== 'skipped') await writeTexts(tx, o.kind, o.key, source.name, texts, run.now);
+          return applied;
+        }
         const id = await recordEvent(tx, event, run.now);
         const applied = await applyObservation(tx, { ...o, source: source.name, actor: `sync:${source.name}`, observedAt: run.now, ...(id ? { sourceEventId: id } : {}) });
+        if (texts && applied !== 'skipped') await writeTexts(tx, o.kind, o.key, source.name, texts, run.now);
         if (id) {
           const status = applied === 'skipped' ? 'ignored' : 'applied';
           await markProcessed(tx, id, status, run.now);
@@ -108,8 +131,26 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     summary[outcome] += 1;
   }
 
+  // People, offered to world.person.create: never applied by the sync itself.
+  if (people.length) {
+    try {
+      const offered = await offerPeople(db, people, run.now, tz);
+      summary.updated += offered.seen;
+      summary.created += offered.created;
+      summary.skipped += offered.refused + offered.proposed;
+    } catch (err) {
+      summary.failed += 1;
+      console.error(`[sync] ${source.name}: offering people failed: ${redact(err instanceof Error ? err.message : String(err)).slice(0, 300)}`);
+    }
+  }
+
   // Event-only sources: each event applied with its triage job; nothing enters the world model.
-  for (const { current, ...e } of result.events ?? []) {
+  for (const { current, ...raised } of result.events ?? []) {
+    const e = await withEntity(db, raised);
+    if (!e) {
+      summary.skipped += 1;
+      continue;
+    }
     const event: EventIn = { source: source.name, ...e, occurredAt: sourceTime(e.occurredAt, run.now) };
     try {
       const id = await db.$transaction(async (tx) => {
@@ -189,4 +230,34 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     });
   }
   return summary;
+}
+
+/**
+ * A raised event that names its entity by kind and key (the calendar does not
+ * know ids) carries its id instead. Undefined when that entity is not active:
+ * a forgotten or vanished event raises nothing.
+ */
+async function withEntity(db: Db, e: Omit<RaisedEvent, 'current'>): Promise<Omit<RaisedEvent, 'current'> | undefined> {
+  const { entityKind, entityKey, ...payload } = e.payload;
+  if (entityKind === undefined && entityKey === undefined) return e;
+  if (typeof entityKind !== 'string' || typeof entityKey !== 'string') return undefined;
+  const found = await db.entity.findUnique({ where: { kind_key: { kind: entityKind, key: entityKey } }, select: { id: true, status: true } });
+  if (found?.status !== 'active') return undefined;
+  return { ...e, payload: { ...payload, entityId: found.id } };
+}
+
+/** The entity's untrusted text, refreshed (or removed, when the source no longer has it). */
+async function writeTexts(tx: Tx, kind: string, key: string, source: string, texts: { title?: string }, now: Date): Promise<void> {
+  const e = await tx.entity.findUnique({ where: { kind_key: { kind, key } }, select: { id: true } });
+  if (!e) return;
+  const title = texts.title?.trim() ? clip(texts.title.trim(), 300) : undefined;
+  if (!title) {
+    await tx.entityText.deleteMany({ where: { entityId: e.id, field: 'title' } });
+    return;
+  }
+  await tx.entityText.upsert({
+    where: { entityId_field: { entityId: e.id, field: 'title' } },
+    create: { entityId: e.id, field: 'title', text: title, source, tainted: true, observedAt: now },
+    update: { text: title, source, observedAt: now },
+  });
 }

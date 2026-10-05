@@ -122,6 +122,15 @@ export const TEMPLATES = {
     fieldFreeTitle: 'A handoff is waiting',
     fieldFreeBody: 'A Nexus handoff to Flint has not been accepted in 24 hours.',
   }),
+  // P2.5: the calendar's heads-up, replacing the server's Watcher. The event is a
+  // ref (its title is untrusted text and never in a note); the console shows it.
+  calendar_upcoming: t({
+    fields: z.object({ item: Ref, kind: z.enum(['commitment', 'deadline']), day: z.enum(['today', 'tomorrow']), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict(),
+    title: (f) => (f.kind === 'deadline' ? `A deadline ${f.day}` : `On your calendar ${f.day}${f.time ? ` at ${f.time}` : ' (all day)'}`),
+    body: (f) => `${f.kind === 'deadline' ? 'A deadline' : 'An event'} from your Google Calendar, ${f.day}${f.time ? ` at ${f.time}` : ''}. Open it in the console to see what it is.`,
+    fieldFreeTitle: 'Something on your calendar',
+    fieldFreeBody: 'Something from your Google Calendar is coming up. Open it in the console to see what it is.',
+  }),
   new_item: t({
     fields: z.object({ kind: z.enum(['issue', 'pull_request', 'thread']), item: Ref, reasonCode: z.enum(REASON_CODES) }).strict(),
     title: (f, show) => `New ${f.kind.replace('_', ' ')}: ${show(f.item, f.item)}`,

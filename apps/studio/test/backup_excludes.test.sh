@@ -10,13 +10,14 @@ here=${0:A:h}
 FLINT_BACKUP_DEFINE_ONLY=1 source "$here/../backup_flint.sh"
 
 fx=$(mktemp -d); trap 'rm -rf "$fx"' EXIT
-mkdir -p "$fx/src"/{memory,training,legion,tokens,brain/adapters,eval,spend,evolve}
+mkdir -p "$fx/src"/{memory,training,legion,tokens,google,brain/adapters,eval,spend,evolve}
 cd "$fx/src"
 secret=(
   secrets.env secrets.env.bak secrets.env.bak-tier secrets.env.bak-20260930-0919
   com.flint.server.plist.bak-20260925-0743 mcp.json mcp.json.all42 mcp.json.bak-20260925-1152
   nexus-responder.json nexus-responder.sh nexus-responder.env legion/crossbar.sh
   token nexus-admin-token.txt tokens/voice.token memory/knowledge.json.bak-20260925
+  google/token.json google/client.json
 )
 keep=(
   memory/conversations.json memory/knowledge.json training/corpus.jsonl notifications.json

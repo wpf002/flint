@@ -1,7 +1,7 @@
 /**
  * The world-model mapper (plan P1 exit criterion 3): idempotent, volatile values
  * never create a version, one change creates exactly one version, people are
- * never created, and forgotten records stay forgotten.
+ * created only through world.person.create, and forgotten records stay forgotten.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { NO_DB, freshDb, withClient, URLS } from './db';
@@ -42,8 +42,8 @@ describe.skipIf(NO_DB)('world mapper', () => {
     await expect(apply(obs({ key: 'service:launchd:x', state: { managedBy: 'launchd', latencyMs: 12 } }))).rejects.toThrow(/latencyMs|Unrecognized/);
   });
 
-  it('never creates a person', async () => {
-    await expect(apply(obs({ kind: 'person', key: 'person:x', state: {} }))).rejects.toThrow(/forbidden/);
+  it('never creates a person from an ordinary sync (only world.person.create may, P2.5)', async () => {
+    await expect(apply(obs({ kind: 'person', key: 'person:x', state: {} }))).rejects.toThrow(/only through world\.person\.create/);
   });
 
   it('tainted names are recorded as tainted, and a taint change is a change', async () => {
