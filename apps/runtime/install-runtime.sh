@@ -239,6 +239,36 @@ restart_agent() {
   return 1
 }
 
+# The database's nightly backup (backup-nightly.sh, 02:15): a LaunchAgent of its own,
+# since it holds the backup role's URL (backup.env) that the runtime never sees. It
+# runs from the deploy checkout and is (re)loaded only when its plist changes.
+BACKUP_LABEL="com.flint.runtime-backup"
+install_backup_agent() {
+  local plist="$AGENTS/$BACKUP_LABEL.plist" bin
+  bin="$(dirname "$(command -v node)"):$(dirname "$(command -v pnpm)"):/usr/bin:/bin:/usr/sbin:/sbin"
+  cat > "$plist.new" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$BACKUP_LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>$RT_SRC/backup-nightly.sh</string></array>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$HOME</string><key>PATH</key><string>$bin</string><key>FLINT_REPO</key><string>$REPO</string></dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>15</integer></dict>
+  <key>StandardOutPath</key><string>$DATA/runtime-backup.out.log</string>
+  <key>StandardErrorPath</key><string>$DATA/runtime-backup.err.log</string>
+</dict></plist>
+PLIST
+  chmod 600 "$plist.new"
+  if cmp -s "$plist.new" "$plist" && launchctl print "gui/$UID/$BACKUP_LABEL" >/dev/null 2>&1; then
+    rm -f "$plist.new"
+    return 0
+  fi
+  mv "$plist.new" "$plist"
+  launchctl bootout "gui/$UID/$BACKUP_LABEL" 2>/dev/null || true
+  for i in {1..20}; do launchctl print "gui/$UID/$BACKUP_LABEL" >/dev/null 2>&1 || break; sleep 0.25; done
+  launchctl bootstrap "gui/$UID" "$plist" && echo "runtime: nightly backup agent loaded (02:15)"
+}
+
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
 # A failed restart is one incident: recorded once, straight to the rollback (no health
@@ -253,6 +283,7 @@ for i in {1..30}; do
     echo "runtime: $SHA is up on [::1]:$PORT"
     DEPLOY_STAGE=
     deploy_event runtime deploy ok "$SHA"
+    install_backup_agent || echo "✗ runtime: the nightly backup agent could not be (re)loaded (the runtime itself is up)" >&2
     # Keep the three newest releases, and any named in ~/.flint/runtime/pinned
     # (one release sha per line: a known-good one to roll back to).
     ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do
