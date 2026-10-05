@@ -59,12 +59,12 @@
   /* tooltips: the button's name and shortcut */
   [data-tip]:hover::after,[data-tip]:focus-visible::after{content:attr(data-tip);position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);white-space:nowrap;background:var(--s2);color:var(--t1);font-size:12px;line-height:16px;padding:4px 8px;border-radius:6px;box-shadow:var(--shadow);pointer-events:none;z-index:20;}
   .trail [data-tip]:hover::after,.trail [data-tip]:focus-visible::after{left:auto;right:0;transform:none;}
+  .grp [data-tip]:hover::after,.grp [data-tip]:focus-visible::after{top:50%;left:calc(100% + 6px);transform:translateY(-50%);}
 
-  /* the mark: the glowing dot and FLINT, as it has always been */
-  .brand{position:absolute;top:calc(var(--hdr) + 12px);left:24px;display:flex;align-items:center;gap:11px;z-index:2;user-select:none;}
+  /* the mark: the glowing dot and FLINT, in the header as it has always been */
+  .brand{display:flex;align-items:center;gap:11px;margin-right:8px;user-select:none;}
   .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,#ffb14a 55%,#7a4a10);box-shadow:0 0 16px #ffb14a;}
   .brand .nm{color:var(--gold-hi);letter-spacing:.42em;font:700 18px/1 "SF Mono",ui-monospace,Menlo,monospace;}
-  #app.side-open .brand{display:none;}
 
   /* ---------- sidebar: past chats ---------- */
   .side{grid-row:1;grid-column:1;background:var(--s0);display:flex;flex-direction:column;min-height:0;overflow:hidden;padding:var(--hdr) 8px 12px;}
@@ -85,7 +85,7 @@
 
   /* ---------- the orb's stage ---------- */
   .stage{position:relative;grid-column:1;min-width:0;min-height:0;}
-  #brainwrap{position:absolute;inset:0;}
+  #brainwrap{position:absolute;inset:var(--hdr) 0 0 0;}
   #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
   .think{display:none;}
 
@@ -153,7 +153,8 @@
   .lopill svg.i{width:12px;height:12px;stroke-width:2;}
 
   /* ---------- panels (modal on the Mac, a sheet on the phone) ---------- */
-  .overlay{position:fixed;inset:0;background:var(--scrim);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:56px 16px;}
+  /* A panel covers the chat side only: --stage-edge is where the orb's stage ends (0 when it is not beside the chat). */
+  .overlay{position:fixed;top:0;right:0;bottom:0;left:var(--stage-edge,0px);background:var(--scrim);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:56px 16px;}
   .overlay.open{display:flex;}
   .modal{width:min(640px,100%);max-height:min(720px,calc(100vh - 112px));display:flex;flex-direction:column;background:var(--s1);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;}
   .modal.narrow{width:min(480px,100%);}
@@ -178,6 +179,7 @@
   .row .lbl{flex:1;min-width:0;display:flex;flex-direction:column;}
   .row .lbl b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .row .lbl span{font-size:12px;line-height:16px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .row .lbl .st{font-size:inherit;line-height:inherit;overflow:visible;}
   .row .val{color:var(--t3);font-variant-numeric:tabular-nums;white-space:nowrap;}
   .row svg.i{width:16px;height:16px;color:var(--t2);}
   .row.click{cursor:pointer;} .row.click:hover{background:var(--s3);}
@@ -258,6 +260,8 @@
     .main{grid-template-columns:0 minmax(0,1fr);} .stage{display:none;}
     .main.empty .stage{display:block;position:absolute;inset:var(--hdr) 0 auto 0;height:38vh;z-index:0;}
     .main.empty .empty-state{inset:calc(var(--hdr) + 38vh) 0 140px 0;justify-content:flex-start;}
+    .main.empty .stage #brainwrap{inset:0;}
+    body.panel-open .stage{visibility:hidden;}
     .brand{display:none;}
   }
   @media (max-width:600px){
@@ -314,6 +318,7 @@
   </aside>
   <div class="main empty" id="main">
     <header class="top" id="top">
+      <div class="brand" aria-hidden="true"><span class="sp"></span><span class="nm">FLINT</span></div>
       <div class="grp">
         <button class="ib" id="sidebtn" onclick="toggleSidebar()" aria-label="Toggle Sidebar" data-tip="Toggle Sidebar ⌘B"><svg class="i"><use href="#i-side"/></svg></button>
         <button class="ib" onclick="newChat()" aria-label="New Chat" data-tip="New Chat ⌘N"><svg class="i"><use href="#i-new"/></svg></button>
@@ -324,8 +329,7 @@
         <button class="ib" id="bellbtn" onclick="openActivity()" aria-label="Activity" data-tip="Activity"><svg class="i"><use href="#i-bell"/></svg><span class="udot" id="nbadge" hidden></span></button>
       </div>
     </header>
-    <div class="stage">
-      <div class="brand" aria-hidden="true"><span class="sp"></span><span class="nm">FLINT</span></div>
+    <div class="stage" id="stage">
       <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
     </div>
     <section class="chat" id="chat">
@@ -423,7 +427,7 @@ function svgi(name){var s=document.createElementNS('http://www.w3.org/2000/svg',
 /* ---------- the window: sidebar, title, empty state, panels ---------- */
 var SIDE_KEY='flint_side';
 function sideWanted(){try{var v=localStorage.getItem(SIDE_KEY);if(v==='1')return true;if(v==='0')return false;}catch(e){}return window.innerWidth>=1100;}
-function setSidebar(open,keep){$('app').classList.toggle('side-open',open);$('sidebtn').classList.toggle('on',open);if(keep){try{localStorage.setItem(SIDE_KEY,open?'1':'0');}catch(e){}}}
+function setSidebar(open,keep){$('app').classList.toggle('side-open',open);$('sidebtn').classList.toggle('on',open);if(typeof syncStageEdge==='function')syncStageEdge();if(keep){try{localStorage.setItem(SIDE_KEY,open?'1':'0');}catch(e){}}}
 /* Only Will's own toggles are remembered; until then it follows the window's width. */
 function toggleSidebar(){setSidebar(!$('app').classList.contains('side-open'),true);}
 setSidebar(sideWanted());
@@ -438,7 +442,11 @@ function newChat(){
 }
 var PANELS=['approvals','settings','activity'];
 function panelOpen(){return PANELS.some(function(id){return $(id).classList.contains('open');});}
-function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);}
+function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);document.body.classList.toggle('panel-open',panelOpen());syncStageEdge();}
+/* Where the orb's stage ends, when it stands beside the chat: panels open to its right and never cover it. */
+function stageBeside(){var st=$('stage');if(!st||window.innerWidth<=900)return 0;var r=st.getBoundingClientRect();return r.width>0&&getComputedStyle(st).display!=='none'?Math.round(r.right):0;}
+function syncStageEdge(){document.documentElement.style.setProperty('--stage-edge',stageBeside()+'px');}
+window.addEventListener('resize',syncStageEdge);
 function openSettings(){showPanel('settings',true);loadCreds();loadHealth();refresh();syncAccess();}
 function closeSettings(){showPanel('settings',false);}
 /* The app's menu bar and keyboard shortcuts land here. */
@@ -807,8 +815,9 @@ function toggleMic(){
 
 /* ---------- the brain (approved viz) ----------
    Flint's orb, unchanged: ~520 particles with their neighbour lines, the warm glow and core.
-   It fills its own stage beside the chat (never behind text), rests while a panel is open,
-   and holds one still frame under Reduce Motion. */
+   It fills its own stage beside the chat, below the header: no text is ever drawn over it
+   (panels open to its right; on a narrow window it steps away while a panel is open, and
+   rests then). One still frame under Reduce Motion. */
 var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 (function(){
   var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
@@ -824,7 +833,7 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
   var flares=[],t0=performance.now();
   function rot(p,ay,ax){var x=p.sx*p.rad,y=p.sy*p.rad,z=p.sz*p.rad;var cy1=Math.cos(ay),sy1=Math.sin(ay),x1=x*cy1-z*sy1,z1=x*sy1+z*cy1;var cx1=Math.cos(ax),sx1=Math.sin(ax),y1=y*cx1-z1*sx1,z2=y*sx1+z1*cx1;var fov=2.6,sc=fov/(fov+z2);return{X:cx+x1*R*sc,Y:cy+y1*R*sc,z:z2};}
   function frame(now){
-    if(!still&&typeof panelOpen==='function'&&panelOpen()){requestAnimationFrame(frame);return;}
+    if(!still&&typeof panelOpen==='function'&&panelOpen()&&!stageBeside()){requestAnimationFrame(frame);return;}
     var t=still?2:(now-t0)/1000;
     talkNow+=(talkTarget-talkNow)*0.08;
     var talk=talkNow*( (Math.sin(t*7)*0.5+0.5)*(Math.sin(t*13)*0.5+0.5) );
@@ -851,7 +860,7 @@ function starters(n){var box=$('starters');box.textContent='';
   if(n>0)add('Review '+n+' Approval'+(n===1?'':'s'),openApprovals);
   add('Summarize Today',function(){$('input').value='Summarize my day so far.';send();});
   add('Plan Tomorrow',function(){$('input').value='Help me plan tomorrow.';send();});}
-starters(0);syncEmpty();refresh();loadEnclave();
+starters(0);syncEmpty();syncStageEdge();if(window.ResizeObserver)new ResizeObserver(syncStageEdge).observe($('stage'));refresh();loadEnclave();
 if(!TOKEN) setTimeout(openSettings,400); else {loadCreds();loadThreads();}
 </script>
 <script id="lanes-js">
