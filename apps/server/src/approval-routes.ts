@@ -47,7 +47,11 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         // Pending ones to decide; approved ones not run yet (a cap was reached, the
         // runtime did not answer) to run again.
         const [pending, approved] = await Promise.all([ctx.proposals.list('pending'), ctx.proposals.list('approved')]);
-        const card = (p: RuntimeProposal) => ({ id: p.id, fullName: p.action.replace(/^mcp:/, ''), args: p.args, tainted: p.tainted, provenance: p.argsProvenance, status: p.status, origin: p.origin, ts: Date.parse(p.createdAt) });
+        const card = (p: RuntimeProposal) => ({
+          id: p.id, fullName: p.action.replace(/^mcp:/, ''), args: p.args, tainted: p.tainted, provenance: p.argsProvenance, status: p.status, origin: p.origin, ts: Date.parse(p.createdAt),
+          // What the card says about itself (the promotion table's week, a source's name), and when it lapses.
+          ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
+        });
         return reply(res, 200, { proposals: [...pending.map(card), ...approved.map(card)], unsynced: ctx.proposals.unsynced(), signed: true });
       } catch {
         return reply(res, 200, { proposals: [], unsynced: ctx.proposals.unsynced(), runtime: 'down', signed: true });

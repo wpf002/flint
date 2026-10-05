@@ -153,16 +153,32 @@ describe.skipIf(NO_DB)('P2 sources on flint_test', () => {
 
   it('deploy: once per sha and stage; a failed migration is one critical escalation', async () => {
     const file = join(home, '.flint', 'deploy-events.jsonl');
-    writeFileSync(file, line({ stage: 'migrate', sha: sha('9') }) + line({ id: 'b'.repeat(32), stage: 'migrate', sha: sha('9') }));
+    // Stamped with the sync's own clock: an event more than a day old when seen is old news (the next test).
+    const now = new Date();
+    const at = now.toISOString();
+    writeFileSync(file, line({ at, stage: 'migrate', sha: sha('9') }) + line({ id: 'b'.repeat(32), at, stage: 'migrate', sha: sha('9') }));
     const src = deploySource({ file });
-    await syncOnce(db, src, run(undefined, new Date()), 'UTC');
-    await syncOnce(db, { ...src, run: (r) => src.run({ ...r, cursor: { cursor: '0:0', etag: null } }) } as Source, run(undefined, new Date()), 'UTC');
+    await syncOnce(db, src, run(undefined, now), 'UTC');
+    await syncOnce(db, { ...src, run: (r) => src.run({ ...r, cursor: { cursor: '0:0', etag: null } }) } as Source, run(undefined, now), 'UTC');
     const evs = await db.sourceEvent.findMany({ where: { source: 'deploy' } });
     expect(evs).toHaveLength(1);
     expect(await processEvent({ eventId: evs[0]!.id }, deps())).toBe('decided');
     const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: evs[0]!.id }, include: { escalation: true } });
     expect(d).toMatchObject({ action: 'escalate', critical: true, decidedBy: 'code:migrate.failed' });
     expect(d.escalation).toMatchObject({ templateId: 'migrate_failed', title: 'A database migration failed' });
+  });
+
+  it('deploy: a failure first seen more than a day after it happened is old news, logged and not escalated', async () => {
+    // Its own file: the deploy cursor (offset:inode) the next tests read from stays theirs.
+    const file = join(home, '.flint', 'deploy-events-old.jsonl');
+    const now = new Date();
+    writeFileSync(file, line({ id: 'd'.repeat(32), at: new Date(now.getTime() - 25 * 3_600_000).toISOString(), stage: 'migrate', sha: sha('8') }));
+    await syncOnce(db, { ...deploySource({ file }), run: (r) => deploySource({ file }).run({ ...r, cursor: { cursor: '0:0', etag: null } }) } as Source, run(undefined, now), 'UTC');
+    const ev = await db.sourceEvent.findFirstOrThrow({ where: { source: 'deploy', sourceRef: { contains: sha('8') } } });
+    expect(await processEvent({ eventId: ev.id }, deps())).toBe('decided');
+    const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev.id }, include: { escalation: true } });
+    expect(d).toMatchObject({ action: 'log', critical: false, decidedBy: 'code:migrate.failed', escalation: null });
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: d.id } })).inputs).toMatchObject({ downgraded: 'backfill' });
   });
 
   it('knowledge: in shadow nothing is filed; an approved link writes a tainted relation', async () => {
@@ -194,7 +210,7 @@ describe.skipIf(NO_DB)('P2 sources on flint_test', () => {
 
   it('one failed migration, told by its deploy event and by its marker, is one escalation', async () => {
     const shaX = 'e'.repeat(40);
-    writeFileSync(join(home, '.flint', 'deploy-events.jsonl'), line({ id: 'c'.repeat(32), stage: 'migrate', sha: shaX }));
+    writeFileSync(join(home, '.flint', 'deploy-events.jsonl'), line({ id: 'c'.repeat(32), at: new Date().toISOString(), stage: 'migrate', sha: shaX }));
     await syncOnce(db, deploySource({ file: join(home, '.flint', 'deploy-events.jsonl') }), run(undefined, new Date()), 'UTC');
     const { raise } = await import('../../src/health/watchdog');
     await raise(db, [{ type: 'migrate.failed', ref: shaX, occurredAt: new Date(), payload: { sha: shaX } }], new Date());
@@ -202,6 +218,10 @@ describe.skipIf(NO_DB)('P2 sources on flint_test', () => {
     expect(evs).toHaveLength(2);
     for (const e of evs) await processEvent({ eventId: e.id }, deps());
     expect(await db.escalation.count({ where: { templateId: 'migrate_failed', fields: { path: ['sha'], equals: shaX.slice(0, 12) } } })).toBe(1);
+    // The second is held back as told once, not as old news.
+    const ds = await db.triageDecision.findMany({ where: { sourceEventId: { in: evs.map((e) => e.id) } }, select: { id: true } });
+    const why = await Promise.all(ds.map(async (d) => ((await db.auditEntry.findFirstOrThrow({ where: { correlationId: d.id } })).inputs as { downgraded?: string }).downgraded ?? null));
+    expect(why.sort()).toEqual([null, 'told_once']);
   });
 
   it('a link that exists already is not proposed again, and an approved duplicate completes without a second row', async () => {

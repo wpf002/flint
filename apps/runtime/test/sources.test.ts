@@ -219,8 +219,9 @@ describe.skipIf(NO_DB)('sync engine (flint_test)', () => {
   it('10 restarts with no change: one event, one version; quiet runs are counted, not logged', async () => {
     for (let i = 0; i < 10; i++) await syncOnce(db, fake, runAt(new Date(Date.now() + i * 1000)), 'UTC');
     expect(await counts()).toEqual({ events: 1, versions: 1, points: 1 });
-    const rollup = await db.auditRollup.findFirst({ where: { action: 'world.sync.launchd' } });
-    expect(rollup?.count).toBe(9);
+    // Summed over days: the ten runs may straddle midnight UTC.
+    const rollup = await db.auditRollup.aggregate({ where: { action: 'world.sync.launchd' }, _sum: { count: true } });
+    expect(rollup._sum.count).toBe(9);
     expect(await db.auditEntry.count({ where: { action: 'world.sync.launchd', kind: 'sync' } })).toBe(1);
   });
 

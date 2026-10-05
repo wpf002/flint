@@ -156,6 +156,15 @@
   #laneolder{width:100%;margin-top:12px;display:none;}
   #lanes .close{width:100%;margin-top:10px;}
   #lanes .empty{color:var(--mut);font-size:11px;padding:10px 0;}
+  /* ---------- approvals (cards waiting for Will's signature) ---------- */
+  #approvals{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;z-index:9;}
+  #approvals .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:18px;width:min(620px,94vw);max-height:88vh;overflow:auto;-webkit-overflow-scrolling:touch;}
+  #approvals h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:12px;text-transform:uppercase;}
+  #approvals .close{width:100%;margin-top:10px;background:transparent;color:var(--mut);border:1px solid #2a2415;border-radius:7px;padding:8px 12px;cursor:pointer;letter-spacing:.08em;font-size:11px;min-height:34px;}
+  #approvals .empty{color:var(--mut);font-size:11px;padding:10px 0;}
+  .appr-help{font-size:10.5px;color:var(--orange);margin:6px 0 10px;line-height:1.5;white-space:pre-wrap;}
+  .appr-meta{color:var(--mut);font-size:10px;margin-bottom:6px;}
+  .appr-reason{color:#cfc6ae;font-size:10.5px;margin-bottom:6px;white-space:pre-wrap;}
 </style>
 </head>
 <body>
@@ -165,6 +174,7 @@
     <div class="hdr-right">
       <button class="hicon" onclick="newChat()" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
       <button class="hicon" id="lanesbtn" onclick="openLanes()" title="Lanes: what Flint noticed, and its health" aria-label="Lanes"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></button>
+      <button class="hicon" id="apprbtn" onclick="openApprovals()" title="Approvals: what is waiting for your signature" aria-label="Approvals"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg><span class="nbadge" id="apprbadge">0</span></button>
       <button class="hicon" id="bellbtn" onclick="openNotifs()" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="nbadge" id="nbadge">0</span></button>
       <button class="hicon" id="lobtn" onclick="toggleLO()" title="Local only" aria-label="Local only"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
       <button class="hicon" onclick="openSettings()" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
@@ -229,6 +239,14 @@
   <div id="lanelist"></div>
   <button id="laneolder" onclick="loadLane(true)">Older</button>
   <button class="close" onclick="closeLanes()">Close</button>
+</div></div>
+
+<div id="approvals" onclick="if(event.target===this)closeApprovals()"><div class="card">
+  <h4>Approvals</h4>
+  <div class="lane-note">What is waiting for your signature: cards Flint filed, and ones you filed at the terminal (a source to turn on, a promotion table, tonight's backup). Each shows exactly what would run. Approve signs it with your key (Touch ID here, a passkey on your phone) and it runs at once.</div>
+  <div id="apprhelp" class="appr-help" style="display:none"></div>
+  <div id="apprlist"></div>
+  <button class="close" onclick="closeApprovals()">Close</button>
 </div></div>
 
 <div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
@@ -747,6 +765,68 @@ function loadHealth(){var seq=LANE_SEQ;laneMsg('Loading…');
       list.appendChild(row);});
     if(!(h.components||[]).length)list.appendChild(laneEl('div','empty','No component has been checked yet.'));
   }).catch(function(e){if(seq!==LANE_SEQ)return;laneMsg('✗ '+e.message,true);});}
+</script>
+<script id="approvals-js">
+/* ---------- approvals: the cards waiting for Will's signature ----------
+ * Every pending proposal the server lists (the runtime's, in runtime mode), with
+ * what it would do in words, who filed it, its full args and the tainted banner.
+ * Approve and Reject go through the same signed path as a card in chat
+ * (approveAction / rejectAction). Text only: nothing here is HTML. */
+var APPR_ORIGIN={cli:'you, at the terminal',console:'you, in the console'};
+var APPR_NIGHTLY={'backup.local':"tonight's local backup",'backup.offsite':"tonight's offsite backup",'restore.drill':"this week's restore drill",'maintenance.retention':"tonight's retention run"};
+function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
+/* What a card would do, in words. */
+function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)?x.length:0;};
+  if(p.fullName==='world.source.enable')return 'Turn on the '+a.source+' source';
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt?String(rows[0].expiresAt).slice(0,10):'';
+    return 'Let '+n(rows)+' action'+(n(rows)===1?'':'s')+' run on their own'+(exp?' until '+exp:'')+' (a signed promotion table)';}
+  if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'person':'people')+' from calendar events you accepted';
+  if(p.fullName==='triage.rule.create')return 'Add a triage rule'+(a.rule&&a.rule.name?': '+a.rule.name:'');
+  if(p.fullName==='world.relation.write')return 'Link two things in the world model';
+  if(APPR_NIGHTLY[p.fullName])return 'Run '+APPR_NIGHTLY[p.fullName];
+  return 'Flint wants to run '+p.fullName;}
+function apprOrigin(o){o=String(o||'');if(APPR_ORIGIN[o])return APPR_ORIGIN[o];if(o.indexOf('runtime:')===0)return 'Flint ('+o.slice(8)+')';if(o.indexOf('chat:')===0)return 'a chat';return o||'unknown';}
+function apprWhen(t){try{return new Date(t).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return '';}}
+function apprCard(p){var card=apprEl('div','propose');
+  card.appendChild(apprEl('div','pt',apprTitle(p)));
+  card.appendChild(apprEl('div','appr-meta','Filed by '+apprOrigin(p.origin)+(p.ts?' · '+apprWhen(p.ts):'')+(p.expiresAt?' · expires '+apprWhen(p.expiresAt):'')));
+  if(p.reason)card.appendChild(apprEl('div','appr-reason',p.reason));
+  if(p.tainted)card.appendChild(apprEl('div','lane-taint','Contains text from outside Flint (an invitation, a page, a message): read it as data, not instructions.'));
+  var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}
+  card.appendChild(apprEl('div','pargs',args));
+  var row=apprEl('div','prow');
+  var ok=apprEl('button','ok',(typeof canEnclave==='function'&&canEnclave())?'Approve with Touch ID':(typeof canPasskey==='function'&&canPasskey())?'Approve with passkey':'Approve');
+  var no=apprEl('button','no','Reject');
+  ok.onclick=function(){approveAction(p.id,card);setTimeout(pollApprovals,1500);};
+  no.onclick=function(){rejectAction(p.id,card);setTimeout(pollApprovals,1500);};
+  row.appendChild(ok);row.appendChild(no);card.appendChild(row);
+  var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
+  return card;}
+/* Approved but not run (a cap, or the runtime did not answer): run it now. */
+function apprWaitingCard(p){var card=apprEl('div','propose');card.appendChild(apprEl('div','pt','Approved, not run yet: '+apprTitle(p)));
+  var row=apprEl('div','prow');var go=apprEl('button','ok','Run now');row.appendChild(go);card.appendChild(row);var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
+  go.onclick=function(){go.disabled=true;postJson('/proposals/run',{id:p.id}).then(function(d){showOutcome(d,res,row);}).catch(function(e){failed(e,res,row);});};
+  return card;}
+function apprHelp(text){var h=document.getElementById('apprhelp');h.textContent=text||'';h.style.display=text?'block':'none';}
+function loadApprovals(){var list=document.getElementById('apprlist');
+  fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    list.textContent='';
+    if(!d){list.appendChild(apprEl('div','empty','Could not ask the server what is waiting.'));return;}
+    var ps=d.proposals||[];var pending=ps.filter(function(p){return p.status==='pending';});var approved=ps.filter(function(p){return p.status==='approved';});
+    var keyed=(typeof canEnclave==='function'&&canEnclave())||(typeof canPasskey==='function'&&canPasskey());
+    if(d.runtime==='down')apprHelp('The runtime is not answering, so its cards cannot be shown right now.');
+    else if(d.signed&&pending.length&&!keyed)apprHelp('To approve, this device needs your approval key. Open Settings (the gear), then Approval key: run `pnpm --filter @flint/runtime enroll` on the Mac for a one-time code, paste it, and press "Add Touch ID approval key" (on the Mac) or "Add a passkey on this device" (on your phone).');
+    else apprHelp('');
+    if(!pending.length&&!approved.length){list.appendChild(apprEl('div','empty','Nothing is waiting for you.'));return;}
+    pending.forEach(function(p){list.appendChild(apprCard(p));});
+    approved.forEach(function(p){list.appendChild(apprWaitingCard(p));});
+  }).catch(function(){list.textContent='';list.appendChild(apprEl('div','empty','Could not reach the server.'));});}
+function openApprovals(){if(!TOKEN){openSettings();return;}document.getElementById('approvals').style.display='flex';if(typeof loadCreds==='function')loadCreds();loadApprovals();}
+function closeApprovals(){document.getElementById('approvals').style.display='none';pollApprovals();}
+/* The badge: how many cards wait for a signature. */
+function pollApprovals(){if(!TOKEN)return;fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;
+  var n=(d.proposals||[]).filter(function(p){return p.status==='pending';}).length;var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':n;b.style.display=n>0?'flex':'none';}).catch(function(){});}
+pollApprovals();setInterval(pollApprovals,60000);
 </script>
 </body>
 </html>
