@@ -1,0 +1,3 @@
+#!/bin/sh
+# A no-op stand-in for afplay while tests run (test-support/quiet.ts): tests never reach the screen.
+exit 0
