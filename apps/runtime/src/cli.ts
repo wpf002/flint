@@ -7,12 +7,15 @@
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime promotion-table [--drop <pattern>]...
  *                                                    file P2's promotion table for Will to sign
+ *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
+ *                                                    P2.5); needs no database
  *
  * Run by hand, it is Will acting (context console). With --auto (the nightly
  * LaunchAgent) it is Flint acting on its own, so the tier engine decides: an
  * action still at APPROVAL waits for Will's signed approval of a proposal it
  * files once a day; a promoted one claims its cap and runs.
  */
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -26,6 +29,8 @@ import { ACTION, gate, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
 import { dumpDatabase, encryptTo, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { notifyWill } from './notify.js';
+import { scopedFetch } from './policy/egress.js';
+import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
 
 /**
  * `enroll`: a one-time code for registering Will's approval key in the console
@@ -44,8 +49,24 @@ function enroll(replace: boolean): void {
   if (replace) console.log('This is a REPLACE code: the key you register with it becomes the only one; every other key is revoked.\n');
 }
 
+/**
+ * `google-login`: the one-time Google sign-in (P2.5). It reaches Google's
+ * token endpoint and nothing else, and opens the consent page with open(1)
+ * directly (no shell, so the URL is one argument whatever it holds).
+ */
+async function loginToGoogle(): Promise<void> {
+  await googleLogin({
+    home: homedir(),
+    fetch: scopedFetch(TOKEN_ENDPOINTS),
+    open: (url) => new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()))),
+    log: (line) => console.log(line),
+  });
+  console.log('\nThen add FLINT_SOURCE_GOOGLE_CALENDAR=on to ~/.flint/runtime.override.env and approve world.source.enable for google_calendar.');
+}
+
 async function main(): Promise<void> {
   if (process.argv[2] === 'enroll') return enroll(process.argv.includes('--replace'));
+  if (process.argv[2] === 'google-login') return loginToGoogle();
   if (process.argv[2] === 'promotion-table') {
     const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
     const config = loadRuntimeConfig();
@@ -71,7 +92,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | p2-report | promotion-table [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | google-login | p2-report | promotion-table [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
