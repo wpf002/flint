@@ -191,7 +191,7 @@
       <div class="bar">
         <input id="input" placeholder="How can I help you?" autocomplete="off" />
         <input type="file" id="filepick" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.log,.ini,.conf,.env,.sql,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.h,.cpp,.hpp,.cs,.php,.sh,.zsh,.bash,.html,.css,.tex,.diff,.patch" />
-        <button class="clip" id="clipbtn" onclick="document.getElementById('filepick').click()" title="Attach images, PDFs or text files" aria-label="Attach files"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+        <button class="clip" id="clipbtn" onclick="FILE_PICKING=Date.now();document.getElementById('filepick').click()" title="Attach images, PDFs or text files" aria-label="Attach files"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
         <button class="mic" id="micbtn" onclick="toggleMic()" title="Hold a conversation — speak, and Flint speaks back" aria-label="Speak"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="18.5" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg></button>
         <button class="sendbtn" onclick="send()" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
       </div>
@@ -566,8 +566,8 @@ function pickVoice(){
 if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_flintVoice=null;pickVoice();};
 // Speech output: prefer the server's neural voice (human); fall back to the
 // local browser voice. Sentences are chained so they always play in order.
-var _ttsChain=Promise.resolve(),_ttsGen=0,_ttsAudio=null;
-function stopSpeech(){_ttsGen++;_ttsChain=Promise.resolve();try{if(_ttsAudio){_ttsAudio.pause();_ttsAudio=null;}}catch(e){}try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(e){}}
+var _ttsChain=Promise.resolve(),_ttsGen=0,_ttsAudio=null,_ttsQueued=0;/* sentences of this generation not yet spoken (update-js: not quiet) */
+function stopSpeech(){_ttsGen++;_ttsQueued=0;_ttsChain=Promise.resolve();try{if(_ttsAudio){_ttsAudio.pause();_ttsAudio=null;}}catch(e){}try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(e){}}
 function _localSpeak(clean){return new Promise(function(res){try{var u=new SpeechSynthesisUtterance(clean);var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;u.onend=u.onerror=function(){res();};window.speechSynthesis.speak(u);}catch(e){res();}});}
 // A 503 (no TTS key, or OpenAI's spend cap reached) means the browser voice for a while:
 // skip the neural request for 10 minutes instead of asking again every sentence.
@@ -592,6 +592,7 @@ function speakSynced(sentence,body,vctx){
   var clean=speakForVoice(sentence);
   var reveal=function(){vctx.displayed+=sentence;body.innerHTML=md(vctx.displayed);var tr=document.getElementById('transcript');if(tr)tr.scrollTop=9e9;};
   var blobP=clean?_neuralFetch(clean).catch(function(){return null;}):Promise.resolve(null); // fetch NOW (parallel prefetch)
+  var g=vctx.gen;if(g===_ttsGen)_ttsQueued++;var spoken=function(){if(g===_ttsGen&&_ttsQueued>0)_ttsQueued--;};
   _ttsChain=_ttsChain.then(function(){
     if(vctx.gen!==_ttsGen)return;
     return blobP.then(function(blob){
@@ -605,7 +606,7 @@ function speakSynced(sentence,body,vctx){
         }else{reveal();_localSpeak(clean).then(res);} // no neural voice → local, still synced
       });
     });
-  });
+  }).then(spoken,spoken);
 }
 function toggleMic(){
   var btn=document.getElementById('micbtn');
@@ -833,11 +834,13 @@ pollApprovals();setInterval(pollApprovals,60000);
    server stamps the page's version into it (__FLINT_UI__) and answers GET /ui-version
    with the deployed one; once they differ, the page reloads at the first quiet moment:
    nothing typed or attached, no panel open, no reply, recording, transcription, speech
-   or approval in progress, and the page hidden or untouched for a minute. The open
-   conversation survives the reload, and a restart of the Mac app (localStorage, kept
-   30 minutes; never reloaded when it cannot be kept). The Mac app asks flintIdle() the
+   or approval in progress, no file being chosen, and the page hidden or untouched for a
+   minute. The open conversation (and Local only, if on) survives the reload, and a
+   restart of the Mac app (localStorage, kept 30 minutes; never reloaded when it cannot
+   be kept). The Mac app asks flintIdle() the
    same before restarting onto a new build, and restarts only if flintSnapshot() kept it. */
-var UI_VERSION=window.__FLINT_UI__||null,UPDATE_READY=false,LAST_INPUT=Date.now();
+var UI_VERSION=window.__FLINT_UI__||null,UPDATE_READY=false,LAST_INPUT=Date.now(),FILE_PICKING=0;
+(function(){var fp=document.getElementById('filepick');if(fp&&fp.addEventListener){['change','cancel'].forEach(function(t){fp.addEventListener(t,function(){FILE_PICKING=0;});});}})();
 ['keydown','pointerdown','wheel','touchstart'].forEach(function(t){document.addEventListener(t,function(){LAST_INPUT=Date.now();},true);});
 function flintBusy(){
   var inp=document.getElementById('input');if(inp&&inp.value.trim())return true;
@@ -847,6 +850,8 @@ function flintBusy(){
   var mb=document.getElementById('micbtn');if(mb&&mb.classList&&(mb.classList.contains('busy')||mb.classList.contains('rec')))return true;
   if(typeof _ttsAudio!=='undefined'&&_ttsAudio)return true;
   if(window.speechSynthesis&&(speechSynthesis.speaking||speechSynthesis.pending))return true;
+  if(typeof _ttsQueued!=='undefined'&&_ttsQueued>0)return true;
+  if(FILE_PICKING&&Date.now()-FILE_PICKING<10*60000)return true;
   /* An approval being signed: its card's buttons dim until the outcome. */
   var t=document.getElementById('transcript'),rows=t&&t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
   for(var i=0;i<rows.length;i++){if(rows[i].style.display!=='none'&&String(rows[i].style.opacity)==='0.5')return true;}
@@ -856,7 +861,7 @@ function flintIdle(quietMs){return !flintBusy()&&(document.hidden||Date.now()-LA
 /* Keep the open conversation for the next page; false when it cannot be kept. */
 function flintSnapshot(){
   var t=document.getElementById('transcript'),html=t?t.innerHTML:'';
-  var snap={convId:convId,html:html,top:t?t.scrollTop:0,end:t?t.scrollHeight-t.scrollTop-t.clientHeight<40:true,at:Date.now()};
+  var snap={convId:convId,html:html,top:t?t.scrollTop:0,end:t?t.scrollHeight-t.scrollTop-t.clientHeight<40:true,lo:typeof LOCAL_ONLY!=='undefined'&&LOCAL_ONLY===true,at:Date.now()};
   try{localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
   /* Too large (attached photos): keep the words, not the pictures. */
   try{snap.html=html.replace(/<img\b[^>]*>/gi,'<span class="att-gone">[image]</span>');localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
@@ -871,13 +876,18 @@ function checkUpdate(){
 }
 (function resume(){var s=null;try{s=JSON.parse(localStorage.getItem('flint_resume')||'null');localStorage.removeItem('flint_resume');}catch(e){}
   if(!s||typeof s.convId!=='string'||typeof s.at!=='number'||Date.now()-s.at>=30*60000)return;
-  convId=s.convId;var t=document.getElementById('transcript');if(!t||typeof s.html!=='string')return;
+  convId=s.convId;
+  /* Local only is per session and starts off; an update is the same session, so it stays on. */
+  if(s.lo===true&&typeof LOCAL_ONLY!=='undefined'){LOCAL_ONLY=true;try{localStorage.setItem('flint_lo','1');}catch(e){}if(typeof applyLO==='function')applyLO();}
+  var t=document.getElementById('transcript');if(!t||typeof s.html!=='string')return;
   t.innerHTML=s.html;
   /* A card still waiting lost its buttons' handlers with the page: decide it in Approvals. */
   var rows=t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
   for(var i=0;i<rows.length;i++){if(rows[i].style.display==='none')continue;rows[i].textContent='';rows[i].style.opacity=1;
     var b=document.createElement('button');b.className='ok';b.textContent='Open Approvals';b.onclick=function(){openApprovals();};rows[i].appendChild(b);}
-  t.scrollTop=s.end?t.scrollHeight:(s.top||0);})();
+  t.scrollTop=s.end?t.scrollHeight:(s.top||0);
+  /* At the end: stay there once restored pictures have their height. */
+  if(s.end){var imgs=t.querySelectorAll?t.querySelectorAll('img'):[];for(var j=0;j<imgs.length;j++){if(!imgs[j].complete&&imgs[j].addEventListener)imgs[j].addEventListener('load',function(){t.scrollTop=t.scrollHeight;});}}})();
 setInterval(checkUpdate,60000);
 document.addEventListener('visibilitychange',function(){if(document.hidden)checkUpdate();});
 </script>

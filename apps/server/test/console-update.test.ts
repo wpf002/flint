@@ -25,6 +25,10 @@ class El {
   classList = { contains: (c: string) => this.classes.has(c) };
   children: El[] = [];
   onclick: (() => void) | null = null;
+  on: Record<string, () => void> = {};
+  addEventListener(t: string, f: () => void) {
+    this.on[t] = f;
+  }
   className = '';
   scrollTop = 0;
   scrollHeight = 2000;
@@ -62,6 +66,7 @@ let store: Map<string, string>;
 let full: boolean;
 let speech: { speaking: boolean; pending: boolean };
 let opened: number;
+let lo: number;
 let ctx: Record<string, unknown>;
 
 const settle = async () => {
@@ -74,7 +79,7 @@ const check = async () => {
 };
 
 function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
-  els = Object.fromEntries(['input', 'think', 'transcript', 'micbtn', 'settings', 'notifs', 'lanes', 'approvals', 'convo'].map((id) => [id, new El()]));
+  els = Object.fromEntries(['input', 'think', 'transcript', 'micbtn', 'filepick', 'settings', 'notifs', 'lanes', 'approvals', 'convo'].map((id) => [id, new El()]));
   listeners = {};
   doc = {
     hidden: false,
@@ -84,6 +89,7 @@ function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
   };
   reloads = 0;
   opened = 0;
+  lo = 0;
   full = false;
   speech = { speaking: false, pending: false };
   store = new Map();
@@ -96,6 +102,9 @@ function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
     mediaRec: null,
     _ttsAudio: null,
     convId: 'console',
+    LOCAL_ONLY: false,
+    applyLO: () => void lo++,
+    _ttsQueued: 0,
     openApprovals: () => void opened++,
     speechSynthesis: speech,
     location: { reload: () => void reloads++ },
@@ -166,6 +175,9 @@ describe('the console updating itself', () => {
       ['a recording (button)', () => void els.micbtn!.classes.add('rec'), () => void els.micbtn!.classes.delete('rec')],
       ['a transcription', () => void els.micbtn!.classes.add('busy'), () => void els.micbtn!.classes.delete('busy')],
       ['speech playing', () => void run('_ttsAudio={}'), () => void run('_ttsAudio=null')],
+      ['sentences still to speak', () => void run('_ttsQueued=2'), () => void run('_ttsQueued=0')],
+      ['a file being chosen', () => void run('FILE_PICKING=Date.now()'), () => void els.filepick!.on.change!()],
+      ['a file being chosen (cancelled)', () => void run('FILE_PICKING=Date.now()'), () => void els.filepick!.on.cancel!()],
       ['the browser voice speaking', () => void (speech.speaking = true), () => void (speech.speaking = false)],
       ['the browser voice queued', () => void (speech.pending = true), () => void (speech.pending = false)],
       [
@@ -255,5 +267,25 @@ describe('the console updating itself', () => {
     waiting!.children[0]!.onclick!();
     expect(opened).toBe(1);
     expect(decided!.children).toHaveLength(0);
+  });
+  it('a file chooser that never said it closed stops counting after 10 minutes', () => {
+    run('FILE_PICKING=Date.now()-11*60000');
+    expect(run('flintIdle(0)')).toBe(true);
+  });
+
+  it('keeps Local only on through an update, and only through an update', async () => {
+    run('LOCAL_ONLY=true');
+    deployed = 'v2';
+    doc.hidden = true;
+    await check();
+    expect(JSON.parse(store.get('flint_resume')!).lo).toBe(true);
+    boot({ resume: JSON.parse(store.get('flint_resume')!) });
+    expect(run('LOCAL_ONLY')).toBe(true);
+    expect(store.get('flint_lo')).toBe('1');
+    expect(lo).toBe(1);
+    // A page opened afresh (no snapshot) starts unlocked, as before.
+    boot();
+    expect(run('LOCAL_ONLY')).toBe(false);
+    expect(lo).toBe(0);
   });
 });

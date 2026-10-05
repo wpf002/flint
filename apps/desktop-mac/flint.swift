@@ -164,12 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   /// Auto-update: once the build on disk is not the one running, restart onto it at
   /// a quiet moment. Quiet is the console's flintIdle(): nothing typed or attached,
   /// no panel open, no reply, voice or approval in progress; no sheet or modal of
-  /// the app's own (the file chooser) open; and Will in another app, or Flint
-  /// untouched for two minutes. It restarts only once flintSnapshot() has kept
+  /// the app's own (the file chooser) open; not full screen or on another Space;
+  /// and Will in another app, or Flint untouched for two minutes. It restarts only once flintSnapshot() has kept
   /// the open conversation (localStorage, which the new instance reads).
   func checkForNewBuild() {
     guard !relaunching, let was = launchedBuild, let now = BuildStamp.current(), now != was else { return }
     guard window.attachedSheet == nil, NSApp.modalWindow == nil else { return }
+    // A new window comes back as a plain one on the current Space: wait until Flint
+    // is out of full screen and on this Space (or minimized or hidden, which it keeps).
+    guard !window.styleMask.contains(.fullScreen), window.isOnActiveSpace || window.isMiniaturized || NSApp.isHidden else { return }
     let away = !NSApp.isActive
     let js = "typeof flintIdle==='function'&&flintIdle(\(away ? 0 : 120000))&&flintSnapshot()===true"
     web.evaluateJavaScript(js) { [weak self] result, _ in

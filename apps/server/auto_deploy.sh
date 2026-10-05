@@ -17,6 +17,12 @@ RUNTIME_DIR="$HOME/.flint/runtime"
 # retried: they need a look, and the next push deploys again. The file holds
 # "<sha> <parts> <tries> <retryable>", parts the comma-joined server,runtime.
 RETRY="$STATE/deploy-retry"
+# The sha of a runtime deploy that failed past its gate: until a push changes runtime
+# code again, later pushes leave the runtime where it is instead of repeating the
+# failure (and its escalation) against the live database on every merge.
+RUNTIME_HELD="$STATE/runtime-held"
+# What the runtime bundle is built from: its code, the packages it imports, the lockfile.
+RUNTIME_PATHS='^(apps/runtime/|packages/(policy|core)/|pnpm-lock\.yaml$)'
 RETRY_EVERY_MIN=30
 RETRY_MAX=6
 ts() { date '+%F %T'; }
@@ -45,16 +51,21 @@ is_live() {
     runtime) [ "$(runtime_live)" = "$2" ] ;;
   esac
 }
-# Does the runtime need deploying at $1? Not installed yet, or runtime code (or
-# the rules it imports) changed between the live release and $1, which also
-# carries a runtime that failed under an earlier sha to the next push.
+# Does the runtime need deploying at $1? Not installed yet, or what it is built
+# from changed since the live release, which also carries a runtime that failed
+# at its gate under an earlier sha to the next push. Held (it failed past its
+# gate): only once what it is built from changed since the held sha.
 runtime_wanted() {
   [ -x ./apps/runtime/install-runtime.sh ] || return 1
-  local live; live=$(runtime_live)
+  local live held from
+  live=$(runtime_live)
   [ -n "$live" ] || return 0
   [ "$live" = "$1" ] && return 1
-  git cat-file -e "$live^{commit}" 2>/dev/null || return 0
-  git diff --name-only "$live" "$1" 2>/dev/null | grep -qE '^(apps/runtime/|packages/policy/)'
+  held=$(head -n 1 "$RUNTIME_HELD" 2>/dev/null)
+  if [ -n "$held" ] && git cat-file -e "$held^{commit}" 2>/dev/null; then from=$held; else from=$live; fi
+  [ "$from" = "$1" ] && return 1
+  git cat-file -e "$from^{commit}" 2>/dev/null || return 0
+  git diff --name-only "$from" "$1" 2>/dev/null | grep -qE "$RUNTIME_PATHS"
 }
 
 # Deploys the given parts of $1 and leaves the ones that failed in $failed, and
@@ -80,8 +91,12 @@ deploy() {
     else echo "$(ts) server deploy FAILED at $sha"; failed=server; fi
   fi
   if [[ ",$parts," == *,runtime,* ]]; then
-    if ./apps/runtime/install-runtime.sh && is_live runtime "$sha"; then echo "$(ts) runtime deployed $sha"
-    else echo "$(ts) runtime deploy FAILED at $sha (the server is unaffected)"; failed="${failed:+$failed,}runtime"; fi
+    if ./apps/runtime/install-runtime.sh && is_live runtime "$sha"; then
+      echo "$(ts) runtime deployed $sha"; rm -f "$RUNTIME_HELD"
+    else
+      echo "$(ts) runtime deploy FAILED at $sha (the server is unaffected)"; failed="${failed:+$failed,}runtime"
+      [ "$(last_event runtime "$sha")" = "gate failed" ] || { mkdir -p "$STATE"; echo "$sha" > "$RUNTIME_HELD"; }
+    fi
   fi
   for part in ${(s:,:)failed}; do
     [ "$(last_event "$part" "$sha")" = "gate failed" ] || retryable=0
@@ -98,7 +113,8 @@ quiet() {
 
 failed=""
 rsha="" rparts="" rtries=0 rretry=0
-[ -s "$RETRY" ] && read -r rsha rparts rtries rretry < "$RETRY"
+# A last line without a newline makes read return 1 after filling the fields: never fatal here.
+if [ -s "$RETRY" ]; then read -r rsha rparts rtries rretry < "$RETRY" || true; fi
 if [ "$before" != "$after" ]; then
   echo "$(ts) new code $before -> $after — redeploying Flint..."
   parts=server
@@ -111,6 +127,7 @@ elif [ "$rsha" = "$after" ]; then
   # What has gone live since (a deploy by hand) is no longer pending.
   left=""
   for part in ${(s:,:)rparts}; do is_live "$part" "$after" || left="${left:+$left,}$part"; done
+  [[ ",$left," == *,runtime,* ]] || [[ ",$rparts," != *,runtime,* ]] || rm -f "$RUNTIME_HELD"
   if [ -z "$left" ]; then
     remember "$after" "" 0 0
     echo "$(ts) up to date ($after)"
@@ -133,4 +150,10 @@ fi
 
 # The native app is not part of the server deploy. Checked every tick, not only
 # on new code; it does nothing unless apps/desktop-mac changed since it last built.
-./apps/desktop-mac/update_app.sh || echo "$(date '+%F %T') app: update_app.sh failed"
+# Only once the server is live at this commit: the app and the console it shows
+# come from the same commit, so a new app never opens onto an older console.
+if is_live server "$after"; then
+  ./apps/desktop-mac/update_app.sh || echo "$(date '+%F %T') app: update_app.sh failed"
+else
+  echo "$(date '+%F %T') app: waiting for the server to deploy $after"
+fi

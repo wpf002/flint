@@ -69,13 +69,14 @@ describe('auto_deploy.sh retries a failed deploy', () => {
       `echo runtime >> "${marks}"`,
       `[ -e "${tmp}/runtime-gate" ] && { ${ev('runtime', 'gate', 'failed')}; exit 1; }`,
       `[ -e "${tmp}/runtime-migrate" ] && { ${ev('runtime', 'migrate', 'failed')}; exit 1; }`,
+      `[ -e "${tmp}/runtime-health" ] && { ${ev('runtime', 'health', 'failed')}; exit 1; }`,
       // A sha whose migration failed before: install-runtime.sh skips it and exits 0.
       `[ -e "${tmp}/runtime-skip" ] && exit 0`,
       `mkdir -p "${runtimeDir}/releases/$(git rev-parse HEAD)" && ln -sfn "${runtimeDir}/releases/$(git rev-parse HEAD)" "${runtimeDir}/current"`,
       ev('runtime', 'deploy', 'ok'),
       'exit 0',
     ].join('\n'));
-    script(join(work, 'apps/desktop-mac/update_app.sh'), 'exit 0');
+    script(join(work, 'apps/desktop-mac/update_app.sh'), `echo app >> "${tmp}/appmarks"; exit 0`);
     writeFileSync(join(work, 'README'), 'v0\n');
     git(work, 'add', '-A');
     git(work, 'commit', '-q', '-m', 'v0');
@@ -94,12 +95,13 @@ describe('auto_deploy.sh retries a failed deploy', () => {
   };
   const tick = () => {
     rmSync(marks, { force: true });
+    rmSync(join(tmp, 'appmarks'), { force: true });
     const r = spawnSync('/bin/zsh', [AUTO_DEPLOY], {
       encoding: 'utf8',
       env: { ...process.env, HOME: tmp, FLINT_REPO: deployDir, FLINT_STATE_DIR: state, PATH: `${bin}:${process.env.PATH}` },
     });
     const ran = existsSync(marks) ? readFileSync(marks, 'utf8').trim().split('\n') : [];
-    return { status: r.status, out: r.stdout + r.stderr, ran };
+    return { status: r.status, out: r.stdout + r.stderr, ran, app: existsSync(join(tmp, 'appmarks')) };
   };
   const flag = (name: string, on = true) => (on ? writeFileSync(join(tmp, name), '') : rmSync(join(tmp, name), { force: true }));
   const retryFile = () => join(state, 'deploy-retry');
@@ -249,7 +251,74 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
     expect(retry()).toBeNull();
   });
+  it('a runtime that failed past its gate is held: unrelated pushes leave it alone, a runtime change tries again', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    const p = live();
+    for (const stage of ['runtime-migrate', 'runtime-health']) {
+      push(`breaks at ${stage}`, 'apps/runtime/x.ts');
+      flag(stage);
+      expect(tick().ran).toEqual(['server', 'runtime']);
+      flag(stage, false);
+      // Two unrelated pushes: the server deploys, the runtime is not tried again.
+      for (const f of ['docs.md', 'apps/console/index.html']) {
+        push(`unrelated ${stage} ${f}`, f);
+        const t = tick();
+        expect(t.ran, `${stage} then ${f}`).toEqual(['server']);
+      }
+      expect(live()).toBe(p);
+    }
+    // The fix touches runtime code: deployed, and no longer held.
+    const fix = push('the fix', 'apps/runtime/x.ts');
+    expect(tick().ran).toEqual(['server', 'runtime']);
+    expect(live()).toBe(fix);
+    expect(existsSync(join(state, 'runtime-held'))).toBe(false);
+    push('docs again', 'docs.md');
+    expect(tick().ran).toEqual(['server']);
+  });
+
+  it('a change to what the runtime is built from (packages/core, the lockfile) deploys the runtime', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    for (const f of ['packages/core/src/ollama.ts', 'pnpm-lock.yaml']) {
+      const sha = push(`change ${f}`, f);
+      expect(tick().ran, f).toEqual(['server', 'runtime']);
+      expect(live()).toBe(sha);
+    }
+    push('policy', 'packages/persona/x.ts');
+    expect(tick().ran).toEqual(['server']);
+  });
+
+  it('updates the app only once the server is live at the same commit', () => {
+    const sha = push('v1');
+    flag('server-gate');
+    // The failing tick stops before the app; the ticks after it say why the app waits.
+    let t = tick();
+    expect(t.status).toBe(1);
+    expect(t.app).toBe(false);
+    t = tick();
+    expect(t.app).toBe(false);
+    expect(t.out).toContain(`app: waiting for the server to deploy ${sha}`);
+    age(31);
+    flag('server-gate', false);
+    t = tick();
+    expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
+    expect(t.app).toBe(true);
+  });
+
+  it('a retry file without a final newline never stops the deploys', () => {
+    const sha = push('v1');
+    flag('server-gate');
+    tick();
+    writeFileSync(retryFile(), `${sha} server 0 1`);
+    age(31);
+    flag('server-gate', false);
+    const t = tick();
+    expect(t.status).toBe(0);
+    expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
+  });
 });
+
 
 describe('update_app.sh installs while Flint.app is open', () => {
   let repo: string, dest: string, state: string, bin: string, said: string, built: string;
