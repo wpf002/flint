@@ -25,6 +25,9 @@ Flint keeps itself current after every merge, with nothing to quit or reload:
   progress, and you in another app or Flint untouched for two minutes). In the
   background it comes back behind your other windows. A change that fails to
   build is skipped until the directory changes again, and the current app is kept.
+  The old app quits only once the new one has finished launching; if none comes
+  up it stays on its build and tries again in 30 minutes. Each step is logged in
+  `~/.flint/app-update.log`.
 - **The console.** The server stamps the page's version into it and answers
   `GET /ui-version` with the deployed one. An open console (here or on the
   phone) checks every minute and reloads at a quiet moment once they differ,
