@@ -79,8 +79,13 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
       continue;
     }
     const age = c.lastOkAt ? now.getTime() - c.lastOkAt.getTime() : Infinity;
-    const status: Status = c.consecutiveFailures >= CIRCUIT_FAILURES ? 'down' : age <= 2 * s.cadenceMs ? 'ok' : age <= 6 * s.cadenceMs ? 'degraded' : 'down';
-    out.push({ component, status, ...(c.consecutiveFailures ? { detail: clip(`${c.consecutiveFailures} failure(s) in a row`) } : c.lastOkAt ? {} : { detail: 'no good run yet' }) });
+    const fresh: Status = c.consecutiveFailures >= CIRCUIT_FAILURES ? 'down' : age <= 2 * s.cadenceMs ? 'ok' : age <= 6 * s.cadenceMs ? 'degraded' : 'down';
+    // A run that succeeded but set something aside (a calendar item it could not read) says so: its last error holds what.
+    // It is degraded, not ok, so the console lists it as an issue rather than folding it under "Normal".
+    const setAside = !c.consecutiveFailures && !!c.lastOkAt && !!c.lastError;
+    const status: Status = fresh === 'ok' && setAside ? 'degraded' : fresh;
+    const detail = c.consecutiveFailures ? `${c.consecutiveFailures} failure(s) in a row` : !c.lastOkAt ? 'no good run yet' : c.lastError ? 'the last run set something aside (see its last error)' : undefined;
+    out.push({ component, status, ...(detail ? { detail: clip(detail) } : {}) });
   }
 
   const backup = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });

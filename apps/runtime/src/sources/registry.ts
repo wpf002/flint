@@ -19,6 +19,8 @@ import { nexusSource } from './nexus.js';
 import { deploySource } from './deploy.js';
 import { knowledgeSource } from './knowledge.js';
 import { nexusInboxSource } from './nexus-inbox.js';
+import { CALENDAR_ENDPOINTS, googleCalendarSource } from './google/calendar.js';
+import { TOKEN_ENDPOINTS, createGoogleAuth } from './google/oauth.js';
 
 /** The loopback health endpoints. Flint listens on ::1 (apps/server/src/access.ts). */
 export const LOCAL_HEALTH: readonly HealthTarget[] = [
@@ -61,7 +63,7 @@ export function registry(config: Config, db: Db): Registered[] {
       source: spendSource({ dir: join(config.home, '.flint', 'spend'), evalCsv: join(config.home, '.flint', 'evolve', 'daily.csv'), caps: config.caps, tz: config.tz }),
       endpoints: [],
     },
-    // The three below exist only once Will has created their credentials.
+    // The sources below exist only once Will has created their credentials.
     ...(config.github
       ? [{
           source: githubSource({ appId: config.github.appId, installationId: config.github.installationId, privateKeyPath: config.github.keyPath, owner: config.github.owner, repos: ['flint', 'nexus', 'trident', 'helm'] }),
@@ -79,6 +81,11 @@ export function registry(config: Config, db: Db): Registered[] {
           { source: nexusSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] },
           { source: nexusInboxSource(config.nexus), endpoints: [{ origin: new URL(config.nexus.url).origin, pathPrefix: new URL(config.nexus.url).pathname, methods: ['GET', 'POST'] as const }] },
         ]
+      : []),
+    // Will's calendar (P2.5): once he has turned it on and signed in (google-login).
+    // Its only endpoints: the token refresh, and his primary calendar's events, read.
+    ...(config.google
+      ? [{ source: googleCalendarSource({ tz: config.tz, accessToken: createGoogleAuth({ dir: config.google.dir }).accessToken }), endpoints: [...TOKEN_ENDPOINTS, ...CALENDAR_ENDPOINTS] }]
       : []),
     // P2's event-only sources: local files, no network.
     { source: deploySource({ file: join(config.home, '.flint', 'deploy-events.jsonl') }), endpoints: [] },

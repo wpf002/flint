@@ -7,7 +7,8 @@
  *
  *  1. FORBIDDEN rules in code: NEVER_AUTO names, merges, trading pools, policy
  *     self-edits, self-modification outside the path allowlist, notification
- *     content pushes, anything about people, audit edits, prediction edits.
+ *     content pushes, anything about people (but world.person.create, P2.5),
+ *     writes to Google, audit edits, prediction edits.
  *     Nothing below can loosen these.
  *  2. Context rules. An autonomous context may run only the closed
  *     AUTONOMOUS_ACTIONS list: no MCP tool and nothing else, ever. A tainted chat
@@ -60,9 +61,12 @@ export interface CodeEntry {
   note?: string;
 }
 
-/** The world-model sources. Each `world.sync.<source>` reaches only its own endpoints. */
-/** The world-model sources; deploy, knowledge and nexus_inbox (P2) only raise events. */
-export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox'] as const;
+/**
+ * The world-model sources. Each `world.sync.<source>` reaches only its own
+ * endpoints. deploy, knowledge and nexus_inbox (P2) only raise events;
+ * google_calendar (P2.5) reads Will's primary calendar, read-only.
+ */
+export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox', 'google_calendar'] as const;
 export type Source = (typeof SOURCES)[number];
 
 const approval = (extra: Partial<CodeEntry> = {}): CodeEntry => ({ tier: 'approval', promotable: true, write: true, ...extra });
@@ -122,10 +126,15 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'digest.daily': approval({ shadow: true, note: 'template only, 07:30' }),
   'runtime.frontier.complete': fixed({ egress: true, note: 'stays APPROVAL; its spend kind is capped at $0' }),
   'triage.rule.create': fixed({ note: 'a triage rule is policy' }),
+  // People (P2.5, Decision 17): only someone on a calendar event Will accepted,
+  // by the name and address the invitation carried (PersonGuard in the runtime).
+  // Any other way of knowing about a person stays forbidden (step 1).
+  'world.person.create': approval({ cap: { limit: 20, period: 'day' }, note: 'only attendees of calendar events Will accepted (Decision 17); never a lookup' }),
   // Policy. Never promotable: a rule change always needs Will's signature.
   'policy.change': fixed(),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
-  'world.person.create': forbidden('no collection on people in P1'),
+  // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
+  'google.write': forbidden('Flint never writes to Google'),
   'audit.update': forbidden('the audit trail is append-only'),
   'audit.delete': forbidden('the audit trail is append-only'),
   'ledger.prediction.edit': forbidden('a prediction is never edited after it is made'),
@@ -144,6 +153,7 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
  */
 export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   ...SOURCES.map((s) => `world.sync.${s}`),
+  'world.person.create',
   'world.entity.write',
   'world.relation.write',
   'ledger.prediction.record',
@@ -189,12 +199,18 @@ const EGRESS_SEGMENTS: ReadonlySet<string> = new Set([
 
 /** Step 1 name lists. */
 const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set([
-  'audit.update', 'audit.delete', 'ledger.prediction.edit', 'notify.push_with_content', 'world.person.create',
+  'audit.update', 'audit.delete', 'ledger.prediction.edit', 'notify.push_with_content',
 ]);
 /** The one `merge` that is not a code merge: joining two world entities. */
 const MERGE_EXEMPT: ReadonlySet<string> = new Set(['world.entity.merge']);
 /** About people: `findPeople`, `peoplesearch`, `whoIs`; not `personal_notes`. Matched on the lowercased name without separators. */
 const PERSON = /person(?!al)|people|whois/;
+/**
+ * The one way to know a person (P2.5, Decision 17): world.person.create, which
+ * the runtime runs only for attendees of events Will accepted. Exact name and
+ * never an MCP tool: `findPerson` and every lookup stay forbidden.
+ */
+const PERSON_EXEMPT: ReadonlySet<string> = new Set(['world.person.create']);
 /**
  * NEVER_AUTO false positives, each reviewed: the word matches but nothing moves
  * money. `withdraw_handoff` retracts a Nexus handoff.
@@ -322,7 +338,9 @@ export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | '
       return `${action} is not a self-modification action`;
     }
   }
-  if (PERSON.test(joined(name))) return 'no collection on people';
+  if (PERSON.test(joined(name)) && (ctx.mcp || !PERSON_EXEMPT.has(action))) return 'no collection on people';
+  // Google is read-only: no action of Flint's own writes to it, whatever its name.
+  if (!ctx.mcp && action.startsWith('google.')) return 'Flint never writes to Google';
   return undefined;
 }
 

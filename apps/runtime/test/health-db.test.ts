@@ -101,6 +101,11 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     // Later than two cadences without a good run: degraded, then down.
     const later = await checkComponents({ db, config, now: new Date(now.getTime() + 5 * MIN), sources: [{ name: 'launchd', cadenceMs: 2 * MIN }] });
     expect(later.find((c) => c.component === 'source:launchd')!.status).toBe('degraded');
+    // A good run that set something aside (a calendar item it could not read) is degraded, with why.
+    await owner(`UPDATE "SourceCursor" SET "lastError" = 'an item set aside', "consecutiveFailures" = 0 WHERE source = 'launchd'`);
+    const aside = (await checkComponents({ db, config, now, sources: [{ name: 'launchd', cadenceMs: 2 * MIN }] })).find((c) => c.component === 'source:launchd');
+    expect(aside).toMatchObject({ status: 'degraded', detail: 'the last run set something aside (see its last error)' });
+    await owner(`UPDATE "SourceCursor" SET "lastError" = NULL WHERE source = 'launchd'`);
     await recordChecks(db, checks, now);
     const report = await healthReport(db, config, now);
     expect(report.triage).toBe('on');

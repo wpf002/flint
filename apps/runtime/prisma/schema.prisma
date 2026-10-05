@@ -189,6 +189,7 @@ model Entity {
   outgoing       Relation[]      @relation("RelFrom")
   incoming       Relation[]      @relation("RelTo")
   predictions    Prediction[]
+  texts          EntityText[]
 
   @@unique([kind, key])
   @@index([kind, status, updatedAt])
@@ -235,11 +236,28 @@ model Relation {
   @@index([sourceEventId])
 }
 
+/// p25_google: untrusted text about an entity, kept out of the world model so
+/// it can be deleted (a calendar event's title). Refreshed while the entity is
+/// seen; retention deletes it 7 days after it last was, forget at once.
+model EntityText {
+  entityId   String
+  entity     Entity   @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  field      String // CHECK title
+  text       String
+  source     String
+  tainted    Boolean  @default(true) // CHECK tainted
+  observedAt DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([entityId, field])
+  @@index([observedAt])
+}
+
 model EntitySource {
   id           String   @id @default(cuid())
   entityId     String
   entity       Entity   @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  source       String // launchd|health|git|spend|github|railway|nexus|google
+  source       String // CHECK launchd|health|git|spend|github|railway|nexus|google|deploy|knowledge|nexus_inbox|google_calendar
   externalId   String
   namespace    String?
   accountOwner String // CHECK = 'will'

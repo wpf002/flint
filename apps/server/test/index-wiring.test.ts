@@ -49,4 +49,9 @@ describe('index.ts wiring', () => {
   it("reports a 5xx answer as route.error, except an eval replay's", () => {
     expect(src).toMatch(/res\.statusCode >= 500 && res\.statusCode <= 599 && route && !turn\?\.eval\) events\.push\(\{ type: 'route\.error'/);
   });
+
+  it('the Watcher starts only while FLINT_WATCHER is not off (P2.5)', () => {
+    expect(src).toContain('if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();');
+    expect(src.match(/new Watcher\(/g)).toHaveLength(1);
+  });
 });

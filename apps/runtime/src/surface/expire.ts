@@ -1,7 +1,9 @@
 /**
  * expire.escalations (hourly): an escalation still open (or acknowledged and
- * left) a week later, or past its prediction's resolve time, expires. Each
- * expiry is audited, and a delivery that never went out is closed with it.
+ * left) a week later, or past its prediction's resolve time, expires. So does a
+ * calendar heads-up once its event has started (a deadline: once its day is
+ * over), or once a newer heads-up for the same event replaced it (it moved).
+ * Each expiry is audited, and a delivery that never went out is closed with it.
  */
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
@@ -10,10 +12,18 @@ export const ESCALATION_TTL_MS = 7 * 24 * 3_600_000;
 
 export async function expireEscalations(db: Db, now = new Date()): Promise<number> {
   const due = await db.$queryRaw<Array<{ id: string; tainted: boolean; why: string }>>`
-    SELECT e.id, e.tainted, CASE WHEN e."createdAt" < ${new Date(now.getTime() - ESCALATION_TTL_MS)} THEN 'week' ELSE 'resolveBy' END AS why
+    SELECT e.id, e.tainted,
+           CASE WHEN e."createdAt" < ${new Date(now.getTime() - ESCALATION_TTL_MS)} THEN 'week'
+                WHEN p."resolveBy" < ${now} THEN 'resolveBy'
+                WHEN e.fields->>'until' < ${now.toISOString()} THEN 'passed'
+                ELSE 'superseded' END AS why
     FROM "Escalation" e LEFT JOIN "Prediction" p ON p.id = e."predictionId"
     WHERE e.status IN ('open', 'acked')
-      AND (e."createdAt" < ${new Date(now.getTime() - ESCALATION_TTL_MS)} OR p."resolveBy" < ${now})
+      AND (e."createdAt" < ${new Date(now.getTime() - ESCALATION_TTL_MS)} OR p."resolveBy" < ${now}
+           OR (e."templateId" = 'calendar_upcoming' AND (
+                 e.fields->>'until' < ${now.toISOString()}
+                 OR EXISTS (SELECT 1 FROM "Escalation" n WHERE n."templateId" = 'calendar_upcoming' AND n.fields->>'item' = e.fields->>'item'
+                              AND n."createdAt" > e."createdAt"))))
     ORDER BY e."createdAt"
     LIMIT 500`;
   for (const e of due) {

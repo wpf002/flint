@@ -73,6 +73,13 @@ const Env = z.object({
   /** Health endpoints off the box: `name=https://host/path,...` (Railway services). */
   HEALTH_EXTRA: z.string().optional(),
   /**
+   * Will's calendar (P2.5): `on` registers the google_calendar source, which
+   * reads ~/.flint/google (the OAuth client Will downloaded, and the token
+   * `google-login` wrote). Anything else, blank included, is off. Turning it on
+   * still needs an approved world.source.enable.
+   */
+  FLINT_SOURCE_GOOGLE_CALENDAR: z.string().optional(),
+  /**
    * Triage (P2): `on` to run it; anything else, blank included, is off (the
    * sources keep running). Off by default: it is turned on, in
    * runtime.override.env, once the chat baseline it is measured against exists.
@@ -108,6 +115,8 @@ export interface Config {
   github?: { appId: string; installationId: string; keyPath: string; owner: string };
   railway: Record<string, string>;
   nexus?: { url: string; token: string };
+  /** The calendar source (P2.5): where its OAuth client and token live. */
+  google?: { dir: string };
   caps: Record<'anthropic' | 'openai' | 'perplexity' | 'tavily', { dailyUsd?: number; monthlyUsd?: number }>;
   /** P2 triage runs (else the sources run and nothing is triaged). */
   triage: boolean;
@@ -166,6 +175,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         .map(([k, v]) => [k.slice('RAILWAY_TOKEN_'.length).toLowerCase(), v as string]),
     ),
     ...(e.NEXUS_MCP_URL && e.NEXUS_READ_TOKEN ? { nexus: { url: e.NEXUS_MCP_URL, token: e.NEXUS_READ_TOKEN } } : {}),
+    ...(e.FLINT_SOURCE_GOOGLE_CALENDAR?.trim().toLowerCase() === 'on' ? { google: { dir: join(e.HOME, '.flint', 'google') } } : {}),
     healthExtra,
     caps: {
       anthropic: cap(e.FLINT_BUDGET_ANTHROPIC_DAILY_USD, e.FLINT_BUDGET_ANTHROPIC_MONTHLY_USD),

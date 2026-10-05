@@ -13,7 +13,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, LANES, ServerEventBatchIn, TriageRecent, type ServerEvent } from '@flint/policy';
+import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, InboxTitles, LANES, ServerEventBatchIn, TriageRecent, type ServerEvent } from '@flint/policy';
 import type { Config, RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import type { Bus } from '../bus.js';
@@ -25,6 +25,7 @@ import { fieldFreeTitle } from '../templates/escalations.js';
 import { healthReport } from '../health/checks.js';
 import { clip } from '../sources/text.js';
 import { p2Report } from '../report/exit.js';
+import { p25Report } from '../report/p25.js';
 
 export interface P2Deps {
   db: Db;
@@ -95,6 +96,23 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
   });
 
   // ---- the console: the lanes, in full --------------------------------------------------
+  // The titles behind lane items (a calendar event's), for Will's eyes in the console (scope events:
+  // never the chat model's). A route of its own: an older server never asks, so never gets a field it refuses.
+  app.get('/v1/inbox/titles', { preHandler: need('events') }, async (req) => {
+    const { ids } = z.object({ ids: z.string().max(4200) }).strict().parse(req.query);
+    const list = [...new Set(ids.split(',').filter(Boolean))];
+    if (list.length > 100 || !list.every((i) => /^[A-Za-z0-9_-]{1,40}$/.test(i))) throw new Refused(400, 'ids: up to 100 decision ids, comma-separated');
+    const rows = await db.triageDecision.findMany({ where: { id: { in: list } }, select: { id: true, sourceEventId: true } });
+    const events = await db.sourceEvent.findMany({ where: { id: { in: rows.map((r) => r.sourceEventId) } }, select: { id: true, payload: true } });
+    const entities = await entitiesOf(db, events);
+    const texts = new Map((await db.entityText.findMany({ where: { entityId: { in: [...entities.values()].map((e) => e.id) }, field: 'title' }, select: { entityId: true, text: true } })).map((t) => [t.entityId, t.text]));
+    const titles = rows.flatMap((r) => {
+      const e = entities.get(r.sourceEventId);
+      const t = e ? texts.get(e.id) : undefined;
+      return t ? [{ id: r.id, title: clip(t, 300) }] : [];
+    });
+    return out(InboxTitles, { titles });
+  });
   app.get('/v1/inbox', { preHandler: need('events') }, async (req) => {
     const q = z.object({ lane: z.enum(LANES), before: z.string().datetime({ offset: true }).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().parse(req.query);
     const rows = await db.triageDecision.findMany({
@@ -168,6 +186,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
 
   // P2's exit criteria, measured now: numbers and verdicts only.
   app.get('/v1/p2/report', { preHandler: need('world:read') }, async () => p2Report(db, { tz: d.config.tz ?? 'America/Chicago', home: d.config.home ?? '' }));
+  app.get('/v1/p25/report', { preHandler: need('world:read') }, async () => p25Report(db, { home: d.config.home ?? '', tz: d.config.tz ?? 'America/Chicago' }));
 
   // ---- the model's projections (the runtime connector) ---------------------------------
   const Limit = z.object({ limit: z.coerce.number().int().min(1).max(20).default(10) }).strict();

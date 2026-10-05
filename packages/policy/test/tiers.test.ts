@@ -36,7 +36,7 @@ describe('step 1: forbidden in code', () => {
   });
 
   it('an ActionPolicy cannot loosen a FORBIDDEN action', () => {
-    for (const action of ['audit.delete', 'ledger.prediction.edit', 'world.person.create', 'notify.push_with_content']) {
+    for (const action of ['audit.delete', 'ledger.prediction.edit', 'world.person.lookup', 'google.calendar.write', 'notify.push_with_content']) {
       const d = resolveTier(action, { ...chat, policies: [row(action, 'alone'), row('*', 'alone')], now: NOW });
       expect(d.tier, action).toBe('forbidden');
     }
@@ -71,10 +71,23 @@ describe('step 1: forbidden in code', () => {
     expect(resolveTier('selfmod.force_push', chat).tier).toBe('forbidden');
   });
 
-  it('nothing about people', () => {
+  it('nothing about people, but world.person.create (P2.5: calendar attendees only, at APPROVAL)', () => {
     expect(resolveTier('world.person.lookup', chat).tier).toBe('forbidden');
     expect(resolveTier('x', { ...chat, mcp: mcp('contacts', 'find_people', { readOnlyHint: true }) }).tier).toBe('forbidden');
-    expect(forbiddenReason('world.person.create', {})).toMatch(/forbidden|people/);
+    // The exemption is the exact name of Flint's own action, never an MCP tool of that name.
+    expect(forbiddenReason('world.person.create', {})).toBeUndefined();
+    expect(resolveTier('x', { ...chat, mcp: mcp('world', 'person.create') }).tier).toBe('forbidden');
+    expect(resolveTier('world.person.create', chat).tier).toBe('approval');
+    expect(resolveTier('world.person.create', auto)).toMatchObject({ tier: 'approval', cap: { limit: 20, period: 'day' } });
+    for (const a of ['world.person.createAll', 'world.people.create', 'world.person.create_from_mail']) expect(resolveTier(a, chat).tier, a).toBe('forbidden');
+  });
+
+  it('Google is read-only: no action of Flint\'s own writes to it, and no policy changes that', () => {
+    for (const a of ['google.write', 'google.calendar.insert', 'google.gmail.send']) {
+      expect(resolveTier(a, { ...chat, policies: [row(a, 'alone'), row('google.*', 'alone')], now: NOW }).tier, a).toBe('forbidden');
+      expect(resolveTier(a, auto).tier, a).toBe('forbidden');
+    }
+    expect(resolveTier('world.sync.google_calendar', auto).tier).toBe('approval');
   });
 });
 

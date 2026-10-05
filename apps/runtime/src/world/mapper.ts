@@ -8,13 +8,14 @@
  *    when it was seen.
  *  - Forgotten entities stay forgotten, and a source key Will asked Flint to
  *    forget is never recreated (the database refuses it too).
- *  - People are never created in P1.
+ *  - A person is created only through world.person.create (PersonGuard,
+ *    ./people.ts); an ordinary sync that reports one is refused.
  */
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { digestOf, mergeTaintedPaths } from '@flint/policy';
 import type { Tx } from '../db.js';
-import { STATE, FORBIDDEN_KINDS } from './kinds.js';
+import { STATE, GUARDED_KINDS } from './kinds.js';
 
 export interface Observation {
   kind: string;
@@ -31,6 +32,8 @@ export interface Observation {
   sourceEventId?: string;
   observedAt: Date;
   actor: string;
+  /** Set only by world.person.create's executor, after PersonGuard passed (./people.ts). */
+  via?: 'world.person.create';
 }
 
 export type Applied = 'created' | 'updated' | 'unchanged' | 'skipped';
@@ -53,7 +56,7 @@ function patchOf(before: Record<string, unknown>, after: Record<string, unknown>
 const vid = () => `ev${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
 export async function applyObservation(tx: Tx, o: Observation): Promise<Applied> {
-  if (FORBIDDEN_KINDS.has(o.kind)) throw new Rejected(`world.person.create is forbidden`);
+  if (GUARDED_KINDS.has(o.kind) && o.via !== 'world.person.create') throw new Rejected(`a ${o.kind} is created only through world.person.create`);
   const schema = STATE[o.kind];
   if (!schema) throw new Rejected(`unknown entity kind ${o.kind}`);
   const parsed = schema.safeParse(o.state);

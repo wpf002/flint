@@ -38,6 +38,7 @@ SECRETS=(
   --exclude './legion'             # helper scripts with inline credentials
   --exclude './tokens'             # per-client token files
   --exclude './enroll-code'        # the one-time code for registering an approval key
+  --exclude './google'             # the Google OAuth client and refresh token (P2.5 calendar)
 )
 
 # Optional: encrypt the offsite copy to an age public key whose private half lives

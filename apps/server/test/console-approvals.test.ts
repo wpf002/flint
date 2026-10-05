@@ -280,6 +280,53 @@ describe('the console Approvals panel', () => {
     expect(decided.map((d) => d[1])).toEqual(['n']);
   });
 
+  it('a person card names each address it would store, and keeps a "Last, First" name whole', async () => {
+    const people = [
+      { name: 'Kim, Alex', email: 'alex.kim@corp.example', emailHash: 'a'.repeat(64) },
+      { name: 'Mom', email: 'mallory@evil.example', emailHash: 'b'.repeat(64) },
+      { name: 'sam@corp.example', email: 'sam@corp.example', emailHash: 'c'.repeat(64) },
+    ];
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pp', fullName: 'world.person.create', origin: 'runtime:google_calendar', tainted: true, args: { people } })] } });
+    await open();
+    const shown = ids.apprlist!.children[0]!.children[0]!.shown();
+    expect(shown).toContain('Add 3 People from Calendar');
+    expect(shown).toContain('PeopleKim, Alex (alex.kim@corp.example) · Mom (mallory@evil.example) · sam@corp.example');
+    expect(shown).not.toContain('a'.repeat(64));
+    expect(shown).toContain('Outside Text');
+  });
+
+  it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
+    const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'google', 'calendar.ts'), 'utf8');
+    const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
+    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'world.person.create', dailyCap: 20, expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
+    await open();
+    const rows = ids.apprlist!.children[0]!.children;
+    expect(rows[0]!.shown()).toContain('LimitsRead Your Calendar · Add People from Calendar 20 a Day');
+    expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
+    expect(rows[1]!.shown()).toContain(`Your calendar, read-only, every ${minutes} minutes`);
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['gc']);
+  });
+
+  it('a signed person card says who was added, and who was not', () => {
+    const fns = /(function resText[\s\S]*?function showOutcome[\s\S]*?'bad'\);\})/.exec(html)![1]!;
+    const c: Record<string, unknown> = {};
+    createContext(c);
+    runInContext(fns, c);
+    const say = (action: Record<string, unknown>) => {
+      const r = new El('div'), row = new El('div');
+      (c.showOutcome as (d: unknown, r: El, row: El) => void)({ action }, r, row);
+      return r.textContent;
+    };
+    expect(say({ status: 'done', result: { created: 0, skipped: 3 } })).toBe('Nobody Added · Skipped 3');
+    expect(say({ status: 'done', result: { created: 2, skipped: 1 } })).toBe('Added 2 People · Skipped 1');
+    expect(say({ status: 'done', result: { created: 1, skipped: 0 } })).toBe('Added 1 Person');
+    expect(say({ status: 'done', note: 'ran tonight', result: { relationId: 'r1' } })).toBe('Done: ran tonight');
+  });
+
   it('the approvals panel never writes HTML', () => {
     expect(apprJs.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });

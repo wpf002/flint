@@ -201,6 +201,9 @@ chmod 600 "$ENVF.new" && mv "$ENVF.new" "$ENVF"
 # never written here, only kept readable by its owner alone (the runtime refuses
 # to start on one others can read).
 [ -f "$DATA/runtime.override.env" ] && chmod 600 "$DATA/runtime.override.env"
+# The calendar's OAuth client and refresh token (google-login writes them 0600):
+# the directory stays its owner's alone too.
+[ -d "$DATA/google" ] && chmod 700 "$DATA/google"
 
 # The LaunchAgent: node on the current release; no secrets in the plist.
 NODE="$(command -v node)"

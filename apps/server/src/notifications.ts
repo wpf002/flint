@@ -172,6 +172,15 @@ export class Notifications {
  * integration (e.g. expired calendar OAuth) degrades quietly instead of taking
  * the watcher down.
  */
+/**
+ * `FLINT_WATCHER=off` (or 0, false, no) turns the Watcher off: once the
+ * runtime's google_calendar source is live it owns the calendar (Machine plan
+ * P2.5), with titles kept out of notes. Unset, or anything else: on.
+ */
+export function watcherEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return !/^(off|0|false|no)$/i.test(env.FLINT_WATCHER?.trim() ?? '');
+}
+
 export class Watcher {
   private timer: ReturnType<typeof setInterval> | undefined;
   constructor(

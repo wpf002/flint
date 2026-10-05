@@ -8,6 +8,10 @@ import { z } from 'zod';
 
 const sha = z.string().regex(/^[0-9a-f]{7,64}$/);
 const short = z.string().max(120);
+/** An instant, as a UTC ISO string to the millisecond (what Date#toISOString gives). */
+const isoTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+/** sha256 of an address, lowercased and trimmed (people are keyed by it, never by the address). */
+const emailHash = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const STATE: Record<string, z.ZodTypeAny> = {
   service: z
@@ -49,7 +53,29 @@ export const STATE: Record<string, z.ZodTypeAny> = {
   project: z.object({ status: z.enum(['active', 'archived']).optional() }).strict(),
   thread: z.object({ status: z.enum(['open', 'archived']).optional(), project: short.optional() }).strict(),
   deadline: z.object({ dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), source: short }).strict(),
+  // P2.5: an event on Will's calendar (a time he has given away). Times are the
+  // event's own, not volatile; the title is never here (EntityText). Attendees
+  // are counted, and named only as hashes of their addresses: the people Will
+  // may meet are created from them (PersonGuard), and nobody else.
+  commitment: z
+    .object({
+      source: z.enum(['google_calendar']),
+      startsAt: isoTime,
+      endsAt: isoTime,
+      allDay: z.boolean(),
+      // Will's answer. A declined event is not a commitment and is never kept.
+      response: z.enum(['accepted', 'tentative', 'needs_action', 'organizer']),
+      eventStatus: z.enum(['confirmed', 'tentative']),
+      // Calendar commitments are Will's own; later sources (mail, chat) propose unconfirmed ones.
+      confirmation: z.enum(['confirmed', 'unconfirmed']),
+      recurring: z.boolean().optional(),
+      attendeeHashes: z.array(emailHash).max(200).optional(),
+    })
+    .strict(),
+  // P2.5 (Decision 17): someone on an event Will accepted, and only that: their
+  // name (tainted) and address. Created only through world.person.create.
+  person: z.object({ source: z.enum(['google_calendar']), email: z.string().email().max(254), emailHash }).strict(),
 };
 
-/** People are FORBIDDEN in P1 (world.person.create). */
-export const FORBIDDEN_KINDS = new Set(['person']);
+/** Kinds an ordinary sync may never write: a person exists only through world.person.create (PersonGuard). */
+export const GUARDED_KINDS = new Set(['person']);

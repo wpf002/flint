@@ -12,8 +12,11 @@
     "backup": "tsx src/cli.ts backup",
     "drill": "tsx src/cli.ts drill",
     "enroll": "tsx src/cli.ts enroll",
+    "google-login": "tsx src/cli.ts google-login",
+    "enable-source": "tsx src/cli.ts enable-source",
     "offsite": "tsx src/cli.ts offsite",
     "p2-report": "tsx src/cli.ts p2-report",
+    "p25-report": "tsx src/cli.ts p25-report",
     "promotion-table": "tsx src/cli.ts promotion-table"
   },
   "dependencies": {

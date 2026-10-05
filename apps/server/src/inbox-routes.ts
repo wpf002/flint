@@ -20,7 +20,7 @@
  * in its audit trail (it is the one writer).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { FEEDBACK, HealthReport, InboxPage, LANES } from '@flint/policy';
+import { FEEDBACK, HealthReport, InboxPage, InboxTitles, LANES } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import type { Runtime } from './audit-sink';
 
@@ -115,6 +115,23 @@ export async function inboxRoutes(req: IncomingMessage, res: ServerResponse, url
     if (!a.ok) return failed(res, deps, a, 'inbox', true);
     const page = InboxPage.safeParse(a.json);
     if (!page.success) return malformed(res, deps, 'inbox', paths(page.error));
+    // A calendar event's title (P2.5), asked for on its own: a runtime that predates it answers 404 and the
+    // page goes without. A title is an invitation author's text, so its item carries the tainted banner.
+    const ids = page.data.items.filter((i) => i.entity).map((i) => i.id);
+    if (ids.length) {
+      const t = await ask(deps, rt, 'GET', `/v1/inbox/titles?${new URLSearchParams({ ids: ids.join(',') })}`);
+      const titles = t.ok ? InboxTitles.safeParse(t.json) : undefined;
+      if (titles?.success) {
+        const byId = new Map(titles.data.titles.map((x) => [x.id, x.title]));
+        for (const item of page.data.items) {
+          const title = byId.get(item.id);
+          if (title && item.entity) {
+            item.entity.title = title;
+            item.tainted = true;
+          }
+        }
+      }
+    }
     return reply(res, 200, page.data);
   }
 

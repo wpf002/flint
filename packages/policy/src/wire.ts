@@ -161,7 +161,11 @@ export const InboxItem = z
     reasonCode: z.enum(REASON_CODES).nullable(),
     source: z.string().max(40),
     eventType: z.string().max(80),
-    entity: z.object({ ref: Ref, kind: z.string().max(40), name: z.string().max(300) }).strict().nullable(),
+    /**
+     * `title`: the entity's untrusted text kept outside the world model (P2.5: a
+     * calendar event's title), for Will in the console only; it is always tainted.
+     */
+    entity: z.object({ ref: Ref, kind: z.string().max(40), name: z.string().max(300), title: z.string().max(300).optional() }).strict().nullable(),
     /** The model's words (it may have read a stranger's text): text only, under the tainted banner; null once purged. */
     reasoning: z.string().max(500).nullable(),
     feedback: z.enum(FEEDBACK).nullable(),
@@ -171,6 +175,14 @@ export const InboxItem = z
   })
   .strict();
 export const InboxPage = z.object({ items: z.array(InboxItem), next: At.nullable() }).strict();
+/**
+ * The titles behind a page of lane items (P2.5: calendar events), asked for
+ * separately so a server that predates them never receives a field it would
+ * refuse. Keyed by decision id; for Will in the console only, always tainted.
+ */
+export const InboxTitles = z
+  .object({ titles: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/), title: z.string().min(1).max(300) }).strict()).max(100) })
+  .strict();
 
 export const HEALTH_STATUS = ['ok', 'degraded', 'down', 'unknown', 'disabled'] as const;
 export const HealthReport = z

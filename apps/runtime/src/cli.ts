@@ -5,27 +5,38 @@
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
- *   pnpm --filter @flint/runtime promotion-table [--drop <pattern>]...
- *                                                    file P2's promotion table for Will to sign
+ *   pnpm --filter @flint/runtime p25-report           P2.5's exit criteria, measured now (JSON)
+ *   pnpm --filter @flint/runtime promotion-table [--phase p2|p25] [--drop <pattern>]...
+ *                                                    file a phase's promotion table for Will to sign
+ *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
+ *                                                    to sign in the console
+ *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
+ *                                                    P2.5); needs no database
  *
  * Run by hand, it is Will acting (context console). With --auto (the nightly
  * LaunchAgent) it is Flint acting on its own, so the tier engine decides: an
  * action still at APPROVAL waits for Will's signed approval of a proposal it
  * files once a day; a promoted one claims its cap and runs.
  */
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
-import { promotionTable } from './governance/promotion.js';
+import { p25Report } from './report/p25.js';
+import { promotionTable, type Phase } from './governance/promotion.js';
+import { proposeEnable } from './governance/internal.js';
+import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, gate, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
 import { dumpDatabase, encryptTo, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { notifyWill } from './notify.js';
+import { scopedFetch } from './policy/egress.js';
+import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
 
 /**
  * `enroll`: a one-time code for registering Will's approval key in the console
@@ -44,14 +55,56 @@ function enroll(replace: boolean): void {
   if (replace) console.log('This is a REPLACE code: the key you register with it becomes the only one; every other key is revoked.\n');
 }
 
+/**
+ * `google-login`: the one-time Google sign-in (P2.5). It reaches Google's
+ * token endpoint and nothing else, and opens the consent page with open(1)
+ * directly (no shell, so the URL is one argument whatever it holds).
+ */
+async function loginToGoogle(): Promise<void> {
+  await googleLogin({
+    home: homedir(),
+    fetch: scopedFetch(TOKEN_ENDPOINTS),
+    open: (url) => new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()))),
+    log: (line) => console.log(line),
+  });
+  // The override file must stay 0600 (the runtime refuses to start on a looser one), so the commands make it so.
+  console.log([
+    '',
+    'Then switch it on (the runtime refuses an override file anyone else can read, so keep it 0600):',
+    '  touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env',
+    // On its own line, once: a file saved without a final newline would glue it onto its last setting.
+    "  grep -q '^FLINT_SOURCE_GOOGLE_CALENDAR=' ~/.flint/runtime.override.env || printf '\\nFLINT_SOURCE_GOOGLE_CALENDAR=on\\n' >> ~/.flint/runtime.override.env",
+    '  launchctl kickstart -k gui/$(id -u)/com.flint.runtime',
+    'and file its card, then sign it in the console\'s Approvals:',
+    '  cd ~/flint && pnpm --filter @flint/runtime enable-source google_calendar',
+  ].join('\n'));
+}
+
 async function main(): Promise<void> {
   if (process.argv[2] === 'enroll') return enroll(process.argv.includes('--replace'));
-  if (process.argv[2] === 'promotion-table') {
-    const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
+  if (process.argv[2] === 'google-login') return loginToGoogle();
+  if (process.argv[2] === 'enable-source') {
+    const source = process.argv[3] ?? '';
+    if (!(SOURCES as readonly string[]).includes(source)) throw new Error(`enable-source: one of ${SOURCES.join(', ')}`);
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      const t = await promotionTable(db, { drop });
+      const p = await proposeEnable(db, source);
+      console.log(`${p.deduped ? 'already filed' : 'filed'}: proposal ${p.id}, to turn on ${source}. Sign it in the console (Approvals) with your key; it runs once signed.`);
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
+  if (process.argv[2] === 'promotion-table') {
+    const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
+    const at = process.argv.indexOf('--phase');
+    const phase = at === -1 ? 'p2' : process.argv[at + 1];
+    if (phase !== 'p2' && phase !== 'p25') throw new Error('promotion-table: --phase is p2 or p25');
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      const t = await promotionTable(db, { phase: phase as Phase, drop, tz: config.tz });
       console.log(`${t.deduped ? 'already filed' : 'filed'}: proposal ${t.proposalId}, ${t.rows.length} rows to ALONE until ${t.rows[0]!.expiresAt}`);
       for (const r of t.rows) console.log(`  ${r.pattern}${r.dailyCap ? ` (cap ${r.dailyCap}/day)` : ''}`);
       console.log('Sign it in the console (Approvals) with your key, or let it expire.');
@@ -60,18 +113,18 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (process.argv[2] === 'p2-report') {
+  if (process.argv[2] === 'p2-report' || process.argv[2] === 'p25-report') {
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      console.log(JSON.stringify(await p2Report(db, config), null, 2));
+      console.log(JSON.stringify(process.argv[2] === 'p2-report' ? await p2Report(db, config) : await p25Report(db, config), null, 2));
     } finally {
       await db.$disconnect();
     }
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | p2-report | promotion-table [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | p2-report | p25-report | promotion-table [--phase p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

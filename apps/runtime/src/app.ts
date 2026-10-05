@@ -255,12 +255,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     };
   });
   // Reading one entity returns its tainted fields too, marked, so the reader
-  // (chat) can taint its turn (plan 3.0.3).
+  // (chat) can taint its turn (plan 3.0.3). That includes its untrusted text
+  // kept outside the world model (P2.5: a calendar title), always tainted.
   app.get('/v1/world/entities/:id', { preHandler: need('world:read') }, async (req, reply) => {
     const { id } = Id.parse(req.params);
-    const e = await db.entity.findUnique({ where: { id }, include: { sources: { select: { source: true, lastSyncedAt: true } } } });
-    if (!e || e.status === 'forgotten') return reply.code(404).send({ error: 'no such entity' });
-    return { entity: e, tainted: e.taintedPaths.length > 0 };
+    const found = await db.entity.findUnique({ where: { id }, include: { sources: { select: { source: true, lastSyncedAt: true } }, texts: { select: { field: true, text: true } } } });
+    if (!found || found.status === 'forgotten') return reply.code(404).send({ error: 'no such entity' });
+    const { texts: rows, ...e } = found;
+    const texts = Object.fromEntries(rows.map((t) => [t.field, t.text]));
+    const taintedPaths = [...e.taintedPaths, ...rows.map((t) => `texts.${t.field}`)];
+    return { entity: { ...e, ...(rows.length ? { texts } : {}), taintedPaths }, tainted: taintedPaths.length > 0 };
   });
 
   // ---- ledger -----------------------------------------------------------------------

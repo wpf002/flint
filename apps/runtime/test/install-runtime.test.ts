@@ -40,6 +40,16 @@ describe('install-runtime.sh', () => {
     expect(readFileSync(join(data, 'runtime.override.env'), 'utf8')).toBe('FLINT_RUNTIME_TRIAGE=on\n');
   });
 
+  it("keeps the calendar's token directory (P2.5) its owner's alone, and makes none when it is absent", () => {
+    const line = SCRIPT.split('\n').find((l) => l.includes('$DATA/google') && l.includes('chmod'))!;
+    const data = mkdtempSync(join(tmpdir(), 'rt-install-'));
+    expect(zsh(`DATA=${data}\n${line}\necho END`).stdout).toContain('END');
+    expect(existsSync(join(data, 'google'))).toBe(false);
+    mkdirSync(join(data, 'google'), { mode: 0o755 });
+    expect(zsh(`DATA=${data}\n${line}\necho END`).stdout).toContain('END');
+    expect(statSync(join(data, 'google')).mode & 0o777).toBe(0o700);
+  });
+
   it('writes the triage model settings only when they are loopback and well-formed', () => {
     const block = between('OLLAMA_HOST_V="$(', 'OLLAMA_NUM_CTX=$OLLAMA_CTX_V"; fi');
     const run = (host: string, model: string, ctx: string) => {

@@ -52,6 +52,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
+| `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
 | `PORT` | no | Injected by Railway. |
 
@@ -222,10 +223,11 @@ both ways (Machine plan P2):
   console; `channels` adds a banner and the content-free phone ping, always with the in-app
   note; a resent `ref` is a duplicate), `/internal/load` (`/chat` turns in flight: triage
   yields to them), `/internal/complete` (see "Spend caps"), `/internal/spend-external`.
-- **The console's Lanes view** (the tray icon): the relevant and quiet lanes page by page,
-  each decision with its escalation, its tainted banner and three labels (should escalate,
-  should be quiet, OK), Acknowledge and Dismiss on an open escalation, and the runtime's health
-  report. Through the routes in the table above (src/inbox-routes.ts), which check what the
+- **The console's Activity panel** (the bell): the relevant and quiet lanes, shown as the
+  Important and Other tabs, page by page. Each decision has its escalation, an Outside Text mark
+  when tainted, and two labels: Correct, plus Not Important (in Important) or Important (in
+  Other), stored as ok, should_be_quiet and should_escalate. Acknowledge and Dismiss sit on an
+  open escalation. The runtime's health report is under Settings → Health. Through the routes in the table above (src/inbox-routes.ts), which check what the
   console sends and what the runtime answers against @flint/policy's wire contracts; a runtime
   that refuses the server's token is a 502, never a 401.
 
