@@ -2,7 +2,7 @@
  * The digest, retention, the daily rollups and the exit report on flint_test.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { digestOf, localDayBounds } from '@flint/policy';
+import { digestOf, localDay, localDayBounds, previousDay } from '@flint/policy';
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
@@ -104,7 +104,9 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     expect(await runDigest(db, config, new Date(now.getTime() + 1000), async () => ({ status: 'refused', code: 422 }))).toBe('failed');
     expect(await db.auditEntry.count({ where: { action: 'digest.daily', outcome: 'failed' } })).toBe(1);
     // A day whose delivery never ended (the server down past the retries) is closed the next day, not sent late.
-    await expect(runDigest(db, config, new Date(now.getTime() - DAY), async () => ({ status: 'retry', why: 'unreachable' }))).rejects.toThrow(/retrying/);
+    // Noon of the previous local day: "now minus 24 h" is still today in the last hour of a 25-hour fall-back day.
+    const yesterdayNoon = new Date(localDayBounds(TZ, previousDay(localDay(TZ, now))).start.getTime() + 12 * 3_600_000);
+    await expect(runDigest(db, config, yesterdayNoon, async () => ({ status: 'retry', why: 'unreachable' }))).rejects.toThrow(/retrying/);
     await owner(`DELETE FROM "ActionCounter" WHERE action = 'digest.daily'`);
     const posted: string[] = [];
     expect(await runDigest(db, config, now, async (req) => (posted.push(req.ref ?? ''), { status: 'stored', pinged: false }))).toBe('delivered');
