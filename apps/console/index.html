@@ -832,10 +832,11 @@ pollApprovals();setInterval(pollApprovals,60000);
 /* Flint updates itself. A deploy replaces this page (and the Mac app's build). The
    server stamps the page's version into it (__FLINT_UI__) and answers GET /ui-version
    with the deployed one; once they differ, the page reloads at the first quiet moment:
-   nothing typed or attached, no panel open, no reply, recording or speech in progress,
-   and the page hidden or untouched for a minute. The open conversation survives the
-   reload (sessionStorage, 30 minutes). The Mac app asks flintIdle() the same before
-   restarting itself onto a new build, and calls flintSnapshot() first. */
+   nothing typed or attached, no panel open, no reply, recording, transcription, speech
+   or approval in progress, and the page hidden or untouched for a minute. The open
+   conversation survives the reload, and a restart of the Mac app (localStorage, kept
+   30 minutes; never reloaded when it cannot be kept). The Mac app asks flintIdle() the
+   same before restarting onto a new build, and restarts only if flintSnapshot() kept it. */
 var UI_VERSION=window.__FLINT_UI__||null,UPDATE_READY=false,LAST_INPUT=Date.now();
 ['keydown','pointerdown','wheel','touchstart'].forEach(function(t){document.addEventListener(t,function(){LAST_INPUT=Date.now();},true);});
 function flintBusy(){
@@ -843,20 +844,40 @@ function flintBusy(){
   if((typeof PENDING!=='undefined'&&PENDING.length)||(typeof ATT_READING!=='undefined'&&ATT_READING))return true;
   var th=document.getElementById('think');if(th&&th.textContent)return true;
   if(typeof mediaRec!=='undefined'&&mediaRec&&mediaRec.state==='recording')return true;
+  var mb=document.getElementById('micbtn');if(mb&&mb.classList&&(mb.classList.contains('busy')||mb.classList.contains('rec')))return true;
   if(typeof _ttsAudio!=='undefined'&&_ttsAudio)return true;
+  if(window.speechSynthesis&&(speechSynthesis.speaking||speechSynthesis.pending))return true;
+  /* An approval being signed: its card's buttons dim until the outcome. */
+  var t=document.getElementById('transcript'),rows=t&&t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
+  for(var i=0;i<rows.length;i++){if(rows[i].style.display!=='none'&&String(rows[i].style.opacity)==='0.5')return true;}
   return ['settings','notifs','lanes','approvals','convo'].some(function(id){var e=document.getElementById(id);return !!(e&&e.style.display&&e.style.display!=='none');});
 }
 function flintIdle(quietMs){return !flintBusy()&&(document.hidden||Date.now()-LAST_INPUT>=(quietMs==null?60000:quietMs));}
-function flintSnapshot(){try{var t=document.getElementById('transcript');sessionStorage.setItem('flint_resume',JSON.stringify({convId:convId,html:t?t.innerHTML:'',at:Date.now()}));}catch(e){}}
+/* Keep the open conversation for the next page; false when it cannot be kept. */
+function flintSnapshot(){
+  var t=document.getElementById('transcript'),html=t?t.innerHTML:'';
+  var snap={convId:convId,html:html,top:t?t.scrollTop:0,end:t?t.scrollHeight-t.scrollTop-t.clientHeight<40:true,at:Date.now()};
+  try{localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
+  /* Too large (attached photos): keep the words, not the pictures. */
+  try{snap.html=html.replace(/<img\b[^>]*>/gi,'<span class="att-gone">[image]</span>');localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
+  return false;
+}
 function checkUpdate(){
   return fetch(BASE+'/ui-version',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
     var v=d&&typeof d.version==='string'?d.version:null;if(!v)return;
     if(!UI_VERSION){UI_VERSION=v;return;}
     if(v!==UI_VERSION)UPDATE_READY=true;
-  }).catch(function(){}).then(function(){if(UPDATE_READY&&flintIdle()){flintSnapshot();location.reload();}});
+  }).catch(function(){}).then(function(){if(UPDATE_READY&&flintIdle()&&flintSnapshot())location.reload();});
 }
-(function resume(){try{var s=JSON.parse(sessionStorage.getItem('flint_resume')||'null');sessionStorage.removeItem('flint_resume');
-  if(s&&typeof s.convId==='string'&&typeof s.at==='number'&&Date.now()-s.at<30*60000){convId=s.convId;var t=document.getElementById('transcript');if(t&&typeof s.html==='string')t.innerHTML=s.html;}}catch(e){}})();
+(function resume(){var s=null;try{s=JSON.parse(localStorage.getItem('flint_resume')||'null');localStorage.removeItem('flint_resume');}catch(e){}
+  if(!s||typeof s.convId!=='string'||typeof s.at!=='number'||Date.now()-s.at>=30*60000)return;
+  convId=s.convId;var t=document.getElementById('transcript');if(!t||typeof s.html!=='string')return;
+  t.innerHTML=s.html;
+  /* A card still waiting lost its buttons' handlers with the page: decide it in Approvals. */
+  var rows=t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
+  for(var i=0;i<rows.length;i++){if(rows[i].style.display==='none')continue;rows[i].textContent='';rows[i].style.opacity=1;
+    var b=document.createElement('button');b.className='ok';b.textContent='Open Approvals';b.onclick=function(){openApprovals();};rows[i].appendChild(b);}
+  t.scrollTop=s.end?t.scrollHeight:(s.top||0);})();
 setInterval(checkUpdate,60000);
 document.addEventListener('visibilitychange',function(){if(document.hidden)checkUpdate();});
 </script>

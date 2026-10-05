@@ -126,8 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     window.titleVisibility = .hidden
     window.backgroundColor = .black
     window.isMovableByWindowBackground = true
+    // Where Will left it (centered only the first time), also after a restart onto a new build.
+    if !window.setFrameUsingName("FlintMain") { window.center() }
     window.setFrameAutosaveName("FlintMain")
-    window.center()
 
     let cfg = WKWebViewConfiguration()
     cfg.userContentController.addScriptMessageHandler(approvalKey, contentWorld: .page, name: "flintApproval")
@@ -138,24 +139,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     if #available(macOS 12.0, *) { web.underPageBackgroundColor = .black }
     web.load(URLRequest(url: URL(string: FLINT_URL)!))
     window.contentView = web
-    // Restarted onto a new build while Will was in another app: come back behind, not in front.
-    if CommandLine.arguments.contains("--relaunched-background") {
+    // Restarted onto a new build: come back as the old window was (behind, minimized or
+    // hidden) when Will was elsewhere, in front only when it was in front.
+    let args = CommandLine.arguments
+    if args.contains("--relaunched-minimized") {
+      window.orderBack(nil)
+      window.miniaturize(nil)
+    } else if args.contains("--relaunched-hidden") {
+      window.orderBack(nil)
+      NSApp.hide(nil)
+    } else if args.contains("--relaunched-background") {
       window.orderBack(nil)
     } else {
       window.makeKeyAndOrderFront(nil)
       NSApp.activate(ignoringOtherApps: true)
     }
+    // update_app.sh reads this to know the open app restarts itself onto a new build.
+    let pidFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".flint/app-pid")
+    try? "\(ProcessInfo.processInfo.processIdentifier)\n".write(to: pidFile, atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pidFile.path)
     Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.checkForNewBuild() }
   }
 
   /// Auto-update: once the build on disk is not the one running, restart onto it at
   /// a quiet moment. Quiet is the console's flintIdle(): nothing typed or attached,
-  /// no panel open, no reply or voice in progress; and Will in another app, or
-  /// Flint untouched for two minutes. flintSnapshot() keeps the open conversation.
+  /// no panel open, no reply, voice or approval in progress; no sheet or modal of
+  /// the app's own (the file chooser) open; and Will in another app, or Flint
+  /// untouched for two minutes. It restarts only once flintSnapshot() has kept
+  /// the open conversation (localStorage, which the new instance reads).
   func checkForNewBuild() {
     guard !relaunching, let was = launchedBuild, let now = BuildStamp.current(), now != was else { return }
+    guard window.attachedSheet == nil, NSApp.modalWindow == nil else { return }
     let away = !NSApp.isActive
-    let js = "typeof flintIdle==='function'&&flintIdle(\(away ? 0 : 120000))&&(flintSnapshot(),true)"
+    let js = "typeof flintIdle==='function'&&flintIdle(\(away ? 0 : 120000))&&flintSnapshot()===true"
     web.evaluateJavaScript(js) { [weak self] result, _ in
       if (result as? Bool) == true { self?.relaunch(front: !away) }
     }
@@ -167,7 +183,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     let cfg = NSWorkspace.OpenConfiguration()
     cfg.createsNewApplicationInstance = true
     cfg.activates = front
-    if !front { cfg.arguments = ["--relaunched-background"] }
+    if window.isMiniaturized {
+      cfg.arguments = ["--relaunched-minimized"]
+    } else if NSApp.isHidden {
+      cfg.arguments = ["--relaunched-hidden"]
+    } else if !front {
+      cfg.arguments = ["--relaunched-background"]
+    }
     NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { app, _ in
       DispatchQueue.main.async {
         if app != nil { NSApp.terminate(nil) } else { self.relaunching = false }

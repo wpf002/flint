@@ -133,6 +133,9 @@ for bundle in "$DATA"/connectors/*-server.mjs(N); do
 done
 
 echo "deploying console -> $DATA/console.html ..."
+# The page that was live, put back with the bundle if the new server does not come up:
+# open consoles reload onto whatever page is there (GET /ui-version).
+[ -f "$DATA/console.html" ] && cp -p "$DATA/console.html" "$DATA/console.html.prev"
 cp "$REPO/apps/console/index.html" "$DATA/console.html"
 
 echo "reloading com.flint.server..."
@@ -156,6 +159,7 @@ if [ "$up" != 1 ]; then
   if [ -f "$DATA/server.mjs.prev" ]; then
     echo "  going back to the previous bundle"
     cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"
+    [ -f "$DATA/console.html.prev" ] && cp -p "$DATA/console.html.prev" "$DATA/console.html"
     launchctl unload "$AGENTS/$PLIST" 2>/dev/null || true
     launchctl load -w "$AGENTS/$PLIST" || echo "✗ the previous bundle did not load either; load it with: launchctl load -w $AGENTS/$PLIST"
   fi

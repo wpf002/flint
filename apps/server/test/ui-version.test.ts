@@ -36,4 +36,14 @@ describe('the console version', () => {
     expect(src.indexOf("url === '/ui-version'")).toBeGreaterThan(0);
     expect(src.indexOf("url === '/ui-version'")).toBeLessThan(src.indexOf('bearerScope(req.headers.authorization'));
   });
+
+  it('install-server.sh puts the previous page back with the previous bundle, so open consoles never reload onto a page the live server does not match', () => {
+    const sh = readFileSync(join(__dirname, '..', 'install-server.sh'), 'utf8');
+    const keep = sh.indexOf('cp -p "$DATA/console.html" "$DATA/console.html.prev"');
+    const deploy = sh.indexOf('cp "$REPO/apps/console/index.html" "$DATA/console.html"');
+    expect(keep).toBeGreaterThan(0);
+    expect(keep).toBeLessThan(deploy);
+    const rollback = sh.slice(sh.indexOf('going back to the previous bundle'), sh.indexOf('exit 1', sh.indexOf('going back to the previous bundle')));
+    expect(rollback).toContain('cp -p "$DATA/console.html.prev" "$DATA/console.html"');
+  });
 });

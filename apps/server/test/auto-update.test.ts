@@ -37,7 +37,11 @@ beforeEach(() => {
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe('auto_deploy.sh retries a failed deploy', () => {
-  let work: string, deployDir: string, bin: string, state: string, marks: string;
+  let work: string, deployDir: string, bin: string, state: string, marks: string, events: string, runtimeDir: string;
+
+  // A deploy event line, as deploy_event writes it (field order matters to auto_deploy's reader).
+  const ev = (component: string, stage: string, outcome: string) =>
+    `printf '{"id":"x","at":"2026-10-05T00:00:00Z","component":"${component}","stage":"${stage}","outcome":"${outcome}","sha":"%s"}\\n' "$(git rev-parse HEAD)" >> "${events}"`;
 
   beforeEach(() => {
     const origin = join(tmp, 'origin.git');
@@ -46,12 +50,31 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     bin = join(tmp, 'bin');
     state = join(tmp, 'state');
     marks = join(tmp, 'marks');
+    events = join(tmp, '.flint', 'deploy-events.jsonl');
+    runtimeDir = join(tmp, '.flint', 'runtime');
+    mkdirSync(join(tmp, '.flint'), { recursive: true });
     git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
     git(tmp, 'clone', '-q', origin, work);
     git(work, 'checkout', '-q', '-b', 'main');
-    // Each stub records that it ran, and fails while its fail-file exists.
-    script(join(work, 'apps/server/install-server.sh'), `echo server >> "${marks}"; [ -e "${tmp}/fail-server" ] && exit 1; exit 0`);
-    script(join(work, 'apps/runtime/install-runtime.sh'), `echo runtime >> "${marks}"; [ -e "${tmp}/fail-runtime" ] && exit 1; exit 0`);
+    // The stubs behave like the real scripts: they record that they ran, write the
+    // deploy events the real ones write, and fail at a stage while its flag file exists.
+    script(join(work, 'apps/server/install-server.sh'), [
+      `echo server >> "${marks}"`,
+      `[ -e "${tmp}/server-gate" ] && { ${ev('server', 'gate', 'failed')}; exit 1; }`,
+      `[ -e "${tmp}/server-health" ] && { ${ev('server', 'health', 'failed')}; exit 1; }`,
+      ev('server', 'deploy', 'ok'),
+      'exit 0',
+    ].join('\n'));
+    script(join(work, 'apps/runtime/install-runtime.sh'), [
+      `echo runtime >> "${marks}"`,
+      `[ -e "${tmp}/runtime-gate" ] && { ${ev('runtime', 'gate', 'failed')}; exit 1; }`,
+      `[ -e "${tmp}/runtime-migrate" ] && { ${ev('runtime', 'migrate', 'failed')}; exit 1; }`,
+      // A sha whose migration failed before: install-runtime.sh skips it and exits 0.
+      `[ -e "${tmp}/runtime-skip" ] && exit 0`,
+      `mkdir -p "${runtimeDir}/releases/$(git rev-parse HEAD)" && ln -sfn "${runtimeDir}/releases/$(git rev-parse HEAD)" "${runtimeDir}/current"`,
+      ev('runtime', 'deploy', 'ok'),
+      'exit 0',
+    ].join('\n'));
     script(join(work, 'apps/desktop-mac/update_app.sh'), 'exit 0');
     writeFileSync(join(work, 'README'), 'v0\n');
     git(work, 'add', '-A');
@@ -61,9 +84,11 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     script(join(bin, 'pnpm'), 'exit 0');
   });
 
-  const push = (text: string) => {
-    writeFileSync(join(work, 'README'), `${text}\n`);
-    git(work, 'commit', '-q', '-am', text);
+  const push = (text: string, file = 'README') => {
+    mkdirSync(join(work, file, '..'), { recursive: true });
+    writeFileSync(join(work, file), `${text}\n`);
+    git(work, 'add', '-A');
+    git(work, 'commit', '-q', '-m', text);
     git(work, 'push', '-q', 'origin', 'main');
     return git(work, 'rev-parse', 'HEAD');
   };
@@ -76,20 +101,23 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     const ran = existsSync(marks) ? readFileSync(marks, 'utf8').trim().split('\n') : [];
     return { status: r.status, out: r.stdout + r.stderr, ran };
   };
+  const flag = (name: string, on = true) => (on ? writeFileSync(join(tmp, name), '') : rmSync(join(tmp, name), { force: true }));
   const retryFile = () => join(state, 'deploy-retry');
+  const retry = () => (existsSync(retryFile()) ? readFileSync(retryFile(), 'utf8').trim() : null);
   const age = (minutes: number) => {
     const t = Date.now() / 1000 - minutes * 60;
     utimesSync(retryFile(), t, t);
   };
+  const live = () => (existsSync(join(runtimeDir, 'current')) ? spawnSync('readlink', [join(runtimeDir, 'current')], { encoding: 'utf8' }).stdout.trim().split('/').pop() : null);
 
-  it('a failed server deploy is retried after 30 minutes, alone, and says failed until then', () => {
+  it('a server that failed its gate is retried after 30 minutes, alone, and reads failed until then', () => {
     const sha = push('v1');
-    writeFileSync(join(tmp, 'fail-server'), '');
+    flag('server-gate');
     let t = tick();
     expect(t.status).toBe(1);
     expect(t.out).toContain(`server deploy FAILED at ${sha}`);
     expect(t.ran).toEqual(['server', 'runtime']);
-    expect(readFileSync(retryFile(), 'utf8').trim()).toBe(`${sha} server 0`);
+    expect(retry()).toBe(`${sha} server 0 1`);
 
     // Within the 30 minutes: nothing runs, and the log does not call it up to date.
     t = tick();
@@ -100,55 +128,126 @@ describe('auto_deploy.sh retries a failed deploy', () => {
 
     // After 30 minutes, with the cause gone: only the server, and it is forgotten.
     age(31);
-    rmSync(join(tmp, 'fail-server'));
+    flag('server-gate', false);
     t = tick();
     expect(t.status).toBe(0);
     expect(t.out).toContain(`retrying the failed deploy of ${sha} (server), attempt 1 of 6`);
     expect(t.out).toMatch(new RegExp(`^\\S+ \\S+ deployed ${sha}$`, 'm'));
     expect(t.ran).toEqual(['server']);
-    expect(existsSync(retryFile())).toBe(false);
+    expect(retry()).toBeNull();
     expect(tick().out).toContain(`up to date (${sha})`);
   });
 
   it('counts its retries and stops after 6; a new push starts over', () => {
     const sha = push('v1');
-    writeFileSync(join(tmp, 'fail-server'), '');
+    flag('server-gate');
     tick();
     for (let n = 1; n <= 6; n++) {
       age(31);
       const t = tick();
       expect(t.out).toContain(`attempt ${n} of 6`);
-      expect(readFileSync(retryFile(), 'utf8').trim()).toBe(`${sha} server ${n}`);
+      expect(retry()).toBe(`${sha} server ${n} 1`);
     }
     age(31);
     let t = tick();
     expect(t.ran).toEqual([]);
-    expect(t.out).toContain(`server deploy FAILED at ${sha} (no retries left)`);
-    rmSync(join(tmp, 'fail-server'));
+    expect(t.out).toContain(`server deploy FAILED at ${sha} (waiting for the next push)`);
+    flag('server-gate', false);
     const next = push('v2');
     t = tick();
     expect(t.out).toMatch(new RegExp(`deployed ${next}$`, 'm'));
-    expect(existsSync(retryFile())).toBe(false);
+    expect(retry()).toBeNull();
   });
 
-  it('a failed runtime deploy is retried on its own, while the server reads up to date', () => {
-    mkdirSync(join(tmp, '.flint', 'runtime', 'current'), { recursive: true });
-    writeFileSync(join(work, 'apps/runtime/x.ts'), '1\n');
-    git(work, 'add', '-A');
-    const sha = push('runtime change');
-    writeFileSync(join(tmp, 'fail-runtime'), '');
+  it('never retries a server that failed past its gate (a boot crash would take Flint down again)', () => {
+    const sha = push('v1');
+    flag('server-health');
+    expect(tick().status).toBe(1);
+    expect(retry()).toBe(`${sha} server 0 0`);
+    age(31);
+    const t = tick();
+    expect(t.ran).toEqual([]);
+    expect(t.out).toContain(`server deploy FAILED at ${sha} (waiting for the next push)`);
+  });
+
+  it('a deploy by hand ends the retrying, and the log says so', () => {
+    const sha = push('v1');
+    flag('server-gate');
+    tick();
+    // Will runs the deploy himself (FLINT_SKIP_TESTS=1 ./apps/server/install-server.sh).
+    flag('server-gate', false);
+    spawnSync('/bin/zsh', [join(deployDir, 'apps/server/install-server.sh')], { cwd: deployDir, env: { ...process.env, HOME: tmp } });
+    const t = tick();
+    expect(t.ran).toEqual([]);
+    expect(t.out).toContain(`up to date (${sha})`);
+    expect(retry()).toBeNull();
+  });
+
+  it('a runtime that failed its gate is retried on its own, while the server reads up to date', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    expect(live()).toBeTruthy();
+    const sha = push('runtime change', 'apps/runtime/x.ts');
+    flag('runtime-gate');
     let t = tick();
     expect(t.status).toBe(0);
     expect(t.ran).toEqual(['server', 'runtime']);
     expect(t.out).toContain(`runtime deploy FAILED at ${sha}`);
-    expect(readFileSync(retryFile(), 'utf8').trim()).toBe(`${sha} runtime 0`);
+    expect(retry()).toBe(`${sha} runtime 0 1`);
     expect(tick().out).toContain(`up to date (${sha})`);
     age(31);
-    rmSync(join(tmp, 'fail-runtime'));
+    flag('runtime-gate', false);
     t = tick();
     expect(t.ran).toEqual(['runtime']);
     expect(t.out).toContain(`runtime deployed ${sha}`);
-    expect(existsSync(retryFile())).toBe(false);
+    expect(live()).toBe(sha);
+    expect(retry()).toBeNull();
+  });
+
+  it('a runtime left behind is deployed by the next push, even one that does not touch it', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    const a = push('runtime change', 'apps/runtime/x.ts');
+    flag('runtime-gate');
+    tick();
+    expect(live()).not.toBe(a);
+    flag('runtime-gate', false);
+    const b = push('docs only', 'docs.md');
+    const t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(live()).toBe(b);
+  });
+
+  it('a runtime whose migration failed is never logged as deployed, nor retried', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    const sha = push('a migration', 'apps/runtime/x.ts');
+    flag('runtime-migrate');
+    tick();
+    expect(retry()).toBe(`${sha} runtime 0 0`);
+    // install-runtime.sh now skips that sha and exits 0: still not deployed.
+    flag('runtime-migrate', false);
+    flag('runtime-skip');
+    age(31);
+    const t = tick();
+    expect(t.ran).toEqual([]);
+    expect(t.out).not.toContain('runtime deployed');
+    expect(live()).not.toBe(sha);
+  });
+
+  it('a run cut short (a restart mid-deploy) leaves a retry behind', () => {
+    const sha = push('v1');
+    // The tick that pulled it died before it finished: HEAD moved, the retry file was written first.
+    git(deployDir, 'fetch', '-q', 'origin', 'main');
+    git(deployDir, 'reset', '-q', '--hard', 'origin/main');
+    mkdirSync(state, { recursive: true });
+    writeFileSync(retryFile(), `${sha} server 0 1\n`);
+    expect(tick().out).toContain(`server deploy FAILED at ${sha} (retrying)`);
+    age(31);
+    const t = tick();
+    expect(t.ran).toEqual(['server']);
+    expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
+    expect(retry()).toBeNull();
   });
 });
 
@@ -201,6 +300,8 @@ describe('update_app.sh installs while Flint.app is open', () => {
 
   it('builds and installs at once, without --if-closed, and says the open app restarts onto it', () => {
     mkdirSync(state, { recursive: true });
+    // The open app wrote its pid at launch: it restarts itself onto a new build.
+    writeFileSync(join(state, 'app-pid'), `${fake!.pid}\n`);
     const u = update();
     expect(u.status).toBe(0);
     expect(u.built).toHaveLength(1);
@@ -211,6 +312,14 @@ describe('update_app.sh installs while Flint.app is open', () => {
     expect(readFileSync(join(state, 'app-installed-tree'), 'utf8').trim()).toBe(tree());
     // The same tree again: nothing to do.
     expect(update().built).toHaveLength(0);
+  });
+
+  it('tells Will to reopen an open app from before self-restart, instead of promising a restart', () => {
+    mkdirSync(state, { recursive: true });
+    const u = update();
+    expect(u.built).toHaveLength(1);
+    expect(u.out).toContain('the open app is older and updates when reopened');
+    expect(u.said).toContain('Flint updated. Quit and reopen it once to finish.');
   });
 
   it('keeps the current app when a build fails, and does not retry the same tree', () => {
