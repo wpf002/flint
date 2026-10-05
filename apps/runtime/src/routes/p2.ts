@@ -107,6 +107,8 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
     const page = rows.slice(0, q.limit);
     const events = new Map((await db.sourceEvent.findMany({ where: { id: { in: page.map((r) => r.sourceEventId) } }, select: { id: true, source: true, type: true, payload: true } })).map((e) => [e.id, e]));
     const entities = await entitiesOf(db, [...events.values()]);
+    // A calendar event's title, for Will's eyes in the console (scope events: never the chat model's).
+    const titles = new Map((await db.entityText.findMany({ where: { entityId: { in: [...entities.values()].map((e) => e.id) }, field: 'title' }, select: { entityId: true, text: true } })).map((t) => [t.entityId, t.text]));
     return out(InboxPage, {
       items: page.map((r) => {
         const ev = events.get(r.sourceEventId);
@@ -115,7 +117,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
         return {
           id: r.id, at: r.createdAt.toISOString(), lane: r.lane, action: r.action, decidedBy: r.decidedBy, ruleName: r.ruleName, relevance: r.relevance, reasonCode: r.reasonCode,
           source: ev?.source ?? 'unknown', eventType: ev?.type ?? 'unknown',
-          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: clip(e.name, 300) } : null,
+          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: clip(e.name, 300), ...(titles.has(e.id) ? { title: clip(titles.get(e.id)!, 300) } : {}) } : null,
           reasoning: r.reasoning, feedback: r.feedback, tainted: r.tainted, sensitivity: r.sensitivity,
           escalation: x
             ? { id: x.id, templateId: x.templateId, title: x.title ?? fieldFreeTitle(x.templateId), body: x.body, status: x.status, channels: x.channels, tainted: x.tainted, createdAt: x.createdAt.toISOString() }

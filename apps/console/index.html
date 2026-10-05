@@ -974,6 +974,8 @@ function laneItem(it){
   if(it.tainted||(es&&es.tainted)){var o=laneEl('span','outside');o.appendChild(laneEl('i'));o.appendChild(document.createTextNode('Outside Text'));fx.appendChild(o);}
   var more=laneEl('span','more');more.hidden=true;
   if(es&&es.body)more.appendChild(laneEl('span',null,es.body));
+  /* A calendar title (P2.5): whoever sent the invitation wrote it, so it is shown as their text, never as Flint's. */
+  if(it.entity&&it.entity.title)more.appendChild(laneEl('span',null,'Invitation title: '+it.entity.title));
   if(it.reasoning)more.appendChild(laneEl('span',null,'Model note: '+it.reasoning));
   if(es)more.appendChild(laneEl('span',null,'Escalation '+titleCase(laneWords(es.status==='acked'?'acknowledged':es.status))));
   fx.appendChild(more);

@@ -381,4 +381,16 @@ describe('config and registry for the three', () => {
     expect(reg.railway).toEqual([{ origin: 'https://backboard.railway.com', pathPrefix: '/graphql/v2', methods: ['POST'] }]);
     expect(reg.nexus).toEqual([{ origin: 'https://nexus.example', pathPrefix: '/mcp', methods: ['GET', 'POST'] }]);
   });
+
+  it("Will's calendar (P2.5) exists only when switched on, reaching only the token refresh and his primary calendar's events", () => {
+    for (const v of [undefined, '', 'off', '1', 'yes']) expect(loadConfig({ ...base, FLINT_SOURCE_GOOGLE_CALENDAR: v }).google, String(v)).toBeUndefined();
+    const c = loadConfig({ ...base, FLINT_SOURCE_GOOGLE_CALENDAR: ' On ' });
+    expect(c.google).toEqual({ dir: '/Users/test/.flint/google' });
+    const reg = Object.fromEntries(registry(c, {} as Db).map((r) => [r.source.name, r.endpoints]));
+    expect(reg.google_calendar).toEqual([
+      { origin: 'https://oauth2.googleapis.com', pathPrefix: '/token', methods: ['POST'] },
+      { origin: 'https://www.googleapis.com', pathPrefix: '/calendar/v3/calendars/primary/events', methods: ['GET'] },
+    ]);
+    expect(Object.keys(Object.fromEntries(registry(loadConfig(base), {} as Db).map((r) => [r.source.name, 1])))).not.toContain('google_calendar');
+  });
 });

@@ -37,6 +37,8 @@ const NAME = 'CANARY-name Ada';
 const EMAIL = 'canary-mail@example.com';
 const CANARY = /canary/i;
 const TOKEN = 'quarantine-chat-model-token';
+/** The server's token (scope events): the console's lanes, which Will reads. */
+const CONSOLE = 'quarantine-console-token';
 
 describe.skipIf(NO_DB)('P2.5 quarantine: no Google text in a frontier prompt', () => {
   let urls: TestUrls;
@@ -80,7 +82,13 @@ describe.skipIf(NO_DB)('P2.5 quarantine: no Google text in a frontier prompt', (
 
     app = buildApp({
       db, status: { problems: [], busStartedAt: null } as never,
-      config: { tz: 'UTC', triage: true, home: config.home, tokens: [{ name: 'runtime-mcp', sha256: createHash('sha256').update(TOKEN).digest('hex'), scopes: new Set(['world:read', 'ledger'] as const) }] },
+      config: {
+        tz: 'UTC', triage: true, home: config.home,
+        tokens: [
+          { name: 'runtime-mcp', sha256: createHash('sha256').update(TOKEN).digest('hex'), scopes: new Set(['world:read', 'ledger'] as const) },
+          { name: 'server', sha256: createHash('sha256').update(CONSOLE).digest('hex'), scopes: new Set(['events'] as const) },
+        ],
+      },
     });
   });
   afterAll(async () => {
@@ -110,6 +118,14 @@ describe.skipIf(NO_DB)('P2.5 quarantine: no Google text in a frontier prompt', (
     }
   });
 
+  it("the console's lanes (scope events, Will's eyes only) show the title, and the chat model's token cannot reach them", async () => {
+    const r = await app.inject({ method: 'GET', url: '/v1/inbox?lane=relevant', headers: { authorization: `Bearer ${CONSOLE}` } });
+    expect(r.statusCode).toBe(200);
+    const item = (r.json() as { items: Array<{ entity: { title?: string } | null; tainted: boolean }> }).items.find((i) => i.entity?.title);
+    expect(item?.entity?.title).toBe(TITLE);
+    expect((await app.inject({ method: 'GET', url: '/v1/inbox?lane=relevant', headers: { authorization: `Bearer ${TOKEN}` } })).statusCode).toBe(403);
+  });
+
   it('the database keeps Google text out of everything that outlives a week', async () => {
     const lasting = {
       entities: await db.entity.findMany({ where: { kind: 'commitment' }, select: { key: true, name: true, state: true } }),
@@ -128,7 +144,7 @@ describe.skipIf(NO_DB)('P2.5 quarantine: no Google text in a frontier prompt', (
       const f = await loadFacts(db, e.id, new Date());
       if (f) expect(needsJudgement(f), e.type).toBe(false);
     }
-    const d = await buildDigest(db, config, new Date(Date.now() + 86_400_000));
+    const d = await buildDigest(db, 'UTC', new Date(Date.now() + 86_400_000));
     expect(JSON.stringify(d)).not.toMatch(CANARY);
   });
 });

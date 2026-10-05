@@ -161,7 +161,11 @@ export const InboxItem = z
     reasonCode: z.enum(REASON_CODES).nullable(),
     source: z.string().max(40),
     eventType: z.string().max(80),
-    entity: z.object({ ref: Ref, kind: z.string().max(40), name: z.string().max(300) }).strict().nullable(),
+    /**
+     * `title`: the entity's untrusted text kept outside the world model (P2.5: a
+     * calendar event's title), for Will in the console only; it is always tainted.
+     */
+    entity: z.object({ ref: Ref, kind: z.string().max(40), name: z.string().max(300), title: z.string().max(300).optional() }).strict().nullable(),
     /** The model's words (it may have read a stranger's text): text only, under the tainted banner; null once purged. */
     reasoning: z.string().max(500).nullable(),
     feedback: z.enum(FEEDBACK).nullable(),
