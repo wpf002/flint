@@ -71,15 +71,32 @@ const post = (p: string, body?: unknown) => fetch(`${base}${p}`, { method: 'POST
 
 describe('GET /inbox', () => {
   it('passes a validated page request through and answers the checked page', async () => {
-    answer = () => ({ status: 200, body: { items: [item()], next: AT } });
+    answer = (q) => (q.url.startsWith('/v1/inbox/titles') ? { status: 200, body: { titles: [] } } : { status: 200, body: { items: [item()], next: AT } });
     const r = await get(`/inbox?lane=quiet&before=${encodeURIComponent(AT)}&limit=20`);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ items: [item()], next: AT });
-    expect(asked).toHaveLength(1);
+    expect(asked).toHaveLength(2);
+    expect(asked[1]!.url).toBe('/v1/inbox/titles?ids=td_cm1');
     expect(asked[0]!.auth).toBe(`Bearer ${TOKEN}`);
     const u = new URL(asked[0]!.url, 'http://x');
     expect(u.pathname).toBe('/v1/inbox');
     expect(Object.fromEntries(u.searchParams)).toEqual({ lane: 'quiet', limit: '20', before: AT });
+  });
+
+  it("a calendar title (P2.5) is fetched on its own and shown under the tainted banner; a runtime without the route leaves the page as it was", async () => {
+    const page = { items: [item({ id: 'td_cal', entity: { ref: 'commitment#abc123', kind: 'commitment', name: 'event 2026-10-06 14:00' } }), item(), item({ id: 'td_none', entity: null })], next: null };
+    answer = (q) => (q.url.startsWith('/v1/inbox/titles') ? { status: 200, body: { titles: [{ id: 'td_cal', title: 'Dinner with Ada' }] } } : { status: 200, body: page });
+    const r = (await (await get('/inbox')).json()) as { items: Array<{ id: string; tainted: boolean; entity: { title?: string } | null }> };
+    expect(r.items.map((i) => [i.id, i.entity?.title ?? null, i.tainted])).toEqual([['td_cal', 'Dinner with Ada', true], ['td_cm1', null, false], ['td_none', null, false]]);
+    // Only items with an entity are asked about.
+    expect(new URL(asked[1]!.url, 'http://x').searchParams.get('ids')).toBe('td_cal,td_cm1');
+    // An older runtime: no such route (404), or an answer that is not the contract. The page, as it came.
+    for (const bad of [{ status: 404, body: { error: 'not found' } }, { status: 200, body: { titles: [{ id: 'td_cal', title: 'x', extra: 1 }] } }]) {
+      answer = (q) => (q.url.startsWith('/v1/inbox/titles') ? bad : { status: 200, body: page });
+      const p = await get('/inbox');
+      expect(p.status).toBe(200);
+      expect(await p.json()).toEqual(page);
+    }
   });
 
   it('defaults to the relevant lane, 50 items', async () => {

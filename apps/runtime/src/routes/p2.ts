@@ -13,7 +13,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, LANES, ServerEventBatchIn, TriageRecent, type ServerEvent } from '@flint/policy';
+import { DecisionExplained, entityRef, EscalationsOpen, FEEDBACK, InboxPage, InboxTitles, LANES, ServerEventBatchIn, TriageRecent, type ServerEvent } from '@flint/policy';
 import type { Config, RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import type { Bus } from '../bus.js';
@@ -96,6 +96,23 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
   });
 
   // ---- the console: the lanes, in full --------------------------------------------------
+  // The titles behind lane items (a calendar event's), for Will's eyes in the console (scope events:
+  // never the chat model's). A route of its own: an older server never asks, so never gets a field it refuses.
+  app.get('/v1/inbox/titles', { preHandler: need('events') }, async (req) => {
+    const { ids } = z.object({ ids: z.string().max(4200) }).strict().parse(req.query);
+    const list = [...new Set(ids.split(',').filter(Boolean))];
+    if (list.length > 100 || !list.every((i) => /^[A-Za-z0-9_-]{1,40}$/.test(i))) throw new Refused(400, 'ids: up to 100 decision ids, comma-separated');
+    const rows = await db.triageDecision.findMany({ where: { id: { in: list } }, select: { id: true, sourceEventId: true } });
+    const events = await db.sourceEvent.findMany({ where: { id: { in: rows.map((r) => r.sourceEventId) } }, select: { id: true, payload: true } });
+    const entities = await entitiesOf(db, events);
+    const texts = new Map((await db.entityText.findMany({ where: { entityId: { in: [...entities.values()].map((e) => e.id) }, field: 'title' }, select: { entityId: true, text: true } })).map((t) => [t.entityId, t.text]));
+    const titles = rows.flatMap((r) => {
+      const e = entities.get(r.sourceEventId);
+      const t = e ? texts.get(e.id) : undefined;
+      return t ? [{ id: r.id, title: clip(t, 300) }] : [];
+    });
+    return out(InboxTitles, { titles });
+  });
   app.get('/v1/inbox', { preHandler: need('events') }, async (req) => {
     const q = z.object({ lane: z.enum(LANES), before: z.string().datetime({ offset: true }).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().parse(req.query);
     const rows = await db.triageDecision.findMany({
@@ -107,8 +124,6 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
     const page = rows.slice(0, q.limit);
     const events = new Map((await db.sourceEvent.findMany({ where: { id: { in: page.map((r) => r.sourceEventId) } }, select: { id: true, source: true, type: true, payload: true } })).map((e) => [e.id, e]));
     const entities = await entitiesOf(db, [...events.values()]);
-    // A calendar event's title, for Will's eyes in the console (scope events: never the chat model's).
-    const titles = new Map((await db.entityText.findMany({ where: { entityId: { in: [...entities.values()].map((e) => e.id) }, field: 'title' }, select: { entityId: true, text: true } })).map((t) => [t.entityId, t.text]));
     return out(InboxPage, {
       items: page.map((r) => {
         const ev = events.get(r.sourceEventId);
@@ -117,7 +132,7 @@ export function registerP2Routes(app: FastifyInstance, d: P2Deps): void {
         return {
           id: r.id, at: r.createdAt.toISOString(), lane: r.lane, action: r.action, decidedBy: r.decidedBy, ruleName: r.ruleName, relevance: r.relevance, reasonCode: r.reasonCode,
           source: ev?.source ?? 'unknown', eventType: ev?.type ?? 'unknown',
-          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: clip(e.name, 300), ...(titles.has(e.id) ? { title: clip(titles.get(e.id)!, 300) } : {}) } : null,
+          entity: e ? { ref: entityRef(e.kind, e.id), kind: e.kind, name: clip(e.name, 300) } : null,
           reasoning: r.reasoning, feedback: r.feedback, tainted: r.tainted, sensitivity: r.sensitivity,
           escalation: x
             ? { id: x.id, templateId: x.templateId, title: x.title ?? fieldFreeTitle(x.templateId), body: x.body, status: x.status, channels: x.channels, tainted: x.tainted, createdAt: x.createdAt.toISOString() }

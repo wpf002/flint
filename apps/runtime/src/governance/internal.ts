@@ -11,7 +11,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
-import { Refused, claimProposal, completeProposal } from './proposals.js';
+import { Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
 import { dbRefused } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
@@ -36,6 +36,19 @@ export function refuseRule(args: unknown): string | undefined {
 }
 
 const EnableArgs = z.object({ source: z.enum(SOURCES) }).strict();
+
+/**
+ * The card that asks Will to turn a source on (`pnpm --filter @flint/runtime
+ * enable-source <name>`): Will acting at the terminal, so origin cli. He signs
+ * it in the console; the same card filed again while it waits is that card.
+ */
+export async function proposeEnable(db: Db, source: string, now = new Date()) {
+  const { source: s } = EnableArgs.parse({ source });
+  return createProposal(db, {
+    kind: 'tool_call', origin: 'cli', action: 'world.source.enable', args: { source: s }, argsProvenance: { source: { source: 'will', tainted: false } },
+    tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 7 * 24 * 60, reason: `Turn on the ${s} source.`,
+  }, 'will:cli', now);
+}
 /**
  * A signed policy change, held to the database's own rules (pattern shape,
  * 180-day expiry, millisecond times, int4 caps) so a bad row is refused when the

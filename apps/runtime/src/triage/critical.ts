@@ -18,12 +18,13 @@
  *    proposal, never a person); any other: log;
  *  - a source's circuit opening: logged in the relevant lane (closing: quietly);
  *  - an event or deadline on Will's calendar within a day (P2.5): escalate,
- *    once per event and start, with its time and never its title.
+ *    once per event and start, with its date and time worked out when triage
+ *    decides (logged if it has passed or left the calendar), never its title.
  *
  * Fields are typed: refs, enums, numbers and hex SHAs. A raised event carries
  * its entity's id, never its name.
  */
-import { entityRef } from '@flint/policy';
+import { entityRef, localDayBounds } from '@flint/policy';
 import type { EventFacts, Template, Verdict } from './verdict.js';
 
 const num = (v: unknown, lo: number, hi: number, dflt: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : dflt);
@@ -88,6 +89,50 @@ export interface CodeRuleContext {
    * (not held) counts: a shadow escalation told nobody.
    */
   escalatedRecently?(templateId: string, field: string, value: string, withinMs: number, at: Date): Promise<boolean>;
+  /** When triage decides, and Flint's zone: a heads-up is worked out then, not when its event was read. */
+  now?: Date;
+  tz?: string;
+}
+
+/** A heads-up is given from a day before its event to a quarter of an hour after it starts. */
+export const UPCOMING_WITHIN_MS = 24 * 3_600_000;
+export const UPCOMING_SINCE_MS = 15 * 60_000;
+
+/** The local day (YYYY-MM-DD) and time (HH:mm) of an instant in tz. */
+function wallClock(tz: string, at: Date): { day: string; time: string } {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map((x) => [x.type, x.value]),
+  );
+  return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
+}
+
+/**
+ * The calendar's heads-up, decided now from the event as it stands: only while
+ * it is still on Will's calendar and still ahead (a deadline: due today or
+ * tomorrow; an event: within a day, or started under a quarter of an hour ago).
+ * Anything later than that is logged quietly: a heads-up for what has passed
+ * would be false.
+ */
+function calendarUpcoming(f: EventFacts, ctx: CodeRuleContext): Verdict {
+  const quiet: Verdict = { action: 'log', lane: 'quiet', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming.stale', critical: false };
+  const e = f.entity;
+  const item = refOf(f);
+  if (!e || e.status !== 'active' || !item || !ctx.now || !ctx.tz) return quiet;
+  const now = ctx.now.getTime();
+  let fields: { item: string; kind: 'commitment' | 'deadline'; date: string; time: string | null; until: string };
+  if (f.type === 'deadline.upcoming') {
+    const dueOn = e.state.dueOn;
+    if (e.kind !== 'deadline' || typeof dueOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dueOn)) return quiet;
+    const b = localDayBounds(ctx.tz, dueOn);
+    if (b.end.getTime() <= now || b.start.getTime() > now + UPCOMING_WITHIN_MS) return quiet;
+    fields = { item, kind: 'deadline', date: dueOn, time: null, until: b.end.toISOString() };
+  } else {
+    const at = typeof e.state.startsAt === 'string' ? Date.parse(e.state.startsAt) : NaN;
+    if (e.kind !== 'commitment' || !Number.isFinite(at) || at < now - UPCOMING_SINCE_MS || at > now + UPCOMING_WITHIN_MS) return quiet;
+    const w = wallClock(ctx.tz, new Date(at));
+    fields = { item, kind: 'commitment', date: w.day, time: e.state.allDay === true ? null : w.time, until: new Date(at).toISOString() };
+  }
+  return { action: 'escalate', lane: 'relevant', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false, template: { id: 'calendar_upcoming', fields } };
 }
 
 export const ROUTE_ERROR_BURST = 5;
@@ -118,17 +163,8 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
   // A source failing 5 times in a row: in the relevant lane, no ping; its recovery quietly.
   if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
   if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };
-  if (name === 'google_calendar:commitment.upcoming' || name === 'google_calendar:deadline.upcoming') {
-    // The heads-up the Watcher used to give, once per event and start time (the source's own key).
-    const day = pick(f.payload.day, ['today', 'tomorrow'] as const);
-    const time = typeof f.payload.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(f.payload.time) ? f.payload.time : null;
-    const item = refOf(f);
-    if (!day || !item) return { action: 'log', lane: 'quiet', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false };
-    return {
-      action: 'escalate', lane: 'relevant', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false,
-      template: { id: 'calendar_upcoming', fields: { item, kind: f.type === 'deadline.upcoming' ? 'deadline' : 'commitment', day, time } },
-    };
-  }
+  // The heads-up the Watcher used to give, once per occurrence of an event at a time (the source's own key).
+  if (name === 'google_calendar:commitment.upcoming' || name === 'google_calendar:deadline.upcoming') return calendarUpcoming(f, ctx);
   if (name === 'knowledge:knowledge.fact') {
     // Two things and a relation between them: propose the link. Anything else is only logged.
     const linked = typeof f.payload.relation === 'string' && typeof f.payload.fromId === 'string' && typeof f.payload.toId === 'string';

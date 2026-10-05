@@ -7,6 +7,7 @@
  * favicon request, a timeout). No secret value ever appears in a message or
  * a log line. No network: fetch is a fake, the browser is http.get.
  */
+import { connect } from 'node:net';
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -461,6 +462,32 @@ describe('googleLogin', () => {
     expect((await b.answers[0]!).status).toBe(404);
     expect((await b.answers[1]!).status).toBe(404);
     expect(await b.answers[2]!).toEqual({ status: 200, body: SIGNED_IN_PAGE });
+  });
+
+  it('a request the URL parser cannot read is ignored, never a crash; a multibyte state is the wrong state, not a throw', async () => {
+    const s = setup();
+    const b = browser((state) => [`/?state=${state}&code=${encodeURIComponent(CODE)}`]);
+    const g = googleFor(b);
+    // First a raw `GET http://[`, with the right Host header, straight to the listener; then the real redirect.
+    const open = async (url: string) => {
+      const back = new URL(new URL(url).searchParams.get('redirect_uri')!);
+      const raw = await new Promise<string>((resolve) => {
+        const sock = connect(Number(back.port), '127.0.0.1', () => sock.write(`GET http://[ HTTP/1.1\r\nHost: ${back.host}\r\nConnection: close\r\n\r\n`));
+        let got = '';
+        sock.on('data', (c) => (got += String(c)));
+        sock.on('close', () => resolve(got));
+        sock.on('error', () => resolve(got));
+      });
+      expect(raw).toMatch(/^HTTP\/1\.1 404/);
+      await b.open(url);
+    };
+    expect((await googleLogin({ home: s.home, fetch: g.fetch, open, log: s.log, now: () => NOW })).scopes).toEqual([CALENDAR_SCOPE]);
+
+    const t = setup();
+    const m = browser(() => [`/?state=${'%C3%A9'.repeat(32)}&code=${encodeURIComponent(CODE)}`]);
+    const e = await caught(() => googleLogin({ home: t.home, fetch: googleFor(m).fetch, open: m.open, log: t.log }));
+    expect(e.code).toBe('state');
+    expect((await m.answers[0]!).status).toBe(400);
   });
 
   it('the wrong state fails the login with a 400, and nothing is exchanged or written', async () => {

@@ -14,9 +14,9 @@ const EDGES: Record<TemplateId, unknown[]> = {
   route_errors: [{ count: 6, minutes: 10 }, { count: 1_000_000, minutes: 60 }],
   handoff_unaccepted: [{ handoff: 'handoff#abc123', namespace: 'trident' }, { handoff: null, namespace: null }],
   calendar_upcoming: [
-    { item: 'commitment#abc123', kind: 'commitment', day: 'today', time: '00:00' },
-    { item: 'commitment#abc123', kind: 'commitment', day: 'tomorrow', time: null },
-    { item: 'deadline#abc123', kind: 'deadline', day: 'today', time: '23:59' },
+    { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: '00:00', until: '2026-10-06T05:00:00.000Z' },
+    { item: 'commitment#abc123', kind: 'commitment', date: '2026-12-31', time: null, until: '2027-01-01T06:00:00.000Z' },
+    { item: 'deadline#abc123', kind: 'deadline', date: '2028-02-29', time: null, until: '2028-03-01T06:00:00.000Z' },
   ],
   new_item: (['issue', 'pull_request', 'thread'] as const).flatMap((kind) => REASON_CODES.map((reasonCode) => ({ kind, item: `${kind}#abc123`, reasonCode }))),
   rule_match: [{ rule: 'r'.repeat(80), source: 'github', eventType: 'issue.state', entity: 'issue#abc123' }, { rule: 'a', source: 'server', eventType: 'route.error', entity: null }],
@@ -78,5 +78,13 @@ describe('escalation templates', () => {
     expect(r.title.length).toBeLessThanOrEqual(80);
     expect(/[\uD800-\uDBFF]$/.test(r.title)).toBe(false);
     expect(displayName({ id: 'cent0000abc123', kind: 'service', name: '🚀'.repeat(31), taintedPaths: [] })).toBe('service#abc123');
+  });
+
+  it('the calendar heads-up says an absolute date, never "today" or "tomorrow", and refuses a date that is not one', () => {
+    const r = render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: '14:30', until: '2026-10-06T19:30:00.000Z' });
+    expect(r.title).toBe('On your calendar Tue Oct 6 at 14:30');
+    expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-11-01', time: null, until: '2026-11-02T06:00:00.000Z' }).title).toBe('A deadline on Sun Nov 1');
+    expect(`${r.title} ${r.body}`).not.toMatch(/today|tomorrow/i);
+    expect(() => render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-02-30', time: null, until: '2026-03-01T06:00:00.000Z' })).toThrow();
   });
 });

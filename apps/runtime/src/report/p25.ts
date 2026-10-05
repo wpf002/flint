@@ -39,19 +39,22 @@ export async function p25Report(db: Db, config: Pick<Config, 'home'>, now = new 
     SELECT e.kind, count(*)::int AS n FROM "Entity" e
     WHERE e.kind IN ('commitment', 'deadline') AND e.status = 'active' AND e.state->>'source' = ${SOURCE}
       AND coalesce(e.state->>'startsAt', e.state->>'dueOn') <= ${horizon}
+      AND coalesce(e.state->>'endsAt', e.state->>'dueOn') >= ${now.toISOString().slice(0, 10)}
     GROUP BY e.kind`;
   const count = (k: string) => ahead.find((r) => r.kind === k)?.n ?? 0;
   const lags = (await db.metricPoint.findMany({ where: { seriesKey: LAG_SERIES, at: { gt: new Date(now.getTime() - 7 * DAY) } }, select: { value: true } })).map((p) => p.value);
   const p95 = lags.length ? percentile(lags, 0.95) : null;
   const lastOkMin = cursor?.lastOkAt ? (now.getTime() - cursor.lastOkAt.getTime()) / 60_000 : null;
   const fresh = lastOkMin !== null && lastOkMin < 15;
+  // The Watcher may go only once the runtime's heads-up has actually reached Will.
+  const delivered = await db.escalationDelivery.count({ where: { status: 'sent', escalation: { templateId: 'calendar_upcoming' } } });
   out.push({
     n: 1, name: 'calendar: the next 14 days as commitments and deadlines, p95 freshness < 15 min (and the Watcher off)',
     pass: !cursor?.enabled ? null : !fresh || (p95 !== null && p95 >= 15 * 60_000) ? false : p95 === null ? null : true,
     detail: !cursor?.enabled
       ? 'the calendar source is not on yet'
-      : `${count('commitment')} commitment(s) and ${count('deadline')} deadline(s) ahead; last good sync ${lastOkMin === null ? 'never' : `${Math.round(lastOkMin)} min ago`}; p95 freshness ${p95 === null ? 'n/a (no changes seen yet)' : `${Math.round(p95 / 1000)} s`} over ${lags.length} change(s); the server's Watcher (FLINT_WATCHER=off) is checked by hand`,
-    values: { enabled: cursor?.enabled ?? false, commitments: count('commitment'), deadlines: count('deadline'), p95LagS: p95 === null ? null : Math.round(p95 / 1000), lastOkMinAgo: lastOkMin === null ? null : Math.round(lastOkMin) },
+      : `${count('commitment')} commitment(s) and ${count('deadline')} deadline(s) ahead; last good sync ${lastOkMin === null ? 'never' : `${Math.round(lastOkMin)} min ago`}; p95 freshness ${p95 === null ? 'n/a (no changes seen yet)' : `${Math.round(p95 / 1000)} s`} over ${lags.length} change(s); ${delivered} heads-up(s) delivered, so the server's Watcher ${delivered ? 'may be turned off (FLINT_WATCHER=off; checked by hand)' : 'should stay on for now'}`,
+    values: { enabled: cursor?.enabled ?? false, commitments: count('commitment'), deadlines: count('deadline'), p95LagS: p95 === null ? null : Math.round(p95 / 1000), lastOkMinAgo: lastOkMin === null ? null : Math.round(lastOkMin), headsUpsDelivered: delivered },
   });
 
   // 2. The refresh token survives 30 days (an app left in Google's Testing mode loses it after 7).

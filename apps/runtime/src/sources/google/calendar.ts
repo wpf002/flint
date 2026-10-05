@@ -19,8 +19,14 @@
  *    tz, so a 23- or 25-hour day is exactly its length.
  *  - What leaves the listing (it ended, was declined, cancelled or deleted) is
  *    archived as it was last known, but only after a complete listing in which
- *    every item could be read: a gap must never read as "gone".
+ *    every item could be read: a gap must never read as "gone". What the
+ *    listing itself shows declined or cancelled, and what has ended, is archived
+ *    whatever else the listing held.
+ *  - An item this source cannot read is set aside as a warning: it is reported
+ *    (the source's last error) without counting as a failed run, so one odd
+ *    invitation from outside can neither open the circuit nor stop the rest.
  */
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { localDayBounds } from '@flint/policy';
 import type { Endpoint } from '../../policy/egress.js';
@@ -55,7 +61,10 @@ const DEADLINE_WORDS = /\b(deadline|due|submit(?:ted)?|submission|expires?|expir
 /** Started this recently, still upcoming: Will may be on his way. */
 const UPCOMING_SINCE_MS = 15 * 60_000;
 const UPCOMING_WITHIN_MS = 24 * 3_600_000;
-const EVENT_ID = /^[A-Za-z0-9_-]{1,200}$/;
+/** Google's own event ids run to 1024 characters (an organizer may choose one; Exchange invitations and recurring instances are long). */
+const EVENT_ID = /^[A-Za-z0-9_-]{1,1024}$/;
+/** Ids longer than this are keyed by a digest, so keys and source refs stay short. */
+const LOCAL_ID_MAX = 200;
 /** Visible ASCII: anything else would make Headers throw an error that quotes the token. */
 const TOKEN = /^[\x21-\x7E]{1,4096}$/;
 const MAX_ERRORS = 10;
@@ -126,11 +135,13 @@ function wallClock(tz: string): (at: Date) => { day: string; time: string } {
   };
 }
 
-/** The day after a YYYY-MM-DD day. */
-const nextDay = (d: string) => {
+/** The day after (or before) a YYYY-MM-DD day. */
+const shiftDay = (d: string, by: number) => {
   const [y, m, n] = d.split('-').map(Number) as [number, number, number];
-  return new Date(Date.UTC(y, m - 1, n + 1)).toISOString().slice(0, 10);
+  return new Date(Date.UTC(y, m - 1, n + by)).toISOString().slice(0, 10);
 };
+const nextDay = (d: string) => shiftDay(d, 1);
+const previousDay = (d: string) => shiftDay(d, -1);
 
 /** An event's span as instants, or why it has none. Google's all-day end date is the day after the last. */
 function spanOf(it: Item, tz: string): { startsAt: string; endsAt: string; allDay: boolean } | string {
@@ -166,6 +177,12 @@ function othersOf(it: Item): Array<{ email: string; hash: string; displayName: s
   });
 }
 
+/** The id Flint keys an event by: Google's own, or for a very long one a stable digest of it. */
+export const localIdOf = (id: string) => (id.length <= LOCAL_ID_MAX ? id : `h-${createHash('sha256').update(id).digest('hex')}`);
+
+/** A display name fit to be a person's name: no control or format characters (a ZWJ, a bidi mark, a newline). */
+const cleanName = (s: string) => wellFormed(s).replace(/\p{Cc}+/gu, ' ').replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim();
+
 /** Which checked fields an item failed on: our schema's names only, never its values. */
 const fieldsOf = (e: z.ZodError) => [...new Set(e.issues.map((i) => i.path.join('.') || 'item'))].slice(0, 5).join(', ');
 
@@ -177,7 +194,7 @@ const fieldsOf = (e: z.ZodError) => [...new Set(e.issues.map((i) => i.path.join(
  * PersonGuard looks for it), the upcoming events, and the items set aside.
  * Pure: the same items, zone and time give the same result.
  */
-export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { observations: SourceObservation[]; events: RaisedEvent[]; errors: string[] } {
+export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { observations: SourceObservation[]; events: RaisedEvent[]; errors: string[]; gone: string[] } {
   const wall = wallClock(ctx.tz);
   const zoneName = new Intl.DateTimeFormat('en-US', { timeZone: ctx.tz, timeZoneName: 'short' });
   const now = ctx.now.getTime();
@@ -197,7 +214,7 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
     return `event ${label}${zone ? ` ${zone}` : ''}`;
   };
   const upcoming = (sourceRef: string, type: string, payload: RaisedEvent['payload']): RaisedEvent => ({
-    // Seen soon now: a condition that holds (the day word moves from tomorrow to today), so it is current.
+    // Seen soon now: a condition that holds while the event is near, so it is current (refreshed each run until decided).
     sourceRef, type, occurredAt: ctx.now, sensitivity: 'personal', tainted: false, current: true, payload,
   });
 
@@ -206,6 +223,8 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
   const events: RaisedEvent[] = [];
   const errors: string[] = [];
   const seen = new Set<string>();
+  /** Events the listing itself shows as no longer Will's (declined, cancelled), by local id. */
+  const gone = new Set<string>();
 
   items.forEach((raw, i) => {
     if (!raw || typeof raw !== 'object') {
@@ -213,46 +232,57 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
       return;
     }
     // Checked before the shape: a cancelled instance of a recurring event comes without a start or end.
-    const head = raw as { status?: unknown; eventType?: unknown };
-    if (head.status === 'cancelled' || SKIPPED_TYPES.has(head.eventType)) return;
+    const head = raw as { id?: unknown; status?: unknown; eventType?: unknown };
+    if (head.status === 'cancelled') {
+      if (typeof head.id === 'string' && EVENT_ID.test(head.id)) gone.add(localIdOf(head.id));
+      return;
+    }
+    if (SKIPPED_TYPES.has(head.eventType)) return;
     const parsed = Item.safeParse(raw);
     if (!parsed.success) {
       errors.push(`google calendar: item ${i} is not an event this source can read (${fieldsOf(parsed.error)}); set aside`);
       return;
     }
     const it = parsed.data;
-    if (seen.has(it.id)) return;
-    seen.add(it.id);
-    const span = spanOf(it, ctx.tz);
-    if (typeof span === 'string') {
-      errors.push(`google calendar: event ${it.id}: ${span}; set aside`);
+    const id = localIdOf(it.id);
+    if (seen.has(id)) return;
+    seen.add(id);
+    const response = responseOf(it);
+    if (response === 'declined') {
+      gone.add(id);
       return;
     }
-    const response = responseOf(it);
-    if (response === 'declined') return;
+    const span = spanOf(it, ctx.tz);
+    if (typeof span === 'string') {
+      errors.push(`google calendar: event ${id}: ${span}; set aside`);
+      return;
+    }
 
     const title = it.summary ?? '';
-    const texts = title.trim() ? { texts: { title: clip(wellFormed(title), 300) } } : {};
+    // Always sent for a listed event: a title removed at Google is removed here too (an empty one deletes it).
+    const texts = { texts: { title: title.trim() ? clip(wellFormed(title), 300) : '' } };
     const changedAt = it.updated && Number.isFinite(Date.parse(it.updated)) ? { changedAt: it.updated } : {};
     const start = new Date(span.startsAt);
 
     if (DEADLINE_WORDS.test(title) || (!span.allDay && span.startsAt === span.endsAt)) {
-      const dueOn = wall(start).day;
-      const key = `deadline:${SOURCE}:${it.id}`;
+      // Due on the span's last day (an all-day end is the day after it; a timed one ends just before its end instant).
+      const dueOn = span.allDay ? previousDay(it.end.date!) : span.startsAt === span.endsAt ? wall(start).day : wall(new Date(Date.parse(span.endsAt) - 1)).day;
+      const key = `deadline:${SOURCE}:${id}`;
       entities.push({
-        type: 'deadline.state', kind: 'deadline', key, externalId: `deadline:${it.id}`, name: `deadline ${dueOn}`,
+        type: 'deadline.state', kind: 'deadline', key, externalId: `deadline:${id}`, name: `deadline ${dueOn}`,
         state: { dueOn, source: SOURCE }, sensitivity: 'personal', taintedPaths: [], ...changedAt, ...texts,
       });
-      const d = dayOf(dueOn);
-      if (d) events.push(upcoming(`upcoming:${it.id}:${dueOn}`, 'deadline.upcoming', { entityKind: 'deadline', entityKey: key, day: d, time: '', allDay: span.allDay }));
+      // The day and time are worked out again when triage decides (the note says them then, from the entity).
+      if (dayOf(dueOn)) events.push(upcoming(`upcoming:${id}:${dueOn}`, 'deadline.upcoming', { entityKind: 'deadline', entityKey: key }));
       return;
     }
 
     const others = othersOf(it);
-    const hashes = [...new Set(others.map((o) => o.hash))].sort().slice(0, 200);
-    const key = `commitment:${SOURCE}:${it.id}`;
+    // Attendees are kept (as hashes) only on events Will accepted or organized: PersonGuard reads no others.
+    const hashes = MEETS.has(response) ? [...new Set(others.map((o) => o.hash))].sort().slice(0, 200) : [];
+    const key = `commitment:${SOURCE}:${id}`;
     entities.push({
-      type: 'commitment.state', kind: 'commitment', key, externalId: `event:${it.id}`,
+      type: 'commitment.state', kind: 'commitment', key, externalId: `event:${id}`,
       name: span.allDay ? `event ${it.start.date} (all day)` : nameAt(start),
       state: {
         source: SOURCE, startsAt: span.startsAt, endsAt: span.endsAt, allDay: span.allDay, response,
@@ -269,8 +299,8 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
         if (people.has(o.hash)) continue;
         people.set(o.hash, {
           type: 'person.seen', kind: 'person', key: personKey(o.hash), externalId: personExternalId(o.hash),
-          // The name the invitation carried, else the address: tainted either way.
-          name: clip(wellFormed(o.displayName ?? '').trim(), 100) || o.email,
+          // The name the invitation carried (without control or format characters), else the address: tainted either way.
+          name: clip(cleanName(o.displayName ?? ''), 100).trim() || o.email,
           state: { source: SOURCE, email: o.email, emailHash: o.hash }, sensitivity: 'personal', taintedPaths: ['name', 'state.email'],
         });
       }
@@ -278,14 +308,12 @@ export function mapEvents(items: unknown[], ctx: { tz: string; now: Date }): { o
 
     const t = start.getTime();
     if (response !== 'needs_action' && t > now - UPCOMING_SINCE_MS && t <= now + UPCOMING_WITHIN_MS) {
-      // Within 24 hours but two local days off (a 23-hour spring-forward day, or just before midnight): next run's word is right.
-      const d = dayOf(wall(start).day);
-      if (d) events.push(upcoming(`upcoming:${it.id}:${span.startsAt}`, 'commitment.upcoming', { entityKind: 'commitment', entityKey: key, day: d, time: span.allDay ? '' : wall(start).time, allDay: span.allDay }));
+      events.push(upcoming(`upcoming:${id}:${span.startsAt}`, 'commitment.upcoming', { entityKind: 'commitment', entityKey: key }));
     }
   });
 
   if (errors.length > MAX_ERRORS) errors.splice(MAX_ERRORS, errors.length - MAX_ERRORS, `google calendar: ${errors.length - MAX_ERRORS} more item(s) set aside`);
-  return { observations: [...entities, ...people.values()], events, errors };
+  return { observations: [...entities, ...people.values()], events, errors, gone: [...gone] };
 }
 
 // ---- the cursor --------------------------------------------------------------------------
@@ -349,18 +377,25 @@ export function googleCalendarSource(opts: CalendarOpts): Source {
 
       const mapped = mapEvents(items, { tz: o.tz, now: r.now });
       const observations = [...mapped.observations];
-      const errors = [...mapped.errors];
-      if (!complete) errors.push(`google calendar: more than ${o.maxPages * PAGE_SIZE} events in the next ${o.windowDays} days; the rest are not read and nothing is archived`);
+      // Set aside, not failed: reported as the source's last error, never counted toward its circuit.
+      const warnings = [...mapped.errors];
+      if (!complete) warnings.push(`google calendar: more than ${o.maxPages * PAGE_SIZE} events in the next ${o.windowDays} days; the rest are not read and only what has ended is archived`);
 
-      // Only a whole, readable listing can say what is gone. People are never archived here.
-      if (complete && mapped.errors.length === 0 && r.known) {
+      // What is gone. A whole, readable listing says it of anything not in it; any listing says it of what it
+      // shows declined or cancelled, and the clock says it of what has ended. People are never archived here.
+      if (r.known) {
+        const whole = complete && mapped.errors.length === 0;
         const listed = new Set(observations.map((x) => x.key));
+        const gone = new Set(mapped.gone);
+        const today = wallClock(o.tz)(r.now).day;
         for (const kind of ['commitment', 'deadline'] as const) {
           const prefix = `${kind}:${SOURCE}:`;
           for (const k of await r.known(kind)) {
             if (!k.key.startsWith(prefix) || listed.has(k.key)) continue;
             const id = k.key.slice(prefix.length);
             if (!EVENT_ID.test(id)) continue;
+            const ended = kind === 'commitment' ? typeof k.state.endsAt === 'string' && Date.parse(k.state.endsAt) <= r.now.getTime() : typeof k.state.dueOn === 'string' && k.state.dueOn < today;
+            if (!whole && !gone.has(id) && !ended) continue;
             observations.push({
               type: `${kind}.state`, kind, key: k.key, name: k.name, state: k.state, status: 'archived',
               externalId: `${kind === 'commitment' ? 'event' : 'deadline'}:${id}`, sensitivity: 'personal', taintedPaths: [],
@@ -373,7 +408,7 @@ export function googleCalendarSource(opts: CalendarOpts): Source {
       const metrics: MetricObservation[] = lag === undefined ? [] : [{ series: LAG_SERIES, at: r.now, value: lag }];
       return {
         observations, metrics, events: mapped.events, cursor: JSON.stringify({ lastRunAt: r.now.toISOString() }),
-        ...(errors.length ? { errors } : {}),
+        ...(warnings.length ? { warnings } : {}),
       };
     },
   };

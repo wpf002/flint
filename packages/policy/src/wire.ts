@@ -175,6 +175,14 @@ export const InboxItem = z
   })
   .strict();
 export const InboxPage = z.object({ items: z.array(InboxItem), next: At.nullable() }).strict();
+/**
+ * The titles behind a page of lane items (P2.5: calendar events), asked for
+ * separately so a server that predates them never receives a field it would
+ * refuse. Keyed by decision id; for Will in the console only, always tainted.
+ */
+export const InboxTitles = z
+  .object({ titles: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/), title: z.string().min(1).max(300) }).strict()).max(100) })
+  .strict();
 
 export const HEALTH_STATUS = ['ok', 'degraded', 'down', 'unknown', 'disabled'] as const;
 export const HealthReport = z

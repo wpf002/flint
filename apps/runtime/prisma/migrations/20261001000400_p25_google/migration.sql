@@ -67,11 +67,29 @@ $$;
 CREATE CONSTRAINT TRIGGER "Entity_person_guard" AFTER INSERT ON "Entity" DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW WHEN (NEW."kind" = 'person') EXECUTE FUNCTION person_insert_guard();
 
--- Forgetting an entity forgets its text at once (forget_entity runs as flint_owner).
+-- Forgetting an entity (inside forget_entity, as flint_owner, while its source
+-- rows still hold their real ids) also forgets, at once:
+--  * its text;
+--  * for a calendar event, the event under its other kind: an event renamed
+--    from a meeting into a deadline (or back) is the same event, still forgotten;
+--  * for a person, their name and address on the calendar cards that proposed them.
 CREATE FUNCTION entity_forgotten_p25() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   DELETE FROM "EntityText" WHERE "entityId" = NEW."id";
+  INSERT INTO "SuppressedKey" ("source", "externalIdHash", "approvalId")
+  SELECT 'google_calendar',
+         encode(sha256(convert_to(CASE WHEN s."externalId" LIKE 'event:%' THEN 'deadline:' || substr(s."externalId", 7)
+                                       ELSE 'event:' || substr(s."externalId", 10) END, 'UTF8')), 'hex'),
+         current_setting('flint.forget_approval', true)
+  FROM "EntitySource" s
+  WHERE s."entityId" = NEW."id" AND s."source" = 'google_calendar' AND (s."externalId" LIKE 'event:%' OR s."externalId" LIKE 'deadline:%')
+  ON CONFLICT DO NOTHING;
+  IF OLD."kind" = 'person' AND OLD."state"->>'emailHash' IS NOT NULL THEN
+    UPDATE "Proposal" SET "args" = NULL, "argsPurgedAt" = coalesce("argsPurgedAt", now()), "reason" = NULL, "result" = NULL, "error" = NULL
+    WHERE "action" = 'world.person.create' AND "args" IS NOT NULL
+      AND jsonb_path_exists("args", '$.people[*] ? (@.emailHash == $h)', jsonb_build_object('h', OLD."state"->>'emailHash'));
+  END IF;
   RETURN NULL;
 END;
 $$;

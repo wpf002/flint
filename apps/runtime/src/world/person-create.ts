@@ -14,6 +14,7 @@
  *    person Will asked Flint to forget is never recreated (the mapper and the
  *    database both refuse).
  */
+import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { resolveTier } from '@flint/policy';
@@ -49,12 +50,13 @@ export function candidateOf(o: SourceObservation): PersonIn | undefined {
   return p.success && s.source === SOURCE && o.key === personKey(p.data.emailHash) && o.externalId === personExternalId(p.data.emailHash) ? p.data : undefined;
 }
 
-/** PersonGuard: on an event Will accepted or organized, still on his calendar. */
-export async function personAllowed(db: Db | Tx, hash: string): Promise<boolean> {
+/** PersonGuard: on an event Will accepted or organized, still on his calendar and not over. */
+export async function personAllowed(db: Db | Tx, hash: string, now = new Date()): Promise<boolean> {
   const rows = await db.$queryRaw<Array<{ ok: number }>>`
     SELECT 1 AS ok FROM "Entity" e
     WHERE e.kind = 'commitment' AND e.status = 'active'
       AND e.state->>'source' = ${SOURCE} AND e.state->>'response' IN (${Prisma.join([...MEETS])})
+      AND e.state->>'endsAt' > ${now.toISOString()}
       AND jsonb_exists(coalesce(e.state->'attendeeHashes', '[]'::jsonb), ${hash})
       AND EXISTS (SELECT 1 FROM "EntitySource" s WHERE s."entityId" = e.id AND s.source = ${SOURCE})
     LIMIT 1`;
@@ -70,10 +72,19 @@ async function create(tx: Tx, p: PersonIn, now: Date, actor: string): Promise<Ap
 }
 
 export interface Offered {
-  seen: number;
+  /** Known already and changed (a new name), or restored. */
+  updated: number;
+  /** Known already and the same. */
+  unchanged: number;
   created: number;
   proposed: number;
   refused: number;
+}
+
+/** A person Will asked Flint to forget: never offered, never created again. */
+export async function forgotten(db: Db | Tx, hash: string): Promise<boolean> {
+  const externalIdHash = createHash('sha256').update(personExternalId(hash)).digest('hex');
+  return !!(await db.suppressedKey.findUnique({ where: { source_externalIdHash: { source: SOURCE, externalIdHash } }, select: { source: true } }));
 }
 
 /**
@@ -81,7 +92,7 @@ export interface Offered {
  * ones offered (a card at APPROVAL, created under the cap once promoted).
  */
 export async function offerPeople(db: Db, people: SourceObservation[], now: Date, tz: string): Promise<Offered> {
-  const out: Offered = { seen: 0, created: 0, proposed: 0, refused: 0 };
+  const out: Offered = { updated: 0, unchanged: 0, created: 0, proposed: 0, refused: 0 };
   const fresh: PersonIn[] = [];
   const seen = new Set<string>();
   for (const o of people) {
@@ -91,16 +102,21 @@ export async function offerPeople(db: Db, people: SourceObservation[], now: Date
       continue;
     }
     seen.add(p.emailHash);
-    const known = await db.entity.findUnique({ where: { kind_key: { kind: 'person', key: personKey(p.emailHash) } }, select: { status: true } });
-    if (known) {
-      // Known already: seen again (a forgotten one stays forgotten: the mapper skips it).
-      if (known.status === 'active' || known.status === 'archived') {
-        await db.$transaction((tx) => create(tx, p, now, `sync:${SOURCE}`));
-        out.seen += 1;
-      }
+    // Forgotten (its entity was rekeyed, so the key no longer finds it): never offered again.
+    if (await forgotten(db, p.emailHash)) {
+      out.refused += 1;
       continue;
     }
-    if (!(await personAllowed(db, p.emailHash))) {
+    const known = await db.entity.findUnique({ where: { kind_key: { kind: 'person', key: personKey(p.emailHash) } }, select: { status: true } });
+    if (known) {
+      // Known already: seen again, counted by what that changed.
+      const a = await db.$transaction((tx) => create(tx, p, now, `sync:${SOURCE}`));
+      if (a === 'updated' || a === 'created') out.updated += 1;
+      else if (a === 'unchanged') out.unchanged += 1;
+      else out.refused += 1;
+      continue;
+    }
+    if (!(await personAllowed(db, p.emailHash, now))) {
       out.refused += 1;
       continue;
     }
@@ -127,11 +143,12 @@ export async function offerPeople(db: Db, people: SourceObservation[], now: Date
     }
     return out;
   }
-  // APPROVAL: at most one card a day, none while one is open, and a week's quiet after Will turns one down.
-  const last = await db.proposal.findFirst({ where: { action: ACTION, templateId: TEMPLATE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } });
+  // APPROVAL: at most one card a day, none while one is open, and a week's quiet after Will turns one down
+  // (counted from when the card could last have been rejected: its expiry).
+  const last = await db.proposal.findFirst({ where: { action: ACTION, templateId: TEMPLATE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } });
   if (last) {
     const age = now.getTime() - last.createdAt.getTime();
-    if (['pending', 'approved', 'executing'].includes(last.status) || age < DAY || (last.status === 'rejected' && age < 7 * DAY)) return out;
+    if (['pending', 'approved', 'executing'].includes(last.status) || age < DAY || (last.status === 'rejected' && now.getTime() - last.expiresAt.getTime() < 7 * DAY)) return out;
   }
   const batch = fresh.slice(0, PER_CARD).sort((a, b) => a.emailHash.localeCompare(b.emailHash));
   await createProposal(db, {
@@ -149,7 +166,7 @@ export async function createPeople(db: Db, args: unknown, now: Date, actor: stri
   let created = 0;
   let skipped = 0;
   for (const p of people) {
-    if (!(await personAllowed(db, p.emailHash))) {
+    if ((await forgotten(db, p.emailHash)) || !(await personAllowed(db, p.emailHash, now))) {
       skipped += 1;
       continue;
     }

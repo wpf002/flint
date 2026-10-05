@@ -188,7 +188,8 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
   it('people: a rejected card means a quiet week; promoted, they are created under the cap, audited by hash', async () => {
     const grace = 'grace@example.com';
     const now = Date.now();
-    await syncOnce(db, calendar([event('m2', { attendees: [grace] }), person(grace, 'Grace')], []), run(new Date(now)), 'UTC');
+    // An event far enough ahead that it is still on the calendar when the later offers are made.
+    await syncOnce(db, calendar([event('m2', { attendees: [grace], startsIn: 20 * DAY }), person(grace, 'Grace')], []), run(new Date(now)), 'UTC');
     // Within a day of the last card: none yet. A day later: one; rejected; then a week of quiet.
     expect(await db.proposal.count({ where: { action: 'world.person.create', status: 'pending' } })).toBe(0);
     await offerPeople(db, [person(grace, 'Grace')], new Date(now + 1.1 * DAY), 'UTC');
@@ -222,7 +223,11 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     expect(await processEvent({ eventId: evs[0]!.id }, deps())).toBe('decided');
     const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: evs[0]!.id }, include: { escalation: true } });
     expect(d).toMatchObject({ action: 'escalate', critical: false, decidedBy: 'code:calendar.upcoming' });
-    expect(d.escalation).toMatchObject({ templateId: 'calendar_upcoming', title: 'On your calendar today at 14:30' });
+    // The date and time are the event's own, worked out when triage decided (in Flint's zone, UTC here), never the title.
+    const start = new Date(T0 + 3_600_000);
+    const day = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(start).replace(',', '');
+    expect(d.escalation).toMatchObject({ templateId: 'calendar_upcoming', title: `On your calendar ${day} at ${start.toISOString().slice(11, 16)}` });
+    expect(d.escalation!.fields).toMatchObject({ date: start.toISOString().slice(0, 10), time: start.toISOString().slice(11, 16), until: start.toISOString() });
     expect(JSON.stringify(d.escalation)).not.toContain('CANARY');
     // Seen again (the next sync): the same occurrence, no second escalation.
     await syncOnce(db, calendar([event('u1', { title: CANARY, startsIn: 3_600_000 })], [upcoming('u1', 'today', '14:30')]), run(), 'UTC');
@@ -245,8 +250,14 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
 
   it('the P2.5 promotion table waits for a week of calendar syncs, and is its own card', async () => {
     await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/days of calendar syncs/);
-    // The week's evidence: the calendar's first audited sync, eight days ago.
+    // A first sync eight days ago is not a week lived: every one of the last seven days needs a good sync.
     await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 8 * DAY));
+    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/does not count yet: \d of the last 7 days/);
+    // Quiet good runs, one each day (AuditRollup's days are the zone's: UTC here), and a sync in the last hour.
+    const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - i * DAY).toISOString().slice(0, 10));
+    await db.auditRollup.createMany({ data: days.map((day) => ({ day, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 })), skipDuplicates: true });
+    await owner(`UPDATE "AuditRollup" SET count = count + 1 WHERE action = 'world.sync.google_calendar'`);
+    await owner(`UPDATE "SourceCursor" SET "lastOkAt" = now() WHERE source = 'google_calendar'`);
     const t = await promotionTable(db, { phase: 'p25' });
     expect(t.rows.map((r) => [r.pattern, r.dailyCap ?? null])).toEqual([['world.sync.google_calendar', null], ['world.person.create', 20]]);
     expect((await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).templateId).toBe('p25.promotion');

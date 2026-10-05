@@ -341,7 +341,12 @@ export interface LoginOptions {
   now?: () => Date;
 }
 
-const sameSecret = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** Equal, in constant time. Compared as bytes: a multibyte string of the right length must not throw. */
+const sameSecret = (a: string, b: string) => {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 
 /** Answers the browser; settles once the answer is sent or the browser has gone (a closed tab never hangs the login). */
 function answer(res: ServerResponse, status: number, text: string): Promise<void> {
@@ -408,7 +413,13 @@ export async function googleLogin(o: LoginOptions): Promise<{ file: string; scop
         reject(new GoogleAuthError('timeout', `no sign-in within ${Math.round(timeoutMs / 1000)}s: run ${LOGIN_COMMAND} again`));
       }, timeoutMs);
       server.on('request', (req: IncomingMessage, res: ServerResponse) => {
-        const r = done ? ({ ignore: true } as const) : readRedirect(req, host, state);
+        let r: Redirect;
+        try {
+          r = done ? { ignore: true } : readRedirect(req, host, state);
+        } catch {
+          // A request the URL parser cannot read (`GET http://[`) is not the redirect; it never ends the login.
+          r = { ignore: true };
+        }
         if ('ignore' in r) return void answer(res, 404, 'not found');
         done = true;
         clearTimeout(timer);

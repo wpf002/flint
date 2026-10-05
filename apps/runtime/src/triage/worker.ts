@@ -55,8 +55,10 @@ function standing(action: string, tainted: boolean, policies: Awaited<ReturnType
 }
 
 /** The non-critical code rules' reads. */
-export function codeContext(db: Db, delivering = false): CodeRuleContext {
+export function codeContext(db: Db, delivering = false, now?: Date, tz?: string): CodeRuleContext {
   return {
+    ...(now ? { now } : {}),
+    ...(tz ? { tz } : {}),
     async routeErrorsIn10m(at) {
       return db.sourceEvent.count({ where: { source: 'server', type: 'route.error', occurredAt: { gt: new Date(at.getTime() - 10 * 60_000), lte: at } } });
     },
@@ -110,7 +112,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
   const ollama = config.ollama;
   let decision = await decide(f, {
     rules: dbRules,
-    code: codeContext(db, !rules.shadow && standing('notify.inapp', false, policies, now).tier === 'alone'),
+    code: codeContext(db, !rules.shadow && standing('notify.inapp', false, policies, now).tier === 'alone', now, config.tz),
     rulesAllowed: rules.may,
     ...(ollama && model.may
       ? {

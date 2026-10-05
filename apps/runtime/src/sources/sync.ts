@@ -135,7 +135,8 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   if (people.length) {
     try {
       const offered = await offerPeople(db, people, run.now, tz);
-      summary.updated += offered.seen;
+      summary.updated += offered.updated;
+      summary.unchanged += offered.unchanged;
       summary.created += offered.created;
       summary.skipped += offered.refused + offered.proposed;
     } catch (err) {
@@ -146,7 +147,7 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
 
   // Event-only sources: each event applied with its triage job; nothing enters the world model.
   for (const { current, ...raised } of result.events ?? []) {
-    const e = await withEntity(db, raised);
+    const e = await occurrence(db, source.name, await withEntity(db, raised));
     if (!e) {
       summary.skipped += 1;
       continue;
@@ -197,11 +198,14 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     summary.metrics += 1;
   }
 
-  // Parts of the run that failed, and observations that did not apply, are this run's error.
+  // Parts of the run that failed, and observations that did not apply, are this run's error. Items the
+  // source set aside are said too (Will should see them) but are not a failure.
   const partErrors = (result.errors ?? []).map((e) => redact(e).slice(0, 300));
   const problems = [...partErrors, ...(summary.failed ? [`${summary.failed} observation(s) failed to apply`] : [])];
+  const warnings = (result.warnings ?? []).map((e) => redact(e).slice(0, 300));
   summary.failed += partErrors.length;
-  const lastError = problems.length ? problems.join('; ').slice(0, 500) : null;
+  const said = [...problems, ...warnings];
+  const lastError = said.length ? said.join('; ').slice(0, 500) : null;
   if (lastError) summary.reason = lastError;
   await db.sourceCursor.update({
     where: { source: source.name },
@@ -244,6 +248,31 @@ async function withEntity(db: Db, e: Omit<RaisedEvent, 'current'>): Promise<Omit
   const found = await db.entity.findUnique({ where: { kind_key: { kind: entityKind, key: entityKey } }, select: { id: true, status: true } });
   if (found?.status !== 'active') return undefined;
   return { ...e, payload: { ...payload, entityId: found.id } };
+}
+
+/** Heads-ups (the calendar): one per occurrence of an event at a time. */
+const UPCOMING: ReadonlySet<string> = new Set(['commitment.upcoming', 'deadline.upcoming']);
+const AGAIN = /:r\d+$/;
+
+/**
+ * A heads-up's source names the event and its time (`upcoming:<id>:<when>`),
+ * so the same time read again is the same event. An event moved away and back
+ * again is a new occurrence of that old time (`...:r1`): Will hears the time
+ * that holds now, not silence after the one before.
+ */
+async function occurrence(db: Db, source: string, e: Omit<RaisedEvent, 'current'> | undefined): Promise<Omit<RaisedEvent, 'current'> | undefined> {
+  if (!e || !UPCOMING.has(e.type)) return e;
+  const parts = e.sourceRef.split(':');
+  if (parts.length < 3) return e;
+  const event = `${parts[0]}:${parts[1]}:`;
+  const last = await db.sourceEvent.findFirst({ where: { source, type: e.type, sourceRef: { startsWith: event } }, orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }], select: { sourceRef: true } });
+  if (!last) return e;
+  // The time last raised still holds: the same occurrence (a duplicate, or a refresh while undecided).
+  if (last.sourceRef.replace(AGAIN, '') === e.sourceRef) return { ...e, sourceRef: last.sourceRef };
+  // It moved: a time not raised before is simply new; one raised before is raised again.
+  if (!(await db.sourceEvent.count({ where: { source, sourceRef: e.sourceRef } }))) return e;
+  const n = await db.sourceEvent.count({ where: { source, sourceRef: { startsWith: `${e.sourceRef}:r` } } });
+  return { ...e, sourceRef: `${e.sourceRef}:r${n + 1}`.slice(0, 500) };
 }
 
 /** The entity's untrusted text, refreshed (or removed, when the source no longer has it). */

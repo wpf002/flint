@@ -118,12 +118,21 @@ describe.skipIf(NO_DB)('P2.5 quarantine: no Google text in a frontier prompt', (
     }
   });
 
-  it("the console's lanes (scope events, Will's eyes only) show the title, and the chat model's token cannot reach them", async () => {
-    const r = await app.inject({ method: 'GET', url: '/v1/inbox?lane=relevant', headers: { authorization: `Bearer ${CONSOLE}` } });
-    expect(r.statusCode).toBe(200);
-    const item = (r.json() as { items: Array<{ entity: { title?: string } | null; tainted: boolean }> }).items.find((i) => i.entity?.title);
-    expect(item?.entity?.title).toBe(TITLE);
-    expect((await app.inject({ method: 'GET', url: '/v1/inbox?lane=relevant', headers: { authorization: `Bearer ${TOKEN}` } })).statusCode).toBe(403);
+  it("the console's lanes (scope events, Will's eyes only) get the title from its own route, and the chat model's token reaches neither", async () => {
+    const auth = { authorization: `Bearer ${CONSOLE}` };
+    const page = await app.inject({ method: 'GET', url: '/v1/inbox?lane=relevant', headers: auth });
+    expect(page.statusCode).toBe(200);
+    // The page itself never carries a title (a server that predates titles would refuse the field).
+    expect(page.body).not.toMatch(CANARY);
+    const ids = (page.json() as { items: Array<{ id: string }> }).items.map((i) => i.id);
+    expect(ids.length).toBeGreaterThan(0);
+    const t = await app.inject({ method: 'GET', url: `/v1/inbox/titles?ids=${ids.join(',')}`, headers: auth });
+    expect(t.statusCode).toBe(200);
+    expect((t.json() as { titles: Array<{ title: string }> }).titles.map((x) => x.title)).toContain(TITLE);
+    for (const url of ['/v1/inbox?lane=relevant', `/v1/inbox/titles?ids=${ids[0]}`]) {
+      expect((await app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${TOKEN}` } })).statusCode, url).toBe(403);
+    }
+    expect((await app.inject({ method: 'GET', url: `/v1/inbox/titles?ids=${Array.from({ length: 101 }, (_, i) => `x${i}`).join(',')}`, headers: auth })).statusCode).toBe(400);
   });
 
   it('the database keeps Google text out of everything that outlives a week', async () => {

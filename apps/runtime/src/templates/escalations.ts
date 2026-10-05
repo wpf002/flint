@@ -39,6 +39,9 @@ export function hasLoosePrediction(text: string, fromLedger: readonly string[] =
   return PROBABILITY_WORDS.test(rest);
 }
 
+/** "Tue Oct 6" for 2026-10-06: the day itself, whatever the zone (read at noon UTC). */
+const calendarDay = (d: string) => new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${d}T12:00:00Z`)).replace(',', '');
+
 /** How a field is shown: an entity ref by its clean name, everything else as it is. */
 type Show = (ref: string | null, fallback: string) => string;
 
@@ -123,11 +126,21 @@ export const TEMPLATES = {
     fieldFreeBody: 'A Nexus handoff to Flint has not been accepted in 24 hours.',
   }),
   // P2.5: the calendar's heads-up, replacing the server's Watcher. The event is a
-  // ref (its title is untrusted text and never in a note); the console shows it.
+  // ref (its title is untrusted text and never in a note; the console shows it).
+  // The date is absolute ("Tue Oct 6"): a note read the next day must not say
+  // "tomorrow" for a day that is now today. `until`: when it stops being news.
   calendar_upcoming: t({
-    fields: z.object({ item: Ref, kind: z.enum(['commitment', 'deadline']), day: z.enum(['today', 'tomorrow']), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable() }).strict(),
-    title: (f) => (f.kind === 'deadline' ? `A deadline ${f.day}` : `On your calendar ${f.day}${f.time ? ` at ${f.time}` : ' (all day)'}`),
-    body: (f) => `${f.kind === 'deadline' ? 'A deadline' : 'An event'} from your Google Calendar, ${f.day}${f.time ? ` at ${f.time}` : ''}. Open it in the console to see what it is.`,
+    fields: z
+      .object({
+        item: Ref,
+        kind: z.enum(['commitment', 'deadline']),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => new Date(`${d}T12:00:00Z`).toISOString().slice(0, 10) === d, 'a real date'),
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable(),
+        until: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+      })
+      .strict(),
+    title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ' (all day)'}`),
+    body: (f) => `${f.kind === 'deadline' ? 'A deadline' : 'An event'} from your Google Calendar, on ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ''}. Open it in the console to see what it is.`,
     fieldFreeTitle: 'Something on your calendar',
     fieldFreeBody: 'Something from your Google Calendar is coming up. Open it in the console to see what it is.',
   }),

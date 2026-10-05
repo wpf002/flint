@@ -14,7 +14,7 @@
  *    signed rows carry a fixed one.
  *  - Filing the same table again is the same card: a waiting one is reused.
  */
-import { CODE_TABLE } from '@flint/policy';
+import { CODE_TABLE, localDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -68,6 +68,8 @@ const PHASES: Record<Phase, {
   label: string;
   evidence: string;
   first: (db: Db) => Promise<Date | undefined>;
+  /** Why the week does not count yet (it must have been lived, not only begun), or undefined. */
+  covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
   measured: (db: Db, first: Date, now: Date) => Promise<string>;
 }> = {
   p2: {
@@ -92,17 +94,31 @@ const PHASES: Record<Phase, {
     evidence: 'calendar syncs',
     // The calendar's first audited sync: the source has been running since.
     first: async (db) => (await db.auditEntry.findFirst({ where: { action: 'world.sync.google_calendar', outcome: 'ok' }, orderBy: { at: 'asc' }, select: { at: true } }))?.at,
-    measured: async (db) => {
-      const failed = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { consecutiveFailures: true } }))?.consecutiveFailures ?? 0;
+    // Every one of the last 7 local days had a good sync (one that changed something is an ok audit
+    // entry; a quiet one is counted in AuditRollup), and the source synced in the last hour.
+    covered: async (db, now, tz) => {
+      const since = new Date(now.getTime() - 8 * DAY);
+      const days = new Set<string>();
+      for (const a of await db.auditEntry.findMany({ where: { action: 'world.sync.google_calendar', outcome: 'ok', at: { gt: since } }, select: { at: true } })) days.add(localDay(tz, a.at));
+      for (const r of await db.auditRollup.findMany({ where: { action: 'world.sync.google_calendar', count: { gt: 0 }, day: { gte: localDay(tz, since) } }, select: { day: true } })) days.add(r.day);
+      const missing = Array.from({ length: SHADOW_DAYS }, (_, i) => localDay(tz, new Date(now.getTime() - i * DAY))).filter((d) => !days.has(d));
+      if (missing.length) return `${SHADOW_DAYS - missing.length} of the last ${SHADOW_DAYS} days had a good calendar sync (none on ${missing.join(', ')})`;
+      const last = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { lastOkAt: true } }))?.lastOkAt;
+      if (!last || now.getTime() - last.getTime() > 3_600_000) return 'the calendar has not synced in the last hour';
+      return undefined;
+    },
+    measured: async (db, _first, now) => {
+      const inRow = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { consecutiveFailures: true } }))?.consecutiveFailures ?? 0;
+      const week = await db.auditEntry.count({ where: { action: 'world.sync.google_calendar', outcome: 'failed', at: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } } });
       const people = await db.entity.count({ where: { kind: 'person' } });
       const cards = await db.proposal.groupBy({ by: ['status'], where: { action: 'world.person.create' }, _count: { _all: true } });
       const n = (st: string) => cards.find((c) => c.status === st)?._count._all ?? 0;
-      return `${people} people known; person cards ${n('executed')} signed, ${n('rejected')} rejected, ${n('expired')} expired; ${failed} sync failure(s) in a row now`;
+      return `${people} people known; person cards ${n('executed')} signed, ${n('rejected')} rejected, ${n('expired')} expired; ${week} failed sync run(s) this week, ${inRow} in a row now`;
     },
   },
 };
 
-export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date } = {}) {
+export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz?: string } = {}) {
   const now = opts.now ?? new Date();
   const phase = PHASES[opts.phase ?? 'p2'];
   const first = await phase.first(db);
@@ -110,6 +126,8 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
     const days = first ? ((now.getTime() - first.getTime()) / DAY).toFixed(1) : '0';
     throw new Refused(409, `the shadow week is not over: ${days} of ${SHADOW_DAYS} days of ${phase.evidence}`);
   }
+  const gap = await phase.covered?.(db, now, opts.tz ?? 'UTC');
+  if (gap) throw new Refused(409, `the shadow week does not count yet: ${gap}`);
   const drop = new Set(opts.drop ?? []);
   const patterns = phase.rows.filter((r) => !drop.has(r.pattern) && !NEVER_PROMOTED.has(r.pattern) && CODE_TABLE[r.pattern]?.tier !== 'forbidden' && CODE_TABLE[r.pattern]?.promotable !== false);
   if (!patterns.length) throw new Refused(400, 'nothing left to promote');

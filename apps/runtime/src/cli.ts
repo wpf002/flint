@@ -8,6 +8,8 @@
  *   pnpm --filter @flint/runtime p25-report           P2.5's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime promotion-table [--phase p2|p25] [--drop <pattern>]...
  *                                                    file a phase's promotion table for Will to sign
+ *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
+ *                                                    to sign in the console
  *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
  *                                                    P2.5); needs no database
  *
@@ -25,6 +27,8 @@ import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
 import { promotionTable, type Phase } from './governance/promotion.js';
+import { proposeEnable } from './governance/internal.js';
+import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, gate, type Command } from './backup/nightly.js';
@@ -63,12 +67,25 @@ async function loginToGoogle(): Promise<void> {
     open: (url) => new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()))),
     log: (line) => console.log(line),
   });
-  console.log('\nThen add FLINT_SOURCE_GOOGLE_CALENDAR=on to ~/.flint/runtime.override.env and approve world.source.enable for google_calendar.');
+  console.log('\nThen add FLINT_SOURCE_GOOGLE_CALENDAR=on to ~/.flint/runtime.override.env, kickstart com.flint.runtime, run\n`pnpm --filter @flint/runtime enable-source google_calendar` and sign that card in the console.');
 }
 
 async function main(): Promise<void> {
   if (process.argv[2] === 'enroll') return enroll(process.argv.includes('--replace'));
   if (process.argv[2] === 'google-login') return loginToGoogle();
+  if (process.argv[2] === 'enable-source') {
+    const source = process.argv[3] ?? '';
+    if (!(SOURCES as readonly string[]).includes(source)) throw new Error(`enable-source: one of ${SOURCES.join(', ')}`);
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      const p = await proposeEnable(db, source);
+      console.log(`${p.deduped ? 'already filed' : 'filed'}: proposal ${p.id}, to turn on ${source}. Sign it in the console (Approvals) with your key; it runs once signed.`);
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
   if (process.argv[2] === 'promotion-table') {
     const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
     const at = process.argv.indexOf('--phase');
@@ -77,7 +94,7 @@ async function main(): Promise<void> {
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      const t = await promotionTable(db, { phase: phase as Phase, drop });
+      const t = await promotionTable(db, { phase: phase as Phase, drop, tz: config.tz });
       console.log(`${t.deduped ? 'already filed' : 'filed'}: proposal ${t.proposalId}, ${t.rows.length} rows to ALONE until ${t.rows[0]!.expiresAt}`);
       for (const r of t.rows) console.log(`  ${r.pattern}${r.dailyCap ? ` (cap ${r.dailyCap}/day)` : ''}`);
       console.log('Sign it in the console (Approvals) with your key, or let it expire.');
@@ -97,7 +114,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | google-login | p2-report | p25-report | promotion-table [--phase p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | p2-report | p25-report | promotion-table [--phase p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

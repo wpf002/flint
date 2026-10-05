@@ -7,7 +7,8 @@
  * quote the token, and the lag metric. No network: fetch is a stub.
  */
 import { describe, it, expect } from 'vitest';
-import { CALENDAR_ENDPOINTS, CALENDAR_EVENTS_PATH, GOOGLE_API, googleCalendarSource, mapEvents, type CalendarOpts } from '../../src/sources/google/calendar';
+import { createHash } from 'node:crypto';
+import { CALENDAR_ENDPOINTS, CALENDAR_EVENTS_PATH, GOOGLE_API, googleCalendarSource, localIdOf, mapEvents, type CalendarOpts } from '../../src/sources/google/calendar';
 import { allowed, scopedFetch } from '../../src/policy/egress';
 import { STATE } from '../../src/world/kinds';
 import { emailHash, personExternalId, personKey } from '../../src/world/people';
@@ -94,10 +95,10 @@ describe('google_calendar: mapping events', () => {
       },
       sensitivity: 'personal', taintedPaths: [], changedAt: '2026-10-01T12:00:00.000Z', texts: { title: 'Private title a1' },
     });
-    // Not recurring and nobody else on it: neither field is there at all; no title, no texts.
+    // Not recurring and nobody else on it: neither field is there at all. No title: an empty one, which removes a stored title.
     const a2 = commitment(r.observations, 'a2')!;
     expect(a2.state).toEqual({ source: 'google_calendar', startsAt: '2026-10-07T19:00:00.000Z', endsAt: '2026-10-07T20:00:00.000Z', allDay: false, response: 'organizer', eventStatus: 'confirmed', confirmation: 'confirmed' });
-    expect(a2).not.toHaveProperty('texts');
+    expect(a2.texts).toEqual({ title: '' });
   });
 
   it('DST fall-back (2026-11-01): 01:30 CDT and 01:30 CST are different instants and names; the all-day day is 25 hours', () => {
@@ -171,6 +172,13 @@ describe('google_calendar: mapping events', () => {
     expect(commitment(r.observations, 'r7')!.state.eventStatus).toBe('tentative');
     expect(commitment(r.observations, 'r2')!.state.eventStatus).toBe('confirmed');
     expect(r.events.some((e) => e.sourceRef.startsWith('upcoming:r1:'))).toBe(false);
+    // The declined one is in the listing, so it is known to be gone (archived even when another item was set aside).
+    expect(r.gone).toEqual(['r1']);
+    // Attendees are kept (hashed) only where Will accepted or organized: never on what he has not answered yet.
+    const hashed = (id: string) => commitment(r.observations, id)?.state.attendeeHashes;
+    expect(['r2', 'r3', 'r6'].map(hashed)).toEqual([undefined, undefined, undefined]);
+    expect(hashed('r5')).toEqual([emailHash('alice@example.com')]);
+    expect(hashed('r7')).toEqual([emailHash('alice@example.com')]);
   });
 
   it('attendee hashes: not Will, not a room, not a bad address; sorted, unique, at most 200', () => {
@@ -191,7 +199,7 @@ describe('google_calendar: mapping events', () => {
     expect([...many].sort()).toEqual(many);
   });
 
-  it('deadlines: a due-date word in the title, or a zero-length timed event; dueOn is the local day of the start', () => {
+  it('deadlines: a due-date word in the title, or a zero-length timed event; dueOn is the local day the span ends on', () => {
     const r = map([
       ev('dl1', { summary: 'Passport renewal', ...allDay('2026-10-20', '2026-10-21') }),
       // 22:00 CDT on the 7th is the 8th in UTC: the local day is the due date.
@@ -202,6 +210,10 @@ describe('google_calendar: mapping events', () => {
       ev('dl6', { summary: 'Report submitted?' }),
       ev('c1', { summary: 'Lunch with Sam' }),
       ev('c2', { summary: 'Overdue library books chat' }),
+      // Spanning several days: due on the last of them (an all-day end date is the day after; a timed end, the instant).
+      ev('dl7', { summary: 'Passport renewal window', ...allDay('2026-10-20', '2026-10-24') }),
+      ev('dl8', { summary: 'Submission window', ...timed('2026-10-12T09:00:00-05:00', '2026-10-16T17:00:00-05:00') }),
+      ev('dl9', { summary: 'Proposal due', ...timed('2026-10-12T09:00:00-05:00', '2026-10-13T00:00:00-05:00') }),
     ]);
     expect(r.errors).toEqual([]);
     expect(byKey(r.observations, 'deadline:google_calendar:dl1')).toEqual({
@@ -212,13 +224,14 @@ describe('google_calendar: mapping events', () => {
     expect(byKey(r.observations, 'deadline:google_calendar:dl2')!.state).toEqual({ dueOn: '2026-10-07', source: 'google_calendar' });
     expect(byKey(r.observations, 'deadline:google_calendar:dl3')!.state.dueOn).toBe('2026-10-09');
     for (const id of ['dl4', 'dl5', 'dl6']) expect(byKey(r.observations, `deadline:google_calendar:${id}`), id).toBeDefined();
+    expect(['dl7', 'dl8', 'dl9'].map((id) => byKey(r.observations, `deadline:google_calendar:${id}`)!.state.dueOn)).toEqual(['2026-10-23', '2026-10-16', '2026-10-12']);
     for (const id of ['c1', 'c2']) expect(commitment(r.observations, id), id).toBeDefined();
     // A deadline is never also a commitment, and names nobody.
     expect(r.observations.filter((o) => o.key.endsWith(':dl5')).map((o) => o.kind)).toEqual(['deadline']);
     expect(persons(r.observations)).toEqual([]);
   });
 
-  it('skips cancelled events, working locations and birthdays; a bare cancelled instance is no error', () => {
+  it('skips cancelled events (known to be gone), working locations and birthdays; a bare cancelled instance is no error', () => {
     const r = map([
       ev('x1', { status: 'cancelled' }),
       { id: 'rec1_20261010T150000Z', status: 'cancelled', recurringEventId: 'rec1' },
@@ -228,6 +241,24 @@ describe('google_calendar: mapping events', () => {
     ]);
     expect(r.errors).toEqual([]);
     expect(r.observations.map((o) => o.key)).toEqual(['commitment:google_calendar:x4']);
+    expect(r.gone).toEqual(['x1', 'rec1_20261010T150000Z']);
+  });
+
+  it("Google's long ids (to 1024 characters) are read, keyed by a stable digest past 200; longer is set aside", () => {
+    const long = `_${'a'.repeat(299)}`;
+    const huge = 'b'.repeat(1024);
+    const r = map([ev(long), ev(huge, { summary: 'Fee due' }), ev('c'.repeat(1025))]);
+    const lid = `h-${createHash('sha256').update(long).digest('hex')}`;
+    expect(localIdOf(long)).toBe(lid);
+    expect(localIdOf('short_id')).toBe('short_id');
+    expect(commitment(r.observations, lid)).toMatchObject({ externalId: `event:${lid}` });
+    expect(byKey(r.observations, `deadline:google_calendar:${localIdOf(huge)}`)).toBeDefined();
+    expect(r.observations.every((o) => o.key.length < 300)).toBe(true);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatch(/item 2 .*\(id\)/);
+    // The same long id is the same key on every run; a cancelled one is gone by the same key.
+    expect(map([ev(long)]).observations[0]!.key).toBe(commitment(r.observations, lid)!.key);
+    expect(map([{ id: long, status: 'cancelled' }]).gone).toEqual([lid]);
   });
 
   it('sets aside a malformed item with an error that names fields, never its text', () => {
@@ -273,42 +304,39 @@ describe('google_calendar: mapping events', () => {
       ev('d3', { summary: 'Visa expires', ...allDay('2026-10-08', '2026-10-09') }),
     ]);
     expect(r.errors).toEqual([]);
-    const c = (id: string, startsAt: string, day: string, time: string, allDayEv = false): RaisedEvent => ({
+    // The event names its entity only: the date and time a note says are worked out when triage decides.
+    const c = (id: string, startsAt: string): RaisedEvent => ({
       sourceRef: `upcoming:${id}:${startsAt}`, type: 'commitment.upcoming', occurredAt: NOW, sensitivity: 'personal', tainted: false, current: true,
-      payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}`, day, time, allDay: allDayEv },
+      payload: { entityKind: 'commitment', entityKey: `commitment:google_calendar:${id}` },
     });
-    const d = (id: string, dueOn: string, day: string, allDayEv: boolean): RaisedEvent => ({
+    const d = (id: string, dueOn: string): RaisedEvent => ({
       sourceRef: `upcoming:${id}:${dueOn}`, type: 'deadline.upcoming', occurredAt: NOW, sensitivity: 'personal', tainted: false, current: true,
-      payload: { entityKind: 'deadline', entityKey: `deadline:google_calendar:${id}`, day, time: '', allDay: allDayEv },
+      payload: { entityKind: 'deadline', entityKey: `deadline:google_calendar:${id}` },
     });
     expect(r.events).toEqual([
-      c('u2', '2026-10-05T14:46:00.000Z', 'today', '09:46'),
-      c('u3', '2026-10-06T15:00:00.000Z', 'tomorrow', '10:00'),
-      c('u5', '2026-10-06T05:00:00.000Z', 'tomorrow', '', true),
-      c('u8', '2026-10-05T17:00:00.000Z', 'today', '12:00'),
-      c('u9', '2026-10-05T18:00:00.000Z', 'today', '13:00'),
-      d('d1', '2026-10-05', 'today', true),
-      d('d2', '2026-10-06', 'tomorrow', false),
+      c('u2', '2026-10-05T14:46:00.000Z'),
+      c('u3', '2026-10-06T15:00:00.000Z'),
+      c('u5', '2026-10-06T05:00:00.000Z'),
+      c('u8', '2026-10-05T17:00:00.000Z'),
+      c('u9', '2026-10-05T18:00:00.000Z'),
+      d('d1', '2026-10-05'),
+      d('d2', '2026-10-06'),
     ]);
   });
 
-  it('upcoming days are local: just before midnight, and across a 23-hour spring-forward day', () => {
-    // 23:50 CDT on the 4th (already the 5th in UTC).
+  it('upcoming is the window alone, whatever the local day: just before midnight, and across a 23-hour spring-forward day', () => {
+    // 23:50 CDT on the 4th (already the 5th in UTC). A deadline due on the 5th is due tomorrow, locally.
     const late = new Date('2026-10-05T04:50:00Z');
     const r = map([
       ev('le1', timed('2026-10-05T04:40:00Z', '2026-10-05T05:40:00Z')),
       ev('le2', timed('2026-10-05T05:10:00Z', '2026-10-05T06:10:00Z')),
       ev('le3', { summary: 'Form due', ...allDay('2026-10-05', '2026-10-06') }),
     ], late);
-    expect(r.events.map((e) => [e.sourceRef, e.payload.day, e.payload.time])).toEqual([
-      ['upcoming:le1:2026-10-05T04:40:00.000Z', 'today', '23:40'],
-      ['upcoming:le2:2026-10-05T05:10:00.000Z', 'tomorrow', '00:10'],
-      ['upcoming:le3:2026-10-05', 'tomorrow', ''],
-    ]);
-    // 23:30 CST on 2027-03-13: 00:15 on the 15th is 23 h 45 min away but two local days off, so it waits.
+    expect(r.events.map((e) => e.sourceRef)).toEqual(['upcoming:le1:2026-10-05T04:40:00.000Z', 'upcoming:le2:2026-10-05T05:10:00.000Z', 'upcoming:le3:2026-10-05']);
+    // 23:30 CST on 2027-03-13: 00:15 on the 15th is 23 h 45 min away, two local days off, and still within the window.
     const dst = new Date('2027-03-14T05:30:00Z');
     const s = map([ev('dst1', timed('2027-03-15T05:15:00Z', '2027-03-15T06:00:00Z')), ev('dst2', timed('2027-03-15T04:30:00Z', '2027-03-15T05:00:00Z'))], dst);
-    expect(s.events.map((e) => [e.sourceRef, e.payload.day, e.payload.time])).toEqual([['upcoming:dst2:2027-03-15T04:30:00.000Z', 'tomorrow', '23:30']]);
+    expect(s.events.map((e) => e.sourceRef)).toEqual(['upcoming:dst1:2027-03-15T05:15:00.000Z', 'upcoming:dst2:2027-03-15T04:30:00.000Z']);
   });
 
   it('people come only from commitments Will accepted or organized, once per address, never Will or a room', () => {
@@ -334,8 +362,14 @@ describe('google_calendar: mapping events', () => {
     });
     // No display name (or a blank one): the address is the name, tainted like any name.
     expect(people[1]!.name).toBe('bob@example.com');
+    // Nobody from an event Will has not accepted: p3 (tentative), p4 (not answered), p6 (declined).
+    for (const e of ['dave@example.com', 'erin@example.com', 'gina@example.com']) expect(people.some((p) => (p.state as { email: string }).email === e), e).toBe(false);
     expect(people[3]!.name).toBe('carol@example.com');
     expect(people[2]!.name).toHaveLength(100);
+    // A name loses control and format characters (a ZWJ in an emoji, a bidi mark, a newline); all of them gone, the address.
+    const odd = persons(map([ev('p7', { attendees: [me, { email: 'ana@x.org', displayName: 'Ana \u200D\u{1F4BB}\u200F' }, { email: 'bo@x.org', displayName: 'Bo\nBo' }, { email: 'cy@x.org', displayName: '\u200D\u200F' }] })]).observations);
+    expect(odd.map((p) => p.name)).toEqual(['Ana \u{1F4BB}', 'Bo Bo', 'cy@x.org']);
+    for (const p of odd) expect(p.name).not.toMatch(/[\p{Cc}\p{Cf}]/u);
     // Commitments first, so PersonGuard finds the commitment that names each person.
     const firstPerson = r.observations.findIndex((o) => o.kind === 'person');
     expect(r.observations.slice(firstPerson).every((o) => o.kind === 'person')).toBe(true);
@@ -360,12 +394,12 @@ describe('google_calendar: mapping events', () => {
     expect(byKey(r.observations, 'deadline:google_calendar:s2')!.texts).toEqual({ title: 'TOPSECRET filing due' });
   });
 
-  it('texts: the title clipped to 300 and made storable; none when it is blank', () => {
+  it('texts: the title clipped to 300 and made storable; empty when it is blank (which removes a stored one)', () => {
     // The NUL goes first; the cut at 300 then falls inside the emoji, and never keeps half of it.
     const long = `\u0000${'x'.repeat(299)}😀tail`;
     const r = map([ev('t1', { summary: long }), ev('t2', { summary: '   ' }), ev('t3', { summary: 'half \uD800 pair' })]);
     expect(commitment(r.observations, 't1')!.texts).toEqual({ title: 'x'.repeat(299) });
-    expect(commitment(r.observations, 't2')).not.toHaveProperty('texts');
+    expect(commitment(r.observations, 't2')!.texts).toEqual({ title: '' });
     expect(commitment(r.observations, 't3')!.texts).toEqual({ title: 'half � pair' });
   });
 });
@@ -393,6 +427,7 @@ describe('google_calendar: the source', () => {
     expect(signal).toBe(run.signal);
     expect(res.observations.map((o) => o.key)).toEqual(['commitment:google_calendar:a1']);
     expect(res.errors).toBeUndefined();
+    expect(res.warnings).toBeUndefined();
 
     // The endpoint list admits exactly that request.
     expect(allowed(CALENDAR_ENDPOINTS, url.toString(), 'GET')).toBe(true);
@@ -441,24 +476,29 @@ describe('google_calendar: the source', () => {
     expect(asked).toEqual(['commitment', 'deadline']);
   });
 
-  it('an incomplete listing (maxPages reached) archives nothing, and says so', async () => {
+  /** Known and still ahead: only a whole listing may say it is gone. */
+  const knownAhead = (id: string): Known => ({ ...knownCommitment(id), state: { ...knownCommitment(id).state, startsAt: '2026-10-09T14:00:00.000Z', endsAt: '2026-10-09T15:00:00.000Z' } });
+
+  it('an incomplete listing (maxPages reached) is a warning: only what has ended is archived', async () => {
     const g = fakeGoogle({ '': { items: [ev('pg1')], nextPageToken: 'tok-2' }, 'tok-2': { items: [ev('pg2')] } });
-    const asked: string[] = [];
-    const res = await source({ maxPages: 1 }).run(runOf(g.fetch, { known: [knownCommitment('gone1')], asked }));
+    const res = await source({ maxPages: 1 }).run(runOf(g.fetch, { known: [knownCommitment('ended1'), knownAhead('ahead1'), knownDeadline('pastdue')] }));
     expect(g.seen).toHaveLength(1);
-    expect(res.observations.map((o) => [o.key, o.status])).toEqual([['commitment:google_calendar:pg1', undefined]]);
-    expect(asked).toEqual([]);
-    expect(res.errors).toEqual(['google calendar: more than 250 events in the next 14 days; the rest are not read and nothing is archived']);
+    expect(res.observations.map((o) => [o.key, o.status])).toEqual([
+      ['commitment:google_calendar:pg1', undefined], ['commitment:google_calendar:ended1', 'archived'], ['deadline:google_calendar:pastdue', 'archived'],
+    ]);
+    expect(res.errors).toBeUndefined();
+    expect(res.warnings).toEqual(['google calendar: more than 250 events in the next 14 days; the rest are not read and only what has ended is archived']);
   });
 
-  it('a malformed item is set aside, reported, and blocks archiving', async () => {
-    const g = fakeGoogle({ '': { items: [ev('ok1'), ev('bad', { start: { dateTime: 'soon' } })] } });
-    const asked: string[] = [];
-    const res = await source().run(runOf(g.fetch, { known: [knownCommitment('gone1')], asked }));
-    expect(res.observations.map((o) => o.key)).toEqual(['commitment:google_calendar:ok1']);
-    expect(res.errors).toHaveLength(1);
-    expect(res.errors![0]).toMatch(/item 1 .*start\.dateTime/);
-    expect(asked).toEqual([]);
+  it('an item that cannot be read is set aside as a warning, not a failure; what the listing shows declined or cancelled is still archived', async () => {
+    const g = fakeGoogle({ '': { items: [ev('ok1'), ev('bad', { start: { dateTime: 'soon' } }), ev('dec2', { attendees: [{ ...me, responseStatus: 'declined' }] }), { id: 'can2', status: 'cancelled' }] } });
+    const res = await source().run(runOf(g.fetch, { known: [knownAhead('ahead1'), knownAhead('dec2'), knownAhead('can2')] }));
+    expect(res.observations.map((o) => [o.key, o.status])).toEqual([
+      ['commitment:google_calendar:ok1', undefined], ['commitment:google_calendar:dec2', 'archived'], ['commitment:google_calendar:can2', 'archived'],
+    ]);
+    expect(res.errors).toBeUndefined();
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings![0]).toMatch(/item 1 .*start\.dateTime/);
   });
 
   it('a failed page fails the whole run, never quoting the token', async () => {
@@ -515,6 +555,6 @@ describe('google_calendar: the source', () => {
   it('raises the upcoming events with the observations', async () => {
     const g = fakeGoogle({ '': { items: [ev('soon', { attendees: [me], ...timed(at(30 * MIN), at(90 * MIN)) })] } });
     const res = await source().run(runOf(g.fetch));
-    expect(res.events!.map((e) => [e.type, e.sourceRef, e.payload.day, e.payload.time])).toEqual([['commitment.upcoming', 'upcoming:soon:2026-10-05T15:30:00.000Z', 'today', '10:30']]);
+    expect(res.events!.map((e) => [e.type, e.sourceRef, e.payload])).toEqual([['commitment.upcoming', 'upcoming:soon:2026-10-05T15:30:00.000Z', { entityKind: 'commitment', entityKey: 'commitment:google_calendar:soon' }]]);
   });
 });
