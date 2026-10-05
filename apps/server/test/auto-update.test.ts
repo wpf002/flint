@@ -317,6 +317,58 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.status).toBe(0);
     expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
   });
+  it('a held runtime is released only by a change to its own code, not to shared code or the lockfile', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    push('a bad migration', 'apps/runtime/x.ts');
+    flag('runtime-migrate');
+    tick();
+    flag('runtime-migrate', false);
+    for (const f of ['packages/core/src/provider/anthropic.ts', 'pnpm-lock.yaml']) {
+      push(`server-side change ${f}`, f);
+      expect(tick().ran, f).toEqual(['server']);
+    }
+    const fix = push('the migration fix', 'apps/runtime/prisma/x.sql');
+    expect(tick().ran).toEqual(['server', 'runtime']);
+    expect(live()).toBe(fix);
+  });
+
+  it('a runtime deployed by hand clears the hold', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    push('crashes on boot', 'apps/runtime/x.ts');
+    flag('runtime-health');
+    tick();
+    flag('runtime-health', false);
+    expect(existsSync(join(state, 'runtime-held'))).toBe(true);
+    // Will deploys a runtime by hand from another clone: a release this checkout does not know.
+    const other = 'e'.repeat(40);
+    mkdirSync(join(runtimeDir, 'releases', other), { recursive: true });
+    spawnSync('ln', ['-sfn', join(runtimeDir, 'releases', other), join(runtimeDir, 'current')]);
+    const next = push('docs', 'docs.md');
+    const t = tick();
+    expect(existsSync(join(state, 'runtime-held'))).toBe(false);
+    // Main's runtime comes back at the next push, as without a hold.
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(live()).toBe(next);
+  });
+
+  it('a server that failed at its gate under a run that left no retry (the old script, on the merge tick) is retried', () => {
+    const sha = push('v1');
+    // The old script deployed it and failed at the gate, writing only the event.
+    git(deployDir, 'fetch', '-q', 'origin', 'main');
+    git(deployDir, 'reset', '-q', '--hard', 'origin/main');
+    writeFileSync(events, `{"id":"x","at":"2026-10-05T00:00:00Z","component":"server","stage":"gate","outcome":"failed","sha":"${sha}"}\n`, { flag: 'a' });
+    let t = tick();
+    expect(t.out).toContain(`server deploy FAILED at ${sha} (retrying)`);
+    expect(t.out).not.toContain('up to date');
+    expect(t.app).toBe(false);
+    expect(retry()).toBe(`${sha} server 0 1`);
+    age(31);
+    t = tick();
+    expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
+    expect(t.app).toBe(true);
+  });
 });
 
 

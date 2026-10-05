@@ -17,12 +17,16 @@ RUNTIME_DIR="$HOME/.flint/runtime"
 # retried: they need a look, and the next push deploys again. The file holds
 # "<sha> <parts> <tries> <retryable>", parts the comma-joined server,runtime.
 RETRY="$STATE/deploy-retry"
-# The sha of a runtime deploy that failed past its gate: until a push changes runtime
-# code again, later pushes leave the runtime where it is instead of repeating the
-# failure (and its escalation) against the live database on every merge.
+# "<sha> <live>": a runtime deploy that failed past its gate, and the release that
+# was live then. Until a push changes the runtime's own code (HELD_PATHS, where a
+# fix for a migration or a boot crash lands), later pushes leave the runtime where
+# it is instead of repeating the failure (and its escalation) against the live
+# database on every merge. Forgotten once a runtime deploys, or the live release
+# changes some other way (a deploy by hand).
 RUNTIME_HELD="$STATE/runtime-held"
 # What the runtime bundle is built from: its code, the packages it imports, the lockfile.
 RUNTIME_PATHS='^(apps/runtime/|packages/(policy|core)/|pnpm-lock\.yaml$)'
+HELD_PATHS='^(apps/runtime/|packages/policy/)'
 RETRY_EVERY_MIN=30
 RETRY_MAX=6
 ts() { date '+%F %T'; }
@@ -57,15 +61,19 @@ is_live() {
 # gate): only once what it is built from changed since the held sha.
 runtime_wanted() {
   [ -x ./apps/runtime/install-runtime.sh ] || return 1
-  local live held from
+  local live held held_live
   live=$(runtime_live)
   [ -n "$live" ] || return 0
   [ "$live" = "$1" ] && return 1
-  held=$(head -n 1 "$RUNTIME_HELD" 2>/dev/null)
-  if [ -n "$held" ] && git cat-file -e "$held^{commit}" 2>/dev/null; then from=$held; else from=$live; fi
-  [ "$from" = "$1" ] && return 1
-  git cat-file -e "$from^{commit}" 2>/dev/null || return 0
-  git diff --name-only "$from" "$1" 2>/dev/null | grep -qE "$RUNTIME_PATHS"
+  if [ -s "$RUNTIME_HELD" ]; then read -r held held_live < "$RUNTIME_HELD" || true; fi
+  if [ -n "$held" ] && [ "$held_live" != "$live" ]; then rm -f "$RUNTIME_HELD"; held=""; fi
+  if [ -n "$held" ] && git cat-file -e "$held^{commit}" 2>/dev/null; then
+    [ "$held" = "$1" ] && return 1
+    git diff --name-only "$held" "$1" 2>/dev/null | grep -qE "$HELD_PATHS"
+    return
+  fi
+  git cat-file -e "$live^{commit}" 2>/dev/null || return 0
+  git diff --name-only "$live" "$1" 2>/dev/null | grep -qE "$RUNTIME_PATHS"
 }
 
 # Deploys the given parts of $1 and leaves the ones that failed in $failed, and
@@ -95,7 +103,7 @@ deploy() {
       echo "$(ts) runtime deployed $sha"; rm -f "$RUNTIME_HELD"
     else
       echo "$(ts) runtime deploy FAILED at $sha (the server is unaffected)"; failed="${failed:+$failed,}runtime"
-      [ "$(last_event runtime "$sha")" = "gate failed" ] || { mkdir -p "$STATE"; echo "$sha" > "$RUNTIME_HELD"; }
+      [ "$(last_event runtime "$sha")" = "gate failed" ] || { mkdir -p "$STATE"; echo "$sha $(runtime_live)" > "$RUNTIME_HELD"; }
     fi
   fi
   for part in ${(s:,:)failed}; do
@@ -143,7 +151,13 @@ elif [ "$rsha" = "$after" ]; then
     quiet "$after" "$left" "retrying"
   fi
 else
-  echo "$(ts) up to date ($after)"
+  # No retry pending, yet the server may have failed at this commit under a run that
+  # wrote none (the previous version of this script, on the tick that brought this one).
+  case "$(last_event server "$after")" in
+    "gate failed") remember "$after" server 0 1; quiet "$after" server "retrying" ;;
+    *" failed") quiet "$after" server "waiting for the next push" ;;
+    *) echo "$(ts) up to date ($after)" ;;
+  esac
 fi
 # A failed server deploy fails this run.
 [[ ",$failed," == *,server,* ]] && exit 1
