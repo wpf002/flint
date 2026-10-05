@@ -6,7 +6,9 @@ import LocalAuthentication
 let FLINT_URL = "http://localhost:8080"
 
 /// Will's approval key on this Mac (Machine plan 3.0.2): a P-256 key inside the
-/// Secure Enclave that signs only after Touch ID. The private key never leaves
+/// Secure Enclave that signs only after Touch ID or the Mac's password
+/// (.userPresence: a keyboard whose Touch ID is not paired, or no fingerprint
+/// enrolled, must not make the key impossible to create). The private key never leaves
 /// the enclave; what is stored in ~/.flint/approval-key.se is the enclave's
 /// encrypted handle, usable by this Mac's enclave alone. The console reaches it
 /// through the `flintApproval` script handler, which answers only pages from
@@ -30,7 +32,7 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
 
   func create() throws -> SecureEnclave.P256.Signing.PrivateKey {
     var err: Unmanaged<CFError>?
-    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet], &err) else {
+    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence], &err) else {
       throw err!.takeRetainedValue() as Error
     }
     let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
@@ -56,10 +58,9 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
         let key = try load() ?? create()
         replyHandler(["publicKey": ApprovalKey.b64url(key.publicKey.derRepresentation)], nil)
       case "reset":
-        // The key is bound to the current fingerprints (.biometryCurrentSet), so a
-        // fingerprint change makes it unusable. Will replaces it here, after Touch
-        // ID or his password; the new key still has to be enrolled (an existing
-        // key's approval, or a replace code from `enroll --replace`).
+        // A lost or unwanted key is replaced here, after Touch ID or Will's
+        // password; the new key still has to be enrolled (an existing key's
+        // approval, or a replace code from `enroll --replace`).
         let ctx = LAContext()
         ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "replace Flint's approval key on this Mac") { ok, _ in
           DispatchQueue.main.async {
