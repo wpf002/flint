@@ -94,6 +94,8 @@ export interface CodeRuleContext {
   tz?: string;
   /** A heads-up for the same entity was raised after this one (the event moved, and moved again): that one tells it. */
   laterHeadsUp?(entityId: string, type: string, receivedAt: Date): Promise<boolean>;
+  /** The time (`until`) of the last heads-up Will was told for this item: the same time is never told twice. */
+  lastToldUntil?(item: string): Promise<string | undefined>;
 }
 
 /** A heads-up is given from a day before its event to a quarter of an hour after it starts. */
@@ -147,6 +149,8 @@ async function calendarUpcoming(f: EventFacts, ctx: CodeRuleContext): Promise<Ve
     const w = wallClock(ctx.tz, new Date(at));
     fields = { item, kind: 'commitment', date: w.day, time: e.state.allDay === true ? null : w.time, until: new Date(at).toISOString() };
   }
+  // Told already, for this very time (it moved away and back while a heads-up waited): once is enough.
+  if ((await ctx.lastToldUntil?.(item)) === fields.until) return { ...quiet, ruleName: 'calendar.upcoming.told' };
   return { action: 'escalate', lane: 'relevant', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false, template: { id: 'calendar_upcoming', fields } };
 }
 

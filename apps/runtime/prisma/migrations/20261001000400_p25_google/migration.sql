@@ -70,32 +70,51 @@ CREATE CONSTRAINT TRIGGER "Entity_person_guard" AFTER INSERT ON "Entity" DEFERRA
 -- Forgetting an entity (inside forget_entity, as flint_owner, while its source
 -- rows still hold their real ids) also forgets, at once:
 --  * its text;
---  * for a calendar event, the same event under its other kind (a meeting renamed
---    into a deadline, or back, is one event): that key is suppressed, and an
---    entity already made under it is forgotten too, the way forget_entity forgets;
+--  * for a calendar event, its heads-ups (named `upcoming:<id>:<when>`, which
+--    forget_entity's own `<externalId>@` match does not reach), and the same
+--    event under its other kind (a meeting renamed into a deadline, or back, is
+--    one event): that key is suppressed, and an entity already made under it is
+--    forgotten too, the way forget_entity forgets, and audited as such;
 --  * for a person, their name and address on the calendar cards that proposed them.
 CREATE FUNCTION entity_forgotten_p25() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   approval text := current_setting('flint.forget_approval', true);
-  other record;
+  src record;
   sib record;
+  local_id text;
+  other_ext text;
+  heads text;
   events text[];
+  n_versions int;
+  n_events int;
 BEGIN
   DELETE FROM "EntityText" WHERE "entityId" = NEW."id";
-  FOR other IN
-    SELECT CASE WHEN s."externalId" LIKE 'event:%' THEN 'deadline:' || substr(s."externalId", 7)
-                ELSE 'event:' || substr(s."externalId", 10) END AS ext
-    FROM "EntitySource" s
+  FOR src IN
+    SELECT s."externalId" FROM "EntitySource" s
     WHERE s."entityId" = NEW."id" AND s."source" = 'google_calendar' AND (s."externalId" LIKE 'event:%' OR s."externalId" LIKE 'deadline:%')
   LOOP
+    local_id := CASE WHEN src."externalId" LIKE 'event:%' THEN substr(src."externalId", 7) ELSE substr(src."externalId", 10) END;
+    other_ext := CASE WHEN src."externalId" LIKE 'event:%' THEN 'deadline:' ELSE 'event:' END || local_id;
+    -- The event's heads-ups, both kinds and every re-raise. Matched by their name (the p2 trigger has
+    -- already cleared their payloads), with left() and not LIKE: `_` may be in an id.
+    heads := 'upcoming:' || local_id || ':';
+    SELECT coalesce(array_agg("id"), '{}') INTO events FROM "SourceEvent" WHERE "source" = 'google_calendar' AND left("sourceRef", length(heads)) = heads;
+    UPDATE "TriageDecision" SET "reasoning" = NULL WHERE "sourceEventId" = ANY (events) AND "reasoning" IS NOT NULL;
+    UPDATE "Escalation" SET "title" = 'Something needs a look', "body" = NULL, "fields" = '{}'::jsonb, "contentPurgedAt" = now()
+    WHERE "contentPurgedAt" IS NULL AND "triageDecisionId" IN (SELECT "id" FROM "TriageDecision" WHERE "sourceEventId" = ANY (events));
+    UPDATE "SourceEvent" SET "payload" = NULL, "lastError" = NULL, "sourceRef" = 'forgotten:' || encode(sha256(convert_to("sourceRef", 'UTF8')), 'hex')
+    WHERE "id" = ANY (events);
+
     INSERT INTO "SuppressedKey" ("source", "externalIdHash", "approvalId")
-    VALUES ('google_calendar', encode(sha256(convert_to(other.ext, 'UTF8')), 'hex'), approval)
+    VALUES ('google_calendar', encode(sha256(convert_to(other_ext, 'UTF8')), 'hex'), approval)
     ON CONFLICT DO NOTHING;
-    -- The other kind's entity, if one was made: forgotten as well (its own trigger then finds this one already forgotten).
+    -- The other kind's entity, if one was made: locked (a sync may be changing it), forgotten as well, and
+    -- audited (its own trigger then finds this one already forgotten).
     FOR sib IN
       SELECT e."id", e."kind", e."key", e."version", s."externalId" FROM "Entity" e JOIN "EntitySource" s ON s."entityId" = e."id"
-      WHERE s."source" = 'google_calendar' AND s."externalId" = other.ext AND e."status" <> 'forgotten'
+      WHERE s."source" = 'google_calendar' AND s."externalId" = other_ext AND e."status" <> 'forgotten'
+      FOR UPDATE OF e
     LOOP
       SELECT coalesce(array_agg(DISTINCT x), '{}') INTO events FROM (
         SELECT "sourceEventId" AS x FROM "EntityVersion" WHERE "entityId" = sib."id" AND "sourceEventId" IS NOT NULL
@@ -108,6 +127,7 @@ BEGIN
         "confidence" = NULL, "mergedIntoId" = NULL, "version" = sib."version" + 1, "lastObservedAt" = now()
       WHERE "id" = sib."id";
       UPDATE "EntityVersion" SET "state" = NULL, "patch" = NULL WHERE "entityId" = sib."id" AND ("state" IS NOT NULL OR "patch" IS NOT NULL);
+      GET DIAGNOSTICS n_versions = ROW_COUNT;
       INSERT INTO "EntityVersion" ("id", "entityId", "version", "changeKind", "actor", "validFrom")
       VALUES ('ev' || replace(gen_random_uuid()::text, '-', ''), sib."id", sib."version" + 1, 'forgotten', 'forget:' || approval, now());
       UPDATE "EntitySource" SET "externalId" = 'forgotten:' || encode(sha256(convert_to("externalId", 'UTF8')), 'hex'), "namespace" = NULL
@@ -115,6 +135,13 @@ BEGIN
       UPDATE "SourceEvent" SET "payload" = NULL, "lastError" = NULL,
         "sourceRef" = CASE WHEN "sourceRef" LIKE 'forgotten:%' THEN "sourceRef" ELSE 'forgotten:' || encode(sha256(convert_to("sourceRef", 'UTF8')), 'hex') END
       WHERE "id" = ANY (events) AND ("payload" IS NOT NULL OR "lastError" IS NOT NULL OR "sourceRef" NOT LIKE 'forgotten:%');
+      GET DIAGNOSTICS n_events = ROW_COUNT;
+      UPDATE "AuditEntry" SET "reasoning" = NULL, "outcomeDetail" = NULL, "redactedAt" = now()
+      WHERE "correlationId" = sib."id" AND "redactedAt" IS NULL;
+      INSERT INTO "AuditEntry" ("id", "actor", "context", "kind", "action", "inputs", "decision", "outcome", "correlationId")
+      VALUES ('au' || replace(gen_random_uuid()::text, '-', ''), 'will', 'console', 'forget', 'world.forget',
+              jsonb_build_object('entityId', sib."id", 'cascadeOf', NEW."id", 'approvalId', approval,
+                                 'counts', jsonb_build_object('versions', n_versions, 'sourceEvents', n_events)), 'act', 'ok', approval);
     END LOOP;
   END LOOP;
   IF OLD."kind" = 'person' AND OLD."state"->>'emailHash' IS NOT NULL THEN

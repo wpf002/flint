@@ -59,6 +59,16 @@ export function codeContext(db: Db, delivering = false, now?: Date, tz?: string)
   return {
     ...(now ? { now } : {}),
     ...(tz ? { tz } : {}),
+    async lastToldUntil(item) {
+      // Told: once escalations are delivered, a note that was not held; in shadow, recorded is enough.
+      const e = await db.escalation.findFirst({
+        where: { templateId: 'calendar_upcoming', fields: { path: ['item'], equals: item }, ...(delivering ? { deliveries: { some: { status: { not: 'held' } } } } : {}) },
+        orderBy: { createdAt: 'desc' },
+        select: { fields: true },
+      });
+      const until = (e?.fields as { until?: unknown } | null)?.until;
+      return typeof until === 'string' ? until : undefined;
+    },
     async laterHeadsUp(entityId, type, receivedAt) {
       return (await db.sourceEvent.count({ where: { type, receivedAt: { gt: receivedAt }, payload: { path: ['entityId'], equals: entityId } } })) > 0;
     },

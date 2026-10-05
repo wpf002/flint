@@ -1,7 +1,9 @@
--- Reverses p25_google. Run only after a pg_dump: calendar titles go, and the
--- calendar source is turned off. Entities it made stay (an entity is never
--- deleted), without their google_calendar source rows. It also removes its own
--- row from _prisma_migrations, so the next deploy re-applies it.
+-- Reverses p25_google. Run only after a pg_dump, and only after deploying a
+-- runtime from before P2.5: calendar titles go, and the calendar source is
+-- turned off. Entities it made stay (an entity is never deleted), and so do
+-- their google_calendar source rows (the source list keeps allowing them), so a
+-- forget made while rolled back still suppresses them for good. It also removes
+-- its own row from _prisma_migrations, so the next deploy re-applies it.
 DROP TRIGGER IF EXISTS "Entity_forgotten_p25" ON "Entity";
 DROP TRIGGER IF EXISTS "Entity_person_guard" ON "Entity";
 DROP TRIGGER IF EXISTS "EntitySource_person_guard" ON "EntitySource";
@@ -15,13 +17,10 @@ BEGIN
   END IF;
 END;
 $$;
--- P2's source lists again.
+-- P2's cursor list again (no calendar cursor); the source rows' list keeps google_calendar (see above).
 DELETE FROM "SourceCursor" WHERE "source" = 'google_calendar';
-DELETE FROM "EntitySource" WHERE "source" = 'google_calendar';
 ALTER TABLE "SourceCursor" DROP CONSTRAINT "SourceCursor_source_check",
   ADD CONSTRAINT "SourceCursor_source_check" CHECK ("source" IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google', 'deploy', 'knowledge', 'nexus_inbox'));
-ALTER TABLE "EntitySource" DROP CONSTRAINT "EntitySource_source_check",
-  ADD CONSTRAINT "EntitySource_source_check" CHECK ("source" IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google', 'deploy', 'knowledge', 'nexus_inbox'));
 DO $$
 BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN

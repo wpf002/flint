@@ -11,6 +11,8 @@ DELETE FROM "ActionCounter" WHERE "day" ~ 'T\d{2}$';
 ALTER TABLE "ActionCounter" DROP CONSTRAINT "ActionCounter_day_check",
   ADD CONSTRAINT "ActionCounter_day_check" CHECK ("day" ~ '^\d{4}-(\d{2}-\d{2}|W\d{2})$');
 DELETE FROM "SourceCursor" WHERE "source" IN ('deploy', 'knowledge', 'nexus_inbox');
+-- Source rows of later sources (P2.5's google_calendar, which its own down keeps) go with a rollback to P1.
+DELETE FROM "EntitySource" WHERE "source" NOT IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google');
 ALTER TABLE "SourceCursor" DROP CONSTRAINT "SourceCursor_source_check",
   ADD CONSTRAINT "SourceCursor_source_check" CHECK ("source" IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google'));
 ALTER TABLE "EntitySource" DROP CONSTRAINT "EntitySource_source_check",
