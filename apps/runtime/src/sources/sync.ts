@@ -15,12 +15,15 @@
  *    events of a source's first successful run are marked backfill; and with
  *    triage on, each applied event's triage job is sent in the transaction
  *    that applied it.
+ *  - A record Will asked Flint to forget is skipped before anything is
+ *    written: no event, no text, so its id and state never come back.
  *  - P2.5: an observation's untrusted text (a calendar title) goes to
  *    EntityText, never into the world model or the event; a person is never
  *    applied here but offered to world.person.create (PersonGuard); a raised
  *    event may name its entity by kind and key, and is dropped when that
  *    entity is not active (a forgotten event raises nothing).
  */
+import { createHash } from 'node:crypto';
 import { redact, resolveTier } from '@flint/policy';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
@@ -78,6 +81,8 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   // The world as it already was: everything a source's first good run reports.
   const backfill = !cursor.lastOkAt;
   const people: SourceObservation[] = [];
+  // What Will asked Flint to forget, from this source: skipped before an event is recorded (the mapper refuses it too).
+  const forgotten = new Set((await db.suppressedKey.findMany({ where: { source: source.name }, select: { externalIdHash: true } })).map((k) => k.externalIdHash));
   for (const raw of result.observations) {
     // A person is never applied by a sync: it is offered to world.person.create below.
     if (raw.kind === 'person') {
@@ -88,6 +93,10 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     // (The time is taken out first: a Date is not plain data; the text too: it never enters the world model.)
     const { changedAt, texts: rawTexts, ...rest } = raw;
     const o = wellFormedDeep({ ...rest, ...(PERSONAL_SOURCES.has(source.name) ? { sensitivity: 'personal' as const } : {}) });
+    if (forgotten.has(createHash('sha256').update(o.externalId).digest('hex'))) {
+      summary.skipped += 1;
+      continue;
+    }
     const texts = rawTexts ? wellFormedDeep(rawTexts) : undefined;
     const hash = stateHash({ name: o.name, state: o.state, ...(o.status ? { status: o.status } : {}), taintedPaths: o.taintedPaths ?? [] });
     // The event names the change: the state, and the version it would replace.
@@ -273,9 +282,10 @@ async function occurrence(db: Db, source: string, e: Omit<RaisedEvent, 'current'
   // The time last raised still holds: the same occurrence (a duplicate, or a refresh while undecided), unless
   // triage passed over it without telling Will (it had moved, or was decided late), when it is raised again.
   if (last.sourceRef.replace(AGAIN, '') === e.sourceRef) {
-    const told = await db.triageDecision.findFirst({ where: { sourceEvent: { source, sourceRef: last.sourceRef } }, select: { action: true } });
+    const told = await db.triageDecision.findFirst({ where: { sourceEvent: { source, sourceRef: last.sourceRef } }, select: { action: true, ruleName: true } });
     const again = await db.sourceEvent.count({ where: { source, sourceRef: { startsWith: `${e.sourceRef}:r` } } });
-    if (!told || told.action === 'escalate' || again >= MAX_AGAIN) return { ...e, sourceRef: last.sourceRef };
+    // Told (this time, or this very time before): the same occurrence; nothing to raise again.
+    if (!told || told.action === 'escalate' || told.ruleName === 'calendar.upcoming.told' || again >= MAX_AGAIN) return { ...e, sourceRef: last.sourceRef };
     return { ...e, sourceRef: `${e.sourceRef}:r${again + 1}`.slice(0, 500) };
   }
   // It moved: a time not raised before is simply new; one raised before is raised again.

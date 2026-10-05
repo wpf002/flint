@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { digestOf } from '@flint/policy';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { localDay, previousDay } from '@flint/policy';
@@ -318,6 +319,8 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
     for (let d = previousDay(localDay(tz, now)); want.length < 7; d = previousDay(d)) want.push(d);
     expect(new Set(want).size).toBe(7);
     const oldest = want[6]!;
+    // Its own evidence that the source began more than a week before `now` (any time the audit guard allows).
+    await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 9 * DAY));
     await db.auditRollup.createMany({ data: want.slice(0, 6).map((day) => ({ day, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 })), skipDuplicates: true });
     await expect(promotionTable(db, { phase: 'p25', now, tz })).rejects.toThrow(new RegExp(`6 of the 7 days before today .*none on ${oldest}`));
     await db.auditRollup.createMany({ data: [{ day: oldest, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 }], skipDuplicates: true });
@@ -335,23 +338,50 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
     expect((r.criteria.find((c) => c.n === 1)!.values.deadlines as number) - (utc.criteria.find((c) => c.n === 1)!.values.deadlines as number)).toBe(1);
   });
 
-  it("forgetting an event forgets its heads-ups' names too (both kinds, every re-raise), and the other kind's forget is audited", async () => {
+  it("forgetting an event forgets its heads-ups (both kinds, a re-raise, payloads already cleared): names, notes and reasoning", async () => {
     const at = T0 + 4 * HOUR;
-    await syncOnce(db, calendar({ observations: [commitment('fh', { startsIn: 4 * HOUR })], events: [upcoming('fh', iso(at))] }), run(), 'UTC');
-    for (const e of await db.sourceEvent.findMany({ where: { sourceRef: { startsWith: 'upcoming:fh:' } } })) await processEvent({ eventId: e.id }, deps());
-    // A raise for the other kind too, and one whose payload retention already cleared.
-    await syncOnce(db, calendar({ observations: [deadline('fh', iso(T0 + DAY).slice(0, 10))], warnings: ['google calendar: item 9 set aside'],
-      events: [{ sourceRef: `upcoming:fh:${iso(T0 + DAY).slice(0, 10)}`, type: 'deadline.upcoming', occurredAt: new Date(), sensitivity: 'personal', tainted: false, current: true, payload: { entityKind: 'deadline', entityKey: 'deadline:google_calendar:fh', at: iso(T0 + DAY).slice(0, 10) } }] }), run(), 'UTC');
-    await withClient(urls.owner, (c) => c.query(`UPDATE "SourceEvent" SET payload = NULL WHERE "sourceRef" LIKE 'upcoming:fh:%' AND type = 'deadline.upcoming'`));
-    expect(await db.sourceEvent.count({ where: { sourceRef: { startsWith: 'upcoming:fh:' } } })).toBe(2);
+    const due = iso(T0 + DAY).slice(0, 10);
+    const decideAll = async () => {
+      for (const e of await db.sourceEvent.findMany({ where: { sourceRef: { startsWith: 'upcoming:fh:' }, decision: null } })) await processEvent({ eventId: e.id }, deps());
+    };
+    const shown = () => syncOnce(db, calendar({ observations: [commitment('fh', { startsIn: 4 * HOUR })], events: [upcoming('fh', iso(at))] }), run(), 'UTC');
+    // A heads-up passed over (the event was off the calendar when triage got to it), then told on its re-raise.
+    await shown();
+    await syncOnce(db, calendar({ observations: [commitment('fh', { startsIn: 4 * HOUR, status: 'archived' })] }), run(), 'UTC');
+    await decideAll();
+    await shown();
+    await decideAll();
+    // The other kind, with its own told heads-up.
+    await syncOnce(db, calendar({ observations: [deadline('fh', due)], warnings: ['google calendar: item 9 set aside'],
+      events: [{ sourceRef: `upcoming:fh:${due}`, type: 'deadline.upcoming', occurredAt: new Date(), sensitivity: 'personal', tainted: false, current: true, payload: { entityKind: 'deadline', entityKey: 'deadline:google_calendar:fh', at: due } }] }), run(), 'UTC');
+    await decideAll();
+    const heads = await db.sourceEvent.findMany({ where: { sourceRef: { startsWith: 'upcoming:fh:' } }, include: { decision: { include: { escalation: true } } } });
+    expect(heads.map((h) => h.sourceRef).sort()).toEqual([`upcoming:fh:${due}`, `upcoming:fh:${iso(at)}`, `upcoming:fh:${iso(at)}:r1`].sort());
+    const escalations = heads.flatMap((h) => (h.decision?.escalation ? [h.decision.escalation.id] : []));
+    expect(escalations).toHaveLength(2);
+    // Retention has already cleared every payload, so the P2 trigger (which matches on it) finds nothing.
+    await withClient(urls.owner, (cl) => cl.query(`UPDATE "SourceEvent" SET payload = NULL WHERE "sourceRef" LIKE 'upcoming:fh:%'`));
     const c = (await entity('commitment', 'commitment:google_calendar:fh'))!;
     const d = (await entity('deadline', 'deadline:google_calendar:fh'))!;
     await forget(c.id);
     expect(await db.sourceEvent.count({ where: { sourceRef: { startsWith: 'upcoming:fh:' } } })).toBe(0);
-    expect(JSON.stringify(await db.escalation.findMany({ where: { templateId: 'calendar_upcoming' }, select: { fields: true, title: true } }))).not.toContain(iso(at));
+    for (const x of await db.escalation.findMany({ where: { id: { in: escalations } } })) {
+      expect(x).toMatchObject({ title: 'Something needs a look', body: null, fields: {} });
+      expect(x.contentPurgedAt).not.toBeNull();
+    }
     expect((await db.entity.findUniqueOrThrow({ where: { id: d.id } })).status).toBe('forgotten');
     const cascade = await db.auditEntry.findFirstOrThrow({ where: { action: 'world.forget', inputs: { path: ['entityId'], equals: d.id } } });
     expect(cascade.inputs).toMatchObject({ cascadeOf: c.id });
+  });
+
+  it("a forgotten event's next sync writes nothing: no event, no text, so its id never comes back", async () => {
+    await syncOnce(db, calendar({ observations: [commitment('nx')] }), run(), 'UTC');
+    await forget((await entity('commitment', 'commitment:google_calendar:nx'))!.id);
+    const s1 = await syncOnce(db, calendar({ observations: [commitment('nx')] }), run(), 'UTC');
+    const s2 = await syncOnce(db, calendar({ observations: [commitment('nx', { startsIn: 6 * DAY })] }), run(), 'UTC');
+    expect([s1.skipped, s1.failed, s2.skipped, s2.failed]).toEqual([1, 0, 1, 0]);
+    expect(await db.sourceEvent.count({ where: { source: 'google_calendar', sourceRef: { startsWith: 'event:nx@' } } })).toBe(0);
+    expect(JSON.stringify(await db.sourceEvent.findMany({ where: { source: 'google_calendar' }, select: { payload: true } }))).not.toContain('commitment:google_calendar:nx');
   });
 
   it('a time already told is not told again when the event moves away and back while a heads-up waits', async () => {
@@ -366,6 +396,10 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
     const told = await db.triageDecision.findMany({ where: { sourceEvent: { sourceRef: { startsWith: 'upcoming:tw:' } } }, select: { action: true, ruleName: true } });
     expect(told.filter((t) => t.action === 'escalate')).toHaveLength(1);
     expect(told.map((t) => t.ruleName).sort()).toEqual(['calendar.upcoming', 'calendar.upcoming.moved', 'calendar.upcoming.told']);
+    // Read again and again: told is told, nothing more is raised.
+    await raise(at15);
+    await raise(at15);
+    expect(await db.sourceEvent.count({ where: { sourceRef: { startsWith: 'upcoming:tw:' } } })).toBe(3);
   });
 
   it("a sync changing the other kind while it is forgotten waits for the lock: the forget succeeds, tombstoned past the sync's version", async () => {
@@ -390,12 +424,21 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
   });
 
   it("a rollback's down.sql keeps the calendar's source rows, so a forget made while rolled back still suppresses", async () => {
+    await syncOnce(db, calendar({ observations: [commitment('rb')] }), run(), 'UTC');
     const before = await db.entitySource.count({ where: { source: 'google_calendar' } });
-    expect(before).toBeGreaterThan(0);
     const down = readFileSync(join(MIGRATIONS, '20261001000400_p25_google', 'down.sql'), 'utf8');
     await withClient(urls.owner, (c) => c.query(down));
     expect(await db.entitySource.count({ where: { source: 'google_calendar' } })).toBe(before);
+    // Forgotten while rolled back (P2.5's trigger is gone; forget_entity still has the row's real id).
+    await forget((await entity('commitment', 'commitment:google_calendar:rb'))!.id);
+    const hash = (x: string) => createHash('sha256').update(x).digest('hex');
+    expect(await db.suppressedKey.count({ where: { source: 'google_calendar', externalIdHash: hash('event:rb') } })).toBe(1);
     await migrateUp(urls.owner);
-    expect(await db.entitySource.count({ where: { source: 'google_calendar' } })).toBe(before);
+    // Back on P2.5 (its cursor went with the rollback: turned on again), the event is not recreated, and nothing of it is written.
+    const p = await proposeEnable(db, 'google_calendar');
+    await sign(p.id, 'world.source.enable', { source: 'google_calendar' });
+    const s = await syncOnce(db, calendar({ observations: [commitment('rb')] }), run(), 'UTC');
+    expect(s.skipped).toBe(1);
+    expect(await entity('commitment', 'commitment:google_calendar:rb')).toBeNull();
   });
 });

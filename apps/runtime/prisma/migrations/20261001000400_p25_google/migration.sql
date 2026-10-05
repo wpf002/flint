@@ -109,8 +109,10 @@ BEGIN
     INSERT INTO "SuppressedKey" ("source", "externalIdHash", "approvalId")
     VALUES ('google_calendar', encode(sha256(convert_to(other_ext, 'UTF8')), 'hex'), approval)
     ON CONFLICT DO NOTHING;
-    -- The other kind's entity, if one was made: locked (a sync may be changing it), forgotten as well, and
-    -- audited (its own trigger then finds this one already forgotten).
+    -- The other kind's entity, if one was made: locked (a sync may be changing it; its source row first,
+    -- in the order a sync takes them), forgotten as well, and audited (its own trigger then finds this one
+    -- already forgotten).
+    PERFORM 1 FROM "EntitySource" WHERE "source" = 'google_calendar' AND "externalId" = other_ext FOR UPDATE;
     FOR sib IN
       SELECT e."id", e."kind", e."key", e."version", s."externalId" FROM "Entity" e JOIN "EntitySource" s ON s."entityId" = e."id"
       WHERE s."source" = 'google_calendar' AND s."externalId" = other_ext AND e."status" <> 'forgotten'
