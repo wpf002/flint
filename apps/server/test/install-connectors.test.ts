@@ -90,3 +90,25 @@ describe('install-server.sh connector rebuild', () => {
   });
 });
 
+// The deploy test-starts a rebuilt bundle as <name>.new.mjs. The runtime connector started only when its
+// file was named runtime-server.*, so from P1 on every rebuild was rejected ("exited 0 before listing tools")
+// and the bundle installed with P1 stayed live through P2 and P2.5.
+describe('the real connectors under the deploy\'s start check', () => {
+  it('the runtime connector, built as runtime-server.new.mjs, starts and lists its tools', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rt-conn-'));
+    const out = join(dir, 'runtime-server.new.mjs');
+    const b = spawnSync(ESBUILD, [join(REPO, 'packages', 'mcp', 'connectors', 'runtime-server.ts'), '--bundle', '--platform=node', '--format=esm', '--target=node20',
+      "--banner:js=import{createRequire as __cr}from'module';const require=__cr(import.meta.url);", `--outfile=${out}`, '--log-level=error'], { encoding: 'utf8' });
+    expect(b.status, b.stderr).toBe(0);
+    const s = spawnSync(process.execPath, [join(REPO, 'apps', 'server', 'connector-smoke.mjs'), out, '20000'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir } });
+    expect(s.stdout + s.stderr).toMatch(/^\d+ tools/);
+    expect(s.status).toBe(0);
+  }, 60_000);
+
+  it('no connector decides whether to run by its own file name', () => {
+    const dir = join(REPO, 'packages', 'mcp', 'connectors');
+    for (const f of readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
+      expect(readFileSync(join(dir, f), 'utf8'), f).not.toMatch(/argv\[1\][^\n]*-server\\?\./);
+    }
+  });
+});
