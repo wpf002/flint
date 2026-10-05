@@ -15,9 +15,10 @@ When triage turns on, it runs in shadow for a week: it sorts what comes in and
 sends nothing. Open **Activity** in the console. **Important** is what Flint
 judged worth your attention; **Other** is what it filed away. Click a row and
 mark it: **Correct** if Flint got it right, **Not Important** (in Important) or
-**Important** (in Other) if it didn't. Your marks give the precision that
-P2's promotion table (`pnpm --filter @flint/runtime promotion-table`) reports
-on the card that lets triage send anything.
+**Important** (in Other) if it didn't. The marks that count most are on rows
+Flint escalated (those with Acknowledge and Dismiss in their details): they
+give the precision P2's promotion card reports, and `p2-report` wants at least
+20. Marking a row in Other as Important records a miss.
 
 ## Your calendar (`google_calendar`)
 
@@ -61,11 +62,13 @@ Steps 1 and 2 need your Google account, so they're yours:
    Google's consent page and waits on `127.0.0.1` for the redirect. It writes
    `~/.flint/google/token.json` (0600). The offsite backup leaves `~/.flint/google`
    out.
-3. **Switch it on.** These keep the override file `0600`, whether or not it
-   exists yet:
+3. **Switch it on.** These keep the override file `0600` whether or not it
+   exists yet, add the line only once, and start it on a line of its own (a
+   file saved without a final newline would otherwise glue it onto its last
+   setting, and both would silently stop working):
    ```bash
    touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env
-   echo 'FLINT_SOURCE_GOOGLE_CALENDAR=on' >> ~/.flint/runtime.override.env
+   grep -q '^FLINT_SOURCE_GOOGLE_CALENDAR=' ~/.flint/runtime.override.env || printf '\nFLINT_SOURCE_GOOGLE_CALENDAR=on\n' >> ~/.flint/runtime.override.env
    launchctl kickstart -k gui/$(id -u)/com.flint.runtime
    ```
 4. **File the card that turns it on:**

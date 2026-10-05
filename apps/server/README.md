@@ -223,10 +223,11 @@ both ways (Machine plan P2):
   console; `channels` adds a banner and the content-free phone ping, always with the in-app
   note; a resent `ref` is a duplicate), `/internal/load` (`/chat` turns in flight: triage
   yields to them), `/internal/complete` (see "Spend caps"), `/internal/spend-external`.
-- **The console's Lanes view** (the tray icon): the relevant and quiet lanes page by page,
-  each decision with its escalation, its tainted banner and three labels (should escalate,
-  should be quiet, OK), Acknowledge and Dismiss on an open escalation, and the runtime's health
-  report. Through the routes in the table above (src/inbox-routes.ts), which check what the
+- **The console's Activity panel** (the bell): the relevant and quiet lanes, shown as the
+  Important and Other tabs, page by page. Each decision has its escalation, an Outside Text mark
+  when tainted, and two labels: Correct, plus Not Important (in Important) or Important (in
+  Other), stored as ok, should_be_quiet and should_escalate. Acknowledge and Dismiss sit on an
+  open escalation. The runtime's health report is under Settings → Health. Through the routes in the table above (src/inbox-routes.ts), which check what the
   console sends and what the runtime answers against @flint/policy's wire contracts; a runtime
   that refuses the server's token is a 502, never a 401.
 

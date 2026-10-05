@@ -163,12 +163,15 @@ describe('the console Activity panel: lanes', () => {
           cal('c2', 'commitment.upcoming', 'event 2026-10-09 (all day)'),
           cal('c3', 'deadline.upcoming', 'deadline 2026-10-06'),
           cal('c4', 'commitment.state', 'event 2026-11-01 01:30 CST'),
+          cal('c5', 'commitment.state', 'event 2026-10-25 01:30 GMT+1'),
+          // A week on, retention clears the link to its event: still the calendar's words.
+          { ...cal('c6', 'commitment.upcoming', 'x'), entity: null },
         ],
         next: null,
       },
     });
     await openLane('quiet');
-    const [a, b, c, d] = ids.lanelist!.children;
+    const [a, b, c, d, e, f] = ids.lanelist!.children;
     expect(a!.shown()).toContain('Event Tue Oct 6 at 14:00');
     expect(a!.shown()).toContain('Google Calendar · event changed');
     expect(a!.shown()).toContain('Outside Text');
@@ -181,6 +184,9 @@ describe('the console Activity panel: lanes', () => {
     expect(c!.shown()).toContain('Google Calendar · due soon');
     // In the hour a fall-back repeats, the zone tells the two apart.
     expect(d!.shown()).toContain('Event Sun Nov 1 at 01:30 CST');
+    expect(e!.shown()).toContain('Event Sun Oct 25 at 01:30 GMT+1');
+    expect(f!.shown()).toContain('Coming Up');
+    expect(f!.shown()).not.toContain('Commitment Upcoming');
     // Another source's names are its own.
     expect(run(`calName('event soon')`)).toBe('');
   });
@@ -253,6 +259,8 @@ describe('the console Activity panel: notifications', () => {
     expect(text.split('On Your Calendar Tue Oct 6, All Day')).toHaveLength(3);
     expect(text).not.toContain('2 times');
     expect(run(`titleCase('on your calendar (all day) at noon')`)).toBe('On Your Calendar (All Day) at Noon');
+    // Any script's first letter, not only a–z.
+    expect(run(`titleCase('école of ödeme')`)).toBe('École of Ödeme');
   });
 
   it('folds repeats, title-cases Flint’s titles, groups by day, and reads itself on opening', async () => {

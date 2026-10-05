@@ -72,7 +72,8 @@ async function loginToGoogle(): Promise<void> {
     '',
     'Then switch it on (the runtime refuses an override file anyone else can read, so keep it 0600):',
     '  touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env',
-    "  echo 'FLINT_SOURCE_GOOGLE_CALENDAR=on' >> ~/.flint/runtime.override.env",
+    // On its own line, once: a file saved without a final newline would glue it onto its last setting.
+    "  grep -q '^FLINT_SOURCE_GOOGLE_CALENDAR=' ~/.flint/runtime.override.env || printf '\\nFLINT_SOURCE_GOOGLE_CALENDAR=on\\n' >> ~/.flint/runtime.override.env",
     '  launchctl kickstart -k gui/$(id -u)/com.flint.runtime',
     'and file its card, then sign it in the console\'s Approvals:',
     '  cd ~/flint && pnpm --filter @flint/runtime enable-source google_calendar',

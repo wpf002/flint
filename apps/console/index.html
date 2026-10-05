@@ -905,7 +905,7 @@ function laneDay(t){var ms=typeof t==='number'?t:Date.parse(t);var s=new Date();
 /* Apple's title style, for Flint's own short titles (never for user data). */
 var SMALL={a:1,an:1,the:1,and:1,but:1,or:1,nor:1,for:1,so:1,yet:1,as:1,at:1,by:1,from:1,in:1,into:1,of:1,off:1,on:1,onto:1,out:1,over:1,to:1,up:1,with:1};
 function titleCase(s){var w=String(s||'').split(' ');return w.map(function(x,i){if(!x)return x;if(/[A-Z].*[A-Z]|\d|[_.:/@]/.test(x))return x;var l=x.toLowerCase();
-  if(i>0&&i<w.length-1&&SMALL[l])return l;return l.replace(/^([^a-z]*)([a-z])/,function(m,p,c){return p+c.toUpperCase();});}).join(' ');}
+  if(i>0&&i<w.length-1&&SMALL[l])return l;return l.replace(/^(\P{L}*)(\p{L})/u,function(m,p,c){return p+c.toUpperCase();});}).join(' ');}
 function laneCall(path,body){
   var opts={headers:Object.assign({'content-type':'application/json'},auth())};
   if(body!==undefined){opts.method='POST';opts.body=JSON.stringify(body);}
@@ -967,7 +967,7 @@ var SOURCE_NAMES={github:'GitHub',imessage:'iMessage'};
 /* A calendar entity's name is a machine label ("event 2026-10-06 14:00", "deadline 2026-10-06"): its title stays
    out of the world model. The row says it in Flint's words; the invitation's title is only in the details. */
 var CAL_TYPES={'commitment.state':'event changed','deadline.state':'deadline changed','commitment.upcoming':'coming up','deadline.upcoming':'due soon'};
-function calName(name){var m=/^(event|deadline) (\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2})(?: ([A-Z]{2,5}))?)?( \(all day\))?$/.exec(String(name||''));if(!m)return '';
+function calName(name){var m=/^(event|deadline) (\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2})(?: ([A-Z]{2,5}|GMT[+-]\d{1,2}(?::\d{2})?))?)?( \(all day\))?$/.exec(String(name||''));if(!m)return '';
   var day=new Date(Date.UTC(+m[2],+m[3]-1,+m[4],12)).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'}).replace(',','');
   /* In the hour a fall-back repeats, the zone tells the two apart (01:30 CDT, 01:30 CST). */
   return (m[1]==='event'?'Event ':'Deadline ')+day+(m[5]?' at '+m[5]+(m[6]?' '+m[6]:''):m[7]?', All Day':'');}
@@ -980,6 +980,7 @@ function laneItem(it){
   row.appendChild(laneEl('span','ud'+(es&&es.status==='open'?'':' read')));
   var fx=laneEl('span','fx');
   var cal=it.source==='google_calendar'&&it.entity?calName(it.entity.name):'';
+  if(!cal&&it.source==='google_calendar'&&!it.entity&&CAL_TYPES[it.eventType])cal=titleCase(CAL_TYPES[it.eventType]);
   fx.appendChild(laneEl('b',null,es?es.title:cal||(it.entity?it.entity.name:titleCase(laneWords(it.eventType)))));
   var sub=[SOURCE_NAMES[it.source]||titleCase(laneWords(it.source)),(it.source==='google_calendar'&&CAL_TYPES[it.eventType])||laneWords(it.eventType)].filter(Boolean).join(' · ');
   fx.appendChild(laneEl('span',null,sub));
