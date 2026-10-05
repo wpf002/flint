@@ -15,7 +15,7 @@
  *           existing credential's signature over exactly the new key.
  *           `enroll --replace` writes a code that revokes every enrolled
  *           credential and registers the new one: the recovery when the only
- *           key is lost (a fingerprint change kills a Touch ID key). Whoever
+ *           key is lost (the Mac is wiped or replaced). Whoever
  *           can write ~/.flint is Will (plan 3.0.2's boundary).
  *   approve: begin() builds the payload and a challenge; finish() verifies the
  *           signature and records the Approval as flint_approver, the only role

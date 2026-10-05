@@ -32,7 +32,7 @@ import { notifyWill } from './notify.js';
  * (plan 3.0.2). Written to ~/.flint/enroll-code (0600); the server deletes it
  * once a key is registered with it. `enroll --replace` writes a code that, once
  * used, revokes every enrolled key and keeps only the new one: the way back
- * when the only key is lost (a fingerprint change kills a Touch ID key).
+ * when the only key is lost (the Mac is wiped or replaced).
  */
 function enroll(replace: boolean): void {
   const home = homedir();
