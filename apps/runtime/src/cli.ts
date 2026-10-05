@@ -67,7 +67,16 @@ async function loginToGoogle(): Promise<void> {
     open: (url) => new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()))),
     log: (line) => console.log(line),
   });
-  console.log('\nThen add FLINT_SOURCE_GOOGLE_CALENDAR=on to ~/.flint/runtime.override.env, kickstart com.flint.runtime, run\n`pnpm --filter @flint/runtime enable-source google_calendar` and sign that card in the console.');
+  // The override file must stay 0600 (the runtime refuses to start on a looser one), so the commands make it so.
+  console.log([
+    '',
+    'Then switch it on (the runtime refuses an override file anyone else can read, so keep it 0600):',
+    '  touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env',
+    "  echo 'FLINT_SOURCE_GOOGLE_CALENDAR=on' >> ~/.flint/runtime.override.env",
+    '  launchctl kickstart -k gui/$(id -u)/com.flint.runtime',
+    'and file its card, then sign it in the console\'s Approvals:',
+    '  cd ~/flint && pnpm --filter @flint/runtime enable-source google_calendar',
+  ].join('\n'));
 }
 
 async function main(): Promise<void> {

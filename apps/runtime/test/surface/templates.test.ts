@@ -85,6 +85,11 @@ describe('escalation templates', () => {
     expect(r.title).toBe('On your calendar Tue Oct 6 at 14:30');
     expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-11-01', time: null, until: '2026-11-02T06:00:00.000Z' }).title).toBe('A deadline on Sun Nov 1');
     expect(`${r.title} ${r.body}`).not.toMatch(/today|tomorrow/i);
+    // No word starts with a bracket (the console title-cases a note's title), and the body says where the title is.
+    const allDay = render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: null, until: '2026-10-06T05:00:00.000Z' });
+    expect(allDay.title).toBe('On your calendar Tue Oct 6, all day');
+    expect(allDay.title).not.toMatch(/(^|\s)\(/);
+    expect(allDay.body).toContain('Its title is in Activity, under Important.');
     expect(() => render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-02-30', time: null, until: '2026-03-01T06:00:00.000Z' })).toThrow();
   });
 });

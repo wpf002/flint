@@ -564,10 +564,13 @@ function approveLabel(all){var p=all?'Approve All':'Approve';
   return p;}
 /* How an approval ended: done, still approved (a cap was reached, or a runtime job runs it), or failed. Text only, never HTML. */
 function resText(r,t,kind){r.style.display='block';r.textContent=t;r.className='res'+(kind?' '+kind:'');}
+/* A person card's result: who was added, and who no longer qualified (already known, declined, or the event is over). */
+function peopleOutcome(x){if(!x||typeof x.created!=='number'||typeof x.skipped!=='number')return '';
+  var s=x.created?'Added '+x.created+' '+(x.created===1?'Person':'People'):'Nobody Added';return x.skipped?s+' · Skipped '+x.skipped:s;}
 function showOutcome(d,r,row){var a=(d&&d.action)||{};
   if(d&&d.error&&!d.action){resText(r,d.error,'bad');row.style.opacity=1;return;}
   row.style.display='none';
-  if(a.status==='done')resText(r,'Done'+(a.note?': '+a.note:''),'ok');
+  if(a.status==='done')resText(r,peopleOutcome(a.result)||('Done'+(a.note?': '+a.note:'')),'ok');
   else if(a.status==='approved')resText(r,a.note||'Approved, not run yet','ok');
   else resText(r,(a.error||'Failed')+(a.note?': '+a.note:''),'bad');}
 function showDecision(d,decision,r,row){if(decision==='reject'){row.style.display='none';resText(r,'Rejected');return;}showOutcome(d,r,row);}
@@ -902,7 +905,7 @@ function laneDay(t){var ms=typeof t==='number'?t:Date.parse(t);var s=new Date();
 /* Apple's title style, for Flint's own short titles (never for user data). */
 var SMALL={a:1,an:1,the:1,and:1,but:1,or:1,nor:1,for:1,so:1,yet:1,as:1,at:1,by:1,from:1,in:1,into:1,of:1,off:1,on:1,onto:1,out:1,over:1,to:1,up:1,with:1};
 function titleCase(s){var w=String(s||'').split(' ');return w.map(function(x,i){if(!x)return x;if(/[A-Z].*[A-Z]|\d|[_.:/@]/.test(x))return x;var l=x.toLowerCase();
-  if(i>0&&i<w.length-1&&SMALL[l])return l;return l.charAt(0).toUpperCase()+l.slice(1);}).join(' ');}
+  if(i>0&&i<w.length-1&&SMALL[l])return l;return l.replace(/^([^a-z]*)([a-z])/,function(m,p,c){return p+c.toUpperCase();});}).join(' ');}
 function laneCall(path,body){
   var opts={headers:Object.assign({'content-type':'application/json'},auth())};
   if(body!==undefined){opts.method='POST';opts.body=JSON.stringify(body);}
@@ -932,8 +935,9 @@ function loadNotifs(){var list=document.getElementById('nlist');if(!list.childre
     list.textContent='';var items=(d&&d.items)||[];
     if(!d){list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));return;}
     if(!items.length){list.appendChild(laneEmpty('Nothing New',''));return;}
-    /* The same message again and again is one row with a count. */
-    var rows=[];items.forEach(function(n){var last=rows[rows.length-1];if(last&&last.title===n.title&&last.body===n.body&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&n.read;}else rows.push({title:n.title,body:n.body,ts:n.ts,read:!!n.read,count:1});});
+    /* The same message again and again is one row with a count. The runtime's notes are each their own
+       escalation (two events at the same time read alike, as their titles stay out), so they never fold. */
+    var rows=[];items.forEach(function(n){var last=rows[rows.length-1];if(last&&n.kind!=='runtime'&&last.kind!=='runtime'&&last.title===n.title&&last.body===n.body&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&n.read;}else rows.push({title:n.title,body:n.body,kind:n.kind,ts:n.ts,read:!!n.read,count:1});});
     var group='';rows.forEach(function(n){var g=laneDay(n.ts);if(g!==group){list.appendChild(laneEl('div','gsh fsh',g));group=g;}
       var row=laneEl('div','frow'+(n.read?' read':''));row.appendChild(laneEl('span','ud'+(n.read?' read':'')));
       var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,titleCase(n.title)));fx.appendChild(laneEl('span',null,(n.body||'')+(n.count>1?' · '+n.count+' times':'')));row.appendChild(fx);
@@ -960,6 +964,13 @@ function loadLane(older){if(older&&(LANE_OLDER||!LANE_NEXT))return;
   }).catch(function(e){if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg(e.message,true);});}
 function laneLabelOf(f){for(var i=0;i<LANE_LABELS.length;i++)if(LANE_LABELS[i][0]===f)return LANE_LABELS[i][1];return f;}
 var SOURCE_NAMES={github:'GitHub',imessage:'iMessage'};
+/* A calendar entity's name is a machine label ("event 2026-10-06 14:00", "deadline 2026-10-06"): its title stays
+   out of the world model. The row says it in Flint's words; the invitation's title is only in the details. */
+var CAL_TYPES={'commitment.state':'event changed','deadline.state':'deadline changed','commitment.upcoming':'coming up','deadline.upcoming':'due soon'};
+function calName(name){var m=/^(event|deadline) (\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2})(?: ([A-Z]{2,5}))?)?( \(all day\))?$/.exec(String(name||''));if(!m)return '';
+  var day=new Date(Date.UTC(+m[2],+m[3]-1,+m[4],12)).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'}).replace(',','');
+  /* In the hour a fall-back repeats, the zone tells the two apart (01:30 CDT, 01:30 CST). */
+  return (m[1]==='event'?'Event ':'Deadline ')+day+(m[5]?' at '+m[5]+(m[6]?' '+m[6]:''):m[7]?', All Day':'');}
 function laneWords(s){return String(s||'').replace(/[_.]+/g,' ').trim();}
 /* A row: what happened (an escalation's title, the thing it is about, or the event), then where and when;
    the rest (its text, the model's note) opens on click; labels show on hover. */
@@ -968,8 +979,9 @@ function laneItem(it){
   var row=laneEl('div','frow');row.tabIndex=0;
   row.appendChild(laneEl('span','ud'+(es&&es.status==='open'?'':' read')));
   var fx=laneEl('span','fx');
-  fx.appendChild(laneEl('b',null,es?es.title:it.entity?it.entity.name:titleCase(laneWords(it.eventType))));
-  var sub=[SOURCE_NAMES[it.source]||titleCase(laneWords(it.source)),laneWords(it.eventType)].filter(Boolean).join(' · ');
+  var cal=it.source==='google_calendar'&&it.entity?calName(it.entity.name):'';
+  fx.appendChild(laneEl('b',null,es?es.title:cal||(it.entity?it.entity.name:titleCase(laneWords(it.eventType)))));
+  var sub=[SOURCE_NAMES[it.source]||titleCase(laneWords(it.source)),(it.source==='google_calendar'&&CAL_TYPES[it.eventType])||laneWords(it.eventType)].filter(Boolean).join(' · ');
   fx.appendChild(laneEl('span',null,sub));
   if(it.tainted||(es&&es.tainted)){var o=laneEl('span','outside');o.appendChild(laneEl('i'));o.appendChild(document.createTextNode('Outside Text'));fx.appendChild(o);}
   var more=laneEl('span','more');more.hidden=true;
@@ -1009,7 +1021,7 @@ var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',
 var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
 /* The runtime's note, without asides, starting with a capital. */
 function healthDetail(d){d=String(d||'').replace(/\s*\([^)]*\)/g,'').replace(/\b[0-9a-f]{7,40}\b/g,'').replace(/(^|\s)~?\/[\w.-]+(\/[\w.-]+)+\/?/g,'$1').replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim();return d.charAt(0).toUpperCase()+d.slice(1);}
-function healthName(c){c=String(c||'');if(HEALTH_NAMES[c])return HEALTH_NAMES[c];if(c.indexOf('source:')===0)return titleCase(laneWords(c.slice(7)));return titleCase(laneWords(c));}
+function healthName(c){c=String(c||'');if(HEALTH_NAMES[c])return HEALTH_NAMES[c];if(c.indexOf('source:')===0)return SOURCE_NAMES[c.slice(7)]||titleCase(laneWords(c.slice(7)));return titleCase(laneWords(c));}
 function healthDot(status,text){var cls={ok:'ok',degraded:'degraded',down:'down',unknown:'unknown',disabled:'off'}[status]||'unknown';var s=laneEl('span','st '+cls);s.appendChild(laneEl('i'));if(text)s.appendChild(document.createTextNode(text));return s;}
 var HEALTH_ALL=false;
 function loadHealth(){var top=document.getElementById('sethealth'),last=document.getElementById('sethealth-last');
@@ -1047,7 +1059,7 @@ pollNotifs();setInterval(pollNotifs,60000);
  * its own prompt. Text only: nothing here is HTML. */
 var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false};
 var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db'],'backup.offsite':["Run Tonight's Offsite Copy",'db'],'restore.drill':["Run This Week's Restore Test",'db'],'maintenance.retention':["Run Tonight's Cleanup",'db']};
-var APPR_SOURCES={launchd:'Flint’s background jobs, every 2 minutes',health:'Service checks, every 5 minutes',git:'Your repos, every 5 minutes',spend:'Spend against your caps, every minute',deploy:'Deploy results, every minute',knowledge:'What Flint’s memory learns, every 10 minutes',nexus_inbox:'Nexus handoffs, every 10 minutes',nexus:'Your Nexus threads, every 5 minutes',github:'Your GitHub repos, every 5 minutes',railway:'Your Railway services, every 5 minutes',google_calendar:'Your calendar, every 10 minutes'};
+var APPR_SOURCES={launchd:'Flint’s background jobs, every 2 minutes',health:'Service checks, every 5 minutes',git:'Your repos, every 5 minutes',spend:'Spend against your caps, every minute',deploy:'Deploy results, every minute',knowledge:'What Flint’s memory learns, every 10 minutes',nexus_inbox:'Nexus handoffs, every 10 minutes',nexus:'Your Nexus threads, every 5 minutes',github:'Your GitHub repos, every 5 minutes',railway:'Your Railway services, every 5 minutes',google_calendar:'Your calendar, read-only, every 5 minutes'};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -1078,15 +1090,18 @@ function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if
 function apprFacts(p){var a=p.args||{},f=[];
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
     var lim={'backup.local':'Backup 1 a Day','restore.drill':'Restore Test 1 a Week','backup.offsite':'Offsite 1 a Day'};
-    var named=rows.map(function(r){return lim[r.pattern]||(apprWords(r.pattern)+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
+    var words={'world.sync.google_calendar':'Read Your Calendar','world.person.create':'Add People from Calendar'};
+    var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
-  else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){return x.name||x.email;}).join(', ')]);
+  /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole. */
+  else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
   f.push(['Filed By',apprFrom(p.origin)]);
   if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
   return f.slice(0,3);}
-/* Asks on its own, never in Approve All: outside text, or money. */
-function apprAlone(p){return !!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''));}
+/* Asks on its own, never in Approve All: outside text, money, or letting Flint add people by itself. */
+function apprAlone(p){return !!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
+  (p.fullName==='policy.change'&&((p.args&&p.args.rows)||[]).some(function(r){return r&&r.pattern==='world.person.create';}));}
 function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
 
 function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+(open?' open':''));card.style.display='block';

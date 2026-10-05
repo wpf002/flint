@@ -139,10 +139,11 @@ export const TEMPLATES = {
         until: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
       })
       .strict(),
-    title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ' (all day)'}`),
-    body: (f) => `${f.kind === 'deadline' ? 'A deadline' : 'An event'} from your Google Calendar, on ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ''}. Open it in the console to see what it is.`,
+    // The console title-cases a note's title, so no word starts with a bracket ("(all day)" read "(all Day)").
+    title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ', all day'}`),
+    body: (f) => `${f.kind === 'deadline' ? 'A deadline' : 'An event'} from your Google Calendar, on ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ''}. Its title is in Activity, under Important.`,
     fieldFreeTitle: 'Something on your calendar',
-    fieldFreeBody: 'Something from your Google Calendar is coming up. Open it in the console to see what it is.',
+    fieldFreeBody: 'Something from your Google Calendar is coming up. Its title is in Activity, under Important.',
   }),
   new_item: t({
     fields: z.object({ kind: z.enum(['issue', 'pull_request', 'thread']), item: Ref, reasonCode: z.enum(REASON_CODES) }).strict(),

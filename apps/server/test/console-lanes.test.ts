@@ -152,6 +152,39 @@ describe('the console Activity panel: lanes', () => {
     expect(ids.laneolder!.hidden).toBe(true);
   });
 
+  it('a calendar row is in Flint’s words, never its machine name; the invitation’s title only in the details, as outside text', async () => {
+    const cal = (id: string, eventType: string, name: string, title?: string) =>
+      item({ id, lane: 'quiet', action: 'log', source: 'google_calendar', eventType, escalation: null, reasoning: null, tainted: !!title, entity: { ref: `commitment#${id}`, kind: 'commitment', name, ...(title ? { title } : {}) } });
+    routes['/inbox'] = () => ({
+      status: 200,
+      body: {
+        items: [
+          cal('c1', 'commitment.state', 'event 2026-10-06 14:00', 'Dinner with <b>Ann</b>'),
+          cal('c2', 'commitment.upcoming', 'event 2026-10-09 (all day)'),
+          cal('c3', 'deadline.upcoming', 'deadline 2026-10-06'),
+          cal('c4', 'commitment.state', 'event 2026-11-01 01:30 CST'),
+        ],
+        next: null,
+      },
+    });
+    await openLane('quiet');
+    const [a, b, c, d] = ids.lanelist!.children;
+    expect(a!.shown()).toContain('Event Tue Oct 6 at 14:00');
+    expect(a!.shown()).toContain('Google Calendar · event changed');
+    expect(a!.shown()).toContain('Outside Text');
+    expect(a!.shown()).not.toMatch(/event 2026|commitment state|Dinner/);
+    a!.onclick!({ target: { tagName: 'DIV' } });
+    expect(a!.shown()).toContain('Invitation title: Dinner with <b>Ann</b>');
+    expect(b!.shown()).toContain('Event Fri Oct 9, All Day');
+    expect(b!.shown()).toContain('Google Calendar · coming up');
+    expect(c!.shown()).toContain('Deadline Tue Oct 6');
+    expect(c!.shown()).toContain('Google Calendar · due soon');
+    // In the hour a fall-back repeats, the zone tells the two apart.
+    expect(d!.shown()).toContain('Event Sun Nov 1 at 01:30 CST');
+    // Another source's names are its own.
+    expect(run(`calName('event soon')`)).toBe('');
+  });
+
   it('labels a decision through the feedback route and marks the label chosen', async () => {
     routes['/inbox?'] = () => ({ status: 200, body: { items: [item()], next: null } });
     await openLane();
@@ -209,6 +242,19 @@ describe('the console Activity panel: lanes', () => {
 });
 
 describe('the console Activity panel: notifications', () => {
+  it('never folds Flint’s own notes (two calendar heads-ups read alike), and title-cases past a bracket', async () => {
+    const now = Date.now();
+    routes['/notifications/read'] = () => ({ status: 200, body: { ok: true } });
+    const note = { title: 'On your calendar Tue Oct 6, all day', body: 'An event from your Google Calendar, on Tue Oct 6. Its title is in Activity, under Important.', kind: 'runtime', read: false };
+    routes['/notifications'] = () => ({ status: 200, body: { unread: 2, items: [{ id: 'n2', ...note, ts: now - 1000 }, { id: 'n1', ...note, ts: now - 2000 }] } });
+    run('openActivity()');
+    await settle();
+    const text = ids.nlist!.shown();
+    expect(text.split('On Your Calendar Tue Oct 6, All Day')).toHaveLength(3);
+    expect(text).not.toContain('2 times');
+    expect(run(`titleCase('on your calendar (all day) at noon')`)).toBe('On Your Calendar (All Day) at Noon');
+  });
+
   it('folds repeats, title-cases Flint’s titles, groups by day, and reads itself on opening', async () => {
     const now = Date.now();
     routes['/notifications/read'] = () => ({ status: 200, body: { ok: true } });
@@ -273,13 +319,26 @@ describe('Settings: Health', () => {
     expect(ids['sethealth-last']!.shown()).toBe('');
     expect(top).toContain('Health');
     expect(top).toContain('2 Issues');
-    expect(top).toContain('Github');
+    expect(top).toContain('GitHub');
     expect(top).toContain('Down · <i>5 failures</i>');
     expect(top).not.toContain('(last at 09:00)');
     expect(top).toContain('Restore Test');
     expect(top).toContain('Degraded · Last test 9 days ago');
     expect(top).toContain('All Components');
     expect(top).not.toContain('Database');
+  });
+
+  it('lists a source that set something aside as an issue, by its own name', async () => {
+    routes['/runtime/health'] = report([
+      { component: 'postgres', status: 'ok', detail: null, at: AT },
+      { component: 'source:google_calendar', status: 'degraded', detail: 'the last run set something aside (see its last error)', at: AT },
+    ]);
+    run('loadHealth()');
+    await settle();
+    const top = ids.sethealth!.shown();
+    expect(top).toContain('1 Issue');
+    expect(top).toContain('Google Calendar');
+    expect(top).toContain('Degraded · The last run set something aside');
   });
 
   it('sits last, quietly, when all is normal; says when checks stopped', async () => {
