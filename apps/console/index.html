@@ -505,13 +505,13 @@ function md(s){
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
 /* ---------- past chats (the sidebar) ---------- */
-var THREADS=[],THREAD_ON=null;
+var THREADS=[],THREAD_ON=null,THREADS_LOADED=false;
 function dayGroup(ms){var d=new Date(ms),now=new Date();var start=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
   if(ms>=start)return 'Today';if(ms>=start-86400000)return 'Yesterday';if(ms>=start-6*86400000)return 'Previous 7 Days';return 'Earlier';}
-function loadThreads(){if(!TOKEN){renderThreads();return;}fetch(BASE+'/threads',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){THREADS=(d&&d.threads)||[];renderThreads();}).catch(function(){renderThreads();});}
+function loadThreads(){if(!TOKEN){THREADS_LOADED=true;renderThreads();return;}fetch(BASE+'/threads',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){THREADS_LOADED=true;THREADS=(d&&d.threads)||[];renderThreads();}).catch(function(){THREADS_LOADED=true;renderThreads();});}
 function renderThreads(){var nav=$('threads');nav.textContent='';var q=($('threadsearch').value||'').trim().toLowerCase();
   var list=THREADS.filter(function(t){return !q||String(t.title||'').toLowerCase().indexOf(q)>=0;});
-  if(!list.length){nav.appendChild(el('div','side-empty',q?'No Matching Chats':'No Chats Yet'));return;}
+  if(!list.length){nav.appendChild(el('div','side-empty',!THREADS_LOADED?'Loading…':q?'No Matching Chats':'No Chats Yet'));return;}
   var last='';list.forEach(function(t){var g=dayGroup(t.updatedAt);if(g!==last){nav.appendChild(el('div','sh',g));last=g;}
     var b=el('button','trow'+(t.id===THREAD_ON?' on':''),t.title||'Untitled');b.title=t.title||'';b.onclick=function(){openThread(t.id);};nav.appendChild(b);});}
 $('threadsearch').addEventListener('input',renderThreads);
@@ -938,7 +938,7 @@ function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
 
 /* ---------- notifications ---------- */
 function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;document.getElementById('nbadge').hidden=!(d.unread>0);}).catch(function(){});}
-function loadNotifs(){var list=document.getElementById('nlist');
+function loadNotifs(){var list=document.getElementById('nlist');if(!list.children.length){list.textContent='';list.appendChild(laneEmpty('Loading…',''));}
   fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
     list.textContent='';var items=(d&&d.items)||[];
     if(!d){list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));return;}
