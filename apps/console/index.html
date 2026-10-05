@@ -450,7 +450,9 @@ function toggleSidebar(){setSidebar(!$('app').classList.contains('side-open'),tr
 setSidebar(sideWanted());
 function setTitle(t){$('ctitle').textContent=t||'';}
 /* The empty state (orb, greeting, starters) shows until the first message. */
-function syncEmpty(){var empty=!$('thread').children.length;$('main').classList.toggle('empty',empty);$('emptystate').hidden=!empty;$('input').placeholder=empty?'Ask Flint':'Reply';}
+/* The thread's box, made again if anything ever removed it. */
+function threadEl(){var th=$('thread');if(!th){th=el('div','thread-col');th.id='thread';$('transcript').appendChild(th);}return th;}
+function syncEmpty(){var empty=!threadEl().children.length;$('main').classList.toggle('empty',empty);$('emptystate').hidden=!empty;$('input').placeholder=empty?'Ask Flint':'Reply';}
 function newChat(){
   stopSpeech();
   convId = 'c' + Date.now();
@@ -1210,7 +1212,7 @@ function checkUpdate(){
     if(v!==UI_VERSION)UPDATE_READY=true;
   }).catch(function(){}).then(function(){if(UPDATE_READY&&flintIdle()&&flintSnapshot())location.reload();});
 }
-(function resume(){var s=null;try{s=JSON.parse(localStorage.getItem('flint_resume')||'null');localStorage.removeItem('flint_resume');}catch(e){}
+(function resume(){try{var s=null;try{s=JSON.parse(localStorage.getItem('flint_resume')||'null');localStorage.removeItem('flint_resume');}catch(e){}
   if(!s||typeof s.convId!=='string'||typeof s.at!=='number'||Date.now()-s.at>=30*60000)return;
   convId=s.convId;
   /* Local only is per session and starts off; an update is the same session, so it stays on. */
@@ -1228,7 +1230,9 @@ function checkUpdate(){
     var b=document.createElement('button');b.className='ok';b.textContent='Open Approvals';b.onclick=function(){openApprovals();};if(rows[i].style)rows[i].style.display='flex';rows[i].appendChild(b);}
   t.scrollTop=s.end?t.scrollHeight:(s.top||0);
   /* At the end: stay there once restored pictures have their height. */
-  if(s.end){var imgs=t.querySelectorAll?t.querySelectorAll('img'):[];for(var j=0;j<imgs.length;j++){if(!imgs[j].complete&&imgs[j].addEventListener)imgs[j].addEventListener('load',function(){t.scrollTop=t.scrollHeight;});}}})();
+  if(s.end){var imgs=t.querySelectorAll?t.querySelectorAll('img'):[];for(var j=0;j<imgs.length;j++){if(!imgs[j].complete&&imgs[j].addEventListener)imgs[j].addEventListener('load',function(){t.scrollTop=t.scrollHeight;});}}
+  /* A snapshot that cannot be restored is dropped; it never stops the page from updating itself. */
+  }catch(e){}})();
 setInterval(checkUpdate,60000);
 document.addEventListener('visibilitychange',function(){if(document.hidden)checkUpdate();});
 </script>
