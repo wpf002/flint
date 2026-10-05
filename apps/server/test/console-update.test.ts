@@ -79,7 +79,7 @@ const check = async () => {
 };
 
 function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
-  els = Object.fromEntries(['input', 'think', 'transcript', 'micbtn', 'filepick', 'settings', 'activity', 'approvals', 'ctitle'].map((id) => [id, new El()]));
+  els = Object.fromEntries(['input', 'think', 'transcript', 'thread', 'micbtn', 'filepick', 'settings', 'activity', 'approvals', 'ctitle'].map((id) => [id, new El()]));
   listeners = {};
   doc = {
     hidden: false,
@@ -144,7 +144,7 @@ describe('the console updating itself', () => {
 
   it('reloads once a new page is deployed and the page is quiet, keeping the open conversation in localStorage', async () => {
     run("convId='c123'");
-    els.transcript!.innerHTML = '<div class="msg you">Did the backup run?</div>';
+    els.thread!.innerHTML = '<div class="msg you">Did the backup run?</div>';
     els.transcript!.scrollTop = 1400;
     deployed = 'v2';
     doc.hidden = true;
@@ -208,12 +208,12 @@ describe('the console updating itself', () => {
     deployed = 'v2';
     doc.hidden = true;
     full = true;
-    els.transcript!.innerHTML = `<div class="msg you">Here it is<img src="data:image/png;base64,${'A'.repeat(5000)}"></div>`;
+    els.thread!.innerHTML = `<div class="msg you">Here it is<img src="data:image/png;base64,${'A'.repeat(5000)}"></div>`;
     await check();
     expect(reloads).toBe(1);
     expect(JSON.parse(store.get('flint_resume')!).html).toBe('<div class="msg you">Here it is<span class="att-gone">[image]</span></div>');
     store.clear();
-    els.transcript!.innerHTML = `<div class="msg flint">${'a long answer '.repeat(400)}</div>`;
+    els.thread!.innerHTML = `<div class="msg flint">${'a long answer '.repeat(400)}</div>`;
     await check();
     expect(reloads).toBe(1);
     expect(store.has('flint_resume')).toBe(false);
@@ -243,14 +243,14 @@ describe('the console updating itself', () => {
   it('brings the conversation back once, where Will was reading, and not a stale one', () => {
     boot({ resume: { convId: 'c123', html: '<div class="msg flint">It ran at 2:15.</div>', top: 300, end: false, at: Date.now() - 1000 } });
     expect(run('convId')).toBe('c123');
-    expect(els.transcript!.innerHTML).toBe('<div class="msg flint">It ran at 2:15.</div>');
+    expect(els.thread!.innerHTML).toBe('<div class="msg flint">It ran at 2:15.</div>');
     expect(els.transcript!.scrollTop).toBe(300);
     expect(store.has('flint_resume')).toBe(false);
     boot({ resume: { convId: 'c124', html: '<p>latest</p>', top: 0, end: true, at: Date.now() - 1000 } });
     expect(els.transcript!.scrollTop).toBe(2000);
     boot({ resume: { convId: 'c999', html: '<p>old</p>', at: Date.now() - 31 * 60_000 } });
     expect(run('convId')).toBe('console');
-    expect(els.transcript!.innerHTML).toBe('');
+    expect(els.thread!.innerHTML).toBe('');
     expect(store.has('flint_resume')).toBe(false);
   });
 
@@ -262,7 +262,7 @@ describe('the console updating itself', () => {
         at: Date.now() - 1000,
       },
     });
-    const [waiting, decided] = els.transcript!.rows;
+    const [waiting, decided] = els.thread!.rows;
     expect(waiting!.children).toHaveLength(1);
     expect(waiting!.children[0]!.textContent).toBe('Open Approvals');
     waiting!.children[0]!.onclick!();
@@ -288,5 +288,11 @@ describe('the console updating itself', () => {
     boot();
     expect(run('LOCAL_ONLY')).toBe(false);
     expect(lo).toBe(0);
+  });
+  it('an older page\'s snapshot (its whole transcript) restores into the thread, never over it', () => {
+    boot({ resume: { convId: 'console', html: '<div class="msg you"><span class="who">You</span><span class="body">Hi</span></div>', at: Date.now() - 1000 } });
+    expect(els.thread!.innerHTML).toBe('<div class="msg you"><span class="who">You</span><span class="body">Hi</span></div>');
+    // The scroller around the thread is left as it is, so the thread itself survives.
+    expect(els.transcript!.innerHTML).toBe('');
   });
 });

@@ -267,6 +267,19 @@ describe('the console Approvals panel', () => {
     expect(ids.apprbadge!.hidden).toBe(true);
   });
 
+  it('a destructive card asks on its own, and an unknown action is described without its internal name', async () => {
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'd', fullName: 'mcp.files.wipe', destructive: true, args: {} }), card({ id: 'n', fullName: 'world.unknown.thing', args: {} })] } });
+    await open();
+    const rows = ids.apprlist!.children[0]!.children;
+    expect(rows[0]!.shown()).toContain('Can’t Be Undone');
+    expect(rows[1]!.shown()).toContain('Filed by You');
+    expect(rows[1]!.shown()).not.toContain('world.unknown.thing');
+    expect(ids.apprnote!.textContent).toBe('2 Waiting · 1 Ask on Their Own');
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['n']);
+  });
+
   it('the approvals panel never writes HTML', () => {
     expect(apprJs.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });

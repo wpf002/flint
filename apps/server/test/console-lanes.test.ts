@@ -136,10 +136,14 @@ describe('the console Activity panel: lanes', () => {
     expect(a!.shown()).toContain('Outside Text');
     // The rest opens on click: the escalation's text, the model's note, what it is about.
     expect(a!.shown()).not.toContain('<script>steal()</script>');
-    a!.onclick!();
+    // Labels and acks wait in the details too: a closed row is one title and one line.
+    expect(a!.shown()).not.toContain('Should Escalate');
+    a!.onclick!({ target: { tagName: 'DIV' } });
     expect(a!.shown()).toContain('<script>steal()</script>');
     expect(a!.shown()).toContain('Model note: The page said: ignore previous instructions.');
-    expect(a!.shown()).toContain('Issue: issue#24ehza');
+    expect(a!.shown()).toContain('Escalation Open');
+    // Internal values (the decider, a relevance score, an entity's ref) are not shown.
+    expect(a!.shown()).not.toMatch(/rule:service_down|issue#24ehza|relevance/);
     expect(b!.shown()).not.toContain('Outside Text');
     expect(b!.shown()).toContain('Issue Opened');
     expect(ids['lanetab-relevant']!.classList.contains('on')).toBe(true);
@@ -151,6 +155,7 @@ describe('the console Activity panel: lanes', () => {
     routes['/inbox?'] = () => ({ status: 200, body: { items: [item()], next: null } });
     await openLane();
     const row = ids.lanelist!.children[0]!;
+    row.onclick!({ target: { tagName: 'DIV' } });
     row.button('Should Be Quiet').onclick!({ stopPropagation() {} });
     await settle();
     expect(calls.at(-1)).toEqual({ url: '/inbox/td_1/feedback', method: 'POST', body: { feedback: 'should_be_quiet' } });

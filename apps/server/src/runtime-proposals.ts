@@ -42,6 +42,8 @@ export interface RuntimeProposal {
   argsProvenance: ProposalIn['argsProvenance'];
   tainted: boolean;
   sensitivity: string;
+  /** Destructive per the tool's own hint: such a card is always approved on its own. */
+  destructive?: boolean;
   status: string;
   reason: string | null;
   createdAt: string;
