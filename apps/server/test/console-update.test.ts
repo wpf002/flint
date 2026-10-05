@@ -79,7 +79,7 @@ const check = async () => {
 };
 
 function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
-  els = Object.fromEntries(['input', 'think', 'transcript', 'micbtn', 'filepick', 'settings', 'notifs', 'lanes', 'approvals', 'convo'].map((id) => [id, new El()]));
+  els = Object.fromEntries(['input', 'think', 'transcript', 'micbtn', 'filepick', 'settings', 'activity', 'approvals', 'ctitle'].map((id) => [id, new El()]));
   listeners = {};
   doc = {
     hidden: false,
@@ -152,6 +152,7 @@ describe('the console updating itself', () => {
     expect(reloads).toBe(1);
     const saved = JSON.parse(store.get('flint_resume')!);
     expect(saved).toMatchObject({ convId: 'c123', html: '<div class="msg you">Did the backup run?</div>', top: 1400, end: true });
+    expect(saved.title).toBe('');
   });
 
   it('waits for a quiet minute when the page is in front and was just used', async () => {
@@ -185,10 +186,10 @@ describe('the console updating itself', () => {
         () => void (els.transcript!.innerHTML = '<div class="propose"><div class="prow" style="opacity: 0.5"></div></div>'),
         () => void (els.transcript!.innerHTML = '<div class="propose"><div class="prow" style="display: none"></div></div>'),
       ],
-      ...['settings', 'notifs', 'lanes', 'approvals', 'convo'].map((id): [string, () => void, () => void] => [
+      ...['settings', 'activity', 'approvals'].map((id): [string, () => void, () => void] => [
         `the ${id} panel`,
-        () => void (els[id]!.style.display = 'flex'),
-        () => void (els[id]!.style.display = 'none'),
+        () => void els[id]!.classes.add('open'),
+        () => void els[id]!.classes.delete('open'),
       ]),
     ];
     for (const [what, on, off] of busy) {

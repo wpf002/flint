@@ -35,3 +35,11 @@ Flint keeps itself current after every merge, with nothing to quit or reload:
 The stable signature is what keeps the microphone grant across updates: macOS
 keys it to the signing certificate, and an ad-hoc signature changes with every
 build.
+
+## Approvals
+
+Approval cards are signed with a Secure Enclave key (Touch ID, else the Mac's
+password). One prompt approves a whole run of cards, and no prompt appears again
+for 5 minutes after it. A card with outside text or money (`fresh: true`) always
+prompts on its own. The bridge contract is in the comment above `ApprovalKey` in
+`flint.swift`.

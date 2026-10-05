@@ -13,247 +13,389 @@
 <meta name="apple-mobile-web-app-title" content="Flint" />
 <meta name="theme-color" content="#050505" />
 <style>
-  :root{--bg:#050505;--gold:#d4af37;--gold-hi:#f3dd8e;--orange:#ffb14a;--ink:#e8e3d2;--mut:#8d7c54;--line:#19150f;}
-  *{box-sizing:border-box;margin:0;font-family:"SF Mono",ui-monospace,Menlo,monospace;}
-  html,body{height:100%;background:var(--bg);color:var(--ink);overflow:hidden;}
-  #app{display:grid;grid-template-rows:auto 1fr;height:100vh;}
-  header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px 14px 90px;border-bottom:1px solid var(--line);-webkit-app-region:drag;}
-  header button,header .gear{-webkit-app-region:no-drag;}
-  .brand{display:flex;align-items:center;gap:11px;cursor:pointer;}
-  .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,var(--orange) 55%,#7a4a10);box-shadow:0 0 16px var(--orange);}
-  .brand .nm{color:var(--gold-hi);letter-spacing:.42em;font-size:18px;font-weight:700;}
-  header .meta{font-size:11px;color:var(--mut);letter-spacing:.14em;text-align:right;line-height:1.7;}
-  header .meta b{color:var(--orange);}
-  main{display:flex;min-height:0;position:relative;}
-  aside h3{font-size:10px;letter-spacing:.26em;color:#8a7320;text-transform:uppercase;margin-bottom:12px;}
-  .sys{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12.5px;border-bottom:1px dashed var(--line);}
-  .dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--gold);box-shadow:0 0 8px var(--gold);}
-  .dot.off{background:#3a3a44;box-shadow:none;}
-  .center{position:relative;display:flex;flex-direction:column;min-height:0;flex:1;}
-  #brainwrap{flex:1;position:relative;min-height:0;}
+  /* Flint's black and gold (the approved direction, 2026-10-05): its #050505 black, warm
+     near-black surfaces, warm ink, gold for the primary action, badges, focus, the small
+     UPPERCASE headers, the mark and the orb. One type family: the system's (San Francisco). */
+  :root{
+    --bg:#050505;--s0:#0b0a07;--s1:#12100c;--s2:#1a1712;--s3:#221e17;--s4:#2b261d;
+    --bd:#3a3326;--bd2:#4a4231;
+    --t1:#e8e3d2;--t2:#b8ad94;--t3:#958b74;--tdis:#6f6754;
+    --gold:#d4af37;--gold-hi:#f3dd8e;--on-gold:#0a0a0a;--orange:#ff9230;--red:#ff4245;--green:#30d158;
+    --ring:rgba(243,221,142,.16);--hair:rgba(232,227,210,.10);--hair2:rgba(232,227,210,.18);--user:rgba(232,227,210,.07);--code:rgba(232,227,210,.08);--scrim:rgba(0,0,0,.6);
+    --shadow:0 0 0 1px var(--ring),0 1px 1px rgba(0,0,0,.2),0 8px 16px -4px rgba(0,0,0,.4),0 24px 32px -8px rgba(0,0,0,.5);
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --side:260px;--hdr:52px;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box;margin:0;}
+  html,body{height:100%;background:var(--bg);color:var(--t1);overflow:hidden;font:13px/18px var(--sans);-webkit-font-smoothing:antialiased;}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;}
+  button:disabled{cursor:default;opacity:.5;}
+  input,textarea{font:inherit;color:inherit;}
+  :focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--gold-hi);border-radius:6px;}
+  [hidden]{display:none!important;}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+  svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none;display:block;}
+
+  /* ---------- the window: sidebar | (header over) orb stage + chat ---------- */
+  #app{display:grid;grid-template-columns:0 minmax(0,1fr);height:100vh;height:100dvh;}
+  #app.side-open{grid-template-columns:var(--side) minmax(0,1fr);}
+  .main{position:relative;display:grid;grid-template-columns:minmax(0,clamp(320px,44%,600px)) minmax(0,1fr);min-width:0;min-height:0;}
+  #app.side-open .main{grid-template-columns:minmax(0,clamp(300px,36%,460px)) minmax(0,1fr);}
+
+  /* header: a drag region; the Mac's traffic lights sit over its top-left */
+  .top{position:absolute;top:0;left:0;right:0;height:var(--hdr);display:flex;align-items:center;gap:12px;padding:0 16px 0 78px;z-index:5;-webkit-app-region:drag;transition:box-shadow .2s;}
+  #app.side-open .top{padding-left:16px;}
+  .top.scrolled{box-shadow:inset 0 -1px 0 var(--hair);}
+  .top button,.top .brand{-webkit-app-region:no-drag;}
+  .grp{display:flex;align-items:center;gap:4px;}
+  .trail{margin-left:auto;display:flex;align-items:center;gap:8px;}
+  .ib{position:relative;width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:var(--t2);transition:background .15s,color .15s;}
+  .ib:hover,.ib.on{background:var(--s3);color:var(--t1);}
+  .ib:active{background:var(--s4);}
+  .ctitle{font-size:13px;line-height:18px;font-weight:600;color:var(--t2);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .badge{position:absolute;top:-2px;right:-3px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--gold);color:var(--on-gold);font-size:11px;line-height:16px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums;box-shadow:0 0 0 2px var(--bg);}
+  .udot{position:absolute;top:6px;right:6px;width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 2px var(--bg);}
+  /* tooltips: the button's name and shortcut */
+  [data-tip]:hover::after,[data-tip]:focus-visible::after{content:attr(data-tip);position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);white-space:nowrap;background:var(--s2);color:var(--t1);font-size:12px;line-height:16px;padding:4px 8px;border-radius:6px;box-shadow:var(--shadow);pointer-events:none;z-index:20;}
+  .trail [data-tip]:hover::after,.trail [data-tip]:focus-visible::after{left:auto;right:0;transform:none;}
+
+  /* the mark: the glowing dot and FLINT, as it has always been */
+  .brand{position:absolute;top:calc(var(--hdr) + 12px);left:24px;display:flex;align-items:center;gap:11px;z-index:2;user-select:none;}
+  .brand .sp{width:11px;height:11px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,#ffb14a 55%,#7a4a10);box-shadow:0 0 16px #ffb14a;}
+  .brand .nm{color:var(--gold-hi);letter-spacing:.42em;font:700 18px/1 "SF Mono",ui-monospace,Menlo,monospace;}
+  #app.side-open .brand{display:none;}
+
+  /* ---------- sidebar: past chats ---------- */
+  .side{grid-row:1;grid-column:1;background:var(--s0);display:flex;flex-direction:column;min-height:0;overflow:hidden;padding:var(--hdr) 8px 12px;}
+  #app:not(.side-open) .side{visibility:hidden;}
+  .search{display:flex;align-items:center;gap:8px;height:32px;margin:0 4px 8px;padding:0 10px;border-radius:8px;background:var(--s2);color:var(--t3);}
+  .search svg.i{width:16px;height:16px;}
+  .search input{flex:1;min-width:0;background:transparent;border:0;outline:none;color:var(--t1);font-size:13px;}
+  .search input::placeholder{color:var(--t3);}
+  .threads{flex:1;overflow:auto;min-height:0;}
+  .sh{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);padding:16px 12px 8px;}
+  .trow{display:block;width:100%;text-align:left;height:32px;line-height:32px;padding:0 12px;border-radius:6px;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;}
+  .trow:hover{background:var(--s3);}
+  .trow.on{background:var(--s4);}
+  .side-empty{color:var(--t3);font-size:12px;line-height:16px;padding:12px;}
+  .side-foot{display:flex;align-items:center;gap:10px;height:36px;padding:0 12px;border-radius:6px;color:var(--t2);font-size:13px;margin-top:8px;}
+  .side-foot:hover{background:var(--s3);color:var(--t1);}
+  .side-foot svg.i{width:16px;height:16px;}
+
+  /* ---------- the orb's stage ---------- */
+  .stage{position:relative;grid-column:1;min-width:0;min-height:0;}
+  #brainwrap{position:absolute;inset:0;}
   #brain{position:absolute;inset:0;width:100%;height:100%;display:block;}
   .think{display:none;}
-  aside.chat{width:380px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
-  #transcript{flex:1;overflow:auto;padding:16px 20px;}
-  aside.chat .bar{margin:12px;}
-  .msg{margin:8px 0;font-size:13.5px;line-height:1.5;}
-  .msg .who{font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);display:block;margin-bottom:3px;}
-  .msg.you .who{color:#7d96b8;} .msg.flint .who{color:var(--gold);}
-  .msg.flint{color:#f0e6cf;}
-  .log{font-size:11.5px;line-height:1.4;}
-  .log .row{display:flex;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);}
-  .log .a{flex:none;color:var(--gold);} .log .a.back{color:#6f9c6a;} .log .a.hold{color:#b9462e;}
-  .log .t{margin-left:auto;color:var(--mut);}
-  footer{padding:12px 18px 16px;border-top:1px solid var(--line);}
-  .bar{display:flex;align-items:center;gap:12px;padding:11px 16px;background:#0c0c12;border:1px solid #1d1d28;border-radius:999px;}
-  .bar input{flex:1;background:transparent;border:none;outline:none;color:var(--ink);font-size:13.5px;letter-spacing:.03em;}
-  .bar input::placeholder{color:var(--mut);}
-  .bar button{background:transparent;border:1px solid var(--gold-dim,#8a7320);color:var(--gold);border-radius:999px;padding:6px 16px;cursor:pointer;letter-spacing:.1em;font-size:11px;}
-  .bar button:hover{border-color:var(--gold);color:var(--gold-hi);}
-  .bar .mic{padding:7px 11px;display:flex;align-items:center;}
-  .bar .mic svg{display:block;}
-  .bar .sendbtn{padding:7px 13px;display:flex;align-items:center;}
-  .bar .sendbtn svg{display:block;}
-  .bar .mic.rec{background:var(--gold);color:#000;border-color:var(--gold);animation:micpulse 1s ease-in-out infinite;}
-  .bar .mic.busy{opacity:.5;}
-  @keyframes micpulse{0%,100%{box-shadow:0 0 0 0 rgba(212,175,55,.5);}50%{box-shadow:0 0 0 6px rgba(212,175,55,0);}}
-  #settings{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9;}
-  #settings .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:22px;width:360px;}
-  #settings h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:14px;text-transform:uppercase;}
-  #settings label{display:block;font-size:10px;color:var(--mut);letter-spacing:.14em;margin:12px 0 5px;}
-  #settings input{width:100%;background:#08080b;border:1px solid #222;border-radius:7px;color:var(--ink);padding:9px;font-size:12px;}
-  #settings .row{display:flex;gap:8px;margin-top:18px;}
-  #settings button{flex:1;background:var(--gold);color:#000;border:none;border-radius:7px;padding:9px;cursor:pointer;letter-spacing:.1em;font-weight:600;}
-  #settings button.ghost{background:transparent;color:var(--mut);border:1px solid #222;}
-  .log .row{cursor:pointer;border-radius:6px;padding:3px 5px;margin:0 -5px;align-items:center;}
-  .log .row:hover{background:#140f06;}
-  .log .row .cv{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;font-size:11px;}
-  #convo{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:10;}
-  #convo .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:24px;width:min(640px,90vw);max-height:80vh;overflow:auto;}
-  #convo h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:8px;text-transform:uppercase;}
-  #convo .lbl{font-size:10px;color:var(--mut);letter-spacing:.14em;text-transform:uppercase;margin-top:12px;}
-  #convo .q{color:var(--ink);font-size:13px;margin:5px 0 4px;white-space:pre-wrap;line-height:1.5;}
-  #convo .ans{color:var(--gold-hi);font-size:13px;white-space:pre-wrap;line-height:1.55;margin-top:5px;}
-  #convo button{margin-top:20px;background:var(--gold);color:#000;border:none;border-radius:7px;padding:9px 18px;cursor:pointer;letter-spacing:.1em;font-weight:600;}
-  .hdr-right{display:flex;align-items:center;gap:2px;}
-  .hicon{background:transparent;border:none;color:var(--mut);cursor:pointer;padding:6px;border-radius:8px;display:flex;align-items:center;}
-  .hicon.on{color:var(--gold);}
-  .bchip{font-size:8px;letter-spacing:.16em;padding:1px 5px;margin-left:8px;border-radius:6px;vertical-align:middle;}
-  .bchip.local{color:var(--mut);border:1px solid var(--line);}
-  .bchip.frontier{color:#050505;background:var(--gold);font-weight:600;border:1px solid var(--gold);}
-  .hicon{position:relative;}
-  .nbadge{position:absolute;top:0;right:0;min-width:14px;height:14px;padding:0 3px;border-radius:8px;background:var(--orange);color:#000;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;line-height:14px;}
-  .propose{margin:8px 0 4px;padding:10px 12px;border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:8px;background:#0c0a06;}
-  .propose .pt{font-size:11px;color:var(--ink);margin-bottom:7px;}
-  .propose .pt b{color:var(--gold);}
-  .propose .pargs{font-size:10px;color:var(--mut);white-space:pre-wrap;word-break:break-word;margin-bottom:9px;}
-  .propose .prow{display:flex;gap:8px;}
-  .propose button{flex:1;border:none;border-radius:6px;padding:7px;font-size:11px;cursor:pointer;letter-spacing:.08em;font-weight:600;}
-  .propose .ok{background:var(--gold);color:#000;}
-  .propose .no{background:transparent;color:var(--mut);border:1px solid #222;}
-  .propose .res{font-size:10px;margin-top:8px;color:var(--mut);}
-  #notifs{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9;}
-  #notifs .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:22px;width:min(460px,92vw);max-height:84vh;overflow:auto;}
-  #notifs h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:14px;text-transform:uppercase;}
-  #notifs .nitem{padding:10px 0;border-bottom:1px solid var(--line);}
-  #notifs .nitem .nt{font-size:10px;color:var(--gold);letter-spacing:.1em;text-transform:uppercase;}
-  #notifs .nitem .nb{font-size:11px;color:var(--ink);margin-top:3px;}
-  #notifs .empty{color:var(--mut);font-size:11px;}
-  #notifs button{width:100%;background:transparent;color:var(--mut);border:1px solid #222;border-radius:7px;padding:9px;cursor:pointer;margin-top:16px;letter-spacing:.1em;}
-  .hicon:hover{color:var(--gold);background:#140f06;}
-  .hicon svg{display:block;}
-  #settings .card{width:min(460px,92vw);max-height:84vh;overflow:auto;}
-  #settings .seg{font-size:10px;letter-spacing:.24em;color:#8a7320;text-transform:uppercase;margin:20px 0 6px;border-top:1px solid var(--line);padding-top:16px;}
-  #settings .seg:first-of-type{border-top:none;padding-top:0;margin-top:2px;}
-  #settings .seg-toggle{display:flex;justify-content:space-between;align-items:center;cursor:pointer;}
-  #settings .seg-toggle:hover{color:var(--gold);}
-  #settings .seg-toggle #logcaret{transition:transform .15s;}
-  #settings #systems .sys{font-size:12.5px;text-transform:uppercase;letter-spacing:.1em;}
-  #settings .log{max-height:46vh;overflow:auto;}
-  .msg .body b{color:var(--gold-hi);font-weight:600;} .msg .body code{background:#1a1712;color:var(--gold-hi);padding:1px 5px;border-radius:4px;font-size:12.5px;}
-  .msg .body i{color:#e8dcc0;font-style:italic;}
-  /* ---------- attachments ---------- */
-  .bar .clip{padding:7px 11px;display:flex;align-items:center;}
-  .bar .clip svg{display:block;}
-  #chips{display:none;flex-wrap:wrap;gap:6px;margin:0 12px -4px;padding-top:8px;}
+
+  /* ---------- chat ---------- */
+  .chat{grid-column:2;position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;}
+  #transcript{flex:1;overflow:auto;padding:calc(var(--hdr) + 24px) 32px 140px;scroll-padding-bottom:140px;}
+  .thread-col{max-width:640px;margin:0 auto;}
+  .msg{margin-top:32px;font-size:16px;line-height:24px;}
+  .msg:first-child{margin-top:0;}
+  .msg.you{display:flex;flex-direction:column;align-items:flex-end;}
+  .msg.you+.msg.you{margin-top:8px;}
+  .msg.you .body{max-width:70%;background:var(--user);border-radius:20px;padding:10px 16px;white-space:pre-wrap;word-break:break-word;}
+  .msg.flint .body{color:var(--t1);word-break:break-word;}
+  .msg .body p{margin:0 0 12px;} .msg .body p:last-child{margin-bottom:0;}
+  .msg .body b{font-weight:600;color:var(--t1);}
+  .msg .body i{font-style:italic;}
+  .msg .body code{font:.875em var(--mono);background:var(--code);border-radius:4px;padding:1px 4px;}
+  .msg .body pre{background:var(--s1);border:1px solid var(--bd);border-radius:8px;margin:12px 0;overflow:auto;}
+  .msg .body pre code{display:block;background:none;padding:12px 16px;font:13px/20px var(--mono);white-space:pre;}
+  .msg .meta{display:flex;align-items:center;gap:2px;margin-top:8px;min-height:28px;color:var(--t3);opacity:0;transition:opacity .15s;}
+  .msg.flint:last-child .meta,.msg.flint:hover .meta,.msg .meta:focus-within{opacity:1;}
+  .msg .meta .ib{width:28px;height:28px;color:var(--t3);}
+  .msg .meta .ib svg.i{width:16px;height:16px;}
+  .msg .body:has(.thinking)+.meta{visibility:hidden;}
+  .tag{font-size:11px;line-height:14px;font-weight:500;color:var(--t3);padding:2px 6px;border-radius:6px;background:var(--s2);margin-left:6px;}
+  .thinking{display:inline-flex;align-items:center;gap:10px;color:var(--t3);}
+  .thinking i{width:12px;height:12px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#fff4cf,#ffb14a 55%,#7a4a10);box-shadow:0 0 12px #ffb14a;animation:pulse 1.4s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{transform:scale(.8);opacity:.7}50%{transform:scale(1);opacity:1}}
+  .msg .atts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;justify-content:flex-end;}
+  .msg .atts img{max-width:180px;max-height:140px;border-radius:12px;display:block;}
+
+  /* empty state */
+  .empty-state{position:absolute;inset:var(--hdr) 0 140px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:0 32px;text-align:center;pointer-events:none;}
+  .empty-state>*{pointer-events:auto;}
+  .empty-state h1{font-size:24px;line-height:32px;font-weight:500;letter-spacing:-.01em;color:var(--t1);}
+  .starters{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;}
+  .starter{height:28px;padding:0 12px;border-radius:14px;background:var(--s2);color:var(--t2);font-weight:500;}
+  .starter:hover{background:var(--s3);color:var(--t1);}
+
+  /* composer */
+  .dock{position:absolute;left:0;right:0;bottom:0;padding:0 32px 24px;background:linear-gradient(to bottom,transparent,var(--bg) 28px);}
+  .dock-col{max-width:640px;margin:0 auto;}
+  #attnote{display:none;margin:0 8px 8px;font-size:12px;line-height:16px;color:var(--orange);}
+  #chips{display:none;flex-wrap:wrap;gap:6px;margin:0 0 8px;}
   #chips.on{display:flex;}
-  .chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px 4px 8px;border:1px solid #2a2415;border-radius:8px;background:#0c0a06;font-size:10.5px;color:var(--ink);}
+  .chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px 4px 8px;border-radius:8px;background:var(--s2);font-size:12px;color:var(--t1);}
   .chip img{width:22px;height:22px;object-fit:cover;border-radius:4px;flex:none;}
-  .chip .ck{flex:none;font-size:8px;letter-spacing:.16em;color:var(--gold);border:1px solid #3a3118;border-radius:4px;padding:1px 4px;}
+  .chip .ck{flex:none;font-size:11px;font-weight:600;color:var(--t2);}
   .chip .cn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;}
-  .chip .cs{color:var(--mut);flex:none;}
-  .chip button{background:transparent;border:none;color:var(--mut);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;}
-  .chip button:hover{color:var(--gold-hi);}
-  .msg .atts{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 5px;}
-  .msg .atts img{max-width:150px;max-height:110px;border-radius:6px;border:1px solid #2a2415;display:block;}
-  .msg .atts .chip{padding:3px 8px;}
-  #attnote{display:none;margin:6px 14px 0;font-size:10.5px;color:var(--orange);}
-  aside.chat.drop{box-shadow:inset 0 0 0 1px var(--gold);background:#0b0904;}
-  /* ---------- lanes (what triage decided; the runtime's health) ---------- */
-  #lanes{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;z-index:9;}
-  #lanes .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:18px;width:min(660px,94vw);max-height:88vh;overflow:auto;-webkit-overflow-scrolling:touch;}
-  #lanes h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:12px;text-transform:uppercase;}
-  .lane-tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
-  .lane-tabs button,.lane-row button,#laneolder,#lanes .close{background:transparent;color:var(--mut);border:1px solid #2a2415;border-radius:7px;padding:8px 12px;cursor:pointer;letter-spacing:.08em;font-size:11px;min-height:34px;}
-  .lane-tabs button.on,.lane-row button.on{color:#050505;background:var(--gold);border-color:var(--gold);}
-  .lane-row button:disabled{opacity:.5;cursor:default;}
-  .lane-note{font-size:10.5px;color:var(--mut);margin-bottom:10px;line-height:1.5;}
-  #lanemsg{display:none;font-size:11px;margin:8px 0;}
-  .lane-item{padding:12px 0;border-bottom:1px solid var(--line);font-size:11.5px;line-height:1.5;word-break:break-word;}
-  .lane-head{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;color:var(--mut);font-size:10.5px;}
-  .lane-act{letter-spacing:.12em;text-transform:uppercase;font-size:9px;border:1px solid #2a2415;border-radius:5px;padding:0 5px;}
-  .lane-act.escalate{color:var(--orange);border-color:var(--orange);} .lane-act.act{color:var(--gold);}
-  .lane-taint{margin:6px 0;padding:6px 8px;border-left:2px solid var(--orange);background:#140b04;color:var(--orange);font-size:10.5px;}
-  .lane-esc{margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:8px;background:#0c0a06;}
-  .lane-title{color:var(--gold-hi);font-weight:600;}
-  .lane-body{color:var(--ink);white-space:pre-wrap;margin-top:3px;}
-  .lane-meta{color:var(--mut);font-size:10.5px;margin-top:3px;} .lane-meta.bad{color:var(--orange);}
-  .lane-reason{color:#cfc6ae;font-size:10.5px;margin-top:4px;white-space:pre-wrap;} .lane-lbl{color:var(--mut);}
-  .lane-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center;}
-  .lane-cur{font-size:10px;color:var(--gold);}
-  .lane-comp{display:flex;gap:8px;align-items:baseline;padding:6px 0;border-bottom:1px dashed var(--line);font-size:11.5px;flex-wrap:wrap;}
-  .lane-st{letter-spacing:.1em;text-transform:uppercase;font-size:9.5px;} .lane-st.ok{color:var(--gold);} .lane-st.degraded{color:var(--orange);} .lane-st.down{color:#e0533a;} .lane-st.unknown,.lane-st.disabled{color:var(--mut);}
-  #laneolder{width:100%;margin-top:12px;display:none;}
-  #lanes .close{width:100%;margin-top:10px;}
-  #lanes .empty{color:var(--mut);font-size:11px;padding:10px 0;}
-  /* ---------- approvals (cards waiting for Will's signature) ---------- */
-  #approvals{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;z-index:9;}
-  #approvals .card{background:#0d0d12;border:1px solid #222;border-radius:12px;padding:18px;width:min(620px,94vw);max-height:88vh;overflow:auto;-webkit-overflow-scrolling:touch;}
-  #approvals h4{color:var(--gold);letter-spacing:.2em;font-size:12px;margin-bottom:12px;text-transform:uppercase;}
-  #approvals .close{width:100%;margin-top:10px;background:transparent;color:var(--mut);border:1px solid #2a2415;border-radius:7px;padding:8px 12px;cursor:pointer;letter-spacing:.08em;font-size:11px;min-height:34px;}
-  #approvals .empty{color:var(--mut);font-size:11px;padding:10px 0;}
-  .appr-help{font-size:10.5px;color:var(--orange);margin:6px 0 10px;line-height:1.5;white-space:pre-wrap;}
-  .appr-meta{color:var(--mut);font-size:10px;margin-bottom:6px;}
-  .appr-reason{color:#cfc6ae;font-size:10.5px;margin-bottom:6px;white-space:pre-wrap;}
+  .chip .cs{color:var(--t3);flex:none;}
+  .chip button{color:var(--t3);font-size:14px;line-height:1;padding:0 2px;}
+  .chip button:hover{color:var(--t1);}
+  .composer{display:flex;align-items:center;gap:4px;min-height:52px;padding:0 10px;border-radius:26px;background:var(--s2);box-shadow:inset 0 0 0 1px var(--hair);transition:box-shadow .15s;}
+  .composer:focus-within{box-shadow:inset 0 0 0 1px var(--hair2);}
+  .composer.drop{box-shadow:inset 0 0 0 1px var(--gold);}
+  #input{flex:1;min-width:0;background:transparent;border:0;outline:none;font-size:16px;line-height:24px;padding:12px 4px;color:var(--t1);}
+  #input::placeholder{color:var(--t3);}
+  .send{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--s4);color:var(--t1);opacity:.35;transition:opacity .15s,background .15s;}
+  .send.live{background:var(--gold);color:var(--on-gold);opacity:1;}
+  .send svg.i{width:16px;height:16px;stroke-width:2;}
+  #micbtn.rec{background:var(--gold);color:var(--on-gold);animation:micpulse 1s ease-in-out infinite;}
+  #micbtn.busy{opacity:.5;}
+  @keyframes micpulse{0%,100%{box-shadow:0 0 0 0 rgba(212,175,55,.5);}50%{box-shadow:0 0 0 6px rgba(212,175,55,0);}}
+  .lopill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 8px;border-radius:12px;background:var(--s3);color:var(--t1);font-size:12px;font-weight:500;flex:none;}
+  .lopill svg.i{width:12px;height:12px;stroke-width:2;}
+
+  /* ---------- panels (modal on the Mac, a sheet on the phone) ---------- */
+  .overlay{position:fixed;inset:0;background:var(--scrim);display:none;align-items:flex-start;justify-content:center;z-index:30;padding:56px 16px;}
+  .overlay.open{display:flex;}
+  .modal{width:min(640px,100%);max-height:min(720px,calc(100vh - 112px));display:flex;flex-direction:column;background:var(--s1);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;}
+  .modal.narrow{width:min(480px,100%);}
+  .mh{display:flex;align-items:center;gap:12px;height:56px;padding:0 16px 0 24px;flex:none;}
+  .mh h2{flex:1;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em;}
+  .xb{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--t2);}
+  .xb:hover{background:var(--s3);color:var(--t1);}
+  .xb svg.i{width:16px;height:16px;}
+  .mb{padding:0 24px 24px;overflow:auto;min-height:0;}
+  .mf{display:flex;align-items:center;gap:12px;padding:16px 24px;box-shadow:inset 0 1px 0 var(--s3);flex:none;}
+  .mf .note{flex:1;color:var(--t3);}
+  .seg{display:inline-flex;background:var(--s2);border-radius:8px;padding:2px;gap:2px;margin-bottom:16px;}
+  .seg button{height:24px;border-radius:6px;padding:0 12px;color:var(--t2);font-weight:500;display:inline-flex;align-items:center;gap:6px;}
+  .seg button.on{background:var(--s4);color:var(--t1);}
+  .seg em{font-style:normal;color:var(--t3);font-variant-numeric:tabular-nums;}
+  .gsh{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);margin:24px 0 8px;}
+  .mb>.gsh:first-child,.mb>[hidden]+.gsh{margin-top:8px;}
+  .group{background:var(--s2);border-radius:8px;}
+  .row{position:relative;display:flex;align-items:center;gap:10px;min-height:44px;padding:0 16px;}
+  .row+.row::before{content:"";position:absolute;top:0;left:16px;right:0;height:1px;background:var(--s4);}
+  .row.two{min-height:56px;}
+  .row .lbl{flex:1;min-width:0;display:flex;flex-direction:column;}
+  .row .lbl b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .row .lbl span{font-size:12px;line-height:16px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .row .val{color:var(--t3);font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .row svg.i{width:16px;height:16px;color:var(--t2);}
+  .row.click{cursor:pointer;} .row.click:hover{background:var(--s3);}
+  .st{display:inline-flex;align-items:center;gap:8px;color:var(--t2);white-space:nowrap;}
+  .st i{width:8px;height:8px;border-radius:50%;background:var(--t3);flex:none;}
+  .st.ok i{background:var(--green);} .st.degraded i{background:var(--orange);} .st.down i{background:var(--red);}
+  .st.unknown i{background:transparent;box-shadow:inset 0 0 0 1.5px var(--t3);} .st.off i{background:var(--tdis);}
+  .btn{height:28px;border-radius:6px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;font-weight:500;background:var(--s3);box-shadow:inset 0 0 0 1px var(--bd);color:var(--t1);white-space:nowrap;}
+  .btn:hover{background:var(--s4);}
+  .btn.pri{background:var(--gold);color:var(--on-gold);box-shadow:none;}
+  .btn.pri:hover{background:var(--gold-hi);}
+  .ghost{height:28px;border-radius:6px;padding:0 10px;display:inline-flex;align-items:center;gap:4px;color:var(--t2);font-weight:500;white-space:nowrap;}
+  .ghost:hover{background:var(--s3);color:var(--t1);}
+  .ghost svg.i{width:14px;height:14px;}
+  .empty{color:var(--t3);padding:24px 0;text-align:center;}
+  .empty b{display:block;color:var(--t1);font-size:15px;line-height:20px;font-weight:600;margin-bottom:4px;}
+  .err{color:var(--orange);font-size:12px;line-height:16px;}
+  .field{width:100%;height:32px;border-radius:6px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--bd2);border:0;outline:none;padding:0 10px;color:var(--t1);font-size:13px;}
+  .field:focus{box-shadow:inset 0 0 0 1px var(--gold);}
+  .formrow{display:flex;gap:8px;align-items:center;padding:12px 16px;}
+  .toggle{position:relative;width:38px;height:22px;border-radius:11px;background:var(--s4);transition:background .15s;flex:none;}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--t1);transition:transform .15s;}
+  .toggle[aria-checked="true"]{background:var(--gold);}
+  .toggle[aria-checked="true"]::after{transform:translateX(16px);background:var(--on-gold);}
+  .mono{font-family:var(--mono);font-size:12px;}
+
+  /* approvals: cards in words */
+  .card{padding:14px 16px;}
+  .card.open{background:var(--s3);}
+  .card+.card::before{content:"";position:absolute;}
+  .ct{display:flex;align-items:center;gap:10px;}
+  .ct svg.i{width:16px;height:16px;color:var(--t2);}
+  .ct b{flex:1;min-width:0;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ct small{font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums;}
+  .ct .sub{display:block;font-size:12px;line-height:16px;color:var(--t3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .facts{display:grid;grid-template-columns:72px minmax(0,1fr);gap:6px 12px;margin:12px 0 0 26px;}
+  .facts dt{font-size:12px;line-height:18px;color:var(--t3);}
+  .facts dd{margin:0;font-size:13px;line-height:18px;overflow-wrap:anywhere;}
+  .details{margin:10px 0 0 26px;}
+  .details pre{font:12px/18px var(--mono);color:var(--t2);white-space:pre-wrap;word-break:break-word;background:var(--bg);border-radius:6px;padding:10px 12px;margin-top:6px;max-height:240px;overflow:auto;}
+  .details p{color:var(--t2);font-size:12px;line-height:18px;margin-top:6px;}
+  .cf{display:flex;align-items:center;gap:8px;margin-top:14px;padding-left:16px;}
+  .cf .ghost{margin-right:auto;}
+  .outside{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);}
+  .outside i{width:6px;height:6px;border-radius:50%;background:var(--orange);}
+  .res{font-size:12px;line-height:16px;color:var(--t2);margin-top:8px;}
+  .res.ok{color:var(--gold);} .res.bad{color:var(--orange);}
+
+  /* a card Flint proposes in chat */
+  .propose{margin-top:12px;border-radius:8px;background:var(--s2);padding:14px 16px;font-size:13px;line-height:18px;}
+  .propose .pt{font-weight:500;}
+  .propose .pargs{display:none;}
+  .propose .prow{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;}
+  .propose .prow button{height:28px;border-radius:6px;padding:0 12px;font-weight:500;}
+  .propose .ok{background:var(--gold);color:var(--on-gold);}
+  .propose .no{background:var(--s3);box-shadow:inset 0 0 0 1px var(--bd);}
+  .propose .res{margin-top:8px;}
+
+  /* activity rows */
+  .frow{display:flex;align-items:flex-start;gap:12px;padding:10px 8px;border-radius:8px;min-height:56px;}
+  .frow:hover{background:var(--s2);}
+  .frow .ud{width:6px;height:6px;border-radius:50%;background:var(--gold);margin-top:6px;flex:none;}
+  .frow .ud.read{background:transparent;}
+  .frow .fx{flex:1;min-width:0;display:flex;flex-direction:column;}
+  .frow .fx b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .frow.read .fx b{color:var(--t2);}
+  .frow .fx span{font-size:12px;line-height:16px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .frow .fx .more{white-space:normal;overflow:visible;margin-top:6px;color:var(--t2);}
+  .frow small{font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums;white-space:nowrap;margin-top:1px;}
+  .frow .acts{display:flex;gap:4px;margin-top:8px;opacity:0;transition:opacity .15s;}
+  .frow:hover .acts,.frow:focus-within .acts{opacity:1;}
+  .frow .acts .ghost.on{color:var(--gold);}
+  .frow .fsh{margin:16px 0 4px 8px;}
+
+  /* ---------- narrower windows and the phone ---------- */
+  @media (max-width:1100px){#app.side-open .main{grid-template-columns:0 minmax(0,1fr);} #app.side-open .stage{display:none;}}
+  @media (max-width:900px){
+    .main{grid-template-columns:0 minmax(0,1fr);} .stage{display:none;}
+    .main.empty .stage{display:block;position:absolute;inset:var(--hdr) 0 auto 0;height:38vh;z-index:0;}
+    .main.empty .empty-state{inset:calc(var(--hdr) + 38vh) 0 140px 0;justify-content:flex-start;}
+    .brand{display:none;}
+  }
+  @media (max-width:600px){
+    :root{--hdr:calc(44px + env(safe-area-inset-top,0px));}
+    html,body{font-size:15px;line-height:20px;}
+    .top{padding:env(safe-area-inset-top,0px) 4px 0;}
+    .ib{width:44px;height:44px;} svg.i{width:22px;height:22px;}
+    .ctitle{font-size:15px;}
+    #app.side-open{grid-template-columns:0 minmax(0,1fr);}
+    #app.side-open .side{position:fixed;inset:0 auto 0 0;width:min(84vw,320px);z-index:25;box-shadow:var(--shadow);}
+    #transcript{padding:calc(var(--hdr) + 16px) 16px 150px;}
+    .msg{font-size:17px;line-height:24px;}
+    .dock{padding:0 16px calc(12px + env(safe-area-inset-bottom,0px));}
+    #input{font-size:17px;}
+    .overlay{align-items:flex-end;padding:0;}
+    .modal,.modal.narrow{width:100%;max-height:88vh;border-radius:16px 16px 0 0;padding-top:8px;}
+    .modal::before{content:"";display:block;width:36px;height:5px;border-radius:3px;background:var(--bd2);margin:0 auto 4px;}
+    .mh h2{font-size:22px;line-height:28px;}
+    .mb{padding:0 16px 16px;} .mf{padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px));}
+    .mf .btn.pri{flex:1;height:50px;border-radius:12px;font-size:17px;justify-content:center;}
+    .row{min-height:48px;font-size:17px;} .btn,.ghost{height:36px;}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-side" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+</defs></svg>
+
 <div id="app">
-  <header>
-    <div class="brand"><span class="sp"></span><span class="nm">FLINT</span></div>
-    <div class="hdr-right">
-      <button class="hicon" onclick="newChat()" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
-      <button class="hicon" id="lanesbtn" onclick="openLanes()" title="Lanes: what Flint noticed, and its health" aria-label="Lanes"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></button>
-      <button class="hicon" id="apprbtn" onclick="openApprovals()" title="Approvals: what is waiting for your signature" aria-label="Approvals"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg><span class="nbadge" id="apprbadge">0</span></button>
-      <button class="hicon" id="bellbtn" onclick="openNotifs()" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="nbadge" id="nbadge">0</span></button>
-      <button class="hicon" id="lobtn" onclick="toggleLO()" title="Local only" aria-label="Local only"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
-      <button class="hicon" onclick="openSettings()" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
-    </div>
-  </header>
-  <main>
-    <div class="center">
+  <aside class="side" id="side" aria-label="Chats">
+    <label class="search"><svg class="i"><use href="#i-search"/></svg><input id="threadsearch" placeholder="Search" autocomplete="off" aria-label="Search Chats" /></label>
+    <nav class="threads" id="threads"></nav>
+    <button class="side-foot" onclick="openSettings()"><svg class="i"><use href="#i-gear"/></svg>Settings</button>
+  </aside>
+  <div class="main empty" id="main">
+    <header class="top" id="top">
+      <div class="grp">
+        <button class="ib" id="sidebtn" onclick="toggleSidebar()" aria-label="Toggle Sidebar" data-tip="Toggle Sidebar ⌘B"><svg class="i"><use href="#i-side"/></svg></button>
+        <button class="ib" onclick="newChat()" aria-label="New Chat" data-tip="New Chat ⌘N"><svg class="i"><use href="#i-new"/></svg></button>
+      </div>
+      <span class="ctitle" id="ctitle"></span>
+      <div class="trail">
+        <button class="ib" id="apprbtn" onclick="openApprovals()" aria-label="Approvals" data-tip="Approvals"><svg class="i"><use href="#i-shield"/></svg><span class="badge" id="apprbadge" hidden></span></button>
+        <button class="ib" id="bellbtn" onclick="openActivity()" aria-label="Activity" data-tip="Activity"><svg class="i"><use href="#i-bell"/></svg><span class="udot" id="nbadge" hidden></span></button>
+      </div>
+    </header>
+    <div class="stage">
+      <div class="brand" aria-hidden="true"><span class="sp"></span><span class="nm">FLINT</span></div>
       <div id="brainwrap"><canvas id="brain"></canvas><div class="think" id="think"></div></div>
     </div>
-    <aside class="chat">
-      <div id="transcript"></div>
-      <div id="attnote"></div>
-      <div id="chips"></div>
-      <div class="bar">
-        <input id="input" placeholder="How can I help you?" autocomplete="off" />
-        <input type="file" id="filepick" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.log,.ini,.conf,.env,.sql,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.h,.cpp,.hpp,.cs,.php,.sh,.zsh,.bash,.html,.css,.tex,.diff,.patch" />
-        <button class="clip" id="clipbtn" onclick="FILE_PICKING=Date.now();document.getElementById('filepick').click()" title="Attach images, PDFs or text files" aria-label="Attach files"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-        <button class="mic" id="micbtn" onclick="toggleMic()" title="Hold a conversation — speak, and Flint speaks back" aria-label="Speak"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="18.5" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg></button>
-        <button class="sendbtn" onclick="send()" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+    <section class="chat" id="chat">
+      <div id="transcript"><div class="thread-col" id="thread"></div></div>
+      <div class="empty-state" id="emptystate">
+        <h1>How can I help?</h1>
+        <div class="starters" id="starters"></div>
       </div>
-    </aside>
-  </main>
+      <div class="dock">
+        <div class="dock-col">
+          <div id="attnote"></div>
+          <div id="chips"></div>
+          <div class="composer" id="composer">
+            <input type="file" id="filepick" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.log,.ini,.conf,.env,.sql,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.h,.cpp,.hpp,.cs,.php,.sh,.zsh,.bash,.html,.css,.tex,.diff,.patch" />
+            <button class="ib" id="clipbtn" onclick="FILE_PICKING=Date.now();document.getElementById('filepick').click()" aria-label="Attach Files" data-tip="Attach Files"><svg class="i"><use href="#i-plus"/></svg></button>
+            <input id="input" placeholder="Ask Flint" autocomplete="off" aria-label="Message" />
+            <button class="lopill" id="lopill" onclick="toggleLO()" hidden aria-label="Local Only Is On" data-tip="Turn Off ⌘⇧L"><svg class="i"><use href="#i-lock"/></svg>Local Only</button>
+            <button class="ib" id="micbtn" onclick="toggleMic()" aria-label="Speak" data-tip="Speak"><svg class="i"><use href="#i-mic"/></svg></button>
+            <button class="send" id="sendbtn" onclick="send()" aria-label="Send"><svg class="i"><use href="#i-up"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
 </div>
 
-<div id="settings"><div class="card">
-  <h4>Flint — Settings</h4>
-  <div class="seg">Systems</div>
-  <div id="systems"><div class="sys"><span class="dot off"></span>—</div></div>
-  <div class="seg seg-toggle" onclick="toggleLog()"><span>Action Log</span><span id="logcaret">▸</span></div>
-  <div class="log" id="log" style="display:none"></div>
-  <div class="seg">Approval key</div>
-  <div id="creds" class="log" style="display:block">—</div>
-  <div id="enrollbox" style="display:none">
-    <label for="enrollcode">Enrolment code (run <code>pnpm --filter @flint/runtime enroll</code> on the Mac)</label>
-    <input id="enrollcode" type="password" autocomplete="off" placeholder="one-time code">
-    <input id="enrolllabel" type="text" autocomplete="off" placeholder="name this key, e.g. iPhone">
-    <div class="row"><button class="ghost" id="enrollpk" onclick="enrollPasskey()">Add a passkey on this device</button><button class="ghost" id="enrollse" style="display:none" onclick="enrollEnclave()">Add Touch ID approval key</button><button class="ghost" id="resetse" style="display:none" onclick="resetEnclave()">Replace this Mac's key</button></div>
+<div class="overlay" id="approvals" onclick="if(event.target===this)closeApprovals()"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="apprttl">
+  <div class="mh"><h2 id="apprttl">Approvals</h2><button class="xb" onclick="closeApprovals()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mb">
+    <div class="seg" id="apprseg" hidden><button id="apprtab-waiting" class="on" onclick="apprShow('waiting')">Waiting <em id="apprn-waiting"></em></button><button id="apprtab-approved" onclick="apprShow('approved')">Approved <em id="apprn-approved"></em></button></div>
+    <div class="err" id="apprhelp" hidden></div>
+    <div id="apprlist"></div>
   </div>
-  <div id="enrollmsg" class="log" style="display:none"></div>
-  <div id="keyapprovals" class="log" style="display:none"></div>
-  <div id="waiting" class="log" style="display:none"></div>
-  <label for="tokin">Access token (only on a device Flint doesn't sign in for you)</label>
-  <input id="tokin" type="password" autocomplete="off" placeholder="paste the token from ~/.flint/token">
-  <div class="row"><button class="ghost" onclick="saveToken()">Save token</button><button onclick="closeSettings()">Close</button></div>
+  <div class="mf" id="apprfoot" hidden><span class="note" id="apprnote"></span><button class="btn pri" id="apprall" onclick="approveAll()">Approve All</button></div>
 </div></div>
 
-<div id="notifs" onclick="if(event.target===this)closeNotifs()"><div class="card">
-  <h4>Notifications</h4>
-  <div id="nlist"></div>
-  <button onclick="closeNotifs()">Close</button>
-</div></div>
-
-<div id="lanes" onclick="if(event.target===this)closeLanes()"><div class="card">
-  <h4>Lanes</h4>
-  <div class="lane-tabs">
-    <button id="lanetab-relevant" onclick="showLane('relevant')">Relevant</button>
-    <button id="lanetab-quiet" onclick="showLane('quiet')">Quiet</button>
-    <button id="lanetab-health" onclick="showLane('health')">Health</button>
+<div class="overlay" id="settings" onclick="if(event.target===this&&TOKEN)closeSettings()"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="setttl">
+  <div class="mh"><h2 id="setttl">Settings</h2><button class="xb" onclick="closeSettings()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mb" id="setbody">
+    <div id="sethealth"></div>
+    <div class="gsh">Approval Keys</div>
+    <div class="group" id="creds"><div class="row"><span class="lbl"><b>Approval Key</b></span><span class="val">Checking…</span></div></div>
+    <div id="enrollbox" hidden>
+      <div class="group" style="margin-top:8px">
+        <div class="formrow"><input class="field" id="enrollcode" type="password" autocomplete="off" placeholder="Enrollment Code" aria-label="Enrollment Code" /><input class="field" id="enrolllabel" type="text" autocomplete="off" placeholder="Name" aria-label="Key Name" style="max-width:140px" /></div>
+        <div class="formrow" style="padding-top:0;justify-content:flex-end"><button class="btn" id="resetse" onclick="resetEnclave()" hidden>Replace This Mac's Key</button><button class="btn" id="enrollpk" onclick="enrollPasskey()" hidden>Add Passkey</button><button class="btn pri" id="enrollse" onclick="enrollEnclave()" hidden>Add Approval Key</button></div>
+      </div>
+    </div>
+    <div class="err" id="enrollmsg" hidden style="margin-top:8px"></div>
+    <div id="keyapprovals" hidden></div>
+    <div class="gsh">Connected Systems</div>
+    <div class="group" id="systems"><div class="row"><span class="lbl"><b>Checking…</b></span></div></div>
+    <div class="gsh">Privacy</div>
+    <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span>Answers stay on this Mac</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" onclick="toggleLO()"></button></div></div>
+    <div class="gsh">Access</div>
+    <div class="group" id="access">
+      <div class="row" id="tokrow-signed"><span class="lbl"><b>Access Token</b></span><span class="val">Signed In</span></div>
+      <div class="formrow" id="tokrow-paste"><input class="field" id="tokin" type="password" autocomplete="off" placeholder="Access Token" aria-label="Access Token" /><button class="btn pri" onclick="saveToken()">Save Token</button></div>
+    </div>
+    <div id="sethealth-last"></div>
   </div>
-  <div class="lane-note" id="lanenote">What Flint's triage decided about each event. Label them: your labels say what deserves your attention, and they are the evidence for promoting triage.</div>
-  <div id="lanemsg"></div>
-  <div id="lanelist"></div>
-  <button id="laneolder" onclick="loadLane(true)">Older</button>
-  <button class="close" onclick="closeLanes()">Close</button>
 </div></div>
 
-<div id="approvals" onclick="if(event.target===this)closeApprovals()"><div class="card">
-  <h4>Approvals</h4>
-  <div class="lane-note">What is waiting for your signature: cards Flint filed, and ones you filed at the terminal (a source to turn on, a promotion table, tonight's backup). Each shows exactly what would run. Approve signs it with your key (Touch ID here, a passkey on your phone) and it runs at once.</div>
-  <div id="apprhelp" class="appr-help" style="display:none"></div>
-  <div id="apprlist"></div>
-  <button class="close" onclick="closeApprovals()">Close</button>
-</div></div>
-
-<div id="convo" onclick="if(event.target===this)closeConvo()"><div class="card">
-  <h4>Conversation</h4>
-  <div class="lbl">You</div><div class="q" id="cv-q"></div>
-  <div class="lbl">Flint</div><div class="ans" id="cv-a"></div>
-  <button onclick="closeConvo()">Close</button>
+<div class="overlay" id="activity" onclick="if(event.target===this)closeActivity()"><div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="actttl">
+  <div class="mh"><h2 id="actttl">Activity</h2><button class="ghost" id="markread" onclick="markAllRead()">Mark All as Read</button><button class="xb" onclick="closeActivity()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mb">
+    <div class="seg"><button id="acttab-notifications" class="on" onclick="actShow('notifications')">Notifications</button><button id="lanetab-relevant" onclick="actShow('relevant')">Relevant</button><button id="lanetab-quiet" onclick="actShow('quiet')">Quiet</button></div>
+    <div class="err" id="lanemsg" hidden></div>
+    <div id="nlist"></div>
+    <div id="lanelist"></div>
+    <button class="ghost" id="laneolder" onclick="loadLane(true)" hidden style="margin:8px auto 0;display:flex">Older</button>
+  </div>
 </div></div>
 
 <script>
@@ -267,113 +409,155 @@ var TOKEN = window.__FLINT_TOKEN__ || localStorage.getItem('flint_token') || '';
 if (window.__FLINT_TOKEN__) localStorage.setItem('flint_token', window.__FLINT_TOKEN__);
 /* A token the server rejects is forgotten, so Settings asks for the current one. */
 function tokenRejected(){localStorage.removeItem('flint_token');TOKEN='';openSettings();}
-function saveToken(){var el=document.getElementById('tokin');var v=(el.value||'').trim();if(!v)return;localStorage.setItem('flint_token',v);TOKEN=v;el.value='';closeSettings();}
+function saveToken(){var el=document.getElementById('tokin');var v=(el.value||'').trim();if(!v)return;localStorage.setItem('flint_token',v);TOKEN=v;el.value='';closeSettings();refresh();loadThreads();pollApprovals();pollNotifs();}
+function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
+/* This Mac (and Will's tailnet devices) are signed in by the server; elsewhere the token is pasted once. */
+function syncAccess(){var injected=!!window.__FLINT_TOKEN__;$('tokrow-signed').hidden=!(injected||TOKEN);$('tokrow-paste').hidden=injected;}
 var convId = 'console';
+function $(id){return document.getElementById(id);}
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
+function svgi(name){var s=document.createElementNS('http://www.w3.org/2000/svg','svg');s.setAttribute('class','i');var u=document.createElementNS('http://www.w3.org/2000/svg','use');u.setAttribute('href','#i-'+name);s.appendChild(u);return s;}
+
+/* ---------- the window: sidebar, title, empty state, panels ---------- */
+var SIDE_KEY='flint_side';
+function sideWanted(){try{var v=localStorage.getItem(SIDE_KEY);if(v==='1')return true;if(v==='0')return false;}catch(e){}return window.innerWidth>=1100;}
+function setSidebar(open,keep){$('app').classList.toggle('side-open',open);$('sidebtn').classList.toggle('on',open);if(keep){try{localStorage.setItem(SIDE_KEY,open?'1':'0');}catch(e){}}}
+/* Only Will's own toggles are remembered; until then it follows the window's width. */
+function toggleSidebar(){setSidebar(!$('app').classList.contains('side-open'),true);}
+setSidebar(sideWanted());
+function setTitle(t){$('ctitle').textContent=t||'';}
+/* The empty state (orb, greeting, starters) shows until the first message. */
+function syncEmpty(){var empty=!$('thread').children.length;$('main').classList.toggle('empty',empty);$('emptystate').hidden=!empty;$('input').placeholder=empty?'Ask Flint':'Reply';}
 function newChat(){
   stopSpeech();
   convId = 'c' + Date.now();
-  document.getElementById('transcript').innerHTML = '';
-  var inp = document.getElementById('input'); inp.value = ''; inp.focus();
+  $('thread').textContent='';setTitle('');markThread(null);syncEmpty();
+  var inp = $('input'); inp.value = ''; syncSend(); inp.focus();
 }
-function openSettings(){document.getElementById('settings').style.display='flex';loadCreds();}
-function closeSettings(){document.getElementById('settings').style.display='none';}
-function auth(){return TOKEN?{'Authorization':'Bearer '+TOKEN}:{};}
+var PANELS=['approvals','settings','activity'];
+function panelOpen(){return PANELS.some(function(id){return $(id).classList.contains('open');});}
+function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);}
+function openSettings(){showPanel('settings',true);loadCreds();loadHealth();refresh();syncAccess();}
+function closeSettings(){showPanel('settings',false);}
+/* The app's menu bar and keyboard shortcuts land here. */
+function flintCommand(name){
+  if(name==='newChat')newChat();else if(name==='toggleSidebar')toggleSidebar();else if(name==='openSettings')openSettings();
+  else if(name==='openApprovals')openApprovals();else if(name==='openActivity')openActivity();else if(name==='toggleLocalOnly')toggleLO();}
+document.addEventListener('keydown',function(e){
+  var mod=e.metaKey||e.ctrlKey;
+  if(e.key==='Escape'){if($('approvals').classList.contains('open'))closeApprovals();else if($('activity').classList.contains('open'))closeActivity();else if($('settings').classList.contains('open')&&TOKEN)closeSettings();return;}
+  if(!mod)return;
+  if(!e.shiftKey&&(e.key==='b'||e.key==='B')){e.preventDefault();toggleSidebar();}
+  else if(e.shiftKey&&(e.key==='l'||e.key==='L')){e.preventDefault();toggleLO();}
+  else if(!e.shiftKey&&e.key===','){e.preventDefault();openSettings();}
+});
+/* The header's hairline appears once the conversation scrolls under it. */
+$('transcript').addEventListener('scroll',function(){$('top').classList.toggle('scrolled',this.scrollTop>4);});
 
 /* ---------- live data ---------- */
 function refresh(){
-  fetch(BASE+'/health').then(r=>r.json()).then(h=>{
-    var sys=document.getElementById('systems');sys.innerHTML='';
-    (h.servers||[]).forEach(function(s){sys.innerHTML+='<div class="sys"><span class="dot"></span>'+esc(s)+'</div>';});
-    if(!(h.servers||[]).length)sys.innerHTML='<div class="sys"><span class="dot off"></span>No connectors</div>';
+  fetch(BASE+'/health').then(function(r){return r.json();}).then(function(h){
+    var sys=$('systems');sys.textContent='';
+    (h.servers||[]).forEach(function(s){var row=el('div','row');var l=el('span','lbl');l.appendChild(el('b',null,sysName(s)));row.appendChild(l);
+      var st=el('span','st ok');st.appendChild(el('i'));st.appendChild(document.createTextNode('Connected'));row.appendChild(st);sys.appendChild(row);});
+    if(!(h.servers||[]).length){var row=el('div','row');var l=el('span','lbl');l.appendChild(el('b',null,'None Connected'));row.appendChild(l);sys.appendChild(row);}
   }).catch(function(){});
-  pollLog();
 }
+function sysName(s){s=String(s||'');return s.replace(/[_-]+/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();});}
 function md(s){
   s=esc(s);
-  s=s.replace(/```([\s\S]*?)```/g,'<code>$1</code>');
+  s=s.replace(/```[a-zA-Z0-9_+-]*\n?([\s\S]*?)```/g,function(m,c){return '<pre><code>'+c.replace(/\n/g,'\u0000')+'</code></pre>';});
   s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
   s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/__([^_]+)__/g,'<b>$1</b>');
   s=s.replace(/^\s{0,3}#{1,6}\s+(.+)$/gm,'<b>$1</b>');
   s=s.replace(/^\s*[*\-•]\s+/gm,'• ');
-  s=s.replace(/\n/g,'<br>');
+  s=s.replace(/\n/g,'<br>').replace(/\u0000/g,'\n');
   return s;
 }
-var CONVOS=[];
-function esc(s){return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-function pollLog(){
-  if(!TOKEN)return;
-  fetch(BASE+'/conversations',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-    if(!d)return;CONVOS=d.conversations||[];
-    var log=document.getElementById('log');var rows=CONVOS.slice(-100).reverse();log.innerHTML='';
-    if(!rows.length){log.innerHTML='<div class="row" style="cursor:default"><span class="a">·</span><span class="cv">No conversations yet</span></div>';return;}
-    rows.forEach(function(e){
-      var dt=new Date(e.ts);var hh=('0'+dt.getHours()).slice(-2)+':'+('0'+dt.getMinutes()).slice(-2);
-      var div=document.createElement('div');div.className='row';
-      div.innerHTML='<span class="a">✓</span><span>Complete</span><span class="t" style="margin-left:auto">'+hh+'</span>';
-      div.onclick=function(){openConvo(e.id);};
-      log.appendChild(div);
-    });
-  }).catch(function(){});
-}
-function openConvo(id){var c=null;for(var i=0;i<CONVOS.length;i++){if(CONVOS[i].id===id)c=CONVOS[i];}
-  if(!c)return;
-  document.getElementById('cv-q').textContent=c.question;
-  document.getElementById('cv-a').innerHTML=md(c.answer||'(no text captured)');
-  document.getElementById('convo').style.display='flex';}
-function closeConvo(){document.getElementById('convo').style.display='none';}
-function toggleLog(){var l=document.getElementById('log'),c=document.getElementById('logcaret');
-  var open=l.style.display!=='none';l.style.display=open?'none':'block';c.textContent=open?'▸':'▾';}
-setInterval(refresh,5000);
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+/* ---------- past chats (the sidebar) ---------- */
+var THREADS=[],THREAD_ON=null;
+function dayGroup(ms){var d=new Date(ms),now=new Date();var start=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
+  if(ms>=start)return 'Today';if(ms>=start-86400000)return 'Yesterday';if(ms>=start-6*86400000)return 'Previous 7 Days';return 'Earlier';}
+function loadThreads(){if(!TOKEN){renderThreads();return;}fetch(BASE+'/threads',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){THREADS=(d&&d.threads)||[];renderThreads();}).catch(function(){renderThreads();});}
+function renderThreads(){var nav=$('threads');nav.textContent='';var q=($('threadsearch').value||'').trim().toLowerCase();
+  var list=THREADS.filter(function(t){return !q||String(t.title||'').toLowerCase().indexOf(q)>=0;});
+  if(!list.length){nav.appendChild(el('div','side-empty',q?'No Matching Chats':'No Chats Yet'));return;}
+  var last='';list.forEach(function(t){var g=dayGroup(t.updatedAt);if(g!==last){nav.appendChild(el('div','sh',g));last=g;}
+    var b=el('button','trow'+(t.id===THREAD_ON?' on':''),t.title||'Untitled');b.title=t.title||'';b.onclick=function(){openThread(t.id);};nav.appendChild(b);});}
+$('threadsearch').addEventListener('input',renderThreads);
+function markThread(id){THREAD_ON=id;renderThreads();}
+/* Reopen a past chat: its turns in the thread, and replies continue it. */
+function openThread(id){if(!TOKEN)return;fetch(BASE+'/threads/'+encodeURIComponent(id),{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;
+  stopSpeech();convId=d.id;$('thread').textContent='';
+  (d.turns||[]).forEach(function(t){var you=addMsg('you');you.textContent=t.user||'';
+    if(t.attachments&&t.attachments.length){var box=el('div','atts');t.attachments.forEach(function(a){box.appendChild(el('span','chip',a.name));});you.parentNode.insertBefore(box,you);}
+    var b=addMsg('flint');b.innerHTML=md(t.assistant||'');});
+  setTitle(d.title||'');markThread(d.id);syncEmpty();$('transcript').scrollTop=9e9;if(window.innerWidth<=600)setSidebar(false);}).catch(function(){});}
 
 /* ---------- chat (SSE) ---------- */
-function addMsg(who,cls){var t=document.getElementById('transcript');var d=document.createElement('div');d.className='msg '+cls;
-  d.innerHTML='<span class="who">'+who+'</span><span class="body"></span>';t.appendChild(d);t.scrollTop=t.scrollHeight;return d.querySelector('.body');}
+function addMsg(cls){var d=el('div','msg '+cls);var body=el('div','body');d.appendChild(body);
+  if(cls==='flint'){var meta=el('div','meta');
+    var cp=el('button','ib');cp.setAttribute('aria-label','Copy');cp.setAttribute('data-tip','Copy');cp.appendChild(svgi('copy'));cp.onclick=function(){copyText(body.innerText||body.textContent||'',cp);};
+    meta.appendChild(cp);d.appendChild(meta);}
+  $('thread').appendChild(d);syncEmpty();$('transcript').scrollTop=$('transcript').scrollHeight;return body;}
+function copyText(t,btn){try{navigator.clipboard.writeText(t).then(function(){btn.setAttribute('data-tip','Copied');setTimeout(function(){btn.setAttribute('data-tip','Copy');},1500);});}catch(e){}}
 /* ---------- brain: local vs frontier ---------- */
 var LOCAL_ONLY=false;localStorage.setItem('flint_lo','0');/* always start on the full brain (Claude); lock is per-session, never sticky */
-function applyLO(){var b=document.getElementById('lobtn');if(!b)return;b.classList.toggle('on',LOCAL_ONLY);b.title=LOCAL_ONLY?'Local only: ON — everything stays on this Mac (no frontier escalation)':'Local only: OFF — hard questions may escalate to the frontier brain';}
+function applyLO(){$('lopill').hidden=!LOCAL_ONLY;$('lotoggle').setAttribute('aria-checked',LOCAL_ONLY?'true':'false');}
 function toggleLO(){LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL_ONLY?'1':'0');applyLO();}
-function setBrainChip(bodyEl,brain){try{var who=bodyEl.parentNode.querySelector('.who');if(!who)return;var ex=who.querySelector('.bchip');if(ex)ex.remove();
-  /* Flint is just Flint — no Claude tag. Only flag the exception: an on-device answer. */
-  if(brain==='frontier')return;
-  var c=document.createElement('span');c.className='bchip local';c.textContent='LOCAL';who.appendChild(c);}catch(e){}}
+/* Flint is just Flint: no tag for the frontier brain; an on-device answer says "Local". */
+function setBrainChip(bodyEl,brain){try{var meta=bodyEl.parentNode.querySelector('.meta');if(!meta)return;var ex=meta.querySelector('.tag');if(ex)ex.remove();
+  if(brain==='frontier')return;meta.appendChild(el('span','tag','Local'));}catch(e){}}
 applyLO();
 
-/* ---------- proposed actions (one-tap approval) ---------- */
+/* ---------- proposed actions in chat ---------- */
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
-  var card=document.createElement('div');card.className='propose';
+  var card=el('div','propose');
+  card.appendChild(el('div','pt',typeof apprTitle==='function'?apprTitle(a):a.fullName));
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
-  card.innerHTML='<div class="pt">Flint wants to run <b>'+esc(a.fullName)+'</b></div><div class="pargs">'+esc(args)+'</div><div class="prow"><button class="ok">'+(canEnclave()?'Approve with Touch ID':canPasskey()?'Approve with passkey':'Approve')+'</button><button class="no">Dismiss</button></div><div class="res" style="display:none"></div>';
-  card.querySelector('.ok').onclick=function(){approveAction(a.id,card);};
-  card.querySelector('.no').onclick=function(){rejectAction(a.id,card);};
-  host.appendChild(card);});document.getElementById('transcript').scrollTop=9e9;}
-function esc(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+  card.appendChild(el('div','pargs',args));
+  var row=el('div','prow');var no=el('button','no','Reject');var ok=el('button','ok',approveLabel());row.appendChild(no);row.appendChild(ok);card.appendChild(row);
+  var res=el('div','res');res.style.display='none';card.appendChild(res);
+  ok.onclick=function(){approveAction(a.id,card,{reason:'approve: '+(typeof apprTitle==='function'?apprTitle(a):a.fullName),fresh:!!a.tainted});};
+  no.onclick=function(){rejectAction(a.id,card);};
+  host.appendChild(card);});$('transcript').scrollTop=9e9;}
 /* ---------- Will's approval key (passkey on the tailnet HTTPS origin) ---------- */
 var CREDS=null;
 function b64u(buf){var b=new Uint8Array(buf),s='';for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
 function passkeysHere(){return !!(window.PublicKeyCredential&&location.protocol==='https:');}
 function canPasskey(){return passkeysHere()&&!!CREDS&&CREDS.some(function(c){return c.factor==='webauthn';});}
-/* The Mac app's Touch ID key (Secure Enclave), through its flintApproval bridge. */
-var SE_ID=null;
+/* The Mac app's approval key (Secure Enclave: Touch ID, else the Mac password), through its flintApproval bridge. */
+var SE_ID=null,SE_METHOD='touchid';
 function enclave(){return window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.flintApproval;}
 function se(op,args){return enclave().postMessage(Object.assign({op:op},args||{}));}
 function seIdOf(pub){return crypto.subtle.digest('SHA-256',unb64u(pub)).then(function(h){return 'se_'+Array.prototype.map.call(new Uint8Array(h),function(b){return ('0'+b.toString(16)).slice(-2);}).join('').slice(0,32);});}
 function canEnclave(){return !!enclave()&&!!SE_ID&&!!CREDS&&CREDS.some(function(c){return c.credentialId===SE_ID;});}
-function loadEnclave(){if(!enclave())return;se('status').then(function(st){if(!st||!st.hasKey)return null;return se('publicKey').then(function(r){return seIdOf(r.publicKey);});}).then(function(id){SE_ID=id;}).catch(function(){});}
+function loadEnclave(){if(!enclave())return;se('status').then(function(st){if(st&&st.method)SE_METHOD=st.method;if(!st||!st.hasKey)return null;return se('publicKey').then(function(r){return seIdOf(r.publicKey);});}).then(function(id){SE_ID=id;}).catch(function(){});}
+/* The approve button names the method this device will ask for. */
+function approveLabel(all){var p=all?'Approve All':'Approve';
+  if(typeof canEnclave==='function'&&canEnclave())return p+(SE_METHOD==='touchid'?' with Touch ID':' with Password');
+  if(typeof canPasskey==='function'&&canPasskey())return p+(/iPhone|iPad/.test(navigator.userAgent)?' with Face ID':' with Passkey');
+  return p;}
 /* How an approval ended: done, still approved (a cap was reached, or a runtime job runs it), or failed. Text only, never HTML. */
-function showOutcome(d,r,row){r.style.display='block';var a=(d&&d.action)||{};
-  if(d&&d.error&&!d.action){r.textContent='✗ '+d.error;r.style.color='var(--orange)';row.style.opacity=1;return;}
+function resText(r,t,kind){r.style.display='block';r.textContent=t;r.className='res'+(kind?' '+kind:'');}
+function showOutcome(d,r,row){var a=(d&&d.action)||{};
+  if(d&&d.error&&!d.action){resText(r,d.error,'bad');row.style.opacity=1;return;}
   row.style.display='none';
-  if(a.status==='done'){r.textContent='✓ done'+(a.note?' ('+a.note+')':'');r.style.color='var(--gold)';}
-  else if(a.status==='approved'){r.textContent='⏳ '+(a.note||'approved; not run yet');r.style.color='var(--gold)';}
-  else{r.textContent='✗ '+(a.error||'failed')+(a.note?' ('+a.note+')':'');r.style.color='var(--orange)';}}
-function showDecision(d,decision,r,row){if(decision==='reject'){r.style.display='block';row.style.display='none';r.textContent='dismissed (signed)';return;}showOutcome(d,r,row);}
-function failed(e,r,row){row.style.opacity=1;r.style.display='block';r.textContent='✗ '+(e.message||e);r.style.color='var(--orange)';}
-/* Sign a challenge with this device's approval key: Touch ID on the Mac, else a passkey. */
-function signWithMyKey(b,reason){
-  if(canEnclave())return se('sign',{challenge:b.challenge,reason:reason}).then(function(sg){return {credentialId:SE_ID,signature:sg.signature};});
-  if(!canPasskey())return Promise.reject(new Error('no approval key on this device'));
+  if(a.status==='done')resText(r,'Done'+(a.note?': '+a.note:''),'ok');
+  else if(a.status==='approved')resText(r,a.note||'Approved, not run yet','ok');
+  else resText(r,(a.error||'Failed')+(a.note?': '+a.note:''),'bad');}
+function showDecision(d,decision,r,row){if(decision==='reject'){row.style.display='none';resText(r,'Rejected');return;}showOutcome(d,r,row);}
+/* An error in Flint's words: a cancelled prompt is "Cancelled", anything else starts with a capital. */
+function errText(e){var m=String(e&&e.message||e||'Stopped');if(/^not confirmed$/i.test(m))return 'Cancelled';return m.charAt(0).toUpperCase()+m.slice(1);}
+function failed(e,r,row){row.style.opacity=1;resText(r,errText(e),'bad');}
+/* Sign a challenge with this device's approval key: the Mac's key (one prompt covers a run of cards for 5 minutes, unless fresh), else a passkey. */
+function signWithMyKey(b,reason,fresh){
+  if(canEnclave())return se('sign',{challenge:b.challenge,reason:reason,fresh:!!fresh}).then(function(sg){return {credentialId:SE_ID,signature:sg.signature};});
+  if(!canPasskey())return Promise.reject(new Error('No approval key on this device'));
   var allow=CREDS.filter(function(c){return c.factor==='webauthn';}).map(function(c){return {type:'public-key',id:unb64u(c.credentialId)};});
   return navigator.credentials.get({publicKey:{challenge:unb64u(b.challenge),rpId:location.hostname,allowCredentials:allow,userVerification:'required',timeout:60000}})
     .then(function(a){return {credentialId:b64u(a.rawId),authenticatorData:b64u(a.response.authenticatorData),clientDataJSON:b64u(a.response.clientDataJSON),signature:b64u(a.response.signature)};});}
@@ -381,121 +565,109 @@ function signWithMyKey(b,reason){
 function finishEnrolment(b,reg,label){
   if(!b.needsApproval)return postJson('/approvals/enroll/finish',reg);
   return postJson('/approvals/enroll/approve-begin',reg).then(function(ap){
-    enrollMsg('Approve "'+label+'" with an approval key you already have (Touch ID on the Mac, or a passkey): open Settings there. Waiting…');
+    enrollMsg('Approve "'+label+'" from a device that already has a key. Waiting…');
     var tries=0;
     return new Promise(function(resolve,reject){(function poll(){
       fetch(BASE+'/approvals/enroll/approved?challengeId='+encodeURIComponent(ap.challengeId),{headers:auth()}).then(function(r){return r.json();}).then(function(d){
         if(d.approved)return resolve(postJson('/approvals/enroll/finish',Object.assign({},reg,{approval:{challengeId:ap.challengeId}})));
-        if(++tries>90)return reject(new Error('not approved within the time limit; start again'));
+        if(++tries>90)return reject(new Error('Not approved in time. Start again.'));
         setTimeout(poll,3000);}).catch(reject);})();});});}
-function enrollEnclave(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'Touch ID (Mac)';
+function enrollEnclave(){var code=$('enrollcode').value.trim();var label=$('enrolllabel').value.trim()||'Mac';
   postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
-    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as Flint approval key'}).then(function(sg){
+    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as Flint approval key',fresh:true}).then(function(sg){
       var reg={challengeId:b.challengeId,factor:'secure_enclave',publicKey:pk.publicKey,signature:sg.signature};
       return finishEnrolment(b,reg,label).then(function(){return seIdOf(pk.publicKey);});});});
-  }).then(function(id){SE_ID=id;document.getElementById('enrollcode').value='';enrollMsg('✓ Touch ID approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
+  }).then(function(id){SE_ID=id;$('enrollcode').value='';enrollMsg('Approval key added');loadCreds();}).catch(function(e){enrollMsg(e.message||e,true);});}
 /* Replace this Mac's key (lost or unwanted): make a new one (Touch ID or password), then enrol it with a code from `enroll --replace` (or another key's approval). */
 function resetEnclave(){/* No confirm(): the app's web view has no dialog for it. Touch ID (or the password) is the confirmation. */
-  enrollMsg("Replacing this Mac's key: confirm with Touch ID or your password…");
-  se('reset').then(function(){SE_ID=null;enrollMsg('New key made on this Mac. Enter a code and press "Add Touch ID approval key".');}).catch(function(e){enrollMsg('✗ '+(e.message||e),true);});}
-function enclaveDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
-  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
-    return se('sign',{challenge:b.challenge,reason:(decision==='approve'?'approve ':'reject ')+b.payload.action}).then(function(sg){
+  se('reset').then(function(){SE_ID=null;enrollMsg('New key made. Enter a code to add it.');}).catch(function(e){enrollMsg(e.message||e,true);});}
+function enclaveDecide(id,decision,card,o){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;o=o||{};
+  return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+    return se('sign',{challenge:b.challenge,reason:o.reason||((decision==='approve'?'approve ':'reject ')+b.payload.action),fresh:!!o.fresh}).then(function(sg){
       return postJson('/approvals/finish',{challengeId:b.challengeId,credentialId:SE_ID,signature:sg.signature});});
-  }).then(function(d){showDecision(d,decision,r,row);}).catch(function(e){failed(e,r,row);});}
+  }).then(function(d){showDecision(d,decision,r,row);return d;}).catch(function(e){failed(e,r,row);throw e;});}
+function keyRow(label,value,btn){var row=el('div','row');var l=el('span','lbl');l.appendChild(el('b',null,label));row.appendChild(l);if(value)row.appendChild(el('span','val',value));if(btn)row.appendChild(btn);return row;}
 function loadCreds(){if(!TOKEN)return;fetch(BASE+'/approvals/credentials',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-  var el=document.getElementById('creds');var box=document.getElementById('enrollbox');
-  if(!d){CREDS=null;el.textContent='approvals are one-tap (no approval key store)';box.style.display='none';return;}
+  var g=$('creds');g.textContent='';var box=$('enrollbox');
+  if(!d){CREDS=null;g.appendChild(keyRow('Approval Key','Not Needed'));box.hidden=true;return;}
   CREDS=d.credentials||[];
-  el.textContent=CREDS.length?CREDS.map(function(c){return '🔑 '+c.label+' ('+(c.factor==='webauthn'?'passkey':'Touch ID')+')';}).join('\n'):'no approval key yet';
-  box.style.display=(passkeysHere()||enclave())?'block':'none';
-  document.getElementById('enrollpk').style.display=passkeysHere()?'':'none';
-  document.getElementById('enrollse').style.display=enclave()?'':'none';
-  document.getElementById('resetse').style.display=enclave()?'':'none';
-  loadKeyApprovals();loadWaiting();}).catch(function(){});}
+  var here=enclave()?'mac':passkeysHere()?'passkey':null,mine=false;
+  CREDS.forEach(function(c){var isThis=c.factor==='secure_enclave'&&c.credentialId===SE_ID;if(isThis)mine=true;
+    g.appendChild(keyRow(isThis?'This Mac':c.label,c.factor==='webauthn'?'Passkey':isThis?(SE_METHOD==='touchid'?'Touch ID':'Password'):'Mac Key'));});
+  if(!mine&&here){var add=el('button','btn',here==='mac'?'Add Approval Key':'Add Passkey');add.onclick=function(){box.hidden=false;$('enrollcode').focus();};
+    g.appendChild(keyRow(here==='mac'?'This Mac':'This Device','Not Set Up',add));}
+  if(!CREDS.length&&!here)g.appendChild(keyRow('Approval Key','Not Set Up'));
+  $('enrollpk').hidden=!passkeysHere();$('enrollse').hidden=!enclave();$('resetse').hidden=!(enclave()&&mine);
+  if(mine)box.hidden=true;
+  loadKeyApprovals();}).catch(function(){});}
 /* New keys (on another device) waiting for this device's approval. */
-function loadKeyApprovals(){var el=document.getElementById('keyapprovals');
-  if(!(canEnclave()||canPasskey())){el.style.display='none';return;}
+function loadKeyApprovals(){var box=$('keyapprovals');
+  if(!(canEnclave()||canPasskey())){box.hidden=true;return;}
   fetch(BASE+'/approvals/enroll/pending',{headers:auth()}).then(function(r){return r.ok?r.json():{pending:[]};}).then(function(d){
-    el.innerHTML='';var list=d.pending||[];el.style.display=list.length?'block':'none';
-    list.forEach(function(p){var row=document.createElement('div');var t=document.createElement('span');
-      var f=p.payload.fields||{};t.textContent='New key waiting: '+(f.label||'?')+' ('+(f.factor==='webauthn'?'passkey':'Touch ID')+') ';
-      var ok=document.createElement('button');ok.className='ghost';ok.textContent='Approve this key';
-      ok.onclick=function(){ok.disabled=true;signWithMyKey(p,'approve a new Flint approval key: '+(f.label||'')).then(function(sig){
-        return postJson('/approvals/enroll/approve-finish',Object.assign({challengeId:p.challengeId},sig));}).then(function(){t.textContent='✓ approved: '+(f.label||'');ok.remove();})
-        .catch(function(e){ok.disabled=false;t.textContent='✗ '+(e.message||e)+' ';});};
-      row.appendChild(t);row.appendChild(ok);el.appendChild(row);});}).catch(function(){});}
-/* Approved actions that have not run yet (a cap was reached, the runtime did not answer): run them now. */
-function loadWaiting(){var el=document.getElementById('waiting');
-  fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():{proposals:[]};}).then(function(d){
-    var list=(d.proposals||[]).filter(function(p){return p.status==='approved';});el.innerHTML='';el.style.display=list.length?'block':'none';
-    list.forEach(function(p){var row=document.createElement('div');var t=document.createElement('span');t.textContent='Approved, not run: '+p.fullName+' ';
-      var go=document.createElement('button');go.className='ghost';go.textContent='Run now';
-      go.onclick=function(){go.disabled=true;postJson('/proposals/run',{id:p.id}).then(function(x){var a=x.action||{};t.textContent=(a.status==='done'?'✓ ':a.status==='approved'?'⏳ ':'✗ ')+p.fullName+' '+(a.note||a.error||'');go.remove();})
-        .catch(function(e){go.disabled=false;t.textContent='✗ '+(e.message||e)+' ';});};
-      row.appendChild(t);row.appendChild(go);el.appendChild(row);});}).catch(function(){});}
-function enrollMsg(t,bad){var m=document.getElementById('enrollmsg');m.style.display='block';m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
+    box.textContent='';var list=d.pending||[];box.hidden=!list.length;if(!list.length)return;
+    var g=el('div','group');g.style.marginTop='8px';
+    list.forEach(function(p){var f=p.payload.fields||{};var ok=el('button','btn pri','Approve Key');var row=keyRow('New Key: '+(f.label||'Unnamed'),f.factor==='webauthn'?'Passkey':'Mac',ok);
+      ok.onclick=function(){ok.disabled=true;signWithMyKey(p,'approve a new Flint approval key: '+(f.label||''),true).then(function(sig){
+        return postJson('/approvals/enroll/approve-finish',Object.assign({challengeId:p.challengeId},sig));}).then(function(){ok.replaceWith(el('span','val','Approved'));})
+        .catch(function(e){ok.disabled=false;enrollMsg(e.message||e,true);});};
+      g.appendChild(row);});box.appendChild(g);}).catch(function(){});}
+function enrollMsg(t,bad){t=t?errText(t):'';var m=$('enrollmsg');m.hidden=!t;m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
 function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});}
-function enrollPasskey(){var code=document.getElementById('enrollcode').value.trim();var label=document.getElementById('enrolllabel').value.trim()||'passkey';
+function enrollPasskey(){var code=$('enrollcode').value.trim();var label=$('enrolllabel').value.trim()||'Passkey';
   postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
     return navigator.credentials.create({publicKey:{challenge:unb64u(b.challenge),rp:{id:b.rp.id,name:'Flint'},user:{id:unb64u(b.user.id),name:'will',displayName:'Will'},
       pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{userVerification:'required',residentKey:'preferred'},attestation:'none',timeout:60000}})
     .then(function(c){var resp=c.response;var reg={challengeId:b.challengeId,clientDataJSON:b64u(resp.clientDataJSON)};
       if(resp.getAuthenticatorData)reg.authenticatorData=b64u(resp.getAuthenticatorData());else reg.attestationObject=b64u(resp.attestationObject);
       return finishEnrolment(b,reg,label);});
-  }).then(function(){document.getElementById('enrollcode').value='';enrollMsg('✓ approval key added');loadCreds();}).catch(function(e){enrollMsg('✗ '+e.message,true);});}
+  }).then(function(){$('enrollcode').value='';enrollMsg('Passkey added');loadCreds();}).catch(function(e){enrollMsg(e.message,true);});}
 /* Will signs this exact action and its args with the passkey; the server and the runtime verify it. */
 function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
-  postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+  return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
     return signWithMyKey(b,'').then(function(sig){return postJson('/approvals/finish',Object.assign({challengeId:b.challengeId},sig));});
-  }).then(function(d){showDecision(d,decision,r,row);}).catch(function(e){failed(e,r,row);});}
-function approveAction(id,card){if(canEnclave())return enclaveDecide(id,'approve',card);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
-  fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){showOutcome(d,r,row);})
-  .catch(function(){failed(new Error('connection failed'),r,row);});}
-function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';var r=card.querySelector('.res');r.style.display='block';r.textContent='dismissed';}
-
-/* ---------- notifications (proactive) ---------- */
-function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;var b=document.getElementById('nbadge');var u=d.unread||0;b.textContent=u>9?'9+':u;b.style.display=u>0?'flex':'none';}).catch(function(){});}
-function openNotifs(){if(!TOKEN){openSettings();return;}fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.json();}).then(function(d){var list=document.getElementById('nlist');var items=(d&&d.items)||[];
-  list.innerHTML=items.length?items.map(function(n){return '<div class="nitem"><div class="nt">'+esc(n.title)+'</div><div class="nb">'+esc(n.body)+'</div></div>';}).join(''):'<div class="empty">Nothing new. Flint will surface things here as they come up.</div>';
-  document.getElementById('notifs').style.display='flex';
-  fetch(BASE+'/notifications/read',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:'{}'}).then(function(){pollNotifs();});
-  }).catch(function(){});}
-function closeNotifs(){document.getElementById('notifs').style.display='none';}
-pollNotifs();setInterval(pollNotifs,60000);
+  }).then(function(d){showDecision(d,decision,r,row);return d;}).catch(function(e){failed(e,r,row);throw e;});}
+function approveAction(id,card,o){if(canEnclave())return enclaveDecide(id,'approve',card,o);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  return fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){showOutcome(d,r,row);return d;})
+  .catch(function(e){failed(new Error("Couldn't reach Flint"),r,row);throw e;});}
+function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';resText(card.querySelector('.res'),'Rejected');}
 
 function send(speakBack){
   var sb=speakBack===true;
-  var inp=document.getElementById('input');var msg=inp.value.trim();
-  if(ATT_READING){attNote('Still reading an attachment — one moment.');return;}
+  var inp=$('input');var msg=inp.value.trim();
+  if(ATT_READING){attNote('Still reading an attachment.');return;}
   var atts=PENDING.slice();if(!msg&&!atts.length)return;
   if(!TOKEN){openSettings();return;}
-  inp.value='';PENDING=[];renderChips();attNote('');
-  var you=addMsg('You','you');you.textContent=msg;if(atts.length)renderSentAtts(you,atts);
-  var body=addMsg('Flint','flint');var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};document.getElementById('think').textContent='responding';setTalk(1);
+  inp.value='';syncSend();PENDING=[];renderChips();attNote('');
+  if(!$('thread').children.length&&msg)setTitle(msg.replace(/\s+/g,' ').slice(0,60));
+  var you=addMsg('you');you.textContent=msg;if(atts.length)renderSentAtts(you,atts);
+  var body=addMsg('flint');body.innerHTML='<span class="thinking"><i></i>Thinking…</span>';
+  var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};$('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY,attachments:atts.map(function(a){return {name:a.name,type:a.type,data:a.data};})})})
   .then(function(res){
-    if(res.status===401){body.textContent='[unauthorized — paste the current token in Settings]';tokenRejected();return;}
+    if(res.status===401){body.textContent='The access token was rejected. Add it in Settings.';$('think').textContent='';setTalk(0);tokenRejected();return;}
     /* Refusals (bad file, too large, Local-only + image) come back as JSON, not a stream. */
-    if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent='['+((d&&d.error)||('error '+res.status))+']';document.getElementById('think').textContent='';setTalk(0);});}
+    if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent="Couldn't send: "+((d&&d.error)||('error '+res.status));$('think').textContent='';setTalk(0);});}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
-      if(r.done){document.getElementById('think').textContent='';setTalk(0);pollLog();if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
+      if(r.done){$('think').textContent='';setTalk(0);loadThreads();if(!raw&&!sb)body.textContent='';if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
         if(ev.type==='meta'){setBrainChip(body,ev.brain);}
         if(ev.type==='pending'){renderProposals(ev.actions,body);}
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
-          if(!sb){body.innerHTML=md(raw);document.getElementById('transcript').scrollTop=9e9;}
+          if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}
           else{var rest=raw.slice(spoken),re=/[.!?](\s|$)/g,mm,last=-1;while((mm=re.exec(rest))){last=mm.index+1;}if(last>0){speakSynced(rest.slice(0,last),body,vctx);spoken+=last;}}}
-        if(ev.type==='error'){var em=' [error: '+(ev.error&&ev.error.kind||ev.error)+']';raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
+        if(ev.type==='error'){var em='\n\nStopped: '+(ev.error&&ev.error.kind||ev.error);raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
       }catch(e){}});
       return pump();
     });}
     return pump();
-  }).catch(function(e){body.textContent='[connection failed]';document.getElementById('think').textContent='';setTalk(0);});
+  }).catch(function(e){body.textContent="Couldn't reach Flint. Try again.";$('think').textContent='';setTalk(0);});
 }
-document.getElementById('input').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
+$('input').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.isComposing)send();});
+/* Send turns gold once there is something to send. */
+function syncSend(){$('sendbtn').classList.toggle('live',!!($('input').value.trim()||PENDING.length));}
+$('input').addEventListener('input',syncSend);
 
 /* ---------- attachments (images, PDFs, text files) ----------
    Mirrors the server's limits so a bad file is caught before upload; the server
@@ -515,7 +687,7 @@ function addFiles(list){
   var total=PENDING.reduce(function(s,a){return s+a.size;},0);
   files.forEach(function(f){
     var kind=attKind(f);
-    if(!kind){attNote(f.name+': unsupported — images (PNG/JPEG/GIF/WebP), PDFs and text files only.');return;}
+    if(!kind){attNote(f.name+" can't be attached. Use an image, a PDF or a text file.");return;}
     if(PENDING.length>=ATT_MAX){attNote('Up to '+ATT_MAX+' files per message.');return;}
     if(f.size>ATT_LIM[kind]){attNote(f.name+' is over the '+fmtSize(ATT_LIM[kind])+' limit.');return;}
     if(total+f.size>ATT_TOTAL){attNote('Attachments total over '+fmtSize(ATT_TOTAL)+'.');return;}
@@ -524,17 +696,17 @@ function addFiles(list){
     PENDING.push(a);ATT_READING++;
     var r=new FileReader();
     r.onload=function(){var s=String(r.result||'');a.data=s.slice(s.indexOf(',')+1);if(kind==='image')a.url=s;ATT_READING--;renderChips();};
-    r.onerror=function(){ATT_READING--;PENDING=PENDING.filter(function(x){return x!==a;});attNote('Could not read '+a.name+'.');renderChips();};
+    r.onerror=function(){ATT_READING--;PENDING=PENDING.filter(function(x){return x!==a;});attNote("Couldn't read "+a.name+'.');renderChips();};
     r.readAsDataURL(f);
   });
   renderChips();
-  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote('Local-only is on — the on-device brain can’t read images or PDFs.');
+  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote("Local Only is on, and the on-device brain can't read images or PDFs.");
 }
 function chipHtml(a,removable,i){
   var lead=a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="">':'<span class="ck">'+(a.kind==='document'?'PDF':a.kind==='image'?'IMG':'TXT')+'</span>';
   return '<div class="chip">'+lead+'<span class="cn" title="'+escA(a.name)+'">'+esc(a.name)+'</span><span class="cs">'+fmtSize(a.size)+'</span>'+(removable?'<button data-i="'+i+'" aria-label="Remove">×</button>':'')+'</div>';}
 function renderChips(){
-  var c=document.getElementById('chips');c.classList.toggle('on',PENDING.length>0);
+  var c=document.getElementById('chips');c.classList.toggle('on',PENDING.length>0);if(typeof syncSend==='function')syncSend();
   c.innerHTML=PENDING.map(function(a,i){return chipHtml(a,true,i);}).join('');
   Array.prototype.forEach.call(c.querySelectorAll('button'),function(b){b.onclick=function(){PENDING.splice(Number(b.getAttribute('data-i')),1);renderChips();attNote('');};});
 }
@@ -545,11 +717,11 @@ function renderSentAtts(bodyEl,atts){
 }
 document.getElementById('filepick').addEventListener('change',function(e){addFiles(e.target.files);e.target.value='';});
 document.getElementById('input').addEventListener('paste',function(e){var f=e.clipboardData&&e.clipboardData.files;if(f&&f.length){e.preventDefault();addFiles(f);}});
-(function(){var zone=document.querySelector('aside.chat'),depth=0;
-  zone.addEventListener('dragenter',function(e){if(e.dataTransfer&&Array.prototype.indexOf.call(e.dataTransfer.types||[],'Files')>=0){depth++;zone.classList.add('drop');}});
+(function(){var zone=document.getElementById('chat'),box=document.getElementById('composer'),depth=0;
+  zone.addEventListener('dragenter',function(e){if(e.dataTransfer&&Array.prototype.indexOf.call(e.dataTransfer.types||[],'Files')>=0){depth++;box.classList.add('drop');}});
   zone.addEventListener('dragover',function(e){e.preventDefault();});
-  zone.addEventListener('dragleave',function(){depth=Math.max(0,depth-1);if(!depth)zone.classList.remove('drop');});
-  zone.addEventListener('drop',function(e){e.preventDefault();depth=0;zone.classList.remove('drop');if(e.dataTransfer)addFiles(e.dataTransfer.files);});
+  zone.addEventListener('dragleave',function(){depth=Math.max(0,depth-1);if(!depth)box.classList.remove('drop');});
+  zone.addEventListener('drop',function(e){e.preventDefault();depth=0;box.classList.remove('drop');if(e.dataTransfer)addFiles(e.dataTransfer.files);});
 })();
 
 /* ---------- voice (speak to Flint, Flint speaks back) ---------- */
@@ -612,7 +784,7 @@ function toggleMic(){
   var btn=document.getElementById('micbtn');
   if(mediaRec&&mediaRec.state==='recording'){mediaRec.stop();return;}
   /* Said under the input bar, not with alert(): the Mac app's web view shows no dialogs. */
-  if(!navigator.mediaDevices||!window.MediaRecorder){attNote('Voice input is not available in this view.');return;}
+  if(!navigator.mediaDevices||!window.MediaRecorder){attNote("Voice isn't available here.");return;}
   navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
     voChunks=[];try{mediaRec=new MediaRecorder(stream);}catch(e){mediaRec=new MediaRecorder(stream,{mimeType:'audio/mp4'});}
     btn.classList.add('rec');
@@ -628,14 +800,18 @@ function toggleMic(){
       }).catch(function(){btn.classList.remove('busy');});
     };
     mediaRec.start();
-  }).catch(function(e){attNote('Microphone access is needed for voice: '+(e.message||e));});
+  }).catch(function(e){attNote('Voice needs microphone access.');});
 }
 
-/* ---------- the brain (approved viz) ---------- */
+/* ---------- the brain (approved viz) ----------
+   Flint's orb, unchanged: ~520 particles with their neighbour lines, the warm glow and core.
+   It fills its own stage beside the chat (never behind text), rests while a panel is open,
+   and holds one still frame under Reduce Motion. */
 var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
 (function(){
   var cvs=document.getElementById('brain'),ctx=cvs.getContext('2d'),W,H,DPR,cx,cy,R;
-  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.20;}
+  var still=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function size(){DPR=Math.min(window.devicePixelRatio||1,2);var r=cvs.getBoundingClientRect();W=r.width;H=r.height;cvs.width=W*DPR;cvs.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);cx=W/2;cy=H/2;R=Math.min(W,H)*0.25;if(still&&W&&H)requestAnimationFrame(frame);}
   size();window.addEventListener('resize',size);
   // Refit whenever the canvas box changes size — e.g. the transcript growing
   // underneath shrinks the brain area; without this the viz gets clipped.
@@ -645,7 +821,9 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
   for(var a=0;a<N;a++){var best=[1e9,1e9],bi=[-1,-1],pa=P[a];for(var b=0;b<N;b++){if(b===a)continue;var pb=P[b];var d=(pa.sx-pb.sx)*(pa.sx-pb.sx)+(pa.sy-pb.sy)*(pa.sy-pb.sy)+(pa.sz-pb.sz)*(pa.sz-pb.sz);if(d<best[0]){best[1]=best[0];bi[1]=bi[0];best[0]=d;bi[0]=b;}else if(d<best[1]){best[1]=d;bi[1]=b;}}pa.n=bi;}
   var flares=[],t0=performance.now();
   function rot(p,ay,ax){var x=p.sx*p.rad,y=p.sy*p.rad,z=p.sz*p.rad;var cy1=Math.cos(ay),sy1=Math.sin(ay),x1=x*cy1-z*sy1,z1=x*sy1+z*cy1;var cx1=Math.cos(ax),sx1=Math.sin(ax),y1=y*cx1-z1*sx1,z2=y*sx1+z1*cx1;var fov=2.6,sc=fov/(fov+z2);return{X:cx+x1*R*sc,Y:cy+y1*R*sc,z:z2};}
-  function frame(now){var t=(now-t0)/1000;
+  function frame(now){
+    if(!still&&typeof panelOpen==='function'&&panelOpen()){requestAnimationFrame(frame);return;}
+    var t=still?2:(now-t0)/1000;
     talkNow+=(talkTarget-talkNow)*0.08;
     var talk=talkNow*( (Math.sin(t*7)*0.5+0.5)*(Math.sin(t*13)*0.5+0.5) );
     var breath=0.5+0.5*Math.sin(t*1.3),amp=0.22*breath+0.9*talk,ay=t*0.34,ax=Math.sin(t*0.22)*0.5+0.3,pr=R*(1+amp*0.10);
@@ -656,47 +834,91 @@ var talkTarget=0,talkNow=0;function setTalk(v){talkTarget=v;}
     for(var i=0;i<N;i++){var q=pj[i],p=P[i];var depth=(q.z+1.4)/2.8,rr=(0.9+1.7*depth)*p.sz2*(0.85+amp*0.5),br=0.35+0.65*depth,inner=p.rad<0.8,col=inner?'255,238,170':'255,'+Math.round(150+60*depth)+','+Math.round(40+20*depth);var g=ctx.createRadialGradient(q.X,q.Y,0,q.X,q.Y,rr*3.2);g.addColorStop(0,'rgba('+col+','+br+')');g.addColorStop(1,'rgba('+col+',0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(q.X,q.Y,rr*3.2,0,6.283);ctx.fill();}
     var core=ctx.createRadialGradient(cx,cy,0,cx,cy,pr*0.7);core.addColorStop(0,'rgba(255,250,225,0.9)');core.addColorStop(0.25,'rgba(255,200,110,0.8)');core.addColorStop(0.6,'rgba(220,120,30,0.25)');core.addColorStop(1,'rgba(120,60,10,0)');ctx.fillStyle=core;ctx.beginPath();ctx.arc(cx,cy,pr*0.7,0,6.283);ctx.fill();
     if(talk>0.15){ctx.strokeStyle='rgba(255,180,70,'+(talk*0.5)+')';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,R*(1.05+talk*0.4),0,6.283);ctx.stroke();}
-    if(Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.45,life:1});
+    if(!still&&Math.random()<0.04)flares.push({a:Math.random()*6.283,r:R*0.45,life:1});
     for(var f=flares.length-1;f>=0;f--){var fo=flares[f];fo.r+=1.5;fo.life-=0.03;if(fo.r>R*1.35)fo.life=0;if(fo.life<=0){flares.splice(f,1);continue;}var fx=cx+Math.cos(fo.a)*fo.r,fy=cy+Math.sin(fo.a)*fo.r;var fgr=ctx.createRadialGradient(fx,fy,0,fx,fy,7);fgr.addColorStop(0,'rgba(255,210,120,'+(fo.life*0.6)+')');fgr.addColorStop(1,'rgba(255,150,40,0)');ctx.fillStyle=fgr;ctx.beginPath();ctx.arc(fx,fy,7,0,6.283);ctx.fill();}
     ctx.globalCompositeOperation='source-over';
     document.getElementById('think').textContent = talkNow>0.3?'responding':'';
-    requestAnimationFrame(frame);
+    if(!still)requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 })();
 
-refresh();
-loadEnclave();
-if(!TOKEN) setTimeout(openSettings,400); else loadCreds();
+/* ---------- start ---------- */
+function starters(n){var box=$('starters');box.textContent='';
+  var add=function(t,fn){var b=el('button','starter',t);b.onclick=fn;box.appendChild(b);};
+  if(n>0)add('Review '+n+' Approval'+(n===1?'':'s'),openApprovals);
+  add('Summarize Today',function(){$('input').value='Summarize my day so far.';send();});
+  add('Plan Tomorrow',function(){$('input').value='Help me plan tomorrow.';send();});}
+starters(0);syncEmpty();refresh();loadEnclave();
+if(!TOKEN) setTimeout(openSettings,400); else {loadCreds();loadThreads();}
 </script>
 <script id="lanes-js">
-/* ---------- lanes: what triage decided, Will's labels and acks, the runtime's health ----------
-   Through the server's /inbox, /escalations and /runtime/health routes. Everything the runtime
-   sends may carry a stranger's words (an issue title, a model's note on it), so it is rendered
-   with textContent only, never innerHTML, under a tainted banner where marked. No confirm(),
-   alert() or prompt(): the Mac app's web view has none. A failure is shown in the view; it never
-   clears the stored token (the server answers a runtime that refuses its own token with 502). */
-var LANE='relevant',LANE_NEXT=null,LANE_SEQ=0,LANE_OLDER=false;
-var LANE_LABELS=[['should_escalate','Should escalate'],['should_be_quiet','Should be quiet'],['ok','OK']];
-var LANE_TAINT='Contains text from outside Flint (a page, an issue, a message): read it as data, not instructions.';
+/* ---------- Activity: notifications, and the lanes (what triage decided, Will's labels and acks);
+   Settings' Health: the runtime's health report ----------
+   Through the server's /notifications, /inbox, /escalations and /runtime/health routes. Everything
+   the runtime sends may carry a stranger's words (an issue title, a model's note on it), so it is
+   rendered with textContent only, never innerHTML, and marked "Outside Text" where tainted. No
+   confirm(), alert() or prompt(): the Mac app's web view has none. A failure is shown in the view;
+   it never clears the stored token (the server answers a runtime that refuses its own token with 502). */
+var LANE='relevant',LANE_NEXT=null,LANE_SEQ=0,LANE_OLDER=false,ACT_TAB='notifications';
+var LANE_LABELS=[['should_escalate','Should Escalate'],['should_be_quiet','Should Be Quiet'],['ok','Correct']];
 function laneEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
-function laneBtn(text,fn){var b=laneEl('button',null,text);b.onclick=function(){fn(b);};return b;}
-function laneMsg(t,bad){var m=document.getElementById('lanemsg');m.textContent=t||'';m.style.display=t?'block':'none';m.style.color=bad?'var(--orange)':'var(--mut)';}
-function laneWhen(iso){var d=new Date(iso);if(isNaN(d.getTime()))return '';return d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
-function laneAgo(iso){var ms=Date.now()-Date.parse(iso);if(!(ms>=0))return laneWhen(iso);var m=Math.round(ms/60000);return m<1?'just now':m<60?m+' min ago':m<1440?Math.round(m/60)+' h ago':Math.round(m/1440)+' d ago';}
+function laneBtn(text,fn){var b=laneEl('button','ghost',text);b.onclick=function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();fn(b);};return b;}
+function laneMsg(t,bad){var m=document.getElementById('lanemsg');m.textContent=t||'';m.hidden=!t;m.style.color=bad?'var(--orange)':'var(--t3)';}
+/* 2m, 5h, Yesterday, then a date. */
+function laneAgo(iso){var ms=Date.now()-(typeof iso==='number'?iso:Date.parse(iso));if(!(ms>=0))return '';var m=Math.floor(ms/60000);
+  if(m<1)return 'Now';if(m<60)return m+'m';if(m<1440)return Math.floor(m/60)+'h';if(m<2880)return 'Yesterday';
+  try{return new Date(Date.now()-ms).toLocaleDateString([],{month:'short',day:'numeric'});}catch(e){return '';}}
+/* For a sentence: just now, 2m ago, 5h ago, yesterday, on Oct 1. */
+function agoPhrase(t){var a=laneAgo(t);return a==='Now'?'just now':a==='Yesterday'?'yesterday':/^\d/.test(a)?a+' ago':a?'on '+a:'';}
+function laneDay(t){var ms=typeof t==='number'?t:Date.parse(t);var s=new Date();s.setHours(0,0,0,0);return ms>=s.getTime()?'Today':'Earlier';}
+/* Apple's title style, for Flint's own short titles (never for user data). */
+var SMALL={a:1,an:1,the:1,and:1,but:1,or:1,nor:1,for:1,so:1,yet:1,as:1,at:1,by:1,from:1,in:1,into:1,of:1,off:1,on:1,onto:1,out:1,over:1,to:1,up:1,with:1};
+function titleCase(s){var w=String(s||'').split(' ');return w.map(function(x,i){if(!x)return x;if(/[A-Z].*[A-Z]|\d|[_.:/@]/.test(x))return x;var l=x.toLowerCase();
+  if(i>0&&i<w.length-1&&SMALL[l])return l;return l.charAt(0).toUpperCase()+l.slice(1);}).join(' ');}
 function laneCall(path,body){
   var opts={headers:Object.assign({'content-type':'application/json'},auth())};
   if(body!==undefined){opts.method='POST';opts.body=JSON.stringify(body);}
   return fetch(BASE+path,opts).then(function(r){return r.json().catch(function(){return {};}).then(function(d){
-    if(!r.ok)throw new Error(r.status===401?'unauthorized: check the access token in Settings':((d&&d.error)||('HTTP '+r.status)));
+    if(!r.ok)throw new Error(r.status===401?'The access token was rejected. Check Settings.':((d&&d.error)||('HTTP '+r.status)));
     return d;});});}
-function openLanes(){if(!TOKEN){openSettings();return;}document.getElementById('lanes').style.display='flex';showLane(LANE);}
-function closeLanes(){document.getElementById('lanes').style.display='none';}
+
+/* ---------- the panel ---------- */
+function openActivity(){if(!TOKEN){openSettings();return;}showPanel('activity',true);actShow(ACT_TAB);}
+function closeActivity(){showPanel('activity',false);pollNotifs();}
+function openNotifs(){ACT_TAB='notifications';openActivity();}
+function openLanes(){if(ACT_TAB==='notifications')ACT_TAB=LANE;openActivity();}
+function closeLanes(){closeActivity();}
+function actShow(tab){ACT_TAB=tab;
+  ['notifications','relevant','quiet'].forEach(function(t){var b=document.getElementById(t==='notifications'?'acttab-notifications':'lanetab-'+t);if(b)b.classList.toggle('on',t===tab);});
+  document.getElementById('markread').hidden=tab!=='notifications';
+  document.getElementById('nlist').hidden=tab!=='notifications';document.getElementById('lanelist').hidden=tab==='notifications';
+  laneMsg('');if(tab==='notifications'){document.getElementById('laneolder').hidden=true;loadNotifs();}else showLane(tab);}
 function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
-  ['relevant','quiet','health'].forEach(function(l){document.getElementById('lanetab-'+l).classList.toggle('on',l===lane);});
-  document.getElementById('lanelist').textContent='';document.getElementById('laneolder').style.display='none';
-  document.getElementById('lanenote').style.display=lane==='health'?'none':'block';laneMsg('');
-  if(lane==='health')loadHealth();else loadLane(false);}
+  ['relevant','quiet'].forEach(function(l){var b=document.getElementById('lanetab-'+l);if(b)b.classList.toggle('on',l===lane);});
+  document.getElementById('lanelist').textContent='';document.getElementById('laneolder').hidden=true;laneMsg('');loadLane(false);}
+
+/* ---------- notifications ---------- */
+function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;document.getElementById('nbadge').hidden=!(d.unread>0);}).catch(function(){});}
+function loadNotifs(){var list=document.getElementById('nlist');
+  fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    list.textContent='';var items=(d&&d.items)||[];
+    if(!d){list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));return;}
+    if(!items.length){list.appendChild(laneEmpty('Nothing New',''));return;}
+    /* The same message again and again is one row with a count. */
+    var rows=[];items.forEach(function(n){var last=rows[rows.length-1];if(last&&last.title===n.title&&last.body===n.body&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&n.read;}else rows.push({title:n.title,body:n.body,ts:n.ts,read:!!n.read,count:1});});
+    var group='';rows.forEach(function(n){var g=laneDay(n.ts);if(g!==group){list.appendChild(laneEl('div','gsh fsh',g));group=g;}
+      var row=laneEl('div','frow'+(n.read?' read':''));row.appendChild(laneEl('span','ud'+(n.read?' read':'')));
+      var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,titleCase(n.title)));fx.appendChild(laneEl('span',null,(n.body||'')+(n.count>1?' · '+n.count+' times':'')));row.appendChild(fx);
+      row.appendChild(laneEl('small',null,laneAgo(n.ts)));list.appendChild(row);});
+    markAllRead(true);
+  }).catch(function(){list.textContent='';list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));});}
+function laneEmpty(title,line){var e=laneEl('div','empty');e.appendChild(laneEl('b',null,title));if(line)e.appendChild(laneEl('span',null,line));return e;}
+/* Opening the list reads it; the dots stay until the panel is opened again. */
+function markAllRead(quiet){fetch(BASE+'/notifications/read',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:'{}'}).then(function(){pollNotifs();
+  if(!quiet)Array.prototype.forEach.call(document.querySelectorAll('#nlist .frow'),function(r){r.classList.add('read');var d=r.querySelector('.ud');if(d)d.classList.add('read');});}).catch(function(){});}
+
+/* ---------- lanes ---------- */
 /* One page of a lane; `older` appends the page before the last one shown. */
 function loadLane(older){if(older&&(LANE_OLDER||!LANE_NEXT))return;
   var seq=LANE_SEQ,lane=LANE;LANE_OLDER=!!older;
@@ -705,128 +927,203 @@ function loadLane(older){if(older&&(LANE_OLDER||!LANE_NEXT))return;
     if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg('');
     var list=document.getElementById('lanelist');var items=(d&&d.items)||[];
     items.forEach(function(it){list.appendChild(laneItem(it));});
-    if(!older&&!items.length)list.appendChild(laneEl('div','empty',lane==='relevant'?'Nothing in the relevant lane.':'Nothing in the quiet lane.'));
+    if(!older&&!items.length)list.appendChild(laneEmpty(lane==='relevant'?'Nothing Relevant':'Nothing Quiet',''));
     LANE_NEXT=(d&&d.next)||null;
-    document.getElementById('laneolder').style.display=LANE_NEXT?'block':'none';
-  }).catch(function(e){if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg('✗ '+e.message,true);});}
+    document.getElementById('laneolder').hidden=!LANE_NEXT;
+  }).catch(function(e){if(seq!==LANE_SEQ)return;LANE_OLDER=false;laneMsg(e.message,true);});}
 function laneLabelOf(f){for(var i=0;i<LANE_LABELS.length;i++)if(LANE_LABELS[i][0]===f)return LANE_LABELS[i][1];return f;}
+function laneWords(s){return String(s||'').replace(/[_.]+/g,' ').trim();}
+/* A row: what happened (an escalation's title, the thing it is about, or the event), then where and when;
+   the rest (its text, the model's note) opens on click; labels show on hover. */
 function laneItem(it){
-  var card=laneEl('div','lane-item');
-  var head=laneEl('div','lane-head');
-  head.appendChild(laneEl('span',null,laneWhen(it.at)));
-  head.appendChild(laneEl('span',null,it.source+' · '+it.eventType));
-  head.appendChild(laneEl('span','lane-act '+String(it.action).replace(/[^a-z]/g,''),it.action));
-  card.appendChild(head);
   var es=it.escalation;
-  if(it.tainted||(es&&es.tainted))card.appendChild(laneEl('div','lane-taint','⚠ '+LANE_TAINT));
-  if(es){
-    var box=laneEl('div','lane-esc');
-    box.appendChild(laneEl('div','lane-title',es.title));
-    if(es.body)box.appendChild(laneEl('div','lane-body',es.body));
-    var st=laneEl('div','lane-meta','escalation: '+es.status+(es.channels&&es.channels.length?' · '+es.channels.join(', '):''));
-    box.appendChild(st);
-    if(es.status==='open'){var row=laneEl('div','lane-row');
-      row.appendChild(laneBtn('Acknowledge',function(){laneEscalation(es.id,'ack',row,st,es);}));
-      row.appendChild(laneBtn('Dismiss',function(){laneEscalation(es.id,'dismiss',row,st,es);}));
-      box.appendChild(row);}
-    card.appendChild(box);
-  }
-  if(it.entity)card.appendChild(laneEl('div','lane-meta',it.entity.kind+': '+it.entity.name+' ('+it.entity.ref+')'));
-  card.appendChild(laneEl('div','lane-meta','decided by '+it.decidedBy+(it.reasonCode?' · '+it.reasonCode:'')+(typeof it.relevance==='number'?' · relevance '+it.relevance.toFixed(2):'')));
-  if(it.reasoning){var rs=laneEl('div','lane-reason');rs.appendChild(laneEl('span','lane-lbl','Model note: '));rs.appendChild(laneEl('span',null,it.reasoning));card.appendChild(rs);}
-  var fb=laneEl('div','lane-row');var cur=laneEl('span','lane-cur',it.feedback?'labelled: '+laneLabelOf(it.feedback):'');
-  var btns=LANE_LABELS.map(function(f){var b=laneBtn(f[1],function(){laneLabel(it.id,f[0],btns,cur);});if(it.feedback===f[0])b.classList.add('on');return b;});
-  btns.forEach(function(b){fb.appendChild(b);});fb.appendChild(cur);card.appendChild(fb);
-  return card;}
+  var row=laneEl('div','frow');row.tabIndex=0;
+  row.appendChild(laneEl('span','ud'+(es&&es.status==='open'?'':' read')));
+  var fx=laneEl('span','fx');
+  fx.appendChild(laneEl('b',null,es?es.title:it.entity?it.entity.name:titleCase(laneWords(it.eventType))));
+  var sub=[titleCase(laneWords(it.source)),laneWords(it.eventType),titleCase(laneWords(it.action))].filter(Boolean).join(' · ');
+  fx.appendChild(laneEl('span',null,sub));
+  if(it.tainted||(es&&es.tainted)){var o=laneEl('span','outside');o.appendChild(laneEl('i'));o.appendChild(document.createTextNode('Outside Text'));fx.appendChild(o);}
+  var more=laneEl('span','more');more.hidden=true;
+  if(es&&es.body)more.appendChild(laneEl('span',null,es.body));
+  if(it.reasoning)more.appendChild(laneEl('span',null,'Model note: '+it.reasoning));
+  if(it.entity)more.appendChild(laneEl('span',null,titleCase(laneWords(it.entity.kind))+': '+it.entity.ref));
+  more.appendChild(laneEl('span',null,'Decided by '+it.decidedBy+(typeof it.relevance==='number'?' · relevance '+it.relevance.toFixed(2):'')));
+  if(es)more.appendChild(laneEl('span',null,'Escalation '+es.status));
+  fx.appendChild(more);
+  var acts=laneEl('span','acts');
+  if(es&&es.status==='open'){
+    acts.appendChild(laneBtn('Acknowledge',function(b){laneEscalation(es.id,'ack',acts,es,b);}));
+    acts.appendChild(laneBtn('Dismiss',function(b){laneEscalation(es.id,'dismiss',acts,es,b);}));}
+  var btns=LANE_LABELS.map(function(f){var b=laneBtn(f[1],function(){laneLabel(it.id,f[0],btns);});if(it.feedback===f[0])b.classList.add('on');return b;});
+  btns.forEach(function(b){acts.appendChild(b);});
+  fx.appendChild(acts);
+  row.appendChild(fx);row.appendChild(laneEl('small',null,laneAgo(it.at)));
+  row.onclick=function(){more.hidden=!more.hidden;};
+  row.onkeydown=function(e){if(e.key==='Enter'){more.hidden=!more.hidden;}};
+  return row;}
 /* Will's label on one decision: should have escalated, should have stayed quiet, or right. */
-function laneLabel(id,label,btns,cur){btns.forEach(function(b){b.disabled=true;});
+function laneLabel(id,label,btns){btns.forEach(function(b){b.disabled=true;});
   laneCall('/inbox/'+encodeURIComponent(id)+'/feedback',{feedback:label}).then(function(){
-    btns.forEach(function(b,i){b.disabled=false;b.classList.toggle('on',LANE_LABELS[i][0]===label);});cur.textContent='labelled: '+laneLabelOf(label);
-  }).catch(function(e){btns.forEach(function(b){b.disabled=false;});cur.textContent='✗ '+e.message;});}
-function laneEscalation(id,what,row,st,es){var bs=row.children||[];for(var i=0;i<bs.length;i++)bs[i].disabled=true;
+    btns.forEach(function(b,i){b.disabled=false;b.classList.toggle('on',LANE_LABELS[i][0]===label);});
+  }).catch(function(e){btns.forEach(function(b){b.disabled=false;});laneMsg(e.message,true);});}
+function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.querySelectorAll('button'):[];for(var i=0;i<bs.length;i++)bs[i].disabled=true;
   laneCall('/escalations/'+encodeURIComponent(id)+'/'+what,{}).then(function(){
-    es.status=what==='ack'?'acked':'dismissed';st.textContent='escalation: '+es.status;row.textContent='';row.appendChild(laneEl('span','lane-cur',what==='ack'?'✓ acknowledged':'dismissed'));
-  }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;row.appendChild(laneEl('span','lane-cur','✗ '+e.message));});}
-/* The runtime's health report: the instance, uptime, when checks last ran, each component. */
-function loadHealth(){var seq=LANE_SEQ;laneMsg('Loading…');
-  laneCall('/runtime/health').then(function(h){if(seq!==LANE_SEQ)return;laneMsg('');
-    var list=document.getElementById('lanelist');
-    var top=laneEl('div','lane-item');
-    top.appendChild(laneEl('div','lane-title','Runtime '+(h.instance?h.instance.gitSha.slice(0,7):'(no instance yet)')+' · triage '+h.triage));
-    if(h.instance)top.appendChild(laneEl('div','lane-meta','started '+laneWhen(h.instance.startedAt)+' · last heartbeat '+laneAgo(h.instance.lastBeatAt)));
-    top.appendChild(laneEl('div','lane-meta','uptime, last 14 days: '+(typeof h.uptime14d==='number'?(Math.round(h.uptime14d*1000)/10)+'%':'not known yet')));
+    es.status=what==='ack'?'acked':'dismissed';for(var i=0;i<bs.length;i++)bs[i].disabled=false;
+    btn.textContent=what==='ack'?'Acknowledged':'Dismissed';btn.disabled=true;
+  }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;laneMsg(e.message,true);});}
+
+/* ---------- Settings: Health ---------- */
+var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',triage:'Triage',runtime:'Runtime'};
+var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};
+var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
+/* The runtime's note, without asides, starting with a capital. */
+function healthDetail(d){d=String(d||'').replace(/\s*\([^)]*\)/g,'').trim();return d.charAt(0).toUpperCase()+d.slice(1);}
+function healthName(c){c=String(c||'');if(HEALTH_NAMES[c])return HEALTH_NAMES[c];if(c.indexOf('source:')===0)return titleCase(laneWords(c.slice(7)));return titleCase(laneWords(c));}
+function healthDot(status,text){var cls={ok:'ok',degraded:'degraded',down:'down',unknown:'unknown',disabled:'off'}[status]||'unknown';var s=laneEl('span','st '+cls);s.appendChild(laneEl('i'));if(text)s.appendChild(document.createTextNode(text));return s;}
+var HEALTH_ALL=false;
+function loadHealth(){var top=document.getElementById('sethealth'),last=document.getElementById('sethealth-last');
+  laneCall('/runtime/health').then(function(h){top.textContent='';last.textContent='';
+    var comps=(h.components||[]).slice().sort(function(a,b){return (HEALTH_RANK[a.status]-HEALTH_RANK[b.status])||healthName(a.component).localeCompare(healthName(b.component));});
     var stale=!h.lastHealthRun||Date.now()-Date.parse(h.lastHealthRun)>10*60000;
-    top.appendChild(laneEl('div','lane-meta'+(stale?' bad':''),'health checks: '+(h.lastHealthRun?'last run '+laneAgo(h.lastHealthRun):'never run')+(stale?' (more than 10 minutes ago)':'')));
-    list.appendChild(top);
-    (h.components||[]).forEach(function(c){var row=laneEl('div','lane-comp');
-      row.appendChild(laneEl('span','lane-st '+String(c.status).replace(/[^a-z]/g,''),c.status));
-      row.appendChild(laneEl('span',null,c.component));
-      if(c.detail)row.appendChild(laneEl('span','lane-meta',c.detail));
-      row.appendChild(laneEl('span','lane-meta',laneAgo(c.at)));
-      list.appendChild(row);});
-    if(!(h.components||[]).length)list.appendChild(laneEl('div','empty','No component has been checked yet.'));
-  }).catch(function(e){if(seq!==LANE_SEQ)return;laneMsg('✗ '+e.message,true);});}
+    var issues=comps.filter(function(c){return c.status!=='ok'&&c.status!=='disabled';});
+    var host=(issues.length||stale)?top:last;
+    host.appendChild(laneEl('div','gsh','Health'));
+    var g=laneEl('div','group');host.appendChild(g);
+    var sum=laneEl('div','row');var worst=stale?'unknown':issues.length?issues[0].status:'ok';
+    var label=stale?'Checks Stopped':issues.length?issues.length+' Issue'+(issues.length===1?'':'s'):'All Systems Normal';
+    var lb=laneEl('span','lbl');var st=healthDot(worst,label);st.style.color='var(--t1)';st.style.fontWeight='500';lb.appendChild(st);sum.appendChild(lb);
+    sum.appendChild(laneEl('span','val',h.lastHealthRun?(stale?'Last check ':'Checked ')+agoPhrase(h.lastHealthRun):'Never Checked'));
+    var again=laneEl('button','ghost','Refresh');again.onclick=loadHealth;sum.appendChild(again);g.appendChild(sum);
+    issues.forEach(function(c){var row=laneEl('div','row two');row.appendChild(healthDot(c.status));var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));
+      l.appendChild(laneEl('span',null,HEALTH_WORDS[c.status]+(c.detail?' · '+healthDetail(c.detail):'')));row.appendChild(l);row.appendChild(laneEl('span','val',laneAgo(c.at)));g.appendChild(row);});
+    var rest=comps.filter(function(c){return issues.indexOf(c)<0;});
+    if(rest.length){var all=laneEl('div','row click');var al=laneEl('span','lbl');al.appendChild(laneEl('b',null,'All Components'));all.appendChild(al);all.appendChild(laneEl('span','val',String(rest.length)));
+      all.appendChild(svgi('chev'));g.appendChild(all);
+      var box=laneEl('div');box.hidden=!HEALTH_ALL;rest.forEach(function(c){var r=laneEl('div','row');var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));r.appendChild(l);r.appendChild(healthDot(c.status,HEALTH_WORDS[c.status]));box.appendChild(r);});
+      g.appendChild(box);all.onclick=function(){HEALTH_ALL=!HEALTH_ALL;box.hidden=!HEALTH_ALL;};}
+  }).catch(function(e){top.textContent='';last.textContent='';top.appendChild(laneEl('div','gsh','Health'));var g=laneEl('div','group');var row=laneEl('div','row');var l=laneEl('span','lbl');
+    l.appendChild(laneEl('b',null,"Couldn't Load Health"));l.appendChild(laneEl('span',null,e.message));row.appendChild(l);var again=laneEl('button','ghost','Try Again');again.onclick=loadHealth;row.appendChild(again);g.appendChild(row);top.appendChild(g);});}
+pollNotifs();setInterval(pollNotifs,60000);
 </script>
 <script id="approvals-js">
 /* ---------- approvals: the cards waiting for Will's signature ----------
- * Every pending proposal the server lists (the runtime's, in runtime mode), with
- * what it would do in words, who filed it, its full args and the tainted banner.
- * Approve and Reject go through the same signed path as a card in chat
- * (approveAction / rejectAction). Text only: nothing here is HTML. */
-var APPR_ORIGIN={cli:'you, at the terminal',console:'you, in the console'};
-var APPR_NIGHTLY={'backup.local':"tonight's local backup",'backup.offsite':"tonight's offsite backup",'restore.drill':"this week's restore drill",'maintenance.retention':"tonight's retention run"};
+ * Every pending proposal the server lists (the runtime's, in runtime mode): one open
+ * card at a time says what would run in words (three facts or fewer, the raw args
+ * behind Show Details), the rest wait as rows. Approve and Reject go through the
+ * same signed path as a card in chat (approveAction / rejectAction). Approve All
+ * signs each card in turn after one prompt (the Mac app keeps the key unlocked for
+ * 5 minutes); a card with outside text or money is left for its own approval, with
+ * its own prompt. Text only: nothing here is HTML. */
+var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false};
+var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db'],'backup.offsite':["Run Tonight's Offsite Copy",'db'],'restore.drill':["Run This Week's Restore Test",'db'],'maintenance.retention':["Run Tonight's Cleanup",'db']};
+var APPR_SOURCES={launchd:'Flint’s background jobs, every 2 minutes',health:'Service checks, every 5 minutes',git:'Your repos, every 5 minutes',spend:'Spend against your caps, every minute',deploy:'Deploy results, every minute',knowledge:'What Flint’s memory learns, every 10 minutes',nexus_inbox:'Nexus handoffs, every 10 minutes',nexus:'Your Nexus threads, every 5 minutes',github:'Your GitHub repos, every 5 minutes',railway:'Your Railway services, every 5 minutes',google_calendar:'Your calendar, every 10 minutes'};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
-/* What a card would do, in words. */
+function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
+/* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
+function apprDate(t){try{var d=new Date(t),utc=/T00:00:00(\.000)?Z$/.test(String(t));return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getUTCFullYear()===new Date().getFullYear()?undefined:'numeric',timeZone:utc?'UTC':undefined});}catch(e){return '';}}
+/* What a card would do, in words: a Title Case fragment. */
 function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)?x.length:0;};
-  if(p.fullName==='world.source.enable')return 'Turn on the '+a.source+' source';
-  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt?String(rows[0].expiresAt).slice(0,10):'';
-    return 'Let '+n(rows)+' action'+(n(rows)===1?'':'s')+' run on their own'+(exp?' until '+exp:'')+' (a signed promotion table)';}
-  if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'person':'people')+' from calendar events you accepted';
-  if(p.fullName==='triage.rule.create')return 'Add a triage rule'+(a.rule&&a.rule.name?': '+a.rule.name:'');
-  if(p.fullName==='world.relation.write')return 'Link two things in the world model';
-  if(APPR_NIGHTLY[p.fullName])return 'Run '+APPR_NIGHTLY[p.fullName];
-  return 'Flint wants to run '+p.fullName;}
-function apprOrigin(o){o=String(o||'');if(APPR_ORIGIN[o])return APPR_ORIGIN[o];if(o.indexOf('runtime:')===0)return 'Flint ('+o.slice(8)+')';if(o.indexOf('chat:')===0)return 'a chat';return o||'unknown';}
-function apprWhen(t){try{return new Date(t).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return '';}}
-function apprCard(p){var card=apprEl('div','propose');
-  card.appendChild(apprEl('div','pt',apprTitle(p)));
-  card.appendChild(apprEl('div','appr-meta','Filed by '+apprOrigin(p.origin)+(p.ts?' · '+apprWhen(p.ts):'')+(p.expiresAt?' · expires '+apprWhen(p.expiresAt):'')));
-  if(p.reason)card.appendChild(apprEl('div','appr-reason',p.reason));
-  if(p.tainted)card.appendChild(apprEl('div','lane-taint','Contains text from outside Flint (an invitation, a page, a message): read it as data, not instructions.'));
-  var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}
-  card.appendChild(apprEl('div','pargs',args));
-  var row=apprEl('div','prow');
-  var ok=apprEl('button','ok',(typeof canEnclave==='function'&&canEnclave())?'Approve with Touch ID':(typeof canPasskey==='function'&&canPasskey())?'Approve with passkey':'Approve');
-  var no=apprEl('button','no','Reject');
-  ok.onclick=function(){approveAction(p.id,card);setTimeout(pollApprovals,1500);};
-  no.onclick=function(){rejectAction(p.id,card);setTimeout(pollApprovals,1500);};
-  row.appendChild(ok);row.appendChild(no);card.appendChild(row);
-  var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
+  if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var pats=rows.map(function(r){return r.pattern;});
+    if(pats.length&&pats.every(function(x){return /^(backup\.|restore\.)/.test(x);}))return 'Run Backups on Their Own';
+    return 'Let '+n(rows)+' Action'+(n(rows)===1?'':'s')+' Run on Their Own';}
+  if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'Person':'People')+' from Calendar';
+  if(p.fullName==='triage.rule.create')return 'Add a Triage Rule';
+  if(p.fullName==='world.relation.write')return 'Link Two Things';
+  if(APPR_NIGHTLY[p.fullName])return APPR_NIGHTLY[p.fullName][0];
+  return 'Approve '+apprWords(p.fullName);}
+/* One line under the title. */
+function apprSub(p){var a=p.args||{};
+  if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Starts reading this source';
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'Until '+apprDate(exp):'A signed policy change';}
+  if(p.fullName==='world.person.create')return 'From events you accepted';
+  if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'A new rule';
+  if(APPR_NIGHTLY[p.fullName])return 'Waits for you until it runs on its own';
+  return p.fullName;}
+function apprIcon(p){return p.fullName==='world.source.enable'?'power':(APPR_NIGHTLY[p.fullName]||/^(backup|restore)/.test(String((p.args&&p.args.rows&&p.args.rows[0]&&p.args.rows[0].pattern)||'')))?'db':'bolt';}
+function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if(o.indexOf('runtime:')===0)return 'Flint';if(o.indexOf('chat:')===0)return 'A Chat';return o||'Unknown';}
+/* Three facts or fewer. */
+function apprFacts(p){var a=p.args||{},f=[];
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
+    var lim={'backup.local':'Backup 1 a Day','restore.drill':'Restore Test 1 a Week','backup.offsite':'Offsite 1 a Day'};
+    var named=rows.map(function(r){return lim[r.pattern]||(apprWords(r.pattern)+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
+    f.push(['Limits',named.join(' · ')]);}
+  else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
+  else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){return x.name||x.email;}).join(', ')]);
+  f.push(['Filed By',apprFrom(p.origin)]);
+  if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
+  return f.slice(0,3);}
+/* Asks on its own, never in Approve All: outside text, or money. */
+function apprAlone(p){return !!p.tainted||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge/i.test(String(p.fullName||''));}
+function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
+
+function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+(open?' open':''));card.style.display='block';
+  var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));
+  if(!open)tt.appendChild(apprEl('span','sub',apprSub(p)));ct.appendChild(tt);
+  if(apprAlone(p)){var o=apprEl('span','outside');o.appendChild(apprEl('i'));o.appendChild(document.createTextNode(p.tainted?'Outside Text':'Money'));ct.appendChild(o);}
+  ct.appendChild(apprEl('small',null,apprAge(p.ts)));card.appendChild(ct);
+  var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
+  if(open){var dl=apprEl('dl','facts');apprFacts(p).forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});card.appendChild(dl);
+    var det=apprEl('div','details');det.hidden=true;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
+    var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));
+    var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
+    var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
+    no.onclick=function(){rejectAction(p.id,card);setTimeout(loadApprovals,1200);};
+    ok.onclick=function(){approveAction(p.id,card,{reason:'approve: '+apprTitle(p),fresh:apprAlone(p)}).then(function(){setTimeout(loadApprovals,1200);},function(){});};
+    row.appendChild(show);row.appendChild(no);row.appendChild(ok);card.appendChild(row);card.appendChild(det);}
+  else{row.hidden=true;card.appendChild(row);card.classList.add('click');card.onclick=function(){APPR.open=p.id;apprRender();};}
+  card.appendChild(res);card.setAttribute('data-id',p.id);
   return card;}
 /* Approved but not run (a cap, or the runtime did not answer): run it now. */
-function apprWaitingCard(p){var card=apprEl('div','propose');card.appendChild(apprEl('div','pt','Approved, not run yet: '+apprTitle(p)));
-  var row=apprEl('div','prow');var go=apprEl('button','ok','Run now');row.appendChild(go);card.appendChild(row);var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
+function apprWaitingCard(p){var card=apprEl('div','card row');card.style.display='block';var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));
+  var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));tt.appendChild(apprEl('span','sub','Approved, not run yet'));ct.appendChild(tt);
+  var row=apprEl('div','prow');var go=apprEl('button','btn','Run Now');row.appendChild(go);ct.appendChild(row);card.appendChild(ct);
+  var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
   go.onclick=function(){go.disabled=true;postJson('/proposals/run',{id:p.id}).then(function(d){showOutcome(d,res,row);}).catch(function(e){failed(e,res,row);});};
   return card;}
-function apprHelp(text){var h=document.getElementById('apprhelp');h.textContent=text||'';h.style.display=text?'block':'none';}
-function loadApprovals(){var list=document.getElementById('apprlist');
+function apprHelp(text){var h=document.getElementById('apprhelp');h.textContent=text||'';h.hidden=!text;}
+function apprShow(tab){APPR.tab=tab;apprRender();}
+function apprRender(){var list=document.getElementById('apprlist');list.textContent='';
+  var seg=document.getElementById('apprseg');seg.hidden=!APPR.approved.length;
+  document.getElementById('apprtab-waiting').classList.toggle('on',APPR.tab==='waiting');document.getElementById('apprtab-approved').classList.toggle('on',APPR.tab==='approved');
+  document.getElementById('apprn-waiting').textContent=APPR.pending.length||'';document.getElementById('apprn-approved').textContent=APPR.approved.length||'';
+  var foot=document.getElementById('apprfoot');
+  if(APPR.tab==='approved'&&APPR.approved.length){var g=apprEl('div','group');APPR.approved.forEach(function(p){g.appendChild(apprWaitingCard(p));});list.appendChild(g);foot.hidden=true;return;}
+  if(!APPR.pending.length){var e=apprEl('div','empty');e.appendChild(apprEl('b',null,'Nothing Waiting'));list.appendChild(e);foot.hidden=true;return;}
+  if(!APPR.open||!APPR.pending.some(function(p){return p.id===APPR.open;}))APPR.open=APPR.pending[0].id;
+  var g2=apprEl('div','group');APPR.pending.forEach(function(p){g2.appendChild(apprCard(p));});list.appendChild(g2);
+  var all=APPR.pending.filter(function(p){return !apprAlone(p);}),alone=APPR.pending.length-all.length;
+  foot.hidden=false;var btn=document.getElementById('apprall');var note=document.getElementById('apprnote');
+  if(APPR.signed&&!APPR.keyed){note.textContent='Add an approval key to approve';btn.textContent='Open Settings';btn.onclick=function(){closeApprovals();openSettings();};btn.disabled=false;return;}
+  btn.onclick=approveAll;btn.disabled=APPR.busy||!all.length;btn.textContent=approveLabel(true);
+  if(!APPR.busy)note.textContent=APPR.pending.length+' Waiting'+(alone?' · '+alone+' Ask on Their Own':'');}
+function loadApprovals(){
   fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-    list.textContent='';
-    if(!d){list.appendChild(apprEl('div','empty','Could not ask the server what is waiting.'));return;}
-    var ps=d.proposals||[];var pending=ps.filter(function(p){return p.status==='pending';});var approved=ps.filter(function(p){return p.status==='approved';});
-    var keyed=(typeof canEnclave==='function'&&canEnclave())||(typeof canPasskey==='function'&&canPasskey());
-    if(d.runtime==='down')apprHelp('The runtime is not answering, so its cards cannot be shown right now.');
-    else if(d.signed&&pending.length&&!keyed)apprHelp('To approve, this device needs your approval key. Open Settings (the gear), then Approval key: run `pnpm --filter @flint/runtime enroll` on the Mac for a one-time code, paste it, and press "Add Touch ID approval key" (on the Mac) or "Add a passkey on this device" (on your phone).');
-    else apprHelp('');
-    if(!pending.length&&!approved.length){list.appendChild(apprEl('div','empty','Nothing is waiting for you.'));return;}
-    pending.forEach(function(p){list.appendChild(apprCard(p));});
-    approved.forEach(function(p){list.appendChild(apprWaitingCard(p));});
-  }).catch(function(){list.textContent='';list.appendChild(apprEl('div','empty','Could not reach the server.'));});}
-function openApprovals(){if(!TOKEN){openSettings();return;}document.getElementById('approvals').style.display='flex';if(typeof loadCreds==='function')loadCreds();loadApprovals();}
-function closeApprovals(){document.getElementById('approvals').style.display='none';pollApprovals();}
+    if(!d){APPR.pending=[];APPR.approved=[];apprHelp('');document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Load Approvals"));
+      var again=apprEl('button','ghost','Try Again');again.onclick=loadApprovals;e.appendChild(again);document.getElementById('apprlist').appendChild(e);document.getElementById('apprfoot').hidden=true;return;}
+    var ps=d.proposals||[];APPR.pending=ps.filter(function(p){return p.status==='pending';});APPR.approved=ps.filter(function(p){return p.status==='approved';});
+    APPR.signed=!!d.signed;APPR.keyed=(typeof canEnclave==='function'&&canEnclave())||(typeof canPasskey==='function'&&canPasskey());
+    apprHelp(d.runtime==='down'?"The runtime isn't answering, so its cards can't be shown.":'');
+    if(APPR.tab==='approved'&&!APPR.approved.length)APPR.tab='waiting';
+    apprRender();badge(APPR.pending.length);
+  }).catch(function(){document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Reach Flint"));document.getElementById('apprlist').appendChild(e);});}
+/* One prompt, then each card signed and finished in turn; the server verifies each. */
+function approveAll(){if(APPR.busy)return;var queue=APPR.pending.filter(function(p){return !apprAlone(p);});if(!queue.length)return;
+  APPR.busy=true;var note=document.getElementById('apprnote'),btn=document.getElementById('apprall');btn.disabled=true;var done=0,failedAt=null;
+  var rows={};Array.prototype.forEach.call(document.querySelectorAll('#apprlist .card'),function(c){rows[c.getAttribute('data-id')]=c;});
+  var next=function(i){if(i>=queue.length)return Promise.resolve();var p=queue[i];note.textContent='Approving '+(i+1)+' of '+queue.length+'…';
+    var card=rows[p.id]||apprCard(p);
+    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p)}).then(function(){done++;return next(i+1);});};
+  next(0).catch(function(e){failedAt=e;}).then(function(){APPR.busy=false;
+    note.textContent=failedAt?'Approved '+done+' of '+queue.length+'. '+(typeof errText==='function'?errText(failedAt):'Stopped'):'Approved '+done+' of '+queue.length;
+    setTimeout(loadApprovals,failedAt?2500:1200);});}
+function openApprovals(){if(!TOKEN){openSettings();return;}showPanel('approvals',true);if(typeof loadCreds==='function')loadCreds();loadApprovals();}
+function closeApprovals(){showPanel('approvals',false);pollApprovals();}
 /* The badge: how many cards wait for a signature. */
+function badge(n){var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':String(n);b.hidden=!(n>0);if(typeof starters==='function'&&!document.getElementById('thread').children.length)starters(n);}
 function pollApprovals(){if(!TOKEN)return;fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;
-  var n=(d.proposals||[]).filter(function(p){return p.status==='pending';}).length;var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':n;b.style.display=n>0?'flex':'none';}).catch(function(){});}
+  badge((d.proposals||[]).filter(function(p){return p.status==='pending';}).length);}).catch(function(){});}
 pollApprovals();setInterval(pollApprovals,60000);
 </script>
 <script id="update-js">
@@ -855,13 +1152,14 @@ function flintBusy(){
   /* An approval being signed: its card's buttons dim until the outcome. */
   var t=document.getElementById('transcript'),rows=t&&t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
   for(var i=0;i<rows.length;i++){if(rows[i].style.display!=='none'&&String(rows[i].style.opacity)==='0.5')return true;}
-  return ['settings','notifs','lanes','approvals','convo'].some(function(id){var e=document.getElementById(id);return !!(e&&e.style.display&&e.style.display!=='none');});
+  return ['settings','activity','approvals'].some(function(id){var e=document.getElementById(id);return !!(e&&e.classList&&e.classList.contains('open'));});
 }
 function flintIdle(quietMs){return !flintBusy()&&(document.hidden||Date.now()-LAST_INPUT>=(quietMs==null?60000:quietMs));}
 /* Keep the open conversation for the next page; false when it cannot be kept. */
 function flintSnapshot(){
   var t=document.getElementById('transcript'),html=t?t.innerHTML:'';
-  var snap={convId:convId,html:html,top:t?t.scrollTop:0,end:t?t.scrollHeight-t.scrollTop-t.clientHeight<40:true,lo:typeof LOCAL_ONLY!=='undefined'&&LOCAL_ONLY===true,at:Date.now()};
+  var ct=document.getElementById('ctitle');
+  var snap={convId:convId,html:html,title:ct?ct.textContent:'',top:t?t.scrollTop:0,end:t?t.scrollHeight-t.scrollTop-t.clientHeight<40:true,lo:typeof LOCAL_ONLY!=='undefined'&&LOCAL_ONLY===true,at:Date.now()};
   try{localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
   /* Too large (attached photos): keep the words, not the pictures. */
   try{snap.html=html.replace(/<img\b[^>]*>/gi,'<span class="att-gone">[image]</span>');localStorage.setItem('flint_resume',JSON.stringify(snap));return true;}catch(e){}
@@ -881,10 +1179,12 @@ function checkUpdate(){
   if(s.lo===true&&typeof LOCAL_ONLY!=='undefined'){LOCAL_ONLY=true;try{localStorage.setItem('flint_lo','1');}catch(e){}if(typeof applyLO==='function')applyLO();}
   var t=document.getElementById('transcript');if(!t||typeof s.html!=='string')return;
   t.innerHTML=s.html;
+  var ct=document.getElementById('ctitle');if(ct&&typeof s.title==='string')ct.textContent=s.title;
+  if(typeof syncEmpty==='function')syncEmpty();if(typeof markThread==='function')markThread(convId);
   /* A card still waiting lost its buttons' handlers with the page: decide it in Approvals. */
   var rows=t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
   for(var i=0;i<rows.length;i++){if(rows[i].style.display==='none')continue;rows[i].textContent='';rows[i].style.opacity=1;
-    var b=document.createElement('button');b.className='ok';b.textContent='Open Approvals';b.onclick=function(){openApprovals();};rows[i].appendChild(b);}
+    var b=document.createElement('button');b.className='ok';b.textContent='Open Approvals';b.onclick=function(){openApprovals();};if(rows[i].style)rows[i].style.display='flex';rows[i].appendChild(b);}
   t.scrollTop=s.end?t.scrollHeight:(s.top||0);
   /* At the end: stay there once restored pictures have their height. */
   if(s.end){var imgs=t.querySelectorAll?t.querySelectorAll('img'):[];for(var j=0;j<imgs.length;j++){if(!imgs[j].complete&&imgs[j].addEventListener)imgs[j].addEventListener('load',function(){t.scrollTop=t.scrollHeight;});}}})();
