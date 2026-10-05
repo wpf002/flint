@@ -15,12 +15,22 @@ first run) and replaces `/Applications/Flint.app`. The icon was made from
 
 ## Updates
 
-On the Studio, `auto_deploy.sh` runs `update_app.sh` on every tick. When this
-directory changes on `main`, it rebuilds and installs the app, but only while
-Flint.app is closed: if it is open you get one notification, and the first tick
-after you quit installs it. A change that fails to build is skipped until the
-directory changes again. The console itself is served by the server, so UI
-changes reach the app without any of this.
+Flint keeps itself current after every merge, with nothing to quit or reload:
+
+- **The app.** On the Studio, `auto_deploy.sh` runs `update_app.sh` on every
+  tick. When this directory changes on `main`, it rebuilds and installs the app
+  at once, even while it is open. The running app checks every minute whether
+  the build on disk is still its own; once it is not, it restarts onto the new
+  one at a quiet moment (nothing typed, no panel open, no reply or voice in
+  progress, and you in another app or Flint untouched for two minutes). In the
+  background it comes back behind your other windows. A change that fails to
+  build is skipped until the directory changes again, and the current app is kept.
+- **The console.** The server stamps the page's version into it and answers
+  `GET /ui-version` with the deployed one. An open console (here or on the
+  phone) checks every minute and reloads at a quiet moment once they differ,
+  keeping the open conversation.
+- **A failed deploy** is retried every 30 minutes, up to 6 times, without
+  waiting for the next push (`auto_deploy.sh`, `~/.flint/deploy-retry`).
 
 The stable signature is what keeps the microphone grant across updates: macOS
 keys it to the signing certificate, and an ad-hoc signature changes with every

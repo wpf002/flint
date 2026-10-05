@@ -828,5 +828,37 @@ function pollApprovals(){if(!TOKEN)return;fetch(BASE+'/proposals',{headers:auth(
   var n=(d.proposals||[]).filter(function(p){return p.status==='pending';}).length;var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':n;b.style.display=n>0?'flex':'none';}).catch(function(){});}
 pollApprovals();setInterval(pollApprovals,60000);
 </script>
+<script id="update-js">
+/* Flint updates itself. A deploy replaces this page (and the Mac app's build). The
+   server stamps the page's version into it (__FLINT_UI__) and answers GET /ui-version
+   with the deployed one; once they differ, the page reloads at the first quiet moment:
+   nothing typed or attached, no panel open, no reply, recording or speech in progress,
+   and the page hidden or untouched for a minute. The open conversation survives the
+   reload (sessionStorage, 30 minutes). The Mac app asks flintIdle() the same before
+   restarting itself onto a new build, and calls flintSnapshot() first. */
+var UI_VERSION=window.__FLINT_UI__||null,UPDATE_READY=false,LAST_INPUT=Date.now();
+['keydown','pointerdown','wheel','touchstart'].forEach(function(t){document.addEventListener(t,function(){LAST_INPUT=Date.now();},true);});
+function flintBusy(){
+  var inp=document.getElementById('input');if(inp&&inp.value.trim())return true;
+  if((typeof PENDING!=='undefined'&&PENDING.length)||(typeof ATT_READING!=='undefined'&&ATT_READING))return true;
+  var th=document.getElementById('think');if(th&&th.textContent)return true;
+  if(typeof mediaRec!=='undefined'&&mediaRec&&mediaRec.state==='recording')return true;
+  if(typeof _ttsAudio!=='undefined'&&_ttsAudio)return true;
+  return ['settings','notifs','lanes','approvals','convo'].some(function(id){var e=document.getElementById(id);return !!(e&&e.style.display&&e.style.display!=='none');});
+}
+function flintIdle(quietMs){return !flintBusy()&&(document.hidden||Date.now()-LAST_INPUT>=(quietMs==null?60000:quietMs));}
+function flintSnapshot(){try{var t=document.getElementById('transcript');sessionStorage.setItem('flint_resume',JSON.stringify({convId:convId,html:t?t.innerHTML:'',at:Date.now()}));}catch(e){}}
+function checkUpdate(){
+  return fetch(BASE+'/ui-version',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    var v=d&&typeof d.version==='string'?d.version:null;if(!v)return;
+    if(!UI_VERSION){UI_VERSION=v;return;}
+    if(v!==UI_VERSION)UPDATE_READY=true;
+  }).catch(function(){}).then(function(){if(UPDATE_READY&&flintIdle()){flintSnapshot();location.reload();}});
+}
+(function resume(){try{var s=JSON.parse(sessionStorage.getItem('flint_resume')||'null');sessionStorage.removeItem('flint_resume');
+  if(s&&typeof s.convId==='string'&&typeof s.at==='number'&&Date.now()-s.at<30*60000){convId=s.convId;var t=document.getElementById('transcript');if(t&&typeof s.html==='string')t.innerHTML=s.html;}}catch(e){}})();
+setInterval(checkUpdate,60000);
+document.addEventListener('visibilitychange',function(){if(document.hidden)checkUpdate();});
+</script>
 </body>
 </html>

@@ -94,6 +94,7 @@ import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
 import { Notifications, Watcher, type Check } from './notifications';
+import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
@@ -959,12 +960,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // already authenticated; anyone else gets the page without it (./access).
   if (req.method === 'GET' && (url === '/' || url.startsWith('/console'))) {
     if (!existsSync(CONSOLE_PATH)) return json(res, 404, { error: 'console not built' });
-    const page = readFileSync(CONSOLE_PATH, 'utf8');
+    // Stamped with its version, so an open console can tell when a deploy replaced it (./ui-version).
+    const page = stampUiVersion(readFileSync(CONSOLE_PATH, 'utf8'));
     const html = consoleGetsToken(facts, TAILNET_USER)
       ? page.replace('</head>', `<script>window.__FLINT_TOKEN__=${JSON.stringify(TOKEN)}</script></head>`)
       : page;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
+    return;
+  }
+
+  // The deployed console's version: an open console polls this and reloads itself
+  // at a quiet moment once it differs from the version stamped into the page.
+  if (req.method === 'GET' && url === '/ui-version') {
+    if (!existsSync(CONSOLE_PATH)) return json(res, 404, { error: 'console not built' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ version: uiVersionOf(readFileSync(CONSOLE_PATH, 'utf8')) }));
     return;
   }
 

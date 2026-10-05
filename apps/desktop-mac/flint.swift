@@ -94,10 +94,26 @@ final class ApprovalKey: NSObject, WKScriptMessageHandlerWithReply {
   }
 }
 
+/// Which build is on disk: update_app.sh installs a new one over the running app.
+struct BuildStamp: Equatable {
+  let file: Int
+  let modified: Date
+  static func current() -> BuildStamp? {
+    guard let path = Bundle.main.executablePath,
+          let a = try? FileManager.default.attributesOfItem(atPath: path),
+          let file = (a[.systemFileNumber] as? NSNumber)?.intValue,
+          let modified = a[.modificationDate] as? Date else { return nil }
+    return BuildStamp(file: file, modified: modified)
+  }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
   var window: NSWindow!
   var web: WKWebView!
   let approvalKey = ApprovalKey()
+  /// The build this process runs, and whether it is already restarting onto a newer one.
+  let launchedBuild = BuildStamp.current()
+  var relaunching = false
 
   func applicationDidFinishLaunching(_ note: Notification) {
     buildMenu()
@@ -122,8 +138,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     if #available(macOS 12.0, *) { web.underPageBackgroundColor = .black }
     web.load(URLRequest(url: URL(string: FLINT_URL)!))
     window.contentView = web
-    window.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
+    // Restarted onto a new build while Will was in another app: come back behind, not in front.
+    if CommandLine.arguments.contains("--relaunched-background") {
+      window.orderBack(nil)
+    } else {
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    }
+    Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.checkForNewBuild() }
+  }
+
+  /// Auto-update: once the build on disk is not the one running, restart onto it at
+  /// a quiet moment. Quiet is the console's flintIdle(): nothing typed or attached,
+  /// no panel open, no reply or voice in progress; and Will in another app, or
+  /// Flint untouched for two minutes. flintSnapshot() keeps the open conversation.
+  func checkForNewBuild() {
+    guard !relaunching, let was = launchedBuild, let now = BuildStamp.current(), now != was else { return }
+    let away = !NSApp.isActive
+    let js = "typeof flintIdle==='function'&&flintIdle(\(away ? 0 : 120000))&&(flintSnapshot(),true)"
+    web.evaluateJavaScript(js) { [weak self] result, _ in
+      if (result as? Bool) == true { self?.relaunch(front: !away) }
+    }
+  }
+
+  func relaunch(front: Bool) {
+    guard !relaunching else { return }
+    relaunching = true
+    let cfg = NSWorkspace.OpenConfiguration()
+    cfg.createsNewApplicationInstance = true
+    cfg.activates = front
+    if !front { cfg.arguments = ["--relaunched-background"] }
+    NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { app, _ in
+      DispatchQueue.main.async {
+        if app != nil { NSApp.terminate(nil) } else { self.relaunching = false }
+      }
+    }
   }
 
   func buildMenu() {
