@@ -71,6 +71,12 @@ export function evalToday(csv: string, tz: string, now: Date): number {
 
 const round = (n: number) => Math.round(n * 1e6) / 1e6;
 
+/** This month's ledger totals per vendor (the spend source's numbers, read again for the server's unified view). */
+export function ledgerTotals(dir: string, tz: string, now: Date): Record<Vendor, { day: number; month: number }> {
+  const file = join(dir, `spend-${local(tz, now).month}.jsonl`);
+  return totals(existsSync(file) ? readFileSync(file, 'utf8') : '', tz, now);
+}
+
 export function spendSource(o: SpendOptions): Source {
   return {
     name: 'spend',

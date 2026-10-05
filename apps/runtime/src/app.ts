@@ -29,6 +29,8 @@ import {
 import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
+import { registerP2Routes } from './routes/p2.js';
+import type { Bus } from './bus.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -38,25 +40,32 @@ declare module 'fastify' {
 
 export const BODY_LIMIT = 64 * 1024;
 
-/**
- * A database trigger or check refusing a row for what it contains (23514
- * check_violation). A privilege fault (42501) is the runtime's own problem, not
- * the caller's input: it stays a 500, so the caller keeps the entry and retries.
- */
-export function dbRefused(err: unknown): boolean {
-  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
-  return [e.code, e.meta?.code].map(String).includes('23514') || (typeof e.message === 'string' && /code: "23514"/.test(e.message));
-}
+export { dbRefused } from './dbcodes.js';
+import { dbRefused } from './dbcodes.js';
 /** The trigger's own words (they name the rule, never a value). */
 const dbMessage = (err: unknown) => {
   const m = String((err as { message?: unknown }).message ?? '').match(/message: "([^"]{1,200})"/);
   return m ? m[1] : 'a database rule';
 };
 
+/** What the process knows about itself that the database does not (index.ts keeps it). */
+export interface RuntimeStatus {
+  /** Parts not working: `bus` while pg-boss is not started. */
+  problems: Set<string>;
+  /** When the bus last started: the health job is overdue 10 minutes after it. */
+  busStartedAt: Date | null;
+  /** The bus while it runs (pushed events send their triage jobs through it). */
+  bus?: Pick<Bus, 'boss'>;
+}
+
+/** The health job runs every 5 minutes; twice that without a run means the bus is wedged. */
+export const HEALTH_RUN_STALE_MS = 10 * 60_000;
+
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home'>>;
   logger?: boolean;
+  status?: RuntimeStatus;
 }
 
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
@@ -98,6 +107,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return reply.code(500).send({ error: 'internal error', ref });
   });
 
+  // `ok` is the database alone (install-runtime.sh polls it); `degraded` names
+  // the parts that are not working, never why.
   app.get('/health', async () => {
     let dbOk = false;
     try {
@@ -106,7 +117,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     } catch {
       dbOk = false;
     }
-    return { ok: dbOk, db: dbOk ? 'up' : 'down' };
+    const degraded = [...(deps.status?.problems ?? [])].sort();
+    const since = deps.status?.busStartedAt;
+    if (dbOk && since && Date.now() - since.getTime() > HEALTH_RUN_STALE_MS) {
+      const last = await db.healthCheck.findFirst({ orderBy: { at: 'desc' }, select: { at: true } }).catch(() => null);
+      if (!last || Date.now() - last.at.getTime() > HEALTH_RUN_STALE_MS) degraded.push('health-overdue');
+    }
+    return { ok: dbOk, db: dbOk ? 'up' : 'down', degraded };
   });
 
   // ---- audit ------------------------------------------------------------------
@@ -217,7 +234,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // ---- caps -----------------------------------------------------------------------
   app.post('/v1/counters/claim', { preHandler: need('counters') }, async (req, reply) => {
     const b = z
-      .object({ action: z.string().min(1).max(200), limit: z.number().int().min(0).max(100000), period: z.enum(['day', 'week']) })
+      .object({ action: z.string().min(1).max(200), limit: z.number().int().min(0).max(100000), period: z.enum(['hour', 'day', 'week']) })
       .strict()
       .parse(req.body);
     const n = await claim(db, b.action, { limit: b.limit, period: b.period }, config.tz);
@@ -233,6 +250,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return {
       services: services.map((s) => ({ id: s.id, name: safeName(s), health: (s.state as { health?: string }).health ?? 'unknown', lastObservedAt: s.lastObservedAt })),
       counts: counts.map((c) => ({ kind: c.kind, status: c.status, n: c._count._all })),
+      // P2: escalations still waiting on Will (an older server ignores the field).
+      openEscalations: await db.escalation.count({ where: { status: 'open' } }),
     };
   });
   // Reading one entity returns its tainted fields too, marked, so the reader
@@ -258,6 +277,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (!latest) return { snapshots: [] };
     return { snapshots: await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } }) };
   });
+
+  registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
 
   return app;
 }

@@ -1,6 +1,6 @@
 /**
  * Actions the runtime carries out itself once Will has approved them: turning a
- * source on, and applying a signed policy change. Each goes through
+ * source on, applying a signed policy change, and adding a triage rule. Each goes through
  * claimProposal (re-verification, tier, cap, intent) and then completes, so the
  * audit trail reads the same as any other approved action. The database checks
  * the effect too: a cursor turns on only under an executing enable proposal,
@@ -11,8 +11,27 @@ import { z } from 'zod';
 import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { Refused, claimProposal, completeProposal } from './proposals.js';
+import { dbRefused } from '../dbcodes.js';
+import { RuleArgs, ruleProblems } from '../triage/rules.js';
+import { ACTION_TEMPLATES } from '../templates/actions.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change']);
+export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write']);
+
+/**
+ * A triage rule is policy (kind `rule`): its predicate may read only the
+ * structural fields allowlisted for its source and event type, checked before
+ * Will is asked to sign it. The database inserts it only as the exact rule of
+ * the signed proposal being executed.
+ */
+export const RuleCreateArgs = z.object({ rule: RuleArgs }).strict();
+
+/** Why a proposed rule may not exist, or undefined when it may. */
+export function refuseRule(args: unknown): string | undefined {
+  const parsed = RuleCreateArgs.safeParse(args);
+  if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ').slice(0, 500);
+  const problems = ruleProblems(parsed.data.rule);
+  return problems.length ? problems.join('; ').slice(0, 500) : undefined;
+}
 
 const EnableArgs = z.object({ source: z.enum(SOURCES) }).strict();
 /**
@@ -56,6 +75,43 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await completeProposal(db, id, { ok: true, result: { source, enabled: true } }, actor);
       return { source, enabled: true };
     }
+    if (claimed.action === 'world.relation.write') {
+      // Only the link a knowledge fact proposed (template knowledge.link), between two things that are still here.
+      const p = await db.proposal.findUniqueOrThrow({ where: { id }, select: { templateId: true, tainted: true } });
+      if (p.templateId !== 'knowledge.link') throw new Refused(409, 'the runtime writes only the knowledge.link relation');
+      const link = ACTION_TEMPLATES['knowledge.link'].params.parse(claimed.args);
+      if ((await db.entity.count({ where: { id: { in: [link.fromId, link.toId] }, status: 'active' } })) !== 2) throw new Refused(409, 'one of the two is no longer in the world model');
+      const open = { type: link.type, fromId: link.fromId, toId: link.toId, validTo: null };
+      let rel = await db.relation.findFirst({ where: open, select: { id: true } });
+      let existed = !!rel;
+      if (!rel) {
+        try {
+          rel = await db.relation.create({ data: { type: link.type, fromId: link.fromId, toId: link.toId, attrs: { knowledgeId: link.knowledgeId }, tainted: true, validFrom: new Date() }, select: { id: true } });
+        } catch (err) {
+          // Written by someone else between the look and the write: the link is there, which is what was asked.
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+          rel = await db.relation.findFirstOrThrow({ where: open, select: { id: true } });
+          existed = true;
+        }
+      }
+      await completeProposal(db, id, { ok: true, result: { relationId: rel.id, ...(existed ? { existed: true } : {}) } }, actor);
+      return { relationId: rel.id, ...(existed ? { existed: true } : {}) };
+    }
+    if (claimed.action === 'triage.rule.create') {
+      const why = refuseRule(claimed.args);
+      if (why) throw new Refused(400, `invalid triage rule: ${why}`);
+      const { rule } = RuleCreateArgs.parse(claimed.args);
+      const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
+      // A name taken since it was proposed (another rule signed first).
+      if (await db.triageRule.findUnique({ where: { name: rule.name }, select: { id: true } })) throw new Refused(400, `a triage rule named ${rule.name} exists`);
+      // The predicate as exact JSON: the database compares it with the signed one.
+      await db.$executeRaw`
+        INSERT INTO "TriageRule" (id, name, source, "eventType", predicate, action, lane, priority, "perSenderDailyCap", "createdBy", "approvalId")
+        VALUES (${`tr${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`}, ${rule.name}, ${rule.source}, ${rule.eventType},
+                ${JSON.stringify(rule.predicate)}::jsonb, ${rule.action}, ${rule.lane}, ${rule.priority}, ${rule.perSenderDailyCap}, ${rule.createdBy}, ${approvalId})`;
+      await completeProposal(db, id, { ok: true, result: { rule: rule.name } }, actor);
+      return { rule: rule.name };
+    }
     const { rows } = PolicyArgs.parse(claimed.args);
     const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
     // All rows or none: a signed table is applied whole.
@@ -77,6 +133,13 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     const ref = `err${Date.now().toString(36)}`;
     console.error(`[runtime] ${ref} running ${claimed.action} failed:`, err);
     await completeProposal(db, id, { ok: false, error: `could not carry it out (${ref})` }, actor).catch(() => {});
-    throw err instanceof Refused ? err : new Refused(409, `could not carry it out (${ref})`);
+    if (err instanceof Refused) throw err;
+    // The database refusing what was signed is the input's fault, a 400: a CHECK (23514, wherever Prisma
+    // puts it: a raw query's SQLSTATE is in meta.code), or a rule's name taken by one signed just before.
+    const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+    const codes = [e.code, e.meta?.code].map(String);
+    const refusedInput = dbRefused(err) || (claimed.action === 'triage.rule.create' && (codes.includes('23505') || codes.includes('P2002') || /Code: `23505`/.test(String(e.message ?? ''))));
+    if (refusedInput) throw new Refused(400, `the database refused it as signed (${ref})`);
+    throw new Refused(409, `could not carry it out (${ref})`);
   }
 }

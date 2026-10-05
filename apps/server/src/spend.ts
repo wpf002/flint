@@ -44,13 +44,20 @@ import {
   type TokenUsage,
   type Tool,
 } from '@flint/core';
+import { SPEND_KINDS, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { BrainTier, Tier } from './brains';
 import type { Brain } from './policy';
 
 export type { PaidVendor } from '@flint/core';
+export type { BackgroundKind };
 
-/** What a paid call was for. `eval` is a parity replay: logged, but not charged to Flint's caps. */
-export type SpendKind = 'chat' | 'extract' | 'plan' | 'tts' | 'tool-search' | 'tool-perplexity' | 'eval';
+/**
+ * What a paid call was for. `eval` is a parity replay: logged, but not charged
+ * to Flint's caps. The background kinds (runtime, review, dispatch, selfmod;
+ * plan 3.0.8) are calls the runtime asks for through /internal/complete, each
+ * under its own cap, $0 until Will raises it (readKindCaps).
+ */
+export type SpendKind = 'chat' | 'extract' | 'plan' | 'tts' | 'tool-search' | 'tool-perplexity' | 'eval' | BackgroundKind;
 
 /** One paid call, as one line of the ledger. */
 export interface SpendRow {
@@ -72,7 +79,7 @@ export const VENDOR_NAMES: Record<PaidVendor, string> = {
 /** How the honest note names a vendor ("today's Claude budget is spent"). */
 const SHORT_NAMES: Record<PaidVendor, string> = { anthropic: 'Claude', openai: 'OpenAI', perplexity: 'Perplexity', tavily: 'Tavily' };
 
-const KINDS: ReadonlySet<string> = new Set<SpendKind>(['chat', 'extract', 'plan', 'tts', 'tool-search', 'tool-perplexity', 'eval']);
+const KINDS: ReadonlySet<string> = new Set<SpendKind>(['chat', 'extract', 'plan', 'tts', 'tool-search', 'tool-perplexity', 'eval', ...SPEND_KINDS]);
 
 // ---------------------------------------------------------------------------
 // the ledger
@@ -179,6 +186,12 @@ export class SpendLedger {
     return { day: { ...this.bucket(`${vendor}|d|${day}`) }, month: { ...this.bucket(`${vendor}|m|${month}`) } };
   }
 
+  /** What one kind of call has spent (every vendor) in the day and the month containing `at`. */
+  kindTotals(kind: SpendKind, at: number = this.now()): { dayUsd: number; monthUsd: number } {
+    const { day, month } = this.period(at);
+    return { dayUsd: this.bucket(`kind:${kind}|d|${day}`).usd, monthUsd: this.bucket(`kind:${kind}|m|${month}`).usd };
+  }
+
   /** Price a model call, logging once per model the table has no price for (priced high). */
   priceTokens(vendor: 'anthropic' | 'openai' | 'perplexity', model: string, usage: TokenUsage): number {
     if (!isListedModel(model) && !this.unpriced.has(model)) {
@@ -194,7 +207,7 @@ export class SpendLedger {
 
   private add(row: SpendRow): void {
     const { day, month } = this.period(row.ts);
-    for (const key of [`${row.vendor}|d|${day}`, `${row.vendor}|m|${month}`]) {
+    for (const key of [`${row.vendor}|d|${day}`, `${row.vendor}|m|${month}`, `kind:${row.kind}|d|${day}`, `kind:${row.kind}|m|${month}`]) {
       const b = this.buckets.get(key) ?? { usd: 0, evalUsd: 0, calls: 0 };
       if (row.kind === 'eval') b.evalUsd += row.usd;
       else b.usd += row.usd;
@@ -276,6 +289,41 @@ export function readCaps(env: Record<string, string | undefined>, warn: (msg: st
     caps[vendor] = c;
   }
   return caps;
+}
+
+/** A background kind's caps: both always set, $0 (spend nothing) unless Will raised them. */
+export type KindCaps = Record<BackgroundKind, { dailyUsd: number; monthlyUsd: number }>;
+
+/**
+ * FLINT_BUDGET_KIND_<KIND>_DAILY_USD / _MONTHLY_USD for RUNTIME, REVIEW,
+ * DISPATCH and SELFMOD (plan 3.0.8). Unlike a vendor cap, unset (or blank) is
+ * $0, not "no cap": background spend is off until Will turns it on, and both
+ * periods must be raised for any to happen. Anything unparseable is reported
+ * through `warn` and read as $0 (fail closed).
+ */
+export function readKindCaps(env: Record<string, string | undefined>, warn: (msg: string) => void = () => {}): KindCaps {
+  const caps = {} as KindCaps;
+  for (const kind of SPEND_KINDS) {
+    const c = { dailyUsd: 0, monthlyUsd: 0 };
+    for (const [period, field] of [
+      ['DAILY', 'dailyUsd'],
+      ['MONTHLY', 'monthlyUsd'],
+    ] as const) {
+      const key = `FLINT_BUDGET_KIND_${kind.toUpperCase()}_${period}_USD`;
+      const raw = env[key]?.trim();
+      if (!raw) continue;
+      const n = Number(raw.replace(/^\$/, ''));
+      if (Number.isFinite(n) && n >= 0) c[field] = n;
+      else warn(`${key}=${JSON.stringify(raw)} is not a dollar amount — read as $0`);
+    }
+    caps[kind] = c;
+  }
+  return caps;
+}
+
+/** One boot-log line: the background kinds' caps. */
+export function describeKindCaps(caps: KindCaps): string {
+  return SPEND_KINDS.map((k) => `${k} $${caps[k].dailyUsd.toFixed(2)}/day, $${caps[k].monthlyUsd.toFixed(2)}/month`).join('; ');
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +438,33 @@ export interface ExternalTotals {
   vendors: Record<string, { dayUsd: number; monthUsd: number; estimate?: boolean }>;
 }
 
+/** The unified view is trusted for this long after its `asOf` (plan 3.0.8). */
+export const UNIFIED_MAX_AGE_MS = 2 * 3600_000;
+
+/** A threshold notice the guard has just raised (not one it re-raised on boot). */
+export interface ThresholdNotice {
+  vendor: PaidVendor;
+  period: 'day' | 'month';
+  level: 'notice' | 'degrade' | 'exhausted';
+  /** The notice's dedupe key: the same threshold always has the same key. */
+  key: string;
+}
+
+export interface SpendGuardOptions {
+  /**
+   * Called when a threshold notice is newly stored: never for one the
+   * notifications feed already had (the boot re-check, a restart), so a hook
+   * that tells the runtime does not repeat itself on every deploy.
+   */
+  onThreshold?: (t: ThresholdNotice) => void;
+}
+
+const LEVEL_AT: ReadonlyArray<[number, ThresholdNotice['level']]> = [
+  [NOTICE_AT, 'notice'],
+  [DEGRADE_AT, 'degrade'],
+  [EXHAUSTED_AT, 'exhausted'],
+];
+
 export class SpendGuard {
   private readonly notified = new Set<string>();
   private external: ExternalTotals | undefined;
@@ -398,6 +473,7 @@ export class SpendGuard {
     readonly ledger: SpendLedger,
     readonly caps: Caps,
     private readonly notifier?: Notifier,
+    private readonly opts: SpendGuardOptions = {},
   ) {
     ledger.onRecord((row) => this.checkThresholds(row.vendor));
   }
@@ -457,6 +533,22 @@ export class SpendGuard {
     this.external = t;
   }
 
+  /**
+   * The unified view of one vendor, for a metered background call: `missing`
+   * (no totals for it), `stale` (older than UNIFIED_MAX_AGE_MS, unparseable,
+   * or from the future), or `fresh` with the vendor's whole spend as a share of
+   * Flint's cap for it (undefined when Flint has no cap for that vendor).
+   */
+  unifiedView(vendor: PaidVendor, at = Date.now()): { state: 'missing' | 'stale' } | { state: 'fresh'; fraction: number | undefined } {
+    const ext = this.external?.vendors[vendor];
+    if (!this.external || !ext) return { state: 'missing' };
+    const asOf = Date.parse(this.external.asOf);
+    if (!Number.isFinite(asOf) || at - asOf > UNIFIED_MAX_AGE_MS || asOf - at > 5 * 60_000) return { state: 'stale' };
+    const caps = this.caps[vendor] ?? {};
+    if (caps.dailyUsd === undefined && caps.monthlyUsd === undefined) return { state: 'fresh', fraction: undefined };
+    return { state: 'fresh', fraction: Math.max(fractionOf(ext.dayUsd, caps.dailyUsd), fractionOf(ext.monthUsd, caps.monthlyUsd)) };
+  }
+
   snapshot(at?: number): SpendSnapshot {
     const { day, month } = this.ledger.period(at);
     const vendors = {} as Record<PaidVendor, VendorStatus>;
@@ -498,13 +590,22 @@ export class SpendGuard {
       for (const th of [NOTICE_AT, DEGRADE_AT, EXHAUSTED_AT]) if (th <= hit) this.notified.add(key(th));
       const pct = Math.round(hit * 100);
       const scope = period === 'daily' ? "today's" : "this month's";
-      this.notifier.push(
+      const pushed = this.notifier.push(
         `${VENDOR_NAMES[vendor]} budget: ${pct}% of ${scope} cap`,
         // The effect of the vendor's CURRENT level: the other period's cap may be further along.
         `${usd(used)} of ${usd(cap)} ${period === 'daily' ? 'today' : 'this month'}. ${this.status(vendor).effect}`,
         'budget',
         key(hit),
       );
+      // Only a notice the feed did not already have is new (the feed's keys survive a restart).
+      if (this.opts.onThreshold && (pushed as { status?: unknown } | null)?.status === 'stored') {
+        const level = LEVEL_AT.find(([th]) => th === hit)![1];
+        try {
+          this.opts.onThreshold({ vendor, period: period === 'daily' ? 'day' : 'month', level, key: key(hit) });
+        } catch {
+          /* a listener's failure is not the guard's */
+        }
+      }
     }
   }
 }

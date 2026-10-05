@@ -34,22 +34,32 @@ export function parseLaunchctlList(out: string): Map<string, Listed> {
   return m;
 }
 
+/** Labels `launchctl print-disabled` lists as disabled: put away on purpose (`launchctl disable`). */
+export function parsePrintDisabled(out: string): Set<string> {
+  const off = new Set<string>();
+  for (const m of out.matchAll(/^\s*"([^"]{1,200})"\s*=>\s*(disabled|true)\s*$/gm)) off.add(m[1]!);
+  return off;
+}
+
 export function launchdSource(o: LaunchdOptions): Source {
   const ours = (label: string) => o.prefixes.some((p) => label.startsWith(p));
   return {
     name: 'launchd',
     cadenceMs: 2 * 60_000,
-    async run() {
+    async run(r) {
       const listed = parseLaunchctlList(await o.run('/bin/launchctl', ['list']));
+      // Disabled with `launchctl disable` (the plist may say nothing): put away, not failed.
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      const off = uid === undefined ? new Set<string>() : await o.run('/bin/launchctl', ['print-disabled', `gui/${uid}`]).then(parsePrintDisabled, () => new Set<string>());
       const plists = new Map<string, { periodic: boolean; disabled: boolean }>();
       for (const f of readdirSync(o.agentsDir).filter((f) => f.endsWith('.plist'))) {
         const label = f.slice(0, -'.plist'.length);
         if (!ours(label)) continue;
         try {
           const j = JSON.parse(await o.run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(o.agentsDir, f)])) as Record<string, unknown>;
-          plists.set(label, { periodic: 'StartInterval' in j || 'StartCalendarInterval' in j, disabled: j.Disabled === true });
+          plists.set(label, { periodic: 'StartInterval' in j || 'StartCalendarInterval' in j, disabled: j.Disabled === true || off.has(label) });
         } catch {
-          plists.set(label, { periodic: false, disabled: false });
+          plists.set(label, { periodic: false, disabled: off.has(label) });
         }
       }
       const labels = new Set([...[...listed.keys()].filter(ours), ...plists.keys()]);
@@ -68,10 +78,20 @@ export function launchdSource(o: LaunchdOptions): Source {
             loaded: !!l,
             ...(p?.periodic ? {} : { running: !!l?.pid }),
             lastExit: l?.status ?? null,
-            ...(p?.disabled ? { disabled: true } : {}),
+            // Always said, so "not disabled" is known, not assumed: only a disabled agent is put away on purpose.
+            disabled: !!p?.disabled,
           },
         };
       });
+      // An agent of ours with neither a plist nor a listing is gone: archived as last known, not left "down".
+      if (r.known) {
+        for (const k of await r.known('service')) {
+          if (!k.key.startsWith('service:launchd:')) continue;
+          const label = k.key.slice('service:launchd:'.length);
+          if (labels.has(label) || !ours(label)) continue;
+          observations.push({ type: 'service.status', kind: 'service', key: k.key, name: k.name, sensitivity: 'ops', externalId: label, taintedPaths: k.taintedPaths, state: k.state, status: 'archived' });
+        }
+      }
       return { observations, metrics: [] };
     },
   };

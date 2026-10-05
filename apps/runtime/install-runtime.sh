@@ -32,6 +32,31 @@ secret() { # one key from secrets.env, quotes stripped
 }
 die() { echo "✗ $*"; exit 1; }
 
+# Deploy events (DeployEvent in packages/policy/src/wire.ts): one JSON line per
+# failed stage or finished deploy in ~/.flint/deploy-events.jsonl (0600), read
+# by the runtime's `deploy` source. Ids and enums only, never log text. Writing
+# it can never fail the install: errexit is off inside, and it always returns 0.
+# (The same function is in install-server.sh; a test keeps the two identical.)
+deploy_event() { # <server|runtime> <gate|migrate|restart|health|deploy> <ok|failed> <sha>
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local dir="$HOME/.flint" id at
+  [[ $1 == (server|runtime) && $2 == (gate|migrate|restart|health|deploy) && $3 == (ok|failed) && $4 =~ '^[0-9a-f]{40}$' ]] || return 0
+  id="$(openssl rand -hex 16 2>/dev/null)"
+  [[ $id =~ '^[0-9a-f]{32}$' ]] || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  [[ $at =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]] || return 0
+  { mkdir -p -m 700 "$dir" && chmod 700 "$dir"; } 2>/dev/null || return 0
+  ( umask 077; print -r -- "{\"id\":\"$id\",\"at\":\"$at\",\"component\":\"$1\",\"stage\":\"$2\",\"outcome\":\"$3\",\"sha\":\"$4\"}" >> "$dir/deploy-events.jsonl" ) 2>/dev/null || return 0
+  chmod 600 "$dir/deploy-events.jsonl" 2>/dev/null
+  return 0
+}
+# A failure is recorded under the stage it happened in: DEPLOY_STAGE moves on
+# as the install does, and is emptied once a stage's failure has been recorded
+# by hand (or the deploy finished). The step-2 skip exits 0 and records nothing.
+DEPLOY_STAGE=gate
+trap '[ $? = 0 ] || [ -z "$DEPLOY_STAGE" ] || deploy_event runtime "$DEPLOY_STAGE" failed "$SHA"' EXIT
+
 # 1. every migration is reversible
 for dir in "$RT_SRC"/prisma/migrations/*/(N); do
   [ -f "$dir/migration.sql" ] || continue
@@ -45,8 +70,10 @@ if [ -f "$RT/migrate-failed" ] && grep -qx "$SHA" "$RT/migrate-failed"; then
 fi
 
 # 3. gate
-echo "runtime: building @flint/policy and the Prisma client..."
+echo "runtime: building @flint/policy, @flint/core and the Prisma client..."
 pnpm --filter @flint/policy build >/dev/null
+# Triage asks the local model through @flint/core/ollama (the Ollama provider alone).
+pnpm --filter @flint/core build >/dev/null
 (cd "$RT_SRC" && ./node_modules/.bin/prisma generate >/dev/null)
 if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: runtime typecheck + tests (scratch database flint_test)..."
@@ -62,6 +89,7 @@ APP_URL="$(secret FLINT_DB_URL)"
 [ -n "$OWNER_URL" ] && [ -n "$BACKUP_URL" ] && [ -n "$APP_URL" ] || die "FLINT_DB_OWNER_URL, FLINT_DB_BACKUP_URL and FLINT_DB_URL must be in secrets.env"
 
 # 4. pre-migrate dump (only when a migration is pending)
+DEPLOY_STAGE=migrate
 PENDING="$(cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma migrate status 2>&1 || true)"
 if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been applied|following migration"; then
   echo "runtime: migrations pending; dumping first..."
@@ -84,11 +112,12 @@ if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been ap
   fi
 fi
 
-# 6. bundle the release
+# 6. bundle the release (a failure from here until the agent is started is a failed restart)
+DEPLOY_STAGE=restart
 REL="$RT/releases/$SHA"
 rm -rf "$REL.partial" && mkdir -p "$REL.partial/node_modules"
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
-"$ESBUILD" "$RT_SRC/src/index.ts" --bundle --platform=node --format=esm --target=node20 \
+"$ESBUILD" "$RT_SRC/src/index.ts" --bundle --platform=node --format=esm --target=node22 \
   --external:@prisma/client --external:.prisma \
   --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
   --outfile="$REL.partial/runtime.mjs" >/dev/null
@@ -128,7 +157,7 @@ CONNECTOR="$DATA/connectors/runtime-server.mjs"
 if [ ! -f "$CONNECTOR" ]; then
   ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
   mkdir -p "$DATA/connectors"
-  if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node20 \
+  if [ -n "$ESBUILD" ] && "$ESBUILD" "$REPO/packages/mcp/connectors/runtime-server.ts" --bundle --platform=node --format=esm --target=node22 \
        --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
        --outfile="$CONNECTOR" --log-level=error; then
     echo "runtime: built the runtime MCP connector. To use it, add this to the \"servers\" list in ~/.flint/mcp.json"
@@ -148,6 +177,15 @@ ENVF="$DATA/runtime.env"
   echo "FLINT_TZ=$(plutil -extract EnvironmentVariables.FLINT_USER_TZ raw "$AGENTS/com.flint.server.plist" 2>/dev/null || echo America/Chicago)"
   echo "RUNTIME_GIT_SHA=${SHA}"
   echo "SERVER_INTERNAL_URL=http://[::1]:8081"
+  # Triage's local model: the server's Ollama and model (one model loaded, not
+  # two), on loopback only. Switching triage on is Will's, in runtime.override.env.
+  OLLAMA_HOST_V="$(plutil -extract EnvironmentVariables.OLLAMA_HOST raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  OLLAMA_MODEL_V="$(plutil -extract EnvironmentVariables.OLLAMA_MODEL raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  if print -r -- "$OLLAMA_HOST_V" | grep -qE '^http://(\[::1\]|127\.0\.0\.1|localhost):[0-9]+$'; then echo "OLLAMA_URL=$OLLAMA_HOST_V"; fi
+  if print -r -- "$OLLAMA_MODEL_V" | grep -qE '^[A-Za-z0-9._:/-]{1,80}$'; then echo "FLINT_TRIAGE_MODEL=$OLLAMA_MODEL_V"; fi
+  # The same num_ctx as chat: a different one makes Ollama reload the model under it.
+  OLLAMA_CTX_V="$(plutil -extract EnvironmentVariables.OLLAMA_NUM_CTX raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  if print -r -- "$OLLAMA_CTX_V" | grep -qE '^[0-9]{3,6}$'; then echo "OLLAMA_NUM_CTX=$OLLAMA_CTX_V"; fi
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.
   # (|| true: under pipefail a missing plist or file must not stop the install.)
@@ -159,6 +197,10 @@ ENVF="$DATA/runtime.env"
   fi
 } > "$ENVF.new"
 chmod 600 "$ENVF.new" && mv "$ENVF.new" "$ENVF"
+# Will's own settings (FLINT_RUNTIME_TRIAGE=on, ...) live in runtime.override.env:
+# never written here, only kept readable by its owner alone (the runtime refuses
+# to start on one others can read).
+[ -f "$DATA/runtime.override.env" ] && chmod 600 "$DATA/runtime.override.env"
 
 # The LaunchAgent: node on the current release; no secrets in the plist.
 NODE="$(command -v node)"
@@ -173,6 +215,7 @@ cat > "$AGENTS/$LABEL.plist.new" <<PLIST
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
   <key>StandardOutPath</key><string>$DATA/runtime.out.log</string>
   <key>StandardErrorPath</key><string>$DATA/runtime.err.log</string>
 </dict></plist>
@@ -198,18 +241,38 @@ restart_agent() {
 
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
-restart_agent || true
+# A failed restart is one incident: recorded once, straight to the rollback (no health
+# poll, which would only fail too and record a second failure for the same sha).
+RESTARTED=1
+restart_agent || { deploy_event runtime restart failed "$SHA"; RESTARTED=0; }
 
+DEPLOY_STAGE=health
 for i in {1..30}; do
+  [ "$RESTARTED" = 1 ] || break
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
     echo "runtime: $SHA is up on [::1]:$PORT"
-    # Keep the three newest releases.
-    ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do [ "$old" = "$REL" ] || rm -rf "$old"; done
+    DEPLOY_STAGE=
+    deploy_event runtime deploy ok "$SHA"
+    # Keep the three newest releases, and any named in ~/.flint/runtime/pinned
+    # (one release sha per line: a known-good one to roll back to).
+    ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do
+      [ "$old" = "$REL" ] && continue
+      [ -f "$RT/pinned" ] && grep -qxF "$(basename "$old")" "$RT/pinned" && continue
+      rm -rf "$old"
+    done
     exit 0
   fi
   sleep 1
 done
-echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
+DEPLOY_STAGE=
+if [ "$RESTARTED" = 1 ]; then
+  echo "✗ runtime $SHA did not report healthy; going back to ${PREV:-nothing}"
+  # Recorded before the rollback, not by the trap after it: the line marks when the
+  # check failed, and is written even if the rollback is cut short.
+  deploy_event runtime health failed "$SHA"
+else
+  echo "✗ runtime $SHA did not start; going back to ${PREV:-nothing}"
+fi
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   ln -sfn "$PREV" "$RT/current"
   # Loaded or not (a failed bootstrap leaves it unloaded): the same restart.

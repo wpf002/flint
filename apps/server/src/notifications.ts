@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { execFile } from 'node:child_process';
+import { NOTIFY_CHANNELS, type NotifyChannel } from '@flint/policy';
 
 export interface Notification {
   id: string;
@@ -16,19 +17,65 @@ export interface Notification {
 export type Check = () => Promise<Array<{ title: string; body: string; kind: string; dedupe: string }>>;
 
 /**
+ * What push() did: `stored` (in the console's list, and sent on the other
+ * channels asked for), `duplicate` (already pushed under that dedupe key, so
+ * nothing new happened) or `refused` (not something Flint shows: a raw
+ * payload). `pinged` says whether the phone got its content-free ping.
+ */
+export interface PushResult {
+  status: 'stored' | 'duplicate' | 'refused';
+  pinged: boolean;
+}
+
+/**
+ * The only thing the phone is ever sent (Machine plan P2: 0 ntfy payloads carry
+ * content). ntfy topics are public by name, so the ping says that something is
+ * waiting and nothing about what: the words stay in the console.
+ */
+export const PHONE_PING = { title: 'Flint', body: 'Something needs a look in the console.', tags: 'bell' } as const;
+
+/**
+ * The channels a note goes out on: all three when none are named (what every
+ * note did before P2). A banner or a phone ping always comes with the in-app
+ * note, so nothing points Will at a console that has nothing to show.
+ */
+export function noteChannels(asked?: readonly NotifyChannel[]): NotifyChannel[] {
+  const want = new Set<NotifyChannel>(asked && asked.length > 0 ? asked : NOTIFY_CHANNELS);
+  if (want.has('banner') || want.has('push')) want.add('inapp');
+  return NOTIFY_CHANNELS.filter((c) => want.has(c));
+}
+
+export interface NotificationsDeps {
+  /** The ntfy topic (default FLINT_NTFY_TOPIC); unset: no phone pings. */
+  topic?: () => string | undefined;
+  fetchImpl?: typeof fetch;
+  /** The macOS banner (default osascript). */
+  banner?: (title: string, body: string) => void;
+}
+
+function deliverOS(title: string, body: string): void {
+  const esc = (s: string) => s.replace(/["\\]/g, '\\$&').slice(0, 240);
+  execFile('osascript', ['-e', `display notification "${esc(body)}" with title "Flint" subtitle "${esc(title)}"`], () => {});
+}
+
+/**
  * Makes Flint proactive — it notices and tells Will instead of only answering
  * when asked. A durable notifications feed (console bell + unread badge), plus a
  * watcher that runs lightweight checks on an interval and pushes anything new.
  * Delivery is layered and all best-effort: always the in-app feed; a macOS
- * banner if available; and a phone push via ntfy.sh when FLINT_NTFY_TOPIC is set
- * (install the free ntfy app, subscribe to the topic — no account, no keys).
+ * banner when asked for; and a phone ping via ntfy.sh when FLINT_NTFY_TOPIC is
+ * set (install the free ntfy app, subscribe to the topic — no account, no keys).
+ * The ping is the same for every caller and carries no content (PHONE_PING).
  */
 export class Notifications {
   private items: Notification[] = [];
   private readonly seen = new Set<string>(); // dedupe signatures already pushed
   private seq = 0;
 
-  constructor(private readonly path: string) {
+  constructor(
+    private readonly path: string,
+    private readonly deps: NotificationsDeps = {},
+  ) {
     this.load();
   }
 
@@ -54,40 +101,45 @@ export class Notifications {
   }
 
   /**
-   * Add a notification (deduped by signature) and fan out to OS + phone.
-   * `phone: 'ping'` sends the phone a content-free nudge instead of the words
-   * (ntfy topics are public by name: what came from elsewhere stays in the console).
+   * Add a notification (deduped by signature) and deliver it on `channels`
+   * (noteChannels: all three by default, and never a banner or ping without the
+   * in-app note). The in-app note keeps the words; the banner shows them on this
+   * Mac only; the phone gets PHONE_PING, whatever the title and body say.
    */
-  push(title: string, body: string, kind: string, dedupe?: string, opts: { phone?: 'full' | 'ping' } = {}): Notification | undefined {
+  push(title: string, body: string, kind: string, dedupe?: string, opts: { channels?: readonly NotifyChannel[] } = {}): PushResult {
     // Safety net: never surface a raw JSON blob as a notification — a check
     // should format human-readable text, not dump a tool payload.
-    if (/^\s*[{[]/.test(body)) return undefined;
+    if (/^\s*[{[]/.test(body)) return { status: 'refused', pinged: false };
     const sig = dedupe ?? `${kind}:${title}:${body}`;
-    if (this.seen.has(sig)) return undefined;
+    if (this.seen.has(sig)) return { status: 'duplicate', pinged: false };
     this.seen.add(sig);
+    const channels = noteChannels(opts.channels);
     const n: Notification = { id: `n${++this.seq}`, title, body, kind, ts: Date.now(), read: false };
     this.items.unshift(n);
     if (this.items.length > 300) this.items.length = 300;
     this.save();
-    this.deliverOS(title, body);
-    if (opts.phone === 'ping') this.deliverPhone('Flint', 'Something needs a look in the console.');
-    else this.deliverPhone(title, body);
-    return n;
+    if (channels.includes('banner')) (this.deps.banner ?? deliverOS)(title, body);
+    const pinged = channels.includes('push') && this.deliverPhone();
+    return { status: 'stored', pinged };
   }
 
-  private deliverOS(title: string, body: string): void {
-    const esc = (s: string) => s.replace(/["\\]/g, '\\$&').slice(0, 240);
-    execFile('osascript', ['-e', `display notification "${esc(body)}" with title "Flint" subtitle "${esc(title)}"`], () => {});
-  }
-
-  private deliverPhone(title: string, body: string): void {
-    const topic = process.env.FLINT_NTFY_TOPIC?.trim();
-    if (!topic) return;
-    fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+  /**
+   * The phone ping, content-free by construction: it takes no text, so no caller
+   * (the runtime, the Watcher, the spend guard, "Action done") can put words on
+   * ntfy.sh. Returns whether a ping was sent off.
+   */
+  private deliverPhone(): boolean {
+    const topic = (this.deps.topic ?? (() => process.env.FLINT_NTFY_TOPIC))()?.trim();
+    if (!topic) return false;
+    (this.deps.fetchImpl ?? fetch)(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
       method: 'POST',
-      headers: { Title: title.slice(0, 120), Tags: 'fire' },
-      body: body.slice(0, 1000),
-    }).catch(() => {});
+      headers: { Title: PHONE_PING.title, Tags: PHONE_PING.tags },
+      body: PHONE_PING.body,
+      signal: AbortSignal.timeout(10_000),
+    })
+      .then((r) => r.body?.cancel())
+      .catch(() => {});
+    return true;
   }
 
   private load(): void {

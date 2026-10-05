@@ -26,7 +26,7 @@ import { CLAIM_TEMPLATE_HELP, ClaimTemplate, isWrite, resolveTier, type PolicyRo
 import type { Gate, GateRequest } from '@flint/mcp';
 import type { Tool } from '@flint/core';
 import { outcomeOf, type ActionQueue } from './actions';
-import { isEvalTurn, markTainted, noteProposal, taintSources, turnId, turnTainted, withTurnTaint } from './turn-taint';
+import { currentTurn, isEvalTurn, markTainted, noteProposal, noteTool, taintSources, turnId, turnTainted, withTurnTaint } from './turn-taint';
 import type { RuntimeProposals } from './runtime-proposals';
 
 export interface TierEvent {
@@ -129,6 +129,8 @@ async function needsApproval(opts: TierGateOptions, d: TierDecision, call: Call,
  * outcome is reported under.
  */
 async function gateCall(opts: TierGateOptions, call: Call, mcp?: Mcp): Promise<{ run: false; message: string } | { run: true; correlationId?: string }> {
+  // The turn called it, whatever is decided (the runtime's chat.turn event names it).
+  noteTool(call.fullName);
   const tainted = (opts.taintFloor ?? true) && turnTainted();
   let d = resolveTier(call.fullName, { context: 'chat', tainted, ...(mcp ? { mcp } : {}), policies: opts.policies?.() ?? [] });
   if (d.tier === 'forbidden') {
@@ -222,6 +224,7 @@ export function tierGate(opts: TierGateOptions): Gate {
       };
       const refused = predictionRefusal(req);
       if (refused) {
+        noteTool(req.fullName);
         // A refusal, recorded like every other.
         const d = resolveTier(req.fullName, { context: 'chat', tainted: turnTainted(), mcp, policies: opts.policies?.() ?? [] });
         event(opts, req.fullName, { ...d, tier: 'forbidden', rule: 'forbidden', reason: 'a prediction needs a valid claim template' }, mcp, 'denied');
@@ -271,7 +274,8 @@ export function gateBuiltins(tools: Tool[], opts: TierGateOptions): Tool[] {
           // deep_research searches and then reads what it found: inside it, its own
           // results must not gate its next fetch, so it runs in a scope of its own.
           // What it returns still taints this turn.
-          result = TAINTING_BUILTINS.has(name) ? await withTurnTaint(() => t.handler(call), { eval: isEvalTurn() }) : await t.handler(call);
+          // (The tools it calls in there are still this turn's.)
+          result = TAINTING_BUILTINS.has(name) ? await withTurnTaint(() => t.handler(call), { eval: isEvalTurn(), tools: currentTurn()?.tools }) : await t.handler(call);
         } catch (err) {
           report(false, err instanceof Error ? err.name : 'error');
           throw err;

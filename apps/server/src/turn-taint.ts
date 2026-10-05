@@ -26,6 +26,12 @@ export class TurnTaint {
   readonly id = randomBytes(8).toString('hex');
   /** Proposals this turn filed (RAM queue or runtime), for the console's approval cards. */
   readonly proposed: Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> = [];
+  /**
+   * The tools this turn called (names only, refused and queued calls included),
+   * for the runtime's chat.turn event. A scope opened inside the turn (deep_research's)
+   * shares its parent's set, so the searches it makes are the turn's too.
+   */
+  tools = new Set<string>();
   get tainted(): boolean {
     return this.sources.size > 0;
   }
@@ -34,12 +40,28 @@ export class TurnTaint {
 const scope = new AsyncLocalStorage<TurnTaint>();
 
 /** Run `fn` as one turn with its own taint state, optionally starting from what it carries. */
-export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[]; eval?: boolean; allow?: readonly string[] } = {}): T {
+export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[]; eval?: boolean; allow?: readonly string[]; tools?: Set<string> | undefined } = {}): T {
   const t = new TurnTaint();
   for (const s of seed.sources ?? []) t.sources.add(s);
   for (const a of seed.allow ?? []) t.allowances.add(a);
   t.eval = seed.eval === true;
+  if (seed.tools) t.tools = seed.tools;
   return scope.run(t, fn);
+}
+
+/** The current turn's state, for a listener that runs outside its scope (a response's 'finish'). */
+export function currentTurn(): TurnTaint | undefined {
+  return scope.getStore();
+}
+
+/** Note a tool the current turn called. Outside a turn, nothing. */
+export function noteTool(name: string): void {
+  scope.getStore()?.tools.add(name);
+}
+
+/** The tools the current turn called, in the order first called. */
+export function turnTools(): string[] {
+  return [...(scope.getStore()?.tools ?? [])];
 }
 
 /** This turn's history carries untrusted text read at `origin`: it is tainted from here on. */

@@ -4,6 +4,9 @@
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
+ *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
+ *   pnpm --filter @flint/runtime promotion-table [--drop <pattern>]...
+ *                                                    file P2's promotion table for Will to sign
  *
  * Run by hand, it is Will acting (context console). With --auto (the nightly
  * LaunchAgent) it is Flint acting on its own, so the tier engine decides: an
@@ -14,7 +17,9 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadBackupConfig } from './config.js';
+import { loadBackupConfig, loadRuntimeConfig } from './config.js';
+import { p2Report } from './report/exit.js';
+import { promotionTable } from './governance/promotion.js';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, gate, type Command } from './backup/nightly.js';
@@ -41,8 +46,32 @@ function enroll(replace: boolean): void {
 
 async function main(): Promise<void> {
   if (process.argv[2] === 'enroll') return enroll(process.argv.includes('--replace'));
+  if (process.argv[2] === 'promotion-table') {
+    const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      const t = await promotionTable(db, { drop });
+      console.log(`${t.deduped ? 'already filed' : 'filed'}: proposal ${t.proposalId}, ${t.rows.length} rows to ALONE until ${t.rows[0]!.expiresAt}`);
+      for (const r of t.rows) console.log(`  ${r.pattern}${r.dailyCap ? ` (cap ${r.dailyCap}/day)` : ''}`);
+      console.log('Sign it in the console (Approvals) with your key, or let it expire.');
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
+  if (process.argv[2] === 'p2-report') {
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      console.log(JSON.stringify(await p2Report(db, config), null, 2));
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | p2-report | promotion-table [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

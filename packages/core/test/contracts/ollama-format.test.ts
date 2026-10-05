@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { cassetteProvider, type OllamaChatCassette } from './ollama-harness.js';
 import { decodeAssistantTurn } from '../../src/index.js';
+import { withoutTurnEnd } from '../../src/provider/ollama/index.js';
 import type { GenerateArgs, StreamEvent, ToolDefinition } from '../../src/index.js';
 
 /*
@@ -55,6 +56,12 @@ const padded: OllamaChatCassette = {
   ...answered,
   message: { role: 'assistant', content: `${answered.message.content}\n\n\n\n\n\n\n\n` },
   done_reason: 'length',
+};
+
+/** A model with no stop parameters lets its end-of-turn token through after the JSON (muse-glimmer, recorded 2026-10-02). */
+const turnEnd: OllamaChatCassette = {
+  ...answered,
+  message: { role: 'assistant', content: `${answered.message.content}<|eot|>` },
 };
 
 const args: GenerateArgs = {
@@ -116,5 +123,20 @@ describe('contract (ollama): responseFormat on `format`', () => {
     expect(requests).toHaveLength(1);
     expect(r.reason).toBe('complete');
     expect(JSON.parse(decodeAssistantTurn(r.message).text)).toEqual(expected);
+  });
+
+  it('JSON followed by an end-of-turn token is the answer, in one request', async () => {
+    const { provider, requests } = cassetteProvider([turnEnd]);
+    const r = await provider.generate(args);
+
+    expect(requests).toHaveLength(1);
+    expect(r.reason).toBe('complete');
+    expect(JSON.parse(decodeAssistantTurn(r.message).text)).toEqual(expected);
+  });
+
+  it('only trailing end-of-turn tokens are taken off', () => {
+    expect(withoutTurnEnd(' {"a":"<|eot|>"} <|eot|>\n<|im_end|> ')).toBe('{"a":"<|eot|>"}');
+    expect(withoutTurnEnd('{"a":1}')).toBe('{"a":1}');
+    expect(withoutTurnEnd('<|eot|>{"a":1}')).toBe('<|eot|>{"a":1}');
   });
 });

@@ -438,7 +438,13 @@ describe('internal listener', () => {
   it('a runtime notification is redacted; a raw payload is refused', async () => {
     const notes: Array<[string, string]> = [];
     const TOKEN = 'runtime-to-server-0123456789abcdef';
-    const s = startInternal({ tokenSha256: () => createHash('sha256').update(TOKEN).digest('hex'), notify: (t, b) => (/^\s*[{[]/.test(b) ? 'refused' : (notes.push([t, b]), 'stored')), spendExternal: () => {} }, 0);
+    const s = startInternal({
+      tokenSha256: () => createHash('sha256').update(TOKEN).digest('hex'),
+      notify: (n) => (/^\s*[{[]/.test(n.body) ? { status: 'refused', pinged: false } : (notes.push([n.title, n.body]), { status: 'stored', pinged: false })),
+      spendExternal: () => {},
+      chatInFlight: () => 0,
+      complete: async () => ({ status: 402, body: { error: 'capped', reason: 'kind_cap' } }),
+    }, 0);
     await new Promise((r) => s.once('listening', r));
     const post = (body: unknown) => fetch(`http://[::1]:${(s.address() as AddressInfo).port}/internal/notify`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) });
     expect((await post({ title: 'offsite failed', body: 'pg_dump: password=hunter2hunter2 sk-ant-api03-abcdefghijklmnopqrstuv' })).status).toBe(200);
