@@ -268,23 +268,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
   }
 
+  /// Restart onto the new build without ever leaving Will with no Flint: start a
+  /// second instance, wait until it has finished launching, and only then quit.
+  /// If none comes up (Launch Services can hand back this very instance), try
+  /// `open -n`; if that fails too, stay on this build and try again in 30
+  /// minutes. Every step goes to ~/.flint/app-update.log.
+  var nextRelaunch = Date.distantPast
+
   func relaunch(front: Bool) {
-    guard !relaunching else { return }
+    guard !relaunching, Date() >= nextRelaunch else { return }
     relaunching = true
+    let me = ProcessInfo.processInfo.processIdentifier
+    var args: [String] = []
+    if window.isMiniaturized { args = ["--relaunched-minimized"] }
+    else if NSApp.isHidden { args = ["--relaunched-hidden"] }
+    else if !front { args = ["--relaunched-background"] }
+    updateLog("new build on disk; starting it (\(args.first ?? "in front"))")
     let cfg = NSWorkspace.OpenConfiguration()
     cfg.createsNewApplicationInstance = true
     cfg.activates = front
-    if window.isMiniaturized {
-      cfg.arguments = ["--relaunched-minimized"]
-    } else if NSApp.isHidden {
-      cfg.arguments = ["--relaunched-hidden"]
-    } else if !front {
-      cfg.arguments = ["--relaunched-background"]
-    }
-    NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { app, _ in
+    cfg.arguments = args
+    NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { app, err in
       DispatchQueue.main.async {
-        if app != nil { NSApp.terminate(nil) } else { self.relaunching = false }
+        if let app, app.processIdentifier != me, !app.isTerminated {
+          self.waitForNewInstance(deadline: Date().addingTimeInterval(20), args: args, retried: false)
+        } else {
+          self.updateLog("Launch Services started no new instance (\(err?.localizedDescription ?? (app == nil ? "nothing came back" : "it returned this instance"))); trying open -n")
+          self.openNew(args: args)
+        }
       }
+    }
+  }
+
+  /// The second way to start a new instance: `open -n`, through Launch Services too.
+  func openNew(args: [String]) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    p.arguments = ["-n", Bundle.main.bundlePath] + (args.isEmpty ? [] : ["--args"] + args)
+    do { try p.run() } catch { updateLog("open -n could not run: \(error.localizedDescription)"); relaunchFailed(); return }
+    waitForNewInstance(deadline: Date().addingTimeInterval(20), args: args, retried: true)
+  }
+
+  /// Quit only once another Flint is running and has finished launching.
+  func waitForNewInstance(deadline: Date, args: [String], retried: Bool) {
+    let me = ProcessInfo.processInfo.processIdentifier
+    let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.flint.app").filter { $0.processIdentifier != me && !$0.isTerminated }
+    if let up = others.first(where: { $0.isFinishedLaunching }) {
+      updateLog("new instance \(up.processIdentifier) is up; quitting this one")
+      NSApp.terminate(nil)
+      return
+    }
+    if Date() < deadline {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.waitForNewInstance(deadline: deadline, args: args, retried: retried) }
+      return
+    }
+    others.forEach { _ = $0.forceTerminate() }
+    if retried {
+      updateLog("no new instance finished launching; staying on this build")
+      relaunchFailed()
+    } else {
+      updateLog("the new instance did not finish launching in 20 s; trying open -n")
+      openNew(args: args)
+    }
+  }
+
+  func relaunchFailed() {
+    relaunching = false
+    nextRelaunch = Date().addingTimeInterval(30 * 60)
+  }
+
+  /// One line per step of an update, in ~/.flint/app-update.log (0600).
+  func updateLog(_ line: String) {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".flint/app-update.log")
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    let data = Data("\(stamp) pid \(ProcessInfo.processInfo.processIdentifier): \(line)\n".utf8)
+    if let h = try? FileHandle(forWritingTo: url) {
+      _ = try? h.seekToEnd(); try? h.write(contentsOf: data); try? h.close()
+    } else {
+      try? data.write(to: url, options: .atomic)
+      try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
   }
 

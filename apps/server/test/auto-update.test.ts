@@ -456,3 +456,24 @@ describe('update_app.sh installs while Flint.app is open', () => {
     expect(u.built).toHaveLength(0);
   });
 });
+
+describe('Flint.app restarts onto a new build without ever leaving none running', () => {
+  const swift = readFileSync(join(REPO, 'apps', 'desktop-mac', 'flint.swift'), 'utf8');
+  const relaunch = swift.slice(swift.indexOf('func relaunch(front: Bool)'), swift.indexOf('func buildMenu()'));
+
+  it('quits only after another instance is up and has finished launching', () => {
+    expect(relaunch).not.toMatch(/if app != nil \{ NSApp\.terminate/);
+    const wait = relaunch.slice(relaunch.indexOf('func waitForNewInstance'));
+    expect(wait.indexOf('isFinishedLaunching')).toBeGreaterThan(0);
+    expect(wait.indexOf('NSApp.terminate(nil)')).toBeGreaterThan(wait.indexOf('isFinishedLaunching'));
+    expect(relaunch.match(/NSApp\.terminate\(nil\)/g)).toHaveLength(1);
+    // The instance Launch Services hands back must be another one.
+    expect(relaunch).toContain('app.processIdentifier != me');
+  });
+
+  it('falls back to open -n, then stays on its build and tries again later, logging each step', () => {
+    expect(relaunch).toContain('p.arguments = ["-n", Bundle.main.bundlePath]');
+    expect(relaunch).toContain('nextRelaunch = Date().addingTimeInterval(30 * 60)');
+    expect(relaunch).toContain('.flint/app-update.log');
+  });
+});
