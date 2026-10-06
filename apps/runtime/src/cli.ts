@@ -185,12 +185,16 @@ async function main(): Promise<void> {
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
     if (!ok) {
       process.exitCode = 1;
-      if (auto) await notifyWill(b.config, `${action} failed`, error ?? 'see ~/.flint/runtime-backup.err.log');
+      // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit.
+      if (auto) await notifyWill(b.config, `${action} failed`, `${FAILED_WORDS[cmd]} failed. The details are in ~/.flint/runtime-backup.out.log.`);
     }
   } finally {
     await db.$disconnect();
   }
 }
+
+/** Which run failed, for the note Will reads (the nightly LaunchAgent runs these at 02:15; the drill on Sundays). */
+const FAILED_WORDS: Record<Command, string> = { backup: 'Last night’s backup', offsite: 'Last night’s offsite copy', drill: 'This week’s restore test' };
 
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

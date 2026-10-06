@@ -257,8 +257,9 @@ describe('SpendGuard notifications', () => {
       "Claude (Anthropic) budget: 80% of today's cap",
       "Claude (Anthropic) budget: 100% of today's cap",
     ]);
-    expect(pushed[1]!.body).toMatch(/^\$8\.20 of \$10\.00 today\. Standard, hard and code questions answer on the routine/);
-    expect(pushed[2]!.body).toMatch(/local brain/);
+    expect(pushed[0]!.body).toBe('Flint has spent $5.10 of today’s $10.00 cap. Nothing is limited yet.');
+    expect(pushed[1]!.body).toBe('Flint has spent $8.20 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.');
+    expect(pushed[2]!.body).toBe('Flint has spent $10.20 of today’s $10.00 cap. Claude is off until the cap resets, so another model answers and says so.');
     expect(new Set(pushed.map((p) => p.dedupe)).size).toBe(3);
     expect(pushed[0]!.dedupe).toBe('spend:anthropic:daily:2026-09-25:50');
     expect(pushed.every((p) => p.kind === 'budget')).toBe(true);
@@ -642,9 +643,9 @@ describe('/spend snapshot and spend_status', () => {
       level: 'degrade',
       binding: 'daily',
     });
-    expect(snap.vendors.anthropic.effect).toMatch(/routine \(cheaper\) tier/);
+    expect(snap.vendors.anthropic.effect).toBe('Harder questions use a cheaper model, and background work waits.');
     expect(snap.vendors.openai).toMatchObject({ today: { usd: 0, capUsd: 0, pct: 100 }, level: 'exhausted' });
-    expect(snap.vendors.tavily).toMatchObject({ today: { usd: 0, calls: 0 }, level: 'ok', effect: 'Normal: nothing is limited.' });
+    expect(snap.vendors.tavily).toMatchObject({ today: { usd: 0, calls: 0 }, level: 'ok', effect: 'Nothing is limited yet.' });
     expect(snap.vendors.tavily.today.capUsd).toBeUndefined();
     expect(snap.vendors.tavily.binding).toBeUndefined();
   });
@@ -657,7 +658,7 @@ describe('/spend snapshot and spend_status', () => {
     expect(tool.definition.name).toBe('spend_status');
     expect(tool.definition.idempotent).toBe(true);
     const text = String(await tool.handler({ id: '1', toolName: 'spend_status', args: {} }));
-    expect(text).toContain('Claude (Anthropic): $5.00 today of a $20.00 cap (25%); $5.00 this month (no cap). Normal: nothing is limited.');
+    expect(text).toContain('Claude (Anthropic): $5.00 today of a $20.00 cap (25%); $5.00 this month (no cap). Nothing is limited yet.');
     expect(text).toContain('Tavily: $0.00 today (no cap)');
     expect(formatSpend(g.snapshot())).toBe(text);
   });

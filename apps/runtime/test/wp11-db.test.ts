@@ -96,8 +96,11 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     expect(await runDigest(db, config, now, async (req) => (sent.push(req as never), { status: 'stored', pinged: false }))).toBe('delivered');
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ channels: ['inapp'], ref: expect.stringMatching(/^digest:\d{4}-\d{2}-\d{2}$/) });
-    expect(sent[0]!.body).toMatch(/Done on its own: 1 action\./);
-    expect(sent[0]!.body).toMatch(/Waiting on you: \d+ proposals? and \d+ open escalations?\./);
+    expect(sent[0]!.body).toMatch(/^Yesterday, (no items were|1 item was|\d+ items were) important and (none|\d+) went to Other\./);
+    expect(sent[0]!.body).toMatch(/\nFlint did 1 thing on its own\. (You have (\d+ approvals?|\d+ open escalations?|\d+ approvals? and \d+ open escalations?) waiting|Nothing is waiting on you)\.\n/);
+    expect(sent[0]!.body).toMatch(/\n(Everything checked is healthy|This needs a look: [^.]+|These need a look: [^.]+)\.\n(No predictions resolve today|Today, \d+ predictions? resolves?)\.$/);
+    // Health by its console names, never an internal one.
+    expect(sent[0]!.body).not.toMatch(/restore_drill|source:|audit_intents|quiet lane|proposal/);
     expect(await runDigest(db, config, now, async () => (sent.push({ title: 'x' }), { status: 'stored', pinged: false }))).toBe('already');
     expect(sent).toHaveLength(1);
     await owner(`DELETE FROM "ActionCounter" WHERE action = 'digest.daily'`);

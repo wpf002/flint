@@ -303,6 +303,18 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     expect(posts).toBe(1);
   });
 
+  it('a note whose text was purged before it went out still says something: its field-free title and body', async () => {
+    await promotedDeps();
+    const ev = await raised('runtime', 'drill.failed', { mismatches: 3 });
+    await processEvent({ eventId: ev }, deps());
+    const esc = (await escalationOf(ev)).escalation;
+    expect(esc.body).toBe('The last restore test found 3 tables that differ from the backup, so the backups may not restore.');
+    await owner(`UPDATE "Escalation" SET title = NULL, body = NULL, fields = '{}'::jsonb, "contentPurgedAt" = now() WHERE id = $1`, [esc.id]);
+    let sent: { title?: string; body?: string } = {};
+    expect(await deliver(db, config, esc.id, undefined, async (req) => ((sent = req), { status: 'stored', pinged: false }))).toBe('sent');
+    expect(sent).toMatchObject({ title: 'The restore drill failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
+  });
+
   it('expiry: past the prediction\'s resolve time, the escalation expires and its unsent deliveries close', async () => {
     const ev = await raised('runtime', 'service.down_30m', { entityId: serviceId, downMinutes: 31 });
     await processEvent({ eventId: ev }, deps());

@@ -4,15 +4,16 @@
  *
  *  - Did / queued, as ask's morning brief split them: what was done (actions
  *    with an ok outcome, not Will's own clicks) and what waits on Will
- *    (pending proposals, open escalations); the lanes; what is not healthy;
- *    the predictions that resolve today.
+ *    (pending proposals, open escalations); the lanes; what is not healthy,
+ *    by the names Settings > Health uses; the predictions that resolve today.
+ *    Each line is a sentence in the console's words (Important, Other, approvals).
  *  - Once a local day: the day's claim and the delivery intent are written
  *    together; a retried job finds them and finishes the delivery (the server
  *    dedupes on the digest's ref), never a second digest.
  *  - Recorded in shadow; delivered only once digest.daily and notify.inapp are
  *    promoted. A delivery that fails is audited as failed.
  */
-import { localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
+import { healthName, localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { appendAudit } from './governance/audit.js';
@@ -29,6 +30,8 @@ export interface Digest {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** "A", "A and B", "A, B and C". */
+const listOf = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}` : (xs[0] ?? ''));
 
 export async function buildDigest(db: Db, tz: string, now = new Date()): Promise<Digest> {
   const day = previousDay(localDay(tz, now));
@@ -46,13 +49,24 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
     db.$queryRaw<Array<{ component: string; status: string }>>`SELECT DISTINCT ON (component) component, status FROM "HealthCheck" ORDER BY component, at DESC`,
   ]);
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
-  const body = [
-    `${day}: ${plural(relevant, 'item')} for you (${plural(escalated, 'escalation')}), ${quiet} in the quiet lane.`,
-    `Done on its own: ${plural(did, 'action')}. Waiting on you: ${plural(queued, 'proposal')} and ${plural(open, 'open escalation')}.`,
-    degraded.length ? `Not healthy: ${degraded.slice(0, 6).join(', ')}${degraded.length > 6 ? ` and ${degraded.length - 6} more` : ''}.` : 'Everything checked is healthy.',
-    `Predictions that resolve today: ${due}.`,
+  const counts = { relevant, quiet, escalated, did, queued, open, due };
+  return { day, title: `Flint for ${day}`, body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
+}
+
+/**
+ * The digest's four lines, each a sentence. The title carries the date; the console's
+ * tabs are Important and Other, it calls a proposal an approval, and Health's names
+ * stand for the components.
+ */
+export function digestBody(c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number }, degraded: string[]): string {
+  const waiting = [c.queued ? plural(c.queued, 'approval') : '', c.open ? plural(c.open, 'open escalation') : ''].filter(Boolean);
+  const names = degraded.slice(0, 6).map(healthName).concat(degraded.length > 6 ? [`${degraded.length - 6} more`] : []);
+  return [
+    `Yesterday, ${c.relevant ? plural(c.relevant, 'item') : 'no items'} ${c.relevant === 1 ? 'was' : 'were'} important and ${c.quiet || 'none'} went to Other.${c.escalated ? ` Flint escalated ${c.escalated}.` : ''}`,
+    `${c.did ? `Flint did ${plural(c.did, 'thing')} on its own.` : 'Flint did nothing on its own.'} ${waiting.length ? `You have ${waiting.join(' and ')} waiting.` : 'Nothing is waiting on you.'}`,
+    degraded.length ? `${degraded.length === 1 ? 'This needs' : 'These need'} a look: ${listOf(names)}.` : 'Everything checked is healthy.',
+    c.due ? `Today, ${plural(c.due, 'prediction')} ${c.due === 1 ? 'resolves' : 'resolve'}.` : 'No predictions resolve today.',
   ].join('\n');
-  return { day, title: `Flint for ${day}`, body: body.slice(0, 500), counts: { relevant, quiet, escalated, did, queued, open, due, degraded: degraded.length }, degraded };
 }
 
 export type DigestOutcome = 'delivered' | 'recorded' | 'already' | 'failed' | 'skipped';

@@ -34,15 +34,27 @@ function stableStringify(v: unknown): string {
  * server reports its own failure as `{isError: true}`, and the gate refuses as
  * `{approved: false}`. `error` is a short class for the audit trail (never the
  * tool's own words, which can carry personal data); `detail` is those words, for
- * the console card only.
+ * the console card only: an MCP result's text parts (its content is an array of
+ * `{type: 'text', text}`), or a sentence when it has none.
  */
 export function outcomeOf(result: unknown): { ok: true } | { ok: false; error: string; detail: string } {
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     const r = result as { approved?: unknown; isError?: unknown; message?: unknown; content?: unknown };
-    if (r.approved === false) return { ok: false, error: 'not executed: refused by the gate', detail: typeof r.message === 'string' ? r.message : 'not executed' };
-    if (r.isError === true) return { ok: false, error: 'the tool reported an error', detail: typeof r.content === 'string' ? r.content.slice(0, 2000) : 'the tool reported an error' };
+    if (r.approved === false) return { ok: false, error: 'not executed: refused by the gate', detail: typeof r.message === 'string' ? r.message : 'It wasn’t run.' };
+    if (r.isError === true) return { ok: false, error: 'the tool reported an error', detail: contentText(r.content).slice(0, 2000) || 'The tool reported an error.' };
   }
   return { ok: true };
+}
+
+/** The readable text of a tool's content: a string as it is, or an MCP content array's text parts (as chat's toolText reads them). */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string' ? (c as { text: string }).text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }
 
 /** RAM-queue ids are unique across restarts, so an audit correlation id never names two actions. */
@@ -130,7 +142,7 @@ export class ActionQueue {
     const tool = tools.find((t) => t.definition.name === a.fullName);
     if (!tool) {
       a.status = 'error';
-      a.error = `tool ${a.fullName} not wired`;
+      a.error = 'Its tool isn’t connected.';
       return a;
     }
     // Off the pending list before it runs, so a second approve cannot run it again.

@@ -16,7 +16,7 @@ import { faultAt, type Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { notifyServer, type NotifyOutcome } from '../notify.js';
-import { fieldFreeTitle } from '../templates/escalations.js';
+import { fieldFreeBody, fieldFreeTitle } from '../templates/escalations.js';
 
 export type Delivered = 'sent' | 'refused' | 'nothing' | 'withdrawn';
 
@@ -42,7 +42,7 @@ export async function deliver(
     });
     return 'withdrawn';
   }
-  const r = await post({ title: e.title ?? fieldFreeTitle(e.templateId), body: e.body ?? '', channels, ref: e.id });
+  const r = await post({ title: e.title ?? fieldFreeTitle(e.templateId), body: e.body ?? fieldFreeBody(e.templateId), channels, ref: e.id });
   faultAt('after_notify');
   if (r.status === 'retry') {
     await db.escalationDelivery.updateMany({ where: { escalationId: e.id, status: 'pending' }, data: { attempts: { increment: 1 }, lastError: `not delivered yet: ${r.why}`.slice(0, 200) } });

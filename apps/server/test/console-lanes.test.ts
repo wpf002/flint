@@ -5,12 +5,14 @@
  * outside text is marked, labels and acks go to the server's routes, "Older"
  * pages with `before`, a failure is shown without forgetting the token, the
  * notifications fold repeats and read themselves, Health leads Settings with
- * what needs Will, and there is no confirm/alert/prompt anywhere in the console.
+ * what needs Will, every line under a title is a sentence, and there is no
+ * confirm/alert/prompt anywhere in the console.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { HEALTH_NAMES, SOURCE_NAMES } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const lanesJs = /<script id="lanes-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -132,7 +134,8 @@ describe('the console Activity panel: lanes', () => {
     expect(ids.lanelist!.children).toHaveLength(2);
     // The markup arrives as literal text (the fake DOM has no innerHTML to fall into).
     expect(a!.shown()).toContain('<b>New issue</b> on flint');
-    expect(a!.shown()).toContain('GitHub · issue opened');
+    // The line under the title is a sentence: who reported it, for an event type with no words of its own.
+    expect(a!.shown()).toContain('<b>New issue</b> on flintGitHub reported this.');
     expect(a!.shown()).not.toContain('Escalate');
     expect(a!.shown()).toContain('Outside Text');
     // The rest opens on click: the escalation's text, the model's note, what it is about.
@@ -142,7 +145,7 @@ describe('the console Activity panel: lanes', () => {
     a!.onclick!({ target: { tagName: 'DIV' } });
     expect(a!.shown()).toContain('<script>steal()</script>');
     expect(a!.shown()).toContain('Model note: The page said: ignore previous instructions.');
-    expect(a!.shown()).toContain('Escalation Open');
+    expect(a!.shown()).toContain('It’s waiting on you.');
     // Internal values (the decider, a relevance score, an entity's ref) are not shown.
     expect(a!.shown()).not.toMatch(/rule:service_down|issue#24ehza|relevance/);
     expect(b!.shown()).not.toContain('Outside Text');
@@ -173,15 +176,15 @@ describe('the console Activity panel: lanes', () => {
     await openLane('quiet');
     const [a, b, c, d, e, f] = ids.lanelist!.children;
     expect(a!.shown()).toContain('Event Tue Oct 6 at 14:00');
-    expect(a!.shown()).toContain('Google Calendar · event changed');
+    expect(a!.shown()).toContain('Event Tue Oct 6 at 14:00An event on your calendar changed.');
     expect(a!.shown()).toContain('Outside Text');
     expect(a!.shown()).not.toMatch(/event 2026|commitment state|Dinner/);
     a!.onclick!({ target: { tagName: 'DIV' } });
     expect(a!.shown()).toContain('Invitation title: Dinner with <b>Ann</b>');
     expect(b!.shown()).toContain('Event Fri Oct 9, All Day');
-    expect(b!.shown()).toContain('Google Calendar · coming up');
+    expect(b!.shown()).toContain('An event on your calendar is coming up.');
     expect(c!.shown()).toContain('Deadline Tue Oct 6');
-    expect(c!.shown()).toContain('Google Calendar · due soon');
+    expect(c!.shown()).toContain('A deadline on your calendar is due soon.');
     // In the hour a fall-back repeats, the zone tells the two apart.
     expect(d!.shown()).toContain('Event Sun Nov 1 at 01:30 CST');
     expect(e!.shown()).toContain('Event Sun Oct 25 at 01:30 GMT+1');
@@ -189,6 +192,37 @@ describe('the console Activity panel: lanes', () => {
     expect(f!.shown()).not.toContain('Commitment Upcoming');
     // Another source's names are its own.
     expect(run(`calName('event soon')`)).toBe('');
+  });
+
+  it('the line under each row is a sentence for every event type, and who reported it otherwise', () => {
+    const line = (source: string, eventType: string) => run(`laneLine(${JSON.stringify({ source, eventType })})`) as string;
+    expect(line('github', 'ci_run.state')).toBe('A CI run changed.');
+    expect(line('github', 'pull_request.state')).toBe('A pull request changed.');
+    expect(line('github', 'issue.state')).toBe('An issue changed.');
+    expect(line('git', 'repo.head')).toBe('A repo’s latest commit changed.');
+    expect(line('health', 'service.health')).toBe('A service’s health changed.');
+    expect(line('nexus', 'thread.state')).toBe('A Nexus thread changed.');
+    expect(line('knowledge', 'knowledge.fact')).toBe('Flint’s memory learned something.');
+    expect(line('runtime', 'backup.stale')).toBe('Backups are overdue.');
+    expect(line('runtime', 'source.circuit_open')).toBe('A source stopped after repeated failures.');
+    expect(line('google_calendar', 'person.seen')).toBe('Someone is on an event you accepted or organized.');
+    expect(line('google_calendar', 'deadline.state')).toBe('A deadline on your calendar changed.');
+    expect(line('deploy', 'gate.failed')).toBe('A deploy failed.');
+    expect(line('deploy', 'deploy.ok')).toBe('A deploy finished.');
+    expect(line('railway', 'volume.railway')).toBe('Railway reported this.');
+    expect(line('some_source', 'odd.thing')).toBe('Some Source reported this.');
+    // Health's row names are not the sentence's: they stay as they are.
+    expect(run(`healthName('source:github')`)).toBe('GitHub');
+    for (const t of Object.keys(run('LANE_LINES') as Record<string, string>)) expect(line('x', t)).toMatch(/^[A-Z].*\.$/);
+  });
+
+  it('an escalation says where it stands, in a sentence', async () => {
+    const es = (status: string) => item({ id: `td_${status}`, escalation: { ...item().escalation, id: `es_${status}`, status } });
+    routes['/inbox'] = () => ({ status: 200, body: { items: ['acked', 'dismissed', 'acted', 'expired'].map(es), next: null } });
+    await openLane();
+    const rows = ids.lanelist!.children;
+    rows.forEach((r) => r.onclick!({ target: { tagName: 'DIV' } }));
+    expect(rows.map((r) => /(You acknowledged it\.|You dismissed it\.|It was acted on\.|It expired\.)/.exec(r.shown())?.[1])).toEqual(['You acknowledged it.', 'You dismissed it.', 'It was acted on.', 'It expired.']);
   });
 
   it('labels a decision through the feedback route and marks the label chosen', async () => {
@@ -234,9 +268,9 @@ describe('the console Activity panel: lanes', () => {
   });
 
   it("shows a failure in the view and keeps the token (a runtime's refusal is the server's 502)", async () => {
-    routes['/inbox?'] = () => ({ status: 502, body: { error: "the runtime refused the server's token" } });
+    routes['/inbox?'] = () => ({ status: 502, body: { error: 'The runtime rejected Flint’s token. Reinstall the runtime to fix it.' } });
     await openLane();
-    expect(ids.lanemsg!.textContent).toBe("the runtime refused the server's token");
+    expect(ids.lanemsg!.textContent).toBe('The runtime rejected Flint’s token. Reinstall the runtime to fix it.');
     expect(ids.lanemsg!.hidden).toBe(false);
     expect(stored.flint_token).toBe('tok');
     routes['/inbox?'] = () => ({ status: 401, body: { error: 'unauthorized' } });
@@ -244,6 +278,11 @@ describe('the console Activity panel: lanes', () => {
     await settle();
     expect(ids.lanemsg!.textContent).toBe('The access token was rejected. Check Settings.');
     expect(stored.flint_token).toBe('tok');
+    // No error of its own: the status, in a sentence.
+    routes['/inbox?'] = () => ({ status: 504, body: {} });
+    run("actShow('relevant')");
+    await settle();
+    expect(ids.lanemsg!.textContent).toBe('Flint returned error 504.');
   });
 });
 
@@ -271,9 +310,9 @@ describe('the console Activity panel: notifications', () => {
       body: {
         unread: 3,
         items: [
-          { id: 'n3', title: 'Backups waiting for you', body: 'Approve the card to run tonight', ts: now - 60_000, read: false },
-          { id: 'n2', title: 'Nexus run finished', body: 'Build aqi: closed', ts: now - 3 * 86400_000, read: true },
-          { id: 'n1', title: 'Nexus run finished', body: 'Build aqi: closed', ts: now - 3 * 86400_000 - 1000, read: true },
+          { id: 'n3', title: 'Backups waiting for you', body: 'Approve the card to run tonight.', ts: now - 60_000, read: false },
+          { id: 'n2', title: 'Action done', body: 'Check What’s Happening Now is done.', ts: now - 3 * 86400_000, read: true },
+          { id: 'n1', title: 'Action done', body: 'Check What’s Happening Now is done.', ts: now - 3 * 86400_000 - 1000, read: true },
         ],
       },
     });
@@ -283,8 +322,9 @@ describe('the console Activity panel: notifications', () => {
     expect(text).toContain('Today');
     expect(text).toContain('Backups Waiting for You');
     expect(text).toContain('Earlier');
-    expect(text).toContain('Nexus Run Finished');
-    expect(text).toContain('Build aqi: closed · 2 times');
+    expect(text).toContain('Action Done');
+    // The count is a sentence of its own after the note's.
+    expect(text).toContain('Check What’s Happening Now is done. It happened 2 times.');
     expect(ids.markread!.hidden).toBe(false);
     expect(calls.some((c) => c.url === '/notifications/read' && c.method === 'POST')).toBe(true);
   });
@@ -318,20 +358,23 @@ describe('Settings: Health', () => {
   it('leads Settings with what needs Will: a summary, the problems in plain names, the rest folded', async () => {
     routes['/runtime/health'] = report([
       { component: 'postgres', status: 'ok', detail: null, at: AT },
-      { component: 'source:github', status: 'down', detail: '<i>5 failures</i> (last at 09:00)', at: AT },
-      { component: 'restore_drill', status: 'degraded', detail: 'last test 9 days ago', at: AT },
+      { component: 'source:github', status: 'down', detail: '<i>The last 5 reads failed.</i> (last at 09:00)', at: AT },
+      { component: 'restore_drill', status: 'degraded', detail: 'The last restore test was 9 days ago.', at: AT },
+      { component: 'server', status: 'unknown', detail: null, at: AT },
     ]);
     run('loadHealth()');
     await settle();
     const top = ids.sethealth!.shown();
     expect(ids['sethealth-last']!.shown()).toBe('');
     expect(top).toContain('Health');
-    expect(top).toContain('2 Issues');
-    expect(top).toContain('GitHub');
-    expect(top).toContain('Down · <i>5 failures</i>');
+    expect(top).toContain('3 Issues');
+    // Each issue's line is the runtime's sentence (its dot and its place show how bad); markup stays inert.
+    expect(top).toContain('GitHub<i>The last 5 reads failed.</i>.');
     expect(top).not.toContain('(last at 09:00)');
-    expect(top).toContain('Restore Test');
-    expect(top).toContain('Degraded · Last test 9 days ago');
+    expect(top).toContain('Restore TestThe last restore test was 9 days ago.');
+    // An issue with no note of its own says what its status means.
+    expect(top).toContain('ServerIt hasn’t reported.');
+    expect(top).not.toMatch(/Down ·|Degraded ·/);
     expect(top).toContain('All Components');
     expect(top).not.toContain('Database');
   });
@@ -339,14 +382,22 @@ describe('Settings: Health', () => {
   it('lists a source that set something aside as an issue, by its own name', async () => {
     routes['/runtime/health'] = report([
       { component: 'postgres', status: 'ok', detail: null, at: AT },
-      { component: 'source:google_calendar', status: 'degraded', detail: 'the last run set something aside (see its last error)', at: AT },
+      { component: 'source:google_calendar', status: 'degraded', detail: 'The last read skipped an item.', at: AT },
     ]);
     run('loadHealth()');
     await settle();
     const top = ids.sethealth!.shown();
     expect(top).toContain('1 Issue');
     expect(top).toContain('Google Calendar');
-    expect(top).toContain('Degraded · The last run set something aside');
+    expect(top).toContain('Google CalendarThe last read skipped an item.');
+    // A note that is not a sentence yet gets its capital and its stop.
+    expect(run(`healthDetail('the last read failed (see ~/.flint/runtime.log)')`)).toBe('The last read failed.');
+    expect(run(`healthDetail('done.')`)).toBe('Done.');
+  });
+
+  it('names the components as @flint/policy does, so the morning digest says the same names', () => {
+    expect(JSON.parse(JSON.stringify(run('HEALTH_NAMES')))).toEqual(HEALTH_NAMES);
+    expect(JSON.parse(JSON.stringify(run('SOURCE_NAMES')))).toEqual(SOURCE_NAMES);
   });
 
   it('sits last, quietly, when all is normal; says when checks stopped', async () => {

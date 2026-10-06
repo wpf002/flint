@@ -334,20 +334,20 @@ function hashish(s: string): string {
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return String(h);
 }
-/** Human-readable event time in the user's timezone (e.g. "Sat, Jun 28, 2:00 PM").
- *  All-day events (date only, no "T") omit the clock time. */
-function fmtWhen(iso: string): string {
+/**
+ * When an event starts, in the user's timezone, as two parts for a sentence: the
+ * day ("Sat, Jun 28") and the clock time ("2:00 PM"). An all-day event (a date,
+ * no "T") has no time, and its date is that date wherever the user is.
+ */
+function fmtWhen(iso: string): { day: string; time?: string } {
   try {
+    const d = new Date(iso);
+    if (!Number.isFinite(d.getTime())) return { day: iso };
     const timed = iso.includes('T');
-    return new Date(iso).toLocaleString('en-US', {
-      timeZone: USER_TZ,
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      ...(timed ? { hour: 'numeric', minute: '2-digit' } : {}),
-    });
+    const day = d.toLocaleDateString('en-US', { timeZone: timed ? USER_TZ : 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
+    return timed ? { day, time: d.toLocaleTimeString('en-US', { timeZone: USER_TZ, hour: 'numeric', minute: '2-digit' }) } : { day };
   } catch {
-    return iso;
+    return { day: iso };
   }
 }
 
@@ -390,12 +390,16 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
       return (data.events ?? [])
         .filter((e) => e.start && new Date(e.start).getTime() <= soon)
         .slice(0, 3)
-        .map((e) => ({
-          title: 'Upcoming',
-          body: `${e.summary || 'Untitled event'} — ${fmtWhen(e.start as string)}${e.location ? ` · ${e.location}` : ''}`,
-          kind: 'calendar',
-          dedupe: `cal:${e.id || e.summary}:${e.start}`,
-        }));
+        .map((e) => {
+          const when = fmtWhen(e.start as string);
+          return {
+            title: 'Upcoming',
+            // "Dentist is on Tue, Oct 6 at 3:00 PM, at 123 Main St."
+            body: `${e.summary || 'An untitled event'} is on ${when.day}${when.time ? ` at ${when.time}` : ''}${e.location ? `, at ${e.location}` : ''}.`,
+            kind: 'calendar',
+            dedupe: `cal:${e.id || e.summary}:${e.start}`,
+          };
+        });
     });
   }
 

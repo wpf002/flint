@@ -126,3 +126,15 @@ not to turning the calendar off:
 2. Then take a dump and run `down.sql` by hand.
 
 Any later deploy of P2.5 code applies the migration again.
+
+## When a database update fails
+
+A runtime deploy whose migration fails installs nothing. You get a note ("A
+database migration failed") and Settings > Health lists **Updates**. That
+commit isn't tried again until you clear it:
+
+1. A copy of the database from just before the update is in
+   `~/FlintBackups/pre-migrate/<sha>.dump`.
+2. Fix the migration, then run its `down.sql` by hand.
+3. Delete `~/.flint/runtime/migrate-failed`. The next deploy applies the
+   migration again.

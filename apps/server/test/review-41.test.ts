@@ -248,6 +248,19 @@ describe('outcomes', () => {
     expect(outcomeOf('ok')).toEqual({ ok: true });
     expect(outcomeOf({ isError: true, content: 'bob@example.com not found' })).toEqual({ ok: false, error: 'the tool reported an error', detail: 'bob@example.com not found' });
     expect(outcomeOf({ approved: false, message: 'queued' })).toMatchObject({ ok: false, error: 'not executed: refused by the gate' });
+    expect(outcomeOf({ approved: false })).toMatchObject({ ok: false, detail: 'It wasn’t run.' });
+  });
+
+  it('a failed MCP tool’s own words reach the card: the text parts of its content, clipped; a sentence when it has none', () => {
+    const mcp = (content: unknown) => outcomeOf({ isError: true, content });
+    expect(mcp([{ type: 'text', text: 'quota exceeded for ' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }, { type: 'text', text: 'calendar primary' }])).toEqual({
+      ok: false, error: 'the tool reported an error', detail: 'quota exceeded for \ncalendar primary',
+    });
+    expect(mcp([{ type: 'text', text: 'x'.repeat(5000) }])).toMatchObject({ detail: 'x'.repeat(2000) });
+    // No words of its own: never '[object Object]', never an empty line.
+    expect(mcp([{ type: 'image', data: 'AAAA' }])).toMatchObject({ detail: 'The tool reported an error.' });
+    expect(mcp({ nested: true })).toMatchObject({ detail: 'The tool reported an error.' });
+    expect(mcp(undefined)).toMatchObject({ detail: 'The tool reported an error.' });
   });
 
   it('RAM ids are unique across restarts; an approved call that errors is an error, and runs in a scope as tainted as its proposal', async () => {
@@ -488,7 +501,7 @@ function fakeRuntime(proposal: Record<string, unknown>) {
   const fetchImpl = (async (u: string, init: RequestInit = {}) => {
     const path = new URL(u).pathname;
     calls.push(`${init.method ?? 'GET'} ${path}`);
-    if (path.endsWith('/claim')) return claimStatus === 200 ? Response.json({ id: proposal.id, action: proposal.action, args: proposal.args, argsDigest: 'd' }) : Response.json({ error: 'cap reached' }, { status: claimStatus });
+    if (path.endsWith('/claim')) return claimStatus === 200 ? Response.json({ id: proposal.id, action: proposal.action, args: proposal.args, argsDigest: 'd' }) : Response.json({ error: 'Today’s limit of 1 is reached.' }, { status: claimStatus });
     if (path.endsWith('/complete')) {
       if (!completeUp) throw new Error('ECONNRESET');
       return Response.json({ ok: true });
@@ -565,6 +578,15 @@ describe('approval routes', () => {
     expect(ran).toEqual([]);
   });
 
+  it('a RAM-queue action Will approved posts its note in the app only, without its internal name', async () => {
+    const pushed: unknown[][] = [];
+    const d = baseDeps({ tools: [tool('gcal.create_event', () => 'created')], notes: { push: (...a: unknown[]) => (pushed.push(a), undefined) } as unknown as ApprovalDeps['notes'] });
+    const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 9 }, destructive: false });
+    await serve(d);
+    expect((await post('/proposals/approve', { id })).body.action).toMatchObject({ status: 'done' });
+    expect(pushed).toEqual([['Action done', 'An approved action is done.', 'action', `act:${id}`, { channels: ['inapp'] }]]);
+  });
+
   it('a runtime proposal: wired tools are claimed, run in a scope as tainted as the proposal, and how they ended is reported (spooled if need be)', async () => {
     let tainted: boolean | undefined;
     const proposal = { id: 'pr1', origin: 'chat:t', action: 'mcp:gcal.create_event', args: { t: 1 }, tainted: true, status: 'approved' };
@@ -573,22 +595,32 @@ describe('approval routes', () => {
     const d = baseDeps({ proposals, tools: [tool('gcal.create_event', () => ((tainted = turnTainted()), 'created'))] });
     rt.setComplete(false);
     const out = await executeApproved(d, 'pr1');
-    expect(out).toMatchObject({ status: 'done', note: expect.stringMatching(/told how it ended/) });
+    expect(out).toMatchObject({ status: 'done', note: 'Flint will record the result once the runtime answers.' });
     expect(tainted).toBe(true);
     expect(rt.calls).toContain('POST /v1/proposals/pr1/claim');
     expect(proposals.unsynced()).toBe(0); // proposals spool, not outcomes
     // A cap reached leaves it approved.
     rt.setClaim(429);
-    expect(await executeApproved(d, 'pr1')).toMatchObject({ status: 'approved', note: expect.stringMatching(/cap reached/) });
+    expect(await executeApproved(d, 'pr1')).toMatchObject({ status: 'approved', note: 'Approved. Today’s limit of 1 is reached. Run it later.' });
   });
 
-  it('a runtime job\'s own proposal (a nightly backup) is never claimed by the server', async () => {
+  it('a runtime job\'s own proposal (a nightly backup) is never claimed by the server, and its note says when it runs', async () => {
     const proposal = { id: 'pr2', origin: 'runtime:backup', action: 'backup.local', args: {}, tainted: false, status: 'approved' };
     const rt = fakeRuntime(proposal);
     const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
     const out = await executeApproved(baseDeps({ proposals }), 'pr2');
-    expect(out).toMatchObject({ status: 'approved', note: expect.stringMatching(/runtime job/) });
+    expect(out).toMatchObject({ status: 'approved', note: 'Approved. It runs tonight at 2:15 AM.' });
     expect(rt.calls.some((c) => c.endsWith('/claim'))).toBe(false);
+    const noteFor = async (origin: string, action: string) => {
+      const f = fakeRuntime({ id: 'pr3', origin, action, args: {}, tainted: false, status: 'approved' });
+      return (await executeApproved(baseDeps({ proposals: new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: f.fetchImpl }) }), 'pr3')).note;
+    };
+    expect(await noteFor('runtime:offsite', 'backup.offsite')).toBe('Approved. It runs tonight at 2:15 AM.');
+    expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs Sunday at 2:15 AM.');
+    expect(await noteFor('runtime:retention', 'maintenance.retention')).toBe('Approved. It runs tonight at 3:10 AM.');
+    expect(await noteFor('runtime:other', 'other.job')).toBe('Approved. Its nightly job runs it.');
+    // A chat tool that is not connected right now: Run Now in Approvals, once it is.
+    expect(await noteFor('chat:t', 'mcp:gone.tool')).toBe('Approved. Its tool isn’t connected, so run it later in Approvals.');
   });
 
   it('enrolling a second key from another device: pending, approved there, finished here', async () => {
@@ -656,10 +688,11 @@ describe('second review of #41', () => {
     const proposal = { id: 'pr9', origin: 'chat:t', action: 'mcp:runtime.world_now', args: {}, tainted: false, status: 'approved' };
     const rt = fakeRuntime(proposal);
     const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
-    const notes: Array<[string, string]> = [];
-    const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string) => (notes.push([title, body]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
+    const notes: Array<[string, string, unknown]> = [];
+    const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string, _k: string, _d: string, opts: unknown) => (notes.push([title, body, opts]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
     expect(out.status).toBe('done');
-    expect(notes).toEqual([['Action done', 'Check What’s Happening Now ✓']]);
+    // In the app only: Will just approved it, so no banner and no ping.
+    expect(notes).toEqual([['Action done', 'Check What’s Happening Now is done.', { channels: ['inapp'] }]]);
   });
 
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {
@@ -751,9 +784,9 @@ describe('second review of #41', () => {
     // Enrolling a live key again is refused; a revoked key cannot come back (a new one is made instead).
     await expect(enrol(mac, 'zzzz-0000-1111-2222 replace')).resolves.toBeDefined(); // replace with itself: no-op
     creds.push({ credentialId: 'other', factor: 'webauthn', publicKey: Buffer.alloc(1), label: 'other', signCount: 0, revokedAt: null, enrolledVia: 'approval:y' });
-    await expect(enrol(mac, 'yyyy-0000-1111-2222')).rejects.toThrow(/already enrolled/);
+    await expect(enrol(mac, 'yyyy-0000-1111-2222')).rejects.toThrow('That key is already added.');
     creds.find((c) => c.label === 'k')!.revokedAt = new Date();
-    await expect(enrol(mac, 'xxxx-0000-1111-2222 replace')).rejects.toThrow(/was revoked/);
+    await expect(enrol(mac, 'xxxx-0000-1111-2222 replace')).rejects.toThrow('That key was revoked. Use Replace This Mac’s Key to make a new one.');
   });
 
   it('a second key with a long credential id can be approved (the approval names a fixed-length reference)', async () => {

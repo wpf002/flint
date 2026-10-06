@@ -94,14 +94,14 @@ describe('approvals', () => {
   });
 
   it('enrolment needs the one-time code, and spends it', async () => {
-    await expect(approvals.beginEnroll({ code: 'wrong-code-0000', label: 'phone' })).rejects.toThrow(/enrolment code/);
+    await expect(approvals.beginEnroll({ code: 'wrong-code-0000', label: 'phone' })).rejects.toThrow('That code is wrong or missing. Get a new one with pnpm --filter @flint/runtime enroll.');
     const pk = passkey();
     const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'phone' });
     expect(b.rp).toEqual({ id: rp.rpId });
     await approvals.finishEnroll({ challengeId: b.challengeId, ...pk.register(b.challenge) });
     expect(mem.creds.map((c) => [c.factor, c.label, c.enrolledVia])).toEqual([['webauthn', 'phone', 'enroll_code']]);
     expect(existsSync(codeFile)).toBe(false);
-    await expect(approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'again' })).rejects.toThrow(/enrolment code/);
+    await expect(approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'again' })).rejects.toThrow('That code is wrong or missing. Get a new one with pnpm --filter @flint/runtime enroll.');
   });
 
   it('accepts a registration sent as an attestationObject (older Safari)', async () => {
@@ -122,7 +122,7 @@ describe('approvals', () => {
   it('a Secure Enclave key must prove it holds the key', async () => {
     const se = enclave();
     const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: enclave().sign(b.challenge) })).rejects.toThrow(/did not sign/);
+    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: enclave().sign(b.challenge) })).rejects.toThrow('The key couldn’t be added. Try again.');
     const b2 = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'Touch ID' });
     await approvals.finishEnroll({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b2.challenge) });
     expect(mem.creds[0]).toMatchObject({ factor: 'secure_enclave', label: 'Touch ID' });
@@ -153,7 +153,7 @@ describe('approvals', () => {
     await expect(approvals.finish({ challengeId: b.challengeId, ...assertion })).rejects.toThrow(/no such challenge/);
     const late = approvals.begin(subject);
     now = new Date(now.getTime() + 6 * 60_000);
-    await expect(approvals.finish({ challengeId: late.challengeId, ...pk.assert(late.challenge) })).rejects.toThrow(/expired/);
+    await expect(approvals.finish({ challengeId: late.challengeId, ...pk.assert(late.challenge) })).rejects.toThrow('The request expired. Try again.');
   });
 
   it('a signature over a different challenge, or by an unknown key, is refused and nothing is recorded', async () => {
@@ -162,7 +162,7 @@ describe('approvals', () => {
     const b = approvals.begin({ ...subject, subjectId: 'pr2' });
     await expect(approvals.finish({ challengeId: a.challengeId, ...pk.assert(b.challenge) })).rejects.toThrow(ApprovalError);
     const c = approvals.begin(subject);
-    await expect(approvals.finish({ challengeId: c.challengeId, ...passkey().assert(c.challenge) })).rejects.toThrow(/did not verify/);
+    await expect(approvals.finish({ challengeId: c.challengeId, ...passkey().assert(c.challenge) })).rejects.toThrow('Your approval didn’t verify. Try again.');
     expect(mem.approvals).toEqual([]);
   });
 
@@ -191,14 +191,14 @@ describe('approvals', () => {
     writeFileSync(codeFile, 'qrst-uvwx-yz12-3456\n');
     const se = enclave();
     const b = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow(/existing credential/);
+    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow('A new key needs approval from a key you already have.');
     // An approval for a different key (same id spoofed is impossible: the id is derived from the key) does not carry over.
     const other = enclave();
     const b2 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'other' });
     const ap = await approvals.beginEnrollApproval({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: other.publicKey, signature: other.sign(b2.challenge) });
     await approvals.finishEnrolApproval({ challengeId: ap.challengeId, ...first.assert(ap.challenge) });
     const b3 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b3.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b3.challenge), approval: { challengeId: ap.challengeId } })).rejects.toThrow(/something else/);
+    await expect(approvals.finishEnroll({ challengeId: b3.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b3.challenge), approval: { challengeId: ap.challengeId } })).rejects.toThrow('That approval was for something else.');
     expect(mem.creds).toHaveLength(1);
   });
 

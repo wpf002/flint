@@ -43,6 +43,8 @@ export interface CheckDeps {
 }
 
 const clip = (s: string) => redact(s).slice(0, 300);
+/** "1 hour", "3 hours": each detail is a sentence Will reads in Settings > Health. */
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const { db, now } = d;
@@ -61,12 +63,15 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
            (SELECT count(*) FROM pgboss.job WHERE state = 'active' AND started_on < ${ago(STUCK_ACTIVE_MS)}) AS stuck`;
   const dead = Number(bus[0]?.dead ?? 0);
   const stuck = Number(bus[0]?.stuck ?? 0);
-  out.push({ component: 'bus', status: dead || stuck ? 'degraded' : 'ok', ...(dead || stuck ? { detail: `${dead} dead-lettered in a day, ${stuck} stuck active` } : {}) });
+  const busDetail = dead && stuck
+    ? `The queue had ${count(dead, 'failed job')} in the last day and has ${stuck} stuck now.`
+    : dead ? `The queue had ${count(dead, 'failed job')} in the last day.` : `The queue has ${count(stuck, 'job')} stuck for over 30 minutes.`;
+  out.push({ component: 'bus', status: dead || stuck ? 'degraded' : 'ok', ...(dead || stuck ? { detail: busDetail } : {}) });
 
   for (const [component, key] of [['server', 'service:endpoint:flint-server'], ['ollama', 'service:endpoint:ollama']] as const) {
     const e = await db.entity.findUnique({ where: { kind_key: { kind: 'service', key } }, select: { state: true, lastObservedAt: true } });
     const health = (e?.state as { health?: unknown } | null)?.health;
-    if (!e || e.lastObservedAt < ago(OBSERVATION_STALE_MS)) out.push({ component, status: 'unknown', detail: e ? 'not observed in 15 minutes' : 'never observed' });
+    if (!e || e.lastObservedAt < ago(OBSERVATION_STALE_MS)) out.push({ component, status: 'unknown', detail: e ? 'It hasn’t been checked in 15 minutes.' : 'It hasn’t been checked yet.' });
     else out.push({ component, status: health === 'ok' ? 'ok' : health === 'degraded' ? 'degraded' : 'down' });
   }
 
@@ -84,36 +89,47 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     // It is degraded, not ok, so the console lists it as an issue rather than folding it under "Normal".
     const setAside = !c.consecutiveFailures && !!c.lastOkAt && !!c.lastError;
     const status: Status = fresh === 'ok' && setAside ? 'degraded' : fresh;
-    const detail = c.consecutiveFailures ? `${c.consecutiveFailures} failure(s) in a row` : !c.lastOkAt ? 'no good run yet' : c.lastError ? 'the last run set something aside (see its last error)' : undefined;
+    const detail = c.consecutiveFailures
+      ? c.consecutiveFailures === 1 ? 'The last read failed.' : `The last ${c.consecutiveFailures} reads failed.`
+      : !c.lastOkAt ? 'It hasn’t had a good read yet.' : c.lastError ? 'The last read skipped an item.' : undefined;
     out.push({ component, status, ...(detail ? { detail: clip(detail) } : {}) });
   }
 
   const backup = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
   const backupH = backup ? (now.getTime() - backup.startedAt.getTime()) / 3_600_000 : Infinity;
-  out.push({ component: 'backup', status: backupH <= 26 ? 'ok' : backupH <= 36 ? 'degraded' : 'down', detail: backup ? `${Math.round(backupH)} h old` : 'none yet' });
+  out.push({ component: 'backup', status: backupH <= 26 ? 'ok' : backupH <= 36 ? 'degraded' : 'down', detail: backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.' });
 
   // The latest drill only: one that failed and was then passed is passed.
   const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
   const drillD = drill?.restoreTestedAt ? (now.getTime() - drill.restoreTestedAt.getTime()) / 86_400_000 : Infinity;
-  out.push({ component: 'restore_drill', status: drill?.restoreOk === false ? 'down' : drillD <= 8 ? 'ok' : 'degraded', detail: drill ? `${Math.round(drillD)} d ago` : 'never' });
+  const days = Math.round(drillD);
+  const tested = days === 0 ? 'today' : `${count(days, 'day')} ago`;
+  out.push({
+    component: 'restore_drill', status: drill?.restoreOk === false ? 'down' : drillD <= 8 ? 'ok' : 'degraded',
+    detail: !drill ? 'No restore test has run yet.' : drill.restoreOk === false ? `The last restore test failed ${tested}.` : `The last restore test was ${tested}.`,
+  });
 
   const open = Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM audit_open_intents`)[0]?.n ?? 0);
-  out.push({ component: 'audit_intents', status: open === 0 ? 'ok' : 'degraded', ...(open ? { detail: `${open} intent(s) without an outcome` } : {}) });
+  out.push({ component: 'audit_intents', status: open === 0 ? 'ok' : 'degraded', ...(open ? { detail: open === 1 ? 'The log is missing the result for 1 action.' : `The log is missing results for ${open} actions.` } : {}) });
 
   const retention = await db.auditEntry.findFirst({ where: { action: 'maintenance.retention', kind: 'action' }, orderBy: { at: 'desc' }, select: { at: true, outcome: true } });
   out.push(
     !retention
-      ? { component: 'retention', status: 'unknown', detail: 'has not run (waits for its nightly card until promoted)' }
+      ? { component: 'retention', status: 'unknown', detail: 'It hasn’t run yet.' }
       : (() => {
           const ok = retention.outcome === 'ok' && retention.at > ago(36 * 3_600_000);
+          const h = Math.round((now.getTime() - retention.at.getTime()) / 3_600_000);
+          const ran = h ? `${count(h, 'hour')} ago` : 'less than an hour ago';
           // At APPROVAL it waits for Will's nightly card: overdue until he approves or promotes it.
-          return { component: 'retention', status: ok ? ('ok' as const) : ('degraded' as const), detail: `${ok ? '' : 'overdue: '}last run ${Math.round((now.getTime() - retention.at.getTime()) / 3_600_000)} h ago` };
+          // A run that failed says so, however recent; an ok one is overdue only past 36 hours.
+          const detail = retention.outcome !== 'ok' ? `Its last run failed ${ran}.` : ok ? `It last ran ${ran}.` : `It’s overdue. It last ran ${ran}.`;
+          return { component: 'retention', status: ok ? ('ok' as const) : ('degraded' as const), detail };
         })(),
   );
 
   const marker = join(d.config.home, '.flint', 'runtime', 'migrate-failed');
   const failed = existsSync(marker) ? [...new Set(readFileSync(marker, 'utf8').split('\n').map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/.test(l)))] : [];
-  out.push({ component: 'migrate_failed', status: failed.length ? 'down' : 'ok', ...(failed.length ? { detail: `not retried: ${failed.map((s) => s.slice(0, 7)).join(', ').slice(0, 200)}` } : {}) });
+  out.push({ component: 'migrate_failed', status: failed.length ? 'down' : 'ok', ...(failed.length ? { detail: failed.length === 1 ? 'A database update failed and won’t be retried until it’s fixed.' : 'Several database updates failed and won’t be retried until they’re fixed.' } : {}) });
 
   if (!d.config.triage) out.push({ component: 'triage', status: 'disabled' });
   else {
@@ -133,10 +149,15 @@ export async function recordChecks(db: Db, checks: ComponentCheck[], at: Date): 
   }], at);
 }
 
-/** The report the console shows (GET /v1/health/report): each component's latest check. */
+/**
+ * The report the console shows (GET /v1/health/report): each component's latest check.
+ * A dotted name is a mark of its own (the triage worker's 'triage.deferral'), not a
+ * component: nothing writes it an ok row, so it is left out, as the digest leaves it
+ * out. The 'triage' row already reflects a deferral within the hour.
+ */
 export async function healthReport(db: Db, config: Pick<Config, 'triage'>, now = new Date()): Promise<z.infer<typeof HealthReport>> {
   const rows = await db.$queryRaw<Array<{ component: string; status: Status; detail: string | null; at: Date }>>`
-    SELECT DISTINCT ON (component) component, status, detail, at FROM "HealthCheck" ORDER BY component, at DESC`;
+    SELECT DISTINCT ON (component) component, status, detail, at FROM "HealthCheck" WHERE component NOT LIKE '%.%' ORDER BY component, at DESC`;
   const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' } });
   const from = new Date(now.getTime() - 14 * 86_400_000);
   const beats = await db.runtimeInstance.findMany({ where: { lastBeatAt: { gt: from } }, select: { startedAt: true, lastBeatAt: true } });

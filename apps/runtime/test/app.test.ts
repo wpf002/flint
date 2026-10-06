@@ -169,7 +169,7 @@ describe.skipIf(NO_DB)('runtime API', () => {
       await approver(`UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1`, [cred2]);
       const r = await call('POST', `/v1/proposals/${created.id}/claim`, {});
       expect(r.statusCode).toBe(403);
-      expect(r.json().error).toMatch(/no longer verifies/);
+      expect(r.json().error).toBe('Flint didn’t run it because your approval is no longer valid.');
       const p = await owner(`SELECT status FROM "Proposal" WHERE id = $1`, [created.id]);
       expect(p.rows[0].status).toBe('failed');
     });
@@ -188,7 +188,7 @@ describe.skipIf(NO_DB)('runtime API', () => {
       const approvalId = await signApproval({ subjectId: target.id, action: 'world.sync.railway', argsDigest: target.argsDigest });
       const r = await call('POST', `/v1/proposals/${target.id}/approve`, { approvalId });
       expect(r.statusCode).toBe(409);
-      expect(r.json().error).toMatch(/forbidden/);
+      expect(r.json().error).toBe('Flint isn’t allowed to run this.');
     });
 
     it('a signed rejection rejects', async () => {

@@ -260,6 +260,9 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     await owner(`UPDATE "SourceCursor" SET "lastOkAt" = now() WHERE source = 'google_calendar'`);
     const t = await promotionTable(db, { phase: 'p25' });
     expect(t.rows.map((r) => [r.pattern, r.dailyCap ?? null])).toEqual([['world.sync.google_calendar', null], ['world.person.create', 20]]);
-    expect((await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).templateId).toBe('p25.promotion');
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+    expect(card.templateId).toBe('p25.promotion');
+    // What signing lets Flint do, until when, and what the week measured, in sentences.
+    expect(card.reason).toMatch(/^This lets Flint read your calendar and add people without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Flint knows (no one yet|\d+ (person|people))\. You approved \d+ cards? to add people[^.]*, and (no calendar reads|\d+ calendar reads?) failed this week\./);
   });
 });

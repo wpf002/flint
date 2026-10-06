@@ -90,12 +90,12 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     const checks = await checkComponents({ db, config, now, sources: [{ name: 'launchd', cadenceMs: 2 * MIN }, { name: 'github', cadenceMs: 5 * MIN }] });
     const by = Object.fromEntries(checks.map((c) => [c.component, c]));
     expect(by.postgres!.status).toBe('ok');
-    expect(by.bus).toMatchObject({ status: 'degraded', detail: '1 dead-lettered in a day, 0 stuck active' });
-    expect(by.server!.status).toBe('unknown');
+    expect(by.bus).toMatchObject({ status: 'degraded', detail: 'The queue had 1 failed job in the last day.' });
+    expect(by.server).toMatchObject({ status: 'unknown', detail: 'It hasn’t been checked yet.' });
     expect(by['source:launchd']!.status).toBe('ok');
     expect(by['source:github']!.status).toBe('disabled');
-    expect(by.backup!.status).toBe('down');
-    expect(by.retention!.status).toBe('unknown');
+    expect(by.backup).toMatchObject({ status: 'down', detail: 'There’s no backup yet.' });
+    expect(by.retention).toMatchObject({ status: 'unknown', detail: 'It hasn’t run yet.' });
     expect(by.triage!.status).toBe('ok');
     await owner(`DELETE FROM pgboss.job WHERE name = 'dead'`);
     // Later than two cadences without a good run: degraded, then down.
@@ -104,12 +104,16 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     // A good run that set something aside (a calendar item it could not read) is degraded, with why.
     await owner(`UPDATE "SourceCursor" SET "lastError" = 'an item set aside', "consecutiveFailures" = 0 WHERE source = 'launchd'`);
     const aside = (await checkComponents({ db, config, now, sources: [{ name: 'launchd', cadenceMs: 2 * MIN }] })).find((c) => c.component === 'source:launchd');
-    expect(aside).toMatchObject({ status: 'degraded', detail: 'the last run set something aside (see its last error)' });
+    expect(aside).toMatchObject({ status: 'degraded', detail: 'The last read skipped an item.' });
     await owner(`UPDATE "SourceCursor" SET "lastError" = NULL WHERE source = 'launchd'`);
     await recordChecks(db, checks, now);
+    // The triage worker's own mark is not a component: nothing writes it an ok row, so it never shows as an issue.
+    await db.healthCheck.create({ data: { component: 'triage.deferral', status: 'degraded', detail: 'Chat was busy.', at: now } });
     const report = await healthReport(db, config, now);
     expect(report.triage).toBe('on');
     expect(report.components.find((c) => c.component === 'bus')!.status).toBe('degraded');
+    expect(report.components.map((c) => c.component)).not.toContain('triage.deferral');
+    expect(report.components.map((c) => c.component)).toContain('triage');
     expect(await db.auditEntry.count({ where: { kind: 'health', action: 'health.check' } })).toBe(1);
   });
 
@@ -157,7 +161,11 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     expect(m).toMatchObject([{ ref: 'a'.repeat(40), payload: { sha: 'a'.repeat(40) } }]);
     expect(await raise(db, m, now)).toHaveLength(1);
     expect(await raise(db, m, now)).toHaveLength(0);
-    expect((await checkComponents({ db, config, now, sources: [] })).find((c) => c.component === 'migrate_failed')).toMatchObject({ status: 'down', detail: 'not retried: aaaaaaa' });
+    const after = await checkComponents({ db, config, now, sources: [] });
+    expect(after.find((c) => c.component === 'migrate_failed')).toMatchObject({ status: 'down', detail: 'A database update failed and won’t be retried until it’s fixed.' });
+    // Each detail is a sentence: the latest backup's age (dr2, an hour ago), and the latest drill (passed an hour ago).
+    expect(after.find((c) => c.component === 'backup')).toMatchObject({ status: 'ok', detail: 'The last backup is 1 hour old.' });
+    expect(after.find((c) => c.component === 'restore_drill')).toMatchObject({ status: 'ok', detail: 'The last restore test was today.' });
   });
 
   it('a vendor at its cap is raised once a day, and not when the server said so today', async () => {

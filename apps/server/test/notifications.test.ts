@@ -33,9 +33,9 @@ describe('the phone ping', () => {
   it('is the same request for every note: no title, no body, nothing about what happened', async () => {
     const f = feed();
     const cases: Array<[string, string, string]> = [
-      ['Upcoming', 'Dentist with Dr. Smith — Sat, Oct 4, 2:00 PM · 12 Main St', 'calendar'],
-      ['Claude (Anthropic) budget: 80% of today\'s cap', '$8.00 of $10.00 today. Standard questions answer on the routine tier.', 'budget'],
-      ['Action done', 'trident.gmail_send ✓', 'action'],
+      ['Upcoming', 'Dentist with Dr. Smith is on Sat, Oct 4 at 2:00 PM, at 12 Main St.', 'calendar'],
+      ['Claude (Anthropic) budget: 80% of today\'s cap', 'Flint has spent $8.00 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.', 'budget'],
+      ['Action done', 'An approved action is done.', 'action'],
       ['Service down', 'api has been down for 31 minutes', 'runtime'],
     ];
     for (const [t, b, k] of cases) expect(f.notes.push(t, b, k)).toEqual({ status: 'stored', pinged: true });

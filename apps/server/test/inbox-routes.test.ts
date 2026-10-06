@@ -117,7 +117,7 @@ describe('GET /inbox', () => {
     const r = await get('/inbox');
     expect(r.status).toBe(502);
     const b = (await r.json()) as { error: string; ref: string };
-    expect(b).toEqual({ error: 'the runtime sent an answer the server does not accept', ref: 'ref123' });
+    expect(b).toEqual({ error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' });
     expect(refs[0]).toContain('items.0.reasoning');
     expect(refs[0]).not.toContain('xxxx');
     answer = () => ({ status: 200, body: '<html>oops</html>' });
@@ -130,7 +130,7 @@ describe('GET /inbox', () => {
       const r = await get('/inbox');
       expect(r.status).toBe(502);
       const text = await r.text();
-      expect(text).toMatch(/refused the server's token/);
+      expect(JSON.parse(text)).toEqual({ error: 'The runtime rejected Flint’s token. Reinstall the runtime to fix it.' });
       expect(text).not.toContain('sha mismatch');
     }
   });
@@ -139,7 +139,7 @@ describe('GET /inbox', () => {
     answer = () => ({ status: 404, body: { message: 'Route GET:/v1/inbox not found' } });
     const r = await get('/inbox');
     expect(r.status).toBe(501);
-    expect(await r.json()).toEqual({ error: 'the lanes need the P2 runtime' });
+    expect(await r.json()).toEqual({ error: 'This needs a newer runtime.' });
     answer = () => ({ status: 500, body: { error: 'PrismaClientKnownRequestError: relation "TriageDecision" does not exist' } });
     const f = await get('/inbox');
     expect(f.status).toBe(502);
@@ -148,11 +148,13 @@ describe('GET /inbox', () => {
 
   it('no runtime installed: 503; a runtime that does not answer: 502', async () => {
     deps = { ...deps, runtime: () => undefined };
-    expect((await get('/inbox')).status).toBe(503);
+    const none = await get('/inbox');
+    expect(none.status).toBe(503);
+    expect(await none.json()).toEqual({ error: 'The runtime isn’t installed.' });
     deps = { ...deps, runtime: () => ({ url: 'http://[::1]:9', token: TOKEN }) };
     const r = await get('/inbox');
     expect(r.status).toBe(502);
-    expect(await r.json()).toEqual({ error: 'the runtime did not answer' });
+    expect(await r.json()).toEqual({ error: 'The runtime didn’t answer.' });
   });
 
   it('times out, and reads or cancels every runtime body', async () => {
@@ -209,13 +211,13 @@ describe('labels, acks and dismissals', () => {
 
   it("maps the runtime's refusals to short messages of the server's own", async () => {
     const cases: Array<[number, number, RegExp]> = [
-      [404, 404, /no such escalation/],
-      [409, 409, /cannot change now/],
-      [400, 400, /refused that escalation request/],
-      [401, 502, /refused the server's token/],
-      [403, 502, /refused the server's token/],
-      [429, 429, /busy/],
-      [500, 502, /the runtime failed/],
+      [404, 404, /"That item no longer exists\."/],
+      [409, 409, /"That item can no longer change\."/],
+      [400, 400, /"The runtime refused that change\."/],
+      [401, 502, /"The runtime rejected Flint’s token\. Reinstall the runtime to fix it\."/],
+      [403, 502, /"The runtime rejected Flint’s token\. Reinstall the runtime to fix it\."/],
+      [429, 429, /"The runtime is busy\. Try again shortly\."/],
+      [500, 502, /"The runtime hit an error\. Try again\."/],
     ];
     for (const [rt, want, msg] of cases) {
       answer = () => ({ status: rt, body: { error: 'escalation es_cm1 is dismissed; internal detail' } });

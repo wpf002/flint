@@ -1,7 +1,8 @@
 /**
  * The nightly backup gate (plan P1 backups; review of #41): one card a night,
  * living 26 hours so the next run claims it whenever Will approved it; older
- * pending cards withdrawn; an approved card claimed and run.
+ * pending cards withdrawn; an approved card claimed and run. The drill runs on
+ * Sundays only, so its card lives a week and two hours.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { NO_DB, freshDb, type TestUrls } from './db';
@@ -33,6 +34,8 @@ describe.skipIf(NO_DB)('nightly gate', () => {
     expect(cards.map((c) => [c.id === older.id, c.status, (c.args as { day: string }).day])).toEqual([[true, 'rejected', '2026-09-30'], [false, 'pending', now.toISOString().slice(0, 10)]]);
     const tonight = cards[1]!;
     expect(tonight.expiresAt.getTime() - tonight.createdAt.getTime()).toBeGreaterThanOrEqual(26 * 3600_000 - 1000);
+    expect(tonight.expiresAt.getTime() - tonight.createdAt.getTime()).toBeLessThan(27 * 3600_000);
+    expect(tonight.reason).toBe('It waits for your approval each night until you let it run on its own.');
     // A second run the same night files nothing new.
     await gate(db, 'backup', 'UTC', undefined, new Date());
     expect(await db.proposal.count({ where: { origin: 'runtime:backup', status: 'pending' } })).toBe(1);
@@ -40,5 +43,19 @@ describe.skipIf(NO_DB)('nightly gate', () => {
     const key = await enrollTestKey(urls);
     await approveProposal(db, tonight.id, await key.approve({ subjectId: tonight.id, action: 'backup.local', argsDigest: tonight.argsDigest }), undefined, 'test');
     expect(await gate(db, 'backup', 'UTC', undefined, new Date())).toMatchObject({ go: true, proposalId: tonight.id });
+  });
+
+  it('the drill runs on Sundays only, so its card lives a week and two hours, and the next Sunday’s run claims it', async () => {
+    const sunday = new Date();
+    expect(await gate(db, 'drill', 'UTC', undefined, sunday)).toMatchObject({ go: false });
+    const card = await db.proposal.findFirstOrThrow({ where: { origin: 'runtime:drill', status: 'pending' } });
+    // Filed at 02:15 on a Sunday, it outlives 02:15 the next Sunday (a 169-hour DST week included).
+    expect(card.expiresAt.getTime() - card.createdAt.getTime()).toBeGreaterThanOrEqual((7 * 24 + 2) * 3600_000 - 1000);
+    expect(card.reason).toBe('It waits for your approval each week until you let it run on its own.');
+    const key = await enrollTestKey(urls);
+    await approveProposal(db, card.id, await key.approve({ subjectId: card.id, action: 'restore.drill', argsDigest: card.argsDigest }), undefined, 'test');
+    // Approved on the day it was filed, it is still there for the run a week on.
+    const nextSunday = new Date(sunday.getTime() + 7 * 24 * 3600_000);
+    expect(await gate(db, 'drill', 'UTC', undefined, nextSunday)).toMatchObject({ go: true, proposalId: card.id });
   });
 });

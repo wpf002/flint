@@ -403,23 +403,25 @@ function periodStatus(t: PeriodTotals, cap: number | undefined): PeriodStatus {
   };
 }
 
-/** What a level means for one vendor, for /spend, spend_status and notifications. */
+/**
+ * What a level means for one vendor, for /spend, spend_status and notifications:
+ * the note's second sentence, in Will's words. At 100% a spent brain is skipped
+ * (the next with budget answers, the local one last, and says so); at 80% harder
+ * turns move to the routine (cheaper) tier and background work (memory
+ * extraction, research planning) waits.
+ */
 export function effectOf(vendor: PaidVendor, level: BudgetLevel): string {
-  if (level === 'ok' || level === 'notice') return 'Normal: nothing is limited.';
+  if (level === 'ok' || level === 'notice') return 'Nothing is limited yet.';
   const spent = level === 'exhausted';
   switch (vendor) {
     case 'anthropic':
-      return spent
-        ? 'Claude is not called; Flint answers on the next brain with budget (the local brain at the end) and says so.'
-        : 'Standard, hard and code questions answer on the routine (cheaper) tier; memory extraction and research planning wait.';
+      return spent ? 'Claude is off until the cap resets, so another model answers and says so.' : 'Harder questions use a cheaper model, and background work waits.';
     case 'openai':
-      return spent
-        ? 'OpenAI is not called: voice uses the browser, and any OpenAI brain tier is skipped.'
-        : 'Any OpenAI brain tier drops to the routine tier; background work on OpenAI waits. Voice is unchanged.';
+      return spent ? 'OpenAI is off until the cap resets, so voice uses the browser.' : 'OpenAI questions use a cheaper model, and its background work waits. Voice is unchanged.';
     case 'perplexity':
-      return spent ? 'perplexity_search is off; web search covers it.' : 'Normal until the cap: searches still run.';
+      return spent ? 'Perplexity search is off, so web search covers it.' : 'Searches still run until the cap.';
     case 'tavily':
-      return spent ? 'web_search is off; Perplexity or a keyless page fetch covers it.' : 'Normal until the cap: searches still run.';
+      return spent ? 'Tavily search is off, so Perplexity or a plain page fetch covers it.' : 'Searches still run until the cap.';
   }
 }
 
@@ -593,7 +595,7 @@ export class SpendGuard {
       const pushed = this.notifier.push(
         `${VENDOR_NAMES[vendor]} budget: ${pct}% of ${scope} cap`,
         // The effect of the vendor's CURRENT level: the other period's cap may be further along.
-        `${usd(used)} of ${usd(cap)} ${period === 'daily' ? 'today' : 'this month'}. ${this.status(vendor).effect}`,
+        `Flint has spent ${usd(used)} of ${period === 'daily' ? 'today’s' : 'this month’s'} ${usd(cap)} cap. ${this.status(vendor).effect}`,
         'budget',
         key(hit),
       );

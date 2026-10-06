@@ -34,6 +34,26 @@ export class Refused extends Error {
   }
 }
 
+/** A card that is gone. Its refusals show under the card itself, so "it" needs no noun. */
+export const GONE = 'It no longer exists.';
+
+/** Why a card cannot take this step, from where it stands, as a sentence under the card. */
+export function statusWords(status: string): string {
+  const words: Record<string, string> = {
+    pending: 'It isn’t approved yet.',
+    approved: 'It’s already approved.',
+    executing: 'It’s running now.',
+    executed: 'It already ran.',
+    rejected: 'It was rejected.',
+    expired: 'It expired.',
+    failed: 'It already failed.',
+  };
+  return words[status] ?? 'It can’t change now.';
+}
+
+/** A cap that is reached, by its period: "Today’s limit of 10 is reached." */
+const CAP_PERIOD: Record<string, string> = { hour: 'This hour’s', day: 'Today’s', week: 'This week’s' };
+
 const Provenance = z.record(
   z.string().max(64),
   z.object({ source: z.enum(['will', 'model', 'template', 'event']), ref: z.string().max(120).optional(), tainted: z.boolean() }).strict(),
@@ -172,15 +192,16 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
  */
 export async function approveProposal(db: Db, id: string, approvalId: string, rp: WebAuthnRelyingParty | undefined, actor: string, now = new Date()) {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
-  if (p.status !== 'pending') throw new Refused(409, `the proposal is ${p.status}`);
+  if (!p) throw new Refused(404, GONE);
+  if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   const v = await reverifyApproval(db, approvalId, rp);
-  if (!v.ok) throw new Refused(403, `the approval does not verify: ${v.reason}`);
+  // The reason is crypto wording: it stays out of what Will reads.
+  if (!v.ok) throw new Refused(403, 'Your approval didn’t verify. Try again.');
   if (v.payload.subjectType !== 'proposal' || v.payload.subjectId !== id || v.payload.decision !== 'approve' || v.payload.action !== p.action || v.payload.argsDigest !== p.argsDigest) {
-    throw new Refused(403, 'the approval was signed for something else');
+    throw new Refused(403, 'Your approval was for something else.');
   }
   const decision = await tierOf(db, p, now);
-  if (decision.tier === 'forbidden') throw new Refused(409, `forbidden: ${decision.reason}`);
+  if (decision.tier === 'forbidden') throw new Refused(409, 'Flint isn’t allowed to run this.');
   await db.$transaction(async (tx) => {
     // proposal_transition checks the approval again and consumes it.
     await tx.proposal.update({ where: { id }, data: { status: 'approved', approvalId } });
@@ -194,11 +215,11 @@ export async function approveProposal(db: Db, id: string, approvalId: string, rp
 /** Reject: Will's signed rejection when there is one, or the runtime refusing on its own. */
 export async function rejectProposal(db: Db, id: string, opts: { approvalId?: string; error?: string }, rp: WebAuthnRelyingParty | undefined, actor: string) {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
-  if (p.status !== 'pending') throw new Refused(409, `the proposal is ${p.status}`);
+  if (!p) throw new Refused(404, GONE);
+  if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   if (opts.approvalId) {
     const v = await reverifyApproval(db, opts.approvalId, rp);
-    if (!v.ok) throw new Refused(403, `the rejection does not verify: ${v.reason}`);
+    if (!v.ok) throw new Refused(403, 'Your rejection didn’t verify. Try again.');
   }
   await db.$transaction(async (tx) => {
     await tx.proposal.update({
@@ -222,32 +243,34 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
   // reported, so the transaction returns it instead of throwing it.
   const out = await db.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} FOR UPDATE`;
-    if (locked.length === 0) throw new Refused(404, 'no such proposal');
+    if (locked.length === 0) throw new Refused(404, GONE);
     const p = await tx.proposal.findUniqueOrThrow({ where: { id } });
-    if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, `the proposal is ${p.status}`);
-    if (p.expiresAt <= now) throw new Refused(409, 'the proposal has expired');
-    const fail = async (reason: string, status: 403 | 409) => {
+    if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, p.status === 'approved' ? statusWords('pending') : statusWords(p.status));
+    if (p.expiresAt <= now) throw new Refused(409, 'It expired.');
+    // `reason` is what Will reads (the card's error, and the refusal); `why`, the engine's own words, is audited too.
+    const fail = async (reason: string, status: 403 | 409, why?: string) => {
       await tx.proposal.update({ where: { id }, data: { status: 'failed', error: reason, executedAt: now } });
       await appendAudit(tx, [{
         actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
-        inputs: auditInputs(p), reasoning: reason, correlationId: id, tainted: p.tainted,
+        inputs: auditInputs(p), reasoning: (why ? `${reason} (${why})` : reason).slice(0, 1000), correlationId: id, tainted: p.tainted,
       }], now);
       return { refused: new Refused(status, reason) } as const;
     };
     const v = await reverifyApproval(tx, p.approvalId, rp);
     if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
-      return fail(`refused to execute: the approval no longer verifies (${v.ok ? 'it covers different args' : v.reason})`, 403);
+      // The reason stays in the audit (the refusal is stored as the card's error, which Will reads).
+      return fail('Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
     }
     // The args as stored, read as text (exact), are what is checked and what runs.
     const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;
     const args = stored?.t ? (JSON.parse(stored.t) as Record<string, unknown>) : null;
-    if (args === null || digestOf(args) !== p.argsDigest) return fail('refused to execute: the args do not match their digest', 409);
+    if (args === null || digestOf(args) !== p.argsDigest) return fail('Flint didn’t run it because it changed after you approved it.', 409, 'the args do not match their digest');
     const decision = await tierOf(tx, p, now);
-    if (decision.tier === 'forbidden') return fail(`refused to execute: forbidden: ${decision.reason}`, 409);
+    if (decision.tier === 'forbidden') return fail('Flint didn’t run it because it isn’t allowed now.', 409, `forbidden: ${decision.reason}`);
     if (decision.cap) {
       const n = await claim(tx, decision.key, decision.cap, tz, now);
       // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
-      if (n === null) throw new Refused(429, `the ${decision.cap.period}ly cap of ${decision.cap.limit} for ${decision.key} is reached`);
+      if (n === null) throw new Refused(429, `${CAP_PERIOD[decision.cap.period] ?? 'Its'} limit of ${decision.cap.limit} is reached.`);
     }
     await tx.proposal.update({ where: { id }, data: { status: 'executing' } });
     await appendAudit(tx, [{
@@ -274,7 +297,7 @@ export const GIVEN_UP = 'no completion was reported: outcome unknown';
 
 export async function completeProposal(db: Db, id: string, body: z.infer<typeof CompleteProposal>, actor: string, now = new Date()): Promise<{ late?: true }> {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
+  if (!p) throw new Refused(404, GONE);
   if (p.status === 'failed' && p.error === GIVEN_UP) {
     // The sweep gave up on it, and now it reports: the record says how it really
     // ended, correlated with it (the proposal itself stays as the sweep left it).
@@ -284,7 +307,7 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
     }]);
     return { late: true };
   }
-  if (p.status !== 'executing') throw new Refused(409, `the proposal is ${p.status}`);
+  if (p.status !== 'executing') throw new Refused(409, statusWords(p.status));
   let result: Prisma.InputJsonObject | undefined;
   if (body.result) {
     // Measured as the database measures it (jsonb text), with room to spare: an

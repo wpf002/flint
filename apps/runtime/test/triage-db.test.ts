@@ -127,7 +127,9 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
     expect(await processEvent({ eventId: ev.id, deferrals: MAX_DEFERRALS }, busy)).toBe('decided');
     expect(modelCalls).toBe(0);
     expect(await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev.id } })).toMatchObject({ decidedBy: 'fallback:deferred', lane: 'quiet' });
-    expect(await db.healthCheck.findFirst({ where: { component: 'triage.deferral', status: 'degraded' } })).not.toBeNull();
+    expect(await db.healthCheck.findFirst({ where: { component: 'triage.deferral', status: 'degraded' } })).toMatchObject({
+      detail: 'Chat was busy for 10 minutes, so an event went to Other without the model’s review.',
+    });
   });
 
   it('per day: a handoff escalates once per sender; the next is logged quietly', async () => {

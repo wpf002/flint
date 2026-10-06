@@ -50,7 +50,7 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     expect(patterns).toHaveLength(P2_PROMOTIONS.length - 1);
     expect(t.rows.find((r) => r.pattern === 'notify.push')).toMatchObject({ dailyCap: 3, tier: 'alone' });
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
-    expect(card.reason).toMatch(/The shadow week: [\d.]+ relevant a day; precision (n\/a|\d+%) over \d+ marked\.$/);
+    expect(card.reason).toMatch(/^This lets Flint sort events, send its notes and run its upkeep without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Lately [\d.]+ items a day were important, and (you haven’t rated any yet|the one you rated (was|wasn’t) useful|\d+ of the \d+ you rated were useful)\.$/);
     // Filing it again, later and after more decisions, is the same card.
     await shadowDecision(1);
     const again = await promotionTable(db, { drop: ['world.sync.knowledge'], now: new Date(Date.now() + 90_000) });
@@ -89,7 +89,7 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     expect(t.rows.find((r) => r.pattern === 'ledger_record_prediction')).toMatchObject({ dailyCap: 10, tier: 'alone' });
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
     expect(card.templateId).toBe('p1.promotion');
-    expect(card.reason).toMatch(/The shadow week: chat asked to read 2 time\(s\) this week: 0 approved and run, 0 rejected, 0 expired; 1 in a turn with outside text\.$/);
+    expect(card.reason).toMatch(/^This lets chat look things up and record predictions without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. This week chat asked 2 times: 0 ran, 0 were rejected, 0 expired, and 1 had outside text\.$/);
 
     // Signed: a chat read of the world model no longer asks, and a tainted turn still cannot reach past its floor.
     const key = await enrollTestKey(urls);
