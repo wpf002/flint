@@ -16,6 +16,7 @@ import { nexusSource, parseThreads, threadObservation } from '../../src/sources/
 import { clip, wellFormed, wellFormedDeep } from '../../src/sources/text';
 import { loadConfig } from '../../src/config';
 import { registry } from '../../src/sources/registry';
+import { CalendarInbox } from '../../src/sources/apple/inbox';
 import type { Db } from '../../src/db';
 import type { Known, SourceRun } from '../../src/sources/types';
 
@@ -392,5 +393,18 @@ describe('config and registry for the three', () => {
       { origin: 'https://www.googleapis.com', pathPrefix: '/calendar/v3/calendars/primary/events', methods: ['GET'] },
     ]);
     expect(Object.keys(Object.fromEntries(registry(loadConfig(base), {} as Db).map((r) => [r.source.name, 1])))).not.toContain('google_calendar');
+  });
+
+  it("Will's Apple Calendar (P2.6) exists only when switched on, and reaches nothing: Flint Calendar pushes to it", () => {
+    const names = (c: ReturnType<typeof loadConfig>, inbox?: CalendarInbox) => registry(c, {} as Db, inbox ? { calendarInbox: inbox } : {}).map((r) => r.source.name);
+    const inbox = new CalendarInbox();
+    expect(names(loadConfig(base), inbox)).not.toContain('apple_calendar');
+    expect(names(loadConfig({ ...base, FLINT_SOURCE_APPLE_CALENDAR: 'off' }), inbox)).not.toContain('apple_calendar');
+    const on = loadConfig({ ...base, FLINT_SOURCE_APPLE_CALENDAR: 'on' });
+    // On, but no inbox for it to read (a process that is not the runtime): not registered either.
+    expect(names(on)).not.toContain('apple_calendar');
+    const reg = registry(on, {} as Db, { calendarInbox: inbox }).find((r) => r.source.name === 'apple_calendar')!;
+    expect(reg.endpoints).toEqual([]);
+    expect(reg.source.cadenceMs).toBe(5 * 60_000);
   });
 });

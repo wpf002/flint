@@ -10,6 +10,7 @@ import { loadRuntimeConfig } from './config.js';
 import { createDb } from './db.js';
 import { buildApp, type RuntimeStatus } from './app.js';
 import { run } from './lifecycle.js';
+import { CalendarInbox } from './sources/apple/inbox.js';
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
@@ -17,9 +18,11 @@ async function main(): Promise<void> {
   const db = createDb(config.databaseUrl);
   await db.$queryRaw`SELECT ensure_partitions(2)`;
   const status: RuntimeStatus = { problems: new Set(), busStartedAt: null };
-  const app = buildApp({ db, config, logger: true, status });
+  // P2.6: one Apple Calendar inbox, while that source is on: the push route fills it and the source reads it.
+  const calendarInbox = config.appleCalendar ? new CalendarInbox() : undefined;
+  const app = buildApp({ db, config, logger: true, status, ...(calendarInbox ? { calendarInbox } : {}) });
   await app.listen({ host: config.host, port: config.port });
-  const life = await run(db, config, status, (msg, extra) => app.log.warn(extra ?? {}, msg));
+  const life = await run(db, config, status, (msg, extra) => app.log.warn(extra ?? {}, msg), { ...(calendarInbox ? { calendarInbox } : {}) });
   let exiting = false;
   const exit = (signal: string) => {
     if (exiting) return;

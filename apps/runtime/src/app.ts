@@ -1,9 +1,10 @@
 /**
  * The runtime's HTTP API (plan 3.0.1): loopback only, not in `tailscale serve`.
  * Every route but /health names the one scope it needs; a caller's token grants
- * scopes (config.ts). Bodies over 64 KB are refused with 413, invalid input with
- * 400 (zod), and errors never echo internals: the reply carries a reference, the
- * log the detail.
+ * scopes (config.ts). Bodies over 64 KB are refused with 413 (a route that needs
+ * more says so: a proposal's result, Flint Calendar's snapshot), invalid input
+ * with 400 (zod), and errors never echo internals: the reply carries a
+ * reference, the log the detail.
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
@@ -30,6 +31,8 @@ import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
 import { registerP2Routes } from './routes/p2.js';
+import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
+import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
 
 declare module 'fastify' {
@@ -65,7 +68,11 @@ export interface AppDeps {
   db: Db;
   config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home'>>;
   logger?: boolean;
+  /** Where the log lines go (tests read them); stdout by default. */
+  logStream?: { write(line: string): void };
   status?: RuntimeStatus;
+  /** P2.6: the Apple Calendar inbox the push route fills, while that source is registered (index.ts makes one). */
+  calendarInbox?: CalendarInbox;
 }
 
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
@@ -74,7 +81,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
     bodyLimit: BODY_LIMIT,
     logger: deps.logger
-      ? { level: 'info', redact: { paths: ['req.headers.authorization', 'req.headers.cookie'], censor: '[redacted]' } }
+      ? { level: 'info', redact: { paths: ['req.headers.authorization', 'req.headers.cookie'], censor: '[redacted]' }, ...(deps.logStream ? { stream: deps.logStream } : {}) }
       : false,
   });
   const { db, config } = deps;
@@ -289,6 +296,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
+  // P2.6: Flint Calendar's push (scope calendar:push only; up to 2 MiB, this route alone).
+  registerAppleCalendarRoutes(app, {
+    db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),
+    ...(deps.calendarInbox ? { inbox: deps.calendarInbox } : {}),
+  });
 
   return app;
 }

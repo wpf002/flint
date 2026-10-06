@@ -249,7 +249,7 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
   });
 
   it('the P2.5 promotion table waits for a week of calendar syncs, and is its own card', async () => {
-    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/days of calendar syncs/);
+    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/days of Google Calendar syncs/);
     // A first sync eight days ago is not a week lived: every one of the last seven days needs a good sync.
     await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 8 * DAY));
     await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/does not count yet: \d of the 7 days before today/);
@@ -263,6 +263,6 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
     expect(card.templateId).toBe('p25.promotion');
     // What signing lets Flint do, until when, and what the week measured, in sentences.
-    expect(card.reason).toMatch(/^This lets Flint read your calendar and add people without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Flint knows (no one yet|\d+ (person|people))\. You approved \d+ cards? to add people[^.]*, and (no calendar reads|\d+ calendar reads?) failed this week\./);
+    expect(card.reason).toMatch(/^This lets Flint read your Google Calendar and add people without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Flint knows (no one yet|\d+ (person|people))\. You approved \d+ cards? to add people[^.]*, and (no Google Calendar reads|\d+ Google Calendar reads?) failed this week\./);
   });
 });

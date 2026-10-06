@@ -2,12 +2,13 @@
  * A phase's promotion table (Machine plan 3.0.4): after its shadow week, one
  * signed policy change that moves the phase's autonomous actions to ALONE for
  * 180 days. Built from the code table, filed as an ordinary policy.change
- * proposal Will signs with his key (or does not). P1, P2 and P2.5 each have
- * one, with its own card and its own evidence.
+ * proposal Will signs with his key (or does not). P1, P2, P2.5 and P2.6 each
+ * have one, with its own card and its own evidence.
  *
  *  - Refused before 7 days of evidence: P1's chat reads (since chat first asked
  *    to read the world model or the ledger); P2's shadow decisions; P2.5's
- *    calendar syncs (the source running for a week).
+ *    Google Calendar syncs, and P2.6's Apple Calendar syncs (each source
+ *    running for a week).
  *  - Never runtime.frontier.complete or triage.rule.create (they stay at
  *    APPROVAL), never anything FORBIDDEN, never an action a pattern of Will's
  *    choosing was dropped for (`--drop`).
@@ -63,10 +64,19 @@ export const P25_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number 
   { pattern: 'world.person.create', dailyCap: 20 },
 ];
 
+/**
+ * What P2.6 asks Will to promote: reading Apple Calendar on its own. Creating
+ * people keeps its own approval (P2.5's table, or each card), as before.
+ */
+export const P26_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  { pattern: 'world.sync.apple_calendar' },
+];
+
 /** Never in a table, whatever is asked. */
 export const NEVER_PROMOTED: ReadonlySet<string> = new Set(['runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail']);
 
-export type Phase = 'p1' | 'p2' | 'p25';
+export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26'] as const;
+export type Phase = (typeof PHASES_LIST)[number];
 
 export const SHADOW_DAYS = 7;
 
@@ -81,8 +91,7 @@ const DAY = 86_400_000;
 /** "1 time", "3 times". */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
-const PHASES: Record<Phase, {
+interface PhaseOf {
   rows: ReadonlyArray<{ pattern: string; dailyCap?: number }>;
   template: string;
   label: string;
@@ -93,7 +102,56 @@ const PHASES: Record<Phase, {
   /** Why the week does not count yet (it must have been lived, not only begun), or undefined. */
   covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
   measured: (db: Db, first: Date, now: Date) => Promise<string>;
-}> = {
+}
+
+const CALENDAR_NAMES = { google_calendar: 'Google Calendar', apple_calendar: 'Apple Calendar' } as const;
+
+/** A calendar phase (P2.5 Google's, P2.6 Apple's): its evidence is that calendar's own week of syncs. */
+function calendarPhase(source: keyof typeof CALENDAR_NAMES, rows: PhaseOf['rows'], template: string, label: string, lets: string, evidence: string): PhaseOf {
+  const action = `world.sync.${source}`;
+  const cal = CALENDAR_NAMES[source];
+  return {
+    rows,
+    template,
+    label,
+    lets,
+    evidence,
+    // The calendar's first audited sync: the source has been running since.
+    first: async (db) => (await db.auditEntry.findFirst({ where: { action, outcome: 'ok' }, orderBy: { at: 'asc' }, select: { at: true } }))?.at,
+    // Each of the 7 whole local days before today had a good sync (one that changed something is an ok
+    // audit entry; a quiet one is counted in AuditRollup), and the source synced in the last hour (today).
+    // Days are calendar dates, stepped back one at a time: a 23- or 25-hour day is still one day.
+    covered: async (db, now, tz) => {
+      const want: string[] = [];
+      for (let d = previousDay(localDay(tz, now)); want.length < SHADOW_DAYS; d = previousDay(d)) want.push(d);
+      const since = localDayBounds(tz, want[want.length - 1]!).start;
+      const days = new Set<string>();
+      for (const a of await db.auditEntry.findMany({ where: { action, outcome: 'ok', at: { gte: since } }, select: { at: true } })) days.add(localDay(tz, a.at));
+      for (const r of await db.auditRollup.findMany({ where: { action, count: { gt: 0 }, day: { gte: want[want.length - 1]! } }, select: { day: true } })) days.add(r.day);
+      const missing = want.filter((d) => !days.has(d));
+      if (missing.length) return `${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today had a good ${cal} sync (none on ${missing.join(', ')})`;
+      const last = (await db.sourceCursor.findUnique({ where: { source }, select: { lastOkAt: true } }))?.lastOkAt;
+      if (!last || now.getTime() - last.getTime() > 3_600_000) return `${cal} has not synced in the last hour`;
+      return undefined;
+    },
+    measured: async (db, _first, now) => {
+      const inRow = (await db.sourceCursor.findUnique({ where: { source }, select: { consecutiveFailures: true } }))?.consecutiveFailures ?? 0;
+      const week = await db.auditEntry.count({ where: { action, outcome: 'failed', at: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } } });
+      const people = await db.entity.count({ where: { kind: 'person' } });
+      const cards = await db.proposal.groupBy({ by: ['status'], where: { action: 'world.person.create' }, _count: { _all: true } });
+      const n = (st: string) => cards.find((c) => c.status === st)?._count._all ?? 0;
+      const knows = people ? `Flint knows ${count(people, 'person', 'people')}.` : 'Flint knows no one yet.';
+      const did = [`approved ${count(n('executed'), 'card')} to add people`, ...(n('rejected') ? [`rejected ${n('rejected')}`] : []), ...(n('expired') ? [`let ${n('expired')} expire`] : [])];
+      const decided = `You ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did[did.length - 1]}` : did[0]}`;
+      const failed = `${week ? count(week, `${cal} read`) : `no ${cal} reads`} failed this week`;
+      const inARow = inRow ? ` The last ${inRow === 1 ? `${cal} read` : `${inRow} ${cal} reads`} failed.` : '';
+      return `${knows} ${decided}, and ${failed}.${inARow}`;
+    },
+  };
+}
+
+/** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
+const PHASES: Record<Phase, PhaseOf> = {
   p1: {
     rows: P1_PROMOTIONS,
     template: 'p1.promotion',
@@ -130,44 +188,8 @@ const PHASES: Record<Phase, {
       return `Lately ${(relevant / days).toFixed(1)} items a day were important, and ${rated}.`;
     },
   },
-  p25: {
-    rows: P25_PROMOTIONS,
-    template: 'p25.promotion',
-    label: 'P2.5',
-    lets: 'Flint read your calendar and add people',
-    evidence: 'calendar syncs',
-    // The calendar's first audited sync: the source has been running since.
-    first: async (db) => (await db.auditEntry.findFirst({ where: { action: 'world.sync.google_calendar', outcome: 'ok' }, orderBy: { at: 'asc' }, select: { at: true } }))?.at,
-    // Each of the 7 whole local days before today had a good sync (one that changed something is an ok
-    // audit entry; a quiet one is counted in AuditRollup), and the source synced in the last hour (today).
-    // Days are calendar dates, stepped back one at a time: a 23- or 25-hour day is still one day.
-    covered: async (db, now, tz) => {
-      const want: string[] = [];
-      for (let d = previousDay(localDay(tz, now)); want.length < SHADOW_DAYS; d = previousDay(d)) want.push(d);
-      const since = localDayBounds(tz, want[want.length - 1]!).start;
-      const days = new Set<string>();
-      for (const a of await db.auditEntry.findMany({ where: { action: 'world.sync.google_calendar', outcome: 'ok', at: { gte: since } }, select: { at: true } })) days.add(localDay(tz, a.at));
-      for (const r of await db.auditRollup.findMany({ where: { action: 'world.sync.google_calendar', count: { gt: 0 }, day: { gte: want[want.length - 1]! } }, select: { day: true } })) days.add(r.day);
-      const missing = want.filter((d) => !days.has(d));
-      if (missing.length) return `${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today had a good calendar sync (none on ${missing.join(', ')})`;
-      const last = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { lastOkAt: true } }))?.lastOkAt;
-      if (!last || now.getTime() - last.getTime() > 3_600_000) return 'the calendar has not synced in the last hour';
-      return undefined;
-    },
-    measured: async (db, _first, now) => {
-      const inRow = (await db.sourceCursor.findUnique({ where: { source: 'google_calendar' }, select: { consecutiveFailures: true } }))?.consecutiveFailures ?? 0;
-      const week = await db.auditEntry.count({ where: { action: 'world.sync.google_calendar', outcome: 'failed', at: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } } });
-      const people = await db.entity.count({ where: { kind: 'person' } });
-      const cards = await db.proposal.groupBy({ by: ['status'], where: { action: 'world.person.create' }, _count: { _all: true } });
-      const n = (st: string) => cards.find((c) => c.status === st)?._count._all ?? 0;
-      const knows = people ? `Flint knows ${count(people, 'person', 'people')}.` : 'Flint knows no one yet.';
-      const did = [`approved ${count(n('executed'), 'card')} to add people`, ...(n('rejected') ? [`rejected ${n('rejected')}`] : []), ...(n('expired') ? [`let ${n('expired')} expire`] : [])];
-      const decided = `You ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did[did.length - 1]}` : did[0]}`;
-      const failed = `${week ? count(week, 'calendar read') : 'no calendar reads'} failed this week`;
-      const inARow = inRow ? ` The last ${inRow === 1 ? 'read' : `${inRow} reads`} failed.` : '';
-      return `${knows} ${decided}, and ${failed}.${inARow}`;
-    },
-  },
+  p25: calendarPhase('google_calendar', P25_PROMOTIONS, 'p25.promotion', 'P2.5', 'Flint read your Google Calendar and add people', 'Google Calendar syncs'),
+  p26: calendarPhase('apple_calendar', P26_PROMOTIONS, 'p26.promotion', 'P2.6', 'Flint read your Apple Calendar', 'Apple Calendar syncs'),
 };
 
 /** The expiry's date as the console's cards show it (a UTC midnight is that date anywhere): "Mar 29, 2027". */

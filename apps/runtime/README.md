@@ -32,6 +32,10 @@ give the precision P2's promotion card reports, and `p2-report` wants at least
 
 ## Your calendar (`google_calendar`)
 
+**Off: your events are in Apple Calendar.** Flint reads them there
+([Your Apple Calendar](#your-apple-calendar-apple_calendar), below), so leave
+this source off. Its steps stay here in case that changes.
+
 The runtime reads your primary Google Calendar, read-only, every 5 minutes: the
 next 14 days become commitments and deadlines in the world model. An event or
 deadline within a day gets one heads-up note, once triage is on and its notes
@@ -126,6 +130,100 @@ not to turning the calendar off:
 2. Then take a dump and run `down.sql` by hand.
 
 Any later deploy of P2.5 code applies the migration again.
+
+## Your Apple Calendar (`apple_calendar`)
+
+Flint reads your Apple Calendar through a small helper on this Mac, Flint
+Calendar (`apps/desktop-calendar`). The helper reads the next 14 days of the
+calendars you choose, every 5 minutes and as soon as one changes. It pushes
+what it read to the runtime, which maps it the way it maps Google's: events
+become commitments and deadlines, and an event or deadline within a day gets
+one heads-up note. The runtime itself reaches nothing for this source. A few
+rules hold throughout:
+
+- **Little leaves the Mac.** The helper sends times, titles and your answer.
+  It sends who is invited only for events you organized or accepted. It never
+  sends notes, locations, links or a calendar's name.
+- **Titles stay out of the world model**, and **people come only from events
+  you accepted or organized**, through a card you sign, exactly as for Google.
+  The card says which calendar its people came from.
+- **Its token can only push.** Every runtime deploy keeps
+  `~/.flint/tokens/apple-calendar.token` (0600). That token can file a calendar
+  snapshot and nothing else, and the runtime keeps only its digest.
+- **A gap never reads as "gone".** If the helper stops reporting, or macOS
+  calendar access is off, the source fails and says why. Nothing is archived,
+  and Flint keeps what it last knew. If many events vanish at once (a re-sync
+  can empty the Mac's calendar for a while), they're archived only if they're
+  still missing an hour later.
+- **It's read-only.** macOS only grants full calendar access, so read-only is
+  Flint's own rule: the helper is built without any call that changes a
+  calendar, and Flint's policy forbids every `apple.*` write.
+
+### Turning it on
+
+Flint Calendar, the helper, is installed by its own change. Until it is, leave
+this source off: the runtime then answers the helper's route with 404 and
+reads nothing.
+
+1. **Check that this Mac has your events.** Press Cmd-Space, type Calendar and
+   press Return. If your events are there, go on. If they aren't, open
+   System Settings, click your name at the top of the sidebar, click iCloud,
+   click See All next to "Saved to iCloud", turn on Calendars, and wait a few
+   minutes.
+2. **Switch the source on.** These keep the override file `0600` whether or not
+   it exists yet, add the line only once, and start it on a line of its own:
+   ```bash
+   touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env
+   grep -q '^FLINT_SOURCE_APPLE_CALENDAR=' ~/.flint/runtime.override.env || printf '\nFLINT_SOURCE_APPLE_CALENDAR=on\n' >> ~/.flint/runtime.override.env
+   launchctl kickstart -k gui/$(id -u)/com.flint.runtime
+   ```
+3. **Let Flint Calendar read your calendar.** Follow Flint Calendar's own
+   README. macOS asks once; click Allow Full Access, then choose which
+   calendars count and click Connect.
+4. **File the card that turns it on:**
+   `cd ~/flint && pnpm --filter @flint/runtime enable-source apple_calendar`.
+   Then open Approvals in the console. The card is "Turn On the Apple Calendar
+   Source", and under it: "Your Apple Calendar is read every 5 minutes and
+   when it changes." Click Approve and confirm with your key.
+5. **Check it about 5 minutes later:**
+   `cd ~/flint && pnpm --filter @flint/runtime apple-calendar`. It prints one
+   line, for example "Connected · Last Read 2 Min Ago · 23 Events". It shows
+   states and counts, never a title.
+
+`cd ~/flint && pnpm --filter @flint/runtime p25-report --source apple_calendar`
+measures it the way `p25-report` measures Google: what's ahead, p95 freshness
+(target: under 15 minutes), a good read with full access in the last 15
+minutes, and people only from your calendars.
+
+After a week of good reads,
+`cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase p26` files
+the card that lets reading Apple Calendar run without asking. Adding people
+keeps its own approval.
+
+### Your controls
+
+- **Pause reading:** System Settings > Privacy & Security > Calendars, then
+  turn Flint Calendar off. The `apple-calendar` line says "Calendar Access Is
+  Off", and Flint keeps what it already knows.
+- **Turn the source off:** remove the `FLINT_SOURCE_APPLE_CALENDAR` line from
+  `~/.flint/runtime.override.env` and run
+  `launchctl kickstart -k gui/$(id -u)/com.flint.runtime`. Its events stay as
+  they were last known. To archive them first, disconnect in Flint Calendar
+  before you do this: it tells the runtime, which archives every Apple event.
+- **Titles:** as for Google, the nightly cleanup deletes each a week after it
+  was last seen.
+
+### Rolling P2.6 back
+
+The migration's `down.sql` (`20261006000000_p26_apple_calendar`) belongs to a
+rollback, not to turning the source off:
+
+1. First deploy a runtime from before P2.6. P2.6's job bus expects the Apple
+   Calendar queue that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. It puts PersonGuard and the
+   forget trigger back exactly as P2.5 had them.
+
+Any later deploy of P2.6 code applies the migration again.
 
 ## When a database update fails
 

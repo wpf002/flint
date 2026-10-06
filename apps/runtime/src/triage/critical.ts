@@ -17,7 +17,8 @@
  *  - a knowledge fact naming two things and a relation: act (a link
  *    proposal, never a person); any other: log;
  *  - a source's circuit opening: logged in the relevant lane (closing: quietly);
- *  - an event or deadline on Will's calendar within a day (P2.5): escalate,
+ *  - an event or deadline on Will's calendar (Google's, P2.5, or Apple's,
+ *    P2.6) within a day: escalate,
  *    once per event and start, with its date and time worked out when triage
  *    decides (logged if it has passed or left the calendar), never its title.
  *
@@ -154,6 +155,11 @@ async function calendarUpcoming(f: EventFacts, ctx: CodeRuleContext): Promise<Ve
   return { action: 'escalate', lane: 'relevant', decidedBy: 'code:calendar.upcoming', ruleName: 'calendar.upcoming', critical: false, template: { id: 'calendar_upcoming', fields } };
 }
 
+/** The calendars' heads-ups (`source:type`): Google's (P2.5) and Apple's (P2.6). */
+const CALENDAR_UPCOMING: ReadonlySet<string> = new Set(
+  ['google_calendar', 'apple_calendar'].flatMap((s) => [`${s}:commitment.upcoming`, `${s}:deadline.upcoming`]),
+);
+
 export const ROUTE_ERROR_BURST = 5;
 
 export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<Verdict | undefined> {
@@ -182,8 +188,9 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
   // A source failing 5 times in a row: in the relevant lane, no ping; its recovery quietly.
   if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
   if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };
-  // The heads-up the Watcher used to give, once per occurrence of an event at a time (the source's own key).
-  if (name === 'google_calendar:commitment.upcoming' || name === 'google_calendar:deadline.upcoming') return calendarUpcoming(f, ctx);
+  // The heads-up the Watcher used to give, once per occurrence of an event at a time (the source's own key),
+  // from either of Will's calendars (P2.6: Apple's too).
+  if (CALENDAR_UPCOMING.has(name)) return calendarUpcoming(f, ctx);
   if (name === 'knowledge:knowledge.fact') {
     // Two things and a relation between them: propose the link. Anything else is only logged.
     const linked = typeof f.payload.relation === 'string' && typeof f.payload.fromId === 'string' && typeof f.payload.toId === 'string';

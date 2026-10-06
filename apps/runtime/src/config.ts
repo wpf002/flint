@@ -12,7 +12,11 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { zoneFrom } from '@flint/policy';
 
-export const SCOPES = ['events', 'audit', 'proposals', 'world:read', 'ledger', 'mcp', 'counters'] as const;
+/**
+ * `calendar:push` (P2.6) opens one route, the Apple Calendar snapshot, and
+ * nothing else: Flint Calendar's token can file a snapshot and read nothing.
+ */
+export const SCOPES = ['events', 'audit', 'proposals', 'world:read', 'ledger', 'mcp', 'counters', 'calendar:push'] as const;
 export type RuntimeScope = (typeof SCOPES)[number];
 
 export interface TokenGrant {
@@ -80,6 +84,14 @@ const Env = z.object({
    */
   FLINT_SOURCE_GOOGLE_CALENDAR: z.string().optional(),
   /**
+   * Will's Apple Calendar (P2.6): `on` registers the apple_calendar source,
+   * which takes the snapshots Flint Calendar (apps/desktop-calendar) pushes to
+   * POST /v1/sources/apple_calendar/snapshot. Anything else, blank included, is
+   * off, and that route answers 404. Turning it on still needs an approved
+   * world.source.enable.
+   */
+  FLINT_SOURCE_APPLE_CALENDAR: z.string().optional(),
+  /**
    * Triage (P2): `on` to run it; anything else, blank included, is off (the
    * sources keep running). Off by default: it is turned on, in
    * runtime.override.env, once the chat baseline it is measured against exists.
@@ -117,6 +129,8 @@ export interface Config {
   nexus?: { url: string; token: string };
   /** The calendar source (P2.5): where its OAuth client and token live. */
   google?: { dir: string };
+  /** The Apple Calendar source (P2.6) is registered: Flint Calendar pushes to it. */
+  appleCalendar: boolean;
   caps: Record<'anthropic' | 'openai' | 'perplexity' | 'tavily', { dailyUsd?: number; monthlyUsd?: number }>;
   /** P2 triage runs (else the sources run and nothing is triaged). */
   triage: boolean;
@@ -176,6 +190,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     ),
     ...(e.NEXUS_MCP_URL && e.NEXUS_READ_TOKEN ? { nexus: { url: e.NEXUS_MCP_URL, token: e.NEXUS_READ_TOKEN } } : {}),
     ...(e.FLINT_SOURCE_GOOGLE_CALENDAR?.trim().toLowerCase() === 'on' ? { google: { dir: join(e.HOME, '.flint', 'google') } } : {}),
+    appleCalendar: e.FLINT_SOURCE_APPLE_CALENDAR?.trim().toLowerCase() === 'on',
     healthExtra,
     caps: {
       anthropic: cap(e.FLINT_BUDGET_ANTHROPIC_DAILY_USD, e.FLINT_BUDGET_ANTHROPIC_MONTHLY_USD),

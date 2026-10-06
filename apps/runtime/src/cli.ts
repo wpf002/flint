@@ -5,13 +5,16 @@
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
- *   pnpm --filter @flint/runtime p25-report           P2.5's exit criteria, measured now (JSON)
- *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25] [--drop <pattern>]...
+ *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
+ *                                                    P2.5's exit criteria for a calendar, measured now (JSON)
+ *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25|p26] [--drop <pattern>]...
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
  *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
  *                                                    P2.5); needs no database
+ *   pnpm --filter @flint/runtime apple-calendar       one line on Apple Calendar reading (P2.6):
+ *                                                    its state, last read and event count, never a title
  *
  * Run by hand, it is Will acting (context console). With --auto (the nightly
  * LaunchAgent) it is Flint acting on its own, so the tier engine decides: an
@@ -26,7 +29,9 @@ import { join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
-import { promotionTable, type Phase } from './governance/promotion.js';
+import { appleCalendarStatus } from './report/apple-calendar.js';
+import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
+import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
@@ -100,7 +105,7 @@ async function main(): Promise<void> {
     const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
     const at = process.argv.indexOf('--phase');
     const phase = at === -1 ? 'p2' : process.argv[at + 1];
-    if (phase !== 'p1' && phase !== 'p2' && phase !== 'p25') throw new Error('promotion-table: --phase is p1, p2 or p25');
+    if (!(PHASES_LIST as readonly unknown[]).includes(phase)) throw new Error(`promotion-table: --phase is ${PHASES_LIST.slice(0, -1).join(', ')} or ${PHASES_LIST[PHASES_LIST.length - 1]}`);
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
@@ -114,17 +119,30 @@ async function main(): Promise<void> {
     return;
   }
   if (process.argv[2] === 'p2-report' || process.argv[2] === 'p25-report') {
+    const at = process.argv.indexOf('--source');
+    const source = at === -1 ? 'google_calendar' : process.argv[at + 1];
+    if (!isCalendarSource(source)) throw new Error('p25-report: --source is google_calendar or apple_calendar');
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      console.log(JSON.stringify(process.argv[2] === 'p2-report' ? await p2Report(db, config) : await p25Report(db, config), null, 2));
+      console.log(JSON.stringify(process.argv[2] === 'p2-report' ? await p2Report(db, config) : await p25Report(db, config, new Date(), source), null, 2));
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
+  if (process.argv[2] === 'apple-calendar') {
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      console.log(await appleCalendarStatus(db));
     } finally {
       await db.$disconnect();
     }
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | p2-report | p25-report | promotion-table [--phase p1|p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | promotion-table [--phase p1|p2|p25|p26] [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

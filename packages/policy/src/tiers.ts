@@ -64,9 +64,11 @@ export interface CodeEntry {
 /**
  * The world-model sources. Each `world.sync.<source>` reaches only its own
  * endpoints. deploy, knowledge and nexus_inbox (P2) only raise events;
- * google_calendar (P2.5) reads Will's primary calendar, read-only.
+ * google_calendar (P2.5) reads Will's primary calendar, read-only;
+ * apple_calendar (P2.6) reaches nothing: Flint Calendar, a helper on the Mac,
+ * pushes what it read of Apple Calendar to the runtime.
  */
-export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox', 'google_calendar'] as const;
+export const SOURCES = ['launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'deploy', 'knowledge', 'nexus_inbox', 'google_calendar', 'apple_calendar'] as const;
 export type Source = (typeof SOURCES)[number];
 
 const approval = (extra: Partial<CodeEntry> = {}): CodeEntry => ({ tier: 'approval', promotable: true, write: true, ...extra });
@@ -135,6 +137,8 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   // Forbidden outright (also caught by step 1; listed so the table is complete).
   // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
   'google.write': forbidden('Flint never writes to Google'),
+  // So is Apple Calendar (P2.6): the helper's build refuses a binary that holds a write call.
+  'apple.write': forbidden('Flint never writes to Apple Calendar'),
   'audit.update': forbidden('the audit trail is append-only'),
   'audit.delete': forbidden('the audit trail is append-only'),
   'ledger.prediction.edit': forbidden('a prediction is never edited after it is made'),
@@ -341,6 +345,8 @@ export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | '
   if (PERSON.test(joined(name)) && (ctx.mcp || !PERSON_EXEMPT.has(action))) return 'no collection on people';
   // Google is read-only: no action of Flint's own writes to it, whatever its name.
   if (!ctx.mcp && action.startsWith('google.')) return 'Flint never writes to Google';
+  // Nor to Apple Calendar (P2.6).
+  if (!ctx.mcp && action.startsWith('apple.')) return 'Flint never writes to Apple Calendar';
   return undefined;
 }
 

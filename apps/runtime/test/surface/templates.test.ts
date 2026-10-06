@@ -141,6 +141,8 @@ describe('escalation templates', () => {
     // The body says a time as Will's notes do (the title keeps the 24-hour clock).
     expect(r.body).toBe('You have an event on Tue Oct 6 at 2:30 PM. Its title is in Activity, under Important.');
     expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-10-06', time: '00:05', until: '2026-10-06T05:05:00.000Z' }).body).toBe('You have a deadline on Tue Oct 6 at 12:05 AM. Its title is in Activity, under Important.');
+    // Either calendar (P2.6): the note names neither.
+    expect(`${r.body} ${allDay.body} ${TEMPLATES.calendar_upcoming.fieldFreeBody}`).not.toMatch(/google|apple/i);
     expect(() => render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-02-30', time: null, until: '2026-03-01T06:00:00.000Z' })).toThrow();
   });
 });

@@ -225,6 +225,26 @@ describe('the console Activity panel: lanes', () => {
     expect(rows.map((r) => /(You acknowledged it\.|You dismissed it\.|It was acted on\.|It expired\.)/.exec(r.shown())?.[1])).toEqual(['You acknowledged it.', 'You dismissed it.', 'It was acted on.', 'It expired.']);
   });
 
+  it('an Apple Calendar row (P2.6) is in the same words as Google’s, and anything else from it is Apple Calendar’s', async () => {
+    const cal = (id: string, eventType: string, name: string) =>
+      item({ id, lane: 'quiet', action: 'log', source: 'apple_calendar', eventType, escalation: null, reasoning: null, tainted: false, entity: { ref: `commitment#${id}`, kind: 'commitment', name } });
+    routes['/inbox'] = () => ({
+      status: 200,
+      body: { items: [cal('a1', 'commitment.state', 'event 2026-10-06 14:00'), cal('a2', 'deadline.upcoming', 'deadline 2026-10-06'), { ...cal('a3', 'commitment.upcoming', 'x'), entity: null }], next: null },
+    });
+    await openLane('quiet');
+    const [a, b, c] = ids.lanelist!.children;
+    expect(a!.shown()).toContain('Event Tue Oct 6 at 14:00An event on your calendar changed.');
+    expect(a!.shown()).not.toMatch(/event 2026|commitment state|apple calendar|Apple_calendar/);
+    expect(b!.shown()).toContain('Deadline Tue Oct 6A deadline on your calendar is due soon.');
+    expect(c!.shown()).toContain('Coming Up');
+    expect(c!.shown()).toContain('An event on your calendar is coming up.');
+    const line = (eventType: string) => run(`laneLine(${JSON.stringify({ source: 'apple_calendar', eventType })})`) as string;
+    expect(line('person.seen')).toBe('Someone is on an event you accepted or organized.');
+    expect(line('odd.thing')).toBe('Apple Calendar reported this.');
+    expect(run(`healthName('source:apple_calendar')`)).toBe('Apple Calendar');
+  });
+
   it('labels a decision through the feedback route and marks the label chosen', async () => {
     routes['/inbox?'] = () => ({ status: 200, body: { items: [item()], next: null } });
     await openLane();

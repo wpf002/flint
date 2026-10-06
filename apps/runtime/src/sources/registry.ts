@@ -21,6 +21,8 @@ import { knowledgeSource } from './knowledge.js';
 import { nexusInboxSource } from './nexus-inbox.js';
 import { CALENDAR_ENDPOINTS, googleCalendarSource } from './google/calendar.js';
 import { TOKEN_ENDPOINTS, createGoogleAuth } from './google/oauth.js';
+import { appleCalendarSource } from './apple/calendar.js';
+import type { CalendarInbox } from './apple/inbox.js';
 
 /** The loopback health endpoints. Flint listens on ::1 (apps/server/src/access.ts). */
 export const LOCAL_HEALTH: readonly HealthTarget[] = [
@@ -34,7 +36,12 @@ export interface Registered {
   endpoints: Endpoint[];
 }
 
-export function registry(config: Config, db: Db): Registered[] {
+/** What the running process holds for its sources: P2.6's Apple Calendar inbox (the push route fills it). */
+export interface RegistryExtra {
+  calendarInbox?: CalendarInbox;
+}
+
+export function registry(config: Config, db: Db, extra: RegistryExtra = {}): Registered[] {
   const run = makeRun(config.home);
   const health: HealthTarget[] = [...LOCAL_HEALTH, ...config.healthExtra];
   const endpointOf = (t: HealthTarget): Endpoint => {
@@ -86,6 +93,11 @@ export function registry(config: Config, db: Db): Registered[] {
     // Its only endpoints: the token refresh, and his primary calendar's events, read.
     ...(config.google
       ? [{ source: googleCalendarSource({ tz: config.tz, accessToken: createGoogleAuth({ dir: config.google.dir }).accessToken }), endpoints: [...TOKEN_ENDPOINTS, ...CALENDAR_ENDPOINTS] }]
+      : []),
+    // Will's Apple Calendar (P2.6): once he has turned it on. Flint Calendar pushes to the runtime's own route,
+    // so it reaches nothing; it reads the inbox that route fills (one per process, from index.ts).
+    ...(config.appleCalendar && extra.calendarInbox
+      ? [{ source: appleCalendarSource({ tz: config.tz, inbox: extra.calendarInbox }), endpoints: [] }]
       : []),
     // P2's event-only sources: local files, no network.
     { source: deploySource({ file: join(config.home, '.flint', 'deploy-events.jsonl') }), endpoints: [] },

@@ -13,6 +13,7 @@ import { registry } from './sources/registry.js';
 import { startBus, type Bus } from './bus.js';
 import { jobSpecs, startJobs, failureClass } from './jobs.js';
 import { startInstance, type Instance } from './health/instance.js';
+import type { CalendarInbox } from './sources/apple/inbox.js';
 
 export const BEAT_MS = 30_000;
 
@@ -30,6 +31,8 @@ export interface RunOptions {
   beatMs?: number;
   /** The job set (default jobSpecs). */
   jobs?: typeof jobSpecs;
+  /** P2.6: the Apple Calendar inbox the API's push route fills; the source reads the same one. */
+  calendarInbox?: CalendarInbox;
 }
 
 export async function run(db: Db, config: Config, status: RuntimeStatus, log: (msg: string, extra?: object) => void, opts: RunOptions = {}): Promise<Lifecycle> {
@@ -58,7 +61,7 @@ export async function run(db: Db, config: Config, status: RuntimeStatus, log: (m
       if (stopping) return void (await b.stop().catch(() => {}));
       bus = b;
       status.bus = b;
-      const ctx = { db, config, bus: b, sources: registry(config, db), log };
+      const ctx = { db, config, bus: b, sources: registry(config, db, { ...(opts.calendarInbox ? { calendarInbox: opts.calendarInbox } : {}) }), log };
       await startJobs(ctx, (opts.jobs ?? jobSpecs)(ctx));
       status.problems.delete('bus');
       status.busStartedAt = new Date();

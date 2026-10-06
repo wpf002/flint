@@ -325,6 +325,20 @@ describe('the console Approvals panel', () => {
     expect(decided.map((d) => d[1])).toEqual(['gc']);
   });
 
+  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and goes with Approve All', async () => {
+    const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
+    const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
+    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
+    await open();
+    const rows = ids.apprlist!.children[0]!.children;
+    expect(rows[0]!.shown()).toContain('LimitsRead Your Apple Calendar');
+    // Reading alone adds no one, so it doesn't ask on its own.
+    expect(rows[0]!.shown()).not.toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
+    expect(rows[1]!.shown()).toContain(`Your Apple Calendar is read every ${minutes} minutes and when it changes.`);
+  });
+
   it('a signed card’s outcome is in sentences: who was added and who was not; done, approved or failed, with the server’s note after', () => {
     // resText through errText (showOutcome makes each part a sentence with it).
     const fns = /(function resText[\s\S]*?)function failed/.exec(html)![1]!;

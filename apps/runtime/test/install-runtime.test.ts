@@ -1,13 +1,16 @@
 /**
  * install-runtime.sh, P2's parts: the bundle targets node22, launchd gives a
  * stop 30 s (the bus drains for 15), Will's runtime.override.env is never
- * written (only kept 0600), and pruning keeps a pinned release.
+ * written (only kept 0600), and pruning keeps a pinned release. P2.6's: Flint
+ * Calendar's push token, and a rollback on the env the old release knew.
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parseTokens } from '../src/config';
 
 const SCRIPT = readFileSync(join(__dirname, '..', 'install-runtime.sh'), 'utf8');
 const between = (from: string, to: string) => {
@@ -67,6 +70,53 @@ describe('install-runtime.sh', () => {
     mkdirSync(join(data, 'google'), { mode: 0o755 });
     expect(zsh(`DATA=${data}\n${line}\necho END`).stdout).toContain('END');
     expect(statSync(join(data, 'google')).mode & 0o777).toBe(0o700);
+  });
+
+  it("makes Flint Calendar's push token (P2.6) once, 0600, and grants it calendar:push and nothing else", () => {
+    const block = between('APPLE_TOKEN_FILE="$DATA/tokens/apple-calendar.token"', "APPLE_SHA=\"$(tr -d '\\n' < \"$APPLE_TOKEN_FILE\" | shasum -a 256 | cut -d' ' -f1)\"");
+    const data = mkdtempSync(join(tmpdir(), 'rt-install-'));
+    mkdirSync(join(data, 'tokens'), { mode: 0o700 });
+    const run = () => zsh(`DATA=${data}\n${block}\necho "$APPLE_SHA"`);
+    const first = run();
+    const file = join(data, 'tokens', 'apple-calendar.token');
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    const token = readFileSync(file, 'utf8').trim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.stdout.trim()).toBe(createHash('sha256').update(token).digest('hex'));
+    // Kept across deploys (the helper reads the same file), and made 0600 again if loosened.
+    chmodSync(file, 0o644);
+    expect(run().stdout).toBe(first.stdout);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // The grants: the push token gets calendar:push alone; the server's and the connector's never get it.
+    const line = SCRIPT.split('\n').find((l) => l.includes('echo "RUNTIME_TOKENS='))!;
+    const grants = Object.fromEntries(line.replace(/^.*RUNTIME_TOKENS=/, '').replace(/"$/, '').split(',').map((g) => {
+      const [name, , ...scopes] = g.split(':');
+      return [name, scopes.join(':').split('|')];
+    }));
+    expect(grants['apple-calendar']).toEqual(['calendar:push']);
+    expect(grants.server).not.toContain('calendar:push');
+    expect(grants['runtime-mcp']).not.toContain('calendar:push');
+    expect(line).toContain('apple-calendar:${APPLE_SHA}:calendar:push');
+    expect(() => parseTokens(`apple-calendar:${'a'.repeat(64)}:calendar:push`)).not.toThrow();
+  });
+
+  it('a rollback restarts the previous release on the env it started with, and a good deploy keeps no copy', () => {
+    const keep = SCRIPT.split('\n').find((l) => l.includes('cp -p "$ENVF" "$ENVF.prev"'))!;
+    const restore = SCRIPT.split('\n').find((l) => l.includes('mv "$ENVF.prev" "$ENVF"'))!.trim();
+    expect(SCRIPT.indexOf(keep)).toBeLessThan(SCRIPT.indexOf('} > "$ENVF.new"'));
+    expect(SCRIPT.indexOf(restore)).toBeGreaterThan(SCRIPT.indexOf('ln -sfn "$PREV" "$RT/current"'));
+    expect(SCRIPT).toMatch(/is up on \[::1\]:\$PORT"\n\s+rm -f "\$ENVF\.prev"/);
+    const data = mkdtempSync(join(tmpdir(), 'rt-install-'));
+    const envf = join(data, 'runtime.env');
+    writeFileSync(envf, 'RUNTIME_TOKENS=old\n', { mode: 0o600 });
+    expect(zsh(`ENVF=${envf}\n${keep}\nprint -r -- 'RUNTIME_TOKENS=new' > "$ENVF"\n${restore}\necho END`).stdout).toContain('END');
+    expect(readFileSync(envf, 'utf8')).toBe('RUNTIME_TOKENS=old\n');
+    expect(statSync(envf).mode & 0o777).toBe(0o600);
+    expect(existsSync(`${envf}.prev`)).toBe(false);
+    // A first install (no env yet): nothing kept, and the rollback leaves the new env alone.
+    const fresh = join(mkdtempSync(join(tmpdir(), 'rt-install-')), 'runtime.env');
+    expect(zsh(`ENVF=${fresh}\n${keep}\nprint -r -- 'RUNTIME_TOKENS=new' > "$ENVF"\n${restore}\necho END`).stdout).toContain('END');
+    expect(readFileSync(fresh, 'utf8')).toBe('RUNTIME_TOKENS=new\n');
   });
 
   it('writes the triage model settings only when they are loopback and well-formed', () => {
