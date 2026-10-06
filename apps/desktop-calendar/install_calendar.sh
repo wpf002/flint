@@ -12,15 +12,31 @@
 # that is installed:
 #  1. the stable 'Flint Dev' identity must exist. Never ad-hoc: macOS keys the
 #     calendar permission to the signature, and would forget it on every update;
-#  2. the source scan: no EventKit call that writes, and no way to make one at
-#     run time (macOS only grants full access, so read-only is this rule);
+#  2. the source scan (macOS only grants full access, so read-only is these
+#     rules; SOURCE_FORBIDDEN is the exact list). A Swift source may not name an
+#     EventKit method that writes (save, remove, commit, reset, a span, a
+#     write-only or reminders request, a new event or calendar), nor use what
+#     could reach one without naming it: a selector, class or function made from
+#     data (Selector, NSSelectorFromString, the sel_, class_, method_, objc_ and
+#     dlsym families), a method looked up or cast (method(for:), unsafeBitCast,
+#     @convention(c), @_silgen_name, AnyObject lookup, Unmanaged), a method
+#     called by name (perform, sendAction, KVC, predicates, expressions, sort
+#     descriptors, bindings), or another program (Process, posix_spawn, system);
 #  3. Info.plist key by key, and the entitlements exactly;
 #  4. the headless core tests, against the runtime's golden fixture;
-#  5. the build, in a temp dir, then the scan of the binary's selectors and strings;
+#  5. the build, in a temp dir, then the binary scan: no write selector, no
+#     selector that finds or calls a method by name (KVC, predicates, bindings,
+#     methodForSelector:) and none that starts with "_" (Apple's private
+#     methods), and no import of a function or class that makes a selector,
+#     class or function from data or starts another program (IMPORT_FORBIDDEN).
+#     Its strings are checked for write selectors too, but Swift keeps a string
+#     of 15 bytes or fewer inside the code, where no scan of strings sees it: a
+#     selector made from strings is stopped by its imports, not by its name;
 #  6. signing with the hardened runtime and the entitlements; then the signed
 #     entitlements, the runtime flag and the designated requirement (identifier
-#     com.flint.calendar and the Flint Dev certificate), which must be the
-#     installed app's too, or macOS would ask Will for access again;
+#     com.flint.calendar and the Flint Dev certificate), which the signature must
+#     satisfy and which must be the installed app's too, or macOS would ask Will
+#     for access again;
 #  7. the copy beside the old app, moved into place;
 #  8. a restart of the agent, only when Will turned it on (it is loaded).
 set -eu
@@ -33,11 +49,23 @@ KEYCHAIN="${FLINT_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
 LABEL="com.flint.calendar"
 FIXTURE="$REPO/apps/runtime/test/fixtures/apple-calendar-snapshot.json"
 
-# EventKit calls that write, and the ways to reach one indirectly, in the Swift sources.
-SOURCE_FORBIDDEN='(^|[^A-Za-z0-9_])(save|remove|commit|reset)\(|span:|(save|remove)(Event|Calendar|Reminder|Source)|requestWriteOnlyAccessToEvents|requestFullAccessToReminders|requestAccess\(to:|EK(Event|Calendar|Reminder|Source)\((eventStore|for)|EKSpan|NSSelectorFromString|NSClassFromString|Selector\("|performSelector|\.perform\(|objc_msgSend|dlsym|dlopen|setValue\([^)]*forKey(Path)?:|value\(forKey(Path)?:'
-# The same, as selectors in the built binary (a Swift call to EventKit is an Objective-C message, so its
-# selector is in the binary): matched against whole selector names and whole strings.
-BINARY_FORBIDDEN='(save|remove)(Event|Calendar|Reminder|Source)[A-Za-z]*:.*|commit:?|reset|requestWriteOnlyAccessToEvents.*|requestFullAccessToReminders.*|requestAccessToEntityType:.*|(event|reminder|calendar)WithEventStore:|calendarForEntityType:eventStore:'
+# In the Swift sources, line by line: EventKit's writes by name; then the ways to reach a method without naming it
+# (a selector, class or function made from data; a method looked up, cast or called by name; another program).
+SOURCE_FORBIDDEN='(^|[^A-Za-z0-9_])(save|remove|commit|reset)\(|span:|(save|remove)(Event|Calendar|Reminder|Source)|requestWriteOnlyAccessToEvents|requestFullAccessToReminders|requestAccess\(to:|EK(Event|Calendar|Reminder|Source)\((eventStore|for)|EKSpan'\
+'|(^|[^A-Za-z0-9_])(Selector|AnyObject|AnyClass|Unmanaged|Process)([^A-Za-z0-9_]|$)|NS(Selector|Class|Protocol)FromString|(^|[^A-Za-z0-9_])(sel|class|method|imp|protocol|objc|object|dyld)_[A-Za-z]|dlsym|dlopen'\
+'|(instanceM|m)ethod\(for:|methodSignature|unsafeBitCast|unsafeDowncast|withMemoryRebound|assumingMemoryBound|bindMemory|@convention\(c\)|@_silgen_name|@objc[[:space:]]+(protocol|optional)'\
+'|(^|[^A-Za-z0-9_])perform(Selector)?\(|performSelector|makeObjectsPerform|sendAction|tryToPerform|value\(forKey|setValue\([^)]*forKey|setValuesForKeys|dictionaryWithValues|mutable(Array|Set|OrderedSet)Value|\.bind\(|classNamed'\
+'|NS(Predicate|CompoundPredicate|ComparisonPredicate|Expression|SortDescriptor|Invocation|MethodSignature|XPCConnection|AppleScript|Task|User[A-Za-z]*Task)([^A-Za-z0-9_]|$)|posix_spawn|(^|[^A-Za-z0-9_])(system|popen|fork|vfork|execv[ep]?|execl[ep]?)\('
+# In the built binary (a Swift call to an Objective-C method is a message, so its selector is in the binary), as
+# whole selector names and whole strings: EventKit's writes.
+WRITE_SELECTORS='(save|remove)(Event|Calendar|Reminder|Source)[A-Za-z]*:.*|commit:?|reset|requestWriteOnlyAccessToEvents.*|requestFullAccessToReminders.*|requestAccessToEntityType:.*|(event|reminder|calendar)WithEventStore:|calendarForEntityType:eventStore:'
+# As whole selector names only: the selectors that find or call a method by its name, and Apple's private ones.
+BYNAME_SELECTORS='(instanceM|m)ethodForSelector:|(instanceM|m)ethodSignatureForSelector:|valueForKey(Path)?:|setValue:forKey(Path)?:|dictionaryWithValuesForKeys:|setValuesForKeysWithDictionary:|mutable(Array|Set|OrderedSet)ValueForKey(Path)?:|bind:toObject:withKeyPath:options:|(predicate|expression)WithFormat:.*|expressionForFunction:.*|evaluateWithObject:.*|sortDescriptorWithKey:.*|classNamed:|_.*'
+# What the binary imports (nm -u): a selector, class or function made from data, a method swapped or looked up, a
+# library loaded, KVC's predicates, expressions, sort descriptors and bindings controllers, or another program.
+IMPORT_FORBIDDEN='^_(sel_[A-Za-z_]+|NS(Selector|Class|Protocol)FromString|objc_(getClass|lookUpClass|getRequiredClass|getMetaClass|copyClassList|getClassList|allocateClassPair)|(class|method|imp|protocol)_[A-Za-z_]+|object_(getClass|setClass)|dyld_[A-Za-z_]+|dl(sym|open)|NSCreateObjectFileImageFromMemory|posix_spawnp?|execv[ep]?|execl[ep]?|v?fork|system|popen|xpc_connection_create[A-Za-z_]*'\
+'|OBJC_CLASS_\$_(NS(Predicate|CompoundPredicate|ComparisonPredicate|Expression|SortDescriptor|Invocation|InvocationOperation|MethodSignature|Task|XPCConnection|AppleScript|User[A-Za-z]*Task)|NS(Object|Array|Tree|Dictionary|UserDefaults)Controller|NSScript[A-Za-z]*)'\
+'|\$s10ObjectiveC8SelectorV.*|\$sSo(11NSPredicate|12NSExpression|16NSSortDescriptor|6NSTask)C.*)$'
 # The entitlements, exactly (plutil -p sorts the keys): the sandbox, calendars, outgoing connections, and one
 # file outside the sandbox, read-only. Nothing else: no file writes, no get-task-allow, no library loading.
 EXPECTED_ENTITLEMENTS='{
@@ -51,18 +79,25 @@ EXPECTED_ENTITLEMENTS='{
 
 die() { echo "error: $*" >&2; exit 1; }
 
-scan_source() { # <dir>: the lines that call a write, if any
-  local hits
-  hits=$(grep -nE "$SOURCE_FORBIDDEN" "$1"/*.swift 2>/dev/null || true)
+scan_source() { # <dir>: the lines that break a rule, if any
+  local files hits
+  files=("$1"/*.swift(N))
+  # A directory with no Swift source is not one this scan has checked.
+  [ ${#files} -ge 1 ] || { echo "no Swift sources in $1" >&2; return 1; }
+  hits=$(grep -nE "$SOURCE_FORBIDDEN" "${files[@]}" || true)
   [ -z "$hits" ] || { print -r -- "$hits" >&2; return 1; }
 }
 selectors() { otool -v -s __TEXT __objc_methname "$1" 2>/dev/null | sed -n '3,$p' | sed -E 's/^[0-9a-fA-F]+[[:space:]]+//'; }
-scan_binary() { # <file>: the selectors and strings that write, if any
-  local n hits
-  n=$(selectors "$1" | wc -l | tr -d ' ')
-  # An app with no selector table to read is not one this scan has checked.
-  [ "$n" -ge 1 ] ||{ echo "could not read the selectors of $1" >&2; return 1; }
-  hits=$({ selectors "$1"; strings -a "$1"; } | grep -xE "$BINARY_FORBIDDEN" | sort -u || true)
+scan_binary() { # <file>: the selectors, strings and imports that break a rule, if any
+  local sels imports hits
+  sels=$(selectors "$1" || true)
+  imports=$(nm -u "$1" 2>/dev/null) || imports=""
+  # A binary with no selector table or no imports to read is not one this scan has checked.
+  [ -n "$sels" ] || { echo "could not read the selectors of $1" >&2; return 1; }
+  [ -n "$imports" ] || { echo "could not read the imports of $1" >&2; return 1; }
+  hits=$( { print -r -- "$sels" | grep -xE "$WRITE_SELECTORS|$BYNAME_SELECTORS" || true
+            strings -a "$1" | grep -xE "$WRITE_SELECTORS" || true
+            print -r -- "$imports" | grep -E "$IMPORT_FORBIDDEN" || true; } | sort -u)
   [ -z "$hits" ] || { print -r -- "$hits" >&2; return 1; }
 }
 plist_is() { [ "$(plutil -extract "$2" raw -o - "$1" 2>/dev/null)" = "$3" ] || die "Info.plist: $2 must be $3"; }
@@ -101,7 +136,7 @@ LEAF=$(security find-certificate -c "$IDENTITY" -Z "$KEYCHAIN" 2>/dev/null | sed
 WANT="designated => identifier \"$LABEL\" and certificate leaf = H\"$LEAF\""
 
 # 2-3. Before anything is built.
-scan_source "$DIR" || die "a Swift source calls an EventKit write (above); Flint Calendar only reads"
+scan_source "$DIR" || die "a Swift source breaks a read-only rule (above); Flint Calendar only reads"
 check_plist "$DIR/Info.plist"
 check_entitlements "$DIR/FlintCalendar.entitlements" "FlintCalendar.entitlements"
 
@@ -117,7 +152,7 @@ APP="$WORK/Flint Calendar.app"
 BIN="$APP/Contents/MacOS/flint-calendar"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -o "$BIN" "$DIR/CalendarCore.swift" "$DIR/FlintCalendar.swift" -framework AppKit -framework EventKit -framework CryptoKit || die "Flint Calendar did not compile"
-scan_binary "$BIN" || die "the built binary holds an EventKit write (above); Flint Calendar only reads"
+scan_binary "$BIN" || die "the built binary breaks a read-only rule (above); Flint Calendar only reads"
 cp "$DIR/Info.plist" "$APP/Contents/Info.plist"
 if [ -f "$REPO/apps/desktop-mac/flint.icns" ]; then cp "$REPO/apps/desktop-mac/flint.icns" "$APP/Contents/Resources/flint.icns"; fi
 
@@ -130,6 +165,8 @@ codesign -d -v "$APP" 2>&1 | grep -E '^CodeDirectory .*flags=0x[0-9a-f]*\(runtim
 codesign -d --entitlements - --xml "$APP" > "$WORK/signed.plist" 2>/dev/null || die "could not read the signed entitlements"
 check_entitlements "$WORK/signed.plist" "the signed app"
 [ "$(requirement "$APP")" = "$WANT" ] || die "the build's designated requirement is not $WANT"
+# The text above is what the signer chose to embed; this checks that the signature really meets it.
+codesign --verify --strict -R "=${WANT#designated => }" "$APP" >/dev/null 2>&1 || die "the build's signature does not satisfy $WANT"
 if [ -e "$DEST" ] && [ "$(requirement "$DEST")" != "$WANT" ] && [ "${FLINT_CALENDAR_REPIN:-}" != 1 ]; then
   die "the installed Flint Calendar is signed differently, so macOS would ask for calendar access again. Kept the installed app. To replace it anyway, run this with FLINT_CALENDAR_REPIN=1, then run connect.sh again."
 fi

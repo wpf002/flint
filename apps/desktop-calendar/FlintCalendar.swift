@@ -11,17 +11,23 @@
 //    access it pushes only the access state. If Will opens the app while the
 //    agent runs, the agent opens a fresh copy of itself for the chooser.
 //  - no flag: Will opened it (connect.sh's `open`, Finder, Spotlight). The only
-//    place it asks macOS for calendar access, then the chooser window; it prints
-//    one word for connect.sh (connected, cancelled, denied, restricted) and quits.
+//    place it asks macOS for calendar access, then the chooser window. Before it
+//    says connected it reads its push token, as the agent will (the sandbox lets
+//    it read that one file). It prints one word for connect.sh (ChooserAnswer:
+//    connected, cancelled, denied, restricted, noprompt, notoken), and on stderr
+//    the error's domain and code when a request or the token read failed.
 //  - `--disconnect`: disconnect.sh's. Reads no calendar: it tells the runtime
-//    Will disconnected (state revoked, no events) and exits 0 when told, 3 when
-//    the source is off or not turned on, 1 otherwise.
+//    Will disconnected (state revoked, no events), trying for up to a minute
+//    while the runtime is down, and exits as DisconnectExit says: 0 told, 3 the
+//    source is off or not turned on, 2 not told yet, 1 refused.
 //
 // Read-only by construction: it calls no EventKit method that writes (no save,
 // remove, commit or reset, no write-only or reminders request, no new event or
-// calendar). install_calendar.sh scans this source and the built binary's
-// selectors for them, and refuses to install on any hit. It listens on nothing:
-// no port, no XPC service, no URL scheme, no AppleScript.
+// calendar). install_calendar.sh refuses to install a source or a binary that
+// names one, or that uses the runtime tools that could call one without naming
+// it (a selector, class or function pointer made from data, a method called by
+// name, another program); its header lists exactly what it checks. It listens
+// on nothing: no port, no XPC service, no URL scheme, no AppleScript.
 //
 // Everything that decides anything is in CalendarCore.swift (pure, tested
 // headless); this file only reads EventKit, draws the chooser and sends.
@@ -145,6 +151,22 @@ func realHome() -> String {
   return NSHomeDirectory()
 }
 
+/// The push token, read from its file on each use; or why it can't be: the read's error, or nil for a file that
+/// holds no token. It goes nowhere but the Authorization header.
+func readToken() -> (token: String?, error: NSError?) {
+  do {
+    let raw = try String(contentsOfFile: realHome() + "/.flint/tokens/apple-calendar.token", encoding: .utf8)
+    return (Token.parse(raw), nil)
+  } catch {
+    return (nil, error as NSError)
+  }
+}
+
+/// One line on stderr: the chooser's to connect.sh (`open --stderr`), the agent's to calendar.log.
+func note(_ s: String) {
+  FileHandle.standardError.write(Data("\(s)\n".utf8))
+}
+
 final class OutcomeBox: @unchecked Sendable {
   var value: PushOutcome = .unreachable
 }
@@ -165,8 +187,7 @@ final class Pusher {
 
   /// One push, waited for (never on the main thread). The token is read from its file each time, and goes nowhere else.
   func send(_ s: WireSnapshot) -> PushOutcome {
-    let raw = try? String(contentsOfFile: realHome() + "/.flint/tokens/apple-calendar.token", encoding: .utf8)
-    guard let token = Token.parse(raw), let url = URL(string: Wire.pushURL) else { return .noToken }
+    guard let token = readToken().token, let url = URL(string: Wire.pushURL) else { return .noToken }
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -186,7 +207,7 @@ final class Pusher {
 func logLine(_ s: String) {
   let f = DateFormatter()
   f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-  FileHandle.standardError.write(Data("\(f.string(from: Date())) \(s)\n".utf8))
+  note("\(f.string(from: Date())) \(s)")
 }
 
 // MARK: - Agent (--agent: launchd's copy; never asks, never shows anything)
@@ -339,11 +360,18 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
   /// macOS's own prompt, once, because Will opened Flint Calendar to connect it. Full access to events only.
+  /// Refused and still undecided means macOS never asked: the error goes to stderr for connect.sh, by domain and code.
   private func askForAccess() {
     let s = EKEventStore()
     store = s
-    s.requestFullAccessToEvents { [weak self] granted, _ in
-      DispatchQueue.main.async { self?.show(granted ? .full : currentAccess()) }
+    s.requestFullAccessToEvents { [weak self] granted, error in
+      DispatchQueue.main.async {
+        let access = granted ? Access.full : currentAccess()
+        if !granted, access == .notDetermined, let e = error as NSError? {
+          note(UIText.failure(.accessRequest, domain: e.domain, code: e.code))
+        }
+        self?.show(access)
+      }
     }
   }
 
@@ -358,7 +386,7 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
          let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
         NSWorkspace.shared.open(url)
       }
-      finish(access == .restricted ? "restricted" : "denied")
+      finish(UIText.answer(access))
       return
     }
     // A store made after access was given sees every calendar.
@@ -464,31 +492,42 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   @objc private func cancelled(_ sender: Any?) {
-    finish("cancelled")
+    finish(.cancelled)
   }
 
+  /// Connect: the token first, read here as the agent will read it (the same app, the same sandbox), so connect.sh
+  /// never turns on a source the agent could never push to. Then Will's ticks, under each id and name key.
   @objc private func connected(_ sender: Any?) {
-    var ticks = Choices.load()
-    for (row, box) in boxes { ticks[row.id] = box.state == .on }
-    Choices.keep(ticks)
     window?.orderOut(nil)
+    let read = readToken()
+    guard read.token != nil else {
+      if let e = read.error { note(UIText.failure(.tokenRead, domain: e.domain, code: e.code)) }
+      tell(UIText.noTokenTitle, UIText.noTokenText)
+      finish(.noToken)
+      return
+    }
+    Choices.keep(Calendars.remember(Choices.load(), boxes.map { (row: $0.row, on: $0.box.state == .on) }))
+    tell(UIText.connectedTitle, UIText.connectedText)
+    finish(.connected)
+  }
+
+  private func tell(_ title: String, _ text: String) {
     let alert = NSAlert()
-    alert.messageText = UIText.connectedTitle
-    alert.informativeText = UIText.connectedText
+    alert.messageText = title
+    alert.informativeText = text
     alert.addButton(withTitle: UIText.ok)
     alert.runModal()
-    finish("connected")
   }
 
   func windowWillClose(_ notification: Notification) {
-    finish("cancelled")
+    finish(.cancelled)
   }
 
   /// One word for connect.sh (`open -o` sends it to a file), then quit.
-  private func finish(_ result: String) {
+  private func finish(_ answer: ChooserAnswer) {
     guard !done else { return }
     done = true
-    print(result)
+    print(answer.rawValue)
     fflush(stdout)
     NSApp.terminate(nil)
   }
@@ -503,15 +542,13 @@ final class FlippedClipView: NSClipView {
 enum Disconnect {
   static func run() -> Int32 {
     let pusher = Pusher()
-    var outcome = PushOutcome.unreachable
+    let started = Date()
     var last: Date?
-    for attempt in 0..<3 {
+    let outcome = DisconnectExit.run(send: {
       let at = Snapshots.generatedAt(now: Date(), last: last)
       last = at
-      outcome = pusher.send(Snapshots.build(ReadInput(now: at, timeZone: .current, access: currentAccess(), state: .revoked)))
-      guard attempt < 2, let wait = DisconnectExit.retry(outcome) else { break }
-      Thread.sleep(forTimeInterval: wait)
-    }
+      return pusher.send(Snapshots.build(ReadInput(now: at, timeZone: .current, access: currentAccess(), state: .revoked)))
+    }, wait: { Thread.sleep(forTimeInterval: $0) }, elapsed: { Date().timeIntervalSince(started) })
     print(DisconnectExit.message(outcome))
     return DisconnectExit.code(outcome)
   }

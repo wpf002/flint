@@ -34,6 +34,25 @@ deploy_event() { # <server|runtime> <gate|migrate|restart|health|deploy> <ok|fai
   chmod 600 "$dir/deploy-events.jsonl" 2>/dev/null
   return 0
 }
+# Flint Calendar's Swift checks (desktop-calendar.test.ts: the typecheck, the core
+# tests, the cut against fitToBudget, the binary scan) run in the gate only when
+# this deploy changes the helper or the wire it shares with the runtime since the
+# last server deploy that finished, or when that deploy is unknown
+# (FLINT_REQUIRE_SWIFT=1: swiftc must be there and every check must pass).
+# Otherwise they are skipped (FLINT_REQUIRE_SWIFT=0), so a Swift toolchain that
+# a Software Update broke never holds back a server deploy that doesn't touch the
+# helper; install_calendar.sh runs the core tests and both scans again before it
+# installs anything.
+CALENDAR_PATHS='^(apps/desktop-calendar/|apps/runtime/src/sources/apple/|apps/runtime/src/routes/apple-calendar\.ts$|apps/runtime/test/fixtures/apple-calendar-snapshot\.json$|apps/server/test/desktop-calendar\.test\.ts$)'
+calendar_changed() { # 0: changed since the last finished server deploy, or that deploy is unknown; 1: not changed
+  local last files
+  last=$(grep -F '"component":"server"' "$DATA/deploy-events.jsonl" 2>/dev/null | grep -F '"stage":"deploy","outcome":"ok"' | tail -n 1 | sed -nE 's/.*"sha":"([0-9a-f]{40})".*/\1/p')
+  [ -n "$last" ] && git -C "$REPO" cat-file -e "$last^{commit}" 2>/dev/null || return 0
+  # Against the working tree, so a deploy by hand from a checkout with changes counts them too.
+  files=$(git -C "$REPO" diff --name-only "$last" -- 2>/dev/null) || return 0
+  print -r -- "$files" | grep -E "$CALENDAR_PATHS" >/dev/null
+}
+
 # The server records a failed gate (the workspace build counts: nothing deploys
 # without it) and a finished deploy. Past the gate, DEPLOY_STAGE is empty.
 DEPLOY_STAGE=gate
@@ -63,8 +82,12 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: typechecking..."
   pnpm --filter server typecheck || { echo "✗ typecheck failed — NOT deploying"; exit 1; }
   echo "gate: server policy tests (brain routing + auto-approval)..."
-  # FLINT_REQUIRE_SWIFT: on the Studio, Flint Calendar's Swift checks (desktop-calendar.test.ts) must run, never skip.
-  FLINT_REQUIRE_SWIFT=1 pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
+  if calendar_changed; then
+    SWIFT_CHECKS=1; echo "gate: Flint Calendar changed since the last deploy, so its Swift checks must run"
+  else
+    SWIFT_CHECKS=0; echo "gate: Flint Calendar unchanged since the last deploy, so its Swift checks are skipped"
+  fi
+  FLINT_REQUIRE_SWIFT=$SWIFT_CHECKS pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
   echo "gate: policy typecheck + tests (isSafeTool, the tier engine, approval signatures)..."
   pnpm --filter @flint/policy typecheck || { echo "✗ policy typecheck failed — NOT deploying"; exit 1; }
   pnpm --filter @flint/policy test || { echo "✗ policy tests failed — NOT deploying"; exit 1; }

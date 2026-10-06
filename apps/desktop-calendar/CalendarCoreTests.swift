@@ -7,6 +7,8 @@
 //   core-tests --fixture <apple-calendar-snapshot.json>   run every test
 //   core-tests --emit <worst|worst-cut|plain|plain-cut> [budget]
 //                                                         print one snapshot, for the runtime's fitToBudget to compare
+//   core-tests --emit zones                               print the zone name sent for every zone macOS knows and a few
+//                                                         fixed offsets, for the runtime's own zone check
 //
 // Fake events stand in for EventKit's. The golden test encodes them and must
 // equal the runtime's fixture byte for byte; the byte-budget tests mirror the
@@ -204,6 +206,16 @@ struct CoreTests {
       case "worst-cut": print(JSON.string(Budget.fit(worst())), terminator: "")
       case "plain": print(JSON.string(plain()), terminator: "")
       case "plain-cut": print(JSON.string(Budget.fit(plain(), budget: budget ?? JSON.bytes(plain()) / 2)), terminator: "")
+      case "zones":
+        // Every zone this Mac could be set to: the names macOS lists, every file in its zone database, fixed offsets.
+        let root = "/usr/share/zoneinfo/"
+        var names = TimeZone.knownTimeZoneIdentifiers
+        if let files = FileManager.default.enumerator(atPath: root) {
+          for case let f as String in files where !f.contains(".") { names.append(f) }
+        }
+        let offsets = [-43_200, -18_000, -3_600, 0, 3_600, 19_800, 50_400].compactMap { TimeZone(secondsFromGMT: $0) }
+        let all = names.compactMap { TimeZone(identifier: $0) } + offsets + [TimeZone.current]
+        print(JSON.string(all.map { [$0.identifier, Times.zoneName($0)] }), terminator: "")
       default: FileHandle.standardError.write(Data("unknown --emit\n".utf8)); exit(2)
       }
       exit(0)
@@ -307,6 +319,8 @@ struct CoreTests {
       }
       r.equal(answer(true, [me(.accepted), person("a@x.org")]), "organizer")
       r.equal(answer(true, []), "organizer")
+      // His own entry for a meeting he organized: only a "no" (declined or delegated) outranks organizer.
+      for s: ParticipantStatus in [.accepted, .tentative, .pending, .unknown] { r.equal(answer(true, [me(s), person("a@x.org")]), "organizer", "\(s)") }
       r.equal(answer(false, [me(.accepted)]), "accepted")
       r.equal(answer(false, [me(.tentative)]), "tentative")
       r.equal(answer(false, [me(.declined)]), "declined")
@@ -317,6 +331,25 @@ struct CoreTests {
       r.equal(answer(false, [person("a@x.org"), person("b@x.org")]), "needs_action")
       r.equal(answer(false, []), "needs_action")
       r.equal(answer(nil, [person("a@x.org")]), "needs_action")
+    }
+
+    r.test("a meeting Will organized and then declined is declined, as the Google path has it: no attendees, no heads-up") {
+      func event(_ s: ParticipantStatus) -> WireEvent {
+        read([timed("mine-declined", "2026-10-07T19:00:00Z", "2026-10-07T20:00:00Z") {
+          $0.organizerIsCurrentUser = true
+          $0.participants = [me(s), person("ada@example.com", "Ada")]
+        }]).events[0]
+      }
+      r.equal(event(.declined).answer, "declined")
+      r.equal(event(.declined).attendees, nil)
+      r.check(!JSON.string(event(.declined)).contains("ada@example.com"), "nobody is sent with a meeting he declined")
+      r.equal(event(.delegated).answer, "declined")
+      r.equal(event(.delegated).attendees, nil)
+      r.equal(event(.accepted).answer, "organizer")
+      r.equal(event(.accepted).attendees?.map(\.email), ["ada@example.com"])
+      // With no one else on it, it is still his "no".
+      let alone = timed("alone", "2026-10-07T19:00:00Z", "2026-10-07T20:00:00Z") { $0.organizerIsCurrentUser = true; $0.participants = [me(.declined)] }
+      r.equal(read([alone]).events.map(\.answer), ["declined"])
     }
 
     r.test("attendees: only with an event Will organized or accepted, never Will, never a cancelled event") {
@@ -441,11 +474,11 @@ struct CoreTests {
       let m = ChooserModel.make(allCalendars + [CalendarInfo(id: "z", title: "", kind: .local, sourceKind: .local, sourceTitle: "On My Mac")], ticks: ["calendar-a": false])
       r.equal(m.groups.map(\.header), ["ICLOUD", "ON MY MAC", "SUBSCRIBED", "OTHER ACCOUNTS"])
       r.check(m.groups.allSatisfy { $0.header == $0.header.uppercased() }, "headers are UPPERCASE")
-      r.equal(m.groups[0].rows, [ChooserRow(id: "calendar-a", title: "Home", detail: nil, ticked: false)])
+      r.equal(m.groups[0].rows, [ChooserRow(id: "calendar-a", nameKey: Calendars.nameKey(iCloud), title: "Home", detail: nil, ticked: false)])
       r.equal(m.groups[1].rows.map(\.title), ["Errands", "Untitled"])
       r.equal(m.groups[1].rows.map(\.ticked), [true, true])
       r.equal(m.groups[2].rows.map(\.ticked), [false])
-      r.equal(m.groups[3].rows, [ChooserRow(id: "calendar-e", title: "Work", detail: "Google", ticked: false)])
+      r.equal(m.groups[3].rows, [ChooserRow(id: "calendar-e", nameKey: Calendars.nameKey(google), title: "Work", detail: "Google", ticked: false)])
       r.check(!m.groups.flatMap(\.rows).contains { $0.title == "Birthdays" }, "Birthdays is never shown")
       r.equal(m.empty, nil)
       for s in UIText.titles + [m.windowTitle, m.heading, m.cancel, m.connect] { r.check(titleCase(s), "Title Case: \(s)") }
@@ -455,6 +488,7 @@ struct CoreTests {
         r.check(titleCase(x.title) && sentence(x.text) && x.buttons.allSatisfy(titleCase), "\(a)")
       }
       r.check(UIText.alert(.full) == nil, "full access shows the chooser")
+      r.check(titleCase(UIText.noTokenTitle) && sentence(UIText.noTokenText), "the token alert")
       r.check(titleCase(UIText.connectedTitle) && sentence(UIText.connectedText), "the connected alert")
       let none = ChooserModel.make([birthdays], ticks: [:])
       r.equal(none.groups, [])
@@ -463,6 +497,39 @@ struct CoreTests {
       r.equal(ChooserModel.canConnect([:], rows: rows), true)
       r.equal(ChooserModel.canConnect(Dictionary(uniqueKeysWithValues: rows.map { ($0.id, false) }), rows: rows), false)
       r.check(!titleCase("Calendar access is off") && !sentence("Calendar Access Is Off"), "the checks themselves")
+    }
+
+    r.test("a calendar keeps Will's tick when EventKit gives it a new id (a full sync), by its account and title") {
+      let family = CalendarInfo(id: "family-1", title: "Family", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "iCloud")
+      let home = CalendarInfo(id: "home-1", title: "Home", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "iCloud")
+      let work = CalendarInfo(id: "work-1", title: "Work", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "Google")
+      let before = ChooserModel.make([family, home, work], ticks: [:]).groups.flatMap(\.rows)
+      // He unticks Family and ticks Work.
+      let ticks = Calendars.remember([:], before.map { (row: $0, on: $0.id == "family-1" ? false : $0.id == "work-1" ? true : $0.ticked) })
+      r.equal(ticks["family-1"], false)
+      r.equal(ticks[Calendars.nameKey(family)], false)
+      r.equal(ticks[Calendars.nameKey(work)], true)
+      // After a full sync every id is new: his choices hold, and the chooser shows them.
+      var family2 = family, home2 = home, work2 = work
+      family2.id = "family-2"; home2.id = "home-2"; work2.id = "work-2"
+      r.equal(Calendars.selected([family2, home2, work2], ticks).map(\.id), ["home-2", "work-2"])
+      r.equal(ChooserModel.make([family2], ticks: ticks).groups[0].rows.map(\.ticked), [false])
+      r.equal(read([timed("x", "2026-10-07T19:00:00Z", "2026-10-07T20:00:00Z") { $0.calendarId = "family-2" }], calendars: [family2, home2], ticks: ticks).events, [])
+      // The tick under the id wins; a calendar he has never seen gets its section's default.
+      r.equal(Calendars.ticked(family, ["family-1": true, Calendars.nameKey(family): false]), true)
+      let added = CalendarInfo(id: "trips-1", title: "Trips", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "iCloud")
+      r.equal(Calendars.ticked(added, ticks), true)
+      r.check(Calendars.nameKey(family) != Calendars.nameKey(CalendarInfo(id: "f", title: "Family", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "Google")), "another account is another calendar")
+      // Two calendars with one account and title, ticked differently: the name key falls back to unticked.
+      let twinA = CalendarInfo(id: "twin-a", title: "Shared", kind: .calDAV, sourceKind: .calDAV, sourceTitle: "iCloud")
+      var twinB = twinA
+      twinB.id = "twin-b"
+      let rows = ChooserModel.make([twinA, twinB], ticks: [:]).groups[0].rows
+      let twins = Calendars.remember([:], rows.map { (row: $0, on: $0.id == "twin-a") })
+      r.equal(twins[Calendars.nameKey(twinA)], false)
+      r.equal(Calendars.remember([:], rows.map { (row: $0, on: true) })[Calendars.nameKey(twinA)], true)
+      // Keys are kept for calendars not shown this time.
+      r.equal(Calendars.remember(["gone": false], [])["gone"], false)
     }
 
     r.test("no full access, or disconnected: no events, no calendars, the state said") {
@@ -488,7 +555,17 @@ struct CoreTests {
       r.equal(s.generatedAt, "2026-10-05T15:00:01Z")
       r.equal(s.window, WireWindow(start: "2026-10-05T15:00:01Z", end: "2026-10-19T15:00:01Z"))
       r.equal(Times.zoneName(chicago), "America/Chicago")
-      r.equal(Times.zoneName(TimeZone(secondsFromGMT: 3600)!), "GMT+0100")
+      // A fixed offset is not a zone the runtime takes (Intl refuses "GMT+0100"): UTC instead, never a refused snapshot.
+      r.equal(Times.zoneName(TimeZone(secondsFromGMT: 3600)!), "UTC")
+      r.equal(Times.zoneName(TimeZone(secondsFromGMT: -18_000)!), "UTC")
+      r.equal(Times.zoneName(TimeZone(identifier: "Asia/Kolkata")!), "Asia/Kolkata")
+      r.equal(Times.zoneName(TimeZone(identifier: "GMT")!), "GMT")
+      r.equal(Times.zoneName(TimeZone(identifier: "EST5EDT")!), "EST5EDT")
+      r.equal(Times.zoneName(TimeZone(identifier: "Etc/GMT+5")!), "Etc/GMT+5")
+      r.equal(Times.zoneName(TimeZone(identifier: "Factory")!), "UTC")
+      r.equal(read([], now: NOW).tz, "America/Chicago")
+      r.equal(Snapshots.build(ReadInput(now: NOW, timeZone: TimeZone(secondsFromGMT: 3600)!, access: .full)).tz, "UTC")
+      r.check(TimeZone.knownTimeZoneIdentifiers.allSatisfy { Times.zoneName(TimeZone(identifier: $0)!) == $0 || $0.count > 64 }, "every zone macOS knows goes by its own name")
       r.equal(Times.daysFromCivil(1970, 1, 1), 0)
       r.equal(Times.dayString(Times.daysFromCivil(2026, 2, 28) + 1), "2026-03-01")
     }
@@ -528,14 +605,65 @@ struct CoreTests {
       r.equal(DisconnectExit.code(.status(202)), 0)
       r.equal(DisconnectExit.code(.status(404)), 3)
       r.equal(DisconnectExit.code(.status(409)), 3)
-      for o in [PushOutcome.status(401), .status(500), .unreachable, .noToken] { r.equal(DisconnectExit.code(o), 1) }
+      for o in [PushOutcome.status(400), .status(401), .status(403), .status(413), .status(422)] { r.equal(DisconnectExit.code(o), 1, "\(o)") }
+      for o in [PushOutcome.status(500), .status(503), .status(429), .unreachable, .noToken] { r.equal(DisconnectExit.code(o), 2, "\(o)") }
       r.equal(DisconnectExit.retry(.status(429)), 6)
       r.equal(DisconnectExit.retry(.status(422)), 6)
-      r.equal(DisconnectExit.retry(.status(401)), nil)
-      for o in [PushOutcome.status(202), .status(404), .status(401), .unreachable, .noToken] {
+      for o in [PushOutcome.status(503), .unreachable, .noToken] { r.equal(DisconnectExit.retry(o), 5, "\(o)") }
+      for o in [PushOutcome.status(202), .status(401), .status(400), .status(404), .status(409)] { r.equal(DisconnectExit.retry(o), nil, "\(o)") }
+      for o in [PushOutcome.status(202), .status(404), .status(401), .status(503), .unreachable, .noToken] {
         r.check(sentence(DisconnectExit.message(o)), DisconnectExit.message(o))
       }
-      r.equal(DisconnectExit.message(.unreachable), "Flint couldn't be told that Apple Calendar is disconnected, because the runtime isn't answering.")
+      r.equal(DisconnectExit.message(.unreachable), "Flint couldn't be told yet that Apple Calendar is disconnected, because the runtime isn't answering.")
+      r.equal(DisconnectExit.message(.status(401)), "Flint couldn't be told that Apple Calendar is disconnected, because the runtime answered 401.")
+    }
+
+    r.test("--disconnect keeps trying for a minute while the runtime is down or restarting, then says it wasn't told yet") {
+      /// Runs DisconnectExit.run against a scripted runtime and a fake clock: the outcomes, the waits, and the pushes made.
+      func run(_ script: [PushOutcome]) -> (outcome: PushOutcome, waits: [TimeInterval], pushes: Int) {
+        var clock: TimeInterval = 0, waits: [TimeInterval] = [], pushes = 0
+        let o = DisconnectExit.run(send: {
+          pushes += 1
+          clock += 1
+          return script[min(pushes, script.count) - 1]
+        }, wait: { waits.append($0); clock += $0 }, elapsed: { clock })
+        return (o, waits, pushes)
+      }
+      // A deploy restarts the runtime: two pushes find nobody, the third is taken.
+      let restart = run([.unreachable, .status(503), .status(202)])
+      r.equal(restart.outcome, .status(202))
+      r.equal(restart.waits, [5, 5])
+      // Down the whole minute: it stops trying within it, and the answer is "not yet" (2), not "refused" (1).
+      let down = run([.unreachable])
+      r.equal(down.outcome, .unreachable)
+      r.equal(DisconnectExit.code(down.outcome), 2)
+      r.check(down.waits.reduce(0, +) + Double(down.pushes) <= DisconnectExit.patience + 1, "within a minute")
+      r.check(down.pushes >= 8, "tried every 5 seconds: \(down.pushes)")
+      // The agent's push a moment before (422) or too soon (429): tried again; a refusal is final at once.
+      r.equal(run([.status(422), .status(202)]).outcome, .status(202))
+      r.equal(run([.status(429), .status(202)]).waits, [6])
+      let refused = run([.status(401), .status(202)])
+      r.equal(refused.outcome, .status(401))
+      r.equal(refused.pushes, 1)
+      r.equal(run([.status(404)]).pushes, 1)
+    }
+
+    r.test("the chooser's answers: one word each, and a failure line that is a sentence with a domain and a code only") {
+      r.equal([ChooserAnswer.connected, .cancelled, .denied, .restricted, .noPrompt, .noToken].map(\.rawValue), ["connected", "cancelled", "denied", "restricted", "noprompt", "notoken"])
+      r.equal(UIText.answer(.denied), .denied)
+      r.equal(UIText.answer(.writeOnly), .denied)
+      r.equal(UIText.answer(.restricted), .restricted)
+      // Still undecided after asking: macOS never showed its prompt, so there is no switch in Settings to point to.
+      r.equal(UIText.answer(.notDetermined), .noPrompt)
+      r.equal(UIText.alert(.notDetermined)?.title, UIText.noPromptTitle)
+      r.equal(UIText.alert(.notDetermined)?.buttons, [UIText.close])
+      r.equal(UIText.alert(.denied)?.buttons, [UIText.openSettings, UIText.close])
+      let line = UIText.failure(.accessRequest, domain: "EKCADErrorDomain", code: 1013)
+      r.equal(line, "The access request failed with EKCADErrorDomain error 1013.")
+      r.check(sentence(line), line)
+      r.equal(UIText.failure(.tokenRead, domain: "NSCocoaErrorDomain", code: 257), "Reading the push token failed with NSCocoaErrorDomain error 257.")
+      r.equal(UIText.failure(.tokenRead, domain: "bad domain\n<x>", code: -1), "Reading the push token failed with baddomainx error -1.")
+      r.equal(UIText.failure(.tokenRead, domain: "", code: 4), "Reading the push token failed with Unknown error 4.")
     }
 
     r.test("the log: one sentence a push, counts and codes only") {
@@ -547,6 +675,7 @@ struct CoreTests {
       r.equal(LogText.line(.status(202), events: 23, access: .full, next: 300), "The runtime accepted 23 events (202); the next read is in 5 minutes.")
       r.equal(LogText.line(.status(202), events: 0, access: .denied, next: 300), "Calendar access is denied, so no events were sent (202); the next read is in 5 minutes.")
       r.equal(LogText.line(.unreachable, events: 1, access: .full, next: 15), "The runtime isn't answering, so Flint Calendar tries again in 15 seconds.")
+      r.equal(LogText.line(.noToken, events: 0, access: .full, next: 300), "The push token can't be read, so nothing was sent; Flint Calendar tries again in 5 minutes.")
       r.equal(LogText.duration(60), "1 minute")
     }
 

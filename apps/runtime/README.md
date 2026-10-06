@@ -177,8 +177,8 @@ reads nothing.
    `FLINT_SOURCE_APPLE_CALENDAR=on` in `~/.flint/runtime.override.env` (on a
    line of its own, once, keeping the file `0600`), restarts the runtime,
    starts Flint Calendar in the background and files the card that turns the
-   source on (`enable-source apple_calendar`). Flint Calendar's README has
-   each step.
+   source on (`enable-source apple_calendar`), unless the source is on
+   already. Flint Calendar's README has each step.
 3. **Approve the card.** Open Approvals in the console. The card is "Turn On
    the Apple Calendar Source", and under it: "Your Apple Calendar is read every
    5 minutes and when it changes." Click Approve and confirm with your key.
@@ -205,10 +205,11 @@ keeps its own approval.
 - **Disconnect:** `~/flint/apps/desktop-calendar/disconnect.sh`. It stops
   Flint Calendar, tells the runtime (which archives every Apple event, and the
   `apple-calendar` line says "Disconnected"), then removes the
-  `FLINT_SOURCE_APPLE_CALENDAR` line and restarts the runtime. Add
-  `--uninstall` to remove the app too.
+  `FLINT_SOURCE_APPLE_CALENDAR` line and restarts the runtime. If the runtime
+  can't be told within a minute (it is down or restarting), the line stays and
+  it asks you to run it again. Add `--uninstall` to remove the app too.
 - **Turn the source off by hand:** remove the `FLINT_SOURCE_APPLE_CALENDAR`
-  line from `~/.flint/runtime.override.env` and run
+  lines (with or without `export`) from `~/.flint/runtime.override.env` and run
   `launchctl kickstart -k gui/$(id -u)/com.flint.runtime`. Its events stay as
   they were last known, and the `apple-calendar` line says "Off".
 - **Titles:** as for Google, the nightly cleanup deletes each a week after it

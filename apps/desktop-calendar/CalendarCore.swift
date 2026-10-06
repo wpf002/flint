@@ -230,11 +230,16 @@ enum Times {
     if last <= s { last = s + 1 }
     return (dayString(s), dayString(last))
   }
-  /// The zone as the wire takes it: a plain zone name, else UTC.
+  /// The zone as the wire takes it: a named zone, else UTC. The runtime checks the name with Intl, which takes every
+  /// name in this Mac's zone database (aliases such as Asia/Kolkata among them) but "Factory", and no fixed offset:
+  /// Foundation names one "GMT+0100" (TimeZone(secondsFromGMT:), or TZ=UTC+5), and every snapshot sent with that
+  /// would be refused.
   static func zoneName(_ tz: TimeZone) -> String {
     let id = tz.identifier
-    let ok = !id.isEmpty && id.count <= 64 && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) && $0.isASCII || "_+/-".unicodeScalars.contains($0) }
-    return ok ? id : "UTC"
+    let plain = !id.isEmpty && id.count <= 64 && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) && $0.isASCII || "_+/-".unicodeScalars.contains($0) }
+    let offset = ["GMT+", "GMT-", "UTC+", "UTC-"].contains { id.hasPrefix($0) }
+    let named = TimeZone(identifier: id)?.identifier == id && id != "Factory"
+    return plain && !offset && named ? id : "UTC"
   }
 }
 
@@ -294,10 +299,26 @@ enum Calendars {
     if c.sourceKind == .mobileMe || (c.sourceKind == .calDAV && c.sourceTitle == "iCloud") { return .iCloud }
     return .otherAccounts
   }
-  /// Whether a calendar counts: Will's tick when he has seen it, else its section's default. Birthdays never.
+  /// A calendar's second key, its account and its title: EventKit gives a calendar a new id after a full sync with
+  /// its server (signing out of iCloud and back in, an account rebuilt), and Will's choice must outlive that.
+  static func nameKey(_ c: CalendarInfo) -> String { "name:" + Hash.sha256(c.sourceTitle + "\n" + c.title) }
+  /// Whether a calendar counts: Will's tick under its id; else his tick under its name key (the same calendar with a
+  /// new id); else, for a calendar he has never seen, its section's default. Birthdays never.
   static func ticked(_ c: CalendarInfo, _ ticks: [String: Bool]) -> Bool {
     guard let s = section(c) else { return false }
-    return ticks[c.id] ?? s.tickedByDefault
+    return ticks[c.id] ?? ticks[nameKey(c)] ?? s.tickedByDefault
+  }
+  /// Will's ticks once he clicks Connect: each under its calendar's id and under its name key. Two calendars with
+  /// one name key that he ticked differently leave the name key unticked, so a new id never reads one he unticked.
+  static func remember(_ old: [String: Bool], _ choices: [(row: ChooserRow, on: Bool)]) -> [String: Bool] {
+    var out = old
+    var byName: [String: Bool] = [:]
+    for c in choices {
+      out[c.row.id] = c.on
+      byName[c.row.nameKey] = (byName[c.row.nameKey] ?? true) && c.on
+    }
+    for (k, on) in byName { out[k] = on }
+    return out
   }
   static func selected(_ all: [CalendarInfo], _ ticks: [String: Bool]) -> [CalendarInfo] {
     all.filter { ticked($0, ticks) }
@@ -311,6 +332,8 @@ enum Calendars {
 
 struct ChooserRow: Equatable {
   var id: String
+  /// Calendars.nameKey, where Will's tick is saved too.
+  var nameKey: String
   var title: String
   /// The account, for a calendar under OTHER ACCOUNTS.
   var detail: String?
@@ -337,7 +360,7 @@ struct ChooserModel: Equatable {
     var groups: [ChooserGroup] = []
     for s in CalendarSection.allCases {
       let rows = all.filter { Calendars.section($0) == s }
-        .map { ChooserRow(id: $0.id, title: $0.title.isEmpty ? UIText.untitled : $0.title, detail: s == .otherAccounts ? $0.sourceTitle : nil, ticked: Calendars.ticked($0, ticks)) }
+        .map { ChooserRow(id: $0.id, nameKey: Calendars.nameKey($0), title: $0.title.isEmpty ? UIText.untitled : $0.title, detail: s == .otherAccounts ? $0.sourceTitle : nil, ticked: Calendars.ticked($0, ticks)) }
         .sorted { ($0.title.lowercased(), $0.id) < ($1.title.lowercased(), $1.id) }
       if !rows.isEmpty { groups.append(ChooserGroup(header: s.rawValue, rows: rows)) }
     }
@@ -369,11 +392,14 @@ enum Answer: String {
 }
 
 enum Events {
-  /// Will's answer: the organizer; else his own attendee entry; else, with nobody invited, his own event;
-  /// else (an invitation to an address that isn't his Apple Account's) not answered, which fails safe.
+  /// Will's answer: declined when his own entry says so (declined or delegated), even on an event he organized, as
+  /// the runtime's Google rule has it; else the organizer; else his own entry; else, with nobody invited, his own
+  /// event; else (an invitation to an address that isn't his Apple Account's) not answered, which fails safe.
   static func answer(_ e: CalendarEvent) -> Answer {
+    let mine = e.participants.first(where: { $0.isCurrentUser })
+    if let me = mine, me.status == .declined || me.status == .delegated { return .declined }
     if e.organizerIsCurrentUser == true { return .organizer }
-    if let me = e.participants.first(where: { $0.isCurrentUser }) {
+    if let me = mine {
       switch me.status {
       case .accepted: return .accepted
       case .tentative: return .tentative
@@ -634,24 +660,48 @@ enum Backoff {
   }
 }
 
-/// What --disconnect exits with, for disconnect.sh: 0 told (202), 3 nothing to tell (the source is off or not
-/// turned on, so Flint holds no Apple events to archive), 1 not told.
+/// What --disconnect exits with, for disconnect.sh: 0 told (202); 3 nothing to tell (the source is off or not
+/// turned on, so Flint holds no Apple events to archive); 2 not told yet (the runtime was down, restarting or
+/// failing for the whole minute, or the token couldn't be read), so the source stays on and Will runs it again;
+/// 1 refused (the runtime said no to the token or the snapshot), so his Apple events stay as they were last read.
 enum DisconnectExit {
+  /// How long --disconnect keeps trying before it gives up for now.
+  static let patience: TimeInterval = 60
+
   static func code(_ o: PushOutcome) -> Int32 {
     if Backoff.ok(o) { return 0 }
     if case .status(let code) = o, code == 404 || code == 409 { return 3 }
-    return 1
+    return notYet(o) ? 2 : 1
   }
-  /// Whether to try the revoked push again: once more after a 429 or a 422 (a push the agent made a moment before).
+  /// A push that may land if it is tried again later: no answer, no token read, a 5xx, or a 429.
+  static func notYet(_ o: PushOutcome) -> Bool {
+    switch o {
+    case .unreachable, .noToken: return true
+    case .status(let code): return code == 429 || (500..<600).contains(code)
+    }
+  }
+  /// How long to wait before the revoked push is tried again, or nil to stop: 5 s while the runtime is down, failing
+  /// or restarting, and 6 s after a 429 or a 422 (a push the agent made a moment before).
   static func retry(_ o: PushOutcome) -> TimeInterval? {
     if case .status(let code) = o, code == 429 || code == 422 { return 6 }
-    return nil
+    return notYet(o) ? 5 : nil
+  }
+  /// The revoked push, tried again while retry says so and the next try still starts within `patience`. The push,
+  /// the wait and the clock are given, so the core tests run it with fakes.
+  static func run(send: () -> PushOutcome, wait: (TimeInterval) -> Void, elapsed: () -> TimeInterval) -> PushOutcome {
+    var outcome = send()
+    while let pause = retry(outcome), elapsed() + pause <= patience {
+      wait(pause)
+      outcome = send()
+    }
+    return outcome
   }
   /// What disconnect.sh shows Will.
   static func message(_ o: PushOutcome) -> String {
     switch code(o) {
     case 0: return "Flint was told that Apple Calendar is disconnected."
     case 3: return "The Apple Calendar source is off in Flint, so there was nothing to tell it."
+    case 2: return "Flint couldn't be told yet that Apple Calendar is disconnected, because \(LogText.reason(o))."
     default: return "Flint couldn't be told that Apple Calendar is disconnected, because \(LogText.reason(o))."
     }
   }
@@ -680,21 +730,55 @@ enum UIText {
   static let writeOnlyText = "Flint Calendar can only add events right now, so it can't read them. Choose Full Access for it in System Settings > Privacy & Security > Calendars."
   static let restrictedTitle = "Calendar Access Is Restricted"
   static let restrictedText = "This Mac's settings don't let Flint Calendar read calendars."
+  /// macOS answered the request without showing its prompt, so Flint Calendar isn't listed in Settings either.
+  static let noPromptTitle = "The Calendar Prompt Didn't Appear"
+  static let noPromptText = "Flint Calendar asked for access to your calendar, but macOS didn't show its prompt."
+  /// The sandbox kept Flint Calendar from reading its push token (its one file outside the sandbox).
+  static let noTokenTitle = "Flint Calendar Can't Read Its Token"
+  static let noTokenText = "Flint Calendar can't read the token it needs to send your calendar to Flint."
 
   /// Every title and button, for the Title Case check.
-  static let titles = [windowTitle, chooserHeading, untitled, cancel, connect, ok, close, openSettings, connectedTitle, accessOffTitle, writeOnlyTitle, restrictedTitle]
+  static let titles = [windowTitle, chooserHeading, untitled, cancel, connect, ok, close, openSettings, connectedTitle, accessOffTitle, writeOnlyTitle, restrictedTitle, noPromptTitle, noTokenTitle]
   /// Every secondary line, for the sentence check.
-  static let sentences = [chooserIntro, chooserFootnote, noCalendars, connectedText, accessOffText, writeOnlyText, restrictedText]
+  static let sentences = [chooserIntro, chooserFootnote, noCalendars, connectedText, accessOffText, writeOnlyText, restrictedText, noPromptText, noTokenText]
 
   /// The alert Will sees for each access state when he opens Flint Calendar; nil for full access (the chooser shows).
+  /// Still undecided after the request means macOS never asked: there is no switch in Settings to send him to.
   static func alert(_ a: Access) -> (title: String, text: String, buttons: [String])? {
     switch a {
     case .full: return nil
-    case .denied, .notDetermined: return (accessOffTitle, accessOffText, [openSettings, close])
+    case .denied: return (accessOffTitle, accessOffText, [openSettings, close])
+    case .notDetermined: return (noPromptTitle, noPromptText, [close])
     case .writeOnly: return (writeOnlyTitle, writeOnlyText, [openSettings, close])
     case .restricted: return (restrictedTitle, restrictedText, [close])
     }
   }
+  /// The word the chooser prints for an access state it can't read with.
+  static func answer(_ a: Access) -> ChooserAnswer {
+    switch a {
+    case .restricted: return .restricted
+    case .notDetermined: return .noPrompt
+    case .full, .denied, .writeOnly: return .denied
+    }
+  }
+  /// What failed, for one line on the chooser's stderr (connect.sh shows it): an error's domain and code, never more.
+  enum Failure: String {
+    case accessRequest = "The access request"
+    case tokenRead = "Reading the push token"
+  }
+  static func failure(_ what: Failure, domain: String, code: Int) -> String {
+    let d = String(String.UnicodeScalarView(domain.unicodeScalars.filter { ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "_" || $0 == "." }).prefix(100))
+    return "\(what.rawValue) failed with \(d.isEmpty ? "Unknown" : d) error \(code)."
+  }
+}
+
+/// The one word Flint Calendar prints when Will closes the chooser, for connect.sh (`open -o` writes it to a file).
+enum ChooserAnswer: String {
+  case connected, cancelled, denied, restricted
+  /// macOS answered the request without asking Will.
+  case noPrompt = "noprompt"
+  /// The sandbox kept Flint Calendar from reading its push token.
+  case noToken = "notoken"
 }
 
 /// The helper's log (~/.flint/calendar.log): one sentence a push, with counts, the access state and HTTP codes,
@@ -710,7 +794,7 @@ enum LogText {
   /// Why a push did not land, in a few words.
   static func reason(_ o: PushOutcome) -> String {
     switch o {
-    case .noToken: return "the push token is missing"
+    case .noToken: return "the push token can't be read"
     case .unreachable: return "the runtime isn't answering"
     case .status(let code): return "the runtime answered \(code)"
     }
@@ -721,7 +805,7 @@ enum LogText {
     let what = events == 1 ? "1 event" : "\(events) events"
     switch o {
     case .noToken:
-      return "The push token is missing, so nothing was sent; Flint Calendar tries again in \(again)."
+      return "The push token can't be read, so nothing was sent; Flint Calendar tries again in \(again)."
     case .unreachable:
       return "The runtime isn't answering, so Flint Calendar tries again in \(again)."
     case .status(let code):
