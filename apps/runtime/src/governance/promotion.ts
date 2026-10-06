@@ -2,11 +2,12 @@
  * A phase's promotion table (Machine plan 3.0.4): after its shadow week, one
  * signed policy change that moves the phase's autonomous actions to ALONE for
  * 180 days. Built from the code table, filed as an ordinary policy.change
- * proposal Will signs with his key (or does not). P2 and P2.5 each have one,
- * with its own card and its own evidence.
+ * proposal Will signs with his key (or does not). P1, P2 and P2.5 each have
+ * one, with its own card and its own evidence.
  *
- *  - Refused before 7 days of evidence: P2's shadow decisions; P2.5's calendar
- *    syncs (the source running for a week).
+ *  - Refused before 7 days of evidence: P1's chat reads (since chat first asked
+ *    to read the world model or the ledger); P2's shadow decisions; P2.5's
+ *    calendar syncs (the source running for a week).
  *  - Never runtime.frontier.complete or triage.rule.create (they stay at
  *    APPROVAL), never anything FORBIDDEN, never an action a pattern of Will's
  *    choosing was dropped for (`--drop`).
@@ -18,6 +19,22 @@ import { CODE_TABLE, localDay, localDayBounds, previousDay } from '@flint/policy
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
+
+/**
+ * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
+ * model and the ledger, which ask for his approval each time until he signs this.
+ * Recording a prediction from chat keeps its 10 a day.
+ */
+export const P1_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  // Only the tools the runtime connector serves: a tool added later is not signed for in advance.
+  { pattern: 'world_now' },
+  { pattern: 'world_entity' },
+  { pattern: 'ledger_open' },
+  { pattern: 'ledger_calibration' },
+  { pattern: 'ledger_record_prediction', dailyCap: 10 },
+];
+/** How chat files them: an MCP call to the runtime connector. */
+const P1_CHAT_ACTIONS = P1_PROMOTIONS.map((r) => `mcp:runtime.${r.pattern}`);
 
 /** What P2 asks Will to promote, and the cap each keeps. */
 export const P2_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
@@ -48,7 +65,7 @@ export const P25_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number 
 /** Never in a table, whatever is asked. */
 export const NEVER_PROMOTED: ReadonlySet<string> = new Set(['runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail']);
 
-export type Phase = 'p2' | 'p25';
+export type Phase = 'p1' | 'p2' | 'p25';
 
 export const SHADOW_DAYS = 7;
 
@@ -72,6 +89,20 @@ const PHASES: Record<Phase, {
   covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
   measured: (db: Db, first: Date, now: Date) => Promise<string>;
 }> = {
+  p1: {
+    rows: P1_PROMOTIONS,
+    template: 'p1.promotion',
+    label: 'P1',
+    evidence: 'chat reads',
+    // The first time chat asked to read the world model or the ledger: Will has approved each one since.
+    first: async (db) => (await db.proposal.findFirst({ where: { action: { in: P1_CHAT_ACTIONS } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
+    measured: async (db, _first, now) => {
+      const asked = await db.proposal.groupBy({ by: ['status'], where: { action: { in: P1_CHAT_ACTIONS }, createdAt: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } }, _count: { _all: true } });
+      const n = (st: string) => asked.find((c) => c.status === st)?._count._all ?? 0;
+      const tainted = await db.proposal.count({ where: { action: { in: P1_CHAT_ACTIONS }, tainted: true, createdAt: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } } });
+      return `chat asked to read ${asked.reduce((s, c) => s + c._count._all, 0)} time(s) this week: ${n('executed')} approved and run, ${n('rejected')} rejected, ${n('expired')} expired; ${tainted} in a turn with outside text`;
+    },
+  },
   p2: {
     rows: P2_PROMOTIONS,
     template: 'p2.promotion',

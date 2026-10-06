@@ -9,6 +9,16 @@ readable only by you (`chmod 600`): the runtime refuses to start otherwise.
 Run the commands below in the deploy checkout, `~/flint`, which is always on
 `main` with its packages installed.
 
+## Chat's reads of the world model
+
+With `runtime` in `~/.flint/mcp.json`, chat can look things up in Flint's world
+model and prediction ledger. Each lookup asks first: a card in the chat ("Check
+What's Happening Now", "Read Open Predictions") that you approve or reject.
+After a week of that,
+`cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase p1` files
+the card that lets those reads run without asking (recording a prediction stays
+capped at 10 a day). Sign it in Approvals, or leave it, and they keep asking.
+
 ## The shadow week: labeling Activity
 
 When triage turns on, it runs in shadow for a week: it sorts what comes in and

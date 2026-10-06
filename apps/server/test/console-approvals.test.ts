@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { ACTION_WORDS } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -325,6 +326,22 @@ describe('the console Approvals panel', () => {
     expect(say({ status: 'done', result: { created: 2, skipped: 1 } })).toBe('Added 2 People · Skipped 1');
     expect(say({ status: 'done', result: { created: 1, skipped: 0 } })).toBe('Added 1 Person');
     expect(say({ status: 'done', note: 'ran tonight', result: { relationId: 'r1' } })).toBe('Done: ran tonight');
+  });
+
+  it('a chat lookup in Flint’s world model is named in words, the same words its notes use, for every tool the runtime connector serves', async () => {
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'w', fullName: 'runtime.world_now', origin: 'chat:abc', args: {} })] } });
+    await open();
+    const shown = ids.apprlist!.children[0]!.children[0]!.shown();
+    expect(shown).toContain('Check What’s Happening Now');
+    expect(shown).not.toMatch(/runtime|World Now/);
+    // Closed, a card shows its line in words too.
+    expect(run(`apprSub({fullName:'runtime.world_now',args:{}})`)).toBe('Services, counts and open items in Flint’s world model');
+    const tools = run('APPR_TOOLS') as Record<string, [string, string]>;
+    const src = readFileSync(join(__dirname, '..', '..', '..', 'packages', 'mcp', 'connectors', 'runtime-server.ts'), 'utf8');
+    const served = [...src.matchAll(/registerTool\(\s*'([a-z_]+)'/g)].map((m) => `runtime.${m[1]}`).sort();
+    expect(served.length).toBeGreaterThan(0);
+    expect(Object.keys(tools).sort()).toEqual(served);
+    for (const name of served) expect(tools[name]![0]).toBe(ACTION_WORDS[name]);
   });
 
   it('the approvals panel never writes HTML', () => {

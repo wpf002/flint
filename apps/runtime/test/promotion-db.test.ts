@@ -11,7 +11,7 @@ import { createDb, type Db } from '../src/db';
 import { approveProposal, activePolicies, Refused } from '../src/governance/proposals';
 import { runInternal, PolicyArgs } from '../src/governance/internal';
 import { markProcessed, recordEvent } from '../src/events/record';
-import { promotionTable, NEVER_PROMOTED, P2_PROMOTIONS } from '../src/governance/promotion';
+import { promotionTable, NEVER_PROMOTED, P1_PROMOTIONS, P2_PROMOTIONS } from '../src/governance/promotion';
 
 const DAY = 86_400_000;
 
@@ -66,5 +66,38 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     // Never ALONE: on its own, neither is an autonomous action at all.
     for (const a of NEVER_PROMOTED) expect(resolveTier(a, { context: 'autonomous', tainted: false, policies }).tier).not.toBe('alone');
     expect(Number((await withClient(urls.owner, (c) => c.query(`SELECT count(*) AS n FROM "ActionPolicy" WHERE tier = 'alone'`))).rows[0].n)).toBe(t.rows.length);
+  });
+
+  it('P1: refused before a week of chat reads; then chat\'s reads of the world model and the ledger, predictions kept at 10 a day', async () => {
+    await expect(promotionTable(db, { phase: 'p1' })).rejects.toThrow(/shadow week is not over: 0 of 7 days of chat reads/);
+    // A chat read as chat files it, dated in the past (createProposal dates a card now, and the database refuses one born expired).
+    const read = (daysAgo: number, tool = 'world_now', tainted = false) => {
+      const at = new Date(Date.now() - daysAgo * DAY);
+      return withClient(urls.owner, (c) => c.query(
+        `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, "expiresAt", "createdAt")
+         VALUES ($1, 'tool_call', 'chat:t1', $2, '{}'::jsonb, $3, '{}'::jsonb, $4, 'ops', $5, $6)`,
+        [`prp1${daysAgo}${tool.length}${Math.random().toString(36).slice(2, 8)}`, `mcp:runtime.${tool}`, 'a'.repeat(64), tainted, new Date(at.getTime() + DAY), at],
+      ));
+    };
+    await read(2);
+    await expect(promotionTable(db, { phase: 'p1' })).rejects.toThrow(/shadow week is not over: 2\.\d of 7 days of chat reads/);
+    await read(8, 'ledger_open');
+    await read(1, 'world_entity', true);
+    const t = await promotionTable(db, { phase: 'p1' });
+    expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
+    expect(t.rows.map((r) => r.pattern).sort()).toEqual(P1_PROMOTIONS.map((r) => r.pattern).sort());
+    expect(t.rows.find((r) => r.pattern === 'ledger_record_prediction')).toMatchObject({ dailyCap: 10, tier: 'alone' });
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+    expect(card.templateId).toBe('p1.promotion');
+    expect(card.reason).toMatch(/The shadow week: chat asked to read 2 time\(s\) this week: 0 approved and run, 0 rejected, 0 expired; 1 in a turn with outside text\.$/);
+
+    // Signed: a chat read of the world model no longer asks, and a tainted turn still cannot reach past its floor.
+    const key = await enrollTestKey(urls);
+    await approveProposal(db, card.id, await key.approve({ subjectId: card.id, action: 'policy.change', argsDigest: card.argsDigest }), undefined, 'test');
+    expect(await runInternal(db, card.id, undefined, 'UTC', 'test')).toEqual({ rows: t.rows.length });
+    const policies = await activePolicies(db);
+    const chat = (tool: string) => resolveTier(`mcp:runtime.${tool}`, { context: 'chat', tainted: false, policies, mcp: { server: 'runtime', tool, destructiveHint: false } });
+    expect(chat('world_now').tier).toBe('alone');
+    expect(chat('ledger_record_prediction')).toMatchObject({ tier: 'alone', cap: { limit: 10, period: 'day' } });
   });
 });

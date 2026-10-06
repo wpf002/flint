@@ -6,7 +6,7 @@
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report           P2.5's exit criteria, measured now (JSON)
- *   pnpm --filter @flint/runtime promotion-table [--phase p2|p25] [--drop <pattern>]...
+ *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25] [--drop <pattern>]...
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     const drop = process.argv.flatMap((a, i) => (a === '--drop' && process.argv[i + 1] ? [process.argv[i + 1]!] : []));
     const at = process.argv.indexOf('--phase');
     const phase = at === -1 ? 'p2' : process.argv[at + 1];
-    if (phase !== 'p2' && phase !== 'p25') throw new Error('promotion-table: --phase is p2 or p25');
+    if (phase !== 'p1' && phase !== 'p2' && phase !== 'p25') throw new Error('promotion-table: --phase is p1, p2 or p25');
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | p2-report | p25-report | promotion-table [--phase p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | p2-report | p25-report | promotion-table [--phase p1|p2|p25] [--drop <pattern>] | backup|offsite|drill [--auto]');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

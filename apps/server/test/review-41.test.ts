@@ -652,6 +652,16 @@ describe('second review of #41', () => {
     expect(claims).toBe(0);
   });
 
+  it('the note for a chat lookup Will approved says what it did in words, never the tool\'s name', async () => {
+    const proposal = { id: 'pr9', origin: 'chat:t', action: 'mcp:runtime.world_now', args: {}, tainted: false, status: 'approved' };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    const notes: Array<[string, string]> = [];
+    const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string) => (notes.push([title, body]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
+    expect(out.status).toBe('done');
+    expect(notes).toEqual([['Action done', 'Check What’s Happening Now ✓']]);
+  });
+
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {
     const proposal = { id: 'pr8', origin: 'chat:t', action: 'mcp:gmail.send', args: {}, tainted: false, status: 'approved' };
     const bodies: Array<Record<string, unknown>> = [];

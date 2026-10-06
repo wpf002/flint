@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { digestOf } from '@flint/policy';
+import { actionWords, digestOf } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -232,7 +232,7 @@ export async function runRamApproval(
     actor, context: 'console', kind: 'action', action: result.fullName, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs,
     ...(ok ? {} : { reasoning: 'the action did not complete (the console card has the details)' }), correlationId: `act:${pending.id}`,
   });
-  if (ok) ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
+  if (ok) ctx.notes.push('Action done', `${actionWords(result.fullName)} ✓`, 'action', `act:${result.id}`);
   return { action: result };
 }
 
@@ -298,7 +298,7 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
     outcome = { ok: false, error: `the tool threw (${err instanceof Error ? err.name : 'error'})` };
   }
   const where = await p.completeDurably(id, outcome);
-  if (outcome.ok) ctx.notes.push('Action done', `${fullName} ✓`, 'action', `act:${id}`);
+  if (outcome.ok) ctx.notes.push('Action done', `${actionWords(fullName)} ✓`, 'action', `act:${id}`);
   const note =
     where === 'spooled' ? 'the runtime will be told how it ended once it answers'
     : where === 'refused' ? 'the runtime did not record how it ended; it will mark it "outcome unknown"'

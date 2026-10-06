@@ -1061,6 +1061,8 @@ pollNotifs();setInterval(pollNotifs,60000);
 var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false};
 var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db'],'backup.offsite':["Run Tonight's Offsite Copy",'db'],'restore.drill':["Run This Week's Restore Test",'db'],'maintenance.retention':["Run Tonight's Cleanup",'db']};
 var APPR_SOURCES={launchd:'Flint’s background jobs, every 2 minutes',health:'Service checks, every 5 minutes',git:'Your repos, every 5 minutes',spend:'Spend against your caps, every minute',deploy:'Deploy results, every minute',knowledge:'What Flint’s memory learns, every 10 minutes',nexus_inbox:'Nexus handoffs, every 10 minutes',nexus:'Your Nexus threads, every 5 minutes',github:'Your GitHub repos, every 5 minutes',railway:'Your Railway services, every 5 minutes',google_calendar:'Your calendar, read-only, every 5 minutes'};
+/* Chat's runtime tools in words (the same words as @flint/policy's ACTION_WORDS, which the notes use). */
+var APPR_TOOLS={'runtime.world_now':['Check What’s Happening Now','Services, counts and open items in Flint’s world model'],'runtime.world_entity':['Look Up One Item','One item in Flint’s world model'],'runtime.ledger_open':['Read Open Predictions','Flint’s predictions still waiting on an outcome'],'runtime.ledger_calibration':['Check Prediction Accuracy','How often Flint’s predictions came true'],'runtime.ledger_record_prediction':['Record a Prediction','Adds one to Flint’s prediction ledger'],'runtime.inbox_recent':['Read What Triage Decided','The latest items in Important and Other'],'runtime.escalations_open':['Read Open Escalations','What is waiting on you'],'runtime.explain_decision':['Explain a Triage Decision','Why Flint sorted one item the way it did']};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -1075,6 +1077,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
   if(p.fullName==='triage.rule.create')return 'Add a Triage Rule';
   if(p.fullName==='world.relation.write')return 'Link Two Things';
   if(APPR_NIGHTLY[p.fullName])return APPR_NIGHTLY[p.fullName][0];
+  if(APPR_TOOLS[p.fullName])return APPR_TOOLS[p.fullName][0];
   return 'Approve '+apprWords(p.fullName);}
 /* One line under the title. */
 function apprSub(p){var a=p.args||{};
@@ -1084,6 +1087,7 @@ function apprSub(p){var a=p.args||{};
   if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'A new rule';
   if(APPR_NIGHTLY[p.fullName])return 'Waits for you until it runs on its own';
   if(p.fullName==='world.relation.write')return 'A link a knowledge fact suggested';
+  if(APPR_TOOLS[p.fullName])return APPR_TOOLS[p.fullName][1];
   return 'Filed by '+apprFrom(p.origin);}
 function apprIcon(p){return p.fullName==='world.source.enable'?'power':(APPR_NIGHTLY[p.fullName]||/^(backup|restore)/.test(String((p.args&&p.args.rows&&p.args.rows[0]&&p.args.rows[0].pattern)||'')))?'db':'bolt';}
 function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if(o.indexOf('runtime:')===0)return 'Flint';if(o.indexOf('chat:')===0)return 'A Chat';return o||'Unknown';}
@@ -1092,6 +1096,7 @@ function apprFacts(p){var a=p.args||{},f=[];
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
     var lim={'backup.local':'Backup 1 a Day','restore.drill':'Restore Test 1 a Week','backup.offsite':'Offsite 1 a Day'};
     var words={'world.sync.google_calendar':'Read Your Calendar','world.person.create':'Add People from Calendar'};
+    Object.keys(APPR_TOOLS).forEach(function(k){words[k.replace(/^runtime\./,'')]=APPR_TOOLS[k][0];});
     var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
