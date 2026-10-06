@@ -5,8 +5,9 @@
 -- Calendar cursor and its queue go. Entities it made stay (an entity is never
 -- deleted), and so do their apple_calendar source rows (the source list keeps
 -- allowing them), so a forget made while rolled back still suppresses them for
--- good; their titles go with the nightly retention. It also removes its own row
--- from _prisma_migrations, so the next deploy re-applies it.
+-- good; their titles go with the nightly retention. Suppressed keys stay too,
+-- the ones its backfill added among them: a forget is never undone. It also
+-- removes its own row from _prisma_migrations, so the next deploy re-applies it.
 CREATE OR REPLACE FUNCTION person_source_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN

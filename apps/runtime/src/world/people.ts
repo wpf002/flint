@@ -14,7 +14,8 @@
  *    calendar source (migrations p25_google, p26_apple_calendar).
  *  - P2.6: two calendar sources, google_calendar and apple_calendar. A person
  *    is keyed per source (someone in both is two entities), and forgetting
- *    one forgets them under both (person-create.ts, and the forget trigger).
+ *    one forgets them under both: the other entity is forgotten too, and
+ *    neither comes back (person-create.ts, and the forget trigger).
  */
 import { createHash } from 'node:crypto';
 

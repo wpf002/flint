@@ -296,7 +296,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
-  // P2.6: Flint Calendar's push (scope calendar:push only; up to 2 MiB, this route alone).
+  // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),
     ...(deps.calendarInbox ? { inbox: deps.calendarInbox } : {}),

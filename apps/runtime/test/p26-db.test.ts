@@ -11,12 +11,16 @@
  *    database still refuses a person from any other source.
  *  - Forget: an Apple event's heads-ups and its other kind go with it; a person
  *    forgotten from either calendar is suppressed under both, in the runtime
- *    and in the database.
- *  - A push job runs past an open circuit and the cadence job does not; an idle
- *    run touches nothing; a stale snapshot is a counted failure; a revoked one
- *    archives everything.
+ *    and in the database, and their entity from the other calendar is
+ *    forgotten with them.
+ *  - A push job runs past an open circuit and the cadence job does not; a
+ *    snapshot older than the one last applied is never applied, even after a
+ *    restart; an idle run touches nothing; a stale snapshot is a counted
+ *    failure; a revoked one archives everything and the status says
+ *    Disconnected (Off when the source is not on at all).
  *  - The migration: up gives the three functions both calendars; its down.sql
- *    gives back P2.5's bodies exactly, and a deploy applies it again.
+ *    gives back P2.5's bodies exactly, and a deploy applies it again, suppressing
+ *    under both calendars anyone forgotten in between.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -32,7 +36,7 @@ import { createProposal, approveProposal } from '../src/governance/proposals';
 import { proposeEnable, runInternal } from '../src/governance/internal';
 import { processEvent, type WorkerDeps } from '../src/triage/worker';
 import { syncJobs, type JobContext } from '../src/jobs';
-import { appleCalendarSource } from '../src/sources/apple/calendar';
+import { appleCalendarSource, restoreInbox } from '../src/sources/apple/calendar';
 import { CalendarInbox } from '../src/sources/apple/inbox';
 import { parseSnapshot } from '../src/sources/apple/wire';
 import { appleCalendarStatus } from '../src/report/apple-calendar';
@@ -124,6 +128,8 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     await withClient(urls.app, (c) => c.query(`SELECT forget_entity($1, $2)`, [entityId, `ap26${n}`]));
   }
   const entity = (kind: string, k: string) => db.entity.findUnique({ where: { kind_key: { kind, key: k } } });
+  /** The `apple-calendar` line, with the source on (FLINT_SOURCE_APPLE_CALENDAR=on), as this test's config has it. */
+  const status = () => appleCalendarStatus(db, { on: config.appleCalendar });
   const suppressed = (source: string, externalId: string) => db.suppressedKey.count({ where: { source, externalIdHash: H(externalId) } });
 
   beforeAll(async () => {
@@ -140,13 +146,13 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
   });
 
   it('turning it on needs a world.source.enable Will signed; before that the database refuses it and nothing runs', async () => {
-    expect(await appleCalendarStatus(db)).toBe('Not Turned On · Never Read · 0 Events');
+    expect(await status()).toBe('Not Turned On · Never Read · 0 Events');
     expect(await syncOnce(db, pushed([ev('e0')]).source, run(), 'UTC')).toMatchObject({ ran: false, reason: expect.stringMatching(/^not enabled/) });
     await expect(withClient(urls.app, (c) => c.query(`INSERT INTO "SourceCursor" (source, cursor, enabled, "updatedAt") VALUES ('apple_calendar', '', true, now())`)))
       .rejects.toThrow(/needs an approved world\.source\.enable/);
     const p = await proposeEnable(db, 'apple_calendar');
     expect(await sign(p.id, 'world.source.enable', { source: 'apple_calendar' })).toEqual({ source: 'apple_calendar', enabled: true });
-    expect(await appleCalendarStatus(db)).toBe('Waiting for Flint Calendar · Never Read · 0 Events');
+    expect(await status()).toBe('Waiting for Flint Calendar · Never Read · 0 Events');
   });
 
   it('a pushed snapshot: the title in EntityText only, PERSONAL, keys under apple_calendar, and a card that names its calendar', async () => {
@@ -176,11 +182,12 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     const card = await db.proposal.findFirstOrThrow({ where: { action: 'world.person.create', status: 'pending' } });
     expect(card).toMatchObject({ templateId: 'person.from_calendar', origin: 'runtime:apple_calendar', tainted: true, sensitivity: 'personal' });
     expect(card.args).toEqual({ people: [{ name: 'Ada Lovelace', email: ada, emailHash: emailHash(ada) }], source: 'apple_calendar' });
+    expect(card.reason).toBe('Approving saves the names and addresses of 1 person from Apple Calendar events you accepted or organized.');
     expect(await sign(card.id, 'world.person.create', card.args as Record<string, unknown>)).toEqual({ created: 1, skipped: 0 });
     const p = await db.entity.findFirstOrThrow({ where: { kind: 'person' }, include: { sources: true } });
     expect(p).toMatchObject({ key: personKey(emailHash(ada), 'apple_calendar'), name: 'Ada Lovelace', state: { source: 'apple_calendar', email: ada, emailHash: emailHash(ada) } });
     expect(p.sources).toEqual([expect.objectContaining({ source: 'apple_calendar', externalId: personExternalId(emailHash(ada)) })]);
-    expect(await appleCalendarStatus(db)).toBe('Connected · Last Read Just Now · 2 Events');
+    expect(await status()).toBe('Connected · Last Read Just Now · 2 Events');
     const report = await p25Report(db, { home: '/nonexistent', tz: 'UTC' }, new Date(), 'apple_calendar');
     expect(report.criteria.find((c) => c.n === 1)!.values).toMatchObject({ enabled: true, commitments: 1, deadlines: 1 });
     expect(report.criteria.find((c) => c.n === 2)).toMatchObject({ pass: true, values: { accessOff: false, fresh: true } });
@@ -256,15 +263,40 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     expect(s.skipped).toBe(2);
   });
 
-  it('a person forgotten from either calendar is forgotten under both: the runtime and the database refuse them', async () => {
+  it('a person forgotten from either calendar is forgotten under both: their other entity too, and the runtime and the database refuse them', async () => {
     const ada = 'ada@example.com';
     const h = emailHash(ada);
     const p = await db.entity.findFirstOrThrow({ where: { kind: 'person', key: personKey(h, 'apple_calendar') } });
+    // She is in Will's Google Calendar too (an event he accepted), and was added from there: two entities, one person.
+    await syncOnce(db, fake('google_calendar', { observations: [commitment('google_calendar', 'g-ada', { attendees: [ada] })] }), run(), 'UTC');
+    const gArgs = { people: [{ name: 'Ada Lovelace', email: ada, emailHash: h }] };
+    const gCard = await createProposal(db, { kind: 'tool_call', origin: 'runtime:google_calendar', action: 'world.person.create', templateId: 'person.from_calendar', args: gArgs, argsProvenance: { people: { source: 'event', tainted: true } }, tainted: true, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+    expect(await sign(gCard.id, 'world.person.create', gArgs)).toEqual({ created: 1, skipped: 0 });
+    const g = await db.entity.findFirstOrThrow({ where: { kind: 'person', key: personKey(h, 'google_calendar') } });
+    expect([g.status, p.status]).toEqual(['active', 'active']);
+
+    // Forgetting her Apple entity forgets her Google one as well, the way forget_entity would, and audits it as part of this forget.
     await forget(p.id);
+    for (const id of [p.id, g.id]) {
+      const e = await db.entity.findUniqueOrThrow({ where: { id }, include: { sources: true, versions: true } });
+      expect(e).toMatchObject({ status: 'forgotten', state: {}, taintedPaths: [] });
+      expect(e.name).toMatch(/^forgotten:/);
+      expect(e.key).toMatch(/^forgotten:/);
+      expect(e.sources.every((x) => x.externalId.startsWith('forgotten:'))).toBe(true);
+      expect(e.versions.every((v) => v.state === null && v.patch === null)).toBe(true);
+    }
+    const cascade = await db.auditEntry.findMany({ where: { action: 'world.forget', correlationId: `ap26${approvals}` } });
+    expect(cascade.map((a) => a.inputs)).toEqual(expect.arrayContaining([expect.objectContaining({ entityId: g.id, cascadeOf: p.id })]));
+    // Her name and address are nowhere in the world model, nor on the card that added her from Google.
+    const everywhere = JSON.stringify({
+      entities: await db.entity.findMany({ select: { key: true, name: true, state: true } }),
+      versions: await db.entityVersion.findMany({ select: { state: true, patch: true } }),
+      cards: await db.proposal.findMany({ where: { action: 'world.person.create' }, select: { args: true, reason: true } }),
+    });
+    expect(everywhere).not.toMatch(/ada@example|Ada Lovelace/);
     expect(await suppressed('apple_calendar', personExternalId(h))).toBe(1);
     expect(await suppressed('google_calendar', personExternalId(h))).toBe(1);
-    // Google offers her (she is on a Google event Will accepted): refused, and nobody is created by a card either.
-    await syncOnce(db, fake('google_calendar', { observations: [commitment('google_calendar', 'g-ada', { attendees: [ada] })] }), run(), 'UTC');
+    // Google offers her again (she is still on a Google event Will accepted): refused, and nobody is created by a card either.
     expect(await offerPeople(db, [person('google_calendar', ada, 'Ada')], new Date(Date.now() + 3 * DAY), 'UTC', 'google_calendar')).toMatchObject({ refused: 1, proposed: 0 });
     expect(await createPeople(db, { people: [{ name: 'Ada', email: ada, emailHash: h }] }, new Date(), 'test')).toEqual({ created: 0, skipped: 1 });
     // The database: her Google record would be refused too.
@@ -303,6 +335,30 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     expect(await entity('commitment', `commitment:apple_calendar:${H('cj')}`)).not.toBeNull();
   });
 
+  it('a snapshot older than the one last applied is never applied, even after a restart: the inbox turns it away, and the source would not apply it', async () => {
+    const before = await db.sourceCursor.findUniqueOrThrow({ where: { source: 'apple_calendar' } });
+    const applied = JSON.parse(before.cursor) as { generatedAt?: string };
+    expect(applied.generatedAt).toBeDefined();
+    const at = Date.parse(applied.generatedAt!);
+    // A restart: a new inbox, restored from the cursor, as index.ts does. A replay of an older snapshot (still fresh) is turned away.
+    const inbox = new CalendarInbox(Date.now() - HOUR);
+    await restoreInbox(db, inbox);
+    const older = parseSnapshot({
+      v: 1, generatedAt: iso(at - MIN), access: 'full', state: 'revoked', window: { start: iso(at - MIN), end: iso(at + 13 * DAY) }, tz: 'UTC', complete: true,
+      calendars: { count: 1, hash: H('cal') }, events: [],
+    });
+    if (!older.ok) throw new Error('refused');
+    expect(inbox.offer(older.snapshot, at)).toBe('stale');
+    // Had it got in (an inbox that did not know), the source applies nothing: a revoked replay would have archived every event.
+    const unaware = new CalendarInbox(at - HOUR);
+    expect(unaware.offer(older.snapshot, at)).toBe('accepted');
+    const active = await db.entity.count({ where: { status: 'active', sources: { some: { source: 'apple_calendar' } }, kind: { in: ['commitment', 'deadline'] } } });
+    expect(active).toBeGreaterThan(0);
+    expect(await syncOnce(db, appleCalendarSource({ tz: 'UTC', inbox: unaware }), run(new Date(at)), 'UTC')).toMatchObject({ ran: false, reason: IDLE });
+    expect(await db.entity.count({ where: { status: 'active', sources: { some: { source: 'apple_calendar' } }, kind: { in: ['commitment', 'deadline'] } } })).toBe(active);
+    expect(await db.sourceCursor.findUniqueOrThrow({ where: { source: 'apple_calendar' } })).toEqual(before);
+  });
+
   it('an idle run touches nothing; a stale snapshot is a counted failure that archives nothing; a revoked one archives everything', async () => {
     const before = await db.sourceCursor.findUniqueOrThrow({ where: { source: 'apple_calendar' } });
     const audits = await db.auditEntry.count({ where: { action: 'world.sync.apple_calendar' } });
@@ -319,10 +375,10 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     expect(stale).toMatchObject({ ran: true, failed: 1, reason: expect.stringMatching(/^apple calendar: Flint Calendar hasn't reported since (\d{4}-\d\d-\d\d )?\d\d:\d\d$/) });
     expect((await db.sourceCursor.findUniqueOrThrow({ where: { source: 'apple_calendar' } })).consecutiveFailures).toBe(before.consecutiveFailures + 1);
     expect(await db.entity.count({ where: { status: 'active', sources: { some: { source: 'apple_calendar' } }, kind: { in: ['commitment', 'deadline'] } } })).toBe(active);
-    expect(await appleCalendarStatus(db)).toMatch(/^Not Reporting · Last Read (Just Now|\d+ Min Ago) · \d+ Events?$/);
+    expect(await status()).toMatch(/^Not Reporting · Last Read (Just Now|\d+ Min Ago) · \d+ Events?$/);
     // Calendar access off: said so, and still nothing archived.
     await syncOnce(db, pushed([], { access: 'denied' }).source, run(), 'UTC');
-    expect(await appleCalendarStatus(db)).toMatch(/^Calendar Access Is Off · /);
+    expect(await status()).toMatch(/^Calendar Access Is Off · /);
     const off = await p25Report(db, { home: '/nonexistent', tz: 'UTC' }, new Date(), 'apple_calendar');
     expect(off.criteria.find((c) => c.n === 2)).toMatchObject({ pass: false, values: { accessOff: true } });
     // Disconnected: every Apple event archived; nothing of Google's.
@@ -331,7 +387,13 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
     expect(s).toMatchObject({ ran: true, failed: 0 });
     expect(await db.entity.count({ where: { status: 'active', sources: { some: { source: 'apple_calendar' } }, kind: { in: ['commitment', 'deadline'] } } })).toBe(0);
     expect(await db.entity.count({ where: { status: 'active', sources: { some: { source: 'google_calendar' } }, kind: 'commitment' } })).toBe(google);
-    expect(await appleCalendarStatus(db)).toBe('Connected · Last Read Just Now · 0 Events');
+    expect(await status()).toBe('Disconnected · Last Read Just Now · 0 Events');
+    // Then the helper is quiet, as a disconnected one is: an hour on, the run is idle, not a failure, and it still says so.
+    const quiet = appleCalendarSource({ tz: 'UTC', inbox: new CalendarInbox(Date.now() - 2 * HOUR) });
+    expect(await syncOnce(db, quiet, run(new Date(Date.now() + HOUR)), 'UTC')).toMatchObject({ ran: false, reason: IDLE, failed: 0 });
+    expect(await status()).toBe('Disconnected · Last Read Just Now · 0 Events');
+    // With the source switched off (disconnect.sh removes FLINT_SOURCE_APPLE_CALENDAR), it is Off, whatever the cursor says.
+    expect(await appleCalendarStatus(db, { on: false })).toBe('Off · Last Read Just Now · 0 Events');
   });
 
   it("the migration: both calendars up; down.sql gives back P2.5's bodies exactly and drops the cursor and queue; deploy applies it again", async () => {
@@ -367,9 +429,28 @@ describe.skipIf(NO_DB)('P2.6 on flint_test', () => {
       await c.query('COMMIT');
     })).rejects.toThrow(/only from the calendar \(google_calendar\)/);
 
+    // Someone forgotten while rolled back (as under P2.5) is suppressed under Google alone...
+    const old = emailHash('old@example.com');
+    await withClient(urls.app, async (c) => {
+      await c.query('BEGIN');
+      await c.query(`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", sensitivity, "lastObservedAt", "updatedAt") VALUES ('en26old', 'person', $1, 'Old', $2, $3, 'personal', now(), now())`, [personKey(old), JSON.stringify({ source: 'google_calendar', email: 'old@example.com', emailHash: old }), '0'.repeat(64)]);
+      await c.query(`INSERT INTO "EntitySource" (id, "entityId", source, "externalId", "accountOwner", "lastSyncedAt") VALUES ('es26old', 'en26old', 'google_calendar', $1, 'will', now())`, [personExternalId(old)]);
+      await c.query('COMMIT');
+    });
+    await forget('en26old');
+    expect([await suppressed('google_calendar', personExternalId(old)), await suppressed('apple_calendar', personExternalId(old))]).toEqual([1, 0]);
+
     await migrateUp(urls.owner);
     expect(await fns()).toEqual(up);
     expect(await acls()).toEqual(acl);
     expect([await queue(), await applied()]).toEqual([1, 1]);
+    // ...and the migration suppresses them under Apple Calendar too: the database refuses their Apple record.
+    expect(await suppressed('apple_calendar', personExternalId(old))).toBe(1);
+    await expect(withClient(urls.app, async (c) => {
+      await c.query('BEGIN');
+      await c.query(`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", sensitivity, "lastObservedAt", "updatedAt") VALUES ('en26old2', 'person', $1, 'Old', '{}', $2, 'personal', now(), now())`, [personKey(old, 'apple_calendar'), '0'.repeat(64)]);
+      await c.query(`INSERT INTO "EntitySource" (id, "entityId", source, "externalId", "accountOwner", "lastSyncedAt") VALUES ('es26old2', 'en26old2', 'apple_calendar', $1, 'will', now())`, [personExternalId(old)]);
+      await c.query('COMMIT');
+    })).rejects.toThrow(/stays forgotten/);
   });
 });

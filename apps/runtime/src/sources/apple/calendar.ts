@@ -12,9 +12,15 @@
  *    outside text in the world model, Will's answer decides, times are
  *    instants, items it cannot read are set aside as warnings.
  *  - A gap never reads as "gone". With no snapshot in the first 10 minutes after
- *    a restart, the source is idle (not a failure, nothing touched). With none
- *    after that, or one over 15 minutes old, or calendar access off on the Mac,
- *    the run fails and says why, and nothing is archived.
+ *    a restart, or after a push turned away because the source was not yet on
+ *    (Will has just turned it on), the source is idle (not a failure, nothing
+ *    touched). With none after that, or one over 15 minutes old, or calendar
+ *    access off on the Mac, the run fails and says why, and nothing is archived.
+ *  - A snapshot older than the one last applied is never applied (idle): the
+ *    cursor keeps when that one was read, so a replay is refused after a
+ *    restart too (and the route turns one away: restoreInbox).
+ *  - An event the snapshot holds but this side cannot read is set aside as a
+ *    warning, as an item Google lists that it cannot read is.
  *  - What left the snapshot is archived as it was last known only when the
  *    snapshot is complete, every item was read, Will's choice of calendars is
  *    the one the last good run saw, and either at most 5 (or at most half) of
@@ -24,14 +30,16 @@
  *    what was renamed are archived whatever else held. A wrong archive is
  *    restored the next time the event is read.
  *  - Disconnected (state `revoked`, sent once by disconnect.sh): every event it
- *    has from this calendar is archived.
+ *    has from this calendar is archived, and the cursor says so: until a live
+ *    snapshot comes again, a run with none is idle, not a failure.
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { lagOf, lagSeries, lastRunOf, mapEvents, unlisted, wallClock } from '../calendar/core.js';
+import type { Db } from '../../db.js';
 import type { MetricObservation, Source, SourceRun, SyncResult } from '../types.js';
 import type { CalendarInbox } from './inbox.js';
-import { toItems } from './wire.js';
+import { toItems, type SetAside } from './wire.js';
 
 const SOURCE = 'apple_calendar';
 const LABEL = 'apple calendar';
@@ -58,18 +66,51 @@ const isZone = (tz: string) => {
 };
 const Opts = z.object({ tz: z.string().min(1).refine(isZone, 'not a time zone') });
 
-/** What the source keeps between runs: when it last read, the calendars it saw, and an unconfirmed mass absence. */
+/**
+ * What the source keeps between runs: when it last read, the calendars it saw,
+ * an unconfirmed mass absence, when the snapshot it last applied was read, and
+ * whether that one said Flint Calendar was disconnected. States, digests and
+ * times only.
+ */
 const Cursor = z.object({
   calendars: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   missing: z.object({ hash: z.string().regex(/^[0-9a-f]{64}$/), runs: z.number().int().min(1), since: z.string() }).optional(),
+  generatedAt: z.string().optional(),
+  revoked: z.literal(true).optional(),
 }).passthrough();
-function cursorOf(raw: string | undefined): z.infer<typeof Cursor> {
+function cursorOf(raw: string | null | undefined): z.infer<typeof Cursor> {
   try {
     const c = Cursor.safeParse(JSON.parse(raw ?? ''));
     return c.success ? c.data : {};
   } catch {
     return {};
   }
+}
+
+/** When the snapshot the source last applied was read (ms), from its cursor; undefined when none was. */
+export function appliedAtOf(raw: string | null | undefined): number | undefined {
+  const t = Date.parse(cursorOf(raw).generatedAt ?? '');
+  return Number.isFinite(t) ? t : undefined;
+}
+
+/** Whether the snapshot the source last applied said Flint Calendar was disconnected (the cursor says so). */
+export const revokedIn = (raw: string | null | undefined): boolean => cursorOf(raw).revoked === true;
+
+/**
+ * At startup (index.ts): the inbox turns away any snapshot as old as the one
+ * the source last applied, as it would have before the restart.
+ */
+export async function restoreInbox(db: Pick<Db, 'sourceCursor'>, inbox: CalendarInbox): Promise<void> {
+  const c = await db.sourceCursor.findUnique({ where: { source: 'apple_calendar' }, select: { cursor: true } });
+  const at = appliedAtOf(c?.cursor);
+  if (at !== undefined) inbox.restore(at);
+}
+
+/** The events set aside, said by index and schema path (never a value): at most 5, then how many more. */
+function setAsideOf(list: SetAside[]): string[] {
+  const out = list.slice(0, 5).map((x) => `${LABEL}: event ${x.index} of Flint Calendar's snapshot could not be read (${x.paths.join(', ')}); set aside`);
+  if (list.length > 5) out.push(`${LABEL}: ${list.length - 5} more event(s) set aside`);
+  return out;
 }
 
 export interface AppleCalendarOpts {
@@ -92,22 +133,38 @@ export function appleCalendarSource(opts: AppleCalendarOpts): Source {
     cadenceMs: 5 * 60_000,
     async run(r: SourceRun): Promise<SyncResult> {
       const now = r.now.getTime();
+      const idle: SyncResult = { observations: [], metrics: [], idle: true };
+      const prev = cursorOf(r.cursor?.cursor);
       const held = opts.inbox.latest(now);
       if (!held || now - held.generatedAt > STALE_MS) {
+        // Disconnected in Flint Calendar (the last snapshot applied said so): nothing more comes until Will connects again.
+        if (prev.revoked) return idle;
         const last = opts.inbox.lastAcceptedAt();
-        if (last === undefined && now - opts.inbox.startedAt < GRACE_MS) return { observations: [], metrics: [], idle: true };
-        // A failure (counted toward the circuit), and nothing archived: a quiet helper is not an empty calendar.
-        throw new Error(last === undefined
-          ? `apple calendar: Flint Calendar hasn't reported since the runtime started at ${since(opts.inbox.startedAt, r.now)}`
-          : `apple calendar: Flint Calendar hasn't reported since ${since(held?.generatedAt ?? last, r.now)}`);
+        if (last === undefined) {
+          // Nothing since the runtime started. Idle for 10 minutes from then, or from a push turned away while the
+          // source was not yet on (Will has just turned it on, and the helper's next push is on its way).
+          const away = opts.inbox.lastTurnedAwayAt();
+          const heard = Math.max(opts.inbox.startedAt, away ?? Number.NEGATIVE_INFINITY);
+          if (now - heard < GRACE_MS) return idle;
+          // A failure (counted toward the circuit), and nothing archived: a quiet helper is not an empty calendar.
+          throw new Error(away !== undefined && away > opts.inbox.startedAt
+            ? `apple calendar: Flint Calendar hasn't reported since ${since(away, r.now)}`
+            : `apple calendar: Flint Calendar hasn't reported since the runtime started at ${since(opts.inbox.startedAt, r.now)}`);
+        }
+        throw new Error(`apple calendar: Flint Calendar hasn't reported since ${since(held?.generatedAt ?? last, r.now)}`);
       }
+      // Older than the snapshot last applied (a replay; after a restart the inbox may not know): nothing applied.
+      const applied = appliedAtOf(r.cursor?.cursor);
+      if (applied !== undefined && held.generatedAt < applied) return idle;
       const s = held.snapshot;
-      const cursor = JSON.stringify({ lastRunAt: r.now.toISOString() });
 
       // Disconnected: every event Flint has from this calendar is archived, as it was last known.
       if (s.state === 'revoked') {
         const left = r.known ? await unlisted(r.known, new Set(), new Set(), { source: SOURCE, tz: o.tz, now: r.now }) : undefined;
-        return { observations: (left?.unlisted ?? []).map((u) => u.observation), metrics: [], cursor };
+        return {
+          observations: (left?.unlisted ?? []).map((u) => u.observation), metrics: [],
+          cursor: JSON.stringify({ lastRunAt: r.now.toISOString(), generatedAt: s.generatedAt, revoked: true }),
+        };
       }
       if (s.access !== 'full') throw new Error('apple calendar: Calendar access is off: System Settings > Privacy & Security > Calendars > Flint Calendar');
 
@@ -115,10 +172,9 @@ export function appleCalendarSource(opts: AppleCalendarOpts): Source {
       const mapped = mapEvents(items, { tz: o.tz, now: r.now, source: SOURCE, label: LABEL });
       const observations = [...mapped.observations];
       // Set aside, not failed: reported as the source's last error, never counted toward its circuit.
-      const warnings = [...mapped.errors];
+      const warnings = [...setAsideOf(s.setAside), ...mapped.errors];
       if (!s.complete) warnings.push('apple calendar: Flint Calendar sent only part of the next 14 days (over its limits); only what has ended is archived');
       if (s.calendars.count === 0) warnings.push('apple calendar: no calendars are chosen in Flint Calendar, or iCloud Calendar is off on this Mac; nothing missing is archived');
-      const prev = cursorOf(r.cursor?.cursor);
       const sameCalendars = prev.calendars === s.calendars.hash;
       if (prev.calendars !== undefined && !sameCalendars) warnings.push('apple calendar: the calendars Flint Calendar reads have changed; nothing missing is archived this run');
 
@@ -126,7 +182,8 @@ export function appleCalendarSource(opts: AppleCalendarOpts): Source {
       // says it of what it shows declined or cancelled, and the clock of what has ended. People are never archived here.
       let unconfirmed: { hash: string; runs: number; since: string } | undefined;
       if (r.known) {
-        const whole = s.complete && mapped.errors.length === 0 && s.calendars.count > 0 && sameCalendars;
+        // Every event read: none set aside here, and none by the mapper.
+        const whole = s.complete && s.setAside.length === 0 && mapped.errors.length === 0 && s.calendars.count > 0 && sameCalendars;
         const left = await unlisted(r.known, new Set(observations.map((x) => x.key)), new Set(mapped.gone), { source: SOURCE, tz: o.tz, now: r.now });
         const missing = left.unlisted.filter((u) => u.missing).map((u) => u.observation.key).sort();
         let archiveMissing = false;
@@ -148,7 +205,7 @@ export function appleCalendarSource(opts: AppleCalendarOpts): Source {
       const metrics: MetricObservation[] = lag === undefined ? [] : [{ series: LAG_SERIES, at: r.now, value: lag }];
       return {
         observations, metrics, events: mapped.events,
-        cursor: JSON.stringify({ lastRunAt: r.now.toISOString(), calendars: s.calendars.hash, ...(unconfirmed ? { missing: unconfirmed } : {}) }),
+        cursor: JSON.stringify({ lastRunAt: r.now.toISOString(), generatedAt: s.generatedAt, calendars: s.calendars.hash, ...(unconfirmed ? { missing: unconfirmed } : {}) }),
         ...(warnings.length ? { warnings } : {}),
       };
     },

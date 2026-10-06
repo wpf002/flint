@@ -11,6 +11,7 @@ import { createDb } from './db.js';
 import { buildApp, type RuntimeStatus } from './app.js';
 import { run } from './lifecycle.js';
 import { CalendarInbox } from './sources/apple/inbox.js';
+import { restoreInbox } from './sources/apple/calendar.js';
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
@@ -19,7 +20,9 @@ async function main(): Promise<void> {
   await db.$queryRaw`SELECT ensure_partitions(2)`;
   const status: RuntimeStatus = { problems: new Set(), busStartedAt: null };
   // P2.6: one Apple Calendar inbox, while that source is on: the push route fills it and the source reads it.
+  // It starts knowing when the snapshot last applied was read, so a replay is turned away after a restart too.
   const calendarInbox = config.appleCalendar ? new CalendarInbox() : undefined;
+  if (calendarInbox) await restoreInbox(db, calendarInbox);
   const app = buildApp({ db, config, logger: true, status, ...(calendarInbox ? { calendarInbox } : {}) });
   await app.listen({ host: config.host, port: config.port });
   const life = await run(db, config, status, (msg, extra) => app.log.warn(extra ?? {}, msg), { ...(calendarInbox ? { calendarInbox } : {}) });

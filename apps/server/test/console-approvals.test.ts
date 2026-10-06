@@ -307,6 +307,21 @@ describe('the console Approvals panel', () => {
     expect(shown).toContain('PeopleKim, Alex (alex.kim@corp.example) · Mom (mallory@evil.example) · sam@corp.example');
     expect(shown).not.toContain('a'.repeat(64));
     expect(shown).toContain('Outside Text');
+    // A card that names no calendar is Google's, as every P2.5 card was.
+    expect(shown).toContain('CalendarGoogle Calendar');
+  });
+
+  it('a person card says which calendar its people came from: the one Will signs', async () => {
+    const people = [{ name: 'Ada Lovelace', email: 'ada@example.com', emailHash: 'a'.repeat(64) }];
+    const facts = async (args: Record<string, unknown>) => {
+      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', origin: 'runtime:apple_calendar', tainted: true, args })] } });
+      await open();
+      const dl = ids.apprlist!.children[0]!.children[0]!.all().find((e) => e.tagName === 'dl')!;
+      return dl.children.map((e) => e.textContent);
+    };
+    expect(await facts({ people, source: 'apple_calendar' })).toEqual(['People', 'Ada Lovelace (ada@example.com)', 'Calendar', 'Apple Calendar', 'Filed By', 'Flint']);
+    expect(await facts({ people, source: 'google_calendar' })).toContain('Google Calendar');
+    expect(await facts({ people })).toContain('Google Calendar');
   });
 
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {

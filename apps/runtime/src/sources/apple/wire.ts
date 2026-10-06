@@ -1,13 +1,29 @@
 /**
  * Flint Calendar's snapshot, wire v1 (Machine plan P2.6): what the helper on
  * the Mac (apps/desktop-calendar) pushes to POST
- * /v1/sources/apple_calendar/snapshot, checked strictly, then turned into the
- * calendar core's item shape (Google's), so both calendars map the same way.
+ * /v1/sources/apple_calendar/snapshot, checked, then turned into the calendar
+ * core's item shape (Google's), so both calendars map the same way.
  *
- *  - Strict: an unknown key anywhere is refused, and so is anything over a cap
- *    (1000 events, 100 attendees an event, a 300-character title). Over a cap,
- *    the helper cuts the list itself, the same way every time, and says
- *    `complete: false`; this side then archives only what has ended.
+ *  - The envelope is strict: an unknown key, or anything over a cap (1000
+ *    events, 15 days), refuses the whole snapshot. Over a count cap (1000
+ *    events, 100 attendees an event), the helper cuts the list itself, the
+ *    same way every time, and says `complete: false`; this side then archives
+ *    only what has ended.
+ *  - Events are checked one at a time. One this side cannot read (an unknown
+ *    key, an end before its start, too many attendees) is set aside, by its
+ *    index and schema paths, and the rest are read: the source reports it as a
+ *    warning, and a snapshot with anything set aside archives nothing missing.
+ *  - What someone else wrote is clipped, never refused: a title to 300
+ *    characters and an attendee's name to 100. An address over 254 characters
+ *    is no address, and the mapper drops that attendee.
+ *  - The body has a byte budget, MAX_BYTES (UTF-8, as sent; the route answers
+ *    413 over it). A snapshot over it is cut by fitToBudget's rule (below,
+ *    which the helper follows) and says `complete: false`.
+ *  - Canonical form (the golden fixture, test/fixtures/apple-calendar-snapshot.json,
+ *    which the helper's tests encode byte for byte): compact JSON, keys sorted,
+ *    no trailing newline, and no escaped `/`. Swift's JSONEncoder needs
+ *    `outputFormatting = [.sortedKeys, .withoutEscapingSlashes]` for that: by
+ *    default it writes "America\/Chicago".
  *  - Ids are sha256 hex (the helper hashes Apple's own, so no Apple id or UID
  *    reaches Flint). Instants are UTC (Z). An all-day event is local days with
  *    an exclusive end, as Google's are.
@@ -18,19 +34,34 @@
  *    when Will disconnects).
  *  - The calendars Will chose are a count and a digest of their ids: a change of
  *    choice is seen, and no calendar's name ever leaves the Mac.
- *  - A refusal names schema paths, never a value (zod's messages can quote
- *    what they were given).
+ *  - A refusal, and an event set aside, names schema paths, never a value
+ *    (zod's messages can quote what they were given).
  */
 import { z } from 'zod';
+import { clip } from '../text.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 /** Over 15 days is never a 14-day window. */
 export const MAX_WINDOW_MS = 15 * 86_400_000;
 export const MAX_EVENTS = 1000;
 export const MAX_ATTENDEES = 100;
+/**
+ * The most a snapshot's body may be, in UTF-8 bytes as sent. The route reads
+ * no more (413); the helper cuts a snapshot to fit (fitToBudget) and says
+ * `complete: false`. The caps above allow far more than this (a thousand
+ * events of a hundred attendees each is tens of megabytes), so the budget, not
+ * the caps, is what bounds a body.
+ */
+export const MAX_BYTES = 2 * 1024 * 1024;
+/** What someone else wrote is clipped to these (UTF-16 units, as the world kinds count). */
+export const TITLE_MAX = 300;
+export const NAME_MAX = 100;
 
-/** Text from the calendar: bounded, and never a NUL (Postgres refuses one). */
-const text = (max: number, min = 0) => z.string().min(min).max(max).refine((s) => !s.includes('\u0000'), 'no NUL');
+const noNul = (s: string) => !s.includes('\u0000');
+/** Text the helper writes: bounded, and never a NUL (Postgres refuses one). */
+const text = (max: number, min = 0) => z.string().min(min).max(max).refine(noNul, 'no NUL');
+/** Text someone else wrote (a title, a name): clipped to `max`, never refused for its length, and never a NUL. */
+const outside = (max: number) => z.string().refine(noNul, 'no NUL').transform((s) => clip(s, max));
 /** An instant in UTC, as the helper writes it: to the second or the millisecond, with Z. */
 const At = z
   .string()
@@ -59,9 +90,10 @@ const isZone = (tz: string) => {
 /** Everyone else on an event Will organized or accepted: never Will himself, never their answer. */
 const Attendee = z
   .object({
-    name: text(100).optional(),
-    // Checked as an address when it is mapped: one odd address is dropped there, not the whole snapshot.
-    email: text(254, 1),
+    name: outside(NAME_MAX).optional(),
+    // Checked as an address when it is mapped (at most 254 characters, as an address is): one odd address is
+    // dropped there, not its event. Its length is bounded by the body's budget.
+    email: z.string().min(1).refine(noNul, 'no NUL'),
     kind: z.enum(['person', 'room', 'resource', 'group', 'unknown']),
   })
   .strict();
@@ -73,7 +105,7 @@ const Event = z
     id: z.string().regex(HEX64),
     recurring: z.boolean(),
     status: z.enum(['confirmed', 'tentative', 'cancelled']),
-    title: text(300),
+    title: outside(TITLE_MAX),
     start: When,
     end: When,
     modifiedAt: At.optional(),
@@ -90,7 +122,8 @@ const Event = z
     }
   });
 
-export const Snapshot = z
+/** The envelope, strict; its events are checked one at a time (parseSnapshot). */
+const Envelope = z
   .object({
     v: z.literal(1),
     generatedAt: At,
@@ -101,7 +134,7 @@ export const Snapshot = z
     tz: z.string().min(1).max(64).regex(/^[A-Za-z0-9_+/-]+$/).refine(isZone, 'a time zone'),
     complete: z.boolean(),
     calendars: z.object({ count: z.number().int().min(0).max(1000), hash: z.string().regex(HEX64) }).strict(),
-    events: z.array(Event).max(MAX_EVENTS),
+    events: z.array(z.unknown()).max(MAX_EVENTS),
   })
   .strict()
   .superRefine((s, ctx) => {
@@ -109,13 +142,87 @@ export const Snapshot = z
     if (!(span > 0 && span <= MAX_WINDOW_MS)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['window'], message: 'a window of up to 15 days' });
     if (s.events.length && (s.access !== 'full' || s.state !== 'live')) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['events'], message: 'no events unless access is full and the helper is live' });
   });
-export type Snapshot = z.infer<typeof Snapshot>;
 
-/** A snapshot, or the schema paths it failed on (at most 5): never a value. */
+export type SnapshotEvent = z.infer<typeof Event>;
+/** An event this side could not read: its index in the snapshot, and the schema paths it failed on (at most 5). */
+export interface SetAside {
+  index: number;
+  paths: string[];
+}
+/** A snapshot as read: the events that could be read, and the ones set aside. */
+export type Snapshot = Omit<z.infer<typeof Envelope>, 'events'> & { events: SnapshotEvent[]; setAside: SetAside[] };
+
+/** At most 5 schema paths, never a value. */
+const pathsOf = (e: z.ZodError, prefix = '') => [...new Set(e.issues.map((i) => [prefix, ...i.path].filter((x) => x !== '').join('.') || '(envelope)'))].slice(0, 5);
+
+/** A snapshot (its unreadable events set aside), or the schema paths its envelope failed on (at most 5): never a value. */
 export function parseSnapshot(raw: unknown): { ok: true; snapshot: Snapshot } | { ok: false; issues: string[] } {
-  const r = Snapshot.safeParse(raw);
-  if (r.success) return { ok: true, snapshot: r.data };
-  return { ok: false, issues: [...new Set(r.error.issues.map((i) => i.path.join('.') || '(envelope)'))].slice(0, 5) };
+  const r = Envelope.safeParse(raw);
+  if (!r.success) return { ok: false, issues: pathsOf(r.error) };
+  const events: SnapshotEvent[] = [];
+  const setAside: SetAside[] = [];
+  r.data.events.forEach((item, index) => {
+    const e = Event.safeParse(item);
+    if (e.success) events.push(e.data);
+    else setAside.push({ index, paths: pathsOf(e.error, `events.${index}`) });
+  });
+  return { ok: true, snapshot: { ...r.data, events, setAside } };
+}
+
+// ---- the byte budget ------------------------------------------------------------------------
+
+/** A snapshot as the helper builds it, before it is sent. */
+export type WireSnapshot = Record<string, unknown> & { complete: boolean; events: Array<Record<string, unknown>> };
+
+/** Its body's size: UTF-8 bytes of compact JSON (the same whatever the key order). */
+export const bytesOf = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+/** An event's start as written: an instant, or a day (which sorts before the times on it). */
+function startOf(e: Record<string, unknown>): string {
+  const w = e.start as { at?: unknown; day?: unknown } | undefined;
+  return typeof w?.at === 'string' ? w.at : typeof w?.day === 'string' ? w.day : '';
+}
+/** Plain character order (both are ASCII), so Swift's `<` on the same strings agrees. */
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+/** An event's place in the cut: by start, then id. */
+const order = (a: Record<string, unknown>, b: Record<string, unknown>) => cmp(startOf(a), startOf(b)) || cmp(String(a.id ?? ''), String(b.id ?? ''));
+
+/**
+ * The helper's cut to the byte budget, written here so both sides test the
+ * same rule. A snapshot that fits is sent as it is. One that does not says
+ * `complete: false` and is cut the same way every time: the events are ranked
+ * by start, then id, and from the last-ranked back, each event's attendees are
+ * dropped (all of them, one event at a time) until it fits; if it still does
+ * not, the last-ranked events themselves are dropped until it does. What is
+ * left keeps its order. Pure.
+ */
+export function fitToBudget(s: WireSnapshot, budget = MAX_BYTES): WireSnapshot {
+  if (bytesOf(s) <= budget) return s;
+  const events = s.events.map((e) => ({ ...e }));
+  // Last-ranked first.
+  const cut = events.map((_, i) => i).sort((a, b) => order(events[b]!, events[a]!));
+  const base = bytesOf({ ...s, complete: false, events: [] });
+  const size = events.map(bytesOf);
+  let kept = events.length;
+  // The body is the envelope, each event, and a comma between two.
+  let total = base + size.reduce((a, b) => a + b, 0) + Math.max(0, kept - 1);
+  for (const i of cut) {
+    if (total <= budget) break;
+    if (!('attendees' in events[i]!)) continue;
+    const { attendees: _dropped, ...rest } = events[i]!;
+    events[i] = rest;
+    const n = bytesOf(rest);
+    total += n - size[i]!;
+    size[i] = n;
+  }
+  const dropped = new Set<number>();
+  for (const i of cut) {
+    if (total <= budget) break;
+    dropped.add(i);
+    total -= size[i]! + (kept > 1 ? 1 : 0);
+    kept -= 1;
+  }
+  return { ...s, complete: false, events: events.filter((_, i) => !dropped.has(i)) };
 }
 
 // ---- into the calendar core's item shape --------------------------------------------------

@@ -5,8 +5,14 @@
  * Events". States and counts only: never a title, a name or an address. (The
  * snapshot itself lives in the runtime's memory, which this command cannot see,
  * and need not: a good run is a fresh snapshot with full access.)
+ *
+ * The state, first that holds: Off (FLINT_SOURCE_APPLE_CALENDAR is not on, so
+ * the source is not running), Not Turned On, Calendar Access Is Off, Not
+ * Reporting, Disconnected (the last snapshot applied said Will disconnected in
+ * Flint Calendar), Waiting for Flint Calendar, Connected.
  */
 import type { Db } from '../db.js';
+import { revokedIn } from '../sources/apple/calendar.js';
 import { ACCESS_OFF } from './p25.js';
 
 const SOURCE = 'apple_calendar';
@@ -22,19 +28,21 @@ function ago(ms: number): string {
   return h < 48 ? `${h} H Ago` : `${Math.floor(h / 24)} D Ago`;
 }
 
-export async function appleCalendarStatus(db: Db, now = new Date()): Promise<string> {
-  const cursor = await db.sourceCursor.findUnique({ where: { source: SOURCE }, select: { enabled: true, lastOkAt: true, lastError: true, consecutiveFailures: true } });
+/** `on`: whether this runtime's config registers the source (config.appleCalendar). */
+export async function appleCalendarStatus(db: Db, o: { on: boolean; now?: Date }): Promise<string> {
+  const now = o.now ?? new Date();
+  const cursor = await db.sourceCursor.findUnique({ where: { source: SOURCE }, select: { enabled: true, cursor: true, lastOkAt: true, lastError: true, consecutiveFailures: true } });
   // The events Flint has from Apple Calendar now (commitments and deadlines that are not archived).
   const events = await db.entity.count({ where: { kind: { in: ['commitment', 'deadline'] }, status: 'active', sources: { some: { source: SOURCE } } } });
-  const state = !cursor?.enabled
-    ? 'Not Turned On'
-    : cursor.consecutiveFailures > 0 && !!cursor.lastError && ACCESS_OFF.test(cursor.lastError)
-      ? 'Calendar Access Is Off'
-      : cursor.consecutiveFailures > 0
-        ? 'Not Reporting'
-        : !cursor.lastOkAt
-          ? 'Waiting for Flint Calendar'
-          : now.getTime() - cursor.lastOkAt.getTime() <= FRESH_MS ? 'Connected' : 'Not Reporting';
+  const state = ((): string => {
+    if (!o.on) return 'Off';
+    if (!cursor?.enabled) return 'Not Turned On';
+    // A failure is newer than a disconnect: a run after one fails only on a snapshot that came since.
+    if (cursor.consecutiveFailures > 0) return cursor.lastError && ACCESS_OFF.test(cursor.lastError) ? 'Calendar Access Is Off' : 'Not Reporting';
+    if (revokedIn(cursor.cursor)) return 'Disconnected';
+    if (!cursor.lastOkAt) return 'Waiting for Flint Calendar';
+    return now.getTime() - cursor.lastOkAt.getTime() <= FRESH_MS ? 'Connected' : 'Not Reporting';
+  })();
   const read = cursor?.lastOkAt ? `Last Read ${ago(now.getTime() - cursor.lastOkAt.getTime())}` : 'Never Read';
   return [state, read, `${events} ${events === 1 ? 'Event' : 'Events'}`].join(' · ');
 }

@@ -2,11 +2,14 @@
  * Flint Calendar's push route (P2.6), through buildApp and Fastify's inject
  * (no port, no database: the cursor and the bus are stand-ins). Its token
  * reaches this route and nothing else, and no other token reaches it; the
- * token is checked before the body is read; then 413, 400 (paths, never a
- * value), 404 while the source is off, 409 while it is not turned on (what was
- * held is dropped), 422 for a stale or replayed snapshot, 429 within 5
- * seconds, and 202, which holds the snapshot and sends exactly one job with no
- * content. Nothing of a snapshot, nor the token, reaches the log.
+ * token is checked before the body is read; then 413 over the wire's byte
+ * budget (a snapshot at every cap, cut by the helper's rule, fits), 400 for an
+ * envelope that is not wire v1 (paths, never a value; an event it cannot read
+ * is set aside, not refused), 404 while the source is off, 409 while it is not
+ * turned on (what was held is dropped, and the helper was heard from), 422 for
+ * a stale or replayed snapshot, 429 within 5 seconds, and 202, which holds the
+ * snapshot and sends exactly one job with no content. Nothing of a snapshot,
+ * nor the token, reaches the log.
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -14,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildApp, type RuntimeStatus } from '../src/app';
 import { CalendarInbox } from '../src/sources/apple/inbox';
+import { MAX_ATTENDEES, MAX_BYTES, MAX_EVENTS, bytesOf, fitToBudget, type WireSnapshot } from '../src/sources/apple/wire';
 import { SNAPSHOT_BODY_LIMIT, SNAPSHOT_PATH } from '../src/routes/apple-calendar';
 import type { RuntimeScope } from '../src/config';
 import type { Db } from '../src/db';
@@ -99,15 +103,52 @@ describe('POST /v1/sources/apple_calendar/snapshot', () => {
     await h.app.close();
   });
 
-  it('over 2 MiB is 413; without the token, a big body is 401 before it is read', async () => {
+  it('over the byte budget is 413, and exactly the budget is read; without the token, a big body is 401 before it is read', async () => {
+    expect(SNAPSHOT_BODY_LIMIT).toBe(MAX_BYTES);
     const h = harness();
     const big = JSON.stringify({ ...snapshot(), pad: 'x'.repeat(SNAPSHOT_BODY_LIMIT) });
     expect((await h.push(big, APPLE, true)).statusCode).toBe(413);
     expect((await h.push(big, null, true)).statusCode).toBe(401);
-    // Up to the limit (well over the 64 KB other routes take) is read.
-    const full = snapshot(0, { events: Array.from({ length: 600 }, (_, i) => ({ ...snapshot().events[0]!, id: H(`e${i}`), title: 'x'.repeat(300) })) });
-    expect(JSON.stringify(full).length).toBeGreaterThan(64 * 1024);
-    expect((await h.push(full)).statusCode).toBe(202);
+    // A body of exactly the budget (whitespace makes up the rest, as JSON allows) is read; one byte more is not.
+    const body = JSON.stringify(snapshot());
+    const exact = body + ' '.repeat(MAX_BYTES - Buffer.byteLength(body));
+    expect(Buffer.byteLength(exact)).toBe(MAX_BYTES);
+    expect((await h.push(`${exact} `, APPLE, true)).statusCode).toBe(413);
+    expect((await h.push(exact, APPLE, true)).statusCode).toBe(202);
+    await h.app.close();
+  });
+
+  it('a snapshot at every cap is tens of megabytes; cut by the helper\'s rule it fits, says it is not complete, and is read', async () => {
+    const h = harness();
+    const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+    const base = snapshot();
+    const full = {
+      ...base,
+      events: Array.from({ length: MAX_EVENTS }, (_, i) => ({
+        ...base.events[0]!, id: H(`cap${i}`), title: 'x'.repeat(300), start: { at: at((i % 300) * 3_600_000) }, end: { at: at((i % 300) * 3_600_000 + 3_600_000) },
+        attendees: Array.from({ length: MAX_ATTENDEES }, (_, j) => ({ name: 'n'.repeat(100), email: `${'a'.repeat(236)}${String(i * 100 + j).padStart(6, '0')}@example.org`, kind: 'person' })),
+      })),
+    } as unknown as WireSnapshot;
+    expect(bytesOf(full)).toBeGreaterThan(10 * MAX_BYTES);
+    const cut = fitToBudget(full);
+    expect(bytesOf(cut)).toBeLessThanOrEqual(MAX_BYTES);
+    const r = await h.push(cut);
+    expect(r.statusCode).toBe(202);
+    expect(r.json()).toEqual({ accepted: true });
+    expect(h.inbox.latest()!.snapshot).toMatchObject({ complete: false, setAside: [] });
+    await h.app.close();
+  });
+
+  it('an event it cannot read is set aside, not refused: 202, with how many, and the rest held', async () => {
+    const h = harness();
+    const good = snapshot().events[0]!;
+    const r = await h.push(snapshot(0, { events: [good, { ...good, id: H('e2'), self: 'CANARY-self' }, { ...good, id: H('e3'), location: 'CANARY-room' }] }));
+    expect(r.statusCode).toBe(202);
+    expect(r.json()).toEqual({ accepted: true, setAside: 2 });
+    expect(r.body).not.toMatch(/canary/i);
+    const held = h.inbox.latest()!.snapshot;
+    expect(held.events.map((e) => e.id)).toEqual([H('e1')]);
+    expect(held.setAside).toEqual([{ index: 1, paths: ['events.1.self'] }, { index: 2, paths: ['events.2'] }]);
     await h.app.close();
   });
 
@@ -128,7 +169,7 @@ describe('POST /v1/sources/apple_calendar/snapshot', () => {
     await h.app.close();
   });
 
-  it('404 while the source is off; 409 while it is not turned on, and nothing is held', async () => {
+  it('404 while the source is off; 409 while it is not turned on, and nothing is held, but the helper was heard from', async () => {
     const off = harness({ registered: false });
     expect((await off.push(snapshot())).statusCode).toBe(404);
     expect(off.sent).toEqual([]);
@@ -137,16 +178,27 @@ describe('POST /v1/sources/apple_calendar/snapshot', () => {
       const h = harness({ enabled });
       // Something held from before (turned on, then off): dropped.
       h.inbox.offer(JSON.parse(JSON.stringify(snapshot(60_000))) as never);
+      expect(h.inbox.lastTurnedAwayAt()).toBeUndefined();
       const r = await h.push(snapshot());
       expect(r.statusCode, String(enabled)).toBe(409);
       expect(r.json()).toEqual({ error: 'not_enabled' });
       expect(h.inbox.latest()).toBeUndefined();
+      // Still heard from: the first run after Will turns the source on waits for the next push.
+      expect(h.inbox.lastTurnedAwayAt()).toBeGreaterThan(Date.now() - 60_000);
       expect(h.sent).toEqual([]);
       await h.app.close();
     }
   });
 
   it('422 for a snapshot read too long ago, from the future, replayed, or older than the last', async () => {
+    // After a restart the inbox knows the one last applied (from the source's cursor): nothing as old is taken.
+    const restarted = harness();
+    const applied = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+    restarted.inbox.restore(applied.getTime());
+    expect((await restarted.push(snapshot(90_000))).statusCode).toBe(422);
+    expect((await restarted.push(snapshot(0, { generatedAt: applied.toISOString() }))).statusCode).toBe(422);
+    expect((await restarted.push(snapshot(0))).statusCode).toBe(202);
+    await restarted.app.close();
     const h = harness();
     expect((await h.push(snapshot(11 * 60_000))).statusCode).toBe(422);
     expect((await h.push(snapshot(-3 * 60_000))).statusCode).toBe(422);

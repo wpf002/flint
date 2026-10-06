@@ -1,20 +1,23 @@
 /**
- * The apple_calendar source (P2.6), pure: Flint Calendar's wire v1 checked
- * strictly (the golden fixture the Swift helper's tests encode byte for
- * byte), the snapshot turned into the calendar core's item shape, the same
- * mapping as google_calendar's under its own name, and the source's run: idle
- * while the helper has not pushed since a restart, a failure (never "gone")
- * when it stops or calendar access is off, the mass-archive guards, a
- * disconnect, and no title or address anywhere but EntityText and a person's
- * own row. No network, no database, no EventKit.
+ * The apple_calendar source (P2.6), pure: Flint Calendar's wire v1 (the
+ * golden fixture the Swift helper's tests encode byte for byte; a strict
+ * envelope, events checked one at a time, outside text clipped, a byte budget
+ * and the cut that keeps a snapshot within it), the snapshot turned into the
+ * calendar core's item shape, the same mapping as google_calendar's under its
+ * own name, and the source's run: idle while the helper has not pushed since a
+ * restart or since it was turned away, a failure (never "gone") when it stops
+ * or calendar access is off, never an older snapshot than the one last
+ * applied, the mass-archive guards, a disconnect, and no title or address
+ * anywhere but EntityText and a person's own row. No network, no database, no
+ * EventKit.
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MAX_ATTENDEES, MAX_EVENTS, parseSnapshot, toItems, type Snapshot } from '../../src/sources/apple/wire';
+import { MAX_ATTENDEES, MAX_BYTES, MAX_EVENTS, bytesOf, fitToBudget, parseSnapshot, toItems, type Snapshot, type WireSnapshot } from '../../src/sources/apple/wire';
 import { ACCEPT_EVERY_MS, CalendarInbox, HOLD_MS } from '../../src/sources/apple/inbox';
-import { CONFIRM_MS, CONFIRM_RUNS, GRACE_MS, STALE_MS, appleCalendarSource } from '../../src/sources/apple/calendar';
+import { CONFIRM_MS, CONFIRM_RUNS, GRACE_MS, STALE_MS, appleCalendarSource, appliedAtOf, restoreInbox } from '../../src/sources/apple/calendar';
 import { mapEvents } from '../../src/sources/calendar/core';
 import { mapEvents as mapGoogle } from '../../src/sources/google/calendar';
 import { STATE } from '../../src/world/kinds';
@@ -53,6 +56,8 @@ const refused = (raw: unknown): string[] => {
   if (p.ok) throw new Error('accepted');
   return p.issues;
 };
+/** The schema paths the snapshot's events were set aside on (the snapshot itself is read). */
+const aside = (raw: unknown): string[] => parsed(raw).setAside.flatMap((x) => x.paths);
 
 /** Every observation's state is one its kind accepts (the mapper would refuse anything else). */
 function expectValid(obs: SourceObservation[]) {
@@ -69,64 +74,94 @@ const commitment = (obs: SourceObservation[], name: string) => byKey(obs, `commi
 const persons = (obs: SourceObservation[]) => obs.filter((o) => o.kind === 'person');
 
 describe('apple_calendar: the wire (v1)', () => {
-  it('accepts the golden fixture, which is canonical: keys sorted, compact, as the helper encodes it', () => {
+  it('accepts the golden fixture, which is canonical: keys sorted, compact, nothing escaped, as the helper encodes it', () => {
     const text = readFileSync(FIXTURE, 'utf8');
     const raw = JSON.parse(text) as unknown;
     const sortDeep = (v: unknown): unknown => (Array.isArray(v) ? v.map(sortDeep) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortDeep((v as Record<string, unknown>)[k])])) : v);
     expect(JSON.stringify(sortDeep(raw))).toBe(text);
+    // No backslash anywhere: Swift's JSONEncoder writes "America\/Chicago" unless it is given
+    // outputFormatting [.sortedKeys, .withoutEscapingSlashes], and the escaped form parses the same, so only this sees it.
+    expect(text).toContain('America/Chicago');
+    expect(text).not.toContain('\\');
     const s = parsed(raw);
     expect(s.events).toHaveLength(9);
+    expect(s.setAside).toEqual([]);
     expect(s.calendars).toEqual({ count: 2, hash: CALS });
   });
 
-  it('refuses unknown keys anywhere, and anything over a cap', () => {
+  it('the envelope is strict: an unknown key, or over a cap, refuses the whole snapshot', () => {
     expect(refused(snap([], { extra: 1 }))).toEqual(['(envelope)']);
-    expect(refused(snap([ev('a', { location: 'Room 4' })]))).toEqual(['events.0']);
-    expect(refused(snap([ev('a', { attendees: [{ email: 'a@x.org', kind: 'person', status: 'accepted' }] })]))).toEqual(['events.0.attendees.0']);
     expect(refused(snap([], { window: { start: at(0), end: at(DAY), calendars: 1 } }))).toEqual(['window']);
+    expect(refused(snap([], { calendars: { count: 1, hash: CALS, names: ['Home'] } }))).toEqual(['calendars']);
     expect(refused(snap(Array.from({ length: MAX_EVENTS + 1 }, (_, i) => ev(`e${i}`))))).toEqual(['events']);
-    expect(parseSnapshot(snap(Array.from({ length: MAX_EVENTS }, (_, i) => ev(`e${i}`)))).ok).toBe(true);
-    const many = Array.from({ length: MAX_ATTENDEES + 1 }, (_, i) => ({ email: `p${i}@x.org`, kind: 'person' }));
-    expect(refused(snap([ev('a', { attendees: many })]))).toEqual(['events.0.attendees']);
-    expect(refused(snap([ev('a', { title: 'x'.repeat(301) })]))).toEqual(['events.0.title']);
-    expect(refused(snap([ev('a', { attendees: [{ name: 'n'.repeat(101), email: 'a@x.org', kind: 'person' }] })]))).toEqual(['events.0.attendees.0.name']);
-    expect(refused(snap([ev('a', { attendees: [{ email: `${'a'.repeat(250)}@x.org`, kind: 'person' }] })]))).toEqual(['events.0.attendees.0.email']);
+    expect(parsed(snap(Array.from({ length: MAX_EVENTS }, (_, i) => ev(`e${i}`)))).events).toHaveLength(MAX_EVENTS);
   });
 
-  it('refuses ids that are not sha256 hex, instants without Z, days that are not days, an end before its start', () => {
+  it('an event this side cannot read is set aside, by its index and schema paths, and the rest are read', () => {
+    const many = Array.from({ length: MAX_ATTENDEES + 1 }, (_, i) => ({ email: `p${i}@x.org`, kind: 'person' }));
+    const s = parsed(snap([
+      ev('ok1'), ev('a', { location: 'Room 4' }), ev('b', { attendees: [{ email: 'a@x.org', kind: 'person', status: 'accepted' }] }),
+      ev('c', { attendees: many }), ev('ok2'), 'not an event' as unknown as Ev,
+    ]));
+    expect(s.events.map((e) => e.id)).toEqual([H('ok1'), H('ok2')]);
+    expect(s.setAside).toEqual([
+      { index: 1, paths: ['events.1'] }, { index: 2, paths: ['events.2.attendees.0'] }, { index: 3, paths: ['events.3.attendees'] }, { index: 5, paths: ['events.5'] },
+    ]);
+    // A full snapshot of good events is read whole.
+    expect(parsed(snap([ev('x'), ev('y')])).setAside).toEqual([]);
+  });
+
+  it('what someone else wrote is clipped, never refused: a title to 300, a name to 100; an address over 254 is dropped when mapped', () => {
+    const long = `${'a'.repeat(250)}@x.org`;
+    const s = parsed(snap([ev('a', {
+      title: `${'x'.repeat(299)}😀tail`, self: 'organizer',
+      attendees: [{ name: 'n'.repeat(101), email: 'ada@example.com', kind: 'person' }, { email: long, kind: 'person' }],
+    })]));
+    expect(s.setAside).toEqual([]);
+    expect(s.events[0]!.title).toBe('x'.repeat(299));
+    expect(s.events[0]!.attendees![0]!.name).toBe('n'.repeat(100));
+    expect(s.events[0]!.attendees![1]!.email).toBe(long);
+    const r = apple(toItems(s));
+    expect(r.errors).toEqual([]);
+    expect(persons(r.observations).map((p) => [p.name, (p.state as { email: string }).email])).toEqual([['n'.repeat(100), 'ada@example.com']]);
+    expect(commitment(r.observations, 'a')!.state.attendeeHashes).toEqual([emailHash('ada@example.com')]);
+  });
+
+  it('sets aside an event whose id is not sha256 hex, whose instants lack Z, whose days are not days, or that ends before it starts', () => {
     /** A time is one of two shapes: the path names the field, or the shape it came closest to. */
-    const atStart = (raw: unknown) => expect(refused(raw)[0]).toMatch(/^events\.0\.start(\.at|\.day)?$/);
-    expect(refused(snap([ev('a', { id: 'ABC' })]))).toEqual(['events.0.id']);
-    expect(refused(snap([ev('a', { id: H('x').toUpperCase() })]))).toEqual(['events.0.id']);
+    const atStart = (raw: unknown) => expect(aside(raw)[0]).toMatch(/^events\.0\.start(\.at|\.day)?$/);
+    expect(aside(snap([ev('a', { id: 'ABC' })]))).toEqual(['events.0.id']);
+    expect(aside(snap([ev('a', { id: H('x').toUpperCase() })]))).toEqual(['events.0.id']);
     atStart(snap([ev('a', { start: { at: '2026-10-07T14:00:00-05:00' } })]));
     atStart(snap([ev('a', { start: { at: '2026-10-07T14:00:00' } })]));
     expect(refused(snap([], { generatedAt: '2026-10-05T15:00:00+00:00' }))).toEqual(['generatedAt']);
     atStart(snap([ev('a', { start: { day: '2026-02-30' }, end: { day: '2026-03-01' } })]));
     atStart(snap([ev('a', { start: { at: '2026-02-30T10:00:00Z' }, end: { at: '2026-03-01T10:00:00Z' } })]));
-    expect(refused(snap([ev('a', { start: { at: '2026-10-07T15:00:00Z' }, end: { at: '2026-10-07T14:00:00Z' } })]))).toEqual(['events.0.end']);
+    expect(aside(snap([ev('a', { start: { at: '2026-10-07T15:00:00Z' }, end: { at: '2026-10-07T14:00:00Z' } })]))).toEqual(['events.0.end']);
     // An all-day end is the day after the last: the same day is no span.
-    expect(refused(snap([ev('a', { start: { day: '2026-10-07' }, end: { day: '2026-10-07' } })]))).toEqual(['events.0.end']);
-    expect(refused(snap([ev('a', { start: { day: '2026-10-07' }, end: { at: '2026-10-08T05:00:00Z' } })]))).toEqual(['events.0.end']);
+    expect(aside(snap([ev('a', { start: { day: '2026-10-07' }, end: { day: '2026-10-07' } })]))).toEqual(['events.0.end']);
+    expect(aside(snap([ev('a', { start: { day: '2026-10-07' }, end: { at: '2026-10-08T05:00:00Z' } })]))).toEqual(['events.0.end']);
     atStart(snap([ev('a', { start: { day: '2026-10-07', at: '2026-10-07T05:00:00Z' } })]));
     // A zero-length timed event is a deadline-like one, not an error.
-    expect(parseSnapshot(snap([ev('a', { start: { at: '2026-10-07T15:00:00Z' }, end: { at: '2026-10-07T15:00:00Z' } })])).ok).toBe(true);
+    expect(parsed(snap([ev('a', { start: { at: '2026-10-07T15:00:00Z' }, end: { at: '2026-10-07T15:00:00Z' } })])).setAside).toEqual([]);
   });
 
-  it('refuses a window over 15 days, a zone that is not one, a NUL, and an envelope that is not v1', () => {
+  it('refuses a window over 15 days, a zone that is not one, and an envelope that is not v1; an event with a NUL is set aside', () => {
     expect(refused(snap([], { window: { start: at(0), end: at(15 * DAY + MIN) } }))).toEqual(['window']);
     expect(refused(snap([], { window: { start: at(0), end: at(0) } }))).toEqual(['window']);
     expect(parseSnapshot(snap([], { window: { start: at(0), end: at(15 * DAY) } })).ok).toBe(true);
     expect(refused(snap([], { tz: 'Mars/Olympus_Mons' }))).toEqual(['tz']);
     expect(refused(snap([], { tz: 'America/Chicago; rm' }))).toEqual(['tz']);
-    expect(refused(snap([ev('a', { title: 'Lunch\u0000' })]))).toEqual(['events.0.title']);
+    // (The route refuses any body with a NUL before it is read: the app's own hook.)
+    expect(aside(snap([ev('a', { title: 'Lunch\u0000' })]))).toEqual(['events.0.title']);
     expect(refused(snap([], { v: 2 }))).toEqual(['v']);
     expect(refused('not a snapshot')).toEqual(['(envelope)']);
   });
 
   it("attendees only with an event Will organized or accepted; no events unless access is full and the helper is live", () => {
     const others = [{ email: 'ada@example.com', kind: 'person' }];
-    for (const self of ['tentative', 'declined', 'needs_action']) expect(refused(snap([ev('a', { self, attendees: others })])), self).toEqual(['events.0.attendees']);
-    for (const self of ['organizer', 'accepted']) expect(parseSnapshot(snap([ev('a', { self, attendees: others })])).ok, self).toBe(true);
+    for (const self of ['tentative', 'declined', 'needs_action']) expect(aside(snap([ev('a', { self, attendees: others })])), self).toEqual(['events.0.attendees']);
+    for (const self of ['organizer', 'accepted']) expect(parsed(snap([ev('a', { self, attendees: others })])).setAside, self).toEqual([]);
     for (const access of ['denied', 'restricted', 'not_determined', 'write_only']) {
       expect(refused(snap([ev('a')], { access })), access).toEqual(['events']);
       expect(parseSnapshot(snap([], { access })).ok, access).toBe(true);
@@ -135,11 +170,68 @@ describe('apple_calendar: the wire (v1)', () => {
     expect(parseSnapshot(snap([], { state: 'revoked' })).ok).toBe(true);
   });
 
-  it('a refusal names schema paths, never what it was given', () => {
-    const issues = refused(snap([ev('a', { self: 'CANARY-self', attendees: [{ email: 'canary@example.com', kind: 'CANARY-kind' }] })], { access: 'CANARY-access', extra: 'CANARY' }));
+  it('a refusal, and an event set aside, name schema paths, never what they were given', () => {
+    const bad = ev('a', { self: 'CANARY-self', title: 'CANARY\u0000', attendees: [{ email: 'canary@example.com', kind: 'CANARY-kind', CANARY: 1 }] });
+    const issues = refused(snap([bad], { access: 'CANARY-access', extra: 'CANARY' }));
     expect(issues.length).toBeGreaterThan(0);
     expect(issues.length).toBeLessThanOrEqual(5);
     expect(JSON.stringify(issues)).not.toMatch(/canary/i);
+    const s = parsed(snap([bad]));
+    expect(s.setAside).toHaveLength(1);
+    expect(s.setAside[0]!.paths.length).toBeLessThanOrEqual(5);
+    expect(JSON.stringify(s.setAside)).not.toMatch(/canary/i);
+  });
+});
+
+describe('apple_calendar: the byte budget', () => {
+  /** An event at every cap: a 300-character title, and 100 attendees with 100-character names and long addresses. */
+  const atCaps = (i: number): Ev => ev(`cap${i}`, {
+    title: 't'.repeat(300), self: 'organizer', start: { at: at((i % 300) * HOUR) }, end: { at: at((i % 300) * HOUR + HOUR) },
+    attendees: Array.from({ length: MAX_ATTENDEES }, (_, j) => ({ name: 'é'.repeat(100), email: `${'a'.repeat(236)}${String(i * 100 + j).padStart(6, '0')}@example.org`, kind: 'person' })),
+  });
+  const worst = (): WireSnapshot => snap(Array.from({ length: MAX_EVENTS }, (_, i) => atCaps(i))) as WireSnapshot;
+
+  it('the caps alone allow far more than the budget: a snapshot at every cap is cut to fit, says it is not complete, and is read', () => {
+    const full = worst();
+    expect(bytesOf(full)).toBeGreaterThan(20 * MAX_BYTES);
+    const cut = fitToBudget(full);
+    expect(bytesOf(cut)).toBeLessThanOrEqual(MAX_BYTES);
+    expect(cut.complete).toBe(false);
+    const s = parsed(cut);
+    expect(s.setAside).toEqual([]);
+    expect(s.complete).toBe(false);
+    // Attendees go before events: every event that is left has its time; only the earliest keep their attendees.
+    expect(s.events.length).toBeGreaterThan(MAX_EVENTS / 2);
+    const withPeople = s.events.filter((e) => e.attendees).map((e) => e.start);
+    const without = s.events.filter((e) => !e.attendees).map((e) => e.start);
+    expect(withPeople.length).toBeGreaterThan(0);
+    const latest = (xs: unknown[]) => xs.map((x) => (x as { at: string }).at).sort().at(-1)!;
+    const earliest = (xs: unknown[]) => xs.map((x) => (x as { at: string }).at).sort()[0]!;
+    expect(latest(withPeople) <= earliest(without)).toBe(true);
+  });
+
+  it('cuts the same way every time, whatever the order it was given; the order kept is the one given', () => {
+    const full = worst();
+    const shuffled = { ...full, events: [...full.events].reverse() };
+    const a = fitToBudget(full);
+    const b = fitToBudget(shuffled);
+    const shape = (x: WireSnapshot) => x.events.map((e) => `${String(e.id)}:${'attendees' in e}`).sort();
+    expect(shape(a)).toEqual(shape(b));
+    expect(b.events.map((e) => e.id)).toEqual([...a.events].reverse().map((e) => e.id));
+  });
+
+  it('a snapshot that fits is sent as it is; past the attendees, events go from the last-ranked, until it fits', () => {
+    const small = snap([ev('a'), ev('b')]) as WireSnapshot;
+    expect(fitToBudget(small)).toBe(small);
+    // Events with no attendees at all: the latest are dropped, by start then id, and the rest is exactly within.
+    const plain = snap(Array.from({ length: 40 }, (_, i) => ev(`p${i}`, { title: 'x'.repeat(300), start: { at: at(i * HOUR) }, end: { at: at(i * HOUR + HOUR) } }))) as WireSnapshot;
+    const budget = Math.floor(bytesOf(plain) / 2);
+    const cut = fitToBudget(plain, budget);
+    expect(bytesOf(cut)).toBeLessThanOrEqual(budget);
+    expect(bytesOf(cut) + bytesOf(plain.events[cut.events.length]) + 1).toBeGreaterThan(budget);
+    expect(cut.events.map((e) => e.id)).toEqual(plain.events.slice(0, cut.events.length).map((e) => e.id));
+    // A budget smaller than the envelope leaves no events at all.
+    expect(fitToBudget(plain, 10).events).toEqual([]);
   });
 });
 
@@ -324,6 +416,34 @@ describe('apple_calendar: the inbox', () => {
     inbox.clear();
     expect(inbox.latest(now + 2 * MIN)).toBeUndefined();
   });
+
+  it('after a restart, restored from the cursor, turns away a snapshot as old as the one last applied', async () => {
+    const now = NOW.getTime();
+    const s = (generatedAt: string) => parsed(snap([], { generatedAt }));
+    const cursor = JSON.stringify({ lastRunAt: at(-MIN), generatedAt: at(-2 * MIN), calendars: CALS });
+    expect(appliedAtOf(cursor)).toBe(now - 2 * MIN);
+    expect(appliedAtOf(JSON.stringify({ lastRunAt: at(-MIN) }))).toBeUndefined();
+    expect(appliedAtOf('not json')).toBeUndefined();
+    const db = { sourceCursor: { findUnique: async ({ where }: { where: { source: string } }) => (where.source === 'apple_calendar' ? { cursor } : null) } };
+    const restored = new CalendarInbox(now);
+    await restoreInbox(db as never, restored);
+    expect(restored.offer(s(at(-3 * MIN)), now)).toBe('stale');
+    expect(restored.offer(s(at(-2 * MIN)), now)).toBe('stale');
+    expect(restored.offer(s(at(-MIN)), now)).toBe('accepted');
+    // Without a cursor (never applied one), nothing is turned away for that.
+    const fresh = new CalendarInbox(now);
+    await restoreInbox({ sourceCursor: { findUnique: async () => null } } as never, fresh);
+    expect(fresh.offer(s(at(-3 * MIN)), now)).toBe('accepted');
+  });
+
+  it('a push turned away while the source is not on drops what was held and is remembered as heard', () => {
+    const inbox = new CalendarInbox(NOW.getTime());
+    expect(inbox.offer(parsed(snap([], { generatedAt: at(-MIN) })), NOW.getTime())).toBe('accepted');
+    expect(inbox.lastTurnedAwayAt()).toBeUndefined();
+    inbox.turnedAway(NOW.getTime() + MIN);
+    expect(inbox.latest(NOW.getTime() + MIN)).toBeUndefined();
+    expect(inbox.lastTurnedAwayAt()).toBe(NOW.getTime() + MIN);
+  });
 });
 
 describe('apple_calendar: the source', () => {
@@ -359,7 +479,12 @@ describe('apple_calendar: the source', () => {
     const r = await source(inboxWith(snap([], { state: 'revoked', access: 'denied' }))).run(runOf({ known, cursor: cursorAt() }));
     expect(archived(r)).toEqual([keyOf('k1'), keyOf('k2'), `deadline:apple_calendar:${H('k3')}`].sort());
     expect(r.observations.every((o) => o.status === 'archived' && o.sensitivity === 'personal')).toBe(true);
-    expect(JSON.parse(r.cursor!)).toEqual({ lastRunAt: NOW.toISOString() });
+    expect(JSON.parse(r.cursor!)).toEqual({ lastRunAt: NOW.toISOString(), generatedAt: at(0), revoked: true });
+    // Then quiet, as a disconnected helper is: idle, never "hasn't reported", until a live snapshot comes again.
+    const later = new Date(NOW.getTime() + 3 * HOUR);
+    expect(await source(new CalendarInbox(NOW.getTime() - HOUR)).run(runOf({ now: later, known, cursor: r.cursor! }))).toEqual({ observations: [], metrics: [], idle: true });
+    const back = await source(inboxWith(snap([ev('k1')], { generatedAt: later.toISOString(), window: { start: later.toISOString(), end: at(14 * DAY, later) } }))).run(runOf({ now: later, known, cursor: r.cursor! }));
+    expect(JSON.parse(back.cursor!)).not.toHaveProperty('revoked');
   });
 
   it('a whole snapshot archives what it no longer holds, as it was last known; keys are commitment:apple_calendar:<id>', async () => {
@@ -373,7 +498,47 @@ describe('apple_calendar: the source', () => {
       externalId: `event:${H('gone1')}`, sensitivity: 'personal', taintedPaths: [],
     });
     expect(r.warnings).toBeUndefined();
-    expect(JSON.parse(r.cursor!)).toEqual({ lastRunAt: NOW.toISOString(), calendars: CALS });
+    expect(JSON.parse(r.cursor!)).toEqual({ lastRunAt: NOW.toISOString(), generatedAt: at(0), calendars: CALS });
+  });
+
+  it('an event set aside is said by index and path, the rest are read, and nothing missing is archived', async () => {
+    const known = [knownAhead('keep'), knownAhead('gone1'), knownEnded('ended'), knownAhead('dec')];
+    const bad = ev('bad', { start: { at: '2026-10-07T15:00:00Z' }, end: { at: '2026-10-07T14:00:00Z' }, title: 'CANARY title' });
+    const r = await source(inboxWith(snap([ev('keep'), bad, ev('dec', { self: 'declined' })]))).run(runOf({ known, cursor: cursorAt() }));
+    expect(r.observations.filter((o) => o.status !== 'archived').map((o) => o.key)).toEqual([keyOf('keep')]);
+    // What the snapshot shows gone, and what has ended, still go; what is only missing waits for a whole snapshot.
+    expect(archived(r)).toEqual([keyOf('ended'), keyOf('dec')].sort());
+    expect(r.warnings).toEqual(["apple calendar: event 1 of Flint Calendar's snapshot could not be read (events.1.end); set aside"]);
+    expect(JSON.stringify(r)).not.toMatch(/CANARY/);
+    // Many: the first five, then how many more.
+    const lots = await source(inboxWith(snap(Array.from({ length: 8 }, (_, i) => ev(`b${i}`, { id: `bad-${i}` }))))).run(runOf({ cursor: cursorAt() }));
+    expect(lots.warnings).toHaveLength(6);
+    expect(lots.warnings![5]).toBe('apple calendar: 3 more event(s) set aside');
+  });
+
+  it('never applies a snapshot older than the one last applied (a replay after a restart): idle, nothing touched', async () => {
+    const known = [knownAhead('x')];
+    const cursor = cursorAt({ generatedAt: at(-MIN) });
+    // Read 2 minutes ago, after one read 1 minute ago was applied: older.
+    const old = await source(inboxWith(snap([], { state: 'revoked', access: 'denied', generatedAt: at(-2 * MIN) }))).run(runOf({ known, cursor }));
+    expect(old).toEqual({ observations: [], metrics: [], idle: true });
+    // The same one again (the next 5-minute run reading what is held) is read as before.
+    const same = await source(inboxWith(snap([ev('x')], { generatedAt: at(-MIN) }))).run(runOf({ known, cursor }));
+    expect(same.observations.map((o) => o.key)).toEqual([keyOf('x')]);
+    expect(JSON.parse(same.cursor!).generatedAt).toBe(at(-MIN));
+  });
+
+  it('a push turned away before Will turned the source on counts as hearing from the helper: the run after is idle, not a failure', async () => {
+    // The runtime started an hour ago; the helper's last push was turned away (409) 2 minutes ago; Will has just approved.
+    const inbox = new CalendarInbox(NOW.getTime() - HOUR);
+    inbox.turnedAway(NOW.getTime() - 2 * MIN);
+    expect(await source(inbox).run(runOf({ known: [knownAhead('k1')] }))).toEqual({ observations: [], metrics: [], idle: true });
+    // Nothing for 10 minutes after that push: a failure, from when it was last heard.
+    const quiet = new CalendarInbox(NOW.getTime() - HOUR);
+    quiet.turnedAway(NOW.getTime() - GRACE_MS - MIN);
+    await expect(source(quiet).run(runOf())).rejects.toThrow("apple calendar: Flint Calendar hasn't reported since 09:49");
+    // Without one, as before: a failure since the runtime started.
+    await expect(source(new CalendarInbox(NOW.getTime() - HOUR)).run(runOf())).rejects.toThrow("apple calendar: Flint Calendar hasn't reported since the runtime started at 09:00");
   });
 
   it('a different choice of calendars archives nothing missing this run, says so, and is the choice next time', async () => {
@@ -433,8 +598,9 @@ describe('apple_calendar: the source', () => {
       expect(archived(b)).toEqual([]);
       burst = b.cursor!;
     }
-    // A different set missing: counted from one again.
-    const other = await source(inboxWith(snap(names.slice(7).map((n) => ev(n))))).run(runOf({ known, cursor: burst }));
+    // A different set missing (in a newer snapshot: an older one is never applied): counted from one again.
+    const after = new Date(NOW.getTime() + (CONFIRM_RUNS + 2) * 10_000);
+    const other = await source(inboxWith(snap(names.slice(7).map((n) => ev(n)), { generatedAt: after.toISOString() }))).run(runOf({ now: after, known, cursor: burst }));
     expect(JSON.parse(other.cursor!).missing.runs).toBe(1);
   });
 

@@ -16,8 +16,11 @@
  *    database both refuse).
  *  - P2.6: the calendar is google_calendar or apple_calendar. A card names its
  *    source when it is not Google (so Will signs which calendar the people
- *    came from; a card without one is Google's, as every P2.5 card was), and
- *    someone forgotten under either calendar is forgotten under both.
+ *    came from, and the console shows it; a card without one is Google's, as
+ *    every P2.5 card was), and someone forgotten under either calendar is
+ *    forgotten under both: never offered or created again, and their entity
+ *    from the other calendar, if one was made, is forgotten with them (the
+ *    forget trigger, migration p26_apple_calendar).
  */
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
@@ -37,6 +40,8 @@ export const TEMPLATE = 'person.from_calendar';
 export const PER_CARD = 20;
 /** The source of a card that names none: every P2.5 card was Google's. */
 const DEFAULT_SOURCE: CalendarSource = 'google_calendar';
+/** Each calendar as a card names it (the console's Calendar fact says the same). */
+const CALENDAR_NAME: Record<CalendarSource, string> = { google_calendar: 'Google Calendar', apple_calendar: 'Apple Calendar' };
 const DAY = 86_400_000;
 
 const Name = z.string().min(1).max(100).refine((s) => !/[\p{Cc}\p{Cf}]/u.test(s), 'a name has no control characters');
@@ -168,7 +173,7 @@ export async function offerPeople(db: Db, people: SourceObservation[], now: Date
     kind: 'tool_call', origin: `runtime:${source}`, action: ACTION, templateId: TEMPLATE, args: { people: batch, ...(source === DEFAULT_SOURCE ? {} : { source }) },
     argsProvenance: { people: { source: 'event', ref: source, tainted: true } },
     tainted: true, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 24 * 60,
-    reason: `Approving saves the names and addresses of ${batch.length} ${batch.length === 1 ? 'person' : 'people'} from events you accepted or organized.`,
+    reason: `Approving saves the names and addresses of ${batch.length} ${batch.length === 1 ? 'person' : 'people'} from ${CALENDAR_NAME[source]} events you accepted or organized.`,
   }, `runtime:${source}`, now);
   return { ...out, proposed: batch.length };
 }

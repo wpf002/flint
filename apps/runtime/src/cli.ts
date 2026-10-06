@@ -135,7 +135,7 @@ async function main(): Promise<void> {
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
     try {
-      console.log(await appleCalendarStatus(db));
+      console.log(await appleCalendarStatus(db, { on: config.appleCalendar }));
     } finally {
       await db.$disconnect();
     }

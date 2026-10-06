@@ -50,7 +50,9 @@ $$;
 --    looked for under the calendar its source row names;
 --  * for a person, their name and address on the calendar cards that proposed
 --    them, and the person under both calendars: someone Will forgot from one
---    calendar never comes back through the other (the runtime refuses them too).
+--    calendar never comes back through the other (the runtime refuses them too),
+--    and their entity from the other calendar, if one was made, is forgotten
+--    too, the way forget_entity forgets, and audited as such.
 CREATE OR REPLACE FUNCTION entity_forgotten_p25() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
@@ -130,7 +132,61 @@ BEGIN
     UPDATE "Proposal" SET "args" = NULL, "argsPurgedAt" = coalesce("argsPurgedAt", now()), "reason" = NULL, "result" = NULL, "error" = NULL
     WHERE "action" = 'world.person.create' AND "args" IS NOT NULL
       AND jsonb_path_exists("args", '$.people[*] ? (@.emailHash == $h)', jsonb_build_object('h', OLD."state"->>'emailHash'));
+    -- The same person under the other calendar (someone in both is two entities), if one was made: locked
+    -- (its source row first, in the order a sync takes them), forgotten as well, and audited (its own trigger
+    -- then finds this one already forgotten).
+    other_ext := 'person:' || (OLD."state"->>'emailHash');
+    PERFORM 1 FROM "EntitySource" WHERE "source" IN ('google_calendar', 'apple_calendar') AND "externalId" = other_ext FOR UPDATE;
+    FOR sib IN
+      SELECT e."id", e."kind", e."key", e."version", s."externalId", s."source" FROM "Entity" e JOIN "EntitySource" s ON s."entityId" = e."id"
+      WHERE s."source" IN ('google_calendar', 'apple_calendar') AND s."externalId" = other_ext
+        AND e."kind" = 'person' AND e."id" <> NEW."id" AND e."status" <> 'forgotten'
+      FOR UPDATE OF e
+    LOOP
+      SELECT coalesce(array_agg(DISTINCT x), '{}') INTO events FROM (
+        SELECT "sourceEventId" AS x FROM "EntityVersion" WHERE "entityId" = sib."id" AND "sourceEventId" IS NOT NULL
+        UNION SELECT "sourceEventId" FROM "Relation" WHERE ("fromId" = sib."id" OR "toId" = sib."id") AND "sourceEventId" IS NOT NULL
+        UNION SELECT ev."id" FROM "SourceEvent" ev WHERE ev."source" = sib."source" AND left(ev."sourceRef", length(sib."externalId") + 1) = sib."externalId" || '@'
+        UNION SELECT ev."id" FROM "SourceEvent" ev WHERE ev."payload"->>'entityId' = sib."id"
+      ) q;
+      UPDATE "Entity" SET "name" = 'forgotten:' || left(encode(sha256(convert_to(sib."kind" || ':' || sib."key", 'UTF8')), 'hex'), 16),
+        "key" = 'forgotten:' || encode(sha256(convert_to(sib."kind" || ':' || sib."key", 'UTF8')), 'hex'), "state" = '{}'::jsonb,
+        "stateHash" = encode(sha256(convert_to('{}', 'UTF8')), 'hex'), "status" = 'forgotten', "taintedPaths" = '{}',
+        "confidence" = NULL, "mergedIntoId" = NULL, "version" = sib."version" + 1, "lastObservedAt" = now()
+      WHERE "id" = sib."id";
+      UPDATE "EntityVersion" SET "state" = NULL, "patch" = NULL WHERE "entityId" = sib."id" AND ("state" IS NOT NULL OR "patch" IS NOT NULL);
+      GET DIAGNOSTICS n_versions = ROW_COUNT;
+      INSERT INTO "EntityVersion" ("id", "entityId", "version", "changeKind", "actor", "validFrom")
+      VALUES ('ev' || replace(gen_random_uuid()::text, '-', ''), sib."id", sib."version" + 1, 'forgotten', 'forget:' || approval, now());
+      UPDATE "EntitySource" SET "externalId" = 'forgotten:' || encode(sha256(convert_to("externalId", 'UTF8')), 'hex'), "namespace" = NULL
+      WHERE "entityId" = sib."id" AND "externalId" NOT LIKE 'forgotten:%';
+      UPDATE "Relation" SET "attrs" = NULL WHERE ("fromId" = sib."id" OR "toId" = sib."id") AND "attrs" IS NOT NULL;
+      UPDATE "SourceEvent" SET "payload" = NULL, "lastError" = NULL,
+        "sourceRef" = CASE WHEN "sourceRef" LIKE 'forgotten:%' THEN "sourceRef" ELSE 'forgotten:' || encode(sha256(convert_to("sourceRef", 'UTF8')), 'hex') END
+      WHERE "id" = ANY (events) AND ("payload" IS NOT NULL OR "lastError" IS NOT NULL OR "sourceRef" NOT LIKE 'forgotten:%');
+      GET DIAGNOSTICS n_events = ROW_COUNT;
+      UPDATE "Proposal" SET "args" = NULL, "argsPurgedAt" = coalesce("argsPurgedAt", now()), "reason" = NULL, "result" = NULL, "error" = NULL
+      WHERE "args" IS NOT NULL AND strpos("args"::text, sib."id") > 0;
+      UPDATE "AuditEntry" SET "reasoning" = NULL, "outcomeDetail" = NULL, "redactedAt" = now()
+      WHERE "correlationId" = sib."id" AND "redactedAt" IS NULL;
+      INSERT INTO "AuditEntry" ("id", "actor", "context", "kind", "action", "inputs", "decision", "outcome", "correlationId")
+      VALUES ('au' || replace(gen_random_uuid()::text, '-', ''), 'will', 'console', 'forget', 'world.forget',
+              jsonb_build_object('entityId', sib."id", 'cascadeOf', NEW."id", 'approvalId', approval,
+                                 'counts', jsonb_build_object('versions', n_versions, 'sourceEvents', n_events)), 'act', 'ok', approval);
+    END LOOP;
   END IF;
   RETURN NULL;
 END;
 $$;
+
+-- People Will forgot before this (P2.5's trigger suppressed them under their own calendar only), or while it
+-- was rolled back: suppressed under both calendars, as every forget is from now on. A forgotten person's
+-- calendar source row is `forgotten:<sha256 of person:<hash>>`, and that digest is its suppressed key.
+INSERT INTO "SuppressedKey" ("source", "externalIdHash", "approvalId")
+SELECT c."source", k."externalIdHash", k."approvalId"
+FROM "Entity" e
+JOIN "EntitySource" es ON es."entityId" = e."id" AND es."source" IN ('google_calendar', 'apple_calendar') AND left(es."externalId", 10) = 'forgotten:'
+JOIN "SuppressedKey" k ON k."source" = es."source" AND k."externalIdHash" = substr(es."externalId", 11)
+CROSS JOIN (VALUES ('google_calendar'), ('apple_calendar')) AS c("source")
+WHERE e."kind" = 'person' AND e."status" = 'forgotten'
+ON CONFLICT DO NOTHING;

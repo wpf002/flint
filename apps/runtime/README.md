@@ -208,8 +208,9 @@ keeps its own approval.
 - **Turn the source off:** remove the `FLINT_SOURCE_APPLE_CALENDAR` line from
   `~/.flint/runtime.override.env` and run
   `launchctl kickstart -k gui/$(id -u)/com.flint.runtime`. Its events stay as
-  they were last known. To archive them first, disconnect in Flint Calendar
-  before you do this: it tells the runtime, which archives every Apple event.
+  they were last known, and the `apple-calendar` line says "Off". To archive
+  them first, disconnect in Flint Calendar before you do this: it tells the
+  runtime, which archives every Apple event, and the line says "Disconnected".
 - **Titles:** as for Google, the nightly cleanup deletes each a week after it
   was last seen.
 

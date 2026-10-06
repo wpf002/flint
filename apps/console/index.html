@@ -1103,6 +1103,8 @@ function apprNow(){return new Date();}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
 function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
   if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
+/* Each calendar by its name, for the person card: the calendar its people came from, which Will signs. */
+var APPR_CALENDARS={google_calendar:'Google Calendar',apple_calendar:'Apple Calendar'};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -1141,8 +1143,10 @@ function apprFacts(p){var a=p.args||{},f=[];
     var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
-  /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole. */
-  else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
+  /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole.
+     The calendar is the one the card's people came from, which Will signs (a card that names none is Google's, as every P2.5 card was). */
+  else if(p.fullName==='world.person.create'){f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
+    f.push(['Calendar',APPR_CALENDARS[a.source||'google_calendar']||apprWords(a.source)]);}
   f.push(['Filed By',apprFrom(p.origin)]);
   if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
   return f.slice(0,3);}

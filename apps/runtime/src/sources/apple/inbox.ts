@@ -11,8 +11,13 @@
  *  - A snapshot must be fresh and newer than every one accepted before it:
  *    generatedAt within 10 minutes before and 2 minutes after now, and strictly
  *    after the last accepted one (held or already dropped), so a replayed
- *    snapshot can never bring back an event Will cancelled.
+ *    snapshot can never bring back an event Will cancelled. Across a restart,
+ *    "the last one" is the one the source last applied, which its cursor keeps
+ *    (restore(), at startup: index.ts).
  *  - At most one is accepted every 5 seconds.
+ *  - A push turned away because the source is not turned on yet still counts
+ *    as hearing from the helper (turnedAway()), so the first run after Will
+ *    turns it on waits for the next push instead of failing.
  */
 import type { Snapshot } from './wire.js';
 
@@ -42,6 +47,8 @@ export class CalendarInbox {
   private newest = Number.NEGATIVE_INFINITY;
   /** When one was last accepted (for the rate), held or not (for "hasn't reported since"). */
   private acceptedAt: number | undefined;
+  /** When a push was last turned away because the source is not turned on (409). */
+  private awayAt: number | undefined;
 
   constructor(now = Date.now()) {
     this.startedAt = now;
@@ -72,5 +79,27 @@ export class CalendarInbox {
   /** Drop what is held (the source is not turned on: it keeps no calendar in memory). */
   clear(): void {
     this.held = undefined;
+  }
+
+  /**
+   * A push turned away because the source is not turned on yet: nothing is held
+   * (what was is dropped), but the helper was heard from at `now`.
+   */
+  turnedAway(now = Date.now()): void {
+    this.clear();
+    this.awayAt = now;
+  }
+
+  /** When a push was last turned away because the source was not turned on; undefined when none was. */
+  lastTurnedAwayAt(): number | undefined {
+    return this.awayAt;
+  }
+
+  /**
+   * After a restart: the generatedAt (ms) of the snapshot the source last applied,
+   * from its cursor. Nothing as old as it is accepted again.
+   */
+  restore(appliedAt: number): void {
+    if (Number.isFinite(appliedAt)) this.newest = Math.max(this.newest, appliedAt);
   }
 }
