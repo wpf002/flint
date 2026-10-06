@@ -161,8 +161,9 @@ rules hold throughout:
 
 ### Turning it on
 
-Flint Calendar, the helper, is installed by its own change. Until it is, leave
-this source off: the runtime then answers the helper's route with 404 and
+Flint Calendar, the helper, is installed by auto-deploy
+([`apps/desktop-calendar`](../desktop-calendar/README.md)). Until you connect
+it, this source stays off: the runtime answers the helper's route with 404 and
 reads nothing.
 
 1. **Check that this Mac has your events.** Press Cmd-Space, type Calendar and
@@ -170,22 +171,18 @@ reads nothing.
    System Settings, click your name at the top of the sidebar, click iCloud,
    click See All next to "Saved to iCloud", turn on Calendars, and wait a few
    minutes.
-2. **Switch the source on.** These keep the override file `0600` whether or not
-   it exists yet, add the line only once, and start it on a line of its own:
-   ```bash
-   touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env
-   grep -q '^FLINT_SOURCE_APPLE_CALENDAR=' ~/.flint/runtime.override.env || printf '\nFLINT_SOURCE_APPLE_CALENDAR=on\n' >> ~/.flint/runtime.override.env
-   launchctl kickstart -k gui/$(id -u)/com.flint.runtime
-   ```
-3. **Let Flint Calendar read your calendar.** Follow Flint Calendar's own
-   README. macOS asks once; click Allow Full Access, then choose which
-   calendars count and click Connect.
-4. **File the card that turns it on:**
-   `cd ~/flint && pnpm --filter @flint/runtime enable-source apple_calendar`.
-   Then open Approvals in the console. The card is "Turn On the Apple Calendar
-   Source", and under it: "Your Apple Calendar is read every 5 minutes and
-   when it changes." Click Approve and confirm with your key.
-5. **Check it about 5 minutes later:**
+2. **Connect Flint Calendar:** `~/flint/apps/desktop-calendar/connect.sh`.
+   It opens Flint Calendar: macOS asks once (click Allow Full Access), then you
+   tick the calendars that count and click Connect. It then puts
+   `FLINT_SOURCE_APPLE_CALENDAR=on` in `~/.flint/runtime.override.env` (on a
+   line of its own, once, keeping the file `0600`), restarts the runtime,
+   starts Flint Calendar in the background and files the card that turns the
+   source on (`enable-source apple_calendar`). Flint Calendar's README has
+   each step.
+3. **Approve the card.** Open Approvals in the console. The card is "Turn On
+   the Apple Calendar Source", and under it: "Your Apple Calendar is read every
+   5 minutes and when it changes." Click Approve and confirm with your key.
+4. **Check it about 5 minutes later:**
    `cd ~/flint && pnpm --filter @flint/runtime apple-calendar`. It prints one
    line, for example "Connected · Last Read 2 Min Ago · 23 Events". It shows
    states and counts, never a title.
@@ -205,12 +202,15 @@ keeps its own approval.
 - **Pause reading:** System Settings > Privacy & Security > Calendars, then
   turn Flint Calendar off. The `apple-calendar` line says "Calendar Access Is
   Off", and Flint keeps what it already knows.
-- **Turn the source off:** remove the `FLINT_SOURCE_APPLE_CALENDAR` line from
-  `~/.flint/runtime.override.env` and run
+- **Disconnect:** `~/flint/apps/desktop-calendar/disconnect.sh`. It stops
+  Flint Calendar, tells the runtime (which archives every Apple event, and the
+  `apple-calendar` line says "Disconnected"), then removes the
+  `FLINT_SOURCE_APPLE_CALENDAR` line and restarts the runtime. Add
+  `--uninstall` to remove the app too.
+- **Turn the source off by hand:** remove the `FLINT_SOURCE_APPLE_CALENDAR`
+  line from `~/.flint/runtime.override.env` and run
   `launchctl kickstart -k gui/$(id -u)/com.flint.runtime`. Its events stay as
-  they were last known, and the `apple-calendar` line says "Off". To archive
-  them first, disconnect in Flint Calendar before you do this: it tells the
-  runtime, which archives every Apple event, and the line says "Disconnected".
+  they were last known, and the `apple-calendar` line says "Off".
 - **Titles:** as for Google, the nightly cleanup deletes each a week after it
   was last seen.
 

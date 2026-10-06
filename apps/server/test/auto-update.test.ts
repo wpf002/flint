@@ -5,7 +5,9 @@
  *    "up to date" (the runtime's git source reads those lines);
  *  - update_app.sh installs a new Flint.app build even while the app is open
  *    (the app restarts itself onto it when idle), and keeps the current app
- *    when a build fails.
+ *    when a build fails;
+ *  - Flint Calendar (apps/desktop-calendar) is updated only once the runtime
+ *    it pushes to is live with the commit's runtime code.
  * Everything runs in scratch repos with stub install scripts, a stub pnpm and
  * a stub osascript: nothing touches ~/.flint, /Applications or the screen.
  */
@@ -77,6 +79,7 @@ describe('auto_deploy.sh retries a failed deploy', () => {
       'exit 0',
     ].join('\n'));
     script(join(work, 'apps/desktop-mac/update_app.sh'), `echo app >> "${tmp}/appmarks"; exit 0`);
+    script(join(work, 'apps/desktop-calendar/update_calendar.sh'), `echo calendar >> "${tmp}/calmarks"; exit 0`);
     writeFileSync(join(work, 'README'), 'v0\n');
     git(work, 'add', '-A');
     git(work, 'commit', '-q', '-m', 'v0');
@@ -96,12 +99,13 @@ describe('auto_deploy.sh retries a failed deploy', () => {
   const tick = () => {
     rmSync(marks, { force: true });
     rmSync(join(tmp, 'appmarks'), { force: true });
+    rmSync(join(tmp, 'calmarks'), { force: true });
     const r = spawnSync('/bin/zsh', [AUTO_DEPLOY], {
       encoding: 'utf8',
       env: { ...process.env, HOME: tmp, FLINT_REPO: deployDir, FLINT_STATE_DIR: state, PATH: `${bin}:${process.env.PATH}` },
     });
     const ran = existsSync(marks) ? readFileSync(marks, 'utf8').trim().split('\n') : [];
-    return { status: r.status, out: r.stdout + r.stderr, ran, app: existsSync(join(tmp, 'appmarks')) };
+    return { status: r.status, out: r.stdout + r.stderr, ran, app: existsSync(join(tmp, 'appmarks')), calendar: existsSync(join(tmp, 'calmarks')) };
   };
   const flag = (name: string, on = true) => (on ? writeFileSync(join(tmp, name), '') : rmSync(join(tmp, name), { force: true }));
   const retryFile = () => join(state, 'deploy-retry');
@@ -304,6 +308,60 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     t = tick();
     expect(t.out).toMatch(new RegExp(`deployed ${sha}$`, 'm'));
     expect(t.app).toBe(true);
+  });
+
+  it('updates Flint Calendar only once the runtime is live with the commit, so a new wire format reaches the runtime first', () => {
+    // No runtime live at all (its first deploy failed): the helper waits.
+    flag('runtime-gate');
+    const first = push('v1');
+    let t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(live()).toBeNull();
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${first}`);
+    flag('runtime-gate', false);
+    push('v0 runtime', 'apps/runtime/x.ts');
+    expect(tick().calendar).toBe(true);
+    // A runtime change that fails its gate: the server and the app deploy, the helper waits for the runtime.
+    const sha = push('a new wire format', 'apps/runtime/src/sources/apple/wire.ts');
+    flag('runtime-gate');
+    t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(t.app).toBe(true);
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${sha}`);
+    expect(tick().calendar).toBe(false);
+    // Retried and deployed: the helper follows on the same tick.
+    age(31);
+    flag('runtime-gate', false);
+    t = tick();
+    expect(t.out).toContain(`runtime deployed ${sha}`);
+    expect(t.calendar).toBe(true);
+  });
+
+  it('a push that leaves the runtime alone still updates Flint Calendar; a held runtime holds it back', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    // The runtime's release is older than this commit, but nothing it is built from changed.
+    push('the helper', 'apps/desktop-calendar/FlintCalendar.swift');
+    let t = tick();
+    expect(t.ran).toEqual(['server']);
+    expect(t.calendar).toBe(true);
+    // A runtime that failed past its gate is held at the older release: the helper waits, even for unrelated pushes.
+    push('a bad migration', 'apps/runtime/x.ts');
+    flag('runtime-migrate');
+    expect(tick().calendar).toBe(false);
+    flag('runtime-migrate', false);
+    const docs = push('docs', 'docs.md');
+    t = tick();
+    expect(t.ran).toEqual(['server']);
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${docs}`);
+    // The fix deploys the runtime, and the helper with it.
+    push('the fix', 'apps/runtime/x.ts');
+    t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(t.calendar).toBe(true);
   });
 
   it('a retry file without a final newline never stops the deploys', () => {

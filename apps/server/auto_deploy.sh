@@ -171,3 +171,24 @@ if is_live server "$after"; then
 else
   echo "$(date '+%F %T') app: waiting for the server to deploy $after"
 fi
+
+# Flint Calendar, the Apple Calendar helper (apps/desktop-calendar): the same,
+# once the runtime it pushes to is live with this commit's code (its release is
+# this commit, or no runtime path changed since its release), so a new wire
+# format reaches the runtime before the helper sends it. A runtime held after a
+# failed deploy is not current, and the helper waits for it.
+runtime_current() {
+  local live
+  live=$(runtime_live)
+  [ -n "$live" ] || return 1
+  [ "$live" = "$1" ] && return 0
+  git cat-file -e "$live^{commit}" 2>/dev/null || return 1
+  ! git diff --name-only "$live" "$1" 2>/dev/null | grep -qE "$RUNTIME_PATHS"
+}
+if [ -x ./apps/desktop-calendar/update_calendar.sh ]; then
+  if runtime_current "$after"; then
+    ./apps/desktop-calendar/update_calendar.sh || echo "$(date '+%F %T') calendar: update_calendar.sh failed"
+  else
+    echo "$(date '+%F %T') calendar: waiting for the runtime to deploy $after"
+  fi
+fi

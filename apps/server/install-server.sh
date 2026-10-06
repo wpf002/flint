@@ -63,7 +63,8 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: typechecking..."
   pnpm --filter server typecheck || { echo "✗ typecheck failed — NOT deploying"; exit 1; }
   echo "gate: server policy tests (brain routing + auto-approval)..."
-  pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
+  # FLINT_REQUIRE_SWIFT: on the Studio, Flint Calendar's Swift checks (desktop-calendar.test.ts) must run, never skip.
+  FLINT_REQUIRE_SWIFT=1 pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
   echo "gate: policy typecheck + tests (isSafeTool, the tier engine, approval signatures)..."
   pnpm --filter @flint/policy typecheck || { echo "✗ policy typecheck failed — NOT deploying"; exit 1; }
   pnpm --filter @flint/policy test || { echo "✗ policy tests failed — NOT deploying"; exit 1; }
