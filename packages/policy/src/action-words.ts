@@ -15,6 +15,23 @@ export const ACTION_WORDS: Readonly<Record<string, string>> = {
   'runtime.explain_decision': 'Explain a Triage Decision',
 };
 
+/**
+ * What each action did, as a sentence (the "Action done" note's body): Flint in
+ * the third person, past tense. Its title above is a command ("Check What’s
+ * Happening Now"), which reads wrong as the subject of a sentence. Every action
+ * in ACTION_WORDS has one (a test keeps the two in step).
+ */
+export const ACTION_DONE: Readonly<Record<string, string>> = {
+  'runtime.world_now': 'Flint checked what’s happening now.',
+  'runtime.world_entity': 'Flint looked up one item.',
+  'runtime.ledger_open': 'Flint read its open predictions.',
+  'runtime.ledger_calibration': 'Flint checked its prediction accuracy.',
+  'runtime.ledger_record_prediction': 'Flint recorded a prediction.',
+  'runtime.inbox_recent': 'Flint read what triage decided.',
+  'runtime.escalations_open': 'Flint read the open escalations.',
+  'runtime.explain_decision': 'Flint explained a triage decision.',
+};
+
 /** The words for an action, or its name when it has none. */
 export function actionWords(fullName: string): string {
   return ACTION_WORDS[fullName] ?? fullName;

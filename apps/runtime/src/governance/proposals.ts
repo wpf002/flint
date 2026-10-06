@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { digestOf, redact, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { REFUSAL, digestOf, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -28,6 +28,8 @@ export class Refused extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409 | 429,
     message: string,
+    /** Why, in the engine's or the verifier's own words: logged with a ref, never sent (the message is what Will reads). */
+    readonly why?: string,
   ) {
     super(message);
     this.name = 'Refused';
@@ -186,6 +188,31 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
 }
 
 /**
+ * A signed decision the runtime will not take: the reason (crypto or engine
+ * wording) goes into the audit, the sentence Will reads into the refusal. A
+ * cause no retry can clear (an RP that is not set up, a revoked key) says its
+ * fix instead of "Try again".
+ */
+async function refuseSigned(
+  db: Db,
+  p: { id: string; action: string; argsDigest: string; tainted: boolean },
+  step: 'approve' | 'reject',
+  approvalId: string,
+  r: { status: 403 | 409; words: string; why: string },
+  actor: string,
+  now: Date,
+): Promise<never> {
+  await appendAudit(db, [{
+    actor, context: 'console', kind: 'decision', action: p.action, decision: 'deny', outcome: 'denied',
+    inputs: auditInputs(p, { approvalId, step }), reasoning: r.why.slice(0, 1000), correlationId: p.id, tainted: p.tainted,
+  }], now);
+  throw new Refused(r.status, r.words, r.why);
+}
+
+/** Why a signature did not verify here, as Will reads it: the fix when there is one, else `retry`. */
+const unverified = (reason: string, retry: string) => refusalFix(reason, 'runtime') ?? retry;
+
+/**
  * Approve with Will's signed approval (already verified by the server and
  * recorded by flint_approver). The signature is verified again here; an action
  * that is FORBIDDEN now is refused with 409 and the approval is left unused.
@@ -195,13 +222,16 @@ export async function approveProposal(db: Db, id: string, approvalId: string, rp
   if (!p) throw new Refused(404, GONE);
   if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   const v = await reverifyApproval(db, approvalId, rp);
-  // The reason is crypto wording: it stays out of what Will reads.
-  if (!v.ok) throw new Refused(403, 'Your approval didn’t verify. Try again.');
+  if (!v.ok) {
+    return refuseSigned(db, p, 'approve', approvalId, { status: 403, words: unverified(v.reason, 'Your approval didn’t verify. Try again.'), why: `the approval does not verify: ${v.reason}` }, actor, now);
+  }
   if (v.payload.subjectType !== 'proposal' || v.payload.subjectId !== id || v.payload.decision !== 'approve' || v.payload.action !== p.action || v.payload.argsDigest !== p.argsDigest) {
-    throw new Refused(403, 'Your approval was for something else.');
+    return refuseSigned(db, p, 'approve', approvalId, { status: 403, words: 'Your approval was for something else.', why: 'the approval was signed for something else' }, actor, now);
   }
   const decision = await tierOf(db, p, now);
-  if (decision.tier === 'forbidden') throw new Refused(409, 'Flint isn’t allowed to run this.');
+  if (decision.tier === 'forbidden') {
+    return refuseSigned(db, p, 'approve', approvalId, { status: 409, words: 'Flint isn’t allowed to run this.', why: `forbidden: ${decision.reason}` }, actor, now);
+  }
   await db.$transaction(async (tx) => {
     // proposal_transition checks the approval again and consumes it.
     await tx.proposal.update({ where: { id }, data: { status: 'approved', approvalId } });
@@ -219,7 +249,9 @@ export async function rejectProposal(db: Db, id: string, opts: { approvalId?: st
   if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   if (opts.approvalId) {
     const v = await reverifyApproval(db, opts.approvalId, rp);
-    if (!v.ok) throw new Refused(403, 'Your rejection didn’t verify. Try again.');
+    if (!v.ok) {
+      return refuseSigned(db, p, 'reject', opts.approvalId, { status: 403, words: unverified(v.reason, 'Your rejection didn’t verify. Try again.'), why: `the rejection does not verify: ${v.reason}` }, actor, new Date());
+    }
   }
   await db.$transaction(async (tx) => {
     await tx.proposal.update({
@@ -254,12 +286,15 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
         actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
         inputs: auditInputs(p), reasoning: (why ? `${reason} (${why})` : reason).slice(0, 1000), correlationId: id, tainted: p.tainted,
       }], now);
-      return { refused: new Refused(status, reason) } as const;
+      return { refused: new Refused(status, reason, why) } as const;
     };
     const v = await reverifyApproval(tx, p.approvalId, rp);
     if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
-      // The reason stays in the audit (the refusal is stored as the card's error, which Will reads).
-      return fail('Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
+      // The reason stays in the audit (the refusal is stored as the card's error, which Will reads),
+      // and a cause no retry can clear (the runtime's RP not set up, a revoked key) says its fix.
+      // A revoked key is "no longer valid" (the card has failed: there is nothing to approve again).
+      const fix = v.ok || v.reason === REFUSAL.revoked ? undefined : refusalFix(v.reason, 'runtime');
+      return fail(fix ? `Flint didn’t run it. ${fix}` : 'Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
     }
     // The args as stored, read as text (exact), are what is checked and what runs.
     const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;

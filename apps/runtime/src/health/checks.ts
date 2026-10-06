@@ -16,7 +16,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { redact, HEALTH_STATUS, type HealthReport } from '@flint/policy';
+import { localDay, redact, HEALTH_STATUS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
@@ -37,12 +37,15 @@ export const DEPLOY_WINDOW_MS = 10 * 60_000;
 
 export interface CheckDeps {
   db: Db;
-  config: Pick<Config, 'home' | 'triage'>;
+  config: Pick<Config, 'home' | 'triage' | 'tz'>;
   now: Date;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
 }
 
 const clip = (s: string) => redact(s).slice(0, 300);
+/** How many of Will's calendar days lie between two times (0: the same local day). */
+export const calendarDaysBetween = (tz: string, from: Date, to: Date): number =>
+  Math.round((Date.parse(`${localDay(tz, to)}T00:00:00Z`) - Date.parse(`${localDay(tz, from)}T00:00:00Z`)) / 86_400_000);
 /** "1 hour", "3 hours": each detail is a sentence Will reads in Settings > Health. */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -91,7 +94,8 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     const status: Status = fresh === 'ok' && setAside ? 'degraded' : fresh;
     const detail = c.consecutiveFailures
       ? c.consecutiveFailures === 1 ? 'The last read failed.' : `The last ${c.consecutiveFailures} reads failed.`
-      : !c.lastOkAt ? 'It hasn’t had a good read yet.' : c.lastError ? 'The last read skipped an item.' : undefined;
+      // Set aside: one item, or a calendar's whole tail past its page limit. The count is not kept, so the line is true for any.
+      : !c.lastOkAt ? 'It hasn’t had a good read yet.' : c.lastError ? 'The last read skipped at least one item.' : undefined;
     out.push({ component, status, ...(detail ? { detail: clip(detail) } : {}) });
   }
 
@@ -102,8 +106,9 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   // The latest drill only: one that failed and was then passed is passed.
   const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
   const drillD = drill?.restoreTestedAt ? (now.getTime() - drill.restoreTestedAt.getTime()) / 86_400_000 : Infinity;
-  const days = Math.round(drillD);
-  const tested = days === 0 ? 'today' : `${count(days, 'day')} ago`;
+  // "today" and "yesterday" are Will's calendar days, not 24-hour spans: a 2:15 AM test is "today" all that day.
+  const days = drill?.restoreTestedAt ? calendarDaysBetween(d.config.tz, drill.restoreTestedAt, now) : 0;
+  const tested = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${count(days, 'day')} ago`;
   out.push({
     component: 'restore_drill', status: drill?.restoreOk === false ? 'down' : drillD <= 8 ? 'ok' : 'degraded',
     detail: !drill ? 'No restore test has run yet.' : drill.restoreOk === false ? `The last restore test failed ${tested}.` : `The last restore test was ${tested}.`,

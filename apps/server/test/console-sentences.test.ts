@@ -103,6 +103,20 @@ describe('the console asking Flint', () => {
     }
   });
 
+  it('a reply stopped because no brain has budget left says why and what to do, from the sentence the server wrote for Will', async () => {
+    const message = "Claude (Anthropic) budget reached: today's $10.00 cap is spent. No brain with budget left can answer, so none was called. Ask again after the budget resets, or raise the cap (FLINT_BUDGET_ANTHROPIC_*).";
+    const error = `Error: frontier failed: Error: 529 overloaded. ${message}`;
+    const t = chat(stream({ type: 'error', error, message }));
+    t.send();
+    await settle();
+    expect(t.reply().innerHTML).toBe(
+      "\n\nThis reply stopped early. Claude budget reached: today's $10.00 cap is spent. No brain with budget left can answer, so none was called. Ask again after the budget resets, or raise the cap.",
+    );
+    // The raw error stays in the console log only.
+    expect(t.reply().innerHTML).not.toMatch(/frontier failed|529|Error:/);
+    expect(t.logged).toEqual([['Flint: the reply stopped early:', error]]);
+  });
+
   it('a refused message says it was not sent, in Flint\'s words; no answer at all says so', async () => {
     const refused = chat(async () => ({ status: 413, ok: false, json: async () => ({ error: 'that file is over the 20 MB limit' }) }));
     refused.send();
@@ -116,6 +130,25 @@ describe('the console asking Flint', () => {
     down.send();
     await settle();
     expect(down.reply().textContent).toBe('Flint didn’t answer. Try again.');
+  });
+});
+
+describe('a card a chat proposed', () => {
+  it('says a chat filed it, even when the server sent it without its origin', () => {
+    const host = { children: [] as Array<{ children: Array<{ cls: string; text: string }> }>, appendChild(c: { children: Array<{ cls: string; text: string }> }) { this.children.push(c); return c; } };
+    const subs: unknown[] = [];
+    const c: Record<string, unknown> = {
+      $: () => ({ scrollTop: 0 }),
+      el: (_tag: string, cls?: string, text?: string) => ({ cls, text, children: [] as unknown[], classList: { toggle() {}, contains: () => false }, style: {}, appendChild(x: unknown) { this.children.push(x); return x; } }),
+      apprTitle: (a: { fullName: string }) => a.fullName,
+      apprSub: (a: { origin?: string }) => (subs.push(a.origin), a.origin && a.origin.indexOf('chat:') === 0 ? 'A chat filed this.' : 'Its source is unknown.'),
+      apprAlone: () => false, approveLabel: () => 'Approve', approveAction: () => {}, rejectAction: () => {},
+    };
+    createContext(c);
+    runInContext(fn('renderProposals'), c);
+    (c.renderProposals as (a: unknown[], b: unknown) => void)([{ id: 'act-1', fullName: 'github.create_issue', args: {}, tainted: false, status: 'pending' }, { id: 'pr2', fullName: 'github.create_issue', args: {}, tainted: false, status: 'pending', origin: 'chat:t1' }], { parentNode: host });
+    expect(subs).toEqual(['chat:', 'chat:t1']);
+    expect(host.children.map((card) => card.children.find((x) => x.cls === 'psub')!.text)).toEqual(['A chat filed this.', 'A chat filed this.']);
   });
 });
 

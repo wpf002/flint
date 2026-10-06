@@ -138,3 +138,7 @@ commit isn't tried again until you clear it:
 2. Fix the migration, then run its `down.sql` by hand.
 3. Delete `~/.flint/runtime/migrate-failed`. The next deploy applies the
    migration again.
+
+If the copy itself can't be taken, the deploy stops before the migration and
+the note is "The runtime did not deploy" instead: nothing changed, and the
+deploy is tried again (as any deploy that fails its checks is).

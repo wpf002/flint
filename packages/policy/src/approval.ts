@@ -49,6 +49,43 @@ export type Refused = { ok: false; reason: string };
 export type Verified = { ok: true; signCount?: number } | Refused;
 const no = (reason: string): Refused => ({ ok: false, reason });
 
+/**
+ * The reasons a verifier (here, or the runtime's re-verify) gives that trying
+ * again cannot clear. The reason itself is crypto wording, kept for the log and
+ * the audit; refusalFix() is what Will reads in its place.
+ */
+export const REFUSAL = {
+  origin: 'the origin is not allowed',
+  crossOrigin: 'cross-origin assertions are refused',
+  rpId: 'the RP ID does not match',
+  counter: 'the signature counter did not increase',
+  revoked: 'the credential was revoked',
+  rpMissing: 'passkey approvals need FLINT_RP_ID and FLINT_RP_ORIGINS',
+} as const;
+
+/**
+ * A refusal no retry can clear, as a sentence that names the fix; undefined for
+ * one a retry may clear (a bad signature, a user who was not verified), where
+ * the caller says to try again. `where` is who refused: the server verifies the
+ * browser's fresh signature, so a wrong origin there is the page's address; the
+ * runtime re-verifies what the server accepted, so a wrong origin there is its
+ * own settings disagreeing with the server's.
+ */
+export function refusalFix(reason: string, where: 'server' | 'runtime' = 'server'): string | undefined {
+  if (where === 'runtime') {
+    if (reason === REFUSAL.rpMissing) return 'Passkeys aren’t set up on the runtime. Give it FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.';
+    if (reason === REFUSAL.origin || reason === REFUSAL.crossOrigin || reason === REFUSAL.rpId) {
+      return 'The runtime’s passkey settings don’t match the server’s. Give it the same FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.';
+    }
+    if (reason === REFUSAL.revoked) return 'The key that signed it was revoked. Use a key you have now.';
+    return undefined;
+  }
+  if (reason === REFUSAL.origin || reason === REFUSAL.crossOrigin) return 'Passkeys work only at Flint’s tailnet address. Open Flint there and try again.';
+  if (reason === REFUSAL.rpId) return 'This passkey is for a different address than Flint’s. Open Flint at its tailnet address, or add a passkey there.';
+  if (reason === REFUSAL.counter) return 'This passkey’s counter didn’t go up, which can mean it was copied. Add a new passkey in Settings.';
+  return undefined;
+}
+
 /** A P-256 public key from SPKI DER, or undefined if it is not one. */
 export function p256Key(spki: Uint8Array): KeyObject | undefined {
   try {
@@ -117,14 +154,14 @@ function checkClientData(raw: Uint8Array, type: 'webauthn.get' | 'webauthn.creat
   }
   if (cd.type !== type) return no(`clientData type is not ${type}`);
   if (typeof cd.challenge !== 'string' || cd.challenge !== b64url(challenge)) return no('the challenge does not match');
-  if (typeof cd.origin !== 'string' || !rp.origins.includes(cd.origin)) return no('the origin is not allowed');
-  if (cd.crossOrigin === true) return no('cross-origin assertions are refused');
+  if (typeof cd.origin !== 'string' || !rp.origins.includes(cd.origin)) return no(REFUSAL.origin);
+  if (cd.crossOrigin === true) return no(REFUSAL.crossOrigin);
   return { ok: true };
 }
 
 function checkAuthData(authData: Uint8Array, rp: WebAuthnRelyingParty, needAttested: boolean): Verified & { signCount?: number } {
   if (authData.length < 37) return no('authenticatorData is too short');
-  if (!same(authData.subarray(0, 32), sha256(rp.rpId))) return no('the RP ID does not match');
+  if (!same(authData.subarray(0, 32), sha256(rp.rpId))) return no(REFUSAL.rpId);
   const flags = authData[32]!;
   if (!(flags & UP)) return no('the user was not present');
   if ((rp.requireUserVerification ?? true) && !(flags & UV)) return no('the user was not verified');
@@ -160,7 +197,7 @@ export function verifyWebAuthnAssertion(opts: {
   if (!ad.ok) return ad;
   const count = ad.signCount ?? 0;
   const stored = opts.storedSignCount;
-  if (stored !== undefined && (count !== 0 || stored !== 0) && count <= stored) return no('the signature counter did not increase');
+  if (stored !== undefined && (count !== 0 || stored !== 0) && count <= stored) return no(REFUSAL.counter);
   const signed = Buffer.concat([Buffer.from(opts.authenticatorData), sha256(opts.clientDataJson)]);
   try {
     return verify('sha256', signed, key, Buffer.from(opts.signature)) ? { ok: true, signCount: count } : no('bad signature');

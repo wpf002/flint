@@ -11,7 +11,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { digestOf } from '@flint/policy';
+import { digestOf, localDay } from '@flint/policy';
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
@@ -104,7 +104,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     // A good run that set something aside (a calendar item it could not read) is degraded, with why.
     await owner(`UPDATE "SourceCursor" SET "lastError" = 'an item set aside', "consecutiveFailures" = 0 WHERE source = 'launchd'`);
     const aside = (await checkComponents({ db, config, now, sources: [{ name: 'launchd', cadenceMs: 2 * MIN }] })).find((c) => c.component === 'source:launchd');
-    expect(aside).toMatchObject({ status: 'degraded', detail: 'The last read skipped an item.' });
+    expect(aside).toMatchObject({ status: 'degraded', detail: 'The last read skipped at least one item.' });
     await owner(`UPDATE "SourceCursor" SET "lastError" = NULL WHERE source = 'launchd'`);
     await recordChecks(db, checks, now);
     // The triage worker's own mark is not a component: nothing writes it an ok row, so it never shows as an issue.
@@ -165,7 +165,28 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     expect(after.find((c) => c.component === 'migrate_failed')).toMatchObject({ status: 'down', detail: 'A database update failed and won’t be retried until it’s fixed.' });
     // Each detail is a sentence: the latest backup's age (dr2, an hour ago), and the latest drill (passed an hour ago).
     expect(after.find((c) => c.component === 'backup')).toMatchObject({ status: 'ok', detail: 'The last backup is 1 hour old.' });
-    expect(after.find((c) => c.component === 'restore_drill')).toMatchObject({ status: 'ok', detail: 'The last restore test was today.' });
+    // dr2 passed an hour ago: today, or yesterday when that hour crossed midnight (config.tz is UTC).
+    const dr2Day = localDay('UTC', new Date(now.getTime() - 3_600_000)) === localDay('UTC', now) ? 'today' : 'yesterday';
+    expect(after.find((c) => c.component === 'restore_drill')).toMatchObject({ status: 'ok', detail: `The last restore test was ${dr2Day}.` });
+  });
+
+  it('the restore test’s day is Will’s calendar day: this morning’s is "today" all day, last night’s "yesterday"', async () => {
+    // The newest drill of all (2030), so it is the one checked; removed after, so it leaves the watchdog alone.
+    const chicago = { ...config, tz: 'America/Chicago' };
+    const tested = new Date('2030-06-02T07:15:00Z'); // Sunday 2:15 AM in Chicago (CDT)
+    await owner(`INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt", "restoreTestedAt", "restoreOk") VALUES ('dr2030', 'pg_dump_flint', 'local', '/w', false, 'ok', $1, $1, false)`, [tested]);
+    try {
+      const at = async (iso: string) => (await checkComponents({ db, config: chicago, now: new Date(iso), sources: [] })).find((c) => c.component === 'restore_drill')!.detail;
+      // 3 PM the same day: 0.53 days later, which used to round to "1 day ago".
+      expect(await at('2030-06-02T20:00:00Z')).toBe('The last restore test failed today.');
+      // 12:30 AM Monday: under a day later, but yesterday.
+      expect(await at('2030-06-03T05:30:00Z')).toBe('The last restore test failed yesterday.');
+      expect(await at('2030-06-05T20:00:00Z')).toBe('The last restore test failed 3 days ago.');
+      await owner(`UPDATE "BackupRun" SET "restoreOk" = true WHERE id = 'dr2030'`);
+      expect(await at('2030-06-02T08:00:00Z')).toBe('The last restore test was today.');
+    } finally {
+      await owner(`DELETE FROM "BackupRun" WHERE id = 'dr2030'`);
+    }
   });
 
   it('a vendor at its cap is raised once a day, and not when the server said so today', async () => {

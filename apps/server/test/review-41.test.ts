@@ -6,7 +6,7 @@
  * signed policies and caps from the runtime, notifications that keep their
  * words in the console, and the approval routes end to end.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
@@ -19,13 +19,13 @@ import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
 import { isSafeTool } from '../src/policy';
 import { gateBuiltins, runtimeResultTainted, tierGate, type TierEvent, type TierOutcome } from '../src/tier-gate';
-import { historyOrigin, markEval, markTainted, taintFromHistory, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
+import { currentTurn, historyOrigin, markEval, markTainted, taintFromHistory, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
 import { ConversationTaint } from '../src/conversation-taint';
 import { AuditSink, AuditUnavailable, type AuditRecord } from '../src/audit-sink';
 import { RuntimeProposals } from '../src/runtime-proposals';
 import { RuntimePolicies, capClaimer, parsePolicies } from '../src/runtime-link';
 import { Approvals, type ApproverStore, type Credential } from '../src/approvals';
-import { approvalRoutes, executeApproved, type ApprovalDeps } from '../src/approval-routes';
+import { approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, type ApprovalDeps } from '../src/approval-routes';
 import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 import { SpendGuard, SpendLedger } from '../src/spend';
@@ -217,12 +217,19 @@ describe('runtime results and the gate', () => {
       markTainted('mcp:web');
       await remember!.handler({ id: '3', toolName: 'remember', args: { fact: 'b' } });
       expect(turnProposals().map((p) => p.fullName)).toEqual(['remember']);
+      // A chat filed it: the card in the conversation (and in Approvals) says so, never "Its source is unknown."
+      const turn = currentTurn()!;
+      expect(turnProposals()[0]!.origin).toBe(`chat:${turn.id}`);
+      expect(queue.list()[0]!.origin).toBe(`chat:${turn.id}`);
     });
     expect(events.map((e) => e.status)).toEqual(['read', 'acting', 'queued']);
     expect(events[1]!.correlationId).toMatch(/^call:/);
     expect(outcomes).toEqual([expect.objectContaining({ correlationId: events[1]!.correlationId, ok: false, error: 'the tool reported an error' })]);
     expect(JSON.stringify(outcomes)).not.toContain('secret');
     expect(events[2]!.correlationId).toBe(`act:${queue.list()[0]!.id}`);
+    // Outside a turn nothing says who filed it.
+    const outside = queue.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { out: 1 }, destructive: false });
+    expect(queue.list().find((p) => p.id === outside)!.origin).toBeUndefined();
   });
 
   it('an eval replay queues nothing and proposes nothing, even inside deep_research', async () => {
@@ -570,6 +577,35 @@ describe('approval routes', () => {
     expect(ran).toHaveLength(1);
   });
 
+  it('a refused approval says what Will can do, and why it was refused goes to the log under the ref it returns', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
+    const mem = memoryStore();
+    const logged: string[] = [];
+    const d = baseDeps({ approvals: new Approvals({ store: mem.store, enrollCodeFile: code }), errorRef: (tag, err) => (logged.push(`${tag} ${String(err)}`), 'r1') });
+    await serve(d);
+    const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const b = await post('/approvals/enroll/begin', { code: 'abcd-efgh-ijkl-mnop', label: 'Mac' });
+    await post('/approvals/enroll/finish', { challengeId: b.body.challengeId, factor: 'secure_enclave', publicKey: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), signature: signRaw('sha256', Buffer.from(String(b.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 11 }, destructive: false });
+    const begun = await post('/approvals/begin', { proposalId: id });
+    // Signed by some other key: Will reads a sentence; the verifier's reason is logged, never sent.
+    const other = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const r = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: signRaw('sha256', Buffer.from(String(begun.body.challenge), 'base64url'), other.privateKey).toString('base64url') });
+    expect(r).toEqual({ status: 403, body: { error: 'Your approval didn’t verify. Try again.', ref: 'r1' } });
+    expect(logged).toEqual(['approvals refused: the signature did not verify: bad signature']);
+    expect(ran).toEqual([]);
+    // A refusal that carries no reason of its own (an expired request) logs nothing.
+    const again = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: 'AA' });
+    expect(again.body).not.toHaveProperty('ref');
+    expect(logged).toHaveLength(1);
+    // A server with no approver role says how to set it up.
+    await serve(baseDeps());
+    expect(await post('/approvals/begin', { proposalId: id })).toEqual({ status: 501, body: { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' } });
+    server?.close();
+  });
+
   it('no intent on disk, no action', async () => {
     const d = baseDeps({ audit: { record: (_e: unknown, durable?: boolean) => { if (durable) throw new AuditUnavailable('full'); return {}; } } as unknown as ApprovalDeps['audit'] });
     const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 3 }, destructive: false });
@@ -616,11 +652,42 @@ describe('approval routes', () => {
       return (await executeApproved(baseDeps({ proposals: new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: f.fetchImpl }) }), 'pr3')).note;
     };
     expect(await noteFor('runtime:offsite', 'backup.offsite')).toBe('Approved. It runs tonight at 2:15 AM.');
-    expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs Sunday at 2:15 AM.');
+    // A Tuesday: the restore test runs Sunday (the clock alone is faked; the server and fetch are real).
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 9, 6, 12, 0) });
+    try {
+      expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs Sunday at 2:15 AM.');
+      // The Sunday its card was filed, after the run that filed it: the run that claims it is a week away.
+      vi.setSystemTime(new Date(2026, 9, 4, 15, 0));
+      expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs next Sunday at 2:15 AM.');
+    } finally {
+      vi.useRealTimers();
+    }
     expect(await noteFor('runtime:retention', 'maintenance.retention')).toBe('Approved. It runs tonight at 3:10 AM.');
     expect(await noteFor('runtime:other', 'other.job')).toBe('Approved. Its nightly job runs it.');
     // A chat tool that is not connected right now: Run Now in Approvals, once it is.
     expect(await noteFor('chat:t', 'mcp:gone.tool')).toBe('Approved. Its tool isn’t connected, so run it later in Approvals.');
+  });
+
+  it('the restore test’s run is never a time already past: today before 2:15 on a Sunday, next Sunday after', () => {
+    // Local time, as the LaunchAgent keeps it. 2026-10-04 is a Sunday.
+    expect(drillRunsAt(new Date(2026, 9, 6, 12, 0))).toBe('Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 3, 23, 59))).toBe('Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 0, 30))).toBe('today at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 2, 14))).toBe('today at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 2, 15))).toBe('next Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 15, 0))).toBe('next Sunday at 2:15 AM');
+    expect(nightlyRun('runtime:drill', new Date(2026, 9, 4, 15, 0))).toBe('Approved. It runs next Sunday at 2:15 AM.');
+    expect(nightlyRun('runtime:backup', new Date(2026, 9, 4, 15, 0))).toBe('Approved. It runs tonight at 2:15 AM.');
+    expect(nightlyRun('runtime:other')).toBeUndefined();
+  });
+
+  it('the "Action done" note says what Flint did in a sentence, never a title as its subject', () => {
+    expect(doneNote('runtime.world_now')).toBe('Flint checked what’s happening now.');
+    expect(doneNote('runtime.world_entity')).toBe('Flint looked up one item.');
+    expect(doneNote('gcal.create_event')).toBe('An approved action is done.');
+    for (const name of ['runtime.world_now', 'runtime.ledger_open', 'runtime.ledger_calibration', 'runtime.ledger_record_prediction', 'runtime.inbox_recent', 'runtime.escalations_open', 'runtime.explain_decision']) {
+      expect(doneNote(name)).toMatch(/^Flint [a-z][^A-Z]*\.$/);
+    }
   });
 
   it('enrolling a second key from another device: pending, approved there, finished here', async () => {
@@ -692,7 +759,7 @@ describe('second review of #41', () => {
     const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string, _k: string, _d: string, opts: unknown) => (notes.push([title, body, opts]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
     expect(out.status).toBe('done');
     // In the app only: Will just approved it, so no banner and no ping.
-    expect(notes).toEqual([['Action done', 'Check What’s Happening Now is done.', { channels: ['inapp'] }]]);
+    expect(notes).toEqual([['Action done', 'Flint checked what’s happening now.', { channels: ['inapp'] }]]);
   });
 
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {

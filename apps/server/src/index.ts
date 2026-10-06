@@ -1370,6 +1370,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       let failed = false;
       let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
       let gaveUp = false; // every tier refused or came back empty: the reply is the honest message
+      // A sentence the server wrote for Will about why the reply stopped (the budget refusal), sent with the raw error.
+      let stopWords: string | undefined;
       let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
       const moved = movedBy(message, tier, { toolsLikely, turns });
       // "World now" (./world-now), fetched alongside recall, for frontier turns only: a local
@@ -1439,6 +1441,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
               res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
               await pump(ctx.persona);
             } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
+              stopWords = budget.localRefusal;
               throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
             } else {
               throw err;
@@ -1461,7 +1464,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         if (proposed.length > 0) res.write(`data: ${JSON.stringify({ type: 'pending', actions: proposed })}\n\n`);
       } catch (err) {
         failed = true;
-        res.write(`data: ${JSON.stringify({ type: 'error', error: String(err) })}\n\n`);
+        // `error` is the raw detail (the console logs it); `message`, when the server wrote one, is what Will reads.
+        res.write(`data: ${JSON.stringify({ type: 'error', error: String(err), ...(stopWords ? { message: stopWords } : {}) })}\n\n`);
       }
       // The [route] line (./route-log): tier, what moved it, who answered. Never the message.
       const outcome = chatOutcome({ aborted: ac.signal.aborted, failed, streamErrored, gaveUp, answer });

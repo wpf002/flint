@@ -103,7 +103,8 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     // The words name the service, and its probability is the stored row's, through phrase().
     const p = await db.prediction.findUniqueOrThrow({ where: { id: escalation.predictionId! } });
     expect(p).toMatchObject({ probability: 0.4, method: 'base_rate', claim: `service#${serviceId.slice(-6)} reports healthy at the resolve time`, subjectEntityId: serviceId });
-    expect(escalation.title).toBe('com.flint.server is down');
+    // By its plain name: the entity is com.flint.server.
+    expect(escalation.title).toBe('The server is down');
     expect(escalation.body).toContain(phrase(p.probability!, p.resolveBy, 'America/Chicago'));
     const rec = await db.recommendation.findUniqueOrThrow({ where: { id: escalation.recommendationId! }, include: { prediction: true } });
     expect(rec).toMatchObject({ type: 'escalation_action', prediction: { resolver: 'conditional', conditionRecommendationId: rec.id, probability: 0.8 } });

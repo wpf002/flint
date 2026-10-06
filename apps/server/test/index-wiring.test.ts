@@ -50,6 +50,13 @@ describe('index.ts wiring', () => {
     expect(src).toMatch(/res\.statusCode >= 500 && res\.statusCode <= 599 && route && !turn\?\.eval\) events\.push\(\{ type: 'route\.error'/);
   });
 
+  it('a reply stopped mid-stream because no brain has budget left sends Will the reason beside the raw error', () => {
+    // The refusal the stream throws is the one Will reads: set just before that throw, and only there.
+    expect(chat).toMatch(/stopWords = budget\.localRefusal;\s*throw new Error\(`frontier failed: \$\{String\(err\)\}\. \$\{budget\.localRefusal\}`\);/);
+    expect(chat.match(/stopWords = /g)).toHaveLength(1);
+    expect(chat).toContain("res.write(`data: ${JSON.stringify({ type: 'error', error: String(err), ...(stopWords ? { message: stopWords } : {}) })}\\n\\n`);");
+  });
+
   it('the Watcher starts only while FLINT_WATCHER is not off (P2.5)', () => {
     expect(src).toContain('if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();');
     expect(src.match(/new Watcher\(/g)).toHaveLength(1);

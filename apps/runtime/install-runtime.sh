@@ -88,8 +88,9 @@ BACKUP_URL="$(secret FLINT_DB_BACKUP_URL)"
 APP_URL="$(secret FLINT_DB_URL)"
 [ -n "$OWNER_URL" ] && [ -n "$BACKUP_URL" ] && [ -n "$APP_URL" ] || die "FLINT_DB_OWNER_URL, FLINT_DB_BACKUP_URL and FLINT_DB_URL must be in secrets.env"
 
-# 4. pre-migrate dump (only when a migration is pending)
-DEPLOY_STAGE=migrate
+# 4. pre-migrate dump (only when a migration is pending). Still the gate: a dump that
+# fails stops the deploy before anything changes, writes no migrate-failed marker
+# (so a later run tries again), and leaves no copy, so it is no failed migration.
 PENDING="$(cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma migrate status 2>&1 || true)"
 if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been applied|following migration"; then
   echo "runtime: migrations pending; dumping first..."
@@ -104,7 +105,8 @@ if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been ap
       "$PG_DUMP" -Fc -h "$H" -p "$P" -U "$U" -d "$D" -f "$DUMP.partial" && mv "$DUMP.partial" "$DUMP" && chmod 600 "$DUMP"; } \
     || die "pre-migrate dump failed — NOT migrating"
 
-  # 5. migrate
+  # 5. migrate: only from here is a failure a failed migration (the marker below, and the dump above, exist)
+  DEPLOY_STAGE=migrate
   echo "runtime: prisma migrate deploy (as flint_owner)..."
   if ! (cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma migrate deploy); then
     echo "$SHA" >> "$RT/migrate-failed"

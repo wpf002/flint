@@ -311,8 +311,8 @@ describe('the console Activity panel: notifications', () => {
         unread: 3,
         items: [
           { id: 'n3', title: 'Backups waiting for you', body: 'Approve the card to run tonight.', ts: now - 60_000, read: false },
-          { id: 'n2', title: 'Action done', body: 'Check What’s Happening Now is done.', ts: now - 3 * 86400_000, read: true },
-          { id: 'n1', title: 'Action done', body: 'Check What’s Happening Now is done.', ts: now - 3 * 86400_000 - 1000, read: true },
+          { id: 'n2', title: 'Action done', body: 'Flint checked what’s happening now.', ts: now - 3 * 86400_000, read: true },
+          { id: 'n1', title: 'Action done', body: 'Flint checked what’s happening now.', ts: now - 3 * 86400_000 - 1000, read: true },
         ],
       },
     });
@@ -324,7 +324,7 @@ describe('the console Activity panel: notifications', () => {
     expect(text).toContain('Earlier');
     expect(text).toContain('Action Done');
     // The count is a sentence of its own after the note's.
-    expect(text).toContain('Check What’s Happening Now is done. It happened 2 times.');
+    expect(text).toContain('Flint checked what’s happening now. It happened 2 times.');
     expect(ids.markread!.hidden).toBe(false);
     expect(calls.some((c) => c.url === '/notifications/read' && c.method === 'POST')).toBe(true);
   });
@@ -382,14 +382,14 @@ describe('Settings: Health', () => {
   it('lists a source that set something aside as an issue, by its own name', async () => {
     routes['/runtime/health'] = report([
       { component: 'postgres', status: 'ok', detail: null, at: AT },
-      { component: 'source:google_calendar', status: 'degraded', detail: 'The last read skipped an item.', at: AT },
+      { component: 'source:google_calendar', status: 'degraded', detail: 'The last read skipped at least one item.', at: AT },
     ]);
     run('loadHealth()');
     await settle();
     const top = ids.sethealth!.shown();
     expect(top).toContain('1 Issue');
     expect(top).toContain('Google Calendar');
-    expect(top).toContain('Google CalendarThe last read skipped an item.');
+    expect(top).toContain('Google CalendarThe last read skipped at least one item.');
     // A note that is not a sentence yet gets its capital and its stop.
     expect(run(`healthDetail('the last read failed (see ~/.flint/runtime.log)')`)).toBe('The last read failed.');
     expect(run(`healthDetail('done.')`)).toBe('Done.');

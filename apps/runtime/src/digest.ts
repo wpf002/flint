@@ -2,8 +2,9 @@
  * The 07:30 digest (Machine plan P2): the previous local day, from counts
  * only (no model writes any of it), in the console's note and nowhere else.
  *
- *  - Did / queued, as ask's morning brief split them: what was done (actions
- *    with an ok outcome, not Will's own clicks) and what waits on Will
+ *  - Did / queued, as ask's morning brief split them: what Flint did on its own
+ *    (each action that ended ok, counted once however many rows it wrote, and
+ *    never one Will approved or clicked) and what waits on Will
  *    (pending proposals, open escalations); the lanes; what is not healthy,
  *    by the names Settings > Health uses; the predictions that resolve today.
  *    Each line is a sentence in the console's words (Important, Other, approvals).
@@ -33,6 +34,21 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** "A", "A and B", "A, B and C". */
 const listOf = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}` : (xs[0] ?? ''));
 
+/**
+ * What Flint did on its own in [start, end): actions that ended ok, each counted
+ * once by its correlation id (a nightly job and its proposal both write a row
+ * for one run), never one Will approved (its correlation id is the proposal's)
+ * or did himself (the console), nor a row that only logged.
+ */
+async function didOnItsOwn(db: Db, start: Date, end: Date): Promise<number> {
+  const [row] = await db.$queryRaw<Array<{ n: number }>>`
+    SELECT count(DISTINCT COALESCE(a."correlationId", a.id))::int AS n FROM "AuditEntry" a
+    WHERE a.kind = 'action' AND a.outcome = 'ok' AND a.context <> 'console' AND a.decision IS DISTINCT FROM 'log'
+      AND a.at >= ${start} AND a.at < ${end}
+      AND NOT EXISTS (SELECT 1 FROM "Proposal" p WHERE p.id = a."correlationId")`;
+  return row?.n ?? 0;
+}
+
 export async function buildDigest(db: Db, tz: string, now = new Date()): Promise<Digest> {
   const day = previousDay(localDay(tz, now));
   const { start, end } = localDayBounds(tz, day);
@@ -42,7 +58,7 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
     db.triageDecision.count({ where: { lane: 'relevant', createdAt: window } }),
     db.triageDecision.count({ where: { lane: 'quiet', createdAt: window } }),
     db.escalation.count({ where: { createdAt: window } }),
-    db.auditEntry.count({ where: { kind: 'action', outcome: 'ok', context: { not: 'console' }, at: window } }),
+    didOnItsOwn(db, start, end),
     db.proposal.count({ where: { status: 'pending', expiresAt: { gt: now } } }),
     db.escalation.count({ where: { status: 'open' } }),
     db.prediction.count({ where: { status: 'open', resolveBy: { gte: today.start, lt: today.end } } }),

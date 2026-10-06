@@ -48,8 +48,36 @@ const clockTime = (hhmm: string) => {
   const [h, m] = hhmm.split(':').map(Number) as [number, number];
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 };
-/** A raw ref (kind#id) is no way to start a sentence: the shown name, or the fallback. */
-const nameOr = (shown: string, fallback: string) => (Ref.safeParse(shown).success ? fallback : shown);
+/**
+ * The services the watchdog watches, as Will knows them: the health source's
+ * endpoints (sources/registry.ts) and Flint's own LaunchAgents.
+ */
+const SERVICE_WORDS: Readonly<Record<string, string>> = {
+  'flint-server': 'The server',
+  'com.flint.server': 'The server',
+  'com.flint.runtime': 'The runtime',
+  ollama: 'The local model',
+  'com.flint.ollama': 'The local model',
+  searxng: 'Web search',
+  'com.flint.searxng': 'Web search',
+  'com.flint.deploy': 'Auto-deploy',
+  'com.flint.runtime-backup': 'The nightly backup job',
+  'com.flint.voice': 'Voice',
+};
+/**
+ * A service, to start a sentence: its plain name, or one built around the name it
+ * has ("Nexus’s responder service", "The trident-api service"), never a lowercase
+ * label leading it; "A service" when there is none, or only a raw ref (kind#id).
+ */
+function serviceWords(ref: string | null, show: Show): string {
+  const shown = ref ? show(ref, '') : '';
+  if (!shown || Ref.safeParse(shown).success) return 'A service';
+  const known = SERVICE_WORDS[shown];
+  if (known) return known;
+  const agent = /^com\.(flint|nexus)\.(.+)$/.exec(shown);
+  if (agent) return `${agent[1] === 'flint' ? 'Flint' : 'Nexus'}’s ${agent[2]} service`;
+  return `The ${shown} service`;
+}
 /** "1 minute", "10 minutes". */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** A vendor as Will knows it (the server's SHORT_NAMES). */
@@ -74,9 +102,13 @@ interface Template<F> {
 const t = <F>(x: Template<F>) => x;
 
 const DRILL_FAILED = 'The last restore test didn’t match the backup, so the backups may not restore.';
-/** What a failed deploy did, by the stage it stopped at (the gate is typecheck and tests). */
+/**
+ * What a failed deploy did, by the stage it stopped at. The gate is everything
+ * before the install: typecheck and tests, the database settings, and (before a
+ * migration) the copy of the database the runtime takes first.
+ */
 const DEPLOY_WORDS = {
-  gate: 'failed its checks, so nothing was installed.',
+  gate: 'failed a check before installing, so nothing was installed.',
   restart: 'stopped at the restart and went back to the previous release. Check that it’s running.',
   health: 'failed its health check and went back to the previous release. Check that it’s running.',
 } as const;
@@ -84,8 +116,9 @@ const DEPLOY_WORDS = {
 export const TEMPLATES = {
   service_down: t({
     fields: z.object({ service: Ref.nullable(), downMinutes: Count }).strict(),
-    title: (f, show) => `${show(f.service, 'A service')} is down`,
-    body: (f, show, ledger) => `${nameOr(show(f.service, 'A service'), 'A service')} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
+    // A service by its words ("The server is down"); one with no clean name keeps its ref in the title.
+    title: (f, show) => `${f.service && !Ref.safeParse(show(f.service, '')).success ? serviceWords(f.service, show) : show(f.service, 'A service')} is down`,
+    body: (f, show, ledger) => `${serviceWords(f.service, show)} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
     fieldFreeTitle: 'A service is down',
     fieldFreeBody: 'A service has been down for more than 30 minutes. The console has the details.',
   }),
@@ -125,6 +158,8 @@ export const TEMPLATES = {
     fields: z.object({ component: z.enum(['server', 'runtime']), sha: Sha.nullable() }).strict(),
     title: () => 'A database migration failed',
     // The retry rule (its down.sql, then the marker cleared) is the README's how-to, not the note's.
+    // Only `prisma migrate deploy` failing is filed as this stage (install-runtime.sh), and by then the
+    // copy exists and the marker names the sha: a failed copy is a gate failure, which a later run retries.
     body: (f) =>
       `The ${f.component}’s database update failed and won’t be retried until it’s fixed. ` +
       'A copy of the database from just before it is in ~/FlintBackups/pre-migrate.',

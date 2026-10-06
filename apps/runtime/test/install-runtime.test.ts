@@ -23,6 +23,25 @@ describe('install-runtime.sh', () => {
     expect(SCRIPT.match(/--target=node\d+/g)).toEqual(['--target=node22', '--target=node22']);
   });
 
+  it('files a failed pre-migrate copy under the gate, and only a failed migration under migrate', () => {
+    // The migrate_failed note says the update won't be retried and that a copy exists: true only once both hold.
+    const dump = SCRIPT.indexOf('|| die "pre-migrate dump failed');
+    const stage = SCRIPT.indexOf('DEPLOY_STAGE=migrate');
+    const migrate = SCRIPT.indexOf('prisma migrate deploy)');
+    const marker = SCRIPT.indexOf('echo "$SHA" >> "$RT/migrate-failed"');
+    expect(SCRIPT.match(/DEPLOY_STAGE=migrate/g)).toHaveLength(1);
+    expect(dump).toBeGreaterThan(0);
+    expect(stage).toBeGreaterThan(dump);
+    expect(stage).toBeLessThan(migrate);
+    expect(marker).toBeGreaterThan(migrate);
+    // Before the dump, the stage is still the gate (set once, at the top).
+    expect(SCRIPT.slice(SCRIPT.indexOf('DEPLOY_STAGE=gate'), dump)).not.toMatch(/DEPLOY_STAGE=(?!gate)/);
+    // The trap records the dump's failure as the gate's.
+    const trap = SCRIPT.split('\n').find((l) => l.startsWith('trap '))!;
+    const out = zsh(`deploy_event() { echo "$1 $2 $3"; }\nSHA=x\nDEPLOY_STAGE=gate\n${trap}\nfalse || exit 1`);
+    expect(out.stdout.trim()).toBe('runtime gate failed');
+  });
+
   it('gives the runtime 30 s to stop (ExitTimeOut)', () => {
     expect(SCRIPT).toMatch(/<key>ExitTimeOut<\/key><integer>30<\/integer>/);
   });

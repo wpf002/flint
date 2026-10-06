@@ -536,7 +536,8 @@ applyLO();
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
   var card=el('div','propose');var title=typeof apprTitle==='function'?apprTitle(a):a.fullName;
   card.appendChild(el('div','pt',title));
-  if(typeof apprSub==='function')card.appendChild(el('div','psub',apprSub(a)));
+  /* A chat filed every card here: one the server sent without its origin still says so. */
+  if(typeof apprSub==='function')card.appendChild(el('div','psub',apprSub(a.origin?a:Object.assign({origin:'chat:'},a))));
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
   card.appendChild(el('div','pargs',args));
   var row=el('div','prow');var more=el('button','ghost','Show Details');more.onclick=function(){card.classList.toggle('show');more.textContent=card.classList.contains('show')?'Hide Details':'Show Details';};
@@ -689,8 +690,9 @@ function send(speakBack){
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}
           else{var rest=raw.slice(spoken),re=/[.!?](\s|$)/g,mm,last=-1;while((mm=re.exec(rest))){last=mm.index+1;}if(last>0){speakSynced(rest.slice(0,last),body,vctx);spoken+=last;}}}
-        /* The server's error is a string or {message}: its detail goes to the console log, and the reply says only that it stopped. */
-        if(ev.type==='error'){try{console.log('Flint: the reply stopped early:',ev.error);}catch(e){}var em='\n\nThis reply stopped early.';raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
+        /* The server's raw error goes to the console log, never the reply. A sentence it wrote for Will (`message`: why no
+           brain could answer, and what to do) follows "This reply stopped early."; otherwise the reply says only that. */
+        if(ev.type==='error'){try{console.log('Flint: the reply stopped early:',ev.error);}catch(e){}var em='\n\nThis reply stopped early.'+(typeof ev.message==='string'&&ev.message.trim()?' '+errText(ev.message):'');raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
       }catch(e){}});
       return pump();
     });}
@@ -1088,12 +1090,17 @@ pollNotifs();setInterval(pollNotifs,60000);
  * its own prompt. Text only: nothing here is HTML. */
 var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false,down:false};
 /* The nightly jobs' cards: the title, the icon, and when the job runs one Will approved (the LaunchAgent runs
-   backups at 02:15 and the restore test on Sundays only, backup-nightly.sh; cleanup runs at 03:10, jobs.ts). */
+   backups at 02:15 and the restore test on Sundays only, backup-nightly.sh; cleanup runs at 03:10, jobs.ts).
+   The restore test's day is apprWhen's: its card is filed by a Sunday run, so on a Sunday past 2:15 it is a week away. */
 var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 AM'],'backup.offsite':["Run Tonight's Offsite Copy",'db','tonight at 2:15 AM'],'restore.drill':["Run This Week's Restore Test",'db','Sunday at 2:15 AM'],'maintenance.retention':["Run Tonight's Cleanup",'db','tonight at 3:10 AM']};
 /* What each source reads, and how often (its cadenceMs), as a sentence. */
 var APPR_SOURCES={launchd:'Your Mac’s background services are checked every 2 minutes.',health:'Flint’s services are checked every 5 minutes.',git:'Your repos are read every 5 minutes.',spend:'Spend is checked against your caps every minute.',deploy:'Deploy results are read every minute.',knowledge:'New facts in Flint’s memory are read every 10 minutes.',nexus_inbox:'Nexus handoffs to Flint are checked every 10 minutes.',nexus:'Your Nexus threads are read every 5 minutes.',github:'Your GitHub repos are read every 5 minutes.',railway:'Your Railway services are checked every 5 minutes.',google_calendar:'Your calendar is read every 5 minutes.'};
 /* Chat's runtime tools in words (the same titles as @flint/policy's ACTION_WORDS, which the notes use), and what each does, as a sentence. */
 var APPR_TOOLS={'runtime.world_now':['Check What’s Happening Now','Flint checks its services and what is waiting on you.'],'runtime.world_entity':['Look Up One Item','Flint reads one item it tracks.'],'runtime.ledger_open':['Read Open Predictions','Flint reads its predictions still waiting on an outcome.'],'runtime.ledger_calibration':['Check Prediction Accuracy','Flint checks how often its predictions came true.'],'runtime.ledger_record_prediction':['Record a Prediction','Flint saves a prediction to check later.'],'runtime.inbox_recent':['Read What Triage Decided','Flint reads the latest items in Important and Other.'],'runtime.escalations_open':['Read Open Escalations','Flint reads what is waiting on you.'],'runtime.explain_decision':['Explain a Triage Decision','Flint explains why it sorted one item as it did.']};
+function apprNow(){return new Date();}
+/* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
+function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
+  if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -1116,7 +1123,7 @@ function apprSub(p){var a=p.args||{};
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create')return 'They’re from events you accepted or organized.';
   if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'This adds a new rule.';
-  if(APPR_NIGHTLY[p.fullName])return 'It runs '+APPR_NIGHTLY[p.fullName][2]+' if you approve it.';
+  if(APPR_NIGHTLY[p.fullName])return 'It runs '+apprWhen(p.fullName)+' if you approve it.';
   if(p.fullName==='world.relation.write')return 'Flint’s memory suggests this link.';
   if(APPR_TOOLS[p.fullName])return APPR_TOOLS[p.fullName][1];
   var by=apprFrom(p.origin);
@@ -1163,7 +1170,7 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
    run it now. A nightly card is run by its job, never from here (the server cannot run it), so it says when. */
 function apprWaitingCard(p){var card=apprEl('div','card row');card.style.display='block';var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));
   var nightly=APPR_NIGHTLY[p.fullName];
-  var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));tt.appendChild(apprEl('span','sub',nightly?'Approved. It runs '+nightly[2]+'.':'Approved. It hasn’t run yet.'));ct.appendChild(tt);
+  var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));tt.appendChild(apprEl('span','sub',nightly?'Approved. It runs '+apprWhen(p.fullName)+'.':'Approved. It hasn’t run yet.'));ct.appendChild(tt);
   if(nightly){card.appendChild(ct);return card;}
   var row=apprEl('div','prow');var go=apprEl('button','btn','Run Now');row.appendChild(go);ct.appendChild(row);card.appendChild(ct);
   var res=apprEl('div','res');res.style.display='none';card.appendChild(res);

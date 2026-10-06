@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { ACTION_WORDS, digestOf } from '@flint/policy';
+import { ACTION_DONE, digestOf } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -37,19 +37,36 @@ const NEEDS_KEY = 'This device needs an approval key. Add one in Settings.';
 const GONE = 'It no longer exists.';
 const NOT_WAITING = 'It’s no longer waiting.';
 
-/** The "Action done" note's body: the action in words, or no name at all (never its internal one). */
-const doneNote = (fullName: string) => (ACTION_WORDS[fullName] ? `${ACTION_WORDS[fullName]} is done.` : 'An approved action is done.');
+/**
+ * The "Action done" note's body: what Flint did, in a sentence of its own (a
+ * card's title is a command, "Check What’s Happening Now", and reads wrong as a
+ * sentence's subject), or no name at all (never its internal one).
+ */
+export const doneNote = (fullName: string): string => ACTION_DONE[fullName] ?? 'An approved action is done.';
+
+/**
+ * When the restore test runs next, in this Mac's local time (the LaunchAgent's):
+ * Sundays at 2:15 AM. Its card is filed by that very run, so on a Sunday past
+ * 2:15 the run that claims it is a week away, and "Sunday" would read as today.
+ */
+export function drillRunsAt(now: Date): string {
+  if (now.getDay() !== 0) return 'Sunday at 2:15 AM';
+  return now.getHours() * 60 + now.getMinutes() < 2 * 60 + 15 ? 'today at 2:15 AM' : 'next Sunday at 2:15 AM';
+}
 
 /**
  * When a nightly job runs the card Will approved, by the job that filed it: the
  * LaunchAgent runs backups at 02:15 (the drill on Sundays), and retention runs at 03:10.
  */
-const NIGHTLY_RUNS: Record<string, string> = {
-  'runtime:backup': 'Approved. It runs tonight at 2:15 AM.',
-  'runtime:offsite': 'Approved. It runs tonight at 2:15 AM.',
-  'runtime:drill': 'Approved. It runs Sunday at 2:15 AM.',
-  'runtime:retention': 'Approved. It runs tonight at 3:10 AM.',
-};
+export function nightlyRun(origin: string, now = new Date()): string | undefined {
+  const when: Record<string, string> = {
+    'runtime:backup': 'tonight at 2:15 AM',
+    'runtime:offsite': 'tonight at 2:15 AM',
+    'runtime:drill': drillRunsAt(now),
+    'runtime:retention': 'tonight at 3:10 AM',
+  };
+  return when[origin] ? `Approved. It runs ${when[origin]}.` : undefined;
+}
 
 function reply(res: ServerResponse, status: number, body: unknown): true {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -126,7 +143,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
   }
   // ---- Will's approval factor (./approvals) ------------------------------------
   if (url.startsWith('/approvals/')) {
-    if (!ctx.approvals) return reply(res, 501, { error: 'Approvals aren’t set up on this server.' });
+    if (!ctx.approvals) return reply(res, 501, { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' });
     const ap = ctx.approvals;
     try {
       if (req.method === 'GET' && url === '/approvals/credentials') return reply(res, 200, { credentials: await ap.credentials() });
@@ -202,7 +219,10 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
       }
       return reply(res, 404, { error: 'not found' });
     } catch (err) {
-      if (err instanceof ApprovalError) return reply(res, err.status, { error: err.message });
+      if (err instanceof ApprovalError) {
+        // Will reads the sentence; why it was refused (the verifier's words, never a secret) is logged under the ref.
+        return reply(res, err.status, { error: err.message, ...(err.why ? { ref: ctx.errorRef('approvals', `refused: ${err.why}`) } : {}) });
+      }
       if (err instanceof RuntimeError) return reply(res, err.status >= 500 ? 502 : err.status, { error: err.message });
       return reply(res, 500, { error: 'The approval failed. Try again.', ref: ctx.errorRef('approvals', err) });
     }
@@ -287,7 +307,7 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
         // A tool that is not connected right now (Run Now in Approvals, once it is), or a nightly job's own card.
         const note = m || !proposal.origin.startsWith('runtime:')
           ? 'Approved. Its tool isn’t connected, so run it later in Approvals.'
-          : (NIGHTLY_RUNS[proposal.origin] ?? 'Approved. Its nightly job runs it.');
+          : (nightlyRun(proposal.origin) ?? 'Approved. Its nightly job runs it.');
         return { id, fullName, status: 'approved', note };
       }
       throw err;

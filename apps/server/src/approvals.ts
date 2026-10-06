@@ -31,6 +31,7 @@ import {
   ApprovalPayload,
   challengeOf,
   p256Key,
+  refusalFix,
   verifySecureEnclave,
   verifyWebAuthnAssertion,
   verifyWebAuthnRegistration,
@@ -73,10 +74,15 @@ export class ApprovalError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409,
     message: string,
+    /** Why, in the verifier's own words: logged with a ref (approval-routes), never sent. The message is what Will reads. */
+    readonly why?: string,
   ) {
     super(message);
   }
 }
+
+/** Passkeys need a relying party: the tailnet HTTPS origin (FLINT_RP_ORIGINS, or ~/.flint/tailscale-url.txt). */
+export const NO_PASSKEYS = 'Passkeys aren’t set up on this server. Set FLINT_RP_ORIGINS to its tailnet address, then restart it.';
 
 type Pending =
   | { kind: 'enroll'; challenge: Buffer; label: string; expires: number; codeHash: string }
@@ -234,19 +240,19 @@ export class Approvals {
       const publicKey = fromB64(body.publicKey, 'publicKey');
       if (!p256Key(publicKey)) throw new ApprovalError(400, 'not a P-256 public key');
       const v = verifySecureEnclave({ publicKeySpki: publicKey, challenge: p.challenge, signature: fromB64(body.signature, 'signature') });
-      // The reason is crypto wording: Will reads what to do.
-      if (!v.ok) throw new ApprovalError(403, 'The key couldn’t be added. Try again.');
+      // The reason is crypto wording: Will reads what to do, and the log gets why.
+      if (!v.ok) throw new ApprovalError(403, 'The key couldn’t be added. Try again.', `the key did not sign the challenge: ${v.reason}`);
       return { factor: 'secure_enclave', publicKey, signCount: 0, credentialId: `se_${createHash('sha256').update(publicKey).digest('hex').slice(0, 32)}` };
     }
-    // Passkeys need FLINT_RP_ID and FLINT_RP_ORIGINS (the tailnet HTTPS origin).
-    if (!this.o.rp) throw new ApprovalError(409, 'Passkeys aren’t set up on this server.');
+    if (!this.o.rp) throw new ApprovalError(409, NO_PASSKEYS);
     const r = verifyWebAuthnRegistration({
       challenge: p.challenge,
       authenticatorData: body.authenticatorData !== undefined ? fromB64(body.authenticatorData, 'authenticatorData') : authDataFromAttestation(fromB64(body.attestationObject, 'attestationObject')),
       clientDataJson: fromB64(body.clientDataJSON, 'clientDataJSON'),
       rp: this.o.rp,
     });
-    if (!r.ok) throw new ApprovalError(403, 'The passkey couldn’t be added. Try again.');
+    // A cause no retry can clear (the page is not at the RP's address) says its fix.
+    if (!r.ok) throw new ApprovalError(403, refusalFix(r.reason) ?? 'The passkey couldn’t be added. Try again.', `the passkey registration did not verify: ${r.reason}`);
     return { factor: 'webauthn', publicKey: r.publicKeySpki, signCount: r.signCount, credentialId: r.credentialId };
   }
 
@@ -381,19 +387,21 @@ export class Approvals {
   private async verifyAndRecord(payload: ApprovalPayload, challenge: Buffer, body: Record<string, unknown>): Promise<string> {
     const credentialId = typeof body.credentialId === 'string' ? body.credentialId : '';
     const cred = (await this.o.store.credentials()).find((c) => c.credentialId === credentialId);
-    if (!cred || cred.revokedAt) throw new ApprovalError(403, 'That approval key is unknown or revoked.');
+    if (!cred || cred.revokedAt) {
+      throw new ApprovalError(403, 'This device’s approval key was revoked or isn’t known. Add a new one in Settings.', cred ? 'the credential is revoked' : 'the credential is unknown');
+    }
     const signature = fromB64(body.signature, 'signature');
     let authenticatorData: Buffer | undefined;
     let clientDataJson: Buffer | undefined;
     if (cred.factor === 'secure_enclave') {
       const v = verifySecureEnclave({ publicKeySpki: cred.publicKey, challenge, signature });
-      if (!v.ok) throw new ApprovalError(403, 'Your approval didn’t verify. Try again.');
+      if (!v.ok) throw new ApprovalError(403, 'Your approval didn’t verify. Try again.', `the signature did not verify: ${v.reason}`);
     } else {
-      if (!this.o.rp) throw new ApprovalError(409, 'Passkeys aren’t set up on this server.');
+      if (!this.o.rp) throw new ApprovalError(409, NO_PASSKEYS);
       authenticatorData = fromB64(body.authenticatorData, 'authenticatorData');
       clientDataJson = fromB64(body.clientDataJSON, 'clientDataJSON');
       const v = verifyWebAuthnAssertion({ publicKeySpki: cred.publicKey, challenge, authenticatorData, clientDataJson, signature, storedSignCount: cred.signCount, rp: this.o.rp });
-      if (!v.ok) throw new ApprovalError(403, 'Your approval didn’t verify. Try again.');
+      if (!v.ok) throw new ApprovalError(403, refusalFix(v.reason) ?? 'Your approval didn’t verify. Try again.', `the passkey did not verify: ${v.reason}`);
       if (v.signCount !== undefined && v.signCount > cred.signCount) await this.o.store.setSignCount(cred.credentialId, v.signCount);
     }
     const id = `ap${Date.now().toString(36)}${randomBytes(6).toString('hex')}`;

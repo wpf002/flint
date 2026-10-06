@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Tool, ToolCall } from '@flint/core';
 import type { ApprovalRequest } from '@flint/mcp';
-import { isEvalTurn, takeAllowance, turnTainted, withTurnTaint } from './turn-taint';
+import { currentTurn, isEvalTurn, takeAllowance, turnTainted, withTurnTaint } from './turn-taint';
 
 export interface PendingAction {
   id: string;
@@ -12,6 +12,8 @@ export interface PendingAction {
   destructive: boolean;
   /** Proposed by a turn that had read untrusted text. */
   tainted: boolean;
+  /** Who filed it, as a runtime proposal names it: `chat:<turn>` (only a chat turn captures one); absent outside a turn. */
+  origin?: string;
   ts: number;
   status: 'pending' | 'running' | 'done' | 'error' | 'rejected';
   result?: unknown;
@@ -87,7 +89,11 @@ export class ActionQueue {
     const existing = [...this.pending.values()].find((p) => p.status === 'pending' && keyOf(p.server, p.tool, p.args) === key);
     if (existing) return existing.id;
     const id = `act-${BOOT}-${++this.seq}`;
-    this.pending.set(id, { id, server: req.server, tool: req.tool, fullName: req.fullName, args: req.args, destructive: req.destructive, tainted: turnTainted(), ts: Date.now(), status: 'pending' });
+    const turn = currentTurn();
+    this.pending.set(id, {
+      id, server: req.server, tool: req.tool, fullName: req.fullName, args: req.args, destructive: req.destructive, tainted: turnTainted(),
+      ...(turn ? { origin: `chat:${turn.id}` } : {}), ts: Date.now(), status: 'pending',
+    });
     return id;
   }
 

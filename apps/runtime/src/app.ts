@@ -98,7 +98,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: 'invalid input', issues: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
-    if (err instanceof Refused) return reply.code(err.status).send({ error: err.message });
+    if (err instanceof Refused) {
+      // What Will reads is the message; why (a verifier's or the engine's words) is logged under a ref.
+      if (!err.why) return reply.code(err.status).send({ error: err.message });
+      const ref = `ref${Date.now().toString(36)}`;
+      req.log.warn({ ref, status: err.status, why: err.why }, 'refused');
+      return reply.code(err.status).send({ error: err.message, ref });
+    }
     if (err instanceof Invalid || err instanceof AuditRefused) return reply.code(400).send({ error: err.message });
     if (err.statusCode === 413 || err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') return reply.code(413).send({ error: 'body too large' });
     if (err.statusCode && err.statusCode >= 400 && err.statusCode < 500) return reply.code(err.statusCode).send({ error: 'bad request' });

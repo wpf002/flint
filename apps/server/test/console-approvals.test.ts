@@ -138,6 +138,8 @@ beforeEach(() => {
   };
   createContext(ctx);
   runInContext(apprJs, ctx);
+  // A Tuesday noon, so a restore test's card says the same thing whatever day the tests run.
+  ctx.apprNow = () => new Date(2026, 9, 6, 12, 0);
 });
 
 const open = async () => {
@@ -395,6 +397,29 @@ describe('the console Approvals panel', () => {
     done[3]!.button('Run Now').onclick!();
     await settle();
     expect(calls.at(-1)).toEqual({ url: '/proposals/run', method: 'POST', body: { id: 'tool' } });
+  });
+
+  it('the restore test’s card never names a time already past: on the Sunday it was filed, it runs next Sunday', async () => {
+    const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', origin: 'runtime:drill', status, args: {} });
+    const lines = async (now: Date) => {
+      ctx.apprNow = () => now;
+      answer = () => ({ status: 200, body: { signed: true, proposals: [drill('pending')] } });
+      await open();
+      const waiting = ids.apprlist!.children[0]!.children[0]!.shown();
+      answer = () => ({ status: 200, body: { signed: true, proposals: [drill('approved')] } });
+      await open();
+      run("apprShow('approved')");
+      return [waiting, ids.apprlist!.children[0]!.children[0]!.shown()];
+    };
+    // 2026-10-04 is a Sunday: the drill that filed the card ran at 2:15 AM.
+    expect(await lines(new Date(2026, 9, 4, 15, 0))).toEqual([
+      expect.stringContaining('It runs next Sunday at 2:15 AM if you approve it.'),
+      'Run This Week\'s Restore TestApproved. It runs next Sunday at 2:15 AM.',
+    ]);
+    // Before 2:15 that Sunday, a card from the week before runs within the hour.
+    expect((await lines(new Date(2026, 9, 4, 1, 30)))[1]).toBe('Run This Week\'s Restore TestApproved. It runs today at 2:15 AM.');
+    // Any other day: Sunday.
+    expect((await lines(new Date(2026, 9, 10, 23, 0)))[1]).toBe('Run This Week\'s Restore TestApproved. It runs Sunday at 2:15 AM.');
   });
 
   it('every line under a card’s title is a sentence, whatever filed it', () => {
