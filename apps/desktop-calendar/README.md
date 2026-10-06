@@ -176,4 +176,4 @@ The runtime side, and the source's own controls and rollback, are in
 running the app. The server's deploy gate requires its Swift checks when a
 deploy changes this directory or the wire it shares with the runtime, and skips
 them otherwise, so a broken Swift toolchain never holds back an unrelated
-server deploy (`install_calendar.sh` runs them again before every install).
+server deploy. `install_calendar.sh` reruns the Swift core tests and both read-only scans before every install; the fitToBudget and time zone parity checks run only in the server gate.

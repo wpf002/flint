@@ -3,6 +3,7 @@
 #
 #   ~/flint/apps/desktop-calendar/disconnect.sh              disconnect
 #   ~/flint/apps/desktop-calendar/disconnect.sh --uninstall  disconnect, and remove Flint Calendar.app too
+#   ~/flint/apps/desktop-calendar/disconnect.sh --force      turn the source off even if Flint can't be told
 #
 # 1. Stops Flint Calendar's background agent first, so no read lands after the
 #    disconnect, and checks that it stopped (if it didn't, nothing else
@@ -15,7 +16,8 @@
 # 3. Turns the source off: removes the FLINT_SOURCE_APPLE_CALENDAR lines (with
 #    or without "export ") from ~/.flint/runtime.override.env (it stays 0600)
 #    and restarts the runtime. If Flint wasn't told yet, or hasn't archived yet,
-#    the source stays on until it has: run this again a few minutes later.
+#    the source stays on until it has: run this again a few minutes later, or
+#    with --force to turn it off anyway (Apple events then stay as last read).
 # 4. With --uninstall, deletes /Applications/Flint Calendar.app (once Flint has
 #    been told, since only the app can tell it).
 # macOS keeps the calendar permission itself; the last lines say how to remove it.
@@ -40,10 +42,12 @@ stop() { print -rl -- "$@" >&2; exit 1; }
 loaded() { launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; }
 
 UNINSTALL=0
+FORCE=0
 case "${1:-}" in
   --uninstall) UNINSTALL=1 ;;
+  --force) FORCE=1 ;;
   "") ;;
-  *) stop "Run disconnect.sh alone, or with --uninstall to remove Flint Calendar too." ;;
+  *) stop "Run disconnect.sh alone, with --uninstall to remove Flint Calendar too, or with --force to turn the source off even if Flint can't be told." ;;
 esac
 trap 'rm -f "$OVERRIDE.new"' EXIT
 
@@ -82,12 +86,17 @@ if [ -x "$DEST/Contents/MacOS/flint-calendar" ]; then
       done
       ;;
     3) ;;
-    2)
-      # The runtime was down or restarting the whole minute: the source stays on, so the next run can still tell it.
-      archived=0
-      pending=told
+    1) say "Your Apple events stay in Flint as they were last read. You can forget any of them in Flint." ;;
+    *)
+      # 2: the runtime was down or restarting the whole minute; anything else (a crash, a signal) is no answer
+      # either. The source stays on, so the next run can still tell Flint, unless Will asked to force it off.
+      if [ "$FORCE" = 1 ]; then
+        say "Flint couldn't be told, so your Apple events stay in Flint as they were last read. You can forget any of them in Flint."
+      else
+        archived=0
+        pending=told
+      fi
       ;;
-    *) say "Your Apple events stay in Flint as they were last read. You can forget any of them in Flint." ;;
   esac
 else
   say "Flint Calendar isn't installed, so your Apple events stay in Flint as they were last read."
@@ -128,7 +137,8 @@ say ""
 if [ "$archived" = 1 ]; then
   say "Flint Calendar is disconnected."
 elif [ "$pending" = told ]; then
-  say "Flint Calendar is stopped, but Flint couldn't be told yet, so the source stays on for now. Run this command again in a few minutes to finish."
+  say "Flint Calendar is stopped, but Flint couldn't be told yet, so the source stays on for now. Run this command again in a few minutes to finish." \
+    "If Flint still can't be told, run it with --force to turn the source off anyway."
 else
   say "Flint Calendar is stopped, but Flint is still archiving your Apple events, so the source stays on for now. Run this command again in a few minutes to finish."
 fi

@@ -43,7 +43,7 @@ deploy_event() { # <server|runtime> <gate|migrate|restart|health|deploy> <ok|fai
 # a Software Update broke never holds back a server deploy that doesn't touch the
 # helper; install_calendar.sh runs the core tests and both scans again before it
 # installs anything.
-CALENDAR_PATHS='^(apps/desktop-calendar/|apps/runtime/src/sources/apple/|apps/runtime/src/routes/apple-calendar\.ts$|apps/runtime/test/fixtures/apple-calendar-snapshot\.json$|apps/server/test/desktop-calendar\.test\.ts$)'
+CALENDAR_PATHS='^(apps/desktop-calendar/|apps/runtime/src/sources/apple/|apps/runtime/src/routes/apple-calendar\.ts$|apps/runtime/src/sources/text\.ts$|apps/runtime/test/fixtures/apple-calendar-snapshot\.json$|apps/server/test/desktop-calendar\.test\.ts$)'
 calendar_changed() { # 0: changed since the last finished server deploy, or that deploy is unknown; 1: not changed
   local last files
   last=$(grep -F '"component":"server"' "$DATA/deploy-events.jsonl" 2>/dev/null | grep -F '"stage":"deploy","outcome":"ok"' | tail -n 1 | sed -nE 's/.*"sha":"([0-9a-f]{40})".*/\1/p')

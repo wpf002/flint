@@ -741,6 +741,20 @@ describe('disconnect.sh, with HOME in a temp dir and every side effect stubbed',
     expect(readFileSync(override(), 'utf8')).toBe('FLINT_RUNTIME_TRIAGE=on\n');
   });
 
+  it('a crash of --disconnect is no answer: the source stays on; --force turns it off anyway', () => {
+    writeFileSync(join(state, 'disconnect-rc'), '137');
+    const r = disconnect();
+    expect(r.status).toBe(0);
+    expect(readFileSync(override(), 'utf8')).toContain('FLINT_SOURCE_APPLE_CALENDAR=on');
+    expect(r.out).toContain("If Flint still can't be told, run it with --force to turn the source off anyway.");
+    for (const l of r.out.trim().split('\n')) expect(readable(l), l).toBe(true);
+    const forced = disconnect('--force');
+    expect(forced.status).toBe(0);
+    expect(readFileSync(override(), 'utf8')).toBe('FLINT_RUNTIME_TRIAGE=on\n');
+    expect(forced.out).toContain("Flint couldn't be told, so your Apple events stay in Flint as they were last read.");
+    expect(forced.out).toContain('Flint Calendar is disconnected.');
+  });
+
   it('an agent that will not stop: nothing else changes, and Will is told to run it again', () => {
     writeFileSync(join(state, 'stuck-agent'), '');
     const r = disconnect();
