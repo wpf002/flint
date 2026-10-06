@@ -18,9 +18,10 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { CLAIM_TEMPLATE_HELP, ClaimTemplate, DecisionExplained, EscalationsOpen, TriageRecent, entityRef } from '@flint/policy';
 
@@ -274,7 +275,9 @@ export function buildServer(call = runtimeCall): McpServer {
   return server;
 }
 
-// Run as a stdio MCP server unless imported (tests).
-if (process.argv[1] && /runtime-server\.(ts|mjs|js)$/.test(process.argv[1])) {
+// Run as a stdio MCP server when this file is the program, under any name, and not when a test imports it.
+// The deploy test-starts a rebuilt bundle as runtime-server.new.mjs: a check on the file name never
+// started there, so every rebuild was rejected and the bundle installed with P1 stayed.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   await buildServer().connect(new StdioServerTransport());
 }
