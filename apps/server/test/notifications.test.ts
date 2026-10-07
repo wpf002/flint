@@ -5,10 +5,10 @@
  * never goes out without the in-app note; push() says what it did.
  */
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Notifications, PHONE_PING, noteChannels, watcherEnabled } from '../src/notifications';
+import { Notifications, PHONE_PING, RETIRED_KINDS, noteChannels, watcherEnabled } from '../src/notifications';
 import { SpendGuard, SpendLedger, type ThresholdNotice } from '../src/spend';
 
 function feed(topic: string | null = 'my-topic') {
@@ -146,5 +146,22 @@ describe('the Watcher switch (P2.5: the runtime has the calendar)', () => {
   it('FLINT_WATCHER=off, in any case or spacing, or 0/false/no, turns it off; anything else leaves it on', () => {
     for (const v of ['off', 'OFF', ' off ', 'Off', '0', 'false', 'FALSE', 'no']) expect(watcherEnabled({ FLINT_WATCHER: v }), v).toBe(false);
     for (const v of [undefined, '', ' ', 'on', '1', 'true', 'yes', 'offline']) expect(watcherEnabled({ FLINT_WATCHER: v }), String(v)).toBe(true);
+  });
+});
+
+describe('retired kinds', () => {
+  it("the Nexus run watcher's leftover notes are kept in the file but never shown or counted", () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'flint-notes-')), 'notifications.json');
+    writeFileSync(path, JSON.stringify({ seq: 2, items: [
+      { id: 'n2', title: 'Nexus run finished', body: 'Build aqi: closed', kind: 'nexus', ts: 2, read: false },
+      { id: 'n1', title: 'Market signal', body: 'A signal arrived.', kind: 'signal', ts: 1, read: false },
+    ] }));
+    const notes = new Notifications(path, {});
+    expect(RETIRED_KINDS.has('nexus')).toBe(true);
+    expect(notes.list().map((n) => n.id)).toEqual(['n1']);
+    expect(notes.unreadCount()).toBe(1);
+    notes.markAllRead();
+    // Nothing is deleted: the retired note is still in the file.
+    expect((JSON.parse(readFileSync(path, 'utf8')) as { items: Array<{ id: string }> }).items.map((n) => n.id)).toEqual(['n2', 'n1']);
   });
 });

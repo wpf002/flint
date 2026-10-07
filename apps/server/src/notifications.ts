@@ -67,6 +67,15 @@ function deliverOS(title: string, body: string): void {
  * set (install the free ntfy app, subscribe to the topic — no account, no keys).
  * The ping is the same for every caller and carries no content (PHONE_PING).
  */
+/**
+ * Kinds nothing sends any more, kept in the file but never shown or counted. 'nexus':
+ * the Nexus run watcher was removed (5bbccd9, 19381dc), and the notes it left
+ * ("Nexus run finished: Build aqi: closed") are fragments Will can't act on. They age
+ * out with the 300-item cap; nothing is deleted.
+ */
+export const RETIRED_KINDS: ReadonlySet<string> = new Set(['nexus']);
+const shown = (n: Notification) => !RETIRED_KINDS.has(n.kind);
+
 export class Notifications {
   private items: Notification[] = [];
   private readonly seen = new Set<string>(); // dedupe signatures already pushed
@@ -80,10 +89,10 @@ export class Notifications {
   }
 
   list(limit = 50): Notification[] {
-    return this.items.slice(0, limit);
+    return this.items.filter(shown).slice(0, limit);
   }
   unreadCount(): number {
-    return this.items.filter((n) => !n.read).length;
+    return this.items.filter((n) => shown(n) && !n.read).length;
   }
   markRead(id: string): boolean {
     const n = this.items.find((x) => x.id === id);
