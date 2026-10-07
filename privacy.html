@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flint Privacy Policy</title>
+<meta name="description" content="How Flint uses the Google Calendar data its owner lets it read.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<a class="mark" href="./"><i aria-hidden="true"></i>FLINT</a>
+<h1>Privacy Policy</h1>
+<p class="lead">Flint is a personal assistant that runs on its owner's own Mac. This policy explains what Flint's Google Calendar connection reads, how Flint uses it, where Flint keeps it, and who it is shared with.</p>
+<p>Last updated October 7, 2026.</p>
+
+<h2>Who This Covers</h2>
+<p>Flint is a single-user, self-hosted project. The person who installs it on their Mac is its only user, and the only person whose Google account it connects to.</p>
+
+<h2>What Flint Reads</h2>
+<p>Flint asks Google for one permission, read-only access to calendars (<code>calendar.readonly</code>), and refuses any wider access. Every five minutes it reads the events in its owner's primary calendar for the next 14 days, and only these details of each event:</p>
+<ul>
+<li>its ID, its start and end times, and whether it is confirmed, tentative or cancelled;</li>
+<li>its title;</li>
+<li>its attendees' names, email addresses and replies, whether each attendee is a room, and whether the owner organized it;</li>
+<li>its type, when it last changed, and whether it repeats.</li>
+</ul>
+<p>Flint's Google Calendar connection does not read event descriptions, locations, attachments or links. It never creates, changes or deletes events.</p>
+
+<h2>How Flint Uses It</h2>
+<p>Flint uses this data only for its owner:</p>
+<ul>
+<li>to know what is coming up, and to remind its owner before an event or deadline (its reminders give the date and time, never the title);</li>
+<li>to answer its owner's questions about their schedule in a chat;</li>
+<li>to add people from events the owner accepted or organized as contacts, only with the owner's approval, given each time or once for all.</li>
+</ul>
+<p>Flint's chats are answered either by an AI model that runs on the owner's Mac or by a cloud AI model, today Anthropic's Claude. When a chat answered by Claude needs calendar details, such as an event's date, time, title or the people on it, those details are sent to Anthropic to produce the answer. Every chat answered by Claude also tells it how many events, deadlines and contacts Flint is tracking. Flint later re-reads its owner's chats with Claude to remember facts about its owner, and those chats can include calendar details.</p>
+<p>Flint may use its owner's chats, which can include calendar details, to improve the AI model that runs on the owner's own Mac, for that owner only. It does not use Google user data to train any other model.</p>
+
+<h2>Where It Is Kept</h2>
+<p>Flint keeps what it reads on its owner's Mac: in its database and in its chat history and memory. It leaves the Mac only in the chats described above and in the owner's backups.</p>
+<ul>
+<li>An event's title is kept apart from the rest. Flint's nightly cleanup deletes it about a week after the event leaves the calendar, on each night the cleanup runs. Until the owner lets the cleanup run on its own, it runs on the nights the owner approves it.</li>
+<li>The rest of each event (its times, the owner's reply, whether it repeats, and its attendees as one-way hashes of their addresses), the contacts the owner approved, and the owner's chat history and memory are kept until the owner deletes them or uninstalls Flint.</li>
+<li>Backups of Flint's database stay on the Mac for up to 14 days, and are encrypted with the owner's own key before any copy leaves the Mac. Backups of Flint's folder, which hold its chat history and memory, are also copied to the owner's iCloud Drive and kept there for up to a week. They are encrypted with the owner's own key once the owner sets one up; until then they are stored there as plain archives, protected by Apple's iCloud storage.</li>
+<li>The key Google gives Flint to read the calendar is stored on the Mac, readable only by its owner, and is never included in any backup.</li>
+</ul>
+
+<h2>Sharing</h2>
+<p>Flint does not sell or rent Google user data, and does not use it for advertising. It shares Google user data only with the cloud AI provider that answers its owner's chats (today Anthropic), and only to answer its owner. No person other than the owner sees it.</p>
+<p>Flint's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+<h2>Stopping and Deleting</h2>
+<ul>
+<li>To stop Flint reading the calendar, remove its access at <a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>, or turn the calendar off in Flint.</li>
+<li>Stopping does not delete what Flint already kept. Titles are deleted by the nightly cleanup as described above; everything else stays until it is deleted.</li>
+<li>To remove everything, the owner deletes Flint's folder (<code>~/.flint</code>), drops its database (<code>dropdb flint</code>), and deletes its backups (<code>~/FlintBackups</code> and the FlintBackups folder in iCloud Drive). Chats already answered by the cloud AI provider are kept under that provider's own terms.</li>
+</ul>
+
+<h2>Changes and Questions</h2>
+<p>Changes to this policy are published on this page with a new date. Questions can be raised as an issue on <a href="https://github.com/wpf002/flint/issues">Flint's GitHub page</a>.</p>
+<footer><a href="./">Flint</a><a href="https://github.com/wpf002/flint">GitHub</a></footer>
+</main>
+</body>
+</html>
