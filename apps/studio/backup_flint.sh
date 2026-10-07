@@ -4,8 +4,9 @@
 # venv, the 50k public data, the ollama models, per-iteration checkpoints).
 #
 # Local snapshots keep everything, secrets included (dir is 700). The offsite
-# copy (iCloud by default) drops secrets and tokens: API keys can be reissued,
-# and they shouldn't sit in a synced folder in plaintext.
+# copy (iCloud by default) drops secrets and tokens, and is written only
+# encrypted to Will's age key: it holds his chat history, memory and
+# notifications, which must never sit in a synced folder in plaintext.
 set -eu
 SRC="$HOME/.flint"
 LOCAL="${FLINT_BACKUP_DIR:-$HOME/FlintBackups}"
@@ -41,11 +42,11 @@ SECRETS=(
   --exclude './google'             # the Google OAuth client and refresh token (P2.5 calendar)
 )
 
-# Optional: encrypt the offsite copy to an age public key whose private half lives
-# OFF this Mac (`age-keygen` elsewhere; restore with `age -d -i key.txt`). Put the
+# The offsite copy is encrypted to an age public key whose private half lives OFF
+# this Mac (`age-keygen` elsewhere; restore with `age -d -i key.txt`). Put the
 # public key (age1...) in ~/.flint/backup-age-recipient, or FLINT_BACKUP_AGE_RECIPIENT.
-# Set, the offsite copy is <name>.tar.gz.age; set but `age` not found, no offsite
-# copy is written at all rather than a plaintext one.
+# The offsite copy is <name>.tar.gz.age. With no key, or with `age` not found, no
+# offsite copy is written at all, never a plaintext one; local snapshots go on.
 AGE_RECIPIENT="${FLINT_BACKUP_AGE_RECIPIENT:-}"
 [ -z "$AGE_RECIPIENT" ] && [ -f "$SRC/backup-age-recipient" ] && AGE_RECIPIENT="$(tr -d '[:space:]' < "$SRC/backup-age-recipient")"
 # launchd runs this with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which has no Homebrew,
@@ -121,8 +122,8 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
       name=""
     fi
   else
-    name="flint-$TS.tar.gz"
-    tar -czf "$OFFSITE/$name" -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" .
+    echo "$(date '+%F %T') offsite SKIPPED: no age recipient (put an age1... public key in ~/.flint/backup-age-recipient); no plaintext copy written" >&2
+    name=""
   fi
   if [ -n "$name" ]; then
     echo "$name" >> "$MANIFEST"
