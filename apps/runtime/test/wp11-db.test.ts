@@ -96,8 +96,11 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     expect(await runDigest(db, config, now, async (req) => (sent.push(req as never), { status: 'stored', pinged: false }))).toBe('delivered');
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ channels: ['inapp'], ref: expect.stringMatching(/^digest:\d{4}-\d{2}-\d{2}$/) });
-    expect(sent[0]!.body).toMatch(/Done on its own: 1 action\./);
-    expect(sent[0]!.body).toMatch(/Waiting on you: \d+ proposals? and \d+ open escalations?\./);
+    expect(sent[0]!.body).toMatch(/^Yesterday, (no items were|1 item was|\d+ items were) important and (none|\d+) went to Other\./);
+    expect(sent[0]!.body).toMatch(/\nFlint did 1 thing on its own\. (You have (\d+ approvals?|\d+ open escalations?|\d+ approvals? and \d+ open escalations?) waiting|Nothing is waiting on you)\.\n/);
+    expect(sent[0]!.body).toMatch(/\n(Everything checked is healthy|This needs a look: [^.]+|These need a look: [^.]+)\.\n(No predictions resolve today|Today, \d+ predictions? resolves?)\.$/);
+    // Health by its console names, never an internal one.
+    expect(sent[0]!.body).not.toMatch(/restore_drill|source:|audit_intents|quiet lane|proposal/);
     expect(await runDigest(db, config, now, async () => (sent.push({ title: 'x' }), { status: 'stored', pinged: false }))).toBe('already');
     expect(sent).toHaveLength(1);
     await owner(`DELETE FROM "ActionCounter" WHERE action = 'digest.daily'`);
@@ -115,6 +118,35 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     expect(Number((await owner(`SELECT count(*) AS n FROM audit_open_intents WHERE action = 'digest.daily'`)).rows[0].n)).toBe(0);
     expect(await db.auditEntry.count({ where: { action: 'digest.daily', kind: 'action', outcome: 'failed', inputs: { path: ['reason'], equals: 'not delivered that day' } } })).toBe(1);
   });
+
+  it('"Flint did N things on its own" counts what ran without Will, once each: never an approved card, never twice', async () => {
+    const { appendAudit } = await import('../src/governance/audit');
+    // A day of its own, 20 days back (the audit takes entries from the last 31 days only).
+    const day = previousDay(localDay(TZ, new Date(Date.now() - 20 * DAY)));
+    const { start, end } = localDayBounds(TZ, day);
+    const at = new Date(start.getTime() + 3 * 3_600_000);
+    // A card Will approved (a nightly backup): its completion and the job's own row, both ok, both under its id.
+    const card = await createProposal(db, { kind: 'tool_call', origin: 'console', action: 'world.source.enable', args: { source: 'git' }, argsProvenance: { source: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+    // Actions of their own (test.did.*), so no other test here counts them.
+    const row = (over: Record<string, unknown>) => ({ actor: 'runtime', context: 'autonomous' as const, kind: 'action' as const, action: 'test.did.backup', decision: 'act' as const, outcome: 'ok' as const, inputs: {}, ...over });
+    await appendAudit(db, [
+      row({ context: 'chat', correlationId: card.id }),
+      row({ correlationId: card.id }),
+      // A promoted write that ran alone, reported twice under one id; and a job's run with no id.
+      row({ action: 'test.did.alone', correlationId: 'call:abc123' }),
+      row({ action: 'test.did.alone', correlationId: 'call:abc123' }),
+      row({ action: 'test.did.job' }),
+      // Not Flint on its own: Will's click, a failure, a row that only logged.
+      row({ context: 'console', action: 'test.did.click' }),
+      row({ action: 'test.did.failed', outcome: 'failed' }),
+      row({ action: 'test.did.logged', decision: 'log' }),
+    ] as Parameters<typeof appendAudit>[1], at);
+    const d = await buildDigest(db, TZ, new Date(end.getTime() + 7.5 * 3_600_000));
+    expect(d.day).toBe(day);
+    expect(d.counts.did).toBe(2);
+    expect(d.body.split('\n')[1]).toMatch(/^Flint did 2 things on its own\./);
+  });
+
   async function appendOk(action: string) {
     const { appendAudit } = await import('../src/governance/audit');
     const { start } = localDayBounds(TZ, (await buildDigest(db, TZ)).day);

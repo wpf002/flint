@@ -9,6 +9,16 @@ readable only by you (`chmod 600`): the runtime refuses to start otherwise.
 Run the commands below in the deploy checkout, `~/flint`, which is always on
 `main` with its packages installed.
 
+## Chat's reads of the world model
+
+With `runtime` in `~/.flint/mcp.json`, chat can look things up in Flint's world
+model and prediction ledger. Each lookup asks first: a card in the chat ("Check
+What's Happening Now", "Read Open Predictions") that you approve or reject.
+After a week of that,
+`cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase p1` files
+the card that lets those reads run without asking (recording a prediction stays
+capped at 10 a day). Sign it in Approvals, or leave it, and they keep asking.
+
 ## The shadow week: labeling Activity
 
 When triage turns on, it runs in shadow for a week: it sorts what comes in and
@@ -116,3 +126,19 @@ not to turning the calendar off:
 2. Then take a dump and run `down.sql` by hand.
 
 Any later deploy of P2.5 code applies the migration again.
+
+## When a database update fails
+
+A runtime deploy whose migration fails installs nothing. You get a note ("A
+database migration failed") and Settings > Health lists **Updates**. That
+commit isn't tried again until you clear it:
+
+1. A copy of the database from just before the update is in
+   `~/FlintBackups/pre-migrate/<sha>.dump`.
+2. Fix the migration, then run its `down.sql` by hand.
+3. Delete `~/.flint/runtime/migrate-failed`. The next deploy applies the
+   migration again.
+
+If the copy itself can't be taken, the deploy stops before the migration and
+the note is "The runtime did not deploy" instead: nothing changed, and the
+deploy is tried again (as any deploy that fails its checks is).

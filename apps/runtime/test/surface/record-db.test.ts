@@ -103,7 +103,8 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     // The words name the service, and its probability is the stored row's, through phrase().
     const p = await db.prediction.findUniqueOrThrow({ where: { id: escalation.predictionId! } });
     expect(p).toMatchObject({ probability: 0.4, method: 'base_rate', claim: `service#${serviceId.slice(-6)} reports healthy at the resolve time`, subjectEntityId: serviceId });
-    expect(escalation.title).toBe('com.flint.server is down');
+    // By its plain name: the entity is com.flint.server.
+    expect(escalation.title).toBe('The server is down');
     expect(escalation.body).toContain(phrase(p.probability!, p.resolveBy, 'America/Chicago'));
     const rec = await db.recommendation.findUniqueOrThrow({ where: { id: escalation.recommendationId! }, include: { prediction: true } });
     expect(rec).toMatchObject({ type: 'escalation_action', prediction: { resolver: 'conditional', conditionRecommendationId: rec.id, probability: 0.8 } });
@@ -301,6 +302,18 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     let posts = 0;
     expect(await deliver(flaky, config, blip, undefined, async () => (posts++, { status: 'stored', pinged: true }))).toBe('sent');
     expect(posts).toBe(1);
+  });
+
+  it('a note whose text was purged before it went out still says something: its field-free title and body', async () => {
+    await promotedDeps();
+    const ev = await raised('runtime', 'drill.failed', { mismatches: 3 });
+    await processEvent({ eventId: ev }, deps());
+    const esc = (await escalationOf(ev)).escalation;
+    expect(esc.body).toBe('The last restore test found 3 tables that differ from the backup, so the backups may not restore.');
+    await owner(`UPDATE "Escalation" SET title = NULL, body = NULL, fields = '{}'::jsonb, "contentPurgedAt" = now() WHERE id = $1`, [esc.id]);
+    let sent: { title?: string; body?: string } = {};
+    expect(await deliver(db, config, esc.id, undefined, async (req) => ((sent = req), { status: 'stored', pinged: false }))).toBe('sent');
+    expect(sent).toMatchObject({ title: 'The restore drill failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
   });
 
   it('expiry: past the prediction\'s resolve time, the escalation expires and its unsent deliveries close', async () => {

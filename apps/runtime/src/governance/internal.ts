@@ -11,7 +11,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
-import { Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
+import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
 import { dbRefused } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
@@ -46,7 +46,7 @@ export async function proposeEnable(db: Db, source: string, now = new Date()) {
   const { source: s } = EnableArgs.parse({ source });
   return createProposal(db, {
     kind: 'tool_call', origin: 'cli', action: 'world.source.enable', args: { source: s }, argsProvenance: { source: { source: 'will', tainted: false } },
-    tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 7 * 24 * 60, reason: `Turn on the ${s} source.`,
+    tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 7 * 24 * 60, reason: 'Approving turns this source on.',
   }, 'will:cli', now);
 }
 /**
@@ -80,7 +80,7 @@ export const PolicyArgs = z
 
 export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string) {
   const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
-  if (!p) throw new Refused(404, 'no such proposal');
+  if (!p) throw new Refused(404, GONE);
   if (!INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
   const claimed = await claimProposal(db, id, rp, tz, actor);
   try {
@@ -95,7 +95,7 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       const p = await db.proposal.findUniqueOrThrow({ where: { id }, select: { templateId: true, tainted: true } });
       if (p.templateId !== 'knowledge.link') throw new Refused(409, 'the runtime writes only the knowledge.link relation');
       const link = ACTION_TEMPLATES['knowledge.link'].params.parse(claimed.args);
-      if ((await db.entity.count({ where: { id: { in: [link.fromId, link.toId] }, status: 'active' } })) !== 2) throw new Refused(409, 'one of the two is no longer in the world model');
+      if ((await db.entity.count({ where: { id: { in: [link.fromId, link.toId] }, status: 'active' } })) !== 2) throw new Refused(409, 'One of the two items no longer exists.');
       const open = { type: link.type, fromId: link.fromId, toId: link.toId, validTo: null };
       let rel = await db.relation.findFirst({ where: open, select: { id: true } });
       let existed = !!rel;
@@ -162,7 +162,8 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
     const codes = [e.code, e.meta?.code].map(String);
     const refusedInput = dbRefused(err) || (claimed.action === 'triage.rule.create' && (codes.includes('23505') || codes.includes('P2002') || /Code: `23505`/.test(String(e.message ?? ''))));
-    if (refusedInput) throw new Refused(400, `the database refused it as signed (${ref})`);
-    throw new Refused(409, `could not carry it out (${ref})`);
+    // The ref is in the log above; Will reads a sentence under the card.
+    if (refusedInput) throw new Refused(400, 'The database refused this change.');
+    throw new Refused(409, 'Flint couldn’t carry it out.');
   }
 }

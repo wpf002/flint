@@ -14,3 +14,5 @@ export * from './selfmod-paths.js';
 export * from './claims.js';
 export * from './wire.js';
 export * from './zone.js';
+export * from './action-words.js';
+export * from './health-names.js';

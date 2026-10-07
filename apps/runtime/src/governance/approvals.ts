@@ -7,6 +7,7 @@
  */
 import {
   ApprovalPayload,
+  REFUSAL,
   challengeOf,
   verifySecureEnclave,
   verifyWebAuthnAssertion,
@@ -19,7 +20,7 @@ export type Reverified = { ok: true; payload: ApprovalPayload } | { ok: false; r
 export async function reverifyApproval(db: Db | Tx, approvalId: string, rp: WebAuthnRelyingParty | undefined): Promise<Reverified> {
   const a = await db.approval.findUnique({ where: { id: approvalId }, include: { credential: true } });
   if (!a) return { ok: false, reason: 'no such approval' };
-  if (a.credential.revokedAt) return { ok: false, reason: 'the credential was revoked' };
+  if (a.credential.revokedAt) return { ok: false, reason: REFUSAL.revoked };
   const parsed = ApprovalPayload.safeParse(a.payload);
   if (!parsed.success) return { ok: false, reason: 'the stored payload is not a valid approval payload' };
   const challenge = challengeOf(parsed.data);
@@ -32,7 +33,7 @@ export async function reverifyApproval(db: Db | Tx, approvalId: string, rp: WebA
     const v = verifySecureEnclave({ publicKeySpki: key, challenge, signature: a.signature });
     return v.ok ? { ok: true, payload: parsed.data } : { ok: false, reason: v.reason };
   }
-  if (!rp) return { ok: false, reason: 'passkey approvals need FLINT_RP_ID and FLINT_RP_ORIGINS' };
+  if (!rp) return { ok: false, reason: REFUSAL.rpMissing };
   if (!a.authenticatorData || !a.clientDataJson) return { ok: false, reason: 'a passkey approval is missing its assertion' };
   const v = verifyWebAuthnAssertion({
     publicKeySpki: key,

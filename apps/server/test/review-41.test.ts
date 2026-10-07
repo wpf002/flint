@@ -6,7 +6,7 @@
  * signed policies and caps from the runtime, notifications that keep their
  * words in the console, and the approval routes end to end.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
@@ -19,13 +19,13 @@ import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
 import { isSafeTool } from '../src/policy';
 import { gateBuiltins, runtimeResultTainted, tierGate, type TierEvent, type TierOutcome } from '../src/tier-gate';
-import { historyOrigin, markEval, markTainted, taintFromHistory, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
+import { currentTurn, historyOrigin, markEval, markTainted, taintFromHistory, turnProposals, turnTainted, withTurnTaint } from '../src/turn-taint';
 import { ConversationTaint } from '../src/conversation-taint';
 import { AuditSink, AuditUnavailable, type AuditRecord } from '../src/audit-sink';
 import { RuntimeProposals } from '../src/runtime-proposals';
 import { RuntimePolicies, capClaimer, parsePolicies } from '../src/runtime-link';
 import { Approvals, type ApproverStore, type Credential } from '../src/approvals';
-import { approvalRoutes, executeApproved, type ApprovalDeps } from '../src/approval-routes';
+import { approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, type ApprovalDeps } from '../src/approval-routes';
 import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 import { SpendGuard, SpendLedger } from '../src/spend';
@@ -217,12 +217,19 @@ describe('runtime results and the gate', () => {
       markTainted('mcp:web');
       await remember!.handler({ id: '3', toolName: 'remember', args: { fact: 'b' } });
       expect(turnProposals().map((p) => p.fullName)).toEqual(['remember']);
+      // A chat filed it: the card in the conversation (and in Approvals) says so, never "Its source is unknown."
+      const turn = currentTurn()!;
+      expect(turnProposals()[0]!.origin).toBe(`chat:${turn.id}`);
+      expect(queue.list()[0]!.origin).toBe(`chat:${turn.id}`);
     });
     expect(events.map((e) => e.status)).toEqual(['read', 'acting', 'queued']);
     expect(events[1]!.correlationId).toMatch(/^call:/);
     expect(outcomes).toEqual([expect.objectContaining({ correlationId: events[1]!.correlationId, ok: false, error: 'the tool reported an error' })]);
     expect(JSON.stringify(outcomes)).not.toContain('secret');
     expect(events[2]!.correlationId).toBe(`act:${queue.list()[0]!.id}`);
+    // Outside a turn nothing says who filed it.
+    const outside = queue.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { out: 1 }, destructive: false });
+    expect(queue.list().find((p) => p.id === outside)!.origin).toBeUndefined();
   });
 
   it('an eval replay queues nothing and proposes nothing, even inside deep_research', async () => {
@@ -248,6 +255,19 @@ describe('outcomes', () => {
     expect(outcomeOf('ok')).toEqual({ ok: true });
     expect(outcomeOf({ isError: true, content: 'bob@example.com not found' })).toEqual({ ok: false, error: 'the tool reported an error', detail: 'bob@example.com not found' });
     expect(outcomeOf({ approved: false, message: 'queued' })).toMatchObject({ ok: false, error: 'not executed: refused by the gate' });
+    expect(outcomeOf({ approved: false })).toMatchObject({ ok: false, detail: 'It wasn’t run.' });
+  });
+
+  it('a failed MCP tool’s own words reach the card: the text parts of its content, clipped; a sentence when it has none', () => {
+    const mcp = (content: unknown) => outcomeOf({ isError: true, content });
+    expect(mcp([{ type: 'text', text: 'quota exceeded for ' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }, { type: 'text', text: 'calendar primary' }])).toEqual({
+      ok: false, error: 'the tool reported an error', detail: 'quota exceeded for \ncalendar primary',
+    });
+    expect(mcp([{ type: 'text', text: 'x'.repeat(5000) }])).toMatchObject({ detail: 'x'.repeat(2000) });
+    // No words of its own: never '[object Object]', never an empty line.
+    expect(mcp([{ type: 'image', data: 'AAAA' }])).toMatchObject({ detail: 'The tool reported an error.' });
+    expect(mcp({ nested: true })).toMatchObject({ detail: 'The tool reported an error.' });
+    expect(mcp(undefined)).toMatchObject({ detail: 'The tool reported an error.' });
   });
 
   it('RAM ids are unique across restarts; an approved call that errors is an error, and runs in a scope as tainted as its proposal', async () => {
@@ -488,7 +508,7 @@ function fakeRuntime(proposal: Record<string, unknown>) {
   const fetchImpl = (async (u: string, init: RequestInit = {}) => {
     const path = new URL(u).pathname;
     calls.push(`${init.method ?? 'GET'} ${path}`);
-    if (path.endsWith('/claim')) return claimStatus === 200 ? Response.json({ id: proposal.id, action: proposal.action, args: proposal.args, argsDigest: 'd' }) : Response.json({ error: 'cap reached' }, { status: claimStatus });
+    if (path.endsWith('/claim')) return claimStatus === 200 ? Response.json({ id: proposal.id, action: proposal.action, args: proposal.args, argsDigest: 'd' }) : Response.json({ error: 'Today’s limit of 1 is reached.' }, { status: claimStatus });
     if (path.endsWith('/complete')) {
       if (!completeUp) throw new Error('ECONNRESET');
       return Response.json({ ok: true });
@@ -557,12 +577,50 @@ describe('approval routes', () => {
     expect(ran).toHaveLength(1);
   });
 
+  it('a refused approval says what Will can do, and why it was refused goes to the log under the ref it returns', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
+    const mem = memoryStore();
+    const logged: string[] = [];
+    const d = baseDeps({ approvals: new Approvals({ store: mem.store, enrollCodeFile: code }), errorRef: (tag, err) => (logged.push(`${tag} ${String(err)}`), 'r1') });
+    await serve(d);
+    const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const b = await post('/approvals/enroll/begin', { code: 'abcd-efgh-ijkl-mnop', label: 'Mac' });
+    await post('/approvals/enroll/finish', { challengeId: b.body.challengeId, factor: 'secure_enclave', publicKey: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), signature: signRaw('sha256', Buffer.from(String(b.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 11 }, destructive: false });
+    const begun = await post('/approvals/begin', { proposalId: id });
+    // Signed by some other key: Will reads a sentence; the verifier's reason is logged, never sent.
+    const other = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const r = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: signRaw('sha256', Buffer.from(String(begun.body.challenge), 'base64url'), other.privateKey).toString('base64url') });
+    expect(r).toEqual({ status: 403, body: { error: 'Your approval didn’t verify. Try again.', ref: 'r1' } });
+    expect(logged).toEqual(['approvals refused: the signature did not verify: bad signature']);
+    expect(ran).toEqual([]);
+    // A refusal that carries no reason of its own (an expired request) logs nothing.
+    const again = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: 'AA' });
+    expect(again.body).not.toHaveProperty('ref');
+    expect(logged).toHaveLength(1);
+    // A server with no approver role says how to set it up.
+    await serve(baseDeps());
+    expect(await post('/approvals/begin', { proposalId: id })).toEqual({ status: 501, body: { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' } });
+    server?.close();
+  });
+
   it('no intent on disk, no action', async () => {
     const d = baseDeps({ audit: { record: (_e: unknown, durable?: boolean) => { if (durable) throw new AuditUnavailable('full'); return {}; } } as unknown as ApprovalDeps['audit'] });
     const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 3 }, destructive: false });
     await serve(d);
     expect((await post('/proposals/approve', { id })).status).toBe(503);
     expect(ran).toEqual([]);
+  });
+
+  it('a RAM-queue action Will approved posts its note in the app only, without its internal name', async () => {
+    const pushed: unknown[][] = [];
+    const d = baseDeps({ tools: [tool('gcal.create_event', () => 'created')], notes: { push: (...a: unknown[]) => (pushed.push(a), undefined) } as unknown as ApprovalDeps['notes'] });
+    const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 9 }, destructive: false });
+    await serve(d);
+    expect((await post('/proposals/approve', { id })).body.action).toMatchObject({ status: 'done' });
+    expect(pushed).toEqual([['Action done', 'An approved action is done.', 'action', `act:${id}`, { channels: ['inapp'] }]]);
   });
 
   it('a runtime proposal: wired tools are claimed, run in a scope as tainted as the proposal, and how they ended is reported (spooled if need be)', async () => {
@@ -573,22 +631,63 @@ describe('approval routes', () => {
     const d = baseDeps({ proposals, tools: [tool('gcal.create_event', () => ((tainted = turnTainted()), 'created'))] });
     rt.setComplete(false);
     const out = await executeApproved(d, 'pr1');
-    expect(out).toMatchObject({ status: 'done', note: expect.stringMatching(/told how it ended/) });
+    expect(out).toMatchObject({ status: 'done', note: 'Flint will record the result once the runtime answers.' });
     expect(tainted).toBe(true);
     expect(rt.calls).toContain('POST /v1/proposals/pr1/claim');
     expect(proposals.unsynced()).toBe(0); // proposals spool, not outcomes
     // A cap reached leaves it approved.
     rt.setClaim(429);
-    expect(await executeApproved(d, 'pr1')).toMatchObject({ status: 'approved', note: expect.stringMatching(/cap reached/) });
+    expect(await executeApproved(d, 'pr1')).toMatchObject({ status: 'approved', note: 'Approved. Today’s limit of 1 is reached. Run it later.' });
   });
 
-  it('a runtime job\'s own proposal (a nightly backup) is never claimed by the server', async () => {
+  it('a runtime job\'s own proposal (a nightly backup) is never claimed by the server, and its note says when it runs', async () => {
     const proposal = { id: 'pr2', origin: 'runtime:backup', action: 'backup.local', args: {}, tainted: false, status: 'approved' };
     const rt = fakeRuntime(proposal);
     const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
     const out = await executeApproved(baseDeps({ proposals }), 'pr2');
-    expect(out).toMatchObject({ status: 'approved', note: expect.stringMatching(/runtime job/) });
+    expect(out).toMatchObject({ status: 'approved', note: 'Approved. It runs tonight at 2:15 AM.' });
     expect(rt.calls.some((c) => c.endsWith('/claim'))).toBe(false);
+    const noteFor = async (origin: string, action: string) => {
+      const f = fakeRuntime({ id: 'pr3', origin, action, args: {}, tainted: false, status: 'approved' });
+      return (await executeApproved(baseDeps({ proposals: new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: f.fetchImpl }) }), 'pr3')).note;
+    };
+    expect(await noteFor('runtime:offsite', 'backup.offsite')).toBe('Approved. It runs tonight at 2:15 AM.');
+    // A Tuesday: the restore test runs Sunday (the clock alone is faked; the server and fetch are real).
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 9, 6, 12, 0) });
+    try {
+      expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs Sunday at 2:15 AM.');
+      // The Sunday its card was filed, after the run that filed it: the run that claims it is a week away.
+      vi.setSystemTime(new Date(2026, 9, 4, 15, 0));
+      expect(await noteFor('runtime:drill', 'restore.drill')).toBe('Approved. It runs next Sunday at 2:15 AM.');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(await noteFor('runtime:retention', 'maintenance.retention')).toBe('Approved. It runs tonight at 3:10 AM.');
+    expect(await noteFor('runtime:other', 'other.job')).toBe('Approved. Its nightly job runs it.');
+    // A chat tool that is not connected right now: Run Now in Approvals, once it is.
+    expect(await noteFor('chat:t', 'mcp:gone.tool')).toBe('Approved. Its tool isn’t connected, so run it later in Approvals.');
+  });
+
+  it('the restore test’s run is never a time already past: today before 2:15 on a Sunday, next Sunday after', () => {
+    // Local time, as the LaunchAgent keeps it. 2026-10-04 is a Sunday.
+    expect(drillRunsAt(new Date(2026, 9, 6, 12, 0))).toBe('Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 3, 23, 59))).toBe('Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 0, 30))).toBe('today at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 2, 14))).toBe('today at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 2, 15))).toBe('next Sunday at 2:15 AM');
+    expect(drillRunsAt(new Date(2026, 9, 4, 15, 0))).toBe('next Sunday at 2:15 AM');
+    expect(nightlyRun('runtime:drill', new Date(2026, 9, 4, 15, 0))).toBe('Approved. It runs next Sunday at 2:15 AM.');
+    expect(nightlyRun('runtime:backup', new Date(2026, 9, 4, 15, 0))).toBe('Approved. It runs tonight at 2:15 AM.');
+    expect(nightlyRun('runtime:other')).toBeUndefined();
+  });
+
+  it('the "Action done" note says what Flint did in a sentence, never a title as its subject', () => {
+    expect(doneNote('runtime.world_now')).toBe('Flint checked what’s happening now.');
+    expect(doneNote('runtime.world_entity')).toBe('Flint looked up one item.');
+    expect(doneNote('gcal.create_event')).toBe('An approved action is done.');
+    for (const name of ['runtime.world_now', 'runtime.ledger_open', 'runtime.ledger_calibration', 'runtime.ledger_record_prediction', 'runtime.inbox_recent', 'runtime.escalations_open', 'runtime.explain_decision']) {
+      expect(doneNote(name)).toMatch(/^Flint [a-z][^A-Z]*\.$/);
+    }
   });
 
   it('enrolling a second key from another device: pending, approved there, finished here', async () => {
@@ -650,6 +749,17 @@ describe('second review of #41', () => {
     expect(out.status).toBe('done');
     expect(ran).toBe(1);
     expect(claims).toBe(0);
+  });
+
+  it('the note for a chat lookup Will approved says what it did in words, never the tool\'s name', async () => {
+    const proposal = { id: 'pr9', origin: 'chat:t', action: 'mcp:runtime.world_now', args: {}, tainted: false, status: 'approved' };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    const notes: Array<[string, string, unknown]> = [];
+    const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string, _k: string, _d: string, opts: unknown) => (notes.push([title, body, opts]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
+    expect(out.status).toBe('done');
+    // In the app only: Will just approved it, so no banner and no ping.
+    expect(notes).toEqual([['Action done', 'Flint checked what’s happening now.', { channels: ['inapp'] }]]);
   });
 
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {
@@ -741,9 +851,9 @@ describe('second review of #41', () => {
     // Enrolling a live key again is refused; a revoked key cannot come back (a new one is made instead).
     await expect(enrol(mac, 'zzzz-0000-1111-2222 replace')).resolves.toBeDefined(); // replace with itself: no-op
     creds.push({ credentialId: 'other', factor: 'webauthn', publicKey: Buffer.alloc(1), label: 'other', signCount: 0, revokedAt: null, enrolledVia: 'approval:y' });
-    await expect(enrol(mac, 'yyyy-0000-1111-2222')).rejects.toThrow(/already enrolled/);
+    await expect(enrol(mac, 'yyyy-0000-1111-2222')).rejects.toThrow('That key is already added.');
     creds.find((c) => c.label === 'k')!.revokedAt = new Date();
-    await expect(enrol(mac, 'xxxx-0000-1111-2222 replace')).rejects.toThrow(/was revoked/);
+    await expect(enrol(mac, 'xxxx-0000-1111-2222 replace')).rejects.toThrow('That key was revoked. Use Replace This Mac’s Key to make a new one.');
   });
 
   it('a second key with a long credential id can be approved (the approval names a fixed-length reference)', async () => {

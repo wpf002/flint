@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { digestOf, redact, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { REFUSAL, digestOf, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -28,11 +28,33 @@ export class Refused extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409 | 429,
     message: string,
+    /** Why, in the engine's or the verifier's own words: logged with a ref, never sent (the message is what Will reads). */
+    readonly why?: string,
   ) {
     super(message);
     this.name = 'Refused';
   }
 }
+
+/** A card that is gone. Its refusals show under the card itself, so "it" needs no noun. */
+export const GONE = 'It no longer exists.';
+
+/** Why a card cannot take this step, from where it stands, as a sentence under the card. */
+export function statusWords(status: string): string {
+  const words: Record<string, string> = {
+    pending: 'It isn’t approved yet.',
+    approved: 'It’s already approved.',
+    executing: 'It’s running now.',
+    executed: 'It already ran.',
+    rejected: 'It was rejected.',
+    expired: 'It expired.',
+    failed: 'It already failed.',
+  };
+  return words[status] ?? 'It can’t change now.';
+}
+
+/** A cap that is reached, by its period: "Today’s limit of 10 is reached." */
+const CAP_PERIOD: Record<string, string> = { hour: 'This hour’s', day: 'Today’s', week: 'This week’s' };
 
 const Provenance = z.record(
   z.string().max(64),
@@ -166,21 +188,50 @@ export async function createProposal(db: Db, input: CreateProposal, actor: strin
 }
 
 /**
+ * A signed decision the runtime will not take: the reason (crypto or engine
+ * wording) goes into the audit, the sentence Will reads into the refusal. A
+ * cause no retry can clear (an RP that is not set up, a revoked key) says its
+ * fix instead of "Try again".
+ */
+async function refuseSigned(
+  db: Db,
+  p: { id: string; action: string; argsDigest: string; tainted: boolean },
+  step: 'approve' | 'reject',
+  approvalId: string,
+  r: { status: 403 | 409; words: string; why: string },
+  actor: string,
+  now: Date,
+): Promise<never> {
+  await appendAudit(db, [{
+    actor, context: 'console', kind: 'decision', action: p.action, decision: 'deny', outcome: 'denied',
+    inputs: auditInputs(p, { approvalId, step }), reasoning: r.why.slice(0, 1000), correlationId: p.id, tainted: p.tainted,
+  }], now);
+  throw new Refused(r.status, r.words, r.why);
+}
+
+/** Why a signature did not verify here, as Will reads it: the fix when there is one, else `retry`. */
+const unverified = (reason: string, retry: string) => refusalFix(reason, 'runtime') ?? retry;
+
+/**
  * Approve with Will's signed approval (already verified by the server and
  * recorded by flint_approver). The signature is verified again here; an action
  * that is FORBIDDEN now is refused with 409 and the approval is left unused.
  */
 export async function approveProposal(db: Db, id: string, approvalId: string, rp: WebAuthnRelyingParty | undefined, actor: string, now = new Date()) {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
-  if (p.status !== 'pending') throw new Refused(409, `the proposal is ${p.status}`);
+  if (!p) throw new Refused(404, GONE);
+  if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   const v = await reverifyApproval(db, approvalId, rp);
-  if (!v.ok) throw new Refused(403, `the approval does not verify: ${v.reason}`);
+  if (!v.ok) {
+    return refuseSigned(db, p, 'approve', approvalId, { status: 403, words: unverified(v.reason, 'Your approval didn’t verify. Try again.'), why: `the approval does not verify: ${v.reason}` }, actor, now);
+  }
   if (v.payload.subjectType !== 'proposal' || v.payload.subjectId !== id || v.payload.decision !== 'approve' || v.payload.action !== p.action || v.payload.argsDigest !== p.argsDigest) {
-    throw new Refused(403, 'the approval was signed for something else');
+    return refuseSigned(db, p, 'approve', approvalId, { status: 403, words: 'Your approval was for something else.', why: 'the approval was signed for something else' }, actor, now);
   }
   const decision = await tierOf(db, p, now);
-  if (decision.tier === 'forbidden') throw new Refused(409, `forbidden: ${decision.reason}`);
+  if (decision.tier === 'forbidden') {
+    return refuseSigned(db, p, 'approve', approvalId, { status: 409, words: 'Flint isn’t allowed to run this.', why: `forbidden: ${decision.reason}` }, actor, now);
+  }
   await db.$transaction(async (tx) => {
     // proposal_transition checks the approval again and consumes it.
     await tx.proposal.update({ where: { id }, data: { status: 'approved', approvalId } });
@@ -194,11 +245,13 @@ export async function approveProposal(db: Db, id: string, approvalId: string, rp
 /** Reject: Will's signed rejection when there is one, or the runtime refusing on its own. */
 export async function rejectProposal(db: Db, id: string, opts: { approvalId?: string; error?: string }, rp: WebAuthnRelyingParty | undefined, actor: string) {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
-  if (p.status !== 'pending') throw new Refused(409, `the proposal is ${p.status}`);
+  if (!p) throw new Refused(404, GONE);
+  if (p.status !== 'pending') throw new Refused(409, statusWords(p.status));
   if (opts.approvalId) {
     const v = await reverifyApproval(db, opts.approvalId, rp);
-    if (!v.ok) throw new Refused(403, `the rejection does not verify: ${v.reason}`);
+    if (!v.ok) {
+      return refuseSigned(db, p, 'reject', opts.approvalId, { status: 403, words: unverified(v.reason, 'Your rejection didn’t verify. Try again.'), why: `the rejection does not verify: ${v.reason}` }, actor, new Date());
+    }
   }
   await db.$transaction(async (tx) => {
     await tx.proposal.update({
@@ -222,32 +275,37 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
   // reported, so the transaction returns it instead of throwing it.
   const out = await db.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} FOR UPDATE`;
-    if (locked.length === 0) throw new Refused(404, 'no such proposal');
+    if (locked.length === 0) throw new Refused(404, GONE);
     const p = await tx.proposal.findUniqueOrThrow({ where: { id } });
-    if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, `the proposal is ${p.status}`);
-    if (p.expiresAt <= now) throw new Refused(409, 'the proposal has expired');
-    const fail = async (reason: string, status: 403 | 409) => {
+    if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, p.status === 'approved' ? statusWords('pending') : statusWords(p.status));
+    if (p.expiresAt <= now) throw new Refused(409, 'It expired.');
+    // `reason` is what Will reads (the card's error, and the refusal); `why`, the engine's own words, is audited too.
+    const fail = async (reason: string, status: 403 | 409, why?: string) => {
       await tx.proposal.update({ where: { id }, data: { status: 'failed', error: reason, executedAt: now } });
       await appendAudit(tx, [{
         actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
-        inputs: auditInputs(p), reasoning: reason, correlationId: id, tainted: p.tainted,
+        inputs: auditInputs(p), reasoning: (why ? `${reason} (${why})` : reason).slice(0, 1000), correlationId: id, tainted: p.tainted,
       }], now);
-      return { refused: new Refused(status, reason) } as const;
+      return { refused: new Refused(status, reason, why) } as const;
     };
     const v = await reverifyApproval(tx, p.approvalId, rp);
     if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
-      return fail(`refused to execute: the approval no longer verifies (${v.ok ? 'it covers different args' : v.reason})`, 403);
+      // The reason stays in the audit (the refusal is stored as the card's error, which Will reads),
+      // and a cause no retry can clear (the runtime's RP not set up, a revoked key) says its fix.
+      // A revoked key is "no longer valid" (the card has failed: there is nothing to approve again).
+      const fix = v.ok || v.reason === REFUSAL.revoked ? undefined : refusalFix(v.reason, 'runtime');
+      return fail(fix ? `Flint didn’t run it. ${fix}` : 'Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
     }
     // The args as stored, read as text (exact), are what is checked and what runs.
     const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;
     const args = stored?.t ? (JSON.parse(stored.t) as Record<string, unknown>) : null;
-    if (args === null || digestOf(args) !== p.argsDigest) return fail('refused to execute: the args do not match their digest', 409);
+    if (args === null || digestOf(args) !== p.argsDigest) return fail('Flint didn’t run it because it changed after you approved it.', 409, 'the args do not match their digest');
     const decision = await tierOf(tx, p, now);
-    if (decision.tier === 'forbidden') return fail(`refused to execute: forbidden: ${decision.reason}`, 409);
+    if (decision.tier === 'forbidden') return fail('Flint didn’t run it because it isn’t allowed now.', 409, `forbidden: ${decision.reason}`);
     if (decision.cap) {
       const n = await claim(tx, decision.key, decision.cap, tz, now);
       // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
-      if (n === null) throw new Refused(429, `the ${decision.cap.period}ly cap of ${decision.cap.limit} for ${decision.key} is reached`);
+      if (n === null) throw new Refused(429, `${CAP_PERIOD[decision.cap.period] ?? 'Its'} limit of ${decision.cap.limit} is reached.`);
     }
     await tx.proposal.update({ where: { id }, data: { status: 'executing' } });
     await appendAudit(tx, [{
@@ -274,7 +332,7 @@ export const GIVEN_UP = 'no completion was reported: outcome unknown';
 
 export async function completeProposal(db: Db, id: string, body: z.infer<typeof CompleteProposal>, actor: string, now = new Date()): Promise<{ late?: true }> {
   const p = await db.proposal.findUnique({ where: { id } });
-  if (!p) throw new Refused(404, 'no such proposal');
+  if (!p) throw new Refused(404, GONE);
   if (p.status === 'failed' && p.error === GIVEN_UP) {
     // The sweep gave up on it, and now it reports: the record says how it really
     // ended, correlated with it (the proposal itself stays as the sweep left it).
@@ -284,7 +342,7 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
     }]);
     return { late: true };
   }
-  if (p.status !== 'executing') throw new Refused(409, `the proposal is ${p.status}`);
+  if (p.status !== 'executing') throw new Refused(409, statusWords(p.status));
   let result: Prisma.InputJsonObject | undefined;
   if (body.result) {
     // Measured as the database measures it (jsonb text), with room to spare: an

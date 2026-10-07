@@ -24,8 +24,8 @@ export class TurnTaint {
   readonly allowances = new Set<string>();
   /** Names this turn as a proposal's origin (`chat:<id>`). */
   readonly id = randomBytes(8).toString('hex');
-  /** Proposals this turn filed (RAM queue or runtime), for the console's approval cards. */
-  readonly proposed: Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> = [];
+  /** Proposals this turn filed (RAM queue or runtime), for the console's approval cards; a chat filed each (`chat:<id>`). */
+  readonly proposed: Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending'; origin: string }> = [];
   /**
    * The tools this turn called (names only, refused and queued calls included),
    * for the runtime's chat.turn event. A scope opened inside the turn (deep_research's)
@@ -103,14 +103,14 @@ export function turnTainted(): boolean {
   return scope.getStore()?.tainted ?? false;
 }
 
-/** Note a proposal this turn filed (once per id). */
+/** Note a proposal this turn filed (once per id). Its origin is this turn: the console's card says a chat filed it. */
 export function noteProposal(p: { id: string; fullName: string; args: unknown; tainted: boolean }): void {
   const t = scope.getStore();
-  if (t && !t.proposed.some((x) => x.id === p.id)) t.proposed.push({ ...p, status: 'pending' });
+  if (t && !t.proposed.some((x) => x.id === p.id)) t.proposed.push({ ...p, status: 'pending', origin: `chat:${t.id}` });
 }
 
 /** The proposals this turn filed. */
-export function turnProposals(): Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending' }> {
+export function turnProposals(): Array<{ id: string; fullName: string; args: unknown; tainted: boolean; status: 'pending'; origin: string }> {
   return [...(scope.getStore()?.proposed ?? [])];
 }
 

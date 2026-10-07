@@ -222,6 +222,7 @@
   .ct b{flex:1;min-width:0;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .ct small{font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums;}
   .ct .sub{display:block;font-size:12px;line-height:16px;color:var(--t3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .card.open .ct .sub{white-space:normal;}
   .facts{display:grid;grid-template-columns:72px minmax(0,1fr);gap:6px 12px;margin:12px 0 0 26px;}
   .facts dt{font-size:12px;line-height:18px;color:var(--t3);}
   .facts dd{margin:0;font-size:13px;line-height:18px;overflow-wrap:anywhere;}
@@ -390,7 +391,7 @@
     <div class="gsh">Connected Systems</div>
     <div class="group" id="systems"><div class="row"><span class="lbl"><b>Checking…</b></span></div></div>
     <div class="gsh">Privacy</div>
-    <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span>Answers stay on this Mac</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" onclick="toggleLO()"></button></div></div>
+    <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span>Answers stay on this Mac.</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" onclick="toggleLO()"></button></div></div>
     <div class="gsh">Access</div>
     <div class="group" id="access">
       <div class="row" id="tokrow-signed"><span class="lbl"><b>Access Token</b></span><span class="val">Signed In</span></div>
@@ -500,7 +501,7 @@ function dayGroup(ms){var d=new Date(ms),now=new Date();var start=new Date(now.g
 function loadThreads(){if(!TOKEN){THREADS_LOADED=true;renderThreads();return;}fetch(BASE+'/threads',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){THREADS_LOADED=true;THREADS=(d&&d.threads)||[];renderThreads();}).catch(function(){THREADS_LOADED=true;renderThreads();});}
 function renderThreads(){var nav=$('threads');nav.textContent='';var q=($('threadsearch').value||'').trim().toLowerCase();
   var list=THREADS.filter(function(t){return !q||String(t.title||'').toLowerCase().indexOf(q)>=0;});
-  if(!list.length){nav.appendChild(el('div','side-empty',!THREADS_LOADED?'Loading…':q?'No Matching Chats':'No Chats Yet'));return;}
+  if(!list.length){nav.appendChild(el('div','side-empty',!THREADS_LOADED?'Loading…':q?'No chats match your search.':'You have no chats yet.'));return;}
   var last='';list.forEach(function(t){var g=dayGroup(t.updatedAt);if(g!==last){nav.appendChild(el('div','sh',g));last=g;}
     var b=el('button','trow'+(t.id===THREAD_ON?' on':''),t.title||'Untitled');b.title=t.title||'';b.onclick=function(){openThread(t.id);};nav.appendChild(b);});}
 $('threadsearch').addEventListener('input',renderThreads);
@@ -535,7 +536,8 @@ applyLO();
 function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var host=bodyEl.parentNode;actions.forEach(function(a){
   var card=el('div','propose');var title=typeof apprTitle==='function'?apprTitle(a):a.fullName;
   card.appendChild(el('div','pt',title));
-  if(typeof apprSub==='function')card.appendChild(el('div','psub',apprSub(a)));
+  /* A chat filed every card here: one the server sent without its origin still says so. */
+  if(typeof apprSub==='function')card.appendChild(el('div','psub',apprSub(a.origin?a:Object.assign({origin:'chat:'},a))));
   var args='';try{args=JSON.stringify(a.args,null,1);}catch(e){args=String(a.args);}
   card.appendChild(el('div','pargs',args));
   var row=el('div','prow');var more=el('button','ghost','Show Details');more.onclick=function(){card.classList.toggle('show');more.textContent=card.classList.contains('show')?'Hide Details':'Show Details';};
@@ -564,25 +566,28 @@ function approveLabel(all){var p=all?'Approve All':'Approve';
   return p;}
 /* How an approval ended: done, still approved (a cap was reached, or a runtime job runs it), or failed. Text only, never HTML. */
 function resText(r,t,kind){r.style.display='block';r.textContent=t;r.className='res'+(kind?' '+kind:'');}
-/* A person card's result: who was added, and who no longer qualified (already known, declined, or the event is over). */
+/* A person card's result, as a sentence: who was added, and who no longer qualified (already known, declined, or the event is over). */
 function peopleOutcome(x){if(!x||typeof x.created!=='number'||typeof x.skipped!=='number')return '';
-  var s=x.created?'Added '+x.created+' '+(x.created===1?'Person':'People'):'Nobody Added';return x.skipped?s+' · Skipped '+x.skipped:s;}
+  var s='Flint added '+(x.created?x.created+' '+(x.created===1?'person':'people'):'no one');return s+(x.skipped?' and skipped '+x.skipped:'')+'.';}
+/* Each part of an outcome is its own sentence: the server's note follows "Done." or the error. */
 function showOutcome(d,r,row){var a=(d&&d.action)||{};
-  if(d&&d.error&&!d.action){resText(r,d.error,'bad');row.style.opacity=1;return;}
+  if(d&&d.error&&!d.action){resText(r,errText(d.error),'bad');row.style.opacity=1;return;}
   row.style.display='none';
-  if(a.status==='done')resText(r,peopleOutcome(a.result)||('Done'+(a.note?': '+a.note:'')),'ok');
-  else if(a.status==='approved')resText(r,a.note||'Approved, not run yet','ok');
-  else resText(r,(a.error||'Failed')+(a.note?': '+a.note:''),'bad');}
-function showDecision(d,decision,r,row){if(decision==='reject'){row.style.display='none';resText(r,'Rejected');return;}showOutcome(d,r,row);}
-/* An error in Flint's words: a cancelled prompt is "Cancelled", anything else starts with a capital. */
-function errText(e){var m=String(e&&e.message||e||'Stopped');if(/^not confirmed$/i.test(m))return 'Cancelled';
-  m=m.replace(/\s*\([^)]*\)/g,'').replace(/(^|\s)~?\/[\w.-]+(\/[\w.-]+)+\/?/g,'$1').replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim()||'Stopped';
-  return m.charAt(0).toUpperCase()+m.slice(1);}
+  var note=a.note?' '+errText(a.note):'';
+  if(a.status==='done')resText(r,peopleOutcome(a.result)||('Done.'+note),'ok');
+  else if(a.status==='approved')resText(r,a.note?errText(a.note):'Approved. It hasn’t run yet.','ok');
+  else resText(r,(a.error?errText(a.error):'It failed.')+note,'bad');}
+function showDecision(d,decision,r,row){if(decision==='reject'){row.style.display='none';resText(r,'Rejected.');return;}showOutcome(d,r,row);}
+/* An error in Flint's words, as a sentence: a cancelled prompt is "Cancelled.", anything else starts with a capital and ends with a stop. */
+function errText(e){var m=String(e&&e.message||e||'It stopped.');if(/^not confirmed$/i.test(m))return 'Cancelled.';
+  m=m.replace(/\s*\([^)]*\)/g,'').replace(/(^|\s)~?\/[\w.-]+(\/[\w.-]+)+\/?/g,'$1').replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim()||'It stopped.';
+  m=m.charAt(0).toUpperCase()+m.slice(1);
+  return /[.!?…]$/.test(m)?m:m.replace(/[,:;]$/,'')+'.';}
 function failed(e,r,row){row.style.opacity=1;resText(r,errText(e),'bad');}
 /* Sign a challenge with this device's approval key: the Mac's key (one prompt covers a run of cards for 5 minutes, unless fresh), else a passkey. */
 function signWithMyKey(b,reason,fresh){
   if(canEnclave())return se('sign',{challenge:b.challenge,reason:reason,fresh:!!fresh}).then(function(sg){return {credentialId:SE_ID,signature:sg.signature};});
-  if(!canPasskey())return Promise.reject(new Error('No approval key on this device'));
+  if(!canPasskey())return Promise.reject(new Error('This device has no approval key.'));
   var allow=CREDS.filter(function(c){return c.factor==='webauthn';}).map(function(c){return {type:'public-key',id:unb64u(c.credentialId)};});
   return navigator.credentials.get({publicKey:{challenge:unb64u(b.challenge),rpId:location.hostname,allowCredentials:allow,userVerification:'required',timeout:60000}})
     .then(function(a){return {credentialId:b64u(a.rawId),authenticatorData:b64u(a.response.authenticatorData),clientDataJSON:b64u(a.response.clientDataJSON),signature:b64u(a.response.signature)};});}
@@ -590,22 +595,22 @@ function signWithMyKey(b,reason,fresh){
 function finishEnrolment(b,reg,label){
   if(!b.needsApproval)return postJson('/approvals/enroll/finish',reg);
   return postJson('/approvals/enroll/approve-begin',reg).then(function(ap){
-    enrollMsg('Approve "'+label+'" from a device that already has a key. Waiting…');
+    enrollMsg('Approve “'+label+'” on a device that already has a key. Flint is waiting.');
     var tries=0;
     return new Promise(function(resolve,reject){(function poll(){
       fetch(BASE+'/approvals/enroll/approved?challengeId='+encodeURIComponent(ap.challengeId),{headers:auth()}).then(function(r){return r.json();}).then(function(d){
         if(d.approved)return resolve(postJson('/approvals/enroll/finish',Object.assign({},reg,{approval:{challengeId:ap.challengeId}})));
-        if(++tries>90)return reject(new Error('Not approved in time. Start again.'));
+        if(++tries>90)return reject(new Error('It wasn’t approved in time. Start again.'));
         setTimeout(poll,3000);}).catch(reject);})();});});}
 function enrollEnclave(){var code=$('enrollcode').value.trim();var label=$('enrolllabel').value.trim()||'Mac';
   postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
-    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as Flint approval key',fresh:true}).then(function(sg){
+    return se('publicKey').then(function(pk){return se('sign',{challenge:b.challenge,reason:'add this Mac as your approval key',fresh:true}).then(function(sg){
       var reg={challengeId:b.challengeId,factor:'secure_enclave',publicKey:pk.publicKey,signature:sg.signature};
       return finishEnrolment(b,reg,label).then(function(){return seIdOf(pk.publicKey);});});});
-  }).then(function(id){SE_ID=id;$('enrollcode').value='';enrollMsg('Approval key added');loadCreds();}).catch(function(e){enrollMsg(e.message||e,true);});}
+  }).then(function(id){SE_ID=id;$('enrollcode').value='';enrollMsg('Your approval key is added.');loadCreds();}).catch(function(e){enrollMsg(e.message||e,true);});}
 /* Replace this Mac's key (lost or unwanted): make a new one (Touch ID or password), then enrol it with a code from `enroll --replace` (or another key's approval). */
 function resetEnclave(){/* No confirm(): the app's web view has no dialog for it. Touch ID (or the password) is the confirmation. */
-  se('reset').then(function(){SE_ID=null;$('enrollbox').hidden=false;$('enrollse').hidden=false;enrollMsg('New key made. Enter a replace code to add it.');}).catch(function(e){enrollMsg(e.message||e,true);});}
+  se('reset').then(function(){SE_ID=null;$('enrollbox').hidden=false;$('enrollse').hidden=false;enrollMsg('A new key is ready. Enter a replace code to add it.');}).catch(function(e){enrollMsg(e.message||e,true);});}
 function enclaveDecide(id,decision,card,o){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;o=o||{};
   return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
     return se('sign',{challenge:b.challenge,reason:o.reason||((decision==='approve'?'approve ':'reject ')+b.payload.action),fresh:!!o.fresh}).then(function(sg){
@@ -624,7 +629,8 @@ function loadCreds(){if(!TOKEN)return;fetch(BASE+'/approvals/credentials',{heade
   if(!mine&&here){var add=el('button','btn',here==='mac'?'Add Approval Key':'Add Passkey');add.onclick=function(){box.hidden=false;$('enrollcode').focus();};
     g.appendChild(keyRow(here==='mac'?'This Mac':'This Device','Not Set Up',add));}
   if(!CREDS.length&&!here)g.appendChild(keyRow('Approval Key','Not Set Up'));
-  $('enrollpk').hidden=!passkeysHere();$('enrollse').hidden=!enclave();$('resetse').hidden=!(enclave()&&mine);
+  /* Replace is there whenever this Mac has a key: enrolled, or one that is not (revoked keys are not listed, so Add would only be refused). */
+  $('enrollpk').hidden=!passkeysHere();$('enrollse').hidden=!enclave();$('resetse').hidden=!(enclave()&&(mine||SE_ID));
   if(mine)box.hidden=true;
   loadKeyApprovals();}).catch(function(){});}
 /* New keys (on another device) waiting for this device's approval. */
@@ -639,7 +645,7 @@ function loadKeyApprovals(){var box=$('keyapprovals');
         .catch(function(e){ok.disabled=false;enrollMsg(e.message||e,true);});};
       g.appendChild(row);});box.appendChild(g);}).catch(function(){});}
 function enrollMsg(t,bad){t=t?errText(t):'';var m=$('enrollmsg');m.hidden=!t;m.textContent=t;m.style.color=bad?'var(--orange)':'var(--gold)';}
-function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});});}
+function postJson(path,body){return fetch(BASE+path,{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||('Flint returned error '+r.status+'.'));return d;});});}
 function enrollPasskey(){var code=$('enrollcode').value.trim();var label=$('enrolllabel').value.trim()||'Passkey';
   postJson('/approvals/enroll/begin',{code:code,label:label}).then(function(b){
     return navigator.credentials.create({publicKey:{challenge:unb64u(b.challenge),rp:{id:b.rp.id,name:'Flint'},user:{id:unb64u(b.user.id),name:'will',displayName:'Will'},
@@ -647,7 +653,7 @@ function enrollPasskey(){var code=$('enrollcode').value.trim();var label=$('enro
     .then(function(c){var resp=c.response;var reg={challengeId:b.challengeId,clientDataJSON:b64u(resp.clientDataJSON)};
       if(resp.getAuthenticatorData)reg.authenticatorData=b64u(resp.getAuthenticatorData());else reg.attestationObject=b64u(resp.attestationObject);
       return finishEnrolment(b,reg,label);});
-  }).then(function(){$('enrollcode').value='';enrollMsg('Passkey added');loadCreds();}).catch(function(e){enrollMsg(e.message,true);});}
+  }).then(function(){$('enrollcode').value='';enrollMsg('Your passkey is added.');loadCreds();}).catch(function(e){enrollMsg(e.message,true);});}
 /* Will signs this exact action and its args with the passkey; the server and the runtime verify it. */
 function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
@@ -655,13 +661,13 @@ function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var ro
   }).then(function(d){showDecision(d,decision,r,row);return d;}).catch(function(e){failed(e,r,row);throw e;});}
 function approveAction(id,card,o){if(canEnclave())return enclaveDecide(id,'approve',card,o);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   return fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){showOutcome(d,r,row);return d;})
-  .catch(function(e){failed(new Error("Couldn't reach Flint"),r,row);throw e;});}
-function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';resText(card.querySelector('.res'),'Rejected');}
+  .catch(function(e){failed(new Error('Flint didn’t answer. Try again.'),r,row);throw e;});}
+function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';resText(card.querySelector('.res'),'Rejected.');}
 
 function send(speakBack){
   var sb=speakBack===true;
   var inp=$('input');var msg=inp.value.trim();
-  if(ATT_READING){attNote('Still reading an attachment.');return;}
+  if(ATT_READING){attNote('Flint is still reading an attachment.');return;}
   var atts=PENDING.slice();if(!msg&&!atts.length)return;
   if(!TOKEN){openSettings();return;}
   inp.value='';syncSend();PENDING=[];renderChips();attNote('');
@@ -671,9 +677,9 @@ function send(speakBack){
   var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};$('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY,attachments:atts.map(function(a){return {name:a.name,type:a.type,data:a.data};})})})
   .then(function(res){
-    if(res.status===401){body.textContent='The access token was rejected. Add it in Settings.';$('think').textContent='';setTalk(0);tokenRejected();return;}
+    if(res.status===401){body.textContent='The access token was rejected. Add the current one in Settings.';$('think').textContent='';setTalk(0);tokenRejected();return;}
     /* Refusals (bad file, too large, Local-only + image) come back as JSON, not a stream. */
-    if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent="Couldn't send: "+((d&&d.error)||('error '+res.status));$('think').textContent='';setTalk(0);});}
+    if(!res.ok){return res.json().catch(function(){return {};}).then(function(d){body.textContent='This message wasn’t sent. '+errText((d&&d.error)||('Flint returned error '+res.status+'.'));$('think').textContent='';setTalk(0);});}
     var reader=res.body.getReader(),dec=new TextDecoder(),buf='';
     function pump(){return reader.read().then(function(r){
       if(r.done){$('think').textContent='';setTalk(0);loadThreads();if(!raw)body.textContent='';if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
@@ -684,12 +690,14 @@ function send(speakBack){
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}
           else{var rest=raw.slice(spoken),re=/[.!?](\s|$)/g,mm,last=-1;while((mm=re.exec(rest))){last=mm.index+1;}if(last>0){speakSynced(rest.slice(0,last),body,vctx);spoken+=last;}}}
-        if(ev.type==='error'){var em='\n\nStopped: '+(ev.error&&ev.error.kind||ev.error);raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
+        /* The server's raw error goes to the console log, never the reply. A sentence it wrote for Will (`message`: why no
+           brain could answer, and what to do) follows "This reply stopped early."; otherwise the reply says only that. */
+        if(ev.type==='error'){try{console.log('Flint: the reply stopped early:',ev.error);}catch(e){}var em='\n\nThis reply stopped early.'+(typeof ev.message==='string'&&ev.message.trim()?' '+errText(ev.message):'');raw+=em;if(sb){vctx.displayed+=em;body.innerHTML=md(vctx.displayed);}else{body.innerHTML=md(raw);}}
       }catch(e){}});
       return pump();
     });}
     return pump();
-  }).catch(function(e){body.textContent="Couldn't reach Flint. Try again.";$('think').textContent='';setTalk(0);});
+  }).catch(function(e){body.textContent='Flint didn’t answer. Try again.';$('think').textContent='';setTalk(0);});
 }
 $('input').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.isComposing)send();});
 /* Send turns gold once there is something to send. */
@@ -715,19 +723,19 @@ function addFiles(list){
   files.forEach(function(f){
     var kind=attKind(f);
     if(!kind){attNote(f.name+" can't be attached. Use an image, a PDF or a text file.");return;}
-    if(PENDING.length>=ATT_MAX){attNote('Up to '+ATT_MAX+' files per message.');return;}
+    if(PENDING.length>=ATT_MAX){attNote('A message can have up to '+ATT_MAX+' files.');return;}
     if(f.size>ATT_LIM[kind]){attNote(f.name+' is over the '+fmtSize(ATT_LIM[kind])+' limit.');return;}
-    if(total+f.size>ATT_TOTAL){attNote('Attachments total over '+fmtSize(ATT_TOTAL)+'.');return;}
+    if(total+f.size>ATT_TOTAL){attNote('Attachments can’t total more than '+fmtSize(ATT_TOTAL)+'.');return;}
     total+=f.size;
     var a={name:f.name||('pasted.'+(f.type.split('/')[1]||'bin')),type:f.type,size:f.size,kind:kind,data:null,url:null};
     PENDING.push(a);ATT_READING++;
     var r=new FileReader();
     r.onload=function(){var s=String(r.result||'');a.data=s.slice(s.indexOf(',')+1);if(kind==='image')a.url=s;ATT_READING--;renderChips();};
-    r.onerror=function(){ATT_READING--;PENDING=PENDING.filter(function(x){return x!==a;});attNote("Couldn't read "+a.name+'.');renderChips();};
+    r.onerror=function(){ATT_READING--;PENDING=PENDING.filter(function(x){return x!==a;});attNote('Flint couldn’t read '+a.name+'.');renderChips();};
     r.readAsDataURL(f);
   });
   renderChips();
-  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote("Local Only is on, and the on-device brain can't read images or PDFs.");
+  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote('Local Only is on, so Flint can’t read images or PDFs.');
 }
 function chipHtml(a,removable,i){
   var lead=a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="">':'<span class="ck">'+(a.kind==='document'?'PDF':a.kind==='image'?'IMG':'TXT')+'</span>';
@@ -910,7 +918,7 @@ function laneCall(path,body){
   var opts={headers:Object.assign({'content-type':'application/json'},auth())};
   if(body!==undefined){opts.method='POST';opts.body=JSON.stringify(body);}
   return fetch(BASE+path,opts).then(function(r){return r.json().catch(function(){return {};}).then(function(d){
-    if(!r.ok)throw new Error(r.status===401?'The access token was rejected. Check Settings.':((d&&d.error)||('HTTP '+r.status)));
+    if(!r.ok)throw new Error(r.status===401?'The access token was rejected. Check Settings.':((d&&d.error)||('Flint returned error '+r.status+'.')));
     return d;});});}
 
 /* ---------- the panel ---------- */
@@ -940,7 +948,7 @@ function loadNotifs(){var list=document.getElementById('nlist');if(!list.childre
     var rows=[];items.forEach(function(n){var last=rows[rows.length-1];if(last&&n.kind!=='runtime'&&last.kind!=='runtime'&&last.title===n.title&&last.body===n.body&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&n.read;}else rows.push({title:n.title,body:n.body,kind:n.kind,ts:n.ts,read:!!n.read,count:1});});
     var group='';rows.forEach(function(n){var g=laneDay(n.ts);if(g!==group){list.appendChild(laneEl('div','gsh fsh',g));group=g;}
       var row=laneEl('div','frow'+(n.read?' read':''));row.appendChild(laneEl('span','ud'+(n.read?' read':'')));
-      var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,titleCase(n.title)));fx.appendChild(laneEl('span',null,(n.body||'')+(n.count>1?' · '+n.count+' times':'')));row.appendChild(fx);
+      var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,titleCase(n.title)));fx.appendChild(laneEl('span',null,[n.body||'',n.count>1?'It happened '+n.count+' times.':''].filter(Boolean).join(' ')));row.appendChild(fx);
       row.appendChild(laneEl('small',null,laneAgo(n.ts)));list.appendChild(row);});
     markAllRead(true);
   }).catch(function(){list.textContent='';list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));});}
@@ -967,6 +975,26 @@ var SOURCE_NAMES={github:'GitHub',imessage:'iMessage'};
 /* A calendar entity's name is a machine label ("event 2026-10-06 14:00", "deadline 2026-10-06"): its title stays
    out of the world model. The row says it in Flint's words; the invitation's title is only in the details. */
 var CAL_TYPES={'commitment.state':'event changed','deadline.state':'deadline changed','commitment.upcoming':'coming up','deadline.upcoming':'due soon'};
+/* The line under a row is a sentence: what happened, by its event type (a calendar row's own words), or who
+   reported it. The sentence's source names are its own: Health's row names (SOURCE_NAMES) stay as they are. */
+var CAL_LINES={'commitment.state':'An event on your calendar changed.','deadline.state':'A deadline on your calendar changed.','commitment.upcoming':'An event on your calendar is coming up.',
+  'deadline.upcoming':'A deadline on your calendar is due soon.','person.seen':'Someone is on an event you accepted or organized.'};
+var LANE_LINES={'ci_run.state':'A CI run changed.','pull_request.state':'A pull request changed.','issue.state':'An issue changed.','repo.head':'A repo’s latest commit changed.',
+  'repo.meta':'A repo’s details changed.','deadline.due':'A milestone’s due date changed.','service.health':'A service’s health changed.','service.status':'A background service changed.',
+  'service.railway':'A Railway service changed.','deployment.railway':'A Railway deploy changed.','deployment.status':'A deploy changed.','thread.state':'A Nexus thread changed.',
+  'handoff.unaccepted_24h':'A Nexus handoff hasn’t been accepted in a day.','knowledge.fact':'Flint’s memory learned something.','account.level':'A vendor’s spending level changed.',
+  'backup.stale':'Backups are overdue.','drill.failed':'A restore test failed.','migrate.failed':'A database update failed.','service.down_30m':'A service has been down for 30 minutes.',
+  'vendor.cap_100':'A vendor reached its spending cap.','source.circuit_open':'A source stopped after repeated failures.','source.circuit_closed':'A source is reading again.',
+  'spend.threshold':'Spending reached a budget threshold.','route.error':'A request to Flint failed.'};
+var LANE_SOURCES={github:'GitHub',git:'Git',imessage:'iMessage',google_calendar:'Google Calendar',nexus:'Nexus',nexus_inbox:'Nexus',railway:'Railway',launchd:'Launchd',runtime:'Flint',server:'Flint'};
+function laneLine(it){var t=String(it.eventType||'');
+  if(it.source==='google_calendar'&&CAL_LINES[t])return CAL_LINES[t];
+  if(LANE_LINES[t])return LANE_LINES[t];
+  /* The deploy source writes a failed stage, or a finished deploy. */
+  if(it.source==='deploy')return /\.failed$/.test(t)?'A deploy failed.':'A deploy finished.';
+  return (LANE_SOURCES[it.source]||titleCase(laneWords(it.source))||'Flint')+' reported this.';}
+/* An escalation's standing, in the row's details. */
+var ES_LINES={open:'It’s waiting on you.',acked:'You acknowledged it.',dismissed:'You dismissed it.',acted:'It was acted on.',expired:'It expired.'};
 function calName(name){var m=/^(event|deadline) (\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2})(?: ([A-Z]{2,5}|GMT[+-]\d{1,2}(?::\d{2})?))?)?( \(all day\))?$/.exec(String(name||''));if(!m)return '';
   var day=new Date(Date.UTC(+m[2],+m[3]-1,+m[4],12)).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'}).replace(',','');
   /* In the hour a fall-back repeats, the zone tells the two apart (01:30 CDT, 01:30 CST). */
@@ -982,15 +1010,14 @@ function laneItem(it){
   var cal=it.source==='google_calendar'&&it.entity?calName(it.entity.name):'';
   if(!cal&&it.source==='google_calendar'&&!it.entity&&CAL_TYPES[it.eventType])cal=titleCase(CAL_TYPES[it.eventType]);
   fx.appendChild(laneEl('b',null,es?es.title:cal||(it.entity?it.entity.name:titleCase(laneWords(it.eventType)))));
-  var sub=[SOURCE_NAMES[it.source]||titleCase(laneWords(it.source)),(it.source==='google_calendar'&&CAL_TYPES[it.eventType])||laneWords(it.eventType)].filter(Boolean).join(' · ');
-  fx.appendChild(laneEl('span',null,sub));
+  fx.appendChild(laneEl('span',null,laneLine(it)));
   if(it.tainted||(es&&es.tainted)){var o=laneEl('span','outside');o.appendChild(laneEl('i'));o.appendChild(document.createTextNode('Outside Text'));fx.appendChild(o);}
   var more=laneEl('span','more');more.hidden=true;
   if(es&&es.body)more.appendChild(laneEl('span',null,es.body));
   /* A calendar title (P2.5): whoever sent the invitation wrote it, so it is shown as their text, never as Flint's. */
   if(it.entity&&it.entity.title)more.appendChild(laneEl('span',null,'Invitation title: '+it.entity.title));
   if(it.reasoning)more.appendChild(laneEl('span',null,'Model note: '+it.reasoning));
-  if(es)more.appendChild(laneEl('span',null,'Escalation '+titleCase(laneWords(es.status==='acked'?'acknowledged':es.status))));
+  if(es&&ES_LINES[es.status])more.appendChild(laneEl('span',null,ES_LINES[es.status]));
   fx.appendChild(more);
   /* Labels and acks live in the details: one row, one title, until Will opens it. */
   var acts=laneEl('span','acts');
@@ -1020,8 +1047,11 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
 var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',triage:'Triage',runtime:'Runtime'};
 var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};
 var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
-/* The runtime's note, without asides, starting with a capital. */
-function healthDetail(d){d=String(d||'').replace(/\s*\([^)]*\)/g,'').replace(/\b[0-9a-f]{7,40}\b/g,'').replace(/(^|\s)~?\/[\w.-]+(\/[\w.-]+)+\/?/g,'$1').replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim();return d.charAt(0).toUpperCase()+d.slice(1);}
+/* An issue with no note of its own says what its status means (its dot and its place in the list show how bad). */
+var HEALTH_LINES={degraded:'It needs attention.',down:'It isn’t working.',unknown:'It hasn’t reported.'};
+/* The runtime's note as a sentence: without asides, starting with a capital, ending with a stop. */
+function healthDetail(d){d=String(d||'').replace(/\s*\([^)]*\)/g,'').replace(/\b[0-9a-f]{7,40}\b/g,'').replace(/(^|\s)~?\/[\w.-]+(\/[\w.-]+)+\/?/g,'$1').replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim();
+  if(!d)return '';d=d.charAt(0).toUpperCase()+d.slice(1);return /[.!?…]$/.test(d)?d:d.replace(/[,:;]$/,'')+'.';}
 function healthName(c){c=String(c||'');if(HEALTH_NAMES[c])return HEALTH_NAMES[c];if(c.indexOf('source:')===0)return SOURCE_NAMES[c.slice(7)]||titleCase(laneWords(c.slice(7)));return titleCase(laneWords(c));}
 function healthDot(status,text){var cls={ok:'ok',degraded:'degraded',down:'down',unknown:'unknown',disabled:'off'}[status]||'unknown';var s=laneEl('span','st '+cls);s.appendChild(laneEl('i'));if(text)s.appendChild(document.createTextNode(text));return s;}
 var HEALTH_ALL=false;
@@ -1039,7 +1069,7 @@ function loadHealth(){var top=document.getElementById('sethealth'),last=document
     sum.appendChild(laneEl('span','val',h.lastHealthRun?(stale?'Last check ':'Checked ')+agoPhrase(h.lastHealthRun):'Never Checked'));
     var again=laneEl('button','ghost','Refresh');again.onclick=loadHealth;sum.appendChild(again);g.appendChild(sum);
     issues.forEach(function(c){var row=laneEl('div','row two');row.appendChild(healthDot(c.status));var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));
-      l.appendChild(laneEl('span',null,HEALTH_WORDS[c.status]+(c.detail?' · '+healthDetail(c.detail):'')));row.appendChild(l);row.appendChild(laneEl('span','val',laneAgo(c.at)));g.appendChild(row);});
+      l.appendChild(laneEl('span',null,(c.detail&&healthDetail(c.detail))||HEALTH_LINES[c.status]||''));row.appendChild(l);row.appendChild(laneEl('span','val',laneAgo(c.at)));g.appendChild(row);});
     var rest=comps.filter(function(c){return issues.indexOf(c)<0;});
     if(rest.length){var all=laneEl('div','row click');var al=laneEl('span','lbl');al.appendChild(laneEl('b',null,'All Components'));all.appendChild(al);all.appendChild(laneEl('span','val',String(rest.length)));
       all.appendChild(svgi('chev'));g.appendChild(all);
@@ -1058,9 +1088,19 @@ pollNotifs();setInterval(pollNotifs,60000);
  * signs each card in turn after one prompt (the Mac app keeps the key unlocked for
  * 5 minutes); a card with outside text or money is left for its own approval, with
  * its own prompt. Text only: nothing here is HTML. */
-var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false};
-var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db'],'backup.offsite':["Run Tonight's Offsite Copy",'db'],'restore.drill':["Run This Week's Restore Test",'db'],'maintenance.retention':["Run Tonight's Cleanup",'db']};
-var APPR_SOURCES={launchd:'Flint’s background jobs, every 2 minutes',health:'Service checks, every 5 minutes',git:'Your repos, every 5 minutes',spend:'Spend against your caps, every minute',deploy:'Deploy results, every minute',knowledge:'What Flint’s memory learns, every 10 minutes',nexus_inbox:'Nexus handoffs, every 10 minutes',nexus:'Your Nexus threads, every 5 minutes',github:'Your GitHub repos, every 5 minutes',railway:'Your Railway services, every 5 minutes',google_calendar:'Your calendar, read-only, every 5 minutes'};
+var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false,down:false};
+/* The nightly jobs' cards: the title, the icon, and when the job runs one Will approved (the LaunchAgent runs
+   backups at 02:15 and the restore test on Sundays only, backup-nightly.sh; cleanup runs at 03:10, jobs.ts).
+   The restore test's day is apprWhen's: its card is filed by a Sunday run, so on a Sunday past 2:15 it is a week away. */
+var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 AM'],'backup.offsite':["Run Tonight's Offsite Copy",'db','tonight at 2:15 AM'],'restore.drill':["Run This Week's Restore Test",'db','Sunday at 2:15 AM'],'maintenance.retention':["Run Tonight's Cleanup",'db','tonight at 3:10 AM']};
+/* What each source reads, and how often (its cadenceMs), as a sentence. */
+var APPR_SOURCES={launchd:'Your Mac’s background services are checked every 2 minutes.',health:'Flint’s services are checked every 5 minutes.',git:'Your repos are read every 5 minutes.',spend:'Spend is checked against your caps every minute.',deploy:'Deploy results are read every minute.',knowledge:'New facts in Flint’s memory are read every 10 minutes.',nexus_inbox:'Nexus handoffs to Flint are checked every 10 minutes.',nexus:'Your Nexus threads are read every 5 minutes.',github:'Your GitHub repos are read every 5 minutes.',railway:'Your Railway services are checked every 5 minutes.',google_calendar:'Your calendar is read every 5 minutes.'};
+/* Chat's runtime tools in words (the same titles as @flint/policy's ACTION_WORDS, which the notes use), and what each does, as a sentence. */
+var APPR_TOOLS={'runtime.world_now':['Check What’s Happening Now','Flint checks its services and what is waiting on you.'],'runtime.world_entity':['Look Up One Item','Flint reads one item it tracks.'],'runtime.ledger_open':['Read Open Predictions','Flint reads its predictions still waiting on an outcome.'],'runtime.ledger_calibration':['Check Prediction Accuracy','Flint checks how often its predictions came true.'],'runtime.ledger_record_prediction':['Record a Prediction','Flint saves a prediction to check later.'],'runtime.inbox_recent':['Read What Triage Decided','Flint reads the latest items in Important and Other.'],'runtime.escalations_open':['Read Open Escalations','Flint reads what is waiting on you.'],'runtime.explain_decision':['Explain a Triage Decision','Flint explains why it sorted one item as it did.']};
+function apprNow(){return new Date();}
+/* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
+function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
+  if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -1075,16 +1115,19 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
   if(p.fullName==='triage.rule.create')return 'Add a Triage Rule';
   if(p.fullName==='world.relation.write')return 'Link Two Things';
   if(APPR_NIGHTLY[p.fullName])return APPR_NIGHTLY[p.fullName][0];
+  if(APPR_TOOLS[p.fullName])return APPR_TOOLS[p.fullName][0];
   return 'Approve '+apprWords(p.fullName);}
-/* One line under the title. */
+/* One line under the title: a sentence (a rule's name is its own, and stays as it is). */
 function apprSub(p){var a=p.args||{};
-  if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Starts reading this source';
-  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'Until '+apprDate(exp):'A signed policy change';}
-  if(p.fullName==='world.person.create')return 'From events you accepted';
-  if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'A new rule';
-  if(APPR_NIGHTLY[p.fullName])return 'Waits for you until it runs on its own';
-  if(p.fullName==='world.relation.write')return 'A link a knowledge fact suggested';
-  return 'Filed by '+apprFrom(p.origin);}
+  if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Flint starts reading this source.';
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
+  if(p.fullName==='world.person.create')return 'They’re from events you accepted or organized.';
+  if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'This adds a new rule.';
+  if(APPR_NIGHTLY[p.fullName])return 'It runs '+apprWhen(p.fullName)+' if you approve it.';
+  if(p.fullName==='world.relation.write')return 'Flint’s memory suggests this link.';
+  if(APPR_TOOLS[p.fullName])return APPR_TOOLS[p.fullName][1];
+  var by=apprFrom(p.origin);
+  return by==='You'?'You filed this.':by==='Flint'?'Flint filed this.':by==='A Chat'?'A chat filed this.':'Its source is unknown.';}
 function apprIcon(p){return p.fullName==='world.source.enable'?'power':(APPR_NIGHTLY[p.fullName]||/^(backup|restore)/.test(String((p.args&&p.args.rows&&p.args.rows[0]&&p.args.rows[0].pattern)||'')))?'db':'bolt';}
 function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if(o.indexOf('runtime:')===0)return 'Flint';if(o.indexOf('chat:')===0)return 'A Chat';return o||'Unknown';}
 /* Three facts or fewer. */
@@ -1092,6 +1135,7 @@ function apprFacts(p){var a=p.args||{},f=[];
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
     var lim={'backup.local':'Backup 1 a Day','restore.drill':'Restore Test 1 a Week','backup.offsite':'Offsite 1 a Day'};
     var words={'world.sync.google_calendar':'Read Your Calendar','world.person.create':'Add People from Calendar'};
+    Object.keys(APPR_TOOLS).forEach(function(k){words[k.replace(/^runtime\./,'')]=APPR_TOOLS[k][0];});
     var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
@@ -1107,7 +1151,7 @@ function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
 
 function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+(open?' open':''));card.style.display='block';
   var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));
-  if(!open)tt.appendChild(apprEl('span','sub',apprSub(p)));ct.appendChild(tt);
+  tt.appendChild(apprEl('span','sub',apprSub(p)));ct.appendChild(tt);
   if(apprAlone(p)){var o=apprEl('span','outside');o.appendChild(apprEl('i'));o.appendChild(document.createTextNode(p.tainted?'Outside Text':p.destructive?'Can’t Be Undone':'Asks on Its Own'));ct.appendChild(o);}
   ct.appendChild(apprEl('small',null,apprAge(p.ts)));card.appendChild(ct);
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
@@ -1122,9 +1166,12 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   else{row.hidden=true;card.appendChild(row);card.classList.add('click');card.onclick=function(){APPR.open=p.id;apprRender();};}
   card.appendChild(res);card.setAttribute('data-id',p.id);
   return card;}
-/* Approved but not run (a cap, or the runtime did not answer): run it now. */
+/* Approved but not run. A tool's card (a cap was reached, its tool was not connected, the runtime did not answer):
+   run it now. A nightly card is run by its job, never from here (the server cannot run it), so it says when. */
 function apprWaitingCard(p){var card=apprEl('div','card row');card.style.display='block';var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));
-  var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));tt.appendChild(apprEl('span','sub','Approved, not run yet'));ct.appendChild(tt);
+  var nightly=APPR_NIGHTLY[p.fullName];
+  var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));tt.appendChild(apprEl('span','sub',nightly?'Approved. It runs '+apprWhen(p.fullName)+'.':'Approved. It hasn’t run yet.'));ct.appendChild(tt);
+  if(nightly){card.appendChild(ct);return card;}
   var row=apprEl('div','prow');var go=apprEl('button','btn','Run Now');row.appendChild(go);ct.appendChild(row);card.appendChild(ct);
   var res=apprEl('div','res');res.style.display='none';card.appendChild(res);
   go.onclick=function(){go.disabled=true;postJson('/proposals/run',{id:p.id}).then(function(d){showOutcome(d,res,row);}).catch(function(e){failed(e,res,row);});};
@@ -1137,21 +1184,25 @@ function apprRender(){var list=document.getElementById('apprlist');list.textCont
   document.getElementById('apprn-waiting').textContent=APPR.pending.length||'';document.getElementById('apprn-approved').textContent=APPR.approved.length||'';
   var foot=document.getElementById('apprfoot');
   if(APPR.tab==='approved'&&APPR.approved.length){var g=apprEl('div','group');APPR.approved.forEach(function(p){g.appendChild(apprWaitingCard(p));});list.appendChild(g);foot.hidden=true;return;}
-  if(!APPR.pending.length){var e=apprEl('div','empty');e.appendChild(apprEl('b',null,'Nothing Waiting'));list.appendChild(e);foot.hidden=true;return;}
+  /* With the runtime down, the help line says why the list is empty: "Nothing Waiting" would contradict it. */
+  if(!APPR.pending.length){if(!APPR.down){var e=apprEl('div','empty');e.appendChild(apprEl('b',null,'Nothing Waiting'));list.appendChild(e);}foot.hidden=true;return;}
   if(!APPR.open||!APPR.pending.some(function(p){return p.id===APPR.open;}))APPR.open=APPR.pending[0].id;
   var g2=apprEl('div','group');APPR.pending.forEach(function(p){g2.appendChild(apprCard(p));});list.appendChild(g2);
   var all=APPR.pending.filter(function(p){return !apprAlone(p);}),alone=APPR.pending.length-all.length;
   foot.hidden=false;var btn=document.getElementById('apprall');var note=document.getElementById('apprnote');
-  if(APPR.signed&&!APPR.keyed){note.textContent='Add an approval key to approve';btn.textContent='Open Settings';btn.onclick=function(){closeApprovals();openSettings();};btn.disabled=false;return;}
+  if(APPR.signed&&!APPR.keyed){note.textContent='This device needs an approval key.';btn.textContent='Open Settings';btn.onclick=function(){closeApprovals();openSettings();};btn.disabled=false;return;}
   btn.onclick=approveAll;btn.disabled=APPR.busy||!all.length;btn.textContent=approveLabel(true);
-  if(!APPR.busy)note.textContent=APPR.pending.length+' Waiting'+(alone?' · '+alone+' Ask on Their Own':'');}
+  /* Approve All leaves out the cards that ask on their own (their badge says so). */
+  var n=APPR.pending.length;
+  if(!APPR.busy)note.textContent='You have '+n+' approval'+(n===1?'':'s')+' waiting.'+(alone?' Approve All skips '+alone+'.':'');}
 function loadApprovals(){
   fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-    if(!d){APPR.pending=[];APPR.approved=[];apprHelp('');document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Load Approvals"));
+    if(!d){APPR.pending=[];APPR.approved=[];APPR.down=false;apprHelp('');document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Load Approvals"));
       var again=apprEl('button','ghost','Try Again');again.onclick=loadApprovals;e.appendChild(again);document.getElementById('apprlist').appendChild(e);document.getElementById('apprfoot').hidden=true;return;}
     var ps=d.proposals||[];APPR.pending=ps.filter(function(p){return p.status==='pending';});APPR.approved=ps.filter(function(p){return p.status==='approved';});
     APPR.signed=!!d.signed;APPR.keyed=(typeof canEnclave==='function'&&canEnclave())||(typeof canPasskey==='function'&&canPasskey());
-    apprHelp(d.runtime==='down'?"The runtime isn't answering, so its cards can't be shown.":'');
+    APPR.down=d.runtime==='down';
+    apprHelp(APPR.down?'The runtime isn’t answering, so approvals can’t load.':'');
     if(APPR.tab==='approved'&&!APPR.approved.length)APPR.tab='waiting';
     apprRender();badge(APPR.pending.length);
   }).catch(function(){document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Reach Flint"));document.getElementById('apprlist').appendChild(e);});}
@@ -1163,7 +1214,7 @@ function approveAll(){if(APPR.busy)return;var queue=APPR.pending.filter(function
     var card=rows[p.id]||apprCard(p);
     return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p)}).then(function(){done++;return next(i+1);});};
   next(0).catch(function(e){failedAt=e;}).then(function(){APPR.busy=false;
-    note.textContent=failedAt?'Approved '+done+' of '+queue.length+'. '+(typeof errText==='function'?errText(failedAt):'Stopped'):'Approved '+done+' of '+queue.length;
+    note.textContent='You approved '+done+' of '+queue.length+'.'+(failedAt?' '+(typeof errText==='function'?errText(failedAt):'It stopped.'):'');
     setTimeout(loadApprovals,failedAt?2500:1200);});}
 function openApprovals(){if(!TOKEN){openSettings();return;}if(!APPR.pending.length&&!APPR.approved.length){var l=document.getElementById('apprlist');l.textContent='';l.appendChild(apprEl('div','empty','Loading…'));}showPanel('approvals',true);if(typeof loadCreds==='function')loadCreds();loadApprovals();}
 function closeApprovals(){showPanel('approvals',false);pollApprovals();}

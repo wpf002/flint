@@ -149,8 +149,35 @@ describe.skipIf(NO_DB)('runtime API', () => {
       const approvalId = await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest, signer: forger.privateKey });
       const r = await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId });
       expect(r.statusCode).toBe(403);
+      // Will reads a sentence (a bad signature may be worth a retry); why is in the audit and the log, under a ref.
+      expect(r.json()).toMatchObject({ error: 'Your approval didn’t verify. Try again.', ref: expect.stringMatching(/^ref[0-9a-z]+$/) });
+      const audit = (await call('GET', `/v1/audit?correlationId=${created.id}`)).json().entries;
+      expect(audit).toContainEqual(expect.objectContaining({ kind: 'decision', decision: 'deny', outcome: 'denied', reasoning: 'the approval does not verify: bad signature' }));
       const used = await owner(`SELECT "consumedAt" FROM "Approval" WHERE id = $1`, [approvalId]);
       expect(used.rows[0].consumedAt).toBeNull();
+    });
+
+    it('a passkey approval on a runtime without passkey settings names the fix, never "Try again", and is audited', async () => {
+      // A passkey (webauthn) credential: re-verifying it needs FLINT_RP_ID and FLINT_RP_ORIGINS, which this runtime lacks.
+      const pk = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const pkId = `pk${Date.now().toString(36)}`;
+      await approver(`INSERT INTO "ApprovalCredential" (id, "credentialId", factor, "publicKey", label, "enrolledVia") VALUES ($1, $2, 'webauthn', $3, 'phone', 'enroll_code')`, [`c${pkId}`, pkId, pk.publicKey.export({ format: 'der', type: 'spki' })]);
+      // Args of its own: the same call still pending from an earlier test would be this very card.
+      const created = (await call('POST', '/v1/proposals', proposal('world.sync.github', { source: 'github', by: 'passkey' }))).json();
+      const approvalId = await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest, signer: pk.privateKey, credential: pkId });
+      const r = await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId });
+      expect(r.statusCode).toBe(403);
+      expect(r.json().error).toBe('Passkeys aren’t set up on the runtime. Give it FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.');
+      const audit = (await call('GET', `/v1/audit?correlationId=${created.id}`)).json().entries;
+      expect(audit).toContainEqual(expect.objectContaining({ decision: 'deny', outcome: 'denied', reasoning: 'the approval does not verify: passkey approvals need FLINT_RP_ID and FLINT_RP_ORIGINS' }));
+      // A signed rejection by the same key says the same, and is audited too; the card still waits.
+      const rejection = await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest, signer: pk.privateKey, credential: pkId, decision: 'reject' });
+      const no = await call('POST', `/v1/proposals/${created.id}/reject`, { approvalId: rejection });
+      expect(no.statusCode).toBe(403);
+      expect(no.json().error).toBe('Passkeys aren’t set up on the runtime. Give it FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.');
+      expect((await owner(`SELECT status FROM "Proposal" WHERE id = $1`, [created.id])).rows[0].status).toBe('pending');
+      const after = (await call('GET', `/v1/audit?correlationId=${created.id}`)).json().entries;
+      expect(after.filter((e: { decision: string; outcome: string }) => e.decision === 'deny' && e.outcome === 'denied')).toHaveLength(2);
     });
 
     it('a signature over different args does not approve', async () => {
@@ -169,7 +196,7 @@ describe.skipIf(NO_DB)('runtime API', () => {
       await approver(`UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1`, [cred2]);
       const r = await call('POST', `/v1/proposals/${created.id}/claim`, {});
       expect(r.statusCode).toBe(403);
-      expect(r.json().error).toMatch(/no longer verifies/);
+      expect(r.json().error).toBe('Flint didn’t run it because your approval is no longer valid.');
       const p = await owner(`SELECT status FROM "Proposal" WHERE id = $1`, [created.id]);
       expect(p.rows[0].status).toBe('failed');
     });
@@ -188,7 +215,10 @@ describe.skipIf(NO_DB)('runtime API', () => {
       const approvalId = await signApproval({ subjectId: target.id, action: 'world.sync.railway', argsDigest: target.argsDigest });
       const r = await call('POST', `/v1/proposals/${target.id}/approve`, { approvalId });
       expect(r.statusCode).toBe(409);
-      expect(r.json().error).toMatch(/forbidden/);
+      expect(r.json().error).toBe('Flint isn’t allowed to run this.');
+      // The engine's reason is kept in the audit, not thrown away.
+      const audit = (await call('GET', `/v1/audit?correlationId=${target.id}`)).json().entries;
+      expect(audit).toContainEqual(expect.objectContaining({ decision: 'deny', outcome: 'denied', reasoning: expect.stringMatching(/^forbidden: /) }));
     });
 
     it('a signed rejection rejects', async () => {

@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { digestOf } from '@flint/policy';
+import { ACTION_DONE, digestOf } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -31,6 +31,42 @@ type Ctx = ApprovalDeps;
 
 /** Small JSON bodies (approvals). */
 const SMALL_JSON_BYTES = 64 * 1024;
+
+/** A device without a key, told where to add one (the console's footer says the same). */
+const NEEDS_KEY = 'This device needs an approval key. Add one in Settings.';
+const GONE = 'It no longer exists.';
+const NOT_WAITING = 'It’s no longer waiting.';
+
+/**
+ * The "Action done" note's body: what Flint did, in a sentence of its own (a
+ * card's title is a command, "Check What’s Happening Now", and reads wrong as a
+ * sentence's subject), or no name at all (never its internal one).
+ */
+export const doneNote = (fullName: string): string => ACTION_DONE[fullName] ?? 'An approved action is done.';
+
+/**
+ * When the restore test runs next, in this Mac's local time (the LaunchAgent's):
+ * Sundays at 2:15 AM. Its card is filed by that very run, so on a Sunday past
+ * 2:15 the run that claims it is a week away, and "Sunday" would read as today.
+ */
+export function drillRunsAt(now: Date): string {
+  if (now.getDay() !== 0) return 'Sunday at 2:15 AM';
+  return now.getHours() * 60 + now.getMinutes() < 2 * 60 + 15 ? 'today at 2:15 AM' : 'next Sunday at 2:15 AM';
+}
+
+/**
+ * When a nightly job runs the card Will approved, by the job that filed it: the
+ * LaunchAgent runs backups at 02:15 (the drill on Sundays), and retention runs at 03:10.
+ */
+export function nightlyRun(origin: string, now = new Date()): string | undefined {
+  const when: Record<string, string> = {
+    'runtime:backup': 'tonight at 2:15 AM',
+    'runtime:offsite': 'tonight at 2:15 AM',
+    'runtime:drill': drillRunsAt(now),
+    'runtime:retention': 'tonight at 3:10 AM',
+  };
+  return when[origin] ? `Approved. It runs ${when[origin]}.` : undefined;
+}
 
 function reply(res: ServerResponse, status: number, body: unknown): true {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -62,7 +98,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
     return reply(res, 200, { proposals: ctx.actions.list(), signed: !!ctx.approvals && (await ctx.approvals.hasCredentials().catch(() => true)) });
   }
   if (req.method === 'POST' && url === '/proposals/approve' && ctx.proposals) {
-    return reply(res, 403, { error: 'approvals now need your approval key: use "Approve with passkey"' });
+    return reply(res, 403, { error: NEEDS_KEY });
   }
   // An approved runtime proposal that has not run yet (its cap was reached, or the runtime did not answer): run it now.
   if (req.method === 'POST' && url === '/proposals/run' && ctx.proposals) {
@@ -71,10 +107,10 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
     const id = String(read.body.id ?? '');
     try {
       const p = await ctx.proposals.get(id);
-      if (!p || p.status !== 'approved') return reply(res, 409, { error: 'only an approved proposal that has not run can be run' });
+      if (!p || p.status !== 'approved') return reply(res, 409, { error: 'It already ran or is no longer approved.' });
       return reply(res, 200, { action: await executeApproved(ctx, id) });
     } catch (err) {
-      return reply(res, err instanceof RuntimeError ? (err.status >= 500 ? 502 : err.status) : 502, { error: err instanceof Error ? err.message : 'run failed' });
+      return reply(res, err instanceof RuntimeError ? (err.status >= 500 ? 502 : err.status) : 502, { error: err instanceof Error ? err.message : 'It didn’t run.' });
     }
   }
   if (req.method === 'POST' && url === '/proposals/reject' && ctx.proposals) {
@@ -92,7 +128,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
     // 3.0.2: a stolen token must not be enough); if the keys cannot be checked, neither.
     if (ctx.approvals) {
       const keyed = await ctx.approvals.hasCredentials().catch(() => true);
-      if (keyed) return reply(res, 403, { error: 'approvals need your approval key: use "Approve with passkey" or Touch ID' });
+      if (keyed) return reply(res, 403, { error: NEEDS_KEY });
     }
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
     if (read.tooLarge) return reply(res, 413, { error: 'request too large' });
@@ -100,14 +136,14 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
     const pending = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
     if (!pending) {
       const known = ctx.actions.list().find((a) => a.id === id);
-      return known ? reply(res, 200, { action: known }) : reply(res, 404, { error: 'no such proposal' });
+      return known ? reply(res, 200, { action: known }) : reply(res, 404, { error: GONE });
     }
     const out = await runRamApproval(ctx, pending, 'will:console', {});
     return 'error' in out ? reply(res, out.status, { error: out.error }) : reply(res, 200, { action: out.action });
   }
   // ---- Will's approval factor (./approvals) ------------------------------------
   if (url.startsWith('/approvals/')) {
-    if (!ctx.approvals) return reply(res, 501, { error: 'approvals need the flint_approver database role (FLINT_DB_APPROVER_URL)' });
+    if (!ctx.approvals) return reply(res, 501, { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' });
     const ap = ctx.approvals;
     try {
       if (req.method === 'GET' && url === '/approvals/credentials') return reply(res, 200, { credentials: await ap.credentials() });
@@ -130,7 +166,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         const id = String(body.proposalId ?? '');
         const decision = body.decision === 'reject' ? 'reject' : 'approve';
         const p = await ctx.proposals.get(id);
-        if (!p || p.status !== 'pending') return reply(res, 404, { error: 'no such pending proposal' });
+        if (!p || p.status !== 'pending') return reply(res, 404, { error: NOT_WAITING });
         return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted } }));
       }
       if (url === '/approvals/finish' && ctx.proposals) {
@@ -149,12 +185,12 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         const id = String(body.proposalId ?? '');
         const decision = body.decision === 'reject' ? 'reject' : 'approve';
         const p = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
-        if (!p) return reply(res, 404, { error: 'no such pending proposal' });
+        if (!p) return reply(res, 404, { error: NOT_WAITING });
         let argsDigest: string;
         try {
           argsDigest = digestOf(p.args ?? null);
         } catch {
-          return reply(res, 409, { error: 'these args cannot be signed (no canonical form)' });
+          return reply(res, 409, { error: 'It can’t be signed.' });
         }
         return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.fullName, argsDigest }));
       }
@@ -162,7 +198,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         const { approvalId, payload } = await ap.finish(body);
         const id = payload.subjectId;
         const p = ctx.actions.list().find((a) => a.id === id && a.status === 'pending');
-        if (!p) return reply(res, 409, { error: 'the proposal is no longer pending', approvalId });
+        if (!p) return reply(res, 409, { error: NOT_WAITING, approvalId });
         // The args must still be exactly what was signed.
         let digest = '';
         try {
@@ -171,7 +207,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
           digest = '';
         }
         if (payload.subjectType !== 'proposal' || payload.action !== p.fullName || payload.argsDigest !== digest) {
-          return reply(res, 409, { error: 'the signed approval does not match the proposal', approvalId });
+          return reply(res, 409, { error: 'It changed after you approved it.', approvalId });
         }
         if (payload.decision === 'reject') {
           ctx.actions.reject(id);
@@ -183,9 +219,12 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
       }
       return reply(res, 404, { error: 'not found' });
     } catch (err) {
-      if (err instanceof ApprovalError) return reply(res, err.status, { error: err.message });
+      if (err instanceof ApprovalError) {
+        // Will reads the sentence; why it was refused (the verifier's words, never a secret) is logged under the ref.
+        return reply(res, err.status, { error: err.message, ...(err.why ? { ref: ctx.errorRef('approvals', `refused: ${err.why}`) } : {}) });
+      }
       if (err instanceof RuntimeError) return reply(res, err.status >= 500 ? 502 : err.status, { error: err.message });
-      return reply(res, 500, { error: 'approval failed', ref: ctx.errorRef('approvals', err) });
+      return reply(res, 500, { error: 'The approval failed. Try again.', ref: ctx.errorRef('approvals', err) });
     }
   }
   if (req.method === 'POST' && url === '/proposals/reject') {
@@ -226,13 +265,14 @@ export async function runRamApproval(
     return { status: 503, error: 'the intent could not be recorded, so nothing was run' };
   }
   const result = await ctx.actions.approve(pending.id, ctx.tools);
-  if (!result) return { status: 404, error: 'no such proposal' };
+  if (!result) return { status: 404, error: GONE };
   const ok = result.status === 'done';
   ctx.audit.record({
     actor, context: 'console', kind: 'action', action: result.fullName, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs,
     ...(ok ? {} : { reasoning: 'the action did not complete (the console card has the details)' }), correlationId: `act:${pending.id}`,
   });
-  if (ok) ctx.notes.push('Action done', `${result.fullName} ✓`, 'action', `act:${result.id}`);
+  // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
+  if (ok) ctx.notes.push('Action done', doneNote(result.fullName), 'action', `act:${result.id}`, { channels: ['inapp'] });
   return { action: result };
 }
 
@@ -253,7 +293,7 @@ export type Executed = { id: string; fullName: string; status: 'done' | 'error' 
 export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   const p = ctx.proposals!;
   const proposal = await p.get(id);
-  if (!proposal) return { id, fullName: id, status: 'error', error: 'no such proposal' };
+  if (!proposal) return { id, fullName: id, status: 'error', error: GONE };
   const m = /^mcp:([A-Za-z0-9_-]+)\.(.+)$/.exec(proposal.action);
   const server = m ? m[1]! : 'flint';
   const toolName = m ? m[2]! : proposal.action;
@@ -264,7 +304,10 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
       return { id, fullName, status: 'done', result: await p.run(id) };
     } catch (err) {
       if (err instanceof RuntimeError && err.status === 409 && /not carried out by the runtime/.test(err.message)) {
-        const note = m || !proposal.origin.startsWith('runtime:') ? `${fullName} is not wired right now; it stays approved` : 'approved; the runtime job that asked for it carries it out';
+        // A tool that is not connected right now (Run Now in Approvals, once it is), or a nightly job's own card.
+        const note = m || !proposal.origin.startsWith('runtime:')
+          ? 'Approved. Its tool isn’t connected, so run it later in Approvals.'
+          : (nightlyRun(proposal.origin) ?? 'Approved. Its nightly job runs it.');
         return { id, fullName, status: 'approved', note };
       }
       throw err;
@@ -275,7 +318,8 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
     claimed = await p.claim(id);
   } catch (err) {
     // A cap reached leaves it approved, to run again later.
-    if (err instanceof RuntimeError && err.status === 429) return { id, fullName, status: 'approved', note: `${err.message}: it stays approved; run it again later` };
+    // The runtime's message is a sentence ("Today’s limit of 10 is reached.").
+    if (err instanceof RuntimeError && err.status === 429) return { id, fullName, status: 'approved', note: `Approved. ${err.message} Run it later.` };
     throw err;
   }
   let result: unknown;
@@ -298,10 +342,11 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
     outcome = { ok: false, error: `the tool threw (${err instanceof Error ? err.name : 'error'})` };
   }
   const where = await p.completeDurably(id, outcome);
-  if (outcome.ok) ctx.notes.push('Action done', `${fullName} ✓`, 'action', `act:${id}`);
+  // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
+  if (outcome.ok) ctx.notes.push('Action done', doneNote(fullName), 'action', `act:${id}`, { channels: ['inapp'] });
   const note =
-    where === 'spooled' ? 'the runtime will be told how it ended once it answers'
-    : where === 'refused' ? 'the runtime did not record how it ended; it will mark it "outcome unknown"'
+    where === 'spooled' ? 'Flint will record the result once the runtime answers.'
+    : where === 'refused' ? 'The runtime didn’t record the result, so it will show as unknown.'
     : undefined;
   return {
     id, fullName, status: outcome.ok ? 'done' : 'error',

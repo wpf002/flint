@@ -50,16 +50,16 @@ function passkey() {
     return Buffer.concat([sha(rp.rpId), Buffer.from([flags]), c, extra]);
   };
   return {
-    register(challenge: string) {
+    register(challenge: string, origin = rp.origins[0]) {
       const len = Buffer.alloc(2);
       len.writeUInt16BE(credId.length);
-      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge, origin: rp.origins[0] }));
+      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge, origin }));
       return { authenticatorData: authData(0x45, Buffer.concat([Buffer.alloc(16), len, credId, cose])).toString('base64url'), clientDataJSON: clientDataJSON.toString('base64url') };
     },
-    assert(challenge: string) {
+    assert(challenge: string, origin = rp.origins[0]) {
       counter += 1;
       const ad = authData(0x05);
-      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin: rp.origins[0] }));
+      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin }));
       const signature = sign('sha256', Buffer.concat([ad, sha(clientDataJSON)]), k.privateKey);
       return { credentialId: credId.toString('base64url'), authenticatorData: ad.toString('base64url'), clientDataJSON: clientDataJSON.toString('base64url'), signature: signature.toString('base64url') };
     },
@@ -94,14 +94,14 @@ describe('approvals', () => {
   });
 
   it('enrolment needs the one-time code, and spends it', async () => {
-    await expect(approvals.beginEnroll({ code: 'wrong-code-0000', label: 'phone' })).rejects.toThrow(/enrolment code/);
+    await expect(approvals.beginEnroll({ code: 'wrong-code-0000', label: 'phone' })).rejects.toThrow('That code is wrong or missing. Get a new one with pnpm --filter @flint/runtime enroll.');
     const pk = passkey();
     const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'phone' });
     expect(b.rp).toEqual({ id: rp.rpId });
     await approvals.finishEnroll({ challengeId: b.challengeId, ...pk.register(b.challenge) });
     expect(mem.creds.map((c) => [c.factor, c.label, c.enrolledVia])).toEqual([['webauthn', 'phone', 'enroll_code']]);
     expect(existsSync(codeFile)).toBe(false);
-    await expect(approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'again' })).rejects.toThrow(/enrolment code/);
+    await expect(approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'again' })).rejects.toThrow('That code is wrong or missing. Get a new one with pnpm --filter @flint/runtime enroll.');
   });
 
   it('accepts a registration sent as an attestationObject (older Safari)', async () => {
@@ -122,7 +122,7 @@ describe('approvals', () => {
   it('a Secure Enclave key must prove it holds the key', async () => {
     const se = enclave();
     const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: enclave().sign(b.challenge) })).rejects.toThrow(/did not sign/);
+    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: enclave().sign(b.challenge) })).rejects.toThrow('The key couldn’t be added. Try again.');
     const b2 = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'Touch ID' });
     await approvals.finishEnroll({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b2.challenge) });
     expect(mem.creds[0]).toMatchObject({ factor: 'secure_enclave', label: 'Touch ID' });
@@ -153,7 +153,7 @@ describe('approvals', () => {
     await expect(approvals.finish({ challengeId: b.challengeId, ...assertion })).rejects.toThrow(/no such challenge/);
     const late = approvals.begin(subject);
     now = new Date(now.getTime() + 6 * 60_000);
-    await expect(approvals.finish({ challengeId: late.challengeId, ...pk.assert(late.challenge) })).rejects.toThrow(/expired/);
+    await expect(approvals.finish({ challengeId: late.challengeId, ...pk.assert(late.challenge) })).rejects.toThrow('The request expired. Try again.');
   });
 
   it('a signature over a different challenge, or by an unknown key, is refused and nothing is recorded', async () => {
@@ -162,8 +162,56 @@ describe('approvals', () => {
     const b = approvals.begin({ ...subject, subjectId: 'pr2' });
     await expect(approvals.finish({ challengeId: a.challengeId, ...pk.assert(b.challenge) })).rejects.toThrow(ApprovalError);
     const c = approvals.begin(subject);
-    await expect(approvals.finish({ challengeId: c.challengeId, ...passkey().assert(c.challenge) })).rejects.toThrow(/did not verify/);
+    await expect(approvals.finish({ challengeId: c.challengeId, ...passkey().assert(c.challenge) })).rejects.toThrow('Your approval didn’t verify. Try again.');
     expect(mem.approvals).toEqual([]);
+  });
+
+  it('a refusal no retry can clear names its fix; why it was refused is kept for the log, never in what Will reads', async () => {
+    const refusal = async (p: Promise<unknown>) => {
+      const err = await p.then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(ApprovalError);
+      return { message: (err as ApprovalError).message, why: (err as ApprovalError).why };
+    };
+    // The console opened at an address that is not the tailnet one (localhost): a passkey can't be added there.
+    const b = await approvals.beginEnroll({ code: 'abcd-efgh-ijkl-mnop', label: 'phone' });
+    expect(await refusal(approvals.finishEnroll({ challengeId: b.challengeId, ...passkey().register(b.challenge, 'http://localhost:8080') }))).toEqual({
+      message: 'Passkeys work only at Flint’s tailnet address. Open Flint there and try again.',
+      why: 'the passkey registration did not verify: the origin is not allowed',
+    });
+    // Nor approve with one.
+    const pk = await enrolled();
+    const c = approvals.begin(subject);
+    expect(await refusal(approvals.finish({ challengeId: c.challengeId, ...pk.assert(c.challenge, 'http://localhost:8080') }))).toEqual({
+      message: 'Passkeys work only at Flint’s tailnet address. Open Flint there and try again.',
+      why: 'the passkey did not verify: the origin is not allowed',
+    });
+    // A counter that did not go up (a copied passkey): retrying can't help.
+    mem.creds[0]!.signCount = 50;
+    const d = approvals.begin(subject);
+    expect(await refusal(approvals.finish({ challengeId: d.challengeId, ...pk.assert(d.challenge) }))).toEqual({
+      message: 'This passkey’s counter didn’t go up, which can mean it was copied. Add a new passkey in Settings.',
+      why: 'the passkey did not verify: the signature counter did not increase',
+    });
+    // A bad signature may be worth a retry: "Try again", and why for the log.
+    mem.creds[0]!.signCount = 0;
+    const e = approvals.begin(subject);
+    expect(await refusal(approvals.finish({ challengeId: e.challengeId, ...passkey().assert(e.challenge) }))).toEqual({
+      message: 'Your approval didn’t verify. Try again.',
+      why: 'the passkey did not verify: bad signature',
+    });
+    // A revoked key says where to get a new one.
+    mem.creds[0]!.revokedAt = new Date();
+    const f = approvals.begin(subject);
+    expect(await refusal(approvals.finish({ challengeId: f.challengeId, ...pk.assert(f.challenge) }))).toEqual({
+      message: 'This device’s approval key was revoked or isn’t known. Add a new one in Settings.',
+      why: 'the credential is revoked',
+    });
+    expect(mem.approvals).toEqual([]);
+    // A server without a relying party says how to set one up.
+    const bare = new Approvals({ store: mem.store, enrollCodeFile: codeFile, now: () => now });
+    mem.creds[0]!.revokedAt = null;
+    const g = bare.begin(subject);
+    expect((await refusal(bare.finish({ challengeId: g.challengeId, ...pk.assert(g.challenge) }))).message).toBe('Passkeys aren’t set up on this server. Set FLINT_RP_ORIGINS to its tailnet address, then restart it.');
   });
 
   it('a second credential needs the code AND an existing credential\'s approval of that exact key', async () => {
@@ -191,14 +239,14 @@ describe('approvals', () => {
     writeFileSync(codeFile, 'qrst-uvwx-yz12-3456\n');
     const se = enclave();
     const b = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow(/existing credential/);
+    await expect(approvals.finishEnroll({ challengeId: b.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b.challenge) })).rejects.toThrow('A new key needs approval from a key you already have.');
     // An approval for a different key (same id spoofed is impossible: the id is derived from the key) does not carry over.
     const other = enclave();
     const b2 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'other' });
     const ap = await approvals.beginEnrollApproval({ challengeId: b2.challengeId, factor: 'secure_enclave', publicKey: other.publicKey, signature: other.sign(b2.challenge) });
     await approvals.finishEnrolApproval({ challengeId: ap.challengeId, ...first.assert(ap.challenge) });
     const b3 = await approvals.beginEnroll({ code: 'qrst-uvwx-yz12-3456', label: 'Touch ID' });
-    await expect(approvals.finishEnroll({ challengeId: b3.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b3.challenge), approval: { challengeId: ap.challengeId } })).rejects.toThrow(/something else/);
+    await expect(approvals.finishEnroll({ challengeId: b3.challengeId, factor: 'secure_enclave', publicKey: se.publicKey, signature: se.sign(b3.challenge), approval: { challengeId: ap.challengeId } })).rejects.toThrow('That approval was for something else.');
     expect(mem.creds).toHaveLength(1);
   });
 

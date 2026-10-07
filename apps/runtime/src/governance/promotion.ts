@@ -2,22 +2,40 @@
  * A phase's promotion table (Machine plan 3.0.4): after its shadow week, one
  * signed policy change that moves the phase's autonomous actions to ALONE for
  * 180 days. Built from the code table, filed as an ordinary policy.change
- * proposal Will signs with his key (or does not). P2 and P2.5 each have one,
- * with its own card and its own evidence.
+ * proposal Will signs with his key (or does not). P1, P2 and P2.5 each have
+ * one, with its own card and its own evidence.
  *
- *  - Refused before 7 days of evidence: P2's shadow decisions; P2.5's calendar
- *    syncs (the source running for a week).
+ *  - Refused before 7 days of evidence: P1's chat reads (since chat first asked
+ *    to read the world model or the ledger); P2's shadow decisions; P2.5's
+ *    calendar syncs (the source running for a week).
  *  - Never runtime.frontier.complete or triage.rule.create (they stay at
  *    APPROVAL), never anything FORBIDDEN, never an action a pattern of Will's
  *    choosing was dropped for (`--drop`).
- *  - The card's reason carries what the week measured, as numbers only; the
- *    signed rows carry a fixed one.
+ *  - The card's reason says what signing lets Flint do and until when, then what
+ *    the week measured, as numbers only, in sentences; the signed rows carry a
+ *    fixed one.
  *  - Filing the same table again is the same card: a waiting one is reused.
  */
 import { CODE_TABLE, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
+
+/**
+ * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
+ * model and the ledger, which ask for his approval each time until he signs this.
+ * Recording a prediction from chat keeps its 10 a day.
+ */
+export const P1_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  // Only the tools the runtime connector serves: a tool added later is not signed for in advance.
+  { pattern: 'world_now' },
+  { pattern: 'world_entity' },
+  { pattern: 'ledger_open' },
+  { pattern: 'ledger_calibration' },
+  { pattern: 'ledger_record_prediction', dailyCap: 10 },
+];
+/** How chat files them: an MCP call to the runtime connector. */
+const P1_CHAT_ACTIONS = P1_PROMOTIONS.map((r) => `mcp:runtime.${r.pattern}`);
 
 /** What P2 asks Will to promote, and the cap each keeps. */
 export const P2_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
@@ -48,7 +66,7 @@ export const P25_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number 
 /** Never in a table, whatever is asked. */
 export const NEVER_PROMOTED: ReadonlySet<string> = new Set(['runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail']);
 
-export type Phase = 'p2' | 'p25';
+export type Phase = 'p1' | 'p2' | 'p25';
 
 export const SHADOW_DAYS = 7;
 
@@ -60,22 +78,44 @@ export interface PromotionRow {
   expiresAt: string;
 }
 const DAY = 86_400_000;
+/** "1 time", "3 times". */
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
 const PHASES: Record<Phase, {
   rows: ReadonlyArray<{ pattern: string; dailyCap?: number }>;
   template: string;
   label: string;
+  /** What signing it lets happen without asking, for the card's first sentence. */
+  lets: string;
   evidence: string;
   first: (db: Db) => Promise<Date | undefined>;
   /** Why the week does not count yet (it must have been lived, not only begun), or undefined. */
   covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
   measured: (db: Db, first: Date, now: Date) => Promise<string>;
 }> = {
+  p1: {
+    rows: P1_PROMOTIONS,
+    template: 'p1.promotion',
+    label: 'P1',
+    lets: 'chat look things up and record predictions',
+    evidence: 'chat reads',
+    // The first time chat asked to read the world model or the ledger: Will has approved each one since.
+    first: async (db) => (await db.proposal.findFirst({ where: { action: { in: P1_CHAT_ACTIONS } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
+    measured: async (db, _first, now) => {
+      const asked = await db.proposal.groupBy({ by: ['status'], where: { action: { in: P1_CHAT_ACTIONS }, createdAt: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } }, _count: { _all: true } });
+      const n = (st: string) => asked.find((c) => c.status === st)?._count._all ?? 0;
+      const tainted = await db.proposal.count({ where: { action: { in: P1_CHAT_ACTIONS }, tainted: true, createdAt: { gt: new Date(now.getTime() - SHADOW_DAYS * DAY) } } });
+      const total = asked.reduce((s, c) => s + c._count._all, 0);
+      if (!total) return 'Chat didn’t ask this week.';
+      return `This week chat asked ${count(total, 'time')}: ${n('executed')} ran, ${n('rejected')} ${n('rejected') === 1 ? 'was' : 'were'} rejected, ${n('expired')} expired, and ${tainted || 'none'} had outside text.`;
+    },
+  },
   p2: {
     rows: P2_PROMOTIONS,
     template: 'p2.promotion',
     label: 'P2',
+    lets: 'Flint sort events, send its notes and run its upkeep',
     evidence: 'shadow decisions',
     first: async (db) => (await db.triageDecision.findFirst({ where: { shadow: true }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
     measured: async (db, first, now) => {
@@ -83,14 +123,18 @@ const PHASES: Record<Phase, {
       const relevant = await db.triageDecision.count({ where: { lane: 'relevant', createdAt: { gt: since } } });
       const days = Math.max(1, Math.min(14, (now.getTime() - first.getTime()) / DAY));
       const marked = await db.escalation.findMany({ where: { useful: { not: null } }, select: { useful: true } });
-      const precision = marked.length ? Math.round((marked.filter((m) => m.useful).length / marked.length) * 100) : null;
-      return `${(relevant / days).toFixed(2)} relevant a day; precision ${precision === null ? 'n/a' : `${precision}%`} over ${marked.length} marked`;
+      const useful = marked.filter((m) => m.useful).length;
+      const rated = !marked.length
+        ? 'you haven’t rated any yet'
+        : marked.length === 1 ? `the one you rated ${useful ? 'was' : 'wasn’t'} useful` : `${useful} of the ${marked.length} you rated were useful`;
+      return `Lately ${(relevant / days).toFixed(1)} items a day were important, and ${rated}.`;
     },
   },
   p25: {
     rows: P25_PROMOTIONS,
     template: 'p25.promotion',
     label: 'P2.5',
+    lets: 'Flint read your calendar and add people',
     evidence: 'calendar syncs',
     // The calendar's first audited sync: the source has been running since.
     first: async (db) => (await db.auditEntry.findFirst({ where: { action: 'world.sync.google_calendar', outcome: 'ok' }, orderBy: { at: 'asc' }, select: { at: true } }))?.at,
@@ -116,10 +160,20 @@ const PHASES: Record<Phase, {
       const people = await db.entity.count({ where: { kind: 'person' } });
       const cards = await db.proposal.groupBy({ by: ['status'], where: { action: 'world.person.create' }, _count: { _all: true } });
       const n = (st: string) => cards.find((c) => c.status === st)?._count._all ?? 0;
-      return `${people} people known; person cards ${n('executed')} signed, ${n('rejected')} rejected, ${n('expired')} expired; ${week} failed sync run(s) this week, ${inRow} in a row now`;
+      const knows = people ? `Flint knows ${count(people, 'person', 'people')}.` : 'Flint knows no one yet.';
+      const did = [`approved ${count(n('executed'), 'card')} to add people`, ...(n('rejected') ? [`rejected ${n('rejected')}`] : []), ...(n('expired') ? [`let ${n('expired')} expire`] : [])];
+      const decided = `You ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did[did.length - 1]}` : did[0]}`;
+      const failed = `${week ? count(week, 'calendar read') : 'no calendar reads'} failed this week`;
+      const inARow = inRow ? ` The last ${inRow === 1 ? 'read' : `${inRow} reads`} failed.` : '';
+      return `${knows} ${decided}, and ${failed}.${inARow}`;
     },
   },
 };
+
+/** The expiry's date as the console's cards show it (a UTC midnight is that date anywhere): "Mar 29, 2027". */
+function untilDay(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
 
 export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz?: string } = {}) {
   const now = opts.now ?? new Date();
@@ -152,7 +206,7 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
     kind: 'policy', origin: 'cli', action: 'policy.change', templateId: phase.template, args,
     argsProvenance: { rows: { source: 'template', ref: phase.template, tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
-    reason: `Promote ${phase.label}'s autonomous actions to ALONE until ${expiresAt.slice(0, 10)} (${rows.length} rows). The shadow week: ${measured}.`.slice(0, 1000),
+    reason: `This lets ${phase.lets} without asking until ${untilDay(expiresAt)}. ${measured}`.slice(0, 1000),
   }, 'will:cli', now);
   return { proposalId: p.id, deduped: p.deduped, rows };
 }

@@ -155,7 +155,7 @@ export async function offerPeople(db: Db, people: SourceObservation[], now: Date
     kind: 'tool_call', origin: `runtime:${SOURCE}`, action: ACTION, templateId: TEMPLATE, args: { people: batch },
     argsProvenance: { people: { source: 'event', ref: SOURCE, tainted: true } },
     tainted: true, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 24 * 60,
-    reason: `${batch.length} ${batch.length === 1 ? 'person' : 'people'} on calendar events you accepted: add to Flint's world model (name and address only).`,
+    reason: `Approving saves the names and addresses of ${batch.length} ${batch.length === 1 ? 'person' : 'people'} from events you accepted or organized.`,
   }, `runtime:${SOURCE}`, now);
   return { ...out, proposed: batch.length };
 }

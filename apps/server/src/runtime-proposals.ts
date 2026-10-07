@@ -88,7 +88,7 @@ export class RuntimeProposals {
 
   private async call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     const rt = this.o.runtime();
-    if (!rt) throw new RuntimeError(503, 'the runtime is not installed');
+    if (!rt) throw new RuntimeError(503, 'The runtime isn’t installed.');
     const r = await (this.o.fetchImpl ?? fetch)(`${rt.url}${path}`, {
       method,
       headers: { authorization: `Bearer ${rt.token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
@@ -102,7 +102,7 @@ export class RuntimeProposals {
     } catch {
       data = {};
     }
-    if (!r.ok) throw new RuntimeError(r.status, (data as { error?: string }).error ?? `runtime HTTP ${r.status}`);
+    if (!r.ok) throw new RuntimeError(r.status, (data as { error?: string }).error ?? `The runtime returned error ${r.status}.`);
     return data as T;
   }
 

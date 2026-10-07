@@ -6,6 +6,8 @@ import {
   coseP256ToSpki,
   payloadCurrent,
   p256Key,
+  REFUSAL,
+  refusalFix,
   verifySecureEnclave,
   verifyWebAuthnAssertion,
   verifyWebAuthnRegistration,
@@ -136,6 +138,47 @@ describe('passkey assertions', () => {
     const ad = Buffer.from(a.authenticatorData);
     ad[33] = 9;
     expect(verifyWebAuthnAssertion({ ...base, ...a, authenticatorData: ad }).ok).toBe(false);
+  });
+});
+
+describe('a refusal no retry can clear', () => {
+  const k = keypair();
+  const challenge = challengeOf(payload());
+  const base = { publicKeySpki: k.spki, challenge, storedSignCount: 0, rp };
+  const reason = (o: Parameters<typeof assertion>[2], stored = 0) => {
+    const v = verifyWebAuthnAssertion({ ...base, storedSignCount: stored, ...assertion(k.privateKey, challenge, o) });
+    return v.ok ? undefined : v.reason;
+  };
+
+  it('is the verifier’s own reason, and Will reads its fix instead of "Try again"', () => {
+    // The console opened from an address that is not the RP's (localhost, a second tailnet name).
+    expect(reason({ origin: 'http://localhost:8080' })).toBe(REFUSAL.origin);
+    expect(refusalFix(REFUSAL.origin)).toBe('Passkeys work only at Flint’s tailnet address. Open Flint there and try again.');
+    // A passkey made for another host name.
+    expect(reason({ rpId: 'flint.other.ts.net' })).toBe(REFUSAL.rpId);
+    expect(refusalFix(REFUSAL.rpId)).toMatch(/^This passkey is for a different address than Flint’s\. Open Flint at its tailnet address/);
+    // A counter that did not go up.
+    expect(reason({ count: 5 }, 5)).toBe(REFUSAL.counter);
+    expect(refusalFix(REFUSAL.counter)).toMatch(/Add a new passkey in Settings\.$/);
+    // The runtime re-verifies what the server accepted: its own settings are what is wrong.
+    expect(refusalFix(REFUSAL.rpMissing, 'runtime')).toBe('Passkeys aren’t set up on the runtime. Give it FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.');
+    expect(refusalFix(REFUSAL.origin, 'runtime')).toBe('The runtime’s passkey settings don’t match the server’s. Give it the same FLINT_RP_ID and FLINT_RP_ORIGINS, then restart it.');
+    expect(refusalFix(REFUSAL.rpId, 'runtime')).toBe(refusalFix(REFUSAL.origin, 'runtime'));
+    expect(refusalFix(REFUSAL.revoked, 'runtime')).toBe('The key that signed it was revoked. Use a key you have now.');
+    for (const where of ['server', 'runtime'] as const) {
+      for (const r of Object.values(REFUSAL)) {
+        const words = refusalFix(r, where);
+        if (words) expect(words).toMatch(/^[A-Z][^]*\.$/);
+      }
+    }
+  });
+
+  it('leaves a refusal a retry may clear to the caller', () => {
+    expect(reason({ flags: 0x01 })).toBe('the user was not verified');
+    expect(refusalFix('the user was not verified')).toBeUndefined();
+    expect(refusalFix('bad signature')).toBeUndefined();
+    expect(refusalFix('bad signature', 'runtime')).toBeUndefined();
+    expect(refusalFix(REFUSAL.counter, 'runtime')).toBeUndefined();
   });
 });
 

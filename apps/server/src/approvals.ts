@@ -31,6 +31,7 @@ import {
   ApprovalPayload,
   challengeOf,
   p256Key,
+  refusalFix,
   verifySecureEnclave,
   verifyWebAuthnAssertion,
   verifyWebAuthnRegistration,
@@ -73,10 +74,15 @@ export class ApprovalError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409,
     message: string,
+    /** Why, in the verifier's own words: logged with a ref (approval-routes), never sent. The message is what Will reads. */
+    readonly why?: string,
   ) {
     super(message);
   }
 }
+
+/** Passkeys need a relying party: the tailnet HTTPS origin (FLINT_RP_ORIGINS, or ~/.flint/tailscale-url.txt). */
+export const NO_PASSKEYS = 'Passkeys aren’t set up on this server. Set FLINT_RP_ORIGINS to its tailnet address, then restart it.';
 
 type Pending =
   | { kind: 'enroll'; challenge: Buffer; label: string; expires: number; codeHash: string }
@@ -167,7 +173,7 @@ export class Approvals {
     // Expired challenges go; at most 100 outstanding.
     const t = this.now().getTime();
     for (const [k, v] of this.pending) if (v.expires <= t) this.pending.delete(k);
-    if (this.pending.size >= 100) throw new ApprovalError(409, 'too many approvals in flight');
+    if (this.pending.size >= 100) throw new ApprovalError(409, 'Too many approvals are in progress. Try again shortly.');
     this.pending.set(id, p);
     return id;
   }
@@ -177,7 +183,7 @@ export class Approvals {
     const p = this.pending.get(id);
     this.pending.delete(id); // used once, success or not
     if (!p || p.kind !== kind) throw new ApprovalError(404, 'no such challenge');
-    if (p.expires <= this.now().getTime()) throw new ApprovalError(409, 'the challenge expired');
+    if (p.expires <= this.now().getTime()) throw new ApprovalError(409, 'The request expired. Try again.');
     return p;
   }
 
@@ -213,7 +219,7 @@ export class Approvals {
     if (!label) throw new ApprovalError(400, 'label required');
     const code = this.enrollCode();
     if (!code || typeof body.code !== 'string' || !same(body.code.trim(), code.code)) {
-      throw new ApprovalError(403, 'the enrolment code is missing or wrong (run: pnpm --filter @flint/runtime enroll)');
+      throw new ApprovalError(403, 'That code is wrong or missing. Get a new one with pnpm --filter @flint/runtime enroll.');
     }
     const challenge = randomBytes(32);
     const challengeId = this.put({ kind: 'enroll', challenge, label, expires: this.now().getTime() + this.ttl, codeHash: Approvals.hashOf(code.code) });
@@ -234,17 +240,19 @@ export class Approvals {
       const publicKey = fromB64(body.publicKey, 'publicKey');
       if (!p256Key(publicKey)) throw new ApprovalError(400, 'not a P-256 public key');
       const v = verifySecureEnclave({ publicKeySpki: publicKey, challenge: p.challenge, signature: fromB64(body.signature, 'signature') });
-      if (!v.ok) throw new ApprovalError(403, `the key did not sign the challenge: ${v.reason}`);
+      // The reason is crypto wording: Will reads what to do, and the log gets why.
+      if (!v.ok) throw new ApprovalError(403, 'The key couldn’t be added. Try again.', `the key did not sign the challenge: ${v.reason}`);
       return { factor: 'secure_enclave', publicKey, signCount: 0, credentialId: `se_${createHash('sha256').update(publicKey).digest('hex').slice(0, 32)}` };
     }
-    if (!this.o.rp) throw new ApprovalError(409, 'passkeys need FLINT_RP_ID and FLINT_RP_ORIGINS (the tailnet HTTPS origin)');
+    if (!this.o.rp) throw new ApprovalError(409, NO_PASSKEYS);
     const r = verifyWebAuthnRegistration({
       challenge: p.challenge,
       authenticatorData: body.authenticatorData !== undefined ? fromB64(body.authenticatorData, 'authenticatorData') : authDataFromAttestation(fromB64(body.attestationObject, 'attestationObject')),
       clientDataJson: fromB64(body.clientDataJSON, 'clientDataJSON'),
       rp: this.o.rp,
     });
-    if (!r.ok) throw new ApprovalError(403, `the passkey registration did not verify: ${r.reason}`);
+    // A cause no retry can clear (the page is not at the RP's address) says its fix.
+    if (!r.ok) throw new ApprovalError(403, refusalFix(r.reason) ?? 'The passkey couldn’t be added. Try again.', `the passkey registration did not verify: ${r.reason}`);
     return { factor: 'webauthn', publicKey: r.publicKeySpki, signCount: r.signCount, credentialId: r.credentialId };
   }
 
@@ -252,7 +260,7 @@ export class Approvals {
     if (typeof id !== 'string') throw new ApprovalError(400, 'challengeId required');
     const p = this.pending.get(id);
     if (!p || p.kind !== 'enroll') throw new ApprovalError(404, 'no such challenge');
-    if (p.expires <= this.now().getTime()) throw new ApprovalError(409, 'the challenge expired');
+    if (p.expires <= this.now().getTime()) throw new ApprovalError(409, 'The request expired. Try again.');
     return p;
   }
 
@@ -323,7 +331,7 @@ export class Approvals {
     const known = all.find((c) => c.credentialId === key.credentialId);
     const record = (enrolledVia: string) => ({ credentialId: key.credentialId, factor: key.factor, publicKey: key.publicKey, label: p.label, signCount: key.signCount, enrolledVia });
     const add = (enrolledVia: string) => this.o.store.addCredential(record(enrolledVia));
-    if (known?.revokedAt) throw new ApprovalError(409, 'that key was revoked: make a new one on this device ("Replace this Mac\'s key", or a new passkey)');
+    if (known?.revokedAt) throw new ApprovalError(409, 'That key was revoked. Use Replace This Mac’s Key to make a new one.');
     let event: EnrolEvent;
     if (codeStands && code.replace) {
       // This key becomes the only one: added (unless it is already enrolled) and every other revoked, in one transaction.
@@ -331,12 +339,12 @@ export class Approvals {
       await this.o.store.replace(known ? undefined : record('enroll_code_replace'), others);
       event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code_replace', revoked: others };
     } else if (known) {
-      throw new ApprovalError(409, 'that key is already enrolled');
+      throw new ApprovalError(409, 'That key is already added.');
     } else if (codeStands && live.length === 0) {
       await add('enroll_code');
       event = { credentialId: key.credentialId, factor: key.factor, via: 'enroll_code', revoked: [] };
     } else {
-      if (live.length === 0) throw new ApprovalError(403, 'the enrolment code was used or replaced: run `pnpm --filter @flint/runtime enroll` again');
+      if (live.length === 0) throw new ApprovalError(403, 'That code was already used. Get a new one with pnpm --filter @flint/runtime enroll.');
       const approvalId = this.approvalOfKey(key, body.approval);
       await add(`approval:${approvalId}`);
       event = { credentialId: key.credentialId, factor: key.factor, via: 'approval', approvalId, revoked: [] };
@@ -367,11 +375,11 @@ export class Approvals {
   private approvalOfKey(key: Registered, raw: unknown): string {
     const id = raw && typeof raw === 'object' ? (raw as { challengeId?: unknown }).challengeId : undefined;
     const a = typeof id === 'string' ? this.enrolApprovals.get(id) : undefined;
-    if (!a) throw new ApprovalError(403, "a further credential needs an existing credential's approval");
+    if (!a) throw new ApprovalError(403, 'A new key needs approval from a key you already have.');
     this.enrolApprovals.delete(id as string);
-    if (a.expires <= this.now().getTime()) throw new ApprovalError(409, 'that approval expired');
+    if (a.expires <= this.now().getTime()) throw new ApprovalError(409, 'That approval expired. Try again.');
     if (a.payload.subjectId !== credentialRef(key.credentialId) || a.payload.argsDigest !== keyDigest(key.publicKey) || a.payload.decision !== 'approve') {
-      throw new ApprovalError(403, 'that approval was for something else');
+      throw new ApprovalError(403, 'That approval was for something else.');
     }
     return a.approvalId;
   }
@@ -379,19 +387,21 @@ export class Approvals {
   private async verifyAndRecord(payload: ApprovalPayload, challenge: Buffer, body: Record<string, unknown>): Promise<string> {
     const credentialId = typeof body.credentialId === 'string' ? body.credentialId : '';
     const cred = (await this.o.store.credentials()).find((c) => c.credentialId === credentialId);
-    if (!cred || cred.revokedAt) throw new ApprovalError(403, 'unknown or revoked credential');
+    if (!cred || cred.revokedAt) {
+      throw new ApprovalError(403, 'This device’s approval key was revoked or isn’t known. Add a new one in Settings.', cred ? 'the credential is revoked' : 'the credential is unknown');
+    }
     const signature = fromB64(body.signature, 'signature');
     let authenticatorData: Buffer | undefined;
     let clientDataJson: Buffer | undefined;
     if (cred.factor === 'secure_enclave') {
       const v = verifySecureEnclave({ publicKeySpki: cred.publicKey, challenge, signature });
-      if (!v.ok) throw new ApprovalError(403, `the signature did not verify: ${v.reason}`);
+      if (!v.ok) throw new ApprovalError(403, 'Your approval didn’t verify. Try again.', `the signature did not verify: ${v.reason}`);
     } else {
-      if (!this.o.rp) throw new ApprovalError(409, 'passkeys need FLINT_RP_ID and FLINT_RP_ORIGINS');
+      if (!this.o.rp) throw new ApprovalError(409, NO_PASSKEYS);
       authenticatorData = fromB64(body.authenticatorData, 'authenticatorData');
       clientDataJson = fromB64(body.clientDataJSON, 'clientDataJSON');
       const v = verifyWebAuthnAssertion({ publicKeySpki: cred.publicKey, challenge, authenticatorData, clientDataJson, signature, storedSignCount: cred.signCount, rp: this.o.rp });
-      if (!v.ok) throw new ApprovalError(403, `the passkey did not verify: ${v.reason}`);
+      if (!v.ok) throw new ApprovalError(403, refusalFix(v.reason) ?? 'Your approval didn’t verify. Try again.', `the passkey did not verify: ${v.reason}`);
       if (v.signCount !== undefined && v.signCount > cred.signCount) await this.o.store.setSignCount(cred.credentialId, v.signCount);
     }
     const id = `ap${Date.now().toString(36)}${randomBytes(6).toString('hex')}`;

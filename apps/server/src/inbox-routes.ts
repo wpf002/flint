@@ -73,19 +73,22 @@ async function ask(deps: InboxDeps, rt: Runtime, method: 'GET' | 'POST', path: s
  * read of a whole route (a 404 there means a runtime older than the lanes).
  */
 function failed(res: ServerResponse, deps: InboxDeps, a: { status: number }, what: string, list: boolean): true {
+  // Each error is a sentence Will reads in Activity: a decision and an escalation are both a row there, an "item".
   const s = a.status;
-  if (s === 0) return reply(res, 502, { error: 'the runtime did not answer' });
-  if (s === 401 || s === 403) return reply(res, 502, { error: "the runtime refused the server's token (reinstall the runtime, or check ~/.flint/tokens/runtime.token)" });
-  if (s === 404) return list ? reply(res, 501, { error: 'the lanes need the P2 runtime' }) : reply(res, 404, { error: `no such ${what} (or the runtime predates the lanes)` });
-  if (s === 400 || s === 422) return reply(res, 400, { error: `the runtime refused that ${what} request` });
-  if (s === 409) return reply(res, 409, { error: `that ${what} cannot change now` });
-  if (s === 429) return reply(res, 429, { error: 'the runtime is busy; try again shortly' });
-  return reply(res, 502, { error: 'the runtime failed', ref: deps.errorRef('inbox', new Error(`the runtime answered ${s} for a ${what} request`)) });
+  if (s === 0) return reply(res, 502, { error: 'The runtime didn’t answer.' });
+  // The token is ~/.flint/tokens/runtime.token; reinstalling writes it for both sides.
+  if (s === 401 || s === 403) return reply(res, 502, { error: 'The runtime rejected Flint’s token. Reinstall the runtime to fix it.' });
+  // A 404 on a list is a runtime older than the lanes; on one item, the item is gone (or the runtime predates them).
+  if (s === 404) return list ? reply(res, 501, { error: 'This needs a newer runtime.' }) : reply(res, 404, { error: 'That item no longer exists.' });
+  if (s === 400 || s === 422) return reply(res, 400, { error: 'The runtime refused that change.' });
+  if (s === 409) return reply(res, 409, { error: 'That item can no longer change.' });
+  if (s === 429) return reply(res, 429, { error: 'The runtime is busy. Try again shortly.' });
+  return reply(res, 502, { error: 'The runtime hit an error. Try again.', ref: deps.errorRef('inbox', new Error(`the runtime answered ${s} for a ${what} request`)) });
 }
 
 /** The runtime answered 2xx with something that is not the contract: logged by field paths, never values. */
 function malformed(res: ServerResponse, deps: InboxDeps, what: string, issues: string): true {
-  return reply(res, 502, { error: 'the runtime sent an answer the server does not accept', ref: deps.errorRef('inbox', new Error(`malformed ${what} answer (${issues.slice(0, 300)})`)) });
+  return reply(res, 502, { error: 'The runtime sent an answer Flint can’t read.', ref: deps.errorRef('inbox', new Error(`malformed ${what} answer (${issues.slice(0, 300)})`)) });
 }
 
 const paths = (e: { issues: Array<{ path: Array<string | number> }> }) => [...new Set(e.issues.map((i) => i.path.join('.') || '(root)'))].join(', ');
@@ -99,7 +102,7 @@ export async function inboxRoutes(req: IncomingMessage, res: ServerResponse, url
   const ours = (req.method === 'GET' && (path === '/inbox' || path === '/runtime/health')) || (req.method === 'POST' && (feedback || escalation));
   if (!ours) return false;
   const rt = deps.runtime();
-  if (!rt) return reply(res, 503, { error: 'the runtime is not installed' });
+  if (!rt) return reply(res, 503, { error: 'The runtime isn’t installed.' });
 
   if (path === '/inbox') {
     const q = u.searchParams;
