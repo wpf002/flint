@@ -329,7 +329,9 @@ function stubs(bin: string) {
   script(join(bin, 'pnpm'), [
     'echo "pnpm $* @ $PWD" >> "$CALLS"',
     'case "$*" in',
-    '  *enable-source*) [ -e "$STATE/pnpm-fail" ] && exit 1; echo "filed: proposal p1, to turn on apple_calendar."; exit 0 ;;',
+    // As the runtime's CLI prints it: its line on stdout, an error on stderr.
+    '  *enable-source*) [ -e "$STATE/pnpm-fail" ] && { echo "Can\'t reach database server at localhost:5432" >&2; exit 1; }',
+    '    echo "filed: proposal 0b6c1f2e-1d2a-4f5b-9c3d-7e8f9a0b1c2d, to turn on apple_calendar. Sign it in the console (Approvals) with your key; it runs once signed."; exit 0 ;;',
     '  *apple-calendar*) cat "$STATE/status" 2>/dev/null; exit 0 ;;',
     'esac',
     'exit 0',
@@ -432,9 +434,9 @@ describe('connect.sh, with HOME in a temp dir and every side effect stubbed', ()
     expect(mode(join(data, 'calendar.log'))).toBe(0o600);
     // The token is read by the helper alone: never in a call, the plist or the output.
     expect([...r.ran, r.out, readFileSync(plistPath(), 'utf8')].join('\n')).not.toContain(TOKEN);
-    // What Will reads: sentences, and the next step.
-    const lines = r.out.trim().split('\n').filter((l) => !l.startsWith('filed:'));
-    for (const l of lines) expect(readable(l), l).toBe(true);
+    // What Will reads: sentences, and the next step; never enable-source's own line, with its id.
+    for (const l of r.out.trim().split('\n')) expect(readable(l), l).toBe(true);
+    expect(r.out).not.toContain('proposal');
     expect(r.out).toContain('Flint Calendar is connected.');
     expect(r.out).toContain('approve "Turn On the Apple Calendar Source"');
     expect(r.out).toMatch(/\n {2}cd \S+ && pnpm --filter @flint\/runtime apple-calendar\n$/);
@@ -628,6 +630,8 @@ describe('connect.sh, with HOME in a temp dir and every side effect stubbed', ()
     const r = connect();
     expect(r.status).toBe(1);
     expect(r.err).toMatch(/The card couldn't be filed\. Run this command to try again:\n {2}cd \S+ && pnpm --filter @flint\/runtime enable-source apple_calendar\n$/);
+    // Its own error still shows, though its stdout doesn't.
+    expect(r.err).toContain("Can't reach database server");
   });
 });
 

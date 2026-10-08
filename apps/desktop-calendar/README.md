@@ -72,7 +72,8 @@ Login Items, `connect.sh` says so before it opens anything.
   restarting, it keeps trying for a minute; if Flint still can't be told, the
   source stays on and it asks you to run it again in a few minutes. Add
   `--uninstall` to remove the app as well. To remove the calendar permission
-  too, run `tccutil reset Calendar com.flint.calendar`.
+  too, run `tccutil reset Calendar com.flint.calendar`. To connect again later,
+  run `connect.sh`. Once you've approved its card, it files no new one.
 
 ## What it reads, and what reaches Flint
 
@@ -147,8 +148,9 @@ makes, and never signs ad-hoc.
 
 - `apple-calendar` says "Calendar Access Is Off": turn Flint Calendar on in
   System Settings > Privacy & Security > Calendars.
-- It says "Not Reporting": `~/.flint/calendar.log` has one line per change,
-  with counts and status codes only.
+- It says "Not Reporting": `~/.flint/calendar.log` gets one line each time
+  the runtime's answer or your calendar access changes (and at least one an
+  hour), with counts and status codes only.
 - `connect.sh` says macOS didn't show its prompt: Flint Calendar isn't listed
   in Settings then, so there is nothing to turn on there. Send Claude the line
   it printed and the output of the command it gives.

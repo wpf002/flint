@@ -183,13 +183,13 @@ if loaded && cmp -s "$PLIST.new" "$PLIST"; then
   launchctl kickstart -k "gui/$UID/$LABEL" >/dev/null 2>&1 || true
 else
   if loaded; then
-    launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+    launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
     for i in {1..40}; do loaded || break; sleep 0.25; done
   fi
   mv "$PLIST.new" "$PLIST"
   ok=0
   for i in 1 2 3 4 5; do
-    if launchctl bootstrap "gui/$UID" "$PLIST" 2>/dev/null; then ok=1; break; fi
+    if launchctl bootstrap "gui/$UID" "$PLIST" >/dev/null 2>&1; then ok=1; break; fi
     sleep 2
   done
   # It never ran, so calendar.log has nothing to say: the usual cause is the switch in Login Items.
@@ -208,7 +208,8 @@ case "$source_state" in
 esac
 if [ "$card" = 1 ]; then
   say "Filing the card that turns the source on."
-  ( cd "$REPO" && pnpm --silent --filter @flint/runtime enable-source apple_calendar ) \
+  # Its line names the proposal's id; step 7 says what to do instead. An error still shows, on stderr.
+  ( cd "$REPO" && pnpm --silent --filter @flint/runtime enable-source apple_calendar >/dev/null ) \
     || stop "The card couldn't be filed. Run this command to try again:" "  cd $SHOWN_REPO && pnpm --filter @flint/runtime enable-source apple_calendar"
 fi
 

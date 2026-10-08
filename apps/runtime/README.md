@@ -205,9 +205,10 @@ keeps its own approval.
 - **Disconnect:** `~/flint/apps/desktop-calendar/disconnect.sh`. It stops
   Flint Calendar, tells the runtime (which archives every Apple event, and the
   `apple-calendar` line says "Disconnected"), then removes the
-  `FLINT_SOURCE_APPLE_CALENDAR` line and restarts the runtime. If the runtime
-  can't be told within a minute (it is down or restarting), the line stays and
-  it asks you to run it again. Add `--uninstall` to remove the app too.
+  `FLINT_SOURCE_APPLE_CALENDAR` line and restarts the runtime, so the line
+  says "Off". If the runtime can't be told within a minute (it is down or
+  restarting), or hasn't archived within 2 minutes, the source stays on and it
+  asks you to run it again. Add `--uninstall` to remove the app too.
 - **Turn the source off by hand:** remove the `FLINT_SOURCE_APPLE_CALENDAR`
   lines (with or without `export`) from `~/.flint/runtime.override.env` and run
   `launchctl kickstart -k gui/$(id -u)/com.flint.runtime`. Its events stay as
@@ -217,25 +218,32 @@ keeps its own approval.
 
 ### If it stops reading
 
-- **After you disconnect,** the source goes quiet on purpose. Its runs don't
-  fail and nothing is read, and the `apple-calendar` line says "Disconnected"
-  until Flint Calendar pushes again. Settings > Health shows Apple Calendar as
-  Normal, because it's disconnected on purpose, and the morning digest leaves
-  it out. To start again, connect in Flint Calendar (step 3 above). Within 5
-  minutes the line should say "Connected".
+- **After you disconnect,** the source is off, nothing is read, and the
+  `apple-calendar` line says "Off". If `disconnect.sh` asked you to run it
+  again, the source stays on until you do. In that time, once Flint has
+  archived your Apple events, the line says "Disconnected", Settings > Health
+  shows Apple Calendar as Normal because it's disconnected on purpose, and the
+  morning digest leaves it out. To start again, run
+  `~/flint/apps/desktop-calendar/connect.sh` (step 2 above). It files no new
+  card, because you approved one already. Within 5 minutes the line should say
+  "Connected".
 - **If it still says "Disconnected" 10 minutes after you connect,** and "Last
   Read" keeps growing, Flint Calendar's pushes aren't landing. Run these two:
   ```bash
   cd ~/flint && pnpm --filter @flint/runtime apple-calendar
   tail -n 5 ~/.flint/calendar.log
   ```
-  The log has one line per push, with counts and the runtime's answer, never a
-  title. The number in parentheses says what to do:
+  The log gets one line each time the runtime's answer or your calendar access
+  changes (and at least one an hour), with counts and the runtime's answer,
+  never a title. The number in parentheses says what to do:
   - **401** ("refused the push token"): the token file changed after the
     runtime last started, so the runtime doesn't know it. Reinstall the
     runtime, which reads the file again:
     `zsh ~/flint/apps/runtime/install-runtime.sh`. It checks and tests the
-    code first, so it takes a few minutes. The next push lands on its own.
+    code first, so it takes a few minutes. After a 401, Flint Calendar waits
+    30 minutes before it pushes again, so the next push lands within 30
+    minutes on its own. To make it push now, run
+    `launchctl kickstart -k gui/$(id -u)/com.flint.calendar`.
   - **400** ("refused the snapshot"): Flint Calendar and the runtime disagree
     on the snapshot's format, usually because one was updated and the other
     not yet. Both update from `main` on their own, so wait for the next deploy

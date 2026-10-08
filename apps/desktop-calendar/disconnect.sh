@@ -58,7 +58,7 @@ trap 'rm -f "$OVERRIDE.new"' EXIT
 
 # 1. The agent stops first, and is checked stopped; then its file goes, so no login brings it back.
 if loaded; then
-  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+  launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
   for i in {1..40}; do loaded || break; sleep 0.25; done
   if loaded; then
     stop "Flint Calendar's background part didn't stop, so nothing else changed. Run this again in a minute."

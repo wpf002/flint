@@ -781,8 +781,9 @@ enum ChooserAnswer: String {
   case noToken = "notoken"
 }
 
-/// The helper's log (~/.flint/calendar.log): one sentence a push, with counts, the access state and HTTP codes,
-/// never a title, a name, an address or the token.
+/// The helper's log (~/.flint/calendar.log): one sentence each time the runtime's answer or calendar access changes
+/// (and at least one an hour), with counts, the access state and HTTP codes, never a title, a name, an address or
+/// the token.
 enum LogText {
   static func duration(_ t: TimeInterval) -> String {
     let s = Int(t.rounded())

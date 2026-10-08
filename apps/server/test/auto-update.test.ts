@@ -583,7 +583,7 @@ describe("install-server.sh requires Flint Calendar's Swift checks only when the
     commit('runtime elsewhere', 'apps/runtime/src/sources/google/x.ts');
     expect(needed()).toBe(false);
     for (const path of ['apps/desktop-calendar/FlintCalendar.swift', 'apps/runtime/src/sources/apple/wire.ts', 'apps/runtime/src/routes/apple-calendar.ts',
-      'apps/runtime/test/fixtures/apple-calendar-snapshot.json', 'apps/server/test/desktop-calendar.test.ts']) {
+      'apps/runtime/src/sources/text.ts', 'apps/runtime/test/fixtures/apple-calendar-snapshot.json', 'apps/server/test/desktop-calendar.test.ts']) {
       const sha = commit(`change ${path}`, path);
       expect(needed(), path).toBe(true);
       // Once a server deploy of it finished, the next unrelated push skips them again.

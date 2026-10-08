@@ -321,7 +321,7 @@ final class Agent: NSObject, NSApplicationDelegate {
     }
     lastOutcome = outcome
     let delay = Backoff.delay(after: outcome, failures: failures)
-    // One line when something changes, else at most one an hour.
+    // One line each time the runtime's answer or calendar access changes (and at least one an hour).
     let kind = "\(outcome) \(access.rawValue)"
     if lastLogged.map({ $0.0 != kind || Date().timeIntervalSince($0.1) > 3600 }) ?? true {
       logLine(LogText.line(outcome, events: events, access: access, next: delay))

@@ -666,7 +666,7 @@ struct CoreTests {
       r.equal(UIText.failure(.tokenRead, domain: "", code: 4), "Reading the push token failed with Unknown error 4.")
     }
 
-    r.test("the log: one sentence a push, counts and codes only") {
+    r.test("the log: every line a sentence, counts and codes only") {
       let outcomes: [PushOutcome] = [.status(202), .status(404), .status(409), .status(401), .status(429), .status(422), .status(503), .unreachable, .noToken]
       for o in outcomes {
         let line = LogText.line(o, events: 23, access: .full, next: Backoff.delay(after: o, failures: 1))
