@@ -218,8 +218,10 @@ keeps its own approval.
 
 - **After you disconnect,** the source goes quiet on purpose. Its runs don't
   fail and nothing is read, and the `apple-calendar` line says "Disconnected"
-  until Flint Calendar pushes again. To start again, connect in Flint Calendar
-  (step 3 above). Within 5 minutes the line should say "Connected".
+  until Flint Calendar pushes again. Settings > Health shows Apple Calendar as
+  Normal, because it's disconnected on purpose, and the morning digest leaves
+  it out. To start again, connect in Flint Calendar (step 3 above). Within 5
+  minutes the line should say "Connected".
 - **If it still says "Disconnected" 10 minutes after you connect,** and "Last
   Read" keeps growing, Flint Calendar's pushes aren't landing. Run these two:
   ```bash
@@ -227,7 +229,7 @@ keeps its own approval.
   tail -n 5 ~/.flint/calendar.log
   ```
   The log has one line per push, with counts and the runtime's answer, never a
-  title. The number in brackets says what to do:
+  title. The number in parentheses says what to do:
   - **401** ("refused the push token"): the token file changed after the
     runtime last started, so the runtime doesn't know it. Reinstall the
     runtime, which reads the file again:
@@ -243,6 +245,11 @@ keeps its own approval.
     Calendar cuts every snapshot to fit, so this is the same mismatch as 400:
     do the same. To read less in the meantime, open Flint Calendar, choose
     fewer calendars and click Connect.
+  - **422** ("refused the snapshot"): the snapshot was read too long before it
+    arrived (for example, the Mac slept in between), or it was no newer than
+    the last one Flint took. Flint Calendar reads again 5 minutes later, and
+    that push should land on its own. If it's still 422 after that, send
+    Claude the log line. It holds no calendar data.
 
 ### Rolling P2.6 back
 

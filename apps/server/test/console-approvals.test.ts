@@ -334,10 +334,10 @@ describe('the console Approvals panel', () => {
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Calendar · Add People from Calendar 20 a Day');
+    expect(rows[0]!.shown()).toContain('LimitsRead Your Google Calendar · Add People from Calendar 20 a Day');
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
-    expect(rows[1]!.shown()).toContain(`Your calendar is read every ${minutes} minutes.`);
+    expect(rows[1]!.shown()).toContain(`Your Google Calendar is read every ${minutes} minutes.`);
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['gc']);

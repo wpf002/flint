@@ -7,7 +7,9 @@
  *  - the server and Ollama, as the health source last saw them (no probe of
  *    their own: an observation older than 15 minutes is unknown);
  *  - each source: fresh within 2 cadences ok, within 6 degraded, else down; an
- *    open circuit (5 failures in a row) is down;
+ *    open circuit (5 failures in a row) is down; a good run's warnings in
+ *    words (degraded when Will has something to see to); Apple Calendar
+ *    disconnected in Flint Calendar is ok, quiet on purpose, and never stale;
  *  - the last good local backup, the latest restore drill, open audit
  *    intents, the last retention run, a migration marked failed, triage.
  *
@@ -21,6 +23,7 @@ import type { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
+import { revokedIn } from '../sources/apple/calendar.js';
 import { uptime } from './instance.js';
 import { CIRCUIT_FAILURES } from './circuits.js';
 
@@ -48,6 +51,27 @@ export const calendarDaysBetween = (tz: string, from: Date, to: Date): number =>
   Math.round((Date.parse(`${localDay(tz, to)}T00:00:00Z`) - Date.parse(`${localDay(tz, from)}T00:00:00Z`)) / 86_400_000);
 /** "1 hour", "3 hours": each detail is a sentence Will reads in Settings > Health. */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * A good run's warnings (its last error, with no failure counted), matched on the calendar sources' own
+ * wording: an item set aside or a listing cut at its limit (calendar/core.ts, google/calendar.ts,
+ * apple/calendar.ts) skipped something (how much is not kept: "at least one item"); Apple's other three
+ * skip nothing. Only a skip or no calendars at all is degraded: a change of calendars lasts one run, and
+ * events missing are archived or come back within the hour, so neither puts Apple Calendar in the
+ * morning digest.
+ */
+const WARNINGS: ReadonlyArray<{ said: RegExp; detail: string; degraded: boolean }> = [
+  { said: /\bset aside\b|the rest are not read|sent only part of/, detail: 'The last read skipped at least one item.', degraded: true },
+  { said: /no calendars are chosen in Flint Calendar/, detail: 'No calendars are chosen in Flint Calendar, or iCloud Calendar is off.', degraded: true },
+  { said: /the calendars Flint Calendar reads have changed/, detail: 'The calendars Flint Calendar reads changed, so nothing missing was archived.', degraded: false },
+  { said: /events ahead are missing from Flint Calendar/, detail: 'Some events are missing from Flint Calendar. They’re archived if still missing in an hour.', degraded: false },
+];
+/** What a good run's warnings say, and whether that is an issue. Wording no rule knows is one, said plainly. */
+function warned(lastError: string): { detail: string; degraded: boolean } {
+  const hits = WARNINGS.filter((w) => w.said.test(lastError));
+  if (!hits.length) return { detail: 'The last read finished with a warning.', degraded: true };
+  return { detail: hits.map((w) => w.detail).join(' '), degraded: hits.some((w) => w.degraded) };
+}
 
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const { db, now } = d;
@@ -86,16 +110,20 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
       out.push({ component, status: 'disabled' });
       continue;
     }
+    // Disconnected in Flint Calendar: every run is idle until it connects again, so lastOkAt stands still on purpose.
+    if (s.name === 'apple_calendar' && !c.consecutiveFailures && revokedIn(c.cursor)) {
+      out.push({ component, status: 'ok', detail: 'It’s disconnected in Flint Calendar.' });
+      continue;
+    }
     const age = c.lastOkAt ? now.getTime() - c.lastOkAt.getTime() : Infinity;
     const fresh: Status = c.consecutiveFailures >= CIRCUIT_FAILURES ? 'down' : age <= 2 * s.cadenceMs ? 'ok' : age <= 6 * s.cadenceMs ? 'degraded' : 'down';
-    // A run that succeeded but set something aside (a calendar item it could not read) says so: its last error holds what.
-    // It is degraded, not ok, so the console lists it as an issue rather than folding it under "Normal".
-    const setAside = !c.consecutiveFailures && !!c.lastOkAt && !!c.lastError;
-    const status: Status = fresh === 'ok' && setAside ? 'degraded' : fresh;
+    // A run that succeeded with warnings (a calendar item set aside, no calendars chosen) says so: its last error holds what.
+    // One Will has to see to is degraded, not ok, so the console lists it as an issue rather than folding it under "Normal".
+    const warning = !c.consecutiveFailures && !!c.lastOkAt && !!c.lastError ? warned(c.lastError) : undefined;
+    const status: Status = fresh === 'ok' && warning?.degraded ? 'degraded' : fresh;
     const detail = c.consecutiveFailures
       ? c.consecutiveFailures === 1 ? 'The last read failed.' : `The last ${c.consecutiveFailures} reads failed.`
-      // Set aside: one item, or a calendar's whole tail past its page limit. The count is not kept, so the line is true for any.
-      : !c.lastOkAt ? 'It hasn’t had a good read yet.' : c.lastError ? 'The last read skipped at least one item.' : undefined;
+      : !c.lastOkAt ? 'It hasn’t had a good read yet.' : warning?.detail;
     out.push({ component, status, ...(detail ? { detail: clip(detail) } : {}) });
   }
 
