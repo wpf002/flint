@@ -214,6 +214,36 @@ keeps its own approval.
 - **Titles:** as for Google, the nightly cleanup deletes each a week after it
   was last seen.
 
+### If it stops reading
+
+- **After you disconnect,** the source goes quiet on purpose. Its runs don't
+  fail and nothing is read, and the `apple-calendar` line says "Disconnected"
+  until Flint Calendar pushes again. To start again, connect in Flint Calendar
+  (step 3 above). Within 5 minutes the line should say "Connected".
+- **If it still says "Disconnected" 10 minutes after you connect,** and "Last
+  Read" keeps growing, Flint Calendar's pushes aren't landing. Run these two:
+  ```bash
+  cd ~/flint && pnpm --filter @flint/runtime apple-calendar
+  tail -n 5 ~/.flint/calendar.log
+  ```
+  The log has one line per push, with counts and the runtime's answer, never a
+  title. The number in brackets says what to do:
+  - **401** ("refused the push token"): the token file changed after the
+    runtime last started, so the runtime doesn't know it. Reinstall the
+    runtime, which reads the file again:
+    `zsh ~/flint/apps/runtime/install-runtime.sh`. It checks and tests the
+    code first, so it takes a few minutes. The next push lands on its own.
+  - **400** ("refused the snapshot"): Flint Calendar and the runtime disagree
+    on the snapshot's format, usually because one was updated and the other
+    not yet. Both update from `main` on their own, so wait for the next deploy
+    (`~/.flint/calendar-install.log` says when Flint Calendar last installed).
+    If it's still 400 after that, send Claude the log line. It holds no
+    calendar data.
+  - **413** ("refused the snapshot"): the snapshot is over 2 MiB. Flint
+    Calendar cuts every snapshot to fit, so this is the same mismatch as 400:
+    do the same. To read less in the meantime, open Flint Calendar, choose
+    fewer calendars and click Connect.
+
 ### Rolling P2.6 back
 
 The migration's `down.sql` (`20261006000000_p26_apple_calendar`) belongs to a

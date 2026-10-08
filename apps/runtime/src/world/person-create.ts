@@ -40,7 +40,7 @@ export const TEMPLATE = 'person.from_calendar';
 export const PER_CARD = 20;
 /** The source of a card that names none: every P2.5 card was Google's. */
 const DEFAULT_SOURCE: CalendarSource = 'google_calendar';
-/** Each calendar as a card names it (the console's Calendar fact says the same). */
+/** Each calendar as a card names it (the console's person card says the same, under its title). */
 const CALENDAR_NAME: Record<CalendarSource, string> = { google_calendar: 'Google Calendar', apple_calendar: 'Apple Calendar' };
 const DAY = 86_400_000;
 

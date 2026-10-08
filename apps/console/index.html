@@ -1103,7 +1103,8 @@ function apprNow(){return new Date();}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
 function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
   if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
-/* Each calendar by its name, for the person card: the calendar its people came from, which Will signs. */
+/* Each calendar by its name, for the person card's subtitle: the calendar its people came from, which Will signs
+   (a card that names none is Google's, as every P2.5 card was). */
 var APPR_CALENDARS={google_calendar:'Google Calendar',apple_calendar:'Apple Calendar'};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
@@ -1125,7 +1126,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
 function apprSub(p){var a=p.args||{};
   if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Flint starts reading this source.';
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
-  if(p.fullName==='world.person.create')return 'They’re from events you accepted or organized.';
+  if(p.fullName==='world.person.create'){var cal=APPR_CALENDARS[a.source||'google_calendar'];return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
   if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'This adds a new rule.';
   if(APPR_NIGHTLY[p.fullName])return 'It runs '+apprWhen(p.fullName)+' if you approve it.';
   if(p.fullName==='world.relation.write')return 'Flint’s memory suggests this link.';
@@ -1144,9 +1145,8 @@ function apprFacts(p){var a=p.args||{},f=[];
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
   /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole.
-     The calendar is the one the card's people came from, which Will signs (a card that names none is Google's, as every P2.5 card was). */
-  else if(p.fullName==='world.person.create'){f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
-    f.push(['Calendar',APPR_CALENDARS[a.source||'google_calendar']||apprWords(a.source)]);}
+     The calendar is in the subtitle (apprSub), so the third fact stays Expires. */
+  else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
   f.push(['Filed By',apprFrom(p.origin)]);
   if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
   return f.slice(0,3);}
