@@ -11,6 +11,7 @@ import {
   type PolicyRow,
   type TierContext,
 } from '../src/tiers';
+import { TAINTED_SOURCES } from '../src/taint';
 
 const chat: TierContext = { context: 'chat', tainted: false };
 const auto: TierContext = { context: 'autonomous', tainted: false };
@@ -88,6 +89,21 @@ describe('step 1: forbidden in code', () => {
       expect(resolveTier(a, auto).tier, a).toBe('forbidden');
     }
     expect(resolveTier('world.sync.google_calendar', auto).tier).toBe('approval');
+  });
+
+  it('Apple Calendar (P2.6) is read-only too; its sync ships at APPROVAL, promotable, and its text is tainted', () => {
+    for (const a of ['apple.write', 'apple.calendar.save_event', 'apple.reminders.add']) {
+      expect(resolveTier(a, { ...chat, policies: [row(a, 'alone'), row('apple.*', 'alone'), row('*', 'alone')], now: NOW }).tier, a).toBe('forbidden');
+      expect(resolveTier(a, auto).tier, a).toBe('forbidden');
+    }
+    expect(CODE_TABLE['apple.write']).toMatchObject({ tier: 'forbidden', promotable: false });
+    expect(SOURCES).toContain('apple_calendar');
+    expect(resolveTier('world.sync.apple_calendar', auto)).toMatchObject({ tier: 'approval', rule: 'code' });
+    expect(CODE_TABLE['world.sync.apple_calendar']).toMatchObject({ tier: 'approval', promotable: true });
+    // Promoted by a signed row, it runs alone; a policy can never reach a write.
+    expect(resolveTier('world.sync.apple_calendar', { ...auto, policies: [row('world.sync.apple_calendar', 'alone')], now: NOW }).tier).toBe('alone');
+    expect(AUTONOMOUS_ACTIONS.has('world.sync.apple_calendar')).toBe(true);
+    expect(TAINTED_SOURCES.has('apple_calendar')).toBe(true);
   });
 });
 

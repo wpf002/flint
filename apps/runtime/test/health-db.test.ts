@@ -5,9 +5,12 @@
  * observation, 30 minutes on; a backup once per last good one; the latest
  * drill only; a migration once per sha; a vendor once a day unless the server
  * said so); circuits open once and close once; details are redacted; the
- * spend view goes to the server.
+ * spend view goes to the server. A calendar's warnings are said as they are
+ * (only a skip, or no calendars, is an issue), and a disconnected Apple
+ * Calendar is ok, never stale, and not in the digest.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +27,11 @@ import { checkComponents, healthReport, recordChecks } from '../src/health/check
 import { raise, watchdog } from '../src/health/watchdog';
 import { circuitAllows, circuitEvents } from '../src/health/circuits';
 import { pushSpend } from '../src/spend/push';
+import { buildDigest } from '../src/digest';
+import { googleCalendarSource } from '../src/sources/google/calendar';
+import { appleCalendarSource } from '../src/sources/apple/calendar';
+import { CalendarInbox } from '../src/sources/apple/inbox';
+import { parseSnapshot } from '../src/sources/apple/wire';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
@@ -67,7 +75,14 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
   let db: Db;
   let config: Config;
   let home: string;
+  let key: Awaited<ReturnType<typeof enrollTestKey>>;
   const owner = (sql: string, params: unknown[] = []) => withClient(urls.owner, (c) => c.query(sql, params));
+  /** A source turned on as Will turns one on: a world.source.enable he signed. */
+  async function enable(source: string) {
+    const p = await createProposal(db, { kind: 'tool_call', origin: 'console', action: 'world.source.enable', args: { source }, argsProvenance: { source: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'world.source.enable', argsDigest: digestOf({ source }) }), undefined, 'test');
+    await runInternal(db, p.id, undefined, 'UTC', 'test');
+  }
   const svc = (running: boolean, lastExit = 0): SourceObservation => ({ type: 'service.status', kind: 'service', key: 'service:launchd:com.flint.watched', name: 'com.flint.watched', sensitivity: 'ops', externalId: 'com.flint.watched', state: { managedBy: 'launchd', loaded: true, running, lastExit, disabled: false } });
   const launchd = (o: () => SourceObservation[]): Source => ({ name: 'launchd', cadenceMs: 2 * MIN, run: async () => ({ observations: o(), metrics: [] }) });
 
@@ -76,10 +91,8 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     db = createDb(urls.app);
     home = mkdtempSync(join(tmpdir(), 'health-home-'));
     config = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_RUNTIME_TRIAGE: 'on' });
-    const key = await enrollTestKey(urls);
-    const p = await createProposal(db, { kind: 'tool_call', origin: 'console', action: 'world.source.enable', args: { source: 'launchd' }, argsProvenance: { source: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
-    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'world.source.enable', argsDigest: digestOf({ source: 'launchd' }) }), undefined, 'test');
-    await runInternal(db, p.id, undefined, 'UTC', 'test');
+    key = await enrollTestKey(urls);
+    await enable('launchd');
   });
   afterAll(async () => db?.$disconnect());
 
@@ -221,5 +234,72 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     const known = async () => [{ key: 'service:launchd:com.flint.gone', name: 'com.flint.gone', state: { managedBy: 'launchd', loaded: true, running: true, lastExit: 0, disabled: false }, taintedPaths: [] }];
     const r = await launchdSource({ run, agentsDir: dir, prefixes: ['com.flint.'] }).run({ now: new Date(), signal: new AbortController().signal, fetch: async () => new Response(null), known });
     expect(r.observations).toMatchObject([{ key: 'service:launchd:com.flint.gone', status: 'archived' }]);
+  });
+
+  it('a calendar’s warnings in words: only a skip or no calendars is an issue; a disconnected Apple Calendar is ok, never stale, and not in the digest', async () => {
+    await enable('google_calendar');
+    await enable('apple_calendar');
+    const sources = [{ name: 'google_calendar', cadenceMs: 5 * MIN }, { name: 'apple_calendar', cadenceMs: 5 * MIN }];
+    const check = async (source: string, now: Date) => {
+      const c = (await checkComponents({ db, config, now, sources })).find((x) => x.component === `source:${source}`)!;
+      return { status: c.status, detail: c.detail };
+    };
+    const skipped = { status: 'degraded', detail: 'The last read skipped at least one item.' };
+
+    // Google, through its real source: an item it cannot read, then a listing past its page limit. Each skipped something.
+    const google = googleCalendarSource({ tz: 'UTC', maxPages: 1, accessToken: async () => 'ya29.test' });
+    const listing = (body: unknown) => ({ ...runAt(new Date()), fetch: async () => new Response(JSON.stringify(body)) });
+    expect(await syncOnce(db, google, listing({ items: [42] }), 'UTC')).toMatchObject({ ran: true, failed: 0, reason: expect.stringMatching(/set aside$/) });
+    expect(await check('google_calendar', new Date())).toEqual(skipped);
+    expect(await syncOnce(db, google, listing({ items: [], nextPageToken: 'more' }), 'UTC')).toMatchObject({ ran: true, failed: 0, reason: expect.stringMatching(/the rest are not read/) });
+    expect(await check('google_calendar', new Date())).toEqual(skipped);
+    // Wording no rule knows is still an issue, said plainly.
+    await owner(`UPDATE "SourceCursor" SET "lastError" = 'google calendar: something new' WHERE source = 'google_calendar'`);
+    expect(await check('google_calendar', new Date())).toEqual({ status: 'degraded', detail: 'The last read finished with a warning.' });
+
+    // Apple, through its real source: each snapshot read a minute after the last, as Flint Calendar would push it.
+    // Three hours ago, so "two hours after it was disconnected" is in the past too (an audit entry is never in the future).
+    const H = (x: string) => createHash('sha256').update(x).digest('hex');
+    const iso = (t: number) => new Date(t).toISOString();
+    const T0 = Date.now() - 180 * MIN;
+    let at = T0;
+    const ev = (name: string, o: Record<string, unknown> = {}) => ({
+      id: H(name), recurring: false, status: 'confirmed', title: `Title ${name}`, start: { at: iso(T0 + 3 * 86_400_000) }, end: { at: iso(T0 + 3 * 86_400_000 + 3_600_000) }, self: 'accepted', ...o,
+    });
+    const push = async (events: unknown[], o: Record<string, unknown> = {}) => {
+      at += MIN;
+      const p = parseSnapshot({
+        v: 1, generatedAt: iso(at), access: 'full', state: 'live', window: { start: iso(at), end: iso(at + 14 * 86_400_000) }, tz: 'UTC', complete: true,
+        calendars: { count: 1, hash: H('cal') }, events, ...o,
+      });
+      if (!p.ok) throw new Error(`refused: ${p.issues.join(', ')}`);
+      const inbox = new CalendarInbox(at - 60 * MIN);
+      expect(inbox.offer(p.snapshot, at)).toBe('accepted');
+      expect(await syncOnce(db, appleCalendarSource({ tz: 'UTC', inbox }), runAt(new Date(at)), 'UTC')).toMatchObject({ ran: true, failed: 0 });
+      return check('apple_calendar', new Date(at));
+    };
+    const eight = Array.from({ length: 8 }, (_, i) => ev(`e${i}`));
+    // No calendars chosen: Will has something to fix, so it is an issue, and it is said every run until he does.
+    expect(await push([], { calendars: { count: 0, hash: H('none') } })).toEqual({ status: 'degraded', detail: 'No calendars are chosen in Flint Calendar, or iCloud Calendar is off.' });
+    // A change of calendars lasts one run, and a mass absence is archived or comes back within the hour: said, not issues.
+    expect(await push(eight)).toEqual({ status: 'ok', detail: 'The calendars Flint Calendar reads changed, so nothing missing was archived.' });
+    expect(await push([])).toEqual({ status: 'ok', detail: 'Some events are missing from Flint Calendar. They’re archived if still missing in an hour.' });
+    // An event set aside, and a snapshot cut at the helper's limits, each skipped something.
+    expect(await push([...eight, ev('bad', { location: 'Room 4' })])).toEqual(skipped);
+    expect(await push(eight, { complete: false })).toEqual(skipped);
+    // Two at once: both said, and the skip makes it an issue.
+    expect(await push([ev('bad', { location: 'Room 4' })], { calendars: { count: 2, hash: H('two') } }))
+      .toEqual({ status: 'degraded', detail: 'The last read skipped at least one item. The calendars Flint Calendar reads changed, so nothing missing was archived.' });
+    expect(await push(eight, { calendars: { count: 2, hash: H('two') } })).toEqual({ status: 'ok' });
+
+    // Disconnected in Flint Calendar: every run after is idle, so lastOkAt stands still. Two hours on it is still ok, and says why.
+    await push([], { state: 'revoked', access: 'denied' });
+    const later = new Date(at + 2 * 3_600_000);
+    expect(await check('apple_calendar', later)).toEqual({ status: 'ok', detail: 'It’s disconnected in Flint Calendar.' });
+    await recordChecks(db, await checkComponents({ db, config, now: later, sources }), later);
+    expect((await buildDigest(db, 'UTC', later)).degraded).not.toContain('source:apple_calendar');
+    // A run that failed since (a live snapshot with calendar access off) is said, and judged as any source's.
+    await owner(`UPDATE "SourceCursor" SET "consecutiveFailures" = 1 WHERE source = 'apple_calendar'`);
+    expect(await check('apple_calendar', later)).toEqual({ status: 'down', detail: 'The last read failed.' });
   });
 });

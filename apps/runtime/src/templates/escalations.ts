@@ -203,9 +203,10 @@ export const TEMPLATES = {
       .strict(),
     // The console title-cases a note's title, so no word starts with a bracket ("(all day)" read "(all Day)").
     title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ', all day'}`),
+    // "You have": the same note for Google's and (P2.6) Apple's calendar, so neither names the other.
     body: (f) => `You have ${f.kind === 'deadline' ? 'a deadline' : 'an event'} on ${calendarDay(f.date)}${f.time ? ` at ${clockTime(f.time)}` : ''}. Its title is in Activity, under Important.`,
     fieldFreeTitle: 'Something on your calendar',
-    fieldFreeBody: 'Something from your Google Calendar is coming up. Its title is in Activity, under Important.',
+    fieldFreeBody: 'Something from your calendar is coming up. Its title is in Activity, under Important.',
   }),
   new_item: t({
     fields: z.object({ kind: z.enum(['issue', 'pull_request', 'thread']), item: Ref, reasonCode: z.enum(REASON_CODES) }).strict(),

@@ -4,13 +4,15 @@
  * them. A job is a queue the migration made, an optional cron (in Flint's zone)
  * and a handler; startJobs registers the set it is given and unschedules every
  * other scheduled queue, so a job switched off (triage off) stops firing
- * instead of piling up unworked.
+ * instead of piling up unworked. A source that is pushed to (P2.6, Apple
+ * Calendar) is also sent its job when a push arrives.
  */
 import type { Job, ScheduleOptions, WorkOptions } from 'pg-boss';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { ALL_QUEUES, cronFor, type Bus } from './bus.js';
 import { runLocked } from './scheduler.js';
+import { IDLE } from './sources/sync.js';
 import type { Registered } from './sources/registry.js';
 import { triageEnqueue } from './events/record.js';
 import { reconcile, sweepEvents } from './triage/reconcile.js';
@@ -50,6 +52,13 @@ export interface JobSpec {
   handler: (jobs: Job<object>[]) => Promise<void>;
 }
 
+/**
+ * A sync job sent because something new arrived (P2.6: Flint Calendar pushed
+ * a snapshot to the runtime's route), not by the source's cron. It carries no
+ * content, only why it was sent.
+ */
+export const PushJob = z.object({ reason: z.literal('push') }).strict();
+
 /** The world sources, one queue each, run under the same advisory lock as before. */
 export function syncJobs(ctx: JobContext): JobSpec[] {
   // Triage off: the sources keep running, and nothing is queued for triage.
@@ -57,14 +66,16 @@ export function syncJobs(ctx: JobContext): JobSpec[] {
   return ctx.sources.map((r) => ({
     queue: `sync.${r.source.name}`,
     cron: cronFor(r.source.cadenceMs),
-    handler: async () => {
+    handler: async (jobs) => {
       const now = new Date();
       const cursor = () => ctx.db.sourceCursor.findUnique({ where: { source: r.source.name }, select: { consecutiveFailures: true, lastOkAt: true, updatedAt: true } });
       const before = await cursor();
-      // An open circuit: skipped, but for one try every 6 cadences.
-      if (!circuitAllows(before, r.source.cadenceMs, now)) return;
+      // An open circuit: skipped, but for one try every 6 cadences. A push is let through: a fresh
+      // snapshot is the source saying it is back (the cron's own runs still wait for the circuit).
+      const pushed = jobs.some((j) => PushJob.safeParse(j.data).success);
+      if (!pushed && !circuitAllows(before, r.source.cadenceMs, now)) return;
       const s = await runLocked(ctx.db, r, ctx.config.tz, now, enqueue);
-      if (s?.failed || (s && !s.ran && s.reason && !s.reason.startsWith('not enabled'))) ctx.log(`sync ${r.source.name}: ${s.reason ?? `${s.failed} failed`}`, { failed: s.failed });
+      if (s?.failed || (s && !s.ran && s.reason && !s.reason.startsWith('not enabled') && s.reason !== IDLE)) ctx.log(`sync ${r.source.name}: ${s.reason ?? `${s.failed} failed`}`, { failed: s.failed });
       if (s?.ran) await raise(ctx.db, circuitEvents(r.source.name, before, await cursor(), new Date()), new Date(), enqueue);
       // The server's unified spend view, fresh after each spend sync.
       if (r.source.name === 'spend' && s?.ran && !s.failed && (await pushSpend(ctx.config)) === 'failed') ctx.log('pushing the spend view to the server failed');

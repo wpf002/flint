@@ -155,6 +155,16 @@ if ! grep -qE '^[0-9a-f]{64}$' "$MCP_TOKEN_FILE" 2>/dev/null; then
 fi
 chmod 600 "$MCP_TOKEN_FILE"
 MCP_TOKEN_SHA="$(tr -d '\n' < "$MCP_TOKEN_FILE" | shasum -a 256 | cut -d' ' -f1)"
+# Flint Calendar's push token (P2.6, apps/desktop-calendar): calendar:push only, so
+# it can file an Apple Calendar snapshot and read nothing. The helper reads the
+# file on each push; the runtime keeps only its digest. It exists whether or not
+# the source is on (then the route answers 404).
+APPLE_TOKEN_FILE="$DATA/tokens/apple-calendar.token"
+if ! grep -qE '^[0-9a-f]{64}$' "$APPLE_TOKEN_FILE" 2>/dev/null; then
+  ( umask 077; openssl rand -hex 32 > "$APPLE_TOKEN_FILE" )
+fi
+chmod 600 "$APPLE_TOKEN_FILE"
+APPLE_SHA="$(tr -d '\n' < "$APPLE_TOKEN_FILE" | shasum -a 256 | cut -d' ' -f1)"
 CONNECTOR="$DATA/connectors/runtime-server.mjs"
 if [ ! -f "$CONNECTOR" ]; then
   ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
@@ -170,11 +180,15 @@ if [ ! -f "$CONNECTOR" ]; then
   fi
 fi
 ENVF="$DATA/runtime.env"
+# The env the running release started with, for the rollback below: a release
+# from before a new token scope (P2.6's calendar:push) refuses to start on an env
+# that grants it.
+if [ -f "$ENVF" ]; then cp -p "$ENVF" "$ENVF.prev"; else rm -f "$ENVF.prev"; fi
 {
   echo "DATABASE_URL=$APP_URL"
   echo "RUNTIME_PORT=$PORT"
   # ${...}: a bare "$TOKEN_SHA:e..." is zsh's :e modifier and would eat the digest.
-  echo "RUNTIME_TOKENS=server:${TOKEN_SHA}:events|audit|proposals|world:read|ledger|counters,runtime-mcp:${MCP_TOKEN_SHA}:world:read|ledger"
+  echo "RUNTIME_TOKENS=server:${TOKEN_SHA}:events|audit|proposals|world:read|ledger|counters,runtime-mcp:${MCP_TOKEN_SHA}:world:read|ledger,apple-calendar:${APPLE_SHA}:calendar:push"
   # The server's days and months (FLINT_USER_TZ, default America/Chicago): the spend source must agree.
   echo "FLINT_TZ=$(plutil -extract EnvironmentVariables.FLINT_USER_TZ raw "$AGENTS/com.flint.server.plist" 2>/dev/null || echo America/Chicago)"
   echo "RUNTIME_GIT_SHA=${SHA}"
@@ -286,6 +300,7 @@ for i in {1..30}; do
   [ "$RESTARTED" = 1 ] || break
   if curl -fsS -m 2 "http://[::1]:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
     echo "runtime: $SHA is up on [::1]:$PORT"
+    rm -f "$ENVF.prev"
     DEPLOY_STAGE=
     deploy_event runtime deploy ok "$SHA"
     install_backup_agent || echo "✗ runtime: the nightly backup agent could not be (re)loaded (the runtime itself is up)" >&2
@@ -311,6 +326,8 @@ else
 fi
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   ln -sfn "$PREV" "$RT/current"
+  # With the env it started with (0600 kept by cp -p).
+  [ -f "$ENVF.prev" ] && mv "$ENVF.prev" "$ENVF"
   # Loaded or not (a failed bootstrap leaves it unloaded): the same restart.
   restart_agent || echo "✗ runtime: the previous release did not start either; start it with: launchctl bootstrap gui/$UID $AGENTS/$LABEL.plist" >&2
 fi

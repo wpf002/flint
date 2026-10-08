@@ -183,8 +183,9 @@ export class Notifications {
  */
 /**
  * `FLINT_WATCHER=off` (or 0, false, no) turns the Watcher off: once the
- * runtime's google_calendar source is live it owns the calendar (Machine plan
- * P2.5), with titles kept out of notes. Unset, or anything else: on.
+ * runtime's calendar source (google_calendar, or apple_calendar from P2.6) is
+ * live it owns the calendar (Machine plan P2.5), with titles kept out of notes.
+ * Unset, or anything else: on.
  */
 export function watcherEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return !/^(off|0|false|no)$/i.test(env.FLINT_WATCHER?.trim() ?? '');

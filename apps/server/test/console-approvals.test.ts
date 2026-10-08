@@ -307,6 +307,24 @@ describe('the console Approvals panel', () => {
     expect(shown).toContain('PeopleKim, Alex (alex.kim@corp.example) · Mom (mallory@evil.example) · sam@corp.example');
     expect(shown).not.toContain('a'.repeat(64));
     expect(shown).toContain('Outside Text');
+    // A card that names no calendar is Google's, as every P2.5 card was.
+    expect(shown).toContain('They’re from Google Calendar events you accepted or organized.');
+  });
+
+  it('a person card says which calendar its people came from in its subtitle, the one Will signs, and still says when it expires', async () => {
+    const people = [{ name: 'Ada Lovelace', email: 'ada@example.com', emailHash: 'a'.repeat(64) }];
+    const shown = async (args: Record<string, unknown>) => {
+      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', origin: 'runtime:apple_calendar', tainted: true, args })] } });
+      await open();
+      const row = ids.apprlist!.children[0]!.children[0]!;
+      const dl = row.all().find((e) => e.tagName === 'dl')!;
+      return { text: row.shown(), facts: dl.children.map((e) => e.textContent) };
+    };
+    const apple = await shown({ people, source: 'apple_calendar' });
+    expect(apple.text).toContain('They’re from Apple Calendar events you accepted or organized.');
+    expect(apple.facts).toEqual(['People', 'Ada Lovelace (ada@example.com)', 'Filed By', 'Flint', 'Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]);
+    expect((await shown({ people, source: 'google_calendar' })).text).toContain('They’re from Google Calendar events you accepted or organized.');
+    expect((await shown({ people })).text).toContain('They’re from Google Calendar events you accepted or organized.');
   });
 
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
@@ -316,13 +334,27 @@ describe('the console Approvals panel', () => {
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Calendar · Add People from Calendar 20 a Day');
+    expect(rows[0]!.shown()).toContain('LimitsRead Your Google Calendar · Add People from Calendar 20 a Day');
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
-    expect(rows[1]!.shown()).toContain(`Your calendar is read every ${minutes} minutes.`);
+    expect(rows[1]!.shown()).toContain(`Your Google Calendar is read every ${minutes} minutes.`);
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['gc']);
+  });
+
+  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and goes with Approve All', async () => {
+    const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
+    const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
+    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
+    await open();
+    const rows = ids.apprlist!.children[0]!.children;
+    expect(rows[0]!.shown()).toContain('LimitsRead Your Apple Calendar');
+    // Reading alone adds no one, so it doesn't ask on its own.
+    expect(rows[0]!.shown()).not.toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
+    expect(rows[1]!.shown()).toContain(`Your Apple Calendar is read every ${minutes} minutes and when it changes.`);
   });
 
   it('a signed card’s outcome is in sentences: who was added and who was not; done, approved or failed, with the server’s note after', () => {
@@ -424,12 +456,14 @@ describe('the console Approvals panel', () => {
 
   it('every line under a card’s title is a sentence, whatever filed it', () => {
     const sub = (p: Record<string, unknown>) => run(`apprSub(${JSON.stringify(p)})`) as string;
-    for (const source of ['launchd', 'health', 'git', 'spend', 'deploy', 'knowledge', 'nexus_inbox', 'nexus', 'github', 'railway', 'google_calendar', 'unknown_source']) {
+    for (const source of ['launchd', 'health', 'git', 'spend', 'deploy', 'knowledge', 'nexus_inbox', 'nexus', 'github', 'railway', 'google_calendar', 'apple_calendar', 'unknown_source']) {
       expect(sub({ fullName: 'world.source.enable', args: { source } })).toMatch(/^[A-Z].*\.$/);
     }
     expect(sub({ fullName: 'world.source.enable', args: { source: 'unknown_source' } })).toBe('Flint starts reading this source.');
     expect(sub({ fullName: 'policy.change', args: { rows: [{}] } })).toBe('It changes what Flint may do on its own.');
-    expect(sub({ fullName: 'world.person.create', args: {} })).toBe('They’re from events you accepted or organized.');
+    // A card that names no calendar is Google's, as every P2.5 card was.
+    expect(sub({ fullName: 'world.person.create', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
+    expect(sub({ fullName: 'world.person.create', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
     expect(sub({ fullName: 'triage.rule.create', args: {} })).toBe('This adds a new rule.');
     expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('ci-red');
     expect(sub({ fullName: 'world.relation.write', args: {} })).toBe('Flint’s memory suggests this link.');

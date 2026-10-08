@@ -5,7 +5,7 @@
  */
 import type { Observation } from '../world/mapper.js';
 
-export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox' | 'google_calendar';
+export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox' | 'google_calendar' | 'apple_calendar';
 
 export interface SeriesDef {
   key: string;
@@ -71,6 +71,12 @@ export interface SyncResult {
    * not a failure, so they never open its circuit.
    */
   warnings?: string[];
+  /**
+   * Nothing to read yet, and that is no failure (P2.6: Flint Calendar has not
+   * pushed since the runtime started, within its grace period). The run is not
+   * counted: the cursor and lastOkAt stay as they were, and nothing is applied.
+   */
+  idle?: true;
 }
 
 /** One of this source's live entities, as the world model has it now. */

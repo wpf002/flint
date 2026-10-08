@@ -257,7 +257,7 @@ model EntitySource {
   id           String   @id @default(cuid())
   entityId     String
   entity       Entity   @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  source       String // CHECK launchd|health|git|spend|github|railway|nexus|google|deploy|knowledge|nexus_inbox|google_calendar
+  source       String // CHECK launchd|health|git|spend|github|railway|nexus|google|deploy|knowledge|nexus_inbox|google_calendar|apple_calendar
   externalId   String
   namespace    String?
   accountOwner String // CHECK = 'will'
@@ -293,7 +293,7 @@ model SourceEvent {
 
 /// Turning a source on needs an approved world.source.enable proposal (source_enable_guard).
 model SourceCursor {
-  source              String    @id
+  source              String    @id // CHECK launchd|health|git|spend|github|railway|nexus|google|deploy|knowledge|nexus_inbox|google_calendar|apple_calendar
   cursor              String
   etag                String?
   enabled             Boolean   @default(false)

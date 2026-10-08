@@ -50,4 +50,14 @@ describe('the calendar heads-up', () => {
     // Without a clock and a zone (an older caller), nothing is told.
     expect(await codeVerdict(event('2026-10-05T19:30:00.000Z'), noCode)).toMatchObject({ action: 'log' });
   });
+
+  it("Apple Calendar's heads-ups (P2.6) are the same rule; another source's are not", async () => {
+    const now = '2026-10-05T15:00:00Z';
+    const as = (source: string, f: ReturnType<typeof event>) => ({ ...f, source, entity: { ...f.entity!, key: f.entity!.key.replace('google_calendar', source), state: { ...f.entity!.state, source } } });
+    expect(await codeVerdict(as('apple_calendar', event('2026-10-05T19:30:00.000Z')), ctx(now))).toMatchObject({
+      action: 'escalate', ruleName: 'calendar.upcoming', template: { id: 'calendar_upcoming', fields: { kind: 'commitment', date: '2026-10-05', time: '14:30' } },
+    });
+    expect(await codeVerdict(as('apple_calendar', deadline('2026-10-06')), ctx(now))).toMatchObject({ action: 'escalate', template: { fields: { kind: 'deadline', date: '2026-10-06' } } });
+    expect(await codeVerdict(as('github', event('2026-10-05T19:30:00.000Z')), ctx(now))).toBeUndefined();
+  });
 });

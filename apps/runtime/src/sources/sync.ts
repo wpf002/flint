@@ -22,6 +22,8 @@
  *    applied here but offered to world.person.create (PersonGuard); a raised
  *    event may name its entity by kind and key, and is dropped when that
  *    entity is not active (a forgotten event raises nothing).
+ *  - P2.6: a source with nothing to read yet says it is idle, and the run is
+ *    not counted at all: no audit, no rollup, the cursor left as it was.
  */
 import { createHash } from 'node:crypto';
 import { redact, resolveTier } from '@flint/policy';
@@ -38,8 +40,11 @@ import { clip } from './text.js';
 import type { Known, RaisedEvent, Source, SourceObservation, SourceRun } from './types.js';
 import type { Tx } from '../db.js';
 
-/** Sources whose every observation is PERSONAL, whatever the adapter says (Will's calendar). */
-const PERSONAL_SOURCES: ReadonlySet<string> = new Set(['google_calendar']);
+/** Sources whose every observation is PERSONAL, whatever the adapter says (Will's calendars). */
+const PERSONAL_SOURCES: ReadonlySet<string> = new Set(['google_calendar', 'apple_calendar']);
+
+/** An idle run's reason (jobs.ts does not log it: nothing went wrong). */
+export const IDLE = 'idle: nothing to read yet';
 
 export interface SyncSummary {
   source: string;
@@ -76,6 +81,8 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
     await appendAudit(db, [{ actor: `sync:${source.name}`, context: 'autonomous', kind: 'sync', action, tier: tier.tier, decision: 'act', outcome: 'failed', inputs: { source: source.name }, reasoning: message }], run.now);
     return { ...summary, ran: true, reason: message, failed: 1 };
   }
+  // Nothing to read yet (P2.6): not a run at all. The cursor, lastOkAt and the circuit stay as they were.
+  if (result.idle) return { ...summary, reason: IDLE };
   summary.ran = true;
 
   // The world as it already was: everything a source's first good run reports.
@@ -143,7 +150,7 @@ export async function syncOnce(db: Db, source: Source, run: Omit<SourceRun, 'cur
   // People, offered to world.person.create: never applied by the sync itself.
   if (people.length) {
     try {
-      const offered = await offerPeople(db, people, run.now, tz);
+      const offered = await offerPeople(db, people, run.now, tz, source.name);
       summary.updated += offered.updated;
       summary.unchanged += offered.unchanged;
       summary.created += offered.created;

@@ -39,6 +39,15 @@ describe('runtime config', () => {
     expect(() => parseTokens('server:short:audit')).toThrow(/malformed/);
   });
 
+  it("Flint Calendar's scope (P2.6) parses on its own, and the Apple Calendar source is on only for `on`", () => {
+    const [g] = parseTokens(`apple-calendar:${H}:calendar:push`);
+    expect(g!.name).toBe('apple-calendar');
+    expect([...g!.scopes]).toEqual(['calendar:push']);
+    expect(() => parseTokens(`apple-calendar:${H}:calendar:pull`)).toThrow(/unknown scope/);
+    for (const v of [undefined, '', 'off', '1', 'yes', 'true']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_SOURCE_APPLE_CALENDAR: v }).appleCalendar, String(v)).toBe(false);
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_SOURCE_APPLE_CALENDAR: ' On ' }).appleCalendar).toBe(true);
+  });
+
   it('reads caps and off-box health URLs, and refuses credentials in them', () => {
     const c = loadConfig({ DATABASE_URL: DB, HOME, FLINT_BUDGET_ANTHROPIC_DAILY_USD: '10', FLINT_BUDGET_ANTHROPIC_MONTHLY_USD: '150', HEALTH_EXTRA: 'nexus-mcp=https://nexus.example.app/health' });
     expect(c.caps.anthropic).toEqual({ dailyUsd: 10, monthlyUsd: 150 });
