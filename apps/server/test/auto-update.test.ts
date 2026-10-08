@@ -5,7 +5,12 @@
  *    "up to date" (the runtime's git source reads those lines);
  *  - update_app.sh installs a new Flint.app build even while the app is open
  *    (the app restarts itself onto it when idle), and keeps the current app
- *    when a build fails.
+ *    when a build fails;
+ *  - Flint Calendar (apps/desktop-calendar) is updated only once the runtime
+ *    it pushes to is live with the commit's runtime code;
+ *  - the server's gate requires Flint Calendar's Swift checks only when a
+ *    deploy changes the helper or its wire since the last finished server
+ *    deploy (install-server.sh's calendar_changed), and skips them otherwise.
  * Everything runs in scratch repos with stub install scripts, a stub pnpm and
  * a stub osascript: nothing touches ~/.flint, /Applications or the screen.
  */
@@ -77,6 +82,7 @@ describe('auto_deploy.sh retries a failed deploy', () => {
       'exit 0',
     ].join('\n'));
     script(join(work, 'apps/desktop-mac/update_app.sh'), `echo app >> "${tmp}/appmarks"; exit 0`);
+    script(join(work, 'apps/desktop-calendar/update_calendar.sh'), `echo calendar >> "${tmp}/calmarks"; exit 0`);
     writeFileSync(join(work, 'README'), 'v0\n');
     git(work, 'add', '-A');
     git(work, 'commit', '-q', '-m', 'v0');
@@ -96,12 +102,13 @@ describe('auto_deploy.sh retries a failed deploy', () => {
   const tick = () => {
     rmSync(marks, { force: true });
     rmSync(join(tmp, 'appmarks'), { force: true });
+    rmSync(join(tmp, 'calmarks'), { force: true });
     const r = spawnSync('/bin/zsh', [AUTO_DEPLOY], {
       encoding: 'utf8',
       env: { ...process.env, HOME: tmp, FLINT_REPO: deployDir, FLINT_STATE_DIR: state, PATH: `${bin}:${process.env.PATH}` },
     });
     const ran = existsSync(marks) ? readFileSync(marks, 'utf8').trim().split('\n') : [];
-    return { status: r.status, out: r.stdout + r.stderr, ran, app: existsSync(join(tmp, 'appmarks')) };
+    return { status: r.status, out: r.stdout + r.stderr, ran, app: existsSync(join(tmp, 'appmarks')), calendar: existsSync(join(tmp, 'calmarks')) };
   };
   const flag = (name: string, on = true) => (on ? writeFileSync(join(tmp, name), '') : rmSync(join(tmp, name), { force: true }));
   const retryFile = () => join(state, 'deploy-retry');
@@ -306,6 +313,60 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.app).toBe(true);
   });
 
+  it('updates Flint Calendar only once the runtime is live with the commit, so a new wire format reaches the runtime first', () => {
+    // No runtime live at all (its first deploy failed): the helper waits.
+    flag('runtime-gate');
+    const first = push('v1');
+    let t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(live()).toBeNull();
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${first}`);
+    flag('runtime-gate', false);
+    push('v0 runtime', 'apps/runtime/x.ts');
+    expect(tick().calendar).toBe(true);
+    // A runtime change that fails its gate: the server and the app deploy, the helper waits for the runtime.
+    const sha = push('a new wire format', 'apps/runtime/src/sources/apple/wire.ts');
+    flag('runtime-gate');
+    t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(t.app).toBe(true);
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${sha}`);
+    expect(tick().calendar).toBe(false);
+    // Retried and deployed: the helper follows on the same tick.
+    age(31);
+    flag('runtime-gate', false);
+    t = tick();
+    expect(t.out).toContain(`runtime deployed ${sha}`);
+    expect(t.calendar).toBe(true);
+  });
+
+  it('a push that leaves the runtime alone still updates Flint Calendar; a held runtime holds it back', () => {
+    push('v0 runtime', 'apps/runtime/x.ts');
+    tick();
+    // The runtime's release is older than this commit, but nothing it is built from changed.
+    push('the helper', 'apps/desktop-calendar/FlintCalendar.swift');
+    let t = tick();
+    expect(t.ran).toEqual(['server']);
+    expect(t.calendar).toBe(true);
+    // A runtime that failed past its gate is held at the older release: the helper waits, even for unrelated pushes.
+    push('a bad migration', 'apps/runtime/x.ts');
+    flag('runtime-migrate');
+    expect(tick().calendar).toBe(false);
+    flag('runtime-migrate', false);
+    const docs = push('docs', 'docs.md');
+    t = tick();
+    expect(t.ran).toEqual(['server']);
+    expect(t.calendar).toBe(false);
+    expect(t.out).toContain(`calendar: waiting for the runtime to deploy ${docs}`);
+    // The fix deploys the runtime, and the helper with it.
+    push('the fix', 'apps/runtime/x.ts');
+    t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(t.calendar).toBe(true);
+  });
+
   it('a retry file without a final newline never stops the deploys', () => {
     const sha = push('v1');
     flag('server-gate');
@@ -475,5 +536,83 @@ describe('Flint.app restarts onto a new build without ever leaving none running'
     expect(relaunch).toContain('p.arguments = ["-n", Bundle.main.bundlePath]');
     expect(relaunch).toContain('nextRelaunch = Date().addingTimeInterval(30 * 60)');
     expect(relaunch).toContain('.flint/app-update.log');
+  });
+});
+
+describe("install-server.sh requires Flint Calendar's Swift checks only when the helper or its wire changed", () => {
+  const SERVER = readFileSync(join(REPO, 'apps', 'server', 'install-server.sh'), 'utf8');
+  /** CALENDAR_PATHS and calendar_changed, exactly as install-server.sh has them. */
+  const fn = SERVER.slice(SERVER.indexOf('CALENDAR_PATHS='), SERVER.indexOf('\n}\n', SERVER.indexOf('calendar_changed() {')) + 3);
+  let repo: string, data: string;
+  const commit = (msg: string, path: string) => {
+    mkdirSync(join(repo, path, '..'), { recursive: true });
+    writeFileSync(join(repo, path), `${msg}\n`);
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', msg);
+    return git(repo, 'rev-parse', 'HEAD');
+  };
+  /** A finished (or failed) server deploy of `sha`, as deploy_event writes it. */
+  const deployed = (sha: string, outcome = 'ok', stage = 'deploy') =>
+    writeFileSync(join(data, 'deploy-events.jsonl'), `{"id":"x","at":"2026-10-06T00:00:00Z","component":"server","stage":"${stage}","outcome":"${outcome}","sha":"${sha}"}\n`, { flag: 'a' });
+  /** true when the Swift checks must run. */
+  const needed = () => {
+    const r = spawnSync('/bin/zsh', ['-f', '-c', `set -e\nREPO=${JSON.stringify(repo)}\nDATA=${JSON.stringify(data)}\n${fn}\nif calendar_changed; then echo needed; else echo skipped; fi`], { encoding: 'utf8' });
+    expect(r.status, r.stderr).toBe(0);
+    return r.stdout.trim() === 'needed';
+  };
+
+  beforeEach(() => {
+    repo = join(tmp, 'repo');
+    data = join(tmp, 'data');
+    mkdirSync(data, { recursive: true });
+    git(tmp, 'init', '-q', '-b', 'main', repo);
+  });
+
+  it('the gate passes FLINT_REQUIRE_SWIFT=1 or =0 from calendar_changed, never 1 on every deploy', () => {
+    expect(fn).toMatch(/^CALENDAR_PATHS='[^\n]+'\ncalendar_changed\(\) \{[\s\S]+\n\}\n$/);
+    expect(SERVER).toContain('if calendar_changed; then\n    SWIFT_CHECKS=1;');
+    expect(SERVER).toContain('FLINT_REQUIRE_SWIFT=$SWIFT_CHECKS pnpm --filter server test');
+    expect(SERVER).not.toContain('FLINT_REQUIRE_SWIFT=1 pnpm');
+  });
+
+  it('skips them for a deploy that leaves the helper and its wire alone, and requires them for one that changes either', () => {
+    const base = commit('v0', 'README.md');
+    deployed(base);
+    commit('docs', 'docs/x.md');
+    commit('server', 'apps/server/src/x.ts');
+    commit('runtime elsewhere', 'apps/runtime/src/sources/google/x.ts');
+    expect(needed()).toBe(false);
+    for (const path of ['apps/desktop-calendar/FlintCalendar.swift', 'apps/runtime/src/sources/apple/wire.ts', 'apps/runtime/src/routes/apple-calendar.ts',
+      'apps/runtime/src/sources/text.ts', 'apps/runtime/test/fixtures/apple-calendar-snapshot.json', 'apps/server/test/desktop-calendar.test.ts']) {
+      const sha = commit(`change ${path}`, path);
+      expect(needed(), path).toBe(true);
+      // Once a server deploy of it finished, the next unrelated push skips them again.
+      deployed(sha);
+      commit(`after ${path}`, 'docs/y.md');
+      expect(needed(), path).toBe(false);
+    }
+  });
+
+  it('a failed deploy is not a finished one: the change stays pending until a deploy of it finishes', () => {
+    deployed(commit('v0', 'README.md'));
+    const helper = commit('helper', 'apps/desktop-calendar/FlintCalendar.swift');
+    deployed(helper, 'failed', 'gate');
+    commit('docs', 'docs/x.md');
+    expect(needed()).toBe(true);
+  });
+
+  it('requires them when the last finished deploy is unknown: no events, an unknown commit, or a change not committed yet', () => {
+    commit('v0', 'README.md');
+    expect(needed()).toBe(true);
+    deployed('f'.repeat(40));
+    expect(needed()).toBe(true);
+    writeFileSync(join(data, 'deploy-events.jsonl'), '');
+    deployed(git(repo, 'rev-parse', 'HEAD'));
+    expect(needed()).toBe(false);
+    // A deploy by hand from a checkout with an uncommitted change to the helper.
+    commit('helper', 'apps/desktop-calendar/x.swift');
+    deployed(git(repo, 'rev-parse', 'HEAD'));
+    writeFileSync(join(repo, 'apps/desktop-calendar/x.swift'), 'changed\n');
+    expect(needed()).toBe(true);
   });
 });
