@@ -54,6 +54,7 @@ export const SAY = {
   reshaped: 'Flint reads this card differently since you approved it. File it again.',
   provenance: 'A goal card names where its parts came from by id only.',
   stepDone: 'A done step stays done.',
+  identity: 'A goal you add is yours: only one Flint suggested from chat is its own.',
   exists: 'It adds a step the plan already has.',
   missing: 'It changes a step the plan doesn’t have.',
   depends: 'A step depends on a step the plan doesn’t have.',

@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, sign as signRaw } from 'node:crypto';
-import type { TierDecision } from '@flint/policy';
+import { digestOf, type TierDecision } from '@flint/policy';
 import type { Tool, Turn } from '@flint/core';
 import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
@@ -25,7 +25,7 @@ import { AuditSink, AuditUnavailable, type AuditRecord } from '../src/audit-sink
 import { RuntimeProposals } from '../src/runtime-proposals';
 import { RuntimePolicies, capClaimer, parsePolicies } from '../src/runtime-link';
 import { Approvals, type ApproverStore, type Credential } from '../src/approvals';
-import { approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, type ApprovalDeps } from '../src/approval-routes';
+import { DOES_NOT_MATCH, approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, type ApprovalDeps } from '../src/approval-routes';
 import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 import { SpendGuard, SpendLedger } from '../src/spend';
@@ -603,6 +603,33 @@ describe('approval routes', () => {
     // A server with no approver role says how to set it up.
     await serve(baseDeps());
     expect(await post('/approvals/begin', { proposalId: id })).toEqual({ status: 501, body: { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' } });
+    server?.close();
+  });
+
+  it('a runtime card whose args do not hash to the digest it asks Will to sign cannot be signed (a reject still can)', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
+    const mem = memoryStore();
+    const shown = { goalId: 'gotest0001', goalTitle: 'Synthetic' };
+    const other = { goalId: 'gotest0002', goalTitle: 'Synthetic' };
+    const proposal = { id: 'prd', origin: 'console', action: 'goal.abandon', args: shown, argsDigest: digestOf(other), tainted: false, status: 'pending' };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    await serve(baseDeps({ approvals: new Approvals({ store: mem.store, enrollCodeFile: code }), proposals }));
+    const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const b = await post('/approvals/enroll/begin', { code: 'abcd-efgh-ijkl-mnop', label: 'Mac' });
+    await post('/approvals/enroll/finish', { challengeId: b.body.challengeId, factor: 'secure_enclave', publicKey: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), signature: signRaw('sha256', Buffer.from(String(b.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    expect(await post('/approvals/begin', { proposalId: 'prd' })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect((await post('/approvals/begin', { proposalId: 'prd', decision: 'reject' })).status).toBe(200);
+    // Purged args (null) cannot be signed either; the true digest can.
+    (proposal as Record<string, unknown>).args = null;
+    expect((await post('/approvals/begin', { proposalId: 'prd' })).status).toBe(409);
+    (proposal as Record<string, unknown>).args = shown;
+    proposal.argsDigest = digestOf(shown);
+    const begun = await post('/approvals/begin', { proposalId: 'prd' });
+    expect(begun.status).toBe(200);
+    expect(begun.body).toHaveProperty('challenge');
     server?.close();
   });
 

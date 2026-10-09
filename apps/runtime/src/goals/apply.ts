@@ -126,6 +126,9 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
 
   if (action === 'goal.activate') {
     const a = args as ActivateArgs;
+    // What a goal is: a new one is Will's own; an existing one is signed as it is.
+    if (!goal && a.origin !== 'will') throw new Refused(400, SAY.identity);
+    if (goal && !sameIdentity(goal, a)) throw new Refused(409, SAY.looked);
     if (goal?.status === 'paused') {
       if (a.plan) throw new Refused(400, SAY.resumePlan);
       if (!sameDefinition(goal, a) || !sameTiming(goal, a) || !sameLinks(await currentLinks(db, goal.id), a.links)) throw new Refused(409, SAY.looked);
@@ -168,7 +171,8 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     ...input,
     args: parsed.data as Record<string, unknown>,
     reason,
-    sensitivity: 'personal',
+    // A goal is personal, or financial when it says so.
+    sensitivity: action === 'goal.activate' ? (args as ActivateArgs).sensitivity : goal?.sensitivity === 'financial' ? 'financial' : 'personal',
     // Marked for Will's fresh touch: every goal card, and every plan card but a review's minor ones (part 3
     // says which). Nothing reads the mark yet: the console must (a README requirement for the goals panel).
     consequential: action === 'plan.change' ? input.consequential || context !== 'autonomous' : true,
@@ -184,6 +188,11 @@ interface ApplyContext {
   tz: string;
 }
 type Applied = { result: Record<string, string | number | boolean> } | { refusal: string };
+
+/** What a goal is matches what a card signs: owner, origin, sensitivity, taint and Nexus project. */
+function sameIdentity(g: { owner: string; origin: string; sensitivity: string; tainted: boolean; nexusProjectId: string | null }, a: ActivateArgs): boolean {
+  return g.owner === a.owner && g.origin === a.origin && g.sensitivity === a.sensitivity && g.tainted === a.tainted && g.nexusProjectId === a.nexusProjectId;
+}
 
 /** The goal row, locked for this transaction (a review, a tick and another card wait), or null. */
 async function lockGoal(tx: Tx, id: string) {
@@ -216,6 +225,8 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
 
   if (action === 'goal.activate') {
     const a = args as ActivateArgs;
+    if (goal && !sameIdentity(goal, a)) return { refusal: SAY.goalChanged };
+    if (!goal && a.origin !== 'will') return { refusal: SAY.identity };
     if (goal?.status === 'paused') {
       // Resuming changes nothing else (the database refuses it otherwise): what the card shows is what there is.
       if (a.plan || !sameDefinition(goal, a) || !sameTiming(goal, a) || !sameLinks(await currentLinks(tx, goal.id), a.links)) return { refusal: SAY.goalChanged };
@@ -231,7 +242,8 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
     if (first && !first.ok) return { refusal: SAY.invalid };
     const g = goal ?? (await tx.goal.create({
       data: {
-        id: a.goalId, title: a.title, description: a.description, owner: 'will', origin: 'will', successCriteria: json(a.successCriteria),
+        id: a.goalId, title: a.title, description: a.description, owner: a.owner, origin: a.origin, sensitivity: a.sensitivity, tainted: a.tainted,
+        nexusProjectId: a.nexusProjectId, successCriteria: json(a.successCriteria),
         horizonAt: a.horizonAt ? new Date(a.horizonAt) : null, reviewCadence: a.reviewCadence,
       },
     }));
@@ -364,7 +376,8 @@ export async function runGoal(db: Db, id: string, rp: WebAuthnRelyingParty | und
         await completeIn(tx, id, { ok: true, result: r.result }, actor, now);
         return { done: r.result };
       },
-      { maxWait: 10_000, timeout: 30_000 },
+      // READ COMMITTED, said out loud: the database refuses a plan written above it (each check reads what is committed now).
+      { maxWait: 10_000, timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
   } catch (err) {
     throw sanitize(err);

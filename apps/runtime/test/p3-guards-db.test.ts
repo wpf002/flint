@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import pg from 'pg';
+import { digestOf } from '@flint/policy';
 import { NO_DB, freshDb, withClient, pgConfig, pgError, id, HEX, type TestUrls } from './db';
 
 type Q = (sql: string, params?: unknown[]) => Promise<pg.QueryResult>;
@@ -28,6 +29,8 @@ const DEF = {
   horizonAt: '2027-03-01T00:00:00.000Z',
   reviewCadence: 'P1W',
 };
+/** What a goal is, as goal.activate signs it (the goals made here are all Will's own). */
+const IDENTITY = { owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null };
 const NEW_DEF = { ...DEF, title: 'Synthetic goal, renamed', successCriteria: [...DEF.successCriteria, { id: 'c2', text: 'Synthetic second check', check: { kind: 'manual' } }] };
 const NEW_TIMING = { horizonAt: '2027-06-01T00:00:00.000Z', reviewCadence: 'P1D' };
 
@@ -85,10 +88,10 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
   /** 'ok', or the SQLSTATE it was refused with. */
   const outcome = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string; message?: string }) => e.code ?? e.message);
 
-  async function approval(subjectId: string, action: string, decision: 'approve' | 'reject' = 'approve'): Promise<string> {
+  async function approval(subjectId: string, action: string, decision: 'approve' | 'reject' = 'approve', digest = HEX('a')): Promise<string> {
     const aid = id('appr');
     const expires = (await owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
-    const payload = { v: 1, subjectType: 'proposal', subjectId, decision, action, argsDigest: HEX('a'), expiresAt: expires, nonce: HEX('0').slice(0, 32) };
+    const payload = { v: 1, subjectType: 'proposal', subjectId, decision, action, argsDigest: digest, expiresAt: expires, nonce: HEX('0').slice(0, 32) };
     await approver(
       `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt") VALUES ($1, 'proposal', $2, $3, $4, $5, $6, '\\x01', $7)`,
       [aid, subjectId, decision, JSON.stringify(payload), HEX('c'), credentialId, expires],
@@ -96,15 +99,16 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
     return aid;
   }
 
-  /** A card for `action` with these args, taken as far as `status` (executing by default). */
-  async function card(action: string, args: Record<string, unknown>, status: 'pending' | 'approved' | 'executing' | 'executed' = 'executing') {
+  /** A card for `action` with these args (and their true digest), taken as far as `status` (executing by default). */
+  async function card(action: string, args: Record<string, unknown>, status: 'pending' | 'approved' | 'executing' | 'executed' = 'executing', life = '1 hour') {
     const pid = id('prop');
+    const digest = digestOf(args);
     await app(
-      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", sensitivity, "expiresAt") VALUES ($1, $2, 'console', $3, $4::jsonb, $5, '{}', 'personal', now() + interval '1 hour')`,
-      [pid, action === 'plan.change' ? 'plan' : 'goal', action, JSON.stringify(args), HEX('a')],
+      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", sensitivity, "expiresAt") VALUES ($1, $2, 'console', $3, $4::jsonb, $5, '{}', 'personal', now() + $6::interval)`,
+      [pid, action === 'plan.change' ? 'plan' : 'goal', action, JSON.stringify(args), digest, life],
     );
     if (status === 'pending') return { pid, aid: '' };
-    const aid = await approval(pid, action);
+    const aid = await approval(pid, action, 'approve', digest);
     await app(`UPDATE "Proposal" SET status = 'approved', "approvalId" = $2 WHERE id = $1`, [pid, aid]);
     if (status === 'approved') return { pid, aid };
     await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = $1`, [pid]);
@@ -116,7 +120,7 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
   type Kind = keyof typeof ACTION;
   /** The signed args of each kind of change, as the runtime files them. */
   function argsFor(kind: Kind, goalId: string, over: Record<string, unknown> = {}): Record<string, unknown> {
-    if (kind === 'activate') return { goalId, ...DEF, links: [], plan: null, ...over };
+    if (kind === 'activate') return { goalId, ...IDENTITY, ...DEF, links: [], plan: null, ...over };
     if (kind === 'criteria') return { goalId, title: NEW_DEF.title, description: NEW_DEF.description, successCriteria: NEW_DEF.successCriteria, links: [], ...over };
     if (kind === 'horizon') return { goalId, goalTitle: DEF.title, ...NEW_TIMING, ...over };
     return { goalId, goalTitle: DEF.title, ...over };
@@ -325,22 +329,28 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       expect(await code(link(app, pr, 'target'))).toBe('42501');
       expect(await code(link(app, pr, 'watch', ['state', 'status']))).toBe('42501');
       expect(await code(link(app, gone))).toBe('42501');
-      await link(app, pr);
-      await link(app, svc, 'target', []);
+      // The card's links and its goal, in the one transaction that uses its approval.
+      await inTx(async (q) => {
+        await link(q, pr);
+        await link(q, svc, 'target', []);
+        await setGoal(q, 'activate', gid, aid);
+      }, true);
       // The cursor starts at the item's version, whatever was sent.
       expect((await app(`SELECT "seenVersion" FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr])).rows[0].seenVersion).toBe(3);
-      await setGoal(app, 'activate', gid, aid);
+      // That approval is spent: it brings no link later.
+      expect(await code(app(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, svc]))).toBe('42501');
       // Afterwards only the cursor moves, and only forward.
       await app(`UPDATE "GoalEntity" SET "seenVersion" = 5 WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr]);
       expect(await code(app(`UPDATE "GoalEntity" SET "seenVersion" = 4 WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr]))).toBe('42501');
       expect(await code(app(`UPDATE "GoalEntity" SET role = 'target' WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr]))).toBe('42501');
       expect(await code(owner(`UPDATE "GoalEntity" SET role = 'target' WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr]))).toBe('42501');
       // goal.activate brings links only to a goal still proposed; criteria_change changes them on an active one.
-      expect(await code(app(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, svc]))).toBe('42501');
       const keep = await card('goal.criteria_change', argsFor('criteria', gid, { links: [links[0]] }));
       expect(await code(app(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, pr]))).toBe('42501');
-      await app(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, svc]);
-      await setGoal(app, 'criteria', gid, keep.aid);
+      await inTx(async (q) => {
+        await q(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, svc]);
+        await setGoal(q, 'criteria', gid, keep.aid);
+      }, true);
       expect((await app(`SELECT "entityId" FROM "GoalEntity" WHERE "goalId" = $1`, [gid])).rows.map((r) => r.entityId)).toEqual([pr]);
       // A name or title is never watched, even on a card that lists it.
       await card('goal.criteria_change', argsFor('criteria', gid, { links: [links[0], { entityId: gone, role: 'watch', watchPaths: ['name'] }] }));
@@ -438,15 +448,22 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       // The approval is set only as a draft becomes active; a draft may be dropped freely.
       expect(await code(app(`UPDATE "Plan" SET "approvalId" = $2 WHERE id = $1`, [v1, a2]))).toBe('42501');
       const draft = id('pl');
-      await app(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 9, 'flint')`, [draft, gid]);
-      await insertSteps(app, draft, [S('s1', { title: 'Synthetic, never signed' })]);
+      await inTx(async (q) => {
+        await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 9, 'flint')`, [draft, gid]);
+        await insertSteps(q, draft, [S('s1', { title: 'Synthetic, never signed' })]);
+      }, true);
+      // Another transaction writes no step into it, and cannot make it its own by writing its row again.
+      expect(await code(insertSteps(app, draft, [S('s5')]))).toBe('42501');
+      expect(await code(app(`UPDATE "Plan" SET status = status WHERE id = $1`, [draft]))).toBe('42501');
       await app(`UPDATE "Plan" SET status = 'superseded' WHERE id = $1`, [draft]);
       expect(await code(app(`UPDATE "Plan" SET status = 'active', "approvalId" = $2 WHERE id = $1`, [draft, aid]))).toBe('42501');
-      // A dropped draft is never the version a change builds on: its unsigned steps cannot ride a signed card.
+      // A dropped draft is never the version a change builds on (its unsigned steps cannot ride a signed card),
+      // and it never freezes the goal's plan: the next version is simply numbered after it.
       const prev = await stepsOf(v1);
       const card2 = await planCard(gid, [addOp(S('s2'))]);
       expect(await code(inTx((q) => nextVersion(q, gid, v1, 10, [...prev.map((s) => ({ ...s, title: s.key === 's1' ? 'Synthetic, never signed' : s.title })), S('s2')], card2.aid)))).toBe('42501');
-      expect(await outcome(inTx((q) => nextVersion(q, gid, v1, 2, [...prev, S('s2')], card2.aid), true))).toBe('ok');
+      expect(await code(inTx((q) => nextVersion(q, gid, v1, 2, [...prev, S('s2')], card2.aid)))).toBe('42501');
+      expect(await outcome(inTx((q) => nextVersion(q, gid, v1, 10, [...prev, S('s2')], card2.aid), true))).toBe('ok');
       expect(await code(app(`INSERT INTO "Plan" (id, "goalId", version, "createdBy", status) VALUES ($1, $2, 10, 'will', 'active')`, [id('pl'), gid]))).toBe('42501');
       expect(await code(owner(`UPDATE "Plan" SET rationale = 'Synthetic' WHERE id = $1`, [v1]))).toBe('42501');
     });
@@ -575,15 +592,16 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
     });
 
     it('a goal or commitment card from chat needs Will\'s own untainted words, quoted, 12 to 300 characters (exit 7)', async () => {
-      const file = (action: string, o: { origin?: string; tainted?: boolean; quote?: unknown; prov?: unknown } = {}) =>
-        app(
+      const file = (action: string, o: { origin?: string; tainted?: boolean; quote?: unknown; prov?: unknown } = {}) => {
+        const args = { text: 'Synthetic', ...(o.quote === undefined ? { quote: 'I will finish the synthetic thing' } : o.quote === null ? {} : { quote: o.quote }) };
+        return app(
           `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, "expiresAt") VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, 'personal', now() + interval '1 day')`,
           [
-            id('prop'), action === 'goal.propose' ? 'goal' : 'tool_call', o.origin ?? 'chat:c1', action,
-            JSON.stringify({ text: 'Synthetic', ...(o.quote === undefined ? { quote: 'I will finish the synthetic thing' } : o.quote === null ? {} : { quote: o.quote }) }), HEX('a'),
+            id('prop'), action === 'goal.propose' ? 'goal' : 'tool_call', o.origin ?? 'chat:c1', action, JSON.stringify(args), digestOf(args),
             JSON.stringify(o.prov ?? { quote: { source: 'will', tainted: false } }), o.tainted ?? false,
           ],
         );
+      };
       for (const action of ['goal.propose', 'world.commitment.from_chat']) {
         await file(action);
         expect(await code(file(action, { quote: null })), action).toBe('23514');
@@ -634,8 +652,9 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
     });
 
     it('every RAISE in a P3 function names its SQLSTATE; the helpers run inside trigger bodies as flint_app', async () => {
-      const names = ['p3_signed_proposal', 'p3_step_norm', 'goal_insert_check', 'goal_guard', 'goal_entity_guard', 'plan_insert_check', 'plan_guard', 'plan_step_guard',
-        'goal_review_insert_check', 'goal_review_guard', 'row_history_masked', 'proposal_quote_check'];
+      const names = ['p3_signed_proposal', 'p3_step_norm', 'p3_canonical', 'p3_args_digest', 'p3_bind_approval', 'goal_insert_check', 'goal_valid', 'goal_guard',
+        'goal_entity_guard', 'plan_insert_check', 'plan_guard', 'plan_replaced_check', 'plan_valid', 'plan_step_guard', 'plan_step_valid',
+        'goal_review_insert_check', 'goal_review_guard', 'goal_review_valid', 'row_history_masked', 'proposal_quote_check', 'proposal_digest_check'];
       const fns = await owner(`SELECT p.proname, p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = ANY ($1)`, [names]);
       expect(fns.rows.map((r) => r.proname).sort()).toEqual([...names].sort());
       for (const f of fns.rows as Array<{ proname: string; prosrc: string }>) {
@@ -644,6 +663,9 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       // Read-only helpers flint_app may call; the trigger functions and the history writer it may not.
       expect((await app(`SELECT p3_step_norm('{"dueAt":"2026-10-20T22:00:00.000Z","dependsOn":["s2","s1","s2"],"note":"x"}') AS n`)).rows[0].n).toEqual({ dueAt: Date.parse('2026-10-20T22:00:00.000Z'), dependsOn: ['s1', 's2'] });
       expect((await pgError(app(`SELECT row_history_masked()`))).message).toMatch(/permission denied|trigger/);
+      // flint_app may use an approval through the helper, never read or free the record of its use.
+      expect(await code(app(`SELECT * FROM "GoalApprovalUse"`))).toBe('42501');
+      expect(await code(app(`DELETE FROM "GoalApprovalUse"`))).toBe('42501');
     });
   });
 });

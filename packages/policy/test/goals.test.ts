@@ -45,6 +45,11 @@ describe('goal args', () => {
       successCriteria: [crit('c1', { kind: 'item', entityId: 'ena', key: 'state', value: 'merged' })],
     }));
     expect(a).toMatchObject({ description: '', horizonAt: null, reviewCadence: 'P1W', plan: null });
+    // What the goal is, signed with it: Will's own, personal, untainted, no Nexus project, unless the card says so.
+    expect(a).toMatchObject({ owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null });
+    expect(GoalActivateArgs.safeParse(activate({ sensitivity: 'ops' })).success).toBe(false);
+    expect(GoalActivateArgs.safeParse(activate({ nexusProjectId: 'has space' })).success).toBe(false);
+    expect(GoalActivateArgs.parse(activate({ sensitivity: 'financial', owner: 'flint' }))).toMatchObject({ sensitivity: 'financial', owner: 'flint' });
     expect(a.links.map((l: { entityId: string }) => l.entityId)).toEqual(['ena', 'enb']);
     expect(a.links[1]!.watchPaths).toEqual(['state', 'status']);
   });

@@ -56,17 +56,17 @@ export async function activePlan(db: Db | Tx, goalId: string, lock = false): Pro
   return { id: plan.id, version: plan.version, steps: steps.map(stepState) };
 }
 
-/** The goal's latest version that was ever active (it holds an approval; a dropped draft does not): the next is this plus one, or 1. */
+/** The goal's highest version number, a dropped draft's included: the next version is this plus one (the database requires it). */
 export async function lastVersion(tx: Tx, goalId: string): Promise<number> {
-  const last = await tx.plan.findFirst({ where: { goalId, approvalId: { not: null } }, orderBy: { version: 'desc' }, select: { version: true } });
+  const last = await tx.plan.findFirst({ where: { goalId }, orderBy: { version: 'desc' }, select: { version: true } });
   return last?.version ?? 0;
 }
 
 /**
  * A plan version, written as an unsigned draft with exactly these steps. Returns
- * its id. Writing a draft and activating it must stay in one transaction: a draft
- * left behind would hold the next version number, and the goal's plan could then
- * never change again.
+ * its id. Writing a draft and activating it stay in one transaction, at READ
+ * COMMITTED: the database lets only the transaction that made a draft write its
+ * steps, and checks the activation against what is committed now.
  */
 export async function writeDraft(tx: Tx, goalId: string, version: number, steps: readonly PlanStepState[], createdBy: 'will' | 'flint', rationale: string): Promise<string> {
   const id = newId('pl');

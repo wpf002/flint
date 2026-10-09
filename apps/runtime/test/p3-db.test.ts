@@ -308,32 +308,52 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     const { args } = await newGoal();
     const gid = args.goalId as string;
     await fileSignRun('goal.activate', args);
-    // A CHECK refusing a row whose DETAIL carries goal text, on the raw path.
+    // A step's rule refusing it: the error names the step and the rule, and holds none of its words.
     const p = await file('goal.done', { goalId: gid, goalTitle });
     await sign(p.id);
-    let detail = '';
-    const check = {
+    let stepError = '';
+    const longStep = {
       afterWrites: async (tx: Tx) => {
         const plan = `pl${Date.now().toString(36)}`;
         await tx.$executeRaw`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES (${plan}, ${gid}, 99, 'will')`;
         try {
           await tx.$executeRaw`INSERT INTO "PlanStep" (id, "planId", key, ordinal, title, kind) VALUES (${`${plan}s`}, ${plan}, 's1', 1, ${`${CANARY} `.repeat(12)}, 'will_task')`;
         } catch (err) {
+          stepError = String((err as Error).message);
+          throw err;
+        }
+      },
+    };
+    await expect(runGoalCard(db, p.id, undefined, 'UTC', 'test', longStep)).rejects.toMatchObject({ status: 400, message: 'The database refused this change.' });
+    expect(stepError).toMatch(/step \w+: its title is not valid/);
+    expect(stepError).not.toMatch(/CANARY|Failing row/);
+    const failed = await db.proposal.findUniqueOrThrow({ where: { id: p.id } });
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toMatch(/^could not carry it out \(err\w+\)$/);
+    expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
+    expect(said.some((l) => l.includes('prisma:error sqlstate 23514'))).toBe(true);
+    expect(said.some((l) => /running proposal \w+ failed: PrismaClientKnownRequestError P2010 23514\n {2}at /.test(l))).toBe(true);
+
+    // A plain CHECK still carries the refused row in its DETAIL (an entity's name here): it never reaches a log line.
+    const r = await file('goal.done', { goalId: gid, goalTitle });
+    await sign(r.id);
+    let detail = '';
+    const longName = {
+      afterWrites: async (tx: Tx) => {
+        try {
+          await tx.$executeRaw`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", "lastObservedAt", "updatedAt") VALUES (${id('en')}, 'service', ${id('k')}, ${`${CANARY} `.repeat(20)}, '{}', ${HEX('d')}, now(), now())`;
+        } catch (err) {
           detail = String((err as Error).message);
           throw err;
         }
       },
     };
-    await expect(runGoalCard(db, p.id, undefined, 'UTC', 'test', check)).rejects.toMatchObject({ status: 400, message: 'The database refused this change.' });
+    await expect(runGoalCard(db, r.id, undefined, 'UTC', 'test', longName)).rejects.toMatchObject({ status: 400 });
     // The format this guards against, confirmed: Postgres's DETAIL carries the refused row.
     expect(detail).toMatch(/Failing row contains/);
     expect(detail).toContain('CANARY');
-    const failed = await db.proposal.findUniqueOrThrow({ where: { id: p.id } });
-    expect(failed.status).toBe('failed');
-    expect(failed.error).toMatch(/^could not carry it out \(err\w+\)$/);
-    expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
-    expect(said.some((l) => l.includes('prisma:error sqlstate 23514, constraint PlanStep_title_check'))).toBe(true);
-    expect(said.some((l) => /running proposal \w+ failed: PrismaClientKnownRequestError P2010 23514 PlanStep_title_check\n {2}at /.test(l))).toBe(true);
+    expect(said.some((l) => l.includes('prisma:error sqlstate 23514, constraint Entity_name_check'))).toBe(true);
+    expect(said.some((l) => /running proposal \w+ failed: PrismaClientKnownRequestError P2010 23514 Entity_name_check\n {2}at /.test(l))).toBe(true);
 
     // A validation error prints the call's arguments in its message: it never gets out either, and the card stays approved.
     const q = await file('goal.abandon', { goalId: gid, goalTitle });

@@ -280,13 +280,20 @@ function itemsLinked(a: { successCriteria: Criterion[]; links: Link[] }, ctx: z.
 }
 
 /**
- * goal.activate: a new goal (or one Flint suggested) with what counts as done,
- * its timing, its links and, optionally, its first plan (adds only); or a paused
- * goal resumed, with exactly what it already has and no plan.
+ * goal.activate: a new goal (or one Flint suggested) with what it is (owner,
+ * origin, sensitivity, taint, Nexus project), what counts as done, its timing,
+ * its links and, optionally, its first plan (adds only); or a paused goal
+ * resumed, with exactly what it already has and no plan.
  */
 export const GoalActivateArgs = z
   .object({
     goalId: GoalId,
+    // What the goal is, signed too (the database compares each with the goal's row).
+    owner: z.enum(['will', 'flint']).default('will'),
+    origin: z.enum(['will', 'flint']).default('will'),
+    sensitivity: z.enum(['personal', 'financial']).default('personal'),
+    tainted: z.boolean().default(false),
+    nexusProjectId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).nullable().default(null),
     title: GoalTitle,
     description: Description.default(''),
     successCriteria: SuccessCriteria,

@@ -286,6 +286,30 @@ nothing reviews goals.
   the console and ask for a fresh touch on every card that has it. Today the
   console decides `fresh` from `apprAlone` alone, which doesn't look at it, so a
   goal card could go through Approve All on one earlier touch.
+- **Reviews (part 3)** must lock a goal before its plan, as the card executor
+  and step updates do, so no two writers wait on each other in a circle. They
+  must also run at READ COMMITTED (the database refuses plan writes above it) and
+  write a plan version's draft and its activation in one transaction.
+- **A later part** must add a way to forget a goal's words (a signed
+  `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
+
+### Known limits
+
+- **History keeps lengths.** A goal's history records how long each changed text
+  was, never the text. Someone who can read the database and guesses a short
+  title could confirm the guess from its length. That's accepted.
+- **What holds against a runtime that breaks the rules.** The rules bound to
+  your signature hold even then, because they rest on your approval: what a goal
+  is and what counts as done, its timing, its links, each plan version, the
+  digest of what you signed, one transaction per approval, and the snapshot
+  checks. Three rules are written by the runtime itself, so they catch its bugs,
+  not a runtime gone wrong: the quote check on chat suggestions, the proof that a
+  Flint action step was done, and the `runtime:goals` label on a goal's forecast.
+- **Older card kinds.** For goal and plan cards the database checks that the
+  digest you sign is the digest of the stored args. For older kinds it doesn't
+  yet (P1's `consume_approval` compares two digests, not args). The server now
+  recomputes the digest from the args you're shown, for every kind, before you
+  sign. A database check for the older kinds is a follow-up.
 
 ### Rolling P3 back
 
