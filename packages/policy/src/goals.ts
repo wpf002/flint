@@ -379,3 +379,250 @@ export const GOAL_REASONS = {
   propose: 'Approving adds it to your suggested goals.',
   commitment: 'Approving adds it to the things Flint knows you said you’d do.',
 } as const;
+
+/**
+ * What Will reads when a goal card or a goal route is refused: fixed sentences,
+ * never a goal's words, never a database's. The runtime refuses with one of
+ * these and names it by its key (`code`); the server passes a refusal through to
+ * the console only as one of these codes, so the runtime's own words never do.
+ */
+export const GOAL_SAYS = {
+  invalid: 'This goal card isn’t valid.',
+  kindGoal: 'A goal card is filed as kind goal.',
+  kindPlan: 'A plan change is filed as kind plan.',
+  fromConsole: 'Goals are changed from the console.',
+  template: 'Flint files a plan change only from its review’s templates.',
+  nothing: 'It changes nothing.',
+  noGoal: 'This goal no longer exists.',
+  looked: 'The goal changed since you looked. Reload it and try again.',
+  planLooked: 'The plan changed since you looked. Reload it and try again.',
+  goalChanged: 'The goal changed since this card was filed.',
+  staleFlint: 'The plan changed since Flint suggested this.',
+  staleWill: 'The plan changed since you asked for this.',
+  resumePlan: 'Resuming a goal doesn’t change its plan.',
+  itemGone: 'One of its items is no longer there.',
+  person: 'A person can’t be linked to a goal.',
+  checkItem: 'A check doesn’t fit its item.',
+  checkStep: 'A check names a step the plan doesn’t have.',
+  future: 'The finish date has to be in the future.',
+  passed: 'The finish date is before the goal was added.',
+  reshaped: 'Flint reads this card differently since you approved it. File it again.',
+  provenance: 'A goal card names where its parts came from by id only.',
+  stepDone: 'A done step stays done.',
+  identity: 'A goal you add is yours: only one Flint suggested from chat is its own.',
+  exists: 'It adds a step the plan already has.',
+  missing: 'It changes a step the plan doesn’t have.',
+  depends: 'A step depends on a step the plan doesn’t have.',
+  circle: 'Its steps would depend on each other in a circle.',
+  // The panel's own writes (P3 part 2).
+  noCheck: 'This goal has no such check.',
+  notManual: 'Flint checks this one itself.',
+  noStep: 'This step isn’t in the plan.',
+  notTickable: 'Flint carries out this step itself.',
+  skipped: 'Bringing back a skipped step is a plan change.',
+  noPlan: 'This goal has no steps yet.',
+  replaced: 'A newer version of this card replaced it.',
+  busy: 'Flint is busy with this goal. Try again shortly.',
+} as const;
+export type GoalSay = keyof typeof GOAL_SAYS;
+
+/** Why a goal cannot take a step from where it stands, by its status. */
+export const GOAL_STATUS_SAYS: Readonly<Record<GoalStatus, string>> = {
+  proposed: 'This goal hasn’t started yet.',
+  active: 'This goal is already active.',
+  paused: 'This goal is paused.',
+  done: 'This goal is already done.',
+  abandoned: 'This goal was abandoned.',
+  rejected: 'This goal was dismissed.',
+};
+
+/** Every code a goal refusal may carry: a GOAL_SAYS key, or `status.<status>`. */
+export const GOAL_CODES: readonly string[] = [...Object.keys(GOAL_SAYS), ...GOAL_STATUSES.map((s) => `status.${s}`)];
+
+/** The sentence a code stands for, or undefined for a code outside the closed set. */
+export function goalSayOf(code: unknown): string | undefined {
+  if (typeof code !== 'string') return undefined;
+  if (Object.prototype.hasOwnProperty.call(GOAL_SAYS, code)) return GOAL_SAYS[code as GoalSay];
+  const m = /^status\.([a-z]+)$/.exec(code);
+  return m && Object.prototype.hasOwnProperty.call(GOAL_STATUS_SAYS, m[1]!) ? GOAL_STATUS_SAYS[m[1] as GoalStatus] : undefined;
+}
+
+/** The code of one of these sentences, or undefined. */
+export function goalCodeOf(sentence: string): string | undefined {
+  for (const [k, v] of Object.entries(GOAL_SAYS)) if (v === sentence) return k;
+  for (const [k, v] of Object.entries(GOAL_STATUS_SAYS)) if (v === sentence) return `status.${k}`;
+  return undefined;
+}
+
+// ---- The goals panel's wire (P3 part 2) ---------------------------------------------------------------
+// The console reaches the runtime's goal routes through the server, which checks
+// every request and every answer against these. Goal text is PERSONAL: it travels
+// only between the runtime and Will's console (the runtime's `proposals` scope),
+// never to a model, a log or an audit entry.
+
+export const GOAL_TABS = ['active', 'suggested', 'finished'] as const;
+export type GoalTab = (typeof GOAL_TABS)[number];
+/** What a check says right now. Unknown is never met. */
+export const CHECK_STATES = ['met', 'unmet', 'unknown'] as const;
+export type CheckState = (typeof CHECK_STATES)[number];
+
+/** A New Goal form's key: the console makes one per form, and the new goal's id is made from it. */
+export const DraftKey = z.string().regex(/^[A-Za-z0-9]{16,32}$/);
+/** The id of the goal a draft adds: filing the same draft twice files the same card. */
+export const goalIdOf = (draftKey: string): string => `go${draftKey}`;
+
+/**
+ * When an item counts as done, by its kind: the conditions the panel offers
+ * (Is Merged, Is Closed, Passes, Is Healthy, Succeeds). Each is one of
+ * CHECK_PATHS's values (a test keeps them so).
+ */
+export const GOAL_CONDITIONS: Readonly<Record<string, ReadonlyArray<{ key: string; value: string }>>> = {
+  pull_request: [{ key: 'state', value: 'merged' }, { key: 'state', value: 'closed' }],
+  issue: [{ key: 'state', value: 'closed' }],
+  ci_run: [{ key: 'conclusion', value: 'success' }],
+  service: [{ key: 'health', value: 'ok' }],
+  deployment: [{ key: 'status', value: 'success' }],
+  thread: [{ key: 'status', value: 'archived' }],
+  project: [{ key: 'status', value: 'archived' }],
+};
+
+/** The routes that file a card for an existing goal, and the action each files. */
+export const GOAL_CARD_VERBS = {
+  edit: 'goal.criteria_change',
+  timing: 'goal.horizon_change',
+  done: 'goal.done',
+  abandon: 'goal.abandon',
+  resume: 'goal.activate',
+  plan: 'plan.change',
+} as const satisfies Readonly<Record<string, GoalSignedAction>>;
+export type GoalCardVerb = keyof typeof GOAL_CARD_VERBS;
+/** The unsigned writes on a goal: they move progress only, never what a goal is. */
+export const GOAL_PLAIN_VERBS = ['pause', 'dismiss'] as const;
+
+/**
+ * POST /goals: a new goal's card, exactly as the panel shows it. A goal Will adds
+ * is his own (owner and origin will), untainted, with no Nexus project, and its
+ * id is made from the form's draft key.
+ */
+export const NewGoalBody = z
+  .object({ draftKey: DraftKey, args: GoalActivateArgs })
+  .strict()
+  .superRefine((b, ctx) => {
+    const issue = (path: string[], message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['args', ...path], message });
+    if (b.args.goalId !== goalIdOf(b.draftKey)) issue(['goalId'], 'is made from the draft key');
+    if (b.args.owner !== 'will' || b.args.origin !== 'will') issue(['origin'], 'a goal you add is yours');
+    if (b.args.tainted) issue(['tainted'], 'a goal you add is your own words');
+    if (b.args.nexusProjectId !== null) issue(['nexusProjectId'], 'the panel names no Nexus project');
+  });
+/** POST /goals/:id/<verb>: that card's args, as the panel shows them. Resuming (or starting a suggested goal) brings no plan. */
+export const GOAL_CARD_BODIES = {
+  edit: z.object({ args: GoalCriteriaChangeArgs }).strict(),
+  timing: z.object({ args: GoalHorizonChangeArgs }).strict(),
+  done: z.object({ args: GoalDoneArgs }).strict(),
+  abandon: z.object({ args: GoalAbandonArgs }).strict(),
+  resume: z.object({ args: GoalActivateArgs }).strict().refine((b) => b.args.plan === null, { message: 'resuming brings no plan', path: ['args', 'plan'] }),
+  plan: z.object({ args: PlanChangeArgs }).strict(),
+} as const satisfies Readonly<Record<GoalCardVerb, z.ZodTypeAny>>;
+/** POST /goals/:id/criteria/:cid: Will's mark on one of his own checks. */
+export const MarkBody = z.object({ met: z.boolean() }).strict();
+/** POST /goals/:id/steps/:key: a step's progress. Never skipped (that is a plan change), never a Flint action's. */
+export const StepBody = z.object({ status: z.enum(['todo', 'in_progress', 'blocked', 'done']) }).strict();
+/** POST /goals/linkable: a POST, so what Will types never lands in a request log. */
+export const LinkableBody = z.object({ q: z.string().max(80) }).strict();
+export const EmptyBody = z.object({}).strict();
+
+const ProposalRef = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+const ItemId = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+const Count = z.number().int().min(0).max(10_000);
+/** An item as the panel names it: by its key (a repo and number), never by a title. */
+const ItemLabel = z.string().min(1).max(120);
+const CheckCounts = z.object({ met: Count, total: Count, unknown: Count }).strict();
+
+/** One goal in a list. `late` stays false until reviews exist (part 3). */
+export const GoalRow = z
+  .object({
+    id: GoalId,
+    title: GoalTitle,
+    status: z.enum(GOAL_STATUSES),
+    origin: z.enum(['will', 'flint']),
+    checks: CheckCounts,
+    horizonAt: IsoMs.nullable(),
+    reviewCadence: z.enum(REVIEW_CADENCES),
+    /** When it was done, abandoned or dismissed. */
+    endedAt: IsoMs.nullable(),
+    /** Its cards waiting for Will's signature. */
+    waiting: Count,
+    late: z.boolean(),
+    tainted: z.boolean(),
+  })
+  .strict();
+export type GoalRow = z.infer<typeof GoalRow>;
+/** A new goal whose card waits for Will's signature: it is not a goal until he signs it. */
+export const WaitingGoal = z.object({ proposalId: ProposalRef, goalId: GoalId, title: GoalTitle, checks: Count }).strict();
+export const GoalsPage = z
+  .object({
+    tab: z.enum(GOAL_TABS),
+    goals: z.array(GoalRow).max(200),
+    waiting: z.array(WaitingGoal).max(50),
+    /** Whether Flint reviews goals (part 3). Off, nothing is ever late. */
+    reviews: z.enum(['off', 'on']),
+  })
+  .strict();
+export type GoalsPage = z.infer<typeof GoalsPage>;
+
+const ENTITY_STATUSES = ['active', 'archived', 'merged', 'forgotten'] as const;
+export const PlanStepView = z
+  .object({
+    key: StepKey,
+    ordinal: Ordinal,
+    title: StepTitle,
+    kind: z.enum(STEP_KINDS),
+    tier: z.enum(STEP_TIERS),
+    status: z.enum(STEP_STATUSES),
+    dueAt: IsoMs.nullable(),
+    dependsOn: z.array(StepKey).max(10),
+  })
+  .strict();
+/** One goal, open: what it is, its checks as they stand, its links by label, its plan, and its waiting cards. */
+export const GoalView = z
+  .object({
+    id: GoalId,
+    title: GoalTitle,
+    description: Description,
+    status: z.enum(GOAL_STATUSES),
+    owner: z.enum(['will', 'flint']),
+    origin: z.enum(['will', 'flint']),
+    sensitivity: z.enum(['personal', 'financial']),
+    tainted: z.boolean(),
+    nexusProjectId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).nullable(),
+    successCriteria: z.array(Criterion).max(10),
+    criteria: z.array(z.object({ id: CriterionId, state: z.enum(CHECK_STATES) }).strict()).max(10),
+    checks: CheckCounts,
+    horizonAt: IsoMs.nullable(),
+    reviewCadence: z.enum(REVIEW_CADENCES),
+    activatedAt: IsoMs.nullable(),
+    endedAt: IsoMs.nullable(),
+    links: z.array(Link.extend({ label: ItemLabel, kind: z.string().max(40), status: z.enum(ENTITY_STATUSES) })).max(20),
+    plan: z.object({ version: z.number().int().min(1), steps: z.array(PlanStepView).max(1000) }).strict().nullable(),
+    waiting: z.array(z.object({ id: ProposalRef, action: z.enum(GOAL_SIGNED_ACTIONS) }).strict()).max(50),
+    reviews: z.enum(['off', 'on']),
+    late: z.boolean(),
+  })
+  .strict();
+export type GoalView = z.infer<typeof GoalView>;
+export const GoalAnswer = z.object({ goal: GoalView }).strict();
+/** A card filed: its id, and whether it was one already waiting. */
+export const GoalFiled = z.object({ id: ProposalRef, deduped: z.boolean() }).strict();
+export const GoalDone = z.object({ ok: z.literal(true) }).strict();
+/** Items a check may watch. The title is shown marked as outside text, never stored or signed: the label is. */
+export const LinkableItem = z
+  .object({
+    entityId: ItemId,
+    kind: z.string().max(40),
+    label: ItemLabel,
+    status: z.enum(['active', 'archived']),
+    title: z.string().min(1).max(300).nullable(),
+    conditions: z.array(z.object({ key: z.string().max(40), value: z.string().max(40) }).strict()).max(10),
+  })
+  .strict();
+export const Linkable = z.object({ items: z.array(LinkableItem).max(25) }).strict();
