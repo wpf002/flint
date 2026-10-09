@@ -256,7 +256,7 @@
   select.field{padding:0 8px;}
   .gfound{padding:0 0 8px;}
   .gcheck,.gstep{position:relative;}
-  .gcheck>.formrow,.gstep{padding-right:48px;}
+  .gcheck.gxr>.formrow,.gstep{padding-right:48px;}
   .gx{position:absolute;top:6px;right:8px;}
   .row.gwrap{padding-top:8px;padding-bottom:8px;}
   .gwrap .lbl b,.gwrap .lbl span{white-space:normal;overflow:visible;}
@@ -1613,7 +1613,7 @@ function goalForm(){var f=GOALS.form;GOALS.view=f.mode==='edit'?'edit':'form';go
     if(f.steps.length<GOAL_MAX){var ms=gEl('div','gact');ms.appendChild(gBtn('ghost','Add Step',function(){f.steps.push({title:'',due:''});goalForm();}));form.appendChild(ms);}}
   var msg=gEl('div','err');msg.id='goalmsg';msg.hidden=!f.error;msg.textContent=f.error||'';form.appendChild(msg);
   body.appendChild(form);goalFormFoot();}
-function goalCheckForm(f,c,i){var g=gEl('div','group gcheck');
+function goalCheckForm(f,c,i){var g=gEl('div','group gcheck'+(f.checks.length>1?' gxr':''));
   var r1=gEl('div','formrow');var t=goalField('Done When','input','You cross the finish line',200);t.input.value=c.text;t.input.oninput=function(){c.text=t.input.value;};r1.appendChild(t.wrap);
   var how=goalSelect('How It’s Checked',GOAL_METHODS,c.method);how.input.onchange=function(){c.method=how.input.value;goalForm();};r1.appendChild(how.wrap);g.appendChild(r1);
   if(f.checks.length>1){var x=gBtn('xb gx','',function(){f.checks.splice(i,1);goalForm();});x.setAttribute('aria-label','Remove Check');x.appendChild(gIcon('x'));g.appendChild(x);}
