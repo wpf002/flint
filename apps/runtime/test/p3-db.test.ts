@@ -19,7 +19,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { NO_DB, freshDb, withClient, id, HEX, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db, type Tx } from '../src/db';
-import { approveProposal, createProposal, Refused } from '../src/governance/proposals';
+import { digestOf } from '@flint/policy';
+import { approveProposal, createProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { runGoal, runGoalCard } from '../src/goals/apply';
 import { SAY } from '../src/goals/errors';
@@ -293,7 +294,11 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     expect(await db.auditEntry.count({ where: { correlationId: p.id, kind: 'intent' } })).toBe(0);
     // runInternal's branch says so with a reference, and leaves it approved to run again; it then runs.
     await expect(runGoalCard(db, p.id, undefined, 'UTC', 'test', crash)).rejects.toMatchObject({ status: 409, message: 'Flint couldn’t carry it out.' });
-    expect(said.some((l) => /^\[runtime\] err\w+ running proposal \w+ failed: Error$/.test(l))).toBe(true);
+    // The class, then where (frames of this file), never the error's words.
+    const line = said.find((l) => /^\[runtime\] err\w+ running proposal \w+ failed: Error\n/.test(l));
+    expect(line).toBeTruthy();
+    expect(line).toMatch(/\n {2}at .+p3-db\.test\.ts:\d+:\d+\)?/);
+    expect(line).not.toContain('the process died here');
     expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('approved');
     expect(await run(p.id)).toMatchObject({ goalId: gid, version: 2 });
     expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('executed');
@@ -328,15 +333,83 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     expect(failed.error).toMatch(/^could not carry it out \(err\w+\)$/);
     expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
     expect(said.some((l) => l.includes('prisma:error sqlstate 23514, constraint PlanStep_title_check'))).toBe(true);
-    expect(said.some((l) => /running proposal \w+ failed: PrismaClientKnownRequestError P2010 23514$/.test(l))).toBe(true);
+    expect(said.some((l) => /running proposal \w+ failed: PrismaClientKnownRequestError P2010 23514 PlanStep_title_check\n {2}at /.test(l))).toBe(true);
 
     // A validation error prints the call's arguments in its message: it never gets out either, and the card stays approved.
     const q = await file('goal.abandon', { goalId: gid, goalTitle });
     await sign(q.id);
     const invalid = { afterWrites: async (tx: Tx) => void (await tx.goal.update({ where: { id: gid }, data: { title: { canary: `${CANARY} title` } as unknown as string } })) };
     await expect(runGoalCard(db, q.id, undefined, 'UTC', 'test', invalid)).rejects.toMatchObject({ status: 409 });
-    expect(said.some((l) => /failed: PrismaClientValidationError$/.test(l))).toBe(true);
+    expect(said.some((l) => /failed: PrismaClientValidationError(\n|$)/.test(l))).toBe(true);
     expect((await db.proposal.findUniqueOrThrow({ where: { id: q.id } })).status).toBe('approved');
+  });
+
+  it('a schema the code does not expect yet (a deploy out of order) leaves the card approved, to run again', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    const p = await file('goal.done', { goalId: gid, goalTitle });
+    await sign(p.id);
+    for (const sql of ['SELECT 1 FROM "NoSuchTable"', 'SELECT "noSuchColumn" FROM "Goal"', 'SELECT no_such_function()']) {
+      const skew = { afterWrites: async (tx: Tx) => void (await tx.$executeRawUnsafe(sql)) };
+      await expect(runGoalCard(db, p.id, undefined, 'UTC', 'test', skew)).rejects.toMatchObject({ status: 409 });
+      expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).status, sql).toBe('approved');
+    }
+    expect(await run(p.id)).toMatchObject({ goalId: gid });
+  });
+
+  it('a mark stays only while its check is the same check: an id reused for a new one starts unmarked', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    const c1 = (args.successCriteria as Array<Record<string, unknown>>)[0]!;
+    await db.goal.update({ where: { id: gid }, data: { criteriaMet: { c1: '2026-10-08', c2: '2026-10-08' } } });
+    // c1 as it was; c2's id now holds another check.
+    const changed = await fileSignRun('goal.criteria_change', { goalId: gid, title: `${CANARY} goal`, successCriteria: [c1, crit('c2')], links: args.links });
+    expect(changed.result).toMatchObject({ marksCleared: 1 });
+    expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).criteriaMet).toEqual({ c1: '2026-10-08' });
+  });
+
+  it('cards that did not come through filing still never run: one from chat, one whose args normalize differently', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    /** A card written straight into the table (as a runtime that skipped filing could), with its args' true digest. */
+    const raw = async (action: string, a: Record<string, unknown>, origin: string) => {
+      const pid = id('pr');
+      await withClient(urls.app, (c) => c.query(
+        `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", sensitivity, "expiresAt") VALUES ($1, 'goal', $2, $3, $4::jsonb, $5, '{}', 'personal', now() + interval '1 hour')`,
+        [pid, origin, action, JSON.stringify(a), digestOf(a)],
+      ));
+      await sign(pid);
+      return pid;
+    };
+    const chat = await raw('goal.done', { goalId: gid, goalTitle }, 'chat:c1');
+    await expect(run(chat)).rejects.toMatchObject({ status: 409, message: SAY.fromConsole });
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: chat } })).status).toBe('failed');
+    // A new goal's card without its description: valid, but read back it gains description '' and so a new digest.
+    const { args: other } = await newGoal();
+    const { description: _drop, ...bare } = other;
+    const reshaped = await raw('goal.activate', bare, 'console');
+    await expect(run(reshaped)).rejects.toMatchObject({ status: 409, message: SAY.reshaped });
+    expect(await db.goal.count({ where: { id: other.goalId as string } })).toBe(0);
+    expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
+  });
+
+  it('filing: the same card from Will and from a review are two cards; provenance names ids; a chat suggestion without a quote is a 400', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    const ops = [{ op: 'set', key: 's1', from: { title: `${CANARY} step s1`, status: 'todo' }, to: { status: 'blocked' } }];
+    const will = await file('plan.change', { goalId: gid, goalTitle, ops });
+    const again = await file('plan.change', { goalId: gid, goalTitle, ops });
+    const flint = await file('plan.change', { goalId: gid, goalTitle, ops }, { origin: 'runtime:goals', templateId: 'plan.diff.minor' });
+    expect(again).toMatchObject({ id: will.id, deduped: true });
+    expect(flint.id).not.toBe(will.id);
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: flint.id } })).reason).toBe('Flint suggests this after its review.');
+    await expect(file('goal.done', { goalId: gid, goalTitle }, { argsProvenance: { goalTitle: { source: 'will', ref: `${CANARY} said so`, tainted: false } } })).rejects.toMatchObject({ status: 400, message: SAY.provenance });
+    expect(await file('goal.done', { goalId: gid, goalTitle }, { argsProvenance: { goalTitle: { source: 'will', ref: `goal:${gid}`, tainted: false } } })).toMatchObject({ deduped: false });
+    await expect(file('goal.propose', { goalId: id('go'), title: 'Synthetic', quote: 'too short' }, { kind: 'goal' })).rejects.toMatchObject({ status: 400, message: 'A suggestion from chat needs your own words, quoted.' });
   });
 
   it('nothing P3 keeps for good carries a goal\'s words: reasons, errors, results, audit entries, history', async () => {
@@ -352,6 +425,5 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     // ...while the goals themselves, and their cards' args (until retention), do hold them.
     expect((await owner(`SELECT count(*)::int AS n FROM "Goal" WHERE title LIKE '%CANARY%'`)).rows[0].n).toBeGreaterThan(0);
     expect((await owner(`SELECT count(*)::int AS n FROM "RowChange" WHERE "tableName" = 'Goal'`)).rows[0].n).toBeGreaterThan(0);
-    expect(Refused).toBeTruthy();
   });
 });

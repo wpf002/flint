@@ -62,7 +62,12 @@ export async function lastVersion(tx: Tx, goalId: string): Promise<number> {
   return last?.version ?? 0;
 }
 
-/** A plan version, written as an unsigned draft with exactly these steps. Returns its id. */
+/**
+ * A plan version, written as an unsigned draft with exactly these steps. Returns
+ * its id. Writing a draft and activating it must stay in one transaction: a draft
+ * left behind would hold the next version number, and the goal's plan could then
+ * never change again.
+ */
 export async function writeDraft(tx: Tx, goalId: string, version: number, steps: readonly PlanStepState[], createdBy: 'will' | 'flint', rationale: string): Promise<string> {
   const id = newId('pl');
   await tx.plan.create({ data: { id, goalId, version, createdBy, rationale } });

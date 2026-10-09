@@ -36,12 +36,22 @@ function offsetMs(tz: string, at: Date): number {
   return wall - Math.floor(at.getTime() / 1000) * 1000;
 }
 
-/** The instant a local wall-clock time (YYYY-MM-DD hh:mm in tz) falls on. DST-safe: two passes settle the offset around a change. */
+/**
+ * The instant a local wall-clock time (YYYY-MM-DD hh:mm in tz) falls on.
+ * DST-safe: two passes settle the offset around a change. A time a spring-forward
+ * skips (02:30 on the day clocks jump from 02:00 to 03:00) lands as far past the
+ * gap as it was into it (03:30), never before it; a time a fall-back repeats
+ * lands on one of its two instants.
+ */
 export function localWallTime(tz: string, day: string, hh = 0, mm = 0): Date {
   const [y, m, d] = day.split('-').map(Number) as [number, number, number];
   const guess = Date.UTC(y, m - 1, d, hh, mm);
   let t = guess - offsetMs(tz, new Date(guess));
   t = guess - offsetMs(tz, new Date(t));
+  const p = partsIn(tz, new Date(t));
+  const wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute));
+  // Inside a gap the two passes settle on the instant before it (01:30 for 02:30): move past it by as much.
+  if (wall < guess) t += guess - wall;
   return new Date(t);
 }
 
@@ -82,12 +92,15 @@ const CADENCE_DAYS: Readonly<Record<string, number>> = { P1D: 1, P3D: 3, P1W: 7,
 
 /**
  * When a goal is next reviewed (P3): the local date of `due` stepped by the
- * cadence (P1D, P3D, P1W and P2W in days, P1M in months on due's day of the
- * month), at 09:00 local, stepped again until it is after `now`. It steps
- * calendar dates, never multiples of 24 hours, so the weekday stays put across a
- * DST change, and a late run does not pile up reviews.
+ * cadence (P1D, P3D, P1W and P2W in days, P1M in months), at 09:00 local,
+ * stepped again until it is after `now`. It steps calendar dates, never
+ * multiples of 24 hours, so the weekday stays put across a DST change, and a
+ * late run does not pile up reviews. Months land on `anchorDay` (the goal's own
+ * day of the month, from when it started), clamped to each month's length, so a
+ * chain from Jan 31 goes Feb 28, Mar 31, Apr 30 and never drifts to the 28th;
+ * without one, due's own day.
  */
-export function nextReviewAt(cadence: 'P1D' | 'P3D' | 'P1W' | 'P2W' | 'P1M', tz: string, due: Date, now: Date): Date {
+export function nextReviewAt(cadence: 'P1D' | 'P3D' | 'P1W' | 'P2W' | 'P1M', tz: string, due: Date, now: Date, anchorDay?: number): Date {
   const base = localDay(tz, due);
   const today = localDay(tz, now);
   const days = CADENCE_DAYS[cadence];
@@ -98,7 +111,7 @@ export function nextReviewAt(cadence: 'P1D' | 'P3D' | 'P1W' | 'P2W' | 'P1M', tz:
     ? Math.max(1, Math.floor((Date.UTC(ty, tm - 1, td) - Date.UTC(by, bm - 1, bd)) / 86_400_000 / days))
     : Math.max(1, ty * 12 + tm - (by * 12 + bm));
   for (;; i++) {
-    const at = localWallTime(tz, days ? addLocalDays(base, i * days) : addLocalMonths(base, i, bd), REVIEW_HOUR, 0);
+    const at = localWallTime(tz, days ? addLocalDays(base, i * days) : addLocalMonths(base, i, anchorDay ?? bd), REVIEW_HOUR, 0);
     if (at.getTime() > now.getTime()) return at;
   }
 }

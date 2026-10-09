@@ -14,13 +14,15 @@ import { z } from 'zod';
 import { GOAL_SIGNED_ACTIONS, SOURCES, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
-import { dbRefused, failureOf } from '../dbcodes.js';
+import { dbRefused, failureReport } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
 import { runGoalCard } from '../goals/apply.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS]);
+export const INTERNAL_ACTIONS: ReadonlySet<string> = new Set([
+  'world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS,
+]);
 
 /**
  * A triage rule is policy (kind `rule`): its predicate may read only the
@@ -81,10 +83,15 @@ export const PolicyArgs = z
   })
   .strict();
 
-export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string) {
+/**
+ * Carry out an approved action the runtime runs itself. `internal` is the set it
+ * takes (INTERNAL_ACTIONS; a test passes a wider one to show that a listed action
+ * without a branch below fails closed).
+ */
+export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, internal: ReadonlySet<string> = INTERNAL_ACTIONS) {
   const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
   if (!p) throw new Refused(404, GONE);
-  if (!INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
+  if (!internal.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
   // P3: a goal card is claimed, applied and completed in one transaction.
   if (isGoalSignedAction(p.action)) return runGoalCard(db, id, rp, tz, actor);
   const claimed = await claimProposal(db, id, rp, tz, actor);
@@ -161,10 +168,10 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     // An action listed above with no branch here fails closed: it is never run as something else.
     throw new Refused(409, 'Flint can’t carry this out yet.');
   } catch (err) {
-    // No database internals in the reply, the record or the log: a reference, and what failed with its
-    // SQLSTATE (a database's message can carry the row it refused).
+    // No database internals in the reply or the record, and no error's message in the log (a database's can
+    // carry the row it refused): a reference, what failed (class, SQLSTATE, constraint) and where.
     const ref = `err${Date.now().toString(36)}`;
-    console.error(`[runtime] ${ref} running ${claimed.action} failed: ${failureOf(err)}`);
+    console.error(`[runtime] ${ref} running ${claimed.action} failed: ${failureReport(err)}`);
     await completeProposal(db, id, { ok: false, error: `could not carry it out (${ref})` }, actor).catch(() => {});
     if (err instanceof Refused) throw err;
     // The database refusing what was signed is the input's fault, a 400: a CHECK (23514, wherever Prisma

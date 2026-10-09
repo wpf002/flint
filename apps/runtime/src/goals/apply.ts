@@ -24,20 +24,21 @@ import {
   GOAL_REASONS,
   checkFits,
   composePlan,
+  digestOf,
   isGoalSignedAction,
+  localDay,
   nextReviewAt,
   type Criterion,
+  type GoalArgs,
   type GoalSignedAction,
   type Link,
-  type PlanOp,
-  type ReviewCadence,
   type WebAuthnRelyingParty,
 } from '@flint/policy';
 import type { z } from 'zod';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { Refused, claimIn, completeIn, contextOf, type CreateProposal } from '../governance/proposals.js';
-import { dbRefused, failureOf, sqlState } from '../dbcodes.js';
+import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, SAY, goalStatusWords, sanitize } from './errors.js';
 import { RATIONALE, activePlan, currentLinks, lastVersion, sameDefinition, sameLinks, sameTiming, syncLinks, writeDraft } from './ops.js';
 
@@ -46,38 +47,14 @@ export const PLAN_TEMPLATES: readonly string[] = ['plan.diff.minor', 'plan.diff.
 /** Where a review's cards come from. */
 export const GOALS_ORIGIN = 'runtime:goals';
 
-interface ActivateArgs {
-  goalId: string;
-  title: string;
-  description: string;
-  successCriteria: Criterion[];
-  horizonAt: string | null;
-  reviewCadence: ReviewCadence;
-  links: Link[];
-  plan: { ops: PlanOp[] } | null;
-}
-interface CriteriaArgs {
-  goalId: string;
-  title: string;
-  description: string;
-  successCriteria: Criterion[];
-  links: Link[];
-}
-interface TimingArgs {
-  goalId: string;
-  goalTitle: string;
-  horizonAt: string | null;
-  reviewCadence: ReviewCadence;
-}
-interface FinishArgs {
-  goalId: string;
-  goalTitle: string;
-}
-interface PlanArgs {
-  goalId: string;
-  goalTitle: string;
-  ops: PlanOp[];
-}
+type ActivateArgs = GoalArgs<'goal.activate'>;
+type CriteriaArgs = GoalArgs<'goal.criteria_change'>;
+type TimingArgs = GoalArgs<'goal.horizon_change'>;
+type FinishArgs = GoalArgs<'goal.done'>;
+type PlanArgs = GoalArgs<'plan.change'>;
+
+/** A provenance ref on a goal card is an id: a proposal's provenance is kept for good, so it never holds words. */
+const PROVENANCE_REF = /^[A-Za-z0-9_.:@-]{1,120}$/;
 
 /** A zod error as paths and codes (a message of ours, never a value): it is logged under a ref, not shown. */
 function issuesOf(err: z.ZodError): string {
@@ -104,7 +81,7 @@ function stepsKnown(criteria: readonly Criterion[], keys: ReadonlySet<string>): 
   return criteria.every((c) => c.check.kind !== 'steps' || c.check.keys.every((k) => keys.has(k)));
 }
 
-const COMPOSE_SAYS = { exists: SAY.exists, missing: SAY.missing, depends: SAY.depends, circle: SAY.circle } as const;
+const COMPOSE_SAYS = { exists: SAY.exists, missing: SAY.missing, done: SAY.stepDone, depends: SAY.depends, circle: SAY.circle } as const;
 
 /**
  * A goal card as it may be filed, or a refusal (400 for what it says, 409 for
@@ -121,6 +98,7 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
   }
   if (!isGoalSignedAction(action)) return input;
   if (input.kind !== GOAL_KIND[action]) throw new Refused(400, GOAL_KIND[action] === 'plan' ? SAY.kindPlan : SAY.kindGoal);
+  if (Object.values(input.argsProvenance).some((p) => p.ref !== undefined && !PROVENANCE_REF.test(p.ref))) throw new Refused(400, SAY.provenance);
   const context = contextOf(input.origin);
   if (context === 'chat') throw new Refused(409, SAY.fromConsole);
   // A job may ask for plan.change alone: the tier engine refuses any other (FORBIDDEN, autonomous), and audits it.
@@ -191,13 +169,16 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     args: parsed.data as Record<string, unknown>,
     reason,
     sensitivity: 'personal',
-    // Will's signature on each, with a fresh touch; a review's minor plan cards are not (P3 part 3 says which are).
+    // Marked for Will's fresh touch: every goal card, and every plan card but a review's minor ones (part 3
+    // says which). Nothing reads the mark yet: the console must (a README requirement for the goals panel).
     consequential: action === 'plan.change' ? input.consequential || context !== 'autonomous' : true,
   };
 }
 
 interface ApplyContext {
   approvalId: string;
+  /** What Will signed: the stored args' digest. */
+  argsDigest: string;
   origin: string;
   now: Date;
   tz: string;
@@ -210,19 +191,25 @@ async function lockGoal(tx: Tx, id: string) {
   return rows.length ? tx.goal.findUniqueOrThrow({ where: { id } }) : null;
 }
 
-/** Will's marks that still name one of the checks. */
-function keptMarks(marks: Prisma.JsonValue, criteria: readonly Criterion[]): Record<string, string> {
-  const ids = new Set(criteria.map((c) => c.id));
-  return Object.fromEntries(Object.entries((marks ?? {}) as Record<string, string>).filter(([id]) => ids.has(id)));
+/**
+ * Will's marks that still mean what he marked: a mark stays only while the check
+ * under its id is the same check (its words and what it looks at). An id reused
+ * for a new check starts unmarked.
+ */
+function keptMarks(marks: Prisma.JsonValue, before: Prisma.JsonValue, after: readonly Criterion[]): Record<string, string> {
+  const was = new Map(((before ?? []) as Criterion[]).map((c) => [c.id, digestOf({ text: c.text, check: c.check })]));
+  const now = new Map(after.map((c) => [c.id, digestOf({ text: c.text, check: c.check })]));
+  return Object.fromEntries(Object.entries((marks ?? {}) as Record<string, string>).filter(([id]) => now.has(id) && was.get(id) === now.get(id)));
 }
 
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 
 /** One signed card's change, inside the caller's transaction. A refusal is returned before anything is written. */
 export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, ctx: ApplyContext): Promise<Applied> {
-  // The args as signed, read again with the shared contract (normalizing them again changes nothing).
+  // The args as signed, read again with the shared contract. Normalizing them again must change nothing: what
+  // is written is what Will signed, or nothing is (a contract that changed between filing and running).
   const parsed = GOAL_ARGS[action].safeParse(raw);
-  if (!parsed.success) return { refusal: SAY.invalid };
+  if (!parsed.success || digestOf(parsed.data) !== ctx.argsDigest) return { refusal: SAY.reshaped };
   const args = parsed.data as { goalId: string };
   const { approvalId, now } = ctx;
   const goal = await lockGoal(tx, args.goalId);
@@ -261,7 +248,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
       where: { id: g.id },
       data: {
         status: 'active', approvalId, title: a.title, description: a.description, successCriteria: json(a.successCriteria),
-        horizonAt: a.horizonAt ? new Date(a.horizonAt) : null, reviewCadence: a.reviewCadence, criteriaMet: json(keptMarks(g.criteriaMet, a.successCriteria)),
+        horizonAt: a.horizonAt ? new Date(a.horizonAt) : null, reviewCadence: a.reviewCadence, criteriaMet: json(keptMarks(g.criteriaMet, g.successCriteria, a.successCriteria)),
         // The first review runs within minutes of starting (once reviews are on).
         nextReviewAt: now,
       },
@@ -277,7 +264,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
     const why = await itemProblem(tx, a.links, a.successCriteria);
     if (why) return { refusal: why };
     const links = await syncLinks(tx, goal.id, a.links);
-    const marks = keptMarks(goal.criteriaMet, a.successCriteria);
+    const marks = keptMarks(goal.criteriaMet, goal.successCriteria, a.successCriteria);
     const changed = !sameDefinition(goal, a);
     // A change to the links alone moves no approval onto the goal (the database lets them in on this card).
     if (changed) {
@@ -294,7 +281,9 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
     // A shorter cadence brings the next review forward: the earlier of the one already set and the new cadence's next slot.
     let next = goal.nextReviewAt;
     if (goal.status === 'active' && a.reviewCadence !== goal.reviewCadence) {
-      const slot = nextReviewAt(a.reviewCadence, ctx.tz, now, now);
+      // Monthly reviews keep the goal's own day of the month, from when it started.
+      const anchor = Number(localDay(ctx.tz, goal.activatedAt ?? goal.createdAt).slice(8, 10));
+      const slot = nextReviewAt(a.reviewCadence, ctx.tz, now, now, anchor);
       next = next && next < slot ? next : slot;
     }
     await tx.goal.update({
@@ -353,15 +342,20 @@ export async function runGoal(db: Db, id: string, rp: WebAuthnRelyingParty | und
         const c = await claimIn(tx, id, rp, tz, actor, now);
         if ('refused' in c) return c;
         const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true, origin: true, templateId: true } });
-        // Only Will's own cards, or a review's under its templates (the :95 pattern: a foreign template is refused).
-        const flint = p.origin.startsWith('runtime:');
-        const template = flint ? c.claimed.action === 'plan.change' && p.origin === GOALS_ORIGIN && PLAN_TEMPLATES.includes(p.templateId ?? '') : p.templateId === null;
-        const r = template
-          ? await (async () => {
-              await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
-              return applyGoal(tx, c.claimed.action as GoalSignedAction, c.claimed.args, { approvalId: p.approvalId!, origin: p.origin, now, tz });
-            })()
-          : ({ refusal: SAY.template } as const);
+        // Only Will's own cards from the console, or a review's under its templates (the :95 pattern: a foreign
+        // template is refused). A card from chat never runs, however it was filed.
+        const context = contextOf(p.origin);
+        const template = context === 'autonomous'
+          ? c.claimed.action === 'plan.change' && p.origin === GOALS_ORIGIN && PLAN_TEMPLATES.includes(p.templateId ?? '')
+          : p.templateId === null;
+        const r = context === 'chat'
+          ? ({ refusal: SAY.fromConsole } as const)
+          : template
+            ? await (async () => {
+                await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
+                return applyGoal(tx, c.claimed.action as GoalSignedAction, c.claimed.args, { approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, origin: p.origin, now, tz });
+              })()
+            : ({ refusal: SAY.template } as const);
         if ('refusal' in r) {
           await completeIn(tx, id, { ok: false, error: r.refusal }, actor, now);
           return { refused: new Refused(409, r.refusal) };
@@ -394,12 +388,13 @@ async function failApproved(db: Db, id: string, error: string, failure: string, 
 
 /**
  * runInternal's goal branch: runGoal and, when it fails other than by a
- * refusal, a log line with a reference and the failure's class and SQLSTATE
- * (never its message). Nothing was applied. When the database refused the
- * change itself (a data, integrity, privilege or rule error: running it again
- * would only be refused again), the card fails, saying so with the reference
- * only; after anything else (a lost connection, a conflict, a crash) it stays
- * approved, to run again.
+ * refusal, a log line with a reference, the failure's class, SQLSTATE and
+ * constraint, and its top frames (never its message). Nothing was applied. When
+ * the database refused the change itself (a data, integrity, privilege or rule
+ * error: running it again would only be refused again), the card fails, saying
+ * so with the reference only. After anything else it stays approved, to run
+ * again: a lost connection, a conflict, a crash, or a schema the code does not
+ * expect yet (a deploy out of order, which the next deploy clears).
  */
 export async function runGoalCard(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, hooks: GoalHooks = {}) {
   try {
@@ -407,10 +402,10 @@ export async function runGoalCard(db: Db, id: string, rp: WebAuthnRelyingParty |
   } catch (err) {
     if (err instanceof Refused) throw err;
     const ref = `err${Date.now().toString(36)}`;
-    const failure = err instanceof GoalFailure ? err.failure : failureOf(err);
-    console.error(`[runtime] ${ref} running proposal ${id} failed: ${failure}`);
+    const failure = failureOf(err);
+    console.error(`[runtime] ${ref} running proposal ${id} failed: ${failureReport(err)}`);
     const state = err instanceof GoalFailure ? err.code : sqlState(err);
-    if (state && /^(22|23|42|P0)/.test(state)) await failApproved(db, id, `could not carry it out (${ref})`, failure, actor).catch(() => {});
+    if (state && /^(22|23|42|P0)/.test(state) && !schemaSkew(state)) await failApproved(db, id, `could not carry it out (${ref})`, failure, actor).catch(() => {});
     // The database refusing what was signed is the input's fault (a CHECK, 23514).
     if (dbRefused(err)) throw new Refused(400, 'The database refused this change.');
     throw new Refused(409, 'Flint couldn’t carry it out.');

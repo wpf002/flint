@@ -188,6 +188,8 @@ export const PlanOps = z
         else if (same(o.from[k], o.to[k])) issue(['to', k], 'changes nothing');
       }
       if (o.to.dependsOn?.includes(o.key)) issue(['to', 'dependsOn'], 'a step cannot depend on itself');
+      // A done step stays done: it was done by doing it (H7), and its doneAt stays with it.
+      if (o.from.status === 'done' && o.to.status !== undefined) issue(['to', 'status'], 'a done step stays done');
     });
   });
 
@@ -210,10 +212,11 @@ export interface PlanStepState {
 /**
  * Why operations do not apply: `stale`, a step is no longer as its `from` says;
  * `exists`, an add's key is taken; `missing`, a set's key is not in the plan;
+ * `done`, a set would change a done step's status (a done step stays done);
  * `depends`, a step depends on one the plan does not have; `circle`, the
  * dependencies go round.
  */
-export type ComposeRefusal = 'stale' | 'exists' | 'missing' | 'depends' | 'circle';
+export type ComposeRefusal = 'stale' | 'exists' | 'missing' | 'done' | 'depends' | 'circle';
 export type Composed = { ok: true; steps: PlanStepState[] } | { ok: false; why: ComposeRefusal; key?: string };
 
 /**
@@ -240,6 +243,7 @@ export function composePlan(prev: readonly PlanStepState[], ops: readonly PlanOp
       const now = cur[k as keyof PlanStepState];
       if (!same(Array.isArray(now) ? sorted(now) : now, v)) return { ok: false, why: 'stale', key: op.key };
     }
+    if (cur.status === 'done' && op.to.status !== undefined) return { ok: false, why: 'done', key: op.key };
     const next: PlanStepState = { ...cur };
     for (const [k, v] of Object.entries(op.to)) {
       if (v !== undefined) (next as unknown as Record<string, unknown>)[k] = k === 'dependsOn' ? sorted(v as string[]) : v;
@@ -331,14 +335,16 @@ export const GoalAbandonArgs = GoalDoneArgs;
 export const PlanChangeArgs = z.object({ goalId: GoalId, goalTitle: GoalTitle, ops: PlanOps }).strict().refine(fits, OVER);
 
 /** Each signed action's args. */
-export const GOAL_ARGS: Readonly<Record<GoalSignedAction, z.ZodTypeAny>> = {
+export const GOAL_ARGS = {
   'goal.activate': GoalActivateArgs,
   'goal.criteria_change': GoalCriteriaChangeArgs,
   'goal.horizon_change': GoalHorizonChangeArgs,
   'goal.done': GoalDoneArgs,
   'goal.abandon': GoalAbandonArgs,
   'plan.change': PlanChangeArgs,
-};
+} as const satisfies Readonly<Record<GoalSignedAction, z.ZodTypeAny>>;
+/** A signed action's args, as the contract gives them back (defaults filled in, lists sorted). */
+export type GoalArgs<A extends GoalSignedAction> = z.output<(typeof GOAL_ARGS)[A]>;
 /** The kind of proposal each is filed as (Proposal_kind_check; the database's p3_signed_proposal requires it). */
 export const GOAL_KIND: Readonly<Record<GoalSignedAction, 'goal' | 'plan'>> = {
   'goal.activate': 'goal',

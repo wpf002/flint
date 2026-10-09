@@ -15,7 +15,7 @@ describe('database errors without their words', () => {
   it('finds the SQLSTATE wherever Prisma put it, and never mistakes a Prisma code for one', () => {
     const raw = new Prisma.PrismaClientKnownRequestError(`Raw query failed. Code: \`23514\`. Message: \`${DETAIL}\``, { code: 'P2010', clientVersion: '6', meta: { code: '23514', message: DETAIL } });
     expect(sqlState(raw)).toBe('23514');
-    expect(failureOf(raw)).toBe('PrismaClientKnownRequestError P2010 23514');
+    expect(failureOf(raw)).toBe('PrismaClientKnownRequestError P2010 23514 PlanStep_title_check');
     const orm = new Prisma.PrismaClientUnknownRequestError(`ConnectorError(... PostgresError { code: "42501", message: "goal go1: a goal starts proposed" ...`, { clientVersion: '6' });
     expect(sqlState(orm)).toBe('42501');
     expect(failureOf(orm)).toBe('PrismaClientUnknownRequestError 42501');
@@ -35,7 +35,8 @@ describe('database errors without their words', () => {
     const raw = new Prisma.PrismaClientKnownRequestError(`Raw query failed. Code: \`23514\`. Message: \`${DETAIL}\``, { code: 'P2010', clientVersion: '6', meta: { code: '23514', message: DETAIL } });
     const s = sanitize(raw) as GoalFailure;
     expect(s).toBeInstanceOf(GoalFailure);
-    expect(s.message).toBe('PrismaClientKnownRequestError P2010 23514');
+    expect(s.message).toBe('PrismaClientKnownRequestError P2010 23514 PlanStep_title_check');
+    expect(s.frames.length).toBeGreaterThan(0);
     expect(s.code).toBe('23514');
     expect(JSON.stringify({ ...s, message: s.message, stack: s.stack })).not.toContain('Synthetic');
     expect(dbRefused(s)).toBe(true);

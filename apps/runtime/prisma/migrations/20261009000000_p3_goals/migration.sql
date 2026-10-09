@@ -526,7 +526,7 @@ $$;
 --  - an add puts a new key, as signed, starting todo;
 --  - a set changes a step that still matches its `from` (title and each changed
 --    field, as they were when Flint or Will suggested it) to its `to`, which never
---    makes it done and always changes something;
+--    makes it done, never changes a done step's status, and always changes something;
 --  - every other step is copied as it is, its progress (doneAt, its proof, its
 --    card and task) included, and no step is ever removed (a step is skipped);
 --  - one op per key, every op lands, every dependency names a step, and none
@@ -653,6 +653,10 @@ BEGIN
       END IF;
       IF EXISTS (SELECT 1 FROM jsonb_each(fromn) AS f WHERE (cur -> f.key) IS DISTINCT FROM f.value) THEN
         RAISE EXCEPTION 'plan %: step % changed since approval % was signed', NEW."id", k, NEW."approvalId" USING ERRCODE = 'insufficient_privilege';
+      END IF;
+      -- A done step stays done: it was done by doing it, and its doneAt and proof stay with it.
+      IF cur->>'status' = 'done' AND ton ? 'status' THEN
+        RAISE EXCEPTION 'plan %: step % is done and stays done', NEW."id", k USING ERRCODE = 'insufficient_privilege';
       END IF;
       IF EXISTS (SELECT 1 FROM jsonb_each(ton) AS t WHERE (fromn -> t.key) IS NOT DISTINCT FROM t.value) THEN
         RAISE EXCEPTION 'plan %: the operation on step % changes nothing', NEW."id", k USING ERRCODE = 'insufficient_privilege';

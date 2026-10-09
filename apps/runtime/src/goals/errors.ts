@@ -8,22 +8,26 @@
  */
 import type { GoalStatus } from '@flint/policy';
 import { Refused } from '../governance/proposals.js';
-import { failureOf, sqlState } from '../dbcodes.js';
+import { failureOf, framesOf, sqlState } from '../dbcodes.js';
 
-/** An executor's failure with its words taken out: what failed and its SQLSTATE (`code`, which dbRefused reads). */
+/**
+ * An executor's failure with its words taken out: what failed, its SQLSTATE and
+ * the constraint it names (`failure`; the SQLSTATE also as `code`, which
+ * dbRefused reads), and where it failed (the original error's top frames).
+ */
 export class GoalFailure extends Error {
   readonly code: string | undefined;
-  constructor(readonly failure: string, code?: string) {
+  constructor(readonly failure: string, code?: string, readonly frames: readonly string[] = []) {
     super(failure);
     this.name = 'GoalFailure';
     this.code = code;
   }
 }
 
-/** A refusal stays as it is (its message is one of Flint's sentences); anything else becomes its class and SQLSTATE. */
+/** A refusal stays as it is (its message is one of Flint's sentences); anything else becomes its class, SQLSTATE, constraint and frames. */
 export function sanitize(err: unknown): Refused | GoalFailure {
   if (err instanceof Refused || err instanceof GoalFailure) return err;
-  return new GoalFailure(failureOf(err), sqlState(err));
+  return new GoalFailure(failureOf(err), sqlState(err), framesOf(err));
 }
 
 /** What Will reads under a goal card: sentences, never a goal's words, never a database's. */
@@ -47,6 +51,9 @@ export const SAY = {
   checkStep: 'A check names a step the plan doesn’t have.',
   future: 'The finish date has to be in the future.',
   passed: 'The finish date is before the goal was added.',
+  reshaped: 'Flint reads this card differently since you approved it. File it again.',
+  provenance: 'A goal card names where its parts came from by id only.',
+  stepDone: 'A done step stays done.',
   exists: 'It adds a step the plan already has.',
   missing: 'It changes a step the plan doesn’t have.',
   depends: 'A step depends on a step the plan doesn’t have.',

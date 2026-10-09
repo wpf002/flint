@@ -20,6 +20,7 @@ import {
   composePlan,
   isGoalSignedAction,
   jsonbSize,
+  type PlanOp,
   type PlanStepState,
 } from '../src/goals';
 import { addLocalDays, addLocalMonths, localWallTime, nextReviewAt } from '../src/zone';
@@ -163,6 +164,25 @@ describe('plan operations', () => {
     expect(c.steps.find((s) => s.key === 's1')!.dueAt).toBe('2026-10-20T22:00:00.000Z');
   });
 
+  it('a done step stays done: no set may change its status, in the contract or in composition', () => {
+    const reopen = { op: 'set', key: 's1', from: { title: 'Synthetic step s1', status: 'done' }, to: { status: 'todo' } };
+    expect(issues(PlanOps.safeParse([reopen]))).toEqual(['0.to.status: a done step stays done']);
+    expect(issues(PlanOps.safeParse([{ ...reopen, to: { status: 'skipped' } }]))).toEqual(['0.to.status: a done step stays done']);
+    // Its other fields may still change.
+    expect(PlanOps.safeParse([{ op: 'set', key: 's1', from: { title: 'Synthetic step s1', status: 'done' }, to: { title: 'Renamed' } }]).success).toBe(true);
+    // A card made while the step was open, run after it was done, is stale (its `from` says todo).
+    const prev = [step('s1', { status: 'done', doneAt: '2026-10-01T12:00:00.000Z' })];
+    const later = PlanOps.parse([{ op: 'set', key: 's1', from: { title: 'Synthetic step s1', status: 'todo' }, to: { status: 'blocked' } }]);
+    expect(composePlan(prev, later)).toEqual({ ok: false, why: 'stale', key: 's1' });
+    const rename = PlanOps.parse([{ op: 'set', key: 's1', from: { title: 'Synthetic step s1' }, to: { title: 'Synthetic step s1, renamed' } }]);
+    expect(composePlan(prev, rename).ok).toBe(true);
+    // And composition refuses it on its own, for operations that never went through the contract.
+    for (const status of ['todo', 'skipped', 'blocked'] as const) {
+      const raw = [{ op: 'set', key: 's1', from: { title: 'Synthetic step s1' }, to: { status } }] as unknown as PlanOp[];
+      expect(composePlan(prev, raw)).toEqual({ ok: false, why: 'done', key: 's1' });
+    }
+  });
+
   it('compose refuses: a changed step (stale), a taken key, a missing step, a missing dependency, a circle', () => {
     const prev = [step('s1'), step('s2', { dependsOn: ['s1'] })];
     const set = (key: string, from: Record<string, unknown>, to: Record<string, unknown>) => PlanOps.parse([{ op: 'set', key, from: { title: `Synthetic step ${key}`, ...from }, to }]);
@@ -193,6 +213,15 @@ describe('plan operations', () => {
 
 describe('the review calendar', () => {
   const tz = 'America/Chicago';
+  it('a wall time a spring-forward skips lands past the gap, not before it', () => {
+    // Clocks jump 02:00 -> 03:00 CDT on Sun Mar 8 2026: 02:30 lands at 03:30 CDT (08:30Z), not 01:30 CST.
+    expect(localWallTime(tz, '2026-03-08', 2, 30).toISOString()).toBe('2026-03-08T08:30:00.000Z');
+    expect(localWallTime(tz, '2026-03-08', 3, 0).toISOString()).toBe('2026-03-08T08:00:00.000Z');
+    expect(localWallTime(tz, '2026-03-08', 1, 59).toISOString()).toBe('2026-03-08T07:59:00.000Z');
+    // A repeated time (fall back, Nov 1) lands on one of its two instants.
+    expect(['2026-11-01T06:30:00.000Z', '2026-11-01T07:30:00.000Z']).toContain(localWallTime(tz, '2026-11-01', 1, 30).toISOString());
+  });
+
   it('steps local calendar dates and lands at 09:00 local, the same weekday across DST', () => {
     // Fri Oct 30 2026 (CDT, UTC-5); the clocks fall back on Sun Nov 1.
     const due = localWallTime(tz, '2026-10-30', 9, 0);
@@ -215,6 +244,16 @@ describe('the review calendar', () => {
     expect(addLocalMonths('2028-01-31', 1, 31)).toBe('2028-02-29');
     expect(addLocalMonths('2026-12-15', 1, 15)).toBe('2027-01-15');
     expect(addLocalDays('2026-12-31', 1)).toBe('2027-01-01');
+    // A chain of monthly reviews keeps the goal's own day, clamped month by month: never drifting to the 28th.
+    let at = jan31;
+    const chain: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      at = nextReviewAt('P1M', tz, at, at, 31);
+      chain.push(at.toISOString().slice(0, 10));
+    }
+    expect(chain).toEqual(['2026-02-28', '2026-03-31', '2026-04-30', '2026-05-31', '2026-06-30']);
+    // Without an anchor, the due day's own (the drift the anchor prevents).
+    expect(nextReviewAt('P1M', tz, localWallTime(tz, '2026-02-28', 9, 0), localWallTime(tz, '2026-02-28', 9, 0)).toISOString().slice(0, 10)).toBe('2026-03-28');
     // A due time in the future: one step after it.
     expect(nextReviewAt('P3D', tz, localWallTime(tz, '2026-05-01', 9, 0), localWallTime(tz, '2026-04-01', 9, 0)).toISOString()).toBe(localWallTime(tz, '2026-05-04', 9, 0).toISOString());
   });

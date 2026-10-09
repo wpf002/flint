@@ -389,6 +389,14 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       const due = { op: 'set', key: 's1', from: { title: s1.title, dueAt: null }, to: { dueAt: '2026-10-20T22:00:00.000Z' } };
       expect(await attempt([due], overlay(prev, 's1', { dueAt: '2026-10-20T22:00:00.001Z' }))).toBe('42501');
       expect(await attempt([{ op: 'set', key: 's1', from: { title: s1.title, status: 'todo' }, to: { status: 'todo' } }], prev)).toBe('42501');
+      // A done step stays done: reopening or skipping it is refused, whatever the draft says about its doneAt.
+      const s3 = prev.find((s) => s.key === 's3')!;
+      for (const to of ['todo', 'skipped'] as const) {
+        const reopen = [{ op: 'set', key: 's3', from: { title: s3.title, status: 'done' }, to: { status: to } }];
+        expect(await attempt(reopen, overlay(prev, 's3', { status: to, doneAt: null })), to).toBe('42501');
+        // (With its doneAt kept, the draft step itself is refused first: a status other than done has no doneAt.)
+        expect(await attempt(reopen, overlay(prev, 's3', { status: to })), to).toMatch(/^(23514|42501)$/);
+      }
       // An op on a step the plan does not have; an add on a key it has; a dependency on no step; a circle.
       expect(await attempt([{ ...block, key: 's7' }], prev)).toBe('42501');
       expect(await attempt([addOp(S('s2'))], prev)).toBe('42501');

@@ -23,6 +23,7 @@ import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
 import { claim } from './counters.js';
 import { reverifyApproval } from './approvals.js';
+import { dbRefused } from '../dbcodes.js';
 
 export class Refused extends Error {
   constructor(
@@ -35,6 +36,9 @@ export class Refused extends Error {
     this.name = 'Refused';
   }
 }
+
+/** Chat's suggestions (P3): filed only with Will's own quoted words, which the database checks. */
+const CHAT_SUGGESTIONS: ReadonlySet<string> = new Set(['goal.propose', 'world.commitment.from_chat']);
 
 /** A card that is gone. Its refusals show under the card itself, so "it" needs no noun. */
 export const GONE = 'It no longer exists.';
@@ -134,7 +138,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   // A goal card (P3) is checked against the goal as it stands, filed with its args normalized (what Will
   // signs is what the database compares) and with a fixed reason: a reason is kept for good, and never
   // carries a goal's words. One that could not apply is never filed.
-  if (isGoalSignedAction(input.action) || input.action === 'goal.propose' || input.action === 'world.commitment.from_chat') {
+  const goalCard = isGoalSignedAction(input.action) || CHAT_SUGGESTIONS.has(input.action);
+  if (goalCard) {
     const { checkGoalCard } = await import('../goals/apply.js');
     input = await checkGoalCard(db, input, now);
   }
@@ -173,7 +178,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // makes two concurrent filings of one call agree on which row that is.
     await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`proposal:${input.action}:${argsDigest}`}))) AS l`;
     const same = await tx.proposal.findFirst({
-      where: { action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now } },
+      // A goal card from Will and the same one from a review are two cards: their reasons and their marks differ.
+      where: { action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now }, ...(goalCard ? { origin: input.origin } : {}) },
       orderBy: { createdAt: 'asc' },
       select: { id: true, expiresAt: true },
     });
@@ -181,11 +187,17 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // Written as the exact JSON text (Postgres reads numbers exactly). Through the
     // ORM a long float can be stored a digit short, and the args would then no
     // longer match the digest Will signs: the claim refuses them.
-    await tx.$executeRaw`
-      INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, consequential, reason, "estCostUsd", "expiresAt")
-      VALUES (${id}, ${input.kind}, ${input.origin}, ${input.action}, ${input.templateId ?? null}, ${JSON.stringify(input.args)}::jsonb, ${argsDigest},
-              ${JSON.stringify(input.argsProvenance)}::jsonb, ${input.tainted}, ${input.sensitivity}, ${input.destructive}, ${input.consequential},
-              ${input.reason ? redact(input.reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
+    try {
+      await tx.$executeRaw`
+        INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, consequential, reason, "estCostUsd", "expiresAt")
+        VALUES (${id}, ${input.kind}, ${input.origin}, ${input.action}, ${input.templateId ?? null}, ${JSON.stringify(input.args)}::jsonb, ${argsDigest},
+                ${JSON.stringify(input.argsProvenance)}::jsonb, ${input.tainted}, ${input.sensitivity}, ${input.destructive}, ${input.consequential},
+                ${input.reason ? redact(input.reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
+    } catch (err) {
+      // The database's quote floor (P3) refusing a chat suggestion is the caller's input: a sentence, not a 500.
+      if (CHAT_SUGGESTIONS.has(input.action) && dbRefused(err)) throw new Refused(400, 'A suggestion from chat needs your own words, quoted.');
+      throw err;
+    }
     const row = { id, action: input.action, argsDigest };
     await appendAudit(tx, [{
       actor, context, kind: 'decision', action: input.action, tier: decision.tier, decision: 'queue', outcome: 'pending',

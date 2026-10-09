@@ -280,6 +280,13 @@ changes what counts as done or its timing only with your signature, and every
 change to its plan is a card you sign. Nothing files a goal card yet, and
 nothing reviews goals.
 
+### What the next parts must do
+
+- **The goals panel (part 2)** must forward each card's `consequential` mark to
+  the console and ask for a fresh touch on every card that has it. Today the
+  console decides `fresh` from `apprAlone` alone, which doesn't look at it, so a
+  goal card could go through Approve All on one earlier touch.
+
 ### Rolling P3 back
 
 The migration's `down.sql` (`20261009000000_p3_goals`) belongs to a rollback:
