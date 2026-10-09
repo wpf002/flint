@@ -3,7 +3,8 @@
  * its source): /chat turns are counted after auth and validation, never an
  * eval /generate; "World now" reaches frontier calls only (never the local
  * fallback, never /generate); a chat.turn event ends each /chat turn and no
- * /generate turn; an eval replay's 5xx is not a route.error.
+ * /generate turn; an eval replay's 5xx is not a route.error; memory extraction
+ * waits for chat on the local model and is spend-gated only on the frontier.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -60,5 +61,15 @@ describe('index.ts wiring', () => {
   it('the Watcher starts only while FLINT_WATCHER is not off (P2.5)', () => {
     expect(src).toContain('if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();');
     expect(src.match(/new Watcher\(/g)).toHaveLength(1);
+  });
+
+  it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {
+    const block = between('const memoryPlan = chooseMemoryBrain(process.env', 'const servers = registry?.connectedServers()');
+    expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
+    expect(block).toContain('new MemoryExtractor(memory, knowledge, memoryPlan.brain,');
+    expect(block).toContain("memoryPlan.kind === 'local'\n        ? { chatActive }\n        : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }");
+    // The chat signal is the same ChatLoad /chat counts turns with, built before it.
+    expect(src.indexOf('const chatLoad = new ChatLoad()')).toBeLessThan(src.indexOf('const chatActive = liveChat(chatLoad)'));
+    expect(src.match(/new ChatLoad\(/g)).toHaveLength(1);
   });
 });

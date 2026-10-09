@@ -214,12 +214,12 @@ describe('PersistentStore with a history window', () => {
     const ex = new MemoryExtractor(
       store,
       knowledge,
-      () => ({
+      {
         generate: async (i: { system: string; prompt: string }) => {
           prompts.push(i.prompt);
-          return { text: '[]' };
+          return { text: '{"facts": []}' };
         },
-      }),
+      },
       join(dir, 'extract-state.json'),
       { now: () => NOW },
     );

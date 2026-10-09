@@ -99,6 +99,7 @@ import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
+import { chooseMemoryBrain, liveChat } from './memory-brain';
 import {
   SpendLedger,
   SpendGuard,
@@ -681,7 +682,7 @@ async function main(): Promise<void> {
   // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
   const frontierCfg = buildFrontierProvider();
   let frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
-  let extractFlint: Flint | undefined; // bare frontier (no persona) for background jobs like memory extraction
+  let extractFlint: Flint | undefined; // bare frontier (no persona): memory extraction, when Will opts it in (FLINT_MEMORY_BRAIN=frontier)
   const flintOf = new Map<Persona, Flint>();
   const frontierPersonaFor = (fProvider: ProviderAdapter, fModel: string, variant: StyleVariant): Persona => {
     const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer });
@@ -722,7 +723,7 @@ async function main(): Promise<void> {
     frontier = { persona: brains.primary.persona, model: brains.primary.label, media: mediaOf(brains.primary) };
     frontierModel = brains.primary.label;
     // Query planning is light work: give deep_research the routine tier's client.
-    // Memory extraction is judgment work: the primary tier, bare (no persona).
+    // Memory extraction, if Will opts it onto the frontier: the primary tier, bare (no persona).
     extractFlint = flintOf.get(brains.primary.persona);
     const planner = brains.chain('routine')[0] ?? brains.primary;
     frontierFlint = flintOf.get(planner.persona);
@@ -750,24 +751,44 @@ async function main(): Promise<void> {
   if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();
   else console.error('[watch] proactive watcher off (FLINT_WATCHER=off): the runtime has the calendar');
 
+  // /chat turns in flight (POST /internal/load): the runtime's triage yields to
+  // them, and so does memory extraction on the local model (below).
+  const chatLoad = new ChatLoad();
+
   // Long-term memory that actually grows. `remember` alone produced 9 facts in
   // 1,421 turns, because it only fires when the model elects to call it; this
-  // reads the turns Flint has already had and extracts the durable ones. Uses
-  // the bare frontier model with a curator prompt, not the persona (skips entirely
-  // if none is configured), under a daily call cap, and writes through
+  // reads the turns Flint has already had and extracts the durable ones, with a
+  // curator prompt (not the persona), under a daily call cap, and writes through
   // KnowledgeStore, so dedupe, tombstones + the ephemeral filter still apply.
-  // Background work: it pauses at 80% of its vendor's spend cap (./spend).
-  const extractVendor = brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
-  new MemoryExtractor(
-    memory,
-    knowledge,
-    () => {
-      const f = extractFlint;
-      return f && { generate: (input: { system: string; prompt: string }) => f.generate(input, { context: spendContext('extract') }) };
+  // It runs on the local model by default (./memory-brain), yielding to Will's
+  // chat; on the frontier only with FLINT_MEMORY_BRAIN=frontier, where it is
+  // background spend and pauses at 80% of its vendor's cap (./spend).
+  const extractWith = extractFlint;
+  const chatActive = liveChat(chatLoad);
+  const memoryPlan = chooseMemoryBrain(process.env, {
+    frontier: extractWith && {
+      generate: (input: { system: string; prompt: string }) => extractWith.generate(input, { context: spendContext('extract') }),
     },
-    join(dataDir, 'extract-state.json'),
-    { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined), isTainted: (cid, tid) => convTaint.isTainted(cid, tid) },
-  ).start();
+    chatActive,
+    log: (m) => console.error(m),
+  });
+  if (memoryPlan.kind === 'none') {
+    console.error(`[memory-extract] not running: ${memoryPlan.why}`);
+  } else {
+    const extractVendor = memoryPlan.kind === 'frontier' && brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
+    console.error(
+      memoryPlan.kind === 'local'
+        ? `[memory-extract] on the local model ${memoryPlan.model.model} (num_ctx ${memoryPlan.model.numCtx ?? 'unset'}); it waits for Will's chat`
+        : `[memory-extract] on the frontier (${brains?.primary.label ?? 'primary tier'}), metered as extract`,
+    );
+    new MemoryExtractor(memory, knowledge, memoryPlan.brain, join(dataDir, 'extract-state.json'), {
+      kind: memoryPlan.kind,
+      ...(memoryPlan.kind === 'local'
+        ? { chatActive }
+        : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }),
+      isTainted: (cid, tid) => convTaint.isTainted(cid, tid),
+    }).start();
+  }
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
@@ -788,8 +809,6 @@ async function main(): Promise<void> {
       return cached;
     };
   })();
-  // /chat turns in flight (POST /internal/load): the runtime's triage yields to them.
-  const chatLoad = new ChatLoad();
   // The runtime's metered frontier calls (./background-complete): every kind $0 until Will raises it.
   const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, frontier: () => backgroundFrontier, log: (m) => console.error(m) });
   startInternal({

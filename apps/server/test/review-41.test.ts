@@ -131,7 +131,7 @@ describe('conversation taint', () => {
     const ex = new MemoryExtractor(
       { conversationIds: () => ['c'], getTurns: async () => structuredClone(turns) },
       new KnowledgeStore(join(dir, 'k.json'), { embed: async () => { throw new Error('down'); } } as unknown as ConstructorParameters<typeof KnowledgeStore>[1]),
-      () => ({ generate: async (i: { system: string; prompt: string }) => (prompts.push(i.prompt), { text: '[]' }) }),
+      { generate: async (i: { system: string; prompt: string }) => (prompts.push(i.prompt), { text: '{"facts": []}' }) },
       join(dir, 's.json'),
       { isTainted: (_c, t) => t === 't1' },
     );

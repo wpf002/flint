@@ -35,7 +35,7 @@ function source(convs: Record<string, Turn[]>): TurnSource {
   };
 }
 
-/** A fake frontier that records prompts and replies with a scripted answer. */
+/** A fake brain that records prompts and replies with a scripted answer. */
 function brain(reply: (prompt: string, n: number) => string) {
   const calls: Array<{ system: string; prompt: string }> = [];
   return {
@@ -73,7 +73,7 @@ describe('MemoryExtractor.run', () => {
     };
     const k = new KnowledgeStore(kpath, downEmbedder);
     const { b, calls } = brain(() => '[]');
-    const ex = new MemoryExtractor(source(convs), k, () => b, spath);
+    const ex = new MemoryExtractor(source(convs), k, b, spath);
     await ex.run();
     expect(calls).toHaveLength(1);
     expect(calls[0]!.system).toBe(EXTRACT_SYSTEM); // curator prompt, not the persona
@@ -98,7 +98,7 @@ describe('MemoryExtractor.run', () => {
       ],
     };
     const { b, calls } = brain(() => '[]');
-    await new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath).run();
+    await new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), b, spath).run();
     const second = calls[0]!.prompt.split('### Turn 2')[1]!;
     expect(second).toContain('earlier in this conversation');
     expect(second).toContain('get you a server');
@@ -110,14 +110,16 @@ describe('MemoryExtractor.run', () => {
     const k = new KnowledgeStore(kpath, downEmbedder);
     await k.add("Will's favorite MLB team is the Houston Astros.");
     const { b } = brain(() =>
-      JSON.stringify([
-        { fact: "Will's favorite MLB team is the Houston Astros.", turn: 1 },
-        { fact: 'Will has a friend named Drew.', category: 'Person', turn: 2 },
-        { fact: 'Will asked Flint to say hi to Drew.', turn: 2 },
-        'Will is going to the game tonight with Drew.',
-      ]),
+      JSON.stringify({
+        facts: [
+          { fact: "Will's favorite MLB team is the Houston Astros.", turn: 1, quote: 'My team is the Houston Astros' },
+          { fact: 'Will has a friend named Drew.', category: 'Person', turn: 2, quote: 'my friend Drew' },
+          { fact: 'Will asked Flint to say hi to Drew.', turn: 2, quote: 'Tell my friend Drew hi' },
+          { fact: 'Will is going to the game tonight with Drew.', turn: 2, quote: 'Drew hi from me' },
+        ],
+      }),
     );
-    const ex = new MemoryExtractor(source({ console: [t1], c9: [t2] }), k, () => b, spath);
+    const ex = new MemoryExtractor(source({ console: [t1], c9: [t2] }), k, b, spath);
     expect(await ex.run()).toBe(1);
     const drew = k.all().find((f) => f.text.includes('Drew'))!;
     expect(drew).toMatchObject({ source: 'history', conversationId: 'c9', sourceAt: t2.updatedAt, category: 'person' });
@@ -131,9 +133,11 @@ describe('MemoryExtractor.run', () => {
     const oldId = k.all()[0]!.id;
     const newer = turn('console', 'The Mac Studio is scheduled to arrive September 25 to October 3');
     const { b, calls } = brain(() =>
-      JSON.stringify([{ fact: "Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.", turn: 1, supersedes: [oldId, 'k999'] }]),
+      JSON.stringify({
+        facts: [{ fact: "Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.", turn: 1, quote: 'scheduled to arrive September 25 to October 3', supersedes: [oldId, 'k999'] }],
+      }),
     );
-    const ex = new MemoryExtractor(source({ console: [newer] }), k, () => b, spath);
+    const ex = new MemoryExtractor(source({ console: [newer] }), k, b, spath);
     await ex.run();
     expect(calls[0]!.prompt).toContain(`${oldId}: Will is buying a Mac Studio`); // known facts are shown
     expect(ex.lastStats.superseded).toBe(1);
@@ -145,8 +149,10 @@ describe('MemoryExtractor.run', () => {
     const k = new KnowledgeStore(kpath, downEmbedder);
     await k.add("Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.", 'user', { sourceAt: tick + 10 * 86_400_000 });
     const newerId = k.all()[0]!.id;
-    const { b } = brain(() => JSON.stringify([{ fact: 'Will plans to buy a Mac Studio in August 2026.', turn: 1, supersedes: [newerId] }]));
-    const ex = new MemoryExtractor(source({ console: [old] }), k, () => b, spath);
+    const { b } = brain(() =>
+      JSON.stringify({ facts: [{ fact: 'Will plans to buy a Mac Studio in August 2026.', turn: 1, quote: 'buy a Mac Studio sometime in August', supersedes: [newerId] }] }),
+    );
+    const ex = new MemoryExtractor(source({ console: [old] }), k, b, spath);
     await ex.run();
     expect(ex.lastStats.superseded).toBe(0);
     expect(k.all().map((f) => f.id)).toContain(newerId);
@@ -157,7 +163,7 @@ describe('MemoryExtractor.run', () => {
     const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
     const k = new KnowledgeStore(kpath, downEmbedder);
     const { b, calls } = brain(() => 'Sure! Here are some facts about Will: he has a dog.');
-    const ex = new MemoryExtractor(source(convs), k, () => b, spath);
+    const ex = new MemoryExtractor(source(convs), k, b, spath);
     await ex.run();
     expect(state().watermarks.console).toBeUndefined();
     expect(ex.lastStats.unparseable).toBe(1);
@@ -168,12 +174,24 @@ describe('MemoryExtractor.run', () => {
     expect(calls).toHaveLength(3);
   });
 
-  it('does not advance when the frontier throws', async () => {
+  // It used to throw out of the pass, and every retry spent one of the day's calls.
+  it('a brain that throws moves no watermark, spends none of the day, and backs the next pass off', async () => {
     const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
     const k = new KnowledgeStore(kpath, downEmbedder);
-    const ex = new MemoryExtractor(source(convs), k, () => ({ generate: async () => { throw new Error('529 overloaded'); } }), spath);
-    await expect(ex.run()).rejects.toThrow('529');
+    const ex = new MemoryExtractor(source(convs), k, { generate: async () => { throw new Error('529 overloaded'); } }, spath, {
+      backlogEveryMs: 15 * 60_000,
+      everyMs: 6 * 60 * 60_000,
+    });
+    expect(await ex.run()).toBe(0);
     expect(existsWatermark(spath, 'console')).toBe(false);
+    expect(state().budget.calls).toBe(0);
+    expect(ex.lastStats).toMatchObject({ calls: 0, failed: 1 });
+    expect(ex.nextDelayMs).toBe(15 * 60_000);
+    await ex.run();
+    expect(ex.nextDelayMs).toBe(30 * 60_000);
+    for (let i = 0; i < 10; i++) await ex.run();
+    expect(ex.nextDelayMs).toBe(6 * 60 * 60_000); // never longer than the base interval
+    expect(state().budget.calls).toBe(0);
   });
 
   it('respects the daily call budget and resumes the next day', async () => {
@@ -181,7 +199,7 @@ describe('MemoryExtractor.run', () => {
     for (let i = 0; i < 5; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
     let now = Date.UTC(2026, 8, 23, 12);
     const { b, calls } = brain(() => '[]');
-    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, {
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), b, spath, {
       batchChars: 1, // one turn per call
       maxCallsPerDay: 2,
       now: () => now,
@@ -202,7 +220,7 @@ describe('MemoryExtractor.run', () => {
     for (let i = 0; i < 3; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
     let paused: string | undefined = "Claude (Anthropic) at 85% of today's $20.00 cap; background work waits";
     const { b, calls } = brain(() => '[]');
-    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, { batchChars: 1, gate: () => paused });
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), b, spath, { batchChars: 1, gate: () => paused });
     expect(await ex.run()).toBe(0);
     expect(calls).toHaveLength(0);
     expect(existsWatermark(spath, 'c0')).toBe(false); // nothing skipped: the turns wait
@@ -215,7 +233,7 @@ describe('MemoryExtractor.run', () => {
     const convs: Record<string, Turn[]> = {};
     for (let i = 0; i < 3; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
     const { b, calls } = brain(() => '[]');
-    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, {
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), b, spath, {
       batchChars: 1, // one turn per call
       gate: () => (calls.length >= 1 ? 'at 80% of the cap' : undefined),
     });
@@ -230,7 +248,7 @@ describe('MemoryExtractor.run', () => {
     const convs: Record<string, Turn[]> = {};
     for (let i = 0; i < 5; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
     const { b, calls } = brain(() => '[]');
-    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), () => b, spath, { maxTurnsPerPass: 3 });
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), b, spath, { maxTurnsPerPass: 3 });
     await ex.run();
     expect(ex.lastStats.turnsSent).toBe(3);
     await ex.run();
@@ -245,15 +263,11 @@ describe('MemoryExtractor.run', () => {
     const t = turn('console', 'My friend Tanner lives in Austin and works in oil and gas');
     writeFileSync(spath, JSON.stringify({ watermarks: { console: t.updatedAt } }));
     const { b, calls } = brain(() => '[]');
-    await new MemoryExtractor(source({ console: [t] }), new KnowledgeStore(kpath, downEmbedder), () => b, spath).run();
+    await new MemoryExtractor(source({ console: [t] }), new KnowledgeStore(kpath, downEmbedder), b, spath).run();
     expect(calls).toHaveLength(1);
     expect(state().version).toBe(EXTRACT_VERSION);
   });
 
-  it('skips entirely when no frontier is configured', async () => {
-    const ex = new MemoryExtractor(source({ console: [turn('console', 'something durable about Will here')] }), new KnowledgeStore(kpath, downEmbedder), () => undefined, spath);
-    expect(await ex.run()).toBe(0);
-  });
 });
 
 function existsWatermark(p: string, cid: string): boolean {
