@@ -103,19 +103,30 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(await objects(owner)).toEqual(shape);
   });
 
-  // A change to a grant is a security change: it shows up as a diff to
-  // fixtures/grants.json in review. FLINT_UPDATE_GRANTS=1 rewrites the fixture.
-  it('one migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
-    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, '20261001000200_p1_ledger', 'down.sql'), 'utf8')));
-    expect(await withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."Prediction"') AS t`)).rows[0].t)).toBeNull();
+  // The newest migration is the one a rollback undoes (P3: p3_goals). Its down.sql
+  // alone, then a deploy, gives back exactly the schema: migrate status lists it as
+  // not applied, what it made is gone, and the redeploy diffs empty. (An older
+  // migration's down.sql alone no longer can: p1_ledger's would recreate Prediction
+  // without the goalId P3 adds.)
+  it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
+    const newest = migrationDirs().at(-1)!;
+    // What the newest migration makes, to see it go and come back. A new migration names its own here.
+    const made: Record<string, string> = { '20261009000000_p3_goals': 'Goal' };
+    expect(made[newest], `name a table ${newest} makes`).toBeTruthy();
+    const table = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass($1) AS t`, [`public."${made[newest]}"`])).rows[0].t);
+    expect(await table()).not.toBeNull();
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    expect(await table()).toBeNull();
     const status = await prisma(['migrate', 'status'], owner);
-    expect(status.stdout + status.stderr).toMatch(/20261001000200_p1_ledger/);
+    expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${newest}`));
     await migrateUp(owner);
-    expect(await withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."Prediction"') AS t`)).rows[0].t)).toBe('"Prediction"');
+    expect(await table()).not.toBeNull();
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   });
 
+  // A change to a grant is a security change: it shows up as a diff to
+  // fixtures/grants.json in review. FLINT_UPDATE_GRANTS=1 rewrites the fixture.
   it('the grants are exactly the reviewed ones', async () => {
     const got = await grants(owner);
     if (process.env.FLINT_UPDATE_GRANTS === '1') writeFileSync(GRANTS_FIXTURE, `${JSON.stringify(got, null, 2)}\n`);

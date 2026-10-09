@@ -1,23 +1,26 @@
 /**
  * Actions the runtime carries out itself once Will has approved them: turning a
  * source on, applying a signed policy change, adding a triage rule, writing a
- * proposed link, and creating the people on a calendar card (P2.5). Each goes through
- * claimProposal (re-verification, tier, cap, intent) and then completes, so the
- * audit trail reads the same as any other approved action. The database checks
- * the effect too: a cursor turns on only under an executing enable proposal,
- * and a policy row must appear in the signed proposal.
+ * proposed link, creating the people on a calendar card (P2.5), and changing a
+ * goal or its plan (P3). Each goes through claimProposal (re-verification,
+ * tier, cap, intent) and then completes, so the audit trail reads the same as
+ * any other approved action; a goal card does all three in one transaction
+ * (goals/apply.ts). The database checks the effect too: a cursor turns on only
+ * under an executing enable proposal, a policy row must appear in the signed
+ * proposal, and a goal moves only as its executing card says.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { SOURCES, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SIGNED_ACTIONS, SOURCES, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
-import { dbRefused } from '../dbcodes.js';
+import { dbRefused, failureOf } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
+import { runGoalCard } from '../goals/apply.js';
 
-export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create']);
+export const INTERNAL_ACTIONS = new Set(['world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS]);
 
 /**
  * A triage rule is policy (kind `rule`): its predicate may read only the
@@ -82,6 +85,8 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
   const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
   if (!p) throw new Refused(404, GONE);
   if (!INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
+  // P3: a goal card is claimed, applied and completed in one transaction.
+  if (isGoalSignedAction(p.action)) return runGoalCard(db, id, rp, tz, actor);
   const claimed = await claimProposal(db, id, rp, tz, actor);
   try {
     if (claimed.action === 'world.source.enable') {
@@ -135,26 +140,31 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await completeProposal(db, id, { ok: true, result: { rule: rule.name } }, actor);
       return { rule: rule.name };
     }
-    const { rows } = PolicyArgs.parse(claimed.args);
-    const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
-    // All rows or none: a signed table is applied whole.
-    await db.$transaction(async (tx) => {
-      for (const r of rows) {
-        await tx.actionPolicy.create({
-          data: {
-            id: `ap${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
-            pattern: r.pattern, tier: r.tier, dailyCap: r.dailyCap ?? null, ...(r.scope ? { scope: r.scope as Prisma.InputJsonObject } : {}),
-            reason: r.reason ?? 'signed policy change', approvalId, expiresAt: new Date(r.expiresAt),
-          },
-        });
-      }
-    });
-    await completeProposal(db, id, { ok: true, result: { rows: rows.length } }, actor);
-    return { rows: rows.length };
+    if (claimed.action === 'policy.change') {
+      const { rows } = PolicyArgs.parse(claimed.args);
+      const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
+      // All rows or none: a signed table is applied whole.
+      await db.$transaction(async (tx) => {
+        for (const r of rows) {
+          await tx.actionPolicy.create({
+            data: {
+              id: `ap${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
+              pattern: r.pattern, tier: r.tier, dailyCap: r.dailyCap ?? null, ...(r.scope ? { scope: r.scope as Prisma.InputJsonObject } : {}),
+              reason: r.reason ?? 'signed policy change', approvalId, expiresAt: new Date(r.expiresAt),
+            },
+          });
+        }
+      });
+      await completeProposal(db, id, { ok: true, result: { rows: rows.length } }, actor);
+      return { rows: rows.length };
+    }
+    // An action listed above with no branch here fails closed: it is never run as something else.
+    throw new Refused(409, 'Flint can’t carry this out yet.');
   } catch (err) {
-    // No database internals in the reply or the record: a reference, and the detail in the log.
+    // No database internals in the reply, the record or the log: a reference, and what failed with its
+    // SQLSTATE (a database's message can carry the row it refused).
     const ref = `err${Date.now().toString(36)}`;
-    console.error(`[runtime] ${ref} running ${claimed.action} failed:`, err);
+    console.error(`[runtime] ${ref} running ${claimed.action} failed: ${failureOf(err)}`);
     await completeProposal(db, id, { ok: false, error: `could not carry it out (${ref})` }, actor).catch(() => {});
     if (err instanceof Refused) throw err;
     // The database refusing what was signed is the input's fault, a 400: a CHECK (23514, wherever Prisma

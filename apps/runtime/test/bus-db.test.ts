@@ -57,6 +57,10 @@ describe.skipIf(NO_DB)('the job bus on pg-boss', () => {
     const have = (await b.boss.getQueues()).map((q) => q.name).sort();
     expect(have).toEqual([...ALL_QUEUES, ...PGBOSS_QUEUES].sort());
     expect(QUEUES.sync).toContain('sync.nexus_inbox');
+    // P3's three, made by its migration (nothing sends to them until the planner is on).
+    expect(ALL_QUEUES).toEqual(expect.arrayContaining(['goals.tick', 'goals.review', 'goals.plan']));
+    const policy = Object.fromEntries((await b.boss.getQueues()).map((q) => [q.name, q.policy]));
+    expect([policy['goals.tick'], policy['goals.review'], policy['goals.plan']]).toEqual(['singleton', 'stately', 'stately']);
   });
 
   it('missing queue → degraded start: it refuses to start and names the queue', async () => {

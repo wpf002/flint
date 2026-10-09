@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { REFUSAL, digestOf, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { REFUSAL, digestOf, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -129,7 +129,15 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 });
 
 /** Record a proposal. A FORBIDDEN action is refused (409) and the refusal audited. */
-export async function createProposal(db: Db, input: CreateProposal, actor: string, now = new Date()) {
+export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date()) {
+  let input = given;
+  // A goal card (P3) is checked against the goal as it stands, filed with its args normalized (what Will
+  // signs is what the database compares) and with a fixed reason: a reason is kept for good, and never
+  // carries a goal's words. One that could not apply is never filed.
+  if (isGoalSignedAction(input.action) || input.action === 'goal.propose' || input.action === 'world.commitment.from_chat') {
+    const { checkGoalCard } = await import('../goals/apply.js');
+    input = await checkGoalCard(db, input, now);
+  }
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {
     const { PolicyArgs } = await import('./internal.js');
@@ -273,49 +281,57 @@ export async function rejectProposal(db: Db, id: string, opts: { approvalId?: st
 export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, now = new Date()) {
   // A refusal that changes state (approved -> failed) must commit before it is
   // reported, so the transaction returns it instead of throwing it.
-  const out = await db.$transaction(async (tx) => {
-    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} FOR UPDATE`;
-    if (locked.length === 0) throw new Refused(404, GONE);
-    const p = await tx.proposal.findUniqueOrThrow({ where: { id } });
-    if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, p.status === 'approved' ? statusWords('pending') : statusWords(p.status));
-    if (p.expiresAt <= now) throw new Refused(409, 'It expired.');
-    // `reason` is what Will reads (the card's error, and the refusal); `why`, the engine's own words, is audited too.
-    const fail = async (reason: string, status: 403 | 409, why?: string) => {
-      await tx.proposal.update({ where: { id }, data: { status: 'failed', error: reason, executedAt: now } });
-      await appendAudit(tx, [{
-        actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
-        inputs: auditInputs(p), reasoning: (why ? `${reason} (${why})` : reason).slice(0, 1000), correlationId: id, tainted: p.tainted,
-      }], now);
-      return { refused: new Refused(status, reason, why) } as const;
-    };
-    const v = await reverifyApproval(tx, p.approvalId, rp);
-    if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
-      // The reason stays in the audit (the refusal is stored as the card's error, which Will reads),
-      // and a cause no retry can clear (the runtime's RP not set up, a revoked key) says its fix.
-      // A revoked key is "no longer valid" (the card has failed: there is nothing to approve again).
-      const fix = v.ok || v.reason === REFUSAL.revoked ? undefined : refusalFix(v.reason, 'runtime');
-      return fail(fix ? `Flint didn’t run it. ${fix}` : 'Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
-    }
-    // The args as stored, read as text (exact), are what is checked and what runs.
-    const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;
-    const args = stored?.t ? (JSON.parse(stored.t) as Record<string, unknown>) : null;
-    if (args === null || digestOf(args) !== p.argsDigest) return fail('Flint didn’t run it because it changed after you approved it.', 409, 'the args do not match their digest');
-    const decision = await tierOf(tx, p, now);
-    if (decision.tier === 'forbidden') return fail('Flint didn’t run it because it isn’t allowed now.', 409, `forbidden: ${decision.reason}`);
-    if (decision.cap) {
-      const n = await claim(tx, decision.key, decision.cap, tz, now);
-      // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
-      if (n === null) throw new Refused(429, `${CAP_PERIOD[decision.cap.period] ?? 'Its'} limit of ${decision.cap.limit} is reached.`);
-    }
-    await tx.proposal.update({ where: { id }, data: { status: 'executing' } });
-    await appendAudit(tx, [{
-      actor, context: contextOf(p.origin), kind: 'intent', action: p.action, tier: decision.tier, decision: 'act', outcome: 'pending',
-      inputs: auditInputs(p), correlationId: id, tainted: p.tainted,
-    }], now);
-    return { claimed: { id, action: p.action, args, argsDigest: p.argsDigest } } as const;
-  });
+  const out = await db.$transaction((tx) => claimIn(tx, id, rp, tz, actor, now));
   if ('refused' in out) throw out.refused;
   return out.claimed;
+}
+
+/**
+ * claimProposal's work inside the caller's transaction (P3 claims, applies and
+ * completes a goal card in one). A refusal that fails the card is returned, to
+ * be committed and then thrown; one that changes nothing (gone, not approved, a
+ * cap reached) is thrown, and rolls back with the caller's transaction.
+ */
+export async function claimIn(tx: Tx, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, now = new Date()) {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} FOR UPDATE`;
+  if (locked.length === 0) throw new Refused(404, GONE);
+  const p = await tx.proposal.findUniqueOrThrow({ where: { id } });
+  if (p.status !== 'approved' || !p.approvalId) throw new Refused(409, p.status === 'approved' ? statusWords('pending') : statusWords(p.status));
+  if (p.expiresAt <= now) throw new Refused(409, 'It expired.');
+  // `reason` is what Will reads (the card's error, and the refusal); `why`, the engine's own words, is audited too.
+  const fail = async (reason: string, status: 403 | 409, why?: string) => {
+    await tx.proposal.update({ where: { id }, data: { status: 'failed', error: reason, executedAt: now } });
+    await appendAudit(tx, [{
+      actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
+      inputs: auditInputs(p), reasoning: (why ? `${reason} (${why})` : reason).slice(0, 1000), correlationId: id, tainted: p.tainted,
+    }], now);
+    return { refused: new Refused(status, reason, why) } as const;
+  };
+  const v = await reverifyApproval(tx, p.approvalId, rp);
+  if (!v.ok || v.payload.argsDigest !== p.argsDigest || v.payload.action !== p.action) {
+    // The reason stays in the audit (the refusal is stored as the card's error, which Will reads),
+    // and a cause no retry can clear (the runtime's RP not set up, a revoked key) says its fix.
+    // A revoked key is "no longer valid" (the card has failed: there is nothing to approve again).
+    const fix = v.ok || v.reason === REFUSAL.revoked ? undefined : refusalFix(v.reason, 'runtime');
+    return fail(fix ? `Flint didn’t run it. ${fix}` : 'Flint didn’t run it because your approval is no longer valid.', 403, v.ok ? 'it covers different args' : v.reason);
+  }
+  // The args as stored, read as text (exact), are what is checked and what runs.
+  const [stored] = await tx.$queryRaw<Array<{ t: string | null }>>`SELECT args::text AS t FROM "Proposal" WHERE id = ${id}`;
+  const args = stored?.t ? (JSON.parse(stored.t) as Record<string, unknown>) : null;
+  if (args === null || digestOf(args) !== p.argsDigest) return fail('Flint didn’t run it because it changed after you approved it.', 409, 'the args do not match their digest');
+  const decision = await tierOf(tx, p, now);
+  if (decision.tier === 'forbidden') return fail('Flint didn’t run it because it isn’t allowed now.', 409, `forbidden: ${decision.reason}`);
+  if (decision.cap) {
+    const n = await claim(tx, decision.key, decision.cap, tz, now);
+    // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
+    if (n === null) throw new Refused(429, `${CAP_PERIOD[decision.cap.period] ?? 'Its'} limit of ${decision.cap.limit} is reached.`);
+  }
+  await tx.proposal.update({ where: { id }, data: { status: 'executing' } });
+  await appendAudit(tx, [{
+    actor, context: contextOf(p.origin), kind: 'intent', action: p.action, tier: decision.tier, decision: 'act', outcome: 'pending',
+    inputs: auditInputs(p), correlationId: id, tainted: p.tainted,
+  }], now);
+  return { claimed: { id, action: p.action, args, argsDigest: p.argsDigest } } as const;
 }
 
 export const CompleteProposal = z
@@ -343,6 +359,29 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
     return { late: true };
   }
   if (p.status !== 'executing') throw new Refused(409, statusWords(p.status));
+  await db.$transaction((tx) => writeCompletion(tx, p, body, actor, now));
+  return {};
+}
+
+/**
+ * Complete an executing proposal inside the caller's transaction: P3's executors
+ * commit a goal change and its card's completion together, so a crash between
+ * the two can never leave the change made and the card "outcome unknown".
+ */
+export async function completeIn(tx: Tx, id: string, body: z.infer<typeof CompleteProposal>, actor: string, now = new Date()): Promise<void> {
+  const p = await tx.proposal.findUnique({ where: { id } });
+  if (!p) throw new Refused(404, GONE);
+  if (p.status !== 'executing') throw new Refused(409, statusWords(p.status));
+  await writeCompletion(tx, p, body, actor, now);
+}
+
+async function writeCompletion(
+  tx: Tx,
+  p: { id: string; action: string; argsDigest: string; origin: string; tainted: boolean; sensitivity: string },
+  body: z.infer<typeof CompleteProposal>,
+  actor: string,
+  now: Date,
+): Promise<void> {
   let result: Prisma.InputJsonObject | undefined;
   if (body.result) {
     // Measured as the database measures it (jsonb text), with room to spare: an
@@ -351,25 +390,22 @@ export async function completeProposal(db: Db, id: string, body: z.infer<typeof 
     const size = jsonbBytes(r);
     result = (size <= 15000 ? r : { truncated: true, bytes: size }) as Prisma.InputJsonObject;
   }
-  await db.$transaction(async (tx) => {
-    await tx.proposal.update({
-      where: { id },
-      data: {
-        status: body.ok ? 'executed' : 'failed',
-        executedAt: now,
-        ...(result ? { result } : {}),
-        ...(body.error ? { error: redact(body.error).slice(0, 2000) } : {}),
-      },
-    });
-    await appendAudit(tx, [{
-      actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: body.ok ? 'ok' : 'failed',
-      inputs: auditInputs(p), correlationId: id, tainted: p.tainted, ...(body.costUsd !== undefined ? { costUsd: body.costUsd } : {}),
-      // The audit keeps no PERSONAL free text (plan 3.0.5): for personal, financial or
-      // tainted work the error's words stay in Proposal.error (which retention clears).
-      ...(body.error && p.sensitivity === 'ops' && !p.tainted ? { reasoning: redact(body.error).slice(0, 1000) } : {}),
-    }], now);
+  await tx.proposal.update({
+    where: { id: p.id },
+    data: {
+      status: body.ok ? 'executed' : 'failed',
+      executedAt: now,
+      ...(result ? { result } : {}),
+      ...(body.error ? { error: redact(body.error).slice(0, 2000) } : {}),
+    },
   });
-  return {};
+  await appendAudit(tx, [{
+    actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'act', outcome: body.ok ? 'ok' : 'failed',
+    inputs: auditInputs(p), correlationId: p.id, tainted: p.tainted, ...(body.costUsd !== undefined ? { costUsd: body.costUsd } : {}),
+    // The audit keeps no PERSONAL free text (plan 3.0.5): for personal, financial or
+    // tainted work the error's words stay in Proposal.error (which retention clears).
+    ...(body.error && p.sensitivity === 'ops' && !p.tainted ? { reasoning: redact(body.error).slice(0, 1000) } : {}),
+  }], now);
 }
 
 /** Pending and approved proposals past their expiry become expired, each one audited. Returns how many. */

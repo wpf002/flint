@@ -272,6 +272,29 @@ rollback, not to turning the source off:
 
 Any later deploy of P2.6 code applies the migration again.
 
+## Goals (P3)
+
+Goals arrive in parts. This first part is only what the database guarantees,
+and it changes nothing you see: a goal starts, finishes, is abandoned, or
+changes what counts as done or its timing only with your signature, and every
+change to its plan is a card you sign. Nothing files a goal card yet, and
+nothing reviews goals.
+
+### Rolling P3 back
+
+The migration's `down.sql` (`20261009000000_p3_goals`) belongs to a rollback:
+
+1. First deploy a runtime from before P3, with reviews off. P3's job bus
+   expects the three goal queues that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. Your goals, their plans and
+   their reviews go with it. Their history keeps only lengths, never your
+   words, and their forecasts stay in the prediction ledger.
+
+A goal card still waiting expires on its own. One you approve while P3 is
+rolled back isn't carried out ("not carried out by the runtime") and stays
+approved. Any later deploy of P3 code applies the migration again. Claude runs
+`down.sql` only with your OK, after the dump.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A
