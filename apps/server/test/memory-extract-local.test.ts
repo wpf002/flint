@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import type { Turn } from '@flint/core';
 import { KnowledgeStore } from '../src/knowledge';
 import { ChatLoad } from '../src/chat-load';
-import { OllamaProvider } from '@flint/core';
+import { FlintError, OllamaProvider } from '@flint/core';
 import { liveOllamaOptions } from '../src/local-model';
 import {
   MemoryExtractor,
@@ -25,6 +25,8 @@ import {
   factsReply,
   holdsWords,
   locateQuote,
+  numbersGrounded,
+  sharesContent,
   normalizeQuoteText,
   quoteNeedle,
   type ExtractBrain,
@@ -33,9 +35,12 @@ import {
 import {
   MEMORY_CHAT_QUIET_MS,
   MEMORY_MODEL_REQUESTS,
+  answered,
+  canonicalModel,
   chooseMemoryBrain,
   frontierExtractBrain,
   isCloudModel,
+  sameModel,
   liveChat,
   localExtractBrain,
   localMemoryModel,
@@ -230,8 +235,18 @@ describe('which brain extraction runs on', () => {
     const { f, requests } = fakeOllama(() => chatReply(facts()));
     await localExtractBrain(m, { fetch: f }).generate({ system: 's', prompt: 'p' });
     expect(requests[0]!.body).toMatchObject({ model: 'qwen3.6:35b', keep_alive: 0 });
-    // The same model as the chat brain's (named either way) stays loaded.
+    // The same model as the chat brain's, however it's written, stays loaded.
     expect(localMemoryModel({ OLLAMA_MODEL: 'muse-glimmer:30b', FLINT_MEMORY_MODEL: 'muse-glimmer:30b' }, () => {})!.unloadAfter).toBe(false);
+    expect(localMemoryModel({ OLLAMA_MODEL: 'llama3.1', FLINT_MEMORY_MODEL: 'llama3.1:latest' }, () => {})!.unloadAfter).toBe(false);
+    expect(localMemoryModel({ OLLAMA_MODEL: 'qwen3:8b', FLINT_MEMORY_MODEL: 'Qwen3:8B' }, () => {})!.unloadAfter).toBe(false);
+    const same = fakeOllama(() => chatReply(facts()));
+    await localExtractBrain(localMemoryModel({ OLLAMA_MODEL: 'llama3.1', FLINT_MEMORY_MODEL: 'Llama3.1:latest' }, () => {})!, { fetch: same.f }).generate({ system: 's', prompt: 'p' });
+    expect('keep_alive' in same.requests[0]!.body).toBe(false);
+    // A different tag is a different model.
+    expect(localMemoryModel({ OLLAMA_MODEL: 'qwen3:8b', FLINT_MEMORY_MODEL: 'qwen3:14b' }, () => {})!.unloadAfter).toBe(true);
+    expect(canonicalModel(' Llama3.1 ')).toBe('llama3.1:latest');
+    expect(canonicalModel('registry.local:5000/org/model')).toBe('registry.local:5000/org/model:latest'); // a port is not a tag
+    expect(sameModel('hf.co/Org/Repo:Q4_K_M', 'hf.co/org/repo:q4_k_m')).toBe(true);
   });
 
   it('FLINT_MEMORY_MODEL names another local model; a name that is not one, or a host that is not http(s), is refused', () => {
@@ -295,12 +310,18 @@ describe('the local brain', () => {
     // The status says what to fix; Ollama's own words (which can echo a request) stay out.
     await expect(localExtractBrain(LOCAL, { fetch: notPulled.f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'unavailable', detail: 'validation 404' });
     expect(notPulled.requests.length).toBeLessThanOrEqual(MEMORY_MODEL_REQUESTS);
-    const limited = fakeOllama(() => new Response('{"error":"too many requests"}', { status: 429 }));
-    await expect(localExtractBrain(LOCAL, { fetch: limited.f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'unavailable' });
+    // Too many requests, or busy or down (Ollama answers 503 when its queue is full): it can't serve anyone, so no batch's doing.
+    for (const status of [429, 502, 503, 504]) {
+      const busy = fakeOllama(() => new Response('{"error":"server busy, please try again"}', { status }));
+      await expect(localExtractBrain(LOCAL, { fetch: busy.f }).generate({ system: 's', prompt: 'p' }), String(status)).rejects.toMatchObject({ why: 'unavailable' });
+    }
   });
 
-  it('an error the server answered with (a 5xx, another 4xx) is a server-error: it may be the batch', async () => {
-    for (const status of [500, 503, 400]) {
+  it('any other error the server answered with (a 500, another 4xx) is a server-error: it may be the batch', async () => {
+    expect([200, 204].map(answered)).toEqual(['invalid', 'invalid']);
+    expect([undefined, 404, 429, 502, 503, 504].map(answered)).toEqual(Array(6).fill('unavailable'));
+    expect([400, 413, 422, 500, 501].map(answered)).toEqual(Array(5).fill('server-error'));
+    for (const status of [500, 400]) {
       const { f } = fakeOllama(() => new Response('{"error":"llama runner process has terminated"}', { status }));
       await expect(localExtractBrain(LOCAL, { fetch: f }).generate({ system: 's', prompt: 'p' }), String(status)).rejects.toMatchObject({ why: 'server-error' });
     }
@@ -824,6 +845,26 @@ describe('cheap checks come first', () => {
     await ex.run();
     expect(reads).toBe(1);
   });
+
+  it('reads no history once the day’s calls are spent', async () => {
+    let reads = 0;
+    let n = 0;
+    const src: TurnSource = {
+      conversationIds: () => ['c'],
+      getTurns: async () => {
+        reads++;
+        return [turn('c', `Distinct durable statement number ${n++} about Will's projects`)];
+      },
+    };
+    const { f } = fakeOllama(() => chatReply(facts()));
+    const ex = new MemoryExtractor(src, new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath, { maxCallsPerDay: 1 });
+    await ex.run();
+    expect(reads).toBe(1);
+    expect(state().budget.calls).toBe(1);
+    await ex.run();
+    await ex.run();
+    expect(reads).toBe(1);
+  });
 });
 
 describe('errorKind', () => {
@@ -836,5 +877,150 @@ describe('errorKind', () => {
     expect(errorKind(Object.assign(new Error('x'), { name: 'Zephyr name\n  at secret', code: 'Zephyr code with spaces' }))).not.toMatch(/\s{2}|\n/);
     expect(errorKind('Zephyr as a string')).toBe('error');
     expect(errorKind(null)).toBe('error');
+  });
+});
+
+describe('an outage costs at most a turn at a time', () => {
+  const turnsIn = (seen: Seen) => (seen.body.messages[1]!.content.match(/### Turn \d+/g) ?? []).length;
+  const thirty = () => {
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 30; i++) convs[`c${String(i).padStart(2, '0')}`] = [turn(`c${String(i).padStart(2, '0')}`, `Distinct durable statement number ${i} about Will's projects`)];
+    return convs;
+  };
+
+  it('a 503 (Ollama busy) is no strike: nothing is skipped and none of the day is spent, however long it lasts', async () => {
+    const { f } = fakeOllama(() => new Response('{"error":"server busy, please try again.  maximum pending requests exceeded"}', { status: 503 }));
+    const ex = new MemoryExtractor(source(thirty()), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    for (let i = 0; i < 20; i++) await ex.run();
+    expect(Object.keys(state().watermarks)).toEqual([]);
+    expect(state().failures).toBeUndefined();
+    expect(state().budget.calls).toBe(0);
+  });
+
+  it('500 on every request: 3 strikes halve the batch, and only a single turn is ever skipped', async () => {
+    const { f, requests } = fakeOllama(() => new Response('{"error":"model requires more system memory than is available"}', { status: 500 }));
+    const ex = new MemoryExtractor(source(thirty()), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    for (let i = 0; i < 15; i++) await ex.run();
+    expect(requests.map(turnsIn)).toEqual([30, 30, 30, 15, 15, 15, 7, 7, 7, 3, 3, 3, 1, 1, 1]);
+    // Fifteen failing passes, one turn lost: the oldest, alone.
+    expect(Object.keys(state().watermarks)).toEqual(['c00']);
+    expect(state().failures).toBeUndefined(); // the next batch starts with a clean slate
+    expect(state().budget.calls).toBe(15); // the server answered each time
+  });
+
+  it('a halved batch that then goes through takes its turns, and the rest follow', async () => {
+    let fail = 3; // three 500s, then the server recovers
+    const { f, requests } = fakeOllama(() => (fail-- > 0 ? new Response('{"error":"runner crashed"}', { status: 500 }) : chatReply(facts())));
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 4; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    for (let i = 0; i < 4; i++) await ex.run();
+    expect(requests.map(turnsIn)).toEqual([4, 4, 4, 2, 2]);
+    for (let i = 0; i < 4; i++) expect(watermark(`c${i}`)).toBeDefined();
+    expect(state().failures).toBeUndefined();
+  });
+});
+
+describe('a cut-off reply halves the batch for the rest of the pass', () => {
+  it('8 dense turns take 6 calls, not one full-size retry after every success', async () => {
+    const turnsIn = (seen: Seen) => (seen.body.messages[1]!.content.match(/### Turn \d+/g) ?? []).length;
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 8; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
+    const { f, requests } = fakeOllama((seen) => (turnsIn(seen) > 2 ? chatReply('{"facts": [{"turn": 1, "quote": "Dist', 'length') : chatReply(facts())));
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    await ex.run();
+    expect(requests.map(turnsIn)).toEqual([8, 4, 2, 2, 2, 2]);
+    expect(state().budget.calls).toBe(6);
+    for (let i = 0; i < 8; i++) expect(watermark(`c${i}`)).toBeDefined();
+  });
+});
+
+describe('every number in a fact must be one Will gave, or the turn’s date', () => {
+  const sept21 = Date.UTC(2026, 8, 21, 15);
+  it('rejects numbers the model filled in', () => {
+    expect(numbersGrounded(['is my Mac Studio fast enough'], "Will's Mac Studio has 192GB.", sept21)).toBe(false);
+    expect(numbersGrounded(['my Mac Studio arrived'], "Will's Mac Studio arrived on October 3.", sept21)).toBe(false);
+    expect(numbersGrounded(['my daughter Mia starts school soon'], "Will's daughter Mia is 6.", sept21)).toBe(false);
+    // Coverage alone would pass these: the quote is his, and so are most of the words.
+    expect(factCoverage(['is my Mac Studio fast enough'], "Will's Mac Studio has 192GB.")).toBeGreaterThanOrEqual(0.5);
+    expect(factCoverage(['my daughter Mia starts school soon'], "Will's daughter Mia is 6.")).toBe(1);
+    const turns = [{ will: ['my daughter Mia starts school soon'], assistant: ['How old is she, 6?'], at: sept21 }];
+    expect(locateQuote('my daughter Mia', turns, 1, "Will's daughter Mia is 6.")).toBe('ungrounded');
+  });
+
+  it('keeps numbers he gave, however they are written, and the year from the turn’s date', () => {
+    expect(numbersGrounded(['The Mac Studio is scheduled to arrive September 25 to October 3'], "Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.", sept21)).toBe(true);
+    expect(numbersGrounded(["I'm buying a Mac Studio in August"], 'Will is buying a Mac Studio in August 2026.', sept21)).toBe(true);
+    expect(numbersGrounded(['the GPU cost me 1200 dollars'], "Will's GPU cost $1,200.", sept21)).toBe(true);
+    expect(numbersGrounded(['it cost $1,200 in the end'], "Will's GPU cost 1200 dollars.", sept21)).toBe(true);
+    expect(numbersGrounded(['my surgery is on 9/14'], "Will's surgery is scheduled for 09/14.", sept21)).toBe(true);
+    expect(numbersGrounded(['can my Mac run a 70B model'], 'Will wants to run a 70B model on his Mac.', sept21)).toBe(true);
+    expect(numbersGrounded(['anything'], 'A fact with no numbers in it.')).toBe(true);
+    // Without the date, a year he didn't say is not his.
+    expect(numbersGrounded(["I'm buying a Mac Studio in August"], 'Will is buying a Mac Studio in August 2026.')).toBe(false);
+  });
+
+  it('end to end: a filled-in number drops the fact', async () => {
+    const convs = { console: [turn('console', 'my daughter Mia starts school soon and I am nervous', 'How exciting! Is she 6?')] };
+    const { f } = fakeOllama(() =>
+      chatReply(facts({ turn: 1, quote: 'my daughter Mia starts school soon', fact: "Will's daughter Mia is 6.", category: 'person' }, { turn: 1, quote: 'my daughter Mia', fact: "Will's daughter is named Mia.", category: 'person' })),
+    );
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    const ex = new MemoryExtractor(source(convs), k, localExtractBrain(LOCAL, { fetch: f }), spath);
+    expect(await ex.run()).toBe(1);
+    expect(k.all().map((x) => x.text)).toEqual(["Will's daughter is named Mia."]);
+    expect(ex.lastStats.rejected).toEqual({ ungrounded: 1 });
+  });
+});
+
+describe('a supersede needs two shared content words', () => {
+  it('one shared word is not the same thing; two are', async () => {
+    expect(sharesContent('Will works from home on Fridays.', "Will's sister Ana works as a nurse.")).toBe(false);
+    expect(sharesContent('Will is buying a Mac Studio around August 2026.', "Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.")).toBe(true);
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    await k.add('Will works from home on Fridays.', 'user', { sourceAt: 1 });
+    const convs = { console: [turn('console', 'my sister Ana works as a nurse in Dallas now')] };
+    const { f } = fakeOllama(() => chatReply(facts({ turn: 1, quote: 'my sister Ana works as a nurse', fact: "Will's sister Ana works as a nurse.", supersedes: ['k1'] })));
+    const ex = new MemoryExtractor(source(convs), k, localExtractBrain(LOCAL, { fetch: f }), spath);
+    expect(await ex.run()).toBe(1);
+    expect(ex.lastStats).toMatchObject({ superseded: 0, supersedeRefused: 1 });
+    expect(k.all().map((x) => x.id)).toContain('k1');
+  });
+});
+
+describe('clipping never splits a character', () => {
+  it('cuts by code points: an emoji at the edge goes whole or not at all', async () => {
+    const user = `${'x'.repeat(1499)}😀😀 and my sister Ana lives in Austin`;
+    const convs = { console: [turn('console', `${'y'.repeat(299)}🎉🎉 my brother Theo lives in Portland`), turn('console', user)] };
+    const { f, requests } = fakeOllama(() => chatReply(facts()));
+    await new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath).run();
+    const content = requests[0]!.body.messages[1]!.content;
+    expect(content).toContain(`${'x'.repeat(1499)}😀…`); // the turn, at 1,500 code points
+    expect(content).toContain(`${'y'.repeat(299)}🎉…`); // the previous turn as context, at 300
+    expect(content).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
+});
+
+describe('the frontier, opted in', () => {
+  const failing = (code: string) =>
+    frontierExtractBrain(async () => {
+      throw new FlintError({ kind: code.startsWith('4') ? 'validation' : 'provider_unavailable', message: 'Zephyr: prompt is too long', retryable: false, providerCode: code });
+    });
+
+  it('a 4xx other than 404 and 429 is the request’s fault: a strike, not an outage to wait out forever', async () => {
+    await expect(failing('400').generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'server-error', detail: 'validation 400' });
+    await expect(failing('413').generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'server-error' });
+    for (const code of ['404', '429', '500', '529']) {
+      const err = await failing(code).generate({ system: 's', prompt: 'p' }).catch((e: unknown) => e);
+      expect(err, code).toBeInstanceOf(FlintError); // the extractor reads it as unavailable
+    }
+    const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), failing('400'), spath, { kind: 'frontier' });
+    for (let i = 0; i < 3; i++) await ex.run();
+    expect(watermark('console')).toBeDefined(); // a single turn, three strikes: skipped
+    expect(state().budget.calls).toBe(3);
+    const ex2 = new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k2.json'), downEmbedder), failing('529'), join(dir, 's2.json'), { kind: 'frontier' });
+    for (let i = 0; i < 5; i++) await ex2.run();
+    expect(JSON.parse(readFileSync(join(dir, 's2.json'), 'utf8'))).toMatchObject({ watermarks: {}, budget: { calls: 0 } });
   });
 });

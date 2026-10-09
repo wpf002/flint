@@ -81,20 +81,24 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 - **Every fact quotes Will.** Each fact the model proposes carries `quote`: the words
   of Will's it rests on. It is stored only if that quote is in what Will wrote in the
   turns it was given, as whole words, and that turn's words also hold at least half of
-  what the fact says (so "is my Mac Studio fast enough" can't ground "Will's Mac Studio
-  has 192GB of unified memory"). A quote found only in Flint's answers, or nowhere,
-  drops the fact. The match ignores typography only (curly quotes, dashes, spacing,
+  what the fact says and every number in it (or the number is part of the turn's date,
+  as 2026 is for "August 2026"). So "is my Mac Studio fast enough" can't ground "Will's
+  Mac Studio has 192GB". A quote found only in Flint's answers, or nowhere, drops the
+  fact. The match ignores typography only (curly quotes, dashes, spacing,
   capitals); a word added, dropped or changed fails it.
 - **Only a shown fact can be replaced.** A new fact may retire an old one only if the
-  model was shown that old fact in this call, and the two share a content word.
-- **A failure keeps its place.** A reply that isn't the schema (bad JSON, a missing
-  field), an error the server answered with (a 5xx, or a 4xx other than 404 and 429)
-  or a timeout is a strike: the turns are retried, and a batch with 3 strikes in a row
-  is skipped, so one batch that always fails can't hold up the rest. A reply cut off at
-  its token limit is asked again with half the turns; only a single turn still cut off
-  is a strike. No answer at all (Ollama down, the model not pulled, 429) is no strike
-  and costs none of the day's calls. Any failure but a bad reply backs the next pass
-  off: 15 minutes, doubling, up to 6 hours.
+  model was shown that old fact in this call, and the two share at least two content
+  words. An update that shares fewer is stored beside the old fact, never in its place.
+- **A failure keeps its place.** No answer at all, or one that says Ollama can't serve
+  anyone right now (404: the model isn't pulled; 429; 502, 503, 504: busy or down), is
+  no strike and costs none of the day's calls. A reply that isn't the schema (bad JSON,
+  a missing field), any other error status (a 500, a 4xx) or a timeout is a strike: the
+  turns are retried, 3 strikes in a row halve the batch, and only a single turn is ever
+  skipped. So one turn that always fails can't hold up the rest, and an outage that
+  fails every batch costs at most a turn at a time. A reply cut off at its token limit
+  is asked again with half the turns (for the rest of that pass); only a single turn
+  still cut off is a strike. Any failure but a bad reply backs the next pass off: 15
+  minutes, doubling, up to 6 hours.
 - **Logs carry ids and counts only**, never a fact, a quote or anything Will or Flint
   said. The boot log names the model (`[memory-extract] on the local model ...`), and
   each pass logs one line of counts.
@@ -102,7 +106,7 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `FLINT_MEMORY_BRAIN` | `local` | `local`; `frontier`: the primary frontier tier, metered as `extract` and paused with other background work at 80% of its vendor's cap. Only when set, and never a fallback: with no frontier configured nothing runs, and a local model that is down is not replaced by the frontier. `off`: no extraction. Anything else is logged and read as `local`. |
-| `FLINT_MEMORY_MODEL` | `OLLAMA_MODEL` | Another local model for extraction. One that isn't the chat brain's is unloaded after each request (`keep_alive: 0`), so it never holds memory the chat model needs, at the price of a load per call. A cloud model is refused. |
+| `FLINT_MEMORY_MODEL` | `OLLAMA_MODEL` | Another local model for extraction. One that isn't the chat brain's (compared as Ollama does: case aside, no tag meaning `:latest`) is unloaded after each request (`keep_alive: 0`), so it never holds memory the chat model needs, at the price of a load per call. A cloud model is refused. |
 | `FLINT_EXTRACT_MAX_CALLS_PER_DAY` | 48 local, 24 frontier | Calls per UTC day: GPU time on the local model, dollars on the frontier. |
 | `FLINT_EXTRACT_BATCH_CHARS` | 8,000 local, 24,000 frontier | Characters of transcript per call, at most (a small context window allows fewer). |
 | `FLINT_EXTRACT_INTERVAL_MS` / `FLINT_EXTRACT_BACKLOG_INTERVAL_MS` | 6 hours / 15 minutes | Time between passes, and while a backlog remains. |

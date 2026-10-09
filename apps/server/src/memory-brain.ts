@@ -63,7 +63,7 @@ export interface LocalMemoryModel {
   model: string;
   /** Exactly what the chat brain sends as num_ctx (liveOllamaOptions), sent as is. */
   numCtx: number | undefined;
-  /** A model of its own, not the chat brain's: unloaded after each request (keep_alive 0). */
+  /** A model of its own, not the chat brain's (sameModel): unloaded after each request (keep_alive 0). */
   unloadAfter: boolean;
 }
 
@@ -103,7 +103,22 @@ export function localMemoryModel(env: Env, log: (m: string) => void): LocalMemor
     return undefined;
   }
   const n = live.defaultOptions?.num_ctx;
-  return { baseURL, model, numCtx: typeof n === 'number' ? n : undefined, unloadAfter: model !== chat };
+  return { baseURL, model, numCtx: typeof n === 'number' ? n : undefined, unloadAfter: chat === undefined || !sameModel(model, chat) };
+}
+
+/**
+ * Ollama's name for a model: lower case, and `:latest` when no tag is given
+ * ("Llama3.1" and "llama3.1:latest" are the same model). A tag is what follows
+ * the last ':' after the last '/', so a registry port isn't one.
+ */
+export function canonicalModel(name: string): string {
+  const n = name.trim().toLowerCase();
+  return n.lastIndexOf(':') > n.lastIndexOf('/') ? n : `${n}:latest`;
+}
+
+/** Are these the same Ollama model, however each is written? */
+export function sameModel(a: string, b: string): boolean {
+  return canonicalModel(a) === canonicalModel(b);
 }
 
 export type MemoryBrainPlan =
@@ -139,14 +154,26 @@ export function chooseMemoryBrain(
 /**
  * The frontier as an ExtractBrain (FLINT_MEMORY_BRAIN=frontier): its text is
  * parsed by the extractor, and a reply cut off at its token limit says so, so
- * the batch is asked again at half its turns.
+ * the batch is asked again at half its turns. A 4xx other than 404 and 429 is
+ * the request's own fault (too long, malformed), so it is a server-error, a
+ * strike against the batch, not an outage to wait out forever; anything else
+ * it throws is `unavailable`.
  */
 export function frontierExtractBrain(
   generate: (input: { system: string; prompt: string }) => Promise<{ text: string; reason?: string }>,
 ): ExtractBrain {
   return {
     generate: async (input) => {
-      const out = await generate(input);
+      let out: { text: string; reason?: string };
+      try {
+        out = await generate(input);
+      } catch (err) {
+        const status = isFlintError(err) ? Number(err.error.providerCode) : NaN;
+        if (Number.isInteger(status) && status >= 400 && status < 500 && answered(status) === 'server-error') {
+          throw new MemoryBrainError('server-error', failureDetail(err));
+        }
+        throw err;
+      }
       if (out.reason === 'max_tokens') throw new MemoryBrainError('truncated');
       return { text: out.text };
     },
@@ -289,13 +316,20 @@ async function askLocal(
 }
 
 /**
- * What the server's last answer means when there is no usable reply: none at
- * all, a 404 (the model isn't pulled) or a 429 is `unavailable`, not the
- * batch's doing; any other error status is `server-error`, which may be; a
- * 2xx is a reply that wasn't the shape, `invalid`.
+ * Statuses that say the server can't serve anyone right now, whatever was
+ * asked: the model isn't pulled (404), too many requests (429), busy or down
+ * (502, 503, 504; Ollama answers 503 when its queue is full).
  */
-function answered(status: number | undefined): BrainFailure {
-  if (status === undefined || status === 404 || status === 429) return 'unavailable';
+const OUTAGE = new Set([404, 429, 502, 503, 504]);
+
+/**
+ * What the server's last answer means when there is no usable reply: none at
+ * all, or an OUTAGE status, is `unavailable`, not the batch's doing; any other
+ * error status (a 4xx, a 500) is `server-error`, which may be; a 2xx is a
+ * reply that wasn't the shape, `invalid`.
+ */
+export function answered(status: number | undefined): BrainFailure {
+  if (status === undefined || OUTAGE.has(status)) return 'unavailable';
   return status >= 200 && status < 300 ? 'invalid' : 'server-error';
 }
 

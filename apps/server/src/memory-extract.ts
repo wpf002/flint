@@ -53,10 +53,12 @@ import { contentTokens, type KnowledgeStore } from './knowledge';
  *    calls.
  *  - a call with no answer at all (Ollama down, the model not pulled) moves no
  *    watermark, spends none of the day's calls, and backs the next pass off.
- *    One the server answered with an error, or that ran out of time, is a
- *    strike against the batch (skipped after 3), so one bad batch can't stall
- *    everything behind it. A reply cut off at its token limit is retried with
- *    half the turns.
+ *    Nor does an outage the server reports (502, 503, 504). Any other error it
+ *    answers with, or running out of time, is a strike against the batch; 3
+ *    strikes halve the batch, and only a single turn is ever skipped, so one
+ *    bad turn can't stall everything behind it and an outage that fails every
+ *    batch costs at most a turn at a time. A reply cut off at its token limit
+ *    is asked again with half the turns.
  * Logs carry ids and counts only: never a fact, a quote or transcript text.
  */
 
@@ -85,17 +87,20 @@ export interface ExtractBrain {
  *  - deferred: Will's chat needs the model (nothing ran, or the request was cut
  *    off). The pass stops, the call isn't one of the day's, and the next pass
  *    comes in deferMs.
- *  - unavailable: no answer at all (the server unreachable, the model not
- *    pulled, 429). Not the batch's fault: no strike, the call isn't one of the
- *    day's, and the next pass backs off.
- *  - server-error: the server answered with an error status (any other 4xx, a
- *    5xx). It may be this batch: a strike, the call counts, and it backs off.
+ *  - unavailable: no answer at all (the server unreachable), or one that says
+ *    it can't serve anyone right now (404: the model isn't pulled; 429; 502,
+ *    503, 504: busy or down). Not the batch's fault: no strike, the call isn't
+ *    one of the day's, and the next pass backs off.
+ *  - server-error: the server answered with another error status (a 4xx, a
+ *    500). It may be this batch: a strike, the call counts, and it backs off.
  *  - timeout: the model was still working when the call's time ran out. The
  *    same as server-error.
  *  - truncated: the reply hit its token limit. The batch is asked again at half
  *    its turns; a single turn still cut off is a strike.
  *  - invalid: it replied, but not in FACTS_SCHEMA's shape. A strike.
- * Three strikes in a row against the same batch and it is skipped.
+ * Three strikes in a row against the same batch halve it (the next try sends
+ * half its turns, and the count starts over); three against a single turn
+ * skip that turn.
  */
 export type BrainFailure = 'deferred' | 'unavailable' | 'server-error' | 'timeout' | 'truncated' | 'invalid';
 
@@ -125,8 +130,11 @@ interface ExtractState {
   watermarks: Record<string, number>;
   /** Model calls made on `day` (UTC date): dollars on the frontier, GPU time on the local model. */
   budget: { day: string; calls: number };
-  /** Strikes in a row against the batch starting at `key`. */
-  failures?: { key: string; count: number };
+  /**
+   * Strikes in a row against the batch starting at `key`, and `cap`: how many
+   * turns that batch may send, once strikes have halved it.
+   */
+  failures?: { key: string; count: number; cap?: number };
   /** Lifetime counters, for anyone asking "is memory actually growing?". */
   totals: PassStats;
 }
@@ -289,6 +297,8 @@ const PROMPT_FRAME = 200;
 const KNOWN_SHARE = 0.35;
 /** A batch never gets less than this, however small the window. */
 const MIN_BATCH_CHARS = 1000;
+/** Strikes in a row against a batch before it is halved (or, a single turn, skipped). */
+const STRIKES = 3;
 
 /** What one call can give: the transcript (batchChars), the known facts, and at most one turn (turnChars, the window's limit). */
 interface Room {
@@ -498,7 +508,10 @@ export class MemoryExtractor {
     let idx = 0;
     let gated: string | undefined;
     let failure: { why: BrainFailure; detail?: string } | undefined;
-    /** Turns the next batch may send: halved after a reply cut off at its token limit. */
+    /**
+     * Turns a batch may send: halved after a reply cut off at its token limit,
+     * and kept for the rest of the pass (the turns that follow are as dense).
+     */
     let turnCap = Infinity;
     try {
       while (idx < pending.length) {
@@ -507,11 +520,15 @@ export class MemoryExtractor {
         const batch: Item[] = [];
         let chars = 0;
         let turns = 0;
+        // A batch that strikes have halved keeps that size until it goes through.
+        const head = pending.slice(idx).find((it) => !it.skip);
+        const struck = head && state.failures?.key === `${head.cid}@${head.at}` ? state.failures.cap : undefined;
+        const cap = Math.min(turnCap, struck ?? Infinity);
         let j = idx;
         while (j < pending.length) {
           const it = pending[j]!;
           if (!it.skip) {
-            if (sent + turns >= this.maxTurnsPerPass || turns >= turnCap) break;
+            if (sent + turns >= this.maxTurnsPerPass || turns >= cap) break;
             const size = it.chunk.length + TURN_HEADER;
             if (chars > 0 && chars + size > room.batchChars) break;
             chars += size;
@@ -578,17 +595,26 @@ export class MemoryExtractor {
           if (cands === null) {
             // A strike against this batch. Don't advance: the turns are retried
             // next pass instead of being silently marked done with nothing
-            // extracted, but three strikes and it is skipped, so one batch the
-            // model or the server can never handle doesn't stall the rest.
+            // extracted. Three strikes halve the batch, and only a single turn
+            // is ever skipped: one turn the model or the server can never
+            // handle doesn't stall the rest, and an outage that fails every
+            // batch costs a turn at a time, not a whole backlog.
             const reason = why ?? 'invalid';
             if (reason === 'invalid') stats.unparseable++;
             const count = state.failures?.key === key ? state.failures.count + 1 : 1;
-            if (count < 3) {
-              state.failures = { key, count };
-              console.error(`[memory-extract] no usable reply for batch ${key} (${reason}, attempt ${count}/3); will retry`);
+            if (count < STRIKES) {
+              state.failures = { key, count, ...(struck !== undefined ? { cap: struck } : {}) };
+              console.error(`[memory-extract] no usable reply for batch ${key} (${reason}, attempt ${count}/${STRIKES}); will retry`);
               break;
             }
-            console.error(`[memory-extract] batch ${key} had no usable reply 3 times (${reason}); skipping it`);
+            if (toSend.length > 1) {
+              const half = Math.max(1, Math.floor(toSend.length / 2));
+              state.failures = { key, count: 0, cap: half };
+              console.error(`[memory-extract] batch ${key} had no usable reply ${STRIKES} times (${reason}); trying ${half} of its ${toSend.length} turns`);
+              if (failure) break; // the server's doing: wait for the back-off
+              continue;
+            }
+            console.error(`[memory-extract] turn ${key} had no usable reply ${STRIKES} times (${reason}); skipping it`);
             delete state.failures;
           } else {
             delete state.failures;
@@ -596,13 +622,12 @@ export class MemoryExtractor {
           }
           sent += toSend.length;
           stats.turnsSent += toSend.length;
-          turnCap = Infinity;
         }
         // Advance per batch so a mid-pass failure keeps the progress already paid for.
         for (const b of batch) state.watermarks[b.cid] = Math.max(state.watermarks[b.cid] ?? 0, b.at);
         idx = j;
         this.saveState(state);
-        if (failure) break; // a batch the server kept failing was skipped: the next waits for the back-off
+        if (failure) break; // a turn the server kept failing was skipped: the next waits for the back-off
       }
     } finally {
       this.backlog = !gated && !this.deferred && !failure && idx < pending.length && state.budget.calls < this.maxCallsPerDay;
@@ -693,8 +718,8 @@ export class MemoryExtractor {
               cid,
               at: t.updatedAt,
               chunk: `${before}WILL: ${clip(user, WILL_CHARS)}\nASSISTANT: ${clip(asst, ASSISTANT_CHARS)}`,
-              will: [user.slice(0, WILL_CHARS), ...(context ? [userText(context).slice(0, CONTEXT_CHARS)] : [])],
-              assistant: [asst.slice(0, ASSISTANT_CHARS), ...(context ? [assistantText(context).slice(0, CONTEXT_CHARS)] : [])],
+              will: [head(user, WILL_CHARS), ...(context ? [head(userText(context), CONTEXT_CHARS)] : [])],
+              assistant: [head(asst, ASSISTANT_CHARS), ...(context ? [head(assistantText(context), CONTEXT_CHARS)] : [])],
             });
           }
         }
@@ -751,7 +776,7 @@ export class MemoryExtractor {
   }
 
   private async store(cands: Candidate[], sent: Item[], shown: ReadonlySet<string>, stats: PassStats): Promise<void> {
-    const turns = sent.map((s) => ({ will: s.will ?? [], assistant: s.assistant ?? [] }));
+    const turns = sent.map((s) => ({ will: s.will ?? [], assistant: s.assistant ?? [], at: s.at }));
     for (const c of cands) {
       stats.candidates++;
       // A fact stands on Will's own words or not at all. The quote also says
@@ -777,7 +802,7 @@ export class MemoryExtractor {
         // Only a fact the model was shown (an id copied from an example, or
         // guessed, would retire whatever fact holds it, and a retired fact
         // blocks its own text from coming back), and only one about the same
-        // thing: the two must share a content word.
+        // thing: the two must share two content words.
         const old = shown.has(oldId) ? this.knowledge.all().find((f) => f.id === oldId) : undefined;
         if (!old || !sharesContent(old.text, c.fact)) {
           stats.supersedeRefused++;
@@ -803,7 +828,11 @@ export class MemoryExtractor {
       const s = fresh();
       if (raw.budget) s.budget = raw.budget;
       if (raw.totals) s.totals = { ...emptyStats(), ...raw.totals };
-      if (raw.failures) s.failures = raw.failures;
+      const f = raw.failures as { key?: unknown; count?: unknown; cap?: unknown } | undefined;
+      if (f && typeof f.key === 'string' && Number.isInteger(f.count) && (f.count as number) >= 0) {
+        s.failures = { key: f.key, count: f.count as number };
+        if (Number.isInteger(f.cap) && (f.cap as number) >= 1) s.failures.cap = f.cap as number;
+      }
       // Watermarks from an older extractor version are dropped on purpose: the
       // rules changed, so history is re-read (resumably, under the daily cap).
       // Re-reading is idempotent — the store dedupes and honours tombstones.
@@ -843,8 +872,18 @@ function addStats(into: PassStats, s: PassStats): void {
   }
 }
 
+/** The first `n` code points of `s`: never half of an emoji's surrogate pair. */
+function head(s: string, n: number): string {
+  if (s.length <= n) return s; // n UTF-16 units are at most n code points
+  let i = 0;
+  for (let count = 0; i < s.length && count < n; count++) i += s.codePointAt(i)! > 0xffff ? 2 : 1;
+  return s.slice(0, i);
+}
+
+/** `s` cut to `n` code points, with an ellipsis when anything was cut. */
 function clip(s: string, n: number): string {
-  return s.length <= n ? s : `${s.slice(0, n)}…`;
+  const h = head(s, n);
+  return h.length === s.length ? s : `${h}…`;
 }
 
 function minutes(ms: number): string {
@@ -1041,24 +1080,47 @@ export function factCoverage(will: string[], fact: string): number {
 /** A grounded fact's content words must be at least this much Will's (see factCoverage). */
 export const FACT_COVERAGE = 0.5;
 
-/** Do two facts share a content word (are they about the same thing)? */
+/** The numbers in `s`, as digits: "1,200" is 1200 and "09" is 9, so how they are written doesn't matter. */
+function numbersIn(s: string): string[] {
+  return (s.replace(/(\d)[,_](?=\d{3}\b)/g, '$1').match(/\d+/g) ?? []).map((d) => d.replace(/^0+(?=\d)/, ''));
+}
+
+/**
+ * Is every number in the fact one Will gave in `will`, or part of the turn's
+ * date (`at`: "August 2026" said in 2026)? A model fills in numbers readily
+ * ("192GB", "October 3", "Mia is 6"), and a number is the detail a quote and
+ * word coverage can't vouch for.
+ */
+export function numbersGrounded(will: string[], fact: string, at?: number): boolean {
+  const have = new Set([...numbersIn(will.join(' ')), ...(at !== undefined && Number.isFinite(at) ? numbersIn(new Date(at).toISOString().slice(0, 10)) : [])]);
+  return numbersIn(fact).every((n) => have.has(n));
+}
+
+/**
+ * Are two facts about the same thing: do they share at least two content
+ * words? One isn't enough ("Will works from home on Fridays" and "Will's
+ * sister Ana works as a nurse" share "work"). A real update that shares only
+ * one is stored beside the old fact instead of replacing it: a contradiction
+ * Will can see, never a silent loss.
+ */
 export function sharesContent(a: string, b: string): boolean {
   const A = new Set(contentTokens(normalizeQuoteText(a)));
-  return contentTokens(normalizeQuoteText(b)).some((t) => A.has(t));
+  return new Set(contentTokens(normalizeQuoteText(b)).filter((t) => A.has(t))).size >= 2;
 }
 
 /**
  * Which turn of the batch (0-based) holds the quote in Will's words, as whole
  * words, looking at the cited turn first (`cited` is 1-based, as the model
  * numbers them), or why the candidate isn't grounded. With `fact`, that turn's
- * Will text must also cover the fact (FACT_COVERAGE): a few words he did type
+ * Will text must also cover the fact (FACT_COVERAGE), and hold every number
+ * in it, or the turn's date must (numbersGrounded): a few words he did type
  * ("my Mac Studio") can't carry a claim he never made ("has 192GB"). A quote
  * found in Will's words grounds a fact even when the assistant also said it; a
  * quote found only in the assistant's words never does.
  */
 export function locateQuote(
   quote: string | undefined,
-  turns: Array<{ will: string[]; assistant: string[] }>,
+  turns: Array<{ will: string[]; assistant: string[]; at?: number }>,
   cited?: number,
   fact?: string,
 ): number | Ungrounded {
@@ -1071,7 +1133,8 @@ export function locateQuote(
   for (const i of order) {
     if (!holds(turns[i]!.will)) continue;
     quoted = true;
-    if (fact === undefined || factCoverage(turns[i]!.will, fact) >= FACT_COVERAGE) return i;
+    const t = turns[i]!;
+    if (fact === undefined || (factCoverage(t.will, fact) >= FACT_COVERAGE && numbersGrounded(t.will, fact, t.at))) return i;
   }
   if (quoted) return 'ungrounded'; // he said the words, not what the fact claims
   return turns.some((t) => holds(t.assistant)) ? 'assistant-quote' : 'ungrounded';
