@@ -62,6 +62,14 @@ Switching from Claude to a local 70B is therefore a **config change, not a
 rewrite**. Everything else — the difficulty judge, the shared memory + tools,
 the streaming, the badge — stays identical.
 
+### Already off the frontier
+
+- **Learning from Will's chats** (memory extraction: durable facts into
+  long-term memory) runs on the local model by default, with no API key, and
+  yields to his chat. The frontier is an opt-in (`FLINT_MEMORY_BRAIN=frontier`),
+  never a fallback. See [apps/server/README.md](../apps/server/README.md),
+  "Memory extraction".
+
 ## The milestone
 
 A local model that meaningfully closes the gap on hard reasoning/coding is in

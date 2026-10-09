@@ -49,6 +49,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_STYLE_VARIANT` | no | The frontier tiers' style guide: `v1` (`FLINT_STYLE_GUIDE`, today's), `v2` (`FLINT_STYLE_GUIDE_V2`) or `local-v1` (`FLINT_LOCAL_STYLE_GUIDE`). Unset: `v1`, as before. An unknown value is logged and ignored (`v1`). Set a variant live only after a judged parity A/B (`--flint-variant`) shows it wins. |
 | `FLINT_LOCAL_STYLE_VARIANT` | no | The same, for the local brain and the eval `localModel` override personas. Unset: `v1`, as before. |
 | `FLINT_HISTORY_TURNS` / `FLINT_HISTORY_MAX_AGE_HOURS` | no | How much of a `/chat` conversation each new message carries: the last `FLINT_HISTORY_TURNS` complete turns (default 12) that started within `FLINT_HISTORY_MAX_AGE_HOURS` (default 48), whichever leaves fewer. Every turn stays stored in `~/.flint/memory/conversations.json`, and the memory extractor still reads all of them, but it keeps only durable facts about Will: what was said or decided in an older turn doesn't come back. So when turns are left out, the turn's context says how many, and the persona tells Flint to say so rather than reconstruct them. The tier classifier's "deep thread" rule counts the turns sent (8 or more). `0` means no earlier turns; anything that isn't a number >= 0 is logged and ignored (the default). |
+| `FLINT_MEMORY_BRAIN` / `FLINT_MEMORY_MODEL` | no | Which model learns from Will's chats, and which local model it uses: see "Memory extraction". Unset: the local model, `OLLAMA_MODEL`. |
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
@@ -56,11 +57,69 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
 | `PORT` | no | Injected by Railway. |
 
+## Memory extraction
+
+Flint reads back over its own conversations and writes the durable facts about Will
+to long-term memory (`~/.flint/memory/knowledge.json`), through the same store as the
+`remember` tool, so dedupe, facts Will rejected and the filters for expiring details
+all apply. The pass is `src/memory-extract.ts`; the choice of model is
+`src/memory-brain.ts`.
+
+- **It runs on the local model.** By default it asks the local Ollama model, the chat
+  brain's own: `OLLAMA_MODEL` at `OLLAMA_HOST`, with the same `OLLAMA_NUM_CTX`, so
+  Ollama never reloads the model between Will's chat and a pass. No outside AI and no
+  API key: it runs with no Anthropic key at all. An Ollama cloud model (`...-cloud`,
+  `:cloud`) runs off this Mac, so it is never used, and an `OLLAMA_MODEL` that is one
+  gets a warning at boot. The reply is held to a JSON schema, `think` is off, and each
+  call is sized to fit the model's context window. One more cost: a pass can push the
+  chat's cached prompt out of Ollama's memory, so Will's first message after a pass
+  may take a few seconds longer to start.
+- **Will's chat comes first.** Before every call a pass checks for a `/chat` turn
+  running, or one that ended less than 2 minutes ago, and if so tries again in 2
+  minutes. A call already running is cut off the moment a turn starts. Waiting moves
+  nothing and costs none of the day's calls.
+- **Every fact quotes Will.** Each fact the model proposes carries `quote`: the words
+  of Will's it rests on. It is stored only if that quote is in what Will wrote in the
+  turns it was given, as whole words, and that turn's words also hold at least half of
+  what the fact says and every number in it (or the number is the turn's year, as 2026
+  is for "August 2026"; never its month or day). So "is my Mac Studio fast enough" can't ground "Will's
+  Mac Studio has 192GB". A quote found only in Flint's answers, or nowhere, drops the
+  fact. The match ignores typography only (curly quotes, dashes, spacing,
+  capitals); a word added, dropped or changed fails it.
+- **Only a shown fact can be replaced.** A new fact may retire an old one only if the
+  model was shown that old fact in this call, and the two share at least two content
+  words, or one when both are that short ("Will lives in Dallas" and "Will lives in
+  Austin"). An update that shares fewer is stored beside the old fact, never in its
+  place.
+- **A failure keeps its place.** No answer at all, or one that says Ollama can't serve
+  anyone right now (404: the model isn't pulled; 429; 502, 503, 504: busy or down), is
+  no strike and costs none of the day's calls. A reply that isn't the schema (bad JSON,
+  a missing field), any other error status (a 500, a 4xx) or a timeout is a strike: the
+  turns are retried, 3 strikes in a row halve the batch, and only a single turn is ever
+  skipped. So one turn that always fails can't hold up the rest, and an outage that
+  fails every batch costs at most a turn at a time. A reply cut off at its token limit
+  is asked again with half the turns (for the rest of that pass); only a single turn
+  still cut off is a strike. Any failure but a bad reply backs the next pass off: 15
+  minutes, doubling, up to 6 hours.
+- **Logs carry ids and counts only**, never a fact, a quote or anything Will or Flint
+  said. The boot log names the model (`[memory-extract] on the local model ...`), and
+  each pass logs one line of counts.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `FLINT_MEMORY_BRAIN` | `local` | `local`; `frontier`: the primary frontier tier, metered as `extract` and paused with other background work at 80% of its vendor's cap. Only when set, and never a fallback: with no frontier configured nothing runs, and a local model that is down is not replaced by the frontier. `off`: no extraction. Anything else is logged and read as `local`. |
+| `FLINT_MEMORY_MODEL` | `OLLAMA_MODEL` | Another local model for extraction. One that isn't the chat brain's (compared as Ollama does: case aside, no tag meaning `:latest`) is unloaded after each request (`keep_alive: 0`), so it never holds memory the chat model needs, at the price of a load per call. A cloud model is refused. |
+| `FLINT_EXTRACT_MAX_CALLS_PER_DAY` | 48 local, 24 frontier | Calls per UTC day: GPU time on the local model, dollars on the frontier. |
+| `FLINT_EXTRACT_BATCH_CHARS` | 8,000 local, 24,000 frontier | Characters of transcript per call, at most (a small context window allows fewer). |
+| `FLINT_EXTRACT_INTERVAL_MS` / `FLINT_EXTRACT_BACKLOG_INTERVAL_MS` | 6 hours / 15 minutes | Time between passes, and while a backlog remains. |
+| `FLINT_EXTRACT_MAX_TURNS` | 60 | Turns per pass. |
+| `FLINT_EXTRACT_SKIP_CONVERSATIONS` | `^(bulk\|grow\|seed)-` | Conversations never read: synthetic training traffic. |
+
 ## Spend caps
 
 Every paid call Flint makes is appended to `~/.flint/spend/spend-YYYY-MM.jsonl`, one
 JSON row per call: `{ ts, vendor, model, kind, usd, tokens? }`, where `kind` is `chat`,
-`extract` (memory extraction), `plan` (deep_research's query planner), `tts`,
+`extract` (memory extraction on the frontier), `plan` (deep_research's query planner), `tts`,
 `tool-search` (Tavily), `tool-perplexity` or `eval` (a parity replay). Totals per
 vendor per day and per month (days end at midnight in `FLINT_USER_TZ`, default
 America/Chicago) are rebuilt from the current month's file on boot, so a restart never
@@ -78,6 +137,8 @@ shared with apps/parity):
   that failed before reaching the model was not billed and is not recorded. The local
   brain (Ollama) is free and never recorded.
 - **Memory extraction and the research planner**: the same, tagged `extract` / `plan`.
+  Extraction is billed only when Will opts it onto the frontier (`FLINT_MEMORY_BRAIN=frontier`):
+  on the local model, the default, it is free and never recorded.
 - **TTS** (`/speak`): per character sent, at the model's list price (`tts-1`: $15 / 1M).
 - **Perplexity and Tavily searches** run in the MCP processes, so their usage never reaches
   the server: each SUCCESSFUL call of `trident.perplexity_search`, `web.web_search` or
@@ -132,7 +193,7 @@ every decision is made before a call, so a turn already streaming always finishe
 | Level | Frontier (Claude) | Background work | Searches | Voice |
 | --- | --- | --- | --- | --- |
 | under 50% / 50% | unchanged | unchanged | unchanged | unchanged |
-| 80% | standard, hard and code questions answer on the **routine** tier (only when that is a different, cheaper brain; not when it can't read the turn's image/PDF) | memory extraction and research query planning wait (planning falls back to heuristic queries) | unchanged | unchanged |
+| 80% | standard, hard and code questions answer on the **routine** tier (only when that is a different, cheaper brain; not when it can't read the turn's image/PDF) | memory extraction on the frontier and research query planning wait (planning falls back to heuristic queries) | unchanged | unchanged |
 | 100% | Claude is not called. The next brain in the chain whose vendor has budget answers (e.g. an OpenAI `FLINT_TIER_LAST_RESORT`); with none left, the **local brain** answers, and the first such answer in each `/chat` conversation each day (every `/generate` answer) ends with `(Running on my local brain — today's Claude budget is spent.)` (or "this month's"); the note is shown, never stored as the answer. An image/PDF turn gets a 422 saying why instead of a blind answer | paused | the spent tool returns an error naming only alternatives that are wired and still have budget (`perplexity_search` → `web_search`; `web_search` → `perplexity_search`; plus `fetch_url` on a keyless search page when it is wired). With both spent it says paid search is off and points at the keyless fetch, or, without one, tells the model to answer from what it knows and say live search is unavailable | OpenAI spent: `/speak` returns 503 `{ budget: true, fallback: "browser" }` and the console speaks with the browser's voice |
 
 The same levels apply per vendor to any tier on that vendor. Responses say when the guard
