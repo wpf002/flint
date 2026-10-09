@@ -382,6 +382,7 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
       alert.messageText = a.title
       alert.informativeText = a.text
       for b in a.buttons { alert.addButton(withTitle: b) }
+      alert.window.level = .floating
       if alert.runModal() == .alertFirstButtonReturn && a.buttons.first == UIText.openSettings,
          let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
         NSWorkspace.shared.open(url)
@@ -483,7 +484,16 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
     w.setContentSize(page.fittingSize)
     w.center()
     window = w
-    w.makeKeyAndOrderFront(nil)
+    bringForward(w)
+  }
+
+  /// Flint Calendar has no Dock icon, and macOS may refuse an activation Will didn't click for (here, right after
+  /// its own access prompt), which left the chooser behind the front app's window where he couldn't find it.
+  /// Floating and ordered front regardless, it shows above other apps' windows until he closes it.
+  private func bringForward(_ w: NSWindow) {
+    w.level = .floating
+    w.orderFrontRegardless()
+    w.makeKey()
     NSApp.activate()
   }
 
@@ -516,6 +526,7 @@ final class Chooser: NSObject, NSApplicationDelegate, NSWindowDelegate {
     alert.messageText = title
     alert.informativeText = text
     alert.addButton(withTitle: UIText.ok)
+    alert.window.level = .floating
     alert.runModal()
   }
 
