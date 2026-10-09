@@ -68,22 +68,33 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 - **It runs on the local model.** By default it asks the local Ollama model, the chat
   brain's own: `OLLAMA_MODEL` at `OLLAMA_HOST`, with the same `OLLAMA_NUM_CTX`, so
   Ollama never reloads the model between Will's chat and a pass. No outside AI and no
-  API key: it runs with no Anthropic key at all. The reply is held to a JSON schema,
-  `think` is off, and each call is sized to fit the model's context window.
+  API key: it runs with no Anthropic key at all. An Ollama cloud model (`...-cloud`,
+  `:cloud`) runs off this Mac, so it is never used, and an `OLLAMA_MODEL` that is one
+  gets a warning at boot. The reply is held to a JSON schema, `think` is off, and each
+  call is sized to fit the model's context window. One more cost: a pass can push the
+  chat's cached prompt out of Ollama's memory, so Will's first message after a pass
+  may take a few seconds longer to start.
 - **Will's chat comes first.** Before every call a pass checks for a `/chat` turn
   running, or one that ended less than 2 minutes ago, and if so tries again in 2
   minutes. A call already running is cut off the moment a turn starts. Waiting moves
   nothing and costs none of the day's calls.
 - **Every fact quotes Will.** Each fact the model proposes carries `quote`: the words
   of Will's it rests on. It is stored only if that quote is in what Will wrote in the
-  turns it was given. A quote found only in Flint's answers, or nowhere, drops the
-  fact. The match ignores typography only (curly quotes, dashes, spacing, capitals);
-  a word added, dropped or changed fails it.
+  turns it was given, as whole words, and that turn's words also hold at least half of
+  what the fact says (so "is my Mac Studio fast enough" can't ground "Will's Mac Studio
+  has 192GB of unified memory"). A quote found only in Flint's answers, or nowhere,
+  drops the fact. The match ignores typography only (curly quotes, dashes, spacing,
+  capitals); a word added, dropped or changed fails it.
+- **Only a shown fact can be replaced.** A new fact may retire an old one only if the
+  model was shown that old fact in this call, and the two share a content word.
 - **A failure keeps its place.** A reply that isn't the schema (bad JSON, a missing
-  field, cut off) leaves the turns to be retried; a batch that fails that way 3 times
-  is skipped. No reply at all (Ollama down, the model not pulled) or a timeout leaves
-  the turns too, with no strike against them, and the next pass backs off: 15
-  minutes, doubling, up to 6 hours. A call with no reply costs none of the day's calls.
+  field), an error the server answered with (a 5xx, or a 4xx other than 404 and 429)
+  or a timeout is a strike: the turns are retried, and a batch with 3 strikes in a row
+  is skipped, so one batch that always fails can't hold up the rest. A reply cut off at
+  its token limit is asked again with half the turns; only a single turn still cut off
+  is a strike. No answer at all (Ollama down, the model not pulled, 429) is no strike
+  and costs none of the day's calls. Any failure but a bad reply backs the next pass
+  off: 15 minutes, doubling, up to 6 hours.
 - **Logs carry ids and counts only**, never a fact, a quote or anything Will or Flint
   said. The boot log names the model (`[memory-extract] on the local model ...`), and
   each pass logs one line of counts.
@@ -91,7 +102,7 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `FLINT_MEMORY_BRAIN` | `local` | `local`; `frontier`: the primary frontier tier, metered as `extract` and paused with other background work at 80% of its vendor's cap. Only when set, and never a fallback: with no frontier configured nothing runs, and a local model that is down is not replaced by the frontier. `off`: no extraction. Anything else is logged and read as `local`. |
-| `FLINT_MEMORY_MODEL` | `OLLAMA_MODEL` | Another local model for extraction. One that isn't the chat brain's needs its own room in memory beside it. |
+| `FLINT_MEMORY_MODEL` | `OLLAMA_MODEL` | Another local model for extraction. One that isn't the chat brain's is unloaded after each request (`keep_alive: 0`), so it never holds memory the chat model needs, at the price of a load per call. A cloud model is refused. |
 | `FLINT_EXTRACT_MAX_CALLS_PER_DAY` | 48 local, 24 frontier | Calls per UTC day: GPU time on the local model, dollars on the frontier. |
 | `FLINT_EXTRACT_BATCH_CHARS` | 8,000 local, 24,000 frontier | Characters of transcript per call, at most (a small context window allows fewer). |
 | `FLINT_EXTRACT_INTERVAL_MS` / `FLINT_EXTRACT_BACKLOG_INTERVAL_MS` | 6 hours / 15 minutes | Time between passes, and while a backlog remains. |

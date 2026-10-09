@@ -3,7 +3,9 @@
  * FLINT_MEMORY_BRAIN:
  *  - unset or `local` (the default): the local Ollama model, the chat brain's
  *    own (OLLAMA_MODEL) unless FLINT_MEMORY_MODEL names another. No outside AI
- *    and no API key: with no Anthropic key at all, extraction still runs.
+ *    and no API key: with no Anthropic key at all, extraction still runs. An
+ *    Ollama cloud model (`…-cloud`, `:cloud`) runs on Ollama's servers, not
+ *    this Mac, so it is never used.
  *  - `frontier`: the primary frontier tier, bare, metered as `extract` and
  *    paused with the other background work at 80% of its vendor's cap. Only
  *    when Will sets it, and never a fallback either way: a local model that is
@@ -16,19 +18,20 @@
  *  - OllamaProvider with the reply held to FACTS_SCHEMA (`format`) and checked
  *    again with factsReply; `think` off and temperature 0;
  *  - the num_ctx the chat brain sends (liveOllamaOptions), so Ollama never
- *    reloads the model to switch between Will's chat and a pass;
- *  - at most MEMORY_MODEL_REQUESTS requests a call, however they fail, each
- *    only to /api/chat on the configured host, and each first checking that
- *    Will isn't chatting;
+ *    reloads the model to switch between Will's chat and a pass; a model of its
+ *    own (FLINT_MEMORY_MODEL) is unloaded after each request instead
+ *    (keep_alive 0), so it never holds memory the chat model needs;
+ *  - one request a call (at temperature 0 a second would replay the first),
+ *    only to /api/chat on the configured host, after checking that Will isn't
+ *    chatting;
  *  - a request already running is cut off the moment a chat turn starts, so
  *    his turn never waits behind it;
- *  - failing, it says why (MemoryBrainError): deferred (chat), unavailable (no
- *    reply), timeout, or invalid (replies, none in the shape).
+ *  - failing, it says why (MemoryBrainError, see BrainFailure).
  */
 import { OllamaProvider, isFlintError } from '@flint/core';
 import type { ChatLoad } from './chat-load';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, liveOllamaOptions } from './local-model';
-import { FACTS_SCHEMA, MemoryBrainError, factsReply, type ExtractBrain } from './memory-extract';
+import { FACTS_SCHEMA, MemoryBrainError, factsReply, type BrainFailure, type ExtractBrain, type FactEntry } from './memory-extract';
 
 type Env = Record<string, string | undefined>;
 
@@ -42,25 +45,49 @@ export function memoryBrainSetting(env: Env, log: (m: string) => void): MemoryBr
   return 'local';
 }
 
+/**
+ * Is this one of Ollama's cloud models (`gpt-oss:120b-cloud`, `glm-4.6:cloud`)?
+ * Those run on Ollama's servers: a pull is only a pointer to them.
+ */
+export function isCloudModel(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  const colon = n.lastIndexOf(':');
+  const base = colon === -1 ? n : n.slice(0, colon);
+  const tag = colon === -1 ? '' : n.slice(colon + 1);
+  return /(^|-)cloud$/.test(tag) || /-cloud$/.test(base);
+}
+
 export interface LocalMemoryModel {
   /** Ollama's origin: OLLAMA_HOST, as the chat brain reads it. */
   baseURL: string;
   model: string;
-  /** What the chat brain sends as num_ctx; undefined when that isn't a usable number (then none is sent). */
+  /** Exactly what the chat brain sends as num_ctx (liveOllamaOptions), sent as is. */
   numCtx: number | undefined;
+  /** A model of its own, not the chat brain's: unloaded after each request (keep_alive 0). */
+  unloadAfter: boolean;
 }
 
 /**
  * The local model a pass asks, from the chat brain's own settings: OLLAMA_HOST,
  * OLLAMA_NUM_CTX, and FLINT_MEMORY_MODEL or else OLLAMA_MODEL. Undefined when
- * there is none to ask (the reason is logged).
+ * there is none on this Mac to ask (the reason is logged).
  */
 export function localMemoryModel(env: Env, log: (m: string) => void): LocalMemoryModel | undefined {
   const valid = (m: string) => m.length <= LOCAL_MODEL_MAX_LEN && LOCAL_MODEL_RE.test(m);
-  const own = env.FLINT_MEMORY_MODEL?.trim();
-  if (own && !valid(own)) log('[memory-extract] FLINT_MEMORY_MODEL is not an Ollama model name; ignoring it');
-  const model = own && valid(own) ? own : env.OLLAMA_MODEL?.trim();
-  if (!model) return undefined;
+  const chat = env.OLLAMA_MODEL?.trim() || undefined;
+  if (chat && isCloudModel(chat)) {
+    log('[memory-extract] warning: OLLAMA_MODEL is an Ollama cloud model, so the chat brain runs off this Mac; extraction never uses it');
+  }
+  let own = env.FLINT_MEMORY_MODEL?.trim() || undefined;
+  if (own && !valid(own)) {
+    log('[memory-extract] FLINT_MEMORY_MODEL is not an Ollama model name; ignoring it');
+    own = undefined;
+  } else if (own && isCloudModel(own)) {
+    log('[memory-extract] FLINT_MEMORY_MODEL is an Ollama cloud model, which runs off this Mac; ignoring it');
+    own = undefined;
+  }
+  const model = own ?? chat;
+  if (!model || isCloudModel(model)) return undefined;
   if (!valid(model)) {
     log('[memory-extract] OLLAMA_MODEL is not an Ollama model name');
     return undefined;
@@ -76,7 +103,7 @@ export function localMemoryModel(env: Env, log: (m: string) => void): LocalMemor
     return undefined;
   }
   const n = live.defaultOptions?.num_ctx;
-  return { baseURL, model, numCtx: typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined };
+  return { baseURL, model, numCtx: typeof n === 'number' ? n : undefined, unloadAfter: model !== chat };
 }
 
 export type MemoryBrainPlan =
@@ -86,8 +113,8 @@ export type MemoryBrainPlan =
 
 /**
  * Which brain extraction runs on, from FLINT_MEMORY_BRAIN. `frontier` is the
- * bare frontier client main() built, or undefined when none is configured; it
- * is used only when Will asked for it.
+ * bare frontier client main() built (frontierExtractBrain), or undefined when
+ * none is configured; it is used only when Will asked for it.
  */
 export function chooseMemoryBrain(
   env: Env,
@@ -101,11 +128,28 @@ export function chooseMemoryBrain(
       : { kind: 'none', why: 'FLINT_MEMORY_BRAIN=frontier, but no frontier is configured (the local model does not stand in)' };
   }
   const model = localMemoryModel(env, deps.log);
-  if (!model) return { kind: 'none', why: 'no local model (set OLLAMA_MODEL, or FLINT_MEMORY_MODEL)' };
+  if (!model) return { kind: 'none', why: 'no local model on this Mac (set OLLAMA_MODEL, or FLINT_MEMORY_MODEL)' };
   return {
     kind: 'local',
     model,
     brain: localExtractBrain(model, { ...(deps.chatActive ? { chatActive: deps.chatActive } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+  };
+}
+
+/**
+ * The frontier as an ExtractBrain (FLINT_MEMORY_BRAIN=frontier): its text is
+ * parsed by the extractor, and a reply cut off at its token limit says so, so
+ * the batch is asked again at half its turns.
+ */
+export function frontierExtractBrain(
+  generate: (input: { system: string; prompt: string }) => Promise<{ text: string; reason?: string }>,
+): ExtractBrain {
+  return {
+    generate: async (input) => {
+      const out = await generate(input);
+      if (out.reason === 'max_tokens') throw new MemoryBrainError('truncated');
+      return { text: out.text };
+    },
   };
 }
 
@@ -117,12 +161,13 @@ export function liveChat(load: Pick<ChatLoad, 'busy'>, quietMs = MEMORY_CHAT_QUI
   return () => load.busy(quietMs);
 }
 
-export const MEMORY_MODEL_REQUESTS = 2;
-/** A whole call, every request in it: a cold model load plus a long reply fits easily. */
+/** One request a call: at temperature 0 a second would replay the first. */
+export const MEMORY_MODEL_REQUESTS = 1;
+/** A whole call: a cold model load plus a long reply fits easily. */
 export const MEMORY_CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** How often a running request checks whether Will started a chat turn. */
 const CHAT_POLL_MS = 500;
-/** Ollama's own window, for sizing a call when the chat brain sends no num_ctx. */
+/** Ollama's own window, for sizing a call when the chat brain sends no usable num_ctx. */
 const DEFAULT_NUM_CTX = 4096;
 /** Prompt characters per token, on the low side: transcripts carry names, numbers and ids. */
 const CHARS_PER_TOKEN = 3.5;
@@ -133,7 +178,7 @@ export function replyTokens(numCtx: number): number {
 }
 
 export interface LocalBrainDeps {
-  /** Is Will chatting? Checked before each request, and every pollMs while one runs. */
+  /** Is Will chatting? Checked before the request, and every pollMs while it runs. */
   chatActive?: () => boolean;
   fetch?: typeof fetch;
   timeoutMs?: number;
@@ -149,7 +194,7 @@ class Stop extends Error {}
  * instructions).
  */
 export function localExtractBrain(m: LocalMemoryModel, deps: LocalBrainDeps = {}): ExtractBrain {
-  const numCtx = m.numCtx ?? DEFAULT_NUM_CTX;
+  const numCtx = typeof m.numCtx === 'number' && Number.isInteger(m.numCtx) && m.numCtx > 0 ? m.numCtx : DEFAULT_NUM_CTX;
   const maxTokens = replyTokens(numCtx);
   return {
     promptChars: Math.max(0, Math.floor((numCtx - maxTokens) * CHARS_PER_TOKEN)),
@@ -157,12 +202,19 @@ export function localExtractBrain(m: LocalMemoryModel, deps: LocalBrainDeps = {}
   };
 }
 
-async function askLocal(m: LocalMemoryModel, deps: LocalBrainDeps, input: { system: string; prompt: string }, maxTokens: number): Promise<{ text: string }> {
+async function askLocal(
+  m: LocalMemoryModel,
+  deps: LocalBrainDeps,
+  input: { system: string; prompt: string },
+  maxTokens: number,
+): Promise<{ facts: FactEntry[] }> {
   const chatActive = deps.chatActive ?? (() => false);
   if (chatActive()) throw new MemoryBrainError('deferred');
   const base = deps.fetch ?? fetch;
   let requests = 0;
-  let replied = false;
+  /** The HTTP status the server last answered with. */
+  let status: number | undefined;
+  let truncated = false;
   let stopped: 'deferred' | 'timeout' | undefined;
   let lastError: unknown;
   const ac = new AbortController();
@@ -186,8 +238,10 @@ async function askLocal(m: LocalMemoryModel, deps: LocalBrainDeps, input: { syst
       throw new Stop('chat is busy');
     }
     requests += 1;
-    const res = await base(u.href, init);
-    if (res.ok) replied = true;
+    // keep_alive is top-level in Ollama's request, outside the provider's options.
+    const body = m.unloadAfter && typeof init?.body === 'string' ? JSON.stringify({ ...(JSON.parse(init.body) as object), keep_alive: 0 }) : init?.body;
+    const res = await base(u.href, { ...init, ...(body !== undefined ? { body } : {}) });
+    status = res.status;
     return res;
   }) as typeof fetch;
   const provider = new OllamaProvider({
@@ -207,6 +261,10 @@ async function askLocal(m: LocalMemoryModel, deps: LocalBrainDeps, input: { syst
           maxTokens,
           signal: ac.signal,
         });
+        if (r.reason === 'max_tokens') {
+          truncated = true;
+          break;
+        }
         if (r.reason !== 'complete' || r.message.role !== 'assistant') continue;
         let value: unknown;
         try {
@@ -215,9 +273,9 @@ async function askLocal(m: LocalMemoryModel, deps: LocalBrainDeps, input: { syst
           continue;
         }
         const reply = factsReply(value);
-        if (reply) return { text: JSON.stringify(reply) };
+        if (reply) return reply;
       } catch (err) {
-        // A transport or HTTP error, three unparsable replies, the gate, or a cut-off: the loop decides.
+        // A transport or HTTP error, an unparsable reply, the gate, or a cut-off: the loop decides.
         lastError = err;
         if (requests === 0 && !stopped) break;
       }
@@ -226,8 +284,19 @@ async function askLocal(m: LocalMemoryModel, deps: LocalBrainDeps, input: { syst
     clearTimeout(timer);
     clearInterval(watch);
   }
-  const why = stopped ?? (replied ? 'invalid' : 'unavailable');
-  throw new MemoryBrainError(why, why === 'unavailable' ? failureDetail(lastError) : undefined);
+  const why = stopped ?? (truncated ? 'truncated' : answered(status));
+  throw new MemoryBrainError(why, why === 'unavailable' || why === 'server-error' ? failureDetail(lastError) : undefined);
+}
+
+/**
+ * What the server's last answer means when there is no usable reply: none at
+ * all, a 404 (the model isn't pulled) or a 429 is `unavailable`, not the
+ * batch's doing; any other error status is `server-error`, which may be; a
+ * 2xx is a reply that wasn't the shape, `invalid`.
+ */
+function answered(status: number | undefined): BrainFailure {
+  if (status === undefined || status === 404 || status === 429) return 'unavailable';
+  return status >= 200 && status < 300 ? 'invalid' : 'server-error';
 }
 
 /** A failed request as a log can carry it: the error's kind and status ("validation 404", "provider_unavailable"), never its message, which holds Ollama's reply. */

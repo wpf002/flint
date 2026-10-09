@@ -1,9 +1,11 @@
 /**
  * Memory extraction on the local model (./memory-brain + ./memory-extract):
- * local by default with no API key, the frontier only when Will opts in, a
- * pass that yields to his chat, facts grounded in a quote of his own words, a
- * failed or invalid reply that keeps the watermark, and logs with no
- * transcript in them. Every model is a fake: no network.
+ * local by default with no API key and never a cloud model, the frontier only
+ * when Will opts in, a pass that yields to his chat, facts grounded in a quote
+ * of his own words that also covers what they claim, supersedes limited to
+ * facts the model was shown, strikes so one bad batch can't stall the rest, a
+ * cut-off reply retried at half the turns, and logs with no transcript in them.
+ * Every model is a fake: no network.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -12,12 +14,16 @@ import { join } from 'node:path';
 import type { Turn } from '@flint/core';
 import { KnowledgeStore } from '../src/knowledge';
 import { ChatLoad } from '../src/chat-load';
+import { OllamaProvider } from '@flint/core';
 import { liveOllamaOptions } from '../src/local-model';
 import {
   MemoryExtractor,
   MemoryBrainError,
   FACTS_SCHEMA,
+  errorKind,
+  factCoverage,
   factsReply,
+  holdsWords,
   locateQuote,
   normalizeQuoteText,
   quoteNeedle,
@@ -28,6 +34,8 @@ import {
   MEMORY_CHAT_QUIET_MS,
   MEMORY_MODEL_REQUESTS,
   chooseMemoryBrain,
+  frontierExtractBrain,
+  isCloudModel,
   liveChat,
   localExtractBrain,
   localMemoryModel,
@@ -79,6 +87,7 @@ interface Seen {
     messages: Array<{ role: string; content: string }>;
     format?: unknown;
     think?: boolean;
+    keep_alive?: number;
     stream: boolean;
     options?: Record<string, unknown>;
   };
@@ -106,7 +115,7 @@ function hang(seen: Seen): Promise<Response> {
 const facts = (...fs: Array<{ turn: number; quote: string; fact: string; category?: string; supersedes?: string[] }>) =>
   JSON.stringify({ facts: fs.map((f) => ({ category: 'other', supersedes: [], ...f })) });
 
-const LOCAL: LocalMemoryModel = { baseURL: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b', numCtx: 8192 };
+const LOCAL: LocalMemoryModel = { baseURL: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b', numCtx: 8192, unloadAfter: false };
 
 let dir: string;
 let kpath: string;
@@ -140,7 +149,7 @@ describe('which brain extraction runs on', () => {
     );
     expect(plan.kind).toBe('local');
     if (plan.kind !== 'local') return;
-    expect(plan.model).toEqual({ baseURL: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b', numCtx: 4096 });
+    expect(plan.model).toEqual({ baseURL: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b', numCtx: 4096, unloadAfter: false });
     const convs = { console: [turn('console', 'My sister Ana lives in Austin and teaches piano')] };
     await new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), plan.brain, spath).run();
     expect(requests).toHaveLength(1);
@@ -178,13 +187,51 @@ describe('which brain extraction runs on', () => {
     expect(log.join('\n')).toContain('FLINT_MEMORY_BRAIN must be local, frontier or off');
   });
 
-  it("uses the chat brain's host and num_ctx, so Ollama never reloads the model between them", () => {
-    const env = { OLLAMA_MODEL: 'muse-glimmer:30b', OLLAMA_HOST: 'http://127.0.0.1:11434/', OLLAMA_NUM_CTX: '16384' };
-    const m = localMemoryModel(env, () => {})!;
-    expect(m.numCtx).toBe(liveOllamaOptions(env).defaultOptions!.num_ctx);
-    expect(m.baseURL).toBe('http://127.0.0.1:11434');
-    // Unset: the chat brain's default, 4096.
-    expect(localMemoryModel({ OLLAMA_MODEL: 'muse-glimmer:30b' }, () => {})!.numCtx).toBe(4096);
+  it("sends what the chat brain sends (host, model, num_ctx, no keep_alive), so Ollama never reloads the model between them", async () => {
+    for (const env of [
+      { OLLAMA_MODEL: 'muse-glimmer:30b', OLLAMA_HOST: 'http://127.0.0.1:11434/', OLLAMA_NUM_CTX: '16384' },
+      { OLLAMA_MODEL: 'muse-glimmer:30b' },
+      { OLLAMA_MODEL: 'muse-glimmer:30b', OLLAMA_NUM_CTX: 'lots' },
+    ]) {
+      // The chat brain exactly as index.ts buildProvider makes it, on the wire.
+      const chat = fakeOllama(() => chatReply('Hi Will.'));
+      const chatBrain = new OllamaProvider({ ...liveOllamaOptions(env), fetch: chat.f });
+      await chatBrain.generate({ model: env.OLLAMA_MODEL, messages: [{ id: 'u', role: 'user', content: 'hello there', timestamp: 0 }] });
+      const mem = fakeOllama(() => chatReply(facts()));
+      const plan = chooseMemoryBrain(env, { frontier: undefined, log: () => {}, fetch: mem.f });
+      if (plan.kind !== 'local') throw new Error('expected the local model');
+      await plan.brain.generate({ system: 's', prompt: 'p' });
+      const [c, m] = [chat.requests[0]!, mem.requests[0]!];
+      expect(new URL(m.url).origin, JSON.stringify(env)).toBe(new URL(c.url).origin);
+      expect(m.body.model).toBe(c.body.model);
+      expect(m.body.options!.num_ctx, JSON.stringify(env)).toEqual(c.body.options!.num_ctx);
+      expect('keep_alive' in m.body).toBe(false);
+    }
+  });
+
+  it('never an Ollama cloud model: FLINT_MEMORY_MODEL naming one is ignored, and an OLLAMA_MODEL that is one gets a warning and no extraction', () => {
+    for (const name of ['gpt-oss:120b-cloud', 'glm-4.6:cloud', 'deepseek-v3.1:671b-cloud', 'qwen3-coder-cloud', 'Kimi-K2:1T-Cloud']) expect(isCloudModel(name), name).toBe(true);
+    for (const name of ['muse-glimmer:30b', 'qwen3.6:35b', 'mycloud:7b', 'hf.co/org/cloudy-repo:Q4_K_M', 'nomic-embed-text']) expect(isCloudModel(name), name).toBe(false);
+    const log: string[] = [];
+    expect(localMemoryModel({ OLLAMA_MODEL: 'muse-glimmer:30b', FLINT_MEMORY_MODEL: 'gpt-oss:120b-cloud' }, (m) => log.push(m))!.model).toBe('muse-glimmer:30b');
+    expect(log.join('\n')).toContain('FLINT_MEMORY_MODEL is an Ollama cloud model');
+    log.length = 0;
+    expect(chooseMemoryBrain({ OLLAMA_MODEL: 'glm-4.6:cloud' }, { frontier: undefined, log: (m) => log.push(m) }).kind).toBe('none');
+    expect(log.join('\n')).toContain('warning: OLLAMA_MODEL is an Ollama cloud model');
+    // A local FLINT_MEMORY_MODEL still runs beside a cloud chat brain (with the warning).
+    log.length = 0;
+    expect(localMemoryModel({ OLLAMA_MODEL: 'glm-4.6:cloud', FLINT_MEMORY_MODEL: 'qwen3.6:35b' }, (m) => log.push(m))!.model).toBe('qwen3.6:35b');
+    expect(log.join('\n')).toContain('warning: OLLAMA_MODEL is an Ollama cloud model');
+  });
+
+  it('a model of its own (FLINT_MEMORY_MODEL) is unloaded after each request, so it never holds the chat model\'s memory', async () => {
+    const m = localMemoryModel({ OLLAMA_MODEL: 'muse-glimmer:30b', FLINT_MEMORY_MODEL: 'qwen3.6:35b' }, () => {})!;
+    expect(m.unloadAfter).toBe(true);
+    const { f, requests } = fakeOllama(() => chatReply(facts()));
+    await localExtractBrain(m, { fetch: f }).generate({ system: 's', prompt: 'p' });
+    expect(requests[0]!.body).toMatchObject({ model: 'qwen3.6:35b', keep_alive: 0 });
+    // The same model as the chat brain's (named either way) stays loaded.
+    expect(localMemoryModel({ OLLAMA_MODEL: 'muse-glimmer:30b', FLINT_MEMORY_MODEL: 'muse-glimmer:30b' }, () => {})!.unloadAfter).toBe(false);
   });
 
   it('FLINT_MEMORY_MODEL names another local model; a name that is not one, or a host that is not http(s), is refused', () => {
@@ -206,7 +253,7 @@ describe('the local brain', () => {
     const brain = localExtractBrain(LOCAL, { fetch: f });
     expect(brain.promptChars).toBe(Math.floor((8192 - replyTokens(8192)) * 3.5));
     const out = await brain.generate({ system: 'SYS', prompt: 'PROMPT' });
-    expect(JSON.parse(out.text)).toEqual({ facts: [{ turn: 1, quote: 'my dog Biscuit', fact: "Will's dog is named Biscuit.", category: 'other', supersedes: [] }] });
+    expect(out).toEqual({ facts: [{ turn: 1, quote: 'my dog Biscuit', fact: "Will's dog is named Biscuit.", category: 'other', supersedes: [] }] });
     expect(requests).toHaveLength(1);
     const r = requests[0]!;
     expect(r.url).toBe('http://127.0.0.1:11434/api/chat');
@@ -218,19 +265,25 @@ describe('the local brain', () => {
     ]);
   });
 
-  it('a reply that is not the schema is invalid, after at most two requests', async () => {
+  it('a reply that is not the schema is invalid, after one request (at temperature 0 a second replays the first)', async () => {
     for (const bad of ['not json at all', '{"facts": "nope"}', '{"facts": [{"fact": "Will has a dog."}]}', '[]']) {
       const { f, requests } = fakeOllama(() => chatReply(bad));
       const err = await localExtractBrain(LOCAL, { fetch: f }).generate({ system: 's', prompt: 'p' }).catch((e: unknown) => e);
       expect(err, bad).toBeInstanceOf(MemoryBrainError);
       expect((err as MemoryBrainError).why, bad).toBe('invalid');
-      expect(requests.length, bad).toBe(MEMORY_MODEL_REQUESTS);
+      expect(requests.length, bad).toBe(1);
     }
+    expect(MEMORY_MODEL_REQUESTS).toBe(1);
   });
 
-  it('a reply cut off at its token limit is invalid too', async () => {
-    const { f } = fakeOllama(() => chatReply('{"facts": [{"turn": 1, "quote": "my dog', 'length'));
-    await expect(localExtractBrain(LOCAL, { fetch: f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'invalid' });
+  it('a reply cut off at its token limit says so (truncated), on the local model and the frontier alike', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('{"facts": [{"turn": 1, "quote": "my dog', 'length'));
+    await expect(localExtractBrain(LOCAL, { fetch: f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'truncated' });
+    expect(requests).toHaveLength(1);
+    const cut = frontierExtractBrain(async () => ({ text: '{"facts": [{"turn": 1, "quo', reason: 'max_tokens' }));
+    await expect(cut.generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'truncated' });
+    const whole = frontierExtractBrain(async () => ({ text: '{"facts": []}', reason: 'complete' }));
+    expect(await whole.generate({ system: 's', prompt: 'p' })).toEqual({ text: '{"facts": []}' });
   });
 
   it('no reply at all (Ollama down, the model not pulled) is unavailable', async () => {
@@ -242,6 +295,15 @@ describe('the local brain', () => {
     // The status says what to fix; Ollama's own words (which can echo a request) stay out.
     await expect(localExtractBrain(LOCAL, { fetch: notPulled.f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'unavailable', detail: 'validation 404' });
     expect(notPulled.requests.length).toBeLessThanOrEqual(MEMORY_MODEL_REQUESTS);
+    const limited = fakeOllama(() => new Response('{"error":"too many requests"}', { status: 429 }));
+    await expect(localExtractBrain(LOCAL, { fetch: limited.f }).generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'unavailable' });
+  });
+
+  it('an error the server answered with (a 5xx, another 4xx) is a server-error: it may be the batch', async () => {
+    for (const status of [500, 503, 400]) {
+      const { f } = fakeOllama(() => new Response('{"error":"llama runner process has terminated"}', { status }));
+      await expect(localExtractBrain(LOCAL, { fetch: f }).generate({ system: 's', prompt: 'p' }), String(status)).rejects.toMatchObject({ why: 'server-error' });
+    }
   });
 
   it('a model still working when the time runs out is a timeout, and the request is cut off', async () => {
@@ -377,7 +439,7 @@ describe('a failed or invalid reply keeps the watermark', () => {
     expect(ex.lastStats.unparseable).toBe(1);
   });
 
-  it('a timeout keeps it, and counts the call', async () => {
+  it('a timeout keeps it, counts the call, and is a strike against the batch', async () => {
     const { f } = fakeOllama((seen) => hang(seen));
     const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
     const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f, timeoutMs: 30 }), spath);
@@ -385,7 +447,7 @@ describe('a failed or invalid reply keeps the watermark', () => {
     expect(watermark('console')).toBeUndefined();
     expect(state().budget.calls).toBe(1);
     expect(ex.lastStats).toMatchObject({ failed: 1, unparseable: 0 });
-    expect(state().failures).toBeUndefined(); // no strike against the batch
+    expect(state().failures).toEqual({ key: `console@${convs.console[0]!.updatedAt}`, count: 1 });
   });
 
   it('Ollama down: the watermark stays, none of the day is spent, and the next pass backs off', async () => {
@@ -406,6 +468,15 @@ describe('a failed or invalid reply keeps the watermark', () => {
 });
 
 describe('each call fits the local window', () => {
+  it('a small batchChars only means fewer turns a call: every turn still goes whole', async () => {
+    const user = 'My homelab runs on the Mac Studio with a ZFS pool, nightly backups to the NAS, and a UPS in the closet';
+    const convs = { a: [turn('a', user)], b: [turn('b', 'My sister Ana lives in Austin and teaches piano')] };
+    const { f, requests } = fakeOllama(() => chatReply(facts()));
+    await new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath, { batchChars: 1 }).run();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.body.messages[1]!.content).toContain(`WILL: ${user}\n`);
+  });
+
   it('sizes the transcript and the known facts to what the model can read', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {}); // 120 "embed failed" lines
     const k = new KnowledgeStore(kpath, downEmbedder);
@@ -488,14 +559,17 @@ describe('quote grounding', () => {
     expect(k.all()[0]).toMatchObject({ text: "Will's favorite MLB team is the Houston Astros.", conversationId: 'b', sourceAt: convs.b[0]!.updatedAt });
   });
 
-  it('a reply with no quote at all (a v1-style string) is not trusted', async () => {
+  it('a fact with no quote is not trusted (and a v1-style bare string is not even a candidate)', async () => {
     const convs = { console: [turn('console', 'My sister Ana lives in Austin and teaches piano')] };
-    const brain: ExtractBrain = { generate: async () => ({ text: JSON.stringify(["Will's sister Ana lives in Austin."]) }) };
+    const brain: ExtractBrain = {
+      generate: async () => ({ text: JSON.stringify(["Will's sister Ana lives in Austin.", { turn: 1, fact: "Will's sister Ana teaches piano." }]) }),
+    };
     const k = new KnowledgeStore(kpath, downEmbedder);
     const ex = new MemoryExtractor(source(convs), k, brain, spath);
     await ex.run();
     expect(k.all()).toHaveLength(0);
     expect(ex.lastStats.rejected).toEqual({ ungrounded: 1 });
+    expect(ex.lastStats.candidates).toBe(1);
   });
 
   it('factsReply holds the reply to the schema’s types and required fields', () => {
@@ -567,5 +641,200 @@ describe('logs carry ids and counts only', () => {
     }
     // ...and none of what was said.
     expect(all.toLowerCase()).not.toContain('zephyr');
+  });
+});
+
+describe('a fact retires only a known fact it was shown, and only one about the same thing', () => {
+  it('refuses an id copied from the prompt (never shown) and an unrelated shown one; a real update still supersedes', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {}); // 160 "embed failed" lines
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    for (let i = 1; i <= 160; i++) {
+      await k.add(i === 12 ? "Will's favorite color is teal." : `Will's homelab node n${i}x runs the s${i}y service.`, 'user', { sourceAt: 1 });
+    }
+    expect(k.all().find((f) => f.id === 'k12')?.text).toBe("Will's favorite color is teal."); // the id the old prompt's example named
+    const user = 'My homelab node n3x now runs Plex instead of the old service, and my sister Ana lives in Austin';
+    const convs = { console: [turn('console', user)] };
+    const prompts: string[] = [];
+    const brain: ExtractBrain = {
+      generate: async (i) => {
+        prompts.push(i.prompt);
+        return {
+          text: facts(
+            { turn: 1, quote: 'My homelab node n3x now runs Plex', fact: "Will's homelab node n3x runs the Plex service.", supersedes: ['k3'] },
+            { turn: 1, quote: 'runs Plex', fact: "Will's homelab streams media with Plex.", supersedes: ['k12'] },
+            { turn: 1, quote: 'my sister Ana lives in Austin', fact: "Will's sister Ana lives in Austin.", supersedes: ['k5'] },
+          ),
+        };
+      },
+    };
+    const ex = new MemoryExtractor(source(convs), k, brain, spath);
+    expect(await ex.run()).toBe(3);
+    // 160 facts, 150 shown: the teal one shares no word with the turn, so it isn't among them.
+    expect(prompts[0]).not.toContain('k12: ');
+    expect(prompts[0]).toContain('k3: ');
+    expect(prompts[0]).toContain('k5: ');
+    expect(prompts[0]).toContain('"supersedes": []');
+    expect(prompts[0]).toContain('ids from KNOWN FACTS only');
+    expect(ex.lastStats).toMatchObject({ stored: 3, superseded: 1, supersedeRefused: 2 });
+    const active = new Set(k.all().map((f) => f.id));
+    expect(active.has('k3')).toBe(false); // the real update
+    expect(active.has('k12')).toBe(true); // never shown
+    expect(active.has('k5')).toBe(true); // shown, but about something else
+  });
+});
+
+describe('a quote must be whole words of Will’s, and his words must carry the claim', () => {
+  it('holdsWords and factCoverage', () => {
+    expect(holdsWords('my cardiologist is dr. patel', 'my card')).toBe(false);
+    expect(holdsWords('my cardiologist is dr. patel', 'diologist is dr. patel')).toBe(false);
+    expect(holdsWords('my cardiologist is dr. patel', 'my cardiologist')).toBe(true);
+    expect(holdsWords("heads up - my team's the houston astros", 'my team')).toBe(true);
+    expect(holdsWords('the astros', 'astros')).toBe(true);
+    expect(holdsWords('anything', '')).toBe(false);
+    expect(factCoverage(['is my Mac Studio fast enough'], "Will's Mac Studio has 192GB of unified memory.")).toBeCloseTo(0.4);
+    expect(factCoverage(['I have a question about my car'], 'Will has a dog named Rex.')).toBe(0);
+    expect(factCoverage(['Tell my friend Drew hi from me please'], 'Will has a friend named Drew.')).toBeCloseTo(2 / 3);
+    expect(factCoverage(['My team is the Houston Astros'], "Will's favorite MLB team is the Houston Astros.")).toBeCloseTo(0.6);
+    expect(factCoverage(['anything at all'], 'Will is.')).toBe(0); // no content words: nothing to ground
+  });
+
+  it('drops "my Mac Studio" grounding 192GB, "I have" grounding a dog named Rex, and a quote that starts mid-word; keeps the real ones', async () => {
+    const convs = {
+      console: [
+        turn('console', 'is my Mac Studio fast enough for a 70B model?', 'Your Mac Studio has 192GB of unified memory, so yes.'),
+        turn('console', 'I have a question about my car insurance renewal', 'Sure. Is this about your dog Rex too?'),
+        turn('console', 'My cardiologist is Dr. Patel at Baylor', 'Noted.'),
+        turn('console', 'My sister Ana lives in Austin and teaches piano', 'Lovely.'),
+      ],
+    };
+    const { f } = fakeOllama(() =>
+      chatReply(
+        facts(
+          { turn: 1, quote: 'my Mac Studio', fact: "Will's Mac Studio has 192GB of unified memory." },
+          { turn: 2, quote: 'I have', fact: 'Will has a dog named Rex.' },
+          { turn: 3, quote: 'diologist is Dr. Patel', fact: "Will's cardiologist is Dr. Patel at Baylor." },
+          { turn: 3, quote: 'My cardiologist is Dr. Patel', fact: "Will's cardiologist is Dr. Patel at Baylor.", category: 'person' },
+          { turn: 4, quote: 'my sister Ana lives in Austin', fact: "Will's sister Ana lives in Austin and teaches piano.", category: 'person' },
+        ),
+      ),
+    );
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    const ex = new MemoryExtractor(source(convs), k, localExtractBrain(LOCAL, { fetch: f }), spath);
+    expect(await ex.run()).toBe(2);
+    expect(ex.lastStats.rejected).toEqual({ ungrounded: 3 });
+    expect(k.all().map((x) => x.text).sort()).toEqual(["Will's cardiologist is Dr. Patel at Baylor.", "Will's sister Ana lives in Austin and teaches piano."]);
+    expect(k.all().find((x) => x.text.includes('Patel'))!.sourceAt).toBe(convs.console[2]!.updatedAt);
+  });
+});
+
+describe('one batch that keeps failing can’t stall the rest', () => {
+  it('an error the server answers with (500) is a strike: after 3 the batch is skipped, and a later conversation goes through', async () => {
+    const convs = {
+      a: [turn('a', 'This exact turn always crashes the runner somehow')],
+      b: [turn('b', 'My sister Ana lives in Austin and teaches piano')],
+    };
+    const { f } = fakeOllama((seen) =>
+      seen.body.messages[1]!.content.includes('crashes the runner')
+        ? new Response('{"error":"llama runner process has terminated"}', { status: 500 })
+        : chatReply(facts({ turn: 1, quote: 'my sister Ana lives in Austin', fact: "Will's sister Ana lives in Austin." })),
+    );
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    const ex = new MemoryExtractor(source(convs), k, localExtractBrain(LOCAL, { fetch: f }), spath, { batchChars: 1, backlogEveryMs: 60_000, everyMs: 3_600_000 });
+    await ex.run();
+    expect(state().failures).toEqual({ key: `a@${convs.a[0]!.updatedAt}`, count: 1 });
+    expect(ex.nextDelayMs).toBe(60_000); // backed off
+    await ex.run();
+    expect(watermark('a')).toBeUndefined();
+    await ex.run(); // the third strike: skipped
+    expect(watermark('a')).toBeDefined();
+    expect(state().failures).toBeUndefined();
+    expect(watermark('b')).toBeUndefined(); // that pass stopped there
+    await ex.run();
+    expect(watermark('b')).toBeDefined();
+    expect(k.all().map((x) => x.text)).toEqual(["Will's sister Ana lives in Austin."]);
+    expect(state().budget.calls).toBe(4); // the server answered each time: they count
+  });
+
+  it('a 404 (the model isn’t pulled) is no strike: the turns wait as long as it takes, at none of the day’s calls', async () => {
+    const { f } = fakeOllama(() => new Response('{"error":"model not found"}', { status: 404 }));
+    const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    for (let i = 0; i < 10; i++) await ex.run();
+    expect(watermark('console')).toBeUndefined();
+    expect(state().failures).toBeUndefined();
+    expect(state().budget.calls).toBe(0);
+  });
+});
+
+describe('a reply cut off at its token limit', () => {
+  const turnsIn = (seen: Seen) => (seen.body.messages[1]!.content.match(/### Turn \d+/g) ?? []).length;
+
+  it('is asked again with half the turns, which then go through: no strike', async () => {
+    const convs: Record<string, Turn[]> = {};
+    for (let i = 0; i < 4; i++) convs[`c${i}`] = [turn(`c${i}`, `Distinct durable statement number ${i} about Will's projects`)];
+    const { f, requests } = fakeOllama((seen) => (turnsIn(seen) > 2 ? chatReply('{"facts": [{"turn": 1, "quote": "Distin', 'length') : chatReply(facts())));
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    await ex.run();
+    expect(requests.map(turnsIn)).toEqual([4, 2, 2]);
+    for (let i = 0; i < 4; i++) expect(watermark(`c${i}`)).toBeDefined();
+    expect(state().failures).toBeUndefined();
+    expect(state().budget.calls).toBe(3); // the model worked on each
+    expect(ex.lastStats).toMatchObject({ truncated: 1, turnsSent: 4, unparseable: 0 });
+  });
+
+  it('a single turn still cut off is a strike, and is skipped after 3', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('{"facts": [{"turn": 1, "quote": "My dog', 'length'));
+    const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath);
+    await ex.run();
+    expect(state().failures).toEqual({ key: `console@${convs.console[0]!.updatedAt}`, count: 1 });
+    expect(watermark('console')).toBeUndefined();
+    await ex.run();
+    await ex.run();
+    expect(watermark('console')).toBeDefined();
+    expect(requests).toHaveLength(3);
+    expect(state().totals.truncated).toBe(3);
+  });
+});
+
+describe('cheap checks come first', () => {
+  it('reads no history while the spend gate is closed or Will is chatting', async () => {
+    let reads = 0;
+    const src: TurnSource = {
+      conversationIds: () => ['c'],
+      getTurns: async () => {
+        reads++;
+        return [turn('c', 'My sister Ana lives in Austin and teaches piano')];
+      },
+    };
+    let chatting = true;
+    let paused: string | undefined;
+    const { f } = fakeOllama(() => chatReply(facts()));
+    const ex = new MemoryExtractor(src, new KnowledgeStore(kpath, downEmbedder), localExtractBrain(LOCAL, { fetch: f }), spath, {
+      chatActive: () => chatting,
+      gate: () => paused,
+    });
+    await ex.run();
+    expect(reads).toBe(0);
+    chatting = false;
+    paused = 'at 80% of the cap';
+    await ex.run();
+    expect(reads).toBe(0);
+    paused = undefined;
+    await ex.run();
+    expect(reads).toBe(1);
+  });
+});
+
+describe('errorKind', () => {
+  it('carries a kind and a code, never the message or the stack (even a message line that looks like a frame)', () => {
+    const e = new Error('Zephyr leak\n    at Will told me his sister Zephyrina lives in Zephyrville (x.ts:1:1)');
+    expect(e.stack).toContain('Zephyrina'); // the stack does hold it
+    expect(errorKind(e)).toBe('Error');
+    expect(errorKind(Object.assign(new Error('Zephyr'), { code: 'ECONNREFUSED' }))).toBe('Error ECONNREFUSED');
+    expect(errorKind({ kind: 'provider_unavailable', error: { providerCode: '503' }, message: 'Zephyr' })).toBe('provider_unavailable 503');
+    expect(errorKind(Object.assign(new Error('x'), { name: 'Zephyr name\n  at secret', code: 'Zephyr code with spaces' }))).not.toMatch(/\s{2}|\n/);
+    expect(errorKind('Zephyr as a string')).toBe('error');
+    expect(errorKind(null)).toBe('error');
   });
 });

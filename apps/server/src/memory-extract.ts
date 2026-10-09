@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Turn } from '@flint/core';
-import type { KnowledgeStore } from './knowledge';
+import { contentTokens, type KnowledgeStore } from './knowledge';
 
 /**
  * Automatic long-term memory.
@@ -42,16 +42,29 @@ import type { KnowledgeStore } from './knowledge';
  * precise, so:
  *  - its reply is held to FACTS_SCHEMA (Ollama's `format`, then factsReply);
  *  - every fact carries `quote`, Will's own words it rests on, and is dropped
- *    unless that quote is in a WILL line of the turns it was given. An
+ *    unless that quote is in a WILL line of the turns it was given, as whole
+ *    words, and that line also holds most of what the fact says. An
  *    assistant's words never ground a fact (locateQuote).
+ *  - a fact may retire only a known fact the model was shown, and only one
+ *    about the same thing (store).
  *  - a pass yields to Will's chat (`chatActive`): it waits while a turn runs or
  *    has just ended, and the local brain cuts off a request a new turn would
  *    wait behind. A deferral moves no watermark and spends none of the day's
  *    calls.
- *  - a call with no reply at all (Ollama down, the model not pulled) moves no
+ *  - a call with no answer at all (Ollama down, the model not pulled) moves no
  *    watermark, spends none of the day's calls, and backs the next pass off.
+ *    One the server answered with an error, or that ran out of time, is a
+ *    strike against the batch (skipped after 3), so one bad batch can't stall
+ *    everything behind it. A reply cut off at its token limit is retried with
+ *    half the turns.
  * Logs carry ids and counts only: never a fact, a quote or transcript text.
  */
+
+/**
+ * A brain's reply: `facts`, already checked against FACTS_SCHEMA (the local
+ * model's), or `text` for the extractor to parse (the frontier's).
+ */
+export type BrainReply = { facts: FactEntry[] } | { text: string };
 
 /**
  * The model a pass asks: the local Ollama model by default, the frontier only
@@ -59,7 +72,7 @@ import type { KnowledgeStore } from './knowledge';
  * it has no usable reply; anything else it throws counts as `unavailable`.
  */
 export interface ExtractBrain {
-  generate(input: { system: string; prompt: string }): Promise<{ text: string }>;
+  generate(input: { system: string; prompt: string }): Promise<BrainReply>;
   /**
    * Characters of system prompt + prompt one call can hold: a local model's
    * context window less its reply. Unset, a call is sized by batchChars alone.
@@ -68,13 +81,23 @@ export interface ExtractBrain {
 }
 
 /**
- * Why a brain has no usable reply:
- *  - deferred: Will's chat needs the model (nothing ran, or the request was cut off);
- *  - unavailable: no reply at all (the server is down, the model isn't pulled);
- *  - timeout: the model was still working when the call's time ran out;
- *  - invalid: it replied, but never in the shape FACTS_SCHEMA asks for.
+ * Why a brain has no usable reply, and what the pass does about it:
+ *  - deferred: Will's chat needs the model (nothing ran, or the request was cut
+ *    off). The pass stops, the call isn't one of the day's, and the next pass
+ *    comes in deferMs.
+ *  - unavailable: no answer at all (the server unreachable, the model not
+ *    pulled, 429). Not the batch's fault: no strike, the call isn't one of the
+ *    day's, and the next pass backs off.
+ *  - server-error: the server answered with an error status (any other 4xx, a
+ *    5xx). It may be this batch: a strike, the call counts, and it backs off.
+ *  - timeout: the model was still working when the call's time ran out. The
+ *    same as server-error.
+ *  - truncated: the reply hit its token limit. The batch is asked again at half
+ *    its turns; a single turn still cut off is a strike.
+ *  - invalid: it replied, but not in FACTS_SCHEMA's shape. A strike.
+ * Three strikes in a row against the same batch and it is skipped.
  */
-export type BrainFailure = 'deferred' | 'unavailable' | 'timeout' | 'invalid';
+export type BrainFailure = 'deferred' | 'unavailable' | 'server-error' | 'timeout' | 'truncated' | 'invalid';
 
 export class MemoryBrainError extends Error {
   /** `detail`: what the last request failed with, as a kind and status ("validation 404"), never a message. */
@@ -102,7 +125,7 @@ interface ExtractState {
   watermarks: Record<string, number>;
   /** Model calls made on `day` (UTC date): dollars on the frontier, GPU time on the local model. */
   budget: { day: string; calls: number };
-  /** Consecutive unusable replies for the batch starting at `key`. */
+  /** Strikes in a row against the batch starting at `key`. */
   failures?: { key: string; count: number };
   /** Lifetime counters, for anyone asking "is memory actually growing?". */
   totals: PassStats;
@@ -119,12 +142,16 @@ export interface PassStats {
   calls: number;
   /** Times the pass waited for Will's chat: a call not made, or cut off. */
   deferred: number;
-  /** Calls with no reply (unavailable) or none in time (timeout). */
+  /** Calls with no answer (unavailable), an error answer (server-error) or none in time (timeout). */
   failed: number;
+  /** Calls whose reply hit its token limit. */
+  truncated: number;
   unparseable: number;
   candidates: number;
   stored: number;
   superseded: number;
+  /** Supersedes refused: an id the model wasn't shown, or a fact about something else. */
+  supersedeRefused: number;
   rejected: Record<string, number>;
 }
 
@@ -139,10 +166,12 @@ function emptyStats(): PassStats {
     calls: 0,
     deferred: 0,
     failed: 0,
+    truncated: 0,
     unparseable: 0,
     candidates: 0,
     stored: 0,
     superseded: 0,
+    supersedeRefused: 0,
     rejected: {},
   };
 }
@@ -168,11 +197,11 @@ Rules:
 - No expiring details: weather, prices, scores, what he's doing today, "right now", "currently".
 - Nothing about Flint's own behaviour, tests, bugs or this extraction task.
 - Each fact is ONE standalone sentence in the third person naming Will ("Will's friend Tanner …", not "he" or "my"). Be specific: include names, numbers, dates he gave.
-- Do not repeat a KNOWN FACT. If a turn UPDATES or CONTRADICTS a known fact, write the corrected fact and list the old fact's id in "supersedes".
+- Do not repeat a KNOWN FACT. If a turn UPDATES or CONTRADICTS a known fact, write the corrected fact and put the old fact's id in "supersedes": ids from KNOWN FACTS only, never one you made up. Otherwise "supersedes" is [].
 - {"facts": []} is correct when a batch has nothing durable. Do not pad.
 
 Output ONLY a JSON object, no prose, no code fence:
-{"facts": [{"turn": <number of the turn it came from>, "quote": "<Will's exact words>", "fact": "...", "category": "${FACT_CATEGORIES.join('|')}", "supersedes": ["k12"]}]}`;
+{"facts": [{"turn": <number of the turn it came from>, "quote": "<Will's exact words>", "fact": "...", "category": "${FACT_CATEGORIES.join('|')}", "supersedes": []}]}`;
 
 /**
  * The reply EXTRACT_PROMPT asks for, as a JSON schema: Ollama's `format` holds
@@ -260,6 +289,13 @@ const PROMPT_FRAME = 200;
 const KNOWN_SHARE = 0.35;
 /** A batch never gets less than this, however small the window. */
 const MIN_BATCH_CHARS = 1000;
+
+/** What one call can give: the transcript (batchChars), the known facts, and at most one turn (turnChars, the window's limit). */
+interface Room {
+  batchChars: number;
+  knownChars: number;
+  turnChars: number;
+}
 
 export interface ExtractorOptions {
   /**
@@ -426,6 +462,28 @@ export class MemoryExtractor {
     const today = new Date(this.now()).toISOString().slice(0, 10);
     if (state.budget.day !== today) state.budget = { day: today, calls: 0 };
 
+    // The cheap checks first: none of them needs the history, and reading all
+    // of it (every turn, cloned) while Will chats would be work for nothing.
+    const paused = this.gate?.();
+    if (paused) {
+      console.error(`[memory-extract] paused (${paused})`);
+      this.backlog = false; // nothing to do until the budget allows; base cadence
+      this.saveState(state);
+      return 0;
+    }
+    if (this.chatActive?.()) {
+      this.defer(stats);
+      state.totals.deferred++; // only that: nothing else happened
+      this.saveState(state);
+      return 0;
+    }
+    if (state.budget.calls >= this.maxCallsPerDay) {
+      console.error(`[memory-extract] daily budget spent (${state.budget.calls}/${this.maxCallsPerDay} calls)`);
+      this.backlog = false; // nothing to do until tomorrow; base cadence
+      this.saveState(state);
+      return 0;
+    }
+
     const pending = await this.collect(state, stats);
     if (pending.length === 0) {
       this.backlog = false;
@@ -434,45 +492,30 @@ export class MemoryExtractor {
       this.saveState(state);
       return 0;
     }
-    const paused = this.gate?.();
-    if (paused) {
-      console.error(`[memory-extract] paused (${paused}); ${pending.length} turn(s) queued`);
-      this.backlog = false; // nothing to do until the budget allows; base cadence
-      this.saveState(state);
-      return 0;
-    }
-    if (this.chatActive?.()) {
-      this.defer(stats, pending.length);
-      state.totals.deferred++; // only that: nothing else happened
-      this.saveState(state);
-      return 0;
-    }
-    if (state.budget.calls >= this.maxCallsPerDay) {
-      console.error(`[memory-extract] daily budget spent (${state.budget.calls}/${this.maxCallsPerDay} calls); ${pending.length} turn(s) queued`);
-      this.backlog = false; // nothing to do until tomorrow; base cadence
-      this.saveState(state);
-      return 0;
-    }
 
     const room = this.room();
     let sent = 0;
     let idx = 0;
     let gated: string | undefined;
-    let failure: { why: 'unavailable' | 'timeout'; detail?: string } | undefined;
+    let failure: { why: BrainFailure; detail?: string } | undefined;
+    /** Turns the next batch may send: halved after a reply cut off at its token limit. */
+    let turnCap = Infinity;
     try {
       while (idx < pending.length) {
         // Assemble the next batch: skipped items ride along (they only move the
         // watermark), sent items fill up to the char budget.
         const batch: Item[] = [];
         let chars = 0;
+        let turns = 0;
         let j = idx;
         while (j < pending.length) {
           const it = pending[j]!;
           if (!it.skip) {
-            if (sent + batch.filter((b) => !b.skip).length >= this.maxTurnsPerPass) break;
+            if (sent + turns >= this.maxTurnsPerPass || turns >= turnCap) break;
             const size = it.chunk.length + TURN_HEADER;
             if (chars > 0 && chars + size > room.batchChars) break;
             chars += size;
+            turns++;
           }
           batch.push(it);
           j++;
@@ -485,17 +528,18 @@ export class MemoryExtractor {
           gated = this.gate?.();
           if (gated) break;
           if (this.chatActive?.()) {
-            this.defer(stats, pending.length - idx);
+            this.defer(stats);
             break;
           }
           const key = `${toSend[0]!.cid}@${toSend[0]!.at}`;
           state.budget.calls++;
           stats.calls++;
-          let reply: { text: string } | undefined;
+          const ask = this.prompt(toSend, room);
+          let reply: BrainReply | undefined;
           let why: BrainFailure | undefined;
           let detail: string | undefined;
           try {
-            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: this.prompt(toSend, room) });
+            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text });
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);
@@ -506,40 +550,59 @@ export class MemoryExtractor {
             stats.calls--;
           }
           if (why === 'deferred') {
-            this.defer(stats, pending.length - idx);
+            this.defer(stats);
             break;
           }
-          if (why === 'unavailable' || why === 'timeout') {
-            // Not the batch's fault: no strike against it, and the turns wait.
+          if (why === 'unavailable') {
+            // Nothing answered: not the batch's fault, so no strike, and the turns wait.
             stats.failed++;
             failure = { why, ...(detail ? { detail } : {}) };
             break;
           }
-          this.failStreak = 0;
-          const cands = reply ? parseCandidates(reply.text) : null;
+          if (why === 'truncated') {
+            stats.truncated++;
+            if (toSend.length > 1) {
+              // Too much to answer in one reply: the same turns again, half as many at a time.
+              turnCap = Math.max(1, Math.floor(toSend.length / 2));
+              continue;
+            }
+          }
+          if (why === 'server-error' || why === 'timeout') {
+            stats.failed++;
+            failure = { why, ...(detail ? { detail } : {}) };
+          } else {
+            this.failStreak = 0; // the model answered
+          }
+          let cands: Candidate[] | null = null;
+          if (reply) cands = 'facts' in reply ? candidatesOf(reply.facts) : parseCandidates(reply.text);
           if (cands === null) {
-            stats.unparseable++;
+            // A strike against this batch. Don't advance: the turns are retried
+            // next pass instead of being silently marked done with nothing
+            // extracted, but three strikes and it is skipped, so one batch the
+            // model or the server can never handle doesn't stall the rest.
+            const reason = why ?? 'invalid';
+            if (reason === 'invalid') stats.unparseable++;
             const count = state.failures?.key === key ? state.failures.count + 1 : 1;
             if (count < 3) {
-              // Don't advance: the turns are retried next pass instead of being
-              // silently marked done with nothing extracted.
               state.failures = { key, count };
-              console.error(`[memory-extract] no usable reply for batch ${key} (attempt ${count}/3); will retry`);
+              console.error(`[memory-extract] no usable reply for batch ${key} (${reason}, attempt ${count}/3); will retry`);
               break;
             }
-            console.error(`[memory-extract] batch ${key} had no usable reply 3 times; skipping it`);
+            console.error(`[memory-extract] batch ${key} had no usable reply 3 times (${reason}); skipping it`);
             delete state.failures;
           } else {
             delete state.failures;
-            await this.store(cands, toSend, stats);
+            await this.store(cands, toSend, ask.shown, stats);
           }
           sent += toSend.length;
           stats.turnsSent += toSend.length;
+          turnCap = Infinity;
         }
         // Advance per batch so a mid-pass failure keeps the progress already paid for.
         for (const b of batch) state.watermarks[b.cid] = Math.max(state.watermarks[b.cid] ?? 0, b.at);
         idx = j;
         this.saveState(state);
+        if (failure) break; // a batch the server kept failing was skipped: the next waits for the back-off
       }
     } finally {
       this.backlog = !gated && !this.deferred && !failure && idx < pending.length && state.budget.calls < this.maxCallsPerDay;
@@ -559,19 +622,21 @@ export class MemoryExtractor {
       `[memory-extract] v${EXTRACT_VERSION} ${this.kind} pass: sent ${stats.turnsSent} turn(s) in ${stats.calls} call(s) ` +
         `(skipped synthetic=${stats.skippedSynthetic} trivial=${stats.skippedTrivial} duplicate=${stats.skippedDuplicate} tainted=${stats.skippedTainted}); ` +
         `${stats.candidates} candidate(s) → stored ${stats.stored}, superseded ${stats.superseded}, rejected ${rej}` +
-        `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}; ${pending.length - idx} turn(s) still queued; ` +
+        `${stats.supersedeRefused ? `, supersede refused ${stats.supersedeRefused}` : ''}` +
+        `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}${stats.truncated ? `, cut off ${stats.truncated}` : ''}; ` +
+        `${pending.length - idx} turn(s) still queued; ` +
         `budget ${state.budget.calls}/${this.maxCallsPerDay} today${gated ? `; paused (${gated})` : ''}${ended}`,
     );
     return stats.stored;
   }
 
   /** Will is chatting: this pass stops here, and the next comes in deferMs. */
-  private defer(stats: PassStats, queued: number): void {
+  private defer(stats: PassStats): void {
     this.deferred = true;
     stats.deferred++;
     this.deferStreak++;
     if (this.deferStreak === 1) {
-      console.error(`[memory-extract] waiting for Will's chat: ${queued} turn(s) queued; checking again every ${minutes(this.deferMs)}`);
+      console.error(`[memory-extract] waiting for Will's chat; checking again every ${minutes(this.deferMs)}`);
     }
   }
 
@@ -580,12 +645,13 @@ export class MemoryExtractor {
    * bounded window (the local model) gets what its instructions leave, shared
    * out; one without gets batchChars and every known fact up to KNOWN_CAP.
    */
-  private room(): { batchChars: number; knownChars: number } {
+  private room(): Room {
     const limit = this.brain.promptChars;
-    if (limit === undefined || !Number.isFinite(limit)) return { batchChars: this.batchChars, knownChars: Infinity };
+    if (limit === undefined || !Number.isFinite(limit)) return { batchChars: this.batchChars, knownChars: Infinity, turnChars: Infinity };
     const free = Math.max(0, limit - EXTRACT_SYSTEM.length - EXTRACT_PROMPT.length - PROMPT_FRAME);
     const knownChars = Math.floor(free * KNOWN_SHARE);
-    return { batchChars: Math.min(this.batchChars, Math.max(MIN_BATCH_CHARS, free - knownChars)), knownChars };
+    const turnChars = Math.max(MIN_BATCH_CHARS, free - knownChars);
+    return { batchChars: Math.min(this.batchChars, turnChars), knownChars, turnChars };
   }
 
   /** Every unprocessed complete turn, oldest conversation first, in order. */
@@ -642,18 +708,23 @@ export class MemoryExtractor {
     return convs.flat();
   }
 
-  private prompt(items: Item[], room: { batchChars: number; knownChars: number }): string {
+  /** The call's prompt, and the ids of the known facts it shows (the only ones a fact may supersede). */
+  private prompt(items: Item[], room: Room): { text: string; shown: Set<string> } {
     const known = this.knownFacts(items, room.knownChars);
     const knownBlock = known.length
       ? known.map((f) => `${f.id}: ${f.text}`).join('\n')
       : '(none yet)';
     // A single turn longer than a small window allows is cut to fit (only it
     // can be: a batch otherwise stops before the turn that would overflow).
-    const fit = Math.max(1, room.batchChars - TURN_HEADER);
+    // batchChars never cuts a turn: it only decides how many go in a call.
+    const fit = Math.max(1, room.turnChars - TURN_HEADER);
     const turns = items
       .map((it, i) => `### Turn ${i + 1} (${new Date(it.at).toISOString().slice(0, 10)})\n${clip(it.chunk, fit)}`)
       .join('\n\n');
-    return `${EXTRACT_PROMPT}\n\nKNOWN FACTS (id: text):\n${knownBlock}\n\nTURNS:\n\n${turns}`;
+    return {
+      text: `${EXTRACT_PROMPT}\n\nKNOWN FACTS (id: text):\n${knownBlock}\n\nTURNS:\n\n${turns}`,
+      shown: new Set(known.map((f) => f.id)),
+    };
   }
 
   /** The known facts worth showing the model: all of them while they fit, else
@@ -679,13 +750,13 @@ export class MemoryExtractor {
     return out;
   }
 
-  private async store(cands: Candidate[], sent: Item[], stats: PassStats): Promise<void> {
+  private async store(cands: Candidate[], sent: Item[], shown: ReadonlySet<string>, stats: PassStats): Promise<void> {
     const turns = sent.map((s) => ({ will: s.will ?? [], assistant: s.assistant ?? [] }));
     for (const c of cands) {
       stats.candidates++;
       // A fact stands on Will's own words or not at all. The quote also says
       // which turn it came from, whatever turn number the model gave.
-      const at = locateQuote(c.quote, turns, c.turn);
+      const at = locateQuote(c.quote, turns, c.turn, c.fact);
       if (typeof at !== 'number') {
         stats.rejected[at] = (stats.rejected[at] ?? 0) + 1;
         continue;
@@ -703,8 +774,15 @@ export class MemoryExtractor {
       }
       stats.stored++;
       for (const oldId of c.supersedes.slice(0, 3)) {
-        const old = this.knowledge.all().find((f) => f.id === oldId);
-        if (!old) continue;
+        // Only a fact the model was shown (an id copied from an example, or
+        // guessed, would retire whatever fact holds it, and a retired fact
+        // blocks its own text from coming back), and only one about the same
+        // thing: the two must share a content word.
+        const old = shown.has(oldId) ? this.knowledge.all().find((f) => f.id === oldId) : undefined;
+        if (!old || !sharesContent(old.text, c.fact)) {
+          stats.supersedeRefused++;
+          continue;
+        }
         // An old transcript must not overrule something learned later: only a
         // turn at least as recent as the old fact may replace it.
         const oldAt = old.sourceAt ?? old.ts;
@@ -774,18 +852,18 @@ function minutes(ms: number): string {
 }
 
 /**
- * A thrown error as a log line can carry it: its kind or name, a status or
- * code, and where it was thrown. Never its message, which can hold what a
- * provider was sent or answered.
+ * A thrown error as a log line can carry it: its kind or name, and a status or
+ * code. Never its message, which can hold what a provider was sent or
+ * answered, and never its stack, whose first lines are the message (a message
+ * with a line of its own that starts "  at " would pass for a frame).
  */
 export function errorKind(err: unknown): string {
   if (!err || typeof err !== 'object') return 'error';
-  const e = err as { name?: unknown; kind?: unknown; code?: unknown; error?: { providerCode?: unknown }; stack?: unknown };
-  const name = typeof e.kind === 'string' ? e.kind : typeof e.name === 'string' ? e.name : 'error';
+  const e = err as { name?: unknown; kind?: unknown; code?: unknown; error?: { providerCode?: unknown } };
+  const name = typeof e.kind === 'string' ? e.kind : typeof e.name === 'string' ? e.name : '';
   const code = e.error?.providerCode ?? e.code;
-  const frame = typeof e.stack === 'string' ? e.stack.split('\n').find((l) => /^\s+at /.test(l))?.trim() : undefined;
-  const safe = (s: string) => s.replace(/[^\w .:/@()<>-]/g, '').slice(0, 160);
-  return [safe(name), ...(typeof code === 'string' || typeof code === 'number' ? [safe(String(code))] : []), ...(frame ? [`(${safe(frame)})`] : [])].join(' ');
+  const safe = (s: string) => s.replace(/[^\w.-]/g, '').slice(0, 40);
+  return [safe(name), typeof code === 'string' || typeof code === 'number' ? safe(String(code)) : ''].filter(Boolean).join(' ') || 'error';
 }
 
 export interface Candidate {
@@ -799,23 +877,23 @@ export interface Candidate {
 }
 
 /**
- * Tolerant parse of the model's reply: the `{"facts": [...]}` object, or a bare
- * array of objects (v2) or strings (v1). Returns null when there's no usable
- * reply at all (no array, or JSON that isn't this shape), so the caller can
- * retry instead of treating a garbled reply as "nothing to remember".
+ * Tolerant parse of the frontier's reply: the `{"facts": [...]}` object, or a
+ * bare array of fact objects (v2). A bare string (v1) carries no quote, so it
+ * could never be grounded and is dropped here. Returns null when there's no
+ * usable reply at all (no array, or JSON that isn't this shape), so the caller
+ * can retry instead of treating a garbled reply as "nothing to remember".
  */
 export function parseCandidates(text: string): Candidate[] | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
   const body = fenced?.[1] ?? text;
-  let parsed: unknown;
-  let whole: unknown;
-  let isJson = true;
+  let whole: unknown; // JSON.parse never returns undefined: undefined means it didn't parse
   try {
     whole = JSON.parse(body);
   } catch {
-    isJson = false;
+    whole = undefined;
   }
-  if (isJson) {
+  let parsed: unknown;
+  if (whole !== undefined) {
     // The whole reply is JSON (the local model's always is): it is the shape, or unusable.
     if (Array.isArray(whole)) parsed = whole;
     else if (isRecord(whole) && Array.isArray(whole.facts)) parsed = whole.facts;
@@ -836,20 +914,20 @@ export function parseCandidates(text: string): Candidate[] | null {
       }
     }
   }
-  if (!Array.isArray(parsed)) return null;
+  return Array.isArray(parsed) ? candidatesOf(parsed) : null;
+}
+
+/** The entries that are fact objects of a sane length, as candidates. */
+export function candidatesOf(entries: readonly unknown[]): Candidate[] {
   const out: Candidate[] = [];
-  for (const e of parsed) {
-    let c: Candidate | undefined;
-    if (typeof e === 'string') c = { fact: e.trim(), supersedes: [] };
-    else if (e && typeof e === 'object' && typeof (e as { fact?: unknown }).fact === 'string') {
-      const o = e as { fact: string; category?: unknown; turn?: unknown; quote?: unknown; supersedes?: unknown };
-      c = { fact: o.fact.trim(), supersedes: Array.isArray(o.supersedes) ? o.supersedes.filter((x): x is string => typeof x === 'string') : [] };
-      if (typeof o.category === 'string' && o.category.trim()) c.category = o.category.trim().toLowerCase();
-      const turn = Number(o.turn);
-      if (Number.isInteger(turn) && turn > 0) c.turn = turn;
-      if (typeof o.quote === 'string') c.quote = o.quote;
-    }
-    if (c && c.fact.length >= 8 && c.fact.length <= 400) out.push(c);
+  for (const e of entries) {
+    if (!isRecord(e) || typeof e.fact !== 'string') continue;
+    const c: Candidate = { fact: e.fact.trim(), supersedes: Array.isArray(e.supersedes) ? e.supersedes.filter((x): x is string => typeof x === 'string') : [] };
+    if (typeof e.category === 'string' && e.category.trim()) c.category = e.category.trim().toLowerCase();
+    const turn = Number(e.turn);
+    if (Number.isInteger(turn) && turn > 0) c.turn = turn;
+    if (typeof e.quote === 'string') c.quote = e.quote;
+    if (c.fact.length >= 8 && c.fact.length <= 400) out.push(c);
   }
   return out;
 }
@@ -881,7 +959,7 @@ function topLevelArrays(text: string): string[] {
   return out;
 }
 
-/** Fact texts only; malformed output degrades to []. Kept for callers/tests. */
+/** Fact texts only; malformed output degrades to []. Kept for tests. */
 export function parseFacts(text: string): string[] {
   return (parseCandidates(text) ?? []).map((c) => c.fact);
 }
@@ -930,23 +1008,71 @@ export function quoteNeedle(quote: string | undefined): string | undefined {
 /** Why a candidate's quote grounds nothing: no usable quote, or one found only in the assistant's words. */
 export type Ungrounded = 'ungrounded' | 'assistant-quote';
 
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
 /**
- * Which turn of the batch (0-based) holds the quote in Will's words, looking
- * at the cited turn first (`cited` is 1-based, as the model numbers them), or
- * why the candidate isn't grounded. A quote found in Will's words anywhere in
- * the batch grounds it, even when the assistant also said it; a quote found
- * only in the assistant's words never does.
+ * Does `hay` hold `needle` as whole words: not starting or ending inside a
+ * word ("my card" is not in "my cardiologist")? Both already normalised.
+ */
+export function holdsWords(hay: string, needle: string): boolean {
+  if (!needle) return false;
+  const edgeStart = WORD_CHAR.test(needle[0]!);
+  const edgeEnd = WORD_CHAR.test(needle[needle.length - 1]!);
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) {
+    const before = hay[i - 1];
+    const after = hay[i + needle.length];
+    if ((!edgeStart || before === undefined || !WORD_CHAR.test(before)) && (!edgeEnd || after === undefined || !WORD_CHAR.test(after))) return true;
+  }
+  return false;
+}
+
+/**
+ * How much of what a fact says is in Will's words: the share of the fact's
+ * content words (./knowledge contentTokens: no stop words, no "Will") that
+ * appear in `will`. A quote proves Will said something; this, that he said
+ * this. 0 when the fact has no content words at all.
+ */
+export function factCoverage(will: string[], fact: string): number {
+  const said = new Set(contentTokens(normalizeQuoteText(will.join(' '))));
+  const claims = [...new Set(contentTokens(normalizeQuoteText(fact)))];
+  return claims.length === 0 ? 0 : claims.filter((t) => said.has(t)).length / claims.length;
+}
+
+/** A grounded fact's content words must be at least this much Will's (see factCoverage). */
+export const FACT_COVERAGE = 0.5;
+
+/** Do two facts share a content word (are they about the same thing)? */
+export function sharesContent(a: string, b: string): boolean {
+  const A = new Set(contentTokens(normalizeQuoteText(a)));
+  return contentTokens(normalizeQuoteText(b)).some((t) => A.has(t));
+}
+
+/**
+ * Which turn of the batch (0-based) holds the quote in Will's words, as whole
+ * words, looking at the cited turn first (`cited` is 1-based, as the model
+ * numbers them), or why the candidate isn't grounded. With `fact`, that turn's
+ * Will text must also cover the fact (FACT_COVERAGE): a few words he did type
+ * ("my Mac Studio") can't carry a claim he never made ("has 192GB"). A quote
+ * found in Will's words grounds a fact even when the assistant also said it; a
+ * quote found only in the assistant's words never does.
  */
 export function locateQuote(
   quote: string | undefined,
   turns: Array<{ will: string[]; assistant: string[] }>,
   cited?: number,
+  fact?: string,
 ): number | Ungrounded {
   const needle = quoteNeedle(quote);
   if (!needle) return 'ungrounded';
-  const holds = (texts: string[]) => texts.some((t) => normalizeQuoteText(t).includes(needle));
+  const holds = (texts: string[]) => texts.some((t) => holdsWords(normalizeQuoteText(t), needle));
   const first = cited !== undefined && Number.isInteger(cited) && cited >= 1 && cited <= turns.length ? cited - 1 : undefined;
   const order = first === undefined ? [...turns.keys()] : [first, ...[...turns.keys()].filter((i) => i !== first)];
-  for (const i of order) if (holds(turns[i]!.will)) return i;
+  let quoted = false;
+  for (const i of order) {
+    if (!holds(turns[i]!.will)) continue;
+    quoted = true;
+    if (fact === undefined || factCoverage(turns[i]!.will, fact) >= FACT_COVERAGE) return i;
+  }
+  if (quoted) return 'ungrounded'; // he said the words, not what the fact claims
   return turns.some((t) => holds(t.assistant)) ? 'assistant-quote' : 'ungrounded';
 }

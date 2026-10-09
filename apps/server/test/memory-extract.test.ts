@@ -2,15 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { parseCandidates, parseFacts } from '../src/memory-extract';
 
 describe('parseFacts', () => {
-  it('parses a bare JSON array', () => {
-    expect(parseFacts('["Will bought a Mac Studio M4 Max with 64GB of memory."]')).toEqual([
+  it('parses a bare JSON array of fact objects', () => {
+    expect(parseFacts('[{"fact": "Will bought a Mac Studio M4 Max with 64GB of memory."}]')).toEqual([
       'Will bought a Mac Studio M4 Max with 64GB of memory.',
     ]);
   });
 
   it('parses a fenced array with surrounding prose', () => {
     const out = parseFacts(
-      'Here are the facts:\n```json\n["Will runs Flint on a local Ollama model.", "Will owns the Vantage scoring system."]\n```\nThat is all.',
+      'Here are the facts:\n```json\n[{"fact": "Will runs Flint on a local Ollama model."}, {"fact": "Will owns the Vantage scoring system."}]\n```\nThat is all.',
     );
     expect(out).toHaveLength(2);
     expect(out[1]).toBe('Will owns the Vantage scoring system.');
@@ -29,8 +29,9 @@ describe('parseFacts', () => {
     }
   });
 
-  it('drops non-strings and junk-length entries', () => {
-    const out = parseFacts('["ok", 42, null, "tiny", "' + 'x'.repeat(500) + '", "a real durable fact here"]');
+  // A bare string (v1) has no quote, so it could never be grounded: dropped with the junk.
+  it('drops bare strings, non-objects and junk-length entries', () => {
+    const out = parseFacts('[{"fact": "ok"}, 42, null, "a bare string fact with no quote", {"fact": "' + 'x'.repeat(500) + '"}, {"fact": "a real durable fact here"}]');
     expect(out).toEqual(['a real durable fact here']);
   });
 });

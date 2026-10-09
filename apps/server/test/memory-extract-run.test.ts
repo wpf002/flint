@@ -106,7 +106,7 @@ describe('MemoryExtractor.run', () => {
 
   it('stores facts with provenance and counts rejections by reason', async () => {
     const t1 = turn('console', 'My team is the Houston Astros, have been forever');
-    const t2 = turn('c9', 'Tell my friend Drew hi from me please');
+    const t2 = turn('c9', 'Tell my friend Drew hi from me please, we are going to the game tonight');
     const k = new KnowledgeStore(kpath, downEmbedder);
     await k.add("Will's favorite MLB team is the Houston Astros.");
     const { b } = brain(() =>
@@ -115,7 +115,7 @@ describe('MemoryExtractor.run', () => {
           { fact: "Will's favorite MLB team is the Houston Astros.", turn: 1, quote: 'My team is the Houston Astros' },
           { fact: 'Will has a friend named Drew.', category: 'Person', turn: 2, quote: 'my friend Drew' },
           { fact: 'Will asked Flint to say hi to Drew.', turn: 2, quote: 'Tell my friend Drew hi' },
-          { fact: 'Will is going to the game tonight with Drew.', turn: 2, quote: 'Drew hi from me' },
+          { fact: 'Will is going to the game tonight with Drew.', turn: 2, quote: 'going to the game tonight' },
         ],
       }),
     );
@@ -284,8 +284,8 @@ describe('parseCandidates', () => {
       { fact: 'Will has a friend named Drew.', category: 'person', turn: 2, supersedes: ['k3'] },
     ]);
   });
-  it('accepts v1-style bare strings', () => {
-    expect(parseCandidates('["Will lives in Dallas, Texas."]')).toEqual([{ fact: 'Will lives in Dallas, Texas.', supersedes: [] }]);
+  it('drops v1-style bare strings: with no quote they could never be grounded', () => {
+    expect(parseCandidates('["Will lives in Dallas, Texas."]')).toEqual([]);
   });
   it('distinguishes "nothing to remember" ([]) from garbage (null)', () => {
     expect(parseCandidates('[]')).toEqual([]);

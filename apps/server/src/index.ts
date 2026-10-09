@@ -99,7 +99,7 @@ import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
-import { chooseMemoryBrain, liveChat } from './memory-brain';
+import { chooseMemoryBrain, frontierExtractBrain, liveChat } from './memory-brain';
 import {
   SpendLedger,
   SpendGuard,
@@ -766,9 +766,7 @@ async function main(): Promise<void> {
   const extractWith = extractFlint;
   const chatActive = liveChat(chatLoad);
   const memoryPlan = chooseMemoryBrain(process.env, {
-    frontier: extractWith && {
-      generate: (input: { system: string; prompt: string }) => extractWith.generate(input, { context: spendContext('extract') }),
-    },
+    frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
     chatActive,
     log: (m) => console.error(m),
   });
