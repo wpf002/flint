@@ -8,10 +8,14 @@ import {
   AUTONOMOUS_ACTIONS,
   SOURCES,
   RUNTIME_CHAT_TOOLS,
+  runsInShadow,
   type PolicyRow,
   type TierContext,
 } from '../src/tiers';
 import { TAINTED_SOURCES } from '../src/taint';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { GOAL_SIGNED_ACTIONS, P3_ACTIONS } from '../src/goals';
 
 const chat: TierContext = { context: 'chat', tainted: false };
 const auto: TierContext = { context: 'autonomous', tainted: false };
@@ -361,3 +365,70 @@ describe('the runtime\'s own chat tools', () => {
   });
 });
 
+describe('P3: goals and plans', () => {
+  const consoleCtx: TierContext = { context: 'console', tainted: false };
+  const SUGGESTIONS = ['goal.propose', 'world.commitment.from_chat'];
+
+  it('every P3 action ships at APPROVAL, in chat and in the console', () => {
+    expect([...P3_ACTIONS].sort()).toEqual([
+      'goal.abandon', 'goal.activate', 'goal.criteria_change', 'goal.done', 'goal.horizon_change', 'goal.propose', 'goal.review.local',
+      'nexus.remember_goal_decision', 'plan.change', 'world.commitment.from_chat',
+    ]);
+    for (const a of P3_ACTIONS) {
+      expect(CODE_TABLE[a]?.tier, a).toBe('approval');
+      for (const ctx of [chat, consoleCtx]) expect(resolveTier(a, ctx), a).toMatchObject({ tier: 'approval', rule: 'code' });
+    }
+  });
+
+  it('autonomously, only goal.review.local and plan.change may be asked for; every other P3 action is FORBIDDEN', () => {
+    for (const a of P3_ACTIONS) {
+      const d = resolveTier(a, auto);
+      if (a === 'goal.review.local' || a === 'plan.change') expect(d, a).toMatchObject({ tier: 'approval', rule: 'code' });
+      else expect(d, a).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
+    }
+    expect([...AUTONOMOUS_ACTIONS].filter((a) => (P3_ACTIONS as readonly string[]).includes(a)).sort()).toEqual(['goal.review.local', 'plan.change']);
+  });
+
+  it('the six passkey actions and the Nexus write stay APPROVAL, whatever a policy row says; the rest can be promoted', () => {
+    const passkey = [...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision'];
+    for (const a of passkey) {
+      expect(CODE_TABLE[a]!.promotable, a).toBe(false);
+      for (const ctx of [chat, consoleCtx, auto]) {
+        const d = resolveTier(a, { ...ctx, policies: [row(a, 'alone'), row(`${a.split('.')[0]}.*`, 'alone')], now: NOW });
+        expect(d.tier, `${a} ${ctx.context}`).not.toBe('alone');
+      }
+    }
+    expect(resolveTier('goal.review.local', { ...auto, policies: [row('goal.review.local', 'alone', { dailyCap: 20 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 20, period: 'day' } });
+    for (const a of SUGGESTIONS) {
+      expect(resolveTier(a, { ...chat, policies: [row(a, 'alone', { dailyCap: 3 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 3, period: 'day' } });
+    }
+  });
+
+  it('reviews run in shadow under 20 a day; the chat suggestions carry no code cap (claimed even at APPROVAL, it would stall a 4th card)', () => {
+    expect(runsInShadow('goal.review.local')).toBe(true);
+    expect(CODE_TABLE['goal.review.local']).toMatchObject({ write: false, cap: { limit: 20, period: 'day' } });
+    for (const a of [...SUGGESTIONS, ...GOAL_SIGNED_ACTIONS]) {
+      expect(CODE_TABLE[a]!.cap, a).toBeUndefined();
+      expect(runsInShadow(a), a).toBe(false);
+    }
+    expect(CODE_TABLE['nexus.remember_goal_decision']!.egress).toBe(true);
+  });
+
+  it('no P3 name trips a step-1 rule (NEVER_AUTO, merge, people, policy., selfmod., google., apple.) or the console\'s money and delete words', () => {
+    for (const a of P3_ACTIONS) expect(forbiddenReason(a, {}), a).toBeUndefined();
+    // The console keeps a card out of Approve All when its name has a money or delete word (apprAlone).
+    const html = readFileSync(join(__dirname, '..', '..', '..', 'apps', 'console', 'index.html'), 'utf8');
+    const words = /function apprAlone\(p\)\{[^]*?\/([^/]+)\/i\.test\(String\(p\.fullName/.exec(html)?.[1];
+    expect(words, 'apprAlone in the console').toBeTruthy();
+    for (const a of P3_ACTIONS) expect(new RegExp(words!, 'i').test(a), a).toBe(false);
+  });
+
+  it('no runtime chat tool or server built-in tool shares a P3 name (a same-named tool would run instead of the runtime)', () => {
+    const builtins = Object.entries(CODE_TABLE).filter(([, e]) => e.tier === 'alone').map(([n]) => n);
+    expect(builtins.sort()).toEqual(['calculate', 'deep_research', 'remember', 'spend_status', 'training_status']);
+    for (const a of P3_ACTIONS) {
+      expect(RUNTIME_CHAT_TOOLS.has(a), a).toBe(false);
+      expect(builtins, a).not.toContain(a);
+    }
+  });
+});

@@ -4,16 +4,26 @@
  * APPROVAL is never in it; Will can drop a row; filing it twice is one card.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { resolveTier } from '@flint/policy';
+import { GOAL_SIGNED_ACTIONS, resolveTier } from '@flint/policy';
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { approveProposal, activePolicies, Refused } from '../src/governance/proposals';
 import { runInternal, PolicyArgs } from '../src/governance/internal';
 import { markProcessed, recordEvent } from '../src/events/record';
-import { promotionTable, NEVER_PROMOTED, P1_PROMOTIONS, P2_PROMOTIONS } from '../src/governance/promotion';
+import { promotionTable, NEVER_PROMOTED, P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS } from '../src/governance/promotion';
 
 const DAY = 86_400_000;
+
+describe('P3 and the promotion tables', () => {
+  it('no passkey action (the six goal and plan actions, the Nexus write) is in any table, whatever is asked', () => {
+    const passkey = [...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision'];
+    for (const a of passkey) {
+      expect(NEVER_PROMOTED.has(a), a).toBe(true);
+      for (const rows of [P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS]) expect(rows.map((r) => r.pattern), a).not.toContain(a);
+    }
+  });
+});
 
 describe.skipIf(NO_DB)('the P2 promotion table', () => {
   let urls: TestUrls;

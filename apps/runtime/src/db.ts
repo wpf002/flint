@@ -11,6 +11,7 @@
  * retried by whoever owns it.
  */
 import { PrismaClient } from '@prisma/client';
+import { constraintOf, sqlState } from './dbcodes.js';
 
 export type Db = PrismaClient;
 /** The client inside a $transaction callback. */
@@ -23,8 +24,13 @@ export function createDb(databaseUrl: string): Db {
   const client = new PrismaClient({ datasourceUrl: databaseUrl, log: [{ emit: 'stdout', level: 'warn' }, { emit: 'event', level: 'error' }] });
   let rebuilding: Promise<void> | undefined;
   client.$on('error', (e) => {
-    // As stdout logging printed it: the engine's message, never a query's values.
-    console.error(`prisma:error ${e.message.slice(0, 500)}`);
+    // The SQLSTATE and the constraint's name, never the engine's message: a CHECK's
+    // refusal carries the row it refused ("Failing row contains (...)") and a
+    // validation error the call's arguments, and a goal's row holds Will's words.
+    const state = sqlState(e.message);
+    const constraint = constraintOf(e.message);
+    const lost = CONNECTION_LOST.test(e.message);
+    console.error(`prisma:error ${[state ? `sqlstate ${state}` : '', constraint ? `constraint ${constraint}` : '', lost ? 'connection lost' : ''].filter(Boolean).join(', ') || 'a query failed'}`);
     if (CONNECTION_LOST.test(e.message) && !rebuilding) {
       rebuilding = client
         .$disconnect()

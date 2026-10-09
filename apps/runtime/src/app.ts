@@ -44,7 +44,7 @@ declare module 'fastify' {
 export const BODY_LIMIT = 64 * 1024;
 
 export { dbRefused } from './dbcodes.js';
-import { dbRefused } from './dbcodes.js';
+import { dbRefused, failureOf, framesOf } from './dbcodes.js';
 /** The trigger's own words (they name the rule, never a value). */
 const dbMessage = (err: unknown) => {
   const m = String((err as { message?: unknown }).message ?? '').match(/message: "([^"]{1,200})"/);
@@ -116,7 +116,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (err.statusCode === 413 || err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') return reply.code(413).send({ error: 'body too large' });
     if (err.statusCode && err.statusCode >= 400 && err.statusCode < 500) return reply.code(err.statusCode).send({ error: 'bad request' });
     const ref = `err${Date.now().toString(36)}`;
-    req.log.error({ ref, err }, 'request failed');
+    // What failed (its class, SQLSTATE and constraint) and where, never its message: a database error's can
+    // carry the row it refused, goal text included.
+    req.log.error({ ref, failure: failureOf(err), frames: framesOf(err) }, 'request failed');
     return reply.code(500).send({ error: 'internal error', ref });
   });
 

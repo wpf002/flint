@@ -4,9 +4,13 @@
  * flint_approver, a proposal is approved only by a matching unused approval,
  * policy rows only from a signed policy proposal, append-only audit, atomic caps.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { NO_DB, URLS, freshDb, withClient, pgConfig, pgError, id, HEX } from './db';
+import { enrollTestKey } from './sign';
+import { createDb } from '../src/db';
+import { approveProposal, createProposal } from '../src/governance/proposals';
+import { INTERNAL_ACTIONS, runInternal } from '../src/governance/internal';
 
 type Q = (sql: string, params?: unknown[]) => Promise<pg.QueryResult>;
 const as = (url: string): Q => (sql, params) => withClient(url, (c) => c.query(sql, params));
@@ -344,5 +348,33 @@ describe.skipIf(NO_DB)('governance in the database', () => {
         await pool.end();
       }
     });
+  });
+});
+
+describe.skipIf(NO_DB)('actions the runtime carries out', () => {
+  let db: ReturnType<typeof createDb>;
+  let key: Awaited<ReturnType<typeof enrollTestKey>>;
+  beforeAll(async () => {
+    const urls = await freshDb();
+    db = createDb(urls.app);
+    key = await enrollTestKey(urls);
+  });
+  afterAll(async () => db?.$disconnect());
+
+  it('a member of INTERNAL_ACTIONS with no branch fails closed (409), and is never run as a policy change', async () => {
+    // A runtime whose list names one more action than it has a branch for (the exported list itself stays as it is).
+    const internal = new Set([...INTERNAL_ACTIONS, 'test.unbranched']);
+    // Args shaped exactly like a policy change: the old fallthrough would have parsed and tried them.
+    const rows = [{ pattern: 'world.sync.launchd', tier: 'alone', expiresAt: new Date(Date.now() + 30 * 86400_000).toISOString() }];
+    const p = await createProposal(db, {
+      kind: 'policy', origin: 'console', action: 'test.unbranched', args: { rows }, argsProvenance: {}, tainted: false, sensitivity: 'ops',
+      destructive: false, consequential: false, ttlMinutes: 60,
+    }, 'test');
+    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'test.unbranched', argsDigest: p.argsDigest }), undefined, 'test');
+    await expect(runInternal(db, p.id, undefined, 'UTC', 'test', internal)).rejects.toMatchObject({ status: 409, message: 'Flint can’t carry this out yet.' });
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: p.id } });
+    expect(card.status).toBe('failed');
+    expect(await db.actionPolicy.count({ where: { approvalId: card.approvalId! } })).toBe(0);
+    expect(INTERNAL_ACTIONS.has('test.unbranched')).toBe(false);
   });
 });

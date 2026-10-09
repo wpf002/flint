@@ -272,6 +272,66 @@ rollback, not to turning the source off:
 
 Any later deploy of P2.6 code applies the migration again.
 
+## Goals (P3)
+
+Goals arrive in parts. This first part is only what the database guarantees,
+and it changes nothing you see: a goal starts, finishes, is abandoned, or
+changes what counts as done or its timing only with your signature, and every
+change to its plan is a card you sign. Nothing files a goal card yet, and
+nothing reviews goals.
+
+### What the next parts must do
+
+- **The goals panel (part 2)** must forward each card's `consequential` mark to
+  the console and ask for a fresh touch on every card that has it. Today the
+  console decides `fresh` from `apprAlone` alone, which doesn't look at it, so a
+  goal card could go through Approve All on one earlier touch. It must also pass
+  the args its card shows to `approveAction` (`{ args }`): the console signs
+  nothing unless the digest of what it showed is the one it is asked to sign.
+- **Reviews and step ticks (parts 2 and 3)** must take the goal `FOR UPDATE`
+  before touching any of its steps, plans or reviews, as the card executor does.
+  A step write already takes the goal `FOR NO KEY UPDATE` in the database, so two
+  ticks on one goal wait in turn; a writer that locked a plan or a step first
+  could still wait on another in a circle. They must also run at READ COMMITTED
+  (the database refuses plan writes above it) and write a plan version's draft
+  and its activation in one transaction.
+- **A later part** must add a way to forget a goal's words (a signed
+  `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
+
+### Known limits
+
+- **History keeps lengths.** A goal's history records how long each changed text
+  was, never the text. Someone who can read the database and guesses a short
+  title could confirm the guess from its length. That's accepted.
+- **What holds against a runtime that breaks the rules.** The rules bound to
+  your signature hold even then, because they rest on your approval: what a goal
+  is and what counts as done, its timing, its links, each plan version, the
+  digest of what you signed, one transaction per approval, and the snapshot
+  checks. Three rules are written by the runtime itself, so they catch its bugs,
+  not a runtime gone wrong: the quote check on chat suggestions, the proof that a
+  Flint action step was done, and the `runtime:goals` label on a goal's forecast.
+- **Older card kinds.** For goal and plan cards the database checks that the
+  digest you sign is the digest of the stored args. For older kinds it doesn't
+  yet (P1's `consume_approval` compares two digests, not args). For every kind,
+  the console hashes the args its card shows you and signs nothing unless that
+  is the digest it's asked to sign, and the server checks the same before it
+  starts. A database check for the older kinds is a follow-up.
+
+### Rolling P3 back
+
+The migration's `down.sql` (`20261009000000_p3_goals`) belongs to a rollback:
+
+1. First deploy a runtime from before P3, with reviews off. P3's job bus
+   expects the three goal queues that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. Your goals, their plans and
+   their reviews go with it. Their history keeps only lengths, never your
+   words, and their forecasts stay in the prediction ledger.
+
+A goal card still waiting expires on its own. One you approve while P3 is
+rolled back isn't carried out ("not carried out by the runtime") and stays
+approved. Any later deploy of P3 code applies the migration again. Claude runs
+`down.sql` only with your OK, after the dump.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A

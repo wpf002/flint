@@ -31,6 +31,7 @@ import { completeProposal } from './governance/proposals.js';
 import { resolveTier, runsInShadow } from '@flint/policy';
 import { activePolicies } from './governance/proposals.js';
 import { z } from 'zod';
+import { failureClass } from './dbcodes.js';
 
 const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 
@@ -218,12 +219,8 @@ export function jobSpecs(ctx: JobContext): JobSpec[] {
   return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx)];
 }
 
-/** `TypeError`, `PrismaClientKnownRequestError P2002`, `Error ECONNREFUSED`: what failed, not what it said. */
-export function failureClass(err: unknown): string {
-  if (!(err instanceof Error)) return 'error';
-  const code = (err as { code?: unknown }).code;
-  return `${err.name.slice(0, 60)}${typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? ` ${code}` : ''}`;
-}
+/** What failed, not what it said (dbcodes.ts; kept here for the modules that import it from the jobs). */
+export { failureClass };
 
 export async function startJobs(ctx: JobContext, specs: JobSpec[]): Promise<void> {
   const { boss } = ctx.bus;

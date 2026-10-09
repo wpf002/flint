@@ -22,11 +22,13 @@ export const QUEUES = {
   triage: 'triage',
   /** One escalation's notes; stately, singletonKey = the escalation id. */
   deliver: 'deliver',
-  /** Housekeeping on a schedule, one run at a time. */
-  scheduled: ['health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations'],
+  /** P3: one goal's review, and its local-model plan stage; stately, singletonKey = the goal id. */
+  goals: ['goals.review', 'goals.plan'],
+  /** Housekeeping on a schedule, one run at a time (goals.tick finds the goal reviews that are due). */
+  scheduled: ['health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations', 'goals.tick'],
   dead: 'dead',
 } as const;
-export const ALL_QUEUES: readonly string[] = [...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.scheduled, QUEUES.dead];
+export const ALL_QUEUES: readonly string[] = [...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.goals, ...QUEUES.scheduled, QUEUES.dead];
 /** pg-boss's own: its timekeeper's queue for cron sends (the migration makes it too). */
 export const PGBOSS_QUEUES: readonly string[] = ['__pgboss__send-it'];
 

@@ -194,11 +194,12 @@ describe('the console Approvals panel', () => {
     const first = ids.apprlist!.children[0]!.children[0]!;
     first.button('Approve with Password').onclick!();
     first.button('Reject').onclick!();
-    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Turn On the Deploy Source', fresh: false }]);
+    // The args the card shows go with it: what is signed must hash to them (the main script checks the challenge).
+    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Turn On the Deploy Source', fresh: false, args: { source: 'deploy' } }]);
     expect(decided[1]).toEqual(['reject', 'pr1']);
     ids.apprlist!.children[0]!.children[1]!.onclick!();
     ids.apprlist!.children[0]!.children[1]!.button('Approve with Password').onclick!();
-    expect(decided[2]![2]).toEqual({ reason: 'approve: Add 0 People from Calendar', fresh: true });
+    expect(decided[2]![2]).toEqual({ reason: 'approve: Add 0 People from Calendar', fresh: true, args: { people: [] } });
   });
 
   it('Approve All signs each card in turn after one prompt, and leaves outside text and money for their own', async () => {
@@ -211,8 +212,8 @@ describe('the console Approvals panel', () => {
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b', 'c']);
-    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards' });
-    expect(decided[1]![2]).toEqual({ reason: 'approve: Turn On the Git Source' });
+    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards', args: { source: 'deploy' } });
+    expect(decided[1]![2]).toEqual({ reason: 'approve: Turn On the Git Source', args: { source: 'git' } });
     expect(ids.apprnote!.textContent).toBe('You approved 3 of 3.');
   });
 

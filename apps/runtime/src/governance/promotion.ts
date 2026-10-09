@@ -17,7 +17,7 @@
  *    fixed one.
  *  - Filing the same table again is the same card: a waiting one is reused.
  */
-import { CODE_TABLE, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CODE_TABLE, GOAL_SIGNED_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -72,8 +72,14 @@ export const P26_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number 
   { pattern: 'world.sync.apple_calendar' },
 ];
 
-/** Never in a table, whatever is asked. */
-export const NEVER_PROMOTED: ReadonlySet<string> = new Set(['runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail']);
+/**
+ * Never in a table, whatever is asked: P3's six passkey actions and the Nexus
+ * write among them (their code entries are not promotable either; this is belt
+ * and braces).
+ */
+export const NEVER_PROMOTED: ReadonlySet<string> = new Set([
+  'runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail', ...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision',
+]);
 
 export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26'] as const;
 export type Phase = (typeof PHASES_LIST)[number];
