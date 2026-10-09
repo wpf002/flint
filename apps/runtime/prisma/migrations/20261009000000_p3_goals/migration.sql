@@ -213,7 +213,8 @@ CREATE UNIQUE INDEX "GoalReview_scheduled_key" ON "GoalReview" ("goalId", "dueAt
 
 -- ---- The signed card a guarded change rides on ------------------------------------
 -- An approval Will signed (approve, a live credential) for a proposal that is
--- executing now and not expired, for one of these actions, about this goal. It
+-- executing now and not expired (by the wall clock: a transaction opened before
+-- the card expired gains nothing), for one of these actions, about this goal. It
 -- never consumes the approval (proposal_transition did that when the card was
 -- approved); p3_bind_approval, below, makes each one move its goal in one
 -- transaction only. Raises otherwise. Called from trigger bodies, which run as
@@ -231,7 +232,7 @@ BEGIN
   END IF;
   SELECT * INTO p FROM "Proposal" WHERE "id" = a."subjectId";
   IF NOT FOUND OR NOT coalesce(
-       p."approvalId" = a."id" AND p."status" = 'executing' AND p."expiresAt" > now() AND p."action" = ANY (p_actions)
+       p."approvalId" = a."id" AND p."status" = 'executing' AND p."expiresAt" > clock_timestamp() AND p."action" = ANY (p_actions)
        AND p."kind" = CASE WHEN p."action" = 'plan.change' THEN 'plan' ELSE 'goal' END
        AND a."payload"->>'action' = p."action" AND a."payload"->>'argsDigest' = p."argsDigest"
        AND jsonb_typeof(p."args") = 'object' AND p."args"->>'goalId' = p_goal, false) THEN
@@ -259,6 +260,10 @@ BEGIN
   FOR k, v IN SELECT * FROM jsonb_each(s) LOOP
     CONTINUE WHEN NOT (k = ANY (ARRAY['key', 'ordinal', 'title', 'kind', 'tier', 'status', 'dueAt', 'dependsOn', 'doneAt', 'doneAuditId', 'proposalId', 'taskId']));
     IF k IN ('dueAt', 'doneAt') AND jsonb_typeof(v) = 'string' THEN
+      -- Only a time is cast (a cast's error would repeat whatever text it was given).
+      IF (v #>> '{}') !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:\d{2})?)$' THEN
+        RAISE EXCEPTION 'plan step: a % is not a time', k USING ERRCODE = 'check_violation';
+      END IF;
       v := to_jsonb(floor(extract(epoch FROM (v #>> '{}')::timestamptz) * 1000)::bigint);
     ELSIF k = 'dependsOn' AND jsonb_typeof(v) = 'array' THEN
       v := coalesce((SELECT jsonb_agg(DISTINCT e ORDER BY e) FROM jsonb_array_elements(v) AS e), '[]'::jsonb);
@@ -315,14 +320,17 @@ $$;
 
 -- An approval moves its goal in one transaction only: the first use records the
 -- transaction, and any use from another one (the card left executing, or a second
--- card's run) is refused, as is its use for another goal or action. SECURITY
--- DEFINER: flint_app has no grant on GoalApprovalUse, so it can only use an
--- approval, never free one.
+-- card's run) is refused, as is its use for another goal or action. Only a live,
+-- executing card for that goal and action is ever recorded, so a call of its own
+-- cannot spend another card's approval or fill the table. SECURITY DEFINER:
+-- flint_app has no grant on GoalApprovalUse, so it can only use an approval,
+-- never free one.
 CREATE FUNCTION p3_bind_approval(p_approval text, p_goal text, p_action text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   u "GoalApprovalUse"%ROWTYPE;
 BEGIN
+  PERFORM p3_signed_proposal(p_approval, p_goal, ARRAY[p_action]);
   INSERT INTO "GoalApprovalUse" ("approvalId", "goalId", "action", "xact")
   VALUES (p_approval, p_goal, p_action, pg_current_xact_id()::text)
   ON CONFLICT ("approvalId") DO NOTHING;
@@ -452,8 +460,12 @@ BEGIN
       END IF;
     END IF;
     IF want IN ('goal.activate', 'goal.horizon_change') THEN
-      IF coalesce(jsonb_typeof(p."args"->'horizonAt'), 'missing') NOT IN ('string', 'null')
-         OR (p."args"->>'horizonAt')::timestamptz IS DISTINCT FROM NEW."horizonAt" OR p."args"->>'reviewCadence' IS DISTINCT FROM NEW."reviewCadence" THEN
+      -- Only a time is cast (a cast's error would repeat whatever text it was given), so its shape is checked first.
+      IF NOT coalesce(jsonb_typeof(p."args"->'horizonAt') = 'null'
+                      OR (p."args"->>'horizonAt') ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$', false) THEN
+        RAISE EXCEPTION 'goal %: the timing approval % signed is not a time', OLD."id", NEW."approvalId" USING ERRCODE = 'insufficient_privilege';
+      END IF;
+      IF (p."args"->>'horizonAt')::timestamptz IS DISTINCT FROM NEW."horizonAt" OR p."args"->>'reviewCadence' IS DISTINCT FROM NEW."reviewCadence" THEN
         RAISE EXCEPTION 'goal %: its timing is not what approval % signed', OLD."id", NEW."approvalId" USING ERRCODE = 'insufficient_privilege';
       END IF;
     END IF;
@@ -576,12 +588,16 @@ END;
 $$;
 
 -- ---- Plans -------------------------------------------------------------------------------
--- A plan is born an unsigned draft, made now.
+-- A plan is born an unsigned draft, made now, numbered as the goal's next version
+-- (a version far ahead would leave no room for the next one).
 CREATE FUNCTION plan_insert_check() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NOT coalesce(NEW."status" = 'draft' AND NEW."approvalId" IS NULL, false) THEN
     RAISE EXCEPTION 'plan %: a plan starts as an unsigned draft', NEW."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NEW."version" IS DISTINCT FROM coalesce((SELECT max("version") FROM "Plan" WHERE "goalId" = NEW."goalId"), 0) + 1 THEN
+    RAISE EXCEPTION 'plan %: a new version is numbered after the goal''s last', NEW."id" USING ERRCODE = 'check_violation';
   END IF;
   NEW."createdAt" := clock_timestamp();
   RETURN NEW;
@@ -826,9 +842,9 @@ $$;
 -- signed plan change, and never out of it), doneAt, its proof, its card and its
 -- task. A draft's steps and a superseded plan's never change; a step written as its
 -- plan is replaced is refused (40001: try again on the new version), and so is any
--- step written above READ COMMITTED. Locks go the goal first, then the plan, as
--- every writer takes them (the executor, a review), so none waits on another in a
--- circle. A Flint action is done only with
+-- step written above READ COMMITTED. Locks go the goal first (for update), then the
+-- plan, as every writer takes them (the executor, a review), so none waits on
+-- another in a circle. A Flint action is done only with
 -- its own action on record (H7): an AuditEntry of kind action, outcome ok,
 -- correlated with `<goalId>:<key>`, which stays the same across versions. A copy
 -- into a new draft keeps the proof a version that was active already had.
@@ -848,7 +864,9 @@ BEGIN
     RAISE EXCEPTION 'plan %: steps are written at read committed only', NEW."planId" USING ERRCODE = 'serialization_failure';
   END IF;
   SELECT "goalId" INTO goal FROM "Plan" WHERE "id" = NEW."planId";
-  PERFORM 1 FROM "Goal" WHERE "id" = goal FOR SHARE;
+  -- FOR NO KEY UPDATE, not FOR SHARE: two step writes that then each record progress on the goal would both hold
+  -- a share lock and wait on each other's upgrade. Taken this way, the second waits for the first to finish.
+  PERFORM 1 FROM "Goal" WHERE "id" = goal FOR NO KEY UPDATE;
   SELECT * INTO pl FROM "Plan" WHERE "id" = NEW."planId" FOR SHARE;
   IF TG_OP = 'INSERT' THEN
     SELECT "xmin" = pg_current_xact_id()::xid INTO mine FROM "Plan" WHERE "id" = NEW."planId";
@@ -1051,6 +1069,41 @@ BEGIN
 END;
 $$;
 
+-- A goal or plan card's own rules (Proposal's CHECKs and NOT NULLs), checked first and
+-- named by id: its args hold the goal's words, and a refused CHECK would write them
+-- into the error's DETAIL. Cards of other kinds keep the plain constraints alone.
+CREATE FUNCTION proposal_valid() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+  bad text;
+BEGIN
+  IF NOT (coalesce(NEW."kind" IN ('goal', 'plan'), true) OR coalesce(NEW."action" ~ '^(goal\.|plan\.change$|world\.commitment\.from_chat$)', true)) THEN
+    RETURN NEW;
+  END IF;
+  bad := CASE
+    WHEN NEW."id" IS NULL OR NEW."kind" IS NULL OR NEW."origin" IS NULL OR NEW."action" IS NULL OR NEW."argsDigest" IS NULL OR NEW."argsProvenance" IS NULL
+         OR NEW."tainted" IS NULL OR NEW."sensitivity" IS NULL OR NEW."destructive" IS NULL OR NEW."consequential" IS NULL OR NEW."status" IS NULL
+         OR NEW."expiresAt" IS NULL OR NEW."createdAt" IS NULL THEN 'a required field'
+    WHEN NOT coalesce(NEW."kind" IN ('tool_call', 'goal', 'plan', 'rule', 'policy', 'task', 'pr', 'spend', 'forget', 'void'), false) THEN 'kind'
+    WHEN NOT coalesce(NEW."status" IN ('pending', 'approved', 'executing', 'executed', 'failed', 'rejected', 'expired'), false) THEN 'status'
+    WHEN NOT coalesce(NEW."sensitivity" IN ('ops', 'personal', 'financial'), false) THEN 'sensitivity'
+    WHEN NOT coalesce(NEW."argsDigest" ~ '^[0-9a-f]{64}$', false) THEN 'digest'
+    WHEN NOT coalesce(NEW."args" IS NULL OR octet_length(NEW."args"::text) <= 65536, false) THEN 'args'
+    WHEN NOT coalesce(NEW."result" IS NULL OR octet_length(NEW."result"::text) <= 16384, false) THEN 'result'
+    WHEN NOT coalesce(NEW."error" IS NULL OR char_length(NEW."error") <= 2000, false) THEN 'error'
+    WHEN NOT coalesce(NEW."reason" IS NULL OR char_length(NEW."reason") <= 1000, false) THEN 'reason'
+    WHEN NOT coalesce(jsonb_typeof(NEW."argsProvenance") = 'object', false) THEN 'provenance'
+    WHEN NOT coalesce(NEW."origin" NOT LIKE 'runtime:%' OR NEW."templateId" IS NOT NULL, false) THEN 'template'
+    WHEN NOT coalesce(NEW."argsPurgedAt" IS NULL OR NEW."args" IS NULL, false) THEN 'purge'
+    WHEN NOT coalesce(NEW."expiresAt" > NEW."createdAt", false) THEN 'expiry'
+  END;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'proposal %: its % is not valid', NEW."id", bad USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 -- ---- Triggers --------------------------------------------------------------------------------------
 CREATE TRIGGER "Goal_insert_check" BEFORE INSERT ON "Goal"
   FOR EACH ROW EXECUTE FUNCTION goal_insert_check();
@@ -1104,6 +1157,9 @@ CREATE TRIGGER "Proposal_quote_check" BEFORE INSERT ON "Proposal"
   FOR EACH ROW WHEN (NEW."action" IN ('goal.propose', 'world.commitment.from_chat')) EXECUTE FUNCTION proposal_quote_check();
 CREATE TRIGGER "Proposal_digest_check" BEFORE INSERT ON "Proposal"
   FOR EACH ROW WHEN (NEW."kind" IN ('goal', 'plan')) EXECUTE FUNCTION proposal_digest_check();
+-- Named to fire after the other Proposal triggers (name order) and before any constraint.
+CREATE TRIGGER "Proposal_valid" BEFORE INSERT OR UPDATE ON "Proposal"
+  FOR EACH ROW EXECUTE FUNCTION proposal_valid();
 
 -- ---- The goal queues (the closed set; nothing sends to them until the planner is on) ------------------
 --   goals.tick    finds the reviews that are due, every 2 minutes, one run at a time
@@ -1122,7 +1178,7 @@ SELECT pgboss.create_queue('goals.plan', '{"policy":"stately","retryLimit":2,"re
 REVOKE ALL ON FUNCTION p3_signed_proposal(text, text, text[]), p3_step_norm(jsonb), p3_canonical(jsonb), p3_args_digest(jsonb),
   p3_bind_approval(text, text, text), goal_insert_check(), goal_valid(), goal_guard(), goal_entity_guard(), plan_insert_check(), plan_guard(),
   plan_replaced_check(), plan_valid(), plan_step_guard(), plan_step_valid(), goal_review_insert_check(), goal_review_guard(), goal_review_valid(),
-  row_history_masked(), proposal_quote_check(), proposal_digest_check() FROM PUBLIC;
+  row_history_masked(), proposal_quote_check(), proposal_digest_check(), proposal_valid() FROM PUBLIC;
 REVOKE ALL ON "GoalApprovalUse" FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION p3_signed_proposal(text, text, text[]), p3_step_norm(jsonb), p3_canonical(jsonb), p3_args_digest(jsonb),
   p3_bind_approval(text, text, text) TO flint_app;

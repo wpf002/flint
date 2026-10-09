@@ -273,6 +273,32 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
       expect((await app(`SELECT title FROM "Goal" WHERE id = $1`, [gid])).rows[0].title).toBe('Synthetic two');
     });
 
+    it('only a live card for that goal and action is ever recorded as used: a call of its own spends nothing and fills nothing (b2 §5)', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid));
+      const before = (await owner(`SELECT count(*)::int AS n FROM "GoalApprovalUse"`)).rows[0].n as number;
+      expect(await code(app(`SELECT p3_bind_approval($1, 'goWRONG', 'goal.done')`, [aid]))).toBe('42501');
+      expect(await code(app(`SELECT p3_bind_approval('junk' || g, 'x', 'y') FROM generate_series(1, 50) g`))).toBe('42501');
+      expect((await owner(`SELECT count(*)::int AS n FROM "GoalApprovalUse"`)).rows[0].n).toBe(before);
+      await activate(app, gid, aid);
+      expect((await app(`SELECT status FROM "Goal" WHERE id = $1`, [gid])).rows[0].status).toBe('active');
+    });
+
+    it('a transaction opened before a card expired cannot use it after (b2 §4)', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid), '2 seconds');
+      const t = await client();
+      try {
+        await t.query('BEGIN');
+        await t.query('SELECT now()');
+        await sleep(2300);
+        expect(await code(activate(on(t), gid, aid))).toBe('42501');
+        await t.query('ROLLBACK');
+      } finally {
+        await t.end();
+      }
+    });
+
     it('a card that cannot bring the next version cannot drop the active one; an expired card moves nothing (a2)', async () => {
       const { gid, v1 } = await goalWithPlan([S('s1')]);
       await card('plan.change', { goalId: gid, goalTitle: DEF.title, ops: [{ op: 'set', key: 's7', from: { title: 'x' }, to: { title: 'y' } }] });
@@ -308,6 +334,27 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
       expect((await app(`SELECT count(*)::int AS n FROM "GoalReview" WHERE "goalId" = $1`, [gid])).rows[0].n).toBe(0);
     });
 
+    it('two step ticks that each then record progress on the goal wait in turn, never on each other (b5)', async () => {
+      const { gid, v1 } = await goalWithPlan([S('s1'), S('s2')]);
+      const t1 = await client();
+      const t2 = await client();
+      try {
+        await t1.query('BEGIN');
+        await t2.query('BEGIN');
+        await t1.query(`UPDATE "PlanStep" SET status = 'in_progress' WHERE "planId" = $1 AND key = 's1'`, [v1]);
+        // The second tick waits at its step (the first holds the goal), not at the goal after both hold it.
+        const second = outcome(t2.query(`UPDATE "PlanStep" SET status = 'in_progress' WHERE "planId" = $1 AND key = 's2'`, [v1])
+          .then(() => t2.query(`UPDATE "Goal" SET progress = 0.5 WHERE id = $1`, [gid])).then(() => t2.query('COMMIT')));
+        await sleep(200);
+        const first = await outcome(t1.query(`UPDATE "Goal" SET progress = 0.25 WHERE id = $1`, [gid]).then(() => t1.query('COMMIT')));
+        expect([first, await second]).toEqual(['ok', 'ok']);
+      } finally {
+        await t1.end();
+        await t2.end();
+      }
+      expect((await app(`SELECT progress FROM "Goal" WHERE id = $1`, [gid])).rows[0].progress).toBe(0.5);
+    });
+
     it('a step tick and a plan change take their locks in one order, goal then plan: no deadlock (a8)', async () => {
       const { gid, v1 } = await goalWithPlan([S('s1')]);
       const tick = await client();
@@ -340,6 +387,16 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
       const fin = await goal({ sensitivity: 'financial' });
       expect(await code(activate(app, fin, await card('goal.activate', activateArgs(fin))))).toBe('42501');
       await activate(app, fin, await card('goal.activate', activateArgs(fin, { sensitivity: 'financial' })));
+    });
+  });
+
+  describe('versions', () => {
+    it('a draft is numbered as the next version, never far ahead (b6)', async () => {
+      const { gid } = await goalWithPlan([S('s1')]);
+      for (const version of [2147483647, 3, 1]) {
+        expect(await code(inTx((q) => q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, $3, 'will')`, [id('pl'), gid, version]))), String(version)).toBe('23514');
+      }
+      await inTx((q) => q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 2, 'will')`, [id('pl'), gid]));
     });
   });
 
@@ -388,6 +445,41 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
         VALUES ($1, 'Synthetic claim', 'binary', 0.5, 'rule', 'goals', 'deadline_met', '[]', 'Synthetic criteria', 'will', now() + interval '30 days', 'runtime:goals', $2)`, [pid, active]);
       await refusal(app(`INSERT INTO "GoalReview" (id, "goalId", kind, "dueAt", summary, "progressBefore", "progressAfter", "predictionId") VALUES ($1, $2, 'scheduled', now(), $3, 0, 0, $4)`,
         [id('gr'), active, `${CANARY} `.repeat(60), pid]));
+    });
+
+    it('a goal card refused by one of Proposal\'s own rules says which, never its args (b4)', async () => {
+      const args = activateArgs(id('go'), { title: CANARY });
+      const file = (cols: { origin?: string | null; expires?: string; templateId?: string | null }) =>
+        app(`INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", sensitivity, "expiresAt") VALUES ($1, 'goal', $2, 'goal.activate', $3, $4::jsonb, $5, '{}', 'personal', now() + $6::interval)`,
+          [id('prop'), cols.origin === undefined ? 'console' : cols.origin, cols.templateId ?? null, JSON.stringify(args), digestOf(args), cols.expires ?? '1 hour']);
+      for (const [label, cols, rule] of [
+        ['a runtime card without its template', { origin: 'runtime:goals' }, 'template'],
+        ['a card born expired', { expires: '-1 hour' }, 'expiry'],
+        ['a card with no origin', { origin: null }, 'a required field'],
+      ] as const) {
+        const e = (await pgError(file(cols))) as { code?: string; message: string; detail?: string };
+        expect(e.code, label).toBe('23514');
+        expect(e.message, label).toMatch(new RegExp(`^proposal \\w+: its ${rule} is not valid$`));
+        expect(`${e.message} ${e.detail ?? ''}`, label).not.toContain('CANARY');
+        expect(e.detail, label).toBeUndefined();
+      }
+      // Words where a signed time goes are never cast (a cast's error would repeat them).
+      const g2 = await goal();
+      const words = await card('goal.activate', activateArgs(g2, { horizonAt: `${CANARY} soon` }));
+      const e1 = (await pgError(activate(app, g2, words))) as { code?: string; message: string; detail?: string };
+      expect(e1.code).toBe('42501');
+      expect(`${e1.message} ${e1.detail ?? ''}`).not.toContain('CANARY');
+      const { gid: g3, v1 } = await goalWithPlan([S('s1')]);
+      const step = await card('plan.change', { goalId: g3, goalTitle: DEF.title, ops: [{ op: 'set', key: 's1', from: { title: 'Synthetic step s1', dueAt: `${CANARY} later` }, to: { dueAt: '2027-01-01T00:00:00.000Z' } }] });
+      const e2 = (await pgError(inTx(async (q) => {
+        const v2 = id('pl');
+        await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 2, 'will')`, [v2, g3]);
+        await insertSteps(q, v2, [S('s1', { dueAt: '2027-01-01T00:00:00.000Z' })]);
+        await q(`UPDATE "Plan" SET status = 'superseded' WHERE id = $1`, [v1]);
+        await q(`UPDATE "Plan" SET status = 'active', "approvalId" = $2 WHERE id = $1`, [v2, step]);
+      }, false))) as { code?: string; message: string; detail?: string };
+      expect(e2.code).toBe('23514');
+      expect(`${e2.message} ${e2.detail ?? ''}`).not.toContain('CANARY');
     });
   });
 });

@@ -389,7 +389,8 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       expect(await attempt([block], blocked.filter((s) => s.key !== 's2'))).toBe('42501');
       expect(await attempt([block], prev)).toBe('42501');
       expect(await attempt([block], overlay(blocked, 's2', { title: 'Synthetic, edited' }))).toBe('42501');
-      expect(await attempt([block], blocked, 3)).toBe('42501');
+      // (A version that is not the next is refused when the draft is made.)
+      expect(await attempt([block], blocked, 3)).toBe('23514');
       // A copied step's progress is copied too: its doneAt, its proof, its card and its task.
       for (const to of [{ doneAt: '2026-10-08T12:00:00.001Z' }, { proposalId: 'prx' }, { taskId: 'tkx' }]) expect(await attempt([block], overlay(blocked, 's3', to))).toBe('42501');
       // A failed precondition; an op that makes a step done; two ops on one key; a dueAt 1 ms off; an op that changes nothing.
@@ -449,7 +450,7 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       expect(await code(app(`UPDATE "Plan" SET "approvalId" = $2 WHERE id = $1`, [v1, a2]))).toBe('42501');
       const draft = id('pl');
       await inTx(async (q) => {
-        await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 9, 'flint')`, [draft, gid]);
+        await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 2, 'flint')`, [draft, gid]);
         await insertSteps(q, draft, [S('s1', { title: 'Synthetic, never signed' })]);
       }, true);
       // Another transaction writes no step into it, and cannot make it its own by writing its row again.
@@ -461,9 +462,9 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       // and it never freezes the goal's plan: the next version is simply numbered after it.
       const prev = await stepsOf(v1);
       const card2 = await planCard(gid, [addOp(S('s2'))]);
-      expect(await code(inTx((q) => nextVersion(q, gid, v1, 10, [...prev.map((s) => ({ ...s, title: s.key === 's1' ? 'Synthetic, never signed' : s.title })), S('s2')], card2.aid)))).toBe('42501');
-      expect(await code(inTx((q) => nextVersion(q, gid, v1, 2, [...prev, S('s2')], card2.aid)))).toBe('42501');
-      expect(await outcome(inTx((q) => nextVersion(q, gid, v1, 10, [...prev, S('s2')], card2.aid), true))).toBe('ok');
+      expect(await code(inTx((q) => nextVersion(q, gid, v1, 3, [...prev.map((s) => ({ ...s, title: s.key === 's1' ? 'Synthetic, never signed' : s.title })), S('s2')], card2.aid)))).toBe('42501');
+      expect(await code(inTx((q) => nextVersion(q, gid, v1, 2, [...prev, S('s2')], card2.aid)))).toBe('23514');
+      expect(await outcome(inTx((q) => nextVersion(q, gid, v1, 3, [...prev, S('s2')], card2.aid), true))).toBe('ok');
       expect(await code(app(`INSERT INTO "Plan" (id, "goalId", version, "createdBy", status) VALUES ($1, $2, 10, 'will', 'active')`, [id('pl'), gid]))).toBe('42501');
       expect(await code(owner(`UPDATE "Plan" SET rationale = 'Synthetic' WHERE id = $1`, [v1]))).toBe('42501');
     });
@@ -524,6 +525,8 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       await executor.connect();
       try {
         await executor.query('BEGIN');
+        // As the executor does: the goal, then its plan.
+        await executor.query(`SELECT id FROM "Goal" WHERE id = $1 FOR UPDATE`, [gid]);
         await executor.query(`SELECT id FROM "Plan" WHERE id = $1 FOR UPDATE`, [v1]);
         // The tick waits on the plan...
         const tick = app(`UPDATE "PlanStep" SET status = 'in_progress' WHERE "planId" = $1 AND key = 's1'`, [v1]).then(() => 'written', (e: { code?: string }) => e.code);

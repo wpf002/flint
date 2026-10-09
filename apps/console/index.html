@@ -543,7 +543,7 @@ function renderProposals(actions,bodyEl){if(!actions||!actions.length)return;var
   var row=el('div','prow');var more=el('button','ghost','Show Details');more.onclick=function(){card.classList.toggle('show');more.textContent=card.classList.contains('show')?'Hide Details':'Show Details';};
   var no=el('button','no','Reject');var ok=el('button','ok',approveLabel());row.appendChild(more);row.appendChild(no);row.appendChild(ok);card.appendChild(row);
   var res=el('div','res');res.style.display='none';card.appendChild(res);
-  ok.onclick=function(){approveAction(a.id,card,{reason:'approve: '+title,fresh:typeof apprAlone==='function'?apprAlone(a):true});};
+  ok.onclick=function(){approveAction(a.id,card,{reason:'approve: '+title,fresh:typeof apprAlone==='function'?apprAlone(a):true,args:a.args});};
   no.onclick=function(){rejectAction(a.id,card);};
   host.appendChild(card);});$('transcript').scrollTop=9e9;}
 /* ---------- Will's approval key (passkey on the tailnet HTTPS origin) ---------- */
@@ -611,8 +611,26 @@ function enrollEnclave(){var code=$('enrollcode').value.trim();var label=$('enro
 /* Replace this Mac's key (lost or unwanted): make a new one (Touch ID or password), then enrol it with a code from `enroll --replace` (or another key's approval). */
 function resetEnclave(){/* No confirm(): the app's web view has no dialog for it. Touch ID (or the password) is the confirmation. */
   se('reset').then(function(){SE_ID=null;$('enrollbox').hidden=false;$('enrollse').hidden=false;enrollMsg('A new key is ready. Enter a replace code to add it.');}).catch(function(e){enrollMsg(e.message||e,true);});}
+/* What Will signs is what his card showed him. The digest of the args the card displayed (the same canonical JSON and
+   SHA-256 as @flint/policy's digestOf, canonical.ts: keys sorted, no spaces, strings and numbers as JSON writes them) goes
+   with the request, and nothing is signed unless the challenge names that same digest. A runtime that showed one thing
+   and asked for another is caught before the key is touched. */
+var UNSIGNABLE='It can’t be signed: what it would do doesn’t match what it shows.';
+function canonJson(v){if(v===null)return 'null';var t=typeof v;
+  if(t==='string')return JSON.stringify(v);if(t==='boolean')return v?'true':'false';
+  if(t==='number'){if(!isFinite(v))throw new Error(UNSIGNABLE);return JSON.stringify(v);}
+  if(t!=='object')throw new Error(UNSIGNABLE);
+  if(Array.isArray(v))return '['+v.map(function(x){if(x===undefined)throw new Error(UNSIGNABLE);return canonJson(x);}).join(',')+']';
+  var proto=Object.getPrototypeOf(v);if(proto!==Object.prototype&&proto!==null)throw new Error(UNSIGNABLE);
+  return '{'+Object.keys(v).filter(function(k){return v[k]!==undefined;}).sort().map(function(k){return JSON.stringify(k)+':'+canonJson(v[k]);}).join(',')+'}';}
+function shownDigest(args){var text;try{text=canonJson(args===undefined?null:args);}catch(e){return Promise.reject(new Error(UNSIGNABLE));}
+  return crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)).then(function(h){return Array.prototype.map.call(new Uint8Array(h),function(b){return ('0'+b.toString(16)).slice(-2);}).join('');});}
+/* Begin a signed decision. An approval carries the shown args' digest, and its challenge must carry it back. */
+function beginSigned(id,decision,o){if(decision!=='approve')return postJson('/approvals/begin',{proposalId:id,decision:decision});
+  return shownDigest(o&&o.args).then(function(d){return postJson('/approvals/begin',{proposalId:id,decision:decision,argsDigest:d}).then(function(b){
+    if(!b||!b.payload||b.payload.argsDigest!==d)throw new Error(UNSIGNABLE);return b;});});}
 function enclaveDecide(id,decision,card,o){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;o=o||{};
-  return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+  return beginSigned(id,decision,o).then(function(b){
     return se('sign',{challenge:b.challenge,reason:o.reason||((decision==='approve'?'approve ':'reject ')+b.payload.action),fresh:!!o.fresh}).then(function(sg){
       return postJson('/approvals/finish',{challengeId:b.challengeId,credentialId:SE_ID,signature:sg.signature});});
   }).then(function(d){showDecision(d,decision,r,row);return d;}).catch(function(e){failed(e,r,row);throw e;});}
@@ -655,11 +673,11 @@ function enrollPasskey(){var code=$('enrollcode').value.trim();var label=$('enro
       return finishEnrolment(b,reg,label);});
   }).then(function(){$('enrollcode').value='';enrollMsg('Your passkey is added.');loadCreds();}).catch(function(e){enrollMsg(e.message,true);});}
 /* Will signs this exact action and its args with the passkey; the server and the runtime verify it. */
-function passkeyDecide(id,decision,card){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
-  return postJson('/approvals/begin',{proposalId:id,decision:decision}).then(function(b){
+function passkeyDecide(id,decision,card,o){var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+  return beginSigned(id,decision,o||{}).then(function(b){
     return signWithMyKey(b,'').then(function(sig){return postJson('/approvals/finish',Object.assign({challengeId:b.challengeId},sig));});
   }).then(function(d){showDecision(d,decision,r,row);return d;}).catch(function(e){failed(e,r,row);throw e;});}
-function approveAction(id,card,o){if(canEnclave())return enclaveDecide(id,'approve',card,o);if(canPasskey())return passkeyDecide(id,'approve',card);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
+function approveAction(id,card,o){if(canEnclave())return enclaveDecide(id,'approve',card,o);if(canPasskey())return passkeyDecide(id,'approve',card,o);var r=card.querySelector('.res');var row=card.querySelector('.prow');row.style.opacity=.5;
   return fetch(BASE+'/proposals/approve',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).then(function(x){return x.json();}).then(function(d){showOutcome(d,r,row);return d;})
   .catch(function(e){failed(new Error('Flint didn’t answer. Try again.'),r,row);throw e;});}
 function rejectAction(id,card){fetch(BASE+'/proposals/reject',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({id:id})}).catch(function(){});card.querySelector('.prow').style.display='none';resText(card.querySelector('.res'),'Rejected.');}
@@ -1167,7 +1185,7 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
     no.onclick=function(){rejectAction(p.id,card);setTimeout(loadApprovals,1200);};
-    ok.onclick=function(){approveAction(p.id,card,{reason:'approve: '+apprTitle(p),fresh:apprAlone(p)}).then(function(){setTimeout(loadApprovals,1200);},function(){});};
+    ok.onclick=function(){approveAction(p.id,card,{reason:'approve: '+apprTitle(p),fresh:apprAlone(p),args:p.args}).then(function(){setTimeout(loadApprovals,1200);},function(){});};
     row.appendChild(show);row.appendChild(no);row.appendChild(ok);card.appendChild(row);card.appendChild(det);}
   else{row.hidden=true;card.appendChild(row);card.classList.add('click');card.onclick=function(){APPR.open=p.id;apprRender();};}
   card.appendChild(res);card.setAttribute('data-id',p.id);
@@ -1218,7 +1236,7 @@ function approveAll(){if(APPR.busy)return;var queue=APPR.pending.filter(function
   var rows={};Array.prototype.forEach.call(document.querySelectorAll('#apprlist .card'),function(c){rows[c.getAttribute('data-id')]=c;});
   var next=function(i){if(i>=queue.length)return Promise.resolve();var p=queue[i];note.textContent='Approving '+(i+1)+' of '+queue.length+'…';
     var card=rows[p.id]||apprCard(p);
-    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p)}).then(function(){done++;return next(i+1);});};
+    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p),args:p.args}).then(function(){done++;return next(i+1);});};
   next(0).catch(function(e){failedAt=e;}).then(function(){APPR.busy=false;
     note.textContent='You approved '+done+' of '+queue.length+'.'+(failedAt?' '+(typeof errText==='function'?errText(failedAt):'It stopped.'):'');
     setTimeout(loadApprovals,failedAt?2500:1200);});}

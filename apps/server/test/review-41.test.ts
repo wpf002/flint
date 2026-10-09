@@ -606,7 +606,7 @@ describe('approval routes', () => {
     server?.close();
   });
 
-  it('a runtime card whose args do not hash to the digest it asks Will to sign cannot be signed (a reject still can)', async () => {
+  it('a card cannot be signed unless its args, as shown, hash to the digest about to be signed (a reject still can)', async () => {
     const dir = tmp();
     const code = join(dir, 'code');
     writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
@@ -630,6 +630,15 @@ describe('approval routes', () => {
     const begun = await post('/approvals/begin', { proposalId: 'prd' });
     expect(begun.status).toBe(200);
     expect(begun.body).toHaveProperty('challenge');
+    // The console sends the digest of the args its card showed: a different one is refused, the same one is not.
+    expect(await post('/approvals/begin', { proposalId: 'prd', argsDigest: digestOf(other) })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect(await post('/approvals/begin', { proposalId: 'prd', argsDigest: 'not-a-digest' })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect((await post('/approvals/begin', { proposalId: 'prd', argsDigest: digestOf(shown) })).status).toBe(200);
+    // A RAM-queue card (chat's, on a server with no runtime link) too.
+    await serve(baseDeps({ approvals: deps.approvals }));
+    const id = deps.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 41 }, destructive: false });
+    expect(await post('/approvals/begin', { proposalId: id, argsDigest: digestOf({ t: 42 }) })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect((await post('/approvals/begin', { proposalId: id, argsDigest: digestOf({ t: 41 }) })).status).toBe(200);
     server?.close();
   });
 

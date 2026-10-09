@@ -19,6 +19,14 @@ import { withTurnTaint } from './turn-taint';
 /** A runtime card that cannot be signed: what it would carry out is not what it shows. */
 export const DOES_NOT_MATCH = 'It can’t be signed: what it would do doesn’t match what it shows.';
 
+/**
+ * The digest of the args the console's card showed, when it sends one, is the digest about to be signed. (The
+ * console checks the challenge too; this is the server's half. An older console that sends none is not refused.)
+ */
+function shownMatches(body: Record<string, unknown>, digest: string): boolean {
+  return body.argsDigest === undefined || body.argsDigest === digest;
+}
+
 /** Do a runtime card's args hash to the digest it asks Will to sign? (Its args are what the card shows him.) */
 function argsMatch(p: Pick<RuntimeProposal, 'args' | 'argsDigest'>): boolean {
   if (p.args === null) return false;
@@ -182,8 +190,9 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         if (!p || p.status !== 'pending') return reply(res, 404, { error: NOT_WAITING });
         // What Will signs must be the args he is shown: the digest is recomputed here, never taken on the
         // runtime's word (a runtime that stored one thing and reported another would get him to sign the other).
-        // (Rejecting it is always allowed: that carries nothing out.)
-        if (decision === 'approve' && !argsMatch(p)) return reply(res, 409, { error: DOES_NOT_MATCH });
+        // (Rejecting it is always allowed: that carries nothing out.) The console also sends the digest of the args
+        // its card showed: the one signed must be that one too.
+        if (decision === 'approve' && (!argsMatch(p) || !shownMatches(body, p.argsDigest))) return reply(res, 409, { error: DOES_NOT_MATCH });
         return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted } }));
       }
       if (url === '/approvals/finish' && ctx.proposals) {
@@ -214,6 +223,7 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         } catch {
           return reply(res, 409, { error: 'It can’t be signed.' });
         }
+        if (decision === 'approve' && !shownMatches(body, argsDigest)) return reply(res, 409, { error: DOES_NOT_MATCH });
         return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.fullName, argsDigest }));
       }
       if (url === '/approvals/finish') {

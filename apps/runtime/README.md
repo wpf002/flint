@@ -285,11 +285,16 @@ nothing reviews goals.
 - **The goals panel (part 2)** must forward each card's `consequential` mark to
   the console and ask for a fresh touch on every card that has it. Today the
   console decides `fresh` from `apprAlone` alone, which doesn't look at it, so a
-  goal card could go through Approve All on one earlier touch.
-- **Reviews (part 3)** must lock a goal before its plan, as the card executor
-  and step updates do, so no two writers wait on each other in a circle. They
-  must also run at READ COMMITTED (the database refuses plan writes above it) and
-  write a plan version's draft and its activation in one transaction.
+  goal card could go through Approve All on one earlier touch. It must also pass
+  the args its card shows to `approveAction` (`{ args }`): the console signs
+  nothing unless the digest of what it showed is the one it is asked to sign.
+- **Reviews and step ticks (parts 2 and 3)** must take the goal `FOR UPDATE`
+  before touching any of its steps, plans or reviews, as the card executor does.
+  A step write already takes the goal `FOR NO KEY UPDATE` in the database, so two
+  ticks on one goal wait in turn; a writer that locked a plan or a step first
+  could still wait on another in a circle. They must also run at READ COMMITTED
+  (the database refuses plan writes above it) and write a plan version's draft
+  and its activation in one transaction.
 - **A later part** must add a way to forget a goal's words (a signed
   `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
 
@@ -307,9 +312,10 @@ nothing reviews goals.
   Flint action step was done, and the `runtime:goals` label on a goal's forecast.
 - **Older card kinds.** For goal and plan cards the database checks that the
   digest you sign is the digest of the stored args. For older kinds it doesn't
-  yet (P1's `consume_approval` compares two digests, not args). The server now
-  recomputes the digest from the args you're shown, for every kind, before you
-  sign. A database check for the older kinds is a follow-up.
+  yet (P1's `consume_approval` compares two digests, not args). For every kind,
+  the console hashes the args its card shows you and signs nothing unless that
+  is the digest it's asked to sign, and the server checks the same before it
+  starts. A database check for the older kinds is a follow-up.
 
 ### Rolling P3 back
 

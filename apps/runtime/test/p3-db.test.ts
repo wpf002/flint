@@ -315,7 +315,7 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     const longStep = {
       afterWrites: async (tx: Tx) => {
         const plan = `pl${Date.now().toString(36)}`;
-        await tx.$executeRaw`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES (${plan}, ${gid}, 99, 'will')`;
+        await tx.$executeRaw`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES (${plan}, ${gid}, 2, 'will')`;
         try {
           await tx.$executeRaw`INSERT INTO "PlanStep" (id, "planId", key, ordinal, title, kind) VALUES (${`${plan}s`}, ${plan}, 's1', 1, ${`${CANARY} `.repeat(12)}, 'will_task')`;
         } catch (err) {
