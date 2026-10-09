@@ -201,6 +201,19 @@ describe('Flint Calendar only reads', () => {
     }
   });
 
+  it('the chooser and every alert it shows come to the front, above the app Will was in, since it has no Dock icon', () => {
+    const app = src('FlintCalendar.swift');
+    const chooser = app.slice(app.indexOf('// MARK: - Chooser'), app.indexOf('// MARK: - Disconnect'));
+    // The window is floated and ordered front even when macOS refuses the activation.
+    expect(chooser).toMatch(/private func bringForward\(_ w: NSWindow\) \{\s*w\.level = \.floating\s*w\.orderFrontRegardless\(\)/);
+    expect(chooser).toContain('bringForward(w)');
+    expect(chooser).not.toContain('makeKeyAndOrderFront');
+    // Each alert floats before it runs.
+    const modals = chooser.match(/alert\.runModal\(\)/g) ?? [];
+    expect(modals.length).toBeGreaterThan(0);
+    expect(chooser.match(/alert\.window\.level = \.floating\n\s*(if )?alert\.runModal\(\)/g) ?? []).toHaveLength(modals.length);
+  });
+
   it('pushes to the [::1] literal only, at the route the runtime serves, with the runtime\'s limits', () => {
     const core = src('CalendarCore.swift');
     expect(core).toContain(`static let pushURL = "http://[::1]:8090${SNAPSHOT_PATH}"`);
