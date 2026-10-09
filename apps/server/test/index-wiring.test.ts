@@ -4,7 +4,8 @@
  * eval /generate; "World now" reaches frontier calls only (never the local
  * fallback, never /generate); a chat.turn event ends each /chat turn and no
  * /generate turn; an eval replay's 5xx is not a route.error; memory extraction
- * waits for chat on the local model and is spend-gated only on the frontier.
+ * waits for chat on the local model and is spend-gated only on the frontier;
+ * the goals panel's proxy runs after the lanes proxy, behind the full token.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -61,6 +62,15 @@ describe('index.ts wiring', () => {
   it('the Watcher starts only while FLINT_WATCHER is not off (P2.5)', () => {
     expect(src).toContain('if (watcherEnabled()) new Watcher(notes, buildChecks(tools, knowledge)).start();');
     expect(src.match(/new Watcher\(/g)).toHaveLength(1);
+  });
+
+  it('the goals proxy (P3) runs after the lanes proxy, behind the bearer check and its scope, with the runtime link', () => {
+    const goals = src.indexOf('if (await goalsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    const inbox = src.indexOf('if (await inboxRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    expect(inbox).toBeGreaterThan(0);
+    expect(goals).toBeGreaterThan(inbox);
+    expect(src.indexOf('if (!scopeAllows(scope, req.method')).toBeLessThan(goals);
+    expect(src.match(/goalsRoutes\(/g)).toHaveLength(1);
   });
 
   it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {

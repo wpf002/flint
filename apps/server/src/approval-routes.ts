@@ -106,8 +106,11 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         const [pending, approved] = await Promise.all([ctx.proposals.list('pending'), ctx.proposals.list('approved')]);
         const card = (p: RuntimeProposal) => ({
           id: p.id, fullName: p.action.replace(/^mcp:/, ''), args: p.args, tainted: p.tainted, provenance: p.argsProvenance, status: p.status, origin: p.origin, ts: Date.parse(p.createdAt),
-          // What makes a card ask on its own (the console's Approve All leaves it out): money, a destructive tool.
-          sensitivity: p.sensitivity, destructive: p.destructive === true,
+          // What makes a card ask on its own (the console's Approve All leaves it out): money, a destructive tool,
+          // or a card marked for Will's fresh touch (P3: every goal card, and a plan change that is not a review's minor one).
+          sensitivity: p.sensitivity, destructive: p.destructive === true, consequential: p.consequential === true,
+          // What kind of card it is, and the runtime template it came from (P3: a review's minor or material plan change).
+          ...(p.kind ? { kind: p.kind } : {}), ...(p.templateId ? { templateId: p.templateId } : {}),
           // What the card says about itself (the promotion table's week, a source's name), and when it lapses.
           ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
         });

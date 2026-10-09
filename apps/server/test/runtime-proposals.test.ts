@@ -13,6 +13,9 @@ import { RuntimeProposals } from '../src/runtime-proposals';
 import { ActionQueue, keyOf } from '../src/actions';
 import { isSafeTool } from '../src/policy';
 import { gateBuiltins } from '../src/tier-gate';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { approvalRoutes, type ApprovalDeps } from '../src/approval-routes';
 import { markTainted, withTurnTaint } from '../src/turn-taint';
 
 function fakeRuntime() {
@@ -101,5 +104,36 @@ describe('the gate in runtime mode', () => {
       await r!.handler({ id: '4', toolName: 'remember', args: { fact: 'approved' } });
     });
     expect(ran).toEqual([{ fact: 'approved' }]);
+  });
+});
+
+describe('the cards the console lists (P3)', () => {
+  it('carry kind, templateId and consequential, so the console asks a fresh touch for every consequential card', async () => {
+    const at = '2026-10-09T15:00:00.000Z';
+    const card = (over: Record<string, unknown>) => ({
+      id: 'pr1', origin: 'console', action: 'goal.activate', args: { goalId: 'gotest0001' }, argsDigest: 'd'.repeat(64), argsProvenance: {}, tainted: false, sensitivity: 'personal',
+      destructive: false, status: 'pending', reason: 'Approving starts this goal.', createdAt: at, expiresAt: at, ...over,
+    });
+    const listed = [
+      card({ kind: 'goal', consequential: true, templateId: null }),
+      card({ id: 'pr2', origin: 'runtime:goals', action: 'plan.change', kind: 'plan', consequential: false, templateId: 'plan.diff.minor' }),
+      card({ id: 'pr3', action: 'mcp:gcal.create_event', kind: 'tool_call', sensitivity: 'ops' }),
+    ];
+    const fetchImpl = (async (url: string) => Response.json({ proposals: new URL(url).searchParams.get('status') === 'pending' ? listed : [] })) as typeof fetch;
+    const proposals = new RuntimeProposals({ runtime: () => ({ url: 'http://[::1]:8090', token: 't'.repeat(64) }), spoolDir: mkdtempSync(join(tmpdir(), 'flint-rp-')), fetchImpl });
+    const deps = { actions: new ActionQueue(isSafeTool), tools: [], audit: { record: () => {} }, notes: { push: () => {} }, approvals: undefined, proposals, errorRef: () => 'ref' } as unknown as ApprovalDeps;
+    const server = createServer((req, res) => void approvalRoutes(req, res, req.url ?? '/', deps));
+    await new Promise<void>((r) => server.listen(0, '::1', r));
+    try {
+      const r = (await (await fetch(`http://[::1]:${(server.address() as AddressInfo).port}/proposals`)).json()) as { proposals: Array<Record<string, unknown>> };
+      expect(r.proposals.map((p) => [p.id, p.kind, p.templateId ?? null, p.consequential])).toEqual([
+        ['pr1', 'goal', null, true],
+        ['pr2', 'plan', 'plan.diff.minor', false],
+        ['pr3', 'tool_call', null, false],
+      ]);
+      expect(r.proposals[0]).toMatchObject({ fullName: 'goal.activate', reason: 'Approving starts this goal.', sensitivity: 'personal' });
+    } finally {
+      server.close();
+    }
   });
 });

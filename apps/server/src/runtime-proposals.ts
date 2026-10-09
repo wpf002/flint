@@ -44,6 +44,12 @@ export interface RuntimeProposal {
   sensitivity: string;
   /** Destructive per the tool's own hint: such a card is always approved on its own. */
   destructive?: boolean;
+  /** Marked for Will's fresh touch (P3's goal cards, a material plan change): never signed under an earlier prompt or in Approve All. */
+  consequential?: boolean;
+  /** tool_call, goal, plan, rule, policy, ... */
+  kind?: string;
+  /** A runtime job's template (a review's plan.diff.minor or plan.diff.material). */
+  templateId?: string | null;
   status: string;
   reason: string | null;
   createdAt: string;
