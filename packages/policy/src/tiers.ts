@@ -134,6 +134,21 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'world.person.create': approval({ cap: { limit: 20, period: 'day' }, note: 'only attendees of calendar events Will accepted (Decision 17); never a lookup' }),
   // Policy. Never promotable: a rule change always needs Will's signature.
   'policy.change': fixed(),
+  // Goals and plans (P3). Only Will activates, re-scopes, re-times, finishes or
+  // abandons a goal, and every plan change is a card he signs: those six take his
+  // passkey and are never promoted. Reviews run in shadow at APPROVAL. The chat
+  // suggestions have no cap here (a cap here would be claimed even at APPROVAL, so
+  // a 4th approved card in a day would stall): their caps come with their promotion.
+  'goal.propose': approval({ note: "a goal suggested from Will's quoted words in chat; lands PROPOSED" }),
+  'goal.review.local': approval({ write: false, shadow: true, cap: { limit: 20, period: 'day' }, note: 'goal reviews; the local model at most 20 a day, one call at a time, yields to chat' }),
+  'goal.activate': fixed({ note: "Will's signature, never promoted" }),
+  'goal.criteria_change': fixed({ note: "Will's signature, never promoted" }),
+  'goal.horizon_change': fixed({ note: "Will's signature, never promoted" }),
+  'goal.done': fixed({ note: "Will's signature, never promoted" }),
+  'goal.abandon': fixed({ note: "Will's signature, never promoted" }),
+  'plan.change': fixed({ note: 'every plan change is a card Will signs; never promoted' }),
+  'world.commitment.from_chat': approval({ note: 'quote-verified; lands unconfirmed' }),
+  'nexus.remember_goal_decision': fixed({ egress: true, note: 'stays APPROVAL; not built in P3' }),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
   // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
   'google.write': forbidden('Flint never writes to Google'),
@@ -177,6 +192,9 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'health.check',
   'health.report',
   'digest.daily',
+  // P3: reviewing goals, and filing the plan changes a review suggests (each one a card Will signs).
+  'goal.review.local',
+  'plan.change',
 ]);
 
 /** Does an autonomous run of this action, at APPROVAL, happen in shadow (record only)? */

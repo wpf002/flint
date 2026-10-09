@@ -36,14 +36,18 @@ function offsetMs(tz: string, at: Date): number {
   return wall - Math.floor(at.getTime() / 1000) * 1000;
 }
 
-/** The instant a local wall-clock midnight (YYYY-MM-DD 00:00 in tz) falls on. DST-safe: a 23- or 25-hour day is exactly its length. */
-function localMidnight(tz: string, day: string): Date {
+/** The instant a local wall-clock time (YYYY-MM-DD hh:mm in tz) falls on. DST-safe: two passes settle the offset around a change. */
+export function localWallTime(tz: string, day: string, hh = 0, mm = 0): Date {
   const [y, m, d] = day.split('-').map(Number) as [number, number, number];
-  const guess = Date.UTC(y, m - 1, d);
-  // Two passes settle the offset around a DST change.
+  const guess = Date.UTC(y, m - 1, d, hh, mm);
   let t = guess - offsetMs(tz, new Date(guess));
   t = guess - offsetMs(tz, new Date(t));
   return new Date(t);
+}
+
+/** The instant a local wall-clock midnight (YYYY-MM-DD 00:00 in tz) falls on. DST-safe: a 23- or 25-hour day is exactly its length. */
+function localMidnight(tz: string, day: string): Date {
+  return localWallTime(tz, day, 0, 0);
 }
 
 /** [start, end) of a local calendar day in tz. */
@@ -55,8 +59,48 @@ export function localDayBounds(tz: string, day: string): { start: Date; end: Dat
 
 /** The day before a YYYY-MM-DD day. */
 export function previousDay(day: string): string {
+  return addLocalDays(day, -1);
+}
+
+/** A YYYY-MM-DD day n calendar days later (or earlier). */
+export function addLocalDays(day: string, n: number): string {
   const [y, m, d] = day.split('-').map(Number) as [number, number, number];
-  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+/** A YYYY-MM-DD day n calendar months later, on anchorDay clamped to that month's length: Jan 31 gives Feb 28 (or 29), then Mar 31. */
+export function addLocalMonths(day: string, n: number, anchorDay: number): string {
+  const [y, m] = day.split('-').map(Number) as [number, number];
+  const first = new Date(Date.UTC(y, m - 1 + n, 1));
+  const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
+  return `${first.toISOString().slice(0, 8)}${String(Math.min(anchorDay, last)).padStart(2, '0')}`;
+}
+
+/** The local hour a goal's review lands on: clear of the 02:00-02:59 a DST change skips or repeats. */
+export const REVIEW_HOUR = 9;
+const CADENCE_DAYS: Readonly<Record<string, number>> = { P1D: 1, P3D: 3, P1W: 7, P2W: 14 };
+
+/**
+ * When a goal is next reviewed (P3): the local date of `due` stepped by the
+ * cadence (P1D, P3D, P1W and P2W in days, P1M in months on due's day of the
+ * month), at 09:00 local, stepped again until it is after `now`. It steps
+ * calendar dates, never multiples of 24 hours, so the weekday stays put across a
+ * DST change, and a late run does not pile up reviews.
+ */
+export function nextReviewAt(cadence: 'P1D' | 'P3D' | 'P1W' | 'P2W' | 'P1M', tz: string, due: Date, now: Date): Date {
+  const base = localDay(tz, due);
+  const today = localDay(tz, now);
+  const days = CADENCE_DAYS[cadence];
+  const [by, bm, bd] = base.split('-').map(Number) as [number, number, number];
+  const [ty, tm, td] = today.split('-').map(Number) as [number, number, number];
+  // Skip the whole steps that are surely past: every step before this one falls before today.
+  let i = days
+    ? Math.max(1, Math.floor((Date.UTC(ty, tm - 1, td) - Date.UTC(by, bm - 1, bd)) / 86_400_000 / days))
+    : Math.max(1, ty * 12 + tm - (by * 12 + bm));
+  for (;; i++) {
+    const at = localWallTime(tz, days ? addLocalDays(base, i * days) : addLocalMonths(base, i, bd), REVIEW_HOUR, 0);
+    if (at.getTime() > now.getTime()) return at;
+  }
 }
 
 /**
