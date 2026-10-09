@@ -81,14 +81,16 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 - **Every fact quotes Will.** Each fact the model proposes carries `quote`: the words
   of Will's it rests on. It is stored only if that quote is in what Will wrote in the
   turns it was given, as whole words, and that turn's words also hold at least half of
-  what the fact says and every number in it (or the number is part of the turn's date,
-  as 2026 is for "August 2026"). So "is my Mac Studio fast enough" can't ground "Will's
+  what the fact says and every number in it (or the number is the turn's year, as 2026
+  is for "August 2026"; never its month or day). So "is my Mac Studio fast enough" can't ground "Will's
   Mac Studio has 192GB". A quote found only in Flint's answers, or nowhere, drops the
   fact. The match ignores typography only (curly quotes, dashes, spacing,
   capitals); a word added, dropped or changed fails it.
 - **Only a shown fact can be replaced.** A new fact may retire an old one only if the
   model was shown that old fact in this call, and the two share at least two content
-  words. An update that shares fewer is stored beside the old fact, never in its place.
+  words, or one when both are that short ("Will lives in Dallas" and "Will lives in
+  Austin"). An update that shares fewer is stored beside the old fact, never in its
+  place.
 - **A failure keeps its place.** No answer at all, or one that says Ollama can't serve
   anyone right now (404: the model isn't pulled; 429; 502, 503, 504: busy or down), is
   no strike and costs none of the day's calls. A reply that isn't the schema (bad JSON,

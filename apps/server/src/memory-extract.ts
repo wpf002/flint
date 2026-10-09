@@ -685,7 +685,10 @@ export class MemoryExtractor {
     const seenUser = new Set<string>();
     for (const cid of this.memory.conversationIds()) {
       const since = state.watermarks[cid] ?? 0;
-      const turns = (await this.memory.getTurns(cid)).filter((t) => t.status === 'complete');
+      // In time order, whatever order they were stored in: a turn finished on
+      // another device (or a double send) can land after a later one, and the
+      // watermark, a time, would pass it over for good.
+      const turns = (await this.memory.getTurns(cid)).filter((t) => t.status === 'complete').sort((a, b) => a.updatedAt - b.updatedAt);
       const items: Item[] = [];
       let prev: Turn | undefined;
       for (const t of turns) {
@@ -826,8 +829,20 @@ export class MemoryExtractor {
     try {
       const raw = JSON.parse(readFileSync(this.statePath, 'utf8')) as Partial<ExtractState>;
       const s = fresh();
-      if (raw.budget) s.budget = raw.budget;
-      if (raw.totals) s.totals = { ...emptyStats(), ...raw.totals };
+      // Every field is checked: a hand-edited or half-written file loses what
+      // doesn't fit, never the pass.
+      const b = raw.budget as { day?: unknown; calls?: unknown } | undefined;
+      if (b && typeof b.day === 'string' && Number.isInteger(b.calls) && (b.calls as number) >= 0) s.budget = { day: b.day, calls: b.calls as number };
+      if (isRecord(raw.totals)) {
+        const t = raw.totals as Record<string, unknown>;
+        for (const k of Object.keys(s.totals) as Array<keyof PassStats>) {
+          if (k === 'rejected') {
+            if (isRecord(t.rejected)) for (const [r, n] of Object.entries(t.rejected)) if (Number.isFinite(n)) s.totals.rejected[r] = n as number;
+          } else if (Number.isFinite(t[k])) {
+            s.totals[k] = t[k] as number;
+          }
+        }
+      }
       const f = raw.failures as { key?: unknown; count?: unknown; cap?: unknown } | undefined;
       if (f && typeof f.key === 'string' && Number.isInteger(f.count) && (f.count as number) >= 0) {
         s.failures = { key: f.key, count: f.count as number };
@@ -836,8 +851,9 @@ export class MemoryExtractor {
       // Watermarks from an older extractor version are dropped on purpose: the
       // rules changed, so history is re-read (resumably, under the daily cap).
       // Re-reading is idempotent — the store dedupes and honours tombstones.
-      if (raw.version === EXTRACT_VERSION && raw.watermarks) s.watermarks = raw.watermarks;
-      else if (raw.watermarks) console.error(`[memory-extract] extractor v${raw.version ?? 1} → v${EXTRACT_VERSION}: re-reading history under the new rules`);
+      if (raw.version === EXTRACT_VERSION && isRecord(raw.watermarks)) {
+        for (const [cid, at] of Object.entries(raw.watermarks)) if (typeof at === 'number' && Number.isFinite(at)) s.watermarks[cid] = at;
+      } else if (raw.watermarks) console.error(`[memory-extract] extractor v${raw.version ?? 1} → v${EXTRACT_VERSION}: re-reading history under the new rules`);
       return s;
     } catch {
       return fresh();
@@ -1086,26 +1102,32 @@ function numbersIn(s: string): string[] {
 }
 
 /**
- * Is every number in the fact one Will gave in `will`, or part of the turn's
- * date (`at`: "August 2026" said in 2026)? A model fills in numbers readily
- * ("192GB", "October 3", "Mia is 6"), and a number is the detail a quote and
- * word coverage can't vouch for.
+ * Is every number in the fact one Will gave in `will`, or the year of the
+ * turn (`at`: "August 2026" said in 2026)? Only the year: the month and day
+ * would vouch for any small number ("Mia is 9" on September 21). A model fills
+ * in numbers readily ("192GB", "October 3", "Mia is 6"), and a number is the
+ * detail a quote and word coverage can't vouch for.
  */
 export function numbersGrounded(will: string[], fact: string, at?: number): boolean {
-  const have = new Set([...numbersIn(will.join(' ')), ...(at !== undefined && Number.isFinite(at) ? numbersIn(new Date(at).toISOString().slice(0, 10)) : [])]);
+  const year = at !== undefined && Number.isFinite(at) ? String(new Date(at).getUTCFullYear()) : undefined;
+  const have = new Set([...numbersIn(will.join(' ')), ...(year ? [year] : [])]);
   return numbersIn(fact).every((n) => have.has(n));
 }
 
 /**
- * Are two facts about the same thing: do they share at least two content
- * words? One isn't enough ("Will works from home on Fridays" and "Will's
- * sister Ana works as a nurse" share "work"). A real update that shares only
- * one is stored beside the old fact instead of replacing it: a contradiction
- * Will can see, never a silent loss.
+ * Are two facts about the same thing? They share at least two content words,
+ * or, when both are that short (two content words at most: "Will lives in
+ * Dallas" and "Will lives in Austin"), one. One shared word between longer
+ * facts isn't enough ("Will works from home on Fridays" and "Will's sister Ana
+ * works as a nurse" share "work"). A real update that falls short is stored
+ * beside the old fact instead of replacing it: a contradiction Will can see,
+ * never a silent loss.
  */
 export function sharesContent(a: string, b: string): boolean {
   const A = new Set(contentTokens(normalizeQuoteText(a)));
-  return new Set(contentTokens(normalizeQuoteText(b)).filter((t) => A.has(t))).size >= 2;
+  const B = new Set(contentTokens(normalizeQuoteText(b)));
+  const shared = [...B].filter((t) => A.has(t)).length;
+  return shared >= 2 || (shared === 1 && A.size <= 2 && B.size <= 2);
 }
 
 /**
@@ -1113,7 +1135,7 @@ export function sharesContent(a: string, b: string): boolean {
  * words, looking at the cited turn first (`cited` is 1-based, as the model
  * numbers them), or why the candidate isn't grounded. With `fact`, that turn's
  * Will text must also cover the fact (FACT_COVERAGE), and hold every number
- * in it, or the turn's date must (numbersGrounded): a few words he did type
+ * in it, or the number is the turn's year (numbersGrounded): a few words he did type
  * ("my Mac Studio") can't carry a claim he never made ("has 192GB"). A quote
  * found in Will's words grounds a fact even when the assistant also said it; a
  * quote found only in the assistant's words never does.

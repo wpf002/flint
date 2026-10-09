@@ -941,6 +941,9 @@ describe('every number in a fact must be one Will gave, or the turn’s date', (
     expect(numbersGrounded(['is my Mac Studio fast enough'], "Will's Mac Studio has 192GB.", sept21)).toBe(false);
     expect(numbersGrounded(['my Mac Studio arrived'], "Will's Mac Studio arrived on October 3.", sept21)).toBe(false);
     expect(numbersGrounded(['my daughter Mia starts school soon'], "Will's daughter Mia is 6.", sept21)).toBe(false);
+    // Only the turn's year vouches for a number, never its month or day (September 21).
+    expect(numbersGrounded(['my daughter Mia starts school soon'], "Will's daughter Mia is 9.", sept21)).toBe(false);
+    expect(numbersGrounded(['my daughter Mia starts school soon'], "Will's daughter Mia is 21.", sept21)).toBe(false);
     // Coverage alone would pass these: the quote is his, and so are most of the words.
     expect(factCoverage(['is my Mac Studio fast enough'], "Will's Mac Studio has 192GB.")).toBeGreaterThanOrEqual(0.5);
     expect(factCoverage(['my daughter Mia starts school soon'], "Will's daughter Mia is 6.")).toBe(1);
@@ -973,10 +976,14 @@ describe('every number in a fact must be one Will gave, or the turn’s date', (
   });
 });
 
-describe('a supersede needs two shared content words', () => {
-  it('one shared word is not the same thing; two are', async () => {
+describe('a supersede needs two shared content words, or one between two short facts', () => {
+  it('one shared word is not the same thing between longer facts; two are, and so is one between short ones', async () => {
     expect(sharesContent('Will works from home on Fridays.', "Will's sister Ana works as a nurse.")).toBe(false);
+    expect(sharesContent('Will owns a Mac Studio.', 'Will owns a Tesla.')).toBe(false);
     expect(sharesContent('Will is buying a Mac Studio around August 2026.', "Will's Mac Studio is scheduled to be delivered September 25 - October 3, 2026.")).toBe(true);
+    expect(sharesContent('Will lives in Dallas.', 'Will lives in Austin.')).toBe(true);
+    expect(sharesContent('Will works at Acme.', 'Will works at Globex.')).toBe(true);
+    expect(sharesContent('Will lives in Dallas.', 'Will owns a Tesla.')).toBe(false);
     const k = new KnowledgeStore(kpath, downEmbedder);
     await k.add('Will works from home on Fridays.', 'user', { sourceAt: 1 });
     const convs = { console: [turn('console', 'my sister Ana works as a nurse in Dallas now')] };
@@ -985,6 +992,17 @@ describe('a supersede needs two shared content words', () => {
     expect(await ex.run()).toBe(1);
     expect(ex.lastStats).toMatchObject({ superseded: 0, supersedeRefused: 1 });
     expect(k.all().map((x) => x.id)).toContain('k1');
+  });
+
+  it('end to end: Dallas → Austin replaces the old fact', async () => {
+    const k = new KnowledgeStore(kpath, downEmbedder);
+    await k.add('Will lives in Dallas.', 'user', { sourceAt: 1 });
+    const convs = { console: [turn('console', 'I moved last month, I live in Austin now')] };
+    const { f } = fakeOllama(() => chatReply(facts({ turn: 1, quote: 'I live in Austin', fact: 'Will lives in Austin.', supersedes: ['k1'] })));
+    const ex = new MemoryExtractor(source(convs), k, localExtractBrain(LOCAL, { fetch: f }), spath);
+    expect(await ex.run()).toBe(1);
+    expect(ex.lastStats).toMatchObject({ superseded: 1, supersedeRefused: 0 });
+    expect(k.all().map((x) => x.text)).toEqual(['Will lives in Austin.']);
   });
 });
 
@@ -1010,10 +1028,27 @@ describe('the frontier, opted in', () => {
   it('a 4xx other than 404 and 429 is the request’s fault: a strike, not an outage to wait out forever', async () => {
     await expect(failing('400').generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'server-error', detail: 'validation 400' });
     await expect(failing('413').generate({ system: 's', prompt: 'p' })).rejects.toMatchObject({ why: 'server-error' });
-    for (const code of ['404', '429', '500', '529']) {
+    // An expired key, no permission, an unknown model, too many requests, or a 5xx: the
+    // account can't be served right now, whatever is asked. The extractor reads them as unavailable.
+    for (const code of ['401', '403', '404', '429', '500', '529']) {
       const err = await failing(code).generate({ system: 's', prompt: 'p' }).catch((e: unknown) => e);
-      expect(err, code).toBeInstanceOf(FlintError); // the extractor reads it as unavailable
+      expect(err, code).toBeInstanceOf(FlintError);
     }
+    // Anthropic says "credit balance is too low" with a plain 400: an outage too, told apart by its words.
+    const broke = frontierExtractBrain(async () => {
+      throw new FlintError({
+        kind: 'validation',
+        message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}',
+        retryable: false,
+        providerCode: '400',
+      });
+    });
+    expect(await broke.generate({ system: 's', prompt: 'p' }).catch((e: unknown) => e)).toBeInstanceOf(FlintError);
+    const convs0 = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
+    const ex0 = new MemoryExtractor(source(convs0), new KnowledgeStore(join(dir, 'k0.json'), downEmbedder), broke, join(dir, 's0.json'), { kind: 'frontier' });
+    for (let i = 0; i < 5; i++) await ex0.run();
+    expect(JSON.parse(readFileSync(join(dir, 's0.json'), 'utf8'))).toMatchObject({ watermarks: {}, budget: { calls: 0 } });
+    expect(JSON.parse(readFileSync(join(dir, 's0.json'), 'utf8')).failures).toBeUndefined();
     const convs = { console: [turn('console', 'My dog is named Biscuit and she is a corgi')] };
     const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), failing('400'), spath, { kind: 'frontier' });
     for (let i = 0; i < 3; i++) await ex.run();
@@ -1022,5 +1057,62 @@ describe('the frontier, opted in', () => {
     const ex2 = new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k2.json'), downEmbedder), failing('529'), join(dir, 's2.json'), { kind: 'frontier' });
     for (let i = 0; i < 5; i++) await ex2.run();
     expect(JSON.parse(readFileSync(join(dir, 's2.json'), 'utf8'))).toMatchObject({ watermarks: {}, budget: { calls: 0 } });
+  });
+});
+
+describe('turns are read in time order', () => {
+  it('a turn stored after a later one (another device, a double send) is still sent', async () => {
+    const mk = (id: string, user: string, at: number): Turn => ({
+      id,
+      conversationId: 'console',
+      status: 'complete',
+      createdAt: at,
+      updatedAt: at,
+      messages: [
+        { id: `u${id}`, role: 'user', content: user, timestamp: at },
+        { id: `a${id}`, role: 'assistant', content: 'ok', timestamp: at },
+      ],
+    });
+    // Stored later-first: the turn finished at 2e12 landed after the one at 3e12.
+    const convs = { console: [mk('t3', 'My sister Ana lives in Austin and teaches piano', 3e12), mk('t2', 'My brother Theo lives in Portland and bakes bread', 2e12)] };
+    const prompts: string[] = [];
+    const brain: ExtractBrain = { generate: async (i) => (prompts.push(i.prompt), { text: '{"facts": []}' }) };
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), brain, spath, { maxTurnsPerPass: 1 });
+    await ex.run();
+    await ex.run();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain('Theo');
+    expect(prompts[1]).toContain('Ana');
+    expect(watermark('console')).toBe(3e12);
+  });
+});
+
+describe('the state file is checked as it is read', () => {
+  it('drops what does not fit, never the pass', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const convs = { a: [turn('a', 'My sister Ana lives in Austin and teaches piano')], b: [turn('b', 'My brother Theo lives in Portland and bakes bread')] };
+    writeFileSync(
+      spath,
+      JSON.stringify({
+        version: 2,
+        watermarks: { a: 'soon', b: convs.b[0]!.updatedAt, c: null, d: [5] },
+        budget: { day: new Date().toISOString().slice(0, 10), calls: 'lots' },
+        totals: { calls: 'many', stored: 3, rejected: { duplicate: 2, junk: 'x' } },
+        failures: { key: 7, count: 'two' },
+      }),
+    );
+    const prompts: string[] = [];
+    const brain: ExtractBrain = { generate: async (i) => (prompts.push(i.prompt), { text: '{"facts": []}' }) };
+    const ex = new MemoryExtractor(source(convs), new KnowledgeStore(kpath, downEmbedder), brain, spath);
+    await ex.run();
+    // a's watermark was junk, so a is read; b's was a time, so b stays done.
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Ana');
+    expect(prompts[0]).not.toContain('Theo');
+    const s = state();
+    expect(Object.keys(s.watermarks).sort()).toEqual(['a', 'b']);
+    expect(s.budget.calls).toBe(1); // the junk count started over
+    expect(s.totals).toMatchObject({ calls: 1, stored: 3, rejected: { duplicate: 2 } });
+    expect(s.totals.rejected.junk).toBeUndefined();
   });
 });

@@ -154,10 +154,11 @@ export function chooseMemoryBrain(
 /**
  * The frontier as an ExtractBrain (FLINT_MEMORY_BRAIN=frontier): its text is
  * parsed by the extractor, and a reply cut off at its token limit says so, so
- * the batch is asked again at half its turns. A 4xx other than 404 and 429 is
- * the request's own fault (too long, malformed), so it is a server-error, a
- * strike against the batch, not an outage to wait out forever; anything else
- * it throws is `unavailable`.
+ * the batch is asked again at half its turns. A 4xx is the request's own fault
+ * (too long, malformed), so it is a server-error, a strike against the batch,
+ * not an outage to wait out forever; except those that say the account can't
+ * be served right now, whatever is asked (FRONTIER_OUTAGE): those, and
+ * anything else it throws, are `unavailable`.
  */
 export function frontierExtractBrain(
   generate: (input: { system: string; prompt: string }) => Promise<{ text: string; reason?: string }>,
@@ -169,7 +170,7 @@ export function frontierExtractBrain(
         out = await generate(input);
       } catch (err) {
         const status = isFlintError(err) ? Number(err.error.providerCode) : NaN;
-        if (Number.isInteger(status) && status >= 400 && status < 500 && answered(status) === 'server-error') {
+        if (isFlintError(err) && Number.isInteger(status) && status >= 400 && status < 500 && !frontierOutage(status, err.message)) {
           throw new MemoryBrainError('server-error', failureDetail(err));
         }
         throw err;
@@ -178,6 +179,18 @@ export function frontierExtractBrain(
       return { text: out.text };
     },
   };
+}
+
+/**
+ * A frontier 4xx that says the account can't be served right now, whatever is
+ * asked: the key was rejected or lacks permission (401, 403), the model or
+ * endpoint is unknown (404), too many requests (429), or the credit balance is
+ * too low. Anthropic answers that last one with a plain 400 whose error type
+ * (invalid_request_error) is a malformed request's too, so only the message
+ * tells them apart; if its wording ever changes it falls back to a strike.
+ */
+export function frontierOutage(status: number, message: string): boolean {
+  return [401, 403, 404, 429].includes(status) || (status === 400 && /credit balance is too low/i.test(message));
 }
 
 /** How long the local model stays Will's after a chat turn ends: his next message usually comes within it. */
