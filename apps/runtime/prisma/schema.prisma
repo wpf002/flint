@@ -80,7 +80,7 @@ model ActionCounter {
   @@id([action, day])
 }
 
-/// Guarded by proposal_transition.
+/// Guarded by proposal_transition; proposal_review_floor and proposal_review_guard hold its review (P5).
 model Proposal {
   id             String    @id @default(cuid())
   kind           String // CHECK tool_call|goal|plan|rule|policy|task|pr|spend|forget|void
@@ -104,10 +104,15 @@ model Proposal {
   error          String?
   argsPurgedAt   DateTime? @db.Timestamptz(3)
   createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  /// P5: its review (attached once, while it waits), and whether it needs one (set when filed, never changes).
+  reviewId       String?
+  review         Review?   @relation(fields: [reviewId], references: [id], onDelete: Restrict)
+  reviewRequired Boolean   @default(false)
 
   @@index([status, createdAt])
   @@index([status, expiresAt])
   @@index([origin])
+  @@index([reviewId])
 }
 
 /// Partitioned by month on "at" (partitions in schema flint_part); append-only.
@@ -657,6 +662,7 @@ model Goal {
   reviews         GoalReview[]
   links           GoalEntity[]
   predictions     Prediction[]
+  tasks           Task[]
 
   @@index([status, nextReviewAt])
 }
@@ -823,6 +829,144 @@ model PredictionQuestion {
 /// SECURITY DEFINER helper; flint_app has no grant on it.
 model ForecastApprovalUse {
   approvalId String   @id
+  action     String
+  xact       String // the transaction that used it (its id and when it began)
+  usedAt     DateTime @default(now()) @db.Timestamptz(3)
+}
+
+// ---------------------------------------------------------------------------
+// p5_assets
+// Task and review text is personal or outside text: RowChange keeps only its
+// length (row_history_masked), and a refused row never reaches an error's text
+// (task_valid, task_output_guard, review_valid, p5_card_valid name the row and
+// the rule only).
+
+/// Something Flint may hand work to. asset_insert_check: born off and unsigned.
+/// asset_guard: what it is never changes; turned on only as the exact asset of an
+/// executing asset.enable card Will signed (p5_signed_proposal), in that
+/// approval's one transaction; turning it off needs nothing; never deleted.
+model Asset {
+  id             String   @id @default(cuid())
+  kind           String // CHECK local_worker|local_reviewer|ci_runner|nexus_participant|trident_panel|hive_bot
+  externalRef    String // ollama:worker:v1, github:ci:v1, nexus:<participant>
+  name           String // 1..80, the code registry's
+  capabilities   String[] @default([]) // task templates, or `review`
+  enabled        Boolean  @default(false)
+  dispatchAction String // CHECK: one per kind (task.dispatch.<kind>, review.local, review.trident_panel, hive.dispatch_job)
+  spends         Boolean // CHECK: a Nexus participant or the Trident panel always, an asset on this Mac never
+  entityId       String?
+  approvalId     String? // the signed card that last turned it on; plain reference, checked by trigger
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  tasks          Task[]
+
+  @@unique([kind, externalRef])
+}
+
+/// task_insert_check: born proposed. task_guard: dispatched only as the exact task
+/// of an executing dispatch card Will signed, with its open forecast; a spending
+/// asset's task by a spend card with its estimate, ending with its cost; accepted
+/// only with its own successful check on record, on Will's card until
+/// task.check_bar is promoted; an override and a cancellation each on a signed card.
+model Task {
+  id                 String      @id @default(cuid())
+  assetId            String
+  asset              Asset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  goalId             String?
+  goal               Goal?       @relation(fields: [goalId], references: [id], onDelete: Restrict)
+  stepKey            String? // s<n>: the plan step it carries out (stable across plan versions); one live task per step
+  title              String // 1..200
+  spec               Json? // {template, params}, <= 16 KB; NULL once purged
+  acceptance         Json? // [{id, text, check}], 1..10, <= 8 KB; NULL once purged
+  entityIds          String[]    @default([]) // the world items its spec names (a forget finds it by them)
+  origin             String // will|flint
+  sensitivity        String      @default("personal") // ops|personal|financial
+  tainted            Boolean     @default(false)
+  status             String      @default("proposed") // proposed|queued|dispatched|running|submitted|checking|accepted|rejected|failed|cancelled
+  dispatchApprovalId String?
+  externalJobId      String?
+  outputRef          String? // out:<digest prefix> (TaskOutput), or an item's ref
+  outputSummary      String? // <= 1,000, redacted, always shown as outside text
+  metBar             Boolean?
+  barEvidence        Json? // [{id, met, by}]
+  barCheckedBy       String? // flint:rule | ollama:<model> | will
+  acceptedAuditId    String? // AuditEntry is partitioned: checked by trigger, not a foreign key
+  predictionId       String?     @unique
+  estCostUsd         Decimal?    @db.Decimal(10, 4)
+  costUsd            Decimal?    @db.Decimal(10, 4)
+  costIsEstimate     Boolean     @default(true)
+  attempts           Int         @default(0)
+  failure            String? // a class, never words
+  dispatchedAt       DateTime?   @db.Timestamptz(3) // set by the trigger
+  dueAt              DateTime?   @db.Timestamptz(3)
+  completedAt        DateTime?   @db.Timestamptz(3) // set by the trigger
+  textPurgedAt       DateTime?   @db.Timestamptz(3)
+  createdAt          DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime    @updatedAt @db.Timestamptz(3)
+  output             TaskOutput?
+
+  @@index([status, dueAt])
+  @@index([assetId, createdAt])
+  @@index([goalId])
+}
+
+/// A task's raw output, kept apart so it can be deleted (EntityText's pattern).
+/// task_output_guard: written once while the task is out, always tainted, never
+/// updated; deleted once the task has ended (retention) or in a forget.
+model TaskOutput {
+  taskId    String   @id
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  body      Json // the template's output shape, <= 32 KB
+  sha256    String
+  tainted   Boolean  @default(true) // always true: a model wrote it
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+
+/// Written once (review_insert_check: of a card still waiting, by its args digest,
+/// or of a task being checked, by its output's digest). review_guard: what it
+/// found never changes; its words may only be cleared; never deleted.
+model Review {
+  id                   String     @id @default(cuid())
+  subjectType          String // proposal|task|recommendation|change_request
+  subjectId            String
+  subjectDigest        String // the card's argsDigest, or the task output's sha256
+  engine               String // local_adj|trident_panel
+  models               Json // {attacker, defender, judge}
+  findings             Json       @default("[]") // what the code found, as closed codes
+  reasonCodes          String[]   @default([])
+  attack               String? // <= 2,000; NULL once purged
+  defense              String? // <= 2,000
+  verdict              String // proceed|proceed_with_changes|block
+  verdictReason        String? // <= 500
+  confidence           Float
+  agreed               Boolean    @default(true) // both judge passes agreed
+  shadow               Boolean    @default(true) // made in the trial
+  tainted              Boolean    @default(false)
+  sensitivity          String     @default("personal")
+  costUsd              Decimal?   @db.Decimal(10, 4)
+  modelMs              Int?
+  overridePredictionId String?    @unique // the forecast that scores Will's approval past a block
+  textPurgedAt         DateTime?  @db.Timestamptz(3)
+  createdAt            DateTime   @default(now()) @db.Timestamptz(3)
+  proposals            Proposal[]
+
+  @@index([subjectType, subjectId])
+}
+
+/// One row (`proposal`): are reviews required before approval? review_gate_guard:
+/// changes only as an executing review.enforce card Will signed says.
+model ReviewGate {
+  id         String   @id
+  enforced   Boolean  @default(false)
+  approvalId String?
+  changedAt  DateTime @default(now()) @db.Timestamptz(3)
+}
+
+/// One-use approvals (p5_bind_approval): a signed card counts in one transaction
+/// only, for one subject and one action. Written only by that SECURITY DEFINER
+/// helper; flint_app has no grant on it.
+model TaskApprovalUse {
+  approvalId String   @id
+  subject    String // taskId:<id> | assetId:<id> | gate:proposal
   action     String
   xact       String // the transaction that used it (its id and when it began)
   usedAt     DateTime @default(now()) @db.Timestamptz(3)
