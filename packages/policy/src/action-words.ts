@@ -82,7 +82,7 @@ export function jobFailedNote(job: NightlyJob, f: JobFailure): { title: string; 
     : 'This week’s practice restore didn’t finish.';
   const weekly = job === 'restore.drill';
   const next =
-    f.next === 'setup' ? 'It won’t work until its setup is fixed, so tell Claude.'
+    f.next === 'setup' ? 'It won’t work until its setup is fixed.'
     : f.next === 'retry' ? `Flint tries again ${weekly ? 'next Sunday' : 'tonight'}.`
     : f.next === 'card' ? 'It runs again once you approve its next card in Approvals.'
     : `Its next card will be in Approvals ${weekly ? 'next Sunday' : 'tomorrow morning'}.`;

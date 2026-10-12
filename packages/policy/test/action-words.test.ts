@@ -60,10 +60,10 @@ describe('jobFailedNote', () => {
   it('a failure another try cannot change never says "tries again": it says its setup needs fixing', () => {
     for (const job of JOBS) {
       const note = jobFailedNote(job, { next: 'setup', icloud: true });
-      expect(note.body).toMatch(/ It won’t work until its setup is fixed, so tell Claude\.$/);
+      expect(note.body).toMatch(/ It won’t work until its setup is fixed\.$/);
       expect(note.body).not.toMatch(/tries again|approve/);
     }
-    expect(jobFailedNote('backup.offsite', { next: 'setup', icloud: true }).body).toBe('Last night’s encrypted copy to iCloud didn’t finish. It won’t work until its setup is fixed, so tell Claude.');
+    expect(jobFailedNote('backup.offsite', { next: 'setup', icloud: true }).body).toBe('Last night’s encrypted copy to iCloud didn’t finish. It won’t work until its setup is fixed.');
   });
 
   it('a job that waits on Will’s card points at a card that is there, or says when it will be', () => {

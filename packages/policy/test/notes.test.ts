@@ -133,7 +133,7 @@ describe('noteProblems', () => {
       'A GitHub event matched one of your rules.',
       // Money, counts and times are not ids.
       'The last good database backup is 1000000 hours old.',
-      'It won’t work until its setup is fixed, so tell Claude.',
+      'It won’t work until its setup is fixed.',
     ];
     for (const ok of fine) expect(body(ok), ok).toEqual([]);
     for (const ok of ['Is the Server Down?', 'The iCloud Copy Failed', 'New Issue: Item', 'On Your Calendar Tue Oct 6 at 2:30 PM', 'Offsite Backup Failed']) expect(title(ok), ok).toEqual([]);

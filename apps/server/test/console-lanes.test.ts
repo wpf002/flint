@@ -474,7 +474,7 @@ describe('the console Activity panel: notifications', () => {
     expect(await showNotes([{ ...note, kind: 'runtime', ts: now - 3_600_000 }])).toEqual([{ title: 'Offsite Backup Failed', line: note.body, when: '1h', read: false }]);
     // The newest note's own words are what the row says: one whose setup needs fixing says so, whatever the nights before said.
     const setup = jobFailedNote('backup.offsite', { next: 'setup', icloud: true });
-    expect((await showNotes([{ ...setup, kind: 'runtime', ts: now - 3_600_000 }, { ...note, kind: 'runtime', ts: now - NIGHT - 3_600_000 }]))[0]!.line).toBe('Last night’s encrypted copy to iCloud didn’t finish. It won’t work until its setup is fixed, so tell Claude. It has failed 2 nights in a row.');
+    expect((await showNotes([{ ...setup, kind: 'runtime', ts: now - 3_600_000 }, { ...note, kind: 'runtime', ts: now - NIGHT - 3_600_000 }]))[0]!.line).toBe('Last night’s encrypted copy to iCloud didn’t finish. It won’t work until its setup is fixed. It has failed 2 nights in a row.');
   });
 
   describe('a streak', () => {
