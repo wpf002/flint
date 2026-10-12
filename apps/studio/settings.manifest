@@ -217,6 +217,7 @@ runtime.env  FLINT_BUDGET_TAVILY_MONTHLY_USD      derive    install-runtime
 backup.env  FLINT_DB_BACKUP_URL                   generate  bootstrap-db
 backup.env  FLINT_DB_RESTORE_URL                  generate  bootstrap-db
 backup.env  FLINT_OFFSITE_DIR                     restore   homepath
+backup.env  FLINT_BACKUP_CATCHUP                  restore   onoff
 backup.env  FLINT_BACKUP_AGE_RECIPIENT            reenter   Backup-Key
 
 # ---- the local model's LaunchAgent: com.flint.ollama ---------------------------------------

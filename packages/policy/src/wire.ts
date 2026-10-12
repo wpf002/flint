@@ -286,7 +286,7 @@ export type DeployEvent = z.infer<typeof DeployEvent>;
  * (the name is the script's own, a time and nothing else) and never log text.
  * Ids make a line read twice the same event.
  */
-export const BACKUP_EVENT_REASONS = ['space', 'archive', 'unreadable', 'encrypt', 'no_key', 'no_tool', 'no_folder', 'interrupted'] as const;
+export const BACKUP_EVENT_REASONS = ['space', 'archive', 'unreadable', 'encrypt', 'no_tool', 'no_folder', 'interrupted'] as const;
 export const BackupEvent = z
   .object({
     id: Id,

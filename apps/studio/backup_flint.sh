@@ -7,6 +7,19 @@
 # copy (iCloud by default) drops secrets and tokens, and is written only
 # encrypted to Will's age key: it holds his chat history, memory and
 # notifications, which must never sit in a synced folder in plaintext.
+#
+# Every archive it writes, here or offsite, and every one it could not write, is
+# one line in ~/.flint/backup-events.jsonl (backup_event, below). The runtime
+# reads them, so Settings > Health says how old the last files backup is and
+# whether the last one failed. It checks for room before it writes, and an
+# archive that was not finished is never left under a snapshot's name.
+#
+#   backup_flint.sh              tonight's archive (com.flint.backup, 02:30)
+#   backup_flint.sh --catch-up   only when the catch-up is switched on
+#                                (FLINT_BACKUP_CATCHUP=on in ~/.flint/backup.env)
+#                                and the last good archive is over 26 hours
+#                                old: the night's run was missed. Started when
+#                                you log in (com.flint.backup-catchup).
 set -eu
 SRC="$HOME/.flint"
 LOCAL="${FLINT_BACKUP_DIR:-$HOME/FlintBackups}"
@@ -26,6 +39,7 @@ EXCLUDES=(
   --exclude './tailscaled.sock' --exclude './server.mjs' --exclude './ask.mjs'
   --exclude './*.log.[0-9]*'       # rotated logs (rotate_logs below)
   --exclude './runtime/releases'   # runtime bundles, ~100 MB each, rebuilt by install-runtime.sh
+  --exclude './backup.lock'        # this run's own lock (below)
 )
 # Offsite only. bsdtar's * crosses '/', so './*.x' matches at any depth: no
 # './*token*' here, it would take the adapters' tokenizer files with it.
@@ -94,17 +108,154 @@ rotate_logs() { # dir: any *.log over 20 MB becomes <log>.1.gz (keeping 3); copy
   done
 }
 
+# The record of each archive (BackupEvent in packages/policy/src/wire.ts): one JSON
+# line in ~/.flint/backup-events.jsonl (0600), read by the runtime into its list of
+# backups. Ids, enums, numbers and hashes only: the archive's own name (a time,
+# nothing else), never a path and never log text. Writing it can never fail a
+# backup: errexit is off inside, and it always returns 0.
+EVENTS="$SRC/backup-events.jsonl"
+backup_event() { # <local|icloud> ok <name> <bytes> <sha256>  |  <local|icloud> failed <name> <reason>
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local id at said
+  [[ $1 == (local|icloud) && $2 == (ok|failed) ]] || return 0
+  [[ $3 =~ '^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age)?$' ]] || return 0
+  # Offsite is the encrypted archive, and only that.
+  if [[ $1 == icloud ]]; then [[ $3 == *.age ]] || return 0; else [[ $3 != *.age ]] || return 0; fi
+  if [[ $2 == ok ]]; then
+    [[ ${4:-} =~ '^(0|[1-9][0-9]{0,14})$' && ${5:-} =~ '^[0-9a-f]{64}$' ]] || return 0
+    said="\"bytes\":$4,\"sha256\":\"$5\""
+  else
+    [[ ${4:-} == (space|archive|unreadable|encrypt|no_tool|no_folder|interrupted) ]] || return 0
+    said="\"reason\":\"$4\""
+  fi
+  id="$(openssl rand -hex 16 2>/dev/null)"
+  [[ $id =~ '^[0-9a-f]{32}$' ]] || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  [[ $at =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]] || return 0
+  ( umask 077; print -r -- "{\"id\":\"$id\",\"at\":\"$at\",\"kind\":\"flint_tar\",\"location\":\"$1\",\"outcome\":\"$2\",\"name\":\"$3\",$said}" >> "$EVENTS" ) 2>/dev/null || return 0
+  chmod 600 "$EVENTS" 2>/dev/null
+  return 0
+}
+size_of() { stat -f %z "$1" 2>/dev/null; }
+hash_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# This run's own unfinished file, taken away: only a name this script writes (a snapshot's,
+# whole, encrypted or part written), and only in a folder that is named. Nothing else is ever removed here.
+drop_own() { # folder name
+  emulate -L zsh
+  setopt no_err_exit no_err_return
+  [[ -n ${1:-} && ${2:-} =~ '^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age|\.partial)?$' ]] || return 0
+  [[ -f $1/$2 ]] && unlink "$1/$2" 2>/dev/null
+  return 0
+}
+
+# Room to write tonight's archive: twice the size of the newest one here (the new
+# archive, and as much again to spare), and never less than 1 GB. An archive cut
+# short by a full disk is worse than none, and the database stops when the disk fills.
+free_kb() { # folder
+  if [ -n "${FLINT_BACKUP_FREE_KB:-}" ]; then print -r -- "$FLINT_BACKUP_FREE_KB"; return 0; fi   # a test's stand-in for a full disk
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 { print $4 }'
+}
+need_kb() { # folder
+  local -a olds; olds=("$1"/flint-*.tar.gz(Nom))
+  local last=0
+  (( ${#olds} )) && last="$(size_of "${olds[1]}")"
+  local need=$(( ${last:-0} * 2 / 1024 ))
+  (( need < 1048576 )) && need=1048576
+  print -r -- "$need"
+}
+
+# The catch-up is off unless FLINT_BACKUP_CATCHUP=on is in ~/.flint/backup.env (the environment, when it says, wins).
+catchup_on() {
+  local v="${FLINT_BACKUP_CATCHUP:-}"
+  [ -z "$v" ] && [ -r "$SRC/backup.env" ] && v="$(sed -n 's/^FLINT_BACKUP_CATCHUP=//p' "$SRC/backup.env" | tail -1)"
+  [[ ${v:l} == on ]]
+}
+# How old the newest good archive here is, in seconds (nothing printed when there is none).
+newest_age() { # folder
+  local -a olds; olds=("$1"/flint-*.tar.gz(Nom))
+  (( ${#olds} )) || return 0
+  print -r -- $(( $(date +%s) - $(stat -f %m "${olds[1]}") ))
+}
+
 # test/backup_excludes.test.sh sources this file for the arrays and functions alone.
 [ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
+
+MODE=nightly
+case "${1:-}" in
+  '') ;;
+  --catch-up) MODE=catchup ;;
+  *) echo "usage: backup_flint.sh [--catch-up]" >&2; exit 2 ;;
+esac
+if [ "$MODE" = catchup ]; then
+  catchup_on || exit 0
+  age="$(newest_age "$LOCAL")"
+  # 26 hours: a night's run that is merely late is not one that was missed.
+  if [ -n "$age" ] && [ "$age" -le $(( 26 * 3600 )) ]; then exit 0; fi
+  echo "$(date '+%F %T') catching up: the last good archive is over 26 hours old (or there is none)"
+fi
+
+# One run at a time: the catch-up and the night's own run must not write the same archive.
+# A lock left by a run that died is nobody's once it is six hours old.
+# (A data folder that cannot be written to takes no lock at all: the backup of what is in it still runs.)
+LOCK="$SRC/backup.lock"; LOCKED=0
+if mkdir "$LOCK" 2>/dev/null; then LOCKED=1
+elif [ -d "$LOCK" ]; then
+  if [ $(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) )) -gt 21600 ] && rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null; then LOCKED=1
+  else echo "$(date '+%F %T') another backup is running; this one stops"; exit 0
+  fi
+fi
+
+# However this run ends, the record says so: an archive that was not finished is taken away (it is
+# never left under a snapshot's name) and written down as failed, with why.
+NAME_LOCAL="flint-$TS.tar.gz"
+NAME_OFFSITE=""
+STAGE=start LOCAL_DONE=0 OFFSITE_DONE=0 INTERRUPTED=0 WHY=""
+finish() { # exit status
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_unset
+  local st=$1 why="${WHY:-archive}"
+  [ "$INTERRUPTED" = 1 ] && why=interrupted
+  if [ "$st" != 0 ]; then
+    if [ "$STAGE" != start ] && [ "$LOCAL_DONE" = 0 ]; then
+      drop_own "$LOCAL" "$NAME_LOCAL.partial"
+      backup_event local failed "$NAME_LOCAL" "$why"
+    fi
+    if [ "$STAGE" = offsite ] && [ "$OFFSITE_DONE" = 0 ] && offsite_name "$NAME_OFFSITE"; then
+      drop_own "$OFFSITE" "$NAME_OFFSITE"
+      backup_event icloud failed "$NAME_OFFSITE" "$why"
+    fi
+  fi
+  [ "$LOCKED" = 1 ] && rmdir "$LOCK" 2>/dev/null
+  return 0
+}
+trap 'finish $?' EXIT
+trap 'INTERRUPTED=1; exit 130' INT TERM HUP
 
 rotate_logs "$SRC"
 # The settings a rebuild puts back (settings_manifest.sh), saved into $SRC first so
 # tonight's archives carry them. Never secrets, and never a reason to skip a backup.
 [ -r "${0:A:h}/settings_manifest.sh" ] && { /bin/zsh "${0:A:h}/settings_manifest.sh" || true; }
 mkdir -p "$LOCAL"; chmod 700 "$LOCAL"
-tar -czf "$LOCAL/flint-$TS.tar.gz" -C "$SRC" "${EXCLUDES[@]}" .
-chmod 600 "$LOCAL/flint-$TS.tar.gz"
-tar -tzf "$LOCAL/flint-$TS.tar.gz" >/dev/null   # a snapshot that can't be listed isn't a backup
+# What a run that was killed outright left part written.
+for left in "$LOCAL"/flint-*.tar.gz.partial(N); do drop_own "$LOCAL" "${left:t}"; done
+STAGE=local
+free="$(free_kb "$LOCAL")"; need="$(need_kb "$LOCAL")"
+if [[ $free =~ '^[0-9]+$' ]] && [ "$free" -lt "$need" ]; then
+  WHY=space
+  echo "$(date '+%F %T') local SKIPPED: not enough free space ($(( free / 1024 )) MB free, $(( need / 1024 )) MB needed); no archive written" >&2
+  exit 1
+fi
+# Written under another name until it is whole and can be listed: a snapshot's name is only ever a good archive's.
+tar -czf "$LOCAL/$NAME_LOCAL.partial" -C "$SRC" "${EXCLUDES[@]}" .
+chmod 600 "$LOCAL/$NAME_LOCAL.partial"
+WHY=unreadable
+tar -tzf "$LOCAL/$NAME_LOCAL.partial" >/dev/null   # a snapshot that can't be listed isn't a backup
+WHY=""
+mv "$LOCAL/$NAME_LOCAL.partial" "$LOCAL/$NAME_LOCAL"
+LOCAL_DONE=1
+backup_event local ok "$NAME_LOCAL" "$(size_of "$LOCAL/$NAME_LOCAL")" "$(hash_of "$LOCAL/$NAME_LOCAL")"
 prune "$LOCAL" "$KEEP_LOCAL"
 echo "$(date '+%F %T') local  $(du -h "$LOCAL/flint-$TS.tar.gz" | cut -f1)  $LOCAL/flint-$TS.tar.gz"
 
@@ -117,6 +268,8 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   if [ -n "$AGE_RECIPIENT" ]; then
     if [ -n "$AGE_BIN" ] && [ -x "$AGE_BIN" ]; then
       name="flint-$TS.tar.gz.age"
+      # From here an archive is being written offsite: a run stopped part way takes it away and says so (finish).
+      NAME_OFFSITE="$name"; STAGE=offsite
       # Both sides must succeed: zsh's set -e sees only the last command of a pipe,
       # and age would happily encrypt a truncated tar stream.
       set +e
@@ -126,10 +279,13 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
       if [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ]; then
         rm -f "$OFFSITE/$name"
         echo "$(date '+%F %T') offsite FAILED: tar exited ${st[1]}, age ${st[2]}; nothing recorded" >&2
+        backup_event icloud failed "$name" encrypt
         name=""
       fi
+      OFFSITE_DONE=1
     else
       echo "$(date '+%F %T') offsite SKIPPED: an age recipient is set but age was not found (PATH=$PATH, /opt/homebrew/bin, /usr/local/bin); no plaintext copy written" >&2
+      backup_event icloud failed "flint-$TS.tar.gz.age" no_tool
       name=""
     fi
   else
@@ -138,9 +294,13 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   fi
   if [ -n "$name" ]; then
     echo "$name" >> "$MANIFEST"
+    backup_event icloud ok "$name" "$(size_of "$OFFSITE/$name")" "$(hash_of "$OFFSITE/$name")"
     prune_offsite
     echo "$(date '+%F %T') offsite $(du -h "$OFFSITE/$name" | cut -f1)  $OFFSITE/$name"
   fi
 else
   echo "$(date '+%F %T') offsite skipped: $(dirname "$OFFSITE") not present"
+  # With a key here an offsite copy is expected, so a folder that is not there is a copy that was not made.
+  [ -n "$AGE_RECIPIENT" ] && backup_event icloud failed "flint-$TS.tar.gz.age" no_folder
 fi
+exit 0

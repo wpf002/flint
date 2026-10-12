@@ -70,6 +70,7 @@ not_settings=(
   FLINT_BACKUP_KEEP_OFFSITE # how many offsite ones
   FLINT_BACKUP_MANIFEST     # the list of offsite snapshots
   FLINT_BACKUP_TS           # the snapshot's timestamp; the tests set it rather than wait a minute
+  FLINT_BACKUP_FREE_KB      # a test's stand-in for a full disk: how much room the backup is told there is
   FLINT_BACKUP_DEFINE_ONLY  # sourcing backup_flint.sh for its lists alone
   FLINT_AGE_BIN             # the age program; the tests use it to take age away
   FLINT_DOW                 # the day of the week, for the weekly restore drill; the tests set it
