@@ -506,23 +506,31 @@ const grantKey = (g: Grant): string => `${g.grantee ?? 'everyone'} ${g.privilege
 
 /**
  * Give `copy` the privileges the migrations give a Flint database (`spec`, read
- * from the reference) for everyone and the application roles, plus whatever
- * else `production` grants to other roles. Says, as sentences, where the
- * database in use differs from Flint's own setup.
+ * from a reference) for everyone and the application roles, plus whatever else
+ * `production` grants to other roles (Will's own additions).
  */
-async function carryDatabaseGrants(main: pg.Client, copy: string, spec: readonly Grant[], production: readonly Grant[] | undefined, skip: readonly string[]): Promise<string[]> {
-  const wanted = [
+async function carryDatabaseGrants(main: pg.Client, copy: string, spec: readonly Grant[], production: readonly Grant[] | undefined, skip: readonly string[]): Promise<void> {
+  await setDatabaseGrants(main, copy, [
     ...spec.filter((g) => SPEC_GRANTEES.has(g.grantee)),
     ...(production ?? []).filter((g) => !SPEC_GRANTEES.has(g.grantee) && !skip.includes(g.grantee!)),
-  ];
-  await setDatabaseGrants(main, copy, wanted);
+  ]);
+}
+
+/**
+ * Where the database in use differs from what the restored one WILL have once
+ * it is in use (`end`: Flint's own setup for this checkout's whole list of
+ * migrations, the pending ones included), as sentences. Said about the end
+ * state and nothing before it: a right the copy has for a moment, until a
+ * pending update takes it away, is nothing Will is left with.
+ */
+function databaseGrantNotes(end: readonly Grant[], production: readonly Grant[] | undefined): string[] {
   if (!production) return [];
-  const specKeys = new Set(spec.filter((g) => SPEC_GRANTEES.has(g.grantee)).map(grantKey));
+  const endKeys = new Set(end.filter((g) => SPEC_GRANTEES.has(g.grantee)).map(grantKey));
   const prod = production.filter((g) => SPEC_GRANTEES.has(g.grantee));
   const prodKeys = new Set(prod.map(grantKey));
   const notes: string[] = [];
-  for (const g of prod) if (!specKeys.has(grantKey(g))) notes.push(`The database in use gives ${g.grantee ?? 'everyone'} the privilege ${g.privilege}, which Flint's own setup does not. The restored database follows Flint's setup.`);
-  for (const k of specKeys) if (!prodKeys.has(k)) notes.push(`The database in use is missing a privilege Flint's setup gives (${k}). The restored database has it.`);
+  for (const g of prod) if (!endKeys.has(grantKey(g))) notes.push(`The database in use gives ${g.grantee ?? 'everyone'} the privilege ${g.privilege}, which Flint's own setup does not. The restored database follows Flint's setup.`);
+  for (const k of endKeys) if (!prodKeys.has(k)) notes.push(`The database in use is missing a privilege Flint's setup gives (${k}). The restored database has it.`);
   return notes;
 }
 
@@ -1171,7 +1179,10 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
       const head = await asRestorer((c) => migrationState(c, o.migrationsDir));
       if (head.problems.length) throw new RestoreRefused(`The restored copy did not pass its checks: ${head.problems.join('; ')}.`, { stage: 'verify' });
       const spec = (await referenceOf(m, owner, reference, head.applied, locale, o.tools)).grants;
-      notes.push(...(await carryDatabaseGrants(m, scratch, spec, production ? await databaseGrants(m, database) : undefined, [OWNER, restorer.user])));
+      // The copy is checked as its own record says it was built, so until it is brought up to date it has the rights
+      // on the database itself that go with that record. What it will have in use is set, and said, further down.
+      const productionGrants = production ? await databaseGrants(m, database) : undefined;
+      await carryDatabaseGrants(m, scratch, spec, productionGrants, [OWNER, restorer.user]);
 
       // Before it is handed over: counts, the migrations it records, and every object against the reference.
       verified = await asRestorer((c) => verifyRestored(c, { ...(check.counts ? { counts: check.counts } : {}), migrationsDir: o.migrationsDir, reference: referenceFor }));
@@ -1218,6 +1229,13 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
           throw new RestoreRefused(`The restored copy could not be brought up to date: ${[...after.problems, ...(after.migrations.pending.length ? ['migrations still pending'] : [])].join('; ')}.`, { stage: 'migrate' });
         }
       }
+      // What goes into use: the rights on the database itself that this checkout's WHOLE list of migrations gives
+      // (the updates just applied included), with Will's own additions. Set outright, whatever the updates did on
+      // the way, so the end state is one thing: Flint's setup as of now. Only a difference from THAT is said.
+      const all = checkoutMigrations(o.migrationsDir);
+      const end = pending.length ? (await referenceOf(m, owner, reference, all, locale, o.tools)).grants : spec;
+      await carryDatabaseGrants(m, scratch, end, productionGrants, [OWNER, restorer.user]);
+      notes.push(...databaseGrantNotes(end, productionGrants));
       // The runtime's own role must be able to use it.
       await withClient(withDatabase(app, scratch), (c) => c.query('SELECT 1 FROM public."Proposal" LIMIT 1'));
 
