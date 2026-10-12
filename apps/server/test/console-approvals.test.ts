@@ -14,7 +14,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { laterDay, pinLocale, shownDay } from './console-dates';
 import { ACTION_WORDS, noteProblems } from '@flint/policy';
+
+/** A rule's last day, and how the console shows it: a date with its year, whenever this runs. */
+const RULE_UNTIL = laterDay(3, 29);
+const RULE_DAY = shownDay(3, 29);
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -139,6 +144,7 @@ beforeEach(() => {
     openSettings: () => void (panels.settings = true),
   };
   createContext(ctx);
+  pinLocale(ctx);
   runInContext(apprJs, ctx);
   // A Tuesday noon, so a restore test's card says the same thing whatever day the tests run.
   ctx.apprNow = () => new Date(2026, 9, 6, 12, 0);
@@ -156,7 +162,7 @@ describe('the console Approvals panel', () => {
       body: {
         signed: true,
         proposals: [
-          card({ id: 'pr0', fullName: 'policy.change', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'restore.drill', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'backup.offsite', expiresAt: '2027-03-29T00:00:00.000Z' }] } }),
+          card({ id: 'pr0', fullName: 'policy.change', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
           card(),
           card({ id: 'pr2', fullName: 'world.person.create', origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
         ],
@@ -169,8 +175,8 @@ describe('the console Approvals panel', () => {
     const first = rows[0]!.shown();
     expect(first).toContain('Run Backups on Their Own');
     // The open card shows its line too, as a sentence, and its facts.
-    expect(first).toContain('Run Backups on Their OwnIt lasts until Mar 29, 2027.');
-    expect(first).toContain('UntilMar 29, 2027');
+    expect(first).toContain(`Run Backups on Their OwnIt lasts until ${RULE_DAY}.`);
+    expect(first).toContain(`Until${RULE_DAY}`);
     expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite Copy 1 a Day');
     expect(first).toContain('Filed ByYou');
     // The reason and what each rule lets run wait behind Show Details, as sentences: a rule card never shows its rows as they are stored.
@@ -179,9 +185,9 @@ describe('the console Approvals panel', () => {
     rows[0]!.button('Show Details').onclick!();
     const details = rows[0]!.shown();
     expect(details).toContain('The shadow week: 1.2 relevant a day.');
-    expect(details).toContain('The backup may run on its own, once a day, until Mar 29, 2027.');
-    expect(details).toContain('The restore test may run on its own, once a week, until Mar 29, 2027.');
-    expect(details).toContain('The offsite copy may be sent on its own, once a day, until Mar 29, 2027.');
+    expect(details).toContain(`The backup may run on its own, once a day, until ${RULE_DAY}.`);
+    expect(details).toContain(`The restore test may run on its own, once a week, until ${RULE_DAY}.`);
+    expect(details).toContain(`The offsite copy may be sent on its own, once a day, until ${RULE_DAY}.`);
     expect(details).not.toMatch(/[{}"\[\]]|backup\.local|restore\.drill|pattern|expiresAt/);
     expect(rows[1]!.shown()).toContain('Turn On the Deploy Source');
     expect(rows[1]!.shown()).toContain('Turn On the Deploy SourceDeploy results are read every minute.');
@@ -190,7 +196,9 @@ describe('the console Approvals panel', () => {
     // Opening a row shows its facts; the invitation's markup arrives as literal text.
     rows[2]!.onclick!();
     expect(ids.apprlist!.children[0]!.children[2]!.shown()).toContain('<img src=x onerror=alert(1)>Ada');
-    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 1.');
+    // Two ask on their own: the person card (outside text), and the rules card, which would let backups run alone.
+    expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 2.');
     expect(ids.apprall!.textContent).toBe('Approve All with Password');
     expect(ids.apprhelp!.hidden).toBe(true);
   });
@@ -312,7 +320,8 @@ describe('the console Approvals panel', () => {
     await open();
     const shown = ids.apprlist!.children[0]!.children[0]!.shown();
     expect(shown).toContain('Add 3 People from Calendar');
-    expect(shown).toContain('PeopleKim, Alex (alex.kim@corp.example) · Mom (mallory@evil.example) · sam@corp.example');
+    expect(shown).toContain('PeopleKim, Alex, alex.kim@corp.example · Mom, mallory@evil.example · sam@corp.example');
+    expect(shown).not.toMatch(/[()]/);
     expect(shown).not.toContain('a'.repeat(64));
     expect(shown).toContain('Outside Text');
     // A card that names no calendar is Google's, as every P2.5 card was.
@@ -330,7 +339,7 @@ describe('the console Approvals panel', () => {
     };
     const apple = await shown({ people, source: 'apple_calendar' });
     expect(apple.text).toContain('They’re from Apple Calendar events you accepted or organized.');
-    expect(apple.facts).toEqual(['People', 'Ada Lovelace (ada@example.com)', 'Filed By', 'Flint', 'Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]);
+    expect(apple.facts).toEqual(['People', 'Ada Lovelace, ada@example.com', 'Filed By', 'Flint', 'Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]);
     expect((await shown({ people, source: 'google_calendar' })).text).toContain('They’re from Google Calendar events you accepted or organized.');
     expect((await shown({ people })).text).toContain('They’re from Google Calendar events you accepted or organized.');
   });
@@ -338,7 +347,7 @@ describe('the console Approvals panel', () => {
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'google', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'world.person.create', dailyCap: 20, expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
@@ -351,16 +360,20 @@ describe('the console Approvals panel', () => {
     expect(decided.map((d) => d[1])).toEqual(['gc']);
   });
 
-  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and goes with Approve All', async () => {
+  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and asks on its own, as every card that lets something run alone does', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
     expect(rows[0]!.shown()).toContain('LimitsApple Calendar Reads');
-    // Reading alone adds no one, so it doesn't ask on its own.
-    expect(rows[0]!.shown()).not.toContain('Asks on Its Own');
+    // It carries no mark here (an older server's card): the rows say it lets something run alone, and that is enough.
+    expect(promo).not.toHaveProperty('consequential', true);
+    expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['ac']);
     expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Apple Calendar is read every ${minutes} minutes and when it changes.`);
   });
@@ -524,7 +537,7 @@ describe('the console Approvals panel', () => {
     expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
     expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
     // The policy card names P3's rows in words.
-    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', dailyCap: 20 }, { pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }] } })[2])
+    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
       .toContainEqual(['Limits', 'Goal Reviews 20 a Day · Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day']);
   });
 

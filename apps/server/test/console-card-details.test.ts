@@ -21,6 +21,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { laterDay, pinLocale, shownDay } from './console-dates';
 import { noteProblems, shownProblems } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
@@ -104,6 +105,7 @@ function panel(cards: object[], withGoals = true): Panel {
     rejectAction: () => {},
   };
   createContext(ctx);
+  pinLocale(ctx);
   if (withGoals) runInContext(goalWords, ctx);
   runInContext(apprJs, ctx);
   const run = (code: string) => runInContext(code, ctx);
@@ -131,7 +133,8 @@ function opened(p: Panel, id: string) {
 const GOAL = 'go1finishbuildingflint00';
 const ITEM = 'en8f3k2m9x7q1w5z4c6v0b1n';
 const OTHER = 'en1a2b3c4d5e6f7g8h9i0j1k';
-const UNTIL = '2027-04-05T00:00:00.000Z';
+const UNTIL = laterDay(4, 5);
+const UNTIL_SHOWN = shownDay(4, 5);
 const base = (over: Record<string, unknown>) => ({ id: 'pr1', tainted: false, status: 'pending', origin: 'console', ts: Date.now() - 3600_000, expiresAt: '2026-10-27T18:00:00.000Z', destructive: false, ...over });
 const checks = [
   { id: 'c1', text: 'The goals work is merged', check: { kind: 'item', entityId: ITEM, key: 'state', value: 'merged' } },
@@ -145,7 +148,7 @@ const LONG = 'The badge says a review is late when it only waited for the Mac to
 
 /** One card of every kind the panel can show. Ids, paths, links and JSON-shaped text are in the args on purpose. */
 const CARDS: Record<string, Record<string, unknown>> = {
-  'the older rules card': base({ fullName: 'policy.change', kind: 'policy', origin: 'cli', consequential: true, reason: 'This lets Flint sort events, send its notes and run its upkeep without asking until Apr 5, 2027. Lately 1.4 items a day were important.', args: rules(P2) }),
+  'the older rules card': base({ fullName: 'policy.change', kind: 'policy', origin: 'cli', consequential: true, reason: `This lets Flint sort events, send its notes and run its upkeep without asking until ${UNTIL_SHOWN}. Lately 1.4 items a day were important.`, args: rules(P2) }),
   'a rules card with two rules': base({ fullName: 'policy.change', kind: 'policy', origin: 'cli', consequential: true, args: rules([['world.sync.google_calendar'], ['world.person.create', 20]]) }),
   'a new goal': base({
     fullName: 'goal.activate', kind: 'goal', consequential: true, reason: 'Approving starts this goal.',
@@ -357,12 +360,12 @@ describe('what each kind says', () => {
   it('a rule card says each rule; over 6 rules, the Limits fact counts them and the details list them', () => {
     const older = says('the older rules card');
     expect(older.lines).toHaveLength(16);
-    expect(older.lines[1]).toBe('Triage rules may run on their own until Apr 5, 2027.');
-    expect(older.lines[5]).toBe('Phone pings may be sent on their own, up to 3 a day, until Apr 5, 2027.');
+    expect(older.lines[1]).toBe(`Triage rules may run on their own until ${UNTIL_SHOWN}.`);
+    expect(older.lines[5]).toBe(`Phone pings may be sent on their own, up to 3 a day, until ${UNTIL_SHOWN}.`);
     const facts = (kind: string) => JSON.parse(JSON.stringify(p.run(`apprFacts(${JSON.stringify(cardOf(kind))})`))) as Array<[string, string]>;
-    expect(facts('the older rules card')).toEqual([['Until', 'Apr 5, 2027'], ['Limits', '15 actions, listed under Show Details.'], ['Filed By', 'You']]);
+    expect(facts('the older rules card')).toEqual([['Until', `${UNTIL_SHOWN}`], ['Limits', '15 actions, listed under Show Details.'], ['Filed By', 'You']]);
     expect(noteProblems('Limits', '15 actions, listed under Show Details.')).toEqual([]);
-    expect(facts('a rules card with two rules')).toEqual([['Until', 'Apr 5, 2027'], ['Limits', 'Google Calendar Reads · People from Your Calendar 20 a Day'], ['Filed By', 'You']]);
+    expect(facts('a rules card with two rules')).toEqual([['Until', `${UNTIL_SHOWN}`], ['Limits', 'Google Calendar Reads · People from Your Calendar 20 a Day'], ['Filed By', 'You']]);
     // Six is still a list; seven is a count.
     const limits = (n: number) => p.run(`apprLimits(${JSON.stringify(rules(P2.slice(0, n)).rows)})`) as string;
     expect(limits(6)).toBe('Triage Rules · Local Model Triage · In-App Notes · Banners · Phone Pings 3 a Day · Health Checks');
@@ -395,9 +398,9 @@ describe('a card this panel has no words for: labelled facts', () => {
   });
 
   it('an id is never shown: a key that holds one is left out, and an item’s ref is said as its kind', () => {
-    expect(facts('a link between two items')).toEqual([['Relation', 'Blocks'], ['Confidence', '0.8']]);
+    expect(facts('a link between two items')).toEqual([['Relation', 'Blocks'], ['Confidence', '80%']]);
     expect(facts('a tool call: look up one item')).toEqual([['Item', 'One Pull Request']]);
-    expect(facts('a tool call: record a prediction')).toEqual([['Claim', 'The goals work is merged before November'], ['Probability', '0.7'], ['Resolve By', day('2026-11-01T18:00:00.000Z')], ['Domain', 'Goals']]);
+    expect(facts('a tool call: record a prediction')).toEqual([['Claim', 'The goals work is merged before November'], ['Probability', '70%'], ['Resolve By', day('2026-11-01T18:00:00.000Z')], ['Domain', 'Goals']]);
     expect(facts('a tool call: read what triage decided')).toEqual([['Lane', 'Relevant'], ['Limit', '20'], ['Since', day('2026-10-11T00:00:00.000Z')]]);
   });
 
@@ -415,7 +418,7 @@ describe('a card this panel has no words for: labelled facts', () => {
     expect(plain('in_progress')).toBe('In Progress');
     expect(plain('example.com')).toBe('example.com');
     expect(plain('ada@example.com')).toBe('ada@example.com');
-    // An id, whatever key holds it: a long run of letters and digits, a hex string, a UUID.
+    // An id, whatever key holds it: a long run of letters and digits, a commit, a UUID.
     expect([GOAL, '9f8e7d6c5b4a39281706f5e4d3c2b1a0', '3f2a9c1', '0b9d6a52-7c1e-4a3b-9f2d-1c2e3f4a5b6c'].map(plain)).toEqual(['', '', '', '']);
     // Someone's text: one line, typographic quotation marks, no braces, clipped at a word with an ellipsis.
     expect(plain('He said "ship it"\n{now}')).toBe('He said “ship it” now');
@@ -429,6 +432,48 @@ describe('a card this panel has no words for: labelled facts', () => {
     const idKey = (k: string) => p.run(`apprIdKey(${JSON.stringify(k)})`) as boolean;
     expect(['id', 'goalId', 'entity_id', 'approvalId', 'argsDigest', 'key', 'keys', 'ref', 'requestId', 'subjectEntityId', 'api-token'].map(idKey)).toEqual(Array(11).fill(true));
     expect(['valid', 'monkey', 'paid', 'hybrid', 'title', 'keyboard', 'preference'].map(idKey)).toEqual(Array(7).fill(false));
+  });
+
+  it('only what is shaped like an id is hidden: never an ordinary word, however long, or words joined with hyphens', () => {
+    const plain = (v: unknown) => p.run(`apprPlain(${JSON.stringify(v)})`) as string;
+    const idLike = (v: string) => p.run(`apprIdLike(${JSON.stringify(v)})`) as boolean;
+    // Words. A long one, a long one with capitals, ones with a number in them, ones joined by hyphens or underscores.
+    for (const word of [
+      'Pneumonoultramicroscopicsilicovolcanoconiosis', 'Counterrevolutionaries', 'ElectroencephalographicallyUnremarkable',
+      'follow-up-on-the-2026-roadmap', 'covid19-vaccination-reminder', 'Quarterly_Planning_2026_Draft', 'state-of-the-union', 'Q3-2026',
+      'decade', 'facade', 'deadbeef', 'accede', 'cafe2go', 'a1', '2026', '12345678', 'DEADBEEF1', 'Abcdef12',
+    ]) {
+      expect(idLike(word), word).toBe(false);
+      expect(plain(word), word).not.toBe('');
+    }
+    expect(plain('Pneumonoultramicroscopicsilicovolcanoconiosis')).toBe('Pneumonoultramicroscopicsilicovolcanoconiosis');
+    // (A stored name written with hyphens is said as its words.)
+    expect(plain('follow-up-on-the-2026-roadmap')).toBe('Follow up on the 2026 Roadmap');
+    // The shapes that are minted here: a record's id, a digest, a token, a UUID, a prefixed one, a commit.
+    for (const id of [
+      GOAL, 'cmg1x9k2p0001abcd2345wxyz', 'tdmg1x9k2pa1b2c3d4e5', 'seMG1X9K2PA1B2C3D4E5', 'a'.repeat(31) + '7', '9f8e7d6c5b4a39281706f5e4d3c2b1a0', `${'ab12'.repeat(16)}`,
+      '0b9d6a52-7c1e-4a3b-9f2d-1c2e3f4a5b6c', 'turn_0b9d6a52-7c1e-4a3b-9f2d-1c2e3f4a5b6c', 'msg_0B9D6A52-7C1E-4A3B-9F2D-1C2E3F4A5B6C', 'call:9f8e7d6c5b4a3928',
+      '3f2a9c1', '3f2a9c1e', '3f2a9c1e5b7d', '3f2a9c1e5b7d4e2a9c1e5b7d4e2a9c1e5b7d4e2a',
+    ]) {
+      expect(idLike(id), id).toBe(true);
+      expect(plain(id), id).toBe('');
+    }
+    // A UUID's first groups alone are not one, and neither is a run of only letters or only digits.
+    for (const not of ['0b9d6a52-7c1e-', 'abcdefghijklmnopqrstuvwxyz', '1234567890123456789012', '3f2a9c', '3f2a9c1e5']) expect(idLike(not), not).toBe(false);
+    // In a card's facts: the word is shown under its label, the id is not shown at all.
+    const d = JSON.parse(JSON.stringify(p.run(`apprDetails(${JSON.stringify({ fullName: 'some.tool', args: { topic: 'follow-up-on-the-2026-roadmap', condition: 'Pneumonoultramicroscopicsilicovolcanoconiosis', record: 'cmg1x9k2p0001abcd2345wxyz' } })})`))) as { facts: Array<[string, string]> };
+    expect(d.facts).toEqual([['Topic', 'Follow up on the 2026 Roadmap'], ['Condition', 'Pneumonoultramicroscopicsilicovolcanoconiosis']]);
+  });
+
+  it('a probability is a percent: 0.7 reads 70%', () => {
+    const facts = (args: Record<string, unknown>) => (JSON.parse(JSON.stringify(p.run(`apprDetails(${JSON.stringify({ fullName: 'some.tool', args })})`))) as { facts: Array<[string, string]> }).facts;
+    expect(facts({ probability: 0.7, confidence: 0.805, winProbability: 1, prior_probability: 0, likelihood: 0.335, chance: 0.5 })).toEqual([
+      ['Probability', '70%'], ['Confidence', '81%'], ['Win Probability', '100%'], ['Prior Probability', '0%'], ['Likelihood', '34%'], ['Chance', '50%'],
+    ]);
+    // Only a share of 1 under a key that says it is one: any other number is the number it is.
+    expect(facts({ probability: 70, limit: 0.7, score: 0.5, probabilityNote: 0.5, probability2: 0.5 })).toEqual([['Probability', '70'], ['Limit', '0.7'], ['Score', '0.5'], ['Probability Note', '0.5'], ['Probability2', '0.5']]);
+    expect(facts({ probability: '0.7' })).toEqual([['Probability', '0.7']]);
+    expect(facts({ forecast: { probability: 0.25 } })).toEqual([['Forecast Probability', '25%']]);
   });
 
   it('a card that holds a great deal shows the first of it and says there is more', () => {
@@ -470,6 +515,7 @@ describe('the card a chat shows in its thread', () => {
       approveLabel: () => 'Approve', approveAction: (_id: string, _card: El, o: { args: unknown }) => void approved.push(o.args), rejectAction: () => {},
     };
     createContext(ctx);
+    pinLocale(ctx);
     runInContext(apprJs, ctx);
     runInContext(chatCardJs, ctx);
     (ctx.renderProposals as (a: unknown[], b: unknown) => void)([action], { parentNode: host });
