@@ -8,6 +8,7 @@ import {
   chooseStyles,
   echoStyle,
   engineLineFor,
+  promptRevision,
   parseStyleVariantRequest,
   readStyleDefaults,
   styleGuideFor,
@@ -462,5 +463,39 @@ describe('engineLineFor (what powers this brain)', () => {
     expect(styleVariantOf(p)).toBe('v1');
     await p.generate({ prompt: 'what do you run on?' });
     expect(system).toBe(`${FLINT_STYLE_GUIDE}\n\n${engineLineFor(provider, 'muse-glimmer:30b')}`);
+  });
+});
+
+// A variant name says which guide; this says which exact text went to the model.
+describe('promptRevision (which exact prompt a persona speaks with)', () => {
+  const local = engineLineFor({ name: 'ollama' }, 'muse-glimmer:30b');
+  const claude = engineLineFor({ name: 'anthropic' }, 'claude-opus-5-5');
+
+  it('is 8 hex characters, the same for the same guide and engine paragraph', () => {
+    const rev = promptRevision({ styleGuide: styleGuideFor('v1'), engine: local });
+    expect(rev).toMatch(/^[0-9a-f]{8}$/);
+    expect(promptRevision({ styleGuide: styleGuideFor('v1'), engine: local })).toBe(rev);
+  });
+
+  it('changes with the guide, with the engine paragraph, and with having one at all', () => {
+    const revs = [
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: local }),
+      promptRevision({ styleGuide: styleGuideFor('v2'), engine: local }),
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: claude }),
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: engineLineFor({ name: 'ollama' }, 'qwen3.8:27b') }),
+      // The prompt as it was before the engine paragraph existed: a run made then has another revision.
+      promptRevision({ styleGuide: styleGuideFor('v1') }),
+    ];
+    expect(new Set(revs).size).toBe(revs.length);
+  });
+
+  it('reads a real persona: its guide and the engine paragraph it was built with', () => {
+    const provider = { name: 'ollama' } as ProviderAdapter;
+    const p = new Persona(new Flint({ provider, defaultModel: 'muse-glimmer:30b' }), { name: 'Flint', styleGuide: styleGuideFor('local-v2'), engine: local });
+    expect(promptRevision(p)).toBe(promptRevision({ styleGuide: styleGuideFor('local-v2'), engine: local }));
+  });
+
+  it('says nothing of the text it stands for', () => {
+    expect(promptRevision({ styleGuide: 'Will', engine: 'Will' })).not.toMatch(/will/i);
   });
 });

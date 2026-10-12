@@ -93,7 +93,7 @@ import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './ro
 import { ensureScopedTokens } from './scoped-tokens';
 import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
-import { STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
+import { STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, parseStyleVariantRequest, promptRevision, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
 import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
@@ -1074,6 +1074,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       localThinkOverride: !!ctx.localModels,
       // The `styleVariant`s /generate accepts (apps/parity --flint-variant).
       styleVariants: STYLE_VARIANTS,
+      // Which exact prompt each live brain speaks with (a hash of its style guide and engine
+      // paragraph): a run can record it, and tell answers before and after a prompt change apart.
+      promptRevisions: { local: promptRevision(ctx.persona), ...(ctx.frontier ? { frontier: promptRevision(ctx.frontier.persona) } : {}) },
       // The longest tool excerpt an eval /generate may ask for with `groundingChars`
       // (apps/parity tasks), and that GET /eval/tools + POST /eval/tool exist (./eval-tools).
       groundingCharsMax: GROUNDING_CHARS_MAX,
@@ -1237,6 +1240,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // The [route] line (./route-log): tier, what moved it, who answered. Never the prompt.
     const moved = movedBy(prompt, tier, { toolsLikely });
     let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
+    let lastPersona: Persona | undefined; // ...and the persona it spoke with, for its prompt revision
     const logRoute = (outcome: Outcome) =>
       console.error(
         routeLine({
@@ -1248,6 +1252,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
+          ...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),
           outcome,
           recall: recalled.mode,
           ms: Date.now() - started,
@@ -1267,6 +1272,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const callOpts = { ...budget.callOpts, signal: abort.signal };
     const ask = (p: Persona) =>
       turn.run(() => {
+        lastPersona = p;
         const call = () => p.generate({ prompt, context: ctxBlock, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) }, callOpts);
         return evalSpend ? evalSpend.run(call) : call();
       });
@@ -1352,6 +1358,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // The style variant of the persona that answered, read from its guide, not the
         // request (apps/parity checks it against --flint-variant).
         styleVariant: answered.styleVariant(),
+        // ...and the revision of its whole prompt, engine paragraph included (promptRevision).
+        ...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),
         tools: toolsUsed,
         // What the turn was grounded on (recalled memory, tool results), for apps/parity --judge-grounding.
         grounding: turn.grounding(recalled.facts, gc.chars),
@@ -1443,6 +1451,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // A sentence the server wrote for Will about why the reply stopped (the budget refusal), sent with the raw error.
       let stopWords: string | undefined;
       let lastTried: string | undefined; // set as each brain is asked; the winner is the last one asked
+      let lastPersona: Persona | undefined; // ...and the persona it spoke with, for its prompt revision
       const moved = movedBy(message, tier, { toolsLikely, turns });
       // "World now" (./world-now), fetched alongside recall, for frontier turns only: a local
       // turn's prompt is already at its limit with ~42 tool schemas (more text there and the
@@ -1471,6 +1480,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
       // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
       const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
+        lastPersona = persona;
         const events = persona.chat(
           { conversationId, message, context, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
           { signal: ac.signal },
@@ -1559,6 +1569,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
+          ...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),
           outcome,
           ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
           recall: recalled.mode,

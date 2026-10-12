@@ -62,6 +62,13 @@ describe('routeLine', () => {
     expect(routeLine(paused)).not.toMatch(/balance|credit balance|too low/i);
   });
 
+  // Which exact prompt answered (./style-variant promptRevision): a hash, so runs before and after a
+  // prompt change can be told apart in the log.
+  it('carries the prompt revision of the persona that was asked', () => {
+    const parsed = JSON.parse(routeLine({ ...rec, promptRev: '3fa9c1d2' }).slice('[route] '.length));
+    expect(parsed.promptRev).toBe('3fa9c1d2');
+  });
+
   // Plan 3.0.8: what each context block adds to a frontier prompt is measured, as a count.
   it('carries the context blocks\' token estimates when there are any', () => {
     const parsed = JSON.parse(routeLine({ ...rec, ctxTokens: { world: 118 } }).slice('[route] '.length));

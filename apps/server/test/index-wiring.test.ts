@@ -161,6 +161,18 @@ describe('index.ts wiring', () => {
     expect(health).toContain('frontierPaused: ctx.breaker.snapshot(),');
   });
 
+  it('the prompt revision is in /health, on both routes\' [route] lines, and in an eval response', () => {
+    const health = between("url === '/health'", '// Auth for everything else');
+    expect(health).toContain('promptRevisions: { local: promptRevision(ctx.persona), ...(ctx.frontier ? { frontier: promptRevision(ctx.frontier.persona) } : {}) },');
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      expect(route, name).toContain('...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),');
+    }
+    // The persona named is the one each brain was really asked with.
+    expect(generate).toMatch(/turn\.run\(\(\) => \{\s*lastPersona = p;/);
+    expect(chat).toMatch(/const pump = async \(persona: Persona,[^)]*\) => \{\s*lastPersona = persona;/);
+    expect(generate.match(/promptRev: promptRevision\(lastPersona\)/g)).toHaveLength(2); // the log line, and the eval response
+  });
+
   it('/health says where the local model came from, and a guessed one gets one console note a day', () => {
     const health = between("url === '/health'", '// Auth for everything else');
     expect(health).toContain('localModelFrom: ctx.localFrom,');

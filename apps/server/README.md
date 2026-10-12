@@ -11,7 +11,7 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 
 | Method | Path | Auth | Body | Returns |
 | --- | --- | --- | --- | --- |
-| GET | `/health` | no | — | `{ ok, provider, model, tools, servers, evalMode, styleVariants, groundingCharsMax, evalDiscovery, evalRecallOverride, … }` |
+| GET | `/health` | no | — | `{ ok, provider, model, localModelFrom, tools, servers, evalMode, styleVariants, promptRevisions, groundingCharsMax, evalDiscovery, evalRecallOverride, frontierPaused, … }` |
 | POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason, brain, model, … }`. `brain` is `local` or `frontier`, `model` who answered; `frontierPaused` (e.g. `anthropic:credit`) is there when the breaker left outside brains out of the turn (see "When the frontier keeps failing") |
 | POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval, costUsd, costByVendor, paidCalls, budgetBlocked? }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `costUsd` is what the replay's paid calls cost (every model pass and fallback attempt, the research planner, paid searches; see "Spend caps"), and error responses (500 / 502 / 503) carry it too; `budgetBlocked` lists the paid tools refused because Flint's own cap for them is spent. `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
 | POST | `/generate` (eval, style variant) | yes | `{ prompt, eval: true, styleVariant: "v2" }` | as above, answered with that style guide; `styleVariant` echoes the variant of the persona that answered, read from its own guide (not from the request). Unknown variant, or no `eval: true`: 400. `/health` lists the known ones as `styleVariants` (used by `apps/parity --flint-variant`) |
@@ -402,10 +402,15 @@ low and the tool is still offered; only the tier waits for a clear match.
 
 To count tiers: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r .tier | sort | uniq -c`.
 
+Each line also has `promptRev`: 8 hex characters, a hash of the style guide and the engine
+paragraph of the persona that was asked. A variant name says which guide; this says which exact
+prompt, so lines (and parity answers: an eval response carries it too, and `/health` lists the
+live ones as `promptRevisions`) from before and after a prompt change can be told apart.
+
 A turn the local model answered because the frontier was paused, on either route:
 
 ```
-[route] {"ts":"2026-10-12T15:00:00.000Z","path":"chat","tier":"hard","appended":[],"turns":0,"brain":"local","paused":"anthropic:credit","answeredBy":"muse-glimmer:30b","outcome":"answered","ms":2100}
+[route] {"ts":"2026-10-12T15:00:00.000Z","path":"chat","tier":"hard","appended":[],"turns":0,"brain":"local","paused":"anthropic:credit","answeredBy":"muse-glimmer:30b","promptRev":"3fa9c1d2","outcome":"answered","ms":2100}
 ```
 
 To see how often: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r 'select(.paused) | .paused' | sort | uniq -c`.

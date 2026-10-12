@@ -102,7 +102,9 @@ still names a persona's variant by its guide, and a variant name still means one
 
 What does change is the whole system prompt the server sends: every brain's now ends its stable
 half with this paragraph. Don't resume a parity run (`--run`) started before that commit: its
-cached answers were given without it.
+cached answers were given without it. The server gives each prompt a revision id for exactly this
+(a hash of the guide and the engine paragraph: `promptRevisions` in `/health`, `promptRev` on the
+`[route]` line and in an eval response), so answers from before and after can be told apart.
 
 ## Why it's a separate package
 

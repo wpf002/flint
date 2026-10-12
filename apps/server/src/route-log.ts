@@ -39,6 +39,12 @@ export interface RouteRecord {
   answeredBy?: string;
   /** The last brain tried, when none answered: an error, an empty reply, the honest message, a hang-up. */
   tried?: string;
+  /**
+   * The prompt revision of the last persona asked (./style-variant
+   * promptRevision): a hash of its style guide and engine paragraph, so lines
+   * written before and after a prompt change can be told apart.
+   */
+  promptRev?: string;
   outcome: Outcome;
   /** Tiers that refused or came back empty before the one that answered (/chat). */
   declined?: number;

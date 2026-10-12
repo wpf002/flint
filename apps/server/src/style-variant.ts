@@ -30,6 +30,7 @@
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
+import { createHash } from 'node:crypto';
 import { isOllamaCloudModel, type ProviderAdapter } from '@flint/core';
 import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, flintEngineLine, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
 import { resolveLocalPersona, type LocalPersonaCache, type OverridePersona } from './local-model';
@@ -57,6 +58,18 @@ export function styleGuideFor(variant: StyleVariant): string {
  */
 export function engineLineFor(provider: Pick<ProviderAdapter, 'name'>, model: string): string {
   return flintEngineLine({ provider: provider.name, model, ollamaCloud: provider.name === 'ollama' && isOllamaCloudModel(model) });
+}
+
+/**
+ * A short id for the prompt a persona speaks with: the first 8 hex characters
+ * of the sha256 of its style guide and its engine paragraph. A variant name
+ * says which guide; this says which exact text went to the model, engine
+ * paragraph included, so answers given before and after a change to either can
+ * be told apart (/health `promptRevisions`, the [route] line's `promptRev`, an
+ * eval response's `promptRev`). It is a hash: it says nothing of the text.
+ */
+export function promptRevision(p: { readonly styleGuide: string; readonly engine?: string | undefined }): string {
+  return createHash('sha256').update(p.styleGuide).update('\n\n').update(p.engine ?? '').digest('hex').slice(0, 8);
 }
 
 export type StyleVariantRequest =
