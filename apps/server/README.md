@@ -80,10 +80,20 @@ Which model it is:
   Ollama already has loaded, else the first one pulled, skipping embedders and Ollama cloud models.
   A loaded model keeps the context size it is loaded with (unless `OLLAMA_NUM_CTX` is set), and
   memory extraction and background calls use the same, so the pick never makes Ollama reload it.
-- An Ollama that does not answer may simply not be up yet (both start at login), so it is asked
-  again for about a minute before the server settles for `qwen2.5:7b`. That default is a guess
-  that lasts until the next restart, and the console gets one note a day saying so ("Flint Is
-  Guessing Its Local Model").
+- The server never waits on Ollama before it listens. The pick is asked once and cut off by the
+  clock (5 s at most, `LOCAL_PICK_CAP_MS`), and so is embedding the tools for the router (3 s,
+  `BOOT_EMBED_WAIT_MS` in `src/router.ts`: the server starts with the core tools, and the rest are
+  offered once Ollama has embedded them). A server that waited there never answered `/health`
+  while Ollama was slow, and the installer, which polls `/health` after a deploy, put the previous
+  bundle back. The installer now polls for a minute (`HEALTH_WAIT_S` in `install-server.sh`).
+- An Ollama that does not answer may simply not be up yet (both start at login). The server
+  starts on `qwen2.5:7b` as a stand-in and keeps asking in the background (every 5 s for a minute,
+  then every 30 s, `keepPickingLocal`). When Ollama answers, its model becomes the local brain for
+  the next turn, with no restart; a turn already running finishes on the model it started with.
+  Memory extraction on the local model starts then too. The log says both
+  (`[brain] ... Ollama is not answering ...`, then `[brain] Ollama is answering now: ...`).
+- An Ollama that answers and has no chat model leaves `qwen2.5:7b` as a guess that lasts until the
+  next restart, and the console gets one note a day saying so ("Flint Is Guessing Its Local Model").
 - `GET /health` says where the model came from as `localModelFrom`: `env` (`OLLAMA_MODEL`),
   `loaded`, `pulled`, or `default`. The boot log says the same
   (`[brain] OLLAMA_MODEL is unset: the local brain is ...`).

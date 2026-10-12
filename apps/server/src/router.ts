@@ -30,6 +30,16 @@ export function parseTierToolScore(raw: string | undefined, warn: (msg: string) 
   return DEFAULT_TIER_TOOL_SCORE;
 }
 
+/**
+ * How long boot waits for Ollama to embed the rest tools before the server listens without
+ * them. A warm embedder needs well under a second; an Ollama that is slow or silent finishes
+ * (or fails) behind a server that is already up, and appends start when the vectors land.
+ */
+export const BOOT_EMBED_WAIT_MS = 3_000;
+
+/** How long one pass over the rest tools may take before it counts as failed and is retried later. */
+export const EMBED_DEADLINE_MS = 60_000;
+
 export interface RouterOptions {
   maxAppend?: number;
   floor?: number;
@@ -38,6 +48,22 @@ export interface RouterOptions {
   /** Minimum gap between attempts to embed the rest tools after a failure. */
   retryMs?: number;
   now?: () => number;
+  /** How long build() waits for the rest tools' vectors (default BOOT_EMBED_WAIT_MS). */
+  bootWaitMs?: number;
+  /** How long one embedding pass may take (default EMBED_DEADLINE_MS). */
+  embedDeadlineMs?: number;
+}
+
+/** `p`, or a rejection after `ms` by the clock, whichever is first. The timer never keeps the process alive. */
+function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      t = setTimeout(() => reject(Object.assign(new Error(what), { code: 'ETIMEDOUT' })), ms);
+      t.unref?.();
+    }),
+  ]).finally(() => clearTimeout(t));
 }
 
 /**
@@ -53,6 +79,11 @@ export interface RouterOptions {
  * The rest-tool vectors are retried if they couldn't be built. A training run
  * unloads ollama, and a server that restarts during one (a deploy, a crash) used
  * to lose every appended tool until the next restart, long after ollama was back.
+ *
+ * Neither boot nor a turn waits on them for long. build() gives Ollama
+ * BOOT_EMBED_WAIT_MS and then returns (a server that waited here never listened
+ * while Ollama hung, and the installer's /health poll failed the deploy); a
+ * message that arrives while they are still being built gets the core at once.
  */
 export class ToolRouter {
   private restVectors: number[][] = [];
@@ -69,6 +100,7 @@ export class ToolRouter {
     private readonly tierScore: number,
     private readonly retryMs: number,
     private readonly now: () => number,
+    private readonly embedDeadlineMs: number,
   ) {}
 
   static async build(
@@ -100,11 +132,20 @@ export class ToolRouter {
       tierScore,
       opts.retryMs ?? 60_000,
       opts.now ?? Date.now,
+      opts.embedDeadlineMs ?? EMBED_DEADLINE_MS,
     );
-    await router.ensureVectors();
+    const bootWaitMs = opts.bootWaitMs ?? BOOT_EMBED_WAIT_MS;
+    const embedded = router.ensureVectors();
+    const inTime = await within(embedded.then(() => true), bootWaitMs, 'boot wait').catch(() => false);
     console.error(
       `[router] core=${finalCore.length} (cached) + up to ${maxAppend} of ${finalRest.length} by relevance (floor ${floor}; a tier move needs ${tierScore})`,
     );
+    if (!inTime) {
+      console.error(`[router] Ollama has not embedded the rest tools after ${bootWaitMs / 1000}s: starting with the core, and appends go live when it answers`);
+      void embedded.then(() => {
+        if (router.appendsReady) console.error('[router] rest embedding finished: appends live');
+      });
+    }
     return router;
   }
 
@@ -142,8 +183,12 @@ export class ToolRouter {
     const attempt = ++this.attempts;
     this.embedding = (async () => {
       try {
-        const v = await this.embedder.embed(
-          this.rest.map((x) => `${x.definition.name}: ${x.definition.description}`),
+        // By the clock: an Ollama that takes the request and never answers would otherwise leave
+        // this pass in flight for good, and appends off until the next restart.
+        const v = await within(
+          this.embedder.embed(this.rest.map((x) => `${x.definition.name}: ${x.definition.description}`)),
+          this.embedDeadlineMs,
+          `no answer in ${this.embedDeadlineMs / 1000}s`,
         );
         if (v.length !== this.rest.length) throw new Error(`got ${v.length} vectors for ${this.rest.length} tools`);
         this.restVectors = v;
@@ -173,7 +218,9 @@ export class ToolRouter {
   async selectScored(message: string): Promise<{ tools: Tool[]; appended: Array<{ name: string; score: number }> }> {
     const none = { tools: this.core, appended: [] };
     if (this.maxAppend === 0 || this.rest.length === 0) return none;
-    await this.ensureVectors();
+    // Vectors still being built (boot's, when Ollama was slow) are not waited for: this message
+    // gets the core now. Otherwise this call makes the attempt, when one is due.
+    if (!this.appendsReady && !this.embedding) await this.ensureVectors();
     if (!this.appendsReady) return none;
     let qv: number[];
     try {

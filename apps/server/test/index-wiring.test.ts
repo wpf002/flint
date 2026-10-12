@@ -72,7 +72,10 @@ describe('index.ts wiring', () => {
     const block = between('const memoryPlan = chooseMemoryBrain(', 'const servers = registry?.connectedServers()');
     // It is told the local model as main() settled it (OLLAMA_MODEL, or what Ollama had, at its loaded window).
     expect(block).toContain('const memoryPlan = chooseMemoryBrain(localEnv, {');
-    expect(src).toContain('const localEnv = { ...process.env, ...localBrain.env };');
+    expect(src).toContain('let localEnv: Record<string, string | undefined> = { ...process.env, ...localBrain.env };');
+    // On the local model it starts once the model is settled: at boot, or when Ollama answers (adoptLocal).
+    expect(src).toContain("if (localBrain.settled || memoryBrainSetting(process.env, () => {}) !== 'local') startMemory();");
+    expect(between('const adoptLocal = (next: LocalBrain): void => {', 'if (!localBrain.settled) keepPickingLocal(')).toContain('if (!memoryStarted) startMemory();');
     expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
     expect(block).toContain('new MemoryExtractor(memory, knowledge, memoryPlan.brain,');
     expect(block).toContain("memoryPlan.kind === 'local'\n        ? { chatActive }\n        : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }");
@@ -87,9 +90,48 @@ describe('index.ts wiring', () => {
     expect(src).not.toMatch(/AnthropicProvider|FLINT_MODEL\b/);
     expect(src).toContain('const local = await chooseLocalBrain(process.env, {');
     expect(src).toContain('return { provider: new OllamaProvider(local.options), model: local.model, local };');
-    expect(src).toContain('const { provider, model, local: localBrain } = await buildProvider();');
+    expect(src).toContain('let { provider, model, local: localBrain } = await buildProvider();');
     // The legacy frontier is built by ./brains, with the client that fails fast.
     expect(src).toContain('const frontierCfg = buildFrontierProvider(process.env,');
+  });
+
+  // The review's case: the pick waited on Ollama (up to ~112 s) before the server listened, and the
+  // installer's /health poll gave up first. The deploy must never fail because Ollama is slow.
+  it('boot never waits on Ollama for long: it listens on a stand-in, and Ollama\'s answer is swapped in for the next turn', () => {
+    // Everything main() waits for before it listens, so a fourth has to be looked at here. The two
+    // that ask Ollama are cut off by the clock: the local pick (LOCAL_PICK_CAP_MS,
+    // test/local-model.test.ts) and the tools' vectors (BOOT_EMBED_WAIT_MS, test/router.test.ts).
+    // The MCP servers are no part of Ollama.
+    const boot = between('async function main(): Promise<void> {', 'server.listen(PORT, HOST');
+    const waits = boot.split('\n').filter((l) => /^ {2}\S.*\bawait\b/.test(l)).map((l) => l.trim().replace(/\(.*$/, ''));
+    expect(waits).toEqual([
+      'let { provider, model, local: localBrain } = await buildProvider',
+      'const registry = specs.length > 0 ? await McpRegistry.connect',
+      'const router = await ToolRouter.build',
+    ]);
+    // The swap comes after listening, and replaces everything built from the local model.
+    expect(src.indexOf('server.listen(PORT, HOST')).toBeLessThan(src.indexOf('const adoptLocal = (next: LocalBrain): void => {'));
+    const adopt = between('const adoptLocal = (next: LocalBrain): void => {', 'if (!localBrain.settled) keepPickingLocal(');
+    for (const line of [
+      'localBrain = next;',
+      'provider = new OllamaProvider(next.options);',
+      'model = next.model;',
+      'localEnv = { ...process.env, ...next.env };',
+      'flint = new Flint({ provider, defaultModel: model, memory, observer });',
+      'persona = localPersonaFor(flint, styles.local, model);',
+      'styled = makeStyled();',
+      'backgroundBrain = makeBackground();',
+      'noteLocalDefault(next);',
+    ]) {
+      expect(adopt, line).toContain(line);
+    }
+    expect(src).toContain('if (!localBrain.settled) keepPickingLocal(process.env, adoptLocal, { log: (m) => console.error(m) });');
+    // "The next turn": each request reads them as it arrives, inside the request handler, so a turn
+    // already running keeps the persona it started with.
+    const perRequest = between('const server = createServer(safeHandler((req, res) => withTurnTaint(() => {', 'const HOST = bindHost(process.env);');
+    expect(perRequest).toContain('return handle(req, res, { persona, localModels, styled, provider, model, localFrom: localBrain.from,');
+    expect(src).toContain('brain: () => backgroundBrain,');
+    expect(src).toContain('serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel }),');
   });
 
   it('the breaker sees every provider request: its observer is on the one observer every Flint client shares', () => {
@@ -178,8 +220,11 @@ describe('index.ts wiring', () => {
     const health = between("url === '/health'", '// Auth for everything else');
     expect(health).toContain('localModelFrom: ctx.localFrom,');
     expect(src).toContain('localFrom: localBrain.from,');
-    const note = between("if (localBrain.from === 'default') {", 'const runtimeUrl =');
-    expect(note).toContain('const note = localDefaultNote(model);');
+    const note = between('const noteLocalDefault = (b: LocalBrain): void => {', 'const runtimeUrl =');
+    // Only a default that is settled: a stand-in while Ollama has not answered is no guess to report.
+    expect(note).toContain("if (b.from !== 'default' || !b.settled) return;");
+    expect(note).toContain('const note = localDefaultNote(b.model);');
+    expect(note).toContain('noteLocalDefault(localBrain);');
     expect(note).toContain("notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });");
   });
 
@@ -208,7 +253,7 @@ describe('index.ts wiring', () => {
 
   it('every persona says which model answers: the local brain, an eval candidate, each frontier tier', () => {
     expect(src).toContain('engine: engineLineFor(provider, m),');
-    expect(src).toContain('const persona = localPersonaFor(flint, styles.local, model);');
+    expect(src).toContain('let persona = localPersonaFor(flint, styles.local, model);');
     expect(src).toContain('variant ?? styles.local, m),');
     expect(src).toContain('buildLocal: (v) => localPersonaFor(flint, v, model),');
     expect(src).toContain('engine: engineLineFor(fProvider, fModel),');
@@ -219,7 +264,8 @@ describe('index.ts wiring', () => {
   it('background calls (/internal/complete) go to the local model, yielding to chat, and never to a frontier tier', () => {
     const block = between('const backgroundModel = localBackgroundModel(', 'startInternal({');
     expect(block).toContain('const backgroundModel = localBackgroundModel(localEnv, model,');
-    expect(block).toContain('const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
+    expect(block).toContain('return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
+    expect(block).toContain('let backgroundBrain = makeBackground();');
     expect(block).toContain('brain: () => backgroundBrain,');
     // Free calls are bounded by a count a day, read from the env beside the dollar caps.
     expect(block).toContain('const callCaps = readKindCallCaps(process.env,');

@@ -98,9 +98,9 @@ import { ActionQueue } from './actions';
 import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, chooseLocalBrain, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
+import { LocalPersonaCache, chooseLocalBrain, keepPickingLocal, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
-import { chooseMemoryBrain, frontierExtractBrain, liveChat } from './memory-brain';
+import { chooseMemoryBrain, frontierExtractBrain, liveChat, memoryBrainSetting } from './memory-brain';
 import {
   SpendLedger,
   SpendGuard,
@@ -425,10 +425,13 @@ async function main(): Promise<void> {
       ? '[access] tailnet: only FLINT_TAILNET_USER may use Flint, and gets the console token'
       : '[access] FLINT_TAILNET_USER unset: the console carries its token only for this Mac; tailnet devices paste it in Settings',
   );
-  const { provider, model, local: localBrain } = await buildProvider();
+  // The local brain, as the NEXT turn uses it. These four change once at most: when Ollama did not
+  // answer at boot, the server starts on a stand-in default (it never waits for Ollama before it
+  // listens), and adoptLocal below swaps in Ollama's own answer when it comes.
+  let { provider, model, local: localBrain } = await buildProvider();
   // The local model as it was settled (OLLAMA_MODEL, or what Ollama had, at the window it is loaded
   // with): what memory extraction and background calls read, so all three ask the same model alike.
-  const localEnv = { ...process.env, ...localBrain.env };
+  let localEnv: Record<string, string | undefined> = { ...process.env, ...localBrain.env };
   // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
   // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
   const actionLog = new ActionLogObserver(recordTurnEntry, 2000);
@@ -437,11 +440,14 @@ async function main(): Promise<void> {
   // The notifications feed is built here so the guard can warn at 50/80/100%.
   const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
   // Nothing was set and Ollama had no model to offer: the local brain is a guess until the next
-  // restart, and Will is told once a day, in the console only.
-  if (localBrain.from === 'default') {
-    const note = localDefaultNote(model);
+  // restart, and Will is told once a day, in the console only. (Not when Ollama simply has not
+  // answered yet: that is a stand-in for some seconds, and the log says so.)
+  const noteLocalDefault = (b: LocalBrain): void => {
+    if (b.from !== 'default' || !b.settled) return;
+    const note = localDefaultNote(b.model);
     notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });
-  }
+  };
+  noteLocalDefault(localBrain);
   // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
   // (and not blank) it also turns on runtime mode below. One link for everything
   // that talks to the runtime (audit, policies, events, World now, the lanes).
@@ -493,7 +499,7 @@ async function main(): Promise<void> {
     const origin = convTaint.origin(cid, ids, Date.now(), memory.historyStats(cid).window?.maxAgeMs ?? Infinity);
     if (origin !== undefined) taintFromHistory(origin);
   };
-  const flint = new Flint({ provider, defaultModel: model, memory, observer });
+  let flint = new Flint({ provider, defaultModel: model, memory, observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -510,7 +516,7 @@ async function main(): Promise<void> {
       engine: engineLineFor(provider, m),
       lessonStore,
     });
-  const persona = localPersonaFor(flint, styles.local, model);
+  let persona = localPersonaFor(flint, styles.local, model);
   // Eval-only local-model override (apps/parity --local-model / --local-think, see
   // local-model.ts): the same local persona, memory and action log, with a different
   // default model. Built lazily per (model, think, style variant); never used by normal traffic.
@@ -722,11 +728,13 @@ async function main(): Promise<void> {
     makePersona: (fProvider, fModel) => frontierPersonaFor(fProvider, fModel, styles.frontier),
   });
   // Eval requests may name another style variant; built per (brain, variant) on first use.
-  const styled = new StyledPersonas<Persona>(styles, {
-    local: persona,
-    buildLocal: (v) => localPersonaFor(flint, v, model),
-    buildFrontier: frontierPersonaFor,
-  });
+  const makeStyled = () =>
+    new StyledPersonas<Persona>(styles, {
+      local: persona,
+      buildLocal: (v) => localPersonaFor(flint, v, model),
+      buildFrontier: frontierPersonaFor,
+    });
+  let styled = makeStyled();
   if (brains) {
     frontier = { persona: brains.primary.persona, model: brains.primary.label, media: mediaOf(brains.primary) };
     frontierModel = brains.primary.label;
@@ -771,14 +779,18 @@ async function main(): Promise<void> {
   // background spend and pauses at 80% of its vendor's cap (./spend).
   const extractWith = extractFlint;
   const chatActive = liveChat(chatLoad);
-  const memoryPlan = chooseMemoryBrain(localEnv, {
-    frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
-    chatActive,
-    log: (m) => console.error(m),
-  });
-  if (memoryPlan.kind === 'none') {
-    console.error(`[memory-extract] not running: ${memoryPlan.why}`);
-  } else {
+  let memoryStarted = false;
+  const startMemory = (): void => {
+    memoryStarted = true;
+    const memoryPlan = chooseMemoryBrain(localEnv, {
+      frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
+      chatActive,
+      log: (m) => console.error(m),
+    });
+    if (memoryPlan.kind === 'none') {
+      console.error(`[memory-extract] not running: ${memoryPlan.why}`);
+      return;
+    }
     const extractVendor = memoryPlan.kind === 'frontier' && brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
     console.error(
       memoryPlan.kind === 'local'
@@ -792,7 +804,11 @@ async function main(): Promise<void> {
         : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }),
       isTainted: (cid, tid) => convTaint.isTainted(cid, tid),
     }).start();
-  }
+  };
+  // On the local model it reads the model that was settled, so it starts once there is one: now,
+  // or when Ollama answers (adoptLocal). On the frontier, or off, the local model is no part of it.
+  if (localBrain.settled || memoryBrainSetting(process.env, () => {}) !== 'local') startMemory();
+  else console.error('[memory-extract] waiting for Ollama to answer before it picks the local model');
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
@@ -815,8 +831,11 @@ async function main(): Promise<void> {
   })();
   // The runtime's background calls (./background-complete): answered by the local model, never an
   // outside one, yielding to Will's chat like memory extraction. Every kind is off until Will raises its cap.
-  const backgroundModel = localBackgroundModel(localEnv, model, (m) => console.error(m));
-  const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
+  const makeBackground = () => {
+    const backgroundModel = localBackgroundModel(localEnv, model, (m) => console.error(m));
+    return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
+  };
+  let backgroundBrain = makeBackground();
   // The local model costs nothing, so a kind is bounded by its calls a day, not its dollars.
   const callCaps = readKindCallCaps(process.env, (m) => console.error(`[spend] ${m}`));
   const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
@@ -850,6 +869,24 @@ async function main(): Promise<void> {
   // forwards any tailnet peer's connection to 127.0.0.1:<port>, headers and all.
   const HOST = bindHost(process.env);
   server.listen(PORT, HOST, () => console.error(`Flint listening on ${HOST}:${PORT} (provider=${provider.name}, model=${model})`));
+
+  // Ollama did not answer at boot, so the local brain is a stand-in default. Nothing waited for it
+  // (the server is listening, and the installer's /health poll has its answer): it is asked again
+  // in the background, and its own answer becomes the local brain for the NEXT turn. Each request
+  // reads these variables when it arrives, so a turn already running finishes on what it started with.
+  const adoptLocal = (next: LocalBrain): void => {
+    localBrain = next;
+    provider = new OllamaProvider(next.options);
+    model = next.model;
+    localEnv = { ...process.env, ...next.env };
+    flint = new Flint({ provider, defaultModel: model, memory, observer });
+    persona = localPersonaFor(flint, styles.local, model);
+    styled = makeStyled();
+    backgroundBrain = makeBackground();
+    noteLocalDefault(next);
+    if (!memoryStarted) startMemory();
+  };
+  if (!localBrain.settled) keepPickingLocal(process.env, adoptLocal, { log: (m) => console.error(m) });
 }
 
 /** One completed exchange — what the Action Log shows, click-to-read the full text. */

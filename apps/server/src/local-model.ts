@@ -18,7 +18,7 @@
  * how a bake-off measures them with it off. Accepted only with a valid
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
-import { OllamaProvider, isOllamaCloudModel, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
+import { DEFAULT_OLLAMA_MODEL, OllamaProvider, isOllamaCloudModel, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
 import type { StyleVariant } from './style-variant';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
@@ -104,11 +104,25 @@ export interface LocalBrain {
    * with the same window and Ollama never reloads it between them and chat.
    */
   env: { OLLAMA_MODEL: string; OLLAMA_NUM_CTX?: string };
+  /**
+   * False only when the model is the default BECAUSE Ollama did not answer: a
+   * stand-in until it does (keepPickingLocal), not a choice. True for a named
+   * model, a picked one, and the default when Ollama answered with none to offer.
+   */
+  settled: boolean;
 }
 
-/** How many more times an Ollama that did not answer is asked at boot, and how far apart: about a minute in all. */
-export const LOCAL_PICK_RETRIES = 12;
-export const LOCAL_PICK_RETRY_MS = 5_000;
+/**
+ * The longest the pick may take, by the clock. Its two list calls are cut off at 2 s each, so
+ * this is never reached by an Ollama that is merely down or slow; it is there so that nothing
+ * Ollama does (a reply that trickles in, a socket that never closes) can hold the server's boot.
+ */
+export const LOCAL_PICK_CAP_MS = 5_000;
+
+/** How often an Ollama that did not answer at boot is asked again, in the background: every 5 s for the first minute, then every 30 s. */
+export const LOCAL_REPICK_FAST_MS = 5_000;
+export const LOCAL_REPICK_SLOW_MS = 30_000;
+export const LOCAL_REPICK_FAST_TRIES = 12;
 
 /**
  * The local brain. It is always Ollama, and always a model on this Ollama:
@@ -119,10 +133,14 @@ export const LOCAL_PICK_RETRY_MS = 5_000;
  *    model already loaded, else the first one pulled, else DEFAULT_OLLAMA_MODEL).
  *    A loaded model keeps the context size it is loaded with, unless
  *    OLLAMA_NUM_CTX says otherwise, so the pick does not make Ollama reload it.
- *  - An Ollama that does not answer may simply not be up yet (both start at
- *    login), so it is asked again for about a minute before the default is
- *    settled for. The default is a guess that lasts until the next restart:
- *    /health says where the model came from, and the console gets one note.
+ *
+ * It asks ONCE and never waits: two list calls, each cut off at 2 s, and the
+ * whole pick at LOCAL_PICK_CAP_MS by the clock, so the server is listening
+ * within seconds whatever Ollama is doing (the installer polls /health, and a
+ * boot that waited for Ollama failed the deploy). When Ollama does not answer
+ * (both start at login, and it may be a few seconds behind), the result is the
+ * default model with `settled: false`: main() starts on it and
+ * keepPickingLocal swaps in Ollama's own answer for the next turn.
  *
  * It used to become Anthropic's claude-sonnet-4-6 whenever OLLAMA_MODEL was
  * unset and a key was present: a missing setting quietly sent every "local"
@@ -131,7 +149,7 @@ export const LOCAL_PICK_RETRY_MS = 5_000;
  */
 export async function chooseLocalBrain(
   env: Record<string, string | undefined>,
-  deps: { fetch?: typeof fetch; log?: (msg: string) => void; wait?: (ms: number) => Promise<void>; retries?: number } = {},
+  deps: { fetch?: typeof fetch; log?: (msg: string) => void; capMs?: number } = {},
 ): Promise<LocalBrain> {
   const log = deps.log ?? (() => {});
   const options = liveOllamaOptions(env);
@@ -141,20 +159,22 @@ export async function chooseLocalBrain(
     log('[brain] OLLAMA_MODEL is an Ollama cloud model, which runs on Ollama\'s servers: it is not used as the local brain');
     named = undefined;
   }
-  if (named) return { options, model: named, from: 'env', env: { OLLAMA_MODEL: named } };
+  if (named) return { options, model: named, from: 'env', env: { OLLAMA_MODEL: named }, settled: true };
 
-  const pick = () => pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) });
-  const wait = deps.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let picked = await pick();
-  if (!picked.answered) log('[brain] OLLAMA_MODEL is unset and Ollama is not answering yet: asking again for up to a minute');
-  for (let i = 0; !picked.answered && i < (deps.retries ?? LOCAL_PICK_RETRIES); i++) {
-    await wait(LOCAL_PICK_RETRY_MS);
-    picked = await pick();
-  }
+  let cap: ReturnType<typeof setTimeout> | undefined;
+  const picked = await Promise.race([
+    pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+    // Out of time is the same answer as no answer: the stand-in default, asked again in the background.
+    new Promise<PickedOllamaModel>((resolve) => {
+      cap = setTimeout(() => resolve({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered: false }), deps.capMs ?? LOCAL_PICK_CAP_MS);
+    }),
+  ]).finally(() => clearTimeout(cap));
   log(
-    picked.from === 'default'
-      ? `[brain] OLLAMA_MODEL is unset and Ollama ${picked.answered ? 'listed no chat model' : 'did not answer'}: the local brain is ${picked.model} until the next restart (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
-      : `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`,
+    picked.from !== 'default'
+      ? `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`
+      : picked.answered
+        ? `[brain] OLLAMA_MODEL is unset and Ollama listed no chat model: the local brain is ${picked.model} until the next restart (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
+        : `[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${picked.model} for now, and Ollama is asked again in the background`,
   );
   // A loaded model is asked with the window it is loaded with, unless Will set one.
   const numCtx = env.OLLAMA_NUM_CTX?.trim() ? undefined : picked.numCtx;
@@ -163,7 +183,46 @@ export async function chooseLocalBrain(
     model: picked.model,
     from: picked.from,
     env: { OLLAMA_MODEL: picked.model, ...(numCtx !== undefined ? { OLLAMA_NUM_CTX: String(numCtx) } : {}) },
+    settled: picked.from !== 'default' || picked.answered,
   };
+}
+
+/**
+ * Keep asking an Ollama that did not answer at boot, in the background, and
+ * hand its answer to `adopt` once: the local brain for the NEXT turn (a turn
+ * already running finishes on the one it started with). Nothing waits on this:
+ * the server is up and answering on the stand-in default meanwhile. The timer
+ * does not keep the process alive, and `stop()` ends it.
+ */
+export function keepPickingLocal(
+  env: Record<string, string | undefined>,
+  adopt: (brain: LocalBrain) => void,
+  deps: { fetch?: typeof fetch; log?: (msg: string) => void; wait?: (ms: number) => Promise<void> } = {},
+): { stop: () => void; done: Promise<void> } {
+  let stopped = false;
+  const wait =
+    deps.wait ??
+    ((ms: number) =>
+      new Promise<void>((r) => {
+        setTimeout(r, ms).unref?.();
+      }));
+  const done = (async () => {
+    for (let tries = 0; !stopped; tries++) {
+      await wait(tries < LOCAL_REPICK_FAST_TRIES ? LOCAL_REPICK_FAST_MS : LOCAL_REPICK_SLOW_MS);
+      if (stopped) return;
+      // Quiet: one line when it settles, not one for every time Ollama still is not there.
+      const next = await chooseLocalBrain(env, deps.fetch ? { fetch: deps.fetch } : {});
+      if (!next.settled) continue;
+      (deps.log ?? (() => {}))(
+        next.from === 'default'
+          ? `[brain] Ollama is answering now and lists no chat model: the local brain stays ${next.model} (run "ollama pull ${next.model}", or set OLLAMA_MODEL)`
+          : `[brain] Ollama is answering now: the local brain is ${next.model}, which it has ${next.from}; the next turn uses it`,
+      );
+      adopt(next);
+      return;
+    }
+  })();
+  return { stop: () => void (stopped = true), done };
 }
 
 /** The console note when the local brain is the fallback default: nothing was set and Ollama had nothing to offer. */

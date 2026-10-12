@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Tool } from '@flint/core';
 import { classifyMessage } from '@flint/core';
-import { DEFAULT_TIER_TOOL_SCORE, ToolRouter, parseTierToolScore, type Embedder } from '../src/router';
+import { BOOT_EMBED_WAIT_MS, DEFAULT_TIER_TOOL_SCORE, EMBED_DEADLINE_MS, ToolRouter, parseTierToolScore, type Embedder } from '../src/router';
 
 const tool = (name: string): Tool => ({
   definition: { name, description: name, inputSchema: { type: 'object', properties: {} } },
@@ -70,6 +70,78 @@ describe('ToolRouter', () => {
     expect(scored.tools.map((t) => t.definition.name)).toEqual((await router.select('forecast please')).map((t) => t.definition.name));
     expect(scored.appended).toEqual([{ name: 'prophet.forecast', score: 1 }]);
     expect(await router.selectScored('hello there')).toEqual({ tools: [tools[0]], appended: [] });
+  });
+});
+
+// The server builds its router before it listens. An Ollama that took the embedding request and
+// said nothing held the boot there for good: /health never answered, and the installer, which
+// polls it, put the previous bundle back. The deploy must never fail because Ollama is slow.
+describe('ToolRouter never holds the boot, or a turn, on a slow Ollama', () => {
+  const tools = [tool('remember'), tool('prophet.forecast')];
+  const vectors = (texts: string[]) => texts.map((t) => [t.includes('forecast') ? 1 : 0, t.includes('forecast') ? 0 : 1]);
+  const names = (ts: Tool[]) => ts.map((t) => t.definition.name);
+  /** Resolves to 'late' if `p` has not settled within `ms`. */
+  const orLate = <T,>(p: Promise<T>, ms = 500) => Promise.race([p, new Promise<'late'>((r) => setTimeout(() => r('late'), ms))]);
+
+  /** An Ollama whose first embedding request hangs until `answer()` (or for good); later ones answer at once. */
+  function slowEmbedder() {
+    const state = { calls: 0, answer: () => {} };
+    const embedder: Embedder = {
+      embed(texts) {
+        if (++state.calls > 1) return Promise.resolve(vectors(texts));
+        return new Promise((resolve) => {
+          state.answer = () => resolve(vectors(texts));
+        });
+      },
+    };
+    return { state, embedder };
+  }
+
+  it('build() returns after its wait with the core, though Ollama has not answered', async () => {
+    const { embedder } = slowEmbedder();
+    const started = Date.now();
+    const router = await orLate(ToolRouter.build(tools, embedder, ['remember'], { bootWaitMs: 30 }));
+    if (router === 'late') throw new Error('build() waited for Ollama');
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(router.appendsReady).toBe(false);
+    expect(router.coreLength).toBe(1);
+  });
+
+  it('a message that arrives while the vectors are still being built gets the core at once', async () => {
+    const { state, embedder } = slowEmbedder();
+    const router = await ToolRouter.build(tools, embedder, ['remember'], { bootWaitMs: 20, floor: 0.5 });
+    const picked = await orLate(router.select('forecast please'));
+    if (picked === 'late') throw new Error('the turn waited for Ollama');
+    expect(names(picked)).toEqual(['remember']);
+    expect(state.calls).toBe(1); // it did not start a second pass beside the one in flight
+  });
+
+  it('appends go live when the slow answer lands, with no restart', async () => {
+    const { state, embedder } = slowEmbedder();
+    const router = await ToolRouter.build(tools, embedder, ['remember'], { bootWaitMs: 20, floor: 0.5 });
+    expect(router.appendsReady).toBe(false);
+    state.answer();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(router.appendsReady).toBe(true);
+    expect(names(await router.select('forecast please'))).toEqual(['remember', 'prophet.forecast']);
+  });
+
+  it('a pass that is never answered is given up by the clock, and the next one due is made', async () => {
+    const { state, embedder } = slowEmbedder(); // the first request hangs for good
+    let clock = 0;
+    const router = await ToolRouter.build(tools, embedder, ['remember'], { bootWaitMs: 10, embedDeadlineMs: 40, retryMs: 60_000, floor: 0.5, now: () => clock });
+    await new Promise((r) => setTimeout(r, 80)); // past the deadline: the hung pass is no longer in flight
+    expect(router.appendsReady).toBe(false);
+    expect(names(await router.select('forecast please'))).toEqual(['remember']); // not due yet
+    expect(state.calls).toBe(1);
+    clock += 60_000;
+    expect(names(await router.select('forecast please'))).toEqual(['remember', 'prophet.forecast']);
+    expect(router.appendsReady).toBe(true);
+  });
+
+  it('the real waits are short: a few seconds at boot, a minute for a pass', () => {
+    expect(BOOT_EMBED_WAIT_MS).toBeLessThanOrEqual(5_000);
+    expect(EMBED_DEADLINE_MS).toBeLessThanOrEqual(60_000);
   });
 });
 
