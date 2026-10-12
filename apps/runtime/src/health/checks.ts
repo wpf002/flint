@@ -41,7 +41,7 @@ import { REVIEWS_STOPPED, waitedMs } from '../goals/late.js';
 import { reviewStanding } from '../goals/review.js';
 import { activePolicies } from '../governance/proposals.js';
 import { SNAPSHOT_ACTION } from '../ledger/calibration.js';
-import { SWEEP_ACTION } from '../ledger/sweep.js';
+import { LEDGER_ACTOR, SWEEP_ACTION } from '../ledger/sweep.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
 export interface ComponentCheck {
@@ -220,29 +220,40 @@ export const LEDGER_LATE_MS = 3 * 3_600_000;
 export const LEDGER_DOWN_MS = 26 * 3_600_000;
 /** The night's scores are this old: degraded (two nights were missed). */
 export const SCORES_OLD_MS = 50 * 3_600_000;
+/** How long a runtime that just started is given to run its first check: one hourly slot, and ten minutes. */
+export const LEDGER_RESTART_GRACE_MS = 70 * 60_000;
 
 /** What Prediction Checks says in Settings > Health: sentences from counts, never a prediction's words or a number it was about. */
 export const LEDGER_HEALTH = {
   stopped: 'A rule stops Flint from checking its predictions.',
   starting: 'Prediction checks start within the hour.',
-  checked: (n: number) => (n === 0 ? 'Flint had no predictions to check in the last day.' : `Flint checked ${count(n, 'prediction')} in the last day.`),
+  /** The last day's checks: how many predictions were checked (a result written, or set aside with declined advice), and how many ran out unchecked. */
+  checked: (n: number, ranOut = 0) =>
+    ranOut === 0 ? (n === 0 ? 'Flint had no predictions to check in the last day.' : `Flint checked ${count(n, 'prediction')} in the last day.`)
+    : n === 0 ? `In the last day, ${count(ranOut, 'prediction')} ran out unchecked.`
+    : `Flint checked ${count(n, 'prediction')} in the last day, and ${ranOut} ran out unchecked.`,
   late: (hours: number) => `Prediction checks haven’t run in ${count(hours, 'hour')}.`,
   down: 'Prediction checks didn’t run in the last day.',
   refused: (n: number) => `The database refused ${count(n, 'prediction check')}.`,
   noRule: (n: number) => (n === 1 ? 'Flint can’t check 1 prediction, so it will run out unchecked.' : `Flint can’t check ${n} predictions, so they will run out unchecked.`),
+  noScores: 'Flint hasn’t scored its predictions yet.',
   scoresOld: (days: number) => `Flint’s accuracy scores are ${count(days, 'day')} old.`,
 } as const;
 
 /**
  * Prediction checks (P4): is Flint settling and scoring its own predictions?
- * Counts only. Read from the sweep's own audit entries (one per run) and the
- * snapshot's, so a job that died shows within hours.
+ * Counts only. Read from the sweep's own audit entries (one per run, the
+ * ledger's actor alone) and the snapshot's, so a job that died shows within
+ * hours.
  *  - Off while FLINT_PREDICT is off, and while no number was ever turned on
  *    (the jobs do nothing until Will signs the card).
- *  - How long since the last check is counted from the latest of: that check,
- *    the first turn-on, and this runtime's start. So the hours before
- *    predictions were on, and a restart, never read as a missed check; a
- *    runtime that has been up for 3 hours with no check does.
+ *  - How long since the last check is counted from that check, or from the
+ *    first turn-on when there has been none: the hours before predictions
+ *    were on never read as a missed check.
+ *  - A runtime that just started is given one hourly slot to run its first
+ *    check (70 minutes): inside it, the quiet time counts from the start.
+ *    After it a restart excuses nothing, so a runtime that restarts every few
+ *    hours and never checks reads late, then down, like any other.
  */
 async function predictionChecks(d: CheckDeps): Promise<ComponentCheck> {
   const { db, now } = d;
@@ -259,10 +270,13 @@ async function predictionChecks(d: CheckDeps): Promise<ComponentCheck> {
   if (!may('ledger.resolve.auto') && !may('ledger.expire')) return { component, status: 'degraded', detail: LEDGER_HEALTH.stopped };
   const day = new Date(now.getTime() - 24 * 3_600_000);
   const sweeps = await db.auditEntry.findMany({
-    where: { kind: 'action', action: SWEEP_ACTION, at: { gt: new Date(now.getTime() - LEDGER_DOWN_MS), lte: now } }, orderBy: { at: 'desc' }, take: 60, select: { at: true, inputs: true },
+    where: { kind: 'action', action: SWEEP_ACTION, actor: LEDGER_ACTOR, at: { gt: new Date(now.getTime() - LEDGER_DOWN_MS), lte: now } },
+    orderBy: { at: 'desc' }, take: 60, select: { at: true, inputs: true },
   });
   const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
-  const since = Math.max(sweeps[0]?.at.getTime() ?? 0, first.enabledAt.getTime(), instance?.startedAt.getTime() ?? 0);
+  const started = instance?.startedAt.getTime() ?? 0;
+  const last = Math.max(sweeps[0]?.at.getTime() ?? 0, first.enabledAt.getTime());
+  const since = started > 0 && now.getTime() - started <= LEDGER_RESTART_GRACE_MS ? Math.max(last, started) : last;
   const quiet = now.getTime() - since;
   if (quiet > LEDGER_DOWN_MS) return { component, status: 'down', detail: LEDGER_HEALTH.down };
   if (quiet > LEDGER_LATE_MS) return { component, status: 'degraded', detail: LEDGER_HEALTH.late(Math.floor(quiet / 3_600_000)) };
@@ -271,17 +285,23 @@ async function predictionChecks(d: CheckDeps): Promise<ComponentCheck> {
     const v = inputs && typeof inputs === 'object' ? (inputs as Record<string, unknown>)[key] : undefined;
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   };
-  // The latest check's own trouble: a write the database refused, or a prediction with a rule no resolver knows.
+  // The latest check's own trouble: a write the database refused, or a prediction it has no way to check.
   if (n(sweeps[0].inputs, 'refused')) return { component, status: 'degraded', detail: LEDGER_HEALTH.refused(n(sweeps[0].inputs, 'refused')) };
   if (n(sweeps[0].inputs, 'unknownSpec')) return { component, status: 'degraded', detail: LEDGER_HEALTH.noRule(n(sweeps[0].inputs, 'unknownSpec')) };
   // The night's scores, unless a rule forbids them: late once two nights have gone by without any.
   if (may(SNAPSHOT_ACTION)) {
-    const scored = await db.auditEntry.findFirst({ where: { kind: 'action', action: SNAPSHOT_ACTION, at: { lte: now } }, orderBy: { at: 'desc' }, select: { at: true } });
-    const age = now.getTime() - Math.max(scored?.at.getTime() ?? 0, first.enabledAt.getTime());
+    const scored = await db.auditEntry.findFirst({ where: { kind: 'action', action: SNAPSHOT_ACTION, actor: LEDGER_ACTOR, at: { lte: now } }, orderBy: { at: 'desc' }, select: { at: true } });
+    // None yet, two nights after predictions were turned on: said as that, never as scores of some age.
+    if (!scored && now.getTime() - first.enabledAt.getTime() > SCORES_OLD_MS) return { component, status: 'degraded', detail: LEDGER_HEALTH.noScores };
+    const age = scored ? now.getTime() - scored.at.getTime() : 0;
     if (age > SCORES_OLD_MS) return { component, status: 'degraded', detail: LEDGER_HEALTH.scoresOld(Math.floor(age / 86_400_000)) };
   }
-  const checked = sweeps.filter((s) => s.at > day).reduce((t, s) => t + n(s.inputs, 'resolved') + n(s.inputs, 'expired') + n(s.inputs, 'conditionUnmet'), 0);
-  return { component, status: 'ok', detail: LEDGER_HEALTH.checked(checked) };
+  // The last day's checks. None ran in it (the last was just over a day ago, and this runtime has only now started): said as starting, never as a day with nothing to check.
+  const recent = sweeps.filter((s) => s.at > day);
+  if (!recent.length) return { component, status: 'ok', detail: LEDGER_HEALTH.starting };
+  const sum = (key: string) => recent.reduce((t, s) => t + n(s.inputs, key), 0);
+  // Run out is not checked: it is counted beside.
+  return { component, status: 'ok', detail: LEDGER_HEALTH.checked(sum('resolved') + sum('conditionUnmet'), sum('expired')) };
 }
 
 /** How many of the latest plan stages Health looks at. */

@@ -226,25 +226,31 @@ describe('the runtime’s notes to Will', () => {
       expect(line.length, line).toBeLessThanOrEqual(120);
     };
     const health = [
-      LEDGER_HEALTH.stopped, LEDGER_HEALTH.starting, LEDGER_HEALTH.down,
+      LEDGER_HEALTH.stopped, LEDGER_HEALTH.starting, LEDGER_HEALTH.down, LEDGER_HEALTH.noScores,
       ...[0, 1, 2, 18, 240].map((n) => LEDGER_HEALTH.checked(n)),
+      // Run out is said beside what was checked, never as checked.
+      ...[[0, 1], [0, 7], [1, 1], [18, 2], [240, 31]].map(([n, out]) => LEDGER_HEALTH.checked(n!, out)),
       ...[3, 8, 25].map((n) => LEDGER_HEALTH.late(n)),
       ...[1, 2, 40].flatMap((n) => [LEDGER_HEALTH.refused(n), LEDGER_HEALTH.noRule(n)]),
       ...[2, 3, 30].map((n) => LEDGER_HEALTH.scoresOld(n)),
     ];
-    expect(health).toHaveLength(20);
+    expect(health).toHaveLength(26);
     for (const line of health) said(line);
     expect(HEALTH_NAMES.ledger).toBe('Prediction Checks');
     expect([LEDGER_HEALTH.checked(1), LEDGER_HEALTH.checked(18), LEDGER_HEALTH.late(3), LEDGER_HEALTH.refused(1), LEDGER_HEALTH.scoresOld(3)]).toEqual([
       'Flint checked 1 prediction in the last day.', 'Flint checked 18 predictions in the last day.', 'Prediction checks haven’t run in 3 hours.',
       'The database refused 1 prediction check.', 'Flint’s accuracy scores are 3 days old.',
     ]);
+    expect([LEDGER_HEALTH.checked(0, 1), LEDGER_HEALTH.checked(0, 7), LEDGER_HEALTH.checked(18, 2), LEDGER_HEALTH.noScores]).toEqual([
+      'In the last day, 1 prediction ran out unchecked.', 'In the last day, 7 predictions ran out unchecked.',
+      'Flint checked 18 predictions in the last day, and 2 ran out unchecked.', 'Flint hasn’t scored its predictions yet.',
+    ]);
     // Every sentence checks.ts can give for the component is one of these: none is put together where it is returned.
     const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
     const fn = checks.slice(checks.indexOf('async function predictionChecks('), checks.indexOf('/** How many of the latest plan stages Health looks at. */'));
     expect(fn.length).toBeGreaterThan(500);
-    expect(fn.match(/\bdetail: /g)).toHaveLength(8);
-    expect(fn.match(/detail: LEDGER_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(8);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(10);
+    expect(fn.match(/detail: LEDGER_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(10);
     // The digest names the component as Health does when it needs a look.
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['ledger'])).toContain('Prediction Checks');
   });
