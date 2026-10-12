@@ -754,43 +754,95 @@ deploy is tried again (as any deploy that fails its checks is).
 ## Putting the database back from a backup
 
 What to type is in [docs/RECOVERY.md](../../docs/RECOVERY.md). This is how it works
-(`src/backup/restore.ts`).
+(`src/backup/restore.ts`, `catalog.ts`, `carry.ts`).
 
-- **`pnpm --filter @flint/runtime restore-production`** replaces the production
-  database with a nightly dump. It is the action `restore.production`: APPROVAL
-  in code, never promotable, and not an autonomous action, so Flint is refused it
-  on its own whatever a policy row says. It cannot wait on an approval card (the
+- **`pnpm --silent --filter @flint/runtime restore-production`** replaces the
+  production database with a nightly dump. It is the action
+  `restore.production`: APPROVAL in code for Will at the keyboard, never
+  promotable, FORBIDDEN from chat and for Flint on its own, and refused when a
+  policy row of Will's own forbids it (the command reads his rows from the
+  database in use when it still can). It cannot wait on an approval card (the
   cards live in the database it replaces), so the approval is Will at a
-  terminal, typing `RESTORE`: there is no `--auto`, and it refuses to read the
-  answer from a pipe. What it does, in order:
-  1. checks the dump: its name, that only its owner can write it, its
-     fingerprint (the `.sha256` the nightly backup now writes beside each dump,
-     else the `BackupRun` row), that `pg_restore` can read it, and its counts;
-  2. asks; then takes a copy of the database as it is
-     (`~/FlintBackups/pre-restore`);
-  3. restores into a database of its own beside the one in use, as
-     `flint_owner`, and checks it there: every table's row count against the
-     counts taken in the dump's snapshot, that `flint_owner` owns everything,
-     the grants the governance rules depend on, and the migrations;
-  4. applies any migration made since the backup, so the copy matches the code
-     that is running;
-  5. marks every unused approval used, and every card that was approved and had
-     not finished as failed, so nothing signed before the backup can act after
-     it; and writes its own audit entry as the runtime's role;
-  6. only then stops the runtime, renames the database in use to
-     `flint_damaged_<time>`, gives the restored one its name, and starts the
-     runtime. Nothing is dropped. Any failure before the rename leaves the
-     database in use exactly as it was.
-- **`restore-production --check`** is a trial run: steps 1, 3, 4 and 5 on the
-  copy, which is then dropped. Nothing changes, and it says how long a real
-  restore would take.
-- **`restore-empty --dump <file>`** is the rebuild's restore
-  (`apps/studio/rebuild.sh`): into an empty database only.
+  terminal, typing `RESTORE`. There is no `--auto`.
+
+  Asking at a terminal stops an accident: a script, a pipe or a job. It does not
+  stop someone who sets out to answer for him, because a program can run the
+  command under a pseudo-terminal and type the word. What such a caller could
+  do is bounded by what the command itself refuses, below, not by the prompt.
+
+  What it does, in order. Nothing in use is touched before step 9.
+  1. One restore at a time (an advisory lock), and no update while it runs: it
+     makes `~/.flint/deploy-hold` for as long as it runs, and refuses while the
+     deploy job is installing one. If an earlier run was stopped part-way (the
+     database is closed, or missing while a kept copy is there) it says exactly
+     that, with the repair command.
+  2. Checks the setup: the roles and their powers, who owns the database, that
+     the saved passwords still sign in.
+  3. Checks the dump before anything reads it: its name, that it is a plain
+     file of Will's own that no one else can write, and its fingerprint against
+     EVERY record of it: the file the nightly backup writes beside each dump
+     (sealed with a key in `~/.flint/backup-fingerprint.key`, so that whoever
+     can change a dump cannot simply write a new hash beside it) and the
+     `BackupRun` row. A mismatch with any of them is a refusal. With no record
+     at all nothing is restored unless Will adds `--without-fingerprint`.
+  4. Restores into a database of its own, as `flint_restore`: a role that owns
+     nothing else. The SQL in a backup file runs as that role, which cannot
+     reach the production database.
+  5. Compares the copy, object by object, with a database built from THIS
+     checkout's own migrations (after checking, by checksum, that those are the
+     migrations the backup records): every table and column, constraint, index,
+     view, trigger (and whether it is switched on), every function's whole
+     definition, rules, row policies, default privileges, every privilege on
+     every object, and the full list of what the application roles may do. Any
+     difference is a refusal that names the object. Row counts are compared
+     with the counts taken in the dump's own snapshot.
+  6. Hands the copy to `flint_owner`, applies any migration made since the
+     backup, and compares again.
+  7. Carries forward what Will took away after the backup, when the database in
+     use can still be read: a revoked approval key stays revoked, a promotion or
+     triage rule he switched off stays off, and a daily cap already used stays
+     used. Every promotion and rule still in force is checked against his
+     signature, under a key that is still live, and switched off if it fails.
+     Unused approvals are marked used, approved cards that had not finished are
+     marked failed, and queued jobs are closed, so nothing from before the
+     backup acts after it.
+  8. Shows Will what will be in force (the keys that can approve, what Flint
+     may do on its own, what he must do again) and asks. Then takes a copy of
+     the database as it is (`~/FlintBackups/pre-restore`).
+  9. Stops the runtime, closes the production database to new connections,
+     waits for the others to leave (saying who is still connected if they do
+     not), and changes both names in ONE transaction. The database that was in
+     use stays as `flint_damaged_<time>`, closed. Nothing is dropped, except
+     kept databases and pre-restore copies from more than 14 days ago, which
+     are listed before he confirms. The audit entry is written after the swap.
+
+  If the swap fails or is interrupted (Ctrl-C, a closed window), what happens
+  next is decided by reading the catalog: production is opened again under its
+  name and the runtime started, or, when that cannot be confirmed, the copy is
+  kept and the real state is printed with the commands that fix it. "Nothing
+  was changed" is printed only when that was confirmed.
+- **`restore-production --check`** is a trial run: steps 1 to 7 on the copy,
+  which is then dropped. Nothing in use changes, and it says how long a real
+  restore would take and what would be in force. It is recorded in the audit
+  trail and in `~/.flint/restore-log.jsonl`, as is every attempt that fails.
+- **`restore-production --repair`** puts right what a run that was stopped
+  part-way left: a closed database is opened, a missing one gets its newest
+  kept copy back (Will confirms that one), copies that never went into use are
+  removed, and the runtime is started.
+- **`restore-empty --from-rebuild --dump <file> --sha256 <fingerprint>`** is the
+  rebuild's step (`apps/studio/rebuild.sh`), and refuses to run without the
+  rebuild's flag: the same path, into an empty database only. It asks no one,
+  so its audit entry says the rebuild ran it, not Will.
 - **`bootstrap-db --port <n>`** makes the five roles and the `flint` and
   `flint_test` databases on a rebuilt Mac (`src/backup/bootstrap.ts`). Every
   password is new, reaches the server only as a SCRAM verifier, and is written
-  only to `~/.flint/secrets.env` and `backup.env`. It refuses a Mac that
-  already has them.
+  only to `~/.flint/secrets.env` and `backup.env`: staged first, then every
+  role in one transaction, then the files take their names. It refuses a Mac
+  that already has them.
 
-The tests for all four run against a throwaway Postgres of their own
+One thing on the Studio is needed once, because its roles were made by hand
+before this existed: the migration owner must be a member of the restoring
+role. `restore-production --check` says so, with the command, if it is missing.
+
+The tests for all of these run against a throwaway Postgres of their own
 (`test/scratch-cluster.ts`), never against `flint` or `flint_test`.

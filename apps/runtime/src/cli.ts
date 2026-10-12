@@ -15,16 +15,18 @@
  *                                                    P2.5); needs no database
  *   pnpm --filter @flint/runtime apple-calendar       one line on Apple Calendar reading (P2.6):
  *                                                    its state, last read and event count, never a title
- *   pnpm --filter @flint/runtime restore-production [--dump <file>] [--without-copy]
+ *   pnpm --filter @flint/runtime restore-production [--dump <file>] [--without-copy] [--without-fingerprint]
  *                                                    replace the production database with a nightly backup
  *                                                    (P7): Will runs it in Terminal and types RESTORE; the
- *                                                    database in use is kept under another name
+ *                                                    database in use is kept, closed, under another name
  *   pnpm --filter @flint/runtime restore-production --check
- *                                                    a trial run of the same restore: nothing is changed, and
- *                                                    it says how long a real one would take
- *   pnpm --filter @flint/runtime restore-empty --dump <file>
- *                                                    a rebuilt Mac: restore into the empty database
- *                                                    (apps/studio/rebuild.sh runs it)
+ *                                                    a trial run of the same restore: nothing in use is
+ *                                                    changed, and it says how long a real one would take
+ *   pnpm --filter @flint/runtime restore-production --repair
+ *                                                    put right what a restore that was stopped part-way left
+ *   pnpm --filter @flint/runtime restore-empty --from-rebuild --dump <file> [--sha256 <fingerprint>]
+ *                                                    a rebuilt Mac: restore into the empty database (only
+ *                                                    apps/studio/rebuild.sh runs it)
  *
  * Run by hand, it is Will acting (context console). With --auto (the nightly
  * LaunchAgent) it is Flint acting on its own, so the tier engine decides: an
@@ -162,18 +164,37 @@ async function main(): Promise<void> {
       if (process.argv[2] === 'restore-empty') await restoreEmptyCommand(args, loadRestoreConfig(), { say });
       else {
         const ask = terminal(process.stdin, process.stdout);
-        await restoreProductionCommand(args, loadRestoreConfig(), { say, ...(ask ? { ask } : {}), uid: process.getuid?.() ?? 0 });
+        // Ctrl-C, a closed window or a kill: the restore hears it. Before the swap it ends at once, with nothing in use
+        // touched; during the swap it finishes or undoes the swap first (restore.ts).
+        const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+        await restoreProductionCommand(args, loadRestoreConfig(), {
+          say,
+          ...(ask ? { ask } : {}),
+          uid: process.getuid?.() ?? 0,
+          onSignal: (handler) => {
+            for (const s of signals) process.on(s, handler);
+            return () => {
+              for (const s of signals) process.off(s, handler);
+            };
+          },
+          exit: () => {
+            console.log('Flint stopped because it was interrupted. Nothing in use was changed.');
+            process.exit(130);
+          },
+        });
       }
     } catch (err) {
-      // A refusal is a sentence for Will, and all he needs; anything else is a fault and goes to the handler below.
+      // A refusal is a sentence for Will, then any more he needs (a command on a line of its own); anything else is a
+      // fault and goes to the handler below.
       if (!(err instanceof RestoreRefused)) throw err;
       console.log(err.message);
+      for (const line of err.lines) console.log(line);
       process.exitCode = 1;
     }
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | promotion-table [--phase p1|p2|p25|p26] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--check] | restore-empty --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | promotion-table [--phase p1|p2|p25|p26] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
@@ -197,7 +218,7 @@ async function main(): Promise<void> {
       if (cmd === 'backup') {
         const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
         // The dump's fingerprint, kept beside it: a restore can check the file when the database cannot be asked.
-        writeDumpHash(d.path, d.sha256);
+        writeDumpHash(d.path, d.sha256, b.fingerprintKey);
         const pruned = pruneDumps(b.dumpDir, 14);
         await db.backupRun.create({
           data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },

@@ -1,33 +1,78 @@
 /**
- * Putting Flint's database back from a backup (P7):
+ * Putting Flint's database back from a backup (P7).
  *
- *  - restoreIntoEmpty: on a rebuilt Mac, into the empty database the rebuild
- *    just made. Refused if that database holds anything.
- *  - restoreProduction (the action `restore.production`): over the production
- *    database, run by Will at the keyboard. The backup is restored and checked
- *    in a database of its own first, so the one in use is not touched until the
- *    copy has passed every check. Then the two swap names: nothing is dropped,
- *    and the database that was in use stays as `<name>_damaged_<time>`.
+ * One path, two callers:
+ *  - `restore.production`: over the production database, by Will at the keyboard;
+ *  - a rebuild: into the empty database `bootstrap-db` just made on a new Mac
+ *    (apps/studio/rebuild.sh passes `--from-rebuild`).
  *
- * Both restore as the migration owner (flint_owner), never as a superuser: a
- * backup is a file, and a file that was tampered with should be able to do no
- * more than a database owner can. What comes back is owned by flint_owner, with
- * the grants the backup recorded.
+ * The steps, in order. Nothing in use is touched before step 9.
  *
- * Nothing signed before the backup was taken may act after it: every unused
- * approval is marked used, and every card that was approved but had not finished
- * is marked failed, so Will is asked again.
+ *  1. One restore at a time (an advisory lock), and no update while it runs
+ *     (the deploy hold file). The state the last run left is read first: a
+ *     production database that is closed, or missing, is said in plain words
+ *     with the command that repairs it.
+ *  2. The setup this needs is checked (who owns what, who may sign in).
+ *  3. The backup file is checked: a nightly dump, Will's own, unchanged since it
+ *     was written (EVERY fingerprint recorded for it must match), readable.
+ *     Without a recorded fingerprint nothing is restored unless Will says so.
+ *  4. It is restored into a database of its own, by a role that owns nothing
+ *     else (flint_restore): the SQL in a backup file runs as that role, which
+ *     can reach no other database.
+ *  5. The copy is compared, object by object, with a database built from this
+ *     checkout's own migrations (./catalog.ts): tables, triggers, functions,
+ *     every privilege. Any difference is a refusal that names the object.
+ *  6. Only then is it handed to the migration owner, and brought up to date.
+ *  7. What Will took away after the backup is carried forward, what was signed
+ *     and not finished is set aside, and every promotion is checked against
+ *     his signature (./carry.ts).
+ *  8. Will confirms, having read what is in force afterwards. A trial run
+ *     (`--check`) drops the copy here instead.
+ *  9. The swap: the runtime is stopped, the production database is closed to
+ *     new connections, and the two databases change names in ONE transaction.
+ *     Nothing is dropped: the database that was in use stays as
+ *     `<name>_damaged_<time>`, closed, until Will removes it.
  *
- * Passwords go to pg_restore through PGPASSWORD, never argv, and nothing here
- * logs a URL.
+ * If the swap fails or is interrupted, what happens next is decided by reading
+ * the catalog, never by what this process believes it did: production is
+ * opened again under its name and the runtime started, or, when that cannot be
+ * confirmed, the copy is kept and the real state is said with the commands
+ * that fix it. "Nothing was changed" is printed only when that was confirmed.
+ *
+ * Passwords go to pg_restore through PGPASSWORD, never argv; nothing here logs
+ * a URL, and a tool's own error text is never passed on (backup.ts, toolError).
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statfsSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statfsSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import type { WebAuthnRelyingParty } from '@flint/policy';
 import pg from 'pg';
-import { client, countRows, dumpDatabase, run, sha256File, targetOf, type PgTarget, type Tools } from './backup.js';
+import { failureOf } from '../dbcodes.js';
+import { client, countRows, dumpDatabase, run, sha256File, targetOf, ToolFailed, type PgTarget, type Tools } from './backup.js';
+import { carryForward, readCurrent, type CarryReport, type CurrentFacts } from './carry.js';
+import { OWNER, buildReference, catalogDifference, catalogLines, differenceSentence, migrationState, ownedByOthers, type Migration, type MigrationState } from './catalog.js';
 
-/** Why a restore did not start, or stopped before it changed anything: a sentence for Will. */
-export class RestoreRefused extends Error {}
+export { VOIDED_BY_RESTORE } from './carry.js';
+
+/**
+ * Why a restore did not start, or stopped: a sentence for Will, then (in
+ * `lines`) more sentences and any command he should run, each command on a line
+ * of its own.
+ */
+export class RestoreRefused extends Error {
+  readonly lines: string[];
+  /** Where it stopped, for the record: a word, never data. */
+  readonly stage: string;
+  /** The runtime was stopped and did not start again. */
+  readonly runtimeDown: boolean;
+  constructor(message: string, o: { lines?: string[]; stage?: string; runtimeDown?: boolean } = {}) {
+    super(message);
+    this.lines = o.lines ?? [];
+    this.stage = o.stage ?? 'refused';
+    this.runtimeDown = o.runtimeDown ?? false;
+  }
+}
 
 /** A nightly dump's name (dumpDatabase writes it): the only kind restored here. */
 const DUMP_NAME = /^flint-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.dump$/;
@@ -35,88 +80,32 @@ const DUMP_NAME = /^flint-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.
 const COUNT_KEY = /^public\.("[A-Za-z_][A-Za-z0-9_]{0,62}"|[a-z_][a-z0-9_]{0,62})$/;
 /** A database name this module may create, rename or drop: lower case, no quoting needed. */
 const DB_NAME = /^[a-z][a-z0-9_]{0,62}$/;
+/** Never a production name: Postgres's own databases. */
+const RESERVED = new Set(['postgres', 'template0', 'template1']);
+/** The time in a kept or scratch database's name: `20261012t150000z`. */
+const STAMP = /(\d{4})(\d{2})(\d{2})t(\d{2})(\d{2})(\d{2})z$/;
+const HEX64 = /^[0-9a-f]{64}$/;
+/** How long a kept database, and a copy taken before a restore, is kept before a later restore removes it. */
+export const KEEP_DAYS = 14;
+/** Two numbers no other program on this cluster takes an advisory lock on: "FLNT", and this job. */
+const LOCK = [0x464c4e54, 7] as const;
+/** What repairs a database an earlier run left closed or renamed. */
+const REPAIR = '  pnpm --silent --filter @flint/runtime restore-production --repair';
 
-const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`;
+const withDatabase = (t: PgTarget, database: string): PgTarget => ({ ...t, database });
+const urlOf = (base: string, database: string): string => {
+  const u = new URL(base);
+  u.pathname = `/${database}`;
+  return u.toString();
+};
 
-/** The fingerprint file beside a dump: its sha256, written when the dump was. */
-export function writeDumpHash(dump: string, sha256: string): void {
-  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('not a sha256');
-  writeFileSync(`${dump}.sha256`, `${sha256}\n`, { mode: 0o600 });
-}
-
-export interface DumpCheck {
-  path: string;
-  bytes: number;
-  sha256: string;
-  /** `matches`: the file is byte for byte what was written. `none`: no fingerprint was kept for it. */
-  fingerprint: 'matches' | 'none';
-  /** Row counts taken in the dump's own snapshot; undefined when the file came without them and that was allowed. */
-  counts?: Record<string, number>;
-  /** When the dump was taken (its name says). */
-  takenAt: Date;
-}
-
-export interface DumpCheckOptions {
-  /** The sha256 recorded when the dump was taken, used when no `.sha256` sits beside it. */
-  expectedSha256?: string;
-  /**
-   * Accept a dump with no counts file (an offsite copy made before the counts
-   * went offsite too). A counts file that is there must still be readable.
-   */
-  countsOptional?: boolean;
-}
-
-/**
- * Is this file a whole, untouched nightly dump? Checked before anything is
- * restored: its name, that it is a plain file only its owner can change, its
- * fingerprint (the `.sha256` beside it, else `expectedSha256` from the BackupRun
- * row), that pg_restore can read its table of contents, and its counts file.
- */
-export async function checkDump(dump: string, tools: Tools, opts: DumpCheckOptions = {}): Promise<DumpCheck> {
-  if (!dump.startsWith('/')) throw new RestoreRefused('The backup must be named by its full path.');
-  const named = DUMP_NAME.exec(basename(dump));
-  if (!named) throw new RestoreRefused("That is not one of Flint's nightly database backups.");
-  const takenAt = new Date(`${named[1]}T${named[2]}:${named[3]}:${named[4]}.${named[5]}Z`);
-  if (Number.isNaN(takenAt.getTime())) throw new RestoreRefused("That is not one of Flint's nightly database backups.");
-  let st;
-  try {
-    st = lstatSync(dump);
-  } catch {
-    throw new RestoreRefused('That backup file does not exist.');
-  }
-  if (!st.isFile()) throw new RestoreRefused('That backup is not a plain file.');
-  if (st.mode & 0o022) throw new RestoreRefused('Someone other than you could have changed that backup file, so Flint will not restore it.');
-  if (st.size === 0) throw new RestoreRefused('That backup file is empty.');
-
-  const sha256 = await sha256File(dump);
-  const sidecar = `${dump}.sha256`;
-  const recorded = existsSync(sidecar) ? readFileSync(sidecar, 'utf8').trim() : opts.expectedSha256;
-  if (recorded !== undefined && !/^[0-9a-f]{64}$/.test(recorded)) throw new RestoreRefused('The fingerprint saved with that backup is not readable.');
-  if (recorded !== undefined && recorded !== sha256) throw new RestoreRefused('That backup file has changed since it was written. Choose another backup.');
-
-  try {
-    await run(tools.pgRestore, ['--list', dump], '');
-  } catch {
-    throw new RestoreRefused('That backup file is damaged. Choose another backup.');
-  }
-
-  const fingerprint = recorded === undefined ? 'none' : 'matches';
-  const countsFile = `${dump}.counts.json`;
-  if (!existsSync(countsFile)) {
-    if (!opts.countsOptional) throw new RestoreRefused('That backup has no row counts beside it, so Flint could not check what it restored.');
-    return { path: dump, bytes: st.size, sha256, fingerprint, takenAt };
-  }
-  let counts: Record<string, number>;
-  try {
-    counts = JSON.parse(readFileSync(countsFile, 'utf8')) as Record<string, number>;
-  } catch {
-    throw new RestoreRefused('The row counts beside that backup are not readable.');
-  }
-  const entries = counts && typeof counts === 'object' && !Array.isArray(counts) ? Object.entries(counts) : [];
-  if (entries.length === 0 || entries.some(([k, n]) => !COUNT_KEY.test(k) || !Number.isSafeInteger(n) || n < 0)) {
-    throw new RestoreRefused('The row counts beside that backup are not readable.');
-  }
-  return { path: dump, bytes: st.size, sha256, fingerprint, counts, takenAt };
+/** What went wrong, as a class and a code: never a tool's or a database's own words (they can quote a row). */
+export function reasonOf(err: unknown): string {
+  if (err instanceof RestoreRefused) return err.stage;
+  if (err instanceof ToolFailed) return `${err.tool}: ${err.summary}`;
+  return failureOf(err);
 }
 
 async function withClient<T>(t: PgTarget, fn: (c: pg.Client) => Promise<T>): Promise<T> {
@@ -129,64 +118,294 @@ async function withClient<T>(t: PgTarget, fn: (c: pg.Client) => Promise<T>): Pro
   }
 }
 
-/** How many tables, views and sequences the database holds outside Postgres's own schemas. */
-async function userObjects(c: pg.Client): Promise<number> {
-  const r = await c.query<{ n: string }>(`
-    SELECT count(*) AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')`);
-  return Number(r.rows[0]!.n);
+// ---------------------------------------------------------------------------
+// The fingerprint beside a dump
+
+/**
+ * The key that seals fingerprint files (~/.flint/backup-fingerprint.key, 0600):
+ * 32 random bytes, made the first time a backup is written. Without it a
+ * fingerprint file proves nothing, since whoever can change a dump can write a
+ * new hash beside it. Returns undefined when there is none (and `create` is
+ * false), or when the file is not a plain one only its owner can read.
+ */
+function fingerprintKey(keyFile: string, create: boolean): Buffer | undefined {
+  const read = (): Buffer | undefined => {
+    let st;
+    try {
+      st = lstatSync(keyFile);
+    } catch {
+      return undefined;
+    }
+    if (!st.isFile() || st.uid !== process.getuid?.() || st.mode & 0o077) return undefined;
+    const hex = readFileSync(keyFile, 'utf8').trim();
+    return HEX64.test(hex) ? Buffer.from(hex, 'hex') : undefined;
+  };
+  const have = read();
+  if (have || !create || existsSync(keyFile)) return have;
+  mkdirSync(dirname(keyFile), { recursive: true, mode: 0o700 });
+  try {
+    const fd = openSync(keyFile, 'wx', 0o600);
+    try {
+      writeSync(fd, `${randomBytes(32).toString('hex')}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Another run made it first: read theirs.
+  }
+  return read();
+}
+
+const hashOf = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex');
+/** What the key signs: the dump's name (which holds its time), its hash, and the hash of the counts beside it. */
+const seal = (key: Buffer, name: string, sha256: string, counts: string): string =>
+  createHmac('sha256', key).update(`flint dump fingerprint v1\n${name}\n${sha256}\n${counts}\n`).digest('hex');
+
+/**
+ * Write the fingerprint file beside a dump: its sha256, the sha256 of its counts
+ * file, and both sealed with the key in `keyFile` (made if it is not there).
+ * 0600, like the dump.
+ */
+export function writeDumpHash(dump: string, sha256: string, keyFile: string): void {
+  if (!HEX64.test(sha256)) throw new Error('not a sha256');
+  const key = fingerprintKey(keyFile, true);
+  if (!key) throw new Error('the fingerprint key is not a file only its owner can read');
+  const countsFile = `${dump}.counts.json`;
+  const counts = existsSync(countsFile) ? hashOf(countsFile) : '-';
+  writeFileSync(`${dump}.sha256`, `${sha256}\ncounts ${counts}\nhmac ${seal(key, basename(dump), sha256, counts)}\n`, { mode: 0o600 });
+}
+
+export interface DumpCheck {
+  path: string;
+  bytes: number;
+  sha256: string;
+  /** `matches`: a fingerprint recorded when the dump was written matches it. `none`: none was recorded, and that was allowed. */
+  fingerprint: 'matches' | 'none';
+  /** Row counts taken in the dump's own snapshot; undefined when the file came without them and that was allowed. */
+  counts?: Record<string, number>;
+  /** When the dump was taken (its name says). */
+  takenAt: Date;
+}
+
+export interface DumpCheckOptions {
+  /** The key fingerprint files are sealed with. Without it the file beside a dump is compared but does not count as recorded. */
+  keyFile?: string;
+  /**
+   * Fingerprints recorded somewhere else when the dump was written: its
+   * BackupRun rows, or the one a rebuild's bundle lists. EVERY one must match.
+   */
+  recorded?: readonly string[];
+  /** Go on although no fingerprint was recorded anywhere (Will's `--without-fingerprint`). */
+  withoutFingerprint?: boolean;
+  /** Accept a dump with no counts file (an offsite copy made before the counts went offsite too). */
+  countsOptional?: boolean;
 }
 
 /**
- * pg_restore `dump` into `target` (the migration owner, on an EMPTY database),
- * then take TEMP away from everyone as the first migration does: that setting
- * lives on the database, and a dump does not carry it.
+ * Is this file a whole, untouched nightly dump? Checked before anything reads
+ * it, pg_restore included: its name, that it is a plain file of Will's own that
+ * no one else may change, and its fingerprint against every record of it. Then
+ * that pg_restore can read its table of contents, and its counts file.
  */
-export async function restoreInto(dump: string, target: PgTarget, tools: Tools): Promise<void> {
-  if (await withClient(target, userObjects)) throw new RestoreRefused('The database to restore into is not empty.');
-  await run(tools.pgRestore, ['--no-owner', '--exit-on-error', '-h', target.host, '-p', String(target.port), '-U', target.user, '-d', target.database, dump], target.password);
-  await withClient(target, async (c) => {
-    await c.query(`DO $$
-      BEGIN
-        EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
-        EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM flint_app, flint_approver, flint_backup', current_database());
-      END;
-    $$`);
-  });
+export async function checkDump(dump: string, tools: Tools, opts: DumpCheckOptions = {}): Promise<DumpCheck> {
+  if (!dump.startsWith('/')) throw new RestoreRefused('The backup must be named by its full path.', { stage: 'dump' });
+  const named = DUMP_NAME.exec(basename(dump));
+  const notOurs = () => new RestoreRefused("That is not one of Flint's nightly database backups.", { stage: 'dump' });
+  if (!named) throw notOurs();
+  const takenAt = new Date(`${named[1]}T${named[2]}:${named[3]}:${named[4]}.${named[5]}Z`);
+  if (Number.isNaN(takenAt.getTime())) throw notOurs();
+  let st;
+  try {
+    st = lstatSync(dump);
+  } catch {
+    throw new RestoreRefused('That backup file does not exist.', { stage: 'dump' });
+  }
+  if (!st.isFile()) throw new RestoreRefused('That backup is not a plain file.', { stage: 'dump' });
+  if (st.uid !== process.getuid?.()) throw new RestoreRefused('That backup file is not yours, so Flint will not restore it.', { stage: 'dump' });
+  if (st.mode & 0o022) throw new RestoreRefused('Someone other than you could have changed that backup file, so Flint will not restore it.', { stage: 'dump' });
+  if (st.size === 0) throw new RestoreRefused('That backup file is empty.', { stage: 'dump' });
+
+  const sha256 = await sha256File(dump);
+  const changed = () => new RestoreRefused('That backup file has changed since it was written. Choose another backup.', { stage: 'fingerprint' });
+  let recorded = 0;
+
+  // 1. The file beside it. Its hash must match whatever else is true of it; it counts as a record only when this Mac's key sealed it.
+  const sidecar = `${dump}.sha256`;
+  const countsFile = `${dump}.counts.json`;
+  if (existsSync(sidecar)) {
+    const unreadable = () => new RestoreRefused('The fingerprint saved with that backup is not readable.', { stage: 'fingerprint' });
+    if (!lstatSync(sidecar).isFile()) throw unreadable();
+    const [first, ...rest] = readFileSync(sidecar, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!first || !HEX64.test(first)) throw unreadable();
+    if (first !== sha256) throw changed();
+    const field = (name: string): string | undefined => rest.find((l) => l.startsWith(`${name} `))?.slice(name.length + 1);
+    const mac = field('hmac');
+    const counts = field('counts');
+    const key = opts.keyFile ? fingerprintKey(opts.keyFile, false) : undefined;
+    if (mac !== undefined && key) {
+      if (!HEX64.test(mac) || counts === undefined || !(counts === '-' || HEX64.test(counts))) throw unreadable();
+      const want = Buffer.from(seal(key, basename(dump), sha256, counts), 'hex');
+      if (!timingSafeEqual(want, Buffer.from(mac, 'hex'))) {
+        throw new RestoreRefused("The fingerprint saved with that backup was not written by this Mac's Flint. Choose another backup.", { stage: 'fingerprint' });
+      }
+      const countsNow = existsSync(countsFile) ? hashOf(countsFile) : '-';
+      if (counts !== countsNow) throw new RestoreRefused('The row counts beside that backup have changed since they were written. Choose another backup.', { stage: 'fingerprint' });
+      recorded += 1;
+    }
+  }
+  // 2. Every other record of it.
+  for (const r of opts.recorded ?? []) {
+    if (!HEX64.test(r)) throw new RestoreRefused('A fingerprint recorded for that backup is not readable.', { stage: 'fingerprint' });
+    if (r !== sha256) throw changed();
+    recorded += 1;
+  }
+  if (recorded === 0 && !opts.withoutFingerprint) {
+    throw new RestoreRefused('No fingerprint was recorded for that backup, so Flint cannot tell whether it has been changed. Nothing was restored.', {
+      stage: 'fingerprint',
+      lines: ['To restore it all the same, add --without-fingerprint to the command.'],
+    });
+  }
+
+  try {
+    await run(tools.pgRestore, ['--list', dump], '');
+  } catch (err) {
+    // A tool that could not be started at all is a fault of this Mac, not of the file.
+    if (!(err instanceof ToolFailed)) throw err;
+    if (/unsupported version/.test(err.summary)) {
+      throw new RestoreRefused('That backup was made by a newer Postgres than this Mac has, so it cannot be read here. Update Postgres, then run this again.', { stage: 'dump' });
+    }
+    throw new RestoreRefused('That backup file is damaged. Choose another backup.', { stage: 'dump' });
+  }
+
+  const fingerprint = recorded > 0 ? 'matches' : 'none';
+  if (!existsSync(countsFile)) {
+    if (!opts.countsOptional) throw new RestoreRefused('That backup has no row counts beside it, so Flint could not check what it restored.', { stage: 'dump' });
+    return { path: dump, bytes: st.size, sha256, fingerprint, takenAt };
+  }
+  const unreadable = () => new RestoreRefused('The row counts beside that backup are not readable.', { stage: 'dump' });
+  let counts: Record<string, number>;
+  try {
+    counts = JSON.parse(readFileSync(countsFile, 'utf8')) as Record<string, number>;
+  } catch {
+    throw unreadable();
+  }
+  const entries = counts && typeof counts === 'object' && !Array.isArray(counts) ? Object.entries(counts) : [];
+  if (entries.length === 0 || entries.some(([k, n]) => !COUNT_KEY.test(k) || !Number.isSafeInteger(n) || n < 0)) throw unreadable();
+  return { path: dump, bytes: st.size, sha256, fingerprint, counts, takenAt };
 }
 
-export interface MigrationState {
-  /** Applied in the database and known to this checkout. */
-  applied: string[];
-  /** In this checkout, not yet in the database. */
-  pending: string[];
-  /** In the database, unknown to this checkout: the backup is from a newer Flint. */
-  unknown: string[];
-  /** Started and never finished. */
-  unfinished: string[];
+// ---------------------------------------------------------------------------
+// The roles and the reference
+
+const APP_ROLES = ['flint_app', 'flint_approver', 'flint_backup'] as const;
+
+/**
+ * What is wrong with the cluster's roles for a restore, each a short phrase;
+ * empty when nothing is. `restorer` is the role that will restore the copy.
+ */
+export async function roleProblems(c: pg.Client, restorer: string): Promise<string[]> {
+  const rows = (await c.query<{ rolname: string; rolsuper: boolean; rolcreaterole: boolean; rolcreatedb: boolean; rolbypassrls: boolean }>(
+    'SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls FROM pg_roles WHERE rolname = ANY($1)',
+    [[OWNER, restorer, ...APP_ROLES]],
+  )).rows;
+  const by = new Map(rows.map((r) => [r.rolname, r]));
+  const problems: string[] = [];
+  for (const role of [OWNER, restorer, ...APP_ROLES]) if (!by.has(role)) problems.push(`the role ${role} does not exist`);
+  for (const role of APP_ROLES) {
+    const r = by.get(role);
+    if (r && (r.rolsuper || r.rolcreaterole || r.rolcreatedb || r.rolbypassrls)) problems.push(`${role} has more power than an application role may`);
+  }
+  const owner = by.get(OWNER);
+  if (owner && !owner.rolcreatedb) problems.push(`${OWNER} may not create databases`);
+  if (owner && (owner.rolsuper || owner.rolcreaterole || owner.rolbypassrls)) problems.push(`${OWNER} has more power than the migration owner may`);
+  const r = by.get(restorer);
+  if (r && (r.rolsuper || r.rolcreaterole || r.rolbypassrls)) problems.push(`${restorer} has more power than a role that restores backups may`);
+  if (r && !r.rolcreatedb) problems.push(`${restorer} may not create databases`);
+  if (restorer === OWNER || (APP_ROLES as readonly string[]).includes(restorer)) problems.push('the role that restores backups must be one of its own');
+  return problems;
 }
 
-/** The migration directories of this checkout, oldest first. */
-export function migrationNames(migrationsDir: string): string[] {
-  return readdirSync(migrationsDir).filter((d) => /^\d{14}_[a-z0-9_]+$/.test(d)).sort();
+interface Grant {
+  /** A role's name, or null for everyone (PUBLIC). */
+  grantee: string | null;
+  privilege: string;
+  grantable: boolean;
+}
+const DB_PRIVILEGES = new Set(['CONNECT', 'TEMPORARY', 'CREATE']);
+
+/** The privileges on a database itself, its owner's own left out. */
+async function databaseGrants(c: pg.Client, database: string): Promise<Grant[]> {
+  return (await c.query<Grant>(
+    `SELECT CASE WHEN a.grantee = 0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee, a.privilege_type AS privilege, a.is_grantable AS grantable
+     FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+     WHERE d.datname = $1 AND a.grantee <> d.datdba`,
+    [database],
+  )).rows.filter((g) => DB_PRIVILEGES.has(g.privilege));
 }
 
-async function migrationState(c: pg.Client, migrationsDir: string): Promise<MigrationState> {
-  const known = migrationNames(migrationsDir);
-  const has = (await c.query<{ t: string | null }>(`SELECT to_regclass('public._prisma_migrations') AS t`)).rows[0]!.t;
-  const rows = has
-    ? (await c.query<{ name: string; done: boolean; rolled: boolean }>(
-        `SELECT migration_name AS name, finished_at IS NOT NULL AS done, rolled_back_at IS NOT NULL AS rolled FROM _prisma_migrations ORDER BY started_at`,
-      )).rows
-    : [];
-  const live = rows.filter((r) => !r.rolled);
-  const done = new Set(live.filter((r) => r.done).map((r) => r.name));
-  return {
-    applied: known.filter((k) => done.has(k)),
-    pending: known.filter((k) => !done.has(k)),
-    unknown: [...done].filter((n) => !known.includes(n)).sort(),
-    unfinished: live.filter((r) => !r.done).map((r) => r.name),
+/** A database built from this checkout's migrations: every line that says how it behaves, and the privileges on the database itself. */
+interface Reference {
+  lines: string[];
+  grants: Grant[];
+}
+/** Kept for this process: the same migrations on the same server always give the same reference. */
+const references = new Map<string, Reference>();
+
+/**
+ * The reference for `applied`: a database of its own (`name`), made as the
+ * migration owner from the bare template and built from this checkout's
+ * migrations; then dumped and restored once, so that it is compared like with
+ * like. (Postgres does not write an expression back exactly as it was typed: a
+ * CHECK or a view that has been through a dump reads slightly differently from
+ * one that has not, and every backup has been through one.) Read, and dropped.
+ */
+async function referenceOf(main: pg.Client, owner: PgTarget, name: string, applied: readonly Migration[], locale: string, tools: Tools): Promise<Reference> {
+  const key = `${owner.host}:${owner.port}|${createHash('sha256').update(applied.map((m) => `${m.name}:${m.checksum}`).join('\n')).digest('hex')}`;
+  const have = references.get(key);
+  if (have) return have;
+  const fresh = async (): Promise<void> => {
+    await main.query(`DROP DATABASE IF EXISTS ${name}`);
+    await main.query(`CREATE DATABASE ${name} TEMPLATE template0${locale}`);
+    // As on a Mac bootstrap-db set up: the public schema belongs to the migration owner.
+    await withClient(withDatabase(owner, name), (c) => c.query(`ALTER SCHEMA public OWNER TO ${OWNER}`));
   };
+  const dir = mkdtempSync(join(tmpdir(), 'flint-reference-'));
+  const on = ['-h', owner.host, '-p', String(owner.port), '-U', owner.user, '-d', name];
+  try {
+    await fresh();
+    await withClient(withDatabase(owner, name), (c) => buildReference(c, applied));
+    // The privileges on the database itself are set by the first migration and live on the cluster: read before the round trip.
+    const grants = await databaseGrants(main, name);
+    const file = join(dir, 'reference.dump');
+    await run(tools.pgDump, ['-Fc', '--schema-only', ...on, '-f', file], owner.password);
+    await fresh();
+    await run(tools.pgRestore, ['--no-owner', '--exit-on-error', ...on, file], owner.password);
+    await setDatabaseGrants(main, name, grants);
+    const made = { lines: await withClient(withDatabase(owner, name), catalogLines), grants };
+    references.set(key, made);
+    return made;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await main.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => undefined);
+  }
+}
+
+/** Make the privileges on `database` exactly `grants`, for everyone and every role named there or among the application roles. */
+async function setDatabaseGrants(main: pg.Client, database: string, grants: readonly Grant[]): Promise<void> {
+  const who = new Set<string | null>([null, ...APP_ROLES, ...grants.map((g) => g.grantee)]);
+  for (const g of who) await main.query(`REVOKE ALL ON DATABASE ${database} FROM ${g === null ? 'PUBLIC' : quote(g)}`);
+  for (const g of grants) await main.query(`GRANT ${g.privilege} ON DATABASE ${database} TO ${g.grantee === null ? 'PUBLIC' : quote(g.grantee)}${g.grantable ? ' WITH GRANT OPTION' : ''}`);
+}
+
+/**
+ * What `verifyRestored` compares a copy with: the reference for the migrations
+ * the copy records, built (once) as the migration owner at `ownerUrl` under the
+ * database name `name`, through the maintenance session `main`.
+ */
+export function referenceBuilder(main: pg.Client, ownerUrl: string, name: string, tools: Tools): (applied: readonly Migration[]) => Promise<string[]> {
+  if (!DB_NAME.test(name)) throw new Error('not a database name');
+  return async (applied) => (await referenceOf(main, targetOf(ownerUrl), name, applied, '', tools)).lines;
 }
 
 export interface Verified {
@@ -199,187 +418,189 @@ export interface Verified {
 }
 
 /**
- * Is the restored database what the backup said it was, and safe to run on?
+ * Is the copy `c` is connected to what the backup said it was, and built as
+ * this checkout builds a Flint database?
  *  - every table's row count equals the count taken in the dump's snapshot
  *    (`counts` undefined skips this: after a migration the tables have changed);
- *  - everything is owned by the migration owner, and no application role is a
- *    superuser, may create roles or databases, or skips row security;
- *  - the application roles hold the privileges the runtime needs and none of the
- *    ones the governance rules deny them;
- *  - the migrations it holds are ones this checkout knows, each finished.
+ *  - the migrations it records are this checkout's own, each finished;
+ *  - everything that decides how it behaves equals the reference `reference`
+ *    gives for those migrations (./catalog.ts);
+ *  - when `owner` is given: everything in it belongs to that role, and the roles
+ *    in `strangers` hold and have granted nothing.
  */
-export async function verifyRestored(target: PgTarget, counts: Record<string, number> | undefined, migrationsDir: string): Promise<Verified> {
-  return withClient(target, async (c) => {
-    const problems: string[] = [];
-    let mismatches: Verified['mismatches'] = [];
-    if (counts) {
-      const restored = await countRows(c);
-      mismatches = Object.entries(counts)
-        .filter(([table, n]) => restored[table] !== n)
-        .map(([table, n]) => ({ table, expected: n, restored: restored[table] ?? null }));
-      const extra = Object.keys(restored).filter((t) => !(t in counts));
-      if (mismatches.length) problems.push(`row counts differ in ${mismatches.length} table(s)`);
-      if (extra.length) problems.push(`${extra.length} table(s) the backup did not list`);
-    }
-
-    const strangers = Number((await c.query<{ n: string }>(`
-      SELECT count(*) AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' AND c.relowner <> current_user::regrole`)).rows[0]!.n);
-    if (strangers) problems.push(`${strangers} object(s) not owned by the migration owner`);
-
-    const roles = await c.query<{ rolname: string }>(`
-      SELECT rolname FROM pg_roles
-      WHERE rolname IN ('flint_app', 'flint_approver', 'flint_backup') AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolbypassrls)`);
-    for (const r of roles.rows) problems.push(`${r.rolname} has more power than an application role may`);
-    const present = (await c.query<{ rolname: string }>(`SELECT rolname FROM pg_roles WHERE rolname IN ('flint_app', 'flint_approver', 'flint_backup')`)).rows.map((r) => r.rolname);
-    for (const role of ['flint_app', 'flint_approver', 'flint_backup']) if (!present.includes(role)) problems.push(`the role ${role} does not exist`);
-
-    if (present.length === 3) {
-      // [role, privilege, table, must it hold it?]: the governance rules, as the grants enforce them.
-      const table: Array<[string, string, string, boolean]> = [
-        ['flint_app', 'SELECT', '"Proposal"', true],
-        ['flint_app', 'INSERT', '"Proposal"', true],
-        ['flint_app', 'INSERT', '"AuditEntry"', true],
-        ['flint_app', 'SELECT', '"Approval"', true],
-        ['flint_approver', 'INSERT', '"Approval"', true],
-        ['flint_backup', 'SELECT', '"Proposal"', true],
-        ['flint_app', 'INSERT', '"Approval"', false],
-        ['flint_app', 'UPDATE', '"AuditEntry"', false],
-        ['flint_app', 'DELETE', '"AuditEntry"', false],
-        ['flint_app', 'DELETE', '"Proposal"', false],
-        ['flint_approver', 'SELECT', '"Proposal"', false],
-        ['flint_backup', 'INSERT', '"AuditEntry"', false],
-      ];
-      for (const [role, privilege, name, must] of table) {
-        const r = await c.query<{ held: boolean | null }>(
-          `SELECT CASE WHEN to_regclass($3) IS NULL THEN NULL ELSE has_table_privilege($1, to_regclass($3), $2) END AS held`,
-          [role, privilege, `public.${name}`],
-        );
-        const held = r.rows[0]!.held;
-        if (held === null) problems.push(`the table ${name} is missing`);
-        else if (held !== must) problems.push(`${role} ${must ? 'cannot' : 'can'} ${privilege} ${name}`);
-      }
-      const loose = await c.query<{ rolname: string; what: string }>(`
-        SELECT r.rolname, 'TEMP' AS what FROM pg_roles r
-         WHERE r.rolname IN ('flint_app', 'flint_approver', 'flint_backup') AND has_database_privilege(r.oid, current_database(), 'TEMP')
-        UNION ALL
-        SELECT r.rolname, 'CREATE in ' || n.nspname FROM pg_roles r CROSS JOIN pg_namespace n
-         WHERE r.rolname IN ('flint_app', 'flint_approver', 'flint_backup') AND n.nspname IN ('public', 'flint_part', 'pgboss')
-           AND has_schema_privilege(r.oid, n.oid, 'CREATE')`);
-      for (const r of loose.rows) problems.push(`${r.rolname} holds ${r.what}`);
-    }
-
-    const migrations = await migrationState(c, migrationsDir);
-    if (migrations.applied.length === 0) problems.push('no Flint migration is recorded');
-    if (migrations.unknown.length) problems.push(`the backup is from a newer Flint than this copy of the code (${migrations.unknown.length} migration(s) it does not know)`);
-    if (migrations.unfinished.length) problems.push(`${migrations.unfinished.length} migration(s) never finished`);
-
-    return { ok: problems.length === 0, tables: counts ? Object.keys(counts).length : 0, mismatches, problems, migrations };
-  });
-}
-
-/** What Will reads on a card that was approved before the backup and so did not run. */
-export const VOIDED_BY_RESTORE = 'This was approved before the database was restored from a backup, so it did not run. Approve it again.';
-
-/**
- * Nothing signed before the backup may act after it: every unused approval is
- * marked used, and every card that was approved (or had started) and not
- * finished is marked failed. Both are moves the governance triggers allow.
- */
-export async function voidSignedWork(target: PgTarget): Promise<{ approvals: number; proposals: number }> {
-  return withClient(target, async (c) => {
-    await c.query('BEGIN');
-    try {
-      const a = await c.query(`UPDATE "Approval" SET "consumedAt" = now() WHERE "consumedAt" IS NULL`);
-      const p = await c.query(`UPDATE "Proposal" SET status = 'failed', error = $1, "executedAt" = now() WHERE status IN ('approved', 'executing')`, [VOIDED_BY_RESTORE]);
-      await c.query('COMMIT');
-      return { approvals: a.rowCount ?? 0, proposals: p.rowCount ?? 0 };
-    } catch (err) {
-      await c.query('ROLLBACK').catch(() => {});
-      throw err;
-    }
-  });
-}
-
-type AuditInputs = Record<string, string | number | boolean | null>;
-
-/**
- * The restore's own audit entry, written as the runtime's role (flint_app): if
- * the restored grants did not let the runtime write its audit trail, this fails
- * and the restore with it. Ids, hashes and numbers only.
- */
-async function auditRestore(app: PgTarget, inputs: AuditInputs, now: Date): Promise<void> {
-  for (const v of Object.values(inputs)) if (typeof v === 'string' && v.length > 200) throw new Error('an audit input is over 200 characters');
-  await withClient(app, (c) =>
-    c.query(
-      `INSERT INTO "AuditEntry" (id, at, actor, context, kind, action, tier, inputs, decision, outcome)
-       VALUES ($1, $2, 'will:cli', 'console', 'action', 'restore.production', 'approval', $3, 'act', 'ok')`,
-      [`au${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`, now, JSON.stringify(inputs)],
-    ),
-  );
-}
-
-export interface RestoreResult {
-  /** The backup that was restored. */
-  dump: string;
-  sha256: string;
-  fingerprint: DumpCheck['fingerprint'];
-  /** Tables whose row counts were compared with the backup's own; 0 when it came without counts. */
-  tables: number;
-  /** Migrations this checkout has that the backup did not (applied by restoreProduction; left for the installer by a rebuild). */
-  pending: string[];
-  approvals: number;
-  proposals: number;
-  seconds: number;
-  /** A rebuild run again: this same backup was already restored here, so nothing was done. */
-  already?: boolean;
-}
-
-export interface EmptyRestore {
-  dump: string;
-  /** flint_owner, on the empty database. */
-  owner: string;
-  /** flint_app, on the same database. */
-  app: string;
-  tools: Tools;
-  migrationsDir: string;
-  now?: Date;
-}
-
-/**
- * A rebuilt Mac: restore `dump` into the empty database, check it, void what was
- * signed, and write the audit entry. Migrations the backup lacks are left for
- * the runtime's installer, which takes its own copy before applying them.
- */
-export async function restoreIntoEmpty(o: EmptyRestore): Promise<RestoreResult> {
-  const started = Date.now();
-  const now = o.now ?? new Date();
-  const owner = targetOf(o.owner);
-  // An offsite copy made before the counts went offsite too has none: its structure, owners, grants and migrations are still checked.
-  const check = await checkDump(o.dump, o.tools, { countsOptional: true });
-  // A rebuild that stopped later and is run again: the database already holds exactly this backup
-  // (its own audit entry says so, by fingerprint). Anything else in a database that is not empty is refused.
-  if (await withClient(owner, (c) => alreadyRestored(c, check.sha256))) {
-    const v = await verifyRestored(owner, undefined, o.migrationsDir);
-    if (!v.ok) throw new RestoreRefused(`The database restored earlier does not pass its checks: ${v.problems.join('; ')}.`);
-    return { dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: 0, pending: v.migrations.pending, approvals: 0, proposals: 0, seconds: 0, already: true };
+export async function verifyRestored(
+  c: pg.Client,
+  o: { counts?: Record<string, number>; migrationsDir: string; reference(applied: readonly Migration[]): Promise<string[]>; owner?: string; strangers?: readonly string[] },
+): Promise<Verified> {
+  const problems: string[] = [];
+  let mismatches: Verified['mismatches'] = [];
+  if (o.counts) {
+    const restored = await countRows(c);
+    mismatches = Object.entries(o.counts)
+      .filter(([table, n]) => restored[table] !== n)
+      .map(([table, n]) => ({ table, expected: n, restored: restored[table] ?? null }));
+    const extra = Object.keys(restored).filter((t) => !(t in o.counts!));
+    if (mismatches.length) problems.push(`row counts differ in ${mismatches.length} table(s)`);
+    if (extra.length) problems.push(`${extra.length} table(s) the backup did not list`);
   }
-  await restoreInto(o.dump, owner, o.tools);
-  const v = await verifyRestored(owner, check.counts, o.migrationsDir);
-  if (!v.ok) throw new RestoreRefused(`The restored database did not pass its checks: ${v.problems.join('; ')}.`);
-  const voided = await voidSignedWork(owner);
-  const seconds = Math.round((Date.now() - started) / 1000);
-  await auditRestore(targetOf(o.app), { mode: 'rebuild', sha256: check.sha256, tables: v.tables, pending: v.migrations.pending.length, approvals: voided.approvals, proposals: voided.proposals, seconds }, now);
-  return { dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: v.tables, pending: v.migrations.pending, ...voided, seconds };
+  const migrations = await migrationState(c, o.migrationsDir);
+  problems.push(...migrations.problems);
+  // A record that is not ours gives no reference to compare with: it is refused on that alone.
+  if (migrations.problems.length === 0) {
+    const d = catalogDifference(await o.reference(migrations.applied), await catalogLines(c));
+    if (d.objects.length) problems.push(`it is not built the way this copy of Flint builds its database (${differenceSentence(d)})`);
+  }
+  if (o.owner) {
+    const others = await ownedByOthers(c, o.owner, o.strangers ?? []);
+    if (others.length) problems.push(`${others.length} thing(s) in it do not belong to the migration owner (${others.slice(0, 3).join('; ')})`);
+  }
+  return { ok: problems.length === 0, tables: o.counts ? Object.keys(o.counts).length : 0, mismatches, problems, migrations };
 }
 
-/** Did an earlier rebuild already restore the backup with this fingerprint into this database? */
-async function alreadyRestored(c: pg.Client, sha256: string): Promise<boolean> {
-  const has = (await c.query<{ t: string | null }>(`SELECT to_regclass('public."AuditEntry"') AS t`)).rows[0]!.t;
-  if (!has) return false;
-  const r = await c.query(`SELECT 1 FROM "AuditEntry" WHERE action = 'restore.production' AND inputs->>'mode' = 'rebuild' AND inputs->>'sha256' = $1 LIMIT 1`, [sha256]);
-  return (r.rowCount ?? 0) > 0;
+// ---------------------------------------------------------------------------
+// The database's own settings (they live on the cluster, and a dump does not carry them)
+
+/** Who the migrations decide for; everyone else's privileges on the database are Will's own additions. */
+const SPEC_GRANTEES = new Set<string | null>([null, ...APP_ROLES]);
+const grantKey = (g: Grant): string => `${g.grantee ?? 'everyone'} ${g.privilege}`;
+
+/**
+ * Give `copy` the privileges the migrations give a Flint database (`spec`, read
+ * from the reference) for everyone and the application roles, plus whatever
+ * else `production` grants to other roles. Says, as sentences, where the
+ * database in use differs from Flint's own setup.
+ */
+async function carryDatabaseGrants(main: pg.Client, copy: string, spec: readonly Grant[], production: readonly Grant[] | undefined, skip: readonly string[]): Promise<string[]> {
+  const wanted = [
+    ...spec.filter((g) => SPEC_GRANTEES.has(g.grantee)),
+    ...(production ?? []).filter((g) => !SPEC_GRANTEES.has(g.grantee) && !skip.includes(g.grantee!)),
+  ];
+  await setDatabaseGrants(main, copy, wanted);
+  if (!production) return [];
+  const specKeys = new Set(spec.filter((g) => SPEC_GRANTEES.has(g.grantee)).map(grantKey));
+  const prod = production.filter((g) => SPEC_GRANTEES.has(g.grantee));
+  const prodKeys = new Set(prod.map(grantKey));
+  const notes: string[] = [];
+  for (const g of prod) if (!specKeys.has(grantKey(g))) notes.push(`The database in use gives ${g.grantee ?? 'everyone'} the privilege ${g.privilege}, which Flint's own setup does not. The restored database follows Flint's setup.`);
+  for (const k of specKeys) if (!prodKeys.has(k)) notes.push(`The database in use is missing a privilege Flint's setup gives (${k}). The restored database has it.`);
+  return notes;
 }
+
+/** Settings whose value is a list of names, which Postgres wants unquoted as a whole (as pg_dump writes them). */
+const LIST_SETTINGS = new Set(['search_path', 'temp_tablespaces', 'session_preload_libraries', 'local_preload_libraries']);
+
+/**
+ * Copy the settings stored for the production database (ALTER DATABASE ... SET)
+ * onto `copy`. One stored for a single role there needs a superuser to copy, so
+ * it is reported instead, like any setting that does not copy.
+ */
+async function carryDatabaseSettings(main: pg.Client, production: string, copy: string): Promise<string[]> {
+  const rows = (await main.query<{ role: string | null; config: string[] }>(
+    `SELECT CASE WHEN s.setrole = 0 THEN NULL ELSE pg_get_userbyid(s.setrole) END AS role, s.setconfig AS config
+     FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = $1`,
+    [production],
+  )).rows;
+  const notes: string[] = [];
+  const left = (name: string, role: string | null) =>
+    notes.push(`The database in use has a setting Flint could not copy to the restored one: ${name.replace(/[^\w.]/g, '?').slice(0, 60)}${role ? ` for ${role.replace(/[^\w]/g, '?').slice(0, 63)}` : ''}. Set it again afterwards if you still want it.`);
+  for (const row of rows) {
+    for (const entry of row.config ?? []) {
+      const at = entry.indexOf('=');
+      const name = at > 0 ? entry.slice(0, at) : '';
+      const value = at > 0 ? entry.slice(at + 1) : '';
+      if (!/^[a-z_][a-z0-9_.]{0,62}$/.test(name) || row.role !== null) {
+        left(name || 'one', row.role);
+        continue;
+      }
+      // A list of names goes in as it is stored, and only when it is nothing but names; anything else as one quoted value.
+      const literal = LIST_SETTINGS.has(name) ? (/^[A-Za-z0-9_$", ]*$/.test(value) ? value : undefined) : `'${value.replace(/'/g, "''")}'`;
+      try {
+        if (literal === undefined || /[\0\n\r]/.test(value)) throw new Error('not copied');
+        await main.query(`ALTER DATABASE ${copy} SET ${name} = ${literal}`);
+      } catch {
+        left(name, null);
+      }
+    }
+  }
+  return notes;
+}
+
+// ---------------------------------------------------------------------------
+// The cluster, as it is
+
+interface DbRow {
+  /** The database's own id: it stays the same when the name changes. */
+  oid: string;
+  datname: string;
+  open: boolean;
+  owner: string;
+}
+interface ClusterState {
+  production?: DbRow;
+  /** Kept databases (`<name>_damaged_<time>`), oldest first. */
+  kept: DbRow[];
+  /** Copies and references left by a run that did not finish. */
+  stale: DbRow[];
+}
+
+async function clusterState(c: pg.Client, database: string): Promise<ClusterState> {
+  const rows = (await c.query<DbRow>(
+    `SELECT oid::text AS oid, datname, datallowconn AS open, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1 OR left(datname, $2) = $3 ORDER BY datname`,
+    [database, database.length + 1, `${database}_`],
+  )).rows;
+  const named = (kind: string) => rows.filter((r) => new RegExp(`^${database}_${kind}_\\d{8}t\\d{6}z$`).test(r.datname));
+  return { ...(rows.find((r) => r.datname === database) ? { production: rows.find((r) => r.datname === database)! } : {}), kept: named('damaged'), stale: [...named('restoring'), ...named('reference')] };
+}
+
+/** A session on the cluster's maintenance database, where databases are created and renamed from. */
+async function maintenance(t: PgTarget): Promise<pg.Client> {
+  let last: unknown;
+  for (const database of ['postgres', 'template1']) {
+    const c = client(withDatabase(t, database));
+    try {
+      await c.connect();
+      return c;
+    } catch (err) {
+      last = err;
+      await c.end().catch(() => {});
+    }
+  }
+  throw new RestoreRefused(`Flint could not reach the database server (${failureOf(last)}).`, { stage: 'connect' });
+}
+
+async function onMaintenance<T>(t: PgTarget, fn: (c: pg.Client) => Promise<T>): Promise<T> {
+  const c = await maintenance(t);
+  try {
+    return await fn(c);
+  } finally {
+    await c.end().catch(() => {});
+  }
+}
+
+/** The encoding and locale of `database`, as CREATE DATABASE takes them, so a copy sorts and stores text the same way. */
+async function localeOf(c: pg.Client, database: string): Promise<string> {
+  const r = (await c.query<{ enc: string; collate: string; ctype: string; provider: string }>(
+    `SELECT pg_encoding_to_char(encoding) AS enc, datcollate AS collate, datctype AS ctype, datlocprovider::text AS provider FROM pg_database WHERE datname = $1`,
+    [database],
+  )).rows[0];
+  const plain = /^[A-Za-z0-9_.@-]{1,60}$/;
+  // Only the ordinary case is spelled out; anything else takes the cluster's defaults.
+  if (!r || r.provider !== 'c' || !plain.test(r.enc) || !plain.test(r.collate) || !plain.test(r.ctype)) return '';
+  return ` ENCODING '${r.enc}' LC_COLLATE '${r.collate}' LC_CTYPE '${r.ctype}'`;
+}
+
+/** Who is connected to `name` besides this session, in words: `flint_app (3 connections)`. */
+async function connected(c: pg.Client, name: string): Promise<string[]> {
+  const rows = (await c.query<{ who: string | null; app: string | null; n: string }>(
+    `SELECT usename AS who, nullif(application_name, '') AS app, count(*) AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid() GROUP BY 1, 2 ORDER BY 1, 2`,
+    [name],
+  )).rows;
+  const safe = (s: string) => s.replace(/[^\w .:@/-]/g, '?').slice(0, 60);
+  return rows.map((r) => `${safe(r.who ?? 'an unknown role')}${r.app ? ` (${safe(r.app)})` : ''}, ${r.n} connection${r.n === '1' ? '' : 's'}`);
+}
+
+// ---------------------------------------------------------------------------
+// The restore
 
 export interface RestoreSummary {
   /** The backup's file name. */
@@ -391,235 +612,635 @@ export interface RestoreSummary {
   /** The database that will be replaced, and the name it will be kept under. */
   database: string;
   keptAs: string;
+  /** What will be in force, carried forward and set aside (./carry.ts). */
+  report: CarryReport;
+  /** Kept databases and copies from more than KEEP_DAYS ago that this restore removes. */
+  removing: string[];
 }
 
-export interface ProductionRestore {
+type AuditInputs = Record<string, string | number | boolean | null>;
+
+export interface RestoreOptions {
+  /** `production`: over the database in use. `rebuild`: into the empty one a rebuild made. */
+  mode: 'production' | 'rebuild';
   dump: string;
   /** flint_owner on the production database. */
   owner: string;
   /** flint_app on the production database. */
   app: string;
+  /** flint_restore, on any database it may connect to: the role the backup is restored as. */
+  restore: string;
   /** flint_backup on the production database: the copy taken first. */
   backup?: string;
   /** Where that copy goes (~/FlintBackups/pre-restore). */
-  copyDir: string;
+  copyDir?: string;
   /** Restore although the copy of the current database could not be taken. */
   withoutCopy?: boolean;
+  /** Restore a dump no fingerprint was recorded for. */
+  withoutFingerprint?: boolean;
+  /** Fingerprints recorded for the dump outside the database (a rebuild's bundle). */
+  recorded?: readonly string[];
+  /** The key fingerprint files are sealed with. */
+  keyFile?: string;
   tools: Tools;
   migrationsDir: string;
   /** Apply this checkout's pending migrations to the database at `ownerUrl` (prisma migrate deploy). */
   migrate(ownerUrl: string): Promise<void>;
-  /** Will's typed confirmation; false leaves everything as it was. Not asked for a trial run. */
-  confirm(summary: RestoreSummary): Promise<boolean>;
-  /**
-   * A trial run: restore beside the database in use, run every check, then drop
-   * the copy. Nothing is renamed, the runtime is not stopped, no copy of the
-   * current database is taken, and nothing is asked. It says how long a real
-   * restore would take.
-   */
+  /** Will's typed confirmation; false leaves everything as it was. Not asked for a trial run or a rebuild. */
+  confirm?(summary: RestoreSummary): Promise<boolean>;
+  /** A trial run: everything up to the confirmation, then the copy is dropped. Nothing in use is touched. */
   checkOnly?: boolean;
   stopRuntime(): Promise<void>;
+  /** Start the runtime and return only once it is really running. */
   startRuntime(): Promise<void>;
-  /** The sha256 recorded when the dump was taken (its BackupRun row), when the database can still say. */
-  recordedSha256?(dump: string): Promise<string | undefined>;
+  /** The passkey settings signatures are verified against. */
+  rp?: WebAuthnRelyingParty;
   say(line: string): void;
+  /** Names the scratch and kept databases; every time that is recorded is the real one. */
   now?: Date;
   /** How long to wait for other sessions to leave the production database (default 60 s). */
   drainMs?: number;
+  /** The file that pauses updates (~/.flint/deploy-hold): made for as long as this runs. */
+  holdFile?: string;
+  /** Is an update being installed right now? */
+  deployRunning?(): Promise<boolean> | boolean;
+  /** Where Postgres keeps its data, to measure free space, when the server will not say. */
+  dataDir?: string;
+  /** Call `handler` when the process is asked to stop; the returned function stops listening. */
+  onSignal?(handler: (signal: string) => void): () => void;
+  /** End the process after an interruption before the swap (nothing in use was touched). */
+  exit?(signal: string): void;
+  /** One line for the local record (~/.flint/restore-log.jsonl): ids, hashes, numbers and fixed words. */
+  record?(entry: AuditInputs): void;
+  /** For tests: runs at a named point (`closed`: production is closed and nothing is renamed; `swapped`: the names have changed). */
+  at?(point: 'closed' | 'swapped'): Promise<void> | void;
 }
 
-export interface ProductionResult extends RestoreResult {
+export interface RestoreResult {
+  mode: RestoreOptions['mode'];
+  /** The backup that was restored. */
+  dump: string;
+  sha256: string;
+  fingerprint: DumpCheck['fingerprint'];
+  /** Tables whose row counts were compared with the backup's own; 0 when it came without counts. */
+  tables: number;
+  /** Migrations this checkout has that the backup did not: applied to the copy. */
+  pending: string[];
+  report: CarryReport;
+  seconds: number;
+  database: string;
   /** A trial run: the copy passed and was dropped; nothing changed. */
   checkedOnly?: boolean;
-  database: string;
-  /** The database that was in use, kept under this name. */
-  keptAs: string;
+  /** A rebuild run again: this same backup was already restored here, so nothing was done. */
+  already?: boolean;
+  /** The database that was in use, kept (closed) under this name. */
+  keptAs?: string;
   /** The copy of it taken first, when one could be. */
   copy?: string;
   /** False when the restore is done and the runtime did not start again by itself. */
   runtimeStarted?: boolean;
+  /** False when the restore is done and its audit entry could not be written. */
+  audited?: boolean;
+  /** Databases this run could not remove, by name. */
+  leftovers: string[];
+  /** Kept databases and copies from more than KEEP_DAYS ago, removed. */
+  removed: string[];
 }
 
-const withDatabase = (t: PgTarget, database: string): PgTarget => ({ ...t, database });
-const urlOf = (base: string, database: string): string => {
-  const u = new URL(base);
-  u.pathname = `/${database}`;
-  return u.toString();
-};
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** An audit entry, written as the runtime's own role, with the time it is written. Ids, hashes, numbers and fixed words only. */
+async function audit(app: PgTarget, row: { actor: string; context: string; tier: string | null; decision: string; outcome: string; inputs: AuditInputs }): Promise<void> {
+  for (const v of Object.values(row.inputs)) if (typeof v === 'string' && v.length > 200) throw new Error('an audit input is over 200 characters');
+  await withClient(app, (c) =>
+    c.query(
+      `INSERT INTO public."AuditEntry" (id, actor, context, kind, action, tier, inputs, decision, outcome)
+       VALUES ($1, $2, $3, 'action', 'restore.production', $4, $5, $6, $7)`,
+      [`au${Date.now().toString(36)}${randomBytes(6).toString('hex')}`, row.actor, row.context, row.tier, JSON.stringify(row.inputs), row.decision, row.outcome],
+    ),
+  );
+}
+/** Who ran it, truthfully: Will at the keyboard, or the rebuild script with no one asked. */
+const actorOf = (mode: RestoreOptions['mode']) => (mode === 'production' ? { actor: 'will:cli', context: 'console', tier: 'approval' } : { actor: 'rebuild', context: 'deploy', tier: null });
 
-/** A session on the cluster's maintenance database, where databases are created and renamed from. */
-async function maintenance<T>(owner: PgTarget, fn: (c: pg.Client) => Promise<T>): Promise<T> {
-  let last: unknown;
-  for (const database of ['postgres', 'template1']) {
-    const c = client(withDatabase(owner, database));
-    try {
-      await c.connect();
-    } catch (err) {
-      last = err;
-      continue;
-    }
-    try {
-      return await fn(c);
-    } finally {
-      await c.end().catch(() => {});
-    }
+/** How many tables, views and sequences the database holds outside Postgres's own schemas. */
+async function userObjects(c: pg.Client): Promise<number> {
+  const r = await c.query<{ n: string }>(`
+    SELECT count(*) AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')`);
+  return Number(r.rows[0]!.n);
+}
+
+/** Did an earlier rebuild already restore the backup with this fingerprint into this database? */
+async function alreadyRestored(c: pg.Client, sha256: string): Promise<boolean> {
+  const has = (await c.query<{ t: string | null }>(`SELECT to_regclass('public."AuditEntry"')::text AS t`)).rows[0]!.t;
+  if (!has) return false;
+  const r = await c.query(`SELECT 1 FROM public."AuditEntry" WHERE action = 'restore.production' AND outcome = 'ok' AND inputs->>'mode' = 'rebuild' AND inputs->>'sha256' = $1 LIMIT 1`, [sha256]);
+  return (r.rowCount ?? 0) > 0;
+}
+
+/** The file that pauses updates, taken for this run unless one is already there (then it is someone else's, and left alone). */
+function takeHold(file: string | undefined): () => void {
+  if (!file || existsSync(file) || !existsSync(dirname(file))) return () => {};
+  const mine = `restore ${process.pid} `;
+  try {
+    writeFileSync(file, `${mine}${new Date().toISOString()}\n`, { mode: 0o600, flag: 'wx' });
+  } catch {
+    return () => {};
   }
-  throw new RestoreRefused(`Flint could not reach the database server (${message(last).slice(0, 120)}).`);
+  return () => {
+    try {
+      if (readFileSync(file, 'utf8').startsWith(mine)) unlinkSync(file);
+    } catch {
+      // Gone already.
+    }
+  };
+}
+
+/** Kept databases and pre-restore copies older than KEEP_DAYS, which a later restore removes. */
+function oldKept(state: ClusterState, now: number): string[] {
+  return state.kept.filter((k) => {
+    const m = STAMP.exec(k.datname);
+    return m !== null && k.owner === OWNER && now - Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!) > KEEP_DAYS * 86_400_000;
+  }).map((k) => k.datname);
+}
+function oldCopies(copyDir: string | undefined, now: number): string[] {
+  if (!copyDir || !existsSync(copyDir)) return [];
+  return readdirSync(copyDir).filter((f) => {
+    const m = DUMP_NAME.exec(f);
+    return m !== null && now - Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`) > KEEP_DAYS * 86_400_000;
+  }).sort();
 }
 
 /**
- * `restore.production`: replace the production database with `dump`.
- *
- * Refused, with nothing changed, when: the dump fails checkDump; Will does not
- * confirm; the copy of the current database cannot be taken (unless
- * `withoutCopy`); the disk has no room; the restored copy fails any check, or
- * its pending migrations fail; or something will not let go of the production
- * database. Only after all of that do the two databases swap names.
+ * Restore `o.dump` and put it into use (see the top of this file). Refused,
+ * with nothing in use changed, at any step before the swap; after it the
+ * database is the backup, whatever else is reported.
  */
-export async function restoreProduction(o: ProductionRestore): Promise<ProductionResult> {
+export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult> {
   const started = Date.now();
-  const now = o.now ?? new Date();
+  const stampAt = o.now ?? new Date();
   const owner = targetOf(o.owner);
+  const app = targetOf(o.app);
+  const restorer = targetOf(o.restore);
   const database = owner.database;
-  if (!DB_NAME.test(database)) throw new RestoreRefused("The production database's name is not one Flint can rename.");
-  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'z').toLowerCase();
+  if (!DB_NAME.test(database) || RESERVED.has(database)) throw new RestoreRefused("The production database's name is not one Flint can rename.", { stage: 'config' });
+  const backup = o.backup ? targetOf(o.backup) : undefined;
+  for (const t of [app, restorer, ...(backup ? [backup] : [])]) {
+    if (t.host !== owner.host || t.port !== owner.port) throw new RestoreRefused("Flint's database settings do not all name the same database server, so it stopped.", { stage: 'config' });
+  }
+  if (app.database !== database || (backup && backup.database !== database)) throw new RestoreRefused("Flint's database settings do not all name the same database, so it stopped.", { stage: 'config' });
+  const stamp = stampAt.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'z').toLowerCase();
   const scratch = `${database}_restoring_${stamp}`;
+  const reference = `${database}_reference_${stamp}`;
   const keptAs = `${database}_damaged_${stamp}`;
-  if (!DB_NAME.test(scratch) || !DB_NAME.test(keptAs)) throw new RestoreRefused("The production database's name is too long to keep a copy under.");
+  if (![scratch, reference, keptAs].every((n) => DB_NAME.test(n))) throw new RestoreRefused("The production database's name is too long to keep a copy under.", { stage: 'config' });
+  const production = o.mode === 'production';
+  const who = actorOf(o.mode);
+  const notes: string[] = [];
+  const leftovers: string[] = [];
+  let sha: string | undefined;
 
-  // 1. The backup itself. The database's own record of its fingerprint, when it can still be asked.
-  const recorded = o.recordedSha256 ? await o.recordedSha256(o.dump).catch(() => undefined) : undefined;
-  const check = await checkDump(o.dump, o.tools, recorded ? { expectedSha256: recorded } : {});
-  const counts = check.counts;
-  if (!counts) throw new RestoreRefused('That backup has no row counts beside it, so Flint could not check what it restored.');
-
-  // 2. Room: the restored copy sits beside the database it replaces until Will drops the old one.
-  const free = statfsSync(dirname(o.dump));
-  if (free.bavail * free.bsize < check.bytes * 8 + 256 * 1024 * 1024) throw new RestoreRefused('This Mac does not have enough free space to restore safely.');
-
-  // 3. No name this run needs may be taken already.
-  await maintenance(owner, async (c) => {
-    const taken = await c.query<{ datname: string }>('SELECT datname FROM pg_database WHERE datname = ANY($1)', [[scratch, keptAs]]);
-    if (taken.rowCount) throw new RestoreRefused('A restore from this same second is already there. Wait a moment and run this again.');
-    const exists = await c.query('SELECT 1 FROM pg_database WHERE datname = $1', [database]);
-    if (!exists.rowCount) throw new RestoreRefused('There is no production database to replace. A rebuild restores into an empty one.');
+  const releaseHold = takeHold(o.holdFile);
+  /** Before the swap an interruption ends the run at once: nothing in use was touched, and the copy is removed by the next run. */
+  let interrupted: string | undefined;
+  let swapping = false;
+  const off = o.onSignal?.((signal) => {
+    interrupted = signal;
+    if (!swapping) {
+      releaseHold();
+      o.exit?.(signal);
+    }
   });
 
-  // 4. Will's word.
-  const summary: RestoreSummary = { name: basename(o.dump), takenAt: check.takenAt, bytes: check.bytes, tables: Object.keys(counts).length, fingerprint: check.fingerprint, database, keptAs };
-  if (!o.checkOnly && !(await o.confirm(summary))) throw new RestoreRefused('Nothing was changed.');
+  /** Say it in the record that survives: the database in use when it can be written to, and the local file. */
+  let recorded = false;
+  const recordAttempt = async (outcome: 'ok' | 'failed' | 'skipped', inputs: AuditInputs): Promise<void> => {
+    recorded = true;
+    const entry = { mode: o.checkOnly ? 'check' : o.mode, ...(sha ? { sha256: sha } : {}), ...inputs };
+    o.record?.({ outcome, ...entry });
+    if (production) await audit(app, { ...who, decision: o.checkOnly ? 'log' : 'act', outcome, inputs: entry }).catch(() => undefined);
+  };
 
-  // 5. A copy of the database as it is now, taken with the read-only backup role.
-  let copy: string | undefined;
-  if (o.checkOnly) {
-    // A trial run changes nothing, so there is nothing to copy first.
-  } else if (o.backup) {
-    try {
-      mkdirSync(o.copyDir, { recursive: true, mode: 0o700 });
-      const d = await dumpDatabase(o.backup, o.copyDir, o.tools, now);
-      writeDumpHash(d.path, d.sha256);
-      copy = d.path;
-      o.say('Flint copied the current database first.');
-    } catch {
-      if (!o.withoutCopy) throw new RestoreRefused('Flint could not copy the current database first, so it stopped. Nothing was changed.');
-      o.say('Flint could not copy the current database first. It is kept under another name all the same.');
-    }
-  } else if (!o.withoutCopy) {
-    throw new RestoreRefused('Flint has no way to copy the current database first, so it stopped. Nothing was changed.');
-  }
-
-  // 6. Restore beside it, and check everything there.
-  const scratchOwner = withDatabase(owner, scratch);
-  const dropScratch = () => maintenance(owner, (c) => c.query(`DROP DATABASE IF EXISTS ${scratch}`)).catch(() => undefined);
-  await maintenance(owner, (c) => c.query(`CREATE DATABASE ${scratch}`));
-  let verified: Verified;
-  let voided: { approvals: number; proposals: number };
-  let pending: string[];
+  let main: pg.Client | undefined;
   try {
-    await restoreInto(o.dump, scratchOwner, o.tools);
-    verified = await verifyRestored(scratchOwner, counts, o.migrationsDir);
-    if (!verified.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${verified.problems.join('; ')}.`);
-    pending = verified.migrations.pending;
-    if (pending.length) {
-      await o.migrate(urlOf(o.owner, scratch));
-      const after = await verifyRestored(scratchOwner, undefined, o.migrationsDir);
-      if (!after.ok || after.migrations.pending.length) {
-        throw new RestoreRefused(`The restored copy could not be brought up to date: ${[...after.problems, ...(after.migrations.pending.length ? ['migrations still pending'] : [])].join('; ')}.`);
+    if (await o.deployRunning?.()) throw new RestoreRefused('An update is being installed. Wait for it to finish, then run this again.', { stage: 'deploy' });
+    main = await maintenance(owner);
+    const locked = (await main.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1, $2) AS ok', [...LOCK])).rows[0]!.ok;
+    if (!locked) throw new RestoreRefused('Another restore is running. Wait for it to finish.', { stage: 'lock' });
+    const m = main;
+
+    // 1. What the last run left.
+    let state = await clusterState(m, database);
+    if (!state.production) {
+      if (state.kept.length) {
+        throw new RestoreRefused(`There is no database named ${database}, and ${state.kept.at(-1)!.datname} is there: an earlier restore was stopped part-way.`, {
+          stage: 'state', lines: ['Put it back with this command:', REPAIR],
+        });
       }
+      throw new RestoreRefused(production ? 'There is no production database to replace. A rebuild restores into an empty one.' : 'There is no database to restore into.', { stage: 'state' });
     }
-    voided = await voidSignedWork(scratchOwner);
-    await auditRestore(withDatabase(targetOf(o.app), scratch), {
-      mode: 'production', sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending: pending.length,
-      approvals: voided.approvals, proposals: voided.proposals, copied: copy !== undefined, keptAs,
-    }, now);
-  } catch (err) {
-    await dropScratch();
-    if (err instanceof RestoreRefused) throw new RestoreRefused(`${err.message} Nothing was changed.`);
-    throw new RestoreRefused(`The backup could not be restored (${message(err).slice(0, 200)}). Nothing was changed.`);
-  }
-  // A trial run ends here: the copy passed every check, so it is dropped and nothing has changed.
-  if (o.checkOnly) {
-    await dropScratch();
-    return {
-      dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending, ...voided,
-      seconds: Math.round((Date.now() - started) / 1000), database, keptAs, checkedOnly: true,
+    if (!state.production.open) {
+      throw new RestoreRefused(`The database ${database} is closed to connections: an earlier restore was stopped part-way.`, { stage: 'state', lines: ['Open it again with this command:', REPAIR] });
+    }
+    const dropDatabase = async (name: string): Promise<boolean> => {
+      try {
+        await m.query(`DROP DATABASE IF EXISTS ${name}`);
+        return true;
+      } catch {
+        if (!leftovers.includes(name)) leftovers.push(name);
+        return false;
+      }
     };
-  }
-  o.say('The backup restored and passed its checks.');
-
-  // 7. The swap. From here the runtime is down until the new database has the name.
-  try {
-    await o.stopRuntime();
-  } catch (err) {
-    await dropScratch();
-    await o.startRuntime().catch(() => undefined);
-    throw new RestoreRefused(`${err instanceof RestoreRefused ? err.message : 'The runtime could not be stopped.'} Nothing was changed.`);
-  }
-  /** 0: nothing renamed. 1: the old database has its kept name. 2: the new one has the production name (done). */
-  let stage = 0;
-  const deadline = () => Date.now() + (o.drainMs ?? 60_000);
-  /** Wait until nothing but this session is connected to `name` (a closed session takes a moment to go). */
-  const idle = async (c: pg.Client, name: string, until: number): Promise<boolean> => {
-    for (;;) {
-      const busy = await c.query('SELECT 1 FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [name]);
-      if (!busy.rowCount) return true;
-      if (Date.now() > until) return false;
-      await sleep(250);
+    for (const s of state.stale) {
+      if (await dropDatabase(s.datname)) o.say(`Flint removed ${s.datname}, left by an earlier restore that did not finish.`);
+      else o.say(`Flint could not remove ${s.datname}, left by an earlier restore that did not finish.`);
     }
-  };
-  try {
-    await maintenance(owner, async (c) => {
-      await c.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS false`);
-      if (!(await idle(c, database, deadline()))) {
-        throw new RestoreRefused('Something is still using the database, so Flint stopped. Quit anything else that is connected to it and run this again.');
+
+    // 2. The setup this needs.
+    const setup = await roleProblems(m, restorer.user);
+    if (state.production.owner !== OWNER) setup.push(`the database ${database} does not belong to ${OWNER}`);
+    if (setup.length) throw new RestoreRefused(`Flint's database is not set up for a restore: ${setup.join('; ')}.`, { stage: 'setup' });
+    const member = (await m.query<{ ok: boolean }>(`SELECT pg_has_role($1, $2, 'MEMBER') AS ok`, [OWNER, restorer.user])).rows[0]!.ok;
+    if (!member) {
+      throw new RestoreRefused('Flint restores a backup as a role that owns nothing else, and the migration owner must be able to take over what that role makes. That permission is missing.', {
+        stage: 'setup',
+        lines: ['Grant it once with this command, then run this again:', `  psql -d postgres -c 'GRANT ${restorer.user} TO ${OWNER}'`],
+      });
+    }
+    for (const role of APP_ROLES) {
+      const may = (await m.query<{ ok: boolean }>(`SELECT has_database_privilege($1, $2, 'CONNECT') AS ok`, [role, database])).rows[0]!.ok;
+      if (!may) notes.push(`The role ${role} may not connect to the database in use. The restored database follows Flint's own setup.`);
+    }
+    // The saved passwords must still work: the runtime's, the backup role's, and the role that restores.
+    const signIn = async (t: PgTarget, role: string): Promise<void> => {
+      try {
+        await withClient(t, (c) => c.query('SELECT 1'));
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === '28P01' || code === '28000') throw new RestoreRefused(`Flint's saved settings no longer let the role ${role} sign in to the database, so a restore could not be used. Nothing was changed.`, { stage: 'setup' });
+        if (role === restorer.user) throw new RestoreRefused(`The role that restores backups could not reach the database server (${failureOf(err)}).`, { stage: 'setup' });
       }
-      if (!(await idle(c, scratch, deadline()))) throw new Error('the restored copy is still in use');
-      await c.query(`ALTER DATABASE ${database} RENAME TO ${keptAs}`);
-      stage = 1;
-      await c.query(`ALTER DATABASE ${scratch} RENAME TO ${database}`);
-      stage = 2;
-      // The kept copy can be opened again (to look at, or to copy out of); nothing is configured to use its name.
-      await c.query(`ALTER DATABASE ${keptAs} ALLOW_CONNECTIONS true`).catch(() => undefined);
-    });
-  } catch (err) {
-    if (stage < 2) {
-      // Put the name back, let the runtime at it again, and remove the copy that never went live.
-      await maintenance(owner, async (c) => {
-        if (stage === 1) await c.query(`ALTER DATABASE ${keptAs} RENAME TO ${database}`);
-        await c.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS true`);
-      }).catch(() => undefined);
-      await dropScratch();
-      await o.startRuntime().catch(() => undefined);
-      if (err instanceof RestoreRefused) throw new RestoreRefused(`${err.message} Nothing was changed.`);
-      throw new RestoreRefused(`The databases could not be swapped (${message(err).slice(0, 200)}). Nothing was changed.`);
-    }
-  }
-  // The databases are swapped whatever happens now: a runtime that will not start is reported, not undone.
-  const runtimeStarted = await o.startRuntime().then(() => true, () => false);
+    };
+    if (production) await signIn(app, app.user);
+    if (production && backup) await signIn(backup, backup.user);
+    await signIn(withDatabase(restorer, m.database ?? 'postgres'), restorer.user);
 
-  return {
-    dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending, ...voided,
-    seconds: Math.round((Date.now() - started) / 1000), database, keptAs, runtimeStarted, ...(copy ? { copy } : {}),
-  };
+    // 3. The backup itself, against every record of its fingerprint.
+    const rows = production
+      ? await withClient(owner, async (c) => (await c.query<{ sha256: string }>(`SELECT sha256 FROM public."BackupRun" WHERE path = $1 AND location = 'local' AND status = 'ok'`, [o.dump])).rows.map((r) => r.sha256)).catch(() => [] as string[])
+      : [];
+    const check = await checkDump(o.dump, o.tools, {
+      ...(o.keyFile ? { keyFile: o.keyFile } : {}), recorded: [...(o.recorded ?? []), ...rows], ...(o.withoutFingerprint ? { withoutFingerprint: true } : {}), countsOptional: !production,
+    });
+    sha = check.sha256;
+    if (production && !check.counts) throw new RestoreRefused('That backup has no row counts beside it, so Flint could not check what it restored.', { stage: 'dump' });
+
+    // A rebuild restores only into the empty database it made. One that already holds this very backup is done.
+    if (!production && (await withClient(owner, userObjects)) > 0) {
+      if (!(await withClient(owner, (c) => alreadyRestored(c, check.sha256)))) throw new RestoreRefused('The database to restore into is not empty.', { stage: 'state' });
+      const again = await withClient(owner, async (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: async (applied) => (await referenceOf(m, owner, reference, applied, '', o.tools)).lines, owner: OWNER, strangers: [restorer.user] }));
+      if (!again.ok) throw new RestoreRefused(`The database restored earlier does not pass its checks: ${again.problems.join('; ')}.`, { stage: 'verify' });
+      const report = await withClient(owner, (c) => carryForward(c, { ...(o.rp ? { rp: o.rp } : {}), now: new Date() }));
+      return { mode: o.mode, dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: 0, pending: again.migrations.pending, report, seconds: 0, database, already: true, leftovers, removed: [] };
+    }
+
+    // 4. Room: the restored copy sits beside the database it replaces, and a copy of that one is taken first.
+    const size = Number((await m.query<{ n: string }>('SELECT pg_database_size($1) AS n', [database])).rows[0]!.n);
+    const dataDir = (await m.query<{ d: string }>('SHOW data_directory').then((r) => r.rows[0]?.d, () => undefined)) ?? o.dataDir;
+    const free = (dir: string | undefined): number | undefined => {
+      try {
+        if (!dir || !existsSync(dir)) return undefined;
+        const s = statfsSync(dir);
+        return s.bavail * s.bsize;
+      } catch {
+        return undefined;
+      }
+    };
+    const room = free(dataDir);
+    if (room !== undefined && room < Math.max(size * 1.25, check.bytes * 8) + 256 * 1024 * 1024) {
+      throw new RestoreRefused('This Mac does not have enough free space to restore safely.', { stage: 'space' });
+    }
+    const willCopy = production && !o.checkOnly && backup !== undefined && o.copyDir !== undefined;
+    const copyRoom = willCopy ? free(existsSync(o.copyDir!) ? o.copyDir : dirname(o.copyDir!)) : undefined;
+    if (copyRoom !== undefined && copyRoom < check.bytes * 2 + 64 * 1024 * 1024) throw new RestoreRefused('This Mac does not have enough free space to copy the current database first.', { stage: 'space' });
+
+    // No name this run needs may be taken already.
+    const taken = await m.query('SELECT 1 FROM pg_database WHERE datname = ANY($1)', [[scratch, reference, keptAs]]);
+    if (taken.rowCount) throw new RestoreRefused('A restore from this same second is already there. Wait a moment and run this again.', { stage: 'state' });
+
+    // 5 to 7. Restore beside it, as the role that owns nothing else, and check everything there.
+    const locale = await localeOf(m, database);
+    const copyOwner = withDatabase(owner, scratch);
+    let verified: Verified;
+    let pending: string[];
+    let report: CarryReport;
+    let current: CurrentFacts | undefined;
+    const readNow = async (): Promise<CurrentFacts | undefined> => (production ? withClient(owner, (c) => readCurrent(c, check.takenAt)).catch(() => undefined) : undefined);
+    try {
+      await onMaintenance(restorer, (c) => c.query(`CREATE DATABASE ${scratch} TEMPLATE template0${locale}`));
+      await run(o.tools.pgRestore, ['--no-owner', '--exit-on-error', '-h', restorer.host, '-p', String(restorer.port), '-U', restorer.user, '-d', scratch, o.dump], restorer.password);
+      // The file that was restored is the file that was checked.
+      if ((await sha256File(o.dump)) !== check.sha256) throw new RestoreRefused('The backup file changed while it was being restored.', { stage: 'fingerprint' });
+
+      const referenceFor = async (applied: readonly Migration[]) => (await referenceOf(m, owner, reference, applied, locale, o.tools)).lines;
+      // The privileges on the database itself live on the cluster, not in the dump: Flint's own setup, read from a reference.
+      const head = await withClient(copyOwner, (c) => migrationState(c, o.migrationsDir));
+      if (head.problems.length) throw new RestoreRefused(`The restored copy did not pass its checks: ${head.problems.join('; ')}.`, { stage: 'verify' });
+      const spec = (await referenceOf(m, owner, reference, head.applied, locale, o.tools)).grants;
+      notes.push(...(await carryDatabaseGrants(m, scratch, spec, production ? await databaseGrants(m, database) : undefined, [OWNER, restorer.user])));
+
+      // Before it is handed over: counts, the migrations it records, and every object against the reference.
+      verified = await withClient(copyOwner, (c) => verifyRestored(c, { ...(check.counts ? { counts: check.counts } : {}), migrationsDir: o.migrationsDir, reference: referenceFor }));
+      if (!verified.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${verified.problems.join('; ')}.`, { stage: 'verify' });
+
+      // Handed to the migration owner. Any other database the restore role owns (a restore drill's) is given straight back.
+      await withClient(copyOwner, async (c) => {
+        await c.query('BEGIN');
+        try {
+          const theirs = (await c.query<{ datname: string }>(`SELECT datname FROM pg_database WHERE datdba = $1::regrole AND datname <> current_database()`, [restorer.user])).rows;
+          await c.query(`REASSIGN OWNED BY ${quote(restorer.user)} TO ${OWNER}`);
+          for (const d of theirs) await c.query(`ALTER DATABASE ${quote(d.datname)} OWNER TO ${quote(restorer.user)}`);
+          await c.query(`ALTER SCHEMA public OWNER TO ${OWNER}`);
+          await c.query('COMMIT');
+        } catch (err) {
+          await c.query('ROLLBACK').catch(() => {});
+          throw err;
+        }
+      });
+      const handed = await withClient(copyOwner, (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: referenceFor, owner: OWNER, strangers: [restorer.user] }));
+      if (!handed.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${handed.problems.join('; ')}.`, { stage: 'verify' });
+
+      // Brought up to date, and checked again against this checkout's whole list.
+      pending = verified.migrations.pending;
+      if (pending.length) {
+        await o.migrate(urlOf(o.owner, scratch));
+        const after = await withClient(copyOwner, (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: referenceFor, owner: OWNER, strangers: [restorer.user] }));
+        if (!after.ok || after.migrations.pending.length) {
+          throw new RestoreRefused(`The restored copy could not be brought up to date: ${[...after.problems, ...(after.migrations.pending.length ? ['migrations still pending'] : [])].join('; ')}.`, { stage: 'migrate' });
+        }
+      }
+      // The runtime's own role must be able to use it.
+      await withClient(withDatabase(app, scratch), (c) => c.query('SELECT 1 FROM public."Proposal" LIMIT 1'));
+
+      current = await readNow();
+      report = await withClient(copyOwner, (c) => carryForward(c, { ...(current ? { current } : {}), ...(o.rp ? { rp: o.rp } : {}), now: new Date() }));
+      if (production) notes.push(...(await carryDatabaseSettings(m, database, scratch)));
+    } catch (err) {
+      const dropped = await dropDatabase(scratch);
+      const left = dropped ? [] : [`Flint could not remove the copy ${scratch}. The next restore removes it.`];
+      if (err instanceof RestoreRefused) throw new RestoreRefused(`${err.message} Nothing was changed.`, { stage: err.stage, lines: [...err.lines, ...left] });
+      throw new RestoreRefused(`The backup could not be restored (${reasonOf(err)}). Nothing was changed.`, { stage: 'restore', lines: left });
+    }
+    for (const n of notes) o.say(n);
+
+    const result = (): Omit<RestoreResult, 'seconds'> => ({
+      mode: o.mode, dump: o.dump, sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending, report, database, leftovers, removed: [],
+    });
+
+    // 8. A trial run ends here: the copy passed every check, so it is dropped and nothing has changed.
+    if (o.checkOnly) {
+      await dropDatabase(scratch);
+      const seconds = Math.round((Date.now() - started) / 1000);
+      await recordAttempt('ok', { tables: verified.tables, seconds });
+      return { ...result(), seconds, checkedOnly: true };
+    }
+    if (production) o.say('The backup restored and passed its checks.');
+
+    // Will's word, having read what will be in force.
+    const oldDatabases = production ? oldKept(state, Date.now()) : [];
+    const oldFiles = production ? oldCopies(o.copyDir, Date.now()) : [];
+    const removing = [...oldDatabases, ...oldFiles.map((f) => `the copy ${f}`)];
+    if (production) {
+      const summary: RestoreSummary = {
+        name: basename(o.dump), takenAt: check.takenAt, bytes: check.bytes, tables: verified.tables, fingerprint: check.fingerprint, database, keptAs, report, removing,
+      };
+      if (!o.confirm || !(await o.confirm(summary))) {
+        await dropDatabase(scratch);
+        await recordAttempt('skipped', { stage: 'confirm' });
+        throw new RestoreRefused('Nothing was changed.', { stage: 'confirm' });
+      }
+    }
+
+    // A copy of the database as it is now, taken with the read-only backup role.
+    let copy: string | undefined;
+    if (production) {
+      const stop = async (sentence: string): Promise<never> => {
+        await dropDatabase(scratch);
+        throw new RestoreRefused(sentence, { stage: 'copy' });
+      };
+      if (backup && o.copyDir) {
+        try {
+          mkdirSync(o.copyDir, { recursive: true, mode: 0o700 });
+          const d = await dumpDatabase(o.backup!, o.copyDir, o.tools, new Date());
+          if (o.keyFile) writeDumpHash(d.path, d.sha256, o.keyFile);
+          copy = d.path;
+          o.say('Flint copied the current database first.');
+        } catch {
+          if (!o.withoutCopy) await stop('Flint could not copy the current database first, so it stopped. Nothing was changed.');
+          o.say('Flint could not copy the current database first. It is kept under another name all the same.');
+        }
+      } else if (!o.withoutCopy) {
+        await stop('Flint has no way to copy the current database first, so it stopped. Nothing was changed.');
+      }
+    }
+
+    // 9. The swap. From here an interruption is held until the swap is done or undone.
+    swapping = true;
+    const stopIfAsked = () => {
+      if (interrupted) throw new RestoreRefused(`Flint was interrupted (${interrupted}), so it stopped.`, { stage: 'interrupted' });
+    };
+    const ids = async (c: pg.Client): Promise<Map<string, DbRow>> =>
+      new Map((await c.query<DbRow>(`SELECT oid::text AS oid, datname, datallowconn AS open, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = ANY($1)`, [[database, scratch, keptAs]])).rows.map((r) => [r.oid, r]));
+    const before = await ids(m);
+    const prodOid = [...before.values()].find((r) => r.datname === database)?.oid;
+    const copyOid = [...before.values()].find((r) => r.datname === scratch)?.oid;
+    let cause: unknown;
+    let stopped = false;
+    try {
+      if (prodOid === undefined || copyOid === undefined) throw new Error('a database this needs is gone');
+      stopIfAsked();
+      try {
+        await o.stopRuntime();
+        stopped = true;
+      } catch (err) {
+        stopped = true; // It may be half stopped: it is started again below either way.
+        throw err instanceof RestoreRefused ? err : new RestoreRefused('The runtime could not be stopped.', { stage: 'runtime' });
+      }
+      stopIfAsked();
+      // The last word on what Will took away, now that the runtime writes nothing.
+      const late = await readNow();
+      if (late) {
+        const again = await withClient(copyOwner, (c) => carryForward(c, { current: late, ...(o.rp ? { rp: o.rp } : {}), now: new Date() }));
+        report = { ...again, approvals: report.approvals, proposals: report.proposals, deliveries: report.deliveries, jobs: report.jobs, revoked: report.revoked + again.revoked, mismatched: report.mismatched + again.mismatched,
+          policiesOff: report.policiesOff + again.policiesOff, rulesOff: report.rulesOff + again.rulesOff, counters: report.counters + again.counters,
+          unsignedPolicies: [...report.unsignedPolicies, ...again.unsignedPolicies], unsignedRules: [...report.unsignedRules, ...again.unsignedRules] };
+      }
+      if (production) o.say('Flint is waiting for everything else to let go of the database. This can take up to a minute.');
+      await m.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS false`);
+      await o.at?.('closed');
+      const until = Date.now() + (o.drainMs ?? 60_000);
+      for (const name of [database, scratch]) {
+        for (;;) {
+          stopIfAsked();
+          const busy = await connected(m, name);
+          if (!busy.length) break;
+          if (Date.now() > until) {
+            throw new RestoreRefused(`Something is still using the database (${busy.join('; ')}), so Flint stopped.`, { stage: 'drain', lines: ['Quit what is connected to it, then run this again.'] });
+          }
+          await sleep(250);
+        }
+      }
+      stopIfAsked();
+      // Both names change together, or neither does. The database that was in use keeps its closed door.
+      try {
+        await m.query(`BEGIN; ALTER DATABASE ${database} RENAME TO ${keptAs}; ALTER DATABASE ${scratch} RENAME TO ${database}; COMMIT;`);
+      } catch (err) {
+        await m.query('ROLLBACK').catch(() => undefined);
+        throw err;
+      }
+      await o.at?.('swapped');
+    } catch (err) {
+      cause = err;
+    }
+
+    // What happened is read from the catalog, by the databases' own ids, on a session of its own.
+    const settle = async (): Promise<'swapped' | 'original' | 'unknown'> => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let c: pg.Client | undefined;
+        try {
+          c = await maintenance(owner);
+          let now = await ids(c);
+          const prod = prodOid === undefined ? undefined : now.get(prodOid);
+          const cp = copyOid === undefined ? undefined : now.get(copyOid);
+          if (cp?.datname === database && prod?.datname === keptAs) return 'swapped';
+          if (prod?.datname === database) {
+            if (!prod.open) {
+              await c.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS true`);
+              now = await ids(c);
+            }
+            if (now.get(prodOid!)?.open) return 'original';
+          }
+          return 'unknown';
+        } catch {
+          await sleep(500);
+        } finally {
+          await c?.end().catch(() => {});
+        }
+      }
+      return 'unknown';
+    };
+    const outcome = await settle();
+
+    if (outcome !== 'swapped') {
+      const why = cause instanceof RestoreRefused ? cause.message : `The databases could not be swapped (${reasonOf(cause)}).`;
+      const more = cause instanceof RestoreRefused ? cause.lines : [];
+      const stage = cause instanceof RestoreRefused ? cause.stage : 'swap';
+      // The runtime is started again whatever else is true, and whether it did is said.
+      const runtimeUp = !stopped || (await o.startRuntime().then(() => true, () => false));
+      if (outcome === 'original') {
+        // Only now, with production confirmed back under its name and open, is the copy that never went live removed.
+        const dropped = await onMaintenance(owner, (c) => c.query(`DROP DATABASE IF EXISTS ${scratch}`)).then(() => true, () => false);
+        const lines = [...more, ...(dropped ? [] : [`Flint could not remove the copy ${scratch}. The next restore removes it.`])];
+        await recordAttempt('failed', { stage });
+        throw new RestoreRefused(`${why} Nothing was changed.`, { stage, lines, runtimeDown: !runtimeUp });
+      }
+      // Not confirmed: say what is there, keep the copy, and give the commands.
+      const seen = await onMaintenance(owner, (c) => clusterState(c, database)).catch(() => undefined);
+      const lines = [...more];
+      if (!seen) lines.push('Flint could not reach the database server to see what state it is in.');
+      else if (!seen.production) lines.push(`There is no database named ${database} right now.`);
+      else if (!seen.production.open) lines.push(`The database ${database} is closed to connections.`);
+      if (seen?.stale.some((s) => s.datname === scratch)) lines.push(`The restored copy is still there as ${scratch}.`);
+      lines.push('Put things back with this command:', REPAIR, 'If that does not work, open the database by hand with this command:', `  psql -d postgres -c 'ALTER DATABASE ${database} ALLOW_CONNECTIONS true'`);
+      await recordAttempt('failed', { stage: 'undo' });
+      throw new RestoreRefused(`${why} Flint could not confirm that the database is back as it was.`, { stage: 'undo', lines, runtimeDown: !runtimeUp });
+    }
+
+    // The databases are swapped whatever happens now: what follows is reported, never undone.
+    const runtimeStarted = await o.startRuntime().then(() => true, () => false);
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const inputs: AuditInputs = {
+      mode: o.mode, sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending: pending.length,
+      approvals: report.approvals, proposals: report.proposals, revoked: report.revoked + report.mismatched, switchedOff: report.policiesOff + report.rulesOff + report.unsignedPolicies.length + report.unsignedRules.length,
+      currentRead: report.currentRead, copied: copy !== undefined, keptAs, seconds,
+    };
+    recorded = true;
+    o.record?.({ outcome: 'ok', ...inputs });
+    const audited = await audit(app, { ...who, decision: 'act', outcome: 'ok', inputs }).then(() => true, () => false);
+
+    // A rebuild's old database was the empty one it made: there is nothing in it to keep.
+    const removed: string[] = [];
+    if (!production) await dropDatabase(keptAs);
+    else {
+      for (const name of oldDatabases) if (await dropDatabase(name)) removed.push(name);
+      for (const f of oldFiles) {
+        for (const suffix of ['', '.counts.json', '.sha256']) rmSync(join(o.copyDir!, `${f}${suffix}`), { force: true });
+        removed.push(`the copy ${f}`);
+      }
+    }
+    return { ...result(), seconds, ...(production ? { keptAs } : {}), runtimeStarted, audited, removed, ...(copy ? { copy } : {}) };
+  } catch (err) {
+    // Every attempt that got this far and did not finish is on record: where it stopped, never why in a tool's words.
+    if (!recorded) await recordAttempt('failed', err instanceof RestoreRefused ? { stage: err.stage } : { stage: 'fault', what: reasonOf(err).slice(0, 120) }).catch(() => undefined);
+    throw err;
+  } finally {
+    off?.();
+    await main?.end().catch(() => {});
+    releaseHold();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Repair
+
+export interface RepairOptions {
+  /** flint_owner on the production database. */
+  owner: string;
+  /** Will's typed word before a kept database is given the production name back; not asked just to open a closed one. */
+  confirm(kept: string): Promise<boolean>;
+  startRuntime(): Promise<void>;
+  say(line: string): void;
+}
+
+/**
+ * Put right what a restore that was stopped part-way left: a production
+ * database that is closed is opened; one that is missing while a kept copy is
+ * there has the newest kept copy renamed back (Will confirms that one); copies
+ * that never went live are removed; the runtime is started. Returns false when
+ * the runtime did not start.
+ */
+export async function repairDatabase(o: RepairOptions): Promise<{ did: 'opened' | 'renamed' | 'nothing'; runtimeStarted: boolean }> {
+  const owner = targetOf(o.owner);
+  const database = owner.database;
+  if (!DB_NAME.test(database) || RESERVED.has(database)) throw new RestoreRefused("The production database's name is not one Flint can rename.", { stage: 'config' });
+  const c = await maintenance(owner);
+  let did: 'opened' | 'renamed' | 'nothing' = 'nothing';
+  try {
+    const locked = (await c.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1, $2) AS ok', [...LOCK])).rows[0]!.ok;
+    if (!locked) throw new RestoreRefused('A restore is running. Wait for it to finish.', { stage: 'lock' });
+    let state = await clusterState(c, database);
+    if (!state.production) {
+      const kept = state.kept.at(-1);
+      if (!kept) throw new RestoreRefused(`There is no database named ${database} and no kept copy of it. Rebuild from a backup: docs/RECOVERY.md says how.`, { stage: 'state' });
+      o.say(`There is no database named ${database}. The newest kept copy is ${kept.datname}.`);
+      if (!(await o.confirm(kept.datname))) throw new RestoreRefused('Nothing was changed.', { stage: 'confirm' });
+      await c.query(`ALTER DATABASE ${kept.datname} RENAME TO ${database}`);
+      did = 'renamed';
+      state = await clusterState(c, database);
+    }
+    if (state.production && !state.production.open) {
+      await c.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS true`);
+      if (did === 'nothing') did = 'opened';
+      state = await clusterState(c, database);
+    }
+    if (!state.production?.open) throw new RestoreRefused(`Flint could not open the database ${database}.`, { stage: 'undo', lines: ['Open it by hand with this command:', `  psql -d postgres -c 'ALTER DATABASE ${database} ALLOW_CONNECTIONS true'`] });
+    o.say(did === 'renamed' ? `The database ${database} is back, from the kept copy.` : did === 'opened' ? `The database ${database} is open again.` : `The database ${database} is open. Nothing needed repairing.`);
+    for (const s of state.stale) {
+      const gone = await c.query(`DROP DATABASE IF EXISTS ${s.datname}`).then(() => true, () => false);
+      o.say(gone ? `Flint removed ${s.datname}, a copy that never went into use.` : `Flint could not remove ${s.datname}, a copy that never went into use.`);
+    }
+  } finally {
+    await c.end().catch(() => {});
+  }
+  const runtimeStarted = await o.startRuntime().then(() => true, () => false);
+  return { did, runtimeStarted };
 }

@@ -6,7 +6,10 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, prisma, withClient } from './db';
-import { GRANTS_FIXTURE, grants } from './grants';
+import { grantLines } from '../src/backup/grants';
+
+const GRANTS_FIXTURE = join(__dirname, 'fixtures', 'grants.json');
+const grants = (owner: string): Promise<string[]> => withClient(owner, (c) => grantLines(c));
 
 async function objects(owner: string): Promise<{ tables: string[]; functions: string[]; schemas: string[] }> {
   return withClient(owner, async (c) => ({
