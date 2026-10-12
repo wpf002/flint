@@ -36,17 +36,29 @@ export type Decision =
   | { ok: true; action: 'rollback'; why: string }
   | Refusal;
 
+/** An Ollama model name: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. Letters, digits and . _ : / - only. */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
+
+/** A provider or model as a refusal may quote it: its id characters only, so nothing in it can break a line. */
+const quoted = (s: string): string => s.replace(/[^A-Za-z0-9._:/-]/g, '?').slice(0, 80);
+
 /**
  * Is this a model on Will's own Ollama? The one rule every step of `try`
  * checks again for itself (parse, screen, the probe, the config write), so no
  * later change to one of them can let an outside model through:
  *  - the provider is `ollama`, exactly;
+ *  - the model is a model NAME (MODEL_ID): it is written into secrets.env as
+ *    `FLINT_TIER_X=ollama:<model>`, and a name with a line break in it would
+ *    write a second line of its own choosing (a key, a host) under the first;
  *  - the model is not an Ollama cloud model (`...-cloud`, `:cloud`): those are
  *    open weights, but they run on Ollama's servers, not here.
  */
 export function localOnly(c: Pick<Candidate, 'provider' | 'model'>): Refusal | { ok: true } {
   if (c.provider !== 'ollama') {
-    return { ok: false, reason: `evolve only tries local models (ollama:<model>); ${c.provider}:${c.model} is an outside AI, and moving a tier onto one is Will's call, by hand` };
+    return { ok: false, reason: `evolve only tries local models (ollama:<model>); ${quoted(c.provider)}:${quoted(c.model)} is an outside AI, and moving a tier onto one is Will's call, by hand` };
+  }
+  if (!MODEL_ID.test(c.model)) {
+    return { ok: false, reason: `'${quoted(c.model)}' is not an Ollama model name (letters, digits and . _ : / - only)` };
   }
   if (isOllamaCloudModel(c.model)) {
     return { ok: false, reason: `${c.model} is an Ollama cloud model, which runs on Ollama's servers, not on this Mac` };

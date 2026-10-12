@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyCandidate, hasParked, parkEnvLine, readEnvLine, readRollback, recoverIfNeeded, setEnvLine, settleCandidate, unparkEnvLine, type TryIo } from '../src/run-try';
+import { applyCandidate, hasParked, parkEnvLine, readEnvLine, readRollback, recoverIfNeeded, setEnvLine, settleCandidate, unparkEnvLine, writeSecrets, type TryIo } from '../src/run-try';
 
 describe('setEnvLine', () => {
   const file = 'A=1\nFLINT_TIER_HARD=anthropic:claude-opus-5-5\nB=2\n';
@@ -155,6 +155,17 @@ describe('rollback safety', () => {
     expect(restarts).toBe(0);
   });
 
+  // The review's case: the model goes into the file as `FLINT_TIER_X=ollama:<model>`, so a name with a
+  // line break in it wrote a second line of its own choosing under the first.
+  it('never writes a model name that is not one: a line break in it would add a line to secrets.env', async () => {
+    for (const model of ['qwen3.8:27b\nANTHROPIC_API_KEY=sk-ant-planted', 'qwen3.8:27b\rOLLAMA_HOST=http://evil.example', 'qwen 3.8', 'x"y', "x'y", 'x#comment', 'x=y', '', ' ', 'x'.repeat(200)]) {
+      await expect(applyCandidate(io, { tier: 'hard', provider: 'ollama', model }, 'now'), JSON.stringify(model)).rejects.toThrow(/refusing to write/);
+    }
+    expect(readFileSync(io.secretsPath, 'utf8')).toBe(ORIGINAL);
+    expect(existsSync(io.rollbackPath)).toBe(false);
+    expect(restarts).toBe(0);
+  });
+
   it('never writes an env var that is not a tier', async () => {
     for (const tier of ['last_resort', 'ollama_host', 'x']) {
       await expect(applyCandidate(io, { tier, provider: 'ollama', model: 'qwen3.8:27b' }, 'now'), tier).rejects.toThrow(/is not a tier/);
@@ -243,10 +254,72 @@ describe('rollback safety', () => {
     expect(readFileSync(io.secretsPath, 'utf8')).toBe('OTHER=keep\nFLINT_TIER_HARD=ollama:muse-glimmer:30b\n');
   });
 
+  // secrets.env holds every key Flint has. It is replaced by a rename, never rewritten in place.
+  it('every write of the config goes through a temp file, mode 600, renamed over it: nothing is left beside it', async () => {
+    chmodSync(io.secretsPath, 0o644); // as a careless editor might leave it
+    const files = () => readdirSync(dir).sort();
+    await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
+    expect(statSync(io.secretsPath).mode & 0o777).toBe(0o600);
+    expect(files()).toEqual(['rollback.json', 'secrets.env']);
+    await recoverIfNeeded(io);
+    expect(statSync(io.secretsPath).mode & 0o777).toBe(0o600);
+    expect(files()).toEqual(['secrets.env']);
+    await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
+    settleCandidate(io);
+    expect(statSync(io.secretsPath).mode & 0o777).toBe(0o600);
+    expect(files()).toEqual(['secrets.env']);
+  });
+
   it('keeping the candidate drops the marker and the parked line, and leaves the candidate in place', async () => {
     await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
     settleCandidate(io);
     expect(existsSync(io.rollbackPath)).toBe(false);
     expect(readFileSync(io.secretsPath, 'utf8')).toBe('OTHER=keep\nFLINT_TIER_HARD=ollama:qwen3.8:27b\n');
+  });
+});
+
+describe('writeSecrets (the file is replaced whole, or not at all)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'evolve-secrets-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('replaces the contents and leaves the file at mode 600, whatever it was', () => {
+    const path = join(dir, 'secrets.env');
+    writeFileSync(path, 'A=1\n', { encoding: 'utf8', mode: 0o644 });
+    writeSecrets(path, 'A=2\n');
+    expect(readFileSync(path, 'utf8')).toBe('A=2\n');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(['secrets.env']);
+  });
+
+  it('creates the file when there is none', () => {
+    const path = join(dir, 'secrets.env');
+    writeSecrets(path, 'A=1\n');
+    expect(readFileSync(path, 'utf8')).toBe('A=1\n');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('a write that cannot finish leaves what was there untouched, and no temp file behind', () => {
+    // The "file" is a directory with something in it: the rename over it fails.
+    const path = join(dir, 'secrets.env');
+    mkdirSync(path);
+    writeFileSync(join(path, 'keep'), 'still here', 'utf8');
+    expect(() => writeSecrets(path, 'A=1\n')).toThrow();
+    expect(readFileSync(join(path, 'keep'), 'utf8')).toBe('still here');
+    expect(readdirSync(dir)).toEqual(['secrets.env']);
+  });
+
+  it('a symlinked secrets.env stays a symlink: the file it points at is the one replaced', () => {
+    const real = join(dir, 'real.env');
+    const link = join(dir, 'secrets.env');
+    writeFileSync(real, 'A=1\n', 'utf8');
+    symlinkSync(real, link);
+    writeSecrets(link, 'A=2\n');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, 'utf8')).toBe('A=2\n');
+    expect(statSync(real).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).sort()).toEqual(['real.env', 'secrets.env']);
   });
 });

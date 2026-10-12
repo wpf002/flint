@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decide, localOnly, parseCandidate, screen, tierEnvVar, tierReach } from '../src/promote';
+import { MODEL_ID, decide, localOnly, parseCandidate, screen, tierEnvVar, tierReach } from '../src/promote';
 import type { DailyRow } from '../src/measure';
 
 const row = (winRate: number, signal: DailyRow['signal']): DailyRow => ({
@@ -57,6 +57,22 @@ describe('localOnly', () => {
       expect(r.ok, JSON.stringify(provider)).toBe(false);
       expect((r as { reason: string }).reason).toContain('evolve only tries local models');
     }
+  });
+
+  // The model is written into secrets.env as FLINT_TIER_X=ollama:<model>: it has to be a name, and nothing else.
+  it('refuses a model that is not a model name, and quotes none of what could break a line', () => {
+    for (const model of ['qwen3.8:27b\nANTHROPIC_API_KEY=sk-ant-planted', 'a\rb', 'a b', 'a\tb', 'a"b', 'a=b', 'a#b', 'a$(b)', '', ':27b', '-x', 'x'.repeat(161)]) {
+      const r = localOnly({ provider: 'ollama', model });
+      expect(r.ok, JSON.stringify(model)).toBe(false);
+      const reason = (r as { reason: string }).reason;
+      expect(reason).toContain('is not an Ollama model name');
+      expect(reason).not.toMatch(/[\n\r]/);
+      expect(reason).not.toContain('sk-ant-planted\n');
+    }
+    // ...and an outside provider's refusal does not echo a line break either.
+    expect((localOnly({ provider: 'openai\nX=1', model: 'gpt\n5' }) as { reason: string }).reason).not.toMatch(/[\n\r]/);
+    expect(MODEL_ID.test('hf.co/org/repo:Q4_K_M')).toBe(true);
+    expect(MODEL_ID.test('x'.repeat(160))).toBe(true);
   });
 
   it('refuses an Ollama cloud model: it runs on Ollama\'s servers', () => {

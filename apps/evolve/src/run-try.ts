@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { TIERS } from '@flint/core';
 import type { DailyRow } from './measure.js';
 import { type Candidate, localOnly, parseCandidate, tierEnvVar } from './promote.js';
@@ -29,6 +30,11 @@ import { type Candidate, localOnly, parseCandidate, tierEnvVar } from './promote
  *    must be a tier's, its candidate a local model. It used to be read as it
  *    was, so a stale or hand-made rollback.json made any `evolve try`, even a
  *    refused one, write whatever KEY=value it named and restart Flint.
+ *
+ * THE FILE ITSELF. secrets.env holds every key Flint has, and the server reads
+ * it at every start. It is never rewritten in place: the new contents go to a
+ * temp file beside it, mode 600, and are renamed over it (writeSecrets). A
+ * crash mid-write leaves the old file whole, not half of the new one.
  */
 
 export interface Rollback {
@@ -41,6 +47,29 @@ export interface Rollback {
 
 /** The comment a tier's previous line is parked under while a candidate is tried. */
 const PARKED = '#evolve-parked ';
+
+/**
+ * Replace the secrets file with `content`, all or nothing: written to a temp
+ * file in the same directory (so the rename stays on one filesystem), mode 600
+ * whatever the umask, then renamed over the old one. A symlinked secrets.env
+ * keeps being a symlink: the file it points at is the one replaced.
+ */
+export function writeSecrets(path: string, content: string): void {
+  const target = existsSync(path) ? realpathSync(path) : path;
+  const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  try {
+    writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, target);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* it was never created, or the rename already took it */
+    }
+    throw err;
+  }
+}
 
 /** Set or remove one KEY=value line, preserving everything else in the file. */
 export function setEnvLine(content: string, key: string, value: string | undefined): string {
@@ -185,7 +214,7 @@ export async function recoverIfNeeded(io: TryIo): Promise<string | undefined> {
     if (before && localOnly(before).ok) restored = setEnvLine(restored, rb.envVar, rb.previous);
     else note = `removed ${rb.candidate} from ${rb.envVar} after an interrupted try. It was ${rb.previous} before; evolve does not write an outside model, so set it back by hand if you want it`;
   }
-  writeFileSync(io.secretsPath, restored, 'utf8');
+  writeSecrets(io.secretsPath, restored);
   io.restart();
   await io.waitHealthy();
   unlinkSync(io.rollbackPath);
@@ -210,7 +239,7 @@ export async function applyCandidate(io: TryIo, c: Candidate, now: string): Prom
   // Written BEFORE the swap: if we die on the next line, recovery still works.
   writeFileSync(io.rollbackPath, JSON.stringify(rb), 'utf8');
   // The previous line stays in the file, parked: undoing un-parks it and writes no value of its own.
-  writeFileSync(io.secretsPath, parkEnvLine(content, envVar, `${c.provider}:${c.model}`), 'utf8');
+  writeSecrets(io.secretsPath, parkEnvLine(content, envVar, `${c.provider}:${c.model}`));
   io.restart();
   await io.waitHealthy();
 }
@@ -227,7 +256,7 @@ export function settleCandidate(io: TryIo): void {
   if (read.ok && existsSync(io.secretsPath)) {
     const content = readFileSync(io.secretsPath, 'utf8');
     const kept = content.split('\n').filter((l) => !l.trim().startsWith(`${PARKED}${read.rb.envVar}=`)).join('\n');
-    if (kept !== content) writeFileSync(io.secretsPath, kept, 'utf8');
+    if (kept !== content) writeSecrets(io.secretsPath, kept);
   }
   unlinkSync(io.rollbackPath);
 }
