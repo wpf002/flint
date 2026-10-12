@@ -23,9 +23,26 @@ const WHO = `(a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE roln
  * functions, the two schemas, and the database itself (TEMP matters: a temp
  * table could shadow a governance table).
  */
-export async function grantLines(c: pg.Client): Promise<string[]> {
+export async function grantLines(c: pg.Client, o: { everyone?: boolean } = {}): Promise<string[]> {
   const q = async (sql: string) => (await c.query<{ g: string }>(sql)).rows.map((r) => r.g);
+  // What everyone (PUBLIC) holds on the schemas and on the database itself: nothing, since the floor migration.
+  // Listed for the reviewed fixture, where a line here would be a right every role on the server has. (A
+  // restore's comparison does not ask for it: it reads each schema's privileges entry by entry, and sets the
+  // database's own from a reference.)
+  const everyone = o.everyone
+    ? [
+        ...(await q(`
+          SELECT 'PUBLIC ' || pr.p || ' schema ' || s.nspname AS g
+          FROM pg_namespace s CROSS JOIN (VALUES ('USAGE'), ('CREATE')) AS pr(p)
+          WHERE s.nspname IN ${SCHEMAS} AND has_schema_privilege('public', s.oid, pr.p)`)),
+        ...(await q(`
+          SELECT 'PUBLIC ' || pr.p || ' database' AS g
+          FROM (VALUES ('CREATE'), ('TEMP'), ('CONNECT')) AS pr(p)
+          WHERE has_database_privilege('public', current_database(), pr.p)`)),
+      ]
+    : [];
   return [
+    ...everyone,
     // Read from the catalog itself: the information schema gives the same rows and takes fifty times as long.
     ...(await q(`
       SELECT ${GRANTEE} || ' ' || a.privilege_type || ' ' || n.nspname || '.' || c.relname AS g
