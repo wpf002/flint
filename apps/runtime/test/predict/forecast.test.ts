@@ -10,7 +10,7 @@ import {
   backtest, ends, forecast, median, minHistory, minTrain, prepare, profile, scaleOf, sesLevel, slope, verdict,
 } from '../../src/predict/forecast';
 
-const range = (n: number, f: (i: number) => number) => Array.from({ length: n }, (_, i) => f(i));
+const range = <T>(n: number, f: (i: number) => T): T[] => Array.from({ length: n }, (_, i) => f(i));
 /** A seeded generator, for inputs that are random and the same on every run. */
 function rng(seed: number): () => number {
   let x = seed >>> 0;

@@ -25,22 +25,20 @@
  * A self-modification PR may not touch this directory (P6 allowlist).
  */
 import { z } from 'zod';
+import { chanceParts, chancePhrase } from '../predict/phrasing.js';
 import { REASON_CODES, healthName, noteProblems, plainName, properWords, safeName, serviceWords, shownProblems, titleCase } from '@flint/policy';
 
 const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 const Sha = z.string().regex(/^[0-9a-f]{7,40}$/);
 const Count = z.number().int().min(0).max(1_000_000);
 
-function phraseParts(p: number, by: Date | undefined, tz: string): { word: string; pct: number; when: string } {
-  const word = p < 0.1 ? 'very unlikely' : p < 0.35 ? 'unlikely' : p < 0.45 ? 'somewhat unlikely' : p <= 0.55 ? 'about even' : p < 0.65 ? 'somewhat likely' : p < 0.9 ? 'likely' : 'very likely';
-  const when = by ? ` by ${new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(by)}` : '';
-  return { word, pct: Math.round(p * 100), when };
-}
-
-/** "somewhat unlikely, around 40% by Oct 2, 5:30 PM": the only way a probability reaches a note. */
+/**
+ * "somewhat unlikely, around 40% by Oct 2, 5:30 PM": the only way a probability
+ * reaches a note. The words are the phrase table's (predict/phrasing.ts, P4),
+ * which also says a forecast's range.
+ */
 export function phrase(p: number, by: Date | undefined, tz: string): string {
-  const x = phraseParts(p, by, tz);
-  return `${x.word}, around ${x.pct}%${x.when}`;
+  return chancePhrase(p, by, tz);
 }
 
 /**
@@ -49,7 +47,7 @@ export function phrase(p: number, by: Date | undefined, tz: string): string {
  * ledger just the same (report/exit.ts).
  */
 export function phraseBefore(p: number, by: Date | undefined, tz: string): string {
-  const x = phraseParts(p, by, tz);
+  const x = chanceParts(p, by, tz);
   return `${x.word} (~${x.pct}%)${x.when}`;
 }
 
