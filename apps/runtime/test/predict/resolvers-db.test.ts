@@ -14,15 +14,27 @@
  *  - A goal's forecast that reaches its date with the goal unfinished is false;
  *    a finished goal's forecasts are its card's.
  *  - Superseded predictions are settled too. The time on a resolution is the
- *    time the claim is about. A rule no resolver knows is counted and left.
+ *    time the claim is about.
+ *  - Whose a prediction is: one with no rule, or a rule that does not fit its
+ *    own row, is the sweep's to count and let run out; one that carries a rule
+ *    the sweep does not know, or hangs on another module's advice, is that
+ *    module's and is left alone.
+ *  - A row that states triage's first rule ("when it is next observed after
+ *    the resolve time") is settled by that rule where the rows can tell, and
+ *    left to run out where they cannot.
+ *  - Rows written by the real writers (triage's, a goal review's) go through
+ *    the resolvers as they are.
  *  - Nothing here is ever recorded as Will's, and Will's own are never touched.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { NO_DB, freshDb, id, HEX, type TestUrls } from '../db';
 import { CANARY, DAY, HOUR, MIN, TZ, dayStart, ledgerKit, type LedgerKit } from '../ledger/kit';
 import { goalFixture, type GoalFixture } from '../goals/fixture';
+import { recordOnTrack } from '../../src/goals/ontrack';
 import { sweep } from '../../src/ledger/sweep';
-import { ResolverSpec, decisionOf, healthyState, stepEnd, verdictFor, type DuePrediction } from '../../src/predict/resolvers';
+import { NEXT_OBSERVED_CRITERIA, ResolverSpec, decisionOf, healthyState, ruleOwner, stepEnd, verdictFor, type DuePrediction } from '../../src/predict/resolvers';
 
 describe.skipIf(NO_DB)('resolvers on flint_test', () => {
   let urls: TestUrls;
@@ -41,8 +53,7 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
   };
   /** The prediction as the sweep reads it, and what its resolver says, with nothing written. */
   async function verdict(pid: string, now = new Date()) {
-    const p = (await k.owner(
-      `SELECT id, kind, status, resolver, "resolverSpec", "resolveBy", "createdAt", "seriesKey", "goalId", "subjectEntityId", "conditionRecommendationId" FROM "Prediction" WHERE id = $1`, [pid])).rows[0] as DuePrediction;
+    const p: DuePrediction = await k.due(pid);
     return k.db.$transaction((tx) => verdictFor(tx, p, { tz: TZ, now }));
   }
 
@@ -116,7 +127,7 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       expect(await k.resolution(p)).toMatchObject({ outcome: true });
     });
 
-    it('a forgotten item settles nothing; neither does a state that says neither way, or an item first seen after the resolve time', async () => {
+    it('a forgotten item settles nothing, and is no fault to report; neither does a state that says neither way, or an item first seen after the resolve time', async () => {
       const key = k.serviceKey();
       const eid = await k.service(key, { running: true, disabled: false }, ago(5 * HOUR));
       await k.service(key, { running: false, disabled: false }, ago(10 * MIN));
@@ -126,9 +137,12 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       const names = await k.prediction({ resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' } }, { madeAgo: 3 * HOUR, dueAgo: HOUR });
       await k.forget(eid);
       expect((await k.owner(`SELECT claim, "resolverSpec" FROM "Prediction" WHERE id = $1`, [about])).rows[0]).toEqual({ claim: '[forgotten]', resolverSpec: null });
-      expect(await verdict(about)).toEqual({ verdict: 'unknown' });
+      // The forget took the first one's rule away with its words. That is Will's doing, not a prediction Flint cannot
+      // check: both wait as unknowable (and run out quietly), and neither is counted as a rule nobody knows.
+      expect(await k.due(about)).toMatchObject({ forgotten: true, resolverSpec: null });
+      expect(await verdict(about)).toEqual({ verdict: 'wait', why: 'unknowable' });
       expect(await verdict(names)).toEqual({ verdict: 'wait', why: 'unknowable' });
-      expect(await run()).toMatchObject({ resolved: 0, unknownSpec: left.unknownSpec + 1, waiting: left.waiting + 1 });
+      expect(await run()).toMatchObject({ resolved: 0, unknownSpec: left.unknownSpec, waiting: left.waiting + 2 });
       for (const p of [about, names]) expect(await k.resolution(p), p).toBeUndefined();
       // A state with no health check and no running flag says neither way.
       const bare = k.serviceKey();
@@ -140,6 +154,54 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       const late = await k.service(k.serviceKey(), { running: true, disabled: false }, ago(5 * MIN));
       expect(await verdict(await k.prediction({ resolverSpec: { entityId: late, check: 'healthy', at: 'resolveBy' } }, { madeAgo: 3 * HOUR, dueAgo: HOUR }))).toEqual({ verdict: 'wait', why: 'unknowable' });
       expect(await verdict(await k.prediction({ resolverSpec: { entityId: 'ennosuchitem', check: 'healthy', at: 'resolveBy' } }, { madeAgo: 3 * HOUR, dueAgo: HOUR }))).toEqual({ verdict: 'unknown' });
+    });
+  });
+
+  describe('a row that states triage\'s first rule: healthy when it is next observed after the resolve time', () => {
+    const old = (eid: string) => k.prediction({ resolutionCriteria: NEXT_OBSERVED_CRITERIA, resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' }, subjectEntityId: eid }, { madeAgo: 3 * HOUR, dueAgo: HOUR });
+    /** A service seen five hours ago in one state, and again since the resolve time in another (or the same). */
+    const seen = async (then: Record<string, unknown>, since: Record<string, unknown>, sinceAgo = 30 * MIN) => {
+      const key = k.serviceKey();
+      const eid = await k.service(key, then, ago(5 * HOUR));
+      await k.service(key, since, ago(sinceAgo));
+      return eid;
+    };
+
+    it('is settled by its own rule where the rows can tell, and left to run out where they cannot; never by the rule triage writes now', async () => {
+      // The sentence is the one main wrote, and triage no longer writes it: a new row never takes the old rule.
+      expect(NEXT_OBSERVED_CRITERIA).toBe('The service reports healthy (running, or its health check ok) when it is next observed after the resolve time.');
+      expect(readFileSync(join(__dirname, '..', '..', 'src', 'surface', 'record.ts'), 'utf8')).not.toContain('when it is next observed after the resolve time');
+      const left = await leftovers();
+      // Down at its time and nothing changed since: whichever look came next, it saw the service down. Certain: false.
+      const down = await old(await seen({ running: false, disabled: false }, { running: false, disabled: false }));
+      // Healthy at its time, and healthy in the next version too (another field changed): certain: true.
+      const up = await old(await seen({ running: true, disabled: false }, { running: true, disabled: false, lastExit: 0 }));
+      // Down at its time, healthy in the next version. The first look after the resolve time may have been the one that
+      // saw it come back (the row's rule says true) or an earlier one that saw it still down (false). Flint keeps no
+      // list of its looks, so the rows cannot tell: it is left to run out, not settled by some other rule.
+      const flipped = await seen({ running: false, disabled: false }, { running: true, disabled: false });
+      const untold = await old(flipped);
+      // The same history under the rule triage writes now (the state at the resolve time): false, and certain.
+      const now = await k.prediction({ resolverSpec: { entityId: flipped, check: 'healthy', at: 'resolveBy' }, subjectEntityId: flipped }, { madeAgo: 3 * HOUR, dueAgo: HOUR });
+      expect([(await k.due(down)).nextObserved, (await k.due(now)).nextObserved]).toEqual([true, false]);
+      expect(await verdict(down)).toMatchObject({ verdict: 'resolve', outcome: false, evidence: { rule: 'healthy_next_observed' } });
+      expect(await verdict(up)).toMatchObject({ verdict: 'resolve', outcome: true, evidence: { rule: 'healthy_next_observed' } });
+      expect(await verdict(untold)).toEqual({ verdict: 'wait', why: 'unknowable' });
+      expect(await verdict(now)).toMatchObject({ verdict: 'resolve', outcome: false, evidence: { rule: 'healthy_at' } });
+      expect(await run()).toMatchObject({ resolved: 3, waiting: left.waiting + 1, unknownSpec: left.unknownSpec, refused: 0 });
+      expect([await k.status(down), await k.status(up), await k.status(untold), await k.status(now)]).toEqual(['resolved', 'resolved', 'open', 'resolved']);
+      expect(await k.resolution(untold)).toBeUndefined();
+      // The time on each is the resolve time, as for every other.
+      const due = (await k.owner(`SELECT "resolveBy" FROM "Prediction" WHERE id = $1`, [down])).rows[0].resolveBy as Date;
+      expect((await k.resolution(down))!.eventAt.getTime()).toBe(due.getTime());
+    });
+
+    it('the advice beside it carries the same sentence, and is settled the same way once it was taken', async () => {
+      const eid = await seen({ running: false, disabled: false }, { running: false, disabled: false, lastExit: 1 }, 5 * MIN);
+      const e = await k.escalated(eid, { status: 'acked', ackedAgo: 2 * HOUR, criteria: NEXT_OBSERVED_CRITERIA });
+      expect((await k.due(e.conditional)).nextObserved).toBe(true);
+      expect(await run()).toMatchObject({ settled: 1, resolved: 2, refused: 0 });
+      for (const p of [e.plain, e.conditional]) expect(await k.resolution(p), p).toMatchObject({ outcome: false, evidence: { rule: 'healthy_next_observed' } });
     });
   });
 
@@ -206,8 +268,7 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       const key = await k.forgottenSeries({ on: true });
       const at = dayStart(1);
       // The number was there before the forget; the forecast was made before it too (a forgotten series gets no new ones).
-      await k.owner(`ALTER TABLE "MetricPoint" DISABLE TRIGGER USER`);
-      await k.owner(`INSERT INTO "MetricPoint" ("seriesKey", at, value) VALUES ($1, $2, $3)`, [key, at, CANARY]).finally(() => k.owner(`ALTER TABLE "MetricPoint" ENABLE TRIGGER USER`));
+      await k.past('MetricPoint', 'USER', (q) => q(`INSERT INTO "MetricPoint" ("seriesKey", at, value) VALUES ($1, $2, $3)`, [key, at, CANARY]));
       const p = await k.prediction({
         kind: 'interval', probability: null, method: 'base_rate', domain: 'deploys', type: 'trend', resolver: 'auto_metric', pointEstimate: 4, lower: 2, upper: 6, level: 0.8,
         resolverSpec: { seriesKey: key, at: at.toISOString(), op: 'range' },
@@ -299,6 +360,35 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       expect(await k.resolution(odd.conditional)).toBeUndefined();
       expect(await k.status(odd.conditional)).toBe('open');
     });
+
+    it('advice of another type is its own module\'s: never decided here, its prediction never set aside, counted or run out', async () => {
+      const left = await leftovers();
+      // Dismissed and long past its time: triage's advice would be declined, and its prediction set aside at once.
+      const key = k.serviceKey();
+      const eid = await k.service(key, { running: true, disabled: false }, ago(6 * DAY));
+      await k.service(key, { running: true, disabled: false, lastExit: 0 }, ago(5 * MIN));
+      const theirs = await k.escalated(eid, { status: 'dismissed', type: 'plan_change', madeAgo: 5 * DAY, dueAgo: 4 * DAY });
+      expect(await k.due(theirs.conditional)).toMatchObject({ recType: 'plan_change', resolver: 'conditional' });
+      expect(await verdict(theirs.conditional)).toEqual({ verdict: 'other' });
+      const c = await sweep(k.db, { tz: TZ, resolve: true, expire: true });
+      expect(c).toMatchObject({ settled: 0, conditionUnmet: 0, unknownSpec: left.unknownSpec, others: left.others + 1, refused: 0 });
+      expect(await rec(theirs.recommendationId)).toMatchObject({ status: 'proposed', decidedAt: null, effectObserved: null });
+      // Four days past its time, well over the 72 hours: still open, because it is not the sweep's to let run out.
+      expect(await k.status(theirs.conditional)).toBe('open');
+      expect(await k.resolution(theirs.conditional)).toBeUndefined();
+      // The plain prediction beside it carries a rule the sweep knows: settled like any other.
+      expect(await k.status(theirs.plain)).toBe('resolved');
+    });
+
+    it('acted on counts as taken up, whenever it was', async () => {
+      expect(decisionOf({ status: 'acted', ackedAt: null }, ago(HOUR), new Date())).toMatchObject({ status: 'accepted' });
+      const at = ago(30 * MIN);
+      expect(decisionOf({ status: 'acted', ackedAt: at }, ago(HOUR), new Date())).toEqual({ status: 'accepted', decidedAt: at });
+      const e = await k.escalated(await downThenUp(), { status: 'acted' });
+      expect(await run()).toMatchObject({ settled: 1, resolved: 2, conditionUnmet: 0, refused: 0 });
+      expect(await rec(e.recommendationId)).toMatchObject({ status: 'accepted', effectObserved: true });
+      expect([await k.status(e.plain), await k.status(e.conditional)]).toEqual(['resolved', 'resolved']);
+    });
   });
 
   describe('a goal\'s forecast, at its date', () => {
@@ -322,6 +412,24 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       expect([await k.status(first), await k.status(second)]).toEqual(['superseded', 'resolved']);
       // The goal's words are nowhere in what the sweep wrote.
       expect(JSON.stringify([await k.resolution(first), await k.sweepAudits()])).not.toContain('CANARY');
+    });
+
+    it('a forecast as the goal review itself writes it (ontrack.ts) goes through the resolver as it is, and so does the one it replaced', async () => {
+      const goal = await g.activeGoal();
+      const write = () => k.db.$transaction((tx) => recordOnTrack(tx, { id: goal.id, activatedAt: ago(9 * DAY), horizonAt: new Date(Date.now() + 30 * DAY) }, { progress: 0.2, overdueSteps: 0, nextReviewAt: new Date(Date.now() + 7 * DAY) }, TZ, new Date()));
+      const first = await write();
+      const second = await write();
+      expect(second.superseded).toBe(true);
+      // Their dates come: only the two times move (kit.ts backdate); the rest is the writer's own row.
+      await k.backdate(first.id, { madeAgo: 9 * DAY, dueAgo: 2 * HOUR });
+      await k.backdate(second.id, { madeAgo: 2 * DAY, dueAgo: HOUR });
+      expect(await k.due(first.id)).toMatchObject({ kind: 'binary', resolver: 'auto_world', status: 'superseded', goalId: goal.id, resolverSpec: { goalId: goal.id, rule: 'goal_done_by' }, recType: null, forgotten: false, nextObserved: false });
+      expect([ruleOwner(await k.due(first.id)), ruleOwner(await k.due(second.id))]).toEqual(['sweep', 'sweep']);
+      expect(await run()).toMatchObject({ resolved: 2, refused: 0 });
+      for (const p of [first, second]) {
+        expect(await k.resolution(p.id), p.id).toMatchObject({ outcome: false, resolvedBy: 'auto_world', evidence: { rule: 'goal_done_by', goalId: goal.id, goalStatus: 'active', via: 'ledger.sweep' } });
+      }
+      expect([await k.status(first.id), await k.status(second.id)]).toEqual(['superseded', 'resolved']);
     });
 
     it('a finished goal\'s forecasts are its card\'s: the sweep leaves them, and the card settles them as Will', async () => {
@@ -367,40 +475,67 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
   });
 
   describe('what is never guessed, and never Will\'s', () => {
-    it('a rule no resolver knows is counted and left alone: nothing is written for it', async () => {
+    it('whose a prediction is: no rule or a rule that does not fit its row is counted and runs out; a rule the sweep does not know is another module\'s, and is left alone', async () => {
       const eid = await k.service(k.serviceKey(), { running: true, disabled: false }, ago(5 * HOUR));
       const series = await k.onSeries();
       const at = dayStart(1);
       await k.point(series, at, 5);
       const made = { madeAgo: Date.now() - at.getTime() - 4 * HOUR, dueAgo: MIN };
-      const specs: Array<[string, Record<string, unknown>]> = [
+      // Nobody's, or the sweep's own shape on a row it does not fit: nothing can ever settle these.
+      const unknown: Array<[string, Record<string, unknown>]> = [
         ['no rule at all', { resolverSpec: null }],
-        ['a rule of another shape', { resolverSpec: { check: 'vibes' } }],
-        ['a known rule with a field too many', { resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy', also: 'this' } }],
-        ['another check', { resolverSpec: { entityId: eid, check: 'fast', at: 'resolveBy' } }],
-        ['healthy at some other time', { resolverSpec: { entityId: eid, check: 'healthy', at: '2026-10-01T00:00:00.000Z' } }],
         ['a metric rule on a prediction that resolves from the world', { resolverSpec: { seriesKey: series, at: at.toISOString(), op: 'above', value: 1 } }],
         ['a world rule on a prediction that resolves from a metric', { resolver: 'auto_metric', resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' } }],
         ['a range rule on a yes/no prediction', { resolver: 'auto_metric', resolverSpec: { seriesKey: series, at: at.toISOString(), op: 'range' } }],
-        ['a threshold that is not a number', { resolver: 'auto_metric', resolverSpec: { seriesKey: series, at: at.toISOString(), op: 'above', value: '5' } }],
         ['a series that does not exist', { resolver: 'auto_metric', resolverSpec: { seriesKey: 'no.such.series', at: at.toISOString(), op: 'above', value: 1 } }],
+      ];
+      // A rule the sweep's own shapes do not parse: some other module's.
+      const other: Array<[string, Record<string, unknown>]> = [
+        ['a rule of another shape', { resolverSpec: { check: 'vibes' } }],
+        ['a later part\'s rule', { resolverSpec: { taskId: 'tktest0001', rule: 'task_meets_bar' } }],
+        ['a known rule with a field too many', { resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy', also: 'this' } }],
+        ['another check', { resolverSpec: { entityId: eid, check: 'fast', at: 'resolveBy' } }],
+        ['healthy at some other time', { resolverSpec: { entityId: eid, check: 'healthy', at: '2026-10-01T00:00:00.000Z' } }],
+        ['a threshold that is not a number', { resolver: 'auto_metric', resolverSpec: { seriesKey: series, at: at.toISOString(), op: 'above', value: '5' } }],
         ['a step that is not a time', { resolver: 'auto_metric', resolverSpec: { seriesKey: series, at: 'yesterday', op: 'above', value: 1 } }],
       ];
+      const left = await leftovers();
       const ids: string[] = [];
-      for (const [name, over] of specs) {
+      for (const [name, over] of unknown) {
         const p = await k.prediction(over, made);
         expect(await verdict(p), name).toEqual({ verdict: 'unknown' });
+        expect(ruleOwner(await k.due(p)), name).toBe(over.resolverSpec === null ? 'nobody' : 'sweep');
         ids.push(p);
       }
+      const theirs: string[] = [];
+      for (const [name, over] of other) {
+        const p = await k.prediction(over, made);
+        expect(await verdict(p), name).toEqual({ verdict: 'other' });
+        expect(ruleOwner(await k.due(p)), name).toBe('other');
+        theirs.push(p);
+      }
       const c = await run();
-      expect(c.unknownSpec).toBeGreaterThanOrEqual(specs.length);
-      expect(c.refused).toBe(0);
-      expect((await k.owner(`SELECT count(*)::int AS n FROM "Resolution" WHERE "predictionId" = ANY ($1)`, [ids])).rows[0].n).toBe(0);
-      expect((await k.owner(`SELECT DISTINCT status FROM "Prediction" WHERE id = ANY ($1)`, [ids])).rows).toEqual([{ status: 'open' }]);
+      expect(c).toMatchObject({ unknownSpec: left.unknownSpec + unknown.length, others: left.others + other.length, waiting: left.waiting, refused: 0 });
+      expect((await k.owner(`SELECT count(*)::int AS n FROM "Resolution" WHERE "predictionId" = ANY ($1)`, [[...ids, ...theirs]])).rows[0].n).toBe(0);
+      expect((await k.owner(`SELECT DISTINCT status FROM "Prediction" WHERE id = ANY ($1)`, [[...ids, ...theirs]])).rows).toEqual([{ status: 'open' }]);
+      // 72 hours on: what nothing can settle has run out, and another module's is as it was (its owner may yet settle it).
+      const gone = await k.prediction({ resolverSpec: null }, { madeAgo: 5 * DAY, dueAgo: 80 * HOUR });
+      const kept = [await k.prediction({ resolverSpec: { taskId: 'tktest0001', rule: 'task_meets_bar' } }, { madeAgo: 5 * DAY, dueAgo: 80 * HOUR }),
+        await k.prediction({ resolverSpec: { check: 'vibes' } }, { madeAgo: 40 * DAY, dueAgo: 30 * DAY })];
+      const swept = await sweep(k.db, { tz: TZ, resolve: true, expire: true });
+      expect(swept.refused).toBe(0);
+      expect(await k.status(gone)).toBe('expired');
+      for (const p of kept) expect(await k.status(p), p).toBe('open');
+      // A superseded prediction with no rule cannot run out (it stays superseded), so it is not said to: it waits, uncounted.
+      const before = await leftovers();
+      const first = await k.prediction({ resolverSpec: null }, { madeAgo: 3 * DAY, dueAgo: HOUR });
+      await k.prediction({ resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' }, supersedesId: first }, { madeAgo: 2 * DAY, dueAgo: -DAY });
+      expect(await k.status(first)).toBe('superseded');
+      expect(await run()).toMatchObject({ unknownSpec: before.unknownSpec, waiting: before.waiting + 1 });
       // A forecast's row names its series: a rule that names another series is not its rule.
-      const other = await k.onSeries();
-      await k.point(other, at, 7);
-      const crossed = await k.range(series, at, { resolverSpec: { seriesKey: other, at: at.toISOString(), op: 'range' } }, made);
+      const another = await k.onSeries();
+      await k.point(another, at, 7);
+      const crossed = await k.range(series, at, { resolverSpec: { seriesKey: another, at: at.toISOString(), op: 'range' } }, made);
       expect(await verdict(crossed)).toEqual({ verdict: 'unknown' });
       // The shapes, said once.
       expect(ResolverSpec.safeParse({ seriesKey: series, at: at.toISOString(), op: 'range' }).success).toBe(true);
@@ -432,7 +567,8 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       const left = await leftovers();
       // Chat's kind of prediction, due, carrying a rule a resolver would know how to settle.
       const wills = await k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' } }, { madeAgo: 3 * HOUR, dueAgo: HOUR });
-      expect(await verdict(wills)).toEqual({ verdict: 'unknown' });
+      expect(await verdict(wills)).toEqual({ verdict: 'other' });
+      expect(ruleOwner(await k.due(wills))).toBe('other');
       const before = (await k.owner(`SELECT count(*)::int AS n FROM "Resolution"`)).rows[0].n as number;
       const c = await run();
       // It is not even read: not resolved, not waiting, not counted as a rule nobody knows.
@@ -454,7 +590,7 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       const swept = rows.filter((r) => r.via === 'ledger.sweep');
       expect(swept.length).toBeGreaterThan(0);
       expect([...new Set(swept.map((r) => r.resolvedBy))].sort()).toEqual(['auto_metric', 'auto_world']);
-      expect([...new Set(swept.map((r) => r.rule))].sort()).toEqual(['goal_done_by', 'healthy_at', 'metric_range', 'metric_threshold']);
+      expect([...new Set(swept.map((r) => r.rule))].sort()).toEqual(['goal_done_by', 'healthy_at', 'healthy_next_observed', 'metric_range', 'metric_threshold']);
       // Will's are the goal card's alone (this file wrote no answer).
       expect(rows.filter((r) => r.resolvedBy === 'will').map((r) => r.via)).toEqual(['goal.done']);
       // No prediction only Will resolves has a resolution, and none the sweep settled was voided.
@@ -465,7 +601,7 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       expect(audits.length).toBeGreaterThan(5);
       for (const a of audits) {
         expect(a).toMatchObject({ actor: 'runtime:ledger', context: 'autonomous', kind: 'action', outcome: 'ok', reasoning: null, outcomeDetail: null, correlationId: null });
-        expect(Object.keys(a.inputs).sort()).toEqual(['capped', 'conditionUnmet', 'expireRan', 'expired', 'refused', 'resolveRan', 'resolved', 'settled', 'unknownSpec', 'waiting']);
+        expect(Object.keys(a.inputs).sort()).toEqual(['capped', 'conditionUnmet', 'expireRan', 'expired', 'others', 'refused', 'resolveRan', 'resolved', 'settled', 'unknownSpec', 'waiting']);
         for (const v of Object.values(a.inputs)) expect(['number', 'boolean']).toContain(typeof v);
       }
       expect(JSON.stringify(audits)).not.toMatch(/31337|4242|CANARY|daily\.|service:|HEX/);

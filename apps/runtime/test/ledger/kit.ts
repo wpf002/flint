@@ -7,12 +7,16 @@
  * backdated), and it refuses a resolution whose event is before the prediction
  * or after now. A resolver test needs a prediction that is already due, so
  * `madeAgo` turns that one stamp off, as the owner, for the one insert: every
- * rule about resolutions stays on. Test files run one at a time on this
- * database, and each starts from a fresh one.
+ * rule about resolutions stays on. The switch-off, the insert and the
+ * switch-on are ONE owner transaction (`past`): a test that is killed half-way
+ * rolls it back, so the stamp can never be left off. Test files run one at a
+ * time on this database, and each starts from a fresh one.
  */
+import { Prisma } from '@prisma/client';
 import { applyObservation } from '../../src/world/mapper';
 import { createDb, type Db } from '../../src/db';
-import { HEX, id, type TestUrls } from '../db';
+import { DUE_COLUMNS, type DuePrediction } from '../../src/predict/resolvers';
+import { HEX, id, withClient, type TestUrls } from '../db';
 import { CANARY, p4Kit } from '../p4';
 
 export { CANARY };
@@ -27,10 +31,41 @@ export function dayStart(daysAgo: number, now = new Date()): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo));
 }
 
+type Q = (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
+/**
+ * Rows written "in the past": one owner transaction that turns the named triggers off, runs `fn`, and turns them on
+ * again before it commits. Postgres undoes the switch-off with the rest if anything fails or the process dies.
+ */
+export async function pastRows<T>(urls: TestUrls, table: string, triggers: string[] | 'USER', fn: (q: Q) => Promise<T>): Promise<T> {
+  const names = triggers === 'USER' ? ['USER'] : triggers.map((t) => `"${t}"`);
+  return withClient(urls.owner, async (c) => {
+    await c.query('BEGIN');
+    try {
+      for (const t of names) await c.query(`ALTER TABLE "${table}" DISABLE TRIGGER ${t}`);
+      const out = await fn((sql, params) => c.query(sql, params));
+      for (const t of names) await c.query(`ALTER TABLE "${table}" ENABLE TRIGGER ${t}`);
+      await c.query('COMMIT');
+      return out;
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    }
+  });
+}
+/**
+ * A row a real writer just made (triage's, a goal review's), moved into the past so it is due: only its two times
+ * change. The writer's own shape (its rule, its kind, what it hangs on) is what the resolvers then read.
+ */
+export const backdatePrediction = (urls: TestUrls, pid: string, t: { madeAgo: number; dueAgo: number }) =>
+  pastRows(urls, 'Prediction', ['Prediction_guard', 'Prediction_valid_update'], (q) =>
+    q(`UPDATE "Prediction" SET "createdAt" = $2, "resolveBy" = $3 WHERE id = $1`, [pid, new Date(Date.now() - t.madeAgo), new Date(Date.now() - t.dueAgo)]));
+
 export async function ledgerKit(urls: TestUrls) {
   const db: Db = createDb(urls.app);
   const k = await p4Kit(urls);
   const { app, owner } = k;
+
+  const past = <T>(table: string, triggers: string[] | 'USER', fn: (q: Q) => Promise<T>) => pastRows(urls, table, triggers, fn);
 
   /**
    * A prediction as if it was made `madeAgo` ms ago, due `dueAgo` ms ago (negative: still ahead). Defaults: a rule's
@@ -46,21 +81,45 @@ export async function ledgerKit(urls: TestUrls) {
     };
     const createdAt = new Date(now - (t.madeAgo ?? 2 * DAY));
     const resolveBy = new Date(now - (t.dueAgo ?? HOUR));
-    await owner(`ALTER TABLE "Prediction" DISABLE TRIGGER "Prediction_insert_check"`);
-    try {
-      await app(
-        `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolverSpec", "resolveBy", "createdAt", "createdBy", tainted,
-                                   "pointEstimate", lower, upper, level, unit, "seriesKey", "forecastRunId", "goalId", "subjectEntityId", "conditionRecommendationId", "supersedesId")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
-        [v.id, v.claim, v.kind, v.probability, v.method, v.domain, v.type, v.evidence, v.resolutionCriteria, v.resolver, v.resolverSpec === null ? null : JSON.stringify(v.resolverSpec),
-          resolveBy, createdAt, v.createdBy, v.tainted, v.pointEstimate, v.lower, v.upper, v.level, v.unit, v.seriesKey, v.forecastRunId, v.goalId, v.subjectEntityId,
-          v.conditionRecommendationId, v.supersedesId],
-      );
-    } finally {
-      await owner(`ALTER TABLE "Prediction" ENABLE TRIGGER "Prediction_insert_check"`);
-    }
+    await past('Prediction', ['Prediction_insert_check'], (q) => q(
+      `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolverSpec", "resolveBy", "createdAt", "createdBy", tainted,
+                                 "pointEstimate", lower, upper, level, unit, "seriesKey", "forecastRunId", "goalId", "subjectEntityId", "conditionRecommendationId", "supersedesId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+      [v.id, v.claim, v.kind, v.probability, v.method, v.domain, v.type, v.evidence, v.resolutionCriteria, v.resolver, v.resolverSpec === null ? null : JSON.stringify(v.resolverSpec),
+        resolveBy, createdAt, v.createdBy, v.tainted, v.pointEstimate, v.lower, v.upper, v.level, v.unit, v.seriesKey, v.forecastRunId, v.goalId, v.subjectEntityId,
+        v.conditionRecommendationId, v.supersedesId],
+    ));
     return v.id as string;
   }
+
+  /**
+   * Many predictions at once, each due `dueAgo` ms ago and a millisecond apart (or all at one instant), about one
+   * service: more than one page of the sweep's read. Returns the prefix their ids share.
+   */
+  async function bulk(n: number, o: { dueAgo: number; entityId: string; sameInstant?: boolean; madeAgo?: number }): Promise<string> {
+    const prefix = `pdbulk${id('b').slice(-6)}`;
+    const due = new Date(Date.now() - o.dueAgo);
+    await past('Prediction', ['Prediction_insert_check'], (q) => q(
+      `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolverSpec", "resolveBy", "createdAt", "createdBy", tainted)
+       SELECT $1 || lpad(i::text, 6, '0'), 'a synthetic claim', 'binary', 0.6, 'rule', 'services', 'event_occurs', '[]'::jsonb, 'synthetic criteria', 'auto_world',
+              jsonb_build_object('entityId', $2::text, 'check', 'healthy', 'at', 'resolveBy'),
+              $3::timestamptz - (CASE WHEN $4 THEN 0 ELSE i END) * interval '1 millisecond', $5::timestamptz, 'test', false
+       FROM generate_series(1, $6::int) i`,
+      [prefix, o.entityId, due, o.sameInstant ?? false, new Date(Date.now() - (o.madeAgo ?? o.dueAgo + DAY)), n],
+    ));
+    return prefix;
+  }
+
+  const backdate = (pid: string, t: { madeAgo: number; dueAgo: number }) => backdatePrediction(urls, pid, t);
+
+  /** Flint's question to Will about a prediction of his, asked `agoMs` ago (the database stamps a question's time itself). */
+  const asked = (pid: string, agoMs: number) =>
+    past('PredictionQuestion', ['PredictionQuestion_guard'], (q) =>
+      q(`INSERT INTO "PredictionQuestion" ("predictionId", "askedAt") VALUES ($1, $2)`, [pid, new Date(Date.now() - agoMs)]));
+
+  /** A prediction as the sweep reads it. */
+  const due = async (pid: string): Promise<DuePrediction> =>
+    (await db.$queryRaw<DuePrediction[]>(Prisma.sql`SELECT ${DUE_COLUMNS} FROM "Prediction" p WHERE p.id = ${pid}`))[0]!;
 
   /** One number of a series: the value for the step that starts at `at`. */
   const point = (seriesKey: string, at: Date, value: number) => app(`INSERT INTO "MetricPoint" ("seriesKey", at, value) VALUES ($1, $2, $3)`, [seriesKey, at, value]);
@@ -102,16 +161,16 @@ export async function ledgerKit(urls: TestUrls) {
    * plain one ("healthy at the resolve time"), and the one that holds if Will takes the recommendation; with the
    * recommendation and the escalation that showed it to him.
    */
-  async function escalated(entityId: string, o: { madeAgo?: number; dueAgo?: number; status?: string; ackedAgo?: number | null; escalation?: boolean; templateId?: string } = {}) {
+  async function escalated(entityId: string, o: { madeAgo?: number; dueAgo?: number; status?: string; ackedAgo?: number | null; escalation?: boolean; templateId?: string; type?: string; criteria?: string } = {}) {
     const t = { madeAgo: o.madeAgo ?? 3 * HOUR, dueAgo: o.dueAgo ?? HOUR };
     const recommendationId = id('rc');
-    const common = { method: 'base_rate', subjectEntityId: entityId, createdBy: 'runtime:triage' };
+    const common = { method: 'base_rate', subjectEntityId: entityId, createdBy: 'runtime:triage', ...(o.criteria ? { resolutionCriteria: o.criteria } : {}) };
     const plain = await prediction({ ...common, probability: 0.4, domain: 'services', type: 'event_occurs', resolver: 'auto_world', resolverSpec: { entityId, check: 'healthy', at: 'resolveBy' } }, t);
     const conditional = await prediction({ ...common, probability: 0.8, domain: 'recommendation', type: 'effect_given_accept', resolver: 'conditional', conditionRecommendationId: recommendationId }, t);
     await app(
       `INSERT INTO "Recommendation" (id, "templateId", params, domain, type, text, "expectedEffect", "predictionId", "createdBy")
-       VALUES ($1, $2, '{}', 'services', 'escalation_action', 'Look at the synthetic service.', 'it reports healthy within 2 hours', $3, 'runtime:triage')`,
-      [recommendationId, o.templateId ?? 'look_at_service', conditional],
+       VALUES ($1, $2, '{}', 'services', $4, 'Look at the synthetic service.', 'it reports healthy within 2 hours', $3, 'runtime:triage')`,
+      [recommendationId, o.templateId ?? 'look_at_service', conditional, o.type ?? 'escalation_action'],
     );
     let escalationId: string | undefined;
     if (o.escalation !== false) {
@@ -139,6 +198,6 @@ export async function ledgerKit(urls: TestUrls) {
   /** The sweep's audit entries, newest first: what each one says, whole. */
   const sweepAudits = async () => (await owner(`SELECT actor, context, kind, action, outcome, inputs, reasoning, "outcomeDetail", "correlationId" FROM "AuditEntry" WHERE action = 'ledger.sweep' ORDER BY seq DESC`)).rows;
 
-  return { ...k, db, prediction, point, range, question, service, serviceKey, escalated, status, resolution, sweepAudits };
+  return { ...k, db, past, prediction, bulk, backdate, asked, due, point, range, question, service, serviceKey, escalated, status, resolution, sweepAudits };
 }
 export type LedgerKit = Awaited<ReturnType<typeof ledgerKit>>;

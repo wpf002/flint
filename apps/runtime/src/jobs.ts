@@ -293,6 +293,8 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
         // A rule forbids both: nothing runs, and Health says a rule stops the checks.
         if (!resolve.may && !expire.may) return;
         const c = await sweep(ctx.db, { tz: ctx.config.tz, resolve: resolve.may, expire: expire.may, tiers: { resolve: resolve.tier, expire: expire.tier }, log: ctx.log });
+        // Another sweep was still running (one that outlived its job, a second runtime during a deploy): this one did nothing.
+        if (c.busy) return;
         if (c.resolved || c.expired || c.conditionUnmet || c.unknownSpec || c.refused) {
           ctx.log(`ledger: ${c.resolved} resolved, ${c.expired} expired, ${c.conditionUnmet} condition unmet; ${c.unknownSpec} with a rule no resolver knows, ${c.refused} refused, ${c.waiting} waiting`);
         }

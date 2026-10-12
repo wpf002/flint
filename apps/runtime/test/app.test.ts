@@ -368,13 +368,21 @@ describe.skipIf(NO_DB)('runtime API', () => {
       // The database refuses a forecast writer's row that names no run and no series...
       await expect(loose(`pdw${tag}`, 'runtime:forecast', ', kind, probability', `, 'binary', 0.6`)).rejects.toMatchObject({ code: '23514' });
       // ...and the route does not lean on that: a row from before the rule (here, written with the rule off) is left out by its writer.
-      await owner(`ALTER TABLE "Prediction" DISABLE TRIGGER "Prediction_valid"`);
-      try {
-        await loose(`pdw${tag}`, 'runtime:forecast', ', kind, probability', `, 'binary', 0.6`);
-        await loose(`pdv${tag}`, 'runtime:reason', ', kind, probability', `, 'binary', 0.6`);
-      } finally {
-        await owner(`ALTER TABLE "Prediction" ENABLE TRIGGER "Prediction_valid"`);
-      }
+      // One owner transaction: the rule is off only inside it, and a test that is killed half-way leaves it on.
+      await withClient(URLS!.owner, async (c) => {
+        const q = (sql: string, params: unknown[]) => c.query(sql, params);
+        await c.query('BEGIN');
+        try {
+          await c.query(`ALTER TABLE "Prediction" DISABLE TRIGGER "Prediction_valid"`);
+          await loose(`pdw${tag}`, 'runtime:forecast', ', kind, probability', `, 'binary', 0.6`, q);
+          await loose(`pdv${tag}`, 'runtime:reason', ', kind, probability', `, 'binary', 0.6`, q);
+          await c.query(`ALTER TABLE "Prediction" ENABLE TRIGGER "Prediction_valid"`);
+          await c.query('COMMIT');
+        } catch (err) {
+          await c.query('ROLLBACK');
+          throw err;
+        }
+      });
       expect((await owner(`SELECT tgenabled FROM pg_trigger WHERE tgname = 'Prediction_valid'`)).rows).toEqual([{ tgenabled: 'O' }]);
       // Another writer's row with a unit, and another writer's range with no run: left out by the unit, and by being a range.
       await loose(`pdu${tag}`, 'runtime:other', ', kind, probability, unit', `, 'binary', 0.6, 'usd'`);

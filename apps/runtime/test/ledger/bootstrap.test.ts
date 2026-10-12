@@ -97,22 +97,23 @@ describe('the bootstrap interval', () => {
     expect(width(byRow)).toBeLessThan(width(honest) / 2.5);
   });
 
-  it('clusters of different sizes weigh as their rows do: the middle of the interval sits at the mean of all the rows', () => {
-    const rand = seededRng(21);
-    const values: number[] = [];
-    const clusters: string[] = [];
-    for (let c = 0; c < 40; c++) {
-      const size = 1 + Math.floor(rand() * 12);
-      const level = rand();
-      for (let i = 0; i < size; i++) {
-        values.push(Math.min(1, Math.max(0, level + (rand() - 0.5) * 0.1)));
-        clusters.push(`goal:${String(c).padStart(3, '0')}`);
-      }
-    }
+  it('clusters weigh as their rows do: one goal with 91 results and nine days with one each', () => {
+    // 91 results that share a goal, each 0.09 off; nine on days of their own, each 0.81 off. The mean of all 100 rows is 0.1548.
+    const values = [...Array<number>(91).fill(0.09), ...Array<number>(9).fill(0.81)];
+    const clusters = [...Array<string>(91).fill('goal:big'), ...Array.from({ length: 9 }, (_, i) => `day:${i}`)];
+    expect(mean(values)).toBeCloseTo(0.1548, 12);
     const ci = clusterBootstrapMean(values, clusters, { seed: 4 })!;
+    // A resample that draws the goal even once is mostly the goal's rows, so the interval reaches down to them and holds
+    // the mean of the rows it is about.
+    expect(ci[0]).toBeCloseTo(0.108, 9);
+    expect(ci[1]).toBeCloseTo(0.81, 9);
     expect(ci[0]).toBeLessThan(mean(values));
     expect(ci[1]).toBeGreaterThan(mean(values));
-    expect(Math.abs((ci[0] + ci[1]) / 2 - mean(values))).toBeLessThan(0.03);
+    // Were every cluster to weigh the same whatever its size (the mean of the ten cluster means), the goal's 91 rows
+    // would count as one in ten, the interval would start near 0.59, and it would leave out the mean of its own rows.
+    expect(ci[0]).toBeLessThan(0.2);
+    // The seed changes the draws, not that.
+    for (const seed of [7, 21]) expect(clusterBootstrapMean(values, clusters, { seed })![0]).toBeLessThan(mean(values));
   });
 
   it('there is no interval from too few clusters, or from nothing: three goals do not say how sure a score is', () => {

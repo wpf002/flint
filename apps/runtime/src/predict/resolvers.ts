@@ -26,6 +26,17 @@
  *    `auto_world`, and the database refuses either on a prediction only Will
  *    resolves.
  *
+ * Whose a prediction is (ruleOwner): the sweep's when its rule is one of the
+ * shapes above, or it hangs on a piece of triage's advice; nobody's when it has
+ * no rule at all (it can only run out); and another module's when it carries a
+ * rule this file does not know. Another module's prediction is left alone: not
+ * settled, not counted, never run out from here, so a later owner that settles
+ * late finds its row as it left it.
+ *
+ * Triage's first rows say "healthy when it is next observed after the resolve
+ * time", and are settled by that sentence, not by the one triage writes now
+ * (healthy()).
+ *
  * A goal's forecast has two owners, one for each way it ends. When Will marks
  * the goal done or abandons it, the goal's own card settles every forecast of
  * it, as Will, in that transaction (goals/apply.ts). When a forecast's date
@@ -33,6 +44,7 @@
  * false, as its own words say ("not done by then"). A goal that is finished is
  * never settled here.
  */
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { SeriesKey, addLocalDays, localDay, localDayBounds } from '@flint/policy';
 import type { Tx } from '../db.js';
@@ -50,6 +62,13 @@ export type ResolverSpec = z.infer<typeof ResolverSpec>;
 
 /** The recommendation whose accepted prediction is settled as "the service is healthy at the resolve time" (triage's). */
 export const LOOK_AT_SERVICE = 'look_at_service';
+/** The type of the advice the sweep decides and lapses (triage's). Advice of any other type is its own module's. */
+export const ESCALATION_ACTION = 'escalation_action';
+/**
+ * What triage's rows said of themselves before this part settled any: the state "when it is next observed after the
+ * resolve time". A row that states it is settled by it. Triage now writes the sentence in surface/record.ts.
+ */
+export const NEXT_OBSERVED_CRITERIA = 'The service reports healthy (running, or its health check ok) when it is next observed after the resolve time.';
 
 /** What the sweep reads of a prediction. */
 export interface DuePrediction {
@@ -64,6 +83,31 @@ export interface DuePrediction {
   goalId: string | null;
   subjectEntityId: string | null;
   conditionRecommendationId: string | null;
+  /** The type of the advice a conditional prediction hangs on. Null: it hangs on none. */
+  recType: string | null;
+  /** Its words were forgotten (a forget blanks the claim and takes the rule away): nothing can be told of it any more. */
+  forgotten: boolean;
+  /** It states triage's first rule (NEXT_OBSERVED_CRITERIA). */
+  nextObserved: boolean;
+}
+
+/** The columns of a DuePrediction, read from "Prediction" p: the sweep's two reads and the tests share them. Never the claim's words. */
+export const DUE_COLUMNS = Prisma.sql`p.id, p.kind, p.status, p.resolver, p."resolverSpec", p."resolveBy", p."createdAt", p."seriesKey", p."goalId", p."subjectEntityId", p."conditionRecommendationId",
+  (SELECT rc.type FROM "Recommendation" rc WHERE rc.id = p."conditionRecommendationId") AS "recType",
+  (p.claim = '[forgotten]') AS forgotten, (p."resolutionCriteria" = ${NEXT_OBSERVED_CRITERIA}) AS "nextObserved"`;
+
+/**
+ * Whose a prediction that resolves by itself is.
+ *  - `sweep`: its rule is one this file knows, or it hangs on triage's advice. Settled here, and run out here.
+ *  - `nobody`: it has no rule at all, so nothing can ever settle it. It runs out here, and is counted.
+ *  - `other`: it carries a rule this file does not know, or hangs on another module's advice. Left alone.
+ */
+export type RuleOwner = 'sweep' | 'nobody' | 'other';
+export function ruleOwner(p: Pick<DuePrediction, 'resolver' | 'resolverSpec' | 'recType'>): RuleOwner {
+  if (p.resolver === 'conditional') return p.recType === null || p.recType === undefined ? 'nobody' : p.recType === ESCALATION_ACTION ? 'sweep' : 'other';
+  if (p.resolver !== 'auto_metric' && p.resolver !== 'auto_world') return 'other';
+  if (p.resolverSpec === null || p.resolverSpec === undefined) return 'nobody';
+  return ResolverSpec.safeParse(p.resolverSpec).success ? 'sweep' : 'other';
 }
 
 /** Why nothing was written this time. Each is a reason to look again later, or to let the prediction run out. */
@@ -81,10 +125,14 @@ export type Verdict =
   | { verdict: 'resolve'; resolvedBy: 'auto_metric' | 'auto_world'; outcome: boolean | null; outcomeValue: number | null; eventAt: Date; evidence: Record<string, string> }
   | { verdict: 'condition_unmet' }
   | { verdict: 'wait'; why: WaitReason }
-  | { verdict: 'unknown' };
+  /** The sweep's, and it cannot be checked: no rule, or a rule that does not fit its own row. It runs out. */
+  | { verdict: 'unknown' }
+  /** Another module's: left alone. */
+  | { verdict: 'other' };
 
 const wait = (why: WaitReason): Verdict => ({ verdict: 'wait', why });
 const UNKNOWN: Verdict = { verdict: 'unknown' };
+const OTHER: Verdict = { verdict: 'other' };
 
 /** When a series' step that starts at `at` ends: the next local midnight for a daily series, seven local days on for a weekly one. */
 export function stepEnd(tz: string, at: Date, freq: string): Date | undefined {
@@ -129,6 +177,15 @@ export function healthyState(state: unknown): boolean | undefined {
  * valid then (the latest whose validFrom is at or before it), once the item has
  * been observed after that time. A forgotten item, or a version whose content
  * was blanked, is unknowable.
+ *
+ * A row that states triage's first rule (p.nextObserved) is about the state
+ * "when it is next observed after the resolve time" instead. Flint keeps no
+ * list of its looks at an item, only a version each time the state changed, so
+ * that state is either the one valid at the resolve time or the next version's:
+ * whichever the first look after the resolve time saw. Where the two say the
+ * same, the row's own rule is certain and it is settled by it. Where they
+ * differ, the rows cannot tell which it was, and the prediction is left to run
+ * out: it is never settled by a rule its row does not state.
  */
 async function healthy(tx: Tx, p: DuePrediction, entityId: string): Promise<Verdict> {
   const e = await tx.entity.findUnique({ where: { id: entityId }, select: { status: true, lastObservedAt: true } });
@@ -143,7 +200,18 @@ async function healthy(tx: Tx, p: DuePrediction, entityId: string): Promise<Verd
   if (!then || then.changeKind === 'forgotten') return wait('unknowable');
   const outcome = healthyState(then.state);
   if (outcome === undefined) return wait('unknowable');
-  return { verdict: 'resolve', resolvedBy: 'auto_world', outcome, outcomeValue: null, eventAt: p.resolveBy, evidence: { rule: 'healthy_at', entityId, versionId: then.id } };
+  if (p.nextObserved) {
+    const next = await tx.entityVersion.findFirst({
+      where: { entityId, validFrom: { gt: p.resolveBy } },
+      orderBy: [{ validFrom: 'asc' }, { version: 'asc' }],
+      select: { changeKind: true, state: true },
+    });
+    if (next && (next.changeKind === 'forgotten' || healthyState(next.state) !== outcome)) return wait('unknowable');
+  }
+  return {
+    verdict: 'resolve', resolvedBy: 'auto_world', outcome, outcomeValue: null, eventAt: p.resolveBy,
+    evidence: { rule: p.nextObserved ? 'healthy_next_observed' : 'healthy_at', entityId, versionId: then.id },
+  };
 }
 
 /**
@@ -178,20 +246,29 @@ async function conditional(tx: Tx, p: DuePrediction): Promise<Verdict> {
   return healthy(tx, p, p.subjectEntityId);
 }
 
-/**
- * What to do with one prediction that is due, read inside the transaction that
- * will write it. Only a prediction with resolver auto_metric, auto_world or
- * conditional is ever given one: Will's own are his to answer.
- */
-export async function verdictFor(tx: Tx, p: DuePrediction, o: { tz: string; now: Date }): Promise<Verdict> {
+async function ownVerdict(tx: Tx, p: DuePrediction, o: { tz: string; now: Date }): Promise<Verdict> {
   if (p.resolver === 'conditional') return conditional(tx, p);
-  if (p.resolver !== 'auto_metric' && p.resolver !== 'auto_world') return UNKNOWN;
   const parsed = ResolverSpec.safeParse(p.resolverSpec);
   if (!parsed.success) return UNKNOWN;
   const spec = parsed.data;
   if ('seriesKey' in spec) return metric(tx, p, spec, o.tz, o.now);
   if ('entityId' in spec) return p.resolver === 'auto_world' && p.kind === 'binary' ? healthy(tx, p, spec.entityId) : UNKNOWN;
   return goalDoneBy(tx, p, spec);
+}
+
+/**
+ * What to do with one prediction that is due, read inside the transaction that
+ * will write it. Only a prediction with resolver auto_metric, auto_world or
+ * conditional is ever given one: Will's own are his to answer. Another
+ * module's is `other`. One with nothing left to check it by is `unknown`,
+ * unless its words were forgotten: a forget is Will's doing, not a fault, so
+ * that one waits as unknowable and runs out quietly.
+ */
+export async function verdictFor(tx: Tx, p: DuePrediction, o: { tz: string; now: Date }): Promise<Verdict> {
+  const owner = ruleOwner(p);
+  if (owner === 'other') return OTHER;
+  const v = owner === 'nobody' ? UNKNOWN : await ownVerdict(tx, p, o);
+  return v.verdict === 'unknown' && p.forgotten ? wait('unknowable') : v;
 }
 
 /** How a recommendation was decided, from the escalation that showed it to Will. Undefined: not yet. */
