@@ -250,16 +250,16 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
   });
 
   it('the P2.5 promotion table waits for a week of calendar syncs, and is its own card', async () => {
-    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/days of Google Calendar syncs/);
+    await expect(promotionTable(db, { phase: 'p25', tz: 'UTC' })).rejects.toThrow(/days of Google Calendar syncs/);
     // A first sync eight days ago is not a week lived: every one of the last seven days needs a good sync.
     await appendAudit(db, [{ actor: 'sync:google_calendar', context: 'autonomous', kind: 'sync', action: 'world.sync.google_calendar', tier: 'approval', decision: 'act', outcome: 'ok', inputs: { created: 1 } }], new Date(Date.now() - 8 * DAY));
-    await expect(promotionTable(db, { phase: 'p25' })).rejects.toThrow(/does not count yet: \d of the 7 days before today/);
+    await expect(promotionTable(db, { phase: 'p25', tz: 'UTC' })).rejects.toThrow(/does not count yet: \d of the 7 days before today/);
     // Quiet good runs on each of the 7 days before today (AuditRollup's days are the zone's: UTC here), and a sync in the last hour.
     const days = Array.from({ length: 7 }, (_, i) => new Date(Date.now() - (i + 1) * DAY).toISOString().slice(0, 10));
     await db.auditRollup.createMany({ data: days.map((day) => ({ day, action: 'world.sync.google_calendar', context: 'autonomous', count: 1 })), skipDuplicates: true });
     await owner(`UPDATE "AuditRollup" SET count = count + 1 WHERE action = 'world.sync.google_calendar'`);
     await owner(`UPDATE "SourceCursor" SET "lastOkAt" = now() WHERE source = 'google_calendar'`);
-    const t = await promotionTable(db, { phase: 'p25' });
+    const t = await promotionTable(db, { phase: 'p25', tz: 'UTC' });
     expect(t.rows.map((r) => [r.pattern, r.dailyCap ?? null])).toEqual([['world.sync.google_calendar', null], ['world.person.create', 20]]);
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
     expect(card.templateId).toBe('p25.promotion');

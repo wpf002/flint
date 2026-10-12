@@ -8,10 +8,10 @@
  * P2.5's, so it never holds a goal's title, a check's text, a step's title or
  * an id: counts, days, seconds and token sizes (goals/measures.ts).
  */
-import { GOALS_BLOCK_MAX_TOKENS } from '@flint/policy';
+import { GOALS_BLOCK_MAX_TOKENS, localDay, previousDay } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
-import { DAY, activeGoals, chatSuggestions, firstReviewAt, goalsBlockSize, overdueNow, planChanges, reviewCounts, reviewForecasts, signedGoals, watchedLatency } from '../goals/measures.js';
+import { DAY, activeGoals, chatSuggestions, daysNotRunning, firstReviewAt, goalsBlockSize, overdueNow, planChanges, reviewCounts, reviewForecasts, signedGoals, watchedLatency } from '../goals/measures.js';
 import type { Criterion } from './exit.js';
 
 /** Exit 2 looks back this far. */
@@ -32,7 +32,9 @@ export async function p3Report(db: Db, config: Pick<Config, 'tz'> & { planner?: 
   });
 
   // 2. No review more than 24 h late over 30 days, counted from Flint's first review. Late is time waited while
-  //    Flint was reviewing (goals/late.ts), so a review that was due while reviews were off was not late.
+  //    Flint was reviewing (goals/late.ts), so a review that was due while reviews were off was not late. That
+  //    alone would pass a month in which reviews never ran: so reviews must also have been ON for each whole
+  //    day counted (the health check's Goal Reviews rows, as the promotion table reads them).
   if (!first) {
     out.push({ n: 2, name: 'no review more than 24 h late over 30 days', pass: null, detail: config.planner ? 'no review yet' : 'no review yet: reviews are off (FLINT_PLANNER)', values: { reviews: 0, days: 0 } });
   } else {
@@ -40,11 +42,16 @@ export async function p3Report(db: Db, config: Pick<Config, 'tz'> & { planner?: 
     const c = await reviewCounts(db, since, now);
     const waiting = await overdueNow(db, now);
     const days = (now.getTime() - Math.max(first.getTime(), now.getTime() - WINDOW_DAYS * DAY)) / DAY;
+    // The whole local days after the day of the first review and before today, 30 at most.
+    let counted = 0;
+    for (let d = previousDay(localDay(config.tz, now)); counted < WINDOW_DAYS && d > localDay(config.tz, first); d = previousDay(d)) counted++;
+    const off = counted ? (await daysNotRunning(db, config.tz, now, counted)).missing.length : 0;
     out.push({
       n: 2, name: 'no review more than 24 h late over 30 days',
-      pass: c.late > 0 || waiting > 0 ? false : days >= WINDOW_DAYS ? true : null,
-      detail: `${plural(c.reviews, 'review')} over ${days.toFixed(1)} days (${c.scheduled} scheduled); ${c.lateHour} ran over an hour late, ${c.late} over 24 h; ${plural(waiting, 'goal')} over 24 h past due now${days < WINDOW_DAYS ? ` (needs ${WINDOW_DAYS} days)` : ''}`,
-      values: { reviews: c.reviews, scheduled: c.scheduled, lateOverHour: c.lateHour, lateOver24h: c.late, overdueNow: waiting, days: Math.round(days * 10) / 10 },
+      pass: c.late > 0 || waiting > 0 || off > 0 ? false : days >= WINDOW_DAYS ? true : null,
+      detail: `${plural(c.reviews, 'review')} over ${days.toFixed(1)} days (${c.scheduled} scheduled); ${c.lateHour} ran over an hour late, ${c.late} over 24 h; ${plural(waiting, 'goal')} over 24 h past due now; `
+        + `reviews were on all day on ${counted - off} of the ${plural(counted, 'day')} before today${days < WINDOW_DAYS ? ` (needs ${WINDOW_DAYS} days)` : ''}`,
+      values: { reviews: c.reviews, scheduled: c.scheduled, lateOverHour: c.lateHour, lateOver24h: c.late, overdueNow: waiting, days: Math.round(days * 10) / 10, daysCounted: counted, daysOn: counted - off },
     });
   }
 

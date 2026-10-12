@@ -7,8 +7,7 @@
  * guard off for a single statement to move a review in time, then on again.
  */
 import { localDay, previousDay } from '@flint/policy';
-import { withClient, type TestUrls } from '../db';
-import type { Db } from '../../src/db';
+import { healthRows, withClient, type TestUrls } from '../db';
 
 export const HOUR = 3_600_000;
 
@@ -39,9 +38,14 @@ export function daysBefore(tz: string, now: Date, n: number): string[] {
 /** Noon UTC of a YYYY-MM-DD day: inside that day in UTC, the tests' time zone. */
 export const noon = (day: string): Date => new Date(`${day}T12:00:00.000Z`);
 
-/** Settings > Health's Goal Reviews row, as the health job writes it every few minutes: here, one a day. */
-export async function goalReviewsRan(db: Db, days: readonly string[], status: 'ok' | 'degraded' | 'down' | 'disabled' = 'ok', detail?: string): Promise<void> {
-  await db.healthCheck.createMany({ data: days.map((d) => ({ component: 'goals', status, at: noon(d), ...(detail ? { detail } : {}) })) });
+/**
+ * Settings > Health's Goal Reviews row, as the health job writes it every few
+ * minutes: here, one a day. Written as the owner: the database dates the
+ * runtime's own health rows itself (HealthCheck_clock), so no runtime role can
+ * put one in the past.
+ */
+export async function goalReviewsRan(urls: TestUrls, days: readonly string[], status: 'ok' | 'degraded' | 'down' | 'disabled' = 'ok', detail?: string): Promise<void> {
+  await healthRows(urls, days.map((d) => ({ component: 'goals', status, at: noon(d), ...(detail ? { detail } : {}) })));
 }
 
 /**
@@ -50,8 +54,8 @@ export async function goalReviewsRan(db: Db, days: readonly string[], status: 'o
  * rows up to 12 minutes apart are one stretch, goals/late.ts). Lateness is
  * counted from these rows and nothing else.
  */
-export async function reviewing(db: Db, from: Date, to: Date): Promise<void> {
+export async function reviewing(urls: TestUrls, from: Date, to: Date): Promise<void> {
   const at: Date[] = [];
   for (let t = to.getTime(); t >= from.getTime(); t -= 10 * 60_000) at.push(new Date(t));
-  await db.healthCheck.createMany({ data: at.map((d) => ({ component: 'goals', status: 'ok', at: d })) });
+  await healthRows(urls, at.map((d) => ({ component: 'goals', status: 'ok', at: d })));
 }

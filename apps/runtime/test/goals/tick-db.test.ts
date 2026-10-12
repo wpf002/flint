@@ -29,7 +29,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import pg from 'pg';
-import { NO_DB, freshDb, id, pgConfig, pgError, type TestUrls } from '../db';
+import { NO_DB, freshDb, healthRows, id, pgConfig, pgError, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { loadConfig } from '../../src/config';
 import { goalJobs, type JobContext } from '../../src/jobs';
@@ -419,13 +419,13 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
 
     // The log is what the health job wrote for Goal Reviews with reviews on: not `disabled`, and not stopped by a rule.
     await db.healthCheck.deleteMany({ where: { component: 'goals' } });
-    await db.healthCheck.createMany({ data: [
+    await healthRows(urls, [
       ...every5(0, 30).map((t) => ({ component: 'goals', status: 'ok', at: t })),
       ...every5(35, 60).map((t) => ({ component: 'goals', status: 'disabled', at: t })),
       ...every5(65, 90).map((t) => ({ component: 'goals', status: 'degraded', detail: REVIEWS_STOPPED, at: t })),
       ...every5(95, 120).map((t) => ({ component: 'goals', status: 'degraded', detail: 'A goal’s review is over an hour late.', at: t })),
       { component: 'backup', status: 'ok', at: at(45) }, { component: 'goals.deferral', status: 'degraded', at: at(50) },
-    ] });
+    ]);
     try {
       const log = await reviewingLog(db, at(0), at(120));
       expect(log.map((d) => (d.getTime() - t0.getTime()) / MIN)).toEqual([0, 5, 10, 15, 20, 25, 30, 95, 100, 105, 110, 115, 120]);

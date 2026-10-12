@@ -8,8 +8,9 @@
  * title, and nothing returns an id: counts, days and durations.
  */
 import { GOAL_SIGNED_ACTIONS, REVIEW_DOWN_MS, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { Prisma } from '@prisma/client';
 import type { Db } from '../db.js';
-import { REVIEWS_STOPPED, reviewingLog, reviewingMs, waitedMs } from './late.js';
+import { REVIEWS_STOPPED, waitedMs } from './late.js';
 
 export const DAY = 86_400_000;
 /** The chat suggestions (part 5 files them): a goal, or a commitment, from Will's quoted words. */
@@ -26,48 +27,43 @@ export interface ReviewCounts {
   scheduled: number;
   /** Scheduled reviews that ran late: over an hour of waiting while Flint was reviewing, as each review's own audit entry recorded (what the digest counts). */
   lateHour: number;
-  /** Of those, the ones that had waited more than 24 hours. */
+  /** Of those, the ones that had waited more than 24 hours: the review's audit entry marks that too. */
   late: number;
   /** Reviews the local model answered. */
   answered: number;
-  /** Changes those answers suggested and that still fit the plan. */
+  /** Changes those answers suggested and that still fit the plan. A change a waiting card already asks for is one change, however many reviews found the card still waiting. */
   suggested: number;
   /** Reviews made in the trial week (they file no card). */
   shadow: number;
 }
 
 /**
- * The reviews made after `since` and up to `until`. Late is counted on the
- * clock the panel, Settings > Health and the digest read (late.ts): the time a
+ * The reviews made from `since` up to `until`. Late is counted on the clock
+ * the panel, Settings > Health and the digest read (late.ts): the time a
  * review waited WHILE FLINT WAS REVIEWING, so a goal that was due while reviews
- * were off, the runtime was down or the Mac slept was waiting, not late.
- * `lateHour` is the digest's own count (over an hour, marked on the review's
- * audit entry when it ran); `late` is the outage mark, over 24 hours, counted
- * here from the same Goal Reviews rows. Those rows are kept 30 days: a wait
- * that began before that is counted from what is left.
+ * were off, the runtime was down or the Mac slept was waiting, not late. Both
+ * marks are read from the review's own audit entry, written when it ran:
+ * `late` (over an hour, what the digest counts) and `lateOverDay` (over 24
+ * hours, the outage mark). An audit entry is kept, so neither changes when
+ * retention deletes the health rows the wait was counted from.
  */
 export async function reviewCounts(db: Db, since: Date, until: Date): Promise<ReviewCounts> {
-  const [r] = await db.$queryRaw<Array<Omit<ReviewCounts, 'late'>>>`
+  const marked = (mark: string) => Prisma.sql`EXISTS (SELECT 1 FROM "AuditEntry" a WHERE a."correlationId" = r.id AND a.action = 'goal.review.local' AND a.inputs->>${mark} = 'true')`;
+  const [r] = await db.$queryRaw<Array<Omit<ReviewCounts, 'suggested'>>>`
     SELECT count(*)::int AS reviews,
            count(*) FILTER (WHERE r.kind = 'scheduled')::int AS scheduled,
-           count(*) FILTER (WHERE r.kind = 'scheduled' AND EXISTS (
-             SELECT 1 FROM "AuditEntry" a WHERE a."correlationId" = r.id AND a.action = 'goal.review.local' AND a.inputs->>'late' = 'true'))::int AS "lateHour",
+           count(*) FILTER (WHERE r.kind = 'scheduled' AND ${marked('late')})::int AS "lateHour",
+           count(*) FILTER (WHERE r.kind = 'scheduled' AND ${marked('lateOverDay')})::int AS late,
            count(*) FILTER (WHERE r.planner LIKE 'ollama:%')::int AS answered,
-           coalesce(sum((SELECT count(*) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.diff) = 'array' THEN r.diff ELSE '[]'::jsonb END) d
-                         WHERE coalesce(d->>'held', '') NOT IN ('stale', 'rejected'))), 0)::int AS suggested,
            count(*) FILTER (WHERE r.shadow)::int AS shadow
-    FROM "GoalReview" r WHERE r."createdAt" > ${since} AND r."createdAt" <= ${until}`;
-  // Only a review that ran over 24 hours past its time on the wall clock can have waited that long while Flint was reviewing.
-  const slow = await db.$queryRaw<Array<{ due: Date; ran: Date }>>`
-    SELECT r."dueAt" AS due, r."createdAt" AS ran FROM "GoalReview" r
-    WHERE r.kind = 'scheduled' AND r."createdAt" > ${since} AND r."createdAt" <= ${until}
-      AND r."createdAt" > r."dueAt" + ${REVIEW_DOWN_MS / 1000}::float8 * interval '1 second'`;
-  let late = 0;
-  if (slow.length) {
-    const log = await reviewingLog(db, new Date(Math.min(...slow.map((x) => x.due.getTime()))), new Date(Math.max(...slow.map((x) => x.ran.getTime()))));
-    late = slow.filter((x) => reviewingMs(log.filter((at) => at.getTime() <= x.ran.getTime()), x.due, x.ran) > REVIEW_DOWN_MS).length;
-  }
-  return { ...(r ?? { reviews: 0, scheduled: 0, lateHour: 0, answered: 0, suggested: 0, shadow: 0 }), late };
+    FROM "GoalReview" r WHERE r."createdAt" >= ${since} AND r."createdAt" <= ${until}`;
+  // A suggestion on no card (the trial week's, or one held back) is one each time it is made. One on a card is
+  // that card's change: a review that found the card still waiting did not suggest it again.
+  const [s] = await db.$queryRaw<Array<{ suggested: number }>>`
+    SELECT (count(*) FILTER (WHERE d->>'card' IS NULL) + count(DISTINCT (d->>'card') || ' ' || (d->'change')::text) FILTER (WHERE d->>'card' IS NOT NULL))::int AS suggested
+    FROM "GoalReview" r, jsonb_array_elements(CASE WHEN jsonb_typeof(r.diff) = 'array' THEN r.diff ELSE '[]'::jsonb END) d
+    WHERE r."createdAt" >= ${since} AND r."createdAt" <= ${until} AND coalesce(d->>'held', '') NOT IN ('stale', 'rejected')`;
+  return { ...(r ?? { reviews: 0, scheduled: 0, lateHour: 0, late: 0, answered: 0, shadow: 0 }), suggested: s?.suggested ?? 0 };
 }
 
 /** Active goals whose review has now waited more than 24 hours while Flint was reviewing: what Settings > Health shows as down. */
@@ -75,6 +71,32 @@ export async function overdueNow(db: Db, now: Date): Promise<number> {
   const due = await db.goal.findMany({ where: { status: 'active', nextReviewAt: { lt: new Date(now.getTime() - REVIEW_DOWN_MS) } }, select: { nextReviewAt: true } });
   if (!due.length) return 0;
   return (await waitedMs(db, due.map((g) => g.nextReviewAt), now)).filter((ms) => ms > REVIEW_DOWN_MS).length;
+}
+
+/**
+ * Where a count of "the last `days` days" starts: the start of the local day
+ * that many days before today. The promotion table's gate and the sentence on
+ * its card both count from here, so the card never says a number the gate did
+ * not see.
+ */
+export function windowStart(tz: string, now: Date, days: number): Date {
+  let d = localDay(tz, now);
+  for (let i = 0; i < days; i++) d = previousDay(d);
+  return localDayBounds(tz, d).start;
+}
+
+/** A Goal Reviews check older than this says nothing about now (the health job looks every 5 minutes). */
+export const HEALTH_FRESH_MS = 15 * 60_000;
+
+/**
+ * What the latest health check found for goal reviews: `on`; `off`
+ * (FLINT_PLANNER is off); `stopped` (a rule forbids them); or `unknown` when
+ * the health check has not looked in the last 15 minutes.
+ */
+export async function reviewsNow(db: Db, now: Date): Promise<'on' | 'off' | 'stopped' | 'unknown'> {
+  const row = await db.healthCheck.findFirst({ where: { component: 'goals', at: { lte: now } }, orderBy: [{ at: 'desc' }, { id: 'desc' }], select: { status: true, detail: true, at: true } });
+  if (!row || now.getTime() - row.at.getTime() > HEALTH_FRESH_MS) return 'unknown';
+  return row.status === 'disabled' ? 'off' : row.detail === REVIEWS_STOPPED ? 'stopped' : 'on';
 }
 
 /**
@@ -205,7 +227,7 @@ export async function chatSuggestions(
            count(*) FILTER (WHERE c.status = 'executed')::int AS executed,
            count(*) FILTER (WHERE c.status = 'rejected')::int AS rejected,
            count(*) FILTER (WHERE c.status = 'expired')::int AS expired
-    FROM "Proposal" c WHERE c.action = ANY (${[...(o.actions ?? CHAT_SUGGESTION_ACTIONS)]}::text[]) AND (${since}::timestamptz IS NULL OR c."createdAt" > ${since}::timestamptz)`;
+    FROM "Proposal" c WHERE c.action = ANY (${[...(o.actions ?? CHAT_SUGGESTION_ACTIONS)]}::text[]) AND (${since}::timestamptz IS NULL OR c."createdAt" >= ${since}::timestamptz)`;
   return r ?? { filed: 0, withoutQuote: 0, cleared: 0, executed: 0, rejected: 0, expired: 0 };
 }
 

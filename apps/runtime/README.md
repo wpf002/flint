@@ -436,9 +436,13 @@ yet), with the numbers behind it:
 2. reviews that ran over 24 hours late in the last 30 days, and goals that late
    now. Late is counted the way the panel and Settings > Health count it: the
    time a review waited while Flint was reviewing. A goal that was due while
-   reviews were off, or the Mac was asleep, was waiting, not late. It also says
-   how many ran over an hour late (the digest's count), which does not fail it.
-   It passes after 30 days;
+   reviews were off, or the Mac was asleep, was waiting, not late. Each review
+   records its own wait when it runs (over an hour, and over a day), so the
+   count does not change when old health checks are cleared. It also says how
+   many ran over an hour late (the digest's count), which does not fail it.
+   Reviews must also have been on for every whole day it counts: a month with
+   reviews off fails, since nothing ran late only because nothing ran. It
+   passes after 30 days;
 3. how long a watched item's change took to set off its review (10 minutes is
    the limit; a test proves the worst case, and this measures the real ones);
 4. plan versions without a signed card behind them, and reviews that filed
@@ -478,22 +482,52 @@ The command refuses, and says why, until the week has been lived:
 | --- | --- |
 | the shadow week is not over: 3.2 of 7 days of goal reviews | Flint's first review was less than 7 days ago. |
 | goal reviews were on all day on 5 of the 7 days before today (not on ...) | On those days reviews were off, or a rule stopped them, for some of the day, or the health check never ran (the runtime was down all day). A day with nothing due still counts: a weekly goal has no review on most days. |
+| goal reviews are off right now | The last health check found reviews off. A week that was lived is no reason to promote reviews that are off. |
+| a rule stops goal reviews right now | The last health check found a rule forbidding reviews. |
+| the health check has not looked at goal reviews in the last 15 minutes | The runtime is not running, or its health check is stopped. |
 | 1 review ran over 24 hours late | A scheduled review in those days had waited more than a day, while Flint was reviewing, when it ran. It ages out of the week. |
 | 1 goal is over 24 hours past a review | A review is that late right now: Settings > Health shows **Goal Reviews** as down. |
 | the local model has not answered a review yet | No review's plan stage got an answer. Check that `FLINT_TRIAGE_MODEL` is set and Ollama is running. |
 
-The card's details say what the week measured, in numbers: "This week Flint
+The card's details say what the week measured, in numbers: "Since Oct 5, Flint
 reviewed your goals 9 times, and none was late. The local model answered 7. It
-would have suggested 5 changes." Late there is the digest's count: a review
-that ran over an hour late. Under it, each rule the card signs is a sentence:
-"Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027." Every
-rule card reads that way (the earlier tables' and the backups' too): its
-details never show the stored rows. Filing it twice is the same card.
+would have suggested 5 changes." The day it names is the first of the 7 days
+the command counted, so the card never says a number the command did not see.
+Late there is the digest's count: a review that ran over an hour late. Under
+it, each rule the card signs is a sentence: "Goal reviews may run on their own,
+up to 20 a day, until Apr 5, 2027." Every rule card reads that way (the earlier
+tables' and the backups' too): its details never show the stored rows.
+
+Filing it twice is the same card, but only its own: one this command filed,
+with the very rules it would file now. A waiting card that only carries the
+table's name (another limit, another filer) is left where it is and a fresh
+one is filed beside it. If a card with exactly these rules is already waiting
+and this command did not file it, the command stops and names that card, for
+you to reject first.
 
 `--phase p3c` is a second, later table, for goals Flint suggests from your
 chats (a later part builds those): it lets a suggestion land in Suggested
-without asking, 3 a day at most, and needs 14 days of those cards first. A
-suggested goal is never active until you start it with your signature.
+without asking, 3 a day at most. It needs the first of those cards to be 14
+days old, and some of them filed within those 14 days. A suggested goal is
+never active until you start it with your signature.
+
+**What the command checks is evidence. Your signature is the boundary.** The
+command reads rows the runtime itself writes: health checks, reviews, cards.
+Two database rules keep those honest as far as they can be (the
+`p3_policy_floor` migration):
+
+- a health check and a card are dated by the database when the runtime writes
+  them, as a review already was, so a week of "reviews were on" or a two-week-old
+  suggestion cannot be written in an afternoon;
+- a rule card always asks on its own, with a fresh touch, never in Approve
+  All. The runtime sets that mark whoever files the card, the database refuses
+  a rule card without it, and the console treats one as asking on its own
+  whatever it was sent.
+
+That is all they claim. Something with the runtime's own database access could
+still write a row dated now, or delete a health check. Nothing it writes turns a
+rule on: only your signature over the rows on the card does, and the card's
+details say each of them as a sentence.
 
 ### Turning reviews on
 
@@ -626,8 +660,11 @@ they are. This is also the first step of rolling P3 back.
   by a rule. A runtime that was down for part of a day leaves no check for that
   part, so that day still counts; a day with no check at all does not. If the
   health check itself is stopped, no day counts and the table can't be filed.
-  The rows are kept 30 days, so the report's oldest waits are counted from
-  what is left of them.
+  A day is your day, in `FLINT_TZ`.
+- **`FLINT_TZ` is a zone's name.** "America/Chicago", not "-06:00": the runtime
+  and its database read an offset's sign the opposite way, so one is passed
+  over with a warning in the log and the next setting, or America/Chicago, is
+  used. A name that is no zone at all still stops the runtime at start.
 - **Forecasts wait for their dates.** When you mark a goal done or abandon
   it, that card settles the goal's forecasts. A forecast whose date comes
   with the goal not finished is recorded as not met by the prediction check

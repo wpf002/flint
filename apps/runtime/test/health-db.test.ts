@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { digestOf, localDay } from '@flint/policy';
-import { NO_DB, freshDb, withClient, type TestUrls } from './db';
+import { NO_DB, freshDb, healthRows, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { loadConfig, type Config } from '../src/config';
@@ -142,7 +142,8 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
   it('a detail is redacted', async () => {
     const now = new Date();
     await recordChecks(db, [{ component: 'triage', status: 'degraded', detail: 'failed with Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' }], now);
-    const row = await db.healthCheck.findFirstOrThrow({ where: { component: 'triage', at: now } });
+    // (The database dates the row itself, HealthCheck_clock: it is the latest one, not the one at `now` to the millisecond.)
+    const row = await db.healthCheck.findFirstOrThrow({ where: { component: 'triage', at: { gte: new Date(now.getTime() - 1000) } }, orderBy: { at: 'desc' } });
     expect(row.detail).not.toMatch(/sk-ant/);
   });
 
@@ -357,7 +358,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     const at = (ms: number) => new Date(now.getTime() + ms);
     /** The Goal Reviews rows the health job would have written every 5 minutes over a stretch (by default: reviews on and fine). */
     const reviewing = (from: number, to: number, over: { status?: string; detail?: string } = {}) =>
-      db.healthCheck.createMany({ data: Array.from({ length: Math.floor((to - from) / (5 * MIN)) + 1 }, (_, i) => ({ component: 'goals', status: over.status ?? 'ok', ...(over.detail ? { detail: over.detail } : {}), at: at(from + i * 5 * MIN) })) });
+      healthRows(urls, Array.from({ length: Math.floor((to - from) / (5 * MIN)) + 1 }, (_, i) => ({ component: 'goals', status: over.status ?? 'ok', ...(over.detail ? { detail: over.detail } : {}), at: at(from + i * 5 * MIN) })));
     const forget = () => db.healthCheck.deleteMany({ where: { component: 'goals' } });
     // Off (the default): shown as off, whatever the goals' review times say.
     const g = await fx.activeGoal();

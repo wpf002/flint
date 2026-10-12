@@ -17,14 +17,26 @@
  *    choosing was dropped for (`--drop`).
  *  - The card's reason says what signing lets Flint do and until when, then what
  *    the week measured, as numbers only, in sentences; the signed rows carry a
- *    fixed one.
- *  - Filing the same table again is the same card: a waiting one is reused.
+ *    fixed one. P3's two tables count the gate and the sentence over one
+ *    window, so the card never says a number the gate did not see.
+ *  - Filing the same table again is the same card: a waiting one is reused,
+ *    but only one this command filed itself, with the very rules it would file
+ *    now. A waiting card that only looks like the table's (another cap, another
+ *    filer, an evidence sentence of its own) is never returned as the table.
+ *  - A policy change always asks on its own: createProposal sets the mark and
+ *    the database refuses one without it.
+ *
+ * The gate is evidence for Will, not the boundary. It reads rows the runtime
+ * writes (health checks, reviews, cards), and the runtime's role could write
+ * such rows; the database dates them itself, so a week cannot be made in an
+ * afternoon, and no more is claimed for it. What stands between a table and
+ * its rule is Will's signature over the rows on the card.
  */
 import { CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
-import { chatSuggestions, daysNotRunning, firstReviewAt, overdueNow, reviewCounts } from '../goals/measures.js';
+import { chatSuggestions, daysNotRunning, firstReviewAt, overdueNow, reviewCounts, reviewsNow, windowStart } from '../goals/measures.js';
 
 /**
  * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
@@ -113,6 +125,8 @@ export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c'] as const;
 export type Phase = (typeof PHASES_LIST)[number];
 
 export const SHADOW_DAYS = 7;
+/** Who files a table: the CLI, as Will. The audit trail keeps it with the card, and a table reuses only a card it filed. */
+const PROMOTION_ACTOR = 'will:cli';
 
 export interface PromotionRow {
   pattern: string;
@@ -138,7 +152,16 @@ interface PhaseOf {
   /** Why the week does not count yet (it must have been lived, not only begun), or undefined. */
   covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
   measured: (db: Db, first: Date, now: Date) => Promise<string>;
+  /**
+   * The gate and the card's sentence from ONE count over one window: why the
+   * weeks do not count yet (`gap`), else what they measured. A phase that has
+   * it is asked nothing else.
+   */
+  weighed?: (db: Db, now: Date, tz: string) => Promise<{ gap: string } | { measured: string }>;
 }
+
+/** "Oct 5": the day a window starts, as the card says it. */
+const dayWords = (tz: string, at: Date): string => new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric' }).format(at);
 
 const CALENDAR_NAMES = { google_calendar: 'Google Calendar', apple_calendar: 'Apple Calendar' } as const;
 
@@ -235,27 +258,31 @@ const PHASES: Record<Phase, PhaseOf> = {
     // Flint's first review of any goal: the trial week runs from there.
     first: (db) => firstReviewAt(db),
     // The week was lived: reviews were on for each of the 7 whole local days before today (every time the
-    // health check looked; a day with nothing due still counts: a weekly goal has no review on most days),
-    // none ran over 24 hours late and none is that late now, and the local model answered at least one.
-    // Days on and lateness are both read from the health check's Goal Reviews rows, as goals/late.ts reads them.
-    covered: async (db, now, tz) => {
-      if (!(await firstReviewAt(db))) return 'Flint has not reviewed a goal yet';
+    // health check looked; a day with nothing due still counts: a weekly goal has no review on most days)
+    // and are on right now, none ran over 24 hours late and none is that late now, and the local model
+    // answered at least one. Days on are read from the health check's Goal Reviews rows, as goals/late.ts
+    // reads them; a late review from its own audit entry. The sentence on the card counts the same reviews,
+    // from the same moment: the start of the first of those 7 days.
+    covered: async () => undefined,
+    measured: async () => '',
+    weighed: async (db, now, tz) => {
+      if (!(await firstReviewAt(db))) return { gap: 'Flint has not reviewed a goal yet' };
       const { since, missing } = await daysNotRunning(db, tz, now, SHADOW_DAYS);
-      if (missing.length) return `goal reviews were on all day on ${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today (not on ${missing.join(', ')})`;
+      if (missing.length) return { gap: `goal reviews were on all day on ${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today (not on ${missing.join(', ')})` };
+      const today = await reviewsNow(db, now);
+      if (today === 'off') return { gap: 'goal reviews are off right now' };
+      if (today === 'stopped') return { gap: 'a rule stops goal reviews right now' };
+      if (today === 'unknown') return { gap: 'the health check has not looked at goal reviews in the last 15 minutes' };
       const c = await reviewCounts(db, since, now);
-      if (c.late) return `${count(c.late, 'review')} ran over 24 hours late`;
+      if (c.late) return { gap: `${count(c.late, 'review')} ran over 24 hours late` };
       const waiting = await overdueNow(db, now);
-      if (waiting) return `${count(waiting, 'goal is', 'goals are')} over 24 hours past a review`;
-      if (!c.answered) return 'the local model has not answered a review yet';
-      return undefined;
-    },
-    measured: async (db, _first, now) => {
-      const c = await reviewCounts(db, new Date(now.getTime() - SHADOW_DAYS * DAY), now);
+      if (waiting) return { gap: `${count(waiting, 'goal is', 'goals are')} over 24 hours past a review` };
+      if (!c.answered) return { gap: 'the local model has not answered a review yet' };
       // Late as the digest counted it, day by day: over an hour. (Over 24 hours, the card is not filed at all.)
       const late = c.lateHour ? `${c.lateHour} ${c.lateHour === 1 ? 'was' : 'were'} late` : 'none was late';
       // In the trial week a review files nothing: it records what it would have suggested.
       const suggested = `${c.shadow === c.reviews ? 'It would have suggested' : 'It suggested'} ${count(c.suggested, 'change')}.`;
-      return `This week Flint reviewed your goals ${count(c.reviews, 'time')}, and ${late}. The local model answered ${c.answered}. ${suggested}`;
+      return { measured: `Since ${dayWords(tz, since)}, Flint reviewed your goals ${count(c.reviews, 'time')}, and ${late}. The local model answered ${c.answered}. ${suggested}` };
     },
   },
   p3c: {
@@ -267,10 +294,16 @@ const PHASES: Record<Phase, PhaseOf> = {
     shadowDays: P3C_SHADOW_DAYS,
     // The first goal chat suggested: Will has signed or rejected each one since.
     first: async (db) => (await db.proposal.findFirst({ where: { action: 'goal.propose' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
-    measured: async (db, _first, now) => {
-      const s = await chatSuggestions(db, { since: new Date(now.getTime() - P3C_SHADOW_DAYS * DAY), actions: ['goal.propose'] });
-      if (!s.filed) return 'Flint suggested no goals from chat in the last 2 weeks.';
-      return `In the last 2 weeks Flint suggested ${count(s.filed, 'goal')} from chat: you approved ${s.executed}, rejected ${s.rejected}, and ${s.expired} expired.`;
+    // Two weeks of suggestions means there were some: the 14 whole local days before today, and today. The
+    // card that opened the gate is 14 days old, so it is inside that window; one much older, with nothing
+    // since, is not two weeks of evidence. The sentence counts the same cards.
+    covered: async () => undefined,
+    measured: async () => '',
+    weighed: async (db, now, tz) => {
+      const since = windowStart(tz, now, P3C_SHADOW_DAYS);
+      const s = await chatSuggestions(db, { since, actions: ['goal.propose'] });
+      if (!s.filed) return { gap: `Flint suggested no goals from chat in the last ${P3C_SHADOW_DAYS} days` };
+      return { measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(s.filed, 'goal')} from chat: you approved ${s.executed}, rejected ${s.rejected}, and ${s.expired} expired.` };
     },
   },
 };
@@ -280,7 +313,32 @@ function untilDay(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
-export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz?: string } = {}) {
+/** A waiting card's rules, as far as they can be read. */
+const rulesOf = (args: unknown): Array<Record<string, unknown>> => {
+  const rows = (args as { rows?: unknown } | null)?.rows;
+  return Array.isArray(rows) ? rows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && !Array.isArray(r)) : [];
+};
+
+/**
+ * Are a waiting card's rules the very rules this table would file now? Each
+ * pattern once, ALONE, with the table's cap and its fixed reason and nothing
+ * else on the row; one last day for all of them, no later than today's table
+ * would give. (An earlier day's table, still waiting, is the same table.)
+ */
+function sameRules(theirs: Array<Record<string, unknown>>, mine: readonly PromotionRow[], now: Date): boolean {
+  if (theirs.length !== mine.length) return false;
+  const until = theirs[0]?.expiresAt;
+  if (typeof until !== 'string' || !(Date.parse(until) > now.getTime()) || Date.parse(until) > Date.parse(mine[0]!.expiresAt)) return false;
+  return mine.every((m) => {
+    const t = theirs.filter((r) => r.pattern === m.pattern);
+    if (t.length !== 1) return false;
+    const r = t[0]!;
+    const keys = Object.keys(r).sort().join(',');
+    return keys === Object.keys({ ...m }).sort().join(',') && r.tier === 'alone' && r.dailyCap === m.dailyCap && r.reason === m.reason && r.expiresAt === until;
+  });
+}
+
+export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz: string }) {
   const now = opts.now ?? new Date();
   const phase = PHASES[opts.phase ?? 'p2'];
   const first = await phase.first(db);
@@ -289,30 +347,41 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
     const days = first ? (Math.max(0, now.getTime() - first.getTime()) / DAY).toFixed(1) : '0';
     throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week is' : 'weeks are'} not over: ${days} of ${need} days of ${phase.evidence}`);
   }
-  const gap = await phase.covered?.(db, now, opts.tz ?? 'UTC');
-  if (gap) throw new Refused(409, `the shadow week does not count yet: ${gap}`);
+  // One count for the gate and for the card's sentence, where a phase has one (P3's two tables).
+  const weighed = await phase.weighed?.(db, now, opts.tz);
+  const gap = weighed ? ('gap' in weighed ? weighed.gap : undefined) : await phase.covered?.(db, now, opts.tz);
+  if (gap) throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week does' : 'weeks do'} not count yet: ${gap}`);
   const drop = new Set(opts.drop ?? []);
   const patterns = phase.rows.filter((r) => !drop.has(r.pattern) && !NEVER_PROMOTED.has(r.pattern) && CODE_TABLE[r.pattern]?.tier !== 'forbidden' && CODE_TABLE[r.pattern]?.promotable !== false);
   if (!patterns.length) throw new Refused(400, 'nothing left to promote');
-  // A card for the same rows already waiting: that one (Will signs one table, not several).
-  const waiting = await db.proposal.findMany({ where: { action: 'policy.change', templateId: phase.template, status: 'pending', expiresAt: { gt: now } } });
-  const want = patterns.map((r) => r.pattern).sort().join(',');
-  for (const w of waiting) {
-    const rows = ((w.args as { rows?: Array<{ pattern?: string }> } | null)?.rows ?? []).map((r) => r.pattern).sort().join(',');
-    if (rows === want) return { proposalId: w.id, deduped: true, rows: (w.args as unknown as { rows: PromotionRow[] }).rows };
-  }
   // The rows are stable for a day (the expiry from the day's start, a fixed reason), so a refiling is the same card.
   const dayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const expiresAt = new Date(dayStart + 175 * DAY).toISOString();
   const rows: PromotionRow[] = patterns.map((r) => ({ pattern: r.pattern, tier: 'alone' as const, ...(r.dailyCap ? { dailyCap: r.dailyCap } : {}), reason: `${phase.label} promotion table, after the shadow ${need === SHADOW_DAYS ? 'week' : 'weeks'}`, expiresAt }));
   const args = PolicyArgs.parse({ rows });
+  // This table's own card, still waiting: that one (Will signs one table, not several). Its own means this
+  // command filed it (the audit trail's actor), as Will's card that asks on its own, with the very rules it
+  // would file now. A waiting card that only carries the table's name is not it, whatever it says.
+  const own = async (w: { id: string; origin: string; consequential: boolean; args: unknown }): Promise<boolean> =>
+    w.origin === 'cli' && w.consequential === true && sameRules(rulesOf(w.args), rows, now)
+    && (await db.auditEntry.count({ where: { correlationId: w.id, kind: 'decision', action: 'policy.change', decision: 'queue', actor: PROMOTION_ACTOR } })) > 0;
+  const waiting = await db.proposal.findMany({ where: { action: 'policy.change', templateId: phase.template, status: 'pending', expiresAt: { gt: now } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  for (const w of waiting) {
+    if (await own(w)) return { proposalId: w.id, deduped: true, rows: (w.args as unknown as { rows: PromotionRow[] }).rows };
+  }
   // What the week measured goes on the card, outside the signed rows.
-  const measured = await phase.measured(db, first, now);
+  const measured = weighed && 'measured' in weighed ? weighed.measured : await phase.measured(db, first, now);
   const p = await createProposal(db, {
     kind: 'policy', origin: 'cli', action: 'policy.change', templateId: phase.template, args,
     argsProvenance: { rows: { source: 'template', ref: phase.template, tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
     reason: `This lets ${phase.lets} without asking until ${untilDay(expiresAt)}. ${measured}`.slice(0, 1000),
-  }, 'will:cli', now);
+  }, PROMOTION_ACTOR, now);
+  // The same rules, already waiting on a card this command did not file (a proposal is one card for its
+  // args): never handed back as the table's own. It is named by its id alone, for Will to reject.
+  if (p.deduped) {
+    const there = await db.proposal.findUnique({ where: { id: p.id } });
+    if (!there || !(await own(there))) throw new Refused(409, `a card with these rules is already waiting, and this command did not file it: reject card ${p.id} in Approvals, then run this again`);
+  }
   return { proposalId: p.id, deduped: p.deduped, rows };
 }

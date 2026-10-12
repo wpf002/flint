@@ -4,9 +4,11 @@
  *
  *  1. active goals, and how many of their checks Flint reads itself;
  *  2. reviews over 24 hours late in 30 days, counted from Flint's first review.
- *     Late is time waited while Flint was reviewing, as part 3 counts it from
- *     the health check's rows: a goal that was due while reviews were off, or
- *     the Mac asleep, was waiting, not late;
+ *     Late is time waited while Flint was reviewing, as part 3 counts it, read
+ *     from the mark each review left on its own audit entry: a goal that was
+ *     due while reviews were off, or the Mac asleep, was waiting, not late. And
+ *     reviews must have been on for each whole day counted: a month with
+ *     reviews off is a fail, not a clean month;
  *  3. how long a watched item's change took to set off its review;
  *  4. plan versions without a signed card behind them, and reviews that filed
  *     their small changes on more than one card (a card a review found waiting
@@ -22,21 +24,24 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GOALS_BLOCK_MAX_TOKENS, GOAL_SAYS, localDay, localDayBounds, previousDay } from '@flint/policy';
-import { NO_DB, RUNTIME, freshDb, type TestUrls } from './db';
+import { promisify } from 'node:util';
+import { GOALS_BLOCK_MAX_TOKENS, digestOf, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { NO_DB, RUNTIME, freshDb, healthRows, withClient, type TestUrls } from './db';
 import { buildApp } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
 import { markProcessed, recordEvent } from '../src/events/record';
-import { createProposal } from '../src/governance/proposals';
+import { createProposal, rejectProposal } from '../src/governance/proposals';
 import { runReview } from '../src/goals/review';
 import { p3Report } from '../src/report/p3';
 import type { Criterion } from '../src/report/exit';
 import { runRollups } from '../src/rollup';
 import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './goals/fixture';
-import { HOUR, moveReview, reviewing } from './goals/weeks';
+import { HOUR, daysBefore, goalReviewsRan, moveReview, reviewing } from './goals/weeks';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SERVER = 'server-token-0123456789abcdef';
@@ -46,17 +51,6 @@ const tokens = [
   { name: 'runtime-mcp', sha256: sha(MCP), scopes: new Set<RuntimeScope>(['world:read', 'ledger']) },
 ];
 const TZ = 'UTC';
-
-describe('p3-report, the command', () => {
-  it('is a script of the runtime, handled by the CLI, and named in its usage beside the promotion table’s phases', () => {
-    const pkg = JSON.parse(readFileSync(join(RUNTIME, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
-    expect(pkg.scripts['p3-report']).toBe('tsx src/cli.ts p3-report');
-    const cli = readFileSync(join(RUNTIME, 'src', 'cli.ts'), 'utf8');
-    expect(cli).toContain("if (process.argv[2] === 'p3-report') {");
-    expect(cli).toContain('console.log(JSON.stringify(await p3Report(db, { tz: config.tz, planner: config.planner }), null, 2));');
-    expect(cli).toMatch(/usage: cli\.ts .*\| p3-report \| promotion-table \[--phase p1\|p2\|p25\|p26\|p3\|p3c\]/);
-  });
-});
 
 describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
   let urls: TestUrls;
@@ -89,6 +83,19 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
   let g3: { id: string; title: string };
   let pr: string;
   const ago = (ms: number) => new Date(now.getTime() - ms);
+  /** One statement as the tables' owner with that table's rules switched off: the only way to leave a row the database refuses. */
+  const tamper = (table: string, sql: string, params: unknown[] = []) => withClient(urls.owner, async (c0) => {
+    await c0.query('BEGIN');
+    try {
+      await c0.query(`ALTER TABLE "${table}" DISABLE TRIGGER USER`);
+      await c0.query(sql, params);
+      await c0.query(`ALTER TABLE "${table}" ENABLE TRIGGER USER`);
+      await c0.query('COMMIT');
+    } catch (err) {
+      await c0.query('ROLLBACK');
+      throw err;
+    }
+  });
 
   beforeAll(async () => {
     urls = await freshDb();
@@ -143,53 +150,84 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     expect(await c(5)).toMatchObject({ pass: true, values: { started: 4, unsigned: 0 } });
   });
 
-  it('2 and 6: reviews in the last 30 days, from Flint’s first; late is time waited while Flint was reviewing, so a goal that was due while reviews were off was waiting, not late', async () => {
-    // Reviews turned on ten days ago, and the health check has found them on every 10 minutes since. g1 was due then;
-    // g2 had been due for five days already (it started before reviews did).
-    await reviewing(db, ago(10 * DAY), now);
+  it('2 and 6: reviews in the last 30 days, from Flint’s first; late is what each review recorded of its own wait, and reviews must have been on for each day counted', async () => {
+    const marks = async (reviewId: string) => (await db.auditEntry.findFirstOrThrow({ where: { correlationId: reviewId, action: 'goal.review.local' }, orderBy: { seq: 'asc' } })).inputs as { late?: boolean; lateOverDay?: boolean };
+    const due = (goalId: string, when: Date) => db.goal.update({ where: { id: goalId }, data: { nextReviewAt: when } });
+    const days = (n: number) => daysBefore(TZ, now, n);
+    // Reviews turned on ten days ago: Flint's first review, and the health check has found them on every day since.
     const r1 = await reviewed(g1.id, 'scheduled');
-    const r2 = await reviewed(g2.id, 'scheduled');
     await moveReview(urls, r1, ago(10 * DAY), ago(10 * DAY + MIN));
-    await moveReview(urls, r2, ago(10 * DAY - MIN), ago(15 * DAY));
+    await goalReviewsRan(urls, days(9));
+    // g2 had been due for five days when reviews came on (it started before they did). It runs now: it was waiting, not late.
+    await due(g2.id, new Date(Date.now() - 5 * DAY));
+    const r2 = await reviewed(g2.id, 'scheduled');
+    expect(await marks(r2)).not.toHaveProperty('late');
     await moveReview(urls, await reviewed(g3.id), ago(4 * DAY));
     expect(await c(2)).toEqual({
       n: 2, name: 'no review more than 24 h late over 30 days', pass: null,
-      detail: '3 reviews over 10.0 days (2 scheduled); 0 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now (needs 30 days)',
-      values: { reviews: 3, scheduled: 2, lateOverHour: 0, lateOver24h: 0, overdueNow: 0, days: 10 },
+      detail: '3 reviews over 10.0 days (2 scheduled); 0 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now; reviews were on all day on 9 of the 9 days before today (needs 30 days)',
+      values: { reviews: 3, scheduled: 2, lateOverHour: 0, lateOver24h: 0, overdueNow: 0, days: 10, daysCounted: 9, daysOn: 9 },
     });
     expect(await c(6)).toMatchObject({ pass: true, detail: '3 reviews; 0 without its goal’s forecast in the ledger', values: { reviews: 3, withoutForecast: 0 } });
 
-    // Yesterday g3's scheduled review ran 23 hours after it was due: late for the panel, not for this criterion.
-    const r4 = await reviewed(g3.id, 'scheduled');
-    await moveReview(urls, r4, ago(DAY), ago(DAY + 23 * HOUR));
-    expect(await c(2)).toMatchObject({ pass: null, values: { reviews: 4, scheduled: 3, lateOver24h: 0 } });
-    // 25 hours, with Flint reviewing all that time: that one is late, and the criterion fails at once.
-    await moveReview(urls, r4, ago(DAY), ago(DAY + 25 * HOUR));
-    expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 4, scheduled: 3, lateOver24h: 1 } });
-    expect((await c(2)).detail).toBe('4 reviews over 10.0 days (3 scheduled); 0 ran over an hour late, 1 over 24 h; 0 goals over 24 h past due now (needs 30 days)');
-    // Had the Mac been asleep for twenty of those hours (the health check wrote no row), it waited five: not late.
-    await db.healthCheck.deleteMany({ where: { component: 'goals', at: { gt: ago(DAY + 24 * HOUR), lt: ago(DAY + 4 * HOUR) } } });
-    expect(await c(2)).toMatchObject({ pass: null, values: { lateOver24h: 0 } });
+    // g3's scheduled review was due two hours ago, and Flint was reviewing all that time: it runs late, as the digest
+    // counts late. Over an hour is said, and is no outage.
+    await due(g3.id, new Date(Date.now() - 2 * HOUR));
+    await reviewing(urls, new Date(Date.now() - 2 * HOUR), new Date());
+    const hourLate = await reviewed(g3.id, 'scheduled');
+    expect(await marks(hourLate)).toEqual(expect.objectContaining({ late: true }));
+    expect(await marks(hourLate)).not.toHaveProperty('lateOverDay');
+    expect(await c(2)).toMatchObject({ pass: null, values: { reviews: 4, scheduled: 3, lateOverHour: 1, lateOver24h: 0 } });
 
-    // Had Flint been reviewing for the five days g2 waited, that wait was a late review.
-    await reviewing(db, ago(15 * DAY), ago(10 * DAY + 10 * MIN));
-    expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 4, lateOver24h: 1 } });
-    await moveReview(urls, r2, ago(10 * DAY - MIN), ago(10 * DAY));
-    expect(await c(2)).toMatchObject({ pass: null, values: { lateOver24h: 0 } });
+    // A goal a day past its review right now, with Flint reviewing all the while, fails it.
+    const next = (await db.goal.findUniqueOrThrow({ where: { id: g1.id } })).nextReviewAt!;
+    await due(g1.id, ago(30 * HOUR));
+    expect(await c(2)).toMatchObject({ pass: null, values: { overdueNow: 0 } });
+    await reviewing(urls, ago(30 * HOUR), new Date(now.getTime() - MIN));
+    expect(await c(2)).toMatchObject({ pass: false, values: { overdueNow: 1 } });
+    await due(g1.id, next);
+    expect(await c(2)).toMatchObject({ pass: null, values: { overdueNow: 0 } });
 
-    // A review that really runs two hours late is marked late on its own audit entry, as the digest counts it: over
-    // an hour, and no outage.
-    await db.goal.update({ where: { id: g2.id }, data: { nextReviewAt: new Date(Date.now() - 2 * HOUR) } });
-    await reviewed(g2.id, 'scheduled');
-    expect(await c(2)).toMatchObject({ pass: null, values: { reviews: 5, scheduled: 4, lateOverHour: 1, lateOver24h: 0 } });
-
-    // Thirty days of reviews, none over 24 hours late, none overdue: passed. (The first review is now before the window.)
+    // Thirty days of reviews, on every day, none a day late, none overdue: passed. (The first review is now before the window.)
     await moveReview(urls, r1, ago(31 * DAY), ago(31 * DAY + MIN));
-    expect(await c(2)).toMatchObject({
-      pass: true, detail: '4 reviews over 30.0 days (3 scheduled); 1 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now',
-      values: { reviews: 4, scheduled: 3, lateOverHour: 1, lateOver24h: 0, overdueNow: 0, days: 30 },
-    });
-    expect(await c(6)).toMatchObject({ pass: true, values: { reviews: 5, withoutForecast: 0 } });
+    expect(await c(2)).toMatchObject({ pass: false, values: { daysCounted: 30, daysOn: 9 } });
+    await goalReviewsRan(urls, days(30).slice(9));
+    const clean = {
+      pass: true, detail: '3 reviews over 30.0 days (2 scheduled); 1 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now; reviews were on all day on 30 of the 30 days before today',
+      values: { reviews: 3, scheduled: 2, lateOverHour: 1, lateOver24h: 0, overdueNow: 0, days: 30, daysCounted: 30, daysOn: 30 },
+    };
+    expect(await c(2)).toMatchObject(clean);
+    expect(await c(6)).toMatchObject({ pass: true, values: { reviews: 4, withoutForecast: 0 } });
+
+    // Due 25 hours ago with Flint reviewing all that time: that one is late by a day, and the criterion fails at once.
+    await due(g3.id, new Date(Date.now() - 25 * HOUR));
+    await reviewing(urls, new Date(Date.now() - 25 * HOUR), new Date());
+    const dayLate = await reviewed(g3.id, 'scheduled');
+    expect(await marks(dayLate)).toMatchObject({ late: true, lateOverDay: true });
+    expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 4, scheduled: 3, lateOverHour: 2, lateOver24h: 1, daysOn: 30 } });
+    expect((await c(2)).detail).toBe('4 reviews over 30.0 days (3 scheduled); 2 ran over an hour late, 1 over 24 h; 0 goals over 24 h past due now; reviews were on all day on 30 of the 30 days before today');
+    // The mark is the review's own. Retention deleting the health rows the wait was counted from changes nothing.
+    await withClient(urls.owner, (c0) => c0.query(`DELETE FROM "HealthCheck" WHERE component = 'goals' AND at > $1`, [ago(32 * HOUR)]));
+    await goalReviewsRan(urls, days(2));
+    expect(await c(2)).toMatchObject({ pass: false, values: { lateOver24h: 1, daysOn: 30 } });
+    // It ages out of the 30 days, like any review.
+    await moveReview(urls, dayLate, ago(40 * DAY));
+    expect(await c(2)).toMatchObject(clean);
+  });
+
+  it('2: a month with reviews off is a fail, never a clean month: nothing ran late because nothing ran', async () => {
+    // The health check found reviews off (FLINT_PLANNER) on every one of the last 30 days, in place of what it found above.
+    const on = await withClient(urls.owner, async (c0) => (await c0.query(`DELETE FROM "HealthCheck" WHERE component = 'goals' RETURNING status, detail, at`)).rows as Array<{ status: string; detail: string | null; at: Date }>);
+    await goalReviewsRan(urls, daysBefore(TZ, now, 30), 'disabled');
+    const off = await c(2);
+    expect(off).toMatchObject({ pass: false, values: { lateOver24h: 0, overdueNow: 0, daysCounted: 30, daysOn: 0 } });
+    expect(off.detail).toContain('reviews were on all day on 0 of the 30 days before today');
+    // So is a month a rule stopped them for, and one the health check never looked in.
+    await withClient(urls.owner, (c0) => c0.query(`DELETE FROM "HealthCheck" WHERE component = 'goals'`));
+    expect(await c(2)).toMatchObject({ pass: false, values: { daysOn: 0 } });
+    // (Back to the month that was lived, for the criteria below.)
+    await healthRows(urls, on.map((r) => ({ component: 'goals', status: r.status, detail: r.detail, at: r.at })));
+    expect(await c(2)).toMatchObject({ pass: true, values: { daysOn: 30 } });
   });
 
   it('3: a watched item’s change to its review, in seconds; over 10 minutes fails', async () => {
@@ -252,6 +290,34 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     const split = await reviewed(g3.id);
     await db.goalReview.update({ where: { id: split }, data: { planner: 'ollama:test-model', diff: [minor('s1', 'prcardC'), minor('s2', 'prcardD')], proposalId: 'prcardC' } });
     expect(await c(4)).toMatchObject({ pass: false, values: { reviewsWithCards: 3, splitMinor: 1 } });
+    await tamper('GoalReview', `UPDATE "GoalReview" SET diff = '[]'::jsonb WHERE id = $1`, [split]);
+    expect(await c(4)).toMatchObject({ pass: true, values: { splitMinor: 0 } });
+    // And a plan version with no signed card behind it (the database refuses one; only its owner, with the guards off, can leave one).
+    const plan = await db.plan.findFirstOrThrow({ where: { goalId: g1.id, status: 'active' } });
+    await tamper('Plan', `UPDATE "Plan" SET "approvalId" = NULL WHERE id = $1`, [plan.id]);
+    expect(await c(4)).toMatchObject({ pass: false, detail: expect.stringContaining('2 plan versions, 1 without a signed card behind it'), values: { planVersions: 2, withoutCard: 1 } });
+    await tamper('Plan', `UPDATE "Plan" SET "approvalId" = $2 WHERE id = $1`, [plan.id, plan.approvalId]);
+    expect(await c(4)).toMatchObject({ pass: true, values: { withoutCard: 0 } });
+  });
+
+  it('5 and 6, when they fail: a goal with no signed approval behind it, and a review without its goal’s forecast', async () => {
+    // Only the owner, with the guards off, can leave either: the report is what would say so.
+    const goal = await db.goal.findUniqueOrThrow({ where: { id: g2.id } });
+    await tamper('Goal', `UPDATE "Goal" SET "approvalId" = NULL WHERE id = $1`, [g2.id]);
+    const five = await c(5);
+    expect(five).toMatchObject({ pass: false, values: { unsigned: 1 } });
+    expect(five.detail).toMatch(/^\d+ goals started; 1 without a signed approval behind its latest change/);
+    await tamper('Goal', `UPDATE "Goal" SET "approvalId" = $2 WHERE id = $1`, [g2.id, goal.approvalId]);
+    expect(await c(5)).toMatchObject({ pass: true, values: { unsigned: 0 } });
+
+    // A review whose forecast is another goal's is a review without its own.
+    const mine = await db.goalReview.findFirstOrThrow({ where: { goalId: g1.id }, orderBy: { createdAt: 'desc' } });
+    await tamper('Prediction', `UPDATE "Prediction" SET "goalId" = $2 WHERE id = $1`, [mine.predictionId, g3.id]);
+    const six = await c(6);
+    expect(six).toMatchObject({ pass: false, values: { withoutForecast: 1 } });
+    expect(six.detail).toMatch(/^\d+ reviews; 1 without its goal’s forecast in the ledger$/);
+    await tamper('Prediction', `UPDATE "Prediction" SET "goalId" = $2 WHERE id = $1`, [mine.predictionId, g1.id]);
+    expect(await c(6)).toMatchObject({ pass: true, values: { withoutForecast: 0 } });
   });
 
   it('7: suggestions from chat, each resting on Will’s own quoted words (the database refuses any other)', async () => {
@@ -275,6 +341,28 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       detail: '1 suggestion from chat; 0 without your own quoted words; 0 too old to read',
       values: { suggestions: 1, withoutQuote: 0, cleared: 0 },
     });
+    // One that got past the database's rule (only its owner, with the rule off, can file it) fails the criterion: each way a quote can be missing.
+    const bare = (id: string, args: Record<string, unknown>, provenance: Record<string, unknown>) => tamper('Proposal',
+      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, reason, "expiresAt")
+       VALUES ($1, 'goal', 'chat:c1', 'goal.propose', $2::jsonb, $3, $4::jsonb, false, 'personal', 'x', now() + interval '1 hour')`,
+      [id, JSON.stringify(args), digestOf(args), JSON.stringify(provenance)]);
+    await bare('prnoquote1', { title: 'Synthetic no quote' }, { title: { source: 'model', tainted: false } });
+    await bare('prnoquote2', { title: 'Synthetic model quote', quote: 'Synthetic words the model wrote itself' }, { quote: { source: 'model', tainted: false } });
+    await bare('prnoquote3', { title: 'Synthetic outside quote', quote: 'Synthetic words from a page it read' }, { quote: { source: 'will', tainted: true } });
+    expect(await c(7)).toEqual({
+      n: 7, name: 'nothing is suggested from chat without your own quoted words', pass: false,
+      detail: '4 suggestions from chat; 3 without your own quoted words; 0 too old to read',
+      values: { suggestions: 4, withoutQuote: 3, cleared: 0 },
+    });
+    // A card whose args retention has cleared can no longer be read: it is counted as too old, not as a miss.
+    for (const id of ['prnoquote1', 'prnoquote2']) {
+      await rejectProposal(db, id, {}, undefined, 'will:console');
+      await db.$executeRaw`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = ${id}`;
+    }
+    expect(await c(7)).toMatchObject({ pass: false, detail: '4 suggestions from chat; 1 without your own quoted words; 2 too old to read', values: { suggestions: 4, withoutQuote: 1, cleared: 2 } });
+    await rejectProposal(db, 'prnoquote3', {}, undefined, 'will:console');
+    await db.$executeRaw`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = 'prnoquote3'`;
+    expect(await c(7)).toMatchObject({ pass: true, values: { withoutQuote: 0, cleared: 3 } });
   });
 
   it('8, and the daily rollup: the goals block’s mean and largest size on the turns that carried it; over 300 fails', async () => {
@@ -352,7 +440,40 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       expect(r.body, url).not.toContain(CANARY);
     }
     expect((await get('/v1/goals/now', SERVER)).statusCode).toBe(200);
-    expect(GOAL_SAYS.invalid).toBeTruthy();
     expect(lines.join('\n')).not.toContain(CANARY);
   });
+
+  it('p3-report and promotion-table, the commands: run for real against this database, one prints this very report and the other the gate’s own refusal', async () => {
+    // A home of its own, so the commands read no settings but the ones given here.
+    const home = mkdtempSync(join(tmpdir(), 'flint-cli-'));
+    try {
+      const env = { PATH: process.env.PATH ?? '', HOME: home, RUNTIME_ENV_FILE: join(home, 'none.env'), DATABASE_URL: urls.app, FLINT_TZ: TZ, FLINT_PLANNER: 'on' };
+      const cli = (...args: string[]) => promisify(execFile)(join(RUNTIME, 'node_modules', '.bin', 'tsx'), [join(RUNTIME, 'src', 'cli.ts'), ...args], { cwd: RUNTIME, env })
+        .then((r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }), (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }));
+      const out = await cli('p3-report');
+      expect(out.code, out.stderr).toBe(0);
+      const printed = JSON.parse(out.stdout) as { at: string; criteria: Criterion[] };
+      // What it printed is the report, measured at the moment it says, with the planner as the settings have it.
+      expect(printed.criteria).toEqual((await p3Report(db, { tz: TZ, planner: true }, new Date(printed.at))).criteria);
+      expect(printed.criteria.map((x) => x.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(out.stdout).not.toContain(CANARY);
+      // The promotion table's command asks the gate, and files nothing it refuses: reviews were switched off a moment ago.
+      const cards = () => db.proposal.count({ where: { action: 'policy.change' } });
+      const before = await cards();
+      await healthRows(urls, [{ component: 'goals', status: 'disabled', at: new Date() }]);
+      const gate = await cli('promotion-table', '--phase', 'p3');
+      expect(gate.code).not.toBe(0);
+      expect(gate.stderr).toContain('the shadow week does not count yet: goal reviews are off right now');
+      expect(await cards()).toBe(before);
+      // Its other table has its own evidence: no goal was ever suggested from chat here.
+      expect((await cli('promotion-table', '--phase', 'p3c')).stderr).toMatch(/the shadow weeks (are not over: [\d.]+ of 14 days of chat suggestions|do not count yet: Flint suggested no goals from chat in the last 14 days)/);
+      expect(await cards()).toBe(before);
+      // A phase it does not have is refused by name.
+      const unknown = await cli('promotion-table', '--phase', 'p9');
+      expect(unknown.code).not.toBe(0);
+      expect(unknown.stderr).toContain('promotion-table: --phase is p1, p2, p25, p26, p3 or p3c');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

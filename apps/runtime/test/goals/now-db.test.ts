@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
 import { GOALS_NOW_ROWS, GOAL_KIND, GOAL_SAYS, GOAL_SIGNED_ACTIONS, GoalsNowAnswer, entityRef, likelihoodOf, localDay, type GoalsNowAnswer as Answer } from '@flint/policy';
-import { NO_DB, freshDb, id, type TestUrls } from '../db';
+import { NO_DB, freshDb, id, type TestUrls, withClient } from '../db';
 import { buildApp } from '../../src/app';
 import type { RuntimeScope } from '../../src/config';
 import { createDb, type Db } from '../../src/db';
@@ -99,6 +99,28 @@ describe.skipIf(NO_DB)('GET /v1/goals/now on flint_test', () => {
     expect(await at(new Date())).toEqual({ open: 3, overdue: 0 });
     expect(await at(new Date(Date.now() + DAY))).toEqual({ open: 3, overdue: 1 });
     expect(await at(new Date(Date.now() + 11 * DAY))).toEqual({ open: 3, overdue: 2 });
+
+    // The steps are the plan's as it stands now. After a signed change (a step skipped, one added), the plan it replaced
+    // is still in the database, with its three open steps: they are not counted again, and its dates are not this plan's.
+    await fx.fileSignRun('plan.change', { goalId: g.id, goalTitle: g.title, ops: [
+      { op: 'set', key: 's1', from: { title: `${CANARY} step s1`, status: 'todo' }, to: { status: 'skipped' } },
+      fx.step('s4', { dueAt: new Date(Date.now() + 20 * DAY).toISOString() }),
+    ] });
+    expect(await db.plan.count({ where: { goalId: g.id } })).toBe(2);
+    expect(await db.planStep.count({ where: { plan: { goalId: g.id }, status: { in: ['todo', 'in_progress', 'blocked'] } } })).toBe(6);
+    // (The replaced plan is renumbered by the tables' owner so that it is the last of the goal's plans the database
+    // hands back, by row or by version: an answer that took whichever plan came last would be the old one's.)
+    await withClient(urls.owner, async (c) => {
+      await c.query('BEGIN');
+      await c.query('ALTER TABLE "Plan" DISABLE TRIGGER USER');
+      await c.query(`UPDATE "Plan" SET version = 99 WHERE "goalId" = $1 AND status = 'superseded'`, [g.id]);
+      await c.query('ALTER TABLE "Plan" ENABLE TRIGGER USER');
+      await c.query('COMMIT');
+    });
+    // s2, s3 and s4 are to do; s1, the only one that would have been overdue a day from now, is skipped.
+    expect(await at(new Date())).toEqual({ open: 3, overdue: 0 });
+    expect(await at(new Date(Date.now() + DAY))).toEqual({ open: 3, overdue: 0 });
+    expect(await at(new Date(Date.now() + 11 * DAY))).toEqual({ open: 3, overdue: 1 });
   });
 
   it('its forecast is the ledger’s own open row for that goal: the number a review recorded, in the ledger’s words', async () => {

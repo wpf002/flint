@@ -71,22 +71,41 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   });
 
-  // The newest migration is the one a rollback undoes (P4: p4_forecasts). Its
+  // The newest migration is the one a rollback undoes (P3 part 4: p3_policy_floor). Its
   // down.sql alone, then a deploy, gives back exactly the schema: migrate status
   // lists it as not applied, what it made is gone, and the redeploy diffs empty.
   // (An older migration's down.sql alone no longer can: p1_ledger's would recreate
-  // Prediction without the columns P3 and P4 add.)
+  // Prediction without the columns P3 and P4 add.) The one before it (P4: p4_forecasts)
+  // is then rolled back too, as the second step of the same rollback, and held to its own checks.
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
     const newest = migrationDirs().at(-1)!;
-    // What the newest migration makes, to see it go and come back. A new migration names its own here.
-    const made: Record<string, string> = { '20261013000000_p4_forecasts': 'ForecastRun' };
-    expect(made[newest], `name a table ${newest} makes`).toBeTruthy();
-    const table = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass($1) AS t`, [`public."${made[newest]}"`])).rows[0].t);
-    expect(await table()).not.toBeNull();
+    // What the newest migration makes, to see it go and come back: a table, or (a migration of rules only) its triggers. A new migration names its own here.
+    const made: Record<string, string> = {
+      '20261013000100_p3_policy_floor': `SELECT string_agg(tgname, ',' ORDER BY tgname) AS t FROM pg_trigger WHERE tgname IN ('Proposal_policy_floor', 'Proposal_clock', 'HealthCheck_clock') AND NOT tgisinternal`,
+    };
+    expect(made[newest], `name what ${newest} makes`).toBeTruthy();
+    const there = async () => withClient(owner, async (c) => (await c.query(made[newest]!)).rows[0].t as string | null);
+    expect(await there()).not.toBeNull();
+    if (newest === '20261013000100_p3_policy_floor') expect(await there()).toBe('HealthCheck_clock,Proposal_clock,Proposal_policy_floor');
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    expect(await there()).toBeNull();
+    // Its functions go with it, and nothing else of the schema does.
+    expect((await objects(owner)).functions.filter((f) => /proposal_policy_floor|row_clock/.test(f))).toEqual([]);
+    expect((await objects(owner)).tables).toContain('public.Proposal');
+    expect((await objects(owner)).tables).toContain('public.ForecastRun');
+    const status = await prisma(['migrate', 'status'], owner);
+    expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${newest}`));
+    // Run twice, it is still a no-op (every statement tolerates a half-applied state).
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    // The one before it: P4's forecasts. Its down.sql, with the newest already rolled back.
+    const before = migrationDirs().at(-2)!;
+    expect(before).toBe('20261013000000_p4_forecasts');
+    const table = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."ForecastRun"') AS t`)).rows[0].t);
+    expect(await table()).not.toBeNull();
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, before, 'down.sql'), 'utf8')));
     expect(await table()).toBeNull();
     // Run again on what it left (the state a rollback half done would be in): it tolerates that, as its header says.
-    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, before, 'down.sql'), 'utf8')));
     // P4 also hardened three of P3's functions: its down.sql puts P3's own bodies back to the letter (as P3's
     // migration wrote them), and takes away the trigger and the checks it added to older tables.
     const p3 = readFileSync(join(MIGRATIONS, '20261009000000_p3_goals', 'migration.sql'), 'utf8');
@@ -115,9 +134,8 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
                  AND (p.proname ~ '^(p4|forecast)_' OR p.proname IN ('metric_series_guard', 'metric_point_valid', 'prediction_valid', 'prediction_update_valid',
                       'prediction_forecast_check', 'prediction_question_guard', 'resolution_valid', 'resolution_will_check'))) AS functions`)).rows[0]);
     expect(leftovers).toEqual({ triggers: 0, checks: 0, functions: 0 });
-    const status = await prisma(['migrate', 'status'], owner);
-    expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${newest}`));
     await migrateUp(owner);
+    expect(await there()).not.toBeNull();
     expect(await table()).not.toBeNull();
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
