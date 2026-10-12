@@ -104,7 +104,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     const p = await db.prediction.findUniqueOrThrow({ where: { id: escalation.predictionId! } });
     expect(p).toMatchObject({ probability: 0.4, method: 'base_rate', claim: `service#${serviceId.slice(-6)} reports healthy at the resolve time`, subjectEntityId: serviceId });
     // By its plain name: the entity is com.flint.server.
-    expect(escalation.title).toBe('The server is down');
+    expect(escalation.title).toBe('The Server Is Down');
     expect(escalation.body).toContain(phrase(p.probability!, p.resolveBy, 'America/Chicago'));
     const rec = await db.recommendation.findUniqueOrThrow({ where: { id: escalation.recommendationId! }, include: { prediction: true } });
     expect(rec).toMatchObject({ type: 'escalation_action', prediction: { resolver: 'conditional', conditionRecommendationId: rec.id, probability: 0.8 } });
@@ -123,7 +123,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     const ev = await raised('runtime', 'service.down_30m', { downMinutes: 35 });
     await processEvent({ eventId: ev }, deps());
     const { escalation } = await escalationOf(ev);
-    expect(escalation).toMatchObject({ predictionId: null, recommendationId: null, title: 'A service is down' });
+    expect(escalation).toMatchObject({ predictionId: null, recommendationId: null, title: 'A Service Is Down' });
   });
 
   it('the 51st prediction of the day is skipped; the escalation is still made, and says so in its audit', async () => {
@@ -313,7 +313,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     await owner(`UPDATE "Escalation" SET title = NULL, body = NULL, fields = '{}'::jsonb, "contentPurgedAt" = now() WHERE id = $1`, [esc.id]);
     let sent: { title?: string; body?: string } = {};
     expect(await deliver(db, config, esc.id, undefined, async (req) => ((sent = req), { status: 'stored', pinged: false }))).toBe('sent');
-    expect(sent).toMatchObject({ title: 'The restore drill failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
+    expect(sent).toMatchObject({ title: 'The Last Restore Test Failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
   });
 
   it('expiry: past the prediction\'s resolve time, the escalation expires and its unsent deliveries close', async () => {

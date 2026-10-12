@@ -159,7 +159,7 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     const tainted = await decision(old8, { tainted: true, reasoning: 'a stranger said so' });
     const clean = await decision(old8, { reasoning: 'routine' });
     const escDecision = await decision(old8, { tainted: true, action: 'escalate', lane: 'relevant' });
-    await db.escalation.create({ data: { id: 'esret1', triageDecisionId: escDecision, templateId: 'backup_stale', fields: { hoursSince: 40 }, title: 'Backups have stopped', body: 'The last good database backup is 40 hours old.', channels: ['inapp'], tainted: true, sensitivity: 'ops', createdAt: old8 } });
+    await db.escalation.create({ data: { id: 'esret1', triageDecisionId: escDecision, templateId: 'backup_stale', fields: { hoursSince: 40 }, title: 'Backups Have Stopped', body: 'The last good database backup is 40 hours old.', channels: ['inapp'], tainted: true, sensitivity: 'ops', createdAt: old8 } });
     // Expired 13 days ago (purged at 7 days: it is tainted); made 9 days ago but expired 2 days ago (kept).
     // Made in the past, as the owner can (the API stamps the present).
     const mk = async (daysAgo: number, ttlDays: number) => {
@@ -178,7 +178,7 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     const counts = await runRetention(db, TZ, now);
     expect((await db.triageDecision.findUniqueOrThrow({ where: { id: tainted } })).reasoning).toBeNull();
     expect((await db.triageDecision.findUniqueOrThrow({ where: { id: clean } })).reasoning).toBe('routine');
-    expect(await db.escalation.findUniqueOrThrow({ where: { id: 'esret1' } })).toMatchObject({ title: 'Backups have stopped', body: null, fields: {}, contentPurgedAt: expect.any(Date) });
+    expect(await db.escalation.findUniqueOrThrow({ where: { id: 'esret1' } })).toMatchObject({ title: 'Backups Have Stopped', body: null, fields: {}, contentPurgedAt: expect.any(Date) });
     expect((await db.proposal.findUniqueOrThrow({ where: { id: longGone } })).args).toBeNull();
     expect((await db.proposal.findUniqueOrThrow({ where: { id: justEnded } })).args).toEqual({ x: 9 });
     expect(counts).toMatchObject({ decisionReasoning: 1, escalationText: 1, proposalArgs: 1 });

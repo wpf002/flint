@@ -135,7 +135,7 @@ describe.skipIf(NO_DB)('runtime P2 routes', () => {
     expect(r.decisions[0].entity).toMatch(/^issue#[A-Za-z0-9]{6}$/);
 
     const open = await call('GET', '/v1/escalations/open', undefined, MCP);
-    expect(open.json().escalations.map((x: { title: string; tainted: boolean }) => [x.title, x.tainted])).toEqual([['Something new needs a look', true], ['Something new needs a look', true]]);
+    expect(open.json().escalations.map((x: { title: string; tainted: boolean }) => [x.title, x.tainted])).toEqual([['Something New Needs a Look', true], ['Something New Needs a Look', true]]);
 
     const decisionId = r.decisions[0].id;
     const explained = await call('GET', `/v1/triage/decisions/${decisionId}/explain`, undefined, MCP);

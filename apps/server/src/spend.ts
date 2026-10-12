@@ -590,15 +590,9 @@ export class SpendGuard {
       const key = (th: number) => `spend:${vendor}:${period}:${when}:${Math.round(th * 100)}`;
       if (this.notified.has(key(hit))) continue;
       for (const th of [NOTICE_AT, DEGRADE_AT, EXHAUSTED_AT]) if (th <= hit) this.notified.add(key(th));
-      const pct = Math.round(hit * 100);
-      const scope = period === 'daily' ? "today's" : "this month's";
-      const pushed = this.notifier.push(
-        `${VENDOR_NAMES[vendor]} budget: ${pct}% of ${scope} cap`,
-        // The effect of the vendor's CURRENT level: the other period's cap may be further along.
-        `Flint has spent ${usd(used)} of ${period === 'daily' ? 'today’s' : 'this month’s'} ${usd(cap)} cap. ${this.status(vendor).effect}`,
-        'budget',
-        key(hit),
-      );
+      // The effect of the vendor's CURRENT level: the other period's cap may be further along.
+      const note = thresholdNote(vendor, period, Math.round(hit * 100), used, cap, this.status(vendor).effect);
+      const pushed = this.notifier.push(note.title, note.body, 'budget', key(hit));
       // Only a notice the feed did not already have is new (the feed's keys survive a restart).
       if (this.opts.onThreshold && (pushed as { status?: unknown } | null)?.status === 'stored') {
         const level = LEVEL_AT.find(([th]) => th === hit)![1];
@@ -610,6 +604,18 @@ export class SpendGuard {
       }
     }
   }
+}
+
+/**
+ * The note for a vendor's spend reaching 50, 80 or 100% of a cap: the vendor by
+ * the name Will uses and how far along it is, then what was spent and what
+ * that changes (effectOf), each a sentence.
+ */
+export function thresholdNote(vendor: PaidVendor, period: 'daily' | 'monthly', pct: number, used: number, cap: number, effect: string): { title: string; body: string } {
+  return {
+    title: `${SHORT_NAMES[vendor]} Budget at ${pct}% for ${period === 'daily' ? 'Today' : 'This Month'}`,
+    body: `Flint has spent ${usd(used)} of ${period === 'daily' ? 'today’s' : 'this month’s'} ${usd(cap)} cap. ${effect}`,
+  };
 }
 
 function capPhrase(s: VendorStatus): string {

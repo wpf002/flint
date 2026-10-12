@@ -26,8 +26,14 @@ printf '%s exit=%s\n%s\n' "$STAMP" "$CODE" "$OUT" >> "$LOG"
 if [ "$CODE" -ne 0 ]; then
   # Surfaced where you will actually see it, not only in a file you would have to think
   # to open. The notification is best effort; the log is the record.
+  # A plain sentence: how many, in the singular or the plural, or that the check itself did not finish.
   BROKEN=$(printf '%s' "$OUT" | grep -c 'FAIL' || true)
-  osascript -e "display notification \"$BROKEN participant(s) cannot take a turn\" with title \"Nexus health\" sound name \"Basso\"" >/dev/null 2>&1 || true
+  case "$BROKEN" in
+    0) SAID="The Nexus health check didn’t finish." ;;
+    1) SAID="1 Nexus participant can’t take a turn." ;;
+    *) SAID="$BROKEN Nexus participants can’t take a turn." ;;
+  esac
+  osascript -e "display notification \"$SAID\" with title \"Nexus Health\" sound name \"Basso\"" >/dev/null 2>&1 || true
 fi
 
 exit "$CODE"

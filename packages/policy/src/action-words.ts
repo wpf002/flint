@@ -36,3 +36,55 @@ export const ACTION_DONE: Readonly<Record<string, string>> = {
 export function actionWords(fullName: string): string {
   return ACTION_WORDS[fullName] ?? fullName;
 }
+
+/**
+ * The jobs Flint runs on a schedule, as a note names them ("Offsite Backup
+ * Failed"): never the action's internal name ("backup.offsite"). Settings >
+ * Health says the same words (HEALTH_NAMES). The console keeps a copy to show a
+ * note an older Flint stored (NOTE_JOBS in apps/console/index.html; a test keeps
+ * the two in step).
+ */
+export const JOB_WORDS: Readonly<Record<string, string>> = {
+  'backup.local': 'Backup',
+  'backup.offsite': 'Offsite Backup',
+  'restore.drill': 'Restore Test',
+  'maintenance.retention': 'Cleanup',
+};
+
+/** The nightly jobs that tell Will when they fail (apps/runtime/src/cli.ts). */
+export type NightlyJob = 'backup.local' | 'backup.offsite' | 'restore.drill';
+
+export interface JobFailure {
+  /**
+   * What happens next, which is all the note promises:
+   *  - `retry`: the job runs on its own (Will promoted it), so its next run is certain;
+   *  - `card`: it ran on a card he approved, and its next card is in Approvals now;
+   *  - `card_later`: the same, but the next card could not be filed: the next run files it;
+   *  - `setup`: it failed for a reason another try cannot change (no key, no folder, a
+   *    write macOS refuses): it says so, never "tries again".
+   */
+  next: 'retry' | 'card' | 'card_later' | 'setup';
+  /** backup.offsite: the copy goes to iCloud Drive (the default folder), not a folder Will set. */
+  icloud?: boolean;
+  /** restore.drill: it finished and the restored copy differed from the backup. */
+  mismatch?: boolean;
+}
+
+/**
+ * The note for a nightly job that failed: what happened and what happens next,
+ * and nothing else. The error itself is in the job's log and the audit.
+ */
+export function jobFailedNote(job: NightlyJob, f: JobFailure): { title: string; body: string } {
+  const what =
+    job === 'backup.local' ? 'Last night’s database backup didn’t finish.'
+    : job === 'backup.offsite' ? `Last night’s encrypted ${f.icloud ? 'copy to iCloud' : 'offsite copy'} didn’t finish.`
+    : f.mismatch ? 'This week’s practice restore found a problem.'
+    : 'This week’s practice restore didn’t finish.';
+  const weekly = job === 'restore.drill';
+  const next =
+    f.next === 'setup' ? 'It won’t work until its setup is fixed.'
+    : f.next === 'retry' ? `Flint tries again ${weekly ? 'next Sunday' : 'tonight'}.`
+    : f.next === 'card' ? 'It runs again once you approve its next card in Approvals.'
+    : `Its next card will be in Approvals ${weekly ? 'next Sunday' : 'tomorrow morning'}.`;
+  return { title: `${JOB_WORDS[job]!} Failed`, body: `${what} ${next}` };
+}

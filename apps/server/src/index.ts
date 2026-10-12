@@ -95,7 +95,7 @@ import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bea
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
-import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
+import { Notifications, Watcher, signalNote, upcomingNote, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
@@ -393,14 +393,8 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
         .filter((e) => e.start && new Date(e.start).getTime() <= soon)
         .slice(0, 3)
         .map((e) => {
-          const when = fmtWhen(e.start as string);
-          return {
-            title: 'Upcoming',
-            // "Dentist is on Tue, Oct 6 at 3:00 PM, at 123 Main St."
-            body: `${e.summary || 'An untitled event'} is on ${when.day}${when.time ? ` at ${when.time}` : ''}${e.location ? `, at ${e.location}` : ''}.`,
-            kind: 'calendar',
-            dedupe: `cal:${e.id || e.summary}:${e.start}`,
-          };
+          // "Dentist is on Tue, Oct 6 at 3:00 PM, at 123 Main St."
+          return { ...upcomingNote(e, fmtWhen(e.start as string)), kind: 'calendar', dedupe: `cal:${e.id || e.summary}:${e.start}` };
         });
     });
   }
@@ -424,7 +418,7 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
       return rows
         .filter((r) => r && r.headline)
         .slice(0, 3)
-        .map((r) => ({ title: 'Market signal', body: String(r.headline).slice(0, 200), kind: 'signal', dedupe: `sig:${r.headline}` }));
+        .map((r) => ({ ...signalNote(String(r.headline)), kind: 'signal', dedupe: `sig:${r.headline}` }));
     });
   }
 

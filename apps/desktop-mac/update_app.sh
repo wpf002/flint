@@ -15,6 +15,7 @@ STAMP="$STATE/app-installed-tree"
 FAILED="$STATE/app-failed-tree"
 
 log() { echo "$(date '+%F %T') app: $*"; }
+# A banner for Will: a plain sentence, never the commit (that is the log's line).
 notify() { osascript -e "display notification \"$1\" with title \"Flint\"" >/dev/null 2>&1 || true; }
 running_pid() { pgrep -f "^$DEST/Contents/MacOS/flint( |$)" | head -n 1; }
 
@@ -28,19 +29,19 @@ if "$DIR/install_app.sh" >/dev/null 2>&1; then
   pid=$(running_pid)
   if [ -z "$pid" ]; then
     log "installed ($commit)"
-    notify "Flint updated: ${commit#* }"
+    notify "Flint was updated. Open it to use the new version."
   elif [ "$pid" = "$(cat "$STATE/app-pid" 2>/dev/null)" ]; then
     # This app writes its pid at launch and restarts itself onto a new build (flint.swift).
     log "installed ($commit); the open app restarts onto it when idle"
-    notify "Flint updated: ${commit#* }"
+    notify "Flint was updated. The open app restarts onto the new version when you’re not using it."
   else
     # An app from before self-restart (it writes no pid): it runs the old build until reopened.
     log "installed ($commit); the open app is older and updates when reopened"
-    notify "Flint updated. Quit and reopen it once to finish."
+    notify "Flint was updated. Quit and reopen it once to finish."
   fi
 else
   echo "$tree" > "$FAILED"
   log "build failed ($commit); run apps/desktop-mac/install_app.sh to see why"
-  notify "Flint update failed to build. Kept the current app."
+  notify "A Flint update didn’t build, so the current app was kept."
 fi
 exit 0

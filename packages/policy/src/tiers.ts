@@ -42,6 +42,9 @@ export interface Cap {
   period: 'hour' | 'day' | 'week';
 }
 
+/** A cap's period as a word ("the daily cap"): written out, since "day" + "ly" is not one. */
+export const CAP_WORDS: Readonly<Record<Cap['period'], string>> = { hour: 'hourly', day: 'daily', week: 'weekly' };
+
 export interface CodeEntry {
   tier: Tier;
   /** May an ActionPolicy row loosen it to ALONE? */

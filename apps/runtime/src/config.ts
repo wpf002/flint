@@ -8,7 +8,7 @@
  * the passkey relying-party settings it re-verifies approvals against.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, normalize } from 'node:path';
 import { z } from 'zod';
 import { zoneFrom } from '@flint/policy';
 
@@ -247,8 +247,42 @@ export interface BackupConfig {
   restoreUrl: string;
   ageRecipient?: string;
   dumpDir: string;
+  /** Where the encrypted copy goes (offsiteFolder); undefined: nowhere to send it. */
   offsiteDir?: string;
+  /** Why FLINT_OFFSITE_DIR cannot be used as it is set, in words for the log. */
+  offsiteProblem?: string;
+  /** The offsite folder is in iCloud Drive (the note says "to iCloud" only then). */
+  offsiteICloud: boolean;
+  /** The names of the encrypted copies offsite, oldest first (backup.ts, pruneOffsite). */
+  offsiteManifest: string;
   tools: { pgDump: string; pgRestore: string; age?: string };
+}
+
+/**
+ * Where the database's encrypted offsite copy goes: FLINT_OFFSITE_DIR when Will
+ * set one (an absolute path, or one under his home written ~/…); otherwise
+ * iCloud Drive's FlintBackups/pg, when iCloud Drive is on this Mac (beside the
+ * folder the studio's own backup, apps/studio/backup_flint.sh, keeps its
+ * encrypted snapshots in). With neither there is nowhere to send it, and a
+ * setting that is not a whole path is refused rather than guessed at (`problem`):
+ * the offsite job fails and says its setup needs fixing. Only age-encrypted
+ * copies ever go there (backup.ts, encryptTo).
+ */
+export function offsiteFolder(home: string, set: string | undefined): { dir?: string; icloud: boolean; problem?: string } {
+  const drive = join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs');
+  const asked = set?.trim();
+  if (asked) {
+    const chosen = asked === '~' ? home : asked.startsWith('~/') ? join(home, asked.slice(2)) : asked;
+    // A relative path would land wherever the job happened to start; "~user" is not expanded here.
+    if (!isAbsolute(chosen)) return { icloud: false, problem: 'FLINT_OFFSITE_DIR is not an absolute path (or one that starts with ~/), so there is nowhere to send the copy' };
+    const dir = normalize(chosen);
+    return { dir, icloud: dir === drive || dir.startsWith(`${drive}/`) };
+  }
+  try {
+    return statSync(drive).isDirectory() ? { dir: join(drive, 'FlintBackups', 'pg'), icloud: true } : { icloud: false };
+  } catch {
+    return { icloud: false };
+  }
 }
 
 export function loadBackupConfig(): BackupConfig {
@@ -273,13 +307,18 @@ export function loadBackupConfig(): BackupConfig {
   let recipient = B.data.FLINT_BACKUP_AGE_RECIPIENT?.trim();
   const recipientFile = join(home, '.flint', 'backup-age-recipient');
   if (!recipient && existsSync(recipientFile)) recipient = readFileSync(recipientFile, 'utf8').trim().split('\n')[0];
+  const dumpDir = join(home, 'FlintBackups', 'pg');
+  const offsite = offsiteFolder(home, B.data.FLINT_OFFSITE_DIR);
   return {
     config,
     backupUrl: B.data.FLINT_DB_BACKUP_URL,
     restoreUrl: B.data.FLINT_DB_RESTORE_URL,
     ...(recipient ? { ageRecipient: recipient } : {}),
-    dumpDir: join(home, 'FlintBackups', 'pg'),
-    ...(B.data.FLINT_OFFSITE_DIR ? { offsiteDir: B.data.FLINT_OFFSITE_DIR } : {}),
+    dumpDir,
+    ...(offsite.dir ? { offsiteDir: offsite.dir } : {}),
+    ...(offsite.problem ? { offsiteProblem: offsite.problem } : {}),
+    offsiteICloud: offsite.icloud,
+    offsiteManifest: join(dumpDir, 'offsite-copies.txt'),
     tools: { pgDump, pgRestore, ...(age ? { age } : {}) },
   };
 }

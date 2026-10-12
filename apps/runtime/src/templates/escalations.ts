@@ -11,24 +11,46 @@
  *    ledger (an odd service name, say) makes the note fall back to its
  *    field-free wording, and the caller audits that it did.
  *  - Every template has a field-free title, used when its text is purged.
- *  - A body is complete sentences in the console's words ("restore test",
- *    "database update", Activity's tabs), never an internal name.
+ *  - A title is a short Title Case phrase and a body is complete sentences,
+ *    both in the console's words ("restore test", "database update",
+ *    Activity's tabs): never an internal name, a file path, an id or an aside
+ *    in parentheses (@flint/policy's noteProblems).
+ *  - A name never costs a note its facts. A service is said in words made
+ *    from its name (serviceWords: "the Trident API service"); a thing shown
+ *    by the name it was given (a repo, a thread) is shown only if that name
+ *    may be shown at all (shownProblems), and by its kind otherwise. Flint's
+ *    own words are checked with every name masked, so a hyphen in a repo's
+ *    name is never mistaken for an internal name.
  *
  * A self-modification PR may not touch this directory (P6 allowlist).
  */
 import { z } from 'zod';
-import { REASON_CODES, healthName, safeName } from '@flint/policy';
+import { REASON_CODES, healthName, noteProblems, plainName, properWords, safeName, serviceWords, shownProblems, titleCase } from '@flint/policy';
 
 const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 const Sha = z.string().regex(/^[0-9a-f]{7,40}$/);
 const Count = z.number().int().min(0).max(1_000_000);
 
-/** "somewhat unlikely (~40%) by Oct 2, 5:30 PM": the only way a probability reaches a note. */
-export function phrase(p: number, by: Date | undefined, tz: string): string {
-  const pct = Math.round(p * 100);
+function phraseParts(p: number, by: Date | undefined, tz: string): { word: string; pct: number; when: string } {
   const word = p < 0.1 ? 'very unlikely' : p < 0.35 ? 'unlikely' : p < 0.45 ? 'somewhat unlikely' : p <= 0.55 ? 'about even' : p < 0.65 ? 'somewhat likely' : p < 0.9 ? 'likely' : 'very likely';
   const when = by ? ` by ${new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(by)}` : '';
-  return `${word} (~${pct}%)${when}`;
+  return { word, pct: Math.round(p * 100), when };
+}
+
+/** "somewhat unlikely, around 40% by Oct 2, 5:30 PM": the only way a probability reaches a note. */
+export function phrase(p: number, by: Date | undefined, tz: string): string {
+  const x = phraseParts(p, by, tz);
+  return `${x.word}, around ${x.pct}%${x.when}`;
+}
+
+/**
+ * phrase() as it read before 2026-10-12 ("somewhat unlikely (~40%) by …"): the
+ * escalations stored then still carry those words, and they came from the
+ * ledger just the same (report/exit.ts).
+ */
+export function phraseBefore(p: number, by: Date | undefined, tz: string): string {
+  const x = phraseParts(p, by, tz);
+  return `${x.word} (~${x.pct}%)${x.when}`;
 }
 
 /** Probability words a note may not carry unless they came from phrase(). */
@@ -49,34 +71,14 @@ const clockTime = (hhmm: string) => {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 };
 /**
- * The services the watchdog watches, as Will knows them: the health source's
- * endpoints (sources/registry.ts) and Flint's own LaunchAgents.
+ * A service in words (@flint/policy's serviceWords: "the server", "Nexus’s
+ * Responder service", "the Trident API service"); "a service" when it has no
+ * name, or only a raw ref (kind#id). `cap`: to start a sentence.
  */
-const SERVICE_WORDS: Readonly<Record<string, string>> = {
-  'flint-server': 'The server',
-  'com.flint.server': 'The server',
-  'com.flint.runtime': 'The runtime',
-  ollama: 'The local model',
-  'com.flint.ollama': 'The local model',
-  searxng: 'Web search',
-  'com.flint.searxng': 'Web search',
-  'com.flint.deploy': 'Auto-deploy',
-  'com.flint.runtime-backup': 'The nightly backup job',
-  'com.flint.voice': 'Voice',
-};
-/**
- * A service, to start a sentence: its plain name, or one built around the name it
- * has ("Nexus’s responder service", "The trident-api service"), never a lowercase
- * label leading it; "A service" when there is none, or only a raw ref (kind#id).
- */
-function serviceWords(ref: string | null, show: Show): string {
-  const shown = ref ? show(ref, '') : '';
-  if (!shown || Ref.safeParse(shown).success) return 'A service';
-  const known = SERVICE_WORDS[shown];
-  if (known) return known;
-  const agent = /^com\.(flint|nexus)\.(.+)$/.exec(shown);
-  if (agent) return `${agent[1] === 'flint' ? 'Flint' : 'Nexus'}’s ${agent[2]} service`;
-  return `The ${shown} service`;
+function service(ref: string | null, show: Show, cap = false): string {
+  const name = ref ? show.raw(ref) : undefined;
+  const said = !name || Ref.safeParse(name).success ? 'a service' : serviceWords(name);
+  return cap ? said.charAt(0).toUpperCase() + said.slice(1) : said;
 }
 /** "1 minute", "10 minutes". */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -88,11 +90,20 @@ const REASON_WORDS: Record<(typeof REASON_CODES)[number], string> = {
   failure: 'a failure', fyi: 'worth knowing', routine: 'routine', noise: 'noise',
 };
 
-/** How a field is shown: an entity ref by its clean name, everything else as it is. */
-type Show = (ref: string | null, fallback: string) => string;
+/**
+ * How a field is shown: an entity ref by the name it was given (when that name
+ * may be shown at all: shownProblems), everything else as it is. `raw` is the
+ * name as it is written, for a template that says it in its own words (a
+ * service's) rather than showing it.
+ */
+type Show = ((ref: string | null, fallback: string) => string) & { raw: (ref: string) => string | undefined };
+
+/** Where every escalation is, for a note that cannot say more: the Important tab lists it with what it is about. */
+const IN_ACTIVITY = 'It’s in Activity, under Important.';
 
 interface Template<F> {
   fields: z.ZodType<F>;
+  /** Title-cased by render(), so a name inside it reads as the console would show it. */
   title: (f: F, show: Show) => string;
   body: (f: F, show: Show, ledger?: string) => string;
   /** Said when the fields cannot be shown (a lint hit) and kept once the text is purged. */
@@ -109,82 +120,86 @@ const DRILL_FAILED = 'The last restore test didn’t match the backup, so the ba
  */
 const DEPLOY_WORDS = {
   gate: 'failed a check before installing, so nothing was installed.',
-  restart: 'stopped at the restart and went back to the previous release. Check that it’s running.',
-  health: 'failed its health check and went back to the previous release. Check that it’s running.',
+  restart: 'stopped at the restart and went back to the previous release. Check that it’s running in Settings, under Health.',
+  health: 'failed its health check and went back to the previous release. Check that it’s running in Settings, under Health.',
 } as const;
 
 export const TEMPLATES = {
   service_down: t({
     fields: z.object({ service: Ref.nullable(), downMinutes: Count }).strict(),
-    // A service by its words ("The server is down"); one with no clean name keeps its ref in the title.
-    title: (f, show) => `${f.service && !Ref.safeParse(show(f.service, '')).success ? serviceWords(f.service, show) : show(f.service, 'A service')} is down`,
-    body: (f, show, ledger) => `${serviceWords(f.service, show)} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
-    fieldFreeTitle: 'A service is down',
-    fieldFreeBody: 'A service has been down for more than 30 minutes. The console has the details.',
+    // A service by its words ("The Server Is Down"); one with no clean name is "A Service", never its ref.
+    title: (f, show) => `${service(f.service, show)} is down`,
+    body: (f, show, ledger) => `${service(f.service, show, true)} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
+    fieldFreeTitle: 'A Service Is Down',
+    fieldFreeBody: `A service has been down for more than 30 minutes. ${IN_ACTIVITY}`,
   }),
   backup_stale: t({
     fields: z.object({ hoursSince: Count }).strict(),
-    title: () => 'Backups have stopped',
+    title: () => 'Backups Have Stopped',
     body: (f) => `The last good database backup is ${f.hoursSince} hours old.`,
-    fieldFreeTitle: 'Backups have stopped',
+    fieldFreeTitle: 'Backups Have Stopped',
     fieldFreeBody: 'The last good database backup is more than 36 hours old.',
   }),
   drill_failed: t({
     fields: z.object({ mismatches: Count }).strict(),
-    title: () => 'The restore drill failed',
+    // Not "Restore Test Failed": that is the nightly job's own note (jobFailedNote), which says what happens
+    // next. The console folds that one night after night; this one stays its own row.
+    title: () => 'The Last Restore Test Failed',
     // A drill that failed without a count (it defaults to 0) says only that it failed.
     body: (f) =>
       f.mismatches
         ? `The last restore test found ${count(f.mismatches, 'table')} that ${f.mismatches === 1 ? 'differs' : 'differ'} from the backup, so the backups may not restore.`
         : DRILL_FAILED,
-    fieldFreeTitle: 'The restore drill failed',
+    fieldFreeTitle: 'The Last Restore Test Failed',
     fieldFreeBody: DRILL_FAILED,
   }),
   vendor_cap: t({
     fields: z.object({ vendor: z.enum(['anthropic', 'openai', 'perplexity', 'tavily']) }).strict(),
-    title: (f) => `${f.vendor} spend is at its cap`,
+    title: (f) => `${VENDOR_NAMES[f.vendor]} Spending Cap Reached`,
     body: (f) => `Flint has reached its ${VENDOR_NAMES[f.vendor]} spending cap. Paid calls to it stop until the cap resets or is raised.`,
-    fieldFreeTitle: 'A vendor is at its spending cap',
-    fieldFreeBody: 'Flint has reached a vendor spending cap. The console has the details.',
+    fieldFreeTitle: 'A Vendor Is at Its Spending Cap',
+    fieldFreeBody: `Flint has reached a vendor spending cap. ${IN_ACTIVITY}`,
   }),
   deploy_failed: t({
     fields: z.object({ component: z.enum(['server', 'runtime']), stage: z.enum(['gate', 'restart', 'health']), sha: Sha.nullable() }).strict(),
     title: (f) => `The ${f.component} did not deploy`,
     body: (f) => `The ${f.component} deploy ${DEPLOY_WORDS[f.stage]}`,
-    fieldFreeTitle: 'A deploy failed',
-    fieldFreeBody: 'A deploy did not finish. The console has the details.',
+    fieldFreeTitle: 'A Deploy Failed',
+    fieldFreeBody: `A deploy did not finish. ${IN_ACTIVITY}`,
   }),
   migrate_failed: t({
     fields: z.object({ component: z.enum(['server', 'runtime']), sha: Sha.nullable() }).strict(),
-    title: () => 'A database migration failed',
-    // The retry rule (its down.sql, then the marker cleared) is the README's how-to, not the note's.
+    title: () => 'A Database Update Failed',
+    // The retry rule (its down.sql, then the marker cleared) and where the copy is kept
+    // (~/FlintBackups/pre-migrate) are the README's how-to, not the note's.
     // Only `prisma migrate deploy` failing is filed as this stage (install-runtime.sh), and by then the
     // copy exists and the marker names the sha: a failed copy is a gate failure, which a later run retries.
     body: (f) =>
       `The ${f.component}’s database update failed and won’t be retried until it’s fixed. ` +
-      'A copy of the database from just before it is in ~/FlintBackups/pre-migrate.',
-    fieldFreeTitle: 'A database migration failed',
-    fieldFreeBody: 'A database update failed and won’t be retried until it’s fixed. The console has the details.',
+      'Flint kept a copy of the database from just before it.',
+    fieldFreeTitle: 'A Database Update Failed',
+    fieldFreeBody: `A database update failed and won’t be retried until it’s fixed. ${IN_ACTIVITY}`,
   }),
   ci_failing: t({
     fields: z.object({ run: Ref.nullable(), sha: Sha.nullable() }).strict(),
-    title: () => 'CI is failing on flint',
+    title: () => 'CI Is Failing on Flint',
     body: () => 'The latest CI run on main failed.',
-    fieldFreeTitle: 'CI is failing on flint',
+    fieldFreeTitle: 'CI Is Failing on Flint',
     fieldFreeBody: 'The latest CI run on main failed.',
   }),
   route_errors: t({
     fields: z.object({ count: Count, minutes: z.number().int().min(1).max(60) }).strict(),
-    title: () => 'Flint is failing requests',
+    title: () => 'Flint Is Failing Requests',
     body: (f) => `In the last ${f.minutes === 1 ? 'minute' : `${f.minutes} minutes`}, ${count(f.count, 'request')} to Flint failed.`,
-    fieldFreeTitle: 'Flint is failing requests',
-    fieldFreeBody: 'Requests to the server are failing. The console has the details.',
+    fieldFreeTitle: 'Flint Is Failing Requests',
+    fieldFreeBody: `Requests to the server are failing. ${IN_ACTIVITY}`,
   }),
   handoff_unaccepted: t({
     fields: z.object({ handoff: Ref.nullable(), namespace: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/).nullable() }).strict(),
-    title: (f) => `A handoff${f.namespace ? ` from ${f.namespace}` : ''} is waiting`,
-    body: (f) => `A Nexus handoff to Flint${f.namespace ? ` from ${f.namespace}` : ''} has not been accepted in 24 hours.`,
-    fieldFreeTitle: 'A handoff is waiting',
+    // The namespace by its words ("trident-api" is Trident API); one with nothing sayable in it is left out.
+    title: (f) => `A handoff${f.namespace && properWords(f.namespace) ? ` from ${properWords(f.namespace)}` : ''} is waiting`,
+    body: (f) => `A Nexus handoff to Flint${f.namespace && properWords(f.namespace) ? ` from ${properWords(f.namespace)}` : ''} has not been accepted in 24 hours.`,
+    fieldFreeTitle: 'A Handoff Is Waiting',
     fieldFreeBody: 'A Nexus handoff to Flint has not been accepted in 24 hours.',
   }),
   // P2.5: the calendar's heads-up, replacing the server's Watcher. The event is a
@@ -201,31 +216,35 @@ export const TEMPLATES = {
         until: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
       })
       .strict(),
-    // The console title-cases a note's title, so no word starts with a bracket ("(all day)" read "(all Day)").
-    title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${f.time}` : ', all day'}`),
+    // No brackets ("(all day)"), and the time as Will's notes say it (2:30 PM), in the title as in the body.
+    title: (f) => (f.kind === 'deadline' ? `A deadline on ${calendarDay(f.date)}` : `On your calendar ${calendarDay(f.date)}${f.time ? ` at ${clockTime(f.time)}` : ', all day'}`),
     // "You have": the same note for Google's and (P2.6) Apple's calendar, so neither names the other.
     body: (f) => `You have ${f.kind === 'deadline' ? 'a deadline' : 'an event'} on ${calendarDay(f.date)}${f.time ? ` at ${clockTime(f.time)}` : ''}. Its title is in Activity, under Important.`,
-    fieldFreeTitle: 'Something on your calendar',
+    fieldFreeTitle: 'Something on Your Calendar',
     fieldFreeBody: 'Something from your calendar is coming up. Its title is in Activity, under Important.',
   }),
   new_item: t({
     fields: z.object({ kind: z.enum(['issue', 'pull_request', 'thread']), item: Ref, reasonCode: z.enum(REASON_CODES) }).strict(),
-    title: (f, show) => `New ${f.kind.replace('_', ' ')}: ${show(f.item, f.item)}`,
+    // The item by its clean name ("New Issue: wpf002/flint #60"); without one, by its kind, never its ref.
+    title: (f, show) => (Ref.safeParse(show(f.item, f.item)).success ? `A new ${f.kind.replace('_', ' ')}` : `New ${f.kind.replace('_', ' ')}: ${show(f.item, f.item)}`),
     body: (f) => `Flint flagged it as ${REASON_WORDS[f.reasonCode]}. It’s in Activity, under Important.`,
-    fieldFreeTitle: 'Something new needs a look',
-    fieldFreeBody: 'A new item was flagged. It’s in Activity, under Important.',
+    fieldFreeTitle: 'Something New Needs a Look',
+    fieldFreeBody: `A new item was flagged. ${IN_ACTIVITY}`,
   }),
   rule_match: t({
     fields: z
       .object({ rule: z.string().regex(/^[a-z0-9_.-]{1,80}$/), source: z.string().regex(/^[a-z_]{1,40}$/), eventType: z.string().regex(/^[a-z_]{1,40}(\.[a-z0-9_]{1,40}){0,3}$/), entity: Ref.nullable() })
       .strict(),
-    title: (f, show) => `${f.entity ? show(f.entity, f.entity) : f.eventType}: your rule ${f.rule}`,
+    // The rule by the name Will gave it, in words ("ci_red" and "ci-red" are “ci red”); one named with
+    // marks alone has no words to say. What it matched is in Activity.
+    title: () => 'One of Your Rules Matched',
     body: (f) => {
       const source = healthName(`source:${f.source}`);
-      return `${/^[aeiou]/i.test(source) ? 'An' : 'A'} ${source} event matched your rule “${f.rule}”.`;
+      const rule = plainName(f.rule);
+      return `${/^[aeiou]/i.test(source) ? 'An' : 'A'} ${source} event matched ${rule ? `your rule “${rule}”` : 'one of your rules'}.`;
     },
-    fieldFreeTitle: 'One of your rules matched',
-    fieldFreeBody: 'An event matched one of your rules. The console has the details.',
+    fieldFreeTitle: 'One of Your Rules Matched',
+    fieldFreeBody: `An event matched one of your rules. ${IN_ACTIVITY}`,
   }),
 } as const;
 
@@ -234,9 +253,9 @@ export const TEMPLATE_IDS = Object.keys(TEMPLATES) as TemplateId[];
 export const isTemplateId = (id: string): id is TemplateId => Object.prototype.hasOwnProperty.call(TEMPLATES, id);
 
 /** The title an escalation keeps once its text is purged. */
-export const fieldFreeTitle = (id: string): string => (isTemplateId(id) ? TEMPLATES[id].fieldFreeTitle : 'Something needs a look');
+export const fieldFreeTitle = (id: string): string => (isTemplateId(id) ? TEMPLATES[id].fieldFreeTitle : 'Something Needs a Look');
 /** And its body: the note still says something, never an empty line under its title. */
-export const fieldFreeBody = (id: string): string => (isTemplateId(id) ? TEMPLATES[id].fieldFreeBody : 'The console has the details.');
+export const fieldFreeBody = (id: string): string => (isTemplateId(id) ? TEMPLATES[id].fieldFreeBody : IN_ACTIVITY);
 
 export interface Rendered {
   fields: Record<string, unknown>;
@@ -263,10 +282,18 @@ const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n).replac
 export function render(id: TemplateId, rawFields: unknown, names: Readonly<Record<string, string>> = {}, ledger?: string): Rendered {
   const tpl = TEMPLATES[id] as unknown as Template<Record<string, unknown>>;
   const fields = tpl.fields.parse(rawFields);
-  const show: Show = (ref, fallback) => (ref ? names[ref] ?? ref : fallback);
-  const title = clip(tpl.title(fields, show), 80);
+  // A name is shown only if it may be shown at all (no path, command, link or aside in it); otherwise its
+  // ref stands for it, and the template says the thing by its kind ("A New Issue").
+  const shown = (ref: string) => (names[ref] !== undefined && shownProblems(names[ref]!).length === 0 ? names[ref]! : ref);
+  const show: Show = Object.assign((ref: string | null, fallback: string) => (ref ? shown(ref) : fallback), { raw: (ref: string) => names[ref] });
+  const title = clip(titleCase(tpl.title(fields, show)), 80);
   const body = clip(tpl.body(fields, show, ledger), 500);
-  if (hasLoosePrediction(`${title}\n${body}`, ledger ? [ledger] : [])) {
+  // Flint's own words, checked with every name masked: a repo called "nexus-responder" or a thread called
+  // "v2.1 plan" is someone's name for a thing, never a reason to drop the whole note.
+  const masked: Show = Object.assign((ref: string | null, fallback: string) => (ref ? (shown(ref) === ref ? ref : 'Item') : fallback), { raw: (ref: string) => (names[ref] === undefined ? undefined : 'item') });
+  const own = noteProblems(clip(titleCase(tpl.title(fields, masked)), 80), clip(tpl.body(fields, masked, ledger), 500));
+  // A loose probability, or words of Flint's that put an internal name, a path, an id or an aside on screen.
+  if (hasLoosePrediction(`${title}\n${body}`, ledger ? [ledger] : []) || own.length > 0 || shownProblems(`${title}\n${body}`).length > 0) {
     return { fields, title: tpl.fieldFreeTitle, body: tpl.fieldFreeBody, linted: true };
   }
   return { fields, title, body, linted: false };

@@ -1,7 +1,7 @@
 /**
  * Notifications (Machine plan P2: 0 ntfy payloads carry content). The phone
  * ping is the same request whatever the note says and whoever pushes it (the
- * runtime, the Watcher, the spend guard, "Action done"); a banner or a ping
+ * runtime, the Watcher, the spend guard, "Action Done"); a banner or a ping
  * never goes out without the in-app note; push() says what it did.
  */
 import { describe, it, expect } from 'vitest';
@@ -34,9 +34,9 @@ describe('the phone ping', () => {
     const f = feed();
     const cases: Array<[string, string, string]> = [
       ['Upcoming', 'Dentist with Dr. Smith is on Sat, Oct 4 at 2:00 PM, at 12 Main St.', 'calendar'],
-      ['Claude (Anthropic) budget: 80% of today\'s cap', 'Flint has spent $8.00 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.', 'budget'],
-      ['Action done', 'An approved action is done.', 'action'],
-      ['Service down', 'api has been down for 31 minutes', 'runtime'],
+      ['Claude Budget at 80% for Today', 'Flint has spent $8.00 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.', 'budget'],
+      ['Action Done', 'An approved action is done.', 'action'],
+      ['A Service Is Down', 'A service has been down for 31 minutes.', 'runtime'],
     ];
     for (const [t, b, k] of cases) expect(f.notes.push(t, b, k)).toEqual({ status: 'stored', pinged: true });
     await settle();
@@ -154,7 +154,7 @@ describe('retired kinds', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'flint-notes-')), 'notifications.json');
     writeFileSync(path, JSON.stringify({ seq: 2, items: [
       { id: 'n2', title: 'Nexus run finished', body: 'Build aqi: closed', kind: 'nexus', ts: 2, read: false },
-      { id: 'n1', title: 'Market signal', body: 'A signal arrived.', kind: 'signal', ts: 1, read: false },
+      { id: 'n1', title: 'Market Signal', body: 'A signal arrived.', kind: 'signal', ts: 1, read: false },
     ] }));
     const notes = new Notifications(path, {});
     expect(RETIRED_KINDS.has('nexus')).toBe(true);
