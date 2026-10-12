@@ -1432,7 +1432,8 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
     it('everyone being GIVEN something is still refused, in a database set up by hand and in one that was not', async () => {
       for (const [make, grant, named] of [
         [byHand, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /PUBLIC holding CREATE on the schema public is not one Flint makes/],
-        [byHand, 'GRANT USAGE ON SCHEMA public TO PUBLIC', /PUBLIC holding USAGE on the schema public is not one Flint makes|flint_backup holding USAGE on the schema public is not one Flint makes/],
+        // (Everyone given the schema back, with the backup role still named on it: neither what the record says nor what was done by hand.)
+        [byHand, 'GRANT USAGE ON SCHEMA public TO PUBLIC', /flint_backup holding USAGE on the schema public is not one Flint makes/],
         [byHand, 'GRANT SELECT ON "Approval" TO PUBLIC', /PUBLIC holding SELECT on the table public.Approval is not one Flint makes/],
         [before, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /PUBLIC holding CREATE on the schema public is not one Flint makes/],
         [before, 'GRANT USAGE ON SCHEMA public TO flint_restore', /flint_restore holding USAGE on the schema public is not one Flint makes/],
@@ -1470,7 +1471,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const text = err.lines.join('\n');
       expect(text).toContain('Who may do what:\n');
       expect(text).toContain('  PUBLIC holding CREATE on the schema public is not one Flint makes.');
-      expect(text).toContain('  Flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
+      expect(text).toContain('  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
       expect(text).toContain('Checks and indexes:\n  The constraint ActionPolicy_tier_check on public.ActionPolicy is missing.');
       expect(text).toContain('Triggers and rules:\n  The trigger Approval_consume_once on public.Approval is different.');
       expect(text).toContain('Functions:\n  The function public.backdoor() is not one Flint makes.');
@@ -1520,14 +1521,27 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
           await c.query(`ALTER DATABASE ${p.name} SET statement_timeout = '45s'`);
           await c.query(`ALTER DATABASE ${p.name} CONNECTION LIMIT 50`);
           await c.query('CREATE TABLE stray (id integer)');
+          // And three things done to Flint's roles by hand, which live on the server alone.
+          await c.query('GRANT pg_monitor TO flint_app');
+          await c.query(`ALTER ROLE flint_app SET statement_timeout = '30s'`);
+          await c.query('ALTER ROLE flint_approver CONNECTION LIMIT 20');
         }, p.name);
-        const r = await compare(p);
+        let r;
+        try {
+          r = await compare(p);
+        } finally {
+          await admin(async (c) => {
+            await c.query('REVOKE pg_monitor FROM flint_app');
+            await c.query('ALTER ROLE flint_app RESET statement_timeout');
+            await c.query('ALTER ROLE flint_approver CONNECTION LIMIT -1');
+          });
+        }
         expect(r.same).toBe(false);
         const text = lines.join('\n');
         expect(lines[0]).toMatch(new RegExp(`^The database ${p.name} differs from the one this copy of Flint builds in \\d+ ways \\(\\d+ updates on record\\)\\.$`));
         expect(text).toContain('Who may do what:\n');
         expect(text).toContain('  PUBLIC holding CREATE on the schema public is not one Flint makes.');
-        expect(text).toContain('  Flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
+        expect(text).toContain('  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
         expect(text).toContain('Triggers and rules:\n  The trigger Approval_consume_once on public.Approval is different.');
         expect(text).toContain('Tables, columns and views:\n');
         expect(text).toMatch(/In it, \d+ things? do(es)? not belong to the migration owner\. A restore gives everything to the migration owner, so this stops nothing:/);
@@ -1536,6 +1550,9 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
         expect(text).toContain("On the database itself, a right Flint's setup gives is missing (flint_backup CONNECT). A restored database has it.");
         expect(text).toContain('The database has 1 setting of its own (statement_timeout). A restore carries it over.');
         expect(text).toContain('The database has a connection limit of 50. A restored database has none.');
+        expect(text).toContain("The role flint_app is a member of pg_monitor, which Flint's own setup does not make it.");
+        expect(text).toContain('The role flint_app has 1 setting of its own on this server (statement_timeout). No backup holds it.');
+        expect(text).toContain('The role flint_approver has a connection limit of 20.');
         // The last word is the command's.
         expect(lines.at(-1)).not.toBe('Nothing was changed.');
         // Nothing in it was changed by being read: what was done to it above is all still there.

@@ -1612,6 +1612,26 @@ export async function compareDatabase(o: CompareOptions): Promise<Comparison> {
     for (const problem of setup) note(`A restore would stop at this: ${problem}.`);
     const member = (await m.query<{ ok: boolean | null }>(`SELECT CASE WHEN to_regrole($2) IS NULL THEN NULL ELSE pg_has_role($1, $2, 'MEMBER') END AS ok`, [OWNER, restorer.user])).rows[0]!.ok;
     if (member === false) note(`A restore would stop until the migration owner is given the restoring role (the command is printed by a restore).`);
+    // Flint's roles themselves, beyond what a restore checks: what was done to one by hand lives on this server only.
+    const plainName = (x: string): string => x.replace(/[^\w.]/g, '?').slice(0, 63);
+    const expected: Record<string, readonly string[]> = { flint_backup: ['pg_read_all_data'], [OWNER]: [restorer.user] };
+    const roles = (await m.query<{ rolname: string; login: boolean; inherit: boolean; lim: number; expires: boolean; settings: string[] | null; member_of: string[] | null }>(
+      `SELECT r.rolname, r.rolcanlogin AS login, r.rolinherit AS inherit, r.rolconnlimit AS lim, r.rolvaliduntil IS NOT NULL AS expires,
+              (SELECT array_agg(DISTINCT split_part(x, '=', 1) ORDER BY split_part(x, '=', 1)) FROM pg_db_role_setting s, unnest(s.setconfig) AS x WHERE s.setrole = r.oid AND s.setdatabase = 0) AS settings,
+              (SELECT array_agg(g.rolname::text ORDER BY g.rolname) FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid WHERE am.member = r.oid) AS member_of
+       FROM pg_roles r WHERE r.rolname = ANY($1) ORDER BY r.rolname`,
+      [[OWNER, restorer.user, ...APP_ROLES]],
+    )).rows;
+    for (const r of roles) {
+      const want = expected[r.rolname] ?? [];
+      for (const g of r.member_of ?? []) if (!want.includes(g)) note(`The role ${r.rolname} is a member of ${plainName(g)}, which Flint's own setup does not make it.`);
+      for (const g of want) if (g !== restorer.user && !(r.member_of ?? []).includes(g)) note(`The role ${r.rolname} is not a member of ${g}, which Flint's own setup makes it.`);
+      if (!r.login) note(`The role ${r.rolname} cannot sign in.`);
+      if (!r.inherit) note(`The role ${r.rolname} does not take on the rights of the roles it is a member of.`);
+      if (r.lim !== -1) note(`The role ${r.rolname} has a connection limit of ${r.lim}.`);
+      if (r.expires) note(`The role ${r.rolname} has a password that runs out on a set day.`);
+      if (r.settings?.length) note(`The role ${r.rolname} has ${r.settings.length} setting${r.settings.length === 1 ? '' : 's'} of its own on this server (${r.settings.map(plainName).join(', ')}). No backup holds ${r.settings.length === 1 ? 'it' : 'them'}.`);
+    }
     if (migrations.problems.length === 0) {
       const spec = (await referenceFor([...migrations.applied, ...checkoutMigrations(o.migrationsDir).filter((x) => byHand.includes(x.name))])).grants.filter((g) => SPEC_GRANTEES.has(g.grantee));
       const mine = (await databaseGrants(m, database)).filter((g) => SPEC_GRANTEES.has(g.grantee));

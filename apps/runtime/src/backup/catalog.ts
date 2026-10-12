@@ -306,7 +306,11 @@ export function catalogDifference(reference: readonly string[], restored: readon
  * copy of Flint would not build it. "Is different": both have it, in two forms.
  */
 export function differenceLines(d: CatalogDifference): string[] {
-  const sentence = (s: string): string => `  ${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+  // A role's name is written as it is, never with a capital it does not have: it is introduced as "The role".
+  const sentence = (s: string): string => {
+    const said = /^[a-z][a-z0-9_]* holding /.test(s) ? `The role ${s}` : `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
+    return `  ${said}.`;
+  };
   return d.groups.flatMap((g) => [`${g.title}:`, ...g.items.map(sentence)]);
 }
 
@@ -454,7 +458,10 @@ export const ALREADY_BY_HAND: readonly string[] = ['20261013000050_public_schema
 export interface Compared {
   /** How the database differs from what this checkout builds for its record; no objects when it does not. */
   difference: CatalogDifference;
-  /** The migrations found already in place though the record does not list them (ALREADY_BY_HAND); usually none. */
+  /**
+   * The migrations found already in place though the record does not list them (ALREADY_BY_HAND); usually none.
+   * When there are any, `difference` is against a database that has them: what is left, if anything, is something else.
+   */
   byHand: string[];
 }
 
@@ -478,6 +485,7 @@ export async function compareWithReference(
   const early = checkoutMigrations(migrationsDir).filter((m) => ALREADY_BY_HAND.includes(m.name) && state.pending.includes(m.name));
   if (!early.length) return { difference, byHand: [] };
   const withEarly = await against([...state.applied, ...early]);
-  return withEarly.objects.length ? { difference, byHand: [] } : { difference: withEarly, byHand: early.map((m) => m.name) };
+  // The same, or nearer to it than to what the record says: it is that database, and what is left is said against it.
+  return withEarly.objects.length < difference.objects.length ? { difference: withEarly, byHand: early.map((m) => m.name) } : { difference, byHand: [] };
 }
 
