@@ -1298,14 +1298,16 @@ What the database now holds to, whatever the runtime's code does:
   sign for it, once, and only as exactly what that card describes: its kind,
   what it can do, whether it spends, and the item it stands for. Turning it off
   needs no signature.
-- **A later decision stands.** A card you signed earlier that the runtime kept
-  can't undo what you decided after it. That holds for turning an asset back on
-  after you turned it off, for the review requirement, and for overruling a
-  check.
+- **The later signature stands.** When you've signed two cards about the same
+  asset, task or review requirement, the later one counts, whichever one Flint
+  carries out first. A card you signed before you turned an asset off can't
+  turn it back on. The database records when you signed, so nothing can put
+  your signatures in another order.
 - **A task runs only as the task you signed.** Its card carries the whole task:
   the asset, the title, what to do, the bar, any goal and step, the due time
   and the cost estimate. If any of them differs when Flint goes to run it, the
-  task doesn't run. Each run also needs its forecast on record first.
+  task doesn't run. Each run also needs its forecast on record first, naming
+  the task and the rule that settles it.
 - **Paid work says its price first and its cost after.** A task for an asset
   that spends runs only on a spend card filed from the console that carries the
   same estimate, above zero, and it can't end without its cost. No asset that
@@ -1313,14 +1315,16 @@ What the database now holds to, whatever the runtime's code does:
   taken at all yet.
 - **Flint doesn't accept its own work on its own say.** A task is accepted only
   with its check on record and, until you promote that check, only on a card
-  you sign. That card names the result it accepts, so one signed before there
-  was a result accepts nothing. Rejecting a result that passed, accepting one
+  you sign. That card names the result it accepts, and it counts only if you
+  signed it after the result was handed in. A task is checked and accepted only
+  while its result is on record. Rejecting a result that passed, accepting one
   that failed, and cancelling a task that has gone out each take your signed
   card too. An override says the call was yours.
-- **You have a day to overrule a check.** A task's forecast is scored only a
-  day after the task ended, and only as it ended. Until then the runtime can't
-  score it, so it can't close the door on your override. Once it's scored, the
-  result is final.
+- **You have a day to overrule a check.** A task's forecast is scored only for
+  its task, a day after the task ended, and only as it ended. Until then the
+  runtime can't score it, so it can't close the door on your override. A
+  forecast of this kind that has no task yet isn't scored at all. Once it's
+  scored, the result is final.
 - **A review is of the card you're shown.** It's written once, only while the
   card is still waiting, of exactly that card's contents, and only while a
   reviewer is on. What it found never changes. Its words stay while the card
@@ -1340,9 +1344,12 @@ What the database now holds to, whatever the runtime's code does:
   Nobody can tick it by hand, Flint included. If you later reject that result,
   the step is no longer done.
 - **A forget reaches all of it.** Forgetting an item clears the text of tasks
-  about it, deletes their outputs, clears those tasks' cards, and clears the
-  words of the reviews that read any of them. Outcomes and verdicts stay.
-  Nothing is written back afterwards.
+  about it, deletes their outputs, clears those tasks' cards, clears the words
+  of the reviews that read any of them, and blanks the words of those tasks'
+  forecasts. An output or a review being written at that moment goes too.
+  Outcomes, verdicts and numbers stay. Afterwards no output, no review and no
+  card result is taken for those tasks. Two things are kept: a task's title,
+  and the codes a review found.
 - **Task and review text stays out of errors and history.** A task, an output,
   a review or a card of any kind that the database refuses names the row and
   the rule, never a title, a spec or a model's words. History keeps only how
@@ -1352,15 +1359,24 @@ What the database now holds to, whatever the runtime's code does:
 
 Nothing you use. Every card filed from now on records whether it needs a
 review, and cards of the kinds listed above are marked. Nothing reads the mark
-yet, and reviews aren't required, so every card is approved as before. Cards
-filed before this update stay unmarked. Four job queues exist and nothing
-sends to them. No plan has a Flint task step yet, so the new rule on those
-steps holds nothing back.
+yet, and reviews aren't required, so every card is approved as before. Four
+job queues exist and nothing sends to them. No plan has a Flint task step yet,
+so the new rule on those steps holds nothing back.
 
-Two rules about money are new for every card as it is filed: an estimate is
-never negative, and a spend card says an estimate above zero. Nothing files a
-card that breaks either, and a card already on record is not held to them, so
-it can still be approved, rejected or expire.
+Cards filed before this update stay unmarked. One of them could be approved
+without a review even after reviews are required, until it expires, a week at
+most after it was filed. No reviewer exists yet, so reviews can't be required
+before then.
+
+Three things are now refused when a card is filed that were accepted before: a
+spend card with no estimate or an estimate of zero, a negative estimate on any
+card, and a task or spend card whose args hold a number with a fraction.
+Nothing files such a card today, and a card already on record is not held to
+these rules, so it can still be approved, rejected or expire.
+
+The time on each approval is now stamped by the database as the server records
+it. The server sent none before, so nothing changes for it. A forget is now
+refused above READ COMMITTED, the default level. Nothing calls it yet.
 
 A card of any kind that breaks one of its own rules is now refused by name,
 with its id and the rule. Before, only goal, plan and task cards were. The
@@ -1380,9 +1396,16 @@ rules themselves are the same.
   learn each new file that files a card. Every task and spend card's digest is
   checked when it is filed, so its args hold no number with a fraction. A spend
   card says an estimate above zero.
-- **Sign in order.** A card acts only if you signed it after the last change
-  to what it changes. File and sign each card when it is wanted, not ahead of
-  time.
+- **The later signature wins.** A card acts only if it's the latest one you
+  signed about its asset, task or gate. If you've signed a later one, the
+  earlier one is refused as "signed before a later decision", even when the
+  later card failed or expired: ask for a new signature, don't retry. File and
+  sign each card when it's wanted, not ahead of time. Write an asset's row
+  before filing the card that turns it on: a card signed before the row was
+  written, or before the asset was last turned off, doesn't turn it on.
+- **Filing.** A spend card needs an estimate above zero. The route that files
+  cards must answer 400 with a sentence for one that has none. The database
+  refuses it, which would otherwise surface as a 500.
 - **What each card's args hold.** `asset.enable`: `assetId`, `kind`,
   `externalRef`, `name`, `capabilities`, `dispatchAction`, `spends`, `entityId`
   (null when it stands for no item), exactly as the asset's row has them. A dispatch: `taskId`, `assetId`, `assetKind`,
@@ -1390,15 +1413,20 @@ rules themselves are the same.
   `tainted`, `estCostMicros`, with `dueAt` as `Date#toISOString` writes it (or
   null) and money as whole micro-dollars. The card's own `sensitivity` and
   `tainted` must equal the task's. `task.cancel`: `taskId`. `task.check_bar`:
-  `taskId`, `outputRef` (the task's own) and `metBar` (`true`).
+  `taskId`, `outputRef` (the task's own) and `metBar` (`true`), filed and
+  signed after the result was handed in.
   `task.bar_override`: `taskId` and `to`. `review.enforce`: `gate` (`proposal`)
   and `enforced`.
 - **Transactions.** Each signed change is written at READ COMMITTED, in the
   transaction that claims and completes its card. An approval is used by the
   first transaction that makes its change and by no other.
 - **The dispatch** must write the task's forecast first (`assets`,
-  `task_meets_bar`, created by `runtime:tasks`) and set it with the move to
-  `queued`. A forecast belongs to one task.
+  `task_meets_bar`, created by `runtime:tasks`, resolver `auto_world`, with
+  `resolverSpec` `{ taskId, rule: 'task_meets_bar' }`) and set it with the move
+  to `queued`, in the same transaction. A forecast belongs to the one task it
+  names. The rule is what keeps P4's sweep away from it: the sweep leaves alone
+  a prediction whose rule it doesn't know, and would let one with no rule run
+  out 72 hours past its date.
 - **The check** must set `metBar` and `barCheckedBy` in one write while the task
   is `checking`, and write `barEvidence` then too. `outputSummary` is written
   as the result is handed in, or while it is `submitted`. Acceptance names an
@@ -1411,9 +1439,19 @@ rules themselves are the same.
   unscoped policy row promotes `task.check_bar` (or `task.*`) and no live row
   holds it back. See the limit below: the runtime can switch such a row off.
 - **Outputs** are written while the task is `dispatched` or `running`, and are
-  always tainted. Retention may delete one, and clear a task's text (setting
-  `textPurgedAt`), only once the task has ended. A task whose text was cleared
-  takes no output and no review.
+  always tainted. A task's `outputRef` is `out:` and the first 12 or more
+  characters of its output's digest. Write the output and hand the task in
+  under that reference in one transaction: a task is checked, and accepted,
+  only with that output on record. Retention may delete one, and clear a task's
+  text (setting `textPurgedAt`), only once the task has ended. After that an
+  override can still reject the result, but can no longer accept it. A task
+  whose text was cleared takes no output and no review.
+- **After a forget.** Call `forget_entity` at READ COMMITTED. A card of a
+  forgotten task that is still running must finish with no result (the
+  database refuses one; it can still fail with its reason). Don't file a new
+  task or card that names a forgotten item: nothing here refuses that. A
+  forgotten task's forecast loses its rule with its words, so P4's sweep lets
+  it run out.
 - **Clean text before it is written.** Postgres refuses JSON that holds a NUL
   or a lone surrogate before any rule here runs, and its own log then keeps
   about 40 characters of the value. Strip both from a model's output, a spec
@@ -1431,10 +1469,11 @@ rules themselves are the same.
   after them keeps its words.
 - **Signing with reviews required.** The server must put `reviewId` and
   `verdict` in the signed payload's `fields`.
-- **Scoring.** A task's forecast is recorded as `auto_world`, by one writer.
-  The database takes the score only a day or more after the task ended as
-  accepted, rejected or failed, with an outcome that says whether it was
-  accepted. A cancelled task's forecast is left to expire. P4's rule on
+- **Scoring.** A task's forecast is recorded as `auto_world`, by one writer,
+  at READ COMMITTED. The database takes the score only a day or more after the
+  task ended as accepted, rejected or failed, with an outcome that says whether
+  it was accepted. A cancelled task's forecast is left to expire, and the task
+  tick must expire it: P4's sweep leaves a task's forecast alone. P4's rule on
   results recorded as yours is unchanged, so your accept or override card does
   not score the forecast itself. "Was the reviewer right" has to go through a
   question, which can be asked only once the forecast is due.
@@ -1469,7 +1508,15 @@ rules themselves are the same.
   "Never from chat" holds against a mistake in the runtime, not against a
   runtime that lies about where a card came from.
 - **When you signed.** The order rules compare when each approval was recorded.
-  The server records that time, not the runtime.
+  The database stamps that time as the server records the approval, so neither
+  the server nor the runtime can date one. It's the time the server recorded
+  your signature, not the moment you touched the key. Two approvals recorded in
+  the same millisecond are ordered by their ids.
+- **A later card that didn't run.** If the later of two cards about the same
+  thing fails or expires, the earlier one still doesn't act. You sign again.
+- **What a forget leaves.** A task's title and a review's finding codes are
+  kept, which is why both must hold no words of yours. A task or card filed
+  after the forget that names the forgotten item isn't refused.
 - **A transaction held open.** A signed card acts in one transaction. A runtime
   that kept that transaction open could delay when its changes land. A restart
   of the runtime ends it.
