@@ -1267,6 +1267,11 @@ var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what 
   'goal.abandon':['Abandon a Goal','Flint stops reviewing it, and it can’t be restarted.','abandon'],
   'goal.propose':['Suggest a Goal from Chat','You said this in a chat.','propose'],
   'world.commitment.from_chat':['Add a Commitment from Chat','You said this in a chat.','commitment']};
+/* P3's promotion cards, by the one row each signs (what the card changes, never a label it carries): the title, and what
+   Flint then does, as a sentence. Signing the first ends the reviews' trial week; the second is for suggestions from chat. */
+var APPR_PROMOTES={'goal.review.local':['Let Goal Reviews Run on Their Own','Flint files its plan suggestions as cards you sign'],
+  'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested']};
+function apprPromotes(rows){return (rows&&rows.length===1&&rows[0]&&APPR_PROMOTES[rows[0].pattern])||null;}
 function apprCadence(c){for(var i=0;i<APPR_CADENCES.length;i++)if(APPR_CADENCES[i][0]===c)return APPR_CADENCES[i][1];return '';}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
 var APPR_RESUMES='Approving resumes this goal.';
@@ -1371,7 +1376,8 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   if(p.fullName==='policy.change'){var rows=a.rows||[];var pats=rows.map(function(r){return r.pattern;});
     if(pats.length&&pats.every(function(x){return /^(backup\.|restore\.)/.test(x);}))return 'Run Backups on Their Own';
-    return 'Let '+n(rows)+' Action'+(n(rows)===1?'':'s')+' Run on Their Own';}
+    var pr=apprPromotes(rows);if(pr)return pr[0];
+    return n(rows)===1?'Let 1 Action Run on Its Own':'Let '+n(rows)+' Actions Run on Their Own';}
   if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'Person':'People')+' from Calendar';
   if(p.fullName==='triage.rule.create')return 'Add a Triage Rule';
   if(p.fullName==='world.relation.write')return 'Link Two Things';
@@ -1383,7 +1389,9 @@ function apprSub(p){var a=p.args||{};
   if(apprGoalCard(p))return apprGoalSub(p);
   if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of ':'')+'its own numbers each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Flint starts reading this source.';
-  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
+  if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;var pr=apprPromotes(rows);
+    if(pr)return (exp?'Until '+apprDate(exp)+', ':'')+pr[1]+'.';
+    return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create'){var cal=APPR_CALENDARS[a.source||'google_calendar'];return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
   if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'This adds a new rule.';
   if(APPR_NIGHTLY[p.fullName])return 'It runs '+apprWhen(p.fullName)+' if you approve it.';

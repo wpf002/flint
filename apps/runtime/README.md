@@ -349,9 +349,9 @@ is filed and again when it runs, and by the console before Approve All.
 - A suggestion that got no card because of a limit is listed under LATEST
   REVIEW with "Flint will suggest this again at the next review."
 
-**The trial week.** Until you sign the card that promotes reviews (a later part
-files it), every review is in its trial week: it records what it found and what
-it would suggest, and files no card. The panel says so under LATEST REVIEW.
+**The trial week.** Until you sign the card that promotes reviews (see
+[Ending the trial week](#ending-the-trial-week)), every review is in its trial
+week: it records what it found and what it would suggest, and files no card. The panel says so under LATEST REVIEW.
 
 **Review Now in the trial week files no card either.** It runs a review right
 away, and you read what Flint would change under LATEST REVIEW; nothing lands
@@ -383,10 +383,30 @@ finish date. A goal with no date, or one past its date, still gets a forecast
 in the ledger at every review, but for another day, so the panel shows its next
 review instead.
 
+The fourth part is goals in chat, the P3 report and the promotion table:
+
+- **Goals in chat** is the server's, and ships off. With it on, a chat turn that
+  a model on this Mac answers starts from your active goals: each one's title,
+  how many of its checks are met, its forecast and its steps to do. It is never
+  sent to an outside model unless you say so. The server's README has the
+  settings ("Goals in chat"); the runtime only answers `GET /v1/goals/now`.
+- **The P3 report** measures P3's eight exit criteria as numbers
+  ([The P3 report](#the-p3-report)).
+- **The promotion table** ends the reviews' trial week
+  ([Ending the trial week](#ending-the-trial-week)).
+
+Chat has no tool that reads, files or runs a goal: the runtime connector serves
+none, its token is refused by every goal route, and a goal or plan card filed
+from a chat is refused ("Goals are changed from the console.").
+
 ### The goal routes
 
 All under `/v1/goals`, with the `proposals` scope only: the runtime connector's
-token (`world:read|ledger`) can never read a goal's words. `GET ?tab=` and
+token (`world:read|ledger`) can never read a goal's words. `GET /now` answers
+the server's goals block: the active goals as closed values (a ref, counts,
+days, the open forecast as one of the ledger's seven words and a whole
+percent), with a title only for a goal you signed that carries no outside text,
+and never a description, a check's text or a step's title. `GET ?tab=` and
 `GET /:id` answer the panel; `POST` files a new goal's card from the form's draft
 key (the goal's id is made from it, so the same form twice is one card, and a
 changed form's card replaces the one still waiting); `POST /:id/edit|timing|done|abandon|resume|plan`
@@ -404,6 +424,67 @@ in @flint/policy (`GOAL_SAYS`) with its code.
 `POST /v1/proposals` refuses any card whose origin is `runtime:<job>`: a job's
 cards are filed by the job, inside the runtime. Over the wire an origin is only
 a claim, and nothing outside the runtime files under a job's name.
+
+### The P3 report
+
+`cd ~/flint && pnpm --filter @flint/runtime p3-report` prints P3's eight exit
+criteria, measured now. Each says pass, fail or null (not enough to measure
+yet), with the numbers behind it:
+
+1. active goals (3 are needed), and how many of their checks Flint reads itself;
+2. reviews that ran over 24 hours late in the last 30 days, and goals that late
+   now. It counts from Flint's first review: a goal that was already due when
+   reviews were first turned on was waiting, not late. It passes after 30 days;
+3. how long a watched item's change took to set off its review (10 minutes is
+   the limit; a test proves the worst case, and this measures the real ones);
+4. plan versions without a signed card behind them, and reviews whose small
+   changes ended up on more than one card (both must be 0);
+5. started goals without your signed approval behind their latest change;
+6. reviews without their goal's forecast in the ledger;
+7. suggestions from chat without your own quoted words (a later part files
+   suggestions; until then this is null);
+8. the size of the goals block on the chat turns that carried it, by day: the
+   mean and the largest, which must stay within 300 tokens.
+
+It holds numbers only: no title, no check, no id. So it is also served as
+`GET /v1/p3/report` on the `world:read` scope, like P2's and P2.5's reports.
+
+### Ending the trial week
+
+After a week of reviews, this files the card that promotes them:
+
+```bash
+cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase p3
+```
+
+Sign it in Approvals ("Let Goal Reviews Run on Their Own"), or let it expire and
+reviews stay in their trial week. Signed, it lasts 175 days, and from then on:
+
+- a review files the plan changes it suggests, each still a card you sign (its
+  small changes on one card, each bigger one on its own);
+- the local model keeps its limit of 20 reviews a day;
+- nothing else changes. Starting, finishing, abandoning or changing a goal,
+  and every plan change, still take your signature. Those are in no table, and
+  no rule you sign can promote them.
+
+The command refuses, and says why, until the week has been lived:
+
+| It says | It means |
+| --- | --- |
+| the shadow week is not over: 3.2 of 7 days of goal reviews | Flint's first review was less than 7 days ago. |
+| goal reviews were on all day on 5 of the 7 days before today (not on ...) | On those days reviews were off for some of the day, or the runtime was down all day. A day with nothing due still counts: a weekly goal has no review on most days. |
+| 1 review ran over 24 hours late | A scheduled review in those days ran more than a day after it was due. It ages out of the week. |
+| 1 goal is over 24 hours past a review | A review is that late right now. Check Settings > Health for **Goal Reviews**. |
+| the local model has not answered a review yet | No review's plan stage got an answer. Check that `FLINT_TRIAGE_MODEL` is set and Ollama is running. |
+
+The card's details say what the week measured, in numbers: "This week Flint
+reviewed your goals 9 times, and none was late. The local model answered 7. It
+would have suggested 5 changes." Filing it twice is the same card.
+
+`--phase p3c` is a second, later table, for goals Flint suggests from your
+chats (a later part builds those): it lets a suggestion land in Suggested
+without asking, 3 a day at most, and needs 14 days of those cards first. A
+suggested goal is never active until you start it with your signature.
 
 ### Turning reviews on
 
@@ -458,11 +539,14 @@ they are. This is also the first step of rolling P3 back.
   review, with the goal's own template and `auto_world` as its resolver; the
   ledger's route takes neither a goal id nor that template, and the database
   ties a goal's forecast to the goals writer.
-- **A later part** must file the card that promotes reviews out of their trial
-  week, with the measured exit criteria. (Forecasts are now settled at their
-  dates by the prediction check, once predictions are on: see "Checking
-  predictions".)
-- **Suggestions from chat (part 5)** must, in the console:
+- **Anything that puts a goal's words in front of a model** must ask the
+  server's one question first (`brainIsLocal`, apps/server/src/policy.ts): is
+  the brain being asked on this Mac? The goals block does, for every ask. A
+  chat tool that read goals would have to be served to a local brain only, and
+  today there is none.
+- **Suggestions from chat (part 5)** must add their commitments row to the
+  later promotion table (`P3C_PROMOTIONS`: a commitment from chat, 10 a day),
+  and, in the console:
   - mark a suggested goal's words as Outside Text when the goal is tainted;
   - show the links and the sensitivity "Make It a Goal" signs, before it signs;
   - make Dismiss undoable, or ask first (a dismissed goal is final today);
@@ -523,6 +607,21 @@ they are. This is also the first step of rolling P3 back.
   days and the plan changes (you approve a card), Flint reviews the goal once
   for the new plan. Each needs your signature first, and a goal has at most 12
   such reviews a day.
+- **Late, right after turning reviews on.** A goal's first review is due when it
+  starts. Turn reviews on days later and its goals show Late, and Goal Reviews
+  shows down, for the few minutes until the first reviews run. The P3 report
+  and the promotion table don't count those as late: lateness is counted from
+  Flint's first review.
+- **A quiet week still counts.** The promotion table asks that reviews were on
+  for each of the 7 days, not that each day had a review: goals reviewed weekly
+  have none on most days. So a week with few reviews can be promoted; the card
+  says how many there were, and that the local model answered at least one.
+- **A day counts on the health check's word.** The health check looks every 5
+  minutes. A day counts when none of that day's checks found Goal Reviews off,
+  and one found them on (or, with no check at all that day, a review ran). A
+  runtime that was down for part of a day leaves no check for that part, so
+  that day still counts; a review it made late does not pass, which is checked
+  separately. Health checks are kept for 30 days.
 - **Forecasts wait for their dates.** When you mark a goal done or abandon
   it, that card settles the goal's forecasts. A forecast whose date comes
   with the goal not finished is recorded as not met by the prediction check

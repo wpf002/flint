@@ -1,5 +1,6 @@
 /**
- * P2's daily measures (03:20 local, for the previous local day), as daily
+ * The daily measures (03:20 local, for the previous local day): P2's, and the
+ * size of P3's goals block in chat, as daily
  * (`D`) metric series, computed before the events they come from lose their
  * payloads to retention:
  *
@@ -9,7 +10,9 @@
  *  - p2.ctx_tokens.world, p2.ctx_tokens.recall: the context blocks' mean size;
  *  - p2.lane.relevant, p2.lane.quiet: decisions per lane;
  *  - p2.latency.median_s: from a polled source's change to the world model
- *    knowing it (EntityVersion.validFrom minus SourceEvent.occurredAt).
+ *    knowing it (EntityVersion.validFrom minus SourceEvent.occurredAt);
+ *  - p3.ctx_tokens.goals, p3.ctx_tokens.goals_max: the goals block's mean and
+ *    largest size, on the turns that carried it (P3 exit criterion 8).
  * A measure with nothing to measure that day is not written.
  */
 import { Prisma } from '@prisma/client';
@@ -37,15 +40,17 @@ const SERIES: Record<string, { unit: string; description: string }> = {
   'p2.lane.relevant': { unit: 'count', description: 'triage decisions in the relevant lane, per day' },
   'p2.lane.quiet': { unit: 'count', description: 'triage decisions in the quiet lane, per day' },
   'p2.latency.median_s': { unit: 's', description: "median seconds from a polled source's change to the world model, per day" },
+  'p3.ctx_tokens.goals': { unit: 'tokens', description: 'mean goals block size on the turns that had one, per day' },
+  'p3.ctx_tokens.goals_max': { unit: 'tokens', description: 'largest goals block on any turn, per day' },
 };
 
 export async function dayMeasures(db: Db, start: Date, end: Date): Promise<Record<keyof typeof SERIES, number | null>> {
   const turns = (await db.sourceEvent.findMany({ where: { source: 'server', type: 'chat.turn', occurredAt: { gte: start, lt: end }, payload: { not: Prisma.DbNull } }, select: { payload: true } }))
-    .map((e) => (e.payload ?? {}) as { ms?: unknown; recall?: unknown; ctxTokens?: { world?: unknown; recall?: unknown } });
+    .map((e) => (e.payload ?? {}) as { ms?: unknown; recall?: unknown; ctxTokens?: { world?: unknown; recall?: unknown; goals?: unknown } });
   const ms = turns.map((t) => t.ms).filter((x): x is number => typeof x === 'number');
   // Turns that recalled at all; of them, the ones that fell back (as the server's baseline counts them).
   const recalled = turns.map((t) => t.recall).filter((x): x is string => typeof x === 'string' && x !== 'none' && x !== 'skipped');
-  const tokens = (k: 'world' | 'recall') => turns.map((t) => t.ctxTokens?.[k]).filter((x): x is number => typeof x === 'number');
+  const tokens = (k: 'world' | 'recall' | 'goals') => turns.map((t) => t.ctxTokens?.[k]).filter((x): x is number => typeof x === 'number');
   const lanes = await db.triageDecision.groupBy({ by: ['lane'], where: { createdAt: { gte: start, lt: end } }, _count: { _all: true } });
   const lane = (l: string) => lanes.find((x) => x.lane === l)?._count._all ?? 0;
   const lags = await db.$queryRaw<Array<{ s: number }>>`
@@ -60,6 +65,8 @@ export async function dayMeasures(db: Db, start: Date, end: Date): Promise<Recor
     'p2.lane.relevant': lane('relevant'),
     'p2.lane.quiet': lane('quiet'),
     'p2.latency.median_s': percentile(lags.map((l) => Math.max(0, l.s)), 0.5),
+    'p3.ctx_tokens.goals': mean(tokens('goals')),
+    'p3.ctx_tokens.goals_max': tokens('goals').length ? Math.max(...tokens('goals')) : null,
   };
 }
 
