@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
-import { ACTION_WORDS } from '@flint/policy';
+import { ACTION_WORDS, noteProblems } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -674,7 +674,16 @@ describe('the console Approvals panel', () => {
     const details = open1.all().find((e) => e.className === 'details')!;
     expect(details.hidden).toBe(true);
     expect(details.all().filter((e) => e.tagName === 'pre')).toEqual([]);
-    expect(details.all().filter((e) => e.tagName === 'p').map((e) => e.textContent)).toEqual(['Approving turns on Flint’s forecasts of these numbers, on this Mac.']);
+    // After the why: what turning predictions on does to what is already there. The first check settles every
+    // prediction Flint has made so far, and nothing takes a recorded result back, so the card says so before he signs.
+    const also = 'Turning this on also checks the predictions Flint has already made, and those results can’t be undone.';
+    expect(details.all().filter((e) => e.tagName === 'p').map((e) => e.textContent)).toEqual(['Approving turns on Flint’s forecasts of these numbers, on this Mac.', also]);
+    expect(run('APPR_PREDICT_ALSO')).toBe(also);
+    // Held to the notes standard as a line of its own (under a plain title: the check reads "On" in the card's title as a small word).
+    expect(noteProblems('Predictions', also)).toEqual([]);
+    expect(also).toMatch(/^[A-Z][^(){}[\]`]*\.$/);
+    // It is this card's alone: no other card says it.
+    expect(ids.apprlist!.children[0]!.children[1]!.shown()).not.toContain('already made');
     expect(details.all().filter((e) => e.tagName === 'li').map((e) => e.textContent)).toEqual([
       'Anthropic Spend · Spending · Second Opinion', 'OpenAI Spend · Spending', 'Perplexity Spend · Spending', 'Tavily Spend · Spending', 'Deploys · Second Opinion',
       'Flint Commits', 'Nexus Commits', 'Trident Commits', 'Helm Commits', 'Service Downtime', 'Open Threads', 'Calendar Hours · Calendar',

@@ -313,7 +313,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.get('/v1/ledger/calibration', { preHandler: need('ledger') }, async () => {
     const latest = await db.calibrationSnapshot.findFirst({ orderBy: { windowEnd: 'desc' }, select: { windowEnd: true } });
     if (!latest) return { snapshots: [] };
-    return { snapshots: await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } }) };
+    // Chat's ledger_calibration tool reads this whole. Aggregates only: counts and scores by area, never a prediction's
+    // words or a number it was about. A group with nothing scored yet is stored with 0 for its scores (the database wants
+    // a number); a reader would take "Brier 0" for perfect and "coverage 0" for never held, so here those are null.
+    const rows = await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } });
+    return { snapshots: rows.map((r) => (r.n === 0 ? { ...r, brier: null, baseRate: null, brierSkill: null, intervalCoverage: null } : r)) };
   });
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });

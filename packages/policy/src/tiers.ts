@@ -96,9 +96,14 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   // In shadow at APPROVAL: a prediction is Flint's own row, recorded with the decision that made it.
   // A goal review's onTrack forecast is not claimed here: it is counted under ON_TRACK_COUNTER (below).
   'ledger.prediction.record': approval({ cap: { limit: 50, period: 'day' }, shadow: true, note: 'not claimed by a goal review’s onTrack forecast, which is counted under goal.on_track' }),
-  'ledger.resolve.auto': approval({ note: 'world or metric resolution; cannot VOID' }),
-  'ledger.expire': approval({ note: 'marks predictions past resolveBy as expired' }),
-  'ledger.calibration.snapshot': approval(),
+  // In shadow at APPROVAL (P4 part 2, with the code that runs them): each writes only Flint's own rows (a
+  // resolution of its own prediction, a status, a snapshot of its scores) and sends nothing to Will or to chat.
+  // The scores are not private to the runtime, though: chat's ledger_calibration tool (P1) reads the latest
+  // snapshot when a model asks for it. What it gets is aggregates only (counts and scores by area, never a
+  // prediction's words or a number it was about), and it goes wherever that chat model runs.
+  'ledger.resolve.auto': approval({ shadow: true, note: 'world or metric resolution; cannot VOID, and never resolves as Will' }),
+  'ledger.expire': approval({ shadow: true, note: 'marks predictions that ran out unresolved as expired, after a grace' }),
+  'ledger.calibration.snapshot': approval({ shadow: true, note: "the nightly scores of Flint's own predictions" }),
   'ledger.void': fixed({ note: 'stays APPROVAL (passkey)' }),
   'ledger.resolution.correct': fixed({ note: 'stays APPROVAL (passkey)' }),
   // Chat tools over the world and the ledger. Reads, but they can taint the turn.

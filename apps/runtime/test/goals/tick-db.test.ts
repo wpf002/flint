@@ -38,6 +38,7 @@ import { ReviewJob, runReview } from '../../src/goals/review';
 import { COALESCE_SECONDS, TICK_CRON, TICK_SECONDS, tick } from '../../src/goals/tick';
 import { EVIDENCE_GAP_MS, REVIEWS_STOPPED, reviewingLog, reviewingMs, waitedMs } from '../../src/goals/late';
 import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './fixture';
+import { pastRows } from '../ledger/kit';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -307,6 +308,34 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     }
     expect(reviewJobs(g.id).map((j) => String(j.data.triggerEventId).split(':')[0])).toEqual(['version']);
     expect(await db.goalReview.count({ where: { goalId: g.id } })).toBe(before + 1);
+  });
+
+  it('a result written late about something long past sets no review off: the first check of old predictions is news to nobody', async () => {
+    const g = await watching(141);
+    // Two predictions about the goal's item, made and due long ago, both settled just now (as the first sweep after
+    // predictions are turned on settles them): one about 20 days ago, one about 3 days ago.
+    const settle = async (dueAgo: number) => {
+      const p = id('pd');
+      await pastRows(urls, 'Prediction', ['Prediction_insert_check'], (q) => q(
+        `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdAt", "createdBy", tainted, "subjectEntityId")
+         VALUES ($1, 'a synthetic claim', 'binary', 0.6, 'rule', 'repos', 'event_occurs', '[]'::jsonb, 'synthetic criteria', 'auto_world', $2, $3, 'test', false, $4)`,
+        [p, new Date(Date.now() - dueAgo), new Date(Date.now() - dueAgo - DAY), g.pr]));
+      const rid = id('rs');
+      await fx.owner(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, false, $3, 'auto_world')`, [rid, p, new Date(Date.now() - dueAgo)]);
+      return rid;
+    };
+    await settle(20 * DAY);
+    await run();
+    expect(reviewJobs(g.id)).toEqual([]);
+    // One about last week is still news.
+    const recent = await settle(3 * DAY);
+    await run();
+    expect(reviewJobs(g.id).map((j) => j.data.triggerEventId)).toEqual([`resolution:${recent}`]);
+    // Its review runs, so nothing of this goal's is left waiting for the tests below.
+    await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(reviewJobs(g.id)[0]!.data));
+    bus.clear();
+    await run();
+    expect(reviewJobs(g.id)).toEqual([]);
   });
 
   it('a forecast that came false, about the goal’s item, sets a review off once', async () => {

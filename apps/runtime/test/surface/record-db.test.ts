@@ -24,6 +24,10 @@ import { expireEscalations } from '../../src/surface/expire';
 import { phrase } from '../../src/templates/escalations';
 import type { NotifyOutcome } from '../../src/notify';
 import type { Source, SourceName, SourceObservation, SourceRun } from '../../src/sources/types';
+import { Prisma } from '@prisma/client';
+import { sweep } from '../../src/ledger/sweep';
+import { DUE_COLUMNS, ruleOwner, type DuePrediction } from '../../src/predict/resolvers';
+import { backdatePrediction } from '../ledger/kit';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const fakeSource = (name: SourceName, observations: () => SourceObservation[]): Source => ({ name, cadenceMs: 1, run: async () => ({ observations: observations(), metrics: [] }) });
@@ -369,5 +373,38 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     const { decision, escalation } = await escalationOf(ev);
     expect(decision.shadow).toBe(false);
     expect(escalation.deliveries.map((d) => d.status)).toEqual(['held', 'held', 'held']);
+  });
+
+  it('the two predictions triage writes go through the ledger\'s check as they are (P4 part 2): the plain one is settled from how the service stood at its time, and advice that was never shown lapses', async () => {
+    // A service first seen down six hours ago, and escalated now: the rows are triage's own, written by record.ts.
+    const svc: SourceObservation = { type: 'service.status', kind: 'service', key: 'service:launchd:com.flint.settled', name: 'com.flint.settled', sensitivity: 'ops', externalId: 'com.flint.settled', state: { managedBy: 'launchd', loaded: true, running: false } };
+    await syncOnce(db, fakeSource('launchd', () => [svc]), runAt(new Date(Date.now() - 6 * 3_600_000)), 'UTC');
+    const eid = (await db.entity.findFirstOrThrow({ where: { key: svc.key } })).id;
+    const ev = await raised('runtime', 'service.down_30m', { entityId: eid, downMinutes: 41 });
+    expect(await processEvent({ eventId: ev }, deps())).toBe('decided');
+    const { escalation } = await escalationOf(ev);
+    const plain = escalation.predictionId!;
+    const rec = await db.recommendation.findUniqueOrThrow({ where: { id: escalation.recommendationId! } });
+    const conditional = rec.predictionId;
+    // Not due yet: the check leaves both alone.
+    expect(await sweep(db, { tz: 'UTC', resolve: true, expire: true })).toMatchObject({ resolved: 0, settled: 0, conditionUnmet: 0, expired: 0, refused: 0 });
+    // Their time comes (only the two times move), and the service has been seen again since, running.
+    for (const p of [plain, conditional]) await backdatePrediction(urls, p, { madeAgo: 3 * 3_600_000, dueAgo: 3_600_000 });
+    await syncOnce(db, fakeSource('launchd', () => [{ ...svc, state: { ...svc.state, running: true } }]), runAt(new Date()), 'UTC');
+    // As the sweep reads them: rules it knows, in triage's own shape.
+    const due = async (pid: string) => (await db.$queryRaw<DuePrediction[]>(Prisma.sql`SELECT ${DUE_COLUMNS} FROM "Prediction" p WHERE p.id = ${pid}`))[0]!;
+    expect(await due(plain)).toMatchObject({ kind: 'binary', resolver: 'auto_world', resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' }, subjectEntityId: eid, recType: null, nextObserved: false, forgotten: false });
+    expect(await due(conditional)).toMatchObject({ kind: 'binary', resolver: 'conditional', resolverSpec: null, subjectEntityId: eid, conditionRecommendationId: rec.id, recType: 'escalation_action', nextObserved: false });
+    expect([ruleOwner(await due(plain)), ruleOwner(await due(conditional))]).toEqual(['sweep', 'sweep']);
+    const c = await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+    expect(c).toMatchObject({ settled: 1, resolved: 1, conditionUnmet: 1, unknownSpec: 0, others: 0, refused: 0 });
+    // It was down at its time, whatever it says now.
+    const r = await db.resolution.findUniqueOrThrow({ where: { predictionId: plain } });
+    expect(r).toMatchObject({ outcome: false, resolvedBy: 'auto_world', evidence: { rule: 'healthy_at', entityId: eid, via: 'ledger.sweep' } });
+    expect(r.eventAt.getTime()).toBe((await db.prediction.findUniqueOrThrow({ where: { id: plain } })).resolveBy.getTime());
+    // In shadow he was never shown the advice: it lapsed, and what it promised is set aside, never scored.
+    expect(await db.recommendation.findUniqueOrThrow({ where: { id: rec.id } })).toMatchObject({ status: 'expired', effectObserved: null });
+    expect((await db.prediction.findUniqueOrThrow({ where: { id: conditional } })).status).toBe('condition_unmet');
+    expect(await db.resolution.findUnique({ where: { predictionId: conditional } })).toBeNull();
   });
 });

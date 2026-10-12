@@ -24,6 +24,12 @@ describe('healthName', () => {
     // Every name is Title Case, as Settings > Health shows it.
     for (const name of Object.values(HEALTH_NAMES)) expect(name, name).toMatch(/^[A-Z][A-Za-z]*( [A-Z][A-Za-z]*)*$/);
   });
+
+  it('the checks of Flint’s own predictions (P4) are a component by their plain name, never "ledger"', () => {
+    expect(healthName('ledger')).toBe('Prediction Checks');
+    expect(HEALTH_NAMES.ledger).toBe('Prediction Checks');
+    for (const name of Object.values(HEALTH_NAMES)) expect(name.toLowerCase(), name).not.toContain('ledger');
+  });
 });
 
 describe('serviceWords', () => {
