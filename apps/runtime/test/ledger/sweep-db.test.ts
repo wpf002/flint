@@ -25,7 +25,7 @@ import { goalFixture, type GoalFixture } from '../goals/fixture';
 import type { Config } from '../../src/config';
 import type { Bus } from '../../src/bus';
 import { ALL_QUEUES } from '../../src/bus';
-import { SNAPSHOT_CRON, SWEEP_CRON, jobSpecs, predictJobs, type JobContext } from '../../src/jobs';
+import { FORECAST_CRON, SERIES_CRON, SNAPSHOT_CRON, SWEEP_CRON, jobSpecs, predictJobs, type JobContext } from '../../src/jobs';
 import { localDay, localDayBounds, addLocalDays } from '@flint/policy';
 import { withClient } from '../db';
 import { AUTO_GRACE_MS, SUPERSEDED_RETRY_MS, SWEEP_LIMIT, SWEEP_LOCK, WILL_GRACE_MS, predictionsStarted, sweep } from '../../src/ledger/sweep';
@@ -361,24 +361,28 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
     const said: string[] = [];
     const ctx = (over: Partial<Config> = {}): JobContext => ({
       db: k.db, bus: {} as Bus, sources: [], log: (m) => void said.push(m),
-      config: { predict: true, triage: false, planner: false, tz: TZ, ...over } as Config,
+      config: { predict: true, triage: false, planner: false, tz: TZ, home: '/nonexistent-home-for-tests', ...over } as Config,
     });
     const handler = (queue: string, c = ctx()) => predictJobs(c).find((s) => s.queue === queue)!.handler([]);
     const snapshots = async () => (await k.owner(`SELECT count(*)::int AS n FROM "CalibrationSnapshot"`)).rows[0].n as number;
     const snapshotAudits = async () => (await k.owner(`SELECT inputs, tier, outcome FROM "AuditEntry" WHERE action = 'ledger.calibration.snapshot' ORDER BY seq DESC`)).rows;
 
-    it('exist only while FLINT_PREDICT is on: the sweep hourly at :40, the scores at 03:45, on queues the migration made', () => {
+    it('exist only while FLINT_PREDICT is on, in the night\'s order: numbers 03:30, the sweep hourly at :40, scores 03:45, forecasts 03:50', () => {
       expect(predictJobs(ctx({ predict: false }))).toEqual([]);
       const specs = predictJobs(ctx());
-      expect(specs.map((s) => [s.queue, s.cron, s.missed])).toEqual([['ledger.sweep', '40 * * * *', undefined], ['ledger.snapshot', '45 3 * * *', 'once']]);
-      expect([SWEEP_CRON, SNAPSHOT_CRON]).toEqual(['40 * * * *', '45 3 * * *']);
+      expect(specs.map((s) => [s.queue, s.cron, s.missed])).toEqual([
+        ['forecast.series', '30 3 * * *', 'once'], ['forecast.run', '50 3 * * *', 'once'], ['ledger.sweep', '40 * * * *', undefined], ['ledger.snapshot', '45 3 * * *', 'once'],
+      ]);
+      expect([SERIES_CRON, SWEEP_CRON, SNAPSHOT_CRON, FORECAST_CRON]).toEqual(['30 3 * * *', '40 * * * *', '45 3 * * *', '50 3 * * *']);
       for (const s of specs) expect(ALL_QUEUES, s.queue).toContain(s.queue);
       // They are part of the runtime's job set only when on.
       const queues = (c: JobContext) => jobSpecs(c).map((s) => s.queue);
-      expect(queues(ctx())).toEqual(expect.arrayContaining(['ledger.sweep', 'ledger.snapshot']));
-      for (const q of ['ledger.sweep', 'ledger.snapshot']) expect(queues(ctx({ predict: false })), q).not.toContain(q);
-      // The 03:40 sweep runs between the night's numbers (03:30) and the scores (03:45).
-      expect(Number(SWEEP_CRON.split(' ')[0])).toBeLessThan(Number(SNAPSHOT_CRON.split(' ')[0]));
+      const four = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot'];
+      expect(queues(ctx())).toEqual(expect.arrayContaining(four));
+      for (const q of four) expect(queues(ctx({ predict: false })), q).not.toContain(q);
+      // Yesterday's numbers, then the sweep that settles what they decide, then the scores, then today's forecasts.
+      const minute = (cron: string) => Number(cron.split(' ')[0]);
+      expect([minute(SERIES_CRON), minute(SWEEP_CRON), minute(SNAPSHOT_CRON), minute(FORECAST_CRON)]).toEqual([30, 40, 45, 50]);
     });
 
     it('do nothing until Will has turned a number on: with the switch on and no signed card, nothing is settled, run out or scored', async () => {
@@ -396,8 +400,9 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
         const unseen = await fresh.service(fresh.serviceKey(), { running: true, disabled: false }, ago(40 * DAY));
         const lapsed = await fresh.prediction({ resolverSpec: { entityId: unseen, check: 'healthy', at: 'resolveBy' } }, { madeAgo: 5 * DAY, dueAgo: 80 * HOUR });
         said.length = 0;
-        await handler('ledger.sweep');
-        await handler('ledger.snapshot');
+        for (const queue of ['forecast.series', 'ledger.sweep', 'ledger.snapshot', 'forecast.run']) await handler(queue);
+        expect((await fresh.owner(`SELECT count(*)::int AS n FROM "AuditEntry" WHERE action LIKE 'forecast.%' OR action LIKE 'ledger.%'`)).rows[0].n).toBe(0);
+        expect((await fresh.owner(`SELECT (SELECT count(*) FROM "ForecastRun")::int + (SELECT count(*) FROM "MetricPoint")::int AS n`)).rows[0].n).toBe(0);
         expect([await fresh.status(due), await fresh.status(lapsed), await fresh.status(wills)]).toEqual(['open', 'open', 'open']);
         expect(await fresh.resolution(due)).toBeUndefined();
         expect(await fresh.sweepAudits()).toEqual([]);

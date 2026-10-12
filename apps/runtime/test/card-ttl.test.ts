@@ -37,6 +37,7 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/governance/promotion.ts': { minutes: [WEEK], files: 'policy.change' },
   'apps/runtime/src/surface/act.ts': { minutes: [WEEK], files: 'a recommendation\'s action' },
   'apps/runtime/src/world/person-create.ts': { minutes: [24 * 60], files: 'world.person.create' },
+  'apps/runtime/src/predict/enable.ts': { minutes: [WEEK], files: 'forecast.series.enable, from the command line (predictions-on)' },
   // The exception: restore.drill's card, a week and two hours (the restore test runs on Sundays only).
   'apps/runtime/src/backup/nightly.ts': { minutes: [WEEK + 120, 26 * 60], files: 'backup.local, backup.offsite, restore.drill, maintenance.retention' },
 };
@@ -102,8 +103,9 @@ describe('how long a card may wait', () => {
 
   it('the bound covers the six goal and plan actions and turning predictions on, and each of them is filed for a week at most', () => {
     expect([...COVERED].sort()).toEqual(['forecast.series.enable', 'goal.abandon', 'goal.activate', 'goal.criteria_change', 'goal.done', 'goal.horizon_change', 'plan.change']);
-    // Goal and plan cards: goals/service.ts and goals/batch.ts. The predictions card: over HTTP, held to the schema.
-    for (const file of ['apps/runtime/src/goals/service.ts', 'apps/runtime/src/goals/batch.ts']) expect(Math.max(...found.get(file)!), file).toBeLessThanOrEqual(WEEK);
+    // Goal and plan cards: goals/service.ts and goals/batch.ts. The predictions card: from the command line
+    // (predict/enable.ts), and over HTTP, held to the schema.
+    for (const file of ['apps/runtime/src/goals/service.ts', 'apps/runtime/src/goals/batch.ts', 'apps/runtime/src/predict/enable.ts']) expect(Math.max(...found.get(file)!), file).toBeLessThanOrEqual(WEEK);
     const card = (ttlMinutes?: number) => CreateProposal.safeParse({
       kind: 'tool_call', origin: 'console', action: 'forecast.series.enable', args: { series: ['daily.deploys.count'], reason: [] },
       argsProvenance: { series: { source: 'will', tainted: false } }, ...(ttlMinutes === undefined ? {} : { ttlMinutes }),

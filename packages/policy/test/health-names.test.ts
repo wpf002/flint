@@ -37,6 +37,11 @@ describe('healthName', () => {
     expect(HEALTH_NAMES.ledger).toBe('Prediction Checks');
     for (const name of Object.values(HEALTH_NAMES)) expect(name.toLowerCase(), name).not.toContain('ledger');
   });
+
+  it('the nightly forecasts (P4) are a component of their own: Forecasts', () => {
+    expect(healthName('forecasts')).toBe('Forecasts');
+    expect(HEALTH_NAMES.forecasts).toBe('Forecasts');
+  });
 });
 
 describe('serviceWords', () => {

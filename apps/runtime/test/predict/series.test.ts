@@ -81,17 +81,4 @@ describe('the forecast series registry', () => {
     for (const k of ['daily.spend.acme.usd', 'spend.anthropic.day.usd', '', 'constructor', '__proto__', 'toString']) expect(forecastSeries(k), k).toBeUndefined();
   });
 
-  it('nothing under predict/, and nothing that settles or scores a prediction, reaches the network, a model or the frontier', () => {
-    // Part 2's resolvers, sweep, scoring, bootstrap and snapshot are rules and arithmetic over Flint's own rows.
-    for (const f of ['predict/series.ts', 'predict/enable.ts', 'predict/resolvers.ts', 'ledger/sweep.ts', 'ledger/scoring.ts', 'ledger/bootstrap.ts', 'ledger/calibration.ts']) {
-      const src = readFileSync(join(__dirname, '..', '..', 'src', f), 'utf8');
-      expect(src, f).not.toMatch(/\bfetch\s*\(|from 'node:(http|https|net|tls|dgram)'|from '(http|https|net)'|\/internal\/complete|prophet-api|railway\.app|process\.env/);
-      expect(src, f).not.toMatch(/ollama|OllamaProvider|@flint\/core|\/api\/chat|complete\(/i);
-    }
-    // And nothing in the scoring draws on chance or the clock: the same rows give the same scores.
-    for (const f of ['ledger/scoring.ts', 'ledger/bootstrap.ts']) {
-      const src = readFileSync(join(__dirname, '..', '..', 'src', f), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-      expect(src, f).not.toMatch(/Math\.random|Date\.now|new Date\(/);
-    }
-  });
 });

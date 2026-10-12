@@ -42,6 +42,9 @@ import { CANARY, DAY, dayStart, ledgerKit } from './ledger/kit';
 import { sweep } from '../src/ledger/sweep';
 import { appendAudit } from '../src/governance/audit';
 import { runSnapshot } from '../src/ledger/calibration';
+import { appendAudit } from '../src/governance/audit';
+import { runForecasts, runSeries } from '../src/predict/run';
+import { forecastSeries } from '../src/predict/series';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const MIN = 60_000;
@@ -591,6 +594,72 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
       // Nothing Health wrote holds a number, a series' key or a prediction's id.
       const details = (await db.healthCheck.findMany({ where: { component: 'ledger' }, select: { detail: true } })).map((c) => c.detail).join(' ');
       expect(details).not.toMatch(/31337|4242|daily\.|test\.|pd[a-z0-9]{8}/);
+    } finally {
+      await k.db.$disconnect();
+    }
+  });
+  it('forecasts (P4): off until a number is on; a missed night, a failed forecast and unrecorded numbers are said in counts; the digest leaves forecasts out of what resolves today', async () => {
+    const k = await ledgerKit(urls);
+    const on = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_PREDICT: 'on' });
+    const forecasts = async (cfg: Config, now = new Date()) => (await checkComponents({ db, config: cfg, now, sources: [] })).find((c) => c.component === 'forecasts');
+    const H = 3_600_000;
+    const at = (ms: number) => new Date(Date.now() + ms);
+    const audit = (action: string, inputs: Record<string, number>) => appendAudit(db, [{ actor: 'runtime:forecast', context: 'autonomous', kind: 'action', action, tier: 'approval', outcome: 'ok', inputs }]);
+    const backdate = async (hours: number) => {
+      await owner(`ALTER TABLE "ForecastSeries" DISABLE TRIGGER USER`);
+      await owner(`UPDATE "ForecastSeries" SET "enabledAt" = now() - make_interval(hours => $1) WHERE "on"`, [hours]).finally(() => owner(`ALTER TABLE "ForecastSeries" ENABLE TRIGGER USER`));
+    };
+    try {
+      // Whatever earlier tests turned on is turned off (no signature needed): with no number on, Forecasts is off.
+      await k.inTx((q) => q(`UPDATE "ForecastSeries" SET "on" = false WHERE "on"`), { actor: 'will:console' });
+      await db.runtimeInstance.updateMany({ where: { stoppedAt: null }, data: { stoppedAt: new Date() } });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'disabled' });
+      // A registered number, turned on, with a month of history.
+      const def = forecastSeries('daily.deploys.count')!;
+      await k.series({ key: def.key, unit: def.unit, freq: 'D', sensitivity: def.sensitivity, description: def.description });
+      await k.turnOn([def.key]);
+      expect(await forecasts(config)).toEqual({ component: 'forecasts', status: 'disabled' });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'ok', detail: 'Forecasts start tonight.' });
+      // A night goes by with no run, then two.
+      expect(await forecasts(on, at(27 * H))).toEqual({ component: 'forecasts', status: 'degraded', detail: 'Forecasts didn’t run last night.' });
+      expect(await forecasts(on, at(51 * H))).toEqual({ component: 'forecasts', status: 'down', detail: 'Forecasts haven’t run in 2 days.' });
+      // The first night: not enough history yet. That is said, and it is not a fault.
+      expect(await runForecasts({ db, tz: 'UTC' })).toMatchObject({ on: 1, waiting: 1, ran: 0 });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'ok', detail: 'Flint needs more history before it forecasts its number.' });
+      // With history, the night's run makes its forecast.
+      for (let i = 1; i <= 30; i++) await k.point(def.key, dayStart(i), CANARY + i);
+      expect(await runForecasts({ db, tz: 'UTC' })).toMatchObject({ ran: 1, waiting: 0 });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'ok', detail: 'Last night’s forecasts ran for 1 number.' });
+      // The same night again: nothing new to make, and it still reads as made.
+      expect(await runForecasts({ db, tz: 'UTC' })).toMatchObject({ ran: 0, same: 1 });
+      expect(await forecasts(on)).toMatchObject({ status: 'ok', detail: 'Last night’s forecasts ran for 1 number.' });
+      // Yesterday's numbers were not recorded (the number has been on for 30 hours and the numbers job never ran).
+      await backdate(30);
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'degraded', detail: 'Flint didn’t record yesterday’s numbers.' });
+      expect(await runSeries({ db, tz: 'UTC' })).toMatchObject({ ran: true, on: 1 });
+      expect((await forecasts(on))!.status).toBe('ok');
+      // A number that could not be built, and a forecast that failed, each in a count.
+      await audit('forecast.series.build', { on: 3, written: 2, down: 0, failed: 1 });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'degraded', detail: 'Flint couldn’t record 1 number last night.' });
+      await audit('forecast.series.build', { on: 3, written: 3, down: 0, failed: 0 });
+      await audit('forecast.local', { on: 3, ran: 1, steady: 0, same: 0, waiting: 0, capped: 0, refused: 0, failed: 2, predictions: 2 });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'degraded', detail: '2 forecasts failed last night.' });
+      await audit('forecast.local', { on: 3, ran: 2, steady: 1, same: 0, waiting: 0, capped: 0, refused: 0, failed: 0, predictions: 4 });
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'ok', detail: 'Last night’s forecasts ran for 3 numbers.' });
+      // The digest's "resolve today" count is for what Will might watch for: a forecast's own two are left out.
+      const before = (await buildDigest(db, 'UTC', new Date())).counts.due as number;
+      await k.range(def.key, dayStart(0), {}, { madeAgo: 1000, dueAgo: -MIN });
+      await k.question(def.key, dayStart(0), 'above', 5, {}, { madeAgo: 1000, dueAgo: -MIN });
+      expect((await buildDigest(db, 'UTC', new Date())).counts.due).toBe(before);
+      await k.prediction({}, { madeAgo: 1000, dueAgo: -MIN });
+      expect((await buildDigest(db, 'UTC', new Date())).counts.due).toBe(before + 1);
+      // Recorded and reported under its plain name; nothing it wrote holds a number or a key.
+      const now = new Date();
+      await recordChecks(db, await checkComponents({ db, config: on, now, sources: [] }), now);
+      expect((await healthReport(db, on, now)).components.find((c) => c.component === 'forecasts')).toMatchObject({ status: 'ok', detail: 'Last night’s forecasts ran for 3 numbers.' });
+      expect(healthName('forecasts')).toBe('Forecasts');
+      const details = (await db.healthCheck.findMany({ where: { component: 'forecasts' }, select: { detail: true } })).map((c) => c.detail).join(' ');
+      expect(details).not.toMatch(/31337|4242|daily\.|pd[a-z0-9]{8}/);
     } finally {
       await k.db.$disconnect();
     }

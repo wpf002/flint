@@ -26,7 +26,10 @@
  *    not run in 3 hours, when the database refused one of its writes, when a
  *    prediction's rule is one no resolver knows, when the night's scores are
  *    over two days old, or when a rule forbids the checks; down when no check
- *    ran in 26 hours.
+ *    ran in 26 hours;
+ *  - forecasts (P4): disabled while predictions are off or no number is on;
+ *    degraded when last night's forecasts or numbers did not run, when one
+ *    failed, or when a rule forbids forecasting; down after two nights.
  *
  * A detail is redacted and clipped to 300 characters: names and counts, never
  * a stranger's words. One audit entry per run carries the counts.
@@ -46,6 +49,7 @@ import { reviewStanding } from '../goals/review.js';
 import { activePolicies } from '../governance/proposals.js';
 import { SNAPSHOT_ACTION } from '../ledger/calibration.js';
 import { LEDGER_ACTOR, SWEEP_ACTION } from '../ledger/sweep.js';
+import { RUN_ACTION, SERIES_ACTION } from '../predict/run.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
 export interface ComponentCheck {
@@ -271,7 +275,70 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
 
   out.push(await goalReviews(d));
   out.push(await predictionChecks(d));
+  out.push(await forecasts(d));
   return out;
+}
+
+/** Last night's run is this old: it was missed (the jobs run once a night). */
+export const FORECASTS_LATE_MS = 26 * 3_600_000;
+/** Two nights were missed: down. */
+export const FORECASTS_DOWN_MS = 50 * 3_600_000;
+
+/** What Forecasts says in Settings > Health: sentences from counts, never a number a series took or a series' key. */
+export const FORECAST_HEALTH = {
+  stopped: 'A rule stops Flint from forecasting.',
+  starting: 'Forecasts start tonight.',
+  ran: (n: number) => `Last night’s forecasts ran for ${count(n, 'number')}.`,
+  waiting: (n: number) => (n === 1 ? 'Flint needs more history before it forecasts its number.' : `Flint needs more history before it forecasts its ${n} numbers.`),
+  missed: 'Forecasts didn’t run last night.',
+  down: (days: number) => `Forecasts haven’t run in ${count(days, 'day')}.`,
+  failed: (n: number) => `${count(n, 'forecast')} failed last night.`,
+  noNumbers: 'Flint didn’t record yesterday’s numbers.',
+  numbersFailed: (n: number) => `Flint couldn’t record ${count(n, 'number')} last night.`,
+} as const;
+
+/**
+ * Forecasts (P4): did last night's numbers and forecasts run? Counts only, read
+ * from the two jobs' own audit entries (one per run).
+ *  - Off while FLINT_PREDICT is off, and while no number is on.
+ *  - How long since the last run is counted from the latest of: that run, the
+ *    first turn-on, and this runtime's start (as Prediction Checks counts).
+ *  - A number without enough history yet is not a fault: it is said, as ok.
+ */
+async function forecasts(d: CheckDeps): Promise<ComponentCheck> {
+  const { db, now } = d;
+  const component = 'forecasts';
+  if (!d.config.predict) return { component, status: 'disabled' };
+  const first = await db.forecastSeries.findFirst({ where: { on: true }, orderBy: { enabledAt: 'asc' }, select: { enabledAt: true } });
+  if (!first) return { component, status: 'disabled' };
+  const policies = await activePolicies(db, now);
+  const may = (action: string) => {
+    const t = resolveTier(action, { context: 'autonomous', tainted: false, policies, now });
+    return t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action));
+  };
+  if (!may(RUN_ACTION) || !may('ledger.prediction.record')) return { component, status: 'degraded', detail: FORECAST_HEALTH.stopped };
+  const latest = (action: string) => db.auditEntry.findFirst({ where: { kind: 'action', action, at: { lte: now } }, orderBy: { at: 'desc' }, select: { at: true, inputs: true } });
+  const n = (inputs: unknown, key: string): number => {
+    const v = inputs && typeof inputs === 'object' ? (inputs as Record<string, unknown>)[key] : undefined;
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  };
+  const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+  const floor = Math.max(first.enabledAt.getTime(), instance?.startedAt.getTime() ?? 0);
+  const run = await latest(RUN_ACTION);
+  const quiet = now.getTime() - Math.max(run?.at.getTime() ?? 0, floor);
+  if (quiet > FORECASTS_DOWN_MS) return { component, status: 'down', detail: FORECAST_HEALTH.down(Math.floor(quiet / 86_400_000)) };
+  if (quiet > FORECASTS_LATE_MS) return { component, status: 'degraded', detail: FORECAST_HEALTH.missed };
+  if (!run) return { component, status: 'ok', detail: FORECAST_HEALTH.starting };
+  if (n(run.inputs, 'failed')) return { component, status: 'degraded', detail: FORECAST_HEALTH.failed(n(run.inputs, 'failed')) };
+  // Yesterday's numbers, unless a rule forbids keeping them.
+  if (may(SERIES_ACTION)) {
+    const kept = await latest(SERIES_ACTION);
+    if (now.getTime() - Math.max(kept?.at.getTime() ?? 0, floor) > FORECASTS_LATE_MS) return { component, status: 'degraded', detail: FORECAST_HEALTH.noNumbers };
+    if (kept && n(kept.inputs, 'failed')) return { component, status: 'degraded', detail: FORECAST_HEALTH.numbersFailed(n(kept.inputs, 'failed')) };
+  }
+  const made = n(run.inputs, 'ran') + n(run.inputs, 'steady') + n(run.inputs, 'same');
+  if (!made && n(run.inputs, 'waiting')) return { component, status: 'ok', detail: FORECAST_HEALTH.waiting(n(run.inputs, 'waiting')) };
+  return { component, status: 'ok', detail: FORECAST_HEALTH.ran(made) };
 }
 
 /** The hourly check has not run in this long: degraded. */

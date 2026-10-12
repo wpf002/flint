@@ -707,9 +707,11 @@ approved. Any later deploy of P3 code applies the migration again. Claude runs
 
 Predictions arrive in parts. The first part was the store and what the
 database guarantees about it. The second is Flint checking its own predictions
-(see "Checking predictions" below). Nothing is forecast yet, and nothing here
-changes what you see. Flint will forecast its own numbers on this Mac: no
-series is sent anywhere, and no part of this calls an outside service.
+(see "Checking predictions" below). The third is the numbers themselves and
+their forecasts (see "Daily numbers and forecasts"). All of it is off until you
+turn it on, and nothing here changes what you see yet. Flint forecasts its own
+numbers on this Mac: no series is sent anywhere, and no part of this calls an
+outside service.
 
 What the database now holds to, whatever the runtime's code does:
 
@@ -744,11 +746,90 @@ Both must be on before anything runs:
    and any other value is off. Off, the prediction jobs aren't scheduled at
    all. On, they're scheduled and still do nothing until the card is signed.
 2. The signed Turn On Predictions card. This is the real gate, and the database
-   enforces it. Nothing files that card for you yet: the console's panel comes
-   in a later part. Approvals already knows the card. It shows as Turn On
+   enforces it. The console's own panel for it comes in a later part. Until
+   then Claude files the card with one command, with your OK (see "Turning
+   predictions on" below), and you approve it in Approvals. Approvals already
+   knows the card. It shows as Turn On
    Predictions and names each number it covers. It says when spending or
    calendar numbers are among them, and when the local model's second opinion
    is included. It always asks on its own, with a fresh touch.
+
+### Daily numbers and forecasts
+
+Each night, for the numbers you turned on, in this order:
+
+| When | What |
+|---|---|
+| 03:30 | Yesterday's value of each number is recorded. |
+| 03:40 | The sweep checks the forecasts that value settles. |
+| 03:45 | The scores are written. |
+| 03:50 | Today's forecast of each number is made. |
+
+**The numbers.** Each is built from what Flint already holds, with no text
+read and nothing sent anywhere:
+
+| Number | What one day (or week) is |
+|---|---|
+| Anthropic, OpenAI, Perplexity, Tavily Spend | The day's last reading of that vendor's running total. |
+| Deploys | Deployments first seen, or seen with a new commit, that day. |
+| Flint, Nexus, Trident, Helm Commits | Commits in your clone that week (a count from git; it never fetches). |
+| Service Downtime | Minutes any of Flint's or Nexus's services was down that day. |
+| Open Threads | Threads open at the end of the day. It has no numbers until the Nexus source is on. |
+| Calendar Hours | Hours of events you accepted, or made, that day. All-day events and ones cancelled before they ended don't count. |
+
+A day is your local day, so a 23- or 25-hour day is one day. A number is
+written once and never rewritten. The first run fills in what Flint still has
+(up to 400 days, or 60 weeks). A day the runtime was down for more than 20
+hours is left blank, never written as zero, because nothing was watching.
+
+**The forecast.** A number needs 14 days of history (8 weeks for a weekly
+one). Flint then tries a few simple forecasters against that number's own
+past, and compares the best of them with a plain guess: the last value, the
+same weekday last week, or the recent average.
+
+- If a forecaster beats the plain guess by 5% or more, the forecast is recorded
+  as `statistical`.
+- If none does, or there's too little history to tell, it's recorded as
+  `base_rate`, and Flint's words for it are "no reliable trend".
+- Either way it records an 80% range, taken from how far off that forecaster
+  was in the past, and a yes/no question: will today be above the usual?
+- A number that hasn't changed in 28 days gets no prediction. A range of 0 to 0
+  would be right every day and flatter every score.
+
+It's arithmetic in the runtime: no outside service, no model, and the same
+numbers always give the same forecast. About 25 ms per number.
+
+**What you see.** Nothing yet. The numbers, forecasts and results are kept
+(the actions run in shadow), and the Predictions panel that shows them is the
+next part. Forecast numbers never go into chat, notes or logs.
+
+**Settings > Health** has a row, **Forecasts**. It's Off until a number is on.
+It needs a look when last night's forecasts or numbers didn't run, or when one
+failed. It's Down after two nights. A number still waiting for enough history
+is said, and isn't a fault.
+
+### Turning predictions on
+
+Two steps. Claude does the first with your OK; only you can do the second.
+
+1. Claude sets `FLINT_PREDICT=on` in `~/.flint/runtime.override.env`,
+   restarts the runtime, and files the card:
+
+   ```
+   cd ~/flint && pnpm --filter @flint/runtime predictions-on
+   ```
+
+   That files one Turn On Predictions card for all twelve numbers (or name the
+   ones you want after the command). It prints what it filed. Run again, it
+   returns the same card.
+2. You open Flint, click **Approvals** in the top bar, open **Turn On
+   Predictions**, check the numbers it names, and approve it with Touch ID. It
+   asks on its own, never in Approve All, and expires in 7 days.
+
+The first forecasts appear the night after a number has 14 days of history.
+Spend, deploys, downtime and calendar hours are filled in from what Flint
+already has, so most start that night. To turn a number off again there's no
+button yet; ask Claude, and no signature is needed.
 
 ### Checking predictions
 
@@ -876,10 +957,10 @@ check ran in 26 hours. A restart buys 70 minutes and no more: a runtime that
 restarts every few hours and never checks still reads late, then Down. What
 ran out is said beside what was checked, never as checked.
 
-**Rolling it back:** turn `FLINT_PREDICT` off. The jobs are unscheduled at the
-next start. Resolutions already written stay (a resolution is never deleted),
-and each says in its evidence that the sweep wrote it. This part has no
-database update of its own.
+**Rolling it back:** turn `FLINT_PREDICT` off. All four jobs are unscheduled
+at the next start. Resolutions, daily numbers and forecasts already written
+stay (none is ever deleted), and each resolution says in its evidence that the
+sweep wrote it. Parts 2 and 3 have no database update of their own.
 
 ### What changed on deploy
 
@@ -937,14 +1018,22 @@ action so named.
   in `packages/policy/src/claims.ts`, which keeps it out of chat's. A goal
   review's `goal_on_track` and the forecaster's `series_range` are there. The
   ledger route takes `ChatPrediction` and nothing wider.
-- **The forecaster's predictions** must carry the rule the sweep settles them
-  by, in `resolverSpec`: `{seriesKey, at, op: 'range'}` for a range and
-  `{seriesKey, at, op: 'above' | 'below', value}` for a question, where `at` is
-  the first instant of the day or week the claim is about, the same instant its
-  metric point is stored under. `resolveBy` should be when that number will be
-  there (the next morning's run), since the sweep reads a prediction only once
-  it's due.
-- **The forecaster** must write each run and its predictions at READ COMMITTED
+- **Anything else that writes a forecast's predictions** must do it as the
+  runner does (`predict/run.ts`): the rule the sweep settles them by in
+  `resolverSpec` (`{seriesKey, at, op: 'range'}` or `{seriesKey, at, op:
+  'above' | 'below', value}`, with `at` the first instant of the day or week,
+  the same instant its metric point is stored under), and a `resolveBy` of
+  when that number will be there.
+- **The Predictions panel** must show a forecast's range only through the
+  phrase table (`predict/phrasing.ts`): "about 4, with an 80% range of 2 to 6"
+  when the run beat a plain guess, "no reliable trend" when it didn't. It also
+  needs a Turn Off button (turning a number off needs no signature).
+- **The local model's estimate** (a later part) is the only file under
+  `predict/` that may reach anything, and only loopback Ollama through
+  `scopedFetch`. `test/predict/no-egress.test.ts` lists every file there and
+  must name that one.
+- **Whatever writes a run** (the runner does; the local model's estimate will)
+  must write it and its predictions at READ COMMITTED
   (the database refuses them above it). A refused run means the number was
   turned off: skip it, don't retry it. A run's provider is `local` and its
   endpoint is `local:` and a short name (`local:fc.v1`), never a URL. Its
