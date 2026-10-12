@@ -197,7 +197,18 @@ print -r -- "FLINT_DB_URL=postgresql://flint_app:planted@db.example.com:5432/fli
 mkdir -p "$stage/runtime/releases/0000000000000000000000000000000000000000"; print -r -- "planted" > "$stage/runtime/releases/0000000000000000000000000000000000000000/runtime.mjs"
 print -r -- "../../../somewhere/else" > "$stage/offsite-backups.txt"
 print -r -- '{"anything":true}' > "$stage/autonomy.json"
-tar -czf - -C "$stage" . | "$AGE" -r "$recipient" -o "$icloud/flint-20261012-0230.tar.gz.age"
+# A folder whose name tar would read as a pattern, beside files that pattern would take: only the real
+# adapters folder is asked for, by its own plain name.
+mkdir -p "$stage/brain/adapters*"; print -r -- "inside-the-star-folder" > "$stage/brain/adapters*/x.txt"
+print -r -- "taken-by-a-pattern" > "$stage/brain/adapters_note.txt"; print -r -- "not-an-adapter" > "$stage/brain/other.txt"
+# One member whose owner's name has a space in it, which would shift the size out of its column in a
+# listing by name: appended to the archive under that name before it is compressed.
+print -r -- "${(l:5000::x:):-}" > "$stage/memory/spaced-owner.txt"
+tar -cf "$fx/hostile.tar" -C "$stage" --exclude ./memory/spaced-owner.txt .
+tar -rf "$fx/hostile.tar" --uname 'a b' --gname 0 -C "$stage" ./memory/spaced-owner.txt
+check "the made-up archive really has an owner name with a space in it" 'tar -tvf "$fx/hostile.tar" | grep -q " a b  *0  *5001 .*spaced-owner.txt$"'
+gzip -c "$fx/hostile.tar" | "$AGE" -r "$recipient" -o "$icloud/flint-20261012-0230.tar.gz.age"
+rm -f "$fx/hostile.tar"
 newest_names="$("$AGE" -d -i "$key" "$icloud/flint-20261012-0230.tar.gz.age" | tar -tzf -)"
 in_newest() { local n; for n in "$@"; do print -r -- "$newest_names" | grep -qxF -- "$n" || return 1; done; }
 check "the newest archive carries the secrets a rebuild must leave out" 'in_newest ./secrets.env ./token ./google/token.json ./enroll-code'
@@ -271,6 +282,8 @@ check "the data folder and everything secret in it is its owner's alone" '[ "$(s
 check "every settings and token file is its owner's alone" '! find "$ndata" -maxdepth 1 -name "*.env" -perm +077 | grep -q . && ! find "$ndata/tokens" -type f -perm +077 | grep -q .'
 check "a program in the backup is not unpacked at all, and nothing that was unpacked can run" '[ ! -e "$ndata/bin" ] && ! find "$ndata/memory" "$ndata/training" "$ndata/eval" "$ndata/brain" -type f -perm +111 | grep -q .'
 check "only your data was unpacked: nothing else the archive held is there" '[ ! -e "$ndata/autonomy.json" ] && [ ! -e "$ndata/offsite-backups.txt" ] && [ ! -e "$ndata/planted.env" ] && [ ! -e "$ndata/runtime/releases/0000000000000000000000000000000000000000" ]'
+check "a folder named like a pattern is not asked for, and takes nothing beside it" '[ ! -e "$ndata/brain/adapters_note.txt" ] && [ ! -e "$ndata/brain/other.txt" ] && [ -z "$(find "$ndata/brain" -name "x.txt")" ] && [ "$(ls "$ndata/brain")" = adapters ]'
+check "a member whose owner has a space in its name is restored like any other" '[ "$(stat -f %z "$ndata/memory/spaced-owner.txt")" = 5001 ]'
 check "the planted connector list was never read: nothing it names was run" '[ ! -e "$fx/the-planted-connector-ran" ] && ! grep -rq "the-planted-connector-ran" "$ndata" 2>/dev/null'
 check "the planted settings file was not unpacked: the database settings are this rebuild own" '! grep -rq "db.example.com" "$ndata" && ! grep -rq "PLANTED_SETTING" "$ndata"'
 check "future backups are encrypted to your key, worked out from the key itself, not the one in the archive" '[ "$(<"$ndata/backup-age-recipient")" = "$recipient" ] && ! grep -rqF -- "$FORGED_RECIPIENT" "$nhome" && [ "$(stat -f %Lp "$ndata/backup-age-recipient")" = 600 ]'
@@ -306,7 +319,7 @@ check "and in the runtime's" 'grep -qx "FLINT_RUNTIME_TRIAGE=off" "$ndata/runtim
 check "and in the server's LaunchAgent" '[ "$(pget "$nagents/com.flint.server.plist" OLLAMA_MODEL)" = "fixture-model:1b" ] && [ "$(pget "$nagents/com.flint.server.plist" OLLAMA_NUM_CTX)" = 4096 ] && [ "$(pget "$nagents/com.flint.server.plist" FLINT_BUDGET_ANTHROPIC_DAILY_USD)" = 5 ]'
 check "and in the local model's" '[ "$(pget "$nagents/com.flint.ollama.plist" OLLAMA_KEEP_ALIVE)" = 24h ]'
 check "the runtime got the restored model and spend cap through its installer" 'grep -qx "FLINT_TRIAGE_MODEL=fixture-model:1b" "$ndata/runtime.env" && grep -qx "FLINT_BUDGET_ANTHROPIC_DAILY_USD=5" "$ndata/runtime.env"'
-check "a rehearsal never points at the real Flint: its server port, runtime and model address are its own" '[ "$(pget "$nagents/com.flint.server.plist" PORT)" = "$sport" ] && grep -qx "FLINT_RUNTIME_URL=http://\[::1\]:$rport" "$ndata/secrets.env" && [ "$(pget "$nagents/com.flint.server.plist" OLLAMA_HOST)" = "http://127.0.0.1:9" ] && ! grep -q "8090" "$ndata/secrets.env"'
+check "a rehearsal never points at the real Flint: its server port, runtime and model address are its own" '[ "$(pget "$nagents/com.flint.server.plist" PORT)" = "$sport" ] && grep -qx "FLINT_RUNTIME_URL=http://\[::1\]:$rport" "$ndata/secrets.env" && [ "$(pget "$nagents/com.flint.server.plist" OLLAMA_HOST)" = "http://127.0.0.1:9" ] && ! grep -qx "FLINT_RUNTIME_URL=http://\[::1\]:8090" "$ndata/secrets.env"'
 check "the backup settings are back, with this home folder in the path" 'grep -qxF "FLINT_OFFSITE_DIR=$nhome/Library/Mobile Documents/com~apple~CloudDocs/FlintBackups/pg" "$ndata/backup.env"'
 check "it says how many settings it put back, and each one by name and value" '[[ "$out" == *"Flint put back "*" of your settings:"* && "$out" == *$'"'"'\n'"'"'"  FLINT_TIER_HARD is openai:gpt-5."* && "$out" == *"  OLLAMA_MODEL is fixture-model:1b."* && "$out" == *"  FLINT_RUNTIME_TRIAGE is off."* ]]'
 check "it names the outside account that had a key, and where to revoke it" '[[ "$out" == *"Anthropic: revoke the old key at console.anthropic.com"* && "$out" == *"Connectors: the list of connectors holds keys"* ]]'
@@ -461,6 +474,21 @@ check "and nothing was written outside that way either" '[ -z "$(ls -A "$fx/esca
 rm -f "$ic5"/*; mkdir -p "$fx/evil3"; print -r -- one > "$fx/evil3/x1"; print -r -- two > "$fx/evil3/x2"
 tar -czf - -C "$fx/evil3" -s ',^x1$,memory/Knowledge.json,' -s ',^x2$,memory/knowledge.json,' x1 x2 | "$AGE" -r "$recipient" -o "$ic5/flint-20261012-0230.tar.gz.age"
 refused "an archive with two names that differ only in case is refused" "There is no files backup Flint can open in that folder." --unseal "$fx/b5e" --offsite "$ic5" --key "$key" --without-database
+# The size an archive unpacks to, counted by the rebuild's own check (read out of the script, with a cap small
+# enough to reach here): the same whoever the archive says owns its files. An owner's name with a space in it
+# once moved the size out of its column, and such a file counted for nothing.
+eval "$(sed -n '/^archive_is_safe() {$/,/^}$/p' "$rebuild")"
+typeset -ga ARCHIVE_NAMES; ARCHIVE_BYTES=0 ARCHIVE_MAX_FILES=2000000 ARCHIVE_MAX_BYTES=0
+mkdir -p "$fx/sized/memory"; print -r -- "${(l:5000::x:):-}" > "$fx/sized/memory/big.txt"
+tar -czf "$fx/sized-plain.tar.gz" -C "$fx/sized" .
+tar -czf "$fx/sized-spaced.tar.gz" --uname 'a b' --gname 0 -C "$fx/sized" .
+check "the second made-up archive names its owner with a space" 'tar -tvzf "$fx/sized-spaced.tar.gz" | grep -q " a b  *0  *5001 "'
+for owner in plain spaced; do
+  ARCHIVE_MAX_BYTES=6000
+  check "an archive's size is counted whoever owns its files ($owner)" 'archive_is_safe "$fx/sized-$owner.tar.gz" && [ "$ARCHIVE_BYTES" = 5001 ]'
+  ARCHIVE_MAX_BYTES=4000
+  check "and one over the cap is refused ($owner)" '! archive_is_safe "$fx/sized-$owner.tar.gz"'
+done
 # A settings file tucked inside one of the folders a rebuild does unpack: caught on the disk, after unpacking,
 # and what was unpacked is removed.
 ic7="$fx/icloud7/FlintBackups"; mkdir -p "$ic7" "$fx/evil4/memory"

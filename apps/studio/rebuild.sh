@@ -258,7 +258,8 @@ archive_is_safe() {
   local -A seen
   local i link name total=0 size
   ARCHIVE_NAMES=() ARCHIVE_BYTES=0
-  kinds=("${(@f)$(/usr/bin/tar -tvzf "$1" 2>/dev/null)}") || return 1
+  # Owners as numbers: a name is the archive's own words, and one with a space in it would shift every column after it.
+  kinds=("${(@f)$(/usr/bin/tar --numeric-owner -tvzf "$1" 2>/dev/null)}") || return 1
   names=("${(@f)$(/usr/bin/tar -tzf "$1" 2>/dev/null)}") || return 1
   (( ${#names} > 0 && ${#names} == ${#kinds} && ${#names} <= ARCHIVE_MAX_FILES )) || return 1
   for (( i = 1; i <= ${#names}; i++ )); do
@@ -281,7 +282,9 @@ archive_is_safe() {
     [[ ${kinds[i][1]} == l ]] && links+=("${name:l}")
     if [[ ${kinds[i][1]} == - ]]; then
       fields=(${=kinds[i]})
-      size=${fields[5]:-0}
+      # mode, links, owner, group, size: the owner and the group are numbers here, so the fifth column is the size.
+      [[ ${fields[3]:-} == <-> && ${fields[4]:-} == <-> ]] || return 1
+      size=${fields[5]:-}
       [[ $size == <-> ]] || return 1
       total=$(( total + size ))
     fi
@@ -911,19 +914,28 @@ mkdir -p -m 700 "$DATA" && chmod 700 "$DATA" && : > "$MARKER" || refuse "Flint c
 # settings file, a connector list, a token or a program in it is simply never unpacked, whatever
 # case its name is written in. The names are matched exactly as written here.
 UNPACK=(memory training eval spend notifications.json settings-snapshot.tsv)   # and the adapters folders under brain
+# tar reads each name it is given as a pattern, so no name is ever taken from the archive as it is written
+# there: the top-level names are the words above, and an adapters folder is asked for only when its name
+# is `adapters` and at most forty more plain characters (a folder called `adapters*` would ask for every
+# file beside it).
 typeset -a wanted_members left_out
 for name in $ARCHIVE_NAMES; do
   top=${name%%/*}
   if (( ${UNPACK[(Ie)$top]} )); then
     wanted_members+=("./$top")
-  elif [[ $name == brain/adapters*/* ]]; then
-    wanted_members+=("./brain/${${name#brain/}%%/*}")
+  elif [[ $name == brain/*/* ]]; then
+    part=${${name#brain/}%%/*}
+    [[ $part =~ '^adapters[A-Za-z0-9._-]{0,40}$' ]] && wanted_members+=("./brain/$part")
   elif [[ $top != brain && $top =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$' ]]; then
     left_out+=("$top")
   fi
 done
 wanted_members=(${(u)wanted_members})
 left_out=(${(u)left_out})
+# Said once more where it is used: nothing asked of tar holds a character it would read as a pattern.
+for member in $wanted_members; do
+  [[ $member =~ '^\./(brain/)?[A-Za-z0-9._-]{1,60}$' ]] || refuse "The files backup holds a name Flint will not ask for, so it stopped."
+done
 free_kb="$(/bin/df -k "$DATA" 2>/dev/null | awk 'NR == 2 { print $4 }')"
 [[ $free_kb == <-> ]] && (( free_kb * 1024 > ARCHIVE_BYTES + 1024 * 1024 * 1024 )) || refuse "$MAC does not have room for what the backup holds. Free some space, then run this again."
 if (( ${#wanted_members} )); then
