@@ -381,6 +381,29 @@ describe('the encrypted copies offsite', () => {
       expect(j.warned).toEqual([]);
     });
 
+    it('the row counts go offsite beside their dump, encrypted the same way, and are pruned with it; a night that cannot send them still has its copy', async () => {
+      const j = job();
+      for (let n = 1; n <= 9; n++) {
+        writeFileSync(join(j.f.dumps, night(n)), `PLAINTEXT ${n}`);
+        writeFileSync(join(j.f.dumps, `${night(n)}.counts.json`), '{"public.\\"Proposal\\"": 4}');
+        await j.run();
+      }
+      const there = readdirSync(j.f.offsite).sort();
+      // Seven copies, each with its counts; the two oldest and THEIR counts are gone.
+      expect(there).toEqual([3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`${night(n)}.age`, `${night(n)}.counts.json.age`]).sort());
+      for (const name of there) expect(readFileSync(join(j.f.offsite, name), 'utf8'), name).toBe(SEALED);
+      // Only copies are counted and recorded: a counts file is never mistaken for one.
+      expect(manifestOf(j.f)).toEqual([3, 4, 5, 6, 7, 8, 9].map((n) => `${night(n)}.age`));
+      expect(j.rows).toHaveLength(9);
+      expect(j.warned).toEqual([]);
+      // A dump with no counts beside it is sent as it is.
+      writeFileSync(join(j.f.dumps, night(10)), 'PLAINTEXT 10');
+      await j.run();
+      expect(existsSync(join(j.f.offsite, `${night(10)}.age`))).toBe(true);
+      expect(existsSync(join(j.f.offsite, `${night(10)}.counts.json.age`))).toBe(false);
+      expect(j.warned).toEqual([]);
+    });
+
     it('heals a lost manifest from its own rows, whatever way the folder is written (a trailing slash is the same folder)', async () => {
       const j = job();
       const slashed = job({ offsiteDir: `${j.f.offsite}/`, offsiteManifest: j.f.manifest, dumpDir: j.f.dumps });
