@@ -885,7 +885,7 @@ model Task {
   status             String      @default("proposed") // proposed|queued|dispatched|running|submitted|checking|accepted|rejected|failed|cancelled
   dispatchApprovalId String?
   externalJobId      String?
-  outputRef          String? // out:<digest prefix> (TaskOutput), or an item's ref
+  outputRef          String? // out:<the start of its TaskOutput's digest, 12 characters or more>
   outputSummary      String? // <= 1,000, redacted, always shown as outside text
   metBar             Boolean?
   barEvidence        Json? // [{id, met, by}]
@@ -898,6 +898,7 @@ model Task {
   attempts           Int         @default(0)
   failure            String? // a class, never words
   dispatchedAt       DateTime?   @db.Timestamptz(3) // set by the trigger
+  submittedAt        DateTime?   @db.Timestamptz(3) // set by the trigger: when its result was handed in
   dueAt              DateTime?   @db.Timestamptz(3)
   completedAt        DateTime?   @db.Timestamptz(3) // set by the trigger
   textPurgedAt       DateTime?   @db.Timestamptz(3)
@@ -971,6 +972,4 @@ model TaskApprovalUse {
   action     String
   xact       String // the transaction that used it (its id and when it began)
   usedAt     DateTime @default(now()) @db.Timestamptz(3) // set by the binding: the wall clock
-
-  @@index([subject, usedAt])
 }

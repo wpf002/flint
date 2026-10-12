@@ -14,9 +14,11 @@
 -- it was signed), and then run it again. plan_step_guard goes back to P3's own
 -- body, to the letter (copied from 20261009000000_p3_goals; the round-trip test
 -- compares them): a step that is a Flint task is then held by nothing but the
--- console, as before P5. It also removes its own row from _prisma_migrations, so
--- the next deploy re-applies it. Every statement tolerates a half-applied state,
--- and an empty database.
+-- console, as before P5. The time on an approval is again whatever the role
+-- that records it sends (Approval_clock goes; the server sends none, so the
+-- column's default dates it). It also removes its own row from
+-- _prisma_migrations, so the next deploy re-applies it. Every statement
+-- tolerates a half-applied state, and an empty database.
 
 -- Nothing is dropped while a card of this migration's could still act: its one use is on record only in a
 -- table this drops. (Looked at only where both tables are there: an empty or half-applied database has none.)
@@ -109,12 +111,13 @@ DROP TRIGGER IF EXISTS "Proposal_review_floor" ON "Proposal";
 DROP TRIGGER IF EXISTS "Proposal_p5_digest_check" ON "Proposal";
 DROP TRIGGER IF EXISTS "Entity_forgotten_p5" ON "Entity";
 DROP TRIGGER IF EXISTS "Resolution_for_task" ON "Resolution";
+DROP TRIGGER IF EXISTS "Approval_clock" ON "Approval";
 ALTER TABLE IF EXISTS "Proposal" DROP CONSTRAINT IF EXISTS "Proposal_reviewId_fkey", DROP COLUMN IF EXISTS "reviewId", DROP COLUMN IF EXISTS "reviewRequired";
 DROP TABLE IF EXISTS "TaskOutput", "Task", "Asset", "Review", "ReviewGate", "TaskApprovalUse" CASCADE;
 DROP FUNCTION IF EXISTS p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text), p5_digest_check(), p5_card_valid(),
   asset_insert_check(), asset_guard(), task_insert_check(), task_guard(), task_valid(), task_output_guard(), review_insert_check(),
   review_guard(), review_valid(), review_gate_guard(), proposal_review_floor(), proposal_review_guard(), entity_forgotten_p5(),
-  resolution_task_check(), task_step_undone() CASCADE;
+  resolution_task_check(), task_step_undone(), approval_clock() CASCADE;
 DO $$
 DECLARE
   q text;

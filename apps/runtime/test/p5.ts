@@ -20,7 +20,7 @@ export interface CardOptions {
   templateId?: string | null;
   tainted?: boolean;
   sensitivity?: string;
-  /** The card's own-touch mark (default: true for a policy card, as the runtime files one). */
+  /** The card's own-touch mark (default: true for a policy card and for a policy change, as the runtime files them). */
   consequential?: boolean;
   destructive?: boolean;
   estCostUsd?: number | null;
@@ -125,16 +125,20 @@ export async function p5Kit(urls: TestUrls) {
   const outcome = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string; message?: string }) => e.code ?? e.message);
   const one = async (sql: string, params?: unknown[], q: Q = app) => (await q(sql, params)).rows[0];
 
-  /** Will's signed approval of a card, as the server records it after verifying his signature. */
-  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string } = {}): Promise<string> {
+  /**
+   * Will's signed approval of a card, as the server records it after verifying his signature. `at` is a time to
+   * send as when it was signed (SQL; the server never sends one), and `as` the role that writes the row.
+   */
+  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string; at?: string; as?: Q } = {}): Promise<string> {
     const aid = id('appr');
     const expires = (await owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
     const payload = {
       v: 1, subjectType: o.subjectType ?? 'proposal', subjectId: pid, decision: o.decision ?? 'approve', action, argsDigest: digest,
       ...(o.fields ? { fields: o.fields } : {}), expiresAt: expires, nonce: HEX('0').slice(0, 32),
     };
-    await approver(
-      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt") VALUES ($1, $2, $3, $4, $5, $6, $7, '\\x01', $8)`,
+    await (o.as ?? approver)(
+      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt"${o.at ? ', "createdAt"' : ''})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, '\\x01', $8${o.at ? `, ${o.at}` : ''})`,
       [aid, payload.subjectType, pid, payload.decision, JSON.stringify(payload), HEX('c'), o.credential ?? credentialId, expires],
     );
     return aid;
@@ -150,13 +154,13 @@ export async function p5Kit(urls: TestUrls) {
       `INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, consequential, "estCostUsd", "expiresAt")
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, '{}', $8, $9, $10, $11, $12, now() + $13::interval)`,
       [pid, o.kind ?? (policy ? 'policy' : 'task'), origin, action, o.templateId === undefined ? (origin.startsWith('runtime:') ? 'p5.test' : null) : o.templateId,
-        JSON.stringify(args), digest, o.tainted ?? false, o.sensitivity ?? 'ops', o.destructive ?? false, o.consequential ?? policy, o.estCostUsd ?? null, o.life ?? '1 hour'],
+        JSON.stringify(args), digest, o.tainted ?? false, o.sensitivity ?? 'ops', o.destructive ?? false, o.consequential ?? (policy || action === 'policy.change'), o.estCostUsd ?? null, o.life ?? '1 hour'],
     );
     return { pid, digest };
   }
-  /** A card as far as `stage` says (default: signed and executing, never completed). */
-  async function card(action: string, args: Record<string, unknown>, o: CardOptions = {}): Promise<{ pid: string; aid: string }> {
-    const { pid, digest } = await file(action, args, o);
+  /** Will signs a filed card, and it goes as far as `stage` says (default: executing, never completed). */
+  async function sign(filed: { pid: string; digest: string }, action: string, o: CardOptions = {}): Promise<{ pid: string; aid: string }> {
+    const { pid, digest } = filed;
     const aid = await approval(pid, action, digest, { ...(o.credential ? { credential: o.credential } : {}), ...(o.fields ? { fields: o.fields } : {}) });
     if (o.stage === 'pending') return { pid, aid };
     await app(`UPDATE "Proposal" SET status = 'approved', "approvalId" = $2 WHERE id = $1`, [pid, aid]);
@@ -165,6 +169,20 @@ export async function p5Kit(urls: TestUrls) {
     if (o.stage === 'executed') await finish(pid);
     return { pid, aid };
   }
+  /** A card as far as `stage` says (default: signed and executing, never completed). */
+  const card = async (action: string, args: Record<string, unknown>, o: CardOptions = {}) => sign(await file(action, args, o), action, o);
+  /**
+   * One transaction as the owner with one of Proposal's triggers set aside in it: what `fn` files there is as a
+   * card could have been filed were that rule not there. One transaction, so a run that is killed half way
+   * leaves the trigger on.
+   */
+  const without = <T>(trigger: string, fn: (q: Q) => Promise<T>): Promise<T> => inTx(async (q) => {
+    const name = trigger.replace(/[^A-Za-z0-9_]/g, '');
+    await q(`ALTER TABLE "Proposal" DISABLE TRIGGER "${name}"`);
+    const r = await fn(q);
+    await q(`ALTER TABLE "Proposal" ENABLE TRIGGER "${name}"`);
+    return r;
+  }, { url: urls.owner });
   const finish = (pid: string) => app(`UPDATE "Proposal" SET status = 'executed', "executedAt" = now() WHERE id = $1`, [pid]);
   const used = async (aid: string) => (await owner(`SELECT count(*)::int AS n FROM "TaskApprovalUse" WHERE "approvalId" = $1`, [aid])).rows[0].n as number;
 
@@ -223,16 +241,21 @@ export async function p5Kit(urls: TestUrls) {
     taskId: t.id, assetId: t.assetId, assetKind, title: t.title, spec: t.spec, acceptance: t.acceptance, goalId: t.goalId, stepKey: t.stepKey, dueAt: t.dueAt,
     sensitivity: t.sensitivity, tainted: t.tainted, estCostMicros: Math.round(t.estCostUsd * 1_000_000), ...over,
   });
-  /** The forecast a dispatch records: an open assets prediction that the task meets its bar, from the tasks writer. */
+  /**
+   * The forecast a dispatch records: an open assets prediction that the task meets its bar, from the tasks writer,
+   * carrying the rule that says whose it is to settle (`taskId`: this task's). Without a task it carries no rule,
+   * unless `resolverSpec` gives one.
+   */
   async function forecast(over: Record<string, unknown> = {}, q: Q = app): Promise<string> {
     const v: Record<string, unknown> = {
       id: id('pd'), claim: 'task_meets_bar {task: task#000000}', probability: 0.5, method: 'base_rate', domain: 'assets', type: 'task_meets_bar',
       resolver: 'auto_world', resolveIn: '7 days', createdBy: 'runtime:tasks', ...over,
     };
+    const spec = 'resolverSpec' in v ? v.resolverSpec : v.taskId ? { taskId: v.taskId, rule: 'task_meets_bar' } : null;
     await q(
-      `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdBy")
-       VALUES ($1, $2, 'binary', $3, $4, $5, $6, '[]', 'The task is accepted.', $7, now() + $8::interval, $9)`,
-      [v.id, v.claim, v.probability, v.method, v.domain, v.type, v.resolver, v.resolveIn, v.createdBy],
+      `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolverSpec", "resolveBy", "createdBy")
+       VALUES ($1, $2, 'binary', $3, $4, $5, $6, '[]', 'The task is accepted.', $7, $8::jsonb, now() + $9::interval, $10)`,
+      [v.id, v.claim, v.probability, v.method, v.domain, v.type, v.resolver, spec === null ? null : JSON.stringify(spec), v.resolveIn, v.createdBy],
     );
     return v.id as string;
   }
@@ -241,7 +264,7 @@ export async function p5Kit(urls: TestUrls) {
   /** Dispatch a task under its own signed card, with its forecast, in one transaction; the card then completes. */
   async function dispatch(t: TaskRow, a: AssetRow, o: CardOptions = {}): Promise<{ pid: string; aid: string; predictionId: string }> {
     const c = await card(a.dispatchAction, dispatchArgs(t, a.kind), { sensitivity: t.sensitivity, tainted: t.tainted, ...(a.spends ? { kind: 'spend', estCostUsd: t.estCostUsd } : {}), ...o });
-    const predictionId = await forecast();
+    const predictionId = await forecast({ taskId: t.id });
     await queue(app, t.id, c.aid, predictionId);
     await finish(c.pid);
     return { ...c, predictionId };
@@ -378,7 +401,7 @@ export async function p5Kit(urls: TestUrls) {
   }
 
   return {
-    urls, app, owner, approver, credentialId, client, on, inTx, code, outcome, one, approval, file, card, finish, used,
+    urls, app, owner, approver, credentialId, client, on, inTx, code, outcome, one, approval, file, sign, card, without, finish, used,
     asset, enableArgs, switchOn, switchOff, turnOn, onAsset, reviewer,
     task, dispatchArgs, forecast, queue, dispatch, setStatus, outputDigest, putOutput, proof, taskAt, acceptArgs, endedAgo, accept,
     reviewFields, review, reviewed, approve, setGate, gate, enforce, planStep, goalWithPlan, entity, forget,

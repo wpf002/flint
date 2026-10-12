@@ -94,7 +94,7 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
       // The dispatch: one transaction holds the forecast, the move and the card's completion.
       const c = await k.card(a.dispatchAction, k.dispatchArgs(t, a.kind));
       const fid = await k.inTx(async (q) => {
-        const f = await k.forecast({}, q);
+        const f = await k.forecast({ taskId: t.id }, q);
         await k.queue(q, t.id, c.aid, f);
         await q(`UPDATE "Proposal" SET status = 'executed', "executedAt" = now() WHERE id = $1`, [c.pid]);
         return f;

@@ -5,17 +5,20 @@
 --  - an asset is born off, and is turned on only as the exact asset of a card
 --    Will signed, in one transaction; turning it off needs nothing;
 --  - a card he signed earlier never undoes what he decided after it: an
---    approval older than the last change to an asset or to the review
---    requirement, or than the newest use on record for a task, decides nothing;
+--    approval decides nothing once he has signed a later card about the same
+--    asset, task or review requirement, whichever is carried out first, nor
+--    does one signed before its asset was last turned off; when he signed is
+--    stamped by the database, not by the role that records it;
 --  - a task is handed over only as the exact task of an executing dispatch card
 --    he signed (its digest checked, its approval used once), with its forecast
---    on record; a spending asset's task rides a spend card that carries its
---    estimate, and ends with its cost;
---  - a task is accepted only with its own successful check on record, and on
---    Will's signed card (which names the result it accepts) until he lets Flint
---    accept on its own; going against the check, and cancelling what went out,
---    each take a signed card; its forecast is scored only a day after it ended,
---    as it ended, so nothing closes the door on his override before then;
+--    on record, naming it and the rule that settles it; a spending asset's task
+--    rides a spend card that carries its estimate, and ends with its cost;
+--  - a task is checked and accepted only with its result on record and its own
+--    successful check, and on Will's signed card (which names that result, and
+--    was signed after it was handed in) until he lets Flint accept on its own;
+--    going against the check, and cancelling what went out, each take a signed
+--    card; its forecast is scored only for it, a day after it ended, as it
+--    ended, so nothing closes the door on his override before then;
 --  - a review is written once, while a reviewer is on, of exactly the args of a
 --    card still waiting (or of a task's output as it is checked); once Will has
 --    signed for it, a card that needs a review is not approved without one, and
@@ -25,9 +28,12 @@
 -- Task and review text is personal or outside text: history keeps only its
 -- length, and a row refused on INSERT or UPDATE never puts it in the error's
 -- message or DETAIL; nor does a card of any kind that one of Proposal's own
--- rules refuses. A forget clears all of it, and nothing is written back. Also the four task and review job queues (nothing sends to
--- them yet). It replaces P3's plan_step_guard (one rule added, near the end of
--- this file). The only P5 migration. Reversed by down.sql in this directory.
+-- rules refuses. A forget clears all of it, a write in flight included, and
+-- no output, review or result is written back. Also the four task and review
+-- job queues (nothing sends to them yet). It replaces P3's plan_step_guard (one
+-- rule added, near the end of this file), and stamps the time on each approval
+-- (Approval_clock). The only P5 migration. Reversed by down.sql in this
+-- directory.
 
 -- AlterTable
 ALTER TABLE "Proposal" ADD COLUMN     "reviewId" TEXT,
@@ -80,6 +86,7 @@ CREATE TABLE "Task" (
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "failure" TEXT,
     "dispatchedAt" TIMESTAMPTZ(3),
+    "submittedAt" TIMESTAMPTZ(3),
     "dueAt" TIMESTAMPTZ(3),
     "completedAt" TIMESTAMPTZ(3),
     "textPurgedAt" TIMESTAMPTZ(3),
@@ -169,9 +176,6 @@ CREATE UNIQUE INDEX "Review_overridePredictionId_key" ON "Review"("overridePredi
 
 -- CreateIndex
 CREATE INDEX "Review_subjectType_subjectId_idx" ON "Review"("subjectType", "subjectId");
-
--- CreateIndex
-CREATE INDEX "TaskApprovalUse_subject_usedAt_idx" ON "TaskApprovalUse"("subject", "usedAt");
 
 -- CreateIndex
 CREATE INDEX "Proposal_reviewId_idx" ON "Proposal"("reviewId");
@@ -310,12 +314,15 @@ $$;
 -- callers, and flint_app can create none): a call of its own can neither spend a
 -- card nor fill the table. Every caller is a BEFORE UPDATE trigger, which fires
 -- only for a row that is then written (or the statement fails, and the use goes
--- with it): an approval is used only by a change that lands. Order counts too:
--- an approval signed before the newest use on record for the same subject (a
--- card Will signed earlier and the runtime kept) decides nothing, so an older
--- card never undoes what a later one did. Each use is stamped by the wall
--- clock. SECURITY DEFINER: flint_app has no grant on TaskApprovalUse, so it can
--- only use an approval, never free one.
+-- with it): an approval is used only by a change that lands. Order counts too,
+-- and it is the order Will signed in, not the order the runtime applies cards
+-- in: an approval decides nothing once he has signed a later card about the
+-- same asset, task or gate, whichever of the two is carried out first. So the
+-- later signature wins, and a card kept back never undoes it. (When he signed
+-- is the database's to say: Approval_clock, below. Two signed in the same
+-- millisecond are ordered by id, so one of them still wins both ways.)
+-- SECURITY DEFINER: flint_app has no grant on TaskApprovalUse, so it can only
+-- use an approval, never free one.
 CREATE FUNCTION p5_bind_approval(p_approval text, p_key text, p_subject text, p_action text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -337,11 +344,33 @@ BEGIN
   IF NOT coalesce(u."xact" = me AND u."subject" = subj AND u."action" = p_action, false) THEN
     RAISE EXCEPTION '% %: approval % was already used', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
-  -- Signed before the newest use on record for this subject (by another approval): the later decision stands.
+  -- Will has since signed another card about the same asset, task or gate: the later signature stands, applied or not.
   SELECT a."createdAt" INTO signed_at FROM "Approval" a WHERE a."id" = p_approval;
-  IF EXISTS (SELECT 1 FROM "TaskApprovalUse" o WHERE o."subject" = subj AND o."approvalId" <> p_approval AND o."usedAt" >= signed_at) THEN
+  IF EXISTS (
+       SELECT 1 FROM "Approval" b JOIN "Proposal" c ON c."id" = b."subjectId"
+       WHERE b."subjectType" = 'proposal' AND b."decision" = 'approve' AND (b."createdAt", b."id") > (signed_at, p_approval)
+         AND b."payload"->>'action' = c."action" AND b."payload"->>'argsDigest' = c."argsDigest"
+         AND jsonb_typeof(c."args") = 'object' AND c."args"->>p_key = p_subject
+         AND CASE p_key WHEN 'assetId' THEN c."action" = 'asset.enable' WHEN 'gate' THEN c."action" = 'review.enforce'
+               ELSE c."action" LIKE 'task.%' OR c."action" IN ('review.local', 'review.trident_panel', 'hive.dispatch_job') END) THEN
     RAISE EXCEPTION '% %: approval % was signed before a later decision', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
+END;
+$$;
+
+-- ---- When Will signed ---------------------------------------------------------------
+-- The order rules above, and the rule that a review comes before the signature
+-- that names it, compare when an approval was recorded. That time is stamped
+-- here, by the wall clock, for every role but the owner (a restore, a test's
+-- fixture): the server's role, which records approvals, cannot date one into the
+-- past or the future. Named to fire before P1's Approval_insert_check.
+CREATE FUNCTION approval_clock() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF current_user <> 'flint_owner' THEN
+    NEW."createdAt" := clock_timestamp();
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -370,7 +399,10 @@ $$;
 -- p5_digest_check has one. It refuses nothing the constraints allow, but for
 -- two rules about money that hold for a card as it is filed and for no card
 -- that is already there: an estimate is never negative, and a spend card says
--- an estimate above nothing.
+-- an estimate above nothing. One rule more, for the cards this migration acts
+-- on: a card whose args a forget cleared while it ran takes no result when it
+-- finishes (what it did was about what was forgotten; it still ends, and may
+-- still say why it failed).
 CREATE FUNCTION p5_card_valid() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
@@ -398,6 +430,11 @@ BEGIN
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'proposal %: its % is not valid', CASE WHEN NEW."id" ~ '^[A-Za-z0-9_-]{1,64}$' THEN NEW."id" ELSE '?' END, bad USING ERRCODE = 'check_violation';
   END IF;
+  -- (Args are cleared before a card has ended only by a forget: retention waits until it has.)
+  IF TG_OP = 'UPDATE' AND NEW."result" IS NOT NULL AND OLD."result" IS NULL AND OLD."argsPurgedAt" IS NOT NULL
+     AND (NEW."kind" IN ('task', 'spend') OR NEW."action" ~ '^(task[.]|asset[.]enable$|review[.])' OR NEW."action" = 'hive.dispatch_job') THEN
+    RAISE EXCEPTION 'proposal %: its args were cleared, so it takes no result', OLD."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -423,9 +460,10 @@ $$;
 -- externalRef, that Will turns on again), and it is never deleted. It is turned on
 -- only with a new approval whose executing asset.enable card signed exactly what
 -- it is (kind, reference, name, capabilities, dispatch action, whether it spends
--- and the item it stands for), signed after it was last turned on or off (a card
--- kept from before he turned it off does not turn it back on), used in this
--- transaction only. Turning it off needs nothing, except for the last reviewer
+-- and the item it stands for), the latest he signed for it, and signed after it
+-- was last turned on or off (turning it off needs no card, so only the asset
+-- says when that was: a card kept from before does not turn it back on), used in
+-- this transaction only. Turning it off needs nothing, except for the last reviewer
 -- while reviews are required (stop requiring them first: that is a signed card,
 -- and the one card that never waits for a review). On and off both happen at
 -- READ COMMITTED (each check reads what is committed now), and each is stamped
@@ -499,7 +537,7 @@ BEGIN
   IF NOT coalesce(NEW."status" = 'proposed' AND NEW."dispatchApprovalId" IS NULL AND NEW."externalJobId" IS NULL AND NEW."outputRef" IS NULL
                   AND NEW."outputSummary" IS NULL AND NEW."metBar" IS NULL AND NEW."barEvidence" IS NULL AND NEW."barCheckedBy" IS NULL
                   AND NEW."acceptedAuditId" IS NULL AND NEW."predictionId" IS NULL AND NEW."costUsd" IS NULL AND NEW."attempts" = 0
-                  AND NEW."failure" IS NULL AND NEW."dispatchedAt" IS NULL AND NEW."completedAt" IS NULL AND NEW."textPurgedAt" IS NULL
+                  AND NEW."failure" IS NULL AND NEW."dispatchedAt" IS NULL AND NEW."submittedAt" IS NULL AND NEW."completedAt" IS NULL AND NEW."textPurgedAt" IS NULL
                   AND NEW."spec" IS NOT NULL AND NEW."acceptance" IS NOT NULL AND NEW."estCostUsd" IS NOT NULL, false) THEN
     RAISE EXCEPTION 'task %: a task starts proposed, with its spec, its bar and its estimate, and nothing else set', NEW."id" USING ERRCODE = 'insufficient_privilege';
   END IF;
@@ -518,11 +556,12 @@ $$;
 --   proposed   -> queued      the dispatch: a new approval whose executing card (the
 --                             asset's own dispatch action) signed exactly this task,
 --                             used in this transaction only; the asset is on; its
---                             forecast is open; a spending asset's card is a spend
+--                             forecast is open and names it; a spending asset's card is a spend
 --                             card from the console carrying the same estimate, any
 --                             other a task card at no cost
 --   queued     -> dispatched  the asset is still on; the time is the wall clock's
---   ...        -> submitted   with its output's reference
+--   ...        -> submitted   with its output's reference; the time is the wall clock's
+--   submitted  -> checking    with that output on record (so is every acceptance)
 --   checking   -> accepted | rejected   as the bar check found (metBar); accepted only
 --                             with its own successful check on record, and on Will's
 --                             signed card (which names this output and that it met
@@ -613,6 +652,7 @@ BEGIN
   IF NEW."status" IS NOT DISTINCT FROM OLD."status" THEN
     IF NEW."dispatchApprovalId" IS DISTINCT FROM OLD."dispatchApprovalId" OR NEW."predictionId" IS DISTINCT FROM OLD."predictionId"
        OR NEW."acceptedAuditId" IS DISTINCT FROM OLD."acceptedAuditId" OR NEW."dispatchedAt" IS DISTINCT FROM OLD."dispatchedAt"
+       OR NEW."submittedAt" IS DISTINCT FROM OLD."submittedAt"
        OR NEW."completedAt" IS DISTINCT FROM OLD."completedAt" OR NEW."failure" IS DISTINCT FROM OLD."failure" THEN
       RAISE EXCEPTION 'task %: these change only with its status', OLD."id" USING ERRCODE = 'insufficient_privilege';
     END IF;
@@ -677,11 +717,15 @@ BEGIN
     ELSIF NOT coalesce(p."kind" = 'task' AND NEW."estCostUsd" = 0, false) THEN
       RAISE EXCEPTION 'task %: an asset that does not spend is dispatched by a task card, at no cost', OLD."id" USING ERRCODE = 'insufficient_privilege';
     END IF;
-    -- Its forecast: an open assets prediction that it meets its bar, from the tasks writer.
+    -- Its forecast: an open assets prediction that it meets its bar, from the tasks writer, carrying the rule that
+    -- says whose it is to settle: this task's (as a goal's forecast names its goal and its rule). The ledger's own
+    -- sweep settles and runs out only what is its own: a prediction with a rule it does not know is left alone,
+    -- and one with no rule at all would run out there before this task's score was due.
     PERFORM 1 FROM "Prediction" WHERE "id" = NEW."predictionId" AND "domain" = 'assets' AND "type" = 'task_meets_bar'
-      AND "createdBy" = 'runtime:tasks' AND "status" = 'open' FOR SHARE;
+      AND "createdBy" = 'runtime:tasks' AND "status" = 'open' AND "resolver" = 'auto_world'
+      AND "resolverSpec"->>'rule' = 'task_meets_bar' AND "resolverSpec"->>'taskId' = NEW."id" FOR SHARE;
     IF NOT FOUND THEN
-      RAISE EXCEPTION 'task %: dispatching it needs its open forecast', OLD."id" USING ERRCODE = 'insufficient_privilege';
+      RAISE EXCEPTION 'task %: dispatching it needs its open forecast, with its rule', OLD."id" USING ERRCODE = 'insufficient_privilege';
     END IF;
   ELSIF NEW."dispatchApprovalId" IS DISTINCT FROM OLD."dispatchApprovalId" OR NEW."predictionId" IS DISTINCT FROM OLD."predictionId" THEN
     RAISE EXCEPTION 'task %: its approval and forecast are set when it is dispatched', OLD."id" USING ERRCODE = 'insufficient_privilege';
@@ -694,6 +738,19 @@ BEGIN
     NEW."dispatchedAt" := clock_timestamp();
   ELSIF NEW."dispatchedAt" IS DISTINCT FROM OLD."dispatchedAt" THEN
     RAISE EXCEPTION 'task %: dispatchedAt is set when it is dispatched', OLD."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  -- When its result was handed in: the database's to say (an accept card counts only if signed after it).
+  IF NEW."status" = 'submitted' THEN
+    NEW."submittedAt" := clock_timestamp();
+  ELSIF NEW."submittedAt" IS DISTINCT FROM OLD."submittedAt" THEN
+    RAISE EXCEPTION 'task %: submittedAt is set when it is handed in', OLD."id" USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  -- Checked and accepted only with its result on record: its reference names the output it has (the start of that output's digest).
+  IF NEW."status" IN ('checking', 'accepted') AND NOT EXISTS (
+       SELECT 1 FROM "TaskOutput" o
+       WHERE o."taskId" = NEW."id" AND NEW."outputRef" = 'out:' || left(o."sha256", greatest(char_length(NEW."outputRef") - 4, 12))) THEN
+    RAISE EXCEPTION 'task %: it is checked and accepted only with its result on record', OLD."id" USING ERRCODE = 'insufficient_privilege';
   END IF;
 
   IF NEW."status" = 'cancelled' AND OLD."status" <> 'proposed' THEN
@@ -729,11 +786,13 @@ BEGIN
            AND NOT EXISTS (SELECT 1 FROM "ActionPolicy" ap WHERE ap."active" AND ap."expiresAt" > clock_timestamp() AND ap."tier" <> 'alone'
                            AND ap."pattern" IN ('task.check_bar', 'task.*'))) THEN
         ok := false;
-        -- The card signs what it accepts: this output, having met its bar. One signed before there was a result accepts nothing.
+        -- The card signs what it accepts: this output, having met its bar, and it was signed after the result was
+        -- handed in (a reference is the runtime's to choose: one signed before there was a result accepts nothing).
         FOR cand IN
-          SELECT "approvalId" FROM "Proposal"
-          WHERE "status" = 'executing' AND "action" = 'task.check_bar' AND "approvalId" IS NOT NULL AND "args"->>'taskId' = OLD."id"
-            AND "args"->>'outputRef' = OLD."outputRef" AND "args"->'metBar' = to_jsonb(NEW."metBar")
+          SELECT c."approvalId" FROM "Proposal" c JOIN "Approval" s ON s."id" = c."approvalId"
+          WHERE c."status" = 'executing' AND c."action" = 'task.check_bar' AND c."args"->>'taskId' = OLD."id"
+            AND c."args"->>'outputRef' = OLD."outputRef" AND c."args"->'metBar' = to_jsonb(NEW."metBar")
+            AND s."createdAt" > OLD."submittedAt"
         LOOP
           BEGIN
             PERFORM p5_bind_approval(cand, 'taskId', OLD."id", 'task.check_bar');
@@ -1047,9 +1106,9 @@ $$;
 -- Whether a card that needs a review can be approved without one. One row, made
 -- here, off. It changes only as an executing review.enforce card says (that exact
 -- value), in the transaction that uses its approval, at READ COMMITTED, and only
--- by an approval signed after it last changed (a card Will signed earlier and
--- the runtime kept does not undo his later decision); requiring reviews also
--- needs a reviewer that is on. Stamped by the wall clock.
+-- by the latest review.enforce card he signed (a card he signed earlier does
+-- not undo his later decision, whichever is carried out first); requiring
+-- reviews also needs a reviewer that is on. Stamped by the wall clock.
 CREATE FUNCTION review_gate_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
@@ -1070,9 +1129,6 @@ BEGIN
     RAISE EXCEPTION 'the review gate changes at read committed only' USING ERRCODE = 'serialization_failure';
   END IF;
   p := p5_signed_proposal(NEW."approvalId", 'gate', 'proposal', ARRAY['review.enforce']);
-  IF NOT coalesce((SELECT a."createdAt" FROM "Approval" a WHERE a."id" = NEW."approvalId") > OLD."changedAt", false) THEN
-    RAISE EXCEPTION 'the review gate: approval % was signed before it last changed', NEW."approvalId" USING ERRCODE = 'insufficient_privilege';
-  END IF;
   PERFORM p5_bind_approval(NEW."approvalId", 'gate', 'proposal', 'review.enforce');
   IF (p."args"->'enforced') IS DISTINCT FROM to_jsonb(NEW."enforced") THEN
     RAISE EXCEPTION 'the review gate: not what approval % signed', NEW."approvalId" USING ERRCODE = 'insufficient_privilege';
@@ -1266,52 +1322,96 @@ $$;
 -- that names it: the words of tasks about it (by the items they list, or by its
 -- id in their spec) and their outputs; the args of those tasks' cards (a
 -- dispatch card holds the task's title, spec and bar, and may not hold the
--- item's id at all); and the words of the reviews of those tasks, of those
--- cards, and of every card whose args name it (forget_entity clears those
--- cards' args itself, after this). Verdicts, numbers and ids stay. Nothing is
--- written back afterwards: task_output_guard and review_insert_check refuse a
--- task whose text was cleared and a card whose args are gone.
+-- item's id at all); the words of the reviews of those tasks, of those cards,
+-- and of every card whose args name it (forget_entity clears those cards' args
+-- itself, after this); and the words of each of those tasks' own forecasts, as
+-- forget_entity blanks the forecasts about the item itself (the numbers and the
+-- outcome stay). Verdicts, numbers and ids stay.
+--
+-- A write in flight does not outlive it. The cards are locked first, then the
+-- tasks (the order a dispatch takes its card and its task in): a review being
+-- written of one of those cards holds the card, and an output or a review being
+-- written of one of those tasks holds the task, so each has landed, or has not
+-- begun, before its rows are cleared; outputs go after their tasks, reviews
+-- after both. At READ COMMITTED only, so each of these statements reads what
+-- has landed by then. Afterwards task_output_guard and review_insert_check
+-- refuse a task whose text was cleared and a card whose args are gone, and
+-- p5_card_valid a result onto such a card.
 CREATE FUNCTION entity_forgotten_p5() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   tasks text[];
   cards text[];
+  forecasts text[];
 BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'entity %: it is forgotten at read committed only', NEW."id" USING ERRCODE = 'serialization_failure';
+  END IF;
   SELECT coalesce(array_agg("id"), '{}') INTO tasks FROM "Task"
   WHERE NEW."id" = ANY ("entityIds") OR ("spec" IS NOT NULL AND strpos("spec"::text, NEW."id") > 0);
   -- The cards of those tasks, and the cards that name the item themselves, while their args are still there to tell.
   SELECT coalesce(array_agg("id"), '{}') INTO cards FROM "Proposal"
   WHERE "args" IS NOT NULL AND (strpos("args"::text, NEW."id") > 0 OR "args"->>'taskId' = ANY (tasks));
-  DELETE FROM "TaskOutput" WHERE "taskId" = ANY (tasks);
+  PERFORM 1 FROM "Proposal" WHERE "id" = ANY (cards) ORDER BY "id" FOR UPDATE;
   UPDATE "Task" SET "spec" = NULL, "acceptance" = NULL, "outputSummary" = NULL, "barEvidence" = NULL, "textPurgedAt" = coalesce("textPurgedAt", now())
   WHERE "id" = ANY (tasks) AND ("spec" IS NOT NULL OR "acceptance" IS NOT NULL OR "outputSummary" IS NOT NULL OR "barEvidence" IS NOT NULL);
+  DELETE FROM "TaskOutput" WHERE "taskId" = ANY (tasks);
   UPDATE "Review" SET "attack" = NULL, "defense" = NULL, "verdictReason" = NULL, "textPurgedAt" = coalesce("textPurgedAt", now())
   WHERE ("attack" IS NOT NULL OR "defense" IS NOT NULL OR "verdictReason" IS NOT NULL)
     AND (("subjectType" = 'task' AND "subjectId" = ANY (tasks)) OR ("subjectType" = 'proposal' AND "subjectId" = ANY (cards)));
   -- A task's cards that do not name the item (forget_entity would pass them by): cleared as it clears the others.
   UPDATE "Proposal" SET "args" = NULL, "argsPurgedAt" = coalesce("argsPurgedAt", now()), "reason" = NULL, "result" = NULL, "error" = NULL
   WHERE "id" = ANY (cards) AND "args" IS NOT NULL AND "args"->>'taskId' = ANY (tasks) AND strpos("args"::text, NEW."id") = 0;
+  -- Each task's own forecast (its claim says the task), its resolution and any correction of it: blanked as forget_entity blanks them.
+  SELECT coalesce(array_agg("predictionId"), '{}') INTO forecasts FROM "Task" WHERE "id" = ANY (tasks) AND "predictionId" IS NOT NULL;
+  UPDATE "Prediction" SET "claim" = '[forgotten]', "evidence" = '[]'::jsonb, "resolutionCriteria" = '[forgotten]', "resolverSpec" = NULL, "modelConfig" = NULL
+  WHERE "id" = ANY (forecasts) AND "claim" <> '[forgotten]';
+  UPDATE "Resolution" SET "evidence" = NULL WHERE "predictionId" = ANY (forecasts) AND "evidence" IS NOT NULL;
+  UPDATE "ResolutionCorrection" SET "reason" = '[forgotten]'
+  WHERE "resolutionId" IN (SELECT r."id" FROM "Resolution" r WHERE r."predictionId" = ANY (forecasts)) AND "reason" <> '[forgotten]';
   RETURN NULL;
 END;
 $$;
 
 -- ---- A task's forecast is scored as its task ended, and not before Will could overrule it ----------
--- A resolution of a task's forecast, whoever records it: the task (locked, so
--- an override and a score never cross) has ended as accepted, rejected or
--- failed, a day ago or more, and the outcome says whether it was accepted. So
--- the runtime cannot end Will's right to overrule a check by scoring first, nor
--- score a task that is still out, nor record an outcome the task did not have.
--- A cancelled task's forecast is left to expire. Fires before P1's
--- Resolution_leak_guard (name order), which locks the prediction: the task
--- first, then its forecast, the order an override takes them in.
+-- A forecast that a task meets its bar (told by its own domain and type, which
+-- never change) is scored only for its task, whoever records the resolution:
+-- the task has ended as accepted, rejected or failed, a day ago or more, and
+-- the outcome says whether it was accepted. So the runtime cannot end Will's
+-- right to overrule a check by scoring first, nor score a task that is still
+-- out or a forecast that has no task yet, nor record an outcome the task did
+-- not have. A cancelled task's forecast is left to expire.
+--
+-- It is decided by the forecast, never by the task's link to it alone: a
+-- dispatch still in flight has not committed that link. The forecast is locked
+-- first, and the task is looked up after. A dispatch holds the forecast until
+-- its link is committed, and an override until the task's new status is: one
+-- that has it makes this wait, and is then read; one that comes later waits
+-- for this, and then finds the forecast scored. At READ COMMITTED only, so the
+-- lookup reads what is committed by then. Fires before P1's
+-- Resolution_leak_guard (name order), which takes the same lock, and would
+-- otherwise take it only after the task had been read.
 CREATE FUNCTION resolution_task_check() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
+  pid text := CASE WHEN NEW."predictionId" ~ '^[A-Za-z0-9_-]{1,40}$' THEN NEW."predictionId" ELSE '?' END;
+  mine boolean;
   t "Task"%ROWTYPE;
 BEGIN
-  SELECT * INTO t FROM "Task" WHERE "predictionId" = NEW."predictionId" FOR SHARE;
+  SELECT coalesce(f."domain" = 'assets' AND f."type" = 'task_meets_bar', false) INTO mine FROM "Prediction" f WHERE f."id" = NEW."predictionId" FOR UPDATE;
   IF NOT FOUND THEN
+    -- (P1's guard would say so next. Said here, so that a forecast made while this statement runs is never scored unseen.)
+    RAISE EXCEPTION 'resolution: there is no prediction % to score', pid USING ERRCODE = 'check_violation';
+  END IF;
+  IF NOT mine THEN
     RETURN NEW;
+  END IF;
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'prediction %: a task''s forecast is scored at read committed only', pid USING ERRCODE = 'serialization_failure';
+  END IF;
+  SELECT * INTO t FROM "Task" WHERE "predictionId" = NEW."predictionId";
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'prediction %: a task''s forecast is scored only for its task', pid USING ERRCODE = 'insufficient_privilege';
   END IF;
   IF NOT coalesce(t."status" IN ('accepted', 'rejected', 'failed') AND t."completedAt" <= clock_timestamp() - interval '24 hours', false) THEN
     RAISE EXCEPTION 'task %: its forecast is scored a day after it ended as accepted, rejected or failed', t."id" USING ERRCODE = 'insufficient_privilege';
@@ -1405,6 +1505,10 @@ CREATE TRIGGER "Proposal_valid_p5" BEFORE INSERT OR UPDATE ON "Proposal"
 CREATE TRIGGER "Resolution_for_task" BEFORE INSERT ON "Resolution"
   FOR EACH ROW EXECUTE FUNCTION resolution_task_check();
 
+-- Named to fire before P1's Approval_insert_check.
+CREATE TRIGGER "Approval_clock" BEFORE INSERT ON "Approval"
+  FOR EACH ROW EXECUTE FUNCTION approval_clock();
+
 CREATE TRIGGER "Entity_forgotten_p5" AFTER UPDATE OF "status" ON "Entity"
   FOR EACH ROW WHEN (NEW."status" = 'forgotten' AND OLD."status" <> 'forgotten') EXECUTE FUNCTION entity_forgotten_p5();
 
@@ -1427,11 +1531,12 @@ SELECT pgboss.create_queue('reviews.run', '{"policy":"stately","retryLimit":3,"r
 -- what a review found. The two helpers run inside trigger bodies as flint_app, so
 -- it may execute them: one only reads, and p5_bind_approval writes only
 -- TaskApprovalUse, on which flint_app has no grant at all. flint_approver (the
--- server) gets nothing here.
+-- server) gets nothing here: the time on an approval it records is stamped for
+-- it (Approval_clock).
 REVOKE ALL ON FUNCTION p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text), p5_digest_check(), p5_card_valid(),
   asset_insert_check(), asset_guard(), task_insert_check(), task_guard(), task_valid(), task_output_guard(), review_insert_check(),
   review_guard(), review_valid(), review_gate_guard(), proposal_review_floor(), proposal_review_guard(), entity_forgotten_p5(),
-  resolution_task_check(), task_step_undone() FROM PUBLIC;
+  resolution_task_check(), task_step_undone(), approval_clock() FROM PUBLIC;
 REVOKE ALL ON "Asset", "Task", "TaskOutput", "Review", "ReviewGate", "TaskApprovalUse", review_coverage, review_gate_violations FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text) TO flint_app;
 

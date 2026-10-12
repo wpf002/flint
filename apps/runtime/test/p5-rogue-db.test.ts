@@ -152,13 +152,13 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       // Nothing is handed to it meanwhile.
       const t = await k.task(a.id);
       const d = await k.card(a.dispatchAction, k.dispatchArgs(t, a.kind));
-      expect(await code(k.queue(app, t.id, d.aid, await k.forecast()))).toBe('42501');
+      expect(await code(k.queue(app, t.id, d.aid, await k.forecast({ taskId: t.id })))).toBe('42501');
       // A dispatch card is the card of one task: a second task with the same title, spec and bar needs its own.
       const first = await k.task(w.id);
       const twin = await k.task(w.id);
       const one = await k.card(w.dispatchAction, k.dispatchArgs(first, w.kind));
-      await k.queue(app, first.id, one.aid, await k.forecast());
-      expect(await code(k.queue(app, twin.id, one.aid, await k.forecast()))).toBe('42501');
+      await k.queue(app, first.id, one.aid, await k.forecast({ taskId: first.id }));
+      expect(await code(k.queue(app, twin.id, one.aid, await k.forecast({ taskId: twin.id })))).toBe('42501');
       expect(await status(twin.id)).toBe('proposed');
     });
 
@@ -168,7 +168,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
         const c = await k.card('asset.enable', k.enableArgs(a));
         const t = await k.task(w.id);
         const d = await k.card(w.dispatchAction, k.dispatchArgs(t, w.kind));
-        const f = await k.forecast();
+        const f = await k.forecast({ taskId: t.id });
         const stale = await k.client();
         try {
           await stale.query(`BEGIN ISOLATION LEVEL ${iso}`);
@@ -209,7 +209,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       expect(await code(k.switchOn(app, a.id, sleeper.aid))).toBe('42501');
       const task = await k.task(w.id);
       const kept = await k.card(w.dispatchAction, k.dispatchArgs(task, w.kind), { life: '60 days' });
-      expect(await code(k.queue(app, task.id, kept.aid, await k.forecast()))).toBe('42501');
+      expect(await code(k.queue(app, task.id, kept.aid, await k.forecast({ taskId: task.id })))).toBe('42501');
       expect([await assetOn(a.id), await status(task.id)]).toEqual([false, 'proposed']);
     });
 
@@ -231,7 +231,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       expect(await code(k.queue(app, t.id, d.aid, null))).toBe('42501');
       expect(await k.used(d.aid)).toBe(0);
       await k.switchOn(app, a.id, c.aid);
-      await k.queue(app, t.id, d.aid, await k.forecast());
+      await k.queue(app, t.id, d.aid, await k.forecast({ taskId: t.id }));
       expect([await k.used(c.aid), await k.used(d.aid)]).toEqual([1, 1]);
     });
   });
@@ -248,9 +248,9 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       expect(await code(app(`UPDATE "Task" SET acceptance = '[{"id":"a1","text":"anything goes"}]' WHERE id = $1`, [t.id]))).toBe('42501');
       // Another task under this card: one with another spec, and one made to look the same.
       const harder = await k.task(w.id, { spec: { template: 'draft_note', params: { what: `${CANARY} something else` } } });
-      expect(await code(k.queue(app, harder.id, c.aid, await k.forecast()))).toBe('42501');
+      expect(await code(k.queue(app, harder.id, c.aid, await k.forecast({ taskId: harder.id })))).toBe('42501');
       // Without a card, in every shape.
-      const f = await k.forecast();
+      const f = await k.forecast({ taskId: harder.id });
       const attempts: Array<[string, () => Promise<unknown>]> = [
         ['queued', () => app(`UPDATE "Task" SET status = 'queued' WHERE id = $1`, [harder.id])],
         ['queued, with a made-up approval', () => k.queue(app, harder.id, 'apprforged', f)],
@@ -265,7 +265,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       ];
       for (const [label, attempt] of attempts) expect(await k.outcome(attempt()), label).not.toBe('ok');
       expect([await status(harder.id), await k.used(c.aid)]).toEqual(['proposed', 0]);
-      await k.queue(app, t.id, c.aid, f);
+      await k.queue(app, t.id, c.aid, await k.forecast({ taskId: t.id }));
       expect(await status(t.id)).toBe('queued');
     });
 
@@ -277,7 +277,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       const [d, o] = [await k.client(), await k.client()];
       try {
         await d.query('BEGIN');
-        await k.queue(k.on(d), t.id, c.aid, await k.forecast());
+        await k.queue(k.on(d), t.id, c.aid, await k.forecast({ taskId: t.id }));
         const off = waiting(k.switchOff(k.on(o), a.id));
         await sleep(300);
         expect(off.ended, 'the turn-off waits for the dispatch').toBe(false);
@@ -294,7 +294,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       const b = await k.onAsset();
       const u = await k.task(b.id);
       const e = await k.card(b.dispatchAction, k.dispatchArgs(u, b.kind));
-      const f = await k.forecast();
+      const f = await k.forecast({ taskId: u.id });
       const [o2, d2] = [await k.client(), await k.client()];
       try {
         await o2.query('BEGIN');
@@ -654,7 +654,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
     it('that a forecast or a cost is right: the forecast is any open one from the tasks writer, and a cost is what the runtime reports', async () => {
       const t = await k.task(w.id);
       const c = await k.card(w.dispatchAction, k.dispatchArgs(t, w.kind));
-      expect(await k.outcome(k.queue(app, t.id, c.aid, await k.forecast({ probability: 0.95 })))).toBe('ok');
+      expect(await k.outcome(k.queue(app, t.id, c.aid, await k.forecast({ taskId: t.id, probability: 0.95 })))).toBe('ok');
       const paid = await k.onAsset({ kind: 'nexus_participant' });
       const p = await k.task(paid.id, { estCostUsd: 0.25 });
       await k.dispatch(p, paid);
@@ -665,7 +665,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
     it('who asked for a task, and which items it lists: neither is in what Will signs', async () => {
       const [mine, flints] = [await k.task(w.id, { origin: 'will', entityIds: [] }), await k.task(w.id, { origin: 'flint', entityIds: ['en1'] })];
       // The same card args (but for the task's id) dispatch either.
-      for (const t of [mine, flints]) expect(await k.outcome(k.queue(app, t.id, (await k.card(w.dispatchAction, k.dispatchArgs(t, w.kind))).aid, await k.forecast())), t.origin).toBe('ok');
+      for (const t of [mine, flints]) expect(await k.outcome(k.queue(app, t.id, (await k.card(w.dispatchAction, k.dispatchArgs(t, w.kind))).aid, await k.forecast({ taskId: t.id }))), t.origin).toBe('ok');
     });
   });
 });
