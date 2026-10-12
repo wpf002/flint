@@ -99,7 +99,8 @@ async function predictions(tx: Tx, f: EventFacts, by: Date, c: SurfaceContext): 
   const common = {
     template: { id: 'service_healthy' as const, params: { entity: ref } },
     kind: 'binary' as const, method: 'base_rate' as const, evidence: [{ kind: 'base_rate', ref: SERVICE_DOWN.version }],
-    resolutionCriteria: 'The service reports healthy (running, or its health check ok) when it is next observed after the resolve time.',
+    // As the resolver settles it (predict/resolvers.ts): its state in the version valid at the resolve time, once it was seen again.
+    resolutionCriteria: 'The service is healthy (running, or its health check ok) at the resolve time, checked once it has been observed again after it.',
     resolveBy: by.toISOString(), subjectEntityId: e.id, tainted: f.tainted,
   };
   const p = await emitPrediction(tx, {
