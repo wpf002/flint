@@ -73,8 +73,10 @@ import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
-import { goalsForChat, type GoalsNow } from './goals-now';
+import { carriedGoals, goalsForChat, historyFor, type GoalsNow } from './goals-now';
+import { isAiBacked, withoutOutsideAi } from './goals-tools';
 import { readContextBlocks } from './context-blocks';
+import { brainIsLocal, brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
 import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
@@ -510,7 +512,14 @@ async function main(): Promise<void> {
     const origin = convTaint.origin(cid, ids, Date.now(), memory.historyStats(cid).window?.maxAgeMs ?? Infinity);
     if (origin !== undefined) taintFromHistory(origin);
   };
-  let flint = new Flint({ provider, defaultModel: model, memory, observer });
+  // The context blocks (./context-blocks): each is off until Will turns it on, and
+  // FLINT_CONTEXT_BLOCKS=off turns them all off. Read here, before any brain is built: what a
+  // brain may read of the conversation depends on them.
+  const blocks = readContextBlocks(process.env, (m) => console.error(m));
+  // The conversation as each brain may read it (./goals-now historyFor): all of it for a brain on
+  // this Mac; for any other, without the turns that were answered with Will's goals in their context.
+  const historyOf = (p: ProviderAdapter, m: string) => historyFor(memory, brainOf(p, m), blocks.goalsToFrontier);
+  let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -707,7 +716,7 @@ async function main(): Promise<void> {
   let extractFlint: Flint | undefined; // bare frontier (no persona): memory extraction, when Will opts it in (FLINT_MEMORY_BRAIN=frontier)
   const flintOf = new Map<Persona, Flint>();
   const frontierPersonaFor = (fProvider: ProviderAdapter, fModel: string, variant: StyleVariant): Persona => {
-    const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory, observer });
+    const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory: historyOf(fProvider, fModel), observer });
     // Prompt caching, frontier ONLY (the local brain is free, and Ollama has its
     // own KV cache). Two breakpoints: one on the last CORE tool, one at the end
     // of the style guide. Everything before them is byte-identical on every
@@ -803,6 +812,7 @@ async function main(): Promise<void> {
       return;
     }
     const extractVendor = memoryPlan.kind === 'frontier' && brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
+    const extractOutside = memoryPlan.kind === 'frontier' && !blocks.goalsToFrontier && !(brains && brainIsLocal(brainOf(brains.primary.provider, brains.primary.model)));
     console.error(
       memoryPlan.kind === 'local'
         ? `[memory-extract] on the local model ${memoryPlan.model.model} (num_ctx ${memoryPlan.model.numCtx ?? 'unset'}); it waits for Will's chat`
@@ -813,7 +823,9 @@ async function main(): Promise<void> {
       ...(memoryPlan.kind === 'local'
         ? { chatActive }
         : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }),
-      isTainted: (cid, tid) => convTaint.isTainted(cid, tid),
+      // A turn answered with Will's goals in its context is skipped too when the extractor's brain is not on this
+      // Mac (./goals-now): what it would read there is what an outside brain is never sent as history.
+      isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (extractOutside && memory.matches(cid, tid, carriedGoals)),
     }).start();
   };
   // On the local model it reads the model that was settled, so it starts once there is one: now,
@@ -860,12 +872,20 @@ async function main(): Promise<void> {
   }).on('error', (err) => console.error(`[internal] listener failed (${errorSummary(err)})`));
   // "World now" in frontier chat context (./world-now). It adds tokens to every
   // frontier turn, so it is off until Will turns it on (FLINT_WORLD_NOW=1).
-  // ./context-blocks reads every block's setting; FLINT_CONTEXT_BLOCKS=off turns them all off.
-  const blocks = readContextBlocks(process.env, (m) => console.error(m));
+  // (`blocks`, read above by ./context-blocks; FLINT_CONTEXT_BLOCKS=off turns every block off.)
   const worldNow = blocks.world ? new WorldNow({ runtime: runtimeLink }) : undefined;
   // Will's goals in chat context (./goals-now, P3): FLINT_GOALS_NOW=1. Personal text, so a brain reads
   // it only if it runs on this Mac (./policy brainIsLocal), unless Will also set FLINT_GOALS_TO_FRONTIER=on.
-  if (blocks.goals) GOALS = goalsForChat({ runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier, log: (m) => console.error(m) });
+  if (blocks.goals) {
+    // An ask that carries them is offered no tool an outside AI answers, and deep_research in a local
+    // build: no frontier planner, and only the search tools that are left (./goals-tools).
+    const specs = paidToolSpecs(process.env);
+    const localResearch = gateBuiltins([deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, specs)), embedder })], tierOpts);
+    GOALS = goalsForChat({
+      runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier,
+      tools: withoutOutsideAi({ specs, local: localResearch }), log: (m) => console.error(m),
+    });
+  }
 
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
@@ -1524,13 +1544,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // the history, so the memory extractor never reads it, and a local fallback goes without.
       const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
       // Will's goals ride with an ask only if THAT persona's brain may read them (./goals-now): one on
-      // this Mac, or any once Will set FLINT_GOALS_TO_FRONTIER=on. Every ask in /chat takes its context
-      // through here, so a frontier tier goes without and the local model it falls back to does not.
+      // this Mac, or any once Will set FLINT_GOALS_TO_FRONTIER=on. Every ask in /chat is made with
+      // these arguments, so a frontier tier goes without and the local model it falls back to does not.
+      // An ask that carries them is sized to that brain's real context, is offered only the tools that
+      // keep them here, and marks its turn, which keeps the turn out of an outside brain's history.
       let goalsTokens = 0; // the block's size in the prompt of the brain asked last (0: it went without)
-      const forBrain = (persona: Persona, context: string): string => {
-        const asked = goals ? goals.ask(persona, context) : { context, tokens: 0 };
+      const restChars = message.length + ctx.memory.historyChars(conversationId); // with the persona's guide: the rest of the prompt
+      const chatArgs = (persona: Persona, context: string): Parameters<Persona['chat']> => {
+        const asked = goals
+          ? goals.ask(persona, { context, tools: selected, promptChars: persona.styleGuide.length + restChars })
+          : { context, tools: selected, tokens: 0, mark: {} };
         goalsTokens = asked.tokens;
-        return asked.context;
+        return [
+          { conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}), ...(attachments.length ? { attachments } : {}) },
+          { signal: ac.signal, ...asked.mark },
+        ];
       };
       const beforeLog = ctx.actionLog.actions().length;
 
@@ -1550,8 +1578,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
         lastPersona = persona;
         const events = persona.chat(
-          { conversationId, message, context: forBrain(persona, context), ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
-          { signal: ac.signal },
+          ...chatArgs(persona, context),
         );
         for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
           // The budget note rides just ahead of `done`: shown, but never stored as the answer.

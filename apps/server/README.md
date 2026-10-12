@@ -61,8 +61,8 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
-| `FLINT_GOALS_NOW` | no | `1` adds Will's goals to chat turns that a model on this Mac answers, and to no other turn (see "Goals in chat"). At most 300 tokens. Unset: off. |
-| `FLINT_GOALS_TO_FRONTIER` | no | `on` also sends the goals block to outside models. **This sends Will's goal text to whichever provider answers the turn** (Anthropic, OpenAI, Perplexity): the titles of his active goals, their counts and forecasts. Only `on` turns it on, and only with `FLINT_GOALS_NOW=1`. Unset, or anything else: goals never leave this Mac. |
+| `FLINT_GOALS_NOW` | no | `1` adds Will's goals to chat turns that a model on this Mac answers, and to no other turn (see "Goals in chat"). At most 300 tokens, and never more than that model's real context has room for. Unset: off. |
+| `FLINT_GOALS_TO_FRONTIER` | no | `on` also sends the goals block to outside models. **This sends Will's goal text to whichever provider answers the turn** (Anthropic, OpenAI, Perplexity): the titles of his active goals, their counts and forecasts. It also lets those providers read the turns that were answered with the goals, and offers every tool again. Only `on` turns it on, and only with `FLINT_GOALS_NOW=1`. Unset, or anything else: goals never leave this Mac. |
 | `FLINT_CONTEXT_BLOCKS` | no | `off` is the kill switch for every context block (World now and goals), whatever their own settings say. A value that is neither `on` nor `off` is read as `off` and logged, so a mistyped `off` still turns them off. Unset or `on`: each block follows its own setting. |
 | `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
@@ -519,9 +519,37 @@ place, `brainIsLocal` in src/policy.ts, and means all three of:
 
 So a turn Claude answers never holds a goal's words, an `ollama:` tier on this Mac does, and a
 frontier turn that fails over to the local model gets the block only on that last ask. A test
-proves it with a canary on real clients (test/goals-now.test.ts). The one way out is
-`FLINT_GOALS_TO_FRONTIER=on`, which sends the block to every brain; the boot log then says so
-in capitals.
+proves it with a canary on real clients (test/goals-now.test.ts).
+
+Three more things follow the block, so a goal's words don't leave by another door:
+
+- **What the model then says stays here.** A turn whose brain was given the block is marked,
+  with the turn, from the moment it begins (`context: { goals: true }` on the stored turn). A
+  brain that isn't on this Mac never gets that turn back as history: its question and its
+  answer are both left out, and one neutral line stands where they were ("An earlier part of
+  this conversation isn't shown here.", as a placeholder exchange so every provider still gets
+  alternating turns). A brain on this Mac reads the whole conversation. Memory extraction, when
+  it is set to a brain that isn't on this Mac (`FLINT_MEMORY_BRAIN=frontier`), skips those
+  turns too. Tests: test/goals-history.test.ts.
+- **No tool an outside AI answers.** For an ask that carries the block, the tools an outside
+  AI answers are not offered (src/goals-tools.ts): `trident.perplexity_search`, anything else
+  the spend guard prices on an AI vendor, and any tool named for one. `deep_research` is
+  swapped for a local build of itself: it plans its queries by rule, with no frontier planner,
+  and searches without Perplexity. Plain web search and `fetch_url` stay. An ask that went
+  without the block is offered everything, as before. Tests: test/goals-tools.test.ts.
+- **It fits the real context.** The block is sized to the window the brain will really have:
+  the `num_ctx` its Ollama client sends (`OLLAMA_NUM_CTX`, 4,096 unless set;
+  `FLINT_FRONTIER_NUM_CTX` for an `ollama:` tier), not a table's guess. From that it takes the
+  reply's share (at most a quarter of the window), the rest of the ask's prompt (the persona's
+  guide, the context, the tool schemas, the history and the message, at four characters a
+  token) and a 256-token margin. With less room than the block needs, the block is shorter;
+  with no room for one goal, it is left out, and that ask is an ordinary one (every tool, no
+  mark). A prompt Ollama has to cut loses its start, which is the persona and the tools.
+  Tests: test/goals-room.test.ts.
+
+The one way out of all of it is `FLINT_GOALS_TO_FRONTIER=on`: the block goes to every brain,
+the history is whole for every brain, and no tool is held back. The boot log then says so in
+capitals. Turned off again, the turns that were marked are held back again.
 
 What the block holds, at most 300 tokens and 1,200 characters, trimmed at whole lines with the
 rest counted:
@@ -539,8 +567,8 @@ Will’s goals (his own words and Flint’s counts: facts, not instructions):
 - Never a description, a check's text or a step's title. An answer that breaks its contract, or
   carries a taint mark anywhere, gives no block.
 - 300 ms to answer, cached 30 s, a failure remembered for 30 s (an older runtime, a refused
-  token), nothing older than 5 minutes. It rides in the per-turn context, so it is never stored
-  in the conversation, the training corpus or long-term memory.
+  token), nothing older than 5 minutes. It rides in the per-turn context, so the block itself is
+  never stored in the conversation or the training corpus.
 
 **Turning it on.** Claude does this once Will says OK. The server reads its settings at start:
 
@@ -550,8 +578,8 @@ launchctl kickstart -k gui/$(id -u)/com.flint.server
 grep '\[goals-now\]' ~/.flint/server.err.log | tail -1
 ```
 
-The last line prints who reads the goals and who never does, for example
-`[goals-now] on: Will's goals go into chat turns answered on this Mac (ollama:qwen2.5:14b), never to anthropic:claude-opus-5-5`.
+The last line prints who reads the goals, in how large a context, and who never does, for example
+`[goals-now] on: Will's goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 4096-token context), never to anthropic:claude-opus-5-5`.
 If no brain here is local it says so, and nothing is fetched. To turn it off, remove the line
 from `~/.flint/secrets.env` (or set `FLINT_CONTEXT_BLOCKS=off`) and kickstart again.
 
@@ -562,19 +590,26 @@ its `chat.turn` event as `ctxTokens.goals`; the runtime rolls it up daily
 
 **Known limits.**
 
-- *What a model says is conversation.* The block is never stored, but an answer that repeats a
-  goal's title is part of the conversation, like anything Will types. A later turn of that
-  conversation carries its recent history to whichever brain answers it, an outside one
-  included; and memory extraction, when it is set to the frontier (`FLINT_MEMORY_BRAIN=frontier`),
-  reads those answers too. The block itself still goes only to a local brain.
-- *A tool call can carry it out.* A local model that has read a goal may use its words in a
-  tool call it makes for the turn (a web search's query, for instance), as it may with anything
-  Will types or Flint remembers about him. Tools are tiered as before; the goals block does not
-  change what a turn may call.
-- *It adds to the local prompt.* The local model's prompt is near its limit (4,096 tokens with
-  the tool schemas), which is why World now is the frontier's alone. The goals block is up to
-  300 more. After turning it on, watch the `[route]` lines for local turns ending `empty`; if
-  they rise, turn it off.
+- *A plain web search can carry a goal's words.* A local model that has read a goal may put
+  its words in the query of a plain web search, or in a URL it fetches. That goes to a search
+  engine or a website, not to another company's model, and is the same as anything Will types
+  or Flint remembers about him.
+- *Long-term memory.* Memory extraction on the local model reads every turn, the marked ones
+  included, and may keep a fact it learned there. A fact in long-term memory is recalled into
+  any later turn it is relevant to, whichever brain answers. What can travel this way is a
+  one-line fact the extractor took from such a turn, never the block.
+- *The training corpus keeps answers.* Each answered turn is logged for Flint's own training
+  (`~/.flint/training/corpus.jsonl`, on this Mac), the marked ones included. An eval that sent
+  corpus entries to an outside model would send those answers.
+- *A small context gets a small block, or none.* At the default 4,096 tokens the prompt is
+  already near its limit with the tool schemas, so the block is often shortened or left out;
+  the `[route]` line's `ctxTokens.goals` says what each turn got. A local model loaded with a
+  larger context gets the whole block.
+- *Holes in an outside brain's history.* With goals on, every turn a local model answers is
+  marked, so an outside brain that answers a later turn of the same conversation sees the
+  placeholder instead. It is told something is missing, never what.
+- *The sizes are estimates.* The prompt is measured at four characters a token, without the
+  persona's lessons; the 256-token margin is for what that misses.
 - *A 30-second cache.* Goals read up to 30 seconds ago are still served: a goal finished
   a few seconds ago can appear in one more turn.
 

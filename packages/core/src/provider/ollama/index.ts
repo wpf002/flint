@@ -78,12 +78,21 @@ export class OllamaProvider implements ProviderAdapter {
    * caller can tell a model on this machine from one on a server elsewhere.
    */
   readonly baseURL: string;
+  /**
+   * The context window this client asks Ollama for on every call (`num_ctx` in
+   * `defaultOptions`), or undefined when it sets none and Ollama's own default
+   * applies. Readable, so a caller can size a prompt to the window the model
+   * will really have instead of a table's guess.
+   */
+  readonly numCtx: number | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly defaultOptions: Record<string, unknown>;
   private readonly think: boolean | undefined;
 
   constructor(opts: OllamaProviderOptions = {}) {
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    const numCtx = opts.defaultOptions?.num_ctx;
+    this.numCtx = typeof numCtx === 'number' && Number.isInteger(numCtx) && numCtx > 0 ? numCtx : undefined;
     this.fetchImpl = opts.fetch ?? fetch;
     this.defaultOptions = opts.defaultOptions ?? {};
     this.think = opts.think;

@@ -46,7 +46,8 @@ describe('index.ts wiring', () => {
   });
 
   it('Will’s goals (P3) are built only when their block is on, with every brain /chat can ask named for the gate', () => {
-    expect(src).toContain('if (blocks.goals) GOALS = goalsForChat({ runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier, log: (m) => console.error(m) });');
+    const wiring = between('if (blocks.goals) {', '// One request is one turn');
+    expect(wiring).toMatch(/GOALS = goalsForChat\(\{\s*runtime: runtimeLink, local: \{ persona, provider, model \}, tiers: brains, toFrontier: blocks\.goalsToFrontier,\s*tools: withoutOutsideAi\(\{ specs, local: localResearch \}\), log: \(m\) => console\.error\(m\),\s*\}\);/);
     expect(src.match(/\bGOALS = /g)).toHaveLength(1);
     // After the tiers exist: a tier built later would be a persona the gate does not know (it would go without, never with).
     expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('GOALS = goalsForChat('));
@@ -54,18 +55,50 @@ describe('index.ts wiring', () => {
     expect(src).not.toMatch(/renderGoals|GoalsNowAnswer|v1\/goals\/now|new GoalsNow/);
   });
 
+  it('an ask that carries the goals is offered no tool an outside AI answers: deep_research in a local build, with no planner and no AI-backed search', () => {
+    const wiring = between('if (blocks.goals) {', '// One request is one turn');
+    // The local build: the same tool, gated like every built-in, over the tools that are left, and with no `complete` (no frontier planner).
+    expect(wiring).toContain('const specs = paidToolSpecs(process.env);');
+    expect(wiring).toContain('const localResearch = gateBuiltins([deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, specs)), embedder })], tierOpts);');
+    expect(wiring).not.toContain('complete');
+    // The server's own deep_research is the one with the frontier planner: there is one of each.
+    expect(src.match(/deepResearchTool\(/g)).toHaveLength(2);
+    expect(src.match(/complete: pausable\(/g)).toHaveLength(1);
+  });
+
+  it('each brain reads the conversation through historyFor: the turns answered with Will’s goals never go back out to a brain that is not on this Mac', () => {
+    // Decided from the same settings, read once, before any brain is built.
+    expect(src.match(/readContextBlocks\(/g)).toHaveLength(1);
+    expect(src.indexOf('const blocks = readContextBlocks(process.env')).toBeLessThan(src.indexOf('const flint = new Flint('));
+    expect(src).toContain('const historyOf = (p: ProviderAdapter, m: string) => historyFor(memory, brainOf(p, m), blocks.goalsToFrontier);');
+    // The local brain (it is Claude when OLLAMA_MODEL is unset, and then it is not local) and every frontier tier's.
+    expect(src).toContain('const flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });');
+    expect(src).toContain('const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory: historyOf(fProvider, fModel), observer });');
+    // No /chat brain is built on the whole store: the only other client is the eval override's, which never chats.
+    expect(src.match(/new Flint\(\{[^}]*\bmemory, observer \}\)/g)).toEqual(['new Flint({ provider: candidate, defaultModel: m, memory, observer })']);
+    // Memory extraction on a brain that is not on this Mac skips those turns too.
+    expect(src).toContain("const extractOutside = memoryPlan.kind === 'frontier' && !blocks.goalsToFrontier && !(brains && brainIsLocal(brainOf(brains.primary.provider, brains.primary.model)));");
+    expect(src).toContain('isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (extractOutside && memory.matches(cid, tid, carriedGoals)),');
+  });
+
   it('a goal’s words reach a prompt only through the per-ask gate in /chat’s pump: never /generate, never the frontier’s own context', () => {
     expect(generate).not.toMatch(/GOALS|goalsTokens|\bgoals\b/);
     // Fetched once a turn, for whichever brain ends up asked...
     expect(chat.match(/GOALS\?\.forTurn\(\)/g)).toHaveLength(1);
     expect(src.match(/\bGOALS\b[?.]/g)).toHaveLength(1);
-    // ...and read in exactly one place, naming the persona that is about to be asked.
+    // ...and read in exactly one place, naming the persona that is about to be asked, with what the rest of its prompt takes.
     expect(chat.match(/\bgoals\.[A-Za-z]+/g)).toEqual(['goals.ask']);
-    expect(chat).toMatch(/const forBrain = \(persona: Persona, context: string\): string => \{\s*const asked = goals \? goals\.ask\(persona, context\) : \{ context, tokens: 0 \};\s*goalsTokens = asked\.tokens;\s*return asked\.context;\s*\};/);
-    // Every ask in /chat is the pump's one persona.chat, and its context comes through that gate, for the persona being asked.
+    expect(chat).toContain('const restChars = message.length + ctx.memory.historyChars(conversationId);');
+    expect(chat).toMatch(/const chatArgs = \(persona: Persona, context: string\): Parameters<Persona\['chat'\]> => \{\s*const asked = goals\s*\? goals\.ask\(persona, \{ context, tools: selected, promptChars: persona\.styleGuide\.length \+ restChars \}\)\s*: \{ context, tools: selected, tokens: 0, mark: \{\} \};\s*goalsTokens = asked\.tokens;/);
+    // What the ask is made with is all the gate's: its context, its tools, and the mark that goes with the turn.
+    expect(chat).toContain("{ conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}), ...(attachments.length ? { attachments } : {}) },");
+    expect(chat).toContain('{ signal: ac.signal, ...asked.mark },');
+    // Every ask in /chat is the pump's one persona.chat, made with those arguments, for the persona being asked.
     expect(chat.match(/\.chat\(/g)).toHaveLength(1);
-    expect(chat).toMatch(/const events = persona\.chat\(\s*\{ conversationId, message, context: forBrain\(persona, context\),/);
-    expect(chat.match(/forBrain\(/g)).toHaveLength(1);
+    expect(chat).toMatch(/const events = persona\.chat\(\s*\.\.\.chatArgs\(persona, context\),\s*\);/);
+    expect(chat.match(/chatArgs\(/g)).toHaveLength(1);
+    // The turn's own tool list is read nowhere else in /chat: an ask cannot be offered tools the gate did not pass.
+    expect(chat.match(/\bselected\b/g)).toHaveLength(3);
     // The frontier's context is built without them, as before.
     expect(chat).toContain('const frontierCtx = world ? `${ctxBlock}\\n\\n${world}` : ctxBlock;');
   });

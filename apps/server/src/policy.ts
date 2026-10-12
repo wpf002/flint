@@ -99,6 +99,8 @@ export interface AnsweringBrain {
   model: string;
   /** The server the provider sends its requests to (an Ollama client's base URL). Unknown: not local. */
   baseURL?: string | undefined;
+  /** The context window the provider asks for on every call (an Ollama client's `num_ctx`), when it sets one. */
+  numCtx?: number | undefined;
 }
 
 /**
@@ -147,10 +149,15 @@ export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRem
   return opts.allowRemote === true || onThisMachine(brain.baseURL);
 }
 
-/** A provider adapter and its model as an AnsweringBrain: the adapter's own name and address, never a label's. */
+/** A provider adapter and its model as an AnsweringBrain: the adapter's own name, address and context size, never a label's. */
 export function brainOf(provider: { readonly name: string }, model: string): AnsweringBrain {
-  const baseURL = (provider as { readonly baseURL?: unknown }).baseURL;
-  return { provider: provider.name, model, ...(typeof baseURL === 'string' ? { baseURL } : {}) };
+  const { baseURL, numCtx } = provider as { readonly baseURL?: unknown; readonly numCtx?: unknown };
+  return {
+    provider: provider.name,
+    model,
+    ...(typeof baseURL === 'string' ? { baseURL } : {}),
+    ...(typeof numCtx === 'number' && Number.isInteger(numCtx) && numCtx > 0 ? { numCtx } : {}),
+  };
 }
 
 // The tool-name rules (isSafeTool and the sets behind it) moved to @flint/policy,

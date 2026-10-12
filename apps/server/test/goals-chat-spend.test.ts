@@ -34,7 +34,7 @@ describe('the [route] line', () => {
       brainOf: () => ({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://127.0.0.1:11434' }),
       fetchImpl: (async () => new Response(JSON.stringify(answer))) as unknown as typeof fetch,
     });
-    const asked = (await g.forTurn()).ask(local, 'Right now it is Monday.');
+    const asked = (await g.forTurn()).ask(local, { context: 'Right now it is Monday.' });
     expect(asked.context).toContain(CANARY);
     expect(asked.tokens).toBe(estimateTokens(renderGoals(answer)));
     expect(asked.tokens).toBeGreaterThan(200);

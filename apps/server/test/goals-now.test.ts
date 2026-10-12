@@ -8,36 +8,28 @@
  *  - It never makes a turn wait: 300 ms, cached 30 s, failures remembered (an
  *    older runtime, a refused token), nothing older than 5 minutes served.
  *  - THE KEY RULE: goal text reaches a prompt only when the brain being asked
- *    runs on this Mac. Proven with a canary, on the server in miniature: real
- *    Flint clients and personas behind providers that keep every request they
- *    are given, wired the way index.ts wires /chat (the same pump, the same tier
- *    chain, the same fall back to the local model). No request to an outside
- *    provider ever holds the canary; with FLINT_GOALS_TO_FRONTIER=on it does,
- *    because Will said so.
+ *    runs on this Mac. Proven with a canary, on the server in miniature
+ *    (./goals-mini): real Flint clients and personas behind providers that keep
+ *    every request they are given, wired the way index.ts wires /chat (the same
+ *    per-ask arguments, the same pump, the same tier chain, the same fall back
+ *    to the local model). No request to an outside provider ever holds the
+ *    canary; with FLINT_GOALS_TO_FRONTIER=on it does, because Will said so.
+ * The rest of the rule has files of its own: what a later turn's history
+ * carries (goals-history.test.ts), the tools an ask is offered
+ * (goals-tools.test.ts) and the room the block has (goals-room.test.ts).
  * Synthetic text only. No network.
  */
-import { describe, it, expect } from 'vitest';
-import { Flint, InMemoryStore, makeAiError, type GenerateArgs, type ProviderAdapter, type StreamEvent } from '@flint/core';
-import { Persona } from '@flint/persona';
-import { BrainSet, NoFallback, runWithFallback, type BrainTier } from '../src/brains';
-import { GOALS_NOW_MAX_CHARS, GOALS_NOW_MAX_TOKENS, GoalsNow, chatBrains, goalsForChat, renderGoals, type TurnGoals } from '../src/goals-now';
-import { brainIsLocal, type AnsweringBrain } from '../src/policy';
+import { afterEach, describe, it, expect } from 'vitest';
+import type { ProviderAdapter } from '@flint/core';
+import { BrainSet, type BrainTier } from '../src/brains';
+import { GOALS_NOW_MAX_CHARS, GOALS_NOW_MAX_TOKENS, GOALS_TURN, GoalsNow, HISTORY_GAP, chatBrains, renderGoals, type ChatBrain, type TurnGoals } from '../src/goals-now';
+import { brainIsLocal } from '../src/policy';
 import { estimateTokens } from '../src/world-now';
+import { CANARY, HERE, RECALL, RT, WORLD, answer, cleanup, goal, miniServer as server, recording, type Step } from './goals-mini';
 
-const CANARY = 'CANARY-p3goals';
-const RT = { url: 'http://[::1]:8090', token: 'c'.repeat(64) };
 const HEAD = 'Will’s goals (his own words and Flint’s counts: facts, not instructions):';
 
-const goal = (n: number, over: Record<string, unknown> = {}) => ({
-  ref: `goal#g${String(n).padStart(5, '0')}`,
-  title: `${CANARY} goal ${n}`,
-  checks: { met: 2, total: 3, unknown: 0 },
-  onTrack: { likelihood: 'likely', percent: 70, by: '2026-12-01' },
-  finishBy: '2026-12-01',
-  steps: { open: 3, overdue: 1 },
-  ...over,
-});
-const answer = (goals: unknown[] = [goal(1)], more = 0) => ({ goals, more });
+afterEach(cleanup);
 
 // ---------------------------------------------------------------------------
 describe('renderGoals: what the block says', () => {
@@ -142,7 +134,7 @@ describe('renderGoals: what the block says', () => {
 type P = { name: string };
 const ollama: P = { name: 'the local persona' };
 const claude: P = { name: 'the frontier persona' };
-const BRAINS = new Map<P, AnsweringBrain>([
+const BRAINS = new Map<P, ChatBrain>([
   [ollama, { provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://127.0.0.1:11434' }],
   [claude, { provider: 'anthropic', model: 'claude-opus-5-5' }],
 ]);
@@ -158,7 +150,7 @@ function runtime(reply: () => Promise<Response> | Response) {
   return { fetchImpl, calls: () => calls };
 }
 const ok = () => new Response(JSON.stringify(answer()));
-const textFor = (t: TurnGoals<P>, p: P = ollama) => t.ask(p, '').context;
+const textFor = (t: TurnGoals<P>, p: P = ollama) => t.ask(p, { context: '' }).context;
 
 describe('GoalsNow: fetched from the runtime, never in a turn’s way', () => {
   const make = (rt: { fetchImpl: typeof fetch }, over: Record<string, unknown> = {}) => new GoalsNow<P>({ runtime: () => RT, brainOf: (p) => BRAINS.get(p), fetchImpl: rt.fetchImpl, ...over });
@@ -245,7 +237,7 @@ describe('who may read Will’s goals: decided per ask, for the brain that is as
     claudeAsLocal: { name: 'the "local" brain when OLLAMA_MODEL is unset: Claude' },
     unknown: { name: 'a persona this server did not build' },
   };
-  const brains = new Map<P, AnsweringBrain>([
+  const brains = new Map<P, ChatBrain>([
     [people.here, { provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://127.0.0.1:11434' }],
     [people.cloud, { provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: 'http://127.0.0.1:11434' }],
     [people.remote, { provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://rented-gpu.example.com:11434' }],
@@ -258,11 +250,13 @@ describe('who may read Will’s goals: decided per ask, for the brain that is as
 
   it('only the Ollama model on this Mac: the context it is asked with carries the block after what was there, and the block’s size', async () => {
     const turn = await make().forTurn();
-    const asked = turn.ask(people.here, 'Right now it is Monday.');
+    const asked = turn.ask(people.here, { context: 'Right now it is Monday.' });
     expect(asked.context).toBe(`Right now it is Monday.\n\n${renderGoals(answer())}`);
     expect(asked.tokens).toBe(estimateTokens(renderGoals(answer())));
     expect(asked.tokens).toBeGreaterThan(0);
-    expect(turn.ask(people.here, '').context).toBe(renderGoals(answer()));
+    // An ask that carries them marks its turn (the mark is stored with the turn, ./goals-history.test.ts).
+    expect(asked.mark).toEqual({ context: GOALS_TURN });
+    expect(turn.ask(people.here, { context: '' }).context).toBe(renderGoals(answer()));
   });
 
   it('never an outside model, an Ollama cloud model, an Ollama server elsewhere, a "local" brain that is Claude, or an unknown persona', async () => {
@@ -270,7 +264,7 @@ describe('who may read Will’s goals: decided per ask, for the brain that is as
     const turn = await g.forTurn();
     for (const [who, p] of Object.entries(people)) {
       if (who === 'here') continue;
-      expect(turn.ask(p, 'Right now it is Monday.'), who).toEqual({ context: 'Right now it is Monday.', tokens: 0 });
+      expect(turn.ask(p, { context: 'Right now it is Monday.' }), who).toEqual({ context: 'Right now it is Monday.', tools: [], tokens: 0, mark: {} });
       expect(g.mayRead(p), who).toBe(false);
     }
     expect(g.mayRead(people.here)).toBe(true);
@@ -294,7 +288,7 @@ describe('who may read Will’s goals: decided per ask, for the brain that is as
     expect(reach(g)).not.toContain(CANARY);
     expect(reach(turn)).not.toContain(CANARY);
     // It is there all the same, for the brain that may read it.
-    expect(turn.ask(people.here, '').context).toContain(CANARY);
+    expect(turn.ask(people.here, { context: '' }).context).toContain(CANARY);
   });
 
   it('FLINT_GOALS_TO_FRONTIER=on is the one way out: then every brain this server built reads them, and still no unknown persona', async () => {
@@ -302,135 +296,37 @@ describe('who may read Will’s goals: decided per ask, for the brain that is as
     const turn = await g.forTurn();
     for (const [who, p] of Object.entries(people)) {
       if (who === 'unknown') continue;
-      expect(turn.ask(p, '').context, who).toContain(CANARY);
+      expect(turn.ask(p, { context: '' }).context, who).toContain(CANARY);
     }
-    expect(turn.ask(people.unknown, 'ctx')).toEqual({ context: 'ctx', tokens: 0 });
+    expect(turn.ask(people.unknown, { context: 'ctx' })).toEqual({ context: 'ctx', tools: [], tokens: 0, mark: {} });
     // Off unless it is exactly true.
     const off = await make(false).forTurn();
-    expect(off.ask(people.claude, 'ctx')).toEqual({ context: 'ctx', tokens: 0 });
+    expect(off.ask(people.claude, { context: 'ctx' })).toEqual({ context: 'ctx', tools: [], tokens: 0, mark: {} });
   });
 
   it('with no goals to say, every ask goes without', async () => {
     const g = new GoalsNow<P>({ runtime: () => RT, brainOf: (p) => brains.get(p), fetchImpl: runtime(() => new Response(JSON.stringify(answer([])))).fetchImpl, toFrontier: true });
-    expect((await g.forTurn()).ask(people.here, 'ctx')).toEqual({ context: 'ctx', tokens: 0 });
+    expect((await g.forTurn()).ask(people.here, { context: 'ctx' })).toEqual({ context: 'ctx', tools: [], tokens: 0, mark: {} });
   });
 });
 
 // ---------------------------------------------------------------------------
-/** A provider that keeps every request it is given and plays `script`, one step per request. */
-type Step = 'answer' | 'fail' | { say: string };
-function recording(name: string, script: Step[], baseURL?: string) {
-  const requests: GenerateArgs[] = [];
-  const provider: ProviderAdapter & { baseURL?: string } = {
-    name,
-    ...(baseURL ? { baseURL } : {}),
-    getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 100_000, maxOutputTokens: 1_000 }),
-    estimateTokens: () => 1,
-    generate: () => Promise.reject(new Error('stream only')),
-    async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
-      requests.push(args);
-      const step = script[Math.min(requests.length - 1, script.length - 1)]!;
-      if (step === 'fail') {
-        yield { type: 'error', error: makeAiError('provider_unavailable', '529 Overloaded', { retryable: false, providerCode: '529' }) };
-        return;
-      }
-      yield { type: 'text', delta: step === 'answer' ? `answer from ${name}` : step.say };
-      yield { type: 'done', reason: 'complete', usage: { input: 3, output: 2 } };
-    },
-  };
-  /** Everything this provider was ever sent, as text: the system prompt, every message, every tool. */
-  const seen = () => JSON.stringify(requests.map(({ signal: _signal, ...rest }) => rest));
-  return { provider, requests, seen };
-}
-
-const HERE = 'http://127.0.0.1:11434';
-const RECALL = 'RECALL-MARK what Flint remembers';
-const WORLD = 'WORLD-MARK services: all ok';
-
-/** The server in miniature: a frontier chain, a local brain, the goals block, and /chat's pump as index.ts has it. */
-function server(o: {
-  frontier: Array<{ name: string; model: string; script: Step[]; baseURL?: string }>;
-  local?: { name: string; model: string; script?: Step[]; baseURL?: string };
-  toFrontier?: boolean;
-  goals?: unknown;
-}) {
-  const memory = new InMemoryStore();
-  const retryPolicy = { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 };
-  const personaOn = (p: ProviderAdapter, model: string) => new Persona(new Flint({ provider: p, defaultModel: model, memory, retryPolicy }), { name: 'Flint', styleGuide: 'Be brief.' });
-  const tiers = o.frontier.map((t) => ({ ...recording(t.name, t.script, t.baseURL), model: t.model }));
-  const localSpec = o.local ?? { name: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
-  const local = recording(localSpec.name, localSpec.script ?? ['answer'], localSpec.baseURL);
-  const brains: BrainTier<Persona>[] = tiers.map((t) => ({ tier: 'standard', provider: t.provider, model: t.model, label: `${t.provider.name}:${t.model}`, persona: personaOn(t.provider, t.model) }));
-  const localPersona = personaOn(local.provider, localSpec.model);
-  const logs: string[] = [];
-  // As main(): a real tier set (every tier the first brain, the second as the last resort), and the goals block
-  // wired from it and the local brain with the function main() calls.
-  const first = brains[0];
-  const set = first ? new BrainSet<Persona>({ routine: first, standard: first, hard: first, code: first }, brains[1]) : undefined;
-  const chain = set ? set.chain('standard') : [];
-  const GOALS = goalsForChat<Persona>({
-    runtime: () => RT,
-    local: { persona: localPersona, provider: local.provider, model: localSpec.model },
-    tiers: set,
-    toFrontier: o.toFrontier ?? false,
-    log: (m) => logs.push(m),
-    fetchImpl: (async () => new Response(JSON.stringify(o.goals ?? answer([goal(1), goal(2)])))) as unknown as typeof fetch,
-  });
-
-  /** One /chat turn: `brain` is the route's choice; a frontier turn that fails before any text falls back to the local model. */
-  async function chat(brain: 'frontier' | 'local', message = 'how are my goals going?', conversationId = 'c1') {
-    const ctxBlock = `[Context] ${RECALL}`;
-    // World now is the frontier's only; Will's goals are fetched for whichever brain ends up asked.
-    const [world, goals] = await Promise.all([brain === 'frontier' ? WORLD : '', GOALS?.forTurn()]);
-    const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
-    let goalsTokens = 0;
-    let answerText = '';
-    let answeredBy = brain;
-    const pump = async (persona: Persona, _recoverable = false, tried?: number, context = ctxBlock) => {
-      const asked = goals ? goals.ask(persona, context) : { context, tokens: 0 };
-      goalsTokens = asked.tokens;
-      const events = persona.chat({ conversationId, message, context: asked.context });
-      for await (const ev of events) {
-        if (ev.type === 'text') answerText += ev.delta;
-        if (tried !== undefined && ev.type === 'error' && answerText.length === 0) throw new Error(ev.error.message);
-      }
-    };
-    if (brain === 'frontier') {
-      try {
-        await runWithFallback(chain, async (b) => {
-          try {
-            await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx);
-          } catch (err) {
-            if (answerText.length > 0) throw new NoFallback(err);
-            throw err;
-          }
-        });
-      } catch {
-        answeredBy = 'local';
-        await pump(localPersona);
-      }
-    } else {
-      await pump(localPersona);
-    }
-    return { answer: answerText, answeredBy, goalsTokens };
-  }
-  return { chat, tiers, local, logs, GOALS };
-}
-
 describe('chatBrains: every persona /chat can ask, with its brain', () => {
   it('the local persona, each tier’s and the last resort’s, each with its own provider, model and address', () => {
-    const stub = (name: string, baseURL?: string) => recording(name, ['answer'], baseURL).provider;
+    const stub = (name: string, baseURL?: string) => recording(name, ['answer'], baseURL ? { baseURL } : {}).provider;
     const tier = (provider: ProviderAdapter, model: string, persona: string): BrainTier<string> => ({ tier: 'standard', provider, model, label: `${provider.name}:${model}`, persona });
     const opus = tier(stub('anthropic'), 'claude-opus-5-5', 'opus');
     const big = tier(stub('ollama', HERE), 'qwen2.5:72b', 'big');
     const gpt = tier(stub('openai'), 'gpt-5', 'gpt');
     const set = new BrainSet<string>({ routine: big, standard: opus, hard: opus, code: opus }, gpt);
     const brains = chatBrains({ persona: 'local', provider: stub('ollama', HERE), model: 'qwen2.5:14b' }, set);
+    // Each with the room its context has: these stubs say 100,000 tokens and a 1,000-token reply (./goals-room.test.ts has the real sizes).
+    const room = { window: 100_000, reserve: 1_000 };
     expect([...brains]).toEqual([
-      ['local', { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE }],
-      ['big', { provider: 'ollama', model: 'qwen2.5:72b', baseURL: HERE }],
-      ['opus', { provider: 'anthropic', model: 'claude-opus-5-5' }],
-      ['gpt', { provider: 'openai', model: 'gpt-5' }],
+      ['local', { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE, ...room }],
+      ['big', { provider: 'ollama', model: 'qwen2.5:72b', baseURL: HERE, ...room }],
+      ['opus', { provider: 'anthropic', model: 'claude-opus-5-5', ...room }],
+      ['gpt', { provider: 'openai', model: 'gpt-5', ...room }],
     ]);
     // What the one rule then says of each, and of a persona that is not among them.
     expect([...brains.keys()].filter((p) => brainIsLocal(brains.get(p)))).toEqual(['local', 'big']);
@@ -492,18 +388,20 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     for (const t of s.tiers) expect(t.requests).toHaveLength(0);
   });
 
-  it('the next turn of the same conversation, answered by Claude, carries the history and still no goal text', async () => {
+  it('the next turn of the same conversation, answered by Claude: no goal text, and nothing of the turn that had it', async () => {
     const s = server({ frontier: claudeThenGpt });
     await s.chat('local', 'how are my goals going?');
     const r = await s.chat('frontier', 'and what is the weather?');
     expect(r.answeredBy).toBe('frontier');
     const sent = s.tiers[0]!.seen();
-    // The earlier turn is there (the question and the local model's answer)...
-    expect(sent).toContain('how are my goals going?');
-    expect(sent).toContain('answer from ollama');
-    // ...and the block that turn was answered with is not: it was never stored.
+    // The block was never stored, and the turn it was answered with is not sent out again
+    // (its question and its answer both: ./goals-history.test.ts has the whole rule).
     expect(sent).not.toContain(CANARY);
     expect(sent).not.toContain('Will’s goals');
+    expect(sent).not.toContain('how are my goals going?');
+    expect(sent).not.toContain('answer from ollama');
+    expect(sent).toContain(HISTORY_GAP);
+    expect(sent).toContain('and what is the weather?');
   });
 
   it('a "local" brain that is really Claude (no OLLAMA_MODEL) never gets them, first choice or fallback', async () => {
@@ -532,7 +430,7 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     const remote = server({ frontier: [{ name: 'ollama', model: 'qwen2.5:72b', script: ['answer'], baseURL: 'http://rented-gpu.example.com:11434' }] });
     expect((await remote.chat('frontier')).goalsTokens).toBe(0);
     expect(remote.tiers[0]!.seen()).not.toContain(CANARY);
-    expect(remote.logs[0]).toBe('[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b), never to ollama:qwen2.5:72b (not on this Mac)');
+    expect(remote.logs[0]).toBe('[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to ollama:qwen2.5:72b (not on this Mac)');
   });
 
   it('a mixed chain: Claude fails, the local `ollama:` tier answers with the goals, and Claude’s request had none', async () => {
@@ -554,21 +452,19 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
 
   it('the boot log names who reads the goals and who never does, by label only', async () => {
     const s = server({ frontier: claudeThenGpt });
-    expect(s.logs).toEqual(['[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b), never to anthropic:claude-opus-5-5, openai:gpt-5']);
+    expect(s.logs).toEqual(['[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to anthropic:claude-opus-5-5, openai:gpt-5']);
     expect(s.logs.join('\n')).not.toContain(CANARY);
     expect(s.logs.join('\n')).not.toContain('127.0.0.1');
   });
 
-  it('the limit, stated: what a model SAYS about a goal is part of the conversation, and a later turn’s history goes to whoever answers it', async () => {
-    // The local model repeats a goal's title in its answer. That answer is the conversation now, like anything Will types.
+  it('what the local model said about a goal stays here too: its answer never goes out as a later turn’s history', async () => {
+    // The local model repeats a goal's title in its answer.
     const s = server({ frontier: claudeThenGpt, local: { name: 'ollama', model: 'qwen2.5:14b', baseURL: HERE, script: [{ say: `You are working on ${CANARY} goal 1.` }] } });
     await s.chat('local');
     await s.chat('frontier', 'thanks');
     const sent = s.tiers[0]!.seen();
-    // The block itself is still never sent...
-    expect(sent).not.toContain('Will’s goals');
-    expect(sent).not.toContain(`“${CANARY} goal 2”`);
-    // ...but the earlier answer is history, and history goes with the turn (README: "Known limits").
-    expect(sent).toContain(`You are working on ${CANARY} goal 1.`);
+    expect(sent).not.toContain(CANARY);
+    expect(sent).not.toContain('You are working on');
+    expect(sent).toContain(HISTORY_GAP);
   });
 });

@@ -388,8 +388,9 @@ The fourth part is goals in chat, the P3 report and the promotion table:
 - **Goals in chat** is the server's, and ships off. With it on, a chat turn that
   a model on this Mac answers starts from your active goals: each one's title,
   how many of its checks are met, its forecast and its steps to do. It is never
-  sent to an outside model unless you say so. The server's README has the
-  settings ("Goals in chat"); the runtime only answers `GET /v1/goals/now`.
+  sent to an outside model unless you say so, and neither is the turn it was
+  answered in. The server's README has the settings and the rules ("Goals in
+  chat"); the runtime only answers `GET /v1/goals/now`.
 - **The P3 report** measures P3's eight exit criteria as numbers
   ([The P3 report](#the-p3-report)).
 - **The promotion table** ends the reviews' trial week

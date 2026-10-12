@@ -166,6 +166,67 @@ export class PersistentStore implements MemoryStore {
   onHistory: ((conversationId: string, turnIds: string[]) => void) | undefined;
 
   /**
+   * This store as one reader sees it. Every write and every stored turn is the
+   * store's own: only the history `getMessages` hands this reader differs. The
+   * turns `hide` names are left out of it, and where a run of them was, one
+   * placeholder exchange stands in (`gap`, as the user's line and as the
+   * reply), so the reader knows something is missing, does not fill it in, and
+   * every provider still gets user and assistant turns in alternation.
+   *
+   * The server gives each brain that does not run on this Mac such a view, so
+   * a turn that was answered with Will's goals in its context never goes back
+   * out in a later turn's history (./goals-now historyFor). The window is the
+   * store's own, applied first: a hidden turn still takes its place in it.
+   */
+  viewWithout(hide: (turn: Turn) => boolean, gap: string): MemoryStore {
+    return {
+      schemaVersion: this.schemaVersion,
+      beginTurn: (input) => this.beginTurn(input),
+      commitTurn: (input) => this.commitTurn(input),
+      failTurn: (input) => this.failTurn(input),
+      getTurns: (conversationId) => this.getTurns(conversationId),
+      getMessages: async (conversationId) => {
+        const shown: Turn[] = [];
+        const out: Message[] = [];
+        let inGap = false;
+        for (const t of this.windowed(this.completeTurns(conversationId))) {
+          if (hide(t)) {
+            if (!inGap) {
+              out.push({ id: `gap_${t.id}_u`, role: 'user', content: gap, timestamp: t.createdAt });
+              out.push({ id: `gap_${t.id}_a`, role: 'assistant', content: gap, timestamp: t.createdAt });
+            }
+            inGap = true;
+            continue;
+          }
+          inGap = false;
+          shown.push(t);
+          for (const m of t.messages) out.push(structuredClone(m));
+        }
+        // Exactly the turns this reader is handed: a turn left out cannot taint what it never reads.
+        this.onHistory?.(conversationId, shown.map((t) => t.id));
+        return out;
+      },
+    };
+  }
+
+  /** Does this stored turn pass `test`? False for a turn that is not held. */
+  matches(conversationId: string, turnId: string, test: (turn: Turn) => boolean): boolean {
+    const turn = this.conversations.get(conversationId)?.find((t) => t.id === turnId);
+    return turn !== undefined && test(turn);
+  }
+
+  /**
+   * How many characters of text the conversation's next message carries as
+   * history (the window's complete turns), for sizing a prompt before it is
+   * sent. It reads nothing out and triggers no history check.
+   */
+  historyChars(conversationId: string): number {
+    let chars = 0;
+    for (const t of this.windowed(this.completeTurns(conversationId))) for (const m of t.messages) chars += m.content.length;
+    return chars;
+  }
+
+  /**
    * How many complete turns the conversation's next message carries, and how many
    * the window leaves out: the /chat handler sizes the tier classifier's "deep
    * thread" rule with `sent`, and tells the model about `leftOut` (./history-window
