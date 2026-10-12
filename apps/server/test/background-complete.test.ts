@@ -255,8 +255,8 @@ describe('/internal/complete with a raised cap', () => {
 // the brain main() wires: the local model
 
 /** Ollama's /api/chat reply for a non-streamed call. */
-function chatReply(content: string, doneReason = 'stop'): Response {
-  return new Response(JSON.stringify({ message: { role: 'assistant', content }, done: true, done_reason: doneReason, prompt_eval_count: 40, eval_count: 9 }), {
+function chatReply(content: string, doneReason = 'stop', promptTokens = 40): Response {
+  return new Response(JSON.stringify({ message: { role: 'assistant', content }, done: true, done_reason: doneReason, prompt_eval_count: promptTokens, eval_count: 9 }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
@@ -492,6 +492,25 @@ describe('matchesSchema (the part of JSON Schema a reply\'s shape is written in)
     expect(matchesSchema({ items: [], other: 1 }, schema)).toBe(true); // additional properties are allowed unless the schema says not
   });
 
+  // The review's two cases: valid replies it refused.
+  it('enum and const compare by value: an object whose keys come in another order is the same object', () => {
+    const point = { enum: [{ x: 1, y: { a: [1, { p: 1, q: 2 }], b: null } }] };
+    expect(matchesSchema({ y: { b: null, a: [1, { q: 2, p: 1 }] }, x: 1 }, point)).toBe(true);
+    expect(matchesSchema({ y: { b: null, a: [1, { q: 3, p: 1 }] }, x: 1 }, point)).toBe(false);
+    expect(matchesSchema({ b: 2, a: 1 }, { const: { a: 1, b: 2 } })).toBe(true);
+    expect(matchesSchema({ a: 1 }, { const: { a: 1, b: 2 } })).toBe(false);
+    expect(matchesSchema([2, 1], { const: [1, 2] })).toBe(false); // an array's order is its value
+  });
+
+  it('patternProperties allows keys it cannot name, so additionalProperties: false does not refuse them', () => {
+    const schema = { type: 'object', properties: { id: { type: 'string' } }, patternProperties: { '^x-': { type: 'string' } }, additionalProperties: false, required: ['id'] };
+    expect(matchesSchema({ id: 'a', 'x-note': 'kept' }, schema)).toBe(true);
+    expect(matchesSchema({ 'x-note': 'kept' }, schema)).toBe(false); // what it can check, it still checks
+    expect(matchesSchema({ id: 7, 'x-note': 'kept' }, schema)).toBe(false);
+    // Without patternProperties an unnamed key is still refused.
+    expect(matchesSchema({ id: 'a', extra: 1 }, { ...schema, patternProperties: undefined })).toBe(false);
+  });
+
   it('a keyword it does not know is not checked, and a schema that is no object matches anything', () => {
     expect(matchesSchema('abc', { type: 'string', minLength: 10 })).toBe(true);
     expect(matchesSchema(1, true)).toBe(true);
@@ -499,12 +518,26 @@ describe('matchesSchema (the part of JSON Schema a reply\'s shape is written in)
 });
 
 describe('/internal/complete sizes the call to the model\'s window', () => {
-  it('fitWindow: the reply as asked, up to half the window; the prompt in the rest, or it does not fit', () => {
-    expect(fitWindow(4096, 1000, 200)).toEqual({ maxTokens: 200, promptRoom: Math.floor((4096 - 200) * 3.5) });
-    expect(fitWindow(4096, 1000, 4000)).toEqual({ maxTokens: 2048, promptRoom: 7168 });
-    expect(fitWindow(4096, 7168, 4000)).toBeDefined();
-    expect(fitWindow(4096, 7169, 4000)).toBeUndefined();
-    expect(fitWindow(16384, 40_000, 4000)).toEqual({ maxTokens: 4000, promptRoom: 43_344 });
+  // 2 characters a token: what the runtime sends is log lines and JSON, which measured 2.3, not prose's 4.
+  it('fitWindow: the reply as asked, up to half the window; the prompt in the rest at 2 characters a token, or it does not fit', () => {
+    expect(fitWindow(4096, 1000, 200)).toEqual({ maxTokens: 200, promptRoom: (4096 - 200) * 2 });
+    expect(fitWindow(4096, 1000, 4000)).toEqual({ maxTokens: 2048, promptRoom: 4096 });
+    expect(fitWindow(4096, 4096, 4000)).toBeDefined();
+    expect(fitWindow(4096, 4097, 4000)).toBeUndefined();
+    expect(fitWindow(16384, 24_000, 4000)).toEqual({ maxTokens: 4000, promptRoom: 24_768 });
+    // A prompt of log-like JSON at 2.3 characters a token that the old 3.5 let through: 13,000 characters is
+    // about 5,650 tokens, more than the whole 4,096 window.
+    expect(fitWindow(4096, 13_000, 200)).toBeUndefined();
+  });
+
+  // The estimate can still be wrong. The model's own count of the prompt is the check after the fact.
+  it('a reply given with the window full is a failure: the prompt as the model counted it, plus the reply\'s budget, must fit', async () => {
+    const full = fakeOllama(() => chatReply('An answer to a prompt that was cut.', 'stop', 3896));
+    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: full.f })).handle(REQ); // 3,896 + 200 reaches 4,096
+    expect(r).toEqual({ status: 502, body: { error: 'the call failed (WindowFull)', reason: 'provider_failed' } });
+    expect(audit.at(-1)).toMatchObject({ kind: 'spend', outcome: 'failed', inputs: { error: 'WindowFull' } });
+    const room = fakeOllama(() => chatReply('An answer.', 'stop', 3895));
+    expect((await localGate(localBackgroundBrain(LOCAL, { fetch: room.f })).handle(REQ)).status).toBe(200);
   });
 
   it('a reply budget over half the window is cut to it before the model is asked', async () => {
@@ -518,7 +551,7 @@ describe('/internal/complete sizes the call to the model\'s window', () => {
   // Ollama would silently drop the start of it (the instructions) and answer something else.
   it('a prompt that does not fit is refused, 400 too_long, and the model is not asked', async () => {
     const { f, requests } = fakeOllama(() => chatReply('ok'));
-    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f })).handle({ ...REQ, prompt: 'x'.repeat(20_000) });
+    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f })).handle({ ...REQ, prompt: 'x'.repeat(10_000) });
     expect(r).toMatchObject({ status: 400, body: { reason: 'too_long' } });
     expect(r.body).toHaveProperty('error', expect.stringContaining("does not fit the model's 4096-token window"));
     expect(requests).toHaveLength(0);
@@ -526,7 +559,7 @@ describe('/internal/complete sizes the call to the model\'s window', () => {
     expect(audit[0]).toMatchObject({ outcome: 'denied', inputs: { reason: 'too_long' } });
     // The same prompt fits the window the chat brain really has.
     const big = fakeOllama(() => chatReply('ok'));
-    expect((await localGate(localBackgroundBrain({ ...LOCAL, numCtx: 16384 }, { fetch: big.f })).handle({ ...REQ, prompt: 'x'.repeat(20_000) })).status).toBe(200);
+    expect((await localGate(localBackgroundBrain({ ...LOCAL, numCtx: 16384 }, { fetch: big.f })).handle({ ...REQ, prompt: 'x'.repeat(10_000) })).status).toBe(200);
   });
 
   it('with no num_ctx from the chat brain, it sizes to Ollama\'s own 4,096', () => {

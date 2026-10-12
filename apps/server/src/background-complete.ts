@@ -131,8 +131,13 @@ export function readKindCallCaps(env: Record<string, string | undefined>, warn: 
   return out;
 }
 
-/** Prompt characters per token, on the low side (as memory extraction counts them: ./memory-brain). */
-const CHARS_PER_TOKEN = 3.5;
+/**
+ * Prompt characters per token, for sizing: 2. Prose runs near 4 and a
+ * transcript near 3.5, but what the runtime sends is log lines and JSON, which
+ * measured 2.3; an estimate that is too generous lets through a prompt Ollama
+ * then cuts. The reply's own usage is the check after the fact (WindowFull).
+ */
+const CHARS_PER_TOKEN = 2;
 
 /**
  * Size one call to a model's context window: the reply gets what was asked
@@ -316,12 +321,28 @@ export class ChatBusy extends Error {
   }
 }
 
-/** A reply that is no answer: nothing in it (EmptyReply), cut off at its token limit (Truncated), or not the schema asked for (InvalidReply). The name is what the audit trail records. */
+/**
+ * A reply that is no answer: nothing in it (EmptyReply), cut off at its token
+ * limit (Truncated), not the schema asked for (InvalidReply), or given with the
+ * window full (WindowFull: the prompt the model counted plus the reply's budget
+ * reached the window, so part of the prompt was cut or pushed out while it
+ * wrote). The name is what the audit trail records.
+ */
 export class ReplyError extends Error {
-  constructor(name: 'EmptyReply' | 'Truncated' | 'InvalidReply') {
+  constructor(name: 'EmptyReply' | 'Truncated' | 'InvalidReply' | 'WindowFull') {
     super(name);
     this.name = name;
   }
+}
+
+/** A JSON value as text with every object's keys in order, so two values that are equal compare equal however their keys were written. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
 }
 
 /**
@@ -331,7 +352,10 @@ export class ReplyError extends Error {
  * holds the model to the schema while it writes, but a reply cut short or a
  * model that ignores the grammar still comes back as JSON; this is the check
  * that it is the JSON that was asked for. Keywords it does not know are not
- * checked.
+ * checked, and it never refuses a reply over one: a schema with
+ * `patternProperties` allows keys this cannot name, so extra keys are not
+ * counted against it; `enum` and `const` compare by value, whatever order an
+ * object's keys are in.
  */
 export function matchesSchema(value: unknown, schema: unknown): boolean {
   if (typeof schema !== 'object' || schema === null) return true;
@@ -342,8 +366,8 @@ export function matchesSchema(value: unknown, schema: unknown): boolean {
     const want = (Array.isArray(s.type) ? s.type : [s.type]) as unknown[];
     if (!want.some((w) => w === t || (w === 'number' && t === 'integer'))) return false;
   }
-  if (Array.isArray(s.enum) && !s.enum.some((e) => JSON.stringify(e) === JSON.stringify(value))) return false;
-  if ('const' in s && JSON.stringify(s.const) !== JSON.stringify(value)) return false;
+  if (Array.isArray(s.enum) && !s.enum.some((e) => canonical(e) === canonical(value))) return false;
+  if ('const' in s && canonical(s.const) !== canonical(value)) return false;
   if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
     const props = typeof s.properties === 'object' && s.properties !== null ? (s.properties as Record<string, unknown>) : {};
@@ -351,7 +375,7 @@ export function matchesSchema(value: unknown, schema: unknown): boolean {
     for (const [k, v] of Object.entries(obj)) {
       if (Object.prototype.hasOwnProperty.call(props, k)) {
         if (!matchesSchema(v, props[k])) return false;
-      } else if (s.additionalProperties === false) return false;
+      } else if (s.additionalProperties === false && s.patternProperties === undefined) return false;
     }
   }
   if (Array.isArray(value) && s.items !== undefined && !value.every((v) => matchesSchema(v, s.items))) return false;
@@ -382,6 +406,8 @@ export interface LocalBackgroundDeps {
  *    call fails (InvalidReply);
  *  - a reply with nothing in it, or cut off at its token limit, fails too
  *    (EmptyReply, Truncated): half an answer is not handed on as an answer;
+ *  - so does one given with the window full (WindowFull): the prompt as the
+ *    model counted it, plus the reply's budget, has to fit;
  *  - only POST /api/chat on that host, at most BACKGROUND_MODEL_REQUESTS times;
  *  - Will's chat comes first: `busy` says so before a call is started, and a
  *    call already running is cut off the moment a turn starts (ChatBusy).
@@ -392,10 +418,11 @@ export interface LocalBackgroundDeps {
 export function localBackgroundBrain(m: LocalMemoryModel, deps: LocalBackgroundDeps = {}): BackgroundBrain {
   const chatActive = deps.chatActive ?? (() => false);
   const base = deps.fetch ?? fetch;
+  const numCtx = typeof m.numCtx === 'number' && Number.isInteger(m.numCtx) && m.numCtx > 0 ? m.numCtx : DEFAULT_NUM_CTX;
   return {
     vendor: undefined,
     model: m.model,
-    numCtx: typeof m.numCtx === 'number' && Number.isInteger(m.numCtx) && m.numCtx > 0 ? m.numCtx : DEFAULT_NUM_CTX,
+    numCtx,
     busy: chatActive,
     generate: async (input, o) => {
       if (chatActive()) throw new ChatBusy();
@@ -435,6 +462,9 @@ export function localBackgroundBrain(m: LocalMemoryModel, deps: LocalBackgroundD
           signal: ac.signal,
         });
         const text = r.message.content;
+        // The model's own count of the prompt, not the estimate it was sized by: with the reply's
+        // budget it must leave room in the window, or Ollama cut the prompt to make some.
+        if (r.usage.input + o.maxTokens >= numCtx) throw new ReplyError('WindowFull');
         if (r.reason === 'max_tokens') throw new ReplyError('Truncated');
         if (text.trim().length === 0) throw new ReplyError('EmptyReply');
         if (input.schema) {
