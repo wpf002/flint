@@ -1,6 +1,7 @@
-import type { Tool } from '@flint/core';
+import { isFlintError, type Tool } from '@flint/core';
 import { cosineSimilarity } from '@flint/persona';
 import { guardedFetch, isPrivateHost } from '@flint/mcp';
+import { errorSummary } from './error-log';
 
 /**
  * deep_research — Perplexity-grade research as a built-in tool. One call does
@@ -174,7 +175,9 @@ Question: ${question}`;
       if (queries.length >= limits.minQueries) return { queries, planner: 'brain' };
       deps.log?.(`[research] planner gave ${planned.length} usable queries; using heuristics`);
     } catch (err) {
-      deps.log?.(`[research] planner failed (${errMsg(err)}); using heuristics`);
+      // A provider's error is logged as its class, never its words (./error-log). Anything else
+      // here is a reason the server wrote itself (no frontier brain, a budget pause, the timeout).
+      deps.log?.(`[research] planner failed (${isFlintError(err) ? errorSummary(err) : errMsg(err)}); using heuristics`);
     }
   }
   return { queries: heuristicQueries(question, now, limits), planner: 'heuristic' };
@@ -551,7 +554,7 @@ export async function rerank(
       .sort((a, b) => b.score - a.score);
     return { ranked: [...ranked, ...lexical.slice(limits.maxEmbedPassages)], method: 'semantic' };
   } catch (err) {
-    deps.log?.(`[research] embedder unavailable (${errMsg(err)}); lexical rerank`);
+    deps.log?.(`[research] embedder unavailable (${errorSummary(err)}); lexical rerank`);
     return { ranked: lexical, method: 'lexical' };
   }
 }
@@ -666,11 +669,14 @@ export async function deepResearch(question: string, deps: DeepResearchDeps): Pr
           .then((raw) => {
             const res = parseSearchResult(raw);
             // e.g. no PERPLEXITY_API_KEY, or no search key and no SearXNG: the other engines carry on.
-            if (res.error) log(`[research] ${st.name} unavailable for "${query}": ${res.error}`);
+            // The query is Will's question (or the planner's rewording of it) and the tool's error is
+            // the tool's words: neither is logged, only which query of the turn it was and what kind of
+            // error (errorHint: a missing key's name, an HTTP status).
+            if (res.error) log(`[research] ${st.name} unavailable for query ${q + 1} of ${queries.length} (${errorHint(res.error)})`);
             return { q, res };
           })
           .catch((err) => {
-            log(`[research] ${st.name} failed for "${query}": ${errMsg(err)}`);
+            log(`[research] ${st.name} failed for query ${q + 1} of ${queries.length} (${errorSummary(err)})`);
             return { q, res: { hits: [] } };
           }),
       );
@@ -699,7 +705,8 @@ export async function deepResearch(question: string, deps: DeepResearchDeps): Pr
         const ex = isHtml ? extractReadable(body) : { text: body };
         return { hit: h, ...ex, text: ex.text.slice(0, limits.maxCharsPerPage), ok: ex.text.length > 0 };
       } catch (err) {
-        log(`[research] fetch ${h.url} failed: ${errMsg(err)}`);
+        // The host only: a result's URL can carry the search itself in its path or query string.
+        log(`[research] fetch from ${hostOf(h.url) ?? 'a page'} failed (${errorSummary(err)})`);
         return { hit: h, text: '', ok: false };
       } finally {
         clearTimeout(timer);
@@ -752,9 +759,8 @@ export function deepResearchTool(deps: DeepResearchDeps): Tool {
       const question = String((call.args as { question?: unknown } | null)?.question ?? '').trim();
       if (!question) return { isError: true, content: 'deep_research needs a question.' };
       const pack = await deepResearch(question, { log: (m) => console.error(m), ...deps });
-      console.error(
-        `[research] "${question.slice(0, 80)}": ${pack.queries.length} queries (${pack.planner}), ${pack.pagesRead} pages, ${pack.cited.length} cited, ${pack.rerank}`,
-      );
+      // Counts only. The question is what Will asked: it is never in the log.
+      console.error(`[research] ${pack.queries.length} queries (${pack.planner}), ${pack.pagesRead} pages, ${pack.cited.length} cited, ${pack.rerank}`);
       return pack.text;
     },
   };
@@ -796,4 +802,16 @@ function str(v: unknown): string | undefined {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * What kind of error a search tool reported, for a log line: the name of a key
+ * that is not set, or the HTTP status it got. Never the tool's own words, which
+ * can carry a provider's reply or the query.
+ */
+export function errorHint(text: string): string {
+  const key = /\b([A-Z][A-Z0-9_]{2,40}) not set\b/.exec(text);
+  if (key) return `${key[1]} not set`;
+  const status = /\bHTTP (\d{3})\b/.exec(text);
+  return status ? `HTTP ${status[1]}` : 'it reported an error';
 }

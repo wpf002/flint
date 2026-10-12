@@ -1,90 +1,57 @@
 /**
- * Can this model actually answer? A vendor's model list is not the answer.
+ * Can this model actually answer? A model list is not the answer.
  *
- * OpenAI still lists `gpt-5.2-codex` in /v1/models long after deprecating it;
- * the refusal only appears when you call it. So the "is it served" screen let a
- * dead model through, Flint was reconfigured onto it, and a full measurement was
- * paid for before the fallback made the result meaningless — $0.41 to learn the
- * model was gone.
+ * OpenAI still listed `gpt-5.2-codex` in /v1/models long after deprecating it;
+ * the refusal only appeared when it was called. So the "is it served" screen let
+ * a dead model through, Flint was reconfigured onto it, and a full measurement
+ * was paid for before the fallback made the result meaningless.
  *
- * This asks for one token instead. Cheaper than a rounding error, and it is the
- * only check that reflects what happens at call time.
+ * This asks for one token instead, which is the only check that reflects what
+ * happens at call time: for a local model, that it loads and generates.
+ *
+ * It asks the local Ollama and nothing else. `try` only takes local candidates
+ * (promote.ts localOnly), so the OpenAI, Anthropic and Google probes that used
+ * to live here are gone: there is no code path from evolve's probe to a vendor.
  */
+import { localOnly } from './promote.js';
+import { tierOllamaHost } from './vendors.js';
 
 export interface ProbeResult {
   ok: boolean;
   detail: string;
 }
 
-const TIMEOUT_MS = 45_000;
-
-async function post(url: string, headers: Record<string, string>, body: unknown): Promise<{ status: number; text: string }> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
-  return { status: res.status, text: (await res.text()).slice(0, 300) };
-}
+/** A cold 30B model can take most of a minute to load before its first token. */
+const TIMEOUT_MS = 120_000;
 
 /**
- * A minimal generation against the real endpoint Flint would use.
+ * A one-token generation against the Ollama the server's `ollama:` tier is
+ * served from (vendors.ts tierOllamaHost: FLINT_TIER_OLLAMA_HOST, else
+ * FLINT_FRONTIER_BASE_URL, else OLLAMA_HOST), the same one the screen listed.
  *
- * Reasoning models spend their budget thinking before emitting anything, so the
- * cap is high enough that a healthy model is not mistaken for a broken one. An
- * empty completion still counts as alive: the call was accepted, which is what
- * is being tested.
+ * An empty completion still counts as alive: the call was accepted and the
+ * model ran, which is what is being tested.
  */
 export async function probe(opts: {
   provider: string;
   model: string;
   env: NodeJS.ProcessEnv;
+  /** Injectable fetch (tests). Defaults to global fetch. */
+  fetch?: typeof fetch;
 }): Promise<ProbeResult> {
   const { provider, model, env } = opts;
+  const local = localOnly({ provider, model });
+  // Not a local model: refused here too, whoever called, before any request is made.
+  if (!local.ok) return { ok: false, detail: local.reason };
   try {
-    if (provider === 'openai') {
-      const key = env.OPENAI_API_KEY?.trim();
-      if (!key) return { ok: false, detail: 'no OPENAI_API_KEY' };
-      const r = await post(
-        'https://api.openai.com/v1/chat/completions',
-        { authorization: `Bearer ${key}` },
-        { model, messages: [{ role: 'user', content: 'hi' }], max_completion_tokens: 1200 },
-      );
-      return r.status === 200 ? { ok: true, detail: 'answered' } : { ok: false, detail: `HTTP ${r.status}: ${r.text}` };
-    }
-    if (provider === 'anthropic') {
-      const key = env.ANTHROPIC_API_KEY?.trim();
-      if (!key) return { ok: false, detail: 'no ANTHROPIC_API_KEY' };
-      const r = await post(
-        'https://api.anthropic.com/v1/messages',
-        { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        { model, max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] },
-      );
-      return r.status === 200 ? { ok: true, detail: 'answered' } : { ok: false, detail: `HTTP ${r.status}: ${r.text}` };
-    }
-    if (provider === 'google') {
-      const key = env.GEMINI_API_KEY?.trim();
-      if (!key) return { ok: false, detail: 'no GEMINI_API_KEY' };
-      const r = await post(
-        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-        { authorization: `Bearer ${key}` },
-        { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1200 },
-      );
-      return r.status === 200 ? { ok: true, detail: 'answered' } : { ok: false, detail: `HTTP ${r.status}: ${r.text}` };
-    }
-    if (provider === 'ollama') {
-      const host = env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434';
-      const r = await post(`${host.replace(/\/$/, '')}/api/chat`, {}, {
-        model,
-        messages: [{ role: 'user', content: 'hi' }],
-        stream: false,
-        options: { num_predict: 1 },
-      });
-      return r.status === 200 ? { ok: true, detail: 'answered' } : { ok: false, detail: `HTTP ${r.status}: ${r.text}` };
-    }
-    // An unknown provider is not something to gamble a config swap on.
-    return { ok: false, detail: `no probe for provider ${provider}` };
+    const res = await (opts.fetch ?? fetch)(`${tierOllamaHost(env)}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], stream: false, options: { num_predict: 1 } }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status === 200) return { ok: true, detail: 'answered' };
+    return { ok: false, detail: `HTTP ${res.status}: ${(await res.text()).slice(0, 300)}` };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }

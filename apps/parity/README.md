@@ -282,6 +282,18 @@ error) is not recorded at all, so it never counts as a failure, only as not aske
 you pass `--judge-model` or `--judge-panel`, as `report` does, so a later invocation on
 the same run can't switch judges by accident.
 
+**One prompt per contestant.** Answers are cached under a contestant's name, and a style
+variant's name says which guide, not which exact text the server sent (the server also adds a
+paragraph naming the model that answers). So the server reports a revision for each live brain's
+prompt (`/health` `promptRevisions`, a hash), `run.json` records it for each Flint contestant the
+first time that contestant answers, and `--run` refuses to add that contestant's answers from a
+server whose revisions differ: "can't add flint answers to <run>: its cached answers are from
+prompt revisions ...". Start a new run, or use `--judge-only`, which asks Flint nothing. A
+contestant new to a run (`--flint-local`, `--local-model` on an existing run) has nothing cached
+to mix with, and starts its own record. Answers cached before servers reported revisions are
+refused the same way. The gate counts a revision change between its first and last answer as a
+changed server.
+
 **Failures.** A prompt Flint fails on (no successful answer after retries: an empty
 answer, an HTTP 500, a timeout, the local brain being down) is not judged, so the
 head-to-head tally leaves it out. That hides a Flint that often fails to answer, so the

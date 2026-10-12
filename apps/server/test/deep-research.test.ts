@@ -202,11 +202,13 @@ describe('rerank', () => {
 
   it('falls back to lexical when the embedder throws (ollama down during training)', async () => {
     const log = vi.fn();
-    const embedder = { embed: vi.fn(async () => { throw new Error('ECONNREFUSED 127.0.0.1:11434'); }) };
+    // As Node raises it: the code on the error, the address in its message.
+    const embedder = { embed: vi.fn(async () => { throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:11434'), { code: 'ECONNREFUSED' }); }) };
     const { ranked, method } = await rerank(Q, passages, { embedder, log }, DEFAULT_LIMITS);
     expect(method).toBe('lexical');
     expect(ranked[0]!.source).toBe(1);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+    // The log says what kind of failure it was (./error-log), not the error's own words.
+    expect(log).toHaveBeenCalledWith('[research] embedder unavailable (Error ECONNREFUSED); lexical rerank');
   });
 
   it('falls back to lexical when the embedder hangs', async () => {
@@ -374,6 +376,8 @@ describe('deepResearch pipeline (all stubbed, no network)', () => {
     expect(searched).toEqual(pack.queries);
     expect(perplexityCalls).toHaveBeenCalledOnce(); // first query only, as with a key
     expect(logs.some((l) => l.startsWith('[research] trident.perplexity_search unavailable') && l.includes('PERPLEXITY_API_KEY not set'))).toBe(true);
+    // No line carries the question or a search query: which query of the turn it was is a number.
+    for (const l of logs) for (const q of pack.queries) expect(l, l).not.toContain(q);
     expect(pack.cited.map((s) => s.url)).toEqual(
       expect.arrayContaining(['https://www.federalreserve.gov/newsevents/2026-09-17.htm', 'https://apnews.com/article/fed-holds']),
     );

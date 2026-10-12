@@ -15,6 +15,18 @@ but are called out explicitly here.
   needs the new case.
 - **`toolChoice: 'none'`** in `GenerateArgs`: tools stay defined, calling them
   is forbidden (Anthropic `{type:'none'}`, OpenAI `'none'`; Ollama drops the tools).
+- **`maxRetries` and `timeoutMs`** in `AnthropicProviderOptions`, passed to the
+  SDK client: its own retries of a failed request (default 2) and how long it
+  waits for a response to start (default 10 minutes). Unset, nothing changes.
+  Flint's tool loop already retries a retryable failure, so an app that wants
+  a failing call to fail fast sets `maxRetries: 0`.
+- **`pickOllamaModel`, `isOllamaCloudModel`, `DEFAULT_OLLAMA_MODEL`**: the model
+  an app uses when none is named. It asks Ollama (`/api/ps`, then `/api/tags`)
+  for the chat model already loaded, else the first one pulled, skipping
+  embedders and cloud models; never a hosted model. The result says where the
+  model came from (`from`), the context size a loaded model has (`numCtx`, so
+  asking it does not make Ollama reload it), and whether Ollama answered at all
+  (`answered`, to tell "down" from "empty").
 
 ### Changed
 

@@ -524,10 +524,13 @@ export function poolSets(
  * The /health fields that identify what is answering, plus the deploy
  * checkout's HEAD. Auto-deploy restarts the server on every commit to main; a
  * gate whose baseline and candidate straddle a deploy compares two builds.
+ * `promptRevisions` is the server's own hash of each live brain's prompt (style
+ * guide and engine paragraph): a gate whose two sides were answered under
+ * different prompts compares the prompts, not the models.
  */
 export function serverFingerprint(health: Record<string, unknown> | undefined, deployHead: string): string {
   const h = health ?? {};
-  const pick = ['provider', 'model', 'tools', 'evalMode', 'localModelOverride', 'localThinkOverride', 'styleVariants'];
+  const pick = ['provider', 'model', 'tools', 'evalMode', 'localModelOverride', 'localThinkOverride', 'styleVariants', 'promptRevisions'];
   return JSON.stringify({ ...Object.fromEntries(pick.map((k) => [k, h[k] ?? null])), deployHead });
 }
 

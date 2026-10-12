@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decide, parseCandidate, screen, tierEnvVar, tierReach } from '../src/promote';
+import { MODEL_ID, decide, localOnly, parseCandidate, screen, tierEnvVar, tierReach } from '../src/promote';
 import type { DailyRow } from '../src/measure';
 
 const row = (winRate: number, signal: DailyRow['signal']): DailyRow => ({
@@ -42,34 +42,80 @@ describe('tierEnvVar', () => {
   });
 });
 
+// `try` rewrites FLINT_TIER_* in the live config. It may only ever put a model on this Mac's
+// Ollama there: an outside model is Will's call, by hand.
+describe('localOnly', () => {
+  it('passes a model on the local Ollama', () => {
+    for (const model of ['qwen3.8:27b', 'muse-glimmer:30b', 'qwen2.5:7b', 'hf.co/org/repo:Q4_K_M']) {
+      expect(localOnly({ provider: 'ollama', model }), model).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses every outside provider, by name', () => {
+    for (const provider of ['openai', 'anthropic', 'google', 'perplexity', 'bedrock', 'Ollama', 'ollama ', '']) {
+      const r = localOnly({ provider, model: 'x' });
+      expect(r.ok, JSON.stringify(provider)).toBe(false);
+      expect((r as { reason: string }).reason).toContain('evolve only tries local models');
+    }
+  });
+
+  // The model is written into secrets.env as FLINT_TIER_X=ollama:<model>: it has to be a name, and nothing else.
+  it('refuses a model that is not a model name, and quotes none of what could break a line', () => {
+    for (const model of ['qwen3.8:27b\nANTHROPIC_API_KEY=sk-ant-planted', 'a\rb', 'a b', 'a\tb', 'a"b', 'a=b', 'a#b', 'a$(b)', '', ':27b', '-x', 'x'.repeat(161)]) {
+      const r = localOnly({ provider: 'ollama', model });
+      expect(r.ok, JSON.stringify(model)).toBe(false);
+      const reason = (r as { reason: string }).reason;
+      expect(reason).toContain('is not an Ollama model name');
+      expect(reason).not.toMatch(/[\n\r]/);
+      expect(reason).not.toContain('sk-ant-planted\n');
+    }
+    // ...and an outside provider's refusal does not echo a line break either.
+    expect((localOnly({ provider: 'openai\nX=1', model: 'gpt\n5' }) as { reason: string }).reason).not.toMatch(/[\n\r]/);
+    expect(MODEL_ID.test('hf.co/org/repo:Q4_K_M')).toBe(true);
+    expect(MODEL_ID.test('x'.repeat(160))).toBe(true);
+  });
+
+  it('refuses an Ollama cloud model: it runs on Ollama\'s servers', () => {
+    for (const model of ['gpt-oss:120b-cloud', 'glm-4.6:cloud', 'qwen3-coder-cloud']) {
+      const r = localOnly({ provider: 'ollama', model });
+      expect(r.ok, model).toBe(false);
+      expect((r as { reason: string }).reason).toContain('cloud model');
+    }
+  });
+});
+
 describe('screen', () => {
-  const served = [cat('openai', ['gpt-5.5', 'gpt-5.6-sol', 'gpt-6-sol'])];
+  const pulled = [cat('ollama', ['qwen3.8:27b', 'qwen2.5:7b', 'gpt-oss:120b-cloud']), cat('openai', ['gpt-5.5', 'gpt-5.6-sol'])];
 
-  it('passes a model that is both served and priced', () => {
-    expect(screen({ tier: 'hard', provider: 'openai', model: 'gpt-5.5' }, served).ok).toBe(true);
+  // A local model costs nothing per call, so there is no price table to pass.
+  it('passes a local model that is pulled', () => {
+    expect(screen({ tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, pulled).ok).toBe(true);
   });
 
-  // The failure that put a deprecated model in the live config.
-  it('refuses a model the vendor does not serve', () => {
-    const r = screen({ tier: 'code', provider: 'openai', model: 'gpt-5.2-codex' }, served);
+  // The failure that put a deprecated model in the live config, in its local form.
+  it('refuses a local model that is not pulled', () => {
+    const r = screen({ tier: 'code', provider: 'ollama', model: 'qwen2.5:14b' }, pulled);
     expect(r.ok).toBe(false);
-    expect((r as { reason: string }).reason).toContain('does not serve');
+    expect((r as { reason: string }).reason).toContain('not pulled');
   });
 
-  // gpt-6-sol is real but absent from pricing.ts: promoting it would price every
-  // call at UNLISTED_PRICE and quietly shrink every budget guard.
-  it('refuses a served model that has no price', () => {
-    const r = screen({ tier: 'hard', provider: 'openai', model: 'gpt-6-sol' }, served);
+  it('refuses an outside model even when its vendor serves it and it has a price', () => {
+    const r = screen({ tier: 'hard', provider: 'openai', model: 'gpt-5.5' }, pulled);
     expect(r.ok).toBe(false);
-    expect((r as { reason: string }).reason).toContain('price table');
+    expect((r as { reason: string }).reason).toContain('evolve only tries local models');
   });
 
-  it('refuses when the vendor could not be reached, rather than guessing', () => {
-    const r = screen({ tier: 'hard', provider: 'openai', model: 'gpt-5.5' }, [
-      { vendor: 'openai', models: [], error: 'HTTP 500' },
-    ]);
+  it('refuses an Ollama cloud model even when it is listed', () => {
+    const r = screen({ tier: 'hard', provider: 'ollama', model: 'gpt-oss:120b-cloud' }, pulled);
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toContain('cloud model');
+  });
+
+  it('refuses when Ollama could not be reached, rather than guessing', () => {
+    const r = screen({ tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, [{ vendor: 'ollama', models: [], error: 'HTTP 500' }]);
     expect(r.ok).toBe(false);
     expect((r as { reason: string }).reason).toContain('unreachable');
+    expect(screen({ tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, []).ok).toBe(false);
   });
 });
 
@@ -106,18 +152,53 @@ describe('decide', () => {
 import { probe } from '../src/probe';
 
 describe('probe', () => {
-  it('refuses a provider it has no probe for, rather than assuming', async () => {
-    const r = await probe({ provider: 'mystery', model: 'x', env: {} });
-    expect(r.ok).toBe(false);
-    expect(r.detail).toContain('no probe');
+  /** A fetch that records what it was asked and answers `status`. */
+  function recording(status = 200) {
+    const asked: Array<{ url: string; body: { model: string; options: { num_predict: number } } }> = [];
+    const f = (async (url: string, init: { body: string }) => {
+      asked.push({ url, body: JSON.parse(init.body) });
+      return new Response(status === 200 ? '{"message":{"content":""}}' : 'model not found', { status });
+    }) as unknown as typeof fetch;
+    return { f, asked };
+  }
+
+  it('asks the local Ollama for one token, and nothing else', async () => {
+    const { f, asked } = recording();
+    const r = await probe({ provider: 'ollama', model: 'qwen3.8:27b', env: { OLLAMA_HOST: 'http://127.0.0.1:11434/' }, fetch: f });
+    expect(r).toEqual({ ok: true, detail: 'answered' });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.url).toBe('http://127.0.0.1:11434/api/chat');
+    expect(asked[0]!.body).toMatchObject({ model: 'qwen3.8:27b', options: { num_predict: 1 } });
   });
 
-  it('refuses when the provider has no key', async () => {
-    for (const p of ['openai', 'anthropic', 'google']) {
-      const r = await probe({ provider: p, model: 'x', env: {} });
-      expect(r.ok).toBe(false);
-      expect(r.detail).toContain('no ');
+  // The screen listed the tier's Ollama; the probe must ask that same one, or it proves nothing about the tier.
+  it('asks the Ollama the server\'s ollama: tier is served from, not the local brain\'s', async () => {
+    const { f, asked } = recording();
+    await probe({ provider: 'ollama', model: 'big:70b', env: { OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_TIER_OLLAMA_HOST: 'http://bigbox:11434/' }, fetch: f });
+    await probe({ provider: 'ollama', model: 'big:70b', env: { OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434' }, fetch: f });
+    await probe({ provider: 'ollama', model: 'big:70b', env: {}, fetch: f });
+    expect(asked.map((a) => a.url)).toEqual(['http://bigbox:11434/api/chat', 'http://frontier:11434/api/chat', 'http://127.0.0.1:11434/api/chat']);
+  });
+
+  it('reports a model that does not answer', async () => {
+    const { f } = recording(404);
+    const r = await probe({ provider: 'ollama', model: 'qwen2.5:14b', env: {}, fetch: f });
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain('HTTP 404');
+  });
+
+  // Every key is present: it still makes no request. There is no vendor probe left to reach.
+  it('never contacts an outside vendor, whatever keys are set', async () => {
+    const { f, asked } = recording();
+    const env = { OPENAI_API_KEY: 'sk-test', ANTHROPIC_API_KEY: 'sk-ant-test', GEMINI_API_KEY: 'g-test' };
+    for (const p of ['openai', 'anthropic', 'google', 'perplexity', 'mystery']) {
+      const r = await probe({ provider: p, model: 'x', env, fetch: f });
+      expect(r.ok, p).toBe(false);
+      expect(r.detail, p).toContain('evolve only tries local models');
     }
+    const cloud = await probe({ provider: 'ollama', model: 'gpt-oss:120b-cloud', env, fetch: f });
+    expect(cloud.ok).toBe(false);
+    expect(asked).toEqual([]);
   });
 });
 

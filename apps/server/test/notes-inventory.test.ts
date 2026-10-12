@@ -16,6 +16,8 @@
  *   notifications.ts (the phone)             the content-free ping
  *   index.ts (/internal/notify)              the runtime's notes, passed through as they are:
  *                                            apps/runtime/test/notes-inventory.test.ts has their words
+ *   index.ts (the frontier breaker)          an outside AI is paused for something only Will can fix
+ *   index.ts (the local model)               no local model is set, and Ollama has none to offer
  *   apps/desktop-mac/update_app.sh           Flint.app was updated, or its update did not build
  *   apps/desktop-calendar/update_calendar.sh Flint Calendar's update did not build
  *   apps/responder/scripts/nexus-health.sh   a Nexus participant cannot take a turn
@@ -26,6 +28,8 @@ import { join, relative } from 'node:path';
 import { PAID_VENDORS } from '@flint/core';
 import { ACTION_DONE, ACTION_WORDS, noteProblems } from '@flint/policy';
 import { actionDoneNote } from '../src/approval-routes';
+import { breakerNote } from '../src/frontier-breaker';
+import { localDefaultNote } from '../src/local-model';
 import { PHONE_PING, signalNote, upcomingNote } from '../src/notifications';
 import { effectOf, thresholdNote, type BudgetLevel } from '../src/spend';
 
@@ -62,6 +66,8 @@ describe('the server’s notes to Will', () => {
       'approval-routes.ts: done.title', // actionDoneNote
       'approval-routes.ts: done.title',
       'index.ts: n.title', // the runtime's, through /internal/notify
+      'index.ts: note.title', // breakerNote
+      'index.ts: note.title', // localDefaultNote
       'notifications.ts: r.title', // the Watcher's checks: upcomingNote, signalNote
       'spend.ts: note.title', // thresholdNote
     ]);
@@ -71,6 +77,8 @@ describe('the server’s notes to Will', () => {
     expect(checks).toContain('...upcomingNote(');
     expect(checks).toContain('...signalNote(');
     expect(checks).not.toMatch(/\btitle:|\bbody:/);
+    expect(index.match(/const note = breakerNote\(e\);\n\s+if \(note\) notes\.push\(note\.title, note\.body,/g)).toHaveLength(1);
+    expect(index.match(/const note = localDefaultNote\(\);\n\s+notes\.push\(note\.title, note\.body,/g)).toHaveLength(1);
     const routes = readFileSync(join(SRC, 'approval-routes.ts'), 'utf8');
     expect(routes.match(/const done = actionDoneNote\(/g)).toHaveLength(2);
     expect(readFileSync(join(SRC, 'spend.ts'), 'utf8')).toMatch(/const note = thresholdNote\(/);
@@ -104,6 +112,32 @@ describe('the server’s notes to Will', () => {
       body: 'Flint has spent $8.20 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.',
     });
     expect(thresholdNote('openai', 'monthly', 100, 150, 150, effectOf('openai', 'exhausted')).title).toBe('OpenAI Budget at 100% for This Month');
+  });
+
+  it('index.ts: a paused outside AI and a guessed local model are said in plain words, with no model’s id and no setting’s name', () => {
+    // Every provider Flint has a name for, one it has none for, and a model's id of each shape.
+    for (const provider of ['anthropic', 'openai', 'perplexity', 'ollama', 'openai-compat', 'my_proxy']) {
+      for (const e of [
+        { provider, reason: 'credit' as const },
+        { provider, reason: 'auth' as const },
+        { provider, reason: 'auth' as const, model: 'claude-opus-4-8' },
+        { provider, reason: 'auth' as const, model: 'gpt-5.5' },
+        { provider, reason: 'auth' as const, model: 'sonar-deep-research' },
+      ]) {
+        const note = breakerNote(e)!;
+        plain(`index.ts breaker ${provider} ${e.reason} ${'model' in e ? e.model : ''}`, note.title, note.body);
+        expect(note.title.length).toBeLessThanOrEqual(40);
+      }
+    }
+    // An outage clears itself: no note.
+    expect(breakerNote({ provider: 'anthropic', reason: 'transient' })).toBeUndefined();
+    expect(breakerNote({ provider: 'anthropic', reason: 'credit' })).toEqual({
+      title: 'Claude Has No Credit Left',
+      body: 'Flint is answering with the local model, and checks again every 15 minutes.',
+    });
+    const guess = localDefaultNote();
+    plain('index.ts local default', guess.title, guess.body);
+    expect(guess.title).toBe('Flint Is Guessing Its Local Model');
   });
 
   it('notifications.ts: the Watcher’s notes are Flint’s words around someone else’s, and the phone ping says nothing of what happened', () => {

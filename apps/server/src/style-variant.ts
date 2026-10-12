@@ -19,6 +19,9 @@
  *    override personas'). Unset, both are "v1", so nothing changes; an unknown
  *    value is logged and ignored (v1), so a typo can't take Flint down.
  *
+ * Whatever the variant, each persona also says which model is answering
+ * (engineLineFor): that is per brain, not part of any guide.
+ *
  * A requested variant applies to whichever brain answers: frontier, local, or a
  * local fallback after a frontier failure. Personas are built once per (brain,
  * variant) and reused. The default variant's persona is the one main() already
@@ -27,8 +30,9 @@
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
-import type { ProviderAdapter } from '@flint/core';
-import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
+import { createHash } from 'node:crypto';
+import { isOllamaCloudModel, type ProviderAdapter } from '@flint/core';
+import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, flintEngineLine, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
 import { resolveLocalPersona, type LocalPersonaCache, type OverridePersona } from './local-model';
 
 export type StyleVariant = FlintStyleVariant;
@@ -42,6 +46,30 @@ export const DEFAULT_STYLE_VARIANT: StyleVariant = 'v1';
 /** The style guide text for a variant. */
 export function styleGuideFor(variant: StyleVariant): string {
   return FLINT_STYLE_VARIANTS[variant];
+}
+
+/**
+ * The engine paragraph a brain's persona carries after its guide (@flint/persona
+ * flintEngineLine): which model is answering. The frontier guides say "Claude's
+ * model for most questions" in pinned text, and the same guide speaks for every
+ * brain, an `ollama:` tier and the local brain included; this is what keeps a
+ * local model from answering "Claude" when Will asks what it runs on. The guide
+ * itself is untouched, so styleVariantOf still names a persona by its guide.
+ */
+export function engineLineFor(provider: Pick<ProviderAdapter, 'name'>, model: string): string {
+  return flintEngineLine({ provider: provider.name, model, ollamaCloud: provider.name === 'ollama' && isOllamaCloudModel(model) });
+}
+
+/**
+ * A short id for the prompt a persona speaks with: the first 8 hex characters
+ * of the sha256 of its style guide and its engine paragraph. A variant name
+ * says which guide; this says which exact text went to the model, engine
+ * paragraph included, so answers given before and after a change to either can
+ * be told apart (/health `promptRevisions`, the [route] line's `promptRev`, an
+ * eval response's `promptRev`). It is a hash: it says nothing of the text.
+ */
+export function promptRevision(p: { readonly styleGuide: string; readonly engine?: string | undefined }): string {
+  return createHash('sha256').update(p.styleGuide).update('\n\n').update(p.engine ?? '').digest('hex').slice(0, 8);
 }
 
 export type StyleVariantRequest =

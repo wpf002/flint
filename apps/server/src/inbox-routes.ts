@@ -83,12 +83,12 @@ function failed(res: ServerResponse, deps: InboxDeps, a: { status: number }, wha
   if (s === 400 || s === 422) return reply(res, 400, { error: 'The runtime refused that change.' });
   if (s === 409) return reply(res, 409, { error: 'That item can no longer change.' });
   if (s === 429) return reply(res, 429, { error: 'The runtime is busy. Try again shortly.' });
-  return reply(res, 502, { error: 'The runtime hit an error. Try again.', ref: deps.errorRef('inbox', new Error(`the runtime answered ${s} for a ${what} request`)) });
+  return reply(res, 502, { error: 'The runtime hit an error. Try again.', ref: deps.errorRef('inbox', `the runtime answered ${s} for a ${what} request`) });
 }
 
 /** The runtime answered 2xx with something that is not the contract: logged by field paths, never values. */
 function malformed(res: ServerResponse, deps: InboxDeps, what: string, issues: string): true {
-  return reply(res, 502, { error: 'The runtime sent an answer Flint can’t read.', ref: deps.errorRef('inbox', new Error(`malformed ${what} answer (${issues.slice(0, 300)})`)) });
+  return reply(res, 502, { error: 'The runtime sent an answer Flint can’t read.', ref: deps.errorRef('inbox', `malformed ${what} answer (${issues.slice(0, 300)})`) });
 }
 
 const paths = (e: { issues: Array<{ path: Array<string | number> }> }) => [...new Set(e.issues.map((i) => i.path.join('.') || '(root)'))].join(', ');

@@ -118,6 +118,15 @@ export class TurnLog {
   }
 
   /**
+   * Has this turn called a tool yet (one that ran, failed, or was filed for
+   * approval)? Once it has, a failed attempt is not handed to another brain,
+   * which would start the turn over and call it again (./brains mayAskAnother).
+   */
+  get acted(): boolean {
+    return this.entries.some((e) => e.type === 'tool_call' || e.type === 'tool_result');
+  }
+
+  /**
    * The `grounding` of the eval response: `facts` (the recalled memory) and this
    * turn's tool results, each cut to `maxChars` (default 800; an eval request's
    * `groundingChars` asks for more, see ./eval-tools).

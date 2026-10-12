@@ -14,6 +14,8 @@ import { createContext, runInContext } from 'node:vm';
 import { PAID_VENDORS } from '@flint/core';
 import { ACTION_DONE, jobFailedNote, noteProblems, type NightlyJob } from '@flint/policy';
 import { actionDoneNote } from '../src/approval-routes';
+import { breakerNote } from '../src/frontier-breaker';
+import { localDefaultNote } from '../src/local-model';
 import { PHONE_PING } from '../src/notifications';
 import { effectOf, thresholdNote } from '../src/spend';
 
@@ -190,6 +192,34 @@ describe('Settings: Approval Keys', () => {
   });
 });
 
+// While the frontier breaker has Claude paused (apps/server/src/frontier-breaker.ts), a /chat
+// turn's first `meta` event says brain "local": this is what the console does with it.
+describe('who answered, under a reply', () => {
+  function chip(brains: string[]) {
+    const tags: Array<{ cls: string; text: string }> = [];
+    const meta = {
+      querySelector: (sel: string) => (sel === '.tag' && tags.length ? { remove: () => tags.splice(0) } : null),
+      appendChild: (t: { cls: string; text: string }) => tags.push(t),
+    };
+    const body = { parentNode: { querySelector: (sel: string) => (sel === '.meta' ? meta : null) } };
+    const c: Record<string, unknown> = { el: (_tag: string, cls: string, text: string) => ({ cls, text }), applyLO: () => {}, body };
+    createContext(c);
+    runInContext(fn('setBrainChip'), c);
+    for (const b of brains) runInContext(`setBrainChip(body, ${JSON.stringify(b)})`, c);
+    return tags;
+  }
+
+  it('an answer from the local model is marked Local; one from the frontier carries no mark', () => {
+    expect(chip(['local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+    expect(chip(['frontier'])).toEqual([]);
+  });
+
+  it('a turn that started on the frontier and was handed to the local model ends marked Local, once', () => {
+    expect(chip(['frontier', 'local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+    expect(chip(['local', 'local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+  });
+});
+
 describe('the line under a notification', () => {
   const lanesJs = /<script id="lanes-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
   const c: Record<string, unknown> = { document: { getElementById: () => null }, setInterval: () => 0, TOKEN: '', BASE: '', console };
@@ -213,6 +243,11 @@ describe('the line under a notification', () => {
       { title: 'The Trident API Service Is Down', body: 'The Trident API service has been down for 35 minutes.' },
       { title: 'The Last Restore Test Failed', body: 'The last restore test found 2 tables that differ from the backup, so the backups may not restore.' },
       { title: PHONE_PING.title, body: PHONE_PING.body },
+      // An outside AI paused for something only Will can fix, and a local model that is a guess.
+      breakerNote({ provider: 'anthropic', reason: 'credit' })!,
+      breakerNote({ provider: 'openai', reason: 'auth' })!,
+      breakerNote({ provider: 'anthropic', reason: 'auth', model: 'claude-opus-4-8' })!,
+      localDefaultNote(),
     ];
     for (const n of notes) {
       expect(title(n.title), n.title).toBe(n.title);

@@ -19,6 +19,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameS
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Runtime } from './audit-sink';
+import { errorSummary } from './error-log';
 
 export interface ProposalIn {
   kind: 'tool_call';
@@ -156,7 +157,8 @@ export class RuntimeProposals {
       } catch (err) {
         if (isAnswer(err) || err instanceof SyntaxError) {
           const reason = err instanceof Error ? err.message : String(err);
-          this.o.log?.(`[proposals] the runtime refused a spooled ${what}: ${reason}`);
+          // The log gets the class (and the status the runtime answered with); its words go to the audit trail, which redacts.
+          this.o.log?.(`[proposals] the runtime refused a spooled ${what} (${errorSummary(err)})`);
           refused?.(line, reason);
         } else keep.push(line);
       }
@@ -235,7 +237,7 @@ export class RuntimeProposals {
       } catch (err) {
         if (isAnswer(err)) {
           if (outcome.ok && outcome.result !== undefined) return this.completeDurably(id, { ok: true });
-          this.o.log?.(`[proposals] the runtime would not record how ${id} ended: ${(err as Error).message}`);
+          this.o.log?.(`[proposals] the runtime would not record how ${id} ended (${errorSummary(err)})`);
           return 'refused';
         }
         if (attempt < 2) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));

@@ -15,6 +15,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from 'node:path';
 import type { PolicyRow, TierDecision } from '@flint/policy';
 import type { Runtime } from './audit-sink';
+import { errorSummary } from './error-log';
 import type { CapClaim } from './tier-gate';
 
 const TIERS = new Set(['alone', 'approval', 'forbidden']);
@@ -82,7 +83,7 @@ export class RuntimePolicies {
       renameSync(tmp, this.o.file);
       return true;
     } catch (err) {
-      this.o.log?.(`[policies] could not refresh from the runtime: ${err instanceof Error ? err.message : String(err)}`);
+      this.o.log?.(`[policies] could not refresh from the runtime (${errorSummary(err)})`);
       return false;
     }
   }

@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isUnansweredMessage } from './unanswered';
+import { logError } from './error-log';
 import { CorpusTally, type CorpusBreakdown } from './corpus-sources';
 
 /** One captured interaction — a training example for Flint's own future brain. */
@@ -53,7 +54,7 @@ export class TrainingLogger {
       else this.local++;
       this.tally.add(full);
     } catch (err) {
-      console.error('[training] failed to append record:', err);
+      logError('[training] failed to append record:', err);
     }
   }
 
@@ -82,7 +83,8 @@ export class TrainingLogger {
       this.seq = maxId;
       console.error(`[training] corpus has ${this.frontier + this.local} examples (${this.frontier} teacher / ${this.local} student)`);
     } catch (err) {
-      console.error('[training] failed to read corpus:', err);
+      // Its class only: a JSON parse error quotes the line, and the corpus is Will's own questions.
+      logError('[training] failed to read corpus:', err);
     }
   }
 }

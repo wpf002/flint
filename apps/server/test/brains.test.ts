@@ -1,11 +1,17 @@
-import { describe, it, expect, vi } from 'vitest';
-import { FlintError, makeAiError, type ProviderAdapter } from '@flint/core';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { FlintError, isFlintError, makeAiError, type ProviderAdapter } from '@flint/core';
 import {
   classifyMessage,
   parseTierSpec,
   readTierSpecs,
   readLastResortSpec,
   buildTiers,
+  buildFrontierProvider,
+  frontierClientOptions,
+  FRONTIER_MAX_RETRIES,
+  FRONTIER_TIMEOUT_MS,
   envProviderFactory,
   runWithFallback,
   shouldFallBack,
@@ -384,5 +390,120 @@ describe('mediaChain', () => {
 
   it('falls back to the primary when no tier in the chain can', () => {
     expect(mediaChain([blind], { image: true }, sees)).toEqual([sees]);
+  });
+});
+
+describe('the frontier\'s Anthropic client fails fast', () => {
+  it('no SDK retries and 60 s for a response to start, by default', () => {
+    expect(frontierClientOptions({})).toEqual({ maxRetries: 0, timeoutMs: 60_000 });
+    expect(FRONTIER_MAX_RETRIES).toBe(0);
+    expect(FRONTIER_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it('FLINT_FRONTIER_MAX_RETRIES / FLINT_FRONTIER_TIMEOUT_MS override them, within their ranges', () => {
+    expect(frontierClientOptions({ FLINT_FRONTIER_MAX_RETRIES: '2', FLINT_FRONTIER_TIMEOUT_MS: ' 20000 ' })).toEqual({ maxRetries: 2, timeoutMs: 20_000 });
+    const warn = vi.fn();
+    for (const env of [
+      { FLINT_FRONTIER_MAX_RETRIES: '-1' },
+      { FLINT_FRONTIER_MAX_RETRIES: '6' },
+      { FLINT_FRONTIER_MAX_RETRIES: 'two' },
+      { FLINT_FRONTIER_MAX_RETRIES: '1.5' },
+      { FLINT_FRONTIER_TIMEOUT_MS: '999' },
+      { FLINT_FRONTIER_TIMEOUT_MS: '600001' },
+      { FLINT_FRONTIER_TIMEOUT_MS: '30s' },
+    ]) {
+      expect(frontierClientOptions(env, warn), JSON.stringify(env)).toEqual({ maxRetries: 0, timeoutMs: 60_000 });
+    }
+    expect(warn).toHaveBeenCalledTimes(7);
+    expect(warn.mock.calls[0]![0]).toBe('FLINT_FRONTIER_MAX_RETRIES="-1" is not a whole number from 0 to 5; using 0');
+    // Blank is unset, not a mistake.
+    expect(frontierClientOptions({ FLINT_FRONTIER_MAX_RETRIES: ' ' }, warn)).toEqual({ maxRetries: 0, timeoutMs: 60_000 });
+    expect(warn).toHaveBeenCalledTimes(7);
+  });
+
+  // A loopback server stands in for the API: the SDK reads ANTHROPIC_BASE_URL, so the
+  // clients the server really builds are the ones asked. Nothing leaves this machine.
+  let api: Server | undefined;
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    api?.closeAllConnections();
+    await new Promise((r) => (api ? api.close(() => r(undefined)) : r(undefined)));
+    api = undefined;
+  });
+  async function overloadedApi(): Promise<() => number> {
+    let n = 0;
+    api = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        n++;
+        res.writeHead(529, { 'content-type': 'application/json', 'retry-after-ms': '1' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }));
+      });
+    });
+    await new Promise<void>((r) => api!.listen(0, '127.0.0.1', r));
+    vi.stubEnv('ANTHROPIC_BASE_URL', `http://127.0.0.1:${(api.address() as AddressInfo).port}`);
+    return () => n;
+  }
+  const ask = { model: 'claude-test', messages: [{ id: 'm1', role: 'user' as const, content: 'hi', timestamp: 0 }] };
+  const kindOf = async (p: ProviderAdapter) => p.generate(ask).then(() => 'answered', (e: unknown) => (isFlintError(e) ? `${e.kind} ${e.error.providerCode}` : 'other'));
+
+  it('a tier\'s client (envProviderFactory) makes one request for one failing call', async () => {
+    const requests = await overloadedApi();
+    const p = envProviderFactory({ ANTHROPIC_API_KEY: 'sk-ant-test' })('anthropic')!;
+    expect(await kindOf(p)).toBe('provider_unavailable 529');
+    expect(requests()).toBe(1);
+  });
+
+  it('so does the legacy frontier\'s (buildFrontierProvider), and the env can give it retries back', async () => {
+    const requests = await overloadedApi();
+    const legacy = buildFrontierProvider({ ANTHROPIC_API_KEY: 'sk-ant-test' })!;
+    expect(legacy.model).toBe('claude-sonnet-4-6');
+    expect(await kindOf(legacy.provider)).toBe('provider_unavailable 529');
+    expect(requests()).toBe(1);
+    const retrying = buildFrontierProvider({ ANTHROPIC_API_KEY: 'sk-ant-test', FLINT_FRONTIER_MAX_RETRIES: '2' })!;
+    await kindOf(retrying.provider);
+    expect(requests()).toBe(1 + 3);
+  });
+});
+
+describe('buildFrontierProvider (the legacy frontier)', () => {
+  it('Claude while there is a key, on FLINT_FRONTIER_MODEL or Sonnet', () => {
+    expect(buildFrontierProvider({ ANTHROPIC_API_KEY: ' sk-ant-test ' })).toMatchObject({ model: 'claude-sonnet-4-6', provider: { name: 'anthropic' } });
+    expect(buildFrontierProvider({ ANTHROPIC_API_KEY: 'sk-ant-test', FLINT_FRONTIER_MODEL: 'claude-opus-5-5' })?.model).toBe('claude-opus-5-5');
+  });
+
+  it('a self-hosted model when Will points it at one, key or no key', () => {
+    const own = { FLINT_FRONTIER_PROVIDER: 'ollama', FLINT_FRONTIER_BASE_URL: 'http://box:11434', FLINT_FRONTIER_MODEL: 'big:70b' };
+    expect(buildFrontierProvider({ ...own, ANTHROPIC_API_KEY: 'sk-ant-test' })).toMatchObject({ model: 'big:70b', provider: { name: 'ollama' } });
+    expect(buildFrontierProvider({ FLINT_FRONTIER_BASE_URL: 'http://box:11434', FLINT_FRONTIER_MODEL: 'big:70b' })).toMatchObject({ provider: { name: 'ollama' } });
+    expect(buildFrontierProvider({ FLINT_FRONTIER_PROVIDER: 'ollama' })).toBeUndefined(); // no model named
+  });
+
+  it('nothing configured: no frontier (pure local)', () => {
+    expect(buildFrontierProvider({})).toBeUndefined();
+    expect(buildFrontierProvider({ ANTHROPIC_API_KEY: '  ' })).toBeUndefined();
+  });
+});
+
+describe('BrainSet.cheapestOn (the brain the breaker\'s check asks)', () => {
+  it('the routine tier\'s brain on that provider, else any tier\'s, else the last resort', () => {
+    const set = buildTiers({
+      env: { FLINT_TIER_HARD: 'anthropic:claude-opus-4-1', FLINT_TIER_ROUTINE: 'anthropic:claude-haiku-4-5', FLINT_TIER_CODE: 'perplexity:sonar', FLINT_TIER_LAST_RESORT: 'openai:gpt-5' },
+      factory: factoryWith('anthropic', 'openai', 'perplexity'),
+      legacy: LEGACY,
+      makePersona: persona,
+    })!;
+    expect(set.cheapestOn('anthropic')?.label).toBe('anthropic:claude-haiku-4-5');
+    expect(set.cheapestOn('perplexity')?.label).toBe('perplexity:sonar');
+    expect(set.cheapestOn('openai')?.label).toBe('openai:gpt-5');
+    expect(set.cheapestOn('ollama')).toBeUndefined();
+    // One model's own pause is checked on that model.
+    expect(set.cheapestOn('anthropic', 'claude-opus-4-1')?.label).toBe('anthropic:claude-opus-4-1');
+    expect(set.cheapestOn('anthropic', 'claude-nope')).toBeUndefined();
+  });
+
+  it('with defaults it is the one legacy frontier', () => {
+    const set = buildTiers({ env: {}, factory: factoryWith('anthropic'), legacy: LEGACY, makePersona: persona })!;
+    expect(set.cheapestOn('anthropic')?.label).toBe('anthropic:claude-sonnet-4-6');
   });
 });

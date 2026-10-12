@@ -12,6 +12,9 @@
  * one legacy frontier (buildFrontierProvider — anthropic:claude-sonnet-4-6), so
  * the fallback chain is that single brain, exactly as before.
  *
+ * A brain whose provider keeps failing (no credit, a rejected key, an outage) is
+ * left out of the chain for a while by the breaker (./frontier-breaker).
+ *
  * Env (each value is `provider:model`; the model may itself contain colons, e.g.
  * `ollama:qwen2.5:72b`):
  *   FLINT_TIER_STANDARD  the everyday frontier; unset → the legacy frontier
@@ -28,6 +31,9 @@
  * perplexity (PERPLEXITY_API_KEY; no tool calling), ollama (FLINT_TIER_OLLAMA_HOST
  * → FLINT_FRONTIER_BASE_URL → OLLAMA_HOST). A tier whose provider has no key is
  * skipped with a log line and resolves like an unset tier.
+ *   FLINT_FRONTIER_MAX_RETRIES / FLINT_FRONTIER_TIMEOUT_MS  how the Anthropic
+ *                        client fails (frontierClientOptions): 0 retries of its
+ *                        own and 60 s for a response to start, unless set.
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
@@ -39,6 +45,7 @@ import {
   PerplexityProvider,
   TIERS,
   isFlintError,
+  type AiError,
   type ProviderAdapter,
   type Tier,
 } from '@flint/core';
@@ -110,6 +117,71 @@ export function readLastResortSpec(env: Env, warn: (msg: string) => void = () =>
   return spec;
 }
 
+/** The Anthropic SDK's own retries of a failed request, for the frontier's client. */
+export const FRONTIER_MAX_RETRIES = 0;
+/** How long the frontier's Anthropic client waits for a response to start. */
+export const FRONTIER_TIMEOUT_MS = 60_000;
+
+/**
+ * How the frontier's Anthropic client is told to fail, so one failing try is
+ * over quickly and the next brain, or the local model, answers. The SDK's
+ * defaults are 2 retries and 10 minutes; Flint's own loop already retries a
+ * retryable failure (RetryPolicy, 3 attempts), so the two multiplied to 9
+ * requests of up to 10 minutes each before a turn fell back.
+ *  - no SDK retries (FLINT_FRONTIER_MAX_RETRIES, 0 to 5);
+ *  - 60 s for a response to start (FLINT_FRONTIER_TIMEOUT_MS, 1 s to 10 min).
+ *    Every call streams, so this is the wait for the response headers, not for
+ *    the whole answer; it still covers uploading a turn's attachments.
+ * A value outside its range is reported via `warn` and ignored.
+ */
+export function frontierClientOptions(env: Env, warn: (msg: string) => void = () => {}): { maxRetries: number; timeoutMs: number } {
+  const read = (key: string, fallback: number, min: number, max: number): number => {
+    const raw = env[key]?.trim();
+    if (!raw) return fallback;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n >= min && n <= max) return n;
+    warn(`${key}=${JSON.stringify(raw.slice(0, 40))} is not a whole number from ${min} to ${max}; using ${fallback}`);
+    return fallback;
+  };
+  return {
+    maxRetries: read('FLINT_FRONTIER_MAX_RETRIES', FRONTIER_MAX_RETRIES, 0, 5),
+    timeoutMs: read('FLINT_FRONTIER_TIMEOUT_MS', FRONTIER_TIMEOUT_MS, 1_000, 600_000),
+  };
+}
+
+/**
+ * Today's single frontier, the default standard tier: the escalation brain, and
+ * the swappable bridge toward independence. It is Claude while there is an
+ * ANTHROPIC_API_KEY. The day a bigger LOCAL model is good enough, set
+ * FLINT_FRONTIER_PROVIDER=ollama + FLINT_FRONTIER_BASE_URL (e.g. a 70B on a home
+ * box) + FLINT_FRONTIER_MODEL and escalation points there instead: no other
+ * code changes, and Flint is fully independent. undefined: frontier off (pure
+ * local).
+ */
+export function buildFrontierProvider(env: Env, warn: (msg: string) => void = () => {}): { provider: ProviderAdapter; model: string } | undefined {
+  const kind = env.FLINT_FRONTIER_PROVIDER?.trim().toLowerCase();
+  const baseURL = env.FLINT_FRONTIER_BASE_URL?.trim();
+  if (kind === 'ollama' || (!kind && baseURL && !env.ANTHROPIC_API_KEY)) {
+    const model = env.FLINT_FRONTIER_MODEL?.trim();
+    if (!model) return undefined;
+    return {
+      provider: new OllamaProvider({
+        baseURL: baseURL ?? 'http://127.0.0.1:11434',
+        defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
+      }),
+      model,
+    };
+  }
+  const key = env.ANTHROPIC_API_KEY?.trim();
+  if (key) {
+    return {
+      provider: new AnthropicProvider({ apiKey: key, ...frontierClientOptions(env, warn) }),
+      model: env.FLINT_FRONTIER_MODEL?.trim() || 'claude-sonnet-4-6',
+    };
+  }
+  return undefined;
+}
+
 /** Build (or reuse) the adapter for a provider name; undefined = no key / unknown. */
 export type ProviderFactory = (provider: string) => ProviderAdapter | undefined;
 
@@ -123,7 +195,8 @@ export function envProviderFactory(env: Env): ProviderFactory {
     switch (name) {
       case 'anthropic': {
         const apiKey = env.ANTHROPIC_API_KEY?.trim();
-        return apiKey ? new AnthropicProvider({ apiKey }) : undefined;
+        // Fails fast, like the legacy frontier's client (frontierClientOptions).
+        return apiKey ? new AnthropicProvider({ apiKey, ...frontierClientOptions(env) }) : undefined;
       }
       case 'openai': {
         const apiKey = env.OPENAI_API_KEY?.trim();
@@ -203,6 +276,19 @@ export class BrainSet<P> {
       out.push(b);
     }
     return out;
+  }
+
+  /**
+   * The cheapest brain configured on `provider`, for the breaker's one-token
+   * check: the routine chain's first on it, else any tier's, else the last
+   * resort. With `model`, the brain on that model (the one being checked).
+   * `usable` leaves brains out: a provider-wide check must not ask a model
+   * that has a pause of its own (the key may not use it), or that model's 403
+   * would be read as the provider's answer, every time.
+   */
+  cheapestOn(provider: string, model?: string, usable: (brain: BrainTier<P>) => boolean = () => true): BrainTier<P> | undefined {
+    const all = [...this.chain('routine'), ...TIERS.map((t) => this.byTier[t]), ...(this.lastResort ? [this.lastResort] : [])];
+    return all.find((b) => b.provider.name === provider && (model === undefined ? usable(b) : b.model === model));
   }
 
   /** One line per tier for the boot log. */
@@ -295,23 +381,45 @@ function lastResortBrain<P>(
 // ---------------------------------------------------------------------------
 // fallback
 
+/** The tool loop's own failures, as @flint/core words them (core/tool-loop.ts): a tool handler that threw, a loop that ran out of iterations. */
+const TOOL_LOOP_FAILURE = /^Tool (?:'[^']*' failed|loop exceeded)/;
+
+/**
+ * Is this the PROVIDER failing to serve the request (an outage, a timeout, a
+ * rate limit, a rejected key, no credit, an unknown model, an over-long prompt,
+ * a broken stream), or the turn going wrong after the brain was reached: a tool
+ * that threw, a tool loop that ran out? Those two are `internal` errors core
+ * raises itself, and another brain would only do the same thing again.
+ */
+export function providerFailure(err: Pick<AiError, 'kind' | 'message'>): boolean {
+  return !(err.kind === 'internal' && TOOL_LOOP_FAILURE.test(err.message));
+}
+
 /**
  * Whether a failure should move on to the next brain. Everything a provider can
  * throw qualifies — rate limits and outages obviously, but also a rejected key
  * or unknown model (a misconfigured tier should degrade, not break Flint) and a
- * context overflow (the next brain may have a bigger window). The one exception
- * is the caller's own cancellation: a closed tab must not spend another model.
+ * context overflow (the next brain may have a bigger window). Two exceptions:
+ * the caller's own cancellation (a closed tab must not spend another model), and
+ * a failure that is not the provider's (providerFailure: a tool's own error).
  */
 export function shouldFallBack(err: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
   if (isFlintError(err) && err.kind === 'timeout' && !err.retryable && /abort/i.test(err.message)) return false;
+  if (isFlintError(err) && !providerFailure(err.error)) return false;
   return true;
 }
 
-/** A short description of an error for logs: its AiError kind when it has one. */
-export function describeError(err: unknown): string {
-  if (isFlintError(err)) return `${err.kind}: ${err.message}`;
-  return err instanceof Error ? err.message : String(err);
+/**
+ * May a failed attempt be asked again of ANOTHER brain: the next tier, or the
+ * local model? Never once the turn has acted (`acted`: a tool was called, so it
+ * ran, or was filed for approval). The second brain would start the turn over
+ * and call it again: on 2026-10-12 a review showed calendar.create_event run
+ * twice that way, once by the tier that then failed and once by the fallback.
+ * Otherwise as shouldFallBack says.
+ */
+export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortSignal | undefined }): boolean {
+  return !o.acted && shouldFallBack(err, o.signal);
 }
 
 /**
@@ -320,11 +428,14 @@ export function describeError(err: unknown): string {
  * it always has). `attempt` decides for itself whether a failure is still
  * recoverable — e.g. a stream that already sent text must rethrow a non-fallback
  * error by wrapping it with `NoFallback`.
+ *
+ * `acted` says whether the turn has called a tool yet: once it has, a failure
+ * is thrown as it is and no later brain is asked (mayAskAnother).
  */
 export async function runWithFallback<P, T>(
   chain: readonly BrainTier<P>[],
   attempt: (brain: BrainTier<P>) => Promise<T>,
-  opts: { signal?: AbortSignal; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
+  opts: { signal?: AbortSignal; acted?: () => boolean; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
 ): Promise<{ result: T; brain: BrainTier<P> }> {
   if (chain.length === 0) throw new Error('no frontier brain configured');
   let lastErr: unknown;
@@ -336,7 +447,7 @@ export async function runWithFallback<P, T>(
       if (err instanceof NoFallback) throw err.inner;
       lastErr = err;
       const next = chain[i + 1];
-      if (!next || !shouldFallBack(err, opts.signal)) throw err;
+      if (!next || !mayAskAnother(err, { acted: opts.acted?.() ?? false, signal: opts.signal })) throw err;
       opts.onFallback?.(brain, next, err);
     }
   }

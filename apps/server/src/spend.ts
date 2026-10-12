@@ -47,6 +47,7 @@ import {
 import { SPEND_KINDS, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { BrainTier, Tier } from './brains';
 import type { Brain } from './policy';
+import { errorSummary } from './error-log';
 
 export type { PaidVendor } from '@flint/core';
 export type { BackgroundKind };
@@ -163,13 +164,13 @@ export class SpendLedger {
       mkdirSync(this.dir, { recursive: true });
       appendFileSync(this.fileFor(this.period(row.ts).month), JSON.stringify(row) + '\n', 'utf8');
     } catch (err) {
-      this.log(`[spend] could not append to the ledger (totals kept in memory): ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[spend] could not append to the ledger (totals kept in memory) (${errorSummary(err)})`);
     }
     for (const listener of this.listeners) {
       try {
         listener(row);
       } catch (err) {
-        this.log(`[spend] listener failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.log(`[spend] listener failed (${errorSummary(err)})`);
       }
     }
     return row;
@@ -237,7 +238,7 @@ export class SpendLedger {
       }
       this.log(`[spend] restored ${rows} paid call(s) for ${month}${bad ? ` (${bad} unreadable line(s) skipped)` : ''}`);
     } catch (err) {
-      this.log(`[spend] could not read ${path} (starting the month at $0): ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[spend] could not read ${path} (starting the month at $0) (${errorSummary(err)})`);
     }
   }
 }
@@ -732,9 +733,10 @@ export function describePlan<P>(plan: FrontierPlan<P>): string | undefined {
 
 /**
  * The one line appended to a local answer when budgets moved the turn off the
- * frontier. `answeredBy` names a local brain that is itself a paid model (the
- * server without OLLAMA_MODEL runs its "local" persona on Claude), so the note
- * never calls a paid model's answer "my local brain".
+ * frontier. `answeredBy` names a local brain that is itself a paid model, so
+ * the note never calls a paid model's answer "my local brain". (The server's
+ * local brain is always Ollama now, ./local-model chooseLocalBrain, so main()
+ * no longer builds one; the rule stays for any caller that does.)
  */
 export function budgetNote(exhausted: { vendor: PaidVendor; binding: 'daily' | 'monthly' }, answeredBy?: string): string {
   const when = exhausted.binding === 'monthly' ? "this month's" : "today's";
@@ -780,7 +782,7 @@ export interface TurnBudgetInput<P> {
   guard: BudgetView & { blocked(vendor: PaidVendor): string | undefined };
   /** routeTurn's decision. */
   route: { brain: Brain; localFallback: boolean };
-  /** The local brain's provider name: `ollama` (free), or `anthropic` when OLLAMA_MODEL is unset. */
+  /** The local brain's provider name: `ollama` (free). A paid provider's name holds it to that vendor's cap. */
   localProvider: string;
   /** The local brain's model, for the note when it is a paid one. */
   localModel: string;
@@ -974,12 +976,20 @@ export function spendObserver(ledger: SpendLedger): AiObserver {
  * Wrap an OPTIONAL frontier completion (the research planner) so it refuses
  * while `paused()` gives a reason. It throws rather than returning nothing, so
  * the caller's own fallback takes over (deep_research plans heuristically).
- * Inside an eval replay it never pauses: the replay is exempt from Flint's caps
- * like the rest of its turn, and its planner call is eval spend, not Will's.
+ * Inside an eval replay `paused` is not asked: the replay is exempt from Flint's
+ * caps like the rest of its turn, and its planner call is eval spend, not Will's.
+ *
+ * `never()` is asked for every turn, an eval replay included: the reasons that
+ * are no budget's. A turn the local model is answering does not send its
+ * question to an outside AI, and a provider the breaker has paused is not asked.
  */
-export function pausable(complete: (prompt: string) => Promise<string>, paused: () => string | undefined): (prompt: string) => Promise<string> {
+export function pausable(
+  complete: (prompt: string) => Promise<string>,
+  paused: () => string | undefined,
+  never: () => string | undefined = () => undefined,
+): (prompt: string) => Promise<string> {
   return async (prompt) => {
-    const why = currentTurnSpend()?.kind === 'eval' ? undefined : paused();
+    const why = never() ?? (currentTurnSpend()?.kind === 'eval' ? undefined : paused());
     if (why) throw new Error(why);
     return complete(prompt);
   };

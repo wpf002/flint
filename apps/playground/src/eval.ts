@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { writeFileSync } from 'node:fs';
-import { Flint, AnthropicProvider, OllamaProvider, type ProviderAdapter, type Tool } from '@flint/core';
+import { Flint, type Tool } from '@flint/core';
+import { NO_LIVE_MODEL, pickProvider } from './provider.js';
 import {
   Persona,
   InMemoryRetriever,
@@ -16,7 +17,7 @@ import {
  * depth, refusing to hallucinate, and challenging a bad premise.
  *
  *   OLLAMA_MODEL=qwen2.5:14b pnpm --filter playground eval
- *   ANTHROPIC_API_KEY=...    pnpm --filter playground eval
+ *   PLAYGROUND_PROVIDER=anthropic ANTHROPIC_API_KEY=... pnpm --filter playground eval
  */
 
 interface EvalPrompt {
@@ -65,23 +66,10 @@ const PROMPTS: EvalPrompt[] = [
   },
 ];
 
-function pickProvider(): { provider: ProviderAdapter; model: string } | null {
-  const ollama = process.env.OLLAMA_MODEL?.trim();
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (ollama) {
-    return {
-      provider: new OllamaProvider(process.env.OLLAMA_HOST ? { baseURL: process.env.OLLAMA_HOST } : {}),
-      model: ollama,
-    };
-  }
-  if (key) return { provider: new AnthropicProvider({ apiKey: key }), model: 'claude-sonnet-4-6' };
-  return null;
-}
-
 async function main(): Promise<void> {
-  const chosen = pickProvider();
+  const chosen = await pickProvider();
   if (!chosen) {
-    console.error('No live model. Set OLLAMA_MODEL or ANTHROPIC_API_KEY.');
+    console.error(NO_LIVE_MODEL);
     process.exit(1);
   }
   const flint = new Flint({ provider: chosen.provider, defaultModel: chosen.model });

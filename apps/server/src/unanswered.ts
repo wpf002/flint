@@ -85,13 +85,18 @@ export function isUnansweredMessage(text: string): boolean {
  * `unanswered` set) rather than an error, so the caller does not hand a refusal
  * to the local brain — local fallback stays what it was, the answer to an outage.
  * Any other failure is thrown exactly as runWithFallback throws it.
+ *
+ * Once an attempt has called a tool, no later brain is asked: a reply refused
+ * after its tools ran gets the honest message at once, and an error after them
+ * (`acted`, the caller's view of the turn's own tool calls) is thrown as it is.
  */
 export async function answerWithFallback<P, T extends ReplyLike>(
   chain: readonly BrainTier<P>[],
   ask: (brain: BrainTier<P>) => Promise<T>,
-  opts: { signal?: AbortSignal; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
+  opts: { signal?: AbortSignal; acted?: () => boolean; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
 ): Promise<{ result: T; brain: BrainTier<P>; unanswered?: Unanswered }> {
   let tried = 0;
+  let usedTools = false; // a reply that came back had called a tool
   const noAnswers: Unanswered[] = []; // how each non-answering attempt ended; errors are not in it
   try {
     return await runWithFallback(
@@ -99,14 +104,16 @@ export async function answerWithFallback<P, T extends ReplyLike>(
       async (brain) => {
         tried++;
         const reply = await ask(brain);
-        const why = unanswered({ text: reply.text, reason: reply.reason, usedTools: reply.messages.some((m) => m.role === 'tool') });
+        const calledTool = reply.messages.some((m) => m.role === 'tool');
+        if (calledTool) usedTools = true;
+        const why = unanswered({ text: reply.text, reason: reply.reason, usedTools: calledTool });
         if (why) {
           noAnswers.push(why);
           throw new NoAnswer(why, { reply, brain });
         }
         return reply;
       },
-      opts,
+      { ...opts, acted: () => usedTools || (opts.acted?.() ?? false) },
     );
   } catch (err) {
     if (!(err instanceof NoAnswer) || err.carried === undefined) throw err;
@@ -153,8 +160,9 @@ export async function* guardAnswer(
       const why = unanswered({ text, reason: ev.reason, usedTools });
       if (why && text.trim().length === 0) {
         // Retry only when not even whitespace went out: the caller refuses to
-        // fall back once its streamed answer is non-empty.
-        if (opts.recoverable && text.length === 0) {
+        // fall back once its streamed answer is non-empty. And never after a tool
+        // call: the next brain would start the turn over and call it again.
+        if (opts.recoverable && text.length === 0 && !usedTools) {
           opts.noAnswers.push(why);
           throw new NoAnswer(why);
         }

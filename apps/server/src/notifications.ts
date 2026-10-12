@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { NOTIFY_CHANNELS, type NotifyChannel } from '@flint/policy';
+import { logError } from './error-log';
 
 export interface Notification {
   id: string;
@@ -173,7 +174,8 @@ export class Notifications {
       this.seq = raw.seq ?? this.items.length;
       for (const s of raw.seen ?? []) this.seen.add(s);
     } catch (err) {
-      console.error('[notify] failed to load (starting fresh):', err);
+      // Its class only: a JSON parse error quotes the file, and the file holds Will's notes.
+      logError('[notify] failed to load (starting fresh):', err);
     }
   }
 
@@ -184,7 +186,7 @@ export class Notifications {
       writeFileSync(tmp, JSON.stringify({ savedAt: Date.now(), seq: this.seq, items: this.items, seen: [...this.seen].slice(-500) }), 'utf8');
       renameSync(tmp, this.path);
     } catch (err) {
-      console.error('[notify] failed to persist:', err);
+      logError('[notify] failed to persist:', err);
     }
   }
 }
@@ -231,7 +233,7 @@ export class Watcher {
       try {
         for (const r of await check()) this.notes.push(r.title, r.body, r.kind, r.dedupe);
       } catch (err) {
-        console.error('[watch] check failed (skipping):', err);
+        logError('[watch] check failed (skipping):', err);
       }
     }
   }

@@ -13,8 +13,9 @@
  *    a retried delivery a duplicate, not a second note.
  *  - Runtime -> server, POST /internal/load: chat turns in flight (triage
  *    yields to chat).
- *  - Runtime -> server, POST /internal/complete: a metered frontier call for a
- *    background spend kind; every kind is capped at $0 until Will raises it.
+ *  - Runtime -> server, POST /internal/complete: a model call for a background
+ *    spend kind, answered by the server's local model; every kind is capped at
+ *    $0 until Will raises it.
  */
 import { z } from 'zod';
 
@@ -113,6 +114,11 @@ export const InternalCompleteRequest = z
     system: z.string().max(8000),
     prompt: z.string().min(1).max(32000),
     maxTokens: z.number().int().min(1).max(4000),
+    /** A JSON schema the reply must match (the local model's `format`); omitted: plain text. Up to 8,000 characters as JSON. */
+    schema: z
+      .record(z.string(), z.unknown())
+      .refine((s) => JSON.stringify(s).length <= 8000, 'schema too large')
+      .optional(),
   })
   .strict();
 export type InternalCompleteRequest = z.infer<typeof InternalCompleteRequest>;

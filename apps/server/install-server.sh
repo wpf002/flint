@@ -169,12 +169,21 @@ launchctl load -w "$AGENTS/$PLIST"
 # ---- VERIFY: did it actually come back up? -------------------------------
 # A bundle that builds can still fail to boot. Poll the health endpoint the
 # server already exposes rather than assuming the reload worked.
+#
+# The poll outlasts the boot. Before it listens the server asks Ollama twice
+# (which model it has, and to embed the tools), each cut off by the clock: about
+# 8 s in all (src/local-model.ts LOCAL_PICK_CAP_MS, src/router.ts
+# BOOT_EMBED_WAIT_MS), plus starting node and the MCP servers. Ten tries used to
+# end first, and a good bundle was thrown out because Ollama was slow.
 PORT_N="${PORT:-8080}"
-echo "verifying http://localhost:$PORT_N/health ..."
+HEALTH_WAIT_S=60
+echo "verifying http://localhost:$PORT_N/health (up to ${HEALTH_WAIT_S}s) ..."
 up=0
-for i in 1 2 3 4 5 6 7 8 9 10; do
+tries=0
+while [ "$tries" -lt "$HEALTH_WAIT_S" ]; do
   if curl -fsS -m 3 "http://localhost:$PORT_N/health" >/dev/null 2>&1; then up=1; break; fi
   sleep 1
+  tries=$((tries + 1))
 done
 if [ "$up" != 1 ]; then
   echo "✗ server did NOT come up on :$PORT_N — check $DATA/logs/server.err.log"

@@ -43,13 +43,13 @@ Independence is BUILT now (capture + distill), not flipped later.
 ## The swappable brain seam (today's crutch, tomorrow's switch)
 
 Today Flint defaults to Claude for capability and falls back to the local model
-when offline or when Will asks to stay private. The frontier brain is one
+when offline, when Claude keeps failing, or when Will asks to stay private. The frontier brain is one
 swappable seam, so it can be repointed at Flint's own grown-up model — or
 switched off entirely — the day that model is good enough.
 
 ## The seam (already in code)
 
-`buildFrontierProvider()` in `apps/server/src/index.ts` picks the escalation
+`buildFrontierProvider()` in `apps/server/src/brains.ts` picks the escalation
 brain from env:
 
 | Env | Effect |
@@ -69,6 +69,52 @@ the streaming, the badge — stays identical.
   yields to his chat. The frontier is an opt-in (`FLINT_MEMORY_BRAIN=frontier`),
   never a fallback. See [apps/server/README.md](../apps/server/README.md),
   "Memory extraction".
+- **Flint stops waiting on Claude.** When an outside AI is going to keep
+  failing (no credit, a rejected key, an outage), a circuit breaker leaves it
+  alone for a cool-down and the local model answers at once, on `/chat` and
+  `/generate`, every tier. One cheap check after the cool-down; a success puts
+  it back in use. The Anthropic client no longer retries on its own and waits
+  60 seconds, not 10 minutes, for a response to start. See
+  [apps/server/README.md](../apps/server/README.md), "When the frontier keeps
+  failing".
+- **The local brain is never quietly Claude.** With `OLLAMA_MODEL` unset the
+  server (and the `ask` CLI) used to make Anthropic's Sonnet the "local" brain
+  whenever a key was present. They ask Ollama which model it has instead; no
+  key changes that. See "The local brain is always Ollama" in the same README.
+- **The `playground` demos** got the same rule: a local model, and Anthropic
+  only when asked for by name (`PLAYGROUND_PROVIDER=anthropic`).
+- **Flint says what is actually answering.** Each brain's prompt names its own
+  model after the style guide, so a local model asked what it runs on no longer
+  answers "Claude" (packages/persona/README.md, "What powers this answer").
+- **A Local-only turn keeps its question on this machine.** deep_research used
+  to send the question to the frontier's routine tier to plan its searches,
+  whatever the turn. On a turn the local model is answering it now plans by its
+  heuristic, and no outside AI is asked. (Its web searches are still web
+  searches: see "Still on an outside AI".)
+- **Background calls** the runtime asks the server for (`/internal/complete`)
+  are answered by the local model, never a frontier tier. Nothing uses them
+  yet; whatever does will be local from its first call.
+- **`evolve try` only tries local models.** It rewrites `FLINT_TIER_*` in the
+  live config, and used to accept any provider. It now refuses anything but
+  `ollama:<model>` (not an Ollama cloud model either), at four separate points,
+  the config write included, and a refused request touches nothing. Undoing a
+  try writes no value of its own either: the line a tier had before is parked
+  as a comment in the config and un-parked, so the only tier values evolve can
+  put there are a local candidate and Will's own line. Its rollback marker is
+  checked before it is believed. `evolve discover` lists the models on the
+  Ollama the tiers use; the outside vendors' lists need `--vendors`. Putting a
+  tier on an outside model is Will's call, made by hand.
+
+### Still on an outside AI
+
+- **Hard and everyday questions**, while `ANTHROPIC_API_KEY` is set: `judgeBrain`
+  (apps/server/src/policy.ts) sends them to the frontier tiers by default.
+- **`evolve measure`'s judge** (Claude), **voice output** (OpenAI TTS, with the
+  browser's voice as its fallback), and **paid search** (Perplexity, Tavily),
+  which a Local-only turn can still call: the search query leaves the machine
+  even when the question's answer is written here.
+- **deep_research's planner**, on a frontier turn: the routine tier writes the
+  search queries.
 
 ## The milestone
 

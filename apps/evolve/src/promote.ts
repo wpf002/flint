@@ -1,4 +1,4 @@
-import { classifyMessage, isListedModel } from '@flint/core';
+import { classifyMessage, isOllamaCloudModel } from '@flint/core';
 import type { DailyRow } from './measure.js';
 import type { VendorCatalog } from './discover.js';
 import { isServed } from './discover.js';
@@ -12,9 +12,14 @@ import { isServed } from './discover.js';
  * lives in run-try.ts, so the rules can be tested without touching a server.
  *
  * The bias is deliberate: a candidate has to EARN the swap. Anything unproven,
- * unpriced, unserved, or merely noise loses to the incumbent, because the
- * incumbent is known to work and a bad promotion degrades Flint until someone
- * notices.
+ * unserved, or merely noise loses to the incumbent, because the incumbent is
+ * known to work and a bad promotion degrades Flint until someone notices.
+ *
+ * And a candidate is always a LOCAL model (`ollama:...`, localOnly). `try`
+ * rewrites FLINT_TIER_* in the live config; it used to accept any provider, so
+ * a script could point a tier at an outside AI. Flint moving a tier onto
+ * another company's model is never its own call to make: Will does that by
+ * hand, or not at all.
  */
 
 export interface Candidate {
@@ -31,25 +36,51 @@ export type Decision =
   | { ok: true; action: 'rollback'; why: string }
   | Refusal;
 
+/** An Ollama model name: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. Letters, digits and . _ : / - only. */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
+
+/** A provider or model as a refusal may quote it: its id characters only, so nothing in it can break a line. */
+const quoted = (s: string): string => s.replace(/[^A-Za-z0-9._:/-]/g, '?').slice(0, 80);
+
 /**
- * Checks that run BEFORE any money is spent testing a candidate.
+ * Is this a model on Will's own Ollama? The one rule every step of `try`
+ * checks again for itself (parse, screen, the probe, the config write), so no
+ * later change to one of them can let an outside model through:
+ *  - the provider is `ollama`, exactly;
+ *  - the model is a model NAME (MODEL_ID): it is written into secrets.env as
+ *    `FLINT_TIER_X=ollama:<model>`, and a name with a line break in it would
+ *    write a second line of its own choosing (a key, a host) under the first;
+ *  - the model is not an Ollama cloud model (`...-cloud`, `:cloud`): those are
+ *    open weights, but they run on Ollama's servers, not here.
+ */
+export function localOnly(c: Pick<Candidate, 'provider' | 'model'>): Refusal | { ok: true } {
+  if (c.provider !== 'ollama') {
+    return { ok: false, reason: `evolve only tries local models (ollama:<model>); ${quoted(c.provider)}:${quoted(c.model)} is an outside AI, and moving a tier onto one is Will's call, by hand` };
+  }
+  if (!MODEL_ID.test(c.model)) {
+    return { ok: false, reason: `'${quoted(c.model)}' is not an Ollama model name (letters, digits and . _ : / - only)` };
+  }
+  if (isOllamaCloudModel(c.model)) {
+    return { ok: false, reason: `${c.model} is an Ollama cloud model, which runs on Ollama's servers, not on this Mac` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Checks that run BEFORE anything is spent testing a candidate.
  *
- * Unpriced is a hard no: the spend guards price an unlisted model at the
- * pessimistic UNLISTED_PRICE, so promoting one would silently shrink every
- * budget Flint has. Unserved is a hard no because it is the exact failure that
- * put a deprecated gpt-5.2-codex in the live config.
+ * Not local is a hard no (localOnly). Unserved is a hard no because it is the
+ * exact failure that put a deprecated gpt-5.2-codex in the live config: the
+ * model has to be pulled on this Mac's Ollama. A local model costs nothing per
+ * call, so there is no price to check.
  */
 export function screen(c: Candidate, catalogs: VendorCatalog[]): Refusal | { ok: true } {
+  const local = localOnly(c);
+  if (!local.ok) return local;
   const cat = catalogs.find((x) => x.vendor === c.provider);
   if (!cat) return { ok: false, reason: `no catalog for provider ${c.provider}` };
   if (cat.error) return { ok: false, reason: `${c.provider} unreachable (${cat.error}); not risking a swap` };
-  if (!isServed(cat, c.model)) return { ok: false, reason: `${c.provider} does not serve ${c.model}` };
-  if (!isListedModel(c.model)) {
-    return {
-      ok: false,
-      reason: `${c.model} is not in the price table; promoting it would price every call at the unlisted rate and shrink the spend guards`,
-    };
-  }
+  if (!isServed(cat, c.model)) return { ok: false, reason: `${c.model} is not pulled on this Mac's Ollama (run "ollama pull ${c.model}" first)` };
   return { ok: true };
 }
 
@@ -127,7 +158,7 @@ export function decide(opts: {
   };
 }
 
-/** `hard=openai:gpt-5.6-sol` -> a Candidate. */
+/** `hard=ollama:qwen3.8:27b` -> a Candidate (any provider parses; localOnly decides whether it may be tried). */
 export function parseCandidate(spec: string): Candidate | undefined {
   const eq = spec.indexOf('=');
   if (eq <= 0) return undefined;

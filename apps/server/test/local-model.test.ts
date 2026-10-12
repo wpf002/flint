@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { OllamaProvider } from '@flint/core';
+import { DEFAULT_OLLAMA_MODEL, OllamaProvider } from '@flint/core';
 import {
   LOCAL_MODEL_MAX_LEN,
+  LOCAL_PICK_CAP_MS,
+  LOCAL_REPICK_FAST_MS,
+  LOCAL_REPICK_FAST_TRIES,
+  LOCAL_REPICK_SLOW_MS,
   LocalPersonaCache,
+  chooseLocalBrain,
   evalOllamaOptions,
+  keepPickingLocal,
+  localDefaultNote,
   liveOllamaOptions,
   overrideKey,
   overridePersonaCache,
@@ -345,5 +352,221 @@ describe('liveOllamaOptions (the live local brain)', () => {
       defaultOptions: { num_ctx: 8192 },
       think: false,
     });
+  });
+});
+
+describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
+  type Lists = { ps?: Array<string | { name: string; context_length: number }>; tags?: string[] } | 'down';
+  /** Ollama's two list endpoints; `script` gives each round of asking its answer (the last one repeats). Records what was asked. */
+  function ollama(...script: Lists[]) {
+    const asked: string[] = [];
+    let round = 0;
+    const impl = (async (url: string) => {
+      asked.push(url);
+      const ps = url.endsWith('/api/ps');
+      if (ps) round++;
+      const lists = script[Math.min(round, script.length) - 1]!;
+      if (lists === 'down') throw new TypeError('fetch failed');
+      const rows = ((ps ? lists.ps : lists.tags) ?? []).map((m) => (typeof m === 'string' ? { name: m } : m));
+      return new Response(JSON.stringify({ models: rows.map((m) => ({ ...m, details: { family: m.name.includes('embed') ? 'nomic-bert' : 'qwen' } })) }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { impl, asked };
+  }
+  it('OLLAMA_MODEL names it: Ollama is not even asked', async () => {
+    const o = ollama({ tags: ['gemma4:26b'] });
+    const logs: string[] = [];
+    const b = await chooseLocalBrain({ OLLAMA_MODEL: ' muse-glimmer:30b ', OLLAMA_HOST: 'http://gpu:11434', OLLAMA_THINK: 'false' }, { fetch: o.impl, log: (m) => logs.push(m) });
+    expect(b).toEqual({
+      model: 'muse-glimmer:30b',
+      from: 'env',
+      options: { baseURL: 'http://gpu:11434', defaultOptions: { num_ctx: 4096 }, think: false },
+      env: { OLLAMA_MODEL: 'muse-glimmer:30b' },
+      settled: true,
+    });
+    expect(o.asked).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+
+  // The old default: OLLAMA_MODEL unset + ANTHROPIC_API_KEY set made the "local" brain claude-sonnet-4-6.
+  it('unset, with an Anthropic key present: still Ollama, the chat model it has loaded', async () => {
+    const o = ollama({ ps: ['nomic-embed-text:latest', 'muse-glimmer:30b'], tags: ['gemma4:26b', 'muse-glimmer:30b'] });
+    const logs: string[] = [];
+    const b = await chooseLocalBrain({ ANTHROPIC_API_KEY: 'sk-ant-test', OPENAI_API_KEY: 'sk-test' }, { fetch: o.impl, log: (m) => logs.push(m) });
+    expect(b).toMatchObject({ model: 'muse-glimmer:30b', from: 'loaded', options: { baseURL: 'http://127.0.0.1:11434' } });
+    expect(logs).toEqual(['[brain] OLLAMA_MODEL is unset: the local brain is muse-glimmer:30b, which Ollama has loaded (set OLLAMA_MODEL to choose another)']);
+    // Only Ollama's own list endpoint was asked: no vendor, no generation.
+    expect(o.asked).toEqual(['http://127.0.0.1:11434/api/ps']);
+  });
+
+  it('a loaded model keeps the context size it is loaded with, and the rest of the server is told', async () => {
+    const o = ollama({ ps: [{ name: 'muse-glimmer:30b', context_length: 16384 }] });
+    const b = await chooseLocalBrain({}, { fetch: o.impl });
+    // The chat brain's own client...
+    expect(b.options.defaultOptions).toEqual({ num_ctx: 16384 });
+    // ...and what memory extraction and background calls read, so Ollama never reloads the model between them.
+    expect(b.env).toEqual({ OLLAMA_MODEL: 'muse-glimmer:30b', OLLAMA_NUM_CTX: '16384' });
+    expect(liveOllamaOptions({ ...b.env }).defaultOptions).toEqual({ num_ctx: 16384 });
+  });
+
+  it('OLLAMA_NUM_CTX, when Will set it, wins over the loaded size', async () => {
+    const o = ollama({ ps: [{ name: 'muse-glimmer:30b', context_length: 16384 }] });
+    const b = await chooseLocalBrain({ OLLAMA_NUM_CTX: '8192' }, { fetch: o.impl });
+    expect(b.options.defaultOptions).toEqual({ num_ctx: 8192 });
+    expect(b.env).toEqual({ OLLAMA_MODEL: 'muse-glimmer:30b' });
+  });
+
+  it('unset, nothing loaded: the first chat model pulled, asked of OLLAMA_HOST', async () => {
+    const o = ollama({ ps: [], tags: ['nomic-embed-text:latest', 'qwen3.8:27b', 'qwen2.5:7b'] });
+    const logs: string[] = [];
+    const b = await chooseLocalBrain({ OLLAMA_HOST: 'http://gpu:11434' }, { fetch: o.impl, log: (m) => logs.push(m) });
+    expect(b).toMatchObject({ model: 'qwen3.8:27b', from: 'pulled', env: { OLLAMA_MODEL: 'qwen3.8:27b' } });
+    expect(b.options.defaultOptions).toEqual({ num_ctx: 4096 });
+    expect(o.asked).toEqual(['http://gpu:11434/api/ps', 'http://gpu:11434/api/tags']);
+    expect(logs[0]).toMatch(/the local brain is qwen3\.8:27b, which Ollama has pulled/);
+  });
+
+  // The review's case: the pick waited for Ollama before the server listened (up to ~112 s), and the
+  // installer's /health poll gave up first and put the previous bundle back.
+  it('asks once and never waits: an Ollama that is not up gives the default at once, marked as a stand-in', async () => {
+    const o = ollama('down', { ps: ['muse-glimmer:30b'] });
+    const logs: string[] = [];
+    const started = Date.now();
+    const b = await chooseLocalBrain({ ANTHROPIC_API_KEY: 'sk-ant-test' }, { fetch: o.impl, log: (m) => logs.push(m) });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(b).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, from: 'default', settled: false, env: { OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL } });
+    expect(b.model).not.toMatch(/claude|gpt|sonar/);
+    expect(o.asked).toEqual(['http://127.0.0.1:11434/api/ps', 'http://127.0.0.1:11434/api/tags']); // one round, no second
+    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${DEFAULT_OLLAMA_MODEL} for now, and Ollama is asked again in the background`]);
+  });
+
+  // Core cuts each list call off at 2 s, but only through the signal it hands fetch. The cap is the
+  // server's own clock: an Ollama that takes the connection and then says nothing, ever, still
+  // cannot hold the boot.
+  it('is cut off by the clock: an Ollama that never answers and ignores the timeout gives the stand-in', async () => {
+    const never = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const logs: string[] = [];
+    const started = Date.now();
+    const b = await chooseLocalBrain({}, { fetch: never, log: (m) => logs.push(m), capMs: 40 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(b).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, from: 'default', settled: false });
+    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${DEFAULT_OLLAMA_MODEL} for now, and Ollama is asked again in the background`]);
+    // The real cap covers both of core's 2 s list calls, and stays far inside the installer's wait.
+    expect(LOCAL_PICK_CAP_MS).toBeGreaterThanOrEqual(4_000);
+    expect(LOCAL_PICK_CAP_MS).toBeLessThanOrEqual(30_000);
+  });
+
+  it('an Ollama that answers with no chat model is settled: the default until the next restart', async () => {
+    const o = ollama({ ps: [], tags: ['nomic-embed-text:latest'] });
+    const logs: string[] = [];
+    const b = await chooseLocalBrain({}, { fetch: o.impl, log: (m) => logs.push(m) });
+    expect(b).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, from: 'default', settled: true });
+    expect(logs).toEqual([
+      `[brain] OLLAMA_MODEL is unset and Ollama listed no chat model: the local brain is ${DEFAULT_OLLAMA_MODEL} until the next restart (run "ollama pull ${DEFAULT_OLLAMA_MODEL}", or set OLLAMA_MODEL)`,
+    ]);
+  });
+
+  it('a named model and a picked one are settled', async () => {
+    expect((await chooseLocalBrain({ OLLAMA_MODEL: 'qwen2.5:7b' })).settled).toBe(true);
+    expect((await chooseLocalBrain({}, { fetch: ollama({ ps: ['muse-glimmer:30b'] }).impl })).settled).toBe(true);
+    expect((await chooseLocalBrain({}, { fetch: ollama({ ps: [], tags: ['qwen3.8:27b'] }).impl })).settled).toBe(true);
+  });
+
+  // An Ollama cloud model runs on Ollama's servers: naming one would make the "local" brain an outside AI again.
+  it('refuses an Ollama cloud model named in OLLAMA_MODEL, and uses what Ollama has on this machine', async () => {
+    for (const named of ['gpt-oss:120b-cloud', 'glm-4.6:cloud', 'qwen3-coder-cloud']) {
+      const o = ollama({ ps: ['muse-glimmer:30b'] });
+      const logs: string[] = [];
+      const b = await chooseLocalBrain({ OLLAMA_MODEL: named }, { fetch: o.impl, log: (m) => logs.push(m) });
+      expect(b, named).toMatchObject({ model: 'muse-glimmer:30b', from: 'loaded' });
+      expect(logs[0]).toBe("[brain] OLLAMA_MODEL is an Ollama cloud model, which runs on Ollama's servers: it is not used as the local brain");
+    }
+  });
+
+  it('FLINT_MODEL, which used to name the Anthropic "local" model, is no longer read, and says so', async () => {
+    const logs: string[] = [];
+    const b = await chooseLocalBrain({ FLINT_MODEL: 'claude-opus-5-5', ANTHROPIC_API_KEY: 'sk-ant-test', OLLAMA_MODEL: 'qwen2.5:7b' }, { log: (m) => logs.push(m) });
+    expect(b.model).toBe('qwen2.5:7b');
+    expect(logs).toEqual(['[brain] FLINT_MODEL is no longer read: the local brain is always an Ollama model (OLLAMA_MODEL)']);
+  });
+
+  it('what it returns builds an OllamaProvider, whatever the environment holds', async () => {
+    const b = await chooseLocalBrain({ ANTHROPIC_API_KEY: 'sk-ant-test' }, { fetch: ollama('down').impl });
+    expect(new OllamaProvider(b.options).name).toBe('ollama');
+  });
+
+  // Will's rules for a note (2026-10-12): plain sentences, and never an internal name. The
+  // model's id and the setting's name are both in the boot log, which the note points at.
+  it('localDefaultNote: plain sentences for the console when the model is a guess, with no id or setting name in them', () => {
+    const note = localDefaultNote();
+    expect(note).toEqual({
+      title: 'Flint Is Guessing Its Local Model',
+      body: 'No local model is set, and Ollama has none to offer, so Flint is trying a small default. The server log says how to choose one.',
+    });
+    expect(`${note.title} ${note.body}`).not.toMatch(/OLLAMA|[A-Z]+_[A-Z]+|qwen|[a-z0-9]+:[a-z0-9]+|[()`]/);
+  });
+});
+
+// Nothing waits on this: the server is already listening, on the stand-in default.
+describe('keepPickingLocal (an Ollama that did not answer at boot is asked again in the background)', () => {
+  type Lists = { ps?: Array<{ name: string; context_length?: number }>; tags?: string[] } | 'down';
+  function ollama(...script: Lists[]) {
+    let round = 0;
+    return (async (url: string) => {
+      const ps = url.endsWith('/api/ps');
+      if (ps) round++;
+      const lists = script[Math.min(round, script.length) - 1]!;
+      if (lists === 'down') throw new TypeError('fetch failed');
+      const rows = ps ? (lists.ps ?? []) : (lists.tags ?? []).map((name) => ({ name }));
+      return new Response(JSON.stringify({ models: rows }), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it('hands over Ollama\'s own answer once it comes, with the window it is loaded at, and then stops', async () => {
+    const adopted: Array<{ model: string; from: string; env: unknown }> = [];
+    const waits: number[] = [];
+    const logs: string[] = [];
+    const k = keepPickingLocal({}, (b) => adopted.push({ model: b.model, from: b.from, env: b.env }), {
+      fetch: ollama('down', 'down', { ps: [{ name: 'muse-glimmer:30b', context_length: 16384 }] }),
+      wait: async (ms) => void waits.push(ms),
+      log: (m) => logs.push(m),
+    });
+    await k.done;
+    expect(adopted).toEqual([{ model: 'muse-glimmer:30b', from: 'loaded', env: { OLLAMA_MODEL: 'muse-glimmer:30b', OLLAMA_NUM_CTX: '16384' } }]);
+    expect(waits).toEqual([LOCAL_REPICK_FAST_MS, LOCAL_REPICK_FAST_MS, LOCAL_REPICK_FAST_MS]);
+    // One line, when it settles: not one for every time Ollama still was not there.
+    expect(logs).toEqual(['[brain] Ollama is answering now: the local brain is muse-glimmer:30b, which it has loaded; the next turn uses it']);
+  });
+
+  it('asks every 5 s for the first minute, then every 30 s, for as long as it takes', async () => {
+    const waits: number[] = [];
+    let adopted = 0;
+    let k!: ReturnType<typeof keepPickingLocal>;
+    k = keepPickingLocal({}, () => adopted++, {
+      fetch: ollama('down'),
+      wait: async (ms) => {
+        waits.push(ms);
+        if (waits.length === LOCAL_REPICK_FAST_TRIES + 3) k.stop(); // the test's own end: Ollama never comes up
+      },
+    });
+    await k.done;
+    expect(waits.slice(0, LOCAL_REPICK_FAST_TRIES)).toEqual(Array(LOCAL_REPICK_FAST_TRIES).fill(5_000));
+    expect(waits.slice(LOCAL_REPICK_FAST_TRIES)).toEqual([LOCAL_REPICK_SLOW_MS, LOCAL_REPICK_SLOW_MS, LOCAL_REPICK_SLOW_MS]);
+    expect(LOCAL_REPICK_FAST_TRIES * LOCAL_REPICK_FAST_MS).toBe(60_000);
+    expect(adopted).toBe(0);
+  });
+
+  it('an Ollama that comes up with no chat model settles on the default, and says what to do', async () => {
+    const adopted: string[] = [];
+    const logs: string[] = [];
+    await keepPickingLocal({}, (b) => adopted.push(`${b.model} ${b.from} ${b.settled}`), { fetch: ollama('down', { ps: [], tags: [] }), wait: async () => {}, log: (m) => logs.push(m) }).done;
+    expect(adopted).toEqual([`${DEFAULT_OLLAMA_MODEL} default true`]);
+    expect(logs[0]).toMatch(/lists no chat model: the local brain stays/);
+  });
+
+  it('its real timer does not hold the process open, and stop() ends it', async () => {
+    const k = keepPickingLocal({}, () => {}, { fetch: ollama('down') });
+    k.stop();
+    // Nothing to await: the pending 5 s timer is unref'd, so this test (and a server shutting down) is not held up by it.
+    expect(typeof k.stop).toBe('function');
   });
 });

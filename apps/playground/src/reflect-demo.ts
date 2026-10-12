@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { Flint, AnthropicProvider, OllamaProvider, type ProviderAdapter } from '@flint/core';
+import { Flint } from '@flint/core';
+import { NO_LIVE_MODEL, pickProvider } from './provider.js';
 import {
   Persona,
   InMemoryLessonStore,
@@ -13,7 +14,7 @@ import {
  * Nightly-reflection demo — shows Flint learning from a session and applying it.
  *
  *   OLLAMA_MODEL=qwen2.5:14b pnpm --filter playground reflect
- *   ANTHROPIC_API_KEY=...    pnpm --filter playground reflect
+ *   PLAYGROUND_PROVIDER=anthropic ANTHROPIC_API_KEY=... pnpm --filter playground reflect
  *
  * Needs a real model (the mock can't reflect). Uses a fixed timestamp so the run
  * is deterministic.
@@ -21,23 +22,10 @@ import {
 
 const NOW = 1_700_000_000_000;
 
-function pickProvider(): { provider: ProviderAdapter; model: string } | null {
-  const ollama = process.env.OLLAMA_MODEL?.trim();
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (ollama) {
-    return {
-      provider: new OllamaProvider(process.env.OLLAMA_HOST ? { baseURL: process.env.OLLAMA_HOST } : {}),
-      model: ollama,
-    };
-  }
-  if (key) return { provider: new AnthropicProvider({ apiKey: key }), model: 'claude-sonnet-4-6' };
-  return null;
-}
-
 async function main(): Promise<void> {
-  const chosen = pickProvider();
+  const chosen = await pickProvider();
   if (!chosen) {
-    console.error('No live model. Set OLLAMA_MODEL or ANTHROPIC_API_KEY.');
+    console.error(NO_LIVE_MODEL);
     process.exit(1);
   }
   const flint = new Flint({ provider: chosen.provider, defaultModel: chosen.model });

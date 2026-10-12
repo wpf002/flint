@@ -5,6 +5,7 @@
  */
 import pg from 'pg';
 import type { ApproverStore, Credential, NewApproval } from './approvals';
+import { errorSummary } from './error-log';
 
 /** pg config from a URL; pg's own parser keeps an IPv6 host's brackets. */
 function config(url: string): pg.PoolConfig {
@@ -25,7 +26,7 @@ export function pgApproverStore(url: string, log: (m: string) => void = () => {}
   const pool = new pg.Pool(config(url));
   // An idle client's connection dropping (Postgres restarting) is an 'error'
   // event; unhandled, it would take the whole chat server down.
-  pool.on('error', (err) => log(`[approvals] database connection lost: ${err.message}`));
+  pool.on('error', (err) => log(`[approvals] database connection lost (${errorSummary(err)})`));
   return {
     async credentials() {
       const r = await pool.query<{ credentialId: string; factor: Credential['factor']; publicKey: Buffer; label: string; signCount: number; revokedAt: Date | null }>(

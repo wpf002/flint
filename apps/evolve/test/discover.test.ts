@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { analyse, compareVersions, familyOf, isServed, parseTier } from '../src/discover';
+import { allCatalogs, tierOllamaHost, wantsVendors } from '../src/vendors';
 
 const cat = (vendor: string, ids: string[]) => ({ vendor, models: ids.map((id) => ({ id })) });
 
@@ -98,5 +101,75 @@ describe('analyse', () => {
   it('treats a first sighting as news-free', () => {
     const f = analyse({ tiers: [], catalogs: [cat('openai', ['gpt-5.6-sol'])], previous: { openai: [] } });
     expect(f).toEqual([]);
+  });
+});
+
+// `evolve discover` looks at the models on this Mac. The vendors' lists are free, but they are
+// calls to outside AI companies with Will's keys, so they need the flag.
+describe('allCatalogs (what discover asks)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const KEYS = { OPENAI_API_KEY: 'sk-test', ANTHROPIC_API_KEY: 'sk-ant-test', GEMINI_API_KEY: 'g-test', OLLAMA_HOST: 'http://127.0.0.1:11434' };
+
+  /** Stands in for global fetch: records each URL, answers every list as empty-but-valid. */
+  function recordFetch() {
+    const asked: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      asked.push(String(url));
+      const body = String(url).includes('/api/tags') ? { models: [{ name: 'qwen3.8:27b', modified_at: '2026-10-01T00:00:00Z' }] } : { data: [], models: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    return asked;
+  }
+
+  it('by default asks only the local Ollama, even with every vendor key set', async () => {
+    const asked = recordFetch();
+    const cats = await allCatalogs(KEYS);
+    expect(cats.map((c) => c.vendor)).toEqual(['ollama']);
+    expect(cats[0]!.models.map((m) => m.id)).toEqual(['qwen3.8:27b']);
+    expect(asked).toEqual(['http://127.0.0.1:11434/api/tags']);
+  });
+
+  it('with vendors: true also asks each vendor for its model list', async () => {
+    const asked = recordFetch();
+    const cats = await allCatalogs(KEYS, { vendors: true });
+    expect(cats.map((c) => c.vendor).sort()).toEqual(['anthropic', 'google', 'ollama', 'openai']);
+    expect(asked.some((u) => u.startsWith('https://api.openai.com/'))).toBe(true);
+    expect(asked.some((u) => u.startsWith('https://api.anthropic.com/'))).toBe(true);
+    expect(asked).toHaveLength(4);
+  });
+
+  // The server builds an `ollama:` tier's client from FLINT_TIER_OLLAMA_HOST, else FLINT_FRONTIER_BASE_URL,
+  // else OLLAMA_HOST (apps/server/src/brains.ts envProviderFactory). The catalog and the probe read the same.
+  it('lists the Ollama the tiers are served from', async () => {
+    expect(tierOllamaHost({})).toBe('http://127.0.0.1:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434/' })).toBe('http://gpu:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434' })).toBe('http://frontier:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434', FLINT_TIER_OLLAMA_HOST: ' http://bigbox:11434 ' })).toBe('http://bigbox:11434');
+    const asked = recordFetch();
+    await allCatalogs({ OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_TIER_OLLAMA_HOST: 'http://bigbox:11434' });
+    expect(asked).toEqual(['http://bigbox:11434/api/tags']);
+  });
+
+  it('reads the host in the order the server does (this fails if the server\'s order changes)', () => {
+    const server = readFileSync(join(__dirname, '..', '..', 'server', 'src', 'brains.ts'), 'utf8');
+    expect(server.replace(/\s+/g, ' ')).toContain("env.FLINT_TIER_OLLAMA_HOST?.trim() || env.FLINT_FRONTIER_BASE_URL?.trim() || env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434'");
+  });
+
+  it('the flag is --vendors, exactly, and off without it', () => {
+    expect(wantsVendors([])).toBe(false);
+    expect(wantsVendors(['--vendor', 'vendors', '--VENDORS', '--vendors=1'])).toBe(false);
+    expect(wantsVendors(['--vendors'])).toBe(true);
+  });
+
+  // A tier on an outside vendor is neither confirmed nor reported dead when its list was not asked for.
+  it('a tier whose vendor was not asked produces no finding', async () => {
+    recordFetch();
+    const catalogs = await allCatalogs(KEYS);
+    expect(analyse({ tiers: [{ tier: 'code', provider: 'openai', model: 'gpt-5.2-codex' }, { tier: 'routine', provider: 'ollama', model: 'qwen3.8:27b' }], catalogs })).toEqual([]);
+    // ...while a local tier that is not pulled is still caught.
+    const dead = analyse({ tiers: [{ tier: 'routine', provider: 'ollama', model: 'qwen2.5:14b' }], catalogs });
+    expect(dead).toHaveLength(1);
+    expect(dead[0]).toMatchObject({ kind: 'dead-config', severity: 'high' });
   });
 });

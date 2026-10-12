@@ -20,6 +20,7 @@
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { errorSummary } from './error-log';
 
 export class ConversationTaint {
   /** conversation -> turn id -> origin (ms). */
@@ -48,7 +49,7 @@ export class ConversationTaint {
       }
     } catch (err) {
       // An unreadable record must not quietly clear every conversation's taint.
-      this.log(`[taint] ${this.file} is unreadable (${err instanceof Error ? err.message : String(err)}); every conversation with history counts as tainted until it is fixed or removed`);
+      this.log(`[taint] ${this.file} is unreadable (${errorSummary(err)}); every conversation with history counts as tainted until it is fixed or removed`);
       this.unreadable = true;
     }
   }
@@ -72,7 +73,7 @@ export class ConversationTaint {
     try {
       this.save();
     } catch (err) {
-      this.log(`[taint] could not save ${this.file}: ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[taint] could not save ${this.file} (${errorSummary(err)})`);
     }
   }
 

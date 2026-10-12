@@ -4,10 +4,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { analyse, parseTier, type Finding, type TierConfig, type VendorCatalog } from './discover.js';
-import { allCatalogs } from './vendors.js';
+import { allCatalogs, wantsVendors } from './vendors.js';
 import { measure, measuredPrompts, reachReport, type MeasureResult } from './run-measure.js';
 import { allowance, dayOf, record, spentToday } from './ledger.js';
-import { decide, parseCandidate, screen, tierEnvVar, tierReach } from './promote.js';
+import { decide, localOnly, parseCandidate, screen, tierEnvVar, tierReach } from './promote.js';
 import { probe } from './probe.js';
 import {
   applyCandidate,
@@ -23,9 +23,15 @@ import type { DailyRow } from './measure.js';
 /**
  * `evolve discover` — stage 1 of the nightly loop.
  *
- * Asks every vendor what it serves, compares that to the tiers Flint is
- * configured with, and writes a report. Spends nothing: model-list endpoints
- * are free. Run it unattended; read the report in the morning.
+ * Asks the local Ollama which models it has, compares that to the tiers Flint
+ * is configured with, and writes a report. Spends nothing, and by default
+ * contacts no outside AI: `--vendors` adds each vendor's (free) model list, for
+ * a run that wants to know what OpenAI, Anthropic and Google serve today.
+ * Run it unattended; read the report in the morning.
+ *
+ * `evolve try <tier>=ollama:<model>` — stage 3. It only ever tries a model on
+ * the tiers' Ollama (promote.ts localOnly): an outside model is refused before
+ * anything is read, fetched, written or spent.
  */
 
 const FLINT_HOME = process.env.FLINT_HOME?.trim() || join(homedir(), '.flint');
@@ -97,17 +103,22 @@ function render(findings: Finding[], catalogs: VendorCatalog[], tiers: TierConfi
       );
     }
   }
-  L.push('', '_Stage 1 spends nothing: these are free model-list calls._', '');
+  L.push('', '_Stage 1 spends nothing: these are free model-list calls._');
+  if (!catalogs.some((c) => c.vendor !== 'ollama')) {
+    L.push('_Only the local Ollama was asked. `evolve discover --vendors` also lists what the outside vendors serve._');
+  }
+  L.push('');
   return L.join('\n');
 }
 
-async function discover(): Promise<number> {
+async function discover(args: readonly string[]): Promise<number> {
   const env = { ...process.env };
   loadSecrets(join(FLINT_HOME, 'secrets.env'), env);
   mkdirSync(STATE_DIR, { recursive: true });
 
   const tiers = tiersFrom(env);
-  const catalogs = await allCatalogs(env);
+  // The local Ollama's models; the outside vendors' lists only with --vendors.
+  const catalogs = await allCatalogs(env, { vendors: wantsVendors(args) });
 
   let previous: Record<string, string[]> | undefined;
   if (existsSync(SNAPSHOT)) {
@@ -279,7 +290,7 @@ async function runTry(spec: string): Promise<number> {
   mkdirSync(STATE_DIR, { recursive: true });
 
   const cand = parseCandidate(spec);
-  if (!cand) throw new Error(`bad candidate '${spec}'; expected e.g. hard=openai:gpt-5.6-sol`);
+  if (!cand) throw new Error(`bad candidate '${spec}'; expected e.g. hard=ollama:qwen3.8:27b`);
 
   const url = env.FLINT_URL?.trim() || 'http://localhost:8080';
   const io: TryIo = {
@@ -289,7 +300,15 @@ async function runTry(spec: string): Promise<number> {
     waitHealthy: makeWaitHealthy(url),
   };
 
-  // Always first: a previous run may have died mid-test.
+  // Only a local model is ever tried. A request for anything else is refused before any file is
+  // read or written: it does not even set off the recovery below.
+  const local = localOnly(cand);
+  if (!local.ok) {
+    console.log(`refused: ${local.reason}. Nothing was read, changed or spent.`);
+    return 1;
+  }
+
+  // Then: a previous run may have died mid-test. Its marker is checked before it is believed (run-try.ts readRollback).
   const recovered = await recoverIfNeeded(io);
   if (recovered) console.log(recovered);
 
@@ -309,6 +328,7 @@ async function runTry(spec: string): Promise<number> {
   }
   console.log(`${reach.reachable} of ${reach.total} measured questions reach the ${cand.tier} tier`);
 
+  // Ollama's own list is the only catalog a local candidate is checked against.
   const catalogs = await allCatalogs(env);
   const gate = screen(cand, catalogs);
   if (!gate.ok) {
@@ -316,9 +336,9 @@ async function runTry(spec: string): Promise<number> {
     return 1;
   }
 
-  // A vendor's model list is not proof it answers: OpenAI still lists
-  // gpt-5.2-codex after deprecating it. One token settles it for a fraction of
-  // a cent, before Flint is reconfigured and a measurement is paid for.
+  // A model list is not proof it answers (OpenAI listed gpt-5.2-codex long after
+  // deprecating it). One token from the local model settles it, before Flint is
+  // reconfigured and a measurement is paid for.
   const live = await probe({ provider: cand.provider, model: cand.model, env });
   if (!live.ok) {
     console.log(`refused: ${cand.provider}:${cand.model} did not answer a one-token probe — ${live.detail}`);
@@ -386,13 +406,13 @@ if (cmd === 'try') {
       process.exit(1);
     });
 } else if (cmd === 'discover') {
-  discover()
+  discover(process.argv.slice(3))
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
       console.error('discover failed:', err instanceof Error ? err.message : err);
       process.exit(1);
     });
 } else {
-  console.error('usage: evolve <discover|measure|try hard=provider:model>');
+  console.error('usage: evolve <discover [--vendors] | measure | try hard=ollama:model>');
   process.exit(1);
 }

@@ -7,6 +7,8 @@ import {
   StyledPersonas,
   chooseStyles,
   echoStyle,
+  engineLineFor,
+  promptRevision,
   parseStyleVariantRequest,
   readStyleDefaults,
   styleGuideFor,
@@ -413,5 +415,87 @@ describe('turnPersonas + echoStyle: one /generate turn end to end, on capture pr
     const server = realServer(V1);
     const r = turnPersonas({ styleVariant: 'v2', localModel: 'muse-glimmer:30b', localThink: undefined }, { styled: server.styled, model: 'qwen2.5:7b', localModels: undefined });
     expect(r).toMatchObject({ ok: false, status: 422 });
+  });
+});
+
+// The guides say "Claude's model for most questions" in pinned text; each persona also carries
+// the fact for the brain it actually speaks for (@flint/persona flintEngineLine).
+describe('engineLineFor (what powers this brain)', () => {
+  const on = (name: string) => ({ name });
+
+  it('a local Ollama model is an open model Will runs, and not Claude', () => {
+    const line = engineLineFor(on('ollama'), 'muse-glimmer:30b');
+    expect(line).toContain('an open model (muse-glimmer:30b) that Will runs himself with Ollama');
+    expect(line).toContain('It is not Claude');
+    expect(line).not.toMatch(/comes from Claude/);
+  });
+
+  it('an `ollama:` frontier tier gets the same line: a tier is not Claude just for being a tier', () => {
+    expect(engineLineFor(on('ollama'), 'qwen2.5:72b')).toContain('an open model (qwen2.5:72b) that Will runs himself with Ollama');
+  });
+
+  it('an Ollama cloud model runs on Ollama\'s servers, and the line says so', () => {
+    const line = engineLineFor(on('ollama'), 'gpt-oss:120b-cloud');
+    expect(line).toContain("that Ollama runs on its own servers, not on Will's hardware");
+    expect(line).not.toContain('Will runs himself');
+  });
+
+  it('Claude is named as Claude, another vendor by its own name', () => {
+    expect(engineLineFor(on('anthropic'), 'claude-opus-5-5')).toContain("This reply comes from Claude (claude-opus-5-5), Anthropic's model");
+    expect(engineLineFor(on('openai'), 'gpt-5')).toContain("gpt-5, OpenAI's model");
+    expect(engineLineFor(on('openai'), 'gpt-5')).toContain('It is not Claude');
+  });
+
+  it('is beside the guide, not in it: the persona still names its variant, and the model reads both', async () => {
+    let system: string | undefined;
+    const provider: ProviderAdapter = {
+      name: 'ollama',
+      getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 1_000_000, maxOutputTokens: 4096 }),
+      estimateTokens: () => 1,
+      generate: () => Promise.reject(new Error('stream only')),
+      async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
+        system = args.system;
+        yield { type: 'text', delta: 'ok' };
+        yield { type: 'done', reason: 'complete', usage: { input: 1, output: 1 } };
+      },
+    };
+    const p = new Persona(new Flint({ provider, defaultModel: 'muse-glimmer:30b' }), { name: 'Flint', styleGuide: styleGuideFor('v1'), engine: engineLineFor(provider, 'muse-glimmer:30b') });
+    expect(styleVariantOf(p)).toBe('v1');
+    await p.generate({ prompt: 'what do you run on?' });
+    expect(system).toBe(`${FLINT_STYLE_GUIDE}\n\n${engineLineFor(provider, 'muse-glimmer:30b')}`);
+  });
+});
+
+// A variant name says which guide; this says which exact text went to the model.
+describe('promptRevision (which exact prompt a persona speaks with)', () => {
+  const local = engineLineFor({ name: 'ollama' }, 'muse-glimmer:30b');
+  const claude = engineLineFor({ name: 'anthropic' }, 'claude-opus-5-5');
+
+  it('is 8 hex characters, the same for the same guide and engine paragraph', () => {
+    const rev = promptRevision({ styleGuide: styleGuideFor('v1'), engine: local });
+    expect(rev).toMatch(/^[0-9a-f]{8}$/);
+    expect(promptRevision({ styleGuide: styleGuideFor('v1'), engine: local })).toBe(rev);
+  });
+
+  it('changes with the guide, with the engine paragraph, and with having one at all', () => {
+    const revs = [
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: local }),
+      promptRevision({ styleGuide: styleGuideFor('v2'), engine: local }),
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: claude }),
+      promptRevision({ styleGuide: styleGuideFor('v1'), engine: engineLineFor({ name: 'ollama' }, 'qwen3.8:27b') }),
+      // The prompt as it was before the engine paragraph existed: a run made then has another revision.
+      promptRevision({ styleGuide: styleGuideFor('v1') }),
+    ];
+    expect(new Set(revs).size).toBe(revs.length);
+  });
+
+  it('reads a real persona: its guide and the engine paragraph it was built with', () => {
+    const provider = { name: 'ollama' } as ProviderAdapter;
+    const p = new Persona(new Flint({ provider, defaultModel: 'muse-glimmer:30b' }), { name: 'Flint', styleGuide: styleGuideFor('local-v2'), engine: local });
+    expect(promptRevision(p)).toBe(promptRevision({ styleGuide: styleGuideFor('local-v2'), engine: local }));
+  });
+
+  it('says nothing of the text it stands for', () => {
+    expect(promptRevision({ styleGuide: 'Will', engine: 'Will' })).not.toMatch(/will/i);
   });
 });
