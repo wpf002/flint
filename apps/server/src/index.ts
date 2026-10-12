@@ -77,6 +77,7 @@ import { inboxRoutes } from './inbox-routes';
 import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
+import { HOLD_CHECK_EVERY_MS, holdNoteDue } from './deploy-hold';
 import { FrontierBreaker, FrontierPaused, breakerNote, gateChain, gateTurn, pausedCode } from './frontier-breaker';
 import { errorSummary, logError } from './error-log';
 import { createHash } from 'node:crypto';
@@ -443,6 +444,14 @@ async function main(): Promise<void> {
     notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });
   };
   noteLocalDefault(localBrain);
+  // Updates paused for a day (./deploy-hold): said once per pause, in the console, with the phone's
+  // content-free ping. No banner: the pause was made at this Mac, so its screen has nothing new to say.
+  const noteDeployHold = (): void => {
+    const note = holdNoteDue(homedir(), Date.now());
+    if (note) notes.push(note.title, note.body, 'system', note.dedupe, { channels: ['inapp', 'push'] });
+  };
+  noteDeployHold();
+  setInterval(noteDeployHold, HOLD_CHECK_EVERY_MS).unref();
   // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
   // (and not blank) it also turns on runtime mode below. One link for everything
   // that talks to the runtime (audit, policies, events, World now, the lanes).

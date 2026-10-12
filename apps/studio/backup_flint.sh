@@ -31,6 +31,7 @@ EXCLUDES=(
 # './*token*' here, it would take the adapters' tokenizer files with it.
 SECRETS=(
   --exclude './secrets.env' --exclude './*.env' --exclude './token'
+  --exclude './*.env.*'            # a copy of a settings file made by hand (backup.env.before-...): the same secrets
   --exclude './*token*.txt' --exclude './tailscaled.state*' --exclude './tailscale'
   # Found in every offsite archive on 2026-09-30, keys and tokens in plaintext:
   --exclude './*.bak*'             # secrets.env.bak*, plist and mcp.json backups, at any depth
@@ -40,6 +41,7 @@ SECRETS=(
   --exclude './tokens'             # per-client token files
   --exclude './enroll-code'        # the one-time code for registering an approval key
   --exclude './google'             # the Google OAuth client and refresh token (P2.5 calendar)
+  --exclude './backup-fingerprint.key'   # seals each database dump's fingerprint (apps/runtime restore.ts)
 )
 
 # The offsite copy is encrypted to an age public key whose private half lives OFF
@@ -59,6 +61,9 @@ prune() { # dir keep
   ls -1t "$1"/flint-*.tar.gz 2>/dev/null | tail -n +$(( $2 + 1 )) | while read -r f; do rm -f "$f"; done
 }
 
+# A snapshot's own name, and nothing else: no folder in it, no other kind of file.
+offsite_name() { [[ $1 =~ '^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age)?$' ]]; }
+
 prune_offsite() { # by name from the manifest; never lists $OFFSITE
   local total=$(wc -l < "$MANIFEST" | tr -d ' ') kept="$MANIFEST.tmp" name
   local drop=$(( total > KEEP_OFFSITE ? total - KEEP_OFFSITE : 0 ))
@@ -67,10 +72,13 @@ prune_offsite() { # by name from the manifest; never lists $OFFSITE
   # while there was nothing to drop.
   if [ "$drop" -gt 0 ]; then
     head -n "$drop" "$MANIFEST" | while read -r name; do
+      # Only a name this script writes is ever removed: a line that is anything else (a path, a file of
+      # another kind, something put there by hand or by a restored copy of this list) is dropped unread.
+      offsite_name "$name" || continue
       rm -f "$OFFSITE/$name" 2>/dev/null || { echo "$(date '+%F %T') offsite prune FAILED: $name" >&2; echo "$name" >> "$kept"; }
     done
   fi
-  tail -n "$KEEP_OFFSITE" "$MANIFEST" >> "$kept"
+  tail -n "$KEEP_OFFSITE" "$MANIFEST" | while read -r name; do offsite_name "$name" && echo "$name"; done >> "$kept"
   mv "$kept" "$MANIFEST"
 }
 
@@ -90,6 +98,9 @@ rotate_logs() { # dir: any *.log over 20 MB becomes <log>.1.gz (keeping 3); copy
 [ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
 
 rotate_logs "$SRC"
+# The settings a rebuild puts back (settings_manifest.sh), saved into $SRC first so
+# tonight's archives carry them. Never secrets, and never a reason to skip a backup.
+[ -r "${0:A:h}/settings_manifest.sh" ] && { /bin/zsh "${0:A:h}/settings_manifest.sh" || true; }
 mkdir -p "$LOCAL"; chmod 700 "$LOCAL"
 tar -czf "$LOCAL/flint-$TS.tar.gz" -C "$SRC" "${EXCLUDES[@]}" .
 chmod 600 "$LOCAL/flint-$TS.tar.gz"

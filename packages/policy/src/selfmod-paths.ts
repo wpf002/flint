@@ -19,8 +19,9 @@ const ALLOWED: ReadonlyArray<RegExp> = [
   // One source adapter per file; the registry (which names the endpoints a source may reach) is out.
   /^apps\/runtime\/src\/sources\/(?!registry\.ts$|index\.ts$)[A-Za-z0-9_-]+\.ts$/,
   /^apps\/runtime\/test\/sources\/[A-Za-z0-9_-]+\.test\.ts$/,
-  // Docs, but not the security or plan documents.
-  /^docs\/(?![^/]*(security|plan|threat|secret))[A-Za-z0-9_-]+\.md$/i,
+  // Docs, but not the security or plan documents, nor the recovery runbook
+  // (what Will follows when Flint is down must never be rewritten by Flint).
+  /^docs\/(?![^/]*(security|plan|threat|secret|recover|runbook|restore|rebuild))[A-Za-z0-9_-]+\.md$/i,
 ];
 
 /**

@@ -1,0 +1,41 @@
+# Flint's LaunchAgents, by label: where each one's file comes from, so a rebuild
+# makes every one from the repo and never from memory.
+#
+#   <label>  <how>  <source>  <on a rebuild>
+#
+# how      template   rendered from a template in apps/studio/templates (rebuild.sh)
+#          file       a LaunchAgent file kept in the repo; /Users/willfoti in it
+#                     becomes this Mac's home folder
+#          installer  written (and loaded) by an install script in the repo
+#          retired    no longer runs; never made again
+#          local      a one-off made by hand on the Studio; never made again
+#
+# rebuild  load       the rebuild writes the file and loads it
+#          last       the same, after everything else is up (it starts deploys)
+#          installer  the install script named as its source loads it
+#          no         not loaded by a rebuild (the reason is beside it)
+#
+# Checked by apps/studio/test/plist_templates.test.sh, and against the agents on
+# this Mac by apps/studio/test/live/settings_names.check.sh.
+
+com.flint.tailscaled      template   apps/studio/templates/com.flint.tailscaled.plist.tmpl  load
+com.flint.ollama          template   apps/studio/templates/com.flint.ollama.plist.tmpl      load
+com.flint.server          template   apps/studio/templates/com.flint.server.plist.tmpl      installer
+com.flint.runtime         installer  apps/runtime/install-runtime.sh                        installer
+com.flint.runtime-backup  installer  apps/runtime/install-runtime.sh                        installer
+com.flint.backup          file       apps/studio/com.flint.backup.plist                     load
+com.flint.evolve          file       apps/evolve/com.flint.evolve.plist                     load
+com.flint.deploy          file       apps/server/com.flint.deploy.plist                     last
+com.flint.searxng         installer  apps/studio/install_searxng.sh                         installer
+# The weekly rebuild rehearsal (apps/studio/run_rehearsal.sh): the server's installer writes and loads it on every deploy.
+com.flint.rebuild-rehearsal  installer  apps/server/install-server.sh                    installer
+# Flint Calendar: the deploy job builds the app; you load its agent when you choose Allow Full Access.
+com.flint.calendar        installer  apps/desktop-calendar/install_calendar.sh              no
+# Spends money, so it is switched on by hand.
+com.flint.evolve-measure  file       apps/evolve/com.flint.evolve-measure.plist             no
+# Training ships disabled and is switched on by hand after a supervised cycle.
+com.flint.retrain         file       apps/train/mlx/com.flint.retrain.plist                 no
+com.flint.gpulimit        file       apps/studio/com.flint.gpulimit.plist                   no
+com.flint.voice           file       apps/voice/com.flint.voice.plist                       no
+com.flint.grow            retired    -                                                      no
+com.flint.triage-cutover  local      -                                                      no

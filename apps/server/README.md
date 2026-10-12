@@ -63,6 +63,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
 | `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
+| `FLINT_INTERNAL_PORT` | no | The port of the internal listener the runtime calls back on (`[::1]`, default 8081). Only a second Flint on the same Mac needs it: a rebuild rehearsal (`apps/studio/rebuild.sh --rehearse`) runs one beside the real one and must never take its port. Anything that is not a port above 1023 is ignored. |
 | `PORT` | no | Injected by Railway. |
 
 ## The local brain is always Ollama

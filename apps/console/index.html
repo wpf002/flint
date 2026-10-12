@@ -1195,7 +1195,7 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
   }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;laneMsg(e.message,true);});}
 
 /* ---------- Settings: Health ---------- */
-var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',runtime:'Runtime'};
+var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',runtime:'Runtime'};
 var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};
 var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
 /* An issue with no note of its own says what its status means (its dot and its place in the list show how bad). */

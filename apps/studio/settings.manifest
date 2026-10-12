@@ -1,0 +1,241 @@
+# Flint's settings, by NAME: which exist, where each lives, and what a rebuild
+# from backup does with it. This file holds no values and no secrets.
+#
+#   <where>  <NAME>  <class>  <detail>
+#
+# where    secrets.env, backup.env, runtime.env, runtime.override.env: files in ~/.flint
+#          server.plist, ollama.plist, <label>.plist: a LaunchAgent's EnvironmentVariables
+#          file: a file or folder in ~/.flint that holds a secret or this Mac's identity
+#          (a name listed for secrets.env or server.plist counts in both: the
+#          server reads its settings from either)
+#
+# class    restore   not a secret. The nightly backup saves its value
+#                    (settings_manifest.sh) and a rebuild puts it back. <detail>
+#                    names the shape the value must have (recovery_lib.sh); a
+#                    value of another shape, or one that looks like a secret, is
+#                    left out.
+#          generate  a secret Flint makes for itself. Never saved: a rebuild
+#                    makes a new one, so the old one is dead. <detail> says who
+#                    makes it.
+#          reenter   comes from outside Flint: a vendor's key, a sign-in, or
+#                    something typed by hand that Flint cannot check. Never
+#                    saved, and a rebuild cannot make it: you sign in or set it
+#                    again, and revoke the old one if it was a key. <detail>
+#                    names the account or the thing.
+#          derive    worked out on the Mac when Flint is installed (paths, the
+#                    commit, digests). Never saved. <detail> says who writes it.
+#          retired   belongs to a job that no longer runs. Never saved.
+#
+# A name that is not listed here is treated as a secret: it is never saved, and a
+# rebuild names it as something it did not put back.
+# Checked by apps/studio/test/settings_manifest.test.sh, and against the names on
+# this Mac by apps/studio/test/live/settings_names.check.sh.
+
+# ---- the server: ~/.flint/secrets.env ------------------------------------------------
+secrets.env  FLINT_TOKEN                          generate  rebuild
+secrets.env  FLINT_DB_URL                         generate  bootstrap-db
+secrets.env  FLINT_DB_OWNER_URL                   generate  bootstrap-db
+secrets.env  FLINT_DB_APPROVER_URL                generate  bootstrap-db
+secrets.env  FLINT_DB_BACKUP_URL                  generate  bootstrap-db
+secrets.env  FLINT_DB_TEST_URL                    generate  bootstrap-db
+secrets.env  FLINT_DB_TEST_OWNER_URL              generate  bootstrap-db
+secrets.env  ANTHROPIC_API_KEY                    reenter   Anthropic
+secrets.env  OPENAI_API_KEY                       reenter   OpenAI
+secrets.env  GEMINI_API_KEY                       reenter   Google-AI
+secrets.env  PERPLEXITY_API_KEY                   reenter   Perplexity
+secrets.env  TAVILY_API_KEY                       reenter   Tavily
+secrets.env  NEXUS_MCP_TOKEN                      reenter   Nexus
+secrets.env  FLINT_NTFY_TOPIC                     reenter   Phone-Pings
+secrets.env  FLINT_RUNTIME_URL                    restore   loopback
+# Who may use Flint over the tailnet is never taken from a backup: the rebuild reads it from the Tailscale sign-in.
+secrets.env  FLINT_TAILNET_USER                   derive    rebuild
+secrets.env  FLINT_TIERS                          restore   onoff
+secrets.env  FLINT_TIER_STANDARD                  restore   spec
+secrets.env  FLINT_TIER_ROUTINE                   restore   spec
+secrets.env  FLINT_TIER_HARD                      restore   spec
+secrets.env  FLINT_TIER_CODE                      restore   spec
+secrets.env  FLINT_TIER_LAST_RESORT               restore   spec
+secrets.env  FLINT_TIER_OLLAMA_HOST               restore   loopback
+secrets.env  FLINT_TIER_TOOL_SCORE                restore   number
+secrets.env  FLINT_TTS_VOICE                      restore   word
+secrets.env  FLINT_TTS_MODEL                      restore   model
+secrets.env  FLINT_WORLD_NOW                      restore   onoff
+secrets.env  FLINT_WATCHER                        restore   onoff
+secrets.env  FLINT_WATCH_MS                       restore   number
+secrets.env  FLINT_WATCH_SIGNALS                  restore   onoff
+secrets.env  FLINT_USER_TZ                        restore   zone
+secrets.env  FLINT_TZ                             restore   zone
+secrets.env  FLINT_USER_LOCATION                  restore   place
+secrets.env  FLINT_MODEL                          restore   model
+secrets.env  FLINT_EMBED_MODEL                    restore   model
+secrets.env  FLINT_MEMORY_BRAIN                   restore   word
+secrets.env  FLINT_MEMORY_MODEL                   restore   model
+secrets.env  FLINT_MEMORY_K                       restore   number
+secrets.env  FLINT_MEMORY_FLOOR                   restore   number
+secrets.env  FLINT_MEMORY_EMBED_TIMEOUT_MS        restore   number
+secrets.env  FLINT_EXTRACT_SKIP_CONVERSATIONS     restore   onoff
+secrets.env  FLINT_EXTRACT_INTERVAL_MS            restore   number
+secrets.env  FLINT_EXTRACT_BACKLOG_INTERVAL_MS    restore   number
+secrets.env  FLINT_EXTRACT_MAX_TURNS              restore   number
+secrets.env  FLINT_EXTRACT_MAX_CALLS_PER_DAY      restore   number
+secrets.env  FLINT_EXTRACT_BATCH_CHARS            restore   number
+secrets.env  FLINT_FRONTIER_PROVIDER              restore   word
+secrets.env  FLINT_FRONTIER_MODEL                 restore   model
+secrets.env  FLINT_FRONTIER_BASE_URL              restore   loopback
+secrets.env  FLINT_FRONTIER_NUM_CTX               restore   number
+secrets.env  FLINT_FRONTIER_MAX_RETRIES           restore   number
+secrets.env  FLINT_FRONTIER_TIMEOUT_MS            restore   number
+secrets.env  FLINT_EVAL_NUM_CTX                   restore   number
+secrets.env  FLINT_HISTORY_TURNS                  restore   number
+secrets.env  FLINT_HISTORY_MAX_AGE_HOURS          restore   number
+secrets.env  FLINT_LOCAL_STYLE_VARIANT            restore   word
+secrets.env  FLINT_RESEARCH_CHARS                 restore   number
+secrets.env  FLINT_TOOL_APPEND                    restore   number
+secrets.env  FLINT_TOOL_FLOOR                     restore   number
+# A switch that turns a safety rule off is never put back from a backup: it starts safe again.
+secrets.env  FLINT_TAINT_FLOOR                    reenter   Safety-Switch
+secrets.env  FLINT_DEBUG_ERRORS                   reenter   Safety-Switch
+secrets.env  FLINT_PERPLEXITY_USD_PER_CALL        restore   number
+secrets.env  FLINT_TAVILY_USD_PER_CALL            restore   number
+secrets.env  OLLAMA_THINK                         restore   onoff
+secrets.env  WHISPER_MODEL                        reenter   Voice
+secrets.env  WHISPER_BIN                          reenter   Voice
+secrets.env  PARITY_DAILY_BUDGET_USD              restore   number
+secrets.env  PARITY_GOOGLE_MODEL                  restore   model
+secrets.env  FLINT_ALLOWED_HOSTS                  reenter   Allowed-Hosts
+secrets.env  FLINT_RP_ID                          derive    install-runtime
+secrets.env  FLINT_RP_ORIGINS                     derive    install-runtime
+secrets.env  BIND_HOST                            derive    default
+secrets.env  FLINT_INTERNAL_PORT                  derive    default
+
+# ---- the server's LaunchAgent: com.flint.server ----------------------------------------
+server.plist  PATH                                derive    rebuild
+server.plist  ASSETS_DIR                          derive    rebuild
+server.plist  CONSOLE_PATH                        derive    rebuild
+server.plist  MCP_CONFIG                          derive    rebuild
+server.plist  PORT                                restore   port
+server.plist  OLLAMA_HOST                         restore   loopback
+server.plist  OLLAMA_MODEL                        restore   model
+server.plist  OLLAMA_NUM_CTX                      restore   number
+server.plist  FLINT_STYLE_VARIANT                 restore   word
+server.plist  FLINT_BUDGET_ANTHROPIC_DAILY_USD    restore   number
+server.plist  FLINT_BUDGET_ANTHROPIC_MONTHLY_USD  restore   number
+server.plist  FLINT_BUDGET_OPENAI_DAILY_USD       restore   number
+server.plist  FLINT_BUDGET_OPENAI_MONTHLY_USD     restore   number
+server.plist  FLINT_BUDGET_PERPLEXITY_DAILY_USD   restore   number
+server.plist  FLINT_BUDGET_PERPLEXITY_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_TAVILY_DAILY_USD       restore   number
+server.plist  FLINT_BUDGET_TAVILY_MONTHLY_USD     restore   number
+# The background kinds (packages/policy SPEND_KINDS): a dollar cap a day and a month, and a number of calls a day.
+server.plist  FLINT_BUDGET_KIND_RUNTIME_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_RUNTIME_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_RUNTIME_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_DAILY_CALLS restore   number
+
+# ---- the runtime: ~/.flint/runtime.override.env (yours) and runtime.env (rewritten on every install) ----
+runtime.override.env  FLINT_RUNTIME_TRIAGE          restore   onoff
+runtime.override.env  FLINT_PLANNER                 restore   onoff
+runtime.override.env  FLINT_PREDICT                 restore   onoff
+runtime.override.env  FLINT_SOURCE_GOOGLE_CALENDAR  restore   onoff
+runtime.override.env  FLINT_SOURCE_APPLE_CALENDAR   restore   onoff
+runtime.override.env  FLINT_TRIAGE_MODEL            restore   model
+runtime.override.env  HEALTH_EXTRA                  reenter   Health-Endpoints
+runtime.override.env  GITHUB_OWNER                  restore   word
+runtime.override.env  GITHUB_APP_ID                 reenter   GitHub-App
+runtime.override.env  GITHUB_APP_INSTALLATION_ID    reenter   GitHub-App
+runtime.override.env  GITHUB_APP_KEY_PATH           reenter   GitHub-App
+runtime.override.env  NEXUS_MCP_URL                 reenter   Nexus
+runtime.override.env  NEXUS_READ_TOKEN              reenter   Nexus
+runtime.env  DATABASE_URL                         generate  install-runtime
+runtime.env  RUNTIME_TOKENS                       generate  install-runtime
+runtime.env  SERVER_INTERNAL_TOKEN                generate  install-runtime
+runtime.env  SERVER_INTERNAL_URL                  derive    install-runtime
+runtime.env  RUNTIME_HOST                         derive    install-runtime
+runtime.env  RUNTIME_PORT                         derive    install-runtime
+runtime.env  RUNTIME_GIT_SHA                      derive    install-runtime
+runtime.env  FLINT_TZ                             derive    install-runtime
+runtime.env  FLINT_RP_ID                          derive    install-runtime
+runtime.env  FLINT_RP_ORIGINS                     derive    install-runtime
+runtime.env  OLLAMA_URL                           derive    install-runtime
+runtime.env  OLLAMA_NUM_CTX                       derive    install-runtime
+runtime.env  FLINT_TRIAGE_MODEL                   derive    install-runtime
+runtime.env  FLINT_BUDGET_ANTHROPIC_DAILY_USD     derive    install-runtime
+runtime.env  FLINT_BUDGET_ANTHROPIC_MONTHLY_USD   derive    install-runtime
+runtime.env  FLINT_BUDGET_OPENAI_DAILY_USD        derive    install-runtime
+runtime.env  FLINT_BUDGET_OPENAI_MONTHLY_USD      derive    install-runtime
+runtime.env  FLINT_BUDGET_PERPLEXITY_DAILY_USD    derive    install-runtime
+runtime.env  FLINT_BUDGET_PERPLEXITY_MONTHLY_USD  derive    install-runtime
+runtime.env  FLINT_BUDGET_TAVILY_DAILY_USD        derive    install-runtime
+runtime.env  FLINT_BUDGET_TAVILY_MONTHLY_USD      derive    install-runtime
+
+# ---- backups: ~/.flint/backup.env --------------------------------------------------------
+backup.env  FLINT_DB_BACKUP_URL                   generate  bootstrap-db
+backup.env  FLINT_DB_RESTORE_URL                  generate  bootstrap-db
+backup.env  FLINT_OFFSITE_DIR                     restore   homepath
+backup.env  FLINT_BACKUP_AGE_RECIPIENT            reenter   Backup-Key
+
+# ---- the local model's LaunchAgent: com.flint.ollama ---------------------------------------
+ollama.plist  HOME                                derive    rebuild
+ollama.plist  PATH                                derive    rebuild
+ollama.plist  OLLAMA_HOST                         restore   bindaddr
+ollama.plist  OLLAMA_KEEP_ALIVE                   restore   duration
+ollama.plist  OLLAMA_NUM_PARALLEL                 restore   number
+ollama.plist  OLLAMA_MAX_LOADED_MODELS            restore   number
+ollama.plist  OLLAMA_FLASH_ATTENTION              restore   onoff
+ollama.plist  OLLAMA_KV_CACHE_TYPE                restore   word
+
+# ---- the other LaunchAgents: every value is written by the repo or its installers --------------
+com.flint.deploy.plist          FLINT_REPO        derive    rebuild
+com.flint.deploy.plist          PATH              derive    rebuild
+com.flint.runtime.plist         HOME              derive    install-runtime
+com.flint.runtime-backup.plist  HOME              derive    install-runtime
+com.flint.runtime-backup.plist  PATH              derive    install-runtime
+com.flint.runtime-backup.plist  FLINT_REPO        derive    install-runtime
+com.flint.rebuild-rehearsal.plist  PATH           derive    install-server
+com.flint.searxng.plist         SEARXNG_SETTINGS_PATH         derive  install_searxng
+com.flint.searxng.plist         GRANIAN_INTERFACE             derive  install_searxng
+com.flint.searxng.plist         GRANIAN_HOST                  derive  install_searxng
+com.flint.searxng.plist         GRANIAN_PORT                  derive  install_searxng
+com.flint.searxng.plist         GRANIAN_WEBSOCKETS            derive  install_searxng
+com.flint.searxng.plist         GRANIAN_BLOCKING_THREADS      derive  install_searxng
+com.flint.searxng.plist         GRANIAN_WORKERS_KILL_TIMEOUT  derive  install_searxng
+com.flint.evolve.plist          PATH              derive    repo
+com.flint.evolve-measure.plist  PATH              derive    repo
+com.flint.evolve-measure.plist  EVOLVE_BUDGET_USD derive    repo
+com.flint.evolve-measure.plist  EVOLVE_PROMPTS    derive    repo
+com.flint.retrain.plist         PATH              derive    repo
+com.flint.retrain.plist         FLINT_TRAIN_PY    derive    repo
+com.flint.voice.plist           PATH              derive    repo
+com.flint.grow.plist            GROW_CONCURRENCY  retired   training
+com.flint.grow.plist            GROW_TARGET       retired   training
+
+# ---- files and folders in ~/.flint that hold a secret or this Mac's identity ---------------
+# None of these is in the offsite copy (apps/studio/backup_flint.sh leaves them out).
+file  secrets.env                 generate  rebuild
+file  runtime.env                 generate  install-runtime
+file  backup.env                  generate  bootstrap-db
+file  runtime.override.env        derive    rebuild
+file  token                       generate  rebuild
+file  tokens                      generate  install-runtime
+file  enroll-code                 generate  rebuild
+file  backup-fingerprint.key      generate  backup
+file  backup-age-recipient        derive    rebuild
+file  approval-key.se             reenter   Approval-Key
+file  tailscaled.state            reenter   Tailscale
+file  tailscale                   reenter   Tailscale
+file  google                      reenter   Google
+file  mcp.json                    reenter   Connectors
+file  nexus-admin-token.txt       reenter   Nexus
+file  nexus-sandbox-token.txt     reenter   Nexus
+file  nexus-responder.env         reenter   Nexus
+file  nexus-responder.json        reenter   Nexus
+file  nexus-responder.sh          reenter   Nexus
+file  legion                      retired   legion

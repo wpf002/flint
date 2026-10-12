@@ -6,10 +6,10 @@
  * signed policies and caps from the runtime, notifications that keep their
  * words in the console, and the approval routes end to end.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, sign as signRaw } from 'node:crypto';
@@ -31,7 +31,14 @@ import { MemoryExtractor } from '../src/memory-extract';
 import { SpendGuard, SpendLedger } from '../src/spend';
 import { startInternal } from '../src/internal';
 
-const tmp = (p = 'flint-r41-') => mkdtempSync(join(tmpdir(), p));
+/**
+ * One temp folder for the whole file, removed when the file ends: every test makes its own folders inside it.
+ * (Each test used to make a folder of its own in the Mac's temp folder and leave it there. The deploy gate runs
+ * this file on every merge, and thousands had piled up.)
+ */
+const ROOT = mkdtempSync(join(tmpdir(), 'flint-r41-'));
+afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
+const tmp = (p = 'd-') => mkdtempSync(join(ROOT, p));
 const RT = { url: 'http://[::1]:8090', token: 'a'.repeat(64) };
 const tool = (name: string, fn: (args: unknown) => unknown): Tool => ({ definition: { name, description: name, inputSchema: { type: 'object' } }, handler: async (c) => fn(c.args) });
 

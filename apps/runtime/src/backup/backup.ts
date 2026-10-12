@@ -42,7 +42,19 @@ export function targetOf(url: string): PgTarget {
   };
 }
 
-const client = (t: PgTarget) => new pg.Client({ host: t.host, port: t.port, user: t.user, password: t.password, database: t.database });
+/**
+ * A pg client for `t`. Three things every one of them gets:
+ *  - an 'error' listener: a connection Postgres drops while it sits idle is an
+ *    'error' event, and one nobody listens for takes the whole process down. With
+ *    a listener the next query on it is simply refused;
+ *  - a connect timeout, so a server that does not answer is a refusal, not a hang;
+ *  - a lock timeout, so a statement that needs a lock someone holds gives up.
+ */
+export const client = (t: PgTarget): pg.Client => {
+  const c = new pg.Client({ host: t.host, port: t.port, user: t.user, password: t.password, database: t.database, connectionTimeoutMillis: 10_000, lock_timeout: 15_000 });
+  c.on('error', () => {});
+  return c;
+};
 
 export interface Tools {
   pgDump: string;
@@ -50,26 +62,71 @@ export interface Tools {
   age?: string;
 }
 
-function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string } = {}): Promise<void> {
+/**
+ * What a Postgres tool said went wrong, reduced to its kind and the object it
+ * names. Its own words are never passed on: pg_restore prints the statement that
+ * failed ("Command was: ...") and Postgres the row that was refused ("Failing row
+ * contains (...)"), and either can be Will's data. Only these fixed shapes, which
+ * hold a role, database or object name and nothing else, are kept.
+ */
+const TOOL_ERRORS: readonly RegExp[] = [
+  /password authentication failed for user "[^"\n]{1,63}"/,
+  /role "[^"\n]{1,63}" does not exist/,
+  /database "[^"\n]{1,63}" does not exist/,
+  /database "[^"\n]{1,63}" is being accessed by other users/,
+  /(?:relation|schema|function|type|table|sequence|extension|language|constraint|index|trigger|view) "[^"\n]{1,128}" (?:already exists|does not exist)/,
+  /permission denied (?:for|to) [a-z ]{1,30}(?:"[^"\n]{1,128}"|[A-Za-z_][A-Za-z0-9_.]{0,128})?/,
+  /must be (?:owner of|superuser|a member of|able to SET ROLE)[^:;\n]{0,80}/,
+  /server version mismatch/,
+  /unsupported version \([0-9.]+\) in file header/,
+  /input file (?:appears to be a text format dump|does not appear to be a valid archive|is too short)/,
+  /could not open input file/,
+  /connection to server [^\n]{0,120} failed/,
+  /could not connect to server/,
+  /No space left on device/,
+  /out of memory/,
+  /canceling statement due to (?:lock|statement) timeout/,
+];
+export function toolError(stderr: string): string {
+  for (const shape of TOOL_ERRORS) {
+    const m = shape.exec(stderr);
+    if (m) return m[0];
+  }
+  return 'it reported an error';
+}
+
+/** A Postgres tool ended with an error: which tool, its exit code, and toolError's summary (never its own text). */
+export class ToolFailed extends Error {
+  constructor(readonly tool: string, readonly exit: number | null, readonly summary: string) {
+    super(`${tool} exited ${exit}: ${summary}`);
+  }
+}
+
+/**
+ * Run pg_dump or pg_restore. A tool that cannot be started at all (not there, not
+ * runnable) is a fault and is passed on as it is; one that ran and failed is a
+ * ToolFailed, which says what kind of failure and names no data.
+ */
+export function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', PGPASSWORD: password, PGCONNECT_TIMEOUT: '10' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
-    child.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
+    child.stderr.on('data', (d) => (err = (err + d).slice(-8000)));
     if (opts.stdoutFile) child.stdout.pipe(createWriteStream(opts.stdoutFile, { mode: 0o600 }));
     else child.stdout.resume();
     child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${bin.split('/').pop()} exited ${code}: ${err.trim().split('\n').pop() ?? ''}`))));
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new ToolFailed(bin.split('/').pop() ?? 'tool', code, toolError(err)))));
   });
 }
 
-async function sha256File(path: string): Promise<string> {
+export async function sha256File(path: string): Promise<string> {
   const h = createHash('sha256');
   for await (const chunk of createReadStream(path)) h.update(chunk as Buffer);
   return h.digest('hex');
 }
 
 /** Row counts of every table in public and flint_part (partitions counted through their parent). */
-async function countRows(c: pg.Client): Promise<Record<string, number>> {
+export async function countRows(c: pg.Client): Promise<Record<string, number>> {
   const tables = await c.query<{ name: string }>(`
     SELECT format('%I.%I', n.nspname, c.relname) AS name
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -125,6 +182,7 @@ export function pruneDumps(dir: string, keep: number): string[] {
   for (const f of gone) {
     rmSync(join(dir, f), { force: true });
     rmSync(join(dir, `${f}.counts.json`), { force: true });
+    rmSync(join(dir, `${f}.sha256`), { force: true });
   }
   return gone;
 }
@@ -267,6 +325,9 @@ export async function encryptTo(path: string, recipient: string, tools: Tools, o
 /** An encrypted copy's name, as encryptTo writes it: the only kind of file pruneOffsite removes. */
 const OFFSITE_COPY = /^flint-[0-9A-Za-z-]+\.dump\.age$/;
 
+/** The name a copy's row counts are sent under: `flint-….dump.age` gives `flint-….dump.counts.json.age`. */
+const countsOf = (copy: string): string => copy.replace(/\.age$/, '.counts.json.age');
+
 /** A half-written copy younger than this may be another run's, still being written: it is left alone. */
 export const STALE_PARTIAL_MS = 3_600_000;
 
@@ -296,6 +357,8 @@ export const STALE_PARTIAL_MS = 3_600_000;
  *  - Only names this code writes (flint-*.dump.age) are ever removed, and only
  *    from `offsiteDir`; so is one left half-written (.partial), once it is an
  *    hour old (a younger one may be a run still writing).
+ *  - A copy's row counts (flint-*.dump.counts.json.age, sent beside it) go when
+ *    it goes, and never before.
  *  - A copy that will not delete stays in the manifest and is tried again.
  *
  * Returns the names of the files it actually removed.
@@ -329,6 +392,12 @@ export function pruneOffsite(offsiteDir: string, manifest: string, name: string,
       gone.push(old);
     } catch {
       stuck.push(old);
+      continue;
+    }
+    try {
+      rmSync(join(offsiteDir, countsOf(old)), { force: true });
+    } catch {
+      // Its counts alone are a few hundred bytes of nothing useful; they are tried again with nothing to lose.
     }
   }
   // A half-written copy left by a run that died. One written to within the hour may be a run still going

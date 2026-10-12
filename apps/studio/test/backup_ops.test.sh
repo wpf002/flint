@@ -41,6 +41,16 @@ check "pruned down to the keep count" '[ "$(ls "$fx/icloud/FlintBackups" | wc -l
 check "the oldest went first" '[ ! -e "$fx/icloud/FlintBackups/flint-20260901-0230.tar.gz.age" ]'
 check "manifest matches" '[ "$(wc -l < "$fx/manifest.txt" | tr -d " ")" = 2 ]'
 
+# 2b. The list is only ever read as names of offsite copies. A line that is anything else (a path out of the
+#     folder, another kind of file) removes nothing, however it got into the list, and is dropped from it.
+mkdir -p "$fx/outside"; print -r -- keep > "$fx/outside/victim"; print -r -- keep > "$fx/icloud/FlintBackups/notes.txt"; print -r -- keep > "$fx/icloud/victim-here"
+{ print -r -- "../outside/victim"; print -r -- "../victim-here"; print -r -- "notes.txt"; print -r -- "$fx/outside/victim"; print -r -- "flint-20260904-0230.tar.gz.age/../../victim-here"; cat "$fx/manifest.txt"; } > "$fx/manifest.new" && mv "$fx/manifest.new" "$fx/manifest.txt"
+run FLINT_BACKUP_TS=20261001-0005 FLINT_BACKUP_KEEP_OFFSITE=2 FLINT_AGE_BIN="$fx/brew/age" >/dev/null
+check "a line that is not a snapshot's name removes nothing" '[ "$(<"$fx/outside/victim")" = keep ] && [ "$(<"$fx/icloud/FlintBackups/notes.txt")" = keep ] && [ "$(<"$fx/icloud/victim-here")" = keep ]'
+check "and the list holds only snapshot names afterwards" '! grep -vE "^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age)?$" "$fx/manifest.txt"'
+check "the real copies were still pruned to the keep count" '[ "$(ls "$fx/icloud/FlintBackups" | grep -c "^flint-")" = 2 ]'
+rm -f "$fx/icloud/FlintBackups/notes.txt"
+
 # 3. A log over 20 MB is rotated (copy-truncate), and rotated logs stay out of the backup.
 mkfile -n 21m "$fx/home/.flint/ollama.err.log" 2>/dev/null || head -c 22020096 /dev/zero > "$fx/home/.flint/ollama.err.log"
 out=$(run FLINT_BACKUP_TS=20261001-0003 FLINT_AGE_BIN="$fx/brew/age")

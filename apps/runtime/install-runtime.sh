@@ -288,6 +288,30 @@ PLIST
   launchctl bootstrap "gui/$UID" "$plist" && echo "runtime: nightly backup agent loaded (02:15)"
 }
 
+# Which release is live and which one was live before it: one line each, "<commit>
+# <when it was installed, in seconds>", in runtime/version and runtime/version.prev.
+# apps/studio/rollback.sh goes back to the release that really ran before this one
+# and says how old each is. Without them it could only take the next folder by
+# date, and a release that never came up is a folder too. Written once the new
+# release answers; 0600; none of this can fail the install.
+record_versions() { # <the release that was live before this deploy, or nothing>
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local prev=$1 line=
+  if [[ -n $prev && -d $prev && ${prev:t} =~ '^[0-9a-f]{40}$' ]]; then
+    if [[ ${prev:t} != $SHA ]]; then
+      [[ -r $RT/version ]] && IFS= read -r line < "$RT/version"
+      # No line for it yet (a release from before these were kept): its folder was made when it was installed.
+      [[ $line =~ "^${prev:t} [0-9]{9,11}\$" ]] || line="${prev:t} $(stat -f %m "$prev" 2>/dev/null)"
+      if [[ $line =~ '^[0-9a-f]{40} [0-9]{9,11}$' ]] && ( umask 077; print -r -- "$line" > "$RT/version.prev" && chmod 600 "$RT/version.prev" ) 2>/dev/null; then :; else rm -f "$RT/version.prev"; fi
+    fi   # the same commit installed again: what ran before it is unchanged
+  else
+    rm -f "$RT/version.prev"
+  fi
+  ( umask 077; print -r -- "$SHA $(date +%s)" > "$RT/version" && chmod 600 "$RT/version" ) 2>/dev/null || rm -f "$RT/version"
+  return 0
+}
+
 PREV="$(readlink "$RT/current" 2>/dev/null || true)"
 ln -sfn "$REL" "$RT/current"
 # A failed restart is one incident: recorded once, straight to the rollback (no health
@@ -303,11 +327,15 @@ for i in {1..30}; do
     rm -f "$ENVF.prev"
     DEPLOY_STAGE=
     deploy_event runtime deploy ok "$SHA"
+    record_versions "$PREV"
     install_backup_agent || echo "✗ runtime: the nightly backup agent could not be (re)loaded (the runtime itself is up)" >&2
-    # Keep the three newest releases, and any named in ~/.flint/runtime/pinned
-    # (one release sha per line: a known-good one to roll back to).
+    # Keep the three newest releases, the one that ran before this one (what
+    # rollback.sh goes back to: releases that never came up can be newer than it),
+    # and any named in ~/.flint/runtime/pinned (one release sha per line: a
+    # known-good one to roll back to).
     ls -1dt "$RT"/releases/*(/N) | tail -n +4 | while read -r old; do
       [ "$old" = "$REL" ] && continue
+      [ "$old" = "$PREV" ] && continue
       [ -f "$RT/pinned" ] && grep -qxF "$(basename "$old")" "$RT/pinned" && continue
       rm -rf "$old"
     done

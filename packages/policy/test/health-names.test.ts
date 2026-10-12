@@ -18,6 +18,13 @@ describe('healthName', () => {
     expect(HEALTH_NAMES.offsite_backup).toBe(JOB_WORDS['backup.offsite']);
   });
 
+  it('a pause on updates and the rebuild rehearsal are components by their plain names', () => {
+    expect(healthName('deploy_hold')).toBe('Automatic Updates');
+    expect(healthName('rebuild_rehearsal')).toBe('Rebuild Rehearsal');
+    // Not the name a failed database update goes by.
+    expect(HEALTH_NAMES.deploy_hold).not.toBe(HEALTH_NAMES.migrate_failed);
+  });
+
   it('goal reviews (P3) are a component by their plain name; a review’s deferral mark is not a component', () => {
     expect(healthName('goals')).toBe('Goal Reviews');
     expect(HEALTH_NAMES.goals).toBe('Goal Reviews');

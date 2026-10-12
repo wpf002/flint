@@ -31,12 +31,48 @@ RETRY_EVERY_MIN=30
 RETRY_MAX=6
 ts() { date '+%F %T'; }
 
+# Updates are paused while the hold file exists (apps/studio/rollback.sh makes it after putting
+# the previous version back; removing the file resumes them). Nothing is fetched, so the
+# checkout stays at what is running, and the app and Flint Calendar are left as they are.
+# The pause is not silent: Settings > Health shows its age (the runtime reads the same file),
+# and the server posts one note once it has lasted a day.
+HOLD="$STATE/deploy-hold"
+# Left by a tick that found the hold. The first tick after the hold is removed then checks
+# that what is installed is main's newest commit, and installs it when it is not: a rollback
+# put an earlier version back, and with no new push nothing else would bring the newest one
+# back (the checkout is already at it, and its deploy is on record as finished).
+HOLD_SEEN="$STATE/deploy-hold-seen"
+# A database restore pauses updates only while it runs, and says so in the file ("restore <its
+# process> <when>"; apps/runtime, restore-production). One that was killed outright cannot lift its
+# own pause: its process is gone, so the pause is over, and this tick goes on as if it had not been there.
+if [ -e "$HOLD" ]; then
+  hold_kind= hold_pid= hold_rest=
+  read -r hold_kind hold_pid hold_rest < "$HOLD" 2>/dev/null || true
+  if [ "$hold_kind" = restore ] && [[ "$hold_pid" =~ '^[0-9]+$' ]] && ! kill -0 "$hold_pid" 2>/dev/null; then
+    rm -f "$HOLD"
+    echo "$(ts) a database restore that is no longer running had paused updates: the pause is lifted"
+  fi
+fi
+if [ -e "$HOLD" ]; then
+  # A restore's own short pause changes nothing that is installed, so it is not remembered: only a
+  # pause someone made (rollback.sh, or by hand) leads to the check, and the reinstall, when it ends.
+  if [ "$hold_kind" != restore ]; then
+    [ -e "$HOLD_SEEN" ] || { mkdir -p "$STATE"; : > "$HOLD_SEEN"; }
+  fi
+  echo "$(ts) updates are paused: $HOLD exists (remove it to resume)"
+  exit 0
+fi
+resumed=0
+[ -e "$HOLD_SEEN" ] && resumed=1
+
 before=$(git rev-parse HEAD 2>/dev/null || echo none)
 # A stalled connection used to hold the fetch ~3 minutes, past the next tick.
 # Abort once the transfer drops below 1 KB/s for 20s; the next run retries.
 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --quiet origin main || { echo "$(ts) fetch failed"; exit 0; }
 git reset --hard --quiet origin/main   # match GitHub exactly (Studio is deploy-only, never edited directly)
 after=$(git rev-parse HEAD)
+# Fetched, so this tick is the one that checks: a fetch that failed leaves the mark for the next.
+[ "$resumed" = 1 ] && rm -f "$HOLD_SEEN"
 
 # The last deploy event of component $1 at sha $2, as "<stage> <outcome>" (empty if none).
 last_event() {
@@ -74,6 +110,27 @@ runtime_wanted() {
   fi
   git cat-file -e "$live^{commit}" 2>/dev/null || return 0
   git diff --name-only "$live" "$1" 2>/dev/null | grep -qE "$RUNTIME_PATHS"
+}
+
+# After a hold: the parts of $1 that are not what is installed, comma-joined (empty when
+# everything is). The server when the version its installer wrote down (server.version, which
+# rollback.sh moves back with the bundle) is another commit, or there is no such line: after a
+# pause, installing again is the safe answer. The runtime as on any push (runtime_wanted).
+# Never a part whose install of $1 failed past its gate: that still waits for the next push,
+# as it did before the pause (a boot crash would take Flint down again).
+resume_parts() {
+  local parts="" want="" installed="" rest="" part
+  [ -r "$HOME/.flint/server.version" ] && read -r installed rest < "$HOME/.flint/server.version" || true
+  [ "$installed" = "$1" ] || want=server
+  runtime_wanted "$1" && want="${want:+$want,}runtime"
+  for part in ${(s:,:)want}; do
+    case "$(last_event "$part" "$1")" in
+      "gate failed") parts="${parts:+$parts,}$part" ;;
+      *" failed") ;;
+      *) parts="${parts:+$parts,}$part" ;;
+    esac
+  done
+  echo "$parts"
 }
 
 # Deploys the given parts of $1 and leaves the ones that failed in $failed, and
@@ -128,6 +185,11 @@ if [ "$before" != "$after" ]; then
   parts=server
   runtime_wanted "$after" && parts=server,runtime
   # Written first, so a run cut short (a restart, a logout) is retried too.
+  remember "$after" "$parts" 0 1
+  deploy "$after" "$parts"
+  remember "$after" "$failed" 0 "$retryable"
+elif [ "$resumed" = 1 ] && parts=$(resume_parts "$after") && [ -n "$parts" ]; then
+  echo "$(ts) updates resumed, and $after is not what is installed ($parts) — redeploying Flint..."
   remember "$after" "$parts" 0 1
   deploy "$after" "$parts"
   remember "$after" "$failed" 0 "$retryable"

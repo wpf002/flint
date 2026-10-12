@@ -1,0 +1,6 @@
+#!/bin/sh
+# A rebuild rehearsal (../rebuild.sh --rehearse) never installs software, never asks
+# for a password, never joins the tailnet and never reaches another machine. This
+# stand-in for ssh is first on its PATH, so a step that tried to would stop here.
+echo "A rebuild rehearsal does not run ssh." >&2
+exit 97

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Flint's server (the gateway: chat, the console, approvals), kept running by launchd.
+     A TEMPLATE: apps/studio/rebuild.sh fills in __NODE__, __NODE_DIR__, __HOME__ and
+     __PORT__, adds the settings a rebuild restores (the model, its context size, the
+     spend caps: apps/studio/settings.manifest), and apps/server/install-server.sh
+     loads it. Don't copy this file by hand.
+     No secret goes in here: the server reads FLINT_TOKEN and the rest from
+     ~/.flint/secrets.env (0600). Flint listens on ::1 only (apps/server/src/access.ts). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__HOME__/.flint/server.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__NODE_DIR__:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PORT</key><string>__PORT__</string>
+    <key>CONSOLE_PATH</key><string>__HOME__/.flint/console.html</string>
+    <key>ASSETS_DIR</key><string>__HOME__/.flint/app-assets</string>
+    <key>MCP_CONFIG</key><string>__HOME__/.flint/mcp.json</string>
+    <key>OLLAMA_HOST</key><string>http://127.0.0.1:11434</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.flint/server.out.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.flint/server.err.log</string>
+</dict>
+</plist>

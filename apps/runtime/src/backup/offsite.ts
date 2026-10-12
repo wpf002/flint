@@ -6,10 +6,14 @@
  *     missing one is a setup problem (NeedsSetup), which the job's note says.
  *  2. The copy is written whole (backup.ts, encryptTo) before anything else.
  *  3. Its BackupRun row is written next: the copy counts from here.
+ *     The dump's row counts go beside it, encrypted the same way, so a rebuild
+ *     can compare what it restored with what the backup held. A night that
+ *     cannot send them still has its copy.
  *  4. Only then are older copies pruned (the newest 7 stay), from the manifest
  *     and from what the database recorded. A prune that fails is logged and
  *     tried again the next night: it never fails a copy that was made.
  */
+import { existsSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { BackupConfig } from '../config.js';
 import type { Db } from '../db.js';
@@ -28,6 +32,12 @@ export async function sendOffsite(db: Pick<Db, 'backupRun'>, b: OffsiteConfig, n
   if (!dump) throw new Error('no local dump to send');
   const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
   await db.backupRun.create({ data: { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: BigInt(e.bytes), sha256: e.sha256, encrypted: true, status: 'ok', startedAt: now, finishedAt: new Date() } });
+  const counts = `${dump}.counts.json`;
+  if (existsSync(counts)) {
+    await encryptTo(counts, b.ageRecipient, b.tools, b.offsiteDir).catch((err: unknown) =>
+      warn(`backup.offsite: the copy is written, but its row counts were not sent: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
   // The new copy is safe and recorded: now the older ones may go. The copy counts even if this does not.
   let pruned = 0;
   try {
