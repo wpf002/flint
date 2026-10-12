@@ -41,6 +41,7 @@ import { randomBytes } from 'node:crypto';
 import { OllamaProvider, estimateCost, type TokenUsage, type TokenVendor } from '@flint/core';
 import { InternalCompleteRequest, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { AuditSink } from './audit-sink';
+import { errorClass } from './error-log';
 import { chatOllama, isCloudModel, type LocalMemoryModel } from './memory-brain';
 import { DEGRADE_AT, UNIFIED_BACKGROUND_STOP, atLeast, type KindCaps, type SpendGuard } from './spend';
 
@@ -89,14 +90,6 @@ export type CompleteResult =
 
 // The audit action's name predates the move to the local model; it is kept so the trail stays one series.
 const ACTION = 'runtime.frontier.complete';
-
-/** An error's class for the audit trail, never its words. */
-function errorClass(err: unknown): string {
-  const kind = (err as { error?: { kind?: unknown } } | null)?.error?.kind;
-  if (typeof kind === 'string' && /^[a-z_]{1,40}$/.test(kind)) return kind;
-  if (err instanceof Error && err.name === 'TimeoutError') return 'timeout';
-  return err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : 'error';
-}
 
 export class CompleteGate {
   private queue: Promise<unknown> = Promise.resolve();

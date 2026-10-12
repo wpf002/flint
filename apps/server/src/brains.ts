@@ -419,12 +419,6 @@ export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortS
   return !o.acted && shouldFallBack(err, o.signal);
 }
 
-/** A short description of an error for logs: its AiError kind when it has one. */
-export function describeError(err: unknown): string {
-  if (isFlintError(err)) return `${err.kind}: ${err.message}`;
-  return err instanceof Error ? err.message : String(err);
-}
-
 /**
  * Run `attempt` on each brain of the chain in turn until one succeeds. Throws
  * the LAST error if all of them fail (the caller then falls back to local, as

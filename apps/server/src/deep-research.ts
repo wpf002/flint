@@ -1,6 +1,7 @@
-import type { Tool } from '@flint/core';
+import { isFlintError, type Tool } from '@flint/core';
 import { cosineSimilarity } from '@flint/persona';
 import { guardedFetch, isPrivateHost } from '@flint/mcp';
+import { errorSummary } from './error-log';
 
 /**
  * deep_research — Perplexity-grade research as a built-in tool. One call does
@@ -174,7 +175,9 @@ Question: ${question}`;
       if (queries.length >= limits.minQueries) return { queries, planner: 'brain' };
       deps.log?.(`[research] planner gave ${planned.length} usable queries; using heuristics`);
     } catch (err) {
-      deps.log?.(`[research] planner failed (${errMsg(err)}); using heuristics`);
+      // A provider's error is logged as its class, never its words (./error-log). Anything else
+      // here is a reason the server wrote itself (no frontier brain, a budget pause, the timeout).
+      deps.log?.(`[research] planner failed (${isFlintError(err) ? errorSummary(err) : errMsg(err)}); using heuristics`);
     }
   }
   return { queries: heuristicQueries(question, now, limits), planner: 'heuristic' };

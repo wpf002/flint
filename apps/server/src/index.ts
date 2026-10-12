@@ -77,6 +77,7 @@ import { inboxRoutes } from './inbox-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel } from './background-complete';
 import { FrontierBreaker, FrontierPaused, breakerNote, gateTurn, pausedCode } from './frontier-breaker';
+import { errorSummary, logError } from './error-log';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
@@ -173,10 +174,14 @@ const SMALL_JSON_BYTES = 64 * 1024;
 /** Recorded voice notes for /transcribe. */
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
-/** Log an error with a short reference, and return the reference for the client. */
+/**
+ * Log an error with a short reference, and return the reference for the client.
+ * What is logged is the error's class, never a provider's words (./error-log);
+ * FLINT_DEBUG_ERRORS=1 logs the whole error.
+ */
 function errorRef(tag: string, err: unknown): string {
   const ref = Math.random().toString(36).slice(2, 8);
-  console.error(`[${tag}] ref=${ref}`, err);
+  logError(`[${tag}] ref=${ref}`, err);
   return ref;
 }
 
@@ -227,7 +232,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
-import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, describeError, mayAskAnother, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
+import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, mayAskAnother, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -887,16 +892,19 @@ function toolsSince(ctx: Ctx, beforeLen: number): Array<{ tool: string; outcome?
     .map((a) => ({ tool: a.tool, outcome: a.isError ? 'error' : 'ok', ms: a.durationMs }));
 }
 
-/** One line per tier fallback, with the AiError kind that caused it (or that the breaker had the brain paused). */
+/**
+ * One line per tier fallback, with what caused it as code words (./error-log errorSummary: the
+ * AiError kind, the provider's code, the breaker's reason), or that the breaker had the brain paused.
+ */
 function logFallback(from: { label: string }, to: { label: string }, err: unknown): void {
   if (err instanceof FrontierPaused) console.error(`[brain] ${from.label} skipped (${err.message}) — moving on to ${to.label}`);
-  else console.error(`[brain] ${from.label} failed (${describeError(err)}) — falling back to ${to.label}`);
+  else logError(`[brain] ${from.label} failed, falling back to ${to.label}:`, err);
 }
 
-/** One line when the local model takes over a frontier turn: the error, or only the breaker's reason code. */
+/** One line when the local model takes over a frontier turn: the failure's code words, never the provider's message. */
 function logToLocal(how: string, err: unknown): void {
   if (err instanceof FrontierPaused) console.error(`[brain] ${err.brain.label} is paused (${err.brain.reason}); the local model answers`);
-  else console.error(`[brain] ${how}, falling back to local:`, err);
+  else logError(`[brain] ${how}, falling back to local:`, err);
 }
 
 /** One log line when the spend guard changed a turn's route (./spend). */
