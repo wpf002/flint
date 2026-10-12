@@ -4,6 +4,7 @@
  * pinball loss; ECE and the interval around a Brier score only from 100 scored,
  * and the interval only from results spread over enough days or goals.
  */
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { localDay } from '@flint/policy';
 import { NO_DB, freshDb, id, HEX, type TestUrls } from '../db';
@@ -13,12 +14,14 @@ import { MIN_SCORED, WINDOW_DAYS, nightlyWindow, runSnapshot, snapshotCalibratio
 import { clusterBootstrapMean, seedFrom } from '../../src/ledger/bootstrap';
 import { ece, score, scoreRanges } from '../../src/ledger/scoring';
 import { sweep } from '../../src/ledger/sweep';
+import { buildApp } from '../../src/app';
+import type { RuntimeScope } from '../../src/config';
 
 describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
   let urls: TestUrls;
   let k: LedgerKit;
   let g: GoalFixture;
-  const zero = (): SnapshotCounts => ({ groups: 0, scored: 0, ranges: 0, unscaled: 0, withEce: 0, withInterval: 0 });
+  const zero = (): SnapshotCounts => ({ groups: 0, scored: 0, ranges: 0, unscaled: 0, withEce: 0, withInterval: 0, gaveUp: 0 });
   const window = () => ({ start: new Date(Date.now() - 60 * DAY), end: new Date(Date.now() + DAY) });
   const rows = async () => (await k.owner(`SELECT * FROM "CalibrationSnapshot" ORDER BY "windowEnd", domain, type, method, kind`)).rows;
   const row = (all: Array<Record<string, unknown>>, domain: string, kind = 'binary', method = 'rule') => all.find((r) => r.domain === domain && r.kind === kind && r.method === method)!;
@@ -27,24 +30,20 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
    * `n` yes/no predictions of one group, made 40 days ago and resolved over `days` different days (or, with goals,
    * shared between them). Probabilities walk from 5% to 95%; about as many come true as were said to.
    */
-  async function scored(domain: string, n: number, days: number, goals: string[] = []): Promise<string> {
+  async function scored(domain: string, n: number, days: number, goals: string[] = [], when = `date_trunc('day', now()) - ((p.i % $2::int) + 1) * interval '1 day' + interval '6 hours'`): Promise<string> {
     const prefix = `pd${id('g').slice(-6)}x`;
     const made = new Date(Date.now() - 40 * DAY);
-    await k.owner(`ALTER TABLE "Prediction" DISABLE TRIGGER "Prediction_insert_check"`);
-    try {
-      await k.app(
-        `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdAt", "createdBy", "goalId")
-         SELECT $1 || lpad(i::text, 4, '0'), 'a synthetic claim', 'binary', (0.05 + (i % 19) * 0.05)::float8, 'rule', $2, $3, '[]', 'synthetic criteria', 'auto_world',
-                $4::timestamptz + interval '2 days', $4, $5, CASE WHEN $6::text[] = '{}' THEN NULL ELSE ($6::text[])[1 + i % cardinality($6::text[])] END
-         FROM generate_series(1, $7::int) i`,
-        [prefix, domain, goals.length ? 'deadline_met' : 'event_occurs', made, goals.length ? 'runtime:goals' : 'test', goals, n],
-      );
-    } finally {
-      await k.owner(`ALTER TABLE "Prediction" ENABLE TRIGGER "Prediction_insert_check"`);
-    }
+    // One owner transaction: the stamp is off only inside it (kit.ts `past`).
+    await k.past('Prediction', ['Prediction_insert_check'], (q) => q(
+      `INSERT INTO "Prediction" (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdAt", "createdBy", "goalId")
+       SELECT $1 || lpad(i::text, 4, '0'), 'a synthetic claim', 'binary', (0.05 + (i % 19) * 0.05)::float8, 'rule', $2, $3, '[]', 'synthetic criteria', 'auto_world',
+              $4::timestamptz + interval '2 days', $4, $5, CASE WHEN $6::text[] = '{}' THEN NULL ELSE ($6::text[])[1 + i % cardinality($6::text[])] END
+       FROM generate_series(1, $7::int) i`,
+      [prefix, domain, goals.length ? 'deadline_met' : 'event_occurs', made, goals.length ? 'runtime:goals' : 'test', goals, n],
+    ));
     await k.app(
       `INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy")
-       SELECT 'rs' || p.id, p.id, ((p.i * 7) % 20) < (p.probability * 20), date_trunc('day', now()) - ((p.i % $2::int) + 1) * interval '1 day' + interval '6 hours', 'auto_world'
+       SELECT 'rs' || p.id, p.id, ((p.i * 7) % 20) < (p.probability * 20), ${when}, 'auto_world'
        FROM (SELECT id, probability, right(id, 4)::int AS i FROM "Prediction" WHERE id LIKE $1 || '%') p`,
       [prefix, days],
     );
@@ -55,6 +54,17 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     const r = (await k.owner(
       `SELECT p.probability AS p, r.outcome AS o, r."eventAt" AS at, p."goalId" AS goal FROM "Prediction" p JOIN "Resolution" r ON r."predictionId" = p.id WHERE p.id LIKE $1 || '%' ORDER BY p.id`, [prefix])).rows;
     return r as Array<{ p: number; o: boolean; at: Date; goal: string | null }>;
+  }
+
+  /** Set a prediction aside with Will's signature (the only way one is voided). */
+  async function voidIt(pid: string): Promise<void> {
+    const aid = id('appr');
+    const expires = (await k.owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
+    await k.approver(
+      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt") VALUES ($1, 'void', $2, 'approve', $3, $4, $5, '\\x01', $6)`,
+      [aid, pid, JSON.stringify({ v: 1, subjectType: 'void', subjectId: pid, decision: 'approve', action: 'ledger.void', argsDigest: HEX('a'), expiresAt: expires, nonce: HEX('0').slice(0, 32) }), HEX('c'), k.credentialId, expires],
+    );
+    await k.app(`UPDATE "Prediction" SET status = 'void', "voidApprovalId" = $2 WHERE id = $1`, [pid, aid]);
   }
 
   beforeAll(async () => {
@@ -81,7 +91,7 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     const { start, end } = window();
     const written = await snapshotCalibration(k.db, start, end, TZ, counts);
     expect(written.map((r) => `${r.domain}/${r.type}/${r.method}/${r.kind}`).sort()).toEqual(['deploys/event_occurs/rule/binary', 'projects/event_occurs/rule/binary', 'repos/event_occurs/rule/binary', 'services/event_occurs/rule/binary']);
-    expect(counts).toEqual({ groups: 4, scored: 439, ranges: 0, unscaled: 0, withEce: 3, withInterval: 2 });
+    expect(counts).toEqual({ groups: 4, scored: 439, ranges: 0, unscaled: 0, withEce: 3, withInterval: 2, gaveUp: 0 });
     const all = await rows();
     // 120 over 12 days: everything, and each number is what the pure functions give for those rows.
     const a = row(all, 'services');
@@ -133,6 +143,24 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     expect(new Set(scoredGoals.map((x) => localDay(TZ, x.at))).size).toBe(12);
   });
 
+  it('a result\'s day is the day in Flint\'s zone: results on ten UTC days that are five local days are five clusters, and get no interval', async () => {
+    // Each pair of results, at 23:00 and at 03:00 UTC the next day, is one evening in Chicago and two days in UTC.
+    const prefix = await scored('triage', 120, 0, [],
+      `(date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') - (2 * (p.i % 5) + 2) * interval '1 day' + (CASE WHEN (p.i / 5) % 2 = 0 THEN interval '3 hours' ELSE interval '-1 hour' END) + ($2::int * interval '0')`);
+    const at = (await scoredRows(prefix)).map((r) => r.at);
+    expect([new Set(at.map((d) => localDay('UTC', d))).size, new Set(at.map((d) => localDay('America/Chicago', d))).size]).toEqual([10, 5]);
+    const { start, end } = window();
+    await snapshotCalibration(k.db, start, end, 'UTC');
+    const utc = row(await rows(), 'triage');
+    expect(utc.n).toBe(120);
+    expect(utc.ece).not.toBeNull();
+    expect(utc.brierCiLow).not.toBeNull();
+    await snapshotCalibration(k.db, start, end, 'America/Chicago');
+    const local = row(await rows(), 'triage');
+    expect([local.n, local.brier, local.ece]).toEqual([120, utc.brier, utc.ece]);
+    expect([local.brierCiLow, local.brierCiHigh]).toEqual([null, null]);
+  });
+
   it('ranges are their own rows: the share that held, and the pinball loss over each run\'s scale; a run with no scale is left out and counted', async () => {
     const series = await k.onSeries();
     const made = { madeAgo: 3 * DAY, dueAgo: 2 * DAY };
@@ -146,6 +174,11 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
       [{ lower: 1, upper: 3, pointEstimate: 2, level: 0.5 }, { scale: 1, level: 0.5 }, 3],
     ];
     for (const [range, run, value] of five) await settle(await k.range(series, dayStart(2), range, made, run), value);
+    // A sixth, far outside its range, then set aside with Will's signature: counted as void, and out of the score.
+    const voided = await k.range(series, dayStart(2), { lower: 2, upper: 6, pointEstimate: 4 }, made, { scale: 2 });
+    await settle(voided, 1000);
+    await voidIt(voided);
+    expect(await k.status(voided)).toBe('void');
     // Beside them: one still open, and one that ran out.
     await k.range(series, dayStart(2), {}, { madeAgo: 3 * DAY, dueAgo: -DAY });
     const lapsed = await k.range(series, dayStart(2), { resolverSpec: null }, { madeAgo: 5 * DAY, dueAgo: 4 * DAY });
@@ -156,7 +189,7 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     await snapshotCalibration(k.db, start, end, TZ, counts);
     expect(counts).toMatchObject({ ranges: 5, unscaled: 1 });
     const r = row(await rows(), 'deploys', 'interval', 'statistical');
-    expect(r).toMatchObject({ type: 'trend', n: 5, nOpen: 1, nExpired: 1, brier: null, baseRate: null, brierSkill: null, ece: null, brierCiLow: null, brierCiHigh: null, reliability: [] });
+    expect(r).toMatchObject({ type: 'trend', n: 5, nOpen: 1, nExpired: 1, nVoid: 1, brier: null, baseRate: null, brierSkill: null, ece: null, brierCiLow: null, brierCiHigh: null, reliability: [] });
     expect(r.intervalCoverage as number).toBeCloseTo(3 / 5, 12);
     expect(r.pinball as number).toBeCloseTo(0.39375, 12);
     expect(r.unresolvedRate as number).toBeCloseTo(1 / 6, 12);
@@ -185,27 +218,64 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     // Scored, then set aside with Will's signature: counted as void, and out of the score.
     const voided = await said({ probability: 0.9 });
     await settle(voided, false);
-    const aid = id('appr');
-    const expires = (await k.owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
-    await k.approver(
-      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt") VALUES ($1, 'void', $2, 'approve', $3, $4, $5, '\\x01', $6)`,
-      [aid, voided, JSON.stringify({ v: 1, subjectType: 'void', subjectId: voided, decision: 'approve', action: 'ledger.void', argsDigest: HEX('a'), expiresAt: expires, nonce: HEX('0').slice(0, 32) }), HEX('c'), k.credentialId, expires],
-    );
-    await k.app(`UPDATE "Prediction" SET status = 'void', "voidApprovalId" = $2 WHERE id = $1`, [voided, aid]);
+    await voidIt(voided);
+    // Revised, and its date gone 20 days with no result: the sweep reads it no more (it stays superseded for good). It
+    // has run out in all but name, and counts in the unresolved rate. One revised whose date is 5 days gone is still tried.
+    const givenUp = await said({ probability: 0.5 }, { madeAgo: 30 * DAY, dueAgo: 20 * DAY });
+    await said({ supersedesId: givenUp, probability: 0.5 }, { madeAgo: 25 * DAY, dueAgo: -DAY });
+    const stillTried = await said({ probability: 0.5 }, { madeAgo: 10 * DAY, dueAgo: 5 * DAY });
+    await said({ supersedesId: stillTried, probability: 0.5 }, { madeAgo: 6 * DAY, dueAgo: -DAY });
+    expect([await k.status(givenUp), await k.status(stillTried)]).toEqual(['superseded', 'superseded']);
     // Advice that was declined: its prediction's condition was never met.
     const svc = await k.service(k.serviceKey(), { running: false, disabled: false }, new Date(Date.now() - 6 * HOUR));
     await k.escalated(svc, { status: 'dismissed' });
     const swept = await sweep(k.db, { tz: TZ, resolve: true, expire: true });
     expect(swept).toMatchObject({ conditionUnmet: 1, expired: 2 });
     const { start, end } = window();
-    await snapshotCalibration(k.db, start, end, TZ);
+    const counts = zero();
+    await snapshotCalibration(k.db, start, end, TZ, counts);
+    expect(counts.gaveUp).toBe(1);
     const all = await rows();
     const r = row(all, 'assets');
-    expect(r).toMatchObject({ n: 3, nOpen: 2, nExpired: 2, nConditionUnmet: 0, nVoid: 1, nLateSuperseded: 1 });
+    // `nExpired` stays the count of that status; the rate also counts the one the sweep gave up on.
+    expect(r).toMatchObject({ n: 3, nOpen: 4, nExpired: 2, nConditionUnmet: 0, nVoid: 1, nLateSuperseded: 2 });
     expect(r.brier as number).toBeCloseTo((0.2 ** 2 + 0.6 ** 2 + 0.3 ** 2) / 3, 12);
     expect(r.baseRate as number).toBeCloseTo(1 / 3, 12);
-    expect(r.unresolvedRate as number).toBeCloseTo(2 / 5, 12);
+    expect(r.unresolvedRate as number).toBeCloseTo(3 / 6, 12);
+    // A snapshot taken before the 14 days were up would not have counted it yet.
+    await snapshotCalibration(k.db, start, end, TZ, undefined, new Date(Date.now() - 7 * DAY));
+    expect(row(await rows(), 'assets').unresolvedRate as number).toBeCloseTo(2 / 5, 12);
+    await snapshotCalibration(k.db, start, end, TZ);
     expect(row(all, 'recommendation', 'binary', 'base_rate')).toMatchObject({ type: 'effect_given_accept', n: 0, nConditionUnmet: 1, nOpen: 0 });
+  });
+
+  it('what chat is given when it asks (the route behind its calibration tool): the latest rows, with no score where nothing was scored', async () => {
+    const TOKEN = 'ledger-token-0123456789abcdef';
+    const app = buildApp({ db: k.db, config: { tz: TZ, tokens: [{ name: 'server', sha256: createHash('sha256').update(TOKEN).digest('hex'), scopes: new Set<RuntimeScope>(['ledger']) }] } });
+    try {
+      const { start, end } = window();
+      await snapshotCalibration(k.db, start, end, TZ);
+      const stored = await rows();
+      // As stored, a group with nothing scored has 0 for its scores (the database wants a number there).
+      const emptyRange = row(stored, 'calendar', 'interval', 'statistical');
+      const emptyYesNo = row(stored, 'recommendation', 'binary', 'base_rate');
+      expect([emptyRange.n, emptyRange.intervalCoverage, emptyYesNo.n, emptyYesNo.brier, emptyYesNo.baseRate]).toEqual([0, 0, 0, 0, 0]);
+      const r = await app.inject({ method: 'GET', url: '/v1/ledger/calibration', headers: { authorization: `Bearer ${TOKEN}` } });
+      expect(r.statusCode).toBe(200);
+      const given = r.json().snapshots as Array<Record<string, unknown>>;
+      expect(given.length).toBe(stored.filter((x) => (x.windowEnd as Date).getTime() === end.getTime()).length);
+      // "Brier 0" reads as perfect and "coverage 0" as never held: where nothing was scored, chat is given null.
+      for (const g of given.filter((x) => x.n === 0)) expect([g.brier, g.baseRate, g.brierSkill, g.intervalCoverage], `${g.domain}/${g.kind}`).toEqual([null, null, null, null]);
+      expect(given.filter((x) => x.n === 0).map((x) => `${x.domain}/${x.method}/${x.kind}`).sort()).toEqual(['calendar/statistical/interval', 'recommendation/base_rate/binary', 'services/base_rate/binary']);
+      // A scored group is given as it is stored.
+      const services = given.find((x) => x.domain === 'services' && x.method === 'rule' && x.kind === 'binary')!;
+      expect([services.n, services.brier, services.baseRate]).toEqual([120, row(stored, 'services').brier, row(stored, 'services').baseRate]);
+      // Aggregates only: counts and scores by area. No prediction's words, id or series, and no number a series took.
+      expect(JSON.stringify(given)).not.toMatch(/synthetic|pd[a-z0-9]{8}|seriesKey|claim|31337/);
+      expect((await app.inject({ method: 'GET', url: '/v1/ledger/calibration' })).statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
   });
 
   it('scoring the same window again rewrites its rows; the nightly run says what it did in one audit entry, counts only', async () => {
@@ -221,8 +291,8 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     // The nightly run: its own window (made before today, so the 40-day-old groups are in it), and its entry.
     const counts = await runSnapshot(k.db, { tz: TZ, tier: 'approval' });
     expect(counts.groups).toBeGreaterThanOrEqual(5);
-    // Of the five 40-day-old groups, four reached 100 scored, and two of those were spread over 10 days or more.
-    expect(counts).toMatchObject({ withEce: 4, withInterval: 2, ranges: 5, unscaled: 1 });
+    // Of the six 40-day-old groups, five reached 100 scored, and three of those were spread over 10 days or more.
+    expect(counts).toMatchObject({ withEce: 5, withInterval: 3, ranges: 5, unscaled: 1, gaveUp: 1 });
     const night = nightlyWindow(TZ, new Date());
     expect((await k.owner(`SELECT count(*)::int AS n FROM "CalibrationSnapshot" WHERE "windowEnd" = $1 AND "windowStart" = $2`, [night.windowEnd, night.windowStart])).rows[0].n).toBe(counts.groups);
     const audits = (await k.owner(`SELECT actor, context, kind, action, tier, outcome, inputs, reasoning, "outcomeDetail" FROM "AuditEntry" WHERE action = 'ledger.calibration.snapshot' ORDER BY seq DESC`)).rows;

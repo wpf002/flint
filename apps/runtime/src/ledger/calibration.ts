@@ -4,9 +4,13 @@
  *
  * Scored means resolved, superseded ones included (a forecaster who revises
  * does not escape the score); open, expired, condition-unmet, void and
- * late-superseded predictions are counted beside it, and the unresolved rate
- * is expired / (scored + expired), so a ledger that quietly lets predictions
- * lapse shows it.
+ * late-superseded predictions are counted beside it. The unresolved rate is
+ * unresolved / (scored + unresolved), so a ledger that quietly lets
+ * predictions lapse shows it. Unresolved is the ones that ran out (`nExpired`)
+ * and the superseded ones the sweep has stopped trying: a revised prediction
+ * keeps the status `superseded` for good, so one whose date is more than 14
+ * days gone with no result has run out in all but name, and is counted in the
+ * rate with the rest (not in `nExpired`, which stays the count of that status).
  *
  *  - A yes/no row (kind `binary`) has the Brier score, the base rate, the skill
  *    and the ten bins. At 100 scored or more it also has ECE and a 90%
@@ -16,8 +20,10 @@
  *    claim was about, so results that share a goal or a day do not fake a tight
  *    interval. Fewer than 10 clusters: no interval (bootstrap.ts).
  *  - A range row (kind `interval`) has the share of ranges that held and the
- *    scaled pinball loss. With nothing scored yet its coverage is 0 beside
- *    n = 0, as a yes/no row's Brier score is: read `n` first.
+ *    scaled pinball loss. With nothing scored yet its coverage is stored as 0
+ *    beside n = 0, as a yes/no row's Brier score is (the database wants a
+ *    number there). A stored 0 beside n = 0 means "none yet", so the route
+ *    that hands these rows to chat gives null for it (app.ts).
  *
  * The window is by when a prediction was made. Rows are rewritten, never
  * added, when the same window is scored again.
@@ -28,6 +34,7 @@ import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { clusterBootstrapMean, seedFrom } from './bootstrap.js';
 import { score, scoreRanges, type Scored, type ScoredRange } from './scoring.js';
+import { LEDGER_ACTOR, SUPERSEDED_RETRY_MS } from './sweep.js';
 
 /** The audit action a nightly snapshot is recorded under (its policy action). */
 export const SNAPSHOT_ACTION = 'ledger.calibration.snapshot';
@@ -54,16 +61,20 @@ export interface SnapshotCounts {
   withEce: number;
   /** Of those, the ones that also had clusters enough for an interval. */
   withInterval: number;
+  /** Superseded predictions the sweep has stopped trying, counted in the unresolved rate. */
+  gaveUp: number;
 }
 
-export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: Date, tz = 'UTC', counts?: SnapshotCounts) {
+export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: Date, tz = 'UTC', counts?: SnapshotCounts, now = new Date()) {
+  /** A superseded prediction's date before this, with no result: the sweep reads it no more. */
+  const givenUpBefore = now.getTime() - SUPERSEDED_RETRY_MS;
   const preds = await db.prediction.findMany({
     where: { createdAt: { gte: windowStart, lt: windowEnd } },
     // In a fixed order, so the same rows give the same sums and the same interval on every run.
     orderBy: { id: 'asc' },
     select: {
       domain: true, type: true, method: true, kind: true, status: true, probability: true, lateSupersession: true, goalId: true,
-      lower: true, upper: true, level: true,
+      lower: true, upper: true, level: true, resolveBy: true,
       resolution: { select: { outcome: true, outcomeValue: true, eventAt: true } },
       forecastRun: { select: { scale: true } },
     },
@@ -72,12 +83,15 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
   for (const p of preds) {
     if (p.kind !== 'binary' && p.kind !== 'interval') continue;
     const k = [p.domain, p.type, p.method, p.kind].join('\u0000');
-    groups.set(k, [...(groups.get(k) ?? []), p]);
+    const group = groups.get(k);
+    if (group) group.push(p);
+    else groups.set(k, [p]);
   }
   const written = [];
   for (const [k, ps] of [...groups].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     const [domain, type, method, kind] = k.split('\u0000') as [string, string, string, 'binary' | 'interval'];
     const nExpired = ps.filter((p) => p.status === 'expired').length;
+    const gaveUp = ps.filter((p) => p.status === 'superseded' && !p.resolution && p.resolveBy.getTime() <= givenUpBefore).length;
     const beside = {
       nOpen: ps.filter((p) => p.status === 'open').length,
       nExpired,
@@ -126,7 +140,8 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
         counts.unscaled += s.unscaled;
       }
     }
-    const data = { windowStart, windowEnd, domain, type, method, kind, n, ...beside, ...scores, unresolvedRate: n + nExpired ? nExpired / (n + nExpired) : 0 };
+    const unresolved = nExpired + gaveUp;
+    const data = { windowStart, windowEnd, domain, type, method, kind, n, ...beside, ...scores, unresolvedRate: n + unresolved ? unresolved / (n + unresolved) : 0 };
     written.push(
       await db.calibrationSnapshot.upsert({
         where: { windowEnd_domain_type_method_kind: { windowEnd, domain, type, method, kind } },
@@ -134,7 +149,10 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
         update: { ...data, computedAt: new Date() },
       }),
     );
-    if (counts) counts.groups += 1;
+    if (counts) {
+      counts.groups += 1;
+      counts.gaveUp += gaveUp;
+    }
   }
   return written;
 }
@@ -143,10 +161,10 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
 export async function runSnapshot(db: Db, o: { tz: string; now?: Date; tier?: 'alone' | 'approval' | 'forbidden' }): Promise<SnapshotCounts> {
   const now = o.now ?? new Date();
   const { windowStart, windowEnd } = nightlyWindow(o.tz, now);
-  const counts: SnapshotCounts = { groups: 0, scored: 0, ranges: 0, unscaled: 0, withEce: 0, withInterval: 0 };
-  await snapshotCalibration(db, windowStart, windowEnd, o.tz, counts);
+  const counts: SnapshotCounts = { groups: 0, scored: 0, ranges: 0, unscaled: 0, withEce: 0, withInterval: 0, gaveUp: 0 };
+  await snapshotCalibration(db, windowStart, windowEnd, o.tz, counts, now);
   await appendAudit(db, [{
-    actor: 'runtime:ledger', context: 'autonomous', kind: 'action', action: SNAPSHOT_ACTION, outcome: 'ok', ...(o.tier ? { tier: o.tier } : {}),
+    actor: LEDGER_ACTOR, context: 'autonomous', kind: 'action', action: SNAPSHOT_ACTION, outcome: 'ok', ...(o.tier ? { tier: o.tier } : {}),
     inputs: { ...counts, windowDays: WINDOW_DAYS },
     // Stamped by the wall clock: the trail says when it ran.
   }]);
