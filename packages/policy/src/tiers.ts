@@ -117,6 +117,10 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'backup.local': approval({ cap: { limit: 1, period: 'day' } }),
   'restore.drill': approval({ cap: { limit: 1, period: 'week' }, note: 'into a scratch database' }),
   'backup.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, note: 'age-encrypted, to iCloud' }),
+  // Replacing the production database with a backup (P7). Never promoted and never
+  // autonomous: Will runs the command himself and types the confirmation. It cannot
+  // wait on an approval card, because the cards live in the database it replaces.
+  'restore.production': fixed({ note: 'Will runs it at the keyboard and confirms; never promoted, never autonomous' }),
   // Housekeeping the runtime does to its own tables.
   'maintenance.retention': approval({ note: 'nulls payloads and args past their retention' }),
   'maintenance.partitions': approval({ note: 'creates audit partitions; dropping one is partition_drop' }),

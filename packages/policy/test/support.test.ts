@@ -176,6 +176,13 @@ describe('self-modification allowlist', () => {
       'pnpm-lock.yaml',
       'docs/security.md',
       'docs/Machine-Plan.md',
+      // The recovery runbook: what Will follows when Flint is down is never Flint's to rewrite.
+      'docs/RECOVERY.md',
+      'docs/recovery.md',
+      'docs/runbook.md',
+      'docs/disaster-recovery-notes.md',
+      'docs/restore-production.md',
+      'docs/rebuild.md',
       'packages/mcp/connectors/../src/client.ts',
       'packages/mcp/test/connectors/../../src/gate.ts',
       '/etc/passwd',
