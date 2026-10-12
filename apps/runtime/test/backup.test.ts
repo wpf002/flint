@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NO_DB, URLS, freshDb } from './db';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { dumpDatabase, encryptTo, newestDump, pruneDumps, pruneOffsite, restoreDrill, type Tools } from '../src/backup/backup';
 
 const bin = (n: string) => ['/opt/homebrew/opt/postgresql@17/bin', '/usr/lib/postgresql/17/bin', '/opt/homebrew/bin', '/usr/bin'].map((d) => join(d, n)).find((p) => existsSync(p));
@@ -47,10 +48,10 @@ describe('offsite copies', () => {
 
 describe('the encrypted copies offsite', () => {
   const RECIPIENT = `age1${'q'.repeat(58)}`;
-  /** A stand-in for age: it writes ciphertext that is not the dump, to the path after -o. */
-  function fakeAge(dir: string): string {
-    const bin = join(dir, 'age');
-    writeFileSync(bin, '#!/bin/sh\nwhile [ $# -gt 1 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\nprintf "age-encryption.org/v1 sealed" > "$out"\n');
+  /** A stand-in for age: ciphertext that is not the dump, on its stdout (as age does without -o). `fail`: it stops part way. */
+  function fakeAge(dir: string, fail = false): string {
+    const bin = join(dir, fail ? 'age-failing' : 'age');
+    writeFileSync(bin, `#!/bin/sh\nprintf "age-encryption.org/v1 sealed"\n${fail ? 'echo "age: error: disk full" >&2\nexit 1\n' : ''}`);
     chmodSync(bin, 0o755);
     return bin;
   }
@@ -70,6 +71,8 @@ describe('the encrypted copies offsite', () => {
       const e = await encryptTo(join(f.dumps, night(n)), RECIPIENT, { ...tools, age: f.age }, f.offsite);
       const gone = pruneOffsite(f.offsite, f.manifest, `${night(n)}.age`, 7, f.dumps);
       expect(e.path).toBe(join(f.offsite, `${night(n)}.age`));
+      // Its size and hash are the ciphertext's, taken as it was written (nothing is read back from the folder).
+      expect(e).toMatchObject({ bytes: 'age-encryption.org/v1 sealed'.length, sha256: createHash('sha256').update('age-encryption.org/v1 sealed').digest('hex') });
       expect(gone).toEqual(n > 7 ? [`${night(n - 7)}.age`] : []);
     }
     const kept = readdirSync(f.offsite).sort();
@@ -136,6 +139,8 @@ describe('the encrypted copies offsite', () => {
     writeFileSync(join(f.dumps, night(2)), 'PLAINTEXT');
     await expect(encryptTo(join(f.dumps, night(2)), RECIPIENT, { ...tools, age: '/nonexistent/age' }, f.offsite)).rejects.toThrow(/not installed/);
     await expect(encryptTo(join(f.dumps, night(2)), 'not-a-key', { ...tools, age: f.age }, f.offsite)).rejects.toThrow(/age public key/);
+    // age stopping part way leaves no half-written copy under any name.
+    await expect(encryptTo(join(f.dumps, night(2)), RECIPIENT, { ...tools, age: fakeAge(f.root, true) }, f.offsite)).rejects.toThrow(/age exited 1: age: error: disk full/);
     expect(readdirSync(f.offsite)).toEqual([`${night(1)}.age`]);
   });
 });

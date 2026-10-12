@@ -19,7 +19,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import pg from 'pg';
 
 export interface PgTarget {
@@ -129,21 +129,69 @@ export function pruneDumps(dir: string, keep: number): string[] {
   return gone;
 }
 
-/** age-encrypt to Will's public key; never a plaintext fallback. */
+/**
+ * age-encrypt `src` to `recipient`, writing the ciphertext to `dest` and taking
+ * its size and hash as it goes by. Nothing is read back from `dest`: launchd may
+ * write into iCloud Drive by path, and that is all this asks of it.
+ */
+function seal(age: string, recipient: string, src: string, dest: string): Promise<{ bytes: number; sha256: string }> {
+  return new Promise((resolve, reject) => {
+    // No -o: age writes the ciphertext to its stdout, which is a pipe here, never a terminal.
+    const child = spawn(age, ['-r', recipient, src], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = createWriteStream(dest, { mode: 0o600 });
+    const hash = createHash('sha256');
+    let bytes = 0;
+    let err = '';
+    let exited: number | null | undefined;
+    let written = false;
+    // Both must have ended: age (its exit code says whether the stream is whole) and the file.
+    const settle = () => {
+      if (exited === undefined || !written) return;
+      if (exited !== 0) reject(new Error(`age exited ${exited}: ${err.trim().split('\n').pop() ?? ''}`));
+      else if (bytes === 0) reject(new Error('age wrote nothing'));
+      else resolve({ bytes, sha256: hash.digest('hex') });
+    };
+    child.stdout.on('data', (d: Buffer) => {
+      hash.update(d);
+      bytes += d.length;
+    });
+    child.stdout.pipe(out);
+    child.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
+    child.on('error', reject);
+    out.on('error', (e) => {
+      child.kill();
+      reject(e);
+    });
+    out.on('finish', () => {
+      written = true;
+      settle();
+    });
+    child.on('close', (code) => {
+      exited = code;
+      settle();
+    });
+  });
+}
+
+/**
+ * age-encrypt to Will's public key into `outDir`; never a plaintext fallback.
+ * The copy appears under its name only once it is whole, and only ciphertext
+ * is ever written there.
+ */
 export async function encryptTo(path: string, recipient: string, tools: Tools, outDir: string): Promise<{ path: string; bytes: number; sha256: string }> {
   if (!/^age1[0-9a-z]{50,}$/.test(recipient)) throw new Error('the age recipient is not an age public key');
   if (!tools.age || !existsSync(tools.age)) throw new Error('age is not installed (brew install age)');
   mkdirSync(outDir, { recursive: true });
-  const out = join(outDir, `${path.split('/').pop()}.age`);
+  const out = join(outDir, `${basename(path)}.age`);
   const partial = `${out}.partial`;
   try {
-    await run(tools.age, ['-r', recipient, '-o', partial, path], '');
+    const sealed = await seal(tools.age, recipient, path, partial);
     renameSync(partial, out);
+    return { path: out, ...sealed };
   } catch (err) {
     rmSync(partial, { force: true });
     throw err;
   }
-  return { path: out, bytes: statSync(out).size, sha256: await sha256File(out) };
 }
 
 /** An encrypted copy's name, as encryptTo writes it: the only kind of file pruneOffsite removes. */
