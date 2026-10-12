@@ -28,7 +28,7 @@
  * Nothing else is changed. What it reports holds labels, names and counts,
  * never a key or a value.
  */
-import { ApprovalPayload, canonicalJson, challengeOf, digestOf, verifySecureEnclave, verifyWebAuthnAssertion, type WebAuthnRelyingParty } from '@flint/policy';
+import { ApprovalPayload, canonicalJson, challengeOf, digestOf, ruleWords, verifySecureEnclave, verifyWebAuthnAssertion, type WebAuthnRelyingParty } from '@flint/policy';
 import type pg from 'pg';
 
 /** What Will reads on a card that was approved before the backup and so did not run. */
@@ -455,7 +455,8 @@ export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'reb
   for (const k of r.keysNeverHeld) out.push(`Flint revoked the approval key "${plain(k.label)}" from the backup, because the database in use never held it. Enrol it again if it is yours.`);
   for (const k of r.keysNotCarried) out.push(`The approval key "${plain(k.label)}" was enrolled after this backup, so it is not in it. Enrol it again.`);
   if (r.policiesOff + r.rulesOff) out.push(`What you switched off after this backup stays off: ${count(r.policiesOff + r.rulesOff, 'permission', 'permissions')}.`);
-  const unsigned = [...r.unsignedPolicies.map((p) => ({ what: `Flint doing ${plain(p.pattern)} on its own`, why: p.why })), ...r.unsignedRules.map((u) => ({ what: `the triage rule ${plain(u.name)}`, why: u.why }))];
+  // An action is said by its plain name (the console's own, @flint/policy ruleWords), never by its internal one.
+  const unsigned = [...r.unsignedPolicies.map((p) => ({ what: `${ruleWords(p.pattern)} running on its own`, why: p.why })), ...r.unsignedRules.map((u) => ({ what: `the triage rule ${plain(u.name)}`, why: u.why }))];
   for (const u of unsigned.slice(0, 5)) out.push(`Flint switched off ${u.what}: ${u.why}. Sign it again if you want it.`);
   if (unsigned.length > 5) out.push(`Flint switched off ${unsigned.length - 5} more for the same kind of reason. Sign them again if you want them.`);
   if (r.proposals) out.push(`You had approved ${count(r.proposals, 'card', 'cards')} that did not run. Approve ${r.proposals === 1 ? 'it' : 'them'} again in Flint.`);
@@ -480,8 +481,14 @@ export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'reb
   }
   const alone = r.promotions.filter((p) => p.tier === 'alone');
   const limits = r.promotions.filter((p) => p.tier !== 'alone');
-  const some = (rows: PromotionLine[]): string =>
-    `${rows.slice(0, 12).map((p) => `${plain(p.pattern)}${p.dailyCap !== null ? ` (${p.dailyCap} a day)` : ''}`).join(', ')}${rows.length > 12 ? `, and ${rows.length - 12} more` : ''}`;
+  // "Backup, Offsite Backup and Restore Test"; with a daily cap on any of them, each stands apart: "Backup, up to 5 a day; Restore Test".
+  const some = (rows: PromotionLine[]): string => {
+    const shown = rows.slice(0, 12).map((p) => `${ruleWords(p.pattern)}${p.dailyCap !== null ? `, up to ${p.dailyCap} a day` : ''}`);
+    const more = rows.length - shown.length;
+    if (more > 0) return `${shown.join('; ')}; and ${more} more`;
+    if (rows.some((p) => p.dailyCap !== null)) return shown.join('; ');
+    return shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]!}` : shown.join('');
+  };
   if (alone.length === 0) out.push('Flint may do nothing on its own after this restore: every action asks you first.');
   else out.push(`Flint may do ${count(alone.length, 'thing', 'things')} on its own: ${some(alone)}.`);
   if (limits.length) out.push(`You have ${count(limits.length, 'limit', 'limits')} in force: ${some(limits)}.`);

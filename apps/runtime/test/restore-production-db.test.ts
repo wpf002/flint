@@ -128,7 +128,8 @@ describe('the command is Will’s alone', () => {
     expect(lines[0]).toBe('The backup is from Monday, October 12 at 2:15 AM. It is 8 hours old.');
     expect(lines.join(' ')).toContain('flint_damaged_20261012t150000z, closed');
     expect(lines).toContain('This key can approve: "Studio", this Mac\'s key, enrolled October 1, 2026.');
-    expect(lines).toContain('Flint may do 1 thing on its own: backup.local (1 a day).');
+    // By the name the console shows for it, never the action's own; a daily cap is said in words.
+    expect(lines).toContain('Flint may do 1 thing on its own: Backup, up to 1 a day.');
     for (const l of lines) expect(l, l).toMatch(/^[A-Z].*\.$/);
     const none = summaryLines(summary({ takenAt: now, tables: 3, fingerprint: 'none', removing: ['flint_damaged_20260901t000000z'] }), 'UTC', now);
     expect(none[0]).toMatch(/less than an hour old/);
@@ -152,7 +153,7 @@ describe('the command is Will’s alone', () => {
     expect(text).toContain('Flint revoked 1 approval key from the backup, because it is not the same as in the database in use.');
     expect(text).toContain('The approval key "New phone" was enrolled after this backup, so it is not in it. Enrol it again.');
     expect(text).toContain('What you switched off after this backup stays off: 2 permissions.');
-    expect(text).toContain('Flint switched off Flint doing backup.* on its own: the key that signed it is revoked. Sign it again if you want it.');
+    expect(text).toContain('Flint switched off Everything Under Backup running on its own: the key that signed it is revoked. Sign it again if you want it.');
     expect(text).toContain('Flint switched off the triage rule quiet_ci: it is not in the card you signed. Sign it again if you want it.');
     expect(text).toContain('You had approved 2 cards that did not run. Approve them again in Flint.');
     expect(text).toContain('You dealt with 2 cards after this backup, and they are waiting again; 1 of them had already run. Reject what you do not want done twice.');
@@ -162,8 +163,18 @@ describe('the command is Will’s alone', () => {
     expect(text).toContain('Flint revoked the approval key "Stranger??31m" from the backup, because the database in use never held it. Enrol it again if it is yours.');
     expect(text).toContain('This key can approve: "Studio", this Mac\'s key, enrolled October 2, 2026.');
     expect(text).not.toMatch(/revoke it if you do not know it/);
-    expect(text).toContain('Flint may do 1 thing on its own: world.sync.github.');
-    expect(text).toContain('You have 1 limit in force: mcp:*.');
+    expect(text).toContain('Flint may do 1 thing on its own: World Sync Github.');
+    expect(text).toContain('You have 1 limit in force: Everything Under MCP.');
+    // What the real one said the night this was written, and what it says now.
+    const three = carryLines({ ...emptyReport, promotions: ['backup.local', 'backup.offsite', 'restore.drill'].map((pattern) => ({ pattern, tier: 'alone', dailyCap: null, expiresAt: new Date() })) }, 'UTC', 'production');
+    expect(three).toContain('Flint may do 3 things on its own: Backup, Offsite Backup and Restore Test.');
+    // No action's internal name is in anything it says, whatever the rules are.
+    const mixed = carryLines({ ...emptyReport, promotions: ['backup.local', 'world_now', 'mcp:shell.run', 'selfmod.*', 'digest.send'].map((pattern, i) => ({ pattern, tier: i % 2 ? 'forbidden' : 'alone', dailyCap: i === 0 ? 5 : null, expiresAt: new Date() })),
+      unsignedPolicies: [{ pattern: 'mcp:shell.run', why: 'it is not in the card you signed' }] }, 'UTC', 'production').join('\n');
+    expect(mixed).toContain('Flint may do 3 things on its own: Backup, up to 5 a day; MCP Shell Run; Digest Send.');
+    expect(mixed).toContain('You have 2 limits in force: Check What’s Happening Now and Everything Under Selfmod.');
+    expect(mixed).toContain('Flint switched off MCP Shell Run running on its own: it is not in the card you signed. Sign it again if you want it.');
+    expect(mixed).not.toMatch(/[a-z]+[._:][a-z*]/);
     expect(text).toContain('You have 1 triage rule in force: quiet_ci.');
     for (const l of lines) expect(l, l).toMatch(/^([A-Z].*[.:]|  cd ~\/flint && pnpm .*)$/);
     // When the database in use could not be read, or there is none (a rebuild), that is said first.
@@ -1405,11 +1416,15 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       fresh();
       const trial = await restoreDatabase(options(live, { dump, checkOnly: true }));
       expect(trial).toMatchObject({ checkedOnly: true, pending: [FLOOR] });
-      expect(said).toContain('The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.');
+      // One thing is said about how it was set up, and nothing about the database's own rights: after a restore
+      // they are exactly what the database in use has now, so there is nothing to tell.
+      expect(said).toEqual(['The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.']);
       fresh();
       const r = await restoreDatabase(options(live, { dump }));
       expect(r).toMatchObject({ database: live.name, pending: [FLOOR], runtimeStarted: true });
-      // What is in use afterwards is as it was by hand, and now its record says so too.
+      expect(said.filter((l) => /The database in use (gives|is missing)/.test(l))).toEqual([]);
+      // What is in use afterwards, read from the restored database itself: everyone holds nothing on the database or
+      // its public schema, and the three roles are named. As it was by hand, and now its record says so too.
       expect(await rights(live.name)).toEqual(FLOORED);
       expect(await recorded(live.owner)).toBe(1);
       // And each role still does its work in it.
@@ -1425,6 +1440,14 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const r = await restoreDatabase(options(old, { dump }));
       expect(r).toMatchObject({ pending: [FLOOR] });
       expect(said).not.toContain('The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.');
+      // Here the restored database really will differ from the one in use (which lets everyone connect, and names no
+      // role): that is said, once for each right, and it is what the restored database then has.
+      expect(said.filter((l) => /The database in use (gives|is missing)/.test(l)).sort()).toEqual([
+        "The database in use gives everyone the privilege CONNECT, which Flint's own setup does not. The restored database follows Flint's setup.",
+        "The database in use is missing a privilege Flint's setup gives (flint_app CONNECT). The restored database has it.",
+        "The database in use is missing a privilege Flint's setup gives (flint_approver CONNECT). The restored database has it.",
+        "The database in use is missing a privilege Flint's setup gives (flint_backup CONNECT). The restored database has it.",
+      ]);
       expect(await rights(old.name)).toEqual(FLOORED);
       expect(await recorded(old.owner)).toBe(1);
     });
@@ -1924,7 +1947,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       // The promotions that came back are said, and that what was taken away since is back with them.
       const text = carryLines(r.report, 'UTC', 'rebuild').join('\n');
       expect(text).toMatch(/^The rebuilt Flint starts from the backup/);
-      expect(text).toContain('Flint may do 3 things on its own: backup.local, digest.send, world.sync.github (5 a day).');
+      expect(text).toContain('Flint may do 3 things on its own: Backup; Digest Send; World Sync Github, up to 5 a day.');
 
       // Run again with the same backup (a rebuild that stopped later and was restarted): nothing is done, and it says so.
       const again = await restoreDatabase(rebuild(p));
