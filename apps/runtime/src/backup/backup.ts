@@ -6,7 +6,9 @@
  *    counts beside it come from ONE exported snapshot, so a drill can compare
  *    exact numbers even while the runtime keeps writing.
  *  - backup.offsite: the same dump, age-encrypted to Will's public key, copied
- *    off the box; refused when there is no recipient (never plaintext).
+ *    off the box (iCloud Drive's FlintBackups/pg unless FLINT_OFFSITE_DIR names
+ *    another folder); refused when there is no recipient (never plaintext). The
+ *    newest 7 copies are kept there, tracked by name.
  *  - restore.drill: restore the newest dump into a scratch database
  *    (flint_restore_test), compare every table's row count with the counts
  *    taken at dump time, drop the scratch database, and record the result.
@@ -142,6 +144,49 @@ export async function encryptTo(path: string, recipient: string, tools: Tools, o
     throw err;
   }
   return { path: out, bytes: statSync(out).size, sha256: await sha256File(out) };
+}
+
+/** An encrypted copy's name, as encryptTo writes it: the only kind of file pruneOffsite removes. */
+const OFFSITE_COPY = /^flint-[0-9A-Za-z-]+\.dump\.age$/;
+
+/**
+ * Record `name` as the newest encrypted copy offsite and keep the newest `keep`.
+ * The offsite folder is never listed: launchd may write into iCloud Drive by
+ * path, but macOS does not let it list the folder (apps/studio/backup_flint.sh
+ * found its own pruning matched nothing there). The copies are tracked by name
+ * in `manifest` instead, oldest first, one to a line.
+ *
+ *  - Called only after a new copy is safely written, so a night that cannot
+ *    encrypt never costs an older copy.
+ *  - With no manifest yet it starts from the local dumps' names: a copy is
+ *    written under its dump's name, and removing a name that was never written
+ *    offsite does nothing.
+ *  - A copy that will not delete stays in the manifest and is tried again.
+ *
+ * Returns the names removed.
+ */
+export function pruneOffsite(offsiteDir: string, manifest: string, name: string, keep: number, dumpDir?: string): string[] {
+  if (!OFFSITE_COPY.test(name)) throw new Error('not an encrypted copy’s name');
+  const known = existsSync(manifest)
+    ? readFileSync(manifest, 'utf8').split('\n').map((l) => l.trim())
+    : dumpDir && existsSync(dumpDir)
+      ? readdirSync(dumpDir).filter((f) => /^flint-.*\.dump$/.test(f)).sort().map((f) => `${f}.age`)
+      : [];
+  const names = [...new Set(known.filter((n) => OFFSITE_COPY.test(n) && n !== name)), name];
+  const gone: string[] = [];
+  const stuck: string[] = [];
+  for (const old of names.slice(0, Math.max(0, names.length - keep))) {
+    try {
+      rmSync(join(offsiteDir, old), { force: true });
+      gone.push(old);
+    } catch {
+      stuck.push(old);
+    }
+  }
+  const partial = `${manifest}.partial`;
+  writeFileSync(partial, [...stuck, ...names.slice(-keep)].map((n) => `${n}\n`).join(''), { mode: 0o600 });
+  renameSync(partial, manifest);
+  return gone;
 }
 
 export interface DrillResult {

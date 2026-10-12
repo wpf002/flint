@@ -2,7 +2,7 @@
  * The runtime's operator commands (plan P1 backups):
  *
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
- *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
+ *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
@@ -25,7 +25,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
@@ -33,12 +33,12 @@ import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
-import { SOURCES } from '@flint/policy';
+import { SOURCES, jobFailedNote } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, gate, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, encryptTo, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { dumpDatabase, encryptTo, newestDump, pruneDumps, pruneOffsite, restoreDrill } from './backup/backup.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
 import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
@@ -163,6 +163,8 @@ async function main(): Promise<void> {
     let detail: Record<string, string | number | boolean | null> = {};
     let ok = true;
     let error: string | undefined;
+    /** The restore drill ran to its end and the restored copy differed from the backup (not a run that stopped early). */
+    let mismatch = false;
     try {
       if (cmd === 'backup') {
         const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
@@ -173,16 +175,24 @@ async function main(): Promise<void> {
         detail = { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length };
       } else if (cmd === 'offsite') {
         if (!b.ageRecipient) throw new Error('no age recipient: put Will\'s public key in ~/.flint/backup-age-recipient');
-        if (!b.offsiteDir) throw new Error('FLINT_OFFSITE_DIR is not set');
+        if (!b.offsiteDir) throw new Error('nowhere to send it: iCloud Drive is not on this Mac and FLINT_OFFSITE_DIR is not set');
         const dump = newestDump(b.dumpDir);
         if (!dump) throw new Error('no local dump to send');
         const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
         await db.backupRun.create({ data: { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: BigInt(e.bytes), sha256: e.sha256, encrypted: true, status: 'ok', startedAt: now, finishedAt: new Date() } });
-        detail = { bytes: e.bytes, sha256: e.sha256 };
+        // The new copy is safe: now the older ones may go (the newest 7 stay). The copy counts even if this does not.
+        let pruned = 0;
+        try {
+          pruned = pruneOffsite(b.offsiteDir, b.offsiteManifest, basename(e.path), OFFSITE_KEEP, b.dumpDir).length;
+        } catch (err) {
+          console.error(`${action}: the copy is written, but the older copies were not pruned: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        detail = { bytes: e.bytes, sha256: e.sha256, pruned };
       } else {
         const dump = newestDump(b.dumpDir);
         if (!dump) throw new Error('no dump to restore');
         const r = await restoreDrill(dump, b.restoreUrl, b.tools);
+        mismatch = !r.ok;
         ok = r.ok;
         const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
         if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
@@ -203,16 +213,22 @@ async function main(): Promise<void> {
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
     if (!ok) {
       process.exitCode = 1;
-      // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit.
-      if (auto) await notifyWill(b.config, `${action} failed`, `${FAILED_WORDS[cmd]} failed. The details are in ~/.flint/runtime-backup.out.log.`);
+      // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
+      // says what happened and what happens next, in Will's words: a job he promoted runs again at its next
+      // time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays); one that ran on a card waits for
+      // the next card he approves.
+      if (auto) {
+        const note = jobFailedNote(action, { alone: proposalId === undefined, icloud: b.offsiteICloud, mismatch });
+        await notifyWill(b.config, note.title, note.body);
+      }
     }
   } finally {
     await db.$disconnect();
   }
 }
 
-/** Which run failed, for the note Will reads (the nightly LaunchAgent runs these at 02:15; the drill on Sundays). */
-const FAILED_WORDS: Record<Command, string> = { backup: 'Last night’s backup', offsite: 'Last night’s offsite copy', drill: 'This week’s restore test' };
+/** How many encrypted copies stay offsite (the studio's own backup keeps 7 there too). */
+const OFFSITE_KEEP = 7;
 
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

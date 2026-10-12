@@ -66,11 +66,21 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
   ]);
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
   const counts = { relevant, quiet, escalated, did, queued, open, due };
-  return { day, title: `Flint for ${day}`, body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
+  return { day, title: digestTitle(day), body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
 }
 
 /**
- * The digest's four lines, each a sentence. The title carries the date; the console's
+ * "Daily Summary for Sun Oct 11": the day the digest is about, in words (the day
+ * itself, whatever the zone: read at noon UTC). The console says an older
+ * digest's title ("Flint for 2026-10-11") the same way.
+ */
+export function digestTitle(day: string): string {
+  const words = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${day}T12:00:00Z`)).replace(',', '');
+  return `Daily Summary for ${words}`;
+}
+
+/**
+ * The digest's four lines, each a sentence. The title carries the day; the console's
  * tabs are Important and Other, it calls a proposal an approval, and Health's names
  * stand for the components.
  */

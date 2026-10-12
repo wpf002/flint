@@ -247,8 +247,32 @@ export interface BackupConfig {
   restoreUrl: string;
   ageRecipient?: string;
   dumpDir: string;
+  /** Where the encrypted copy goes (offsiteFolder); undefined: nowhere to send it. */
   offsiteDir?: string;
+  /** The offsite folder is in iCloud Drive (the note says "to iCloud" only then). */
+  offsiteICloud: boolean;
+  /** The names of the encrypted copies offsite, oldest first (backup.ts, pruneOffsite). */
+  offsiteManifest: string;
   tools: { pgDump: string; pgRestore: string; age?: string };
+}
+
+/**
+ * Where the database's encrypted offsite copy goes: FLINT_OFFSITE_DIR when Will
+ * set one; otherwise iCloud Drive's FlintBackups/pg, when iCloud Drive is on
+ * this Mac (beside the folder the studio's own backup, apps/studio/backup_flint.sh,
+ * keeps its encrypted snapshots in). With neither there is nowhere to send it,
+ * and the offsite job fails and says so. Only age-encrypted copies ever go
+ * there (backup.ts, encryptTo).
+ */
+export function offsiteFolder(home: string, set: string | undefined): { dir: string; icloud: boolean } | undefined {
+  const drive = join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs');
+  const chosen = set?.trim();
+  if (chosen) return { dir: chosen, icloud: chosen === drive || chosen.startsWith(`${drive}/`) };
+  try {
+    return statSync(drive).isDirectory() ? { dir: join(drive, 'FlintBackups', 'pg'), icloud: true } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function loadBackupConfig(): BackupConfig {
@@ -273,13 +297,17 @@ export function loadBackupConfig(): BackupConfig {
   let recipient = B.data.FLINT_BACKUP_AGE_RECIPIENT?.trim();
   const recipientFile = join(home, '.flint', 'backup-age-recipient');
   if (!recipient && existsSync(recipientFile)) recipient = readFileSync(recipientFile, 'utf8').trim().split('\n')[0];
+  const dumpDir = join(home, 'FlintBackups', 'pg');
+  const offsite = offsiteFolder(home, B.data.FLINT_OFFSITE_DIR);
   return {
     config,
     backupUrl: B.data.FLINT_DB_BACKUP_URL,
     restoreUrl: B.data.FLINT_DB_RESTORE_URL,
     ...(recipient ? { ageRecipient: recipient } : {}),
-    dumpDir: join(home, 'FlintBackups', 'pg'),
-    ...(B.data.FLINT_OFFSITE_DIR ? { offsiteDir: B.data.FLINT_OFFSITE_DIR } : {}),
+    dumpDir,
+    ...(offsite ? { offsiteDir: offsite.dir } : {}),
+    offsiteICloud: offsite?.icloud ?? false,
+    offsiteManifest: join(dumpDir, 'offsite-copies.txt'),
     tools: { pgDump, pgRestore, ...(age ? { age } : {}) },
   };
 }

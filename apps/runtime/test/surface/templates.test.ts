@@ -1,26 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { REASON_CODES } from '@flint/policy';
-import { TEMPLATES, TEMPLATE_IDS, displayName, hasLoosePrediction, phrase, render, fieldFreeBody, fieldFreeTitle, type TemplateId } from '../../src/templates/escalations';
-
-/** Every template's fields at their edges. */
-const EDGES: Record<TemplateId, unknown[]> = {
-  service_down: [{ service: 'service#abc123', downMinutes: 30 }, { service: null, downMinutes: 1_000_000 }],
-  backup_stale: [{ hoursSince: 36 }, { hoursSince: 1_000_000 }],
-  drill_failed: [{ mismatches: 0 }, { mismatches: 1_000_000 }],
-  vendor_cap: ['anthropic', 'openai', 'perplexity', 'tavily'].map((vendor) => ({ vendor })),
-  deploy_failed: ['gate', 'restart', 'health'].flatMap((stage) => [{ component: 'server', stage, sha: 'a'.repeat(40) }, { component: 'runtime', stage, sha: null }]),
-  migrate_failed: [{ component: 'runtime', sha: 'abcdef1' }, { component: 'server', sha: null }],
-  ci_failing: [{ run: 'ci_run#abc123', sha: 'f'.repeat(40) }, { run: null, sha: null }],
-  route_errors: [{ count: 6, minutes: 10 }, { count: 1_000_000, minutes: 60 }],
-  handoff_unaccepted: [{ handoff: 'handoff#abc123', namespace: 'trident' }, { handoff: null, namespace: null }],
-  calendar_upcoming: [
-    { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: '00:00', until: '2026-10-06T05:00:00.000Z' },
-    { item: 'commitment#abc123', kind: 'commitment', date: '2026-12-31', time: null, until: '2027-01-01T06:00:00.000Z' },
-    { item: 'deadline#abc123', kind: 'deadline', date: '2028-02-29', time: null, until: '2028-03-01T06:00:00.000Z' },
-  ],
-  new_item: (['issue', 'pull_request', 'thread'] as const).flatMap((kind) => REASON_CODES.map((reasonCode) => ({ kind, item: `${kind}#abc123`, reasonCode }))),
-  rule_match: [{ rule: 'r'.repeat(80), source: 'github', eventType: 'issue.state', entity: 'issue#abc123' }, { rule: 'a', source: 'server', eventType: 'route.error', entity: null }],
-};
+import { noteProblems } from '@flint/policy';
+import { TEMPLATES, TEMPLATE_IDS, displayName, hasLoosePrediction, phrase, phraseBefore, render, fieldFreeBody, fieldFreeTitle, type TemplateId } from '../../src/templates/escalations';
+import { EDGES } from './template-edges';
 
 describe('escalation templates', () => {
   it('every template at boundary values renders within its limits and passes the lint', () => {
@@ -38,7 +19,8 @@ describe('escalation templates', () => {
       expect(fieldFreeTitle(id)).toBe(TEMPLATES[id].fieldFreeTitle);
       expect(fieldFreeBody(id)).toBe(TEMPLATES[id].fieldFreeBody);
     }
-    expect(fieldFreeBody('unknown')).toBe('The console has the details.');
+    expect(fieldFreeTitle('unknown')).toBe('Something Needs a Look');
+    expect(fieldFreeBody('unknown')).toBe('It’s in Activity, under Important.');
   });
 
   it('every body is complete sentences: a capital first, a stop last, no internal name or raw ref leading it', () => {
@@ -62,22 +44,28 @@ describe('escalation templates', () => {
     expect(body('service_down', { service: null, downMinutes: 31 })).toBe('A service has been down for 31 minutes.');
     // A watched service by its plain name, never its lowercase internal label leading the sentence.
     const down = (name: string) => render('service_down', { service: 'service#abc123', downMinutes: 35 }, { 'service#abc123': name });
-    expect(down('flint-server')).toMatchObject({ title: 'The server is down', body: 'The server has been down for 35 minutes.' });
+    expect(down('flint-server')).toMatchObject({ title: 'The Server Is Down', body: 'The server has been down for 35 minutes.' });
     expect(down('com.flint.server').body).toBe('The server has been down for 35 minutes.');
-    expect(down('com.flint.runtime')).toMatchObject({ title: 'The runtime is down', body: 'The runtime has been down for 35 minutes.' });
+    expect(down('com.flint.runtime')).toMatchObject({ title: 'The Runtime Is Down', body: 'The runtime has been down for 35 minutes.' });
     expect(down('ollama').body).toBe('The local model has been down for 35 minutes.');
     expect(down('searxng').body).toBe('Web search has been down for 35 minutes.');
     // Any other keeps its name, in a sentence that starts with a capital.
-    expect(down('com.nexus.responder')).toMatchObject({ title: 'Nexus’s responder service is down', body: 'Nexus’s responder service has been down for 35 minutes.' });
+    expect(down('com.nexus.responder')).toMatchObject({ title: 'Nexus’s Responder Service Is Down', body: 'Nexus’s responder service has been down for 35 minutes.' });
     expect(down('com.flint.retrain').body).toBe('Flint’s retrain service has been down for 35 minutes.');
-    expect(down('trident-api').body).toBe('The trident-api service has been down for 35 minutes.');
+    expect(down('trident-api')).toMatchObject({ title: 'The Trident-api Service Is Down', body: 'The trident-api service has been down for 35 minutes.' });
+    // A dotted or underscored label of someone else's is said in words, never as it is written.
+    expect(down('org.example.sync_agent')).toMatchObject({ linted: false, title: 'The Org Example Sync Agent Service Is Down', body: 'The org example sync agent service has been down for 35 minutes.' });
+    expect(down('com.flint.evolve_measure').body).toBe('Flint’s evolve measure service has been down for 35 minutes.');
+    // No clean name: "A Service", never its ref.
+    expect(render('service_down', { service: 'service#abc123', downMinutes: 31 }).title).toBe('A Service Is Down');
     expect(body('drill_failed', { mismatches: 1 })).toBe('The last restore test found 1 table that differs from the backup, so the backups may not restore.');
     expect(body('drill_failed', { mismatches: 0 })).toBe('The last restore test didn’t match the backup, so the backups may not restore.');
     expect(body('vendor_cap', { vendor: 'anthropic' })).toBe('Flint has reached its Claude spending cap. Paid calls to it stop until the cap resets or is raised.');
     expect(body('deploy_failed', { component: 'server', stage: 'gate', sha: 'a'.repeat(40) })).toBe('The server deploy failed a check before installing, so nothing was installed.');
-    expect(body('deploy_failed', { component: 'runtime', stage: 'restart', sha: null })).toBe('The runtime deploy stopped at the restart and went back to the previous release. Check that it’s running.');
-    expect(body('deploy_failed', { component: 'server', stage: 'health', sha: null })).toBe('The server deploy failed its health check and went back to the previous release. Check that it’s running.');
-    expect(body('migrate_failed', { component: 'runtime', sha: 'abcdef1' })).toBe('The runtime’s database update failed and won’t be retried until it’s fixed. A copy of the database from just before it is in ~/FlintBackups/pre-migrate.');
+    expect(body('deploy_failed', { component: 'runtime', stage: 'restart', sha: null })).toBe('The runtime deploy stopped at the restart and went back to the previous release. Check that it’s running in Settings, under Health.');
+    expect(body('deploy_failed', { component: 'server', stage: 'health', sha: null })).toBe('The server deploy failed its health check and went back to the previous release. Check that it’s running in Settings, under Health.');
+    // Where the copy is kept is the README's how-to: a note never shows a file path.
+    expect(body('migrate_failed', { component: 'runtime', sha: 'abcdef1' })).toBe('The runtime’s database update failed and won’t be retried until it’s fixed. Flint kept a copy of the database from just before it.');
     expect(body('ci_failing', { run: null, sha: 'f'.repeat(40) })).toBe('The latest CI run on main failed.');
     expect(body('route_errors', { count: 6, minutes: 10 })).toBe('In the last 10 minutes, 6 requests to Flint failed.');
     expect(body('route_errors', { count: 1, minutes: 1 })).toBe('In the last minute, 1 request to Flint failed.');
@@ -85,22 +73,66 @@ describe('escalation templates', () => {
     expect(body('rule_match', { rule: 'ci-red', source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched your rule “ci-red”.');
     expect(body('rule_match', { rule: 'x', source: 'imessage', eventType: 'message.new', entity: null })).toBe('An iMessage event matched your rule “x”.');
     expect(body('rule_match', { rule: 'x', source: 'google_calendar', eventType: 'commitment.state', entity: null })).toBe('A Google Calendar event matched your rule “x”.');
+    // A rule's name is Will's own, said in words: its marks are not shown.
+    expect(body('rule_match', { rule: 'ci_red.main', source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched your rule “ci red main”.');
+    expect(body('handoff_unaccepted', { handoff: null, namespace: 'trident_api' })).toBe('A Nexus handoff to Flint from trident api has not been accepted in 24 hours.');
+  });
+
+  it('every title is a short Title Case phrase in plain words: a vendor by its name, a job by its words, never an internal name, an event type or a ref', () => {
+    const title = (id: TemplateId, f: unknown, names: Record<string, string> = {}) => render(id, f, names).title;
+    expect(title('backup_stale', { hoursSince: 40 })).toBe('Backups Have Stopped');
+    expect(title('drill_failed', { mismatches: 2 })).toBe('Restore Test Failed');
+    expect(title('vendor_cap', { vendor: 'anthropic' })).toBe('Claude Spending Cap Reached');
+    expect(title('vendor_cap', { vendor: 'openai' })).toBe('OpenAI Spending Cap Reached');
+    expect(title('deploy_failed', { component: 'server', stage: 'gate', sha: null })).toBe('The Server Did Not Deploy');
+    expect(title('migrate_failed', { component: 'runtime', sha: null })).toBe('A Database Update Failed');
+    expect(title('ci_failing', { run: null, sha: null })).toBe('CI Is Failing on Flint');
+    expect(title('route_errors', { count: 6, minutes: 10 })).toBe('Flint Is Failing Requests');
+    expect(title('handoff_unaccepted', { handoff: null, namespace: 'trident' })).toBe('A Handoff from Trident Is Waiting');
+    expect(title('handoff_unaccepted', { handoff: null, namespace: null })).toBe('A Handoff Is Waiting');
+    // An item by its clean name; without one, by its kind (its ref is an id).
+    expect(title('new_item', { kind: 'pull_request', item: 'pull_request#abc123', reasonCode: 'fyi' }, { 'pull_request#abc123': 'wpf002/flint #60' })).toBe('New Pull Request: wpf002/flint #60');
+    expect(title('new_item', { kind: 'pull_request', item: 'pull_request#abc123', reasonCode: 'fyi' })).toBe('A New Pull Request');
+    expect(title('new_item', { kind: 'issue', item: 'issue#abc123', reasonCode: 'fyi' })).toBe('A New Issue');
+    // A rule's match names the rule in its body only: the title is the same for every rule.
+    expect(title('rule_match', { rule: 'ci_red', source: 'github', eventType: 'ci_run.state', entity: 'ci_run#abc123' }, { 'ci_run#abc123': 'com.flint.server' })).toBe('One of Your Rules Matched');
+    for (const id of TEMPLATE_IDS) {
+      for (const fields of EDGES[id]) {
+        for (const names of [{}, { 'service#abc123': 'com.flint.server' }, { 'issue#abc123': 'wpf002/flint #60', 'service#abc123': 'trident-api' }]) {
+          const r = render(id, fields, names);
+          expect(noteProblems(r.title, r.body), `${id} ${JSON.stringify(fields)}`).toEqual([]);
+        }
+      }
+      expect(noteProblems(TEMPLATES[id].fieldFreeTitle, TEMPLATES[id].fieldFreeBody), id).toEqual([]);
+    }
+  });
+
+  it('a field that would put a path, an id or an aside on screen falls back to the field-free wording', () => {
+    const odd = (name: string) => render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': name });
+    for (const name of ['api (staging)', '~/bin/api', 'api 4aef4bf9c2', 'api `x`']) {
+      expect(odd(name), name).toMatchObject({ linted: true, title: 'A Service Is Down', body: TEMPLATES.service_down.fieldFreeBody });
+    }
+    expect(render('new_item', { kind: 'issue', item: 'issue#abc123', reasonCode: 'fyi' }, { 'issue#abc123': 'see /Users/will/notes' })).toMatchObject({ linted: true, title: 'Something New Needs a Look' });
   });
 
   it('a lint hit in a field falls back to the field-free wording, and never throws', () => {
     const r = render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': 'likely-broken 50%' });
-    expect(r).toMatchObject({ linted: true, title: 'A service is down', body: TEMPLATES.service_down.fieldFreeBody });
+    expect(r).toMatchObject({ linted: true, title: 'A Service Is Down', body: TEMPLATES.service_down.fieldFreeBody });
   });
 
   it('the probability text is phrase() of the row, and only that passes', () => {
     const by = new Date('2026-10-02T22:30:00Z');
     const p = phrase(0.4, by, 'America/Chicago');
-    expect(p).toBe('somewhat unlikely (~40%) by Oct 2, 5:30 PM');
+    expect(p).toBe('somewhat unlikely, around 40% by Oct 2, 5:30 PM');
     const r = render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': 'com.flint.server' }, p);
     expect(r.linted).toBe(false);
     expect(r.body).toBe(`The server has been down for 45 minutes. Recovery is ${p}.`);
-    expect(phrase(0.05, undefined, 'UTC')).toBe('very unlikely (~5%)');
-    expect(phrase(0.95, undefined, 'UTC')).toBe('very likely (~95%)');
+    expect(phrase(0.05, undefined, 'UTC')).toBe('very unlikely, around 5%');
+    expect(phrase(0.95, undefined, 'UTC')).toBe('very likely, around 95%');
+    // No aside in parentheses, as a note is never shown one; the words an older note stored are still the ledger's.
+    expect(p).not.toMatch(/[()]/);
+    expect(phraseBefore(0.4, by, 'America/Chicago')).toBe('somewhat unlikely (~40%) by Oct 2, 5:30 PM');
+    expect(hasLoosePrediction(`The server has been down for 45 minutes. Recovery is ${phraseBefore(0.4, by, 'America/Chicago')}.`, [p, phraseBefore(0.4, by, 'America/Chicago')])).toBe(false);
   });
 
   it('a non-enum value or a raw name in a ref field is refused', () => {
@@ -130,15 +162,15 @@ describe('escalation templates', () => {
 
   it('the calendar heads-up says an absolute date, never "today" or "tomorrow", and refuses a date that is not one', () => {
     const r = render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: '14:30', until: '2026-10-06T19:30:00.000Z' });
-    expect(r.title).toBe('On your calendar Tue Oct 6 at 14:30');
-    expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-11-01', time: null, until: '2026-11-02T06:00:00.000Z' }).title).toBe('A deadline on Sun Nov 1');
+    expect(r.title).toBe('On Your Calendar Tue Oct 6 at 2:30 PM');
+    expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-11-01', time: null, until: '2026-11-02T06:00:00.000Z' }).title).toBe('A Deadline on Sun Nov 1');
     expect(`${r.title} ${r.body}`).not.toMatch(/today|tomorrow/i);
     // No word starts with a bracket (the console title-cases a note's title), and the body says where the title is.
     const allDay = render('calendar_upcoming', { item: 'commitment#abc123', kind: 'commitment', date: '2026-10-06', time: null, until: '2026-10-06T05:00:00.000Z' });
-    expect(allDay.title).toBe('On your calendar Tue Oct 6, all day');
+    expect(allDay.title).toBe('On Your Calendar Tue Oct 6, All Day');
     expect(allDay.title).not.toMatch(/(^|\s)\(/);
     expect(allDay.body).toBe('You have an event on Tue Oct 6. Its title is in Activity, under Important.');
-    // The body says a time as Will's notes do (the title keeps the 24-hour clock).
+    // The body says a time as Will's notes do, and so does the title.
     expect(r.body).toBe('You have an event on Tue Oct 6 at 2:30 PM. Its title is in Activity, under Important.');
     expect(render('calendar_upcoming', { item: 'deadline#abc123', kind: 'deadline', date: '2026-10-06', time: '00:05', until: '2026-10-06T05:05:00.000Z' }).body).toBe('You have a deadline on Tue Oct 6 at 12:05 AM. Its title is in Activity, under Important.');
     // Either calendar (P2.6): the note names neither.

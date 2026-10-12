@@ -7,13 +7,13 @@
  * only (backup-nightly.sh), so its card lives a week and two hours: approved
  * any time that week, the next Sunday's run claims it.
  */
-import { localDay, resolveTier, type WebAuthnRelyingParty } from '@flint/policy';
+import { CAP_WORDS, localDay, resolveTier, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
 
 export type Command = 'backup' | 'offsite' | 'drill';
-export const ACTION: Record<Command, string> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
+export const ACTION: Record<Command, NightlyJob> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
 
 export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<{ go: boolean; proposalId?: string; why: string }> {
   return cardGate(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
@@ -36,7 +36,7 @@ export async function cardGate(
   const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), now });
   if (t.tier === 'forbidden') return { go: false, why: `forbidden: ${t.reason}` };
   if (t.tier === 'alone') {
-    if (t.cap && (await claim(db, t.key, t.cap, tz, now)) === null) return { go: false, why: `the ${t.cap.period}ly cap is reached` };
+    if (t.cap && (await claim(db, t.key, t.cap, tz, now)) === null) return { go: false, why: `the ${CAP_WORDS[t.cap.period]} cap is reached` };
     return { go: true, why: 'promoted' };
   }
   // APPROVAL: run an approved proposal for it, or file one (one a day) and wait.

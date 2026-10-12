@@ -4,7 +4,7 @@
  * for the components.
  */
 import { describe, it, expect } from 'vitest';
-import { digestBody } from '../src/digest';
+import { digestBody, digestTitle } from '../src/digest';
 
 const zero = { relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 };
 
@@ -36,5 +36,11 @@ describe('the digest body', () => {
   it('names six components and counts the rest', () => {
     const many = ['audit_intents', 'backup', 'bus', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'];
     expect(digestBody(zero, many).split('\n')[2]).toBe('These need a look: Action Log, Backups, Job Queue, Updates, Local Model, Restore Test and 2 more.');
+  });
+
+  it('the title says the day in words, never as a date code', () => {
+    expect(digestTitle('2026-10-11')).toBe('Daily Summary for Sun Oct 11');
+    expect(digestTitle('2026-01-01')).toBe('Daily Summary for Thu Jan 1');
+    expect(digestTitle('2026-10-11')).not.toMatch(/\d{4}-\d{2}/);
   });
 });

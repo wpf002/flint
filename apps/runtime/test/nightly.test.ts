@@ -10,6 +10,7 @@ import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { gate } from '../src/backup/nightly';
 import { approveProposal, createProposal } from '../src/governance/proposals';
+import { runInternal } from '../src/governance/internal';
 
 describe.skipIf(NO_DB)('nightly gate', () => {
   let db: Db;
@@ -57,5 +58,28 @@ describe.skipIf(NO_DB)('nightly gate', () => {
     // Approved on the day it was filed, it is still there for the run a week on.
     const nextSunday = new Date(sunday.getTime() + 7 * 24 * 3600_000);
     expect(await gate(db, 'drill', 'UTC', undefined, nextSunday)).toMatchObject({ go: true, proposalId: card.id });
+  });
+
+  it('promoted, a job runs once in its period, and a second run says so in real words: the daily cap, never "dayly"', async () => {
+    const expiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+    const rows = [{ pattern: 'backup.local', tier: 'alone', dailyCap: 1, expiresAt }, { pattern: 'backup.offsite', tier: 'alone', dailyCap: 1, expiresAt }, { pattern: 'restore.drill', tier: 'alone', expiresAt }];
+    const card = await createProposal(db, {
+      kind: 'policy', origin: 'console', action: 'policy.change', args: { rows }, argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 60,
+    }, 'test');
+    const key = await enrollTestKey(urls);
+    await approveProposal(db, card.id, await key.approve({ subjectId: card.id, action: 'policy.change', argsDigest: card.argsDigest }), undefined, 'test');
+    expect(await runInternal(db, card.id, undefined, 'UTC', 'test')).toEqual({ rows: 3 });
+    // A Tuesday at least ten days on: a day and a week no other test in this file has claimed, inside the policy's life.
+    const now = new Date(Date.now() + 10 * 86400_000);
+    now.setUTCDate(now.getUTCDate() + ((2 - now.getUTCDay() + 7) % 7));
+    for (const cmd of ['backup', 'offsite'] as const) {
+      expect(await gate(db, cmd, 'UTC', undefined, now)).toEqual({ go: true, why: 'promoted' });
+      expect(await gate(db, cmd, 'UTC', undefined, new Date(now.getTime() + 60_000))).toEqual({ go: false, why: 'the daily cap is reached' });
+    }
+    expect(await gate(db, 'drill', 'UTC', undefined, now)).toEqual({ go: true, why: 'promoted' });
+    expect(await gate(db, 'drill', 'UTC', undefined, new Date(now.getTime() + 86400_000))).toEqual({ go: false, why: 'the weekly cap is reached' });
+    // The next night (and the next week) it runs again by itself: what the failure note promises.
+    expect(await gate(db, 'offsite', 'UTC', undefined, new Date(now.getTime() + 86400_000))).toEqual({ go: true, why: 'promoted' });
+    expect(await gate(db, 'drill', 'UTC', undefined, new Date(now.getTime() + 7 * 86400_000))).toEqual({ go: true, why: 'promoted' });
   });
 });

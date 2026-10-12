@@ -165,7 +165,7 @@ describe.skipIf(NO_DB)('P2 sources on flint_test', () => {
     expect(await processEvent({ eventId: evs[0]!.id }, deps())).toBe('decided');
     const d = await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: evs[0]!.id }, include: { escalation: true } });
     expect(d).toMatchObject({ action: 'escalate', critical: true, decidedBy: 'code:migrate.failed' });
-    expect(d.escalation).toMatchObject({ templateId: 'migrate_failed', title: 'A database migration failed' });
+    expect(d.escalation).toMatchObject({ templateId: 'migrate_failed', title: 'A Database Update Failed' });
   });
 
   it('deploy: a failure first seen more than a day after it happened is old news, logged and not escalated', async () => {

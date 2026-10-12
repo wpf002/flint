@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, loadRuntimeConfig, parseTokens } from '../src/config';
+import { loadBackupConfig, loadConfig, loadRuntimeConfig, offsiteFolder, parseTokens } from '../src/config';
 
 const DB = 'postgresql://flint_app:x@[::1]:5432/flint';
 const HOME = '/Users/test';
@@ -85,6 +85,78 @@ describe('runtime config', () => {
   it('the git sha is a full sha or dev', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'f'.repeat(40) }).gitSha).toBe('f'.repeat(40));
     expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'nope' }).gitSha).toBe('dev');
+  });
+
+  describe('where the database’s encrypted offsite copy goes', () => {
+    const DRIVE = ['Library', 'Mobile Documents', 'com~apple~CloudDocs'];
+    const mac = (icloud: boolean) => {
+      const h = mkdtempSync(join(tmpdir(), 'rt-offsite-'));
+      if (icloud) mkdirSync(join(h, ...DRIVE), { recursive: true });
+      return h;
+    };
+
+    it('iCloud Drive’s FlintBackups/pg when nothing is set and iCloud Drive is on this Mac', () => {
+      const h = mac(true);
+      expect(offsiteFolder(h, undefined)).toEqual({ dir: join(h, ...DRIVE, 'FlintBackups', 'pg'), icloud: true });
+      // A blank setting is no setting.
+      expect(offsiteFolder(h, '  ')).toEqual({ dir: join(h, ...DRIVE, 'FlintBackups', 'pg'), icloud: true });
+    });
+
+    it('FLINT_OFFSITE_DIR still wins, and is called iCloud only when it is inside iCloud Drive', () => {
+      const h = mac(true);
+      expect(offsiteFolder(h, '/Volumes/Vault/flint')).toEqual({ dir: '/Volumes/Vault/flint', icloud: false });
+      expect(offsiteFolder(h, join(h, ...DRIVE, 'Elsewhere'))).toEqual({ dir: join(h, ...DRIVE, 'Elsewhere'), icloud: true });
+      expect(offsiteFolder(mac(false), '/Volumes/Vault/flint')).toEqual({ dir: '/Volumes/Vault/flint', icloud: false });
+    });
+
+    it('nowhere without iCloud Drive: no folder is made up, and a file by that name is not a folder', () => {
+      expect(offsiteFolder(mac(false), undefined)).toBeUndefined();
+      const h = mac(false);
+      mkdirSync(join(h, 'Library', 'Mobile Documents'), { recursive: true });
+      writeFileSync(join(h, ...DRIVE), '');
+      expect(offsiteFolder(h, undefined)).toBeUndefined();
+    });
+
+    describe('loadBackupConfig', () => {
+      const saved = { ...process.env };
+      afterEach(() => {
+        for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+        Object.assign(process.env, saved);
+      });
+      const home = (icloud: boolean) => {
+        const h = mac(icloud);
+        mkdirSync(join(h, '.flint'), { mode: 0o700 });
+        writeFileSync(join(h, '.flint', 'runtime.env'), `DATABASE_URL=${DB}\n`, { mode: 0o600 });
+        writeFileSync(join(h, '.flint', 'backup.env'), 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_DB_RESTORE_URL=postgresql://flint_restore:x@[::1]:5432/postgres\n', { mode: 0o600 });
+        process.env.HOME = h;
+        for (const k of ['RUNTIME_ENV_FILE', 'BACKUP_ENV_FILE', 'DATABASE_URL', 'FLINT_OFFSITE_DIR', 'FLINT_DB_BACKUP_URL', 'FLINT_DB_RESTORE_URL', 'FLINT_BACKUP_AGE_RECIPIENT']) delete process.env[k];
+        return h;
+      };
+      // pg_dump and pg_restore are looked up where Homebrew puts them; without them there is no backup config to read.
+      const tools = ['/opt/homebrew/opt/postgresql@17/bin', '/opt/homebrew/bin', '/usr/local/bin'].some((d) => existsSync(join(d, 'pg_dump')) && existsSync(join(d, 'pg_restore')));
+
+      it.skipIf(!tools)('with FLINT_OFFSITE_DIR unset, the offsite job has a folder (what failed five nights running): iCloud Drive’s, and a manifest beside the dumps', () => {
+        const h = home(true);
+        const b = loadBackupConfig();
+        expect(b.offsiteDir).toBe(join(h, ...DRIVE, 'FlintBackups', 'pg'));
+        expect(b.offsiteICloud).toBe(true);
+        expect(b.offsiteManifest).toBe(join(h, 'FlintBackups', 'pg', 'offsite-copies.txt'));
+        // Reading the config makes no folder: the job does, when it writes its first encrypted copy.
+        expect(existsSync(b.offsiteDir!)).toBe(false);
+      });
+
+      it.skipIf(!tools)('the setting wins, from backup.env or the environment; with neither and no iCloud Drive there is no folder', () => {
+        const h = home(true);
+        writeFileSync(join(h, '.flint', 'backup.env'), 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_DB_RESTORE_URL=postgresql://flint_restore:x@[::1]:5432/postgres\nFLINT_OFFSITE_DIR=/Volumes/Vault/flint\n', { mode: 0o600 });
+        expect(loadBackupConfig()).toMatchObject({ offsiteDir: '/Volumes/Vault/flint', offsiteICloud: false });
+        process.env.FLINT_OFFSITE_DIR = '/Volumes/Other';
+        expect(loadBackupConfig().offsiteDir).toBe('/Volumes/Other');
+        home(false);
+        const none = loadBackupConfig();
+        expect(none.offsiteDir).toBeUndefined();
+        expect(none.offsiteICloud).toBe(false);
+      });
+    });
   });
 
   describe('runtime.env, then runtime.override.env, then the process environment', () => {
