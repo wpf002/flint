@@ -1313,12 +1313,12 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
   }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;laneMsg(e.message,true);});}
 
 /* ---------- Settings: Health ---------- */
-var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',runtime:'Runtime',standby_model:'Standby Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access'};
+var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',tasks:'Tasks',runtime:'Runtime',standby_model:'Standby Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access'};
 /* Settings > Health in four groups, in this order, each with its components in theirs (@flint/policy HEALTH_GROUPS;
    a test keeps the two the same). A component named in none of them (each source, and any new one until it is
    placed) is shown under THIS MAC, so a row this page has not heard of is still shown. */
 var HEALTH_GROUPS=[['MODELS',['ollama','standby_model']],['BACKUPS',['backup','files_backup','offsite_backup','restore_drill','offsite_drill','rebuild_rehearsal']],
-  ['THIS MAC',['disk','deploy_hold','migrate_failed','postgres','server','runtime','bus','audit_intents','retention','triage','goals','ledger','forecasts']],['REMOTE ACCESS',['remote_access']]];
+  ['THIS MAC',['disk','deploy_hold','migrate_failed','postgres','server','runtime','bus','audit_intents','retention','triage','goals','ledger','forecasts','tasks']],['REMOTE ACCESS',['remote_access']]];
 var HEALTH_GROUP_OTHER='THIS MAC';
 function healthGroup(c){for(var i=0;i<HEALTH_GROUPS.length;i++)if(HEALTH_GROUPS[i][1].indexOf(c)>=0)return HEALTH_GROUPS[i][0];return HEALTH_GROUP_OTHER;}
 var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};

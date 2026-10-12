@@ -188,6 +188,21 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'ledger.resolve.ask_will': approval({ shadow: true, cap: { limit: 5, period: 'day' }, note: 'a yes/no question for Will about a prediction that is due' }),
   'calibration.note': approval({ write: false, shadow: true, note: "Flint's own track record, as numbers, in chat's context" }),
   'forecast.series.enable': fixed({ note: "turning predictions on is Will's signature, never promoted" }),
+  // Assets, tasks and reviews (P5). An asset does nothing until Will signs asset.enable, and a task goes
+  // out only on its own signed card. The two local dispatches are capped by the day, counted when the card
+  // is claimed. Checking a result runs in shadow at APPROVAL: Flint computes the bar and files the accept
+  // card, and accepts on its own only once Will promotes it. Turning an asset on, requiring reviews,
+  // overruling a check and anything that spends or leaves this Mac are his signature, never promoted.
+  'asset.enable': fixed({ note: "turning an asset on is Will's signature, never promoted" }),
+  'review.enforce': fixed({ note: "requiring reviews, or no longer, is Will's signature, never promoted" }),
+  'task.dispatch.local_worker': approval({ cap: { limit: 20, period: 'day' }, note: 'the local model only; each task waits for its own card' }),
+  'task.dispatch.ci_runner': approval({ write: false, cap: { limit: 50, period: 'day' }, note: 'watches a CI run; calls nothing' }),
+  'task.dispatch.nexus_participant': fixed({ egress: true, note: 'spends; stays APPROVAL; no asset of this kind is built' }),
+  'review.local': approval({ write: false, shadow: true, cap: { limit: 20, period: 'day' }, note: 'a review on the local model; advice on a card, one call at a time, yields to chat' }),
+  'review.trident_panel': fixed({ egress: true, note: 'an outside panel; stays APPROVAL; not built' }),
+  'task.check_bar': approval({ shadow: true, note: "checks a result against its bar; accepting it waits for Will's card until promoted" }),
+  'task.cancel': fixed({ note: "stopping a task that went out is Will's signature" }),
+  'task.bar_override': fixed({ note: "ending a task against its check is Will's signature, never promoted" }),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
   // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
   'google.write': forbidden('Flint never writes to Google'),
@@ -246,6 +261,12 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'ledger.reason.local',
   'ledger.resolve.ask_will',
   'calibration.note',
+  // P5: the two dispatches that stay on this Mac (so Flint can file the card for a step that is ready; the
+  // card still waits for Will), a local review, and checking a result. Never a dispatch that spends.
+  'task.dispatch.local_worker',
+  'task.dispatch.ci_runner',
+  'review.local',
+  'task.check_bar',
 ]);
 
 /**

@@ -20,6 +20,14 @@ export const ACTION_WORDS: Readonly<Record<string, string>> = {
   // P3 part 5: what Flint takes from chat (the console's cards say the same titles).
   'goal.propose': 'Suggest a Goal from Chat',
   'world.commitment.from_chat': 'Add a Commitment from Chat',
+  // P5: the cards for assets and tasks (the console's cards say more: which asset, which way).
+  'asset.enable': 'Turn On an Asset',
+  'review.enforce': 'Change Whether Reviews Are Required',
+  'task.dispatch.local_worker': 'Run a Task',
+  'task.dispatch.ci_runner': 'Watch a CI Run',
+  'task.check_bar': 'Accept a Task Result',
+  'task.cancel': 'Stop a Task',
+  'task.bar_override': 'Overrule a Task’s Checks',
 };
 
 /**
@@ -40,6 +48,13 @@ export const ACTION_DONE: Readonly<Record<string, string>> = {
   'forecast.series.enable': 'Flint turned on predictions.',
   'goal.propose': 'Flint added a goal to your suggestions.',
   'world.commitment.from_chat': 'Flint noted something you said you’d do.',
+  'asset.enable': 'Flint turned on an asset.',
+  'review.enforce': 'Flint changed whether reviews are required.',
+  'task.dispatch.local_worker': 'Flint started a task.',
+  'task.dispatch.ci_runner': 'Flint started watching a run.',
+  'task.check_bar': 'Flint accepted a task’s result.',
+  'task.cancel': 'Flint stopped a task.',
+  'task.bar_override': 'Flint ended a task the way you chose.',
 };
 
 /** The words for an action, or its name when it has none. */

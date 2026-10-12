@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { GOAL_SIGNED_ACTIONS, P3_ACTIONS, PlanOp, classifyPlanOp } from '../src/goals';
 import { FORECAST_SIGNED_ACTIONS, P4_ACTIONS, PREDICT_JOB_ACTIONS, PROPHET_ACTIONS } from '../src/predict';
+import { HIVE_DISPATCH, P5_ACTIONS, PAID_DISPATCH, TASK_SIGNED_ACTIONS, TASK_WILL_ONLY } from '../src/tasks';
 
 const chat: TierContext = { context: 'chat', tainted: false };
 const auto: TierContext = { context: 'autonomous', tainted: false };
@@ -613,6 +614,89 @@ describe('P4: predictions', () => {
     for (const a of ['ledger.void', 'ledger.resolution.correct']) {
       expect(CODE_TABLE[a], a).toMatchObject({ tier: 'approval', promotable: false });
       expect(runsInShadow(a), a).toBe(false);
+    }
+  });
+});
+
+describe('P5: assets, tasks and reviews', () => {
+  const consoleCtx: TierContext = { context: 'console', tainted: false };
+  const AUTO = ['task.dispatch.local_worker', 'task.dispatch.ci_runner', 'review.local', 'task.check_bar'];
+  const NEVER = ['asset.enable', 'review.enforce', 'task.bar_override', 'task.cancel', PAID_DISPATCH, 'review.trident_panel'];
+
+  it('every P5 action is in the code table at APPROVAL, with its cap, shadow, write and egress marks', () => {
+    expect([...P5_ACTIONS].sort()).toEqual([
+      'asset.enable', 'review.enforce', 'review.local', 'review.trident_panel', 'task.bar_override', 'task.cancel', 'task.check_bar',
+      'task.dispatch.ci_runner', 'task.dispatch.local_worker', 'task.dispatch.nexus_participant',
+    ]);
+    for (const a of P5_ACTIONS) expect(CODE_TABLE[a]?.tier, a).toBe('approval');
+    const facts = (a: string) => ({ shadow: runsInShadow(a), cap: CODE_TABLE[a]!.cap, promotable: CODE_TABLE[a]!.promotable, egress: CODE_TABLE[a]!.egress === true, write: CODE_TABLE[a]!.write });
+    expect(facts('task.dispatch.local_worker')).toEqual({ shadow: false, cap: { limit: 20, period: 'day' }, promotable: true, egress: false, write: true });
+    expect(facts('task.dispatch.ci_runner')).toEqual({ shadow: false, cap: { limit: 50, period: 'day' }, promotable: true, egress: false, write: false });
+    expect(facts('review.local')).toEqual({ shadow: true, cap: { limit: 20, period: 'day' }, promotable: true, egress: false, write: false });
+    expect(facts('task.check_bar')).toEqual({ shadow: true, cap: undefined, promotable: true, egress: false, write: true });
+    for (const a of NEVER) expect(facts(a), a).toMatchObject({ shadow: false, cap: undefined, promotable: false });
+    // Only what would leave this Mac is marked so: a paid dispatch and the outside panel. Neither is built.
+    expect(P5_ACTIONS.filter((a) => CODE_TABLE[a]!.egress)).toEqual([PAID_DISPATCH, 'review.trident_panel']);
+  });
+
+  it('autonomously, exactly four may be asked for: the two dispatches that stay on this Mac, a local review, and checking a result', () => {
+    expect([...AUTONOMOUS_ACTIONS].filter((a) => (P5_ACTIONS as readonly string[]).includes(a)).sort()).toEqual([...AUTO].sort());
+    for (const a of P5_ACTIONS) {
+      const d = resolveTier(a, auto);
+      if (AUTO.includes(a)) expect(d, a).toMatchObject({ tier: 'approval', rule: 'code' });
+      else expect(d, a).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
+    }
+    // A job can never file what only Will files, and never a dispatch that spends.
+    for (const a of TASK_WILL_ONLY) expect(resolveTier(a, auto).tier, a).toBe('forbidden');
+    for (const a of P5_ACTIONS) for (const ctx of [chat, consoleCtx]) expect(resolveTier(a, ctx), `${a} ${ctx.context}`).toMatchObject({ tier: 'approval', rule: 'code' });
+  });
+
+  it('no policy row promotes turning an asset on, requiring reviews, an override, a cancellation or anything that spends; the others can be, under the lower cap', () => {
+    for (const a of NEVER) {
+      for (const ctx of [chat, consoleCtx, auto]) {
+        const d = resolveTier(a, { ...ctx, policies: [row(a, 'alone'), row(`${a.split('.')[0]}.*`, 'alone'), row('task.dispatch.*', 'alone')], now: NOW });
+        expect(d.tier, `${a} ${ctx.context}`).not.toBe('alone');
+      }
+    }
+    expect(resolveTier('task.check_bar', { ...auto, policies: [row('task.check_bar', 'alone')], now: NOW }).tier).toBe('alone');
+    expect(resolveTier('review.local', { ...auto, policies: [row('review.local', 'alone', { dailyCap: 40 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 20, period: 'day' } });
+    expect(resolveTier('task.dispatch.local_worker', { ...auto, policies: [row('task.dispatch.local_worker', 'alone', { dailyCap: 5 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 5, period: 'day' } });
+    // A wildcard over task.* promotes what it covers that can be, and still not the cards that are Will's alone.
+    const wild = [row('task.*', 'alone')];
+    expect(resolveTier('task.check_bar', { ...auto, policies: wild, now: NOW }).tier).toBe('alone');
+    for (const a of ['task.cancel', 'task.bar_override', PAID_DISPATCH]) expect(resolveTier(a, { ...consoleCtx, policies: wild, now: NOW }).tier, a).toBe('approval');
+    // A row that tightens holds: checking results can be stopped outright.
+    expect(resolveTier('task.check_bar', { ...auto, policies: [row('task.check_bar', 'forbidden')], now: NOW }).tier).toBe('forbidden');
+  });
+
+  it('a dispatch that names a trading pool is FORBIDDEN in step 1, whoever asks and whatever a policy row says; the Hive\'s dispatch is not in the table', () => {
+    expect(CODE_TABLE[HIVE_DISPATCH]).toBeUndefined();
+    expect(resolveTier(HIVE_DISPATCH, consoleCtx)).toMatchObject({ tier: 'approval', rule: 'unknown' });
+    expect(resolveTier(HIVE_DISPATCH, auto)).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
+    expect(AUTONOMOUS_ACTIONS.has(HIVE_DISPATCH)).toBe(false);
+    for (const pool of ['crypto-trading', 'Broker-East', 'exchange.fx']) {
+      for (const a of [HIVE_DISPATCH, 'task.dispatch.local_worker', PAID_DISPATCH]) {
+        for (const ctx of [chat, consoleCtx, auto]) {
+          const d = resolveTier(a, { ...ctx, pool, policies: [row(a, 'alone'), row('hive.*', 'alone')], now: NOW });
+          expect(d, `${a} ${pool} ${ctx.context}`).toMatchObject({ tier: 'forbidden', rule: 'forbidden' });
+        }
+      }
+    }
+    expect(resolveTier(HIVE_DISPATCH, { ...consoleCtx, pool: 'research' }).tier).toBe('approval');
+    // No policy row promotes the Hive's dispatch (an unknown action is not promotable).
+    expect(resolveTier(HIVE_DISPATCH, { ...consoleCtx, policies: [row(HIVE_DISPATCH, 'alone'), row('hive.*', 'alone')], now: NOW }).tier).toBe('approval');
+  });
+
+  it('none of the names trips a step-1 rule or the console\'s money and delete words; no chat tool or built-in shares one', () => {
+    for (const a of [...P5_ACTIONS, HIVE_DISPATCH]) expect(forbiddenReason(a, {}), a).toBeUndefined();
+    const html = readFileSync(join(__dirname, '..', '..', '..', 'apps', 'console', 'index.html'), 'utf8');
+    const words = /function apprAlone\(p\)\{[^]*?\/([^/]+)\/i\.test\(String\(p\.fullName/.exec(html)?.[1];
+    expect(words, 'apprAlone in the console').toBeTruthy();
+    for (const a of [...TASK_SIGNED_ACTIONS, PAID_DISPATCH]) expect(new RegExp(words!, 'i').test(a), a).toBe(false);
+    const builtins = Object.entries(CODE_TABLE).filter(([, e]) => e.tier === 'alone').map(([n]) => n);
+    for (const a of P5_ACTIONS) {
+      expect(RUNTIME_CHAT_TOOLS.has(a), a).toBe(false);
+      expect(builtins, a).not.toContain(a);
     }
   });
 });

@@ -23,6 +23,7 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   goals: 'Goal Reviews',
   ledger: 'Prediction Checks',
   forecasts: 'Forecasts',
+  tasks: 'Tasks',
   runtime: 'Runtime',
   // P7: the rest of the machine.
   standby_model: 'Standby Model',
@@ -42,7 +43,7 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
 export const HEALTH_GROUPS: ReadonlyArray<{ header: string; components: readonly string[] }> = [
   { header: 'MODELS', components: ['ollama', 'standby_model'] },
   { header: 'BACKUPS', components: ['backup', 'files_backup', 'offsite_backup', 'restore_drill', 'offsite_drill', 'rebuild_rehearsal'] },
-  { header: 'THIS MAC', components: ['disk', 'deploy_hold', 'migrate_failed', 'postgres', 'server', 'runtime', 'bus', 'audit_intents', 'retention', 'triage', 'goals', 'ledger', 'forecasts'] },
+  { header: 'THIS MAC', components: ['disk', 'deploy_hold', 'migrate_failed', 'postgres', 'server', 'runtime', 'bus', 'audit_intents', 'retention', 'triage', 'goals', 'ledger', 'forecasts', 'tasks'] },
   { header: 'REMOTE ACCESS', components: ['remote_access'] },
 ];
 /** Where a component with no place of its own is shown. */
