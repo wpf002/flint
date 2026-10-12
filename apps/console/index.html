@@ -1027,6 +1027,10 @@ var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restor
 var NOTE_OUTSIDE={calendar:1,signal:1};
 /* An internal name (lowercase parts joined by dots or underscores), an entity's ref (issue#24ehza), a file path. */
 var NOTE_NAME=/(^|[^A-Za-z0-9])([a-z][a-z0-9]*(?:[._][a-z0-9]+)+)/g,NOTE_REF=/[a-z_]{2,20}#[A-Za-z0-9]{1,12}\b/g,NOTE_PATH=/(^|[\s"'“(])~?\/[\w.~\/-]+/g;
+/* The one title that shows a thing by the name it was given ("New Issue: wpf002/next.js #60"). The name is someone's
+   own, so its dots and marks stay as they are (the runtime's deliver.ts makes the same exception): only a ref or a
+   file path is taken out of it. */
+var NOTE_NAMED=/^(new (?:issue|pull request|thread):)\s*(.*)$/i;
 function noteWords(m,before,w){return before+(laneOwn(NOTE_JOBS,w)?NOTE_JOBS[w]:laneWords(w));}
 function noteDay(y,m,d){return new Date(Date.UTC(+y,+m-1,+d,12)).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'}).replace(',','');}
 function noteTitle(t){t=String(t||'').replace(/`/g,'').replace(/\s*\([^)]*\)/g,'');
@@ -1034,6 +1038,8 @@ function noteTitle(t){t=String(t||'').replace(/`/g,'').replace(/\s*\([^)]*\)/g,'
   var d=/^Flint for (\d{4})-(\d\d)-(\d\d)$/.exec(t);if(d)return 'Daily Summary for '+noteDay(d[1],d[2],d[3]);
   /* A budget note, as it was titled before ("Claude (Anthropic) budget: 80% of today's cap"). */
   var m=/^(.+?) budget: (\d+)% of (today|this month)['’]s cap$/i.exec(t.replace(/\s+/g,' ').trim());if(m)return titleCase(m[1])+' Budget at '+m[2]+'% for '+(m[3].toLowerCase()==='today'?'Today':'This Month');
+  var named=NOTE_NAMED.exec(t.replace(/\s+/g,' ').trim());
+  if(named){var label=named[2].replace(NOTE_REF,'').replace(NOTE_PATH,'$1').replace(/\s+/g,' ').trim();return titleCase(named[1]+(label?' '+label:'')).replace(/[\s:]+$/,'');}
   t=t.replace(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}(?= is down$)/,'A service').replace(NOTE_REF,'').replace(NOTE_PATH,'$1').replace(NOTE_NAME,noteWords);
   return titleCase(t.replace(/\s+/g,' ').replace(/^[\s:]+|[\s:.]+$/g,''))||'Flint';}
 /* The body's sentences, without asides, without one that points at a file or a command (nothing Will can click),
@@ -1128,10 +1134,12 @@ function laneWords(s){return String(s||'').replace(/[_.]+/g,' ').trim();}
 /* The services Flint watches, as Will knows them, and a name's own words ("trident-api" is Trident API): the same
    as @flint/policy's SERVICE_WORDS, SERVICE_SHORT and serviceWords, which the notes use (a test keeps them in step). */
 var SERVICE_WORDS={'flint-server':'the server','com.flint.server':'the server','com.flint.runtime':'the runtime',ollama:'the local model','com.flint.ollama':'the local model',searxng:'web search','com.flint.searxng':'web search','com.flint.deploy':'auto-deploy','com.flint.runtime-backup':'the nightly backup job','com.flint.voice':'voice'};
-var SERVICE_SHORT={api:'API',mcp:'MCP',ci:'CI',db:'DB',ui:'UI',gpu:'GPU',tts:'TTS',ai:'AI'};
+var SERVICE_SHORT={api:'API',mcp:'MCP',ci:'CI',db:'DB',ui:'UI',gpu:'GPU',tts:'TTS',ai:'AI',imessage:'iMessage',icloud:'iCloud'};
+/* A part of a name written with its own capitals stays as written ("IPhone" is not its name). */
+var INNER_CAPITAL=/^(?:i(?:Cloud|Message|Phone|Pad|OS)|macOS)$/;
 function laneOwn(o,k){return Object.prototype.hasOwnProperty.call(o,k);}
 function properWords(name){return String(name||'').split(/[^\p{L}\p{N}]+/u).filter(function(w){return w&&!/^(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}$/.test(w)&&!/^(?=[a-z0-9]*\d)[a-z0-9]{16,}$/.test(w);})
-  .map(function(w){return laneOwn(SERVICE_SHORT,w.toLowerCase())?SERVICE_SHORT[w.toLowerCase()]:w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
+  .map(function(w){return laneOwn(SERVICE_SHORT,w.toLowerCase())?SERVICE_SHORT[w.toLowerCase()]:INNER_CAPITAL.test(w)?w:w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
 function serviceWords(name){name=String(name||'');if(laneOwn(SERVICE_WORDS,name))return SERVICE_WORDS[name];var a=/^com\.(flint|nexus)\.(.+)$/.exec(name),w=properWords(a?a[2]:name);
   if(!w)return 'a service';return a?(a[1]==='flint'?'Flint':'Nexus')+'’s '+w+' service':'the '+w+' service';}
 /* An escalation about a service whose title does not say which (its words fell back to "A Service Is Down"):

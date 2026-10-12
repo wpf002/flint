@@ -70,8 +70,8 @@ const HYPHENATED: ReadonlySet<string> = new Set([
   'auto-deploy', 'read-only', 'all-day', 're-run', 'sign-in', 'set-up', 'follow-up', 'check-in', 'built-in', 'up-to-date', 'day-to-day', 'e-mail', 'on-call', 'in-app',
   'age-encrypted', 'long-running', 'full-screen', 'field-free', 'one-time', 'third-party', 'money-related',
 ]);
-/** Names written with a capital inside that are words, not code. */
-const INNER_CAPITAL = /^(?:i(?:Cloud|Message|Phone|Pad|OS)|macOS)$/;
+/** Names written with a capital inside that are words, not code: said as they are written, never "IMessage". */
+export const INNER_CAPITAL = /^(?:i(?:Cloud|Message|Phone|Pad|OS)|macOS)$/;
 /** The endings of a site's name (claude.ai): a dotted pair that is not an action's name. */
 const SITE_ENDINGS: ReadonlySet<string> = new Set(['ai', 'com', 'org', 'net', 'io', 'dev']);
 

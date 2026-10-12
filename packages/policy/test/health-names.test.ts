@@ -52,6 +52,19 @@ describe('serviceWords', () => {
     expect(properWords('toString-api')).toBe('ToString API');
   });
 
+  it('a name written with its own capitals keeps them: iMessage is never "IMessage"', () => {
+    expect(serviceWords('iMessage-bridge')).toBe('the iMessage Bridge service');
+    expect(serviceWords('com.flint.imessage')).toBe('Flint’s iMessage service');
+    expect(serviceWords('icloud-sync')).toBe('the iCloud Sync service');
+    expect(serviceWords('iPhone-relay')).toBe('the iPhone Relay service');
+    expect(serviceWords('macOS-agent')).toBe('the macOS Agent service');
+    expect(properWords('iMessage-bridge')).toBe('iMessage Bridge');
+    // Only names that are written that way: any other part gets its capital.
+    expect(properWords('iFoo-bar')).toBe('IFoo Bar');
+    expect(properWords('index-api')).toBe('Index API');
+    for (const name of ['iMessage-bridge', 'com.flint.imessage', 'icloud-sync', 'iPhone-relay', 'macOS-agent']) expect(noteProblems('A Title', `It’s about ${serviceWords(name)}.`), name).toEqual([]);
+  });
+
   it('whatever the name, its words are fit for a note', () => {
     for (const name of ['trident-api', 'npm', 'psql', 'brew', 'worker-4aef4bf9c2', 'com.nexus.worker-2', 'api (staging) ~/bin/api', 'x `y` {z}', 'https://example.com/x', 'FLINT_SERVER', 'myService', 'a.b.c', 'Error: boom', '$HOME']) {
       expect(noteProblems('A Title', `It’s about ${serviceWords(name)}.`), name).toEqual([]);

@@ -7,10 +7,11 @@
  * only (backup-nightly.sh), so its card lives a week and two hours: approved
  * any time that week, the next Sunday's run claims it.
  */
-import { CAP_WORDS, localDay, resolveTier, type JobFailure, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
+import { CAP_WORDS, jobFailedNote, localDay, resolveTier, type JobFailure, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
+import { needsSetup } from './backup.js';
 
 export type Command = 'backup' | 'offsite' | 'drill';
 export const ACTION: Record<Command, NightlyJob> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
@@ -102,4 +103,57 @@ export async function offerNextCard(db: Db, cmd: Command, tz: string, rp: WebAut
  */
 export function nextAfterFailure(f: { setup: boolean; onCard: boolean; cardFiled: boolean }): JobFailure['next'] {
   return f.setup ? 'setup' : !f.onCard ? 'retry' : f.cardFiled ? 'card' : 'card_later';
+}
+
+/** How a nightly job's own work ended. */
+export interface Attempt {
+  ok: boolean;
+  /** Its error, for the log and the audit (never for the note). */
+  error?: string;
+  /** It failed for a reason another try cannot change (needsSetup): no key, no folder, a write macOS refuses. */
+  setup: boolean;
+  /** The restore drill ran to its end and the restored copy differed from the backup (not a run that stopped early). */
+  mismatch: boolean;
+  detail: Record<string, string | number | boolean | null>;
+}
+
+/**
+ * Run a nightly job's own work and say how it ended. It never throws: what the
+ * work throws is the job's failure, classified here, once, as one another try
+ * could change or not.
+ */
+export async function attempt(work: () => Promise<{ ok?: boolean; error?: string; mismatch?: boolean; detail: Attempt['detail'] }>): Promise<Attempt> {
+  try {
+    const r = await work();
+    return { ok: r.ok ?? true, ...(r.error ? { error: r.error } : {}), setup: false, mismatch: r.mismatch ?? false, detail: r.detail };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), setup: needsSetup(err), mismatch: false, detail: {} };
+  }
+}
+
+/**
+ * A nightly job failed on a run of its own (--auto): tell Will, and first make
+ * true what the note will say. A job that ran on a card gets its next card
+ * filed now, so "approve its next card in Approvals" points at one that is
+ * there (if it cannot be filed, the note says when it will be). The words are
+ * jobFailedNote's, whole; the error itself stays in the log and the audit.
+ */
+export async function tellFailure(
+  db: Db,
+  cmd: Command,
+  failed: { setup: boolean; mismatch: boolean; proposalId?: string; icloud: boolean },
+  env: { tz: string; rp: WebAuthnRelyingParty | undefined; now: Date; notify: (title: string, body: string) => Promise<unknown>; warn?: (line: string) => void },
+): Promise<{ title: string; body: string; next: JobFailure['next'] }> {
+  const onCard = failed.proposalId !== undefined;
+  let cardFiled = false;
+  if (onCard) {
+    cardFiled = await offerNextCard(db, cmd, env.tz, env.rp, env.now).then(() => true, (err: unknown) => {
+      (env.warn ?? console.error)(`${ACTION[cmd]}: could not file its next card: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    });
+  }
+  const next = nextAfterFailure({ setup: failed.setup, onCard, cardFiled });
+  const note = jobFailedNote(ACTION[cmd], { next, icloud: failed.icloud, mismatch: failed.mismatch });
+  await env.notify(note.title, note.body);
+  return { ...note, next };
 }

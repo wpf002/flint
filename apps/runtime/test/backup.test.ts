@@ -5,13 +5,13 @@
  * catches a mismatch; offsite copies are never plaintext.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NO_DB, URLS, freshDb } from './db';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { dumpDatabase, encryptTo, needsSetup, NeedsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, type Tools } from '../src/backup/backup';
+import { dumpDatabase, encryptTo, needsSetup, NeedsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, STALE_PARTIAL_MS, type Tools } from '../src/backup/backup';
 import { sendOffsite, type OffsiteConfig } from '../src/backup/offsite';
 
 const bin = (n: string) => ['/opt/homebrew/opt/postgresql@17/bin', '/usr/lib/postgresql/17/bin', '/opt/homebrew/bin', '/usr/bin'].map((d) => join(d, n)).find((p) => existsSync(p));
@@ -98,13 +98,45 @@ describe('the encrypted copies offsite', () => {
     expect(readdirSync(f.dumps).filter((x) => x.endsWith('.dump'))).toHaveLength(10);
   });
 
-  it('what is written must begin as an age file does: a stand-in that passes the dump through writes nothing, under any name', async () => {
+  it('nothing is written until the stream begins as an age file does: a stand-in that passes the dump through never puts a byte offsite, not even as a partial', async () => {
     const f = fixture();
-    writeFileSync(join(f.dumps, night(1)), 'PLAINTEXT rows');
-    const err = await encryptTo(join(f.dumps, night(1)), RECIPIENT, { ...tools, age: fakeAge(f.root, 'plaintext') }, f.offsite).then(() => undefined, (e: unknown) => e);
-    expect(err).toBeInstanceOf(NeedsSetup);
-    expect(String(err)).toMatch(/did not write an age file/);
+    mkdirSync(f.offsite, { recursive: true });
+    const pass = fakeAge(f.root, 'plaintext');
+    // The offsite folder refuses every write: had the code opened a file before seeing age's header, this
+    // would fail as a refused write. It fails as "not an age file" instead: no file was ever asked for.
+    chmodSync(f.offsite, 0o500);
+    try {
+      for (const dump of ['PLAINTEXT rows', `PLAINTEXT ${'rows of the database, '.repeat(40_000)}`]) {
+        writeFileSync(join(f.dumps, night(1)), dump);
+        const err = await encryptTo(join(f.dumps, night(1)), RECIPIENT, { ...tools, age: pass }, f.offsite).then(() => undefined, (e: unknown) => e);
+        expect(err).toBeInstanceOf(NeedsSetup);
+        expect(String(err)).toMatch(/did not write an age file, so nothing was written/);
+        expect((err as { code?: string }).code).toBeUndefined();
+        expect(readdirSync(f.offsite)).toEqual([]);
+      }
+      // The folder really does refuse: the real stand-in, which writes age's header first, is stopped at the file.
+      const refused = await encryptTo(join(f.dumps, night(1)), RECIPIENT, { ...tools, age: f.age }, f.offsite).then(() => undefined, (e: unknown) => e);
+      expect((refused as { code?: string }).code).toBe('EACCES');
+      expect(needsSetup(refused)).toBe(true);
+    } finally {
+      chmodSync(f.offsite, 0o700);
+    }
     expect(readdirSync(f.offsite)).toEqual([]);
+    // A header that comes in pieces is still a header: the copy is whole, and its hash is the stream's.
+    const slow = join(f.root, 'age-slow');
+    writeFileSync(slow, `#!/bin/sh\nprintf 'age-encry'\nsleep 0.1\nprintf 'ption.org/v1'\nsleep 0.1\nprintf '\\n-> X25519 stand-in\\nsealed'\n`);
+    chmodSync(slow, 0o755);
+    const e = await encryptTo(join(f.dumps, night(1)), RECIPIENT, { ...tools, age: slow }, f.offsite);
+    expect(readFileSync(e.path, 'utf8')).toBe(SEALED);
+    expect(e).toMatchObject({ bytes: SEALED.length, sha256: createHash('sha256').update(SEALED).digest('hex') });
+    // An age that says nothing at all, or stops inside its header, wrote no age file either.
+    for (const said of ['', 'age-encryption.org']) {
+      const quiet = join(f.root, 'age-quiet');
+      writeFileSync(quiet, `#!/bin/sh\nprintf '%s' '${said}'\n`);
+      chmodSync(quiet, 0o755);
+      await expect(encryptTo(join(f.dumps, night(2)), RECIPIENT, { ...tools, age: quiet }, f.offsite)).rejects.toThrow(/did not write an age file/);
+    }
+    expect(readdirSync(f.offsite)).toEqual([`${night(1)}.age`]);
   });
 
   it('never lists the offsite folder: a stray file there is left alone, and a copy no record names is found by its dump’s name', () => {
@@ -134,6 +166,44 @@ describe('the encrypted copies offsite', () => {
     expect(manifestOf(f)).toEqual([`${night(14)}.age`]);
   });
 
+  it('tonight’s copy is never the one that goes, whatever its name: an older dump sent again with seven newer copies on record', () => {
+    const f = fixture();
+    mkdirSync(f.offsite, { recursive: true });
+    // The backup has failed for a while, so tonight the offsite job sent night 3's dump again. Seven newer copies are on record.
+    const newer = [10, 11, 12, 13, 14, 15, 16].map((n) => `${night(n)}.age`);
+    for (const name of [...newer, `${night(3)}.age`]) writeFileSync(join(f.offsite, name), 'sealed');
+    writeFileSync(f.manifest, newer.join('\n'));
+    // By name, tonight's is the oldest of eight: it used to be the one removed, in the run that wrote it.
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(3)}.age`, 7, { recorded: newer })).toEqual([`${night(10)}.age`]);
+    expect(readdirSync(f.offsite).sort()).toEqual([`${night(3)}.age`, ...newer.slice(1)].sort());
+    expect(manifestOf(f)).toEqual([`${night(3)}.age`, ...newer.slice(1)]);
+    // The same the next night: it still has its place.
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(3)}.age`, 7, { recorded: newer })).toEqual([]);
+    expect(readdirSync(f.offsite)).toHaveLength(7);
+  });
+
+  it('a name on record whose file is gone never costs a real copy: the folder cannot end empty while the row says ok', () => {
+    const f = fixture();
+    mkdirSync(f.offsite, { recursive: true });
+    // Seven rows for copies that are no longer there (removed by hand, say), all newer by name than tonight's.
+    const gone = [10, 11, 12, 13, 14, 15, 16].map((n) => `${night(n)}.age`);
+    const real = [1, 2].map((n) => `${night(n)}.age`);
+    for (const name of [...real, `${night(5)}.age`]) writeFileSync(join(f.offsite, name), 'sealed');
+    writeFileSync(f.manifest, [...real, ...gone].join('\n'));
+    // Tonight's copy and the two real older ones all stay: only a copy that is there takes a place.
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, 7, { recorded: gone })).toEqual([]);
+    expect(readdirSync(f.offsite).sort()).toEqual([...real, `${night(5)}.age`]);
+    expect(manifestOf(f)).toEqual([...real, `${night(5)}.age`]);
+    // Keeping one: tonight's is that one, and the newest copy there is by name is never removed either.
+    writeFileSync(join(f.offsite, `${night(9)}.age`), 'sealed');
+    writeFileSync(f.manifest, [...real, `${night(9)}.age`, ...gone].join('\n'));
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, 1, { recorded: gone })).toEqual(real);
+    expect(readdirSync(f.offsite).sort()).toEqual([`${night(5)}.age`, `${night(9)}.age`]);
+    // Were tonight's own file somehow not there, the newest copy present still stays.
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(20)}.age`, 1)).toEqual([`${night(5)}.age`]);
+    expect(readdirSync(f.offsite)).toEqual([`${night(9)}.age`]);
+  });
+
   it('a manifest that is missing, empty or cut short heals from what the database recorded, so no copy is left for nothing to prune', () => {
     for (const damage of ['missing', 'empty', 'cut short'] as const) {
       const f = fixture();
@@ -157,21 +227,50 @@ describe('the encrypted copies offsite', () => {
     expect(manifestOf(f)).toEqual([`${night(2)}.age`]);
   });
 
-  it('says how many files it really removed, keeps at least one, and clears a half-written copy a dead run left', () => {
+  it('says how many files it really removed, and keeps at least one', () => {
     const f = fixture();
     mkdirSync(f.offsite, { recursive: true });
-    // Three names on record; only night 2's file is still there.
+    // Three names on record; only nights 2 and 3 are still there.
     writeFileSync(f.manifest, [1, 2, 3].map((n) => `${night(n)}.age`).join('\n'));
-    writeFileSync(join(f.offsite, `${night(2)}.age`), 'sealed');
-    writeFileSync(join(f.offsite, `${night(3)}.age`), 'sealed');
-    writeFileSync(join(f.offsite, `${night(3)}.age.partial`), 'half');
-    writeFileSync(join(f.dumps, night(4)), '');
-    writeFileSync(join(f.offsite, `${night(4)}.age.partial`), 'half, from a run that died before it was recorded');
-    writeFileSync(join(f.offsite, `${night(5)}.age`), 'sealed');
+    for (const n of [2, 3, 5]) writeFileSync(join(f.offsite, `${night(n)}.age`), 'sealed');
     expect(pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, 2, { dumpDir: f.dumps })).toEqual([`${night(2)}.age`]);
     expect(readdirSync(f.offsite).sort()).toEqual([`${night(3)}.age`, `${night(5)}.age`]);
     for (const keep of [0, -1, 1.5, Number.NaN]) expect(() => pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, keep)).toThrow(/at least one/);
     expect(readdirSync(f.offsite).sort()).toEqual([`${night(3)}.age`, `${night(5)}.age`]);
+  });
+
+  it('clears a half-written copy a dead run left once it is an hour old; a younger one may be a run still writing, and is left alone', () => {
+    const f = fixture();
+    mkdirSync(f.offsite, { recursive: true });
+    const now = Date.now();
+    const half = (n: number, minutesOld: number) => {
+      const file = join(f.offsite, `${night(n)}.age.partial`);
+      writeFileSync(file, 'half');
+      utimesSync(file, new Date(now - minutesOld * 60_000), new Date(now - minutesOld * 60_000));
+    };
+    writeFileSync(f.manifest, `${night(3)}.age\n`);
+    writeFileSync(join(f.offsite, `${night(3)}.age`), 'sealed');
+    writeFileSync(join(f.offsite, `${night(5)}.age`), 'sealed');
+    // A name on record, a local dump's (its run died before it was recorded), and tonight's own name from an earlier try.
+    writeFileSync(join(f.dumps, night(4)), '');
+    half(3, 61);
+    half(4, 24 * 60);
+    half(5, 90);
+    // Another job writing night 6's copy at this very moment, and one that began 59 minutes ago.
+    writeFileSync(join(f.dumps, night(6)), '');
+    writeFileSync(join(f.dumps, night(7)), '');
+    half(6, 0);
+    half(7, 59);
+    // Not this code's to touch, however old.
+    writeFileSync(join(f.offsite, 'notes.txt.partial'), 'not Flint’s');
+    utimesSync(join(f.offsite, 'notes.txt.partial'), new Date(now - 86_400_000), new Date(now - 86_400_000));
+    expect(pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, 7, { dumpDir: f.dumps, now })).toEqual([]);
+    expect(readdirSync(f.offsite).sort()).toEqual([`${night(3)}.age`, `${night(5)}.age`, `${night(6)}.age.partial`, `${night(7)}.age.partial`, 'notes.txt.partial'].sort());
+    // An hour on, the one that was 59 minutes old has had its hour; the live one of a moment ago has not.
+    expect(STALE_PARTIAL_MS).toBe(3_600_000);
+    pruneOffsite(f.offsite, f.manifest, `${night(5)}.age`, 7, { dumpDir: f.dumps, now: now + 2 * 60_000 });
+    expect(readdirSync(f.offsite)).not.toContain(`${night(7)}.age.partial`);
+    expect(readdirSync(f.offsite)).toContain(`${night(6)}.age.partial`);
   });
 
   it('removes only names it wrote: a manifest line that is not an encrypted copy’s name is never a path to delete', () => {
@@ -179,7 +278,7 @@ describe('the encrypted copies offsite', () => {
     mkdirSync(f.offsite, { recursive: true });
     const outside = join(f.root, 'keep.txt');
     writeFileSync(outside, 'keep');
-    for (const n of [1, 2]) writeFileSync(join(f.offsite, `${night(n)}.age`), 'sealed');
+    for (const n of [1, 2, 3]) writeFileSync(join(f.offsite, `${night(n)}.age`), 'sealed');
     writeFileSync(f.manifest, ['../../keep.txt', '/etc/hosts', 'flint-x.dump', ...[1, 2].map((n) => `${night(n)}.age`)].join('\n'));
     expect(pruneOffsite(f.offsite, f.manifest, `${night(3)}.age`, 1, { dumpDir: f.dumps })).toEqual([`${night(1)}.age`, `${night(2)}.age`]);
     expect(existsSync(outside)).toBe(true);
@@ -193,12 +292,13 @@ describe('the encrypted copies offsite', () => {
     // Night 1's copy cannot be removed as a file (it is a folder here, standing in for a refusal).
     mkdirSync(join(f.offsite, `${night(1)}.age`));
     writeFileSync(f.manifest, `${night(1)}.age\n`);
+    writeFileSync(join(f.offsite, `${night(2)}.age`), 'sealed');
     expect(pruneOffsite(f.offsite, f.manifest, `${night(2)}.age`, 1)).toEqual([]);
     expect(readFileSync(f.manifest, 'utf8')).toBe(`${night(1)}.age\n${night(2)}.age\n`);
     // Once it can go, it does, and the manifest is back to what is kept.
     rmdirSync(join(f.offsite, `${night(1)}.age`));
     writeFileSync(join(f.offsite, `${night(1)}.age`), 'sealed');
-    writeFileSync(join(f.offsite, `${night(2)}.age`), 'sealed');
+    writeFileSync(join(f.offsite, `${night(3)}.age`), 'sealed');
     expect(pruneOffsite(f.offsite, f.manifest, `${night(3)}.age`, 1)).toEqual([`${night(1)}.age`, `${night(2)}.age`]);
     expect(readFileSync(f.manifest, 'utf8')).toBe(`${night(3)}.age\n`);
   });
@@ -231,6 +331,14 @@ describe('the encrypted copies offsite', () => {
     expect(needsSetup(new Error('age exited 1: age: error: malformed recipient "age1qq": invalid checksum'))).toBe(true);
     expect(needsSetup(new Error('pg_dump exited 1: FATAL:  password authentication failed for user "flint_backup"'))).toBe(true);
     expect(needsSetup(new NeedsSetup('nowhere to send it'))).toBe(true);
+    // A pg_dump older than the server refuses every night until it is upgraded: setup.
+    expect(needsSetup(new Error('pg_dump exited 1: pg_dump: error: aborting because of server version mismatch'))).toBe(true);
+    // A database that is not there is setup, by its code or its words...
+    expect(needsSetup(Object.assign(new Error('database "flint" does not exist'), { code: '3D000' }))).toBe(true);
+    expect(needsSetup(new Error('pg_restore exited 1: FATAL:  database "flint_old" does not exist'))).toBe(true);
+    // ...but never the drill's own scratch database, which it makes and drops each run: next week's drill makes it again.
+    expect(needsSetup(Object.assign(new Error('database "flint_restore_test" does not exist'), { code: '3D000' }))).toBe(false);
+    expect(needsSetup(new Error('pg_restore exited 1: pg_restore: error: connection to server failed: FATAL:  database "flint_restore_test" does not exist'))).toBe(false);
     // A full disk, a dropped connection, no dump yet: another night may pass.
     expect(needsSetup(await failure(encryptTo(join(f.dumps, night(1)), RECIPIENT, { ...tools, age: fakeAge(f.root, 'fails') }, f.offsite)))).toBe(false);
     for (const e of [new Error('no local dump to send'), Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }), Object.assign(new Error('no space'), { code: 'ENOSPC' }), 'a string', undefined]) expect(needsSetup(e)).toBe(false);

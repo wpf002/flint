@@ -4,7 +4,7 @@
  * ("restore_drill"). The console keeps the same maps (HEALTH_NAMES and
  * SOURCE_NAMES in apps/console/index.html; a test keeps the two in step).
  */
-import { nameWords, noteProblems, titleCase } from './notes.js';
+import { INNER_CAPITAL, nameWords, noteProblems, titleCase } from './notes.js';
 
 export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   postgres: 'Database',
@@ -56,20 +56,22 @@ export const SERVICE_WORDS: Readonly<Record<string, string>> = {
   'com.flint.voice': 'voice',
 };
 
-/** Short forms a service's name keeps in capitals. */
-export const SERVICE_SHORT: Readonly<Record<string, string>> = { api: 'API', mcp: 'MCP', ci: 'CI', db: 'DB', ui: 'UI', gpu: 'GPU', tts: 'TTS', ai: 'AI' };
+/** How a part of a service's name is written when a capital first is not it: a short form (API), a name with its own capitals (iMessage). */
+export const SERVICE_SHORT: Readonly<Record<string, string>> = { api: 'API', mcp: 'MCP', ci: 'CI', db: 'DB', ui: 'UI', gpu: 'GPU', tts: 'TTS', ai: 'AI', imessage: 'iMessage', icloud: 'iCloud' };
 
 /**
  * A name's own words: its parts capitalized, a short form in capitals (API,
- * MCP), its marks left out, and no part that reads as an id (the hash in
- * "worker-4aef4bf9c2"). "trident-api" is Trident API; empty when nothing
- * sayable is left.
+ * MCP), a name with its own capitals as it is written (iMessage), its marks
+ * left out, and no part that reads as an id (the hash in "worker-4aef4bf9c2").
+ * "trident-api" is Trident API, "iMessage-bridge" is iMessage Bridge; empty
+ * when nothing sayable is left.
  */
 export function properWords(name: string): string {
   return name
     .split(/[^\p{L}\p{N}]+/u)
     .filter((w) => w && !/^(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}$/.test(w) && !/^(?=[a-z0-9]*\d)[a-z0-9]{16,}$/.test(w))
-    .map((w) => (Object.hasOwn(SERVICE_SHORT, w.toLowerCase()) ? SERVICE_SHORT[w.toLowerCase()]! : w.charAt(0).toUpperCase() + w.slice(1)))
+    // A part written with its own capitals (iPhone, macOS) stays as written: "IPhone" is not its name.
+    .map((w) => (Object.hasOwn(SERVICE_SHORT, w.toLowerCase()) ? SERVICE_SHORT[w.toLowerCase()]! : INNER_CAPITAL.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
     .join(' ');
 }
 

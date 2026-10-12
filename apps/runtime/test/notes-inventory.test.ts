@@ -62,9 +62,12 @@ describe('the runtime’s notes to Will', () => {
 
   it('cli.ts: a nightly job that failed says what happened and what happens next, by the job’s words', () => {
     const cli = readFileSync(join(SRC, 'cli.ts'), 'utf8');
-    // The note is jobFailedNote's, whole, and what it promises is nextAfterFailure's: no words are put together at the call.
-    expect(cli).toMatch(/const note = jobFailedNote\(action, \{ next: nextAfterFailure\(\{[^}]*\}\)[^}]*\}\);\s*await notifyWill\(b\.config, note\.title, note\.body\);/);
+    // The words are tellFailure's (jobFailedNote's, whole; nightly.test.ts runs it): cli.ts only hands it the way
+    // to tell Will, and puts no words together itself.
+    expect(cli.match(/notifyWill\(/g)).toHaveLength(1);
+    expect(cli).toContain('notify: (title, body) => notifyWill(b.config, title, body),');
     expect(cli).not.toMatch(/notifyWill\([^)]*[`'"]/);
+    expect(cli).not.toMatch(/jobFailedNote|needsSetup\(/);
     const jobs = Object.values(ACTION) as NightlyJob[];
     expect(jobs.sort()).toEqual(['backup.local', 'backup.offsite', 'restore.drill']);
     for (const job of jobs) {

@@ -598,9 +598,39 @@ describe('the console Activity panel: notifications', () => {
     for (const name of [
       ...Object.keys(SERVICE_WORDS), 'trident-api', 'nexus-mcp', 'com.nexus.responder', 'com.nexus.worker-2', 'com.flint.evolve_measure', 'org.example.sync_agent', 'npm', 'psql', 'brew',
       'worker-4aef4bf9c2', 'com.nexus.job-cmg4x2k9d0001ab3cdefgh1234', '4aef4bf9c2', '...', 'api (staging)', 'constructor', 'toString', 'école-api', '',
+      // A name written with its own capitals keeps them.
+      'iMessage-bridge', 'com.flint.imessage', 'icloud-sync', 'iPhone-relay', 'macOS-agent', 'iFoo-bar', 'index-api',
     ]) {
       expect(run(`serviceWords(${JSON.stringify(name)})`), name).toBe(serviceWords(name));
     }
+    expect(run(`serviceWords('iMessage-bridge')`)).toBe('the iMessage Bridge service');
+  });
+
+  it('a thing shown by the name it was given keeps that name as it is written, in Notifications and in Important', async () => {
+    // As the runtime titles them now (deliver.ts lets a given name keep its dots and marks), and as an older one did.
+    const titles: Array<[string, string]> = [
+      ['New Thread: v2.1 Plan for claude.ai', 'New Thread: v2.1 Plan for claude.ai'],
+      ['New Issue: wpf002/next.js #60', 'New Issue: wpf002/next.js #60'],
+      ['New Pull Request: wpf002/nexus-responder #12', 'New Pull Request: wpf002/nexus-responder #12'],
+      ['New issue: wpf002/flint.js #7', 'New Issue: wpf002/flint.js #7'],
+      ['New thread: my_thread', 'New Thread: my_thread'],
+      // A ref is an id, never a name: the thing is said by its kind.
+      ['New issue: issue#24ehza', 'New Issue'],
+      ['New pull request: pull_request#abc123', 'New Pull Request'],
+      // Only that title is someone's name: any other title's internal names are still said in words.
+      ['issue.state: your rule ci_red.main', 'Issue State: Your Rule Ci Red Main'],
+      ['backup.offsite failed', 'Offsite Backup Failed'],
+    ];
+    for (const [stored, shown] of titles) expect(run(`noteTitle(${JSON.stringify(stored)})`), stored).toBe(shown);
+    const body = 'Flint flagged it as worth knowing. It’s in Activity, under Important.';
+    const rows = await showNotes(titles.slice(0, 5).map(([title], i) => ({ title, body, kind: 'runtime', ts: Date.now() - i * 1000 })));
+    expect(rows.map((r) => r.title)).toEqual(titles.slice(0, 5).map((t) => t[1]));
+    routes['/inbox'] = () => ({
+      status: 200,
+      body: { items: titles.slice(0, 5).map(([title], i) => item({ id: `n${i}`, tainted: false, reasoning: null, escalation: { id: `es_n${i}`, templateId: 'new_item', title, body, status: 'open', channels: ['inapp'], tainted: false, createdAt: AT } })), next: null },
+    });
+    await openLane();
+    expect(ids.lanelist!.children.map((r) => r.children[1]!.children[0]!.textContent)).toEqual(titles.slice(0, 5).map((t) => t[1]));
   });
 
   it('names the jobs as @flint/policy does and title-cases as it does, so a note reads the same where it is written and where it is shown', () => {

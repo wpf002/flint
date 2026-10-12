@@ -58,6 +58,9 @@ describe('escalation templates', () => {
     expect(down('org.example.sync_agent')).toMatchObject({ linted: false, title: 'The Org Example Sync Agent Service Is Down', body: 'The Org Example Sync Agent service has been down for 35 minutes.' });
     expect(down('com.flint.evolve_measure').body).toBe('Flint’s Evolve Measure service has been down for 35 minutes.');
     expect(down('com.flint.deploy')).toMatchObject({ title: 'Auto-deploy Is Down', body: 'Auto-deploy has been down for 35 minutes.' });
+    // A name written with its own capitals keeps them, in the title too.
+    expect(down('iMessage-bridge')).toMatchObject({ linted: false, title: 'The iMessage Bridge Service Is Down', body: 'The iMessage Bridge service has been down for 35 minutes.' });
+    expect(down('com.flint.imessage')).toMatchObject({ linted: false, title: 'Flint’s iMessage Service Is Down' });
     expect(down('searxng')).toMatchObject({ title: 'Web Search Is Down', body: 'Web search has been down for 35 minutes.' });
     // No clean name: "A Service", never its ref.
     expect(render('service_down', { service: 'service#abc123', downMinutes: 31 }).title).toBe('A Service Is Down');

@@ -33,12 +33,12 @@ import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
-import { SOURCES, jobFailedNote } from '@flint/policy';
+import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, gate, nextAfterFailure, offerNextCard, type Command } from './backup/nightly.js';
+import { ACTION, attempt, gate, tellFailure, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, needsSetup, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { dumpDatabase, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { sendOffsite } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
@@ -161,39 +161,26 @@ async function main(): Promise<void> {
       }
       proposalId = g.proposalId;
     }
-    let detail: Record<string, string | number | boolean | null> = {};
-    let ok = true;
-    let error: string | undefined;
-    /** The restore drill ran to its end and the restored copy differed from the backup (not a run that stopped early). */
-    let mismatch = false;
-    /** It failed for a reason another try cannot change (no key, no folder, a write macOS refuses). */
-    let setup = false;
-    try {
+    // The job's own work. Whatever it throws is its failure, classified once (attempt): one another try
+    // could change, or one that stays until its setup is fixed.
+    const o = await attempt(async () => {
       if (cmd === 'backup') {
         const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
         const pruned = pruneDumps(b.dumpDir, 14);
         await db.backupRun.create({
           data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },
         });
-        detail = { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length };
-      } else if (cmd === 'offsite') {
-        detail = await sendOffsite(db, b, now);
-      } else {
-        const dump = newestDump(b.dumpDir);
-        if (!dump) throw new Error('no dump to restore');
-        const r = await restoreDrill(dump, b.restoreUrl, b.tools);
-        mismatch = !r.ok;
-        ok = r.ok;
-        const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
-        if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
-        detail = { tables: r.tables, mismatches: r.mismatches.length };
-        if (!r.ok) error = `row counts differ in ${r.mismatches.length} table(s)`;
+        return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length } };
       }
-    } catch (err) {
-      ok = false;
-      error = err instanceof Error ? err.message : String(err);
-      setup = needsSetup(err);
-    }
+      if (cmd === 'offsite') return { detail: await sendOffsite(db, b, now) };
+      const dump = newestDump(b.dumpDir);
+      if (!dump) throw new Error('no dump to restore');
+      const r = await restoreDrill(dump, b.restoreUrl, b.tools);
+      const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
+      if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
+      return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length} table(s)` }) };
+    });
+    const { ok, error, detail } = o;
     if (proposalId) {
       // Recording the proposal's end must not cost the job's own audit row or the failure notice.
       await completeProposal(db, proposalId, { ok, ...(error ? { error } : {}), result: detail }, actor).catch((err: unknown) =>
@@ -205,20 +192,14 @@ async function main(): Promise<void> {
     if (!ok) {
       process.exitCode = 1;
       // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
-      // says what happened and what happens next, in Will's words, and promises only what is true:
+      // says what happened and what happens next, in Will's words, and promises only what is true (tellFailure):
       //  - a failure another try cannot change says its setup needs fixing;
       //  - a job he promoted runs again at its next time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays);
-      //  - one that ran on a card waits for his next approval, and that card is filed now, so it is there to approve.
+      //  - one that ran on a card waits for his next approval, and that card is filed first, so it is there to approve.
       if (auto) {
-        let card = false;
-        if (proposalId !== undefined) {
-          card = await offerNextCard(db, cmd, b.config.tz, b.config.rp, now).then(() => true, (err: unknown) => {
-            console.error(`${action}: could not file its next card: ${err instanceof Error ? err.message : String(err)}`);
-            return false;
-          });
-        }
-        const note = jobFailedNote(action, { next: nextAfterFailure({ setup, onCard: proposalId !== undefined, cardFiled: card }), icloud: b.offsiteICloud, mismatch });
-        await notifyWill(b.config, note.title, note.body);
+        await tellFailure(db, cmd, { setup: o.setup, mismatch: o.mismatch, icloud: b.offsiteICloud, ...(proposalId !== undefined ? { proposalId } : {}) }, {
+          tz: b.config.tz, rp: b.config.rp, now, notify: (title, body) => notifyWill(b.config, title, body),
+        });
       }
     }
   } finally {
