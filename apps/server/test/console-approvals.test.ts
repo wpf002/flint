@@ -616,6 +616,39 @@ describe('the console Approvals panel', () => {
     expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
   });
 
+  it('Turn On Predictions (P4) is in words, counts its numbers without naming one, and asks on its own with a fresh touch and a plain prompt', async () => {
+    const predict = (over: Record<string, unknown> = {}) => card({
+      id: 'tp', fullName: 'forecast.series.enable', origin: 'console', sensitivity: 'financial', consequential: true,
+      args: { series: ['daily.calendar.hours', 'daily.deploys.count', 'daily.spend.anthropic.usd'], reason: [] }, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.', ...over,
+    });
+    const say = (p: Record<string, unknown>) => [run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`), JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(p)})`))), run(`apprReason(${JSON.stringify(p)})`)];
+    expect(say(predict({ expiresAt: '2026-10-16T14:00:00.000Z' }))).toEqual([
+      'Turn On Predictions', 'Flint forecasts 3 of its own numbers each night, on this Mac.',
+      [['Numbers', '3'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]], 'turn on predictions',
+    ]);
+    // The title is the one its notes use; one number is singular; a card whose args were cleared still reads as a sentence.
+    expect(run(`apprTitle(${JSON.stringify(predict())})`)).toBe(ACTION_WORDS['forecast.series.enable']);
+    expect(run(`apprSub(${JSON.stringify(predict({ args: { series: ['daily.deploys.count'], reason: [] } }))})`)).toBe('Flint forecasts 1 of its own number each night, on this Mac.');
+    expect(say(predict({ args: null })).slice(0, 3)).toEqual(['Turn On Predictions', 'Flint forecasts its own numbers each night, on this Mac.', [['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]]]);
+    // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', sensitivity: 'ops' })})`)).toBe(true);
+    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops' }), card({ id: 'src' })] } });
+    await open();
+    expect(ids.apprnote!.textContent).toBe('You have 2 approvals waiting. Approve All skips 1.');
+    const shown = ids.apprlist!.children[0]!.children[0]!.shown();
+    expect(shown).toContain('Turn On PredictionsFlint forecasts 3 of its own numbers each night, on this Mac.');
+    expect(shown).toContain('Asks on Its Own');
+    // Never the action's internal name, and never a series' key on the card's face (the raw args stay behind Show Details).
+    expect(`${run(`apprTitle(${JSON.stringify(predict())})`)} ${run(`apprSub(${JSON.stringify(predict())})`)} ${JSON.stringify(run(`apprFacts(${JSON.stringify(predict())})`))}`).not.toMatch(/forecast\.series|daily\.|spend|usd/);
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['src']);
+    decided = [];
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    expect(decided.at(-1)).toEqual(['approve', 'tp', { reason: 'turn on predictions', fresh: true, args: { series: ['daily.calendar.hours', 'daily.deploys.count', 'daily.spend.anthropic.usd'], reason: [] } }]);
+  });
+
   it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
     const told: string[] = [];
     ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);

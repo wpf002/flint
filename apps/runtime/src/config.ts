@@ -104,6 +104,13 @@ const Env = z.object({
    * runtime.override.env, with Will's OK. Turning it off is its rollback.
    */
   FLINT_PLANNER: z.string().optional(),
+  /**
+   * Predictions (P4): `on` to run Flint's prediction jobs; anything else, blank
+   * included, is off, and nothing is forecast, resolved or scored. Off by
+   * default, like triage. On is not enough: nothing is forecast until Will also
+   * signs the Turn On Predictions card, which the database enforces.
+   */
+  FLINT_PREDICT: z.string().optional(),
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
@@ -143,6 +150,8 @@ export interface Config {
   triage: boolean;
   /** P3 goal reviews run (else goals are kept and nothing reviews them). */
   planner: boolean;
+  /** P4's prediction jobs may run (FLINT_PREDICT=on). The signed card is still what turns a number on. */
+  predict: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
   gitSha: string;
@@ -209,6 +218,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
     planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
+    predict: e.FLINT_PREDICT?.trim().toLowerCase() === 'on',
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),

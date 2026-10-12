@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { GOAL_SIGNED_ACTIONS, P3_ACTIONS, PlanOp, classifyPlanOp } from '../src/goals';
+import { FORECAST_SIGNED_ACTIONS, P4_ACTIONS, PREDICT_JOB_ACTIONS, PROPHET_ACTIONS } from '../src/predict';
 
 const chat: TierContext = { context: 'chat', tainted: false };
 const auto: TierContext = { context: 'autonomous', tainted: false };
@@ -442,10 +443,11 @@ describe('P3: goals and plans', () => {
     const js = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
     const goals = /\nvar APPR_GOAL=\{[^\n]*\};/.exec(js)![0];
     const small = /\n(function apprSmallOp\(o\)\{[\s\S]*?\nfunction apprSmallPlan\(p\)\{[^\n]*)\n/.exec(js)![1]!;
+    const predict = /\nvar APPR_PREDICT='[^'\n]*';/.exec(js)![0];
     const alone = /\n(function apprAlone\(p\)\{[\s\S]*?)\nfunction /.exec(js)![1]!;
     const c: Record<string, unknown> = {};
     createContext(c);
-    runInContext(`${goals}\n${small}\n${alone}`, c);
+    runInContext(`${goals}\n${small}\n${predict}\n${alone}`, c);
     const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
     for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
     const status = { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'blocked' } };
@@ -473,6 +475,8 @@ describe('P3: goals and plans', () => {
     }
     expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })).toBe(true);
     expect(apprAlone({ fullName: 'world.source.enable', consequential: true })).toBe(true);
+    // The predictions switch asks alone too, by its name, whatever mark its card carries.
+    for (const a of FORECAST_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
     for (const a of ['goal.propose', 'world.commitment.from_chat']) expect(apprAlone({ fullName: a }), a).toBe(false);
   });
 
@@ -482,6 +486,118 @@ describe('P3: goals and plans', () => {
     for (const a of P3_ACTIONS) {
       expect(RUNTIME_CHAT_TOOLS.has(a), a).toBe(false);
       expect(builtins, a).not.toContain(a);
+    }
+  });
+});
+
+describe('P4: predictions', () => {
+  const consoleCtx: TierContext = { context: 'console', tainted: false };
+  const SIGNED = [...FORECAST_SIGNED_ACTIONS];
+  const OWN = [...PREDICT_JOB_ACTIONS, ...FORECAST_SIGNED_ACTIONS];
+  const NO_OUTSIDE = 'Flint forecasts on this Mac and calls no outside forecaster';
+
+  it('every P4 action is in the code table: the five jobs and the on-switch at APPROVAL, with their caps and shadow flags; the outside forecaster\'s names FORBIDDEN', () => {
+    expect([...P4_ACTIONS].sort()).toEqual([
+      'calibration.note', 'forecast.local', 'forecast.series.build', 'forecast.series.enable', 'ledger.reason.local',
+      'ledger.resolve.ask_will', 'prophet.calibration', 'prophet.forecast_adhoc', 'prophet.models',
+    ]);
+    expect(SIGNED).toEqual(['forecast.series.enable']);
+    for (const a of OWN) expect(CODE_TABLE[a]?.tier, a).toBe('approval');
+    for (const a of PROPHET_ACTIONS) expect(CODE_TABLE[a], a).toMatchObject({ tier: 'forbidden', promotable: false });
+    const facts = (a: string) => ({ shadow: runsInShadow(a), cap: CODE_TABLE[a]!.cap, promotable: CODE_TABLE[a]!.promotable, egress: CODE_TABLE[a]!.egress === true });
+    expect(facts('forecast.series.build')).toEqual({ shadow: true, cap: undefined, promotable: true, egress: false });
+    expect(facts('forecast.local')).toEqual({ shadow: true, cap: { limit: 50, period: 'day' }, promotable: true, egress: false });
+    expect(facts('ledger.reason.local')).toEqual({ shadow: true, cap: { limit: 30, period: 'day' }, promotable: true, egress: false });
+    expect(facts('ledger.resolve.ask_will')).toEqual({ shadow: true, cap: { limit: 5, period: 'day' }, promotable: true, egress: false });
+    expect(facts('calibration.note')).toEqual({ shadow: true, cap: undefined, promotable: true, egress: false });
+    expect(facts('forecast.series.enable')).toEqual({ shadow: false, cap: undefined, promotable: false, egress: false });
+    // Nothing P4 adds is marked as sending anything off this Mac, and there is no action that would let a series leave it.
+    for (const a of OWN) expect(CODE_TABLE[a]!.egress, a).toBeUndefined();
+    expect(Object.keys(CODE_TABLE).filter((a) => /offbox|off_box/i.test(a))).toEqual([]);
+  });
+
+  it('in chat and in the console each of Flint\'s own is APPROVAL by the code table', () => {
+    for (const a of OWN) {
+      for (const ctx of [chat, consoleCtx]) expect(resolveTier(a, ctx), `${a} ${ctx.context}`).toMatchObject({ tier: 'approval', rule: 'code' });
+    }
+  });
+
+  it('autonomously, only Flint\'s five prediction jobs may be asked for: never the on-switch', () => {
+    for (const a of OWN) {
+      const d = resolveTier(a, auto);
+      if ((PREDICT_JOB_ACTIONS as readonly string[]).includes(a)) expect(d, a).toMatchObject({ tier: 'approval', rule: 'code' });
+      else expect(d, a).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
+    }
+    expect([...AUTONOMOUS_ACTIONS].filter((a) => (P4_ACTIONS as readonly string[]).includes(a)).sort()).toEqual([...PREDICT_JOB_ACTIONS].sort());
+  });
+
+  it('the plan\'s persona.calibration_note is FORBIDDEN by the people rule, so the action is calibration.note; no exemption was added', () => {
+    expect(forbiddenReason('persona.calibration_note', {})).toBe('no collection on people');
+    for (const ctx of [chat, consoleCtx, auto]) expect(resolveTier('persona.calibration_note', ctx)).toMatchObject({ tier: 'forbidden', rule: 'forbidden' });
+    expect(resolveTier('persona.calibration_note', { ...auto, policies: [row('persona.calibration_note', 'alone'), row('persona.*', 'alone')], now: NOW }).tier).toBe('forbidden');
+    expect(CODE_TABLE['persona.calibration_note']).toBeUndefined();
+    expect(forbiddenReason('calibration.note', {})).toBeUndefined();
+    expect(resolveTier('calibration.note', auto)).toMatchObject({ tier: 'approval', rule: 'code' });
+    // Only world.person.create is exempt from the people rule, as before.
+    expect(forbiddenReason('world.person.create', {})).toBeUndefined();
+    expect(forbiddenReason('world.person.lookup', {})).toBe('no collection on people');
+  });
+
+  it('Flint calls no outside forecaster: every action of its own under prophet. is FORBIDDEN in step 1, in every context, whatever a policy row says', () => {
+    for (const a of [...PROPHET_ACTIONS, 'prophet.forecast', 'prophet.anything_else']) {
+      expect(forbiddenReason(a, {}), a).toBe(NO_OUTSIDE);
+      for (const ctx of [chat, consoleCtx, auto]) {
+        expect(resolveTier(a, ctx), `${a} ${ctx.context}`).toMatchObject({ tier: 'forbidden', rule: 'forbidden', reason: NO_OUTSIDE });
+        // No policy row loosens step 1: not the name, not a wildcard.
+        expect(resolveTier(a, { ...ctx, policies: [row(a, 'alone'), row('prophet.*', 'alone')], now: NOW }).tier, `${a} ${ctx.context}`).toBe('forbidden');
+      }
+    }
+    for (const a of PROPHET_ACTIONS) expect(AUTONOMOUS_ACTIONS.has(a), a).toBe(false);
+    // The rule is for Flint's own actions. A tool some MCP server exposes keeps its own name space and the MCP rules.
+    expect(forbiddenReason('prophet.forecast_adhoc', { mcp: mcp('prophet', 'forecast_adhoc') })).toBeUndefined();
+    expect(resolveTier('prophet.forecast_adhoc', { ...auto, mcp: mcp('prophet', 'forecast_adhoc') })).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
+  });
+
+  it('no policy row promotes the on-switch, in any context; the five jobs can be promoted, under the lower cap', () => {
+    for (const a of SIGNED) {
+      expect(CODE_TABLE[a]!.promotable, a).toBe(false);
+      for (const ctx of [chat, consoleCtx, auto]) {
+        const d = resolveTier(a, { ...ctx, policies: [row(a, 'alone'), row(`${a.split('.')[0]}.*`, 'alone'), row('forecast.series.*', 'alone')], now: NOW });
+        expect(d.tier, `${a} ${ctx.context}`).not.toBe('alone');
+      }
+    }
+    expect(resolveTier('forecast.local', { ...auto, policies: [row('forecast.local', 'alone', { dailyCap: 80 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 50, period: 'day' } });
+    expect(resolveTier('ledger.reason.local', { ...auto, policies: [row('ledger.reason.local', 'alone', { dailyCap: 10 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 10, period: 'day' } });
+    expect(resolveTier('ledger.resolve.ask_will', { ...auto, policies: [row('ledger.resolve.ask_will', 'alone', { dailyCap: 5 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 5, period: 'day' } });
+    for (const a of ['forecast.series.build', 'calibration.note']) expect(resolveTier(a, { ...auto, policies: [row(a, 'alone')], now: NOW }).tier, a).toBe('alone');
+    // A wildcard over forecast.* promotes the jobs it covers and still not the card.
+    const wild = [row('forecast.*', 'alone')];
+    expect(resolveTier('forecast.local', { ...auto, policies: wild, now: NOW }).tier).toBe('alone');
+    for (const a of SIGNED) expect(resolveTier(a, { ...consoleCtx, policies: wild, now: NOW }).tier, a).toBe('approval');
+  });
+
+  it('none of Flint\'s own P4 names trips a step-1 rule (NEVER_AUTO, merge, people, policy., selfmod., google., apple.) or the console\'s money and delete words', () => {
+    for (const a of OWN) expect(forbiddenReason(a, {}), a).toBeUndefined();
+    // The console keeps a card out of Approve All when its name has a money or delete word (apprAlone).
+    const html = readFileSync(join(__dirname, '..', '..', '..', 'apps', 'console', 'index.html'), 'utf8');
+    const words = /function apprAlone\(p\)\{[^]*?\/([^/]+)\/i\.test\(String\(p\.fullName/.exec(html)?.[1];
+    expect(words, 'apprAlone in the console').toBeTruthy();
+    for (const a of OWN) expect(new RegExp(words!, 'i').test(a), a).toBe(false);
+  });
+
+  it('no runtime chat tool or server built-in tool shares a P4 name', () => {
+    const builtins = Object.entries(CODE_TABLE).filter(([, e]) => e.tier === 'alone').map(([n]) => n);
+    for (const a of P4_ACTIONS) {
+      expect(RUNTIME_CHAT_TOOLS.has(a), a).toBe(false);
+      expect(builtins, a).not.toContain(a);
+    }
+  });
+
+  it('P1\'s three ledger housekeeping actions are unchanged here (they turn to shadow with the code that runs them)', () => {
+    for (const a of ['ledger.resolve.auto', 'ledger.expire', 'ledger.calibration.snapshot']) {
+      expect(CODE_TABLE[a], a).toMatchObject({ tier: 'approval', promotable: true });
+      expect(runsInShadow(a), a).toBe(false);
+      expect(AUTONOMOUS_ACTIONS.has(a), a).toBe(true);
     }
   });
 });

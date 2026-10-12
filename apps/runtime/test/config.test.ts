@@ -70,6 +70,14 @@ describe('runtime config', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RP_ID: 'flint.example.ts.net', FLINT_RP_ORIGINS: 'https://flint.example.ts.net' }).rp).toEqual({ rpId: 'flint.example.ts.net', origins: ['https://flint.example.ts.net'] });
   });
 
+  it('predictions (P4) are off unless FLINT_PREDICT is exactly on (trimmed, any case): unset, blank and every other word are off', () => {
+    expect(loadConfig({ DATABASE_URL: DB, HOME }).predict).toBe(false);
+    for (const v of ['', ' ', 'off', 'OFF', '1', 'yes', 'true', 'enabled', 'on!', 'o n', 'armed']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PREDICT: v }).predict, JSON.stringify(v)).toBe(false);
+    for (const v of ['on', 'ON', ' On ', 'on\n']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PREDICT: v }).predict, JSON.stringify(v)).toBe(true);
+    // It is its own switch: triage being on says nothing about predictions.
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: 'on' }).predict).toBe(false);
+  });
+
   it('triage is off unless set to on; blank values mean the defaults', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME }).triage).toBe(false);
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: '' }).triage).toBe(false);

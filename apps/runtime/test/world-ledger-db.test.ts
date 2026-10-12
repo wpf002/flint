@@ -129,8 +129,11 @@ describe.skipIf(NO_DB)('world model and ledger in the database', () => {
       expect((await app(`SELECT status, "mergedIntoId" FROM "Entity" WHERE id = $1`, [dup])).rows[0]).toEqual({ status: 'forgotten', mergedIntoId: null });
     });
 
-    it('only OPS series may leave the box; backups off the box are encrypted', async () => {
-      expect((await pgError(app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, "offBoxAllowed", description) VALUES ('spend.anthropic.usd', 'usd', 'D', 'financial', true, 'x')`))).message).toMatch(/offbox/);
+    it('no series may leave the box (since P4, not an ops one either); backups off the box are encrypted', async () => {
+      expect((await pgError(app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, "offBoxAllowed", description) VALUES ('spend.anthropic.usd', 'usd', 'D', 'financial', true, 'x')`))).message).toMatch(/no series leaves this Mac/);
+      expect((await pgError(app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, "offBoxAllowed", description) VALUES ('p2.lane.quiet', 'count', 'D', 'ops', true, 'x')`))).message).toMatch(/no series leaves this Mac/);
+      // P1's own rule is still underneath (only an ops series, if any ever could).
+      expect((await owner(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname IN ('MetricSeries_offbox_check', 'MetricSeries_onbox_check')`)).rows[0].n).toBe(2);
       expect((await pgError(app(`INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt") VALUES ($1, 'pg_dump_flint', 'icloud', '/x', false, 'ok', now())`, [id()]))).message).toMatch(/offsite/);
     });
   });

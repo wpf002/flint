@@ -7,10 +7,20 @@
  * Honesty (plan 3.0.9): when any input is tainted, the claim is rendered from a
  * fixed template instead of free text, so a stranger's words never become a
  * statement Flint makes.
+ *
+ * P4: a forecast's prediction also carries its range (a range's middle, ends and
+ * level), its unit, and the series and run it came from. `statistical` is a
+ * forecast computed on this Mac that beat a naive guess; the database holds the
+ * method to what the run earned (prediction_forecast_check). Nothing is recorded
+ * as `prophet`: Flint calls no outside forecaster (the name stays in P1's list).
+ * A reason given here never carries a number from a series.
+ *
+ * Over HTTP only chat's own shape is taken (ChatPrediction): every other
+ * prediction is written by runtime code.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { CLAIM_TEMPLATE_PARAMS } from '@flint/policy';
+import { CHAT_CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_PARAMS, RUNTIME_CLAIM_TEMPLATE_IDS, SeriesKey } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 
 export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation'] as const;
@@ -29,10 +39,19 @@ export const CLAIM_TEMPLATES = {
   closed_by: { params: CLAIM_TEMPLATE_PARAMS.closed_by, render: (p: { entity: string }) => `${p.entity} is closed by the resolve time` },
   // A goal review's forecast (P3): the goal by its ref, never its title.
   goal_on_track: { params: CLAIM_TEMPLATE_PARAMS.goal_on_track, render: (p: { goal: string; by: string }) => `${p.goal} meets its success criteria by ${p.by}` },
+  // P4, the forecaster's own (never offered to chat): a registry key, two numbers and a local date.
+  series_range: { params: CLAIM_TEMPLATE_PARAMS.series_range, render: (p: { series: string; lo: number; hi: number; on: string }) => `${p.series} is between ${p.lo} and ${p.hi} on ${p.on}` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
-/** Templates only the runtime's own writers fill: never one a caller of the ledger's route may send. */
-export const INTERNAL_TEMPLATES: ReadonlySet<string> = new Set<ClaimTemplate>(['goal_on_track']);
+/** Templates only the runtime's own writers fill (a goal review's, the forecaster's): never one a caller of the ledger's route may send. */
+export const INTERNAL_TEMPLATES: ReadonlySet<string> = new Set<ClaimTemplate>(RUNTIME_CLAIM_TEMPLATE_IDS);
+
+export const METHODS = ['model_reasoning', 'prophet', 'statistical', 'rule', 'base_rate', 'human'] as const;
+/** The methods a prediction made from a forecast run may claim. */
+const RUN_METHODS: ReadonlySet<string> = new Set(['statistical', 'base_rate', 'model_reasoning']);
+/** Who writes a run's predictions: the forecaster, and the local model's estimate. */
+export const FORECAST_WRITER = 'runtime:forecast';
+export const REASON_WRITER = 'runtime:reason';
 
 const Evidence = z.array(z.object({ kind: z.string().min(1).max(40), ref: z.string().min(1).max(200), note: z.string().max(200).optional() }).strict()).max(20);
 
@@ -45,7 +64,7 @@ export const EmitPrediction = z
       .optional(),
     kind: z.enum(['binary', 'interval']).default('binary'),
     probability: z.number().min(0).max(1).optional(),
-    method: z.enum(['model_reasoning', 'prophet', 'rule', 'base_rate', 'human']),
+    method: z.enum(METHODS),
     model: z.string().max(100).optional(),
     modelConfig: z.record(z.string(), z.unknown()).optional(),
     domain: z.enum(DOMAINS),
@@ -59,21 +78,66 @@ export const EmitPrediction = z
     subjectEntityId: z.string().max(40).optional(),
     supersedesId: z.string().max(40).optional(),
     tainted: z.boolean().default(false),
+    // P4: a range's numbers (kind interval), and where a forecast's prediction came from.
+    pointEstimate: z.number().finite().optional(),
+    lower: z.number().finite().optional(),
+    upper: z.number().finite().optional(),
+    level: z.number().gt(0).lt(1).optional(),
+    unit: z.string().regex(/^[a-z_]{1,20}$/).optional(),
+    seriesKey: SeriesKey.optional(),
+    forecastRunId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/).optional(),
   })
   .strict();
 export type EmitPrediction = z.infer<typeof EmitPrediction>;
 
 /**
- * A prediction as POST /v1/ledger/predictions takes it: never the runtime's own
- * templates. (A goal's id is not in the body at all: it is strict, and the goal
- * a forecast is about is an argument only the goals writer passes.)
+ * What POST /v1/ledger/predictions takes: exactly what chat's
+ * ledger_record_prediction sends (packages/mcp/connectors/runtime-server.ts), and
+ * no more. A yes/no estimate the model made, which only Will resolves, in the
+ * model's words or one of chat's four templates. Not another method (`human`
+ * would lift the 5% to 95% band; `statistical` would claim a forecast), not
+ * another resolver, not a range, a series, a run, a subject or a supersession.
+ * The chat connector's token holds this route's scope, so the route is held to
+ * what that connector sends.
+ */
+export const ChatPrediction = z
+  .object({
+    claim: z.string().min(1).max(300).optional(),
+    template: z
+      .object({ id: z.enum(CHAT_CLAIM_TEMPLATE_IDS as [(typeof CHAT_CLAIM_TEMPLATE_IDS)[number], ...Array<(typeof CHAT_CLAIM_TEMPLATE_IDS)[number]>]), params: z.record(z.string(), z.union([z.string().max(120), z.number().finite()])) })
+      .strict()
+      .optional(),
+    kind: z.literal('binary').default('binary'),
+    probability: z.number().min(0).max(1),
+    method: z.literal('model_reasoning'),
+    domain: z.enum(DOMAINS),
+    type: z.enum(TYPES),
+    evidence: Evidence,
+    resolutionCriteria: z.string().max(1000),
+    resolver: z.literal('will'),
+    resolveBy: z.string().datetime({ offset: true }),
+    /** Whether the turn read text from outside: the server says, and the connector always sends it. */
+    tainted: z.boolean(),
+  })
+  .strict();
+export type ChatPrediction = z.infer<typeof ChatPrediction>;
+
+/**
+ * The wider shape with the runtime's own templates taken out. The route itself
+ * takes ChatPrediction, which is narrower still; this is what part of P3's
+ * tests hold the wider shape to: no goal's id (the object is strict, and the
+ * goal a forecast is about is an argument only the goals writer passes), and
+ * none of the templates only the runtime fills.
  */
 export const EmitPredictionIn = EmitPrediction.refine((p) => !p.template || !INTERNAL_TEMPLATES.has(p.template.id), { message: 'this template is the runtime’s own', path: ['template', 'id'] });
 
 export class Invalid extends Error {}
 
-/** The reasons a prediction is refused, or [] when it may be recorded. */
-export function validatePrediction(p: EmitPrediction, now = new Date()): string[] {
+/**
+ * The reasons a prediction is refused, or [] when it may be recorded. `createdBy`,
+ * when given, is held to the forecast writers' rule too (emitPrediction gives it).
+ */
+export function validatePrediction(p: EmitPrediction, now = new Date(), createdBy?: string): string[] {
   const why: string[] = [];
   if (!p.resolutionCriteria.trim()) why.push('missing resolution criteria');
   const by = Date.parse(p.resolveBy);
@@ -92,6 +156,25 @@ export function validatePrediction(p: EmitPrediction, now = new Date()): string[
     if (!ok.success) why.push(`template ${p.template.id}: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(', ')}`);
   }
   if (!p.claim && !p.template) why.push('missing claim');
+  // P4 (the database's prediction_valid says the same, by id).
+  const range = [p.pointEstimate, p.lower, p.upper, p.level];
+  if (p.kind === 'interval') {
+    if (range.some((x) => x === undefined)) why.push('a range needs its middle, both ends and a level');
+    else if (!(p.lower! <= p.pointEstimate! && p.pointEstimate! <= p.upper!)) why.push('a range runs from its lower end, through its middle, to its upper end');
+  } else if (range.some((x) => x !== undefined)) {
+    why.push('a yes/no prediction carries no range');
+  }
+  if ((p.forecastRunId === undefined) !== (p.seriesKey === undefined)) why.push('a forecast names its run and its series together');
+  if (p.method === 'prophet') why.push('no prediction is recorded as prophet: Flint forecasts on this Mac');
+  if (p.method === 'statistical' && p.forecastRunId === undefined) why.push('a statistical prediction names its forecast run');
+  if (p.forecastRunId !== undefined) {
+    if (!RUN_METHODS.has(p.method) && p.method !== 'prophet') why.push(`a forecast's prediction is not made by ${p.method}`);
+    if (p.resolver !== 'auto_metric') why.push("a forecast's prediction resolves by itself, from its series");
+    if (p.tainted) why.push("a forecast's prediction is never tainted");
+    if (p.subjectEntityId !== undefined) why.push("a forecast's prediction is about a series, not an entity");
+    const writer = p.method === 'model_reasoning' ? REASON_WRITER : FORECAST_WRITER;
+    if (createdBy !== undefined && createdBy !== writer) why.push(`a forecast's ${p.method} prediction is written by ${writer}`);
+  }
   return why;
 }
 
@@ -110,7 +193,7 @@ export function renderClaim(p: EmitPrediction): string {
  * goals writer's (the database checks createdBy too) and uses its own template.
  */
 export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: string, now = new Date(), own: { goalId?: string } = {}) {
-  const why = validatePrediction(p, now);
+  const why = validatePrediction(p, now, createdBy);
   if ((p.template?.id === 'goal_on_track') !== (own.goalId !== undefined)) why.push('a goal’s forecast uses the goal template, and only it does');
   if (why.length) throw new Invalid(why.join('; '));
   return db.prediction.create({
@@ -133,6 +216,13 @@ export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: 
       subjectEntityId: p.subjectEntityId ?? null,
       supersedesId: p.supersedesId ?? null,
       tainted: p.tainted,
+      pointEstimate: p.pointEstimate ?? null,
+      lower: p.lower ?? null,
+      upper: p.upper ?? null,
+      level: p.level ?? null,
+      unit: p.unit ?? null,
+      seriesKey: p.seriesKey ?? null,
+      forecastRunId: p.forecastRunId ?? null,
       createdBy,
       ...(own.goalId ? { goalId: own.goalId } : {}),
     },

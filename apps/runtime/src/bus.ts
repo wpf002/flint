@@ -8,8 +8,9 @@
  *
  * Jobs survive a restart and a kill -9 (a job's lease expires and it runs
  * again), cron schedules run in Flint's zone, failures retry with backoff
- * before landing in `dead`. Job data is ids only ({eventId}, {escalationId}):
- * pg-boss's tables sit outside retention and forget.
+ * before landing in `dead`. Job data is ids only ({eventId}, {escalationId}; for
+ * P4, a series key or a run id, never a series' values): pg-boss's tables sit
+ * outside retention and forget.
  */
 import { PgBoss, fromPrisma } from 'pg-boss';
 import { SOURCES } from '@flint/policy';
@@ -24,11 +25,20 @@ export const QUEUES = {
   deliver: 'deliver',
   /** P3: one goal's review, and its local-model plan stage; stately, singletonKey = the goal id. */
   goals: ['goals.review', 'goals.plan'],
-  /** Housekeeping on a schedule, one run at a time (goals.tick finds the goal reviews that are due). */
-  scheduled: ['health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations', 'goals.tick'],
+  /** P4: the local model's estimate for one forecast run; stately, singletonKey = the series key. */
+  predict: ['forecast.reason'],
+  /**
+   * Housekeeping on a schedule, one run at a time (goals.tick finds the goal reviews that are due). P4's five
+   * (forecast.series, forecast.run, ledger.sweep, ledger.snapshot, ledger.ask) are made by its migration;
+   * nothing schedules them until predictions are on.
+   */
+  scheduled: [
+    'health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations', 'goals.tick',
+    'forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask',
+  ],
   dead: 'dead',
 } as const;
-export const ALL_QUEUES: readonly string[] = [...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.goals, ...QUEUES.scheduled, QUEUES.dead];
+export const ALL_QUEUES: readonly string[] = [...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.goals, ...QUEUES.predict, ...QUEUES.scheduled, QUEUES.dead];
 /** pg-boss's own: its timekeeper's queue for cron sends (the migration makes it too). */
 export const PGBOSS_QUEUES: readonly string[] = ['__pgboss__send-it'];
 

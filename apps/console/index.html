@@ -1311,6 +1311,7 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
 /* What the Touch ID or password prompt says Flint is trying to do, in plain words. */
 function apprReason(p){if(p.fullName==='goal.activate')return APPR_PROMPTS[p.reason===APPR_RESUMES?'resume':(p.args&&p.args.origin==='flint')?'start':'add'];
   if(p.fullName==='plan.change')return APPR_PROMPTS.plan;
+  if(p.fullName===APPR_PREDICT)return 'turn on predictions';
   return APPR_GOAL_WORDS[p.fullName]?APPR_PROMPTS[APPR_GOAL_WORDS[p.fullName][2]]:'approve: '+apprTitle(p);}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
 function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
@@ -1322,9 +1323,15 @@ function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.classNa
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
 function apprDate(t){try{var d=new Date(t),utc=/T00:00:00(\.000)?Z$/.test(String(t));return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getUTCFullYear()===new Date().getFullYear()?undefined:'numeric',timeZone:utc?'UTC':undefined});}catch(e){return '';}}
+/* P4: the card that turns Flint's forecasts on (the same title as @flint/policy's ACTION_WORDS). It asks on its own,
+   with a fresh touch: the card carries the mark (consequential), and its name holds the line for a server that does
+   not send it. How many numbers it lists is all it says of them: a card shows no series' values, and no key. */
+var APPR_PREDICT='forecast.series.enable';
+function apprPredictCount(p){var x=p.args&&p.args.series;return Array.isArray(x)?x.length:0;}
 /* What a card would do, in words: a Title Case fragment. */
 function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)?x.length:0;};
   if(apprGoalCard(p))return apprGoalTitle(p);
+  if(p.fullName===APPR_PREDICT)return 'Turn On Predictions';
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   if(p.fullName==='policy.change'){var rows=a.rows||[];var pats=rows.map(function(r){return r.pattern;});
     if(pats.length&&pats.every(function(x){return /^(backup\.|restore\.)/.test(x);}))return 'Run Backups on Their Own';
@@ -1338,6 +1345,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
 /* One line under the title: a sentence (a rule's name is its own, and stays as it is). */
 function apprSub(p){var a=p.args||{};
   if(apprGoalCard(p))return apprGoalSub(p);
+  if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of its own number'+(k===1?'':'s'):'its own numbers')+' each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Flint starts reading this source.';
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create'){var cal=APPR_CALENDARS[a.source||'google_calendar'];return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
@@ -1360,6 +1368,7 @@ function apprFacts(p){var a=p.args||{},f=[];
     var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
+  else if(p.fullName===APPR_PREDICT){if(apprPredictCount(p))f.push(['Numbers',String(apprPredictCount(p))]);}
   /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole.
      The calendar is in the subtitle (apprSub), so the third fact stays Expires. */
   else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
@@ -1367,8 +1376,9 @@ function apprFacts(p){var a=p.args||{},f=[];
   if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
   return f.slice(0,3);}
 /* Asks on its own, never in Approve All, with a fresh touch: outside text, money, letting Flint add people by itself,
-   and every card marked consequential (each goal card, a plan change that is not a review's small one: apprSmallPlan). */
-function apprAlone(p){return !!p.consequential||!!APPR_GOAL[p.fullName]||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
+   and every card marked consequential (each goal card, a plan change that is not a review's small one: apprSmallPlan;
+   turning predictions on). */
+function apprAlone(p){return !!p.consequential||!!APPR_GOAL[p.fullName]||p.fullName===APPR_PREDICT||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&p.args.rows)||[]).some(function(r){return r&&r.pattern==='world.person.create';}));}
 function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
 

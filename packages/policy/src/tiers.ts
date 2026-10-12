@@ -8,7 +8,8 @@
  *  1. FORBIDDEN rules in code: NEVER_AUTO names, merges, trading pools, policy
  *     self-edits, self-modification outside the path allowlist, notification
  *     content pushes, anything about people (but world.person.create, P2.5),
- *     writes to Google, audit edits, prediction edits.
+ *     writes to Google, audit edits, prediction edits, and anything under
+ *     `prophet.` (P4: Flint forecasts on this Mac and calls no outside forecaster).
  *     Nothing below can loosen these.
  *  2. Context rules. An autonomous context may run only the closed
  *     AUTONOMOUS_ACTIONS list: no MCP tool and nothing else, ever. A tainted chat
@@ -153,6 +154,18 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'plan.change': fixed({ note: 'every plan change is a card Will signs; never promoted' }),
   'world.commitment.from_chat': approval({ note: 'quote-verified; lands unconfirmed' }),
   'nexus.remember_goal_decision': fixed({ egress: true, note: 'stays APPROVAL; not built in P3' }),
+  // Predictions (P4). Flint forecasts its own numbers on this Mac. The jobs run in
+  // shadow at APPROVAL (they write only Flint's own rows: a daily number, a run, a
+  // prediction, a question kept in the console), and nothing runs at all until
+  // Will signs forecast.series.enable, which is never promoted. The plan's name
+  // for the note, persona.calibration_note, is FORBIDDEN by the people rule
+  // (step 1), so it is calibration.note.
+  'forecast.series.build': approval({ shadow: true, note: "keeps each day's numbers for the series Flint forecasts" }),
+  'forecast.local': approval({ shadow: true, cap: { limit: 50, period: 'day' }, note: 'a forecast computed on this Mac; nothing leaves it' }),
+  'ledger.reason.local': approval({ write: false, shadow: true, cap: { limit: 30, period: 'day' }, note: "the local model's estimate; one call at a time, yields to chat" }),
+  'ledger.resolve.ask_will': approval({ shadow: true, cap: { limit: 5, period: 'day' }, note: 'a yes/no question for Will about a prediction that is due' }),
+  'calibration.note': approval({ write: false, shadow: true, note: "Flint's own track record, as numbers, in chat's context" }),
+  'forecast.series.enable': fixed({ note: "turning predictions on is Will's signature, never promoted" }),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
   // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
   'google.write': forbidden('Flint never writes to Google'),
@@ -161,6 +174,11 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'audit.update': forbidden('the audit trail is append-only'),
   'audit.delete': forbidden('the audit trail is append-only'),
   'ledger.prediction.edit': forbidden('a prediction is never edited after it is made'),
+  // An outside forecasting service (P4): Flint runs on its own and forecasts on this Mac. Forbidden by
+  // name, the three the service has and (step 1) anything else under `prophet.`.
+  'prophet.forecast_adhoc': forbidden('Flint forecasts on this Mac and calls no outside forecaster'),
+  'prophet.calibration': forbidden('Flint forecasts on this Mac and calls no outside forecaster'),
+  'prophet.models': forbidden('Flint forecasts on this Mac and calls no outside forecaster'),
   // Existing built-in chat tools keep today's behaviour (they ran without asking),
   // now audited; a tainted turn still moves their egress and writes to APPROVAL.
   calculate: { tier: 'alone', promotable: false, write: false },
@@ -199,6 +217,12 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   // P3: reviewing goals, and filing the plan changes a review suggests (each one a card Will signs).
   'goal.review.local',
   'plan.change',
+  // P4: Flint's own prediction jobs. Never the card that turns them on, never an outside forecaster.
+  'forecast.series.build',
+  'forecast.local',
+  'ledger.reason.local',
+  'ledger.resolve.ask_will',
+  'calibration.note',
 ]);
 
 /**
@@ -380,6 +404,8 @@ export function forbiddenReason(action: string, ctx: Pick<TierContext, 'mcp' | '
   if (!ctx.mcp && action.startsWith('google.')) return 'Flint never writes to Google';
   // Nor to Apple Calendar (P2.6).
   if (!ctx.mcp && action.startsWith('apple.')) return 'Flint never writes to Apple Calendar';
+  // Nor does it call an outside forecaster (P4): it forecasts on this Mac, and no series leaves it.
+  if (!ctx.mcp && action.startsWith('prophet.')) return 'Flint forecasts on this Mac and calls no outside forecaster';
   return undefined;
 }
 

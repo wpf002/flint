@@ -11,16 +11,27 @@ DROP TABLE IF EXISTS "EntityText" CASCADE;
 DROP FUNCTION IF EXISTS entity_forgotten_p25(), person_insert_guard(), person_source_guard() CASCADE;
 DO $$
 BEGIN
-  -- pg-boss's delete_queue fails on a queue that is not there (a half-applied migration).
-  IF to_regclass('pgboss.queue') IS NOT NULL AND EXISTS (SELECT 1 FROM pgboss.queue WHERE name = 'sync.google_calendar') THEN
-    PERFORM pgboss.delete_queue('sync.google_calendar');
+  -- pg-boss's delete_queue fails on a queue that is not there (a half-applied migration), and its table is
+  -- not there at all on an empty database. The two tests are nested: Postgres plans a whole IF condition at
+  -- once, so `to_regclass(...) IS NOT NULL AND EXISTS (SELECT ... FROM pgboss.queue ...)` fails without the table.
+  IF to_regclass('pgboss.queue') IS NOT NULL THEN
+    IF EXISTS (SELECT 1 FROM pgboss.queue WHERE name = 'sync.google_calendar') THEN
+      PERFORM pgboss.delete_queue('sync.google_calendar');
+    END IF;
   END IF;
 END;
 $$;
 -- P2's cursor list again (no calendar cursor); the source rows' list keeps google_calendar (see above).
-DELETE FROM "SourceCursor" WHERE "source" = 'google_calendar';
-ALTER TABLE "SourceCursor" DROP CONSTRAINT "SourceCursor_source_check",
-  ADD CONSTRAINT "SourceCursor_source_check" CHECK ("source" IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google', 'deploy', 'knowledge', 'nexus_inbox'));
+-- Only where the table is: on an empty database (the test helpers' first run) there is nothing to put back.
+DO $$
+BEGIN
+  IF to_regclass('public."SourceCursor"') IS NOT NULL THEN
+    DELETE FROM "SourceCursor" WHERE "source" = 'google_calendar';
+    ALTER TABLE "SourceCursor" DROP CONSTRAINT IF EXISTS "SourceCursor_source_check",
+      ADD CONSTRAINT "SourceCursor_source_check" CHECK ("source" IN ('launchd', 'health', 'git', 'spend', 'github', 'railway', 'nexus', 'google', 'deploy', 'knowledge', 'nexus_inbox'));
+  END IF;
+END;
+$$;
 DO $$
 BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN

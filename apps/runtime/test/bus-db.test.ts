@@ -61,6 +61,16 @@ describe.skipIf(NO_DB)('the job bus on pg-boss', () => {
     expect(ALL_QUEUES).toEqual(expect.arrayContaining(['goals.tick', 'goals.review', 'goals.plan']));
     const policy = Object.fromEntries((await b.boss.getQueues()).map((q) => [q.name, q.policy]));
     expect([policy['goals.tick'], policy['goals.review'], policy['goals.plan']]).toEqual(['singleton', 'stately', 'stately']);
+    // P4's six, made by its migration (nothing sends to them until predictions are on): five on a schedule, one per series.
+    const p4 = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask', 'forecast.reason'];
+    expect(ALL_QUEUES).toEqual(expect.arrayContaining(p4));
+    expect(p4.map((q) => policy[q])).toEqual(['singleton', 'singleton', 'singleton', 'singleton', 'singleton', 'stately']);
+    expect(QUEUES.predict).toEqual(['forecast.reason']);
+    expect(QUEUES.scheduled).toEqual(expect.arrayContaining(p4.slice(0, 5)));
+    const dead = Object.fromEntries((await b.boss.getQueues()).map((q) => [q.name, q.deadLetter]));
+    for (const q of p4) expect(dead[q], q).toBe('dead');
+    // Nothing is scheduled on them, and nothing waits in them.
+    expect((await b.boss.getSchedules()).filter((s) => p4.includes(s.name))).toEqual([]);
   });
 
   it('missing queue → degraded start: it refuses to start and names the queue', async () => {

@@ -236,17 +236,20 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect((await call('POST', '/v1/counters/claim', { action, limit: 1, period: 'day' })).statusCode).toBe(429);
     });
 
-    it('emit rejects missing criteria, a horizon over 180 days and a non-human probability outside [0.05, 0.95]', async () => {
-      const base = {
-        claim: 'the server stays up', probability: 0.8, method: 'rule', domain: 'services', type: 'event_occurs', evidence: [],
-        resolutionCriteria: 'health ok', resolver: 'auto_world', resolveBy: new Date(Date.now() + 86400_000).toISOString(),
-      };
+    // The body chat's ledger_record_prediction sends (packages/mcp/connectors/runtime-server.ts), field for field.
+    const chatBody = () => ({
+      claim: 'the server stays up', probability: 0.8, domain: 'services', type: 'event_occurs', resolutionCriteria: 'health ok',
+      resolveBy: new Date(Date.now() + 86400_000).toISOString(), method: 'model_reasoning', resolver: 'will', evidence: [], tainted: false,
+    });
+
+    it('emit rejects missing criteria, a horizon over 180 days and a probability outside [0.05, 0.95]', async () => {
+      const base = chatBody();
       expect((await call('POST', '/v1/ledger/predictions', base)).statusCode).toBe(201);
       const bad = async (over: Record<string, unknown>) => (await call('POST', '/v1/ledger/predictions', { ...base, ...over })).json().error as string;
       expect(await bad({ resolutionCriteria: ' ' })).toMatch(/criteria/);
       expect(await bad({ resolveBy: new Date(Date.now() + 181 * 86400_000).toISOString() })).toMatch(/180 days/);
       expect(await bad({ probability: 0.97 })).toMatch(/5%/);
-      expect(await bad({ probability: 0.02, method: 'model_reasoning' })).toMatch(/5%/);
+      expect(await bad({ probability: 0.02 })).toMatch(/5%/);
       expect(await bad({ tainted: true })).toMatch(/template/);
       const templated = await call('POST', '/v1/ledger/predictions', { ...base, claim: undefined, tainted: true, template: { id: 'closed_by', params: { entity: 'issue#abc123' } } });
       expect(templated.json().claim).toBe('issue#abc123 is closed by the resolve time');
@@ -254,10 +257,8 @@ describe.skipIf(NO_DB)('runtime API', () => {
     });
 
     it('a goal’s forecast is its review’s alone: the route takes no goal id and refuses the goal template (P3)', async () => {
-      const base = {
-        probability: 0.8, method: 'rule', domain: 'goals', type: 'deadline_met', evidence: [],
-        resolutionCriteria: 'the goal is done', resolver: 'auto_world', resolveBy: new Date(Date.now() + 86400_000).toISOString(),
-      };
+      // Chat's own body (the only one the route takes, P4), in the goals domain.
+      const base = { ...chatBody(), domain: 'goals', type: 'deadline_met', resolutionCriteria: 'the goal is done' };
       const before = (await call('GET', '/v1/ledger/open?limit=200')).json().predictions.length;
       // The runtime's own template, which only a review fills.
       expect((await call('POST', '/v1/ledger/predictions', { ...base, template: { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } } })).statusCode).toBe(400);
@@ -266,8 +267,96 @@ describe.skipIf(NO_DB)('runtime API', () => {
         expect((await call('POST', '/v1/ledger/predictions', { ...base, claim: 'a goal is done', ...extra })).statusCode, JSON.stringify(extra)).toBe(400);
       }
       expect((await call('GET', '/v1/ledger/open?limit=200')).json().predictions.length).toBe(before);
-      // A plain prediction in the goals domain, about no goal, is still anyone's to record.
+      // A plain prediction in the goals domain, about no goal, is still chat's to record.
       expect((await call('POST', '/v1/ledger/predictions', { ...base, claim: 'a goal is done' })).statusCode).toBe(201);
+    });
+
+    it('the ledger route takes only what chat sends (P4): no other method or resolver, no range, series or run, nothing chat does not send', async () => {
+      const before = (await owner(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n as number;
+      const post = (over: Record<string, unknown>) => call('POST', '/v1/ledger/predictions', { ...chatBody(), ...over });
+      // Chat's exact body is recorded, as the caller's own (the connector's token), a yes/no for Will to resolve.
+      const ok = await post({ claim: 'the deploy finishes today' });
+      expect(ok.statusCode).toBe(201);
+      expect((await owner(`SELECT kind, method, resolver, "createdBy", "seriesKey", "forecastRunId", "pointEstimate" FROM "Prediction" WHERE id = $1`, [ok.json().id])).rows[0])
+        .toEqual({ kind: 'binary', method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', seriesKey: null, forecastRunId: null, pointEstimate: null });
+      const refused = async (over: Record<string, unknown>, field: string) => {
+        const r = await post(over);
+        expect(r.statusCode, JSON.stringify(over)).toBe(400);
+        // The refusal names the field, never what was sent in it.
+        expect(r.json(), JSON.stringify(over)).toMatchObject({ error: 'invalid input' });
+        expect(r.json().issues.map((i: { path: string }) => i.path), JSON.stringify(over)).toContain(field);
+        expect(r.body, JSON.stringify(over)).not.toContain('31337');
+      };
+      // `human` would lift the 5% to 95% band; `statistical` and `prophet` would claim a forecast.
+      for (const method of ['human', 'statistical', 'prophet', 'rule', 'base_rate']) await refused({ method }, 'method');
+      await refused({ method: 'human', probability: 0.999 }, 'method');
+      for (const resolver of ['auto_metric', 'auto_world', 'conditional']) await refused({ resolver }, 'resolver');
+      await refused({ kind: 'interval' }, 'kind');
+      for (const [field, value] of Object.entries({
+        pointEstimate: 31337.4242, lower: 31337.4242, upper: 31337.4242, level: 0.8, unit: 'usd', seriesKey: 'daily.spend.anthropic.usd', forecastRunId: 'frtest31337',
+        subjectEntityId: 'entest0001', supersedesId: ok.json().id, conditionRecommendationId: 'rctest0001', resolverSpec: { entityId: 'x' }, model: 'some-model', modelConfig: { t: 0 },
+      })) await refused({ [field]: value }, '');
+      // A whole forecast, as the forecaster would write it: not over HTTP.
+      await refused({ kind: 'interval', method: 'statistical', resolver: 'auto_metric', seriesKey: 'daily.deploys.count', forecastRunId: 'frtest0001', pointEstimate: 4, lower: 2, upper: 6, level: 0.8, probability: undefined }, 'method');
+      // The forecaster's template is not chat's; and the body says whether the turn read outside text.
+      await refused({ claim: undefined, template: { id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } } }, 'template.id');
+      await refused({ tainted: undefined }, 'tainted');
+      expect((await owner(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n).toBe(before + 1);
+    });
+
+    it('the predictions card over HTTP (P4): filed from the console, refused from chat; run by the runtime, never claimed from outside; no card for an outside forecaster', async () => {
+      const card = (origin: string, action = 'forecast.series.enable', args: Record<string, unknown> = { series: ['daily.deploys.count'], reason: [] }) =>
+        call('POST', '/v1/proposals', { kind: 'tool_call', origin, action, args, argsProvenance: { series: { source: 'will', tainted: false } } });
+      const fromChat = await card('chat:conv1');
+      expect([fromChat.statusCode, fromChat.json().error]).toEqual([409, 'Predictions are turned on from the console.']);
+      for (const action of ['prophet.forecast_adhoc', 'prophet.models']) {
+        const outside = await card('console', action, { series: ['daily.deploys.count'] });
+        expect([outside.statusCode, outside.json().error], action).toEqual([409, 'forbidden: Flint forecasts on this Mac and calls no outside forecaster']);
+      }
+      const unknown = await card('console', 'forecast.series.enable', { series: ['daily.spend.acme.usd'], reason: [] });
+      expect([unknown.statusCode, unknown.json().error]).toEqual([400, 'That number can’t be forecast.']);
+      // A bad shape is refused with a sentence, and why (field paths and codes) goes to the log under a ref.
+      const shaped = await card('console', 'forecast.series.enable', { series: ['daily.deploys.count'], reason: ['daily.calendar.hours'] });
+      expect(shaped.statusCode).toBe(400);
+      expect(shaped.json()).toMatchObject({ error: 'This card isn’t valid.', ref: expect.stringMatching(/^ref[0-9a-z]+$/) });
+      const filed = await card('console');
+      expect(filed.statusCode).toBe(201);
+      expect(filed.json()).toMatchObject({ tier: 'approval', rule: 'code', deduped: false });
+      // The card is marked for Will's own touch: the console then asks for it on its own, never in Approve All.
+      expect((await call('GET', `/v1/proposals/${filed.json().id}`)).json().proposal).toMatchObject({ consequential: true, sensitivity: 'ops', reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.' });
+      const approvalId = await signApproval({ subjectId: filed.json().id, action: 'forecast.series.enable', argsDigest: filed.json().argsDigest });
+      expect((await call('POST', `/v1/proposals/${filed.json().id}/approve`, { approvalId })).statusCode).toBe(200);
+      const claim = await call('POST', `/v1/proposals/${filed.json().id}/claim`, {});
+      expect([claim.statusCode, claim.json().error]).toEqual([409, 'forecast.series.enable is carried out by the runtime: use /run']);
+      expect((await call('POST', `/v1/proposals/${filed.json().id}/run`, {})).json()).toEqual({ on: 1, reason: 0 });
+      expect((await owner(`SELECT "on", reason FROM "ForecastSeries" WHERE "seriesKey" = 'daily.deploys.count'`)).rows).toEqual([{ on: true, reason: false }]);
+      expect((await owner(`SELECT "offBoxAllowed" FROM "MetricSeries" WHERE key = 'daily.deploys.count'`)).rows[0].offBoxAllowed).toBe(false);
+    });
+
+    it('chat\'s list of open predictions never holds a forecast (P4): a series\' numbers do not reach chat through the ledger', async () => {
+      // daily.deploys.count was turned on by the card above. A run and its two predictions, as the forecaster will write them.
+      const app2 = (sql: string, params: unknown[]) => withClient(URLS!.app, (c) => c.query(sql, params));
+      const run = `fr${Date.now().toString(36)}`;
+      await app2(
+        `INSERT INTO "ForecastRun" (id, "seriesKey", provider, endpoint, "requestDigest", horizon, level, "beatsNaive", "naiveMase", "modelMase", scale, points, "latencyMs", ok)
+         VALUES ($1, 'daily.deploys.count', 'local', 'local:fc.v1', $2, 1, 0.8, true, 1.2, 0.9, 2, $3::jsonb, 4, true)`,
+        [run, digestOf({ r: run }), JSON.stringify([{ at: '2026-10-14T04:00:00.000Z', mean: 31337.4242, lo: 31336.4242, hi: 31338.4242 }])]);
+      const forecast = (id: string, kind: string, extra: string, values: string) => app2(
+        `INSERT INTO "Prediction" (id, claim, kind, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdBy", "seriesKey", "forecastRunId", unit${extra})
+         VALUES ($1, $2, $3, 'statistical', 'deploys', 'trend', '[]', 'synthetic', 'auto_metric', now() + interval '1 hour', 'runtime:forecast', 'daily.deploys.count', $4, 'count'${values})`,
+        [id, 'daily.deploys.count is between 31336.4242 and 31338.4242 on 2026-10-14', kind, run]);
+      await forecast(`pdr${run}`, 'interval', ', "pointEstimate", lower, upper, level', ', 31337.4242, 31336.4242, 31338.4242, 0.8');
+      await forecast(`pdq${run}`, 'binary', ', probability', ', 0.7');
+      const open = await call('GET', '/v1/ledger/open?limit=200');
+      expect(open.statusCode).toBe(200);
+      const ids = open.json().predictions.map((p: { id: string }) => p.id);
+      expect(ids).not.toContain(`pdr${run}`);
+      expect(ids).not.toContain(`pdq${run}`);
+      expect(open.body).not.toContain('31337');
+      expect(open.body).not.toContain('daily.deploys.count');
+      // Chat's own predictions are still listed (the ones the tests above recorded), soonest first.
+      expect(ids.length).toBeGreaterThanOrEqual(2);
+      expect(open.json().predictions.every((p: { seriesKey: string | null; forecastRunId: string | null }) => p.seriesKey === null && p.forecastRunId === null)).toBe(true);
     });
   });
 
