@@ -291,12 +291,13 @@ describe.skipIf(NO_DB)('P4: Turn On Predictions, as the runtime runs it', () => 
       const end = new Date(Date.now() + 86_400_000);
       const first = await snapshotCalibration(db, start, end);
       expect(first.length).toBeGreaterThan(0);
-      expect(first.every((r) => r.kind === 'binary' && r.brier !== null && r.baseRate !== null && r.ece === null && r.intervalCoverage === null)).toBe(true);
+      // Yes/no groups have a Brier score and no coverage; the range the test above recorded is a row of its own kind,
+      // with nothing scored yet (ledger/calibration-db.test.ts has the scores).
+      for (const r of first.filter((x) => x.kind === 'binary')) expect([r.brier !== null, r.baseRate !== null, r.ece, r.intervalCoverage]).toEqual([true, true, null, null]);
+      expect(first.filter((x) => x.kind === 'interval').map((r) => [r.domain, r.type, r.method, r.n, r.nOpen, r.brier, r.intervalCoverage, r.pinball])).toEqual([['spend', 'trend', 'statistical', 0, 1, null, 0, null]]);
       const again = await snapshotCalibration(db, start, end);
       expect(again.map((r) => r.id).sort()).toEqual(first.map((r) => r.id).sort());
       expect(await db.calibrationSnapshot.count()).toBe(first.length);
-      // Ranges are not scored yet: no row of kind interval is written by this part.
-      expect(await db.calibrationSnapshot.count({ where: { kind: 'interval' } })).toBe(0);
     });
   });
 

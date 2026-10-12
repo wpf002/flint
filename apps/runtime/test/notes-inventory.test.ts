@@ -17,7 +17,9 @@
  * Goal reviews (P3 part 3) post no note of their own. What they add to words
  * Will reads is held to the same rules here: the digest's line about the
  * goals Flint reviewed, what Goal Reviews says in Settings > Health, and the
- * sentences a goal route or a goal card is refused with.
+ * sentences a goal route or a goal card is refused with. The checks of Flint's
+ * own predictions (P4 part 2) post none either: what Prediction Checks says in
+ * Settings > Health is held to the same rules.
  *
  * The server's own notes and the shell scripts' banners have theirs:
  * apps/server/test/notes-inventory.test.ts.
@@ -30,7 +32,7 @@ import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
-import { GOAL_HEALTH } from '../src/health/checks';
+import { GOAL_HEALTH, LEDGER_HEALTH } from '../src/health/checks';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
 import { EDGES } from './surface/template-edges';
@@ -100,7 +102,7 @@ describe('the runtime’s notes to Will', () => {
   it('digest.ts: the morning digest, for any counts and any component that needs a look', () => {
     const zero = { relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 };
     const counts = [zero, { relevant: 1, quiet: 1, escalated: 1, did: 1, queued: 1, open: 1, due: 1 }, { relevant: 12, quiet: 340, escalated: 3, did: 25, queued: 4, open: 2, due: 7 }];
-    const degraded = [[], ['backup'], ['restore_drill', 'source:github'], ['audit_intents', 'backup', 'bus', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'], ['source:google_calendar', 'source:nexus_inbox', 'health_overdue', 'source:imessage']];
+    const degraded = [[], ['backup'], ['ledger'], ['restore_drill', 'source:github'], ['audit_intents', 'backup', 'bus', 'ledger', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'], ['source:google_calendar', 'source:nexus_inbox', 'health_overdue', 'source:imessage']];
     for (const day of ['2026-10-11', '2026-01-01', '2028-02-29']) {
       expect(digestTitle(day)).toMatch(/^Daily Summary for (Sun|Mon|Tue|Wed|Thu|Fri|Sat) [A-Z][a-z]{2} \d{1,2}$/);
       for (const c of counts) for (const d of degraded) plain('digest.ts', digestTitle(day), digestBody(c, d));
@@ -212,6 +214,45 @@ describe('the runtime’s notes to Will', () => {
     const refusals = { ...GOAL_SAYS, ...GOAL_STATUS_SAYS };
     for (const code of ['reviewsOff', 'reviewCap', 'notReady', 'replacedReview', 'reviewsStopped', 'minorCard', 'reviewStep', 'runtimeOrigin'] as const) expect(GOAL_SAYS[code], code).toBeTruthy();
     for (const [code, sentence] of Object.entries(refusals)) said(`GOAL_SAYS.${code}`, 'Goals', sentence);
+  });
+
+  it('prediction checks (P4): what Prediction Checks says in Settings > Health is plain sentences, from counts, and nothing else', () => {
+    const said = (line: string) => {
+      expect(noteProblems(HEALTH_NAMES.ledger!, line), line).toEqual([]);
+      for (const re of NEVER) expect(`${HEALTH_NAMES.ledger}\n${line}`, line).not.toMatch(re);
+      expect(line, line).toMatch(/^[A-Z].*\.$/);
+      // Counts and fixed words: never the ledger's own name for itself, a key, or an id.
+      expect(line, line).not.toMatch(/ledger|sweep|snapshot|resolver|spec\b|daily\.|pd[a-z0-9]{8}/i);
+      expect(line.length, line).toBeLessThanOrEqual(120);
+    };
+    const health = [
+      LEDGER_HEALTH.stopped, LEDGER_HEALTH.starting, LEDGER_HEALTH.down, LEDGER_HEALTH.noScores,
+      ...[0, 1, 2, 18, 240].map((n) => LEDGER_HEALTH.checked(n)),
+      // Run out is said beside what was checked, never as checked.
+      ...[[0, 1], [0, 7], [1, 1], [18, 2], [240, 31]].map(([n, out]) => LEDGER_HEALTH.checked(n!, out)),
+      ...[3, 8, 25].map((n) => LEDGER_HEALTH.late(n)),
+      ...[1, 2, 40].flatMap((n) => [LEDGER_HEALTH.refused(n), LEDGER_HEALTH.noRule(n)]),
+      ...[2, 3, 30].map((n) => LEDGER_HEALTH.scoresOld(n)),
+    ];
+    expect(health).toHaveLength(26);
+    for (const line of health) said(line);
+    expect(HEALTH_NAMES.ledger).toBe('Prediction Checks');
+    expect([LEDGER_HEALTH.checked(1), LEDGER_HEALTH.checked(18), LEDGER_HEALTH.late(3), LEDGER_HEALTH.refused(1), LEDGER_HEALTH.scoresOld(3)]).toEqual([
+      'Flint checked 1 prediction in the last day.', 'Flint checked 18 predictions in the last day.', 'Prediction checks haven’t run in 3 hours.',
+      'The database refused 1 prediction check.', 'Flint’s accuracy scores are 3 days old.',
+    ]);
+    expect([LEDGER_HEALTH.checked(0, 1), LEDGER_HEALTH.checked(0, 7), LEDGER_HEALTH.checked(18, 2), LEDGER_HEALTH.noScores]).toEqual([
+      'In the last day, 1 prediction ran out unchecked.', 'In the last day, 7 predictions ran out unchecked.',
+      'Flint checked 18 predictions in the last day, and 2 ran out unchecked.', 'Flint hasn’t scored its predictions yet.',
+    ]);
+    // Every sentence checks.ts can give for the component is one of these: none is put together where it is returned.
+    const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
+    const fn = checks.slice(checks.indexOf('async function predictionChecks('), checks.indexOf('/** How many of the latest plan stages Health looks at. */'));
+    expect(fn.length).toBeGreaterThan(500);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(10);
+    expect(fn.match(/detail: LEDGER_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(10);
+    // The digest names the component as Health does when it needs a look.
+    expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['ledger'])).toContain('Prediction Checks');
   });
 
   it('the inventory is not empty by accident', () => {

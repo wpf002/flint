@@ -86,6 +86,7 @@ async function candidates(db: Db, now: Date): Promise<string[]> {
                    AND s."dueAt" > ${now} AND s."dueAt" <= ${new Date(now.getTime() + STEP_DUE_MS)})
       OR EXISTS (SELECT 1 FROM "Resolution" r JOIN "Prediction" pr ON pr.id = r."predictionId"
                  WHERE r.outcome = false AND r."resolvedAt" > ${new Date(now.getTime() - RESOLUTION_WINDOW_MS)}
+                   AND r."eventAt" > ${new Date(now.getTime() - RESOLUTION_WINDOW_MS)}
                    AND pr."goalId" IS NULL AND EXISTS (SELECT 1 FROM "GoalEntity" ge WHERE ge."goalId" = g.id AND ge."entityId" = pr."subjectEntityId")))
     ORDER BY g.id LIMIT ${GOALS_PER_TICK}`;
   return rows.map((r) => r.id);
@@ -112,12 +113,16 @@ async function watched(tx: Tx, goalId: string): Promise<string | undefined> {
 /**
  * A forecast about one of the goal's items that came false since the link was
  * made, with no review of the goal since. Never a goal's own onTrack forecast
- * (Prediction.goalId is set on those alone).
+ * (Prediction.goalId is set on those alone). Recent means both recorded in the
+ * last week and about the last week: a result written late about something
+ * long past (the first check of old predictions) is news to nobody, and wakes
+ * no review.
  */
 async function falseForecast(tx: Tx, goalId: string, now: Date): Promise<string | undefined> {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT r.id FROM "Resolution" r JOIN "Prediction" pr ON pr.id = r."predictionId"
     WHERE r.outcome = false AND r."resolvedAt" > ${new Date(now.getTime() - RESOLUTION_WINDOW_MS)}
+      AND r."eventAt" > ${new Date(now.getTime() - RESOLUTION_WINDOW_MS)}
       AND pr."goalId" IS NULL
       AND EXISTS (SELECT 1 FROM "GoalEntity" ge WHERE ge."goalId" = ${goalId} AND ge."entityId" = pr."subjectEntityId" AND r."resolvedAt" >= ge."createdAt")
       AND NOT EXISTS (SELECT 1 FROM "GoalReview" gr WHERE gr."goalId" = ${goalId} AND gr."createdAt" >= r."resolvedAt")

@@ -21,6 +21,7 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   rebuild_rehearsal: 'Rebuild Rehearsal',
   triage: 'Triage',
   goals: 'Goal Reviews',
+  ledger: 'Prediction Checks',
   runtime: 'Runtime',
 };
 

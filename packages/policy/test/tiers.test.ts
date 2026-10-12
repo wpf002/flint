@@ -593,11 +593,23 @@ describe('P4: predictions', () => {
     }
   });
 
-  it('P1\'s three ledger housekeeping actions are unchanged here (they turn to shadow with the code that runs them)', () => {
+  it('P1\'s three ledger housekeeping actions run in shadow at APPROVAL, now that code runs them (P4 part 2): Flint\'s own rows, nothing delivered', () => {
     for (const a of ['ledger.resolve.auto', 'ledger.expire', 'ledger.calibration.snapshot']) {
-      expect(CODE_TABLE[a], a).toMatchObject({ tier: 'approval', promotable: true });
-      expect(runsInShadow(a), a).toBe(false);
+      expect(CODE_TABLE[a], a).toMatchObject({ tier: 'approval', promotable: true, shadow: true });
+      expect(CODE_TABLE[a]!.cap, a).toBeUndefined();
+      expect(CODE_TABLE[a]!.egress, a).not.toBe(true);
+      expect(runsInShadow(a), a).toBe(true);
       expect(AUTONOMOUS_ACTIONS.has(a), a).toBe(true);
+      // A job may run them: APPROVAL in shadow from an autonomous context, ALONE once a policy row promotes them.
+      expect(resolveTier(a, { ...auto, now: NOW }).tier, a).toBe('approval');
+      expect(resolveTier(a, { ...auto, policies: [row(a, 'alone')], now: NOW }).tier, a).toBe('alone');
+      // A rule may still forbid one, and then it does not run at all.
+      expect(resolveTier(a, { ...auto, policies: [row(a, 'forbidden')], now: NOW }).tier, a).toBe('forbidden');
+    }
+    // What needs Will's signature stays out of shadow: voiding a prediction and correcting a result.
+    for (const a of ['ledger.void', 'ledger.resolution.correct']) {
+      expect(CODE_TABLE[a], a).toMatchObject({ tier: 'approval', promotable: false });
+      expect(runsInShadow(a), a).toBe(false);
     }
   });
 });
