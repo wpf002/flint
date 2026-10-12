@@ -60,6 +60,9 @@ secrets.env  FLINT_TIER_TOOL_SCORE                restore   number
 secrets.env  FLINT_TTS_VOICE                      restore   word
 secrets.env  FLINT_TTS_MODEL                      restore   model
 secrets.env  FLINT_WORLD_NOW                      restore   onoff
+secrets.env  FLINT_CONTEXT_BLOCKS                 restore   onoff
+secrets.env  FLINT_GOALS_NOW                      restore   onoff
+secrets.env  FLINT_GOALS_TO_FRONTIER              reenter   Safety-Switch
 secrets.env  FLINT_WATCHER                        restore   onoff
 secrets.env  FLINT_WATCH_MS                       restore   number
 secrets.env  FLINT_WATCH_SIGNALS                  restore   onoff
