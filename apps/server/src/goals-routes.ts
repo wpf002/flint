@@ -19,8 +19,9 @@
  * console does. A goal card is filed with the runtime straight away: nothing is
  * ever spooled to disk (RuntimeProposals.propose would write its args there), so
  * a runtime that is down is a 503 and nothing changed. A write the runtime did
- * not answer in time is a 504 that says Flint isn't sure it went through (the
- * runtime may still finish it): the same card filed again is the same card. The
+ * not answer (in time, or because the connection dropped on the way) is a 504
+ * that says Flint isn't sure it went through (the runtime may still finish it):
+ * the same card filed again is the same card. The
  * runtime's own words never pass through: a refusal reaches the
  * console only as one of GOAL_SAYS's codes and its fixed sentence. A runtime
  * 401 or 403 is a 502 (the console forgets its token on a 401); a 404 on the
@@ -71,8 +72,13 @@ export interface GoalsDeps {
 export const GOALS_BODY_BYTES = 64 * 1024;
 const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 30_000;
-/** ask()'s status for a call the runtime did not answer in time (0: it could not be reached at all). */
-const TIMED_OUT = -2;
+/**
+ * ask()'s status for a call that reached the runtime, or may have, and got no answer: it timed out, or the
+ * connection dropped on the way. (0: the runtime could not be reached at all, so it got nothing.)
+ */
+const NO_ANSWER = -2;
+/** A connection that was never made: the request did not leave. */
+const UNREACHED: ReadonlySet<string> = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'EAI_AGAIN']);
 /** The largest runtime answer the server reads. */
 const MAX_ANSWER = 2 * 1024 * 1024;
 
@@ -102,7 +108,7 @@ function reply(res: ServerResponse, status: number, body: unknown): true {
 
 type Answer = { ok: true; json: unknown } | { ok: false; status: number; code?: unknown };
 
-/** One call to the runtime: its JSON, or its status (0: unreachable; TIMED_OUT: no answer in time) and a refusal's code. The body is always read or cancelled. */
+/** One call to the runtime: its JSON, or its status (0: unreachable; NO_ANSWER: sent, or maybe sent, and not answered) and a refusal's code. The body is always read or cancelled. */
 async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: string, body?: unknown): Promise<Answer> {
   try {
     const r = await (deps.fetchImpl ?? fetch)(`${rt.url}${path}`, {
@@ -124,8 +130,12 @@ async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: s
     }
     return { ok: true, json: JSON.parse(text) as unknown };
   } catch (err) {
-    const name = (err as { name?: unknown } | null)?.name;
-    return { ok: false, status: name === 'TimeoutError' || name === 'AbortError' ? TIMED_OUT : 0 };
+    // Only a connection that was never made is "the runtime got nothing". A timeout, a reset, a socket closed
+    // mid-answer: the runtime may have the request, and a write may still land.
+    const cause = (err as { cause?: { code?: unknown; errors?: Array<{ code?: unknown }> } } | null)?.cause;
+    // One address, or several tried in turn (localhost): unreached only when every attempt was.
+    const codes = Array.isArray(cause?.errors) && cause.errors.length ? cause.errors.map((e) => e?.code) : [cause?.code];
+    return { ok: false, status: codes.every((c) => typeof c === 'string' && UNREACHED.has(c)) ? 0 : NO_ANSWER };
   }
 }
 
@@ -133,8 +143,9 @@ async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: s
 function failed(res: ServerResponse, deps: GoalsDeps, a: { status: number; code?: unknown }, what: string, read: boolean, list: boolean): true {
   const s = a.status;
   if (s === 0) return reply(res, 503, { error: read ? GOALS_SAY.down : GOALS_SAY.downWrite });
-  // No answer in time: a read just did not load; a write may still land, and saying "nothing changed" would be a guess.
-  if (s === TIMED_OUT) return read ? reply(res, 503, { error: GOALS_SAY.down }) : reply(res, 504, { error: GOALS_SAY.unsure });
+  // No answer (in time, or the connection dropped): a read just did not load; a write may still land, and saying
+  // "nothing changed" would be a guess.
+  if (s === NO_ANSWER) return read ? reply(res, 503, { error: GOALS_SAY.down }) : reply(res, 504, { error: GOALS_SAY.unsure });
   if (s === 401 || s === 403) return reply(res, 502, { error: GOALS_SAY.token });
   // A refusal the runtime named by a code in the closed set: its fixed sentence, and the code.
   const say = goalSayOf(a.code);

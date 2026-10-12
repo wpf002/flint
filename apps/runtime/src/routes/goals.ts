@@ -26,6 +26,7 @@ import {
   GOAL_CARD_VERBS,
   GOAL_TABS,
   GoalAnswer,
+  GoalDone,
   GoalFiled,
   GoalId,
   GoalsPage,
@@ -121,7 +122,7 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
     if (verb === 'pause' || verb === 'dismiss') {
       parse(EmptyBody, req.body ?? {});
       await (verb === 'pause' ? pauseGoal(db, id) : dismissGoal(db, id));
-      return { ok: true };
+      return out(GoalDone, { ok: true });
     }
     const v = verb as GoalCardVerb;
     const body = parse(GOAL_CARD_BODIES[v], req.body) as { args: Record<string, unknown> & { goalId: string } };
@@ -132,13 +133,13 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
     const { id, cid } = parse(Criterion, req.params);
     const { met } = parse(MarkBody, req.body);
     await markCriterion(db, id, cid, met, tz);
-    return { ok: true };
+    return out(GoalDone, { ok: true });
   }));
 
   app.post('/v1/goals/:id/steps/:key', pre, guarded(async (req) => {
     const { id, key } = parse(Step, req.params);
     const { status } = parse(StepBody, req.body);
     await setStep(db, id, key, status);
-    return { ok: true };
+    return out(GoalDone, { ok: true });
   }));
 }

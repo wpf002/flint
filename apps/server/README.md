@@ -304,8 +304,8 @@ src/goals-routes.ts, with the console's full token only. Every id and body (up t
 checked with @flint/policy's goal contracts before the runtime sees it, and every answer
 before the console does. A goal card is filed with the runtime at once and never spooled to
 disk, so a runtime that is down is a 503 and nothing changed. A write the runtime doesn't
-answer in time is a 504 that says Flint isn't sure it went through; filing the same card
-again is safe (it is the same card). A refusal reaches the console
+answer (in time, or because the connection dropped on the way) is a 504 that says Flint
+isn't sure it went through; filing the same card again is safe (it is the same card). A refusal reaches the console
 only as one of the fixed goal sentences, by its code. A runtime that refuses the server's
 token is a 502; a runtime without the routes answers 404, which is a 501 here, and the
 console then hides its Goals button. The item search is a POST, so what Will types never lands

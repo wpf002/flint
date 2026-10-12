@@ -92,6 +92,9 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     };
   }
   const goalTitle = `${CANARY} goal`;
+  /** What a goal was, as a card that changes it says in `from`: its definition and links, or its timing. */
+  const was = (a: Record<string, unknown>) => ({ title: a.title, description: a.description ?? '', successCriteria: a.successCriteria, links: a.links ?? [] });
+  const timed = (a: Record<string, unknown>) => ({ horizonAt: a.horizonAt ?? null, reviewCadence: a.reviewCadence ?? 'P1W' });
 
   it('a new goal with its links and first plan takes one signature', async () => {
     const { args, pr } = await newGoal();
@@ -144,20 +147,25 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     const issue = await entity('issue', { number: 8, state: 'open' });
     await expect(file('goal.activate', { ...args, successCriteria: [crit('c1', { kind: 'item', entityId: issue, key: 'state', value: 'merged' })], links: [{ entityId: issue, role: 'target', watchPaths: [] }] })).rejects.toMatchObject({ status: 400, message: SAY.checkItem });
     // Cards for a goal that does not exist yet, or not in a state to take them.
-    for (const [action, a] of [['goal.done', { goalId: gid, goalTitle }], ['goal.abandon', { goalId: gid, goalTitle }], ['goal.horizon_change', { goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1D' }]] as const) {
+    for (const [action, a] of [['goal.done', { goalId: gid, goalTitle }], ['goal.abandon', { goalId: gid, goalTitle }], ['goal.horizon_change', { goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1D', from: timed(args) }]] as const) {
       await expect(file(action, a)).rejects.toMatchObject({ status: 409, message: SAY.noGoal });
     }
     await fileSignRun('goal.activate', args);
     await expect(file('goal.done', { goalId: gid, goalTitle: 'Another title' })).rejects.toMatchObject({ status: 409, message: SAY.looked });
-    await expect(file('goal.horizon_change', { goalId: gid, goalTitle, horizonAt: args.horizonAt, reviewCadence: 'P1W' })).rejects.toMatchObject({ status: 400, message: SAY.nothing });
-    await expect(file('goal.criteria_change', { goalId: gid, title: args.title, description: args.description, successCriteria: args.successCriteria, links: args.links })).rejects.toMatchObject({ status: 400, message: SAY.nothing });
-    await expect(file('goal.criteria_change', { goalId: gid, title: 'T', successCriteria: [crit('c1', { kind: 'steps', keys: ['s7'] })], links: [] })).rejects.toMatchObject({ status: 400, message: SAY.checkStep });
+    await expect(file('goal.horizon_change', { goalId: gid, goalTitle, horizonAt: args.horizonAt, reviewCadence: 'P1W', from: timed(args) })).rejects.toMatchObject({ status: 400, message: SAY.nothing });
+    await expect(file('goal.criteria_change', { goalId: gid, title: args.title, description: args.description, successCriteria: args.successCriteria, links: args.links, from: was(args) })).rejects.toMatchObject({ status: 400, message: SAY.nothing });
+    await expect(file('goal.criteria_change', { goalId: gid, title: 'T', successCriteria: [crit('c1', { kind: 'steps', keys: ['s7'] })], links: [], from: was(args) })).rejects.toMatchObject({ status: 400, message: SAY.checkStep });
+    // A change says what it changes from, whoever files it (the console or the CLI): without it, it is not a card.
+    await expect(file('goal.horizon_change', { goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1M' })).rejects.toMatchObject({ status: 400, message: SAY.invalid });
+    await expect(file('goal.criteria_change', { goalId: gid, title: 'T', successCriteria: [crit('c1')], links: [] }, { origin: 'cli' })).rejects.toMatchObject({ status: 400, message: SAY.invalid });
+    // And from something the goal is not: refused.
+    await expect(file('goal.horizon_change', { goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1M', from: { horizonAt: null, reviewCadence: 'P2W' } })).rejects.toMatchObject({ status: 409, message: SAY.looked });
     // Reasons: each card's own fixed sentence, whatever the caller sent.
     const reasons = {
       'goal.done': [{ goalId: gid, goalTitle }, 'Approving marks it done.'],
       'goal.abandon': [{ goalId: gid, goalTitle }, 'Approving abandons it for good.'],
-      'goal.horizon_change': [{ goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1M' }, 'Approving changes its timing.'],
-      'goal.criteria_change': [{ goalId: gid, title: 'Synthetic other title', successCriteria: [crit('c1')], links: [] }, 'Approving changes what counts as done.'],
+      'goal.horizon_change': [{ goalId: gid, goalTitle, horizonAt: null, reviewCadence: 'P1M', from: timed(args) }, 'Approving changes its timing.'],
+      'goal.criteria_change': [{ goalId: gid, title: 'Synthetic other title', successCriteria: [crit('c1')], links: [], from: was(args) }, 'Approving changes what counts as done.'],
       'plan.change': [{ goalId: gid, goalTitle, ops: [addOp('s3')] }, 'You asked for this change.'],
     } as const;
     for (const [action, [a, reason]] of Object.entries(reasons)) {
@@ -184,7 +192,7 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     await db.goal.update({ where: { id: gid }, data: { criteriaMet: { c2: '2026-10-08' } } });
     const thread = await entity('thread', { status: 'open' });
     const links = [(args.links as Array<{ entityId: string }>).find((l) => l.entityId !== svc)!, { entityId: thread, role: 'watch', watchPaths: ['status'] }];
-    const changed = await fileSignRun('goal.criteria_change', { goalId: gid, title: `${CANARY} goal, sharper`, successCriteria: [(args.successCriteria as unknown[])[0], crit('c3')], links });
+    const changed = await fileSignRun('goal.criteria_change', { goalId: gid, title: `${CANARY} goal, sharper`, successCriteria: [(args.successCriteria as unknown[])[0], crit('c3')], links, from: was(args) });
     expect(changed.result).toMatchObject({ goalId: gid, criteria: 2, linksAdded: 1, linksRemoved: 1, marksCleared: 1 });
     const after = await db.goal.findUniqueOrThrow({ where: { id: gid }, include: { links: true } });
     expect(after.criteriaMet).toEqual({});
@@ -193,7 +201,7 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     // A shorter cadence brings the next review forward to its first slot; the horizon moves as signed.
     await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() + 6 * DAY) } });
     const horizonAt = iso(Date.now() + 30 * DAY);
-    const retimed = await fileSignRun('goal.horizon_change', { goalId: gid, goalTitle: `${CANARY} goal, sharper`, horizonAt, reviewCadence: 'P1D' });
+    const retimed = await fileSignRun('goal.horizon_change', { goalId: gid, goalTitle: `${CANARY} goal, sharper`, horizonAt, reviewCadence: 'P1D', from: timed(args) });
     expect(retimed.result).toEqual({ goalId: gid, reviewMoved: true });
     const t = await db.goal.findUniqueOrThrow({ where: { id: gid } });
     expect(t.horizonAt?.toISOString()).toBe(horizonAt);
@@ -385,7 +393,7 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     const c1 = (args.successCriteria as Array<Record<string, unknown>>)[0]!;
     await db.goal.update({ where: { id: gid }, data: { criteriaMet: { c1: '2026-10-08', c2: '2026-10-08' } } });
     // c1 as it was; c2's id now holds another check.
-    const changed = await fileSignRun('goal.criteria_change', { goalId: gid, title: `${CANARY} goal`, successCriteria: [c1, crit('c2')], links: args.links });
+    const changed = await fileSignRun('goal.criteria_change', { goalId: gid, title: `${CANARY} goal`, successCriteria: [c1, crit('c2')], links: args.links, from: was(args) });
     expect(changed.result).toMatchObject({ marksCleared: 1 });
     expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).criteriaMet).toEqual({ c1: '2026-10-08' });
   });

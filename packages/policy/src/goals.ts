@@ -324,27 +324,26 @@ export const GoalActivateArgs = z
 
 /**
  * What a goal was when a card to change it was filed: the card's precondition,
- * signed with it, as a plan operation's `from` is. A card whose goal no longer
- * matches does not apply (an older card approved after a newer change would
- * otherwise undo it). The executor checks it; the database compares only the new
- * values with the row (a check of `from` there would need a migration).
+ * signed with it, as a plan operation's `from` is. Every such card carries it,
+ * whoever files it (the console's routes, or the CLI straight at the runtime). A
+ * card whose goal no longer matches does not apply (an older card approved after
+ * a newer change would otherwise undo it). The executor checks it; the database
+ * compares only the new values with the row (a check of `from` there would need
+ * a migration).
  */
 export const DefinitionFrom = z.object({ title: GoalTitle, description: Description, successCriteria: SuccessCriteria, links: Links }).strict();
 export const TimingFrom = z.object({ horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES) }).strict();
 
-/**
- * goal.criteria_change: what counts as done (title, description, checks) and the whole new set of links;
- * `from`, what they were (every card the console files says so).
- */
+/** goal.criteria_change: what counts as done (title, description, checks) and the whole new set of links; `from`, what they were. */
 export const GoalCriteriaChangeArgs = z
-  .object({ goalId: GoalId, title: GoalTitle, description: Description.default(''), successCriteria: SuccessCriteria, links: Links, from: DefinitionFrom.optional() })
+  .object({ goalId: GoalId, title: GoalTitle, description: Description.default(''), successCriteria: SuccessCriteria, links: Links, from: DefinitionFrom })
   .strict()
   .superRefine(itemsLinked)
   .refine(fits, OVER);
 
 /** goal.horizon_change: when it should be done by, and how often it is reviewed; `from`, what they were. The title is for the card only. */
 export const GoalHorizonChangeArgs = z
-  .object({ goalId: GoalId, goalTitle: GoalTitle, horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES), from: TimingFrom.optional() })
+  .object({ goalId: GoalId, goalTitle: GoalTitle, horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES), from: TimingFrom })
   .strict();
 
 /** goal.done and goal.abandon: the goal, and its title for the card. */
@@ -529,8 +528,8 @@ export const NewGoalBody = z
  * brings no plan; a change to what counts as done or to the timing says what it changes from.
  */
 export const GOAL_CARD_BODIES = {
-  edit: z.object({ args: GoalCriteriaChangeArgs }).strict().refine((b) => b.args.from !== undefined, { message: 'says what it changes from', path: ['args', 'from'] }),
-  timing: z.object({ args: GoalHorizonChangeArgs }).strict().refine((b) => b.args.from !== undefined, { message: 'says what it changes from', path: ['args', 'from'] }),
+  edit: z.object({ args: GoalCriteriaChangeArgs }).strict(),
+  timing: z.object({ args: GoalHorizonChangeArgs }).strict(),
   done: z.object({ args: GoalDoneArgs }).strict(),
   abandon: z.object({ args: GoalAbandonArgs }).strict(),
   resume: z.object({ args: GoalActivateArgs }).strict().refine((b) => b.args.plan === null, { message: 'resuming brings no plan', path: ['args', 'plan'] }),

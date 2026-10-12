@@ -45,6 +45,11 @@ describe('labels and conditions', () => {
     for (const x of [thread, e('service', 'service:railway:svc1', 'Outside service words', ['name'])]) {
       expect(label(x)).not.toMatch(/Outside|#|en0123|456789/);
     }
+    // The second and third of its kind first seen that day say so; the first needs no number.
+    expect(labelOf(thread, 'America/Chicago', NOW, 2)).toBe('Nexus Thread 2 from Oct 3');
+    expect(labelOf(thread, 'America/Chicago', NOW, 1)).toBe('Nexus Thread from Oct 3');
+    // An item with a label of its own never takes a number.
+    expect(labelOf(e('pull_request', 'pull_request:github:wpf002/flint#57', 'x', ['name']), 'UTC', NOW, 3)).toBe('wpf002/flint #57');
   });
 
   it('a label never outgrows the wire: a long repo name is clipped, its number kept', () => {
@@ -139,6 +144,24 @@ describe.skipIf(NO_DB)('linkable items on flint_test', () => {
     expect(found).toEqual([expect.objectContaining({ entityId: t, kind: 'thread', title: 'Synthetic okapi thread goal', conditions: [{ key: 'status', value: 'archived' }] })]);
     expect(found[0]!.label).toMatch(/^Nexus Thread from [A-Z][a-z]{2} \d{1,2}$/);
     expect(found[0]!.label).not.toContain(t.slice(-6));
+  });
+
+  it('two threads Flint first saw the same day are told apart, by their place that day, never by their words or ids', async () => {
+    const a = await entity('thread', 'thread:nexus:thr0002', 'Synthetic lemur thread one', { status: 'open' }, { taintedPaths: ['name'] });
+    const b = await entity('thread', 'thread:nexus:thr0003', 'Synthetic lemur thread two', { status: 'open' }, { taintedPaths: ['name'] });
+    const labels = async () => new Map((await linkable(db, 'lemur', 'UTC')).map((i) => [i.entityId, i.label]));
+    const first = await labels();
+    // The thread from the test before is the day's first; these are its second and third.
+    expect(first.get(a)).toMatch(/^Nexus Thread 2 from [A-Z][a-z]{2} \d{1,2}$/);
+    expect(first.get(b)).toMatch(/^Nexus Thread 3 from [A-Z][a-z]{2} \d{1,2}$/);
+    expect((await linkable(db, 'okapi', 'UTC'))[0]!.label).toMatch(/^Nexus Thread from /);
+    for (const l of first.values()) expect(l).not.toMatch(/lemur|thr000|Synthetic/);
+    // A label is fixed once given: a later thread takes the next place, and the earlier ones keep theirs.
+    await entity('thread', 'thread:nexus:thr0004', 'Synthetic lemur thread three', { status: 'open' }, { taintedPaths: ['name'] });
+    const again = await labels();
+    expect(again.get(a)).toBe(first.get(a));
+    expect(again.get(b)).toBe(first.get(b));
+    expect(new Set(again.values()).size).toBe(3);
   });
 
   it('a merged item is read as the item it became, through three merges and no further', async () => {

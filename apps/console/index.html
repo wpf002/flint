@@ -258,7 +258,11 @@
   .gitem b{flex:1;min-width:0;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   textarea.field{height:auto;min-height:60px;padding:8px 10px;line-height:18px;resize:vertical;}
   select.field{padding:0 8px;}
+  /* A date not set says "No Date" (never today's date as if it were chosen); with the cursor in it, the browser's own hint, dimmed. */
+  .fl{position:relative;}
   .field.gempty::-webkit-datetime-edit{opacity:.45;}
+  .field.gempty:not(:focus)::-webkit-datetime-edit{opacity:0;}
+  .fl:has(>.field.gempty:not(:focus))::after{content:"No Date";position:absolute;left:10px;bottom:0;line-height:32px;font-size:13px;color:var(--t3);pointer-events:none;}
   .gfound{padding:0 0 8px;}
   .gcheck,.gstep{position:relative;}
   .gcheck.gxr>.formrow,.gstep{padding-right:48px;}
@@ -333,6 +337,7 @@
     .gform .formrow{flex-wrap:wrap;} .gform .fl{flex-basis:100%;} #goalfoot .gleft{flex-basis:100%;}
     .ct{align-items:flex-start;} .ct b{white-space:normal;} .ct svg.i{margin-top:2px;}
     .row.gwrap{flex-wrap:wrap;} .row.gwrap .lbl{flex:1 1 55%;} .row.gwrap>.ghost{margin-left:auto;}
+    .fl:has(>.field.gempty:not(:focus))::after{font-size:16px;}
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
@@ -458,7 +463,7 @@
 </div></div>
 
 <div class="overlay" id="goals" onclick="if(event.target===this)closeGoals()"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="goalsttl">
-  <div class="mh"><button class="xb" id="goalback" onclick="goalBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="goalsttl">Goals</h2><button class="ghost" id="goaladd" onclick="goalNew()"><svg class="i"><use href="#i-plus"/></svg>Add Goal</button><button class="xb" onclick="closeGoals()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mh"><button class="xb" id="goalback" onclick="goalBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="goalsttl">Goals</h2><button class="ghost" id="goaladd" onclick="goalNew()"><svg class="i"><use href="#i-plus"/></svg>Add Goal</button><button class="ghost" id="goalclear" onclick="goalClearAsk()" hidden>Clear</button><button class="xb" onclick="closeGoals()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
   <div class="mb" id="goalbody"></div>
   <div class="mf" id="goalfoot" hidden></div>
 </div></div>
@@ -1295,7 +1300,8 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
     no.onclick=function(){rejectAction(p.id,card);setTimeout(loadApprovals,1200);};
-    ok.onclick=function(){approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args}).then(function(){setTimeout(loadApprovals,1200);},function(){});};
+    ok.onclick=function(){approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args}).then(function(d){
+      if(d&&d.action&&d.action.status==='done'&&typeof goalsApproved==='function')goalsApproved(p);setTimeout(loadApprovals,1200);},function(){});};
     row.appendChild(show);row.appendChild(no);row.appendChild(ok);card.appendChild(row);card.appendChild(det);}
   else{row.hidden=true;card.appendChild(row);card.classList.add('click');card.onclick=function(){APPR.open=p.id;apprRender();};}
   card.appendChild(res);card.setAttribute('data-id',p.id);
@@ -1368,7 +1374,7 @@ pollApprovals();setInterval(pollApprovals,60000);
  * card left waiting can never undo a later change. Pausing, his own marks and his steps' progress need
  * no signature. Goal text is his own and is shown as text only, never HTML; an item is named by its
  * label, and its title (outside text) appears only in the picker, marked. What the panel has to say
- * (an error, an outcome, "Waiting for your approval.") is said in the footer, which never scrolls away.
+ * (an error, an outcome, "Flint is waiting for your approval.") is said in the footer, which never scrolls away.
  * A half-typed New Goal is kept until it is added or cleared. ES5, no confirm(), alert() or prompt():
  * the Mac app's web view has none. Reviews come in a later part: until then nothing is late. */
 var GOALS={tab:'active',view:'list',page:null,suggested:0,goal:null,form:null,draft:null,busy:false,seq:0,nav:0,note:null,timer:null};
@@ -1416,7 +1422,12 @@ function gGoalPath(g,rest){return '/goals/'+encodeURIComponent(g.id)+(rest||'');
 /* ---------- the panel ---------- */
 function goalsShown(on){var b=document.getElementById('goalsbtn');if(b)b.hidden=!on;}
 /* The header's gold dot: a goal card waits for Will (reviews, and so lateness, come later). */
-function goalsDot(proposals){var d=document.getElementById('goalsdot');if(!d)return;var n=(proposals||[]).filter(function(p){return p.status==='pending'&&/^(goal\.|plan\.change$)/.test(String(p.fullName||''));}).length;d.hidden=!(n>0);}
+function goalsDot(proposals){(proposals||[]).forEach(function(p){if(p.status==='approved')goalsApproved(p);});
+  var d=document.getElementById('goalsdot');if(!d)return;var n=(proposals||[]).filter(function(p){return p.status==='pending'&&/^(goal\.|plan\.change$)/.test(String(p.fullName||''));}).length;d.hidden=!(n>0);}
+/* A New Goal draft is spent once its goal exists: its card was approved (here or in Approvals), or the goal is in a list.
+   Opening New Goal then starts a new one, never the form of a goal Will already has. */
+function goalDraftIs(goalId,cardId){var f=GOALS.draft;return !!f&&((!!goalId&&goalId==='go'+f.draftKey)||(!!cardId&&cardId===f.cardId));}
+function goalsApproved(p){if(p&&goalDraftIs(p.args&&p.args.goalId,p.id))GOALS.draft=null;}
 /* An older runtime (or none) answers 501: no Goals button at all. */
 function goalsProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall('/goals?tab=active').then(function(){goalsShown(true);},function(e){goalsShown(e.status!==501&&e.status!==401);});}
 function goalsOpen(){var p=document.getElementById('goals');return !!(p&&p.classList&&p.classList.contains('open'));}
@@ -1428,7 +1439,8 @@ function openGoals(){if(typeof TOKEN!=='undefined'&&!TOKEN){if(typeof openSettin
   if(typeof showPanel==='function')showPanel('goals',true);if(typeof loadCreds==='function')loadCreds();goalList(GOALS.tab);}
 /* Closing keeps a half-typed New Goal (GOALS.draft): it is there when New Goal opens again. */
 function closeGoals(){if(typeof showPanel==='function')showPanel('goals',false);goalNav('list');GOALS.form=null;if(typeof pollApprovals==='function')pollApprovals();}
-function goalHead(title,back,add){document.getElementById('goalsttl').textContent=title;document.getElementById('goalback').hidden=!back;document.getElementById('goaladd').hidden=!add;}
+function goalHead(title,back,add,clear){document.getElementById('goalsttl').textContent=title;document.getElementById('goalback').hidden=!back;document.getElementById('goaladd').hidden=!add;
+  var c=document.getElementById('goalclear');if(c)c.hidden=!clear;}
 /* The footer: what the panel has to say, on a line of its own that never scrolls away, then the view's buttons. */
 function goalFoot(){var f=document.getElementById('goalfoot');f.textContent='';f.hidden=true;var m=gEl('div','res');m.id='goalmsg';m.hidden=true;m.setAttribute('role','status');f.appendChild(m);return f;}
 /* kind: bad (an error, the default), ok (an outcome) or wait (in progress). An empty message leaves a footer with nothing else hidden. */
@@ -1455,6 +1467,7 @@ function goalList(tab){goalNav('list');GOALS.tab=tab||'active';GOALS.goal=null;G
     if(GOALS.tab!=='suggested')gCall('/goals?tab=suggested').then(function(s){GOALS.suggested=(s.goals||[]).length;var b=document.getElementById('goaltab-suggested');if(b)b.hidden=!(GOALS.suggested>0);},function(){});
   },function(e){if(seq!==GOALS.seq)return;if(e.status===501)goalsShown(false);list.textContent='';list.appendChild(goalFailed(e,function(){goalList(GOALS.tab);}));});}
 function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.waiting||[];
+  goals.forEach(function(x){if(goalDraftIs(x.id))GOALS.draft=null;});
   document.getElementById('goaladd').hidden=GOALS.tab==='active'&&!goals.length&&!waiting.length;
   if(!goals.length&&!waiting.length){
     if(GOALS.tab==='active')list.appendChild(goalEmpty('No Goals Yet','Add something you’re working toward, and Flint keeps track of it.',gBtn('btn pri','Add Goal',function(){goalNew();})));
@@ -1480,18 +1493,19 @@ function goalLine(x){if(x.status==='done')return 'It was done on '+gDay(x.endedA
 function goalTags(x){var t=[];if(x.status==='paused')t.push(gTag('Paused'));if(x.origin==='flint')t.push(gTag('From Chat'));if(x.waiting>0)t.push(gTag('Waiting for You',true));return t;}
 
 /* ---------- one goal, open ---------- */
-function goalOpen(id,note){goalNav('goal');GOALS.form=null;var seq=++GOALS.seq;goalHead('Goals',true,false);goalFoot();var body=goalBody();body.appendChild(gEl('div','empty','Loading…'));
-  gCall('/goals/'+encodeURIComponent(id)).then(function(d){if(seq!==GOALS.seq)return;GOALS.goal=d.goal;goalShow(d.goal,note);},
-    function(e){if(seq!==GOALS.seq)return;var b=goalBody();b.appendChild(goalFailed(e,function(){goalOpen(id);}));});}
+/* `refresh`: the goal is on screen already (a mark, a tick, a change just landed). It is read again and redrawn in place,
+   where Will had scrolled to, with no "Loading…" in between. */
+function goalOpen(id,note,refresh){goalNav('goal');GOALS.form=null;var seq=++GOALS.seq;
+  if(!refresh){goalHead('Goals',true,false);goalFoot();goalBody().appendChild(gEl('div','empty','Loading…'));}
+  gCall('/goals/'+encodeURIComponent(id)).then(function(d){if(seq!==GOALS.seq)return;GOALS.goal=d.goal;goalShow(d.goal,note,refresh);},
+    function(e){if(seq!==GOALS.seq)return;goalHead('Goals',true,false);goalFoot();var b=goalBody();b.appendChild(goalFailed(e,function(){goalOpen(id);}));});}
 function goalLive(g){return g.status==='active'||g.status==='paused';}
 function goalLinkOf(g,entityId){for(var i=0;i<(g.links||[]).length;i++)if(g.links[i].entityId===entityId)return g.links[i];return null;}
 function goalStateOf(g,cid){for(var i=0;i<(g.criteria||[]).length;i++)if(g.criteria[i].id===cid)return g.criteria[i].state;return 'unknown';}
 function goalFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,label));row.appendChild(l);row.appendChild(gEl('span','val',value));return row;}
 /* The goal's links as a card states them: the item, its role and the fields it watches, in item order. */
 function goalRawLinks(g){return (g.links||[]).map(function(l){return {entityId:l.entityId,role:l.role,watchPaths:gSorted(l.watchPaths||[])};}).sort(gById);}
-function goalShow(g,note){goalHead(g.title,true,false);var body=goalBody();
-  /* The header keeps two lines of a title: a longer one is here in full. */
-  if(String(g.title).length>36)body.appendChild(gEl('div','gfull',g.title));
+function goalShow(g,note,keep){goalHead(g.title,true,false);var el=document.getElementById('goalbody'),top=keep?(el.scrollTop||0):0;var body=goalBody();
   var c=g.checks||{met:0,total:0};
   var facts=gEl('div','group');facts.appendChild(goalFact('Checks',c.met+' of '+c.total+' Met'));
   facts.appendChild(goalFact('Finish By',g.horizonAt?gDay(g.horizonAt):'No Date'));
@@ -1507,7 +1521,9 @@ function goalShow(g,note){goalHead(g.title,true,false);var body=goalBody();
   if(goalLive(g)){var add=gEl('div','gact');add.id='goaladdstep';add.appendChild(gBtn('ghost','Add Step',function(){goalAddStep(g,add);}));body.appendChild(add);}
   if((g.waiting||[]).length){var n=g.waiting.length;var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,n+(n===1?' change waits':' changes wait')+' for you in Approvals.'));
     wt.appendChild(gBtn('ghost','Open Approvals',function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));body.appendChild(wt);}
-  goalActions(g);if(note)goalMsg(note,'ok');}
+  /* The header keeps two lines of a title. Only when that cuts it short is it here too, in full. */
+  var h=document.getElementById('goalsttl');if(h&&h.scrollHeight>h.clientHeight+1)body.insertBefore(gEl('div','gfull',g.title),body.children[0]||null);
+  el.scrollTop=top;goalActions(g);if(note)goalMsg(note,'ok');}
 function goalCheckRow(g,cr){var st=goalStateOf(g,cr.id),w=GOAL_STATE[st]||GOAL_STATE.unknown;var row=gEl('div','row two gwrap');
   var dot=gEl('span','st '+w[1]);dot.appendChild(gEl('i'));row.appendChild(dot);
   var l=gEl('span','lbl');l.appendChild(gEl('b',null,cr.text));l.appendChild(gEl('span',null,goalCheckLine(g,cr)));row.appendChild(l);
@@ -1529,11 +1545,13 @@ function goalStepRow(g,s){var row=gEl('div','row two gwrap');var dot=gEl('span',
   return row;}
 
 /* ---------- unsigned: marks, steps, pause, dismiss ---------- */
-/* An answer that comes back after Will has left this goal changes nothing he sees. */
+/* An answer that lands after Will has gone elsewhere never pulls him back: it only redraws what he is looking at, if
+   that is a list or a goal (so neither is stale), and leaves a form alone. */
+function goalAway(){if(!goalsOpen())return;if(GOALS.view==='list')goalList(GOALS.tab);else if(GOALS.view==='goal'&&GOALS.goal)goalOpen(GOALS.goal.id,null,true);}
 function goalPlain(path,body,b,after){if(GOALS.busy)return;GOALS.busy=true;if(b)b.disabled=true;var here=goalHere();
-  gCall(path,body).then(function(){GOALS.busy=false;if(here())after();},function(e){GOALS.busy=false;if(b)b.disabled=false;if(here())goalMsg(gSay(e));});}
-function goalMark(g,cid,met,b){goalPlain(gGoalPath(g,'/criteria/'+cid),{met:met},b,function(){goalOpen(g.id);});}
-function goalTick(g,key,status,b){goalPlain(gGoalPath(g,'/steps/'+key),{status:status},b,function(){goalOpen(g.id);});}
+  gCall(path,body).then(function(){GOALS.busy=false;if(here())after();else goalAway();},function(e){GOALS.busy=false;if(b)b.disabled=false;if(here())goalMsg(gSay(e));});}
+function goalMark(g,cid,met,b){goalPlain(gGoalPath(g,'/criteria/'+cid),{met:met},b,function(){goalOpen(g.id,null,true);});}
+function goalTick(g,key,status,b){goalPlain(gGoalPath(g,'/steps/'+key),{status:status},b,function(){goalOpen(g.id,null,true);});}
 
 /* ---------- signed: a card filed, then signed here with a fresh touch ---------- */
 /* approveAction writes its outcome into a card's .prow and .res: the panel gives it one of its own, out of sight, and says the outcome in its own words. */
@@ -1541,17 +1559,18 @@ function goalHost(){var h=gEl('div');var row=gEl('div','prow');row.hidden=true;v
   h.querySelector=function(sel){return sel==='.prow'?row:sel==='.res'?res:null;};return h;}
 function goalCancelled(e){return gSay(e)==='Cancelled.'||(e&&e.name==='NotAllowedError');}
 /* File the card (o.path, o.body), then sign exactly o.args, the args the panel showed: nothing is signed unless their
-   digest is the one asked for. While the prompt is up the buttons are off and the footer says it is waiting. o.done runs
-   when it ran and Will is still here; o.away when it ran after he went elsewhere. */
+   digest is the one asked for. While the prompt is up the buttons are off and the footer says it is waiting. o.filed gets
+   the card's id; o.done runs when it ran and Will is still here; when it ran after he went elsewhere, o.away (if any)
+   and then whatever list or goal he is looking at is redrawn. */
 function goalSign(o){
   if(!gKeyed()){goalNeedsKey();return;}
   if(GOALS.busy)return;GOALS.busy=true;var buttons=o.buttons||[];buttons.forEach(function(b){b.disabled=true;});var filed=false,here=goalHere();
-  goalMsg('Waiting for your approval.','wait');
+  goalMsg('Flint is waiting for your approval.','wait');
   var end=function(){GOALS.busy=false;buttons.forEach(function(b){b.disabled=false;});};
-  gCall(o.path,o.body).then(function(d){filed=true;if(typeof approveAction!=='function')throw new Error('This device needs an approval key.');
+  gCall(o.path,o.body).then(function(d){filed=true;if(o.filed)o.filed(d.id);if(typeof approveAction!=='function')throw new Error('This device needs an approval key.');
     return approveAction(d.id,goalHost(),{fresh:true,reason:o.prompt,args:o.args});
   }).then(function(r){end();var a=(r&&r.action)||{},ok=a.status==='done';
-    if(!here()){if(ok&&o.away)o.away();return;}
+    if(!here()){if(ok){if(o.away)o.away();goalAway();}return;}
     if(ok)o.done();else goalMsg(a.status==='approved'?'Approved. It hasn’t run yet.':gSay(a.error||'It failed.'));
   },function(e){end();if(here())goalMsg(filed&&goalCancelled(e)?'Cancelled. It’s waiting in Approvals.':gSay(e));});}
 
@@ -1564,7 +1583,7 @@ function goalActions(g){var f=goalFoot();
   var left=gEl('span','gleft');
   left.appendChild(gBtn('ghost','Edit Goal',function(){goalEdit(g);}));
   left.appendChild(gBtn('ghost','Change Timing',function(){goalTiming(g);}));
-  if(g.status==='active')left.appendChild(gBtn('ghost','Pause',function(b){goalPlain(gGoalPath(g,'/pause'),{},b,function(){goalOpen(g.id,'It’s paused, so Flint won’t review it until you resume it.');});}));
+  if(g.status==='active')left.appendChild(gBtn('ghost','Pause',function(b){goalPlain(gGoalPath(g,'/pause'),{},b,function(){goalOpen(g.id,'It’s paused, so Flint won’t review it until you resume it.',true);});}));
   f.appendChild(left);
   f.appendChild(gBtn('btn','Abandon Goal',function(){goalConfirm(g,'abandon');}));
   if(g.status==='paused')f.appendChild(gBtn('btn pri',gLabel('Resume'),function(b){goalResume(g,'resume',[b]);}));
@@ -1576,25 +1595,25 @@ function goalConfirm(g,what){var f=goalFoot();f.hidden=false;var c=g.checks||{me
   f.appendChild(t);var cancel=gBtn('btn','Cancel',function(){goalActions(g);});f.appendChild(cancel);
   var args={goalId:g.id,goalTitle:g.title};
   var go=gBtn('btn pri',gLabel(what==='done'?'Mark Goal Done':'Abandon'),function(){
-    goalSign({path:gGoalPath(g,'/'+what),body:{args:args},args:args,prompt:gPrompt(what),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY[what]);}});});
+    goalSign({path:gGoalPath(g,'/'+what),body:{args:args},args:args,prompt:gPrompt(what),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY[what],true);}});});
   f.appendChild(go);}
 /* Resuming a paused goal (or starting one Flint suggested) signs exactly what the goal is, and no plan. */
 function goalResumeArgs(g){return {goalId:g.id,owner:g.owner,origin:g.origin,sensitivity:g.sensitivity,tainted:g.tainted,nexusProjectId:g.nexusProjectId,title:g.title,description:g.description,
   successCriteria:g.successCriteria,horizonAt:g.horizonAt,reviewCadence:g.reviewCadence,links:goalRawLinks(g),plan:null};}
 function goalResume(g,what,buttons){var args=goalResumeArgs(g);
-  goalSign({path:gGoalPath(g,'/resume'),body:{args:args},args:args,prompt:gPrompt(what),buttons:buttons,done:function(){goalOpen(g.id,GOAL_DONE_SAY[what]);}});}
+  goalSign({path:gGoalPath(g,'/resume'),body:{args:args},args:args,prompt:gPrompt(what),buttons:buttons,done:function(){goalOpen(g.id,GOAL_DONE_SAY[what],true);}});}
 
 /* Add Step: a field and its date, signed as a plan change. */
 function goalAddStep(g,box){box.textContent='';box.className='gadd';goalMsg('');var grp=gEl('div','group gform');
   var row=gEl('div','formrow');var t=goalField('Step','input','What’s next',200);var due=goalField('Due','date',null,null,'');row.appendChild(t.wrap);row.appendChild(due.wrap);grp.appendChild(row);box.appendChild(grp);
-  var act=gEl('div','gact');var cancel=gBtn('ghost','Cancel',function(){goalShow(g);});
+  var act=gEl('div','gact');var cancel=gBtn('ghost','Cancel',function(){goalShow(g,null,true);});
   var go=gBtn('btn pri',gLabel('Add'),function(){var title=gClean(t.input.value);
     if(!title){goalMsg('Give the step a name.');return;}
     if(due.input.value&&due.input.value<gLocalDay()){goalMsg('Pick a step date that isn’t past.');return;}
     var steps=(g.plan&&g.plan.steps)||[],n=0,ord=0;steps.forEach(function(s){n=Math.max(n,Number(s.key.slice(1))||0);ord=Math.max(ord,s.ordinal);});
     if(n>=999||steps.length>=1000){goalMsg('This plan has no room for another step.');return;}
     var args={goalId:g.id,goalTitle:g.title,ops:[{op:'add',key:'s'+(n+1),step:{ordinal:Math.min(1000000,ord+100),title:title.slice(0,200),kind:'will_task',tier:'approval',dueAt:due.input.value?gAt(due.input.value,17,0):null,dependsOn:[]}}]};
-    goalSign({path:gGoalPath(g,'/plan'),body:{args:args},args:args,prompt:gPrompt('step'),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY.step);}});});
+    goalSign({path:gGoalPath(g,'/plan'),body:{args:args},args:args,prompt:gPrompt('step'),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY.step,true);}});});
   act.appendChild(cancel);act.appendChild(go);box.appendChild(act);if(t.input.focus)t.input.focus();}
 
 /* Change Timing: its finish date and how often it is reviewed. The card says what it changes from. */
@@ -1634,11 +1653,18 @@ function goalBlank(){return {mode:'new',draftKey:gDraftKey(),title:'',why:'',che
 /* New Goal opens on the draft Will left, if he left one: Escape, a click outside and Back all keep it; Clear starts over. */
 function goalNew(){if(!GOALS.draft||GOALS.draft.done)GOALS.draft=goalBlank();GOALS.form=GOALS.draft;goalNav('form');goalForm('name');}
 function goalClear(){GOALS.draft=goalBlank();GOALS.form=GOALS.draft;goalForm('name');}
+/* Has Will put anything in this form? */
+function goalDirty(f){return !!(gClean(f.title)||gClean(f.why)||f.finishBy||f.cadence!=='P1W'||f.checks.length>1||f.steps.length>1||
+  f.checks.some(function(c){return gClean(c.text)||c.method!=='manual'||c.item;})||f.steps.some(function(s){return gClean(s.title)||s.due;}));}
+/* Clear asks in place before it wipes what Will typed (there is no undo); an untouched form has nothing to ask about. */
+function goalClearAsk(){var f=GOALS.form;if(!f||f.mode!=='new'||f.done||GOALS.busy)return;if(!goalDirty(f)){goalClear();return;}
+  var foot=goalFoot();foot.hidden=false;var t=gEl('span','note gconfirm');t.appendChild(gEl('b',null,'Clear This Goal?'));t.appendChild(gEl('span',null,'What you typed here is removed.'));foot.appendChild(t);
+  foot.appendChild(gBtn('btn','Cancel',function(){goalFormFoot();}));foot.appendChild(gBtn('btn pri','Clear',function(){goalClear();}));}
 function goalEdit(g){var checks=(g.successCriteria||[]).map(function(c){var k=c.check||{},link=k.kind==='item'?goalLinkOf(g,k.entityId):null;
     return {id:c.id,text:c.text,method:k.kind,q:'',orig:c,cond:k.kind==='item'?k.key+' '+k.value:'',
       item:k.kind==='item'?{entityId:k.entityId,label:link?link.label:'its item',kind:link?link.kind:'',conditions:(link&&link.conditions&&link.conditions.length)?link.conditions:[{key:k.key,value:k.value}]}:null};});
   GOALS.form={mode:'edit',goal:g,title:g.title,why:g.description,checks:checks,done:false};goalNav('edit');goalForm('name');}
-function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false);
+function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false,f.mode==='new'&&!f.done);
   var body=document.getElementById('goalbody'),top=body.scrollTop||0;body.textContent='';
   if(f.done){goalFormDone(body);return;}
   var form=gEl('div','gform');
@@ -1689,7 +1715,7 @@ function goalFind(q,box,c,i){var seq=box.seq=(box.seq||0)+1;box.textContent='';b
       row.onclick=pick;row.onkeydown=function(e){if(e&&e.key==='Enter')pick();};box.appendChild(row);});
   },function(e){if(seq!==box.seq)return;box.textContent='';box.appendChild(gEl('div','err',gSay(e)));});}
 function goalFormFoot(){var f=GOALS.form;if(!gKeyed()){goalNeedsKey();return;}
-  var foot=goalFoot();foot.hidden=false;var left=gEl('span','gleft');if(f.mode==='new')left.appendChild(gBtn('ghost','Clear',function(){goalClear();}));foot.appendChild(left);
+  var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
   var cancel=gBtn('btn','Cancel',function(){if(f.mode==='edit'){goalNav('goal');GOALS.form=null;goalShow(f.goal);}else goalList(GOALS.tab);});
   var go=gBtn('btn pri',gLabel(f.mode==='edit'?'Save':'Add Goal'),function(){goalSubmit([go,cancel]);});
   foot.appendChild(cancel);foot.appendChild(go);}
@@ -1730,8 +1756,8 @@ function goalSubmit(buttons){var f=GOALS.form;if(!f||GOALS.busy)return;goalMsg('
       plan:steps.length?{ops:steps.map(function(s,j){return {op:'add',key:'s'+(j+1),step:{ordinal:(j+1)*100,title:gClean(s.title).slice(0,200),kind:'will_task',tier:'approval',dueAt:s.due?gAt(s.due,17,0):null,dependsOn:[]}};})}:null};
     /* Added: the draft is spent. If Will has gone back to the list meanwhile, the list shows the new goal. */
     var spent=function(){f.done=true;if(GOALS.draft===f)GOALS.draft=null;};
-    goalSign({path:'/goals',body:{draftKey:f.draftKey,args:args},args:args,prompt:gPrompt('add'),buttons:buttons,done:function(){spent();goalForm();},
-      away:function(){spent();if(GOALS.view==='list'&&goalsOpen())goalList(GOALS.tab);}});
+    goalSign({path:'/goals',body:{draftKey:f.draftKey,args:args},args:args,prompt:gPrompt('add'),buttons:buttons,filed:function(id){f.cardId=id;},
+      done:function(){spent();goalForm();},away:spent});
     return;}
   var g=f.goal;var live=((g.plan&&g.plan.steps)||[]).filter(function(s){return s.status!=='skipped';}).map(function(s){return s.key;});
   var ce=goalCriteria(f,live);if(ce.error){goalFormError(ce.error,ce.at);return;}

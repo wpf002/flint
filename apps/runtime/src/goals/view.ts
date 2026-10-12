@@ -19,7 +19,7 @@ import {
 } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf, type ItemFacts, type StepFacts } from './criteria.js';
-import { conditionsOf, labelOf } from './items.js';
+import { conditionsOf, labelFor } from './items.js';
 import { stepState } from './ops.js';
 
 /** Reviews are part 3's: until then they are off, and so is lateness. */
@@ -139,11 +139,11 @@ export async function goalView(db: Db | Tx, id: string, tz: string, now = new Da
   const items = await itemFacts(db, checkedItems(criteria));
   const steps = planRow ? planRow.steps.map(stepState) : null;
   const e = evaluate(criteria, marksOf(g), steps, items);
-  const links = linkRows.map((l) => ({
+  const links = await Promise.all(linkRows.map(async (l) => ({
     entityId: l.entityId, role: l.role as Link['role'], watchPaths: [...l.watchPaths].sort(),
-    label: labelOf(l.entity, tz, now), kind: l.entity.kind, status: l.entity.status as GoalView['links'][number]['status'],
+    label: await labelFor(db, l.entity, tz, now), kind: l.entity.kind, status: l.entity.status as GoalView['links'][number]['status'],
     conditions: conditionsOf(l.entity.kind),
-  }));
+  })));
   return {
     id: g.id, title: g.title, description: g.description, status: g.status as GoalView['status'],
     owner: g.owner as GoalView['owner'], origin: g.origin as GoalView['origin'], sensitivity: g.sensitivity as GoalView['sensitivity'],

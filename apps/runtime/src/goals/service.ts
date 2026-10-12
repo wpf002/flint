@@ -43,13 +43,13 @@ async function file(db: Db, action: GoalSignedAction, args: Record<string, unkno
 
 /**
  * The newer card wins: Will's other cards of this action still waiting for this
- * goal are rejected (unsigned, with a fixed sentence) once a new one is filed. A
- * card left waiting after a cancelled prompt can then never be approved later
- * over the change that replaced it.
+ * goal, from the console or the CLI, are rejected (unsigned, with a fixed
+ * sentence) once a new one is filed. A card left waiting after a cancelled prompt
+ * can then never be approved later over the change that replaced it.
  */
 async function supersede(db: Db, action: GoalSignedAction, goalId: string, keep: string): Promise<void> {
   const older = await db.proposal.findMany({
-    where: { status: 'pending', action, origin: 'console', id: { not: keep }, args: { path: ['goalId'], equals: goalId } },
+    where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: keep }, args: { path: ['goalId'], equals: goalId } },
     select: { id: true },
   });
   for (const o of older) await rejectProposal(db, o.id, { error: SAY.replaced }, undefined, CONSOLE_ACTOR).catch(() => {});

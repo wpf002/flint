@@ -299,11 +299,13 @@ token (`world:read|ledger`) can never read a goal's words. `GET ?tab=` and
 `GET /:id` answer the panel; `POST` files a new goal's card from the form's draft
 key (the goal's id is made from it, so the same form twice is one card, and a
 changed form's card replaces the one still waiting); `POST /:id/edit|timing|done|abandon|resume|plan`
-files that card with exactly the args the panel showed (`edit` and `timing` must
+files that card with exactly the args the panel showed (`edit` and `timing`
 carry `from`, what the goal was, and replace an older card of theirs still
-waiting); `POST /:id/pause|dismiss`, `/:id/criteria/:cid` and `/:id/steps/:key`
-are the unsigned writes; `POST /linkable` lists items by a label made from their
-key or from what they are ("Nexus Thread from Oct 3"), never a title or a raw id.
+waiting, whether it came from the console or the CLI); `POST /:id/pause|dismiss`,
+`/:id/criteria/:cid` and `/:id/steps/:key` are the unsigned writes; `POST /linkable`
+lists items by a label made from their key or from what they are ("Nexus Thread
+from Oct 3", and "Nexus Thread 2 from Oct 3" for the second one first seen that
+day), never a title or a raw id.
 A refusal is one of the fixed sentences in @flint/policy (`GOAL_SAYS`) with its
 code.
 
@@ -353,8 +355,9 @@ code.
   A card to change what counts as done, or the timing, signs `from` (what the
   goal was), and the runtime refuses it when the goal no longer matches. The
   database still compares only the new values with the row; checking `from`
-  there too would need a migration. The contract leaves `from` optional so part
-  1's cards read as before, but the goal routes refuse a card without it.
+  there too would need a migration. Every such card must carry `from`, however
+  it is filed (the console, or the CLI straight at the runtime): one without it
+  is refused when filed and again when it runs.
 - **Older card kinds.** For goal and plan cards the database checks that the
   digest you sign is the digest of the stored args. For older kinds it doesn't
   yet (P1's `consume_approval` compares two digests, not args). For every kind,

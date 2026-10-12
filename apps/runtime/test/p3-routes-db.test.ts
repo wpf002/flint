@@ -258,6 +258,15 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
     const plan = (await call('POST', `/v1/goals/${gid}/plan`, { args: { goalId: gid, goalTitle: args.title, ops: [step('s1', 1)] } })).body.id as string;
     const otherView = await view(other.gid);
     const otherEdit = (await call('POST', `/v1/goals/${other.gid}/edit`, { args: { goalId: other.gid, title: `${CANARY} other edit`, description: '', successCriteria: otherView.successCriteria, links: [], from: definitionOf(otherView) } })).body.id as string;
+    // A card filed at the terminal (origin cli, straight at the runtime's proposals) is held to the same rule: it
+    // says what it changes from, or it is not a card; and a newer change from the console replaces it too.
+    const cli = (a: Record<string, unknown>) => call('POST', '/v1/proposals', { kind: 'goal', origin: 'cli', action: 'goal.criteria_change', args: a, argsProvenance: { args: { source: 'will', tainted: false } }, sensitivity: 'personal' });
+    const cliArgs = { goalId: gid, title: `${CANARY} cli edit`, description: v.description, successCriteria: v.successCriteria, links: [] };
+    expect(await cli(cliArgs)).toMatchObject({ status: 400, body: { error: 'This goal card isn’t valid.' } });
+    expect(await call('POST', '/v1/proposals', { kind: 'goal', origin: 'cli', action: 'goal.horizon_change', args: { goalId: gid, goalTitle: v.title, horizonAt: null, reviewCadence: 'P1D' }, argsProvenance: {}, sensitivity: 'personal' }))
+      .toMatchObject({ status: 400, body: { error: 'This goal card isn’t valid.' } });
+    const cliCard = await cli({ ...cliArgs, from: definitionOf(v) });
+    expect(cliCard.status).toBe(201);
     // The same card again is that card, and replaces nothing.
     expect((await edit(`${CANARY} edit A`)).body).toEqual({ id: editA, deduped: true });
     expect(await statusOf(editA)).toBe('pending');
@@ -265,6 +274,7 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
     const timingB = (await timing('P2W')).body.id as string;
     expect(await db.proposal.findUniqueOrThrow({ where: { id: editA } })).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: timingA } })).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: cliCard.body.id as string } })).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
     for (const pid of [editB, timingB, done, plan, otherEdit]) expect(await statusOf(pid), pid).toBe('pending');
     expect((await view(gid)).waiting.map((w) => w.id).sort()).toEqual([editB, timingB, done, plan].sort());
   });

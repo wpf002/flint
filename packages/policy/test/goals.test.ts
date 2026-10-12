@@ -126,10 +126,15 @@ describe('goal args', () => {
   });
 
   it('the other cards: exact fields, a title for display, and every args object under 64 KB', () => {
-    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')] }).success).toBe(false); // links are required
-    expect(GoalCriteriaChangeArgs.parse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [] })).toMatchObject({ description: '' });
-    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M' }).success).toBe(true);
-    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', reviewCadence: 'P1M' }).success).toBe(false);
+    // A change says what it changes from (its precondition, signed with it): what the goal was.
+    const was = { title: 'Was', description: '', successCriteria: [crit('c1')], links: [] };
+    const timingWas = { horizonAt: null, reviewCadence: 'P1W' };
+    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], from: was }).success).toBe(false); // links are required
+    expect(GoalCriteriaChangeArgs.parse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [], from: was })).toMatchObject({ description: '' });
+    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [] }).success).toBe(false); // so is what it changes from
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M', from: timingWas }).success).toBe(true);
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M' }).success).toBe(false);
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', reviewCadence: 'P1M', from: timingWas }).success).toBe(false);
     expect(GoalDoneArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', note: 'x' }).success).toBe(false);
     const big = activate({ description: 'x'.repeat(1000), successCriteria: Array.from({ length: 10 }, (_, i) => crit(`c${i + 1}`)) });
     expect(jsonbSize(big)).toBeLessThan(65536);
@@ -326,9 +331,9 @@ describe('the goals panel’s wire (P3 part 2)', () => {
     expect(GOAL_CARD_BODIES.timing.safeParse({ args: timing }).success).toBe(false);
     expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null, reviewCadence: 'P1W' } } }).success).toBe(true);
     expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null } } }).success).toBe(false);
-    // The contract itself leaves `from` out for a card that has none (part 1's), and its digest is unchanged by that.
-    expect(GoalHorizonChangeArgs.parse(timing)).toEqual(timing);
-    expect(Object.keys(GoalCriteriaChangeArgs.parse(edit))).not.toContain('from');
+    // The contract itself requires it: a card filed by any other way (the CLI, straight at the runtime) is held to it too.
+    expect(GoalHorizonChangeArgs.safeParse(timing).success).toBe(false);
+    expect(GoalCriteriaChangeArgs.safeParse(edit).success).toBe(false);
     expect(StepBody.safeParse({ status: 'skipped' }).success).toBe(false);
     expect(MarkBody.safeParse({ met: true, at: 'x' }).success).toBe(false);
     expect(LinkableBody.safeParse({ q: 'x'.repeat(81) }).success).toBe(false);

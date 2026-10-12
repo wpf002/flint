@@ -42,6 +42,8 @@ let asked: Array<{ method: string; url: string; auth: string | undefined; body: 
 let answer: (req: { method: string; url: string; body: string }) => { status: number; body: unknown };
 let runtime: Server;
 let rtUrl: string;
+/** A port nothing listens on: a runtime that is down. */
+let downUrl: string;
 let server: Server;
 let base: string;
 let logged: string[];
@@ -49,6 +51,8 @@ let deps: GoalsDeps;
 let up: boolean;
 /** How long the stand-in runtime waits before it answers. */
 let delayMs: number;
+/** The stand-in runtime reads the request, then drops the connection without answering. */
+let drop: boolean;
 
 beforeAll(async () => {
   runtime = createServer((req, res) => {
@@ -56,6 +60,7 @@ beforeAll(async () => {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       asked.push({ method: req.method!, url: req.url!, auth: req.headers.authorization, body });
+      if (drop) return void req.socket.destroy();
       const a = answer({ method: req.method!, url: req.url!, body });
       setTimeout(() => {
         res.writeHead(a.status, { 'content-type': 'application/json' });
@@ -65,6 +70,10 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => runtime.listen(0, '::1', r));
   rtUrl = `http://[::1]:${(runtime.address() as AddressInfo).port}`;
+  const closed = createServer();
+  await new Promise<void>((r) => closed.listen(0, '::1', r));
+  downUrl = `http://[::1]:${(closed.address() as AddressInfo).port}`;
+  await new Promise<void>((r) => closed.close(() => r()));
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void goalsRoutes(req, res, req.url ?? '/', deps).then((handled) => {
       if (!handled) {
@@ -85,9 +94,10 @@ beforeEach(() => {
   logged = [];
   up = true;
   delayMs = 0;
+  drop = false;
   answer = () => ({ status: 200, body: { ok: true } });
   // The server's errorRef logs what it is given: here, a record of it.
-  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: 'http://[::1]:1', token: TOKEN }), errorRef: (_t, err) => (logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
+  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
 });
 
 const get = async (p: string) => {
@@ -258,6 +268,17 @@ describe('writes', () => {
     // The runtime did get each one: it may well have landed.
     expect(asked).toHaveLength(3);
     await new Promise((r) => setTimeout(r, 700));
+  });
+
+  it('a connection that drops after the runtime has the request is the same: only a runtime that was never reached got nothing', async () => {
+    drop = true;
+    expect(await post(`/goals/${GID}/criteria/c1`, { met: true })).toEqual({ status: 504, body: { error: GOALS_SAY.unsure } });
+    expect(await post(`/goals/${GID}/done`, { args: { goalId: GID, goalTitle: 'T' } })).toEqual({ status: 504, body: { error: GOALS_SAY.unsure } });
+    expect(await get('/goals')).toEqual({ status: 503, body: { error: GOALS_SAY.down } });
+    expect(asked).toHaveLength(3);
+    // Nothing listening at all: the request never left, so nothing changed.
+    up = false;
+    expect(await post(`/goals/${GID}/criteria/c1`, { met: true })).toEqual({ status: 503, body: { error: GOALS_SAY.downWrite } });
   });
 
   it('a goals route is never reported back to the runtime as a route.error', () => {

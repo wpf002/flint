@@ -568,6 +568,21 @@ describe('the console Approvals panel', () => {
     expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
   });
 
+  it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
+    const told: string[] = [];
+    ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
+    await open();
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    await settle();
+    expect(told).toEqual(['g1']);
+    failApprove = 'g1';
+    await open();
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    await settle();
+    expect(told).toEqual(['g1']);
+  });
+
   it('the approvals panel never writes HTML', () => {
     expect(apprJs.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });

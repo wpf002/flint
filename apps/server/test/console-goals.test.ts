@@ -4,8 +4,8 @@
  * the exact words (Title Case titles, buttons, tabs and labels; UPPERCASE section
  * headers through .gsh; every secondary line a complete sentence whose verb
  * agrees with its count); never "Late" (reviews come in a later part); what the
- * panel has to say (an error, an outcome, "Waiting for your approval.") is in the
- * footer, which never scrolls away; the form refuses what cannot be filed, in
+ * panel has to say (an error, an outcome, "Flint is waiting for your approval.")
+ * is in the footer, which never scrolls away; a refresh redraws a goal in place; the form refuses what cannot be filed, in
  * sentences; Add Goal posts /goals and then signs exactly the args it showed,
  * with a fresh touch and a prompt in plain words (the args are already what the
  * shared contract normalizes them to, so their digest is the one filed); a
@@ -51,6 +51,8 @@ class El {
   maxLength = -1;
   tabIndex = -1;
   scrollTop = 0;
+  scrollHeight = 0;
+  clientHeight = 0;
   seq?: number;
   private text = '';
   private attrs: Record<string, string> = {};
@@ -182,7 +184,7 @@ beforeEach(() => {
     if (c.url.startsWith('/goals?tab=')) return { status: 200, body: { tab: 'x', goals: [], waiting: [], reviews: 'off' } };
     return { status: 200, body: { ok: true } };
   };
-  ids = Object.fromEntries(['goals', 'goalsbtn', 'goalsdot', 'goalsttl', 'goalback', 'goaladd', 'goalbody', 'goalfoot'].map((id) => [id, new El('div', id)]));
+  ids = Object.fromEntries(['goals', 'goalsbtn', 'goalsdot', 'goalsttl', 'goalback', 'goaladd', 'goalclear', 'goalbody', 'goalfoot'].map((id) => [id, new El('div', id)]));
   const document = {
     getElementById: (id: string) => ids[id] ?? [...Object.values(ids)].flatMap((e) => e.all()).find((e) => e.id === id) ?? null,
     createElement: (tag: string) => new El(tag),
@@ -399,12 +401,17 @@ describe('the Goals panel', () => {
       criteria: [{ id: 'c1', state: 'unmet' }, { id: 'c2', state: 'met' }], checks: { met: 1, total: 2, unknown: 0 },
     }));
     expect(body().shown()).toContain(`Finish ByDec 1, ${YEAR + 1}`);
-    // The header keeps the title (two lines of it); the body has all of it.
-    expect(ids.goalsttl!.textContent).toBe(long);
-    expect(body().visible().find((e) => e.className === 'gfull')!.textContent).toBe(long);
     expect(body().shown()).toContain('Synthetic one stepFlint checks this: its step isn’t done yet.');
     expect(body().shown()).toContain('Synthetic done stepFlint checks this: its step is done.');
-    // A short title needs no second copy.
+    // The header keeps the title, two lines of it. Where that holds all of it (a desktop window), it is not said twice.
+    expect(ids.goalsttl!.textContent).toBe(long);
+    expect(body().visible().find((e) => e.className === 'gfull')).toBeUndefined();
+    // Where the header cuts it short (a phone: its box is shorter than its words), the goal starts with all of it.
+    Object.assign(ids.goalsttl!, { scrollHeight: 112, clientHeight: 56 });
+    run(`goalShow(GOALS.goal)`);
+    expect(body().children[0]).toMatchObject({ className: 'gfull', textContent: long });
+    // A short title never needs a second copy.
+    Object.assign(ids.goalsttl!, { scrollHeight: 28, clientHeight: 28 });
     await openGoal(view());
     expect(body().visible().find((e) => e.className === 'gfull')).toBeUndefined();
   });
@@ -450,7 +457,7 @@ describe('the Goals panel', () => {
     const cancel = foot().button('Cancel');
     go.onclick!();
     await settle();
-    expect(said()).toEqual(['Waiting for your approval.', 'res wait']);
+    expect(said()).toEqual(['Flint is waiting for your approval.', 'res wait']);
     expect([go.disabled, cancel.disabled]).toEqual([true, true]);
     // A second click while it waits files nothing more.
     go.onclick!();
@@ -465,7 +472,7 @@ describe('the Goals panel', () => {
     await settle();
     expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
     // The message is in the footer, never in the scrolling body.
-    expect(body().shown()).not.toMatch(/Cancelled|Waiting for your approval/);
+    expect(body().shown()).not.toMatch(/Cancelled|waiting for your approval/);
   });
 
   it('a paused goal resumes with a signature of exactly what it is, and no plan', async () => {
@@ -647,14 +654,84 @@ describe('the Goals panel', () => {
     await settle();
     run('goalNew()');
     expect(body().field('Name').value).toBe('Synthetic half typed');
-    // Clear is a quiet button, and starts a new draft.
-    expect(foot().buttons()).toEqual(['Clear', 'Cancel', 'Add Goal with Touch ID']);
-    expect(foot().button('Clear').className).toBe('ghost');
+    // Clear is a quiet button in the header (never alone on a row of the footer), there only for a New Goal.
+    expect(ids.goalclear!.hidden).toBe(false);
+    expect(html).toContain('<button class="ghost" id="goalclear" onclick="goalClearAsk()" hidden>Clear</button>');
+    expect(foot().buttons()).toEqual(['Cancel', 'Add Goal with Touch ID']);
+    // It asks in place before it wipes what he typed: there is no undo.
+    run('goalClearAsk()');
+    expect(foot().shown()).toBe('Clear This Goal?What you typed here is removed.CancelClear');
+    expect(body().field('Name').value).toBe('Synthetic half typed');
+    foot().button('Cancel').onclick!();
+    expect(foot().buttons()).toEqual(['Cancel', 'Add Goal with Touch ID']);
+    expect(run('GOALS.form.draftKey')).toBe(key);
+    run('goalClearAsk()');
     foot().button('Clear').onclick!();
     expect(body().field('Name').value).toBe('');
     expect(body().visible().filter((e) => e.getAttribute('aria-label') === 'Step')).toHaveLength(1);
     expect(run('GOALS.form.draftKey')).not.toBe(key);
     expect(focused).toBe('name');
+    expect(foot().buttons()).toEqual(['Cancel', 'Add Goal with Touch ID']);
+    // An untouched form has nothing to ask about.
+    const blank = run('GOALS.form.draftKey');
+    run('goalClearAsk()');
+    expect(foot().shown()).not.toContain('Clear This Goal?');
+    expect(run('GOALS.form.draftKey')).not.toBe(blank);
+    // Not on the list, an open goal, or Edit Goal.
+    run(`goalList('active')`);
+    await settle();
+    expect(ids.goalclear!.hidden).toBe(true);
+  });
+
+  it('a draft is spent once its goal exists: approved in Approvals after a cancelled prompt, or already in the list', async () => {
+    routes = (c) => (c.url === '/goals' && c.method === 'POST' ? { status: 200, body: { id: 'prnew', deduped: false } } : { status: 200, body: { tab: 'active', goals: [], waiting: [], reviews: 'off' } });
+    signAnswer = async () => { throw new Error('not confirmed'); };
+    const cancelled = async () => {
+      await open();
+      run(`goalNew();GOALS.form.title='Synthetic goal';GOALS.form.checks[0].text='Synthetic check';goalForm()`);
+      foot().button('Add Goal with Touch ID').onclick!();
+      await settle();
+      expect(said()![0]).toBe('Cancelled. It’s waiting in Approvals.');
+      return run('GOALS.draft.draftKey') as string;
+    };
+    // The card waits in Approvals, and the draft is still his to change.
+    let key = await cancelled();
+    run('closeGoals()');
+    run('goalNew()');
+    expect(body().field('Name').value).toBe('Synthetic goal');
+    // Approved there (Approvals tells the panel): New Goal starts a new one, never the form of a goal he now has.
+    run(`goalsApproved({id:'prnew',fullName:'goal.activate',args:{goalId:'go${key}'}})`);
+    expect(run('GOALS.draft')).toBeNull();
+    run('goalNew()');
+    expect(body().field('Name').value).toBe('');
+    // Another card's approval leaves a draft alone.
+    key = await cancelled();
+    run(`goalsApproved({id:'prother',fullName:'goal.activate',args:{goalId:'goSomeOtherGoal0001'}})`);
+    expect(run('GOALS.draft.draftKey')).toBe(key);
+    // The poll that feeds the header's dot sees it approved (signed on another device).
+    run(`goalsDot([{id:'prnew',status:'approved',fullName:'goal.activate',args:{goalId:'go${key}'}}])`);
+    expect(run('GOALS.draft')).toBeNull();
+    // Or the goal is simply in the list by now.
+    key = await cancelled();
+    routes = () => ({ status: 200, body: { tab: 'active', goals: [row({ id: `go${key}` })], waiting: [], reviews: 'off' } });
+    run(`goalList('active')`);
+    await settle();
+    expect(run('GOALS.draft')).toBeNull();
+  });
+
+  it('a date not set says No Date, never today’s date as if it were chosen', async () => {
+    await open();
+    run('goalNew()');
+    const finish = body().field('Finish By');
+    const due = body().field('Due');
+    // Empty: marked, and the page shows "No Date" over the browser's own hint until the field has the cursor.
+    expect([finish.classList.contains('gempty'), due.classList.contains('gempty')]).toEqual([true, true]);
+    expect(html).toContain('.field.gempty:not(:focus)::-webkit-datetime-edit{opacity:0;}');
+    expect(html).toContain('.fl:has(>.field.gempty:not(:focus))::after{content:"No Date";');
+    // With a value it is the value.
+    run(`GOALS.form.finishBy='${day(later(30))}';goalForm()`);
+    expect(body().field('Finish By').classList.contains('gempty')).toBe(false);
+    expect(body().field('Due').classList.contains('gempty')).toBe(true);
   });
 
   it('a form drawn again keeps what was typed, where it was scrolled, and the cursor where the next keystroke belongs', async () => {
@@ -752,6 +829,87 @@ describe('the Goals panel', () => {
     expect(ids.goalsttl!.textContent).toBe('Goals');
     expect(run('GOALS.view')).toBe('list');
     expect(calls.filter((c) => c.method === 'GET' && c.url.startsWith('/goals/'))).toEqual([]);
+    // The list he is on is read again, so its counts are not stale.
+    expect(calls.some((c) => c.url === '/goals?tab=active')).toBe(true);
+  });
+
+  it('a signature that lands after Will has gone elsewhere redraws what he is looking at: the list, or another goal, in place', async () => {
+    let release!: (v: unknown) => void;
+    signAnswer = () => new Promise((r) => (release = r));
+    const other = view({ id: 'gotestgoal0002', title: 'Synthetic other goal' });
+    routes = (c) => (c.method === 'GET' && c.url === '/goals/gotestgoal0002' ? { status: 200, body: { goal: other } } : c.method === 'GET' && c.url.startsWith('/goals/') ? { status: 200, body: { goal: view() } }
+      : c.method === 'GET' ? { status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'off' } } : { status: 200, body: { id: 'prcard', deduped: false } });
+    await open();
+    run(`goalOpen('gotestgoal0001')`);
+    await settle();
+    // Mark Goal Done is signed while he goes back to the list: the list is read again when it lands.
+    foot().button('Mark Goal Done').onclick!();
+    foot().button('Mark Goal Done with Touch ID').onclick!();
+    await settle();
+    run(`goalList('active')`);
+    await settle();
+    calls = [];
+    release({ action: { status: 'done' } });
+    await settle();
+    expect(run('GOALS.view')).toBe('list');
+    expect(calls.map((c) => c.url)).toContain('/goals?tab=active');
+    // The same while he has opened another goal: that goal is redrawn in place, and he is not pulled back to the first.
+    run(`goalOpen('gotestgoal0001')`);
+    await settle();
+    foot().button('Abandon Goal').onclick!();
+    foot().button('Abandon with Touch ID').onclick!();
+    await settle();
+    run(`goalOpen('gotestgoal0002')`);
+    await settle();
+    body().scrollTop = 180;
+    calls = [];
+    release({ action: { status: 'done' } });
+    await settle();
+    expect(ids.goalsttl!.textContent).toBe('Synthetic other goal');
+    expect(calls.map((c) => c.url)).toEqual(['/goals/gotestgoal0002']);
+    expect(body().scrollTop).toBe(180);
+    // A form is left alone: nothing is fetched or redrawn under what he is typing.
+    run(`goalOpen('gotestgoal0001')`);
+    await settle();
+    foot().button('Abandon Goal').onclick!();
+    foot().button('Abandon with Touch ID').onclick!();
+    await settle();
+    run('goalNew()');
+    type('Name', 'Synthetic typing');
+    calls = [];
+    release({ action: { status: 'done' } });
+    await settle();
+    expect(calls).toEqual([]);
+    expect(body().field('Name').value).toBe('Synthetic typing');
+  });
+
+  it('a mark or a tick redraws the goal where it was scrolled to, with no Loading in between', async () => {
+    let answerGet: (() => void) | null = null;
+    await openGoal(view(), () => ({ status: 200, body: { ok: true } }));
+    const realFetch = ctx.fetch as (u: string, i?: Record<string, unknown>) => Promise<unknown>;
+    let slowGets = false;
+    ctx.fetch = async (u: string, i?: Record<string, unknown>) => {
+      if (slowGets && (!i || !i.method) && /^\/goals\/go/.test(u)) await new Promise<void>((r) => (answerGet = r));
+      return realFetch(u, i);
+    };
+    slowGets = true;
+    body().scrollTop = 320;
+    body().button('Mark Done').onclick!();
+    await settle();
+    // The tick has landed and the goal is being read again: what he sees is still the goal, where he was.
+    expect(answerGet).toBeTruthy();
+    expect(body().shown()).not.toContain('Loading…');
+    expect(body().shown()).toContain('Synthetic step one');
+    expect(ids.goalsttl!.textContent).toBe('Synthetic goal one');
+    answerGet!();
+    await settle();
+    expect(body().scrollTop).toBe(320);
+    expect(body().shown()).toContain('Synthetic step one');
+    // Opening a goal afresh starts at its top.
+    slowGets = false;
+    run(`goalOpen('gotestgoal0001')`);
+    await settle();
+    expect(body().scrollTop).toBe(0);
   });
 
   it('a device without an approval key is pointed to Settings', async () => {
