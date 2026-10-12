@@ -49,7 +49,12 @@ async function buildProvider(): Promise<{ provider: ProviderAdapter; model: stri
   // localhost to IPv6 ::1 while Ollama binds IPv4, which surfaces as
   // "fetch failed". The explicit IPv4 host avoids it.
   const baseURL = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
-  const named = process.env.OLLAMA_MODEL?.trim();
+  let named = process.env.OLLAMA_MODEL?.trim();
+  if (named && isOllamaCloudModel(named)) {
+    // A cloud model runs on Ollama's servers: an outside AI by another door.
+    process.stderr.write(`[ask] OLLAMA_MODEL=${named} is an Ollama cloud model, which does not run on this machine; using a local one\n`);
+    named = undefined;
+  }
   if (named) return { provider: new OllamaProvider({ baseURL }), model: named };
   // Ask Ollama what it has (@flint/core pickOllamaModel): two free list calls, no generation.
   const picked = await pickOllamaModel({ baseURL });

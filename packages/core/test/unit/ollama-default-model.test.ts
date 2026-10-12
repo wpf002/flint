@@ -28,16 +28,16 @@ describe('pickOllamaModel', () => {
       ps: [model('nomic-embed-text:latest', 'nomic-bert'), model('muse-glimmer:30b', 'muse-glimmer')],
       tags: [model('gemma4:26b', 'gemma4'), model('muse-glimmer:30b', 'muse-glimmer')],
     });
-    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded' });
+    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded', answered: true });
     expect(o.asked).toEqual(['http://127.0.0.1:11434/api/ps']); // the pulled list is not needed
   });
 
   it('says what context window a loaded model has, so asking it does not make Ollama reload it', async () => {
     const o = ollama({ ps: [model('muse-glimmer:30b', 'muse-glimmer', { context_length: 16384 })] });
-    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded', numCtx: 16384 });
+    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded', numCtx: 16384, answered: true });
     for (const bad of [0, -1, 4096.5, '16384', null]) {
       const junk = ollama({ ps: [model('muse-glimmer:30b', 'muse-glimmer', { context_length: bad })] });
-      expect(await pickOllamaModel({ fetch: junk.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded' });
+      expect(await pickOllamaModel({ fetch: junk.impl })).toEqual({ model: 'muse-glimmer:30b', from: 'loaded', answered: true });
     }
   });
 
@@ -53,29 +53,30 @@ describe('pickOllamaModel', () => {
         model('qwen2.5:7b', 'qwen2'),
       ],
     });
-    expect(await pickOllamaModel({ baseURL: 'http://box:11434/', fetch: o.impl })).toEqual({ model: 'qwen3.8:27b', from: 'pulled' });
+    expect(await pickOllamaModel({ baseURL: 'http://box:11434/', fetch: o.impl })).toEqual({ model: 'qwen3.8:27b', from: 'pulled', answered: true });
     expect(o.asked).toEqual(['http://box:11434/api/ps', 'http://box:11434/api/tags']);
   });
 
   it('a model listed without details still counts (an MLX build has no family)', async () => {
     const o = ollama({ ps: [], tags: [{ name: 'muse-glimmer:30b-mlx', details: null }] });
-    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b-mlx', from: 'pulled' });
+    expect(await pickOllamaModel({ fetch: o.impl })).toEqual({ model: 'muse-glimmer:30b-mlx', from: 'pulled', answered: true });
   });
 
   it('falls back to the default, and never throws, when Ollama is down, errors, or has only embedders', async () => {
-    for (const lists of [
-      { ps: 'down', tags: 'down' } as const,
-      { ps: 500, tags: 404 },
-      { ps: [], tags: [] },
-      { ps: [model('nomic-embed-text:latest', 'nomic-bert')], tags: [model('nomic-embed-text:latest', 'nomic-bert'), { name: 7 }, {}] },
-    ]) {
-      expect(await pickOllamaModel({ fetch: ollama(lists).impl })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default' });
+    for (const [lists, answered] of [
+      [{ ps: 'down', tags: 'down' }, false],
+      [{ ps: 500, tags: 404 }, false],
+      [{ ps: [], tags: [] }, true],
+      [{ ps: [model('nomic-embed-text:latest', 'nomic-bert')], tags: [model('nomic-embed-text:latest', 'nomic-bert'), { name: 7 }, {}] }, true],
+    ] as const) {
+      // `answered` tells an Ollama that could not be asked (worth asking again) from one that is up and empty.
+      expect(await pickOllamaModel({ fetch: ollama(lists as Parameters<typeof ollama>[0]).impl })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered });
     }
   });
 
   it('a reply that is not the expected shape is treated as an empty list', async () => {
     const impl = (async () => new Response('"nope"', { status: 200 })) as unknown as typeof fetch;
-    expect(await pickOllamaModel({ fetch: impl })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default' });
+    expect(await pickOllamaModel({ fetch: impl })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered: true });
   });
 });
 

@@ -98,7 +98,7 @@ import { ActionQueue } from './actions';
 import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, chooseLocalBrain, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
+import { LocalPersonaCache, chooseLocalBrain, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
 import { chooseMemoryBrain, frontierExtractBrain, liveChat } from './memory-brain';
 import {
@@ -190,11 +190,11 @@ function errorRef(tag: string, err: unknown): string {
  * OLLAMA_MODEL names it; unset, Ollama is asked which chat model it has. It is
  * never Anthropic, whatever keys are present.
  */
-async function buildProvider(): Promise<{ provider: ProviderAdapter; model: string }> {
+async function buildProvider(): Promise<{ provider: ProviderAdapter; model: string; local: LocalBrain }> {
   // OLLAMA_HOST, OLLAMA_NUM_CTX (keep it at 4096, see liveOllamaOptions) and
   // OLLAMA_THINK=true|false (unset sends no `think`, as before).
   const local = await chooseLocalBrain(process.env, { log: (m) => console.error(m) });
-  return { provider: new OllamaProvider(local.options), model: local.model };
+  return { provider: new OllamaProvider(local.options), model: local.model, local };
 }
 
 /**
@@ -423,7 +423,10 @@ async function main(): Promise<void> {
       ? '[access] tailnet: only FLINT_TAILNET_USER may use Flint, and gets the console token'
       : '[access] FLINT_TAILNET_USER unset: the console carries its token only for this Mac; tailnet devices paste it in Settings',
   );
-  const { provider, model } = await buildProvider();
+  const { provider, model, local: localBrain } = await buildProvider();
+  // The local model as it was settled (OLLAMA_MODEL, or what Ollama had, at the window it is loaded
+  // with): what memory extraction and background calls read, so all three ask the same model alike.
+  const localEnv = { ...process.env, ...localBrain.env };
   // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
   // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
   const actionLog = new ActionLogObserver(recordTurnEntry, 2000);
@@ -431,6 +434,12 @@ async function main(): Promise<void> {
   // and FLINT_BUDGET_* caps degrade Flint as they are approached (never before).
   // The notifications feed is built here so the guard can warn at 50/80/100%.
   const notes = new Notifications(join(homedir(), '.flint', 'notifications.json'));
+  // Nothing was set and Ollama had no model to offer: the local brain is a guess until the next
+  // restart, and Will is told once a day, in the console only.
+  if (localBrain.from === 'default') {
+    const note = localDefaultNote(model);
+    notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });
+  }
   // The runtime: FLINT_RUNTIME_URL where it is moved, else its loopback default. Set
   // (and not blank) it also turns on runtime mode below. One link for everything
   // that talks to the runtime (audit, policies, events, World now, the lanes).
@@ -755,8 +764,7 @@ async function main(): Promise<void> {
   // background spend and pauses at 80% of its vendor's cap (./spend).
   const extractWith = extractFlint;
   const chatActive = liveChat(chatLoad);
-  // The chat brain's model as main() resolved it: OLLAMA_MODEL, or what Ollama had when that is unset.
-  const memoryPlan = chooseMemoryBrain({ ...process.env, OLLAMA_MODEL: model }, {
+  const memoryPlan = chooseMemoryBrain(localEnv, {
     frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
     chatActive,
     log: (m) => console.error(m),
@@ -800,7 +808,7 @@ async function main(): Promise<void> {
   })();
   // The runtime's background calls (./background-complete): answered by the local model, never an
   // outside one, yielding to Will's chat like memory extraction. Every kind is off until Will raises its cap.
-  const backgroundModel = localBackgroundModel(process.env, model, (m) => console.error(m));
+  const backgroundModel = localBackgroundModel(localEnv, model, (m) => console.error(m));
   const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
   const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
   startInternal({
@@ -824,7 +832,7 @@ async function main(): Promise<void> {
     res.once('finish', () => {
       if (res.statusCode >= 500 && res.statusCode <= 599 && route && !turn?.eval) events.push({ type: 'route.error', route, status: res.statusCode });
     });
-    return handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, chatLoad, runtime: runtimeLink });
+    return handle(req, res, { persona, localModels, styled, provider, model, localFrom: localBrain.from, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, chatLoad, runtime: runtimeLink });
   })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
@@ -851,6 +859,8 @@ interface Ctx {
   styled: StyledPersonas<Persona>;
   provider: ProviderAdapter;
   model: string;
+  /** Where the local model's name came from: `env` (OLLAMA_MODEL), or what Ollama had (`loaded`, `pulled`), or the `default` guess. */
+  localFrom: LocalBrain['from'];
   tools: Tool[];
   router: ToolRouter;
   actionLog: ActionLogObserver;
@@ -1045,6 +1055,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       ok: true,
       provider: ctx.provider.name,
       model: ctx.model,
+      // Where the local model's name came from: `env` (OLLAMA_MODEL), `loaded` or `pulled` (Ollama
+      // was asked), or `default` (nothing was set and Ollama offered none: a guess until restart).
+      localModelFrom: ctx.localFrom,
       tools: ctx.tools.length,
       servers: ctx.servers,
       // Lets apps/eval check, BEFORE sending anything, that /generate honours

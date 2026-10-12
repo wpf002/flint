@@ -65,10 +65,18 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 The local brain (private questions, Local-only, the answer when the frontier can't) is an Ollama
 model, whatever keys are in the environment (`chooseLocalBrain` in `src/local-model.ts`):
 
-- `OLLAMA_MODEL` names it.
+- `OLLAMA_MODEL` names it. An Ollama cloud model (`...-cloud`, `:cloud`) is refused: it runs on
+  Ollama's servers, which is an outside AI by another door. The pick below is used in its place.
 - Unset, the server asks Ollama at boot (two free list calls, nothing generated): the chat model
-  Ollama already has loaded, else the first one pulled, skipping embedders and Ollama cloud models;
-  with Ollama down or empty, `qwen2.5:7b`. The boot log says which and why
+  Ollama already has loaded, else the first one pulled, skipping embedders and Ollama cloud models.
+  A loaded model keeps the context size it is loaded with (unless `OLLAMA_NUM_CTX` is set), and
+  memory extraction and background calls use the same, so the pick never makes Ollama reload it.
+- An Ollama that does not answer may simply not be up yet (both start at login), so it is asked
+  again for about a minute before the server settles for `qwen2.5:7b`. That default is a guess
+  that lasts until the next restart, and the console gets one note a day saying so ("Flint Is
+  Guessing Its Local Model").
+- `GET /health` says where the model came from as `localModelFrom`: `env` (`OLLAMA_MODEL`),
+  `loaded`, `pulled`, or `default`. The boot log says the same
   (`[brain] OLLAMA_MODEL is unset: the local brain is ...`).
 
 It used to become Anthropic's `claude-sonnet-4-6` whenever `OLLAMA_MODEL` was unset and

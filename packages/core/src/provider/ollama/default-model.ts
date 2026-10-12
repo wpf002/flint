@@ -53,6 +53,12 @@ export interface PickedOllamaModel {
    * and whatever loaded the model (another app's chat) keeps it warm.
    */
   numCtx?: number;
+  /**
+   * Did Ollama answer either list call? False only with `default`, and then it
+   * means Ollama could not be asked at all (down, or still starting), which is
+   * worth asking again; true with `default` means it is up and has no chat model.
+   */
+  answered: boolean;
 }
 
 export interface PickOllamaModelOptions {
@@ -67,16 +73,19 @@ export interface PickOllamaModelOptions {
 /**
  * The model to use when none is configured: two free list calls to Ollama
  * (`/api/ps`, `/api/tags`), no generation. Never throws: an Ollama that is
- * down, slow or empty gives DEFAULT_OLLAMA_MODEL, and the caller says so.
+ * down, slow or empty gives DEFAULT_OLLAMA_MODEL, and the caller says so
+ * (`answered` tells down from empty, for a caller that would rather ask again).
  */
 export async function pickOllamaModel(opts: PickOllamaModelOptions = {}): Promise<PickedOllamaModel> {
   const base = (opts.baseURL ?? 'http://127.0.0.1:11434').replace(/\/$/, '');
   const doFetch = opts.fetch ?? fetch;
+  let answered = false;
   const list = async (path: string): Promise<ListedModel[]> => {
     try {
       const res = await doFetch(`${base}${path}`, { signal: AbortSignal.timeout(opts.timeoutMs ?? 2000) });
       if (!res.ok) return [];
       const models = ((await res.json()) as { models?: unknown } | null)?.models;
+      answered = true;
       return Array.isArray(models) ? (models as ListedModel[]) : [];
     } catch {
       return [];
@@ -85,9 +94,9 @@ export async function pickOllamaModel(opts: PickOllamaModelOptions = {}): Promis
   const loaded = (await list('/api/ps')).find(localChatModel);
   if (loaded) {
     const n = loaded.context_length;
-    return { model: loaded.name, from: 'loaded', ...(typeof n === 'number' && Number.isInteger(n) && n > 0 ? { numCtx: n } : {}) };
+    return { model: loaded.name, from: 'loaded', answered: true, ...(typeof n === 'number' && Number.isInteger(n) && n > 0 ? { numCtx: n } : {}) };
   }
   const pulled = (await list('/api/tags')).find(localChatModel);
-  if (pulled) return { model: pulled.name, from: 'pulled' };
-  return { model: DEFAULT_OLLAMA_MODEL, from: 'default' };
+  if (pulled) return { model: pulled.name, from: 'pulled', answered: true };
+  return { model: DEFAULT_OLLAMA_MODEL, from: 'default', answered };
 }

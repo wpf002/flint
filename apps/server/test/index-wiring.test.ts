@@ -69,8 +69,9 @@ describe('index.ts wiring', () => {
 
   it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {
     const block = between('const memoryPlan = chooseMemoryBrain(', 'const servers = registry?.connectedServers()');
-    // It is told the chat model main() resolved (OLLAMA_MODEL, or what Ollama had when that is unset).
-    expect(block).toContain('const memoryPlan = chooseMemoryBrain({ ...process.env, OLLAMA_MODEL: model }, {');
+    // It is told the local model as main() settled it (OLLAMA_MODEL, or what Ollama had, at its loaded window).
+    expect(block).toContain('const memoryPlan = chooseMemoryBrain(localEnv, {');
+    expect(src).toContain('const localEnv = { ...process.env, ...localBrain.env };');
     expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
     expect(block).toContain('new MemoryExtractor(memory, knowledge, memoryPlan.brain,');
     expect(block).toContain("memoryPlan.kind === 'local'\n        ? { chatActive }\n        : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }");
@@ -84,8 +85,8 @@ describe('index.ts wiring', () => {
   it('the local brain is an Ollama model whatever keys are set: index.ts never builds an Anthropic client itself', () => {
     expect(src).not.toMatch(/AnthropicProvider|FLINT_MODEL\b/);
     expect(src).toContain('const local = await chooseLocalBrain(process.env, {');
-    expect(src).toContain('return { provider: new OllamaProvider(local.options), model: local.model };');
-    expect(src).toContain('const { provider, model } = await buildProvider();');
+    expect(src).toContain('return { provider: new OllamaProvider(local.options), model: local.model, local };');
+    expect(src).toContain('const { provider, model, local: localBrain } = await buildProvider();');
     // The legacy frontier is built by ./brains, with the client that fails fast.
     expect(src).toContain('const frontierCfg = buildFrontierProvider(process.env,');
   });
@@ -158,6 +159,15 @@ describe('index.ts wiring', () => {
     expect(health).toContain('frontierPaused: ctx.breaker.snapshot(),');
   });
 
+  it('/health says where the local model came from, and a guessed one gets one console note a day', () => {
+    const health = between("url === '/health'", '// Auth for everything else');
+    expect(health).toContain('localModelFrom: ctx.localFrom,');
+    expect(src).toContain('localFrom: localBrain.from,');
+    const note = between("if (localBrain.from === 'default') {", 'const runtimeUrl =');
+    expect(note).toContain('const note = localDefaultNote(model);');
+    expect(note).toContain("notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });");
+  });
+
   it('research planning waits while the breaker has its provider paused', () => {
     const block = between('complete: pausable(', 'calculateTool(),');
     expect(block).toContain('const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;');
@@ -176,7 +186,7 @@ describe('index.ts wiring', () => {
 
   it('background calls (/internal/complete) go to the local model, yielding to chat, and never to a frontier tier', () => {
     const block = between('const backgroundModel = localBackgroundModel(', 'startInternal({');
-    expect(block).toContain('const backgroundModel = localBackgroundModel(process.env, model,');
+    expect(block).toContain('const backgroundModel = localBackgroundModel(localEnv, model,');
     expect(block).toContain('const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
     expect(block).toContain('brain: () => backgroundBrain,');
     expect(block).not.toMatch(/frontier|brains\b|spendContext/);

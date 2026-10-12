@@ -18,7 +18,7 @@
  * how a bake-off measures them with it off. Accepted only with a valid
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
-import { OllamaProvider, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
+import { OllamaProvider, isOllamaCloudModel, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
 import type { StyleVariant } from './style-variant';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
@@ -97,12 +97,32 @@ export interface LocalBrain {
   model: string;
   /** `env`: OLLAMA_MODEL. Otherwise Ollama was asked: the chat model it had loaded, the first it had pulled, or the default. */
   from: 'env' | PickedOllamaModel['from'];
+  /**
+   * What was settled here, as the env the rest of the server reads: the model,
+   * and the context size when it was taken from a loaded model. Memory
+   * extraction and background calls read these, so they ask the same model
+   * with the same window and Ollama never reloads it between them and chat.
+   */
+  env: { OLLAMA_MODEL: string; OLLAMA_NUM_CTX?: string };
 }
 
+/** How many more times an Ollama that did not answer is asked at boot, and how far apart: about a minute in all. */
+export const LOCAL_PICK_RETRIES = 12;
+export const LOCAL_PICK_RETRY_MS = 5_000;
+
 /**
- * The local brain. It is always Ollama: OLLAMA_MODEL names its model, and when
- * that is unset Ollama is asked which it has (@flint/core pickOllamaModel: the
- * chat model already loaded, else the first one pulled, else DEFAULT_OLLAMA_MODEL).
+ * The local brain. It is always Ollama, and always a model on this Ollama:
+ *  - OLLAMA_MODEL names it. An Ollama cloud model (`...-cloud`, `:cloud`) is
+ *    refused: it runs on Ollama's servers, which is an outside AI by another
+ *    door. The pick below is used in its place, and the log says so.
+ *  - Unset, Ollama is asked which it has (@flint/core pickOllamaModel: the chat
+ *    model already loaded, else the first one pulled, else DEFAULT_OLLAMA_MODEL).
+ *    A loaded model keeps the context size it is loaded with, unless
+ *    OLLAMA_NUM_CTX says otherwise, so the pick does not make Ollama reload it.
+ *  - An Ollama that does not answer may simply not be up yet (both start at
+ *    login), so it is asked again for about a minute before the default is
+ *    settled for. The default is a guess that lasts until the next restart:
+ *    /health says where the model came from, and the console gets one note.
  *
  * It used to become Anthropic's claude-sonnet-4-6 whenever OLLAMA_MODEL was
  * unset and a key was present: a missing setting quietly sent every "local"
@@ -111,20 +131,47 @@ export interface LocalBrain {
  */
 export async function chooseLocalBrain(
   env: Record<string, string | undefined>,
-  deps: { fetch?: typeof fetch; log?: (msg: string) => void } = {},
+  deps: { fetch?: typeof fetch; log?: (msg: string) => void; wait?: (ms: number) => Promise<void>; retries?: number } = {},
 ): Promise<LocalBrain> {
   const log = deps.log ?? (() => {});
   const options = liveOllamaOptions(env);
   if (env.FLINT_MODEL?.trim()) log('[brain] FLINT_MODEL is no longer read: the local brain is always an Ollama model (OLLAMA_MODEL)');
-  const named = env.OLLAMA_MODEL?.trim();
-  if (named) return { options, model: named, from: 'env' };
-  const picked = await pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) });
+  let named = env.OLLAMA_MODEL?.trim();
+  if (named && isOllamaCloudModel(named)) {
+    log('[brain] OLLAMA_MODEL is an Ollama cloud model, which runs on Ollama\'s servers: it is not used as the local brain');
+    named = undefined;
+  }
+  if (named) return { options, model: named, from: 'env', env: { OLLAMA_MODEL: named } };
+
+  const pick = () => pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) });
+  const wait = deps.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let picked = await pick();
+  if (!picked.answered) log('[brain] OLLAMA_MODEL is unset and Ollama is not answering yet: asking again for up to a minute');
+  for (let i = 0; !picked.answered && i < (deps.retries ?? LOCAL_PICK_RETRIES); i++) {
+    await wait(LOCAL_PICK_RETRY_MS);
+    picked = await pick();
+  }
   log(
     picked.from === 'default'
-      ? `[brain] OLLAMA_MODEL is unset and Ollama listed no chat model: the local brain is ${picked.model} (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
+      ? `[brain] OLLAMA_MODEL is unset and Ollama ${picked.answered ? 'listed no chat model' : 'did not answer'}: the local brain is ${picked.model} until the next restart (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
       : `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`,
   );
-  return { options, model: picked.model, from: picked.from };
+  // A loaded model is asked with the window it is loaded with, unless Will set one.
+  const numCtx = env.OLLAMA_NUM_CTX?.trim() ? undefined : picked.numCtx;
+  return {
+    options: numCtx === undefined ? options : { ...options, defaultOptions: { ...options.defaultOptions, num_ctx: numCtx } },
+    model: picked.model,
+    from: picked.from,
+    env: { OLLAMA_MODEL: picked.model, ...(numCtx !== undefined ? { OLLAMA_NUM_CTX: String(numCtx) } : {}) },
+  };
+}
+
+/** The console note when the local brain is the fallback default: nothing was set and Ollama had nothing to offer. */
+export function localDefaultNote(model: string): { title: string; body: string } {
+  return {
+    title: 'Flint Is Guessing Its Local Model',
+    body: `No local model is set, and Ollama listed none, so Flint is trying ${model}. Set OLLAMA_MODEL to choose one, then restart Flint.`,
+  };
 }
 
 /**
