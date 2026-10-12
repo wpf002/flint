@@ -9,8 +9,9 @@
  * Jobs survive a restart and a kill -9 (a job's lease expires and it runs
  * again), cron schedules run in Flint's zone, failures retry with backoff
  * before landing in `dead`. Job data is ids only ({eventId}, {escalationId}; for
- * P4, a series key or a run id, never a series' values): pg-boss's tables sit
- * outside retention and forget.
+ * P4, a series key or a run id, never a series' values; for P5, a task's or a
+ * card's id, never a task's words or a model's): pg-boss's tables sit outside
+ * retention and forget.
  */
 import { PgBoss, fromPrisma } from 'pg-boss';
 import { SOURCES } from '@flint/policy';
@@ -28,17 +29,26 @@ export const QUEUES = {
   /** P4: the local model's estimate for one forecast run; stately, singletonKey = the series key. */
   predict: ['forecast.reason'],
   /**
+   * P5: one task's run on its asset and its bar check (stately, singletonKey = the task id), and one review
+   * (stately, singletonKey = the id of the card or task it reviews). Made by its migration; nothing sends to
+   * them yet.
+   */
+  assets: ['tasks.run', 'tasks.check', 'reviews.run'],
+  /**
    * Housekeeping on a schedule, one run at a time (goals.tick finds the goal reviews that are due). P4's five
    * (forecast.series, forecast.run, ledger.sweep, ledger.snapshot, ledger.ask) are made by its migration;
-   * nothing schedules them until predictions are on.
+   * nothing schedules them until predictions are on. P5's tasks.tick is made by its migration; nothing
+   * schedules it yet.
    */
   scheduled: [
     'health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations', 'goals.tick',
-    'forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask',
+    'forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask', 'tasks.tick',
   ],
   dead: 'dead',
 } as const;
-export const ALL_QUEUES: readonly string[] = [...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.goals, ...QUEUES.predict, ...QUEUES.scheduled, QUEUES.dead];
+export const ALL_QUEUES: readonly string[] = [
+  ...QUEUES.sync, QUEUES.triage, QUEUES.deliver, ...QUEUES.goals, ...QUEUES.predict, ...QUEUES.assets, ...QUEUES.scheduled, QUEUES.dead,
+];
 /** pg-boss's own: its timekeeper's queue for cron sends (the migration makes it too). */
 export const PGBOSS_QUEUES: readonly string[] = ['__pgboss__send-it'];
 
