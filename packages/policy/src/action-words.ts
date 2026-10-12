@@ -17,6 +17,9 @@ export const ACTION_WORDS: Readonly<Record<string, string>> = {
   'runtime.explain_decision': 'Explain a Triage Decision',
   // P4: the card that turns Flint's forecasts on (the console's card says the same title).
   'forecast.series.enable': 'Turn On Predictions',
+  // P3 part 5: what Flint takes from chat (the console's cards say the same titles).
+  'goal.propose': 'Suggest a Goal from Chat',
+  'world.commitment.from_chat': 'Add a Commitment from Chat',
 };
 
 /**
@@ -35,6 +38,8 @@ export const ACTION_DONE: Readonly<Record<string, string>> = {
   'runtime.escalations_open': 'Flint read the open escalations.',
   'runtime.explain_decision': 'Flint explained a triage decision.',
   'forecast.series.enable': 'Flint turned on predictions.',
+  'goal.propose': 'Flint added a goal to your suggestions.',
+  'world.commitment.from_chat': 'Flint noted something you said you’d do.',
 };
 
 /** The words for an action, or its name when it has none. */
