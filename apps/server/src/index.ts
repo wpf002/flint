@@ -219,7 +219,8 @@ function loadSecrets(): void {
       if (k && process.env[k] === undefined) process.env[k] = v;
     }
   } catch (err) {
-    console.error('[secrets] failed to read ~/.flint/secrets.env:', err);
+    // Its class only: this is the secrets file.
+    console.error(`[secrets] failed to read ~/.flint/secrets.env (${errorSummary(err)})`);
   }
 }
 
@@ -252,7 +253,8 @@ function loadMcpSpecs(): McpServerSpec[] {
     for (const problem of problems) console.error(`[mcp] ${problem}`);
     return specs;
   } catch (err) {
-    console.error('[mcp] failed to read MCP_CONFIG:', err);
+    // Its class only: a JSON parse error quotes the file, and an MCP config can hold tokens.
+    console.error(`[mcp] failed to read MCP_CONFIG (${errorSummary(err)})`);
     return [];
   }
 }
@@ -825,7 +827,7 @@ async function main(): Promise<void> {
     spendExternal: (t) => spend.setExternal(t),
     chatInFlight: () => chatLoad.inFlight,
     complete: (body) => completeGate.handle(body),
-  }).on('error', (err) => console.error(`[internal] listener failed: ${err.message}`));
+  }).on('error', (err) => console.error(`[internal] listener failed (${errorSummary(err)})`));
   // "World now" in frontier chat context (./world-now). It adds tokens to every
   // frontier turn, so it is off until Will turns it on (FLINT_WORLD_NOW=1).
   const worldNow = process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow({ runtime: runtimeLink }) : undefined;
@@ -1666,6 +1668,6 @@ function readRawLimited(req: IncomingMessage, maxBytes: number): Promise<{ tooLa
 }
 
 main().catch((err) => {
-  console.error('Flint server failed to start:', err);
+  logError('Flint server failed to start:', err);
   process.exit(1);
 });

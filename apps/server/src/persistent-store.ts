@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { logError } from './error-log';
 import {
   TurnSchema,
   SCHEMA_VERSION,
@@ -235,7 +236,8 @@ export class PersistentStore implements MemoryStore {
       }
       console.error(`[memory] restored ${restored} turns across ${this.conversations.size} conversations`);
     } catch (err) {
-      console.error('[memory] failed to load conversation store (starting fresh):', err);
+      // Its class only: a JSON parse error quotes the file, and the file is Will's conversations.
+      logError('[memory] failed to load conversation store (starting fresh):', err);
     }
   }
 
@@ -263,7 +265,7 @@ export class PersistentStore implements MemoryStore {
       writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');
       renameSync(tmp, this.path); // atomic on the same filesystem
     } catch (err) {
-      console.error('[memory] failed to persist conversation store:', err);
+      logError('[memory] failed to persist conversation store:', err);
     }
   }
 }

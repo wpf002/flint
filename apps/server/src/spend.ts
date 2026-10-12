@@ -47,6 +47,7 @@ import {
 import { SPEND_KINDS, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { BrainTier, Tier } from './brains';
 import type { Brain } from './policy';
+import { errorSummary } from './error-log';
 
 export type { PaidVendor } from '@flint/core';
 export type { BackgroundKind };
@@ -163,13 +164,13 @@ export class SpendLedger {
       mkdirSync(this.dir, { recursive: true });
       appendFileSync(this.fileFor(this.period(row.ts).month), JSON.stringify(row) + '\n', 'utf8');
     } catch (err) {
-      this.log(`[spend] could not append to the ledger (totals kept in memory): ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[spend] could not append to the ledger (totals kept in memory) (${errorSummary(err)})`);
     }
     for (const listener of this.listeners) {
       try {
         listener(row);
       } catch (err) {
-        this.log(`[spend] listener failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.log(`[spend] listener failed (${errorSummary(err)})`);
       }
     }
     return row;
@@ -237,7 +238,7 @@ export class SpendLedger {
       }
       this.log(`[spend] restored ${rows} paid call(s) for ${month}${bad ? ` (${bad} unreadable line(s) skipped)` : ''}`);
     } catch (err) {
-      this.log(`[spend] could not read ${path} (starting the month at $0): ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[spend] could not read ${path} (starting the month at $0) (${errorSummary(err)})`);
     }
   }
 }

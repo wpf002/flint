@@ -26,8 +26,11 @@ export function errorClass(err: unknown): string {
 
 /**
  * One error in a few code words: `validation 400 credit`, `provider_unavailable
- * 529 transient`, `timeout`, `NoAnswer refusal`, `TypeError`. The provider's
- * code is kept only when it looks like one (a status, `insufficient_quota`).
+ * 529 transient`, `timeout`, `NoAnswer refusal`, `TypeError`, `Error ENOENT`,
+ * `SyntaxError`. The provider's code is kept only when it looks like one (a
+ * status, `insufficient_quota`). A SyntaxError from JSON.parse quotes what it
+ * was parsing, a file error names a path, a database error can quote a row:
+ * none of that is in here.
  */
 export function errorSummary(err: unknown): string {
   const parts = [errorClass(err)];
@@ -37,9 +40,13 @@ export function errorSummary(err: unknown): string {
     const reason = breakerReason(err.error);
     if (reason) parts.push(reason);
   } else {
+    const e = (typeof err === 'object' && err !== null ? err : {}) as { why?: unknown; code?: unknown; status?: unknown };
+    // What Node says went wrong with a file or a socket (ENOENT, EACCES, ECONNREFUSED): a code, never a path.
+    if (typeof e.code === 'string' && /^[A-Z][A-Z0-9_]{1,30}$/.test(e.code)) parts.push(e.code);
+    // The HTTP status another service answered with (the runtime's RuntimeError).
+    if (typeof e.status === 'number' && Number.isInteger(e.status) && e.status >= 100 && e.status <= 599) parts.push(String(e.status));
     // A reason code some of the server's own errors carry (NoAnswer.why): an enum, never text.
-    const why = (err as { why?: unknown } | null)?.why;
-    if (typeof why === 'string' && /^[a-z_]{1,20}$/.test(why)) parts.push(why);
+    if (typeof e.why === 'string' && /^[a-z_]{1,20}$/.test(e.why)) parts.push(e.why);
   }
   return parts.join(' ');
 }
@@ -49,10 +56,23 @@ export function debugErrors(env: Record<string, string | undefined> = process.en
   return env.FLINT_DEBUG_ERRORS?.trim() === '1';
 }
 
-/** Where a non-provider error was thrown: its first stack frame, which holds a function and a file, never the message. */
+/** A stack frame as V8 writes one: `at fn (file:line:col)` or `at file:line:col`. */
+const FRAME = /^\s+at (?:.* \()?[^()\s]+:\d+:\d+\)?$/;
+
+/**
+ * Where a non-provider error was thrown: its first stack frame, which holds a
+ * function and a file, never the message. A stack is the error's name and
+ * message, then the frames, and a message can run over several lines, one of
+ * which may itself begin "    at ...". So frames are looked for only AFTER the
+ * message. When the message cannot be found in the stack (it was changed after
+ * the stack was written), there is no telling where the old one ends, and no
+ * frame is logged at all.
+ */
 function thrownAt(err: unknown): string {
   if (!(err instanceof Error) || isFlintError(err) || typeof err.stack !== 'string') return '';
-  const frame = err.stack.split('\n').find((l) => /^\s+at /.test(l));
+  const at = err.stack.indexOf(err.message);
+  if (at < 0) return '';
+  const frame = err.stack.slice(at + err.message.length).split('\n').find((l) => FRAME.test(l));
   return frame ? ` ${frame.trim().slice(0, 200)}` : '';
 }
 

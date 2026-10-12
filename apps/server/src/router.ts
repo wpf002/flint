@@ -1,5 +1,6 @@
 import type { Tool } from '@flint/core';
 import { cosineSimilarity } from '@flint/persona';
+import { logError } from './error-log';
 
 /** The slice of OllamaEmbedder the router needs; a stub in tests. */
 export interface Embedder {
@@ -150,7 +151,7 @@ export class ToolRouter {
       } catch (err) {
         // Log the first failure only; a training run keeps ollama down for hours.
         if (attempt === 1) {
-          console.error(`[router] rest embedding failed — appends off, retrying every ${this.retryMs / 1000}s:`, err);
+          logError(`[router] rest embedding failed — appends off, retrying every ${this.retryMs / 1000}s:`, err);
         }
       } finally {
         this.embedding = undefined;

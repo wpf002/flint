@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { dirname } from 'node:path';
 import type { Tool } from '@flint/core';
 import { cosineSimilarity, type Embedder } from '@flint/persona';
+import { logError } from './error-log';
 
 interface Fact {
   id: string;
@@ -153,7 +154,7 @@ export class KnowledgeStore {
     try {
       vector = (await withTimeout(this.embedder.embed([clean]), this.embedTimeoutMs))[0] ?? [];
     } catch (err) {
-      console.error('[memory] embed failed for new fact (storing without vector; recall matches it lexically):', String(err));
+      logError('[memory] embed failed for new fact (storing without vector; recall matches it lexically):', err);
     }
     const fact: Fact = { id: `k${++this.seq}`, text: clean, source, ts: Date.now(), vector };
     if (meta.conversationId) fact.conversationId = meta.conversationId;
@@ -360,7 +361,8 @@ export class KnowledgeStore {
       const retired = this.facts.length - this.active().length;
       console.error(`[memory] loaded ${this.active().length} long-term facts${retired ? ` (+${retired} superseded)` : ''}`);
     } catch (err) {
-      console.error('[memory] failed to load knowledge store (starting fresh):', err);
+      // Its class only: a JSON parse error quotes the file, and the file is what Flint knows about Will.
+      logError('[memory] failed to load knowledge store (starting fresh):', err);
     }
   }
 
@@ -375,7 +377,7 @@ export class KnowledgeStore {
       );
       renameSync(tmp, this.path);
     } catch (err) {
-      console.error('[memory] failed to persist knowledge store:', err);
+      logError('[memory] failed to persist knowledge store:', err);
     }
   }
 }

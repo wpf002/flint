@@ -26,6 +26,7 @@ import { randomBytes } from 'node:crypto';
 
 type RollupRow = { day: string; action: string; context: string; n: number };
 import { redact } from '@flint/policy';
+import { errorSummary } from './error-log';
 
 export interface AuditRecord {
   id: string;
@@ -112,7 +113,7 @@ export class AuditSink {
       writeFileSync(tmp, JSON.stringify({ counts: Object.fromEntries(this.rollups), ...(this.inflight ? { inflight: this.inflight } : {}) }), { mode: 0o600 });
       renameSync(tmp, this.rollupFile);
     } catch (err) {
-      this.opts.log?.(`[audit] could not save the rollup counts: ${err instanceof Error ? err.message : String(err)}`);
+      this.opts.log?.(`[audit] could not save the rollup counts (${errorSummary(err)})`);
     }
   }
 
@@ -145,7 +146,7 @@ export class AuditSink {
       }
     } catch (err) {
       if (err instanceof AuditUnavailable) throw err;
-      this.opts.log?.(`[audit] could not write the spool: ${err instanceof Error ? err.message : String(err)}`);
+      this.opts.log?.(`[audit] could not write the spool (${errorSummary(err)})`);
       if (durable) throw new AuditUnavailable('the audit spool could not be written');
     }
     return full;
