@@ -44,6 +44,20 @@ export function lastDeployed(log: string): string | undefined {
   return undefined;
 }
 
+/**
+ * How many commits a clone holds between two instants (P4: the weekly commit
+ * counts Flint forecasts). One fixed command, numbers only: `rev-list --count`
+ * over every ref the clone already has, by commit date. It never fetches, reads
+ * no commit's words, and its answer is a whole number or nothing: anything
+ * else git prints is refused. Undefined when the clone is not there.
+ */
+export async function commitsBetween(run: Run, path: string, since: Date, before: Date): Promise<number | undefined> {
+  if (!existsSync(path)) return undefined;
+  const out = (await run('/usr/bin/git', ['-C', path, 'rev-list', '--count', '--all', `--since=${since.toISOString()}`, `--before=${before.toISOString()}`])).trim();
+  if (!/^\d{1,9}$/.test(out)) throw new Error('git rev-list --count did not print a number');
+  return Number(out);
+}
+
 export function gitSource(o: GitOptions): Source {
   return {
     name: 'git',

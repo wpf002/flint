@@ -15,7 +15,7 @@ import { createDb, type Db } from '../src/db';
 import { runtimeEnv } from '../src/config';
 import { parseLaunchctlList, parsePrintDisabled, launchdSource } from '../src/sources/launchd';
 import { healthSource, verdict } from '../src/sources/health';
-import { gitSource, lastDeployed } from '../src/sources/git';
+import { commitsBetween, gitSource, lastDeployed } from '../src/sources/git';
 import { evalToday, level, spendSource, totals } from '../src/sources/spend';
 import { allowed, scopedFetch, EgressRefused } from '../src/policy/egress';
 import { syncOnce } from '../src/sources/sync';
@@ -101,6 +101,39 @@ describe('git', () => {
       ['repo:local:flint', { host: 'local', headSha: head, branch: 'main' }],
       ['deployment:studio:flint', { target: 'studio', status: 'success', sha: head }],
     ]);
+  });
+});
+
+describe('git: counting commits (P4)', () => {
+  it('one fixed command, numbers only: rev-list --count over the refs the clone has, between two instants; never a fetch', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'git-count-'));
+    mkdirSync(join(dir, 'flint'));
+    const calls: Array<{ cmd: string; args: readonly string[] }> = [];
+    const run = async (cmd: string, args: readonly string[]) => (calls.push({ cmd, args }), '17\n');
+    const since = new Date('2026-10-05T05:00:00.000Z');
+    const before = new Date('2026-10-12T05:00:00.000Z');
+    expect(await commitsBetween(run, join(dir, 'flint'), since, before)).toBe(17);
+    expect(calls).toEqual([{ cmd: '/usr/bin/git', args: ['-C', join(dir, 'flint'), 'rev-list', '--count', '--all', '--since=2026-10-05T05:00:00.000Z', '--before=2026-10-12T05:00:00.000Z'] }]);
+    // The whole command is these arguments: no shell, no fetch or pull, no log or show (a commit's words are never read).
+    expect(calls[0]!.args.join(' ')).not.toMatch(/fetch|pull|log|show|format|remote|;|\||&/);
+    // A clone that is not there is asked nothing.
+    expect(await commitsBetween(run, join(dir, 'nope'), since, before)).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('its answer is a whole number or it is refused: nothing else git prints becomes a count', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'git-count-'));
+    const at = [new Date('2026-10-05T05:00:00.000Z'), new Date('2026-10-12T05:00:00.000Z')] as const;
+    const says = (out: string) => commitsBetween(async () => out, dir, at[0], at[1]);
+    expect(await says('0\n')).toBe(0);
+    expect(await says('  42  ')).toBe(42);
+    for (const out of ['', 'fatal: not a git repository', '12 commits', '-3', '1.5', '1e3', '12\n13', 'NaN', '9999999999']) {
+      await expect(says(out), JSON.stringify(out)).rejects.toThrow('git rev-list --count did not print a number');
+    }
+    // What it refused is not in the error: the words are fixed.
+    await expect(says('fatal: bad revision SECRET')).rejects.not.toThrow(/SECRET/);
+    // A command that fails is the caller's to count: it is not swallowed here.
+    await expect(commitsBetween(async () => { throw new Error('timeout'); }, dir, at[0], at[1])).rejects.toThrow('timeout');
   });
 });
 
