@@ -40,6 +40,18 @@ export function daysBefore(tz: string, now: Date, n: number): string[] {
 export const noon = (day: string): Date => new Date(`${day}T12:00:00.000Z`);
 
 /** Settings > Health's Goal Reviews row, as the health job writes it every few minutes: here, one a day. */
-export async function goalReviewsRan(db: Db, days: readonly string[], status: 'ok' | 'degraded' | 'down' | 'disabled' = 'ok'): Promise<void> {
-  await db.healthCheck.createMany({ data: days.map((d) => ({ component: 'goals', status, at: noon(d) })) });
+export async function goalReviewsRan(db: Db, days: readonly string[], status: 'ok' | 'degraded' | 'down' | 'disabled' = 'ok', detail?: string): Promise<void> {
+  await db.healthCheck.createMany({ data: days.map((d) => ({ component: 'goals', status, at: noon(d), ...(detail ? { detail } : {}) })) });
+}
+
+/**
+ * Flint was reviewing from `from` to `to`: the Goal Reviews rows the health job
+ * writes while reviews are on, here one every 10 minutes (the job's are 5 apart;
+ * rows up to 12 minutes apart are one stretch, goals/late.ts). Lateness is
+ * counted from these rows and nothing else.
+ */
+export async function reviewing(db: Db, from: Date, to: Date): Promise<void> {
+  const at: Date[] = [];
+  for (let t = to.getTime(); t >= from.getTime(); t -= 10 * 60_000) at.push(new Date(t));
+  await db.healthCheck.createMany({ data: at.map((d) => ({ component: 'goals', status: 'ok', at: d })) });
 }

@@ -31,19 +31,20 @@ export async function p3Report(db: Db, config: Pick<Config, 'tz'> & { planner?: 
     values: { activeGoals: g.active, checks: g.checks, machineChecks: g.machine },
   });
 
-  // 2. No review more than 24 h late over 30 days, counted from Flint's first review.
+  // 2. No review more than 24 h late over 30 days, counted from Flint's first review. Late is time waited while
+  //    Flint was reviewing (goals/late.ts), so a review that was due while reviews were off was not late.
   if (!first) {
     out.push({ n: 2, name: 'no review more than 24 h late over 30 days', pass: null, detail: config.planner ? 'no review yet' : 'no review yet: reviews are off (FLINT_PLANNER)', values: { reviews: 0, days: 0 } });
   } else {
     const since = new Date(Math.max(first.getTime() - 1, now.getTime() - WINDOW_DAYS * DAY));
-    const c = await reviewCounts(db, since, now, first);
+    const c = await reviewCounts(db, since, now);
     const waiting = await overdueNow(db, now);
     const days = (now.getTime() - Math.max(first.getTime(), now.getTime() - WINDOW_DAYS * DAY)) / DAY;
     out.push({
       n: 2, name: 'no review more than 24 h late over 30 days',
       pass: c.late > 0 || waiting > 0 ? false : days >= WINDOW_DAYS ? true : null,
-      detail: `${plural(c.reviews, 'review')} over ${days.toFixed(1)} days (${c.scheduled} scheduled); ${c.late} ran over 24 h late; ${plural(waiting, 'goal')} over 24 h past due now${days < WINDOW_DAYS ? ` (needs ${WINDOW_DAYS} days)` : ''}`,
-      values: { reviews: c.reviews, scheduled: c.scheduled, lateOver24h: c.late, overdueNow: waiting, days: Math.round(days * 10) / 10 },
+      detail: `${plural(c.reviews, 'review')} over ${days.toFixed(1)} days (${c.scheduled} scheduled); ${c.lateHour} ran over an hour late, ${c.late} over 24 h; ${plural(waiting, 'goal')} over 24 h past due now${days < WINDOW_DAYS ? ` (needs ${WINDOW_DAYS} days)` : ''}`,
+      values: { reviews: c.reviews, scheduled: c.scheduled, lateOverHour: c.lateHour, lateOver24h: c.late, overdueNow: waiting, days: Math.round(days * 10) / 10 },
     });
   }
 

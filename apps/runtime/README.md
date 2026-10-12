@@ -434,12 +434,16 @@ yet), with the numbers behind it:
 
 1. active goals (3 are needed), and how many of their checks Flint reads itself;
 2. reviews that ran over 24 hours late in the last 30 days, and goals that late
-   now. It counts from Flint's first review: a goal that was already due when
-   reviews were first turned on was waiting, not late. It passes after 30 days;
+   now. Late is counted the way the panel and Settings > Health count it: the
+   time a review waited while Flint was reviewing. A goal that was due while
+   reviews were off, or the Mac was asleep, was waiting, not late. It also says
+   how many ran over an hour late (the digest's count), which does not fail it.
+   It passes after 30 days;
 3. how long a watched item's change took to set off its review (10 minutes is
    the limit; a test proves the worst case, and this measures the real ones);
-4. plan versions without a signed card behind them, and reviews whose small
-   changes ended up on more than one card (both must be 0);
+4. plan versions without a signed card behind them, and reviews that filed
+   their small changes on more than one card (both must be 0). A card a review
+   found still waiting, and kept, counts for the review that filed it;
 5. started goals without your signed approval behind their latest change;
 6. reviews without their goal's forecast in the ledger;
 7. suggestions from chat without your own quoted words (a later part files
@@ -473,14 +477,15 @@ The command refuses, and says why, until the week has been lived:
 | It says | It means |
 | --- | --- |
 | the shadow week is not over: 3.2 of 7 days of goal reviews | Flint's first review was less than 7 days ago. |
-| goal reviews were on all day on 5 of the 7 days before today (not on ...) | On those days reviews were off for some of the day, or the runtime was down all day. A day with nothing due still counts: a weekly goal has no review on most days. |
-| 1 review ran over 24 hours late | A scheduled review in those days ran more than a day after it was due. It ages out of the week. |
-| 1 goal is over 24 hours past a review | A review is that late right now. Check Settings > Health for **Goal Reviews**. |
+| goal reviews were on all day on 5 of the 7 days before today (not on ...) | On those days reviews were off, or a rule stopped them, for some of the day, or the health check never ran (the runtime was down all day). A day with nothing due still counts: a weekly goal has no review on most days. |
+| 1 review ran over 24 hours late | A scheduled review in those days had waited more than a day, while Flint was reviewing, when it ran. It ages out of the week. |
+| 1 goal is over 24 hours past a review | A review is that late right now: Settings > Health shows **Goal Reviews** as down. |
 | the local model has not answered a review yet | No review's plan stage got an answer. Check that `FLINT_TRIAGE_MODEL` is set and Ollama is running. |
 
 The card's details say what the week measured, in numbers: "This week Flint
 reviewed your goals 9 times, and none was late. The local model answered 7. It
-would have suggested 5 changes." Filing it twice is the same card.
+would have suggested 5 changes." Late there is the digest's count: a review
+that ran over an hour late. Filing it twice is the same card.
 
 `--phase p3c` is a second, later table, for goals Flint suggests from your
 chats (a later part builds those): it lets a suggestion land in Suggested
@@ -608,21 +613,18 @@ they are. This is also the first step of rolling P3 back.
   days and the plan changes (you approve a card), Flint reviews the goal once
   for the new plan. Each needs your signature first, and a goal has at most 12
   such reviews a day.
-- **Late, right after turning reviews on.** A goal's first review is due when it
-  starts. Turn reviews on days later and its goals show Late, and Goal Reviews
-  shows down, for the few minutes until the first reviews run. The P3 report
-  and the promotion table don't count those as late: lateness is counted from
-  Flint's first review.
 - **A quiet week still counts.** The promotion table asks that reviews were on
   for each of the 7 days, not that each day had a review: goals reviewed weekly
   have none on most days. So a week with few reviews can be promoted; the card
   says how many there were, and that the local model answered at least one.
-- **A day counts on the health check's word.** The health check looks every 5
-  minutes. A day counts when none of that day's checks found Goal Reviews off,
-  and one found them on (or, with no check at all that day, a review ran). A
-  runtime that was down for part of a day leaves no check for that part, so
-  that day still counts; a review it made late does not pass, which is checked
-  separately. Health checks are kept for 30 days.
+- **A day counts on the health check's word.** The promotion table and the P3
+  report read the same Goal Reviews rows lateness is counted from. A day counts
+  when a check that day found reviews on, and none found them off or stopped
+  by a rule. A runtime that was down for part of a day leaves no check for that
+  part, so that day still counts; a day with no check at all does not. If the
+  health check itself is stopped, no day counts and the table can't be filed.
+  The rows are kept 30 days, so the report's oldest waits are counted from
+  what is left of them.
 - **Forecasts wait for their dates.** When you mark a goal done or abandon
   it, that card settles the goal's forecasts. A forecast whose date comes
   with the goal not finished is recorded as not met by the prediction check

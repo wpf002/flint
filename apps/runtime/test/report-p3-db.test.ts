@@ -3,11 +3,14 @@
  * measured from the database as it stands, as numbers.
  *
  *  1. active goals, and how many of their checks Flint reads itself;
- *  2. reviews over 24 hours late in 30 days, counted from Flint's first review:
- *     a goal that was due before reviews ever ran was waiting, not late;
+ *  2. reviews over 24 hours late in 30 days, counted from Flint's first review.
+ *     Late is time waited while Flint was reviewing, as part 3 counts it from
+ *     the health check's rows: a goal that was due while reviews were off, or
+ *     the Mac asleep, was waiting, not late;
  *  3. how long a watched item's change took to set off its review;
- *  4. plan versions without a signed card behind them, and reviews whose small
- *     changes are on more than one card;
+ *  4. plan versions without a signed card behind them, and reviews that filed
+ *     their small changes on more than one card (a card a review found waiting
+ *     and kept is the earlier review's);
  *  5. started goals without a signed approval behind their latest change;
  *  6. reviews without their goal's forecast;
  *  7. suggestions from chat without Will's own quoted words;
@@ -33,7 +36,7 @@ import { p3Report } from '../src/report/p3';
 import type { Criterion } from '../src/report/exit';
 import { runRollups } from '../src/rollup';
 import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './goals/fixture';
-import { HOUR, moveReview } from './goals/weeks';
+import { HOUR, moveReview, reviewing } from './goals/weeks';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SERVER = 'server-token-0123456789abcdef';
@@ -140,8 +143,10 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     expect(await c(5)).toMatchObject({ pass: true, values: { started: 4, unsigned: 0 } });
   });
 
-  it('2 and 6: reviews in the last 30 days, from Flint’s first; a goal that was due before reviews ever ran was waiting, not late', async () => {
-    // Reviews turned on ten days ago. g1 was due then; g2 had been due for five days already (it started before reviews did).
+  it('2 and 6: reviews in the last 30 days, from Flint’s first; late is time waited while Flint was reviewing, so a goal that was due while reviews were off was waiting, not late', async () => {
+    // Reviews turned on ten days ago, and the health check has found them on every 10 minutes since. g1 was due then;
+    // g2 had been due for five days already (it started before reviews did).
+    await reviewing(db, ago(10 * DAY), now);
     const r1 = await reviewed(g1.id, 'scheduled');
     const r2 = await reviewed(g2.id, 'scheduled');
     await moveReview(urls, r1, ago(10 * DAY), ago(10 * DAY + MIN));
@@ -149,30 +154,42 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     await moveReview(urls, await reviewed(g3.id), ago(4 * DAY));
     expect(await c(2)).toEqual({
       n: 2, name: 'no review more than 24 h late over 30 days', pass: null,
-      detail: '3 reviews over 10.0 days (2 scheduled); 0 ran over 24 h late; 0 goals over 24 h past due now (needs 30 days)',
-      values: { reviews: 3, scheduled: 2, lateOver24h: 0, overdueNow: 0, days: 10 },
+      detail: '3 reviews over 10.0 days (2 scheduled); 0 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now (needs 30 days)',
+      values: { reviews: 3, scheduled: 2, lateOverHour: 0, lateOver24h: 0, overdueNow: 0, days: 10 },
     });
     expect(await c(6)).toMatchObject({ pass: true, detail: '3 reviews; 0 without its goal’s forecast in the ledger', values: { reviews: 3, withoutForecast: 0 } });
 
-    // Yesterday g3's scheduled review ran 25 hours after it was due: that one is late, and the criterion fails at once.
+    // Yesterday g3's scheduled review ran 23 hours after it was due: late for the panel, not for this criterion.
     const r4 = await reviewed(g3.id, 'scheduled');
+    await moveReview(urls, r4, ago(DAY), ago(DAY + 23 * HOUR));
+    expect(await c(2)).toMatchObject({ pass: null, values: { reviews: 4, scheduled: 3, lateOver24h: 0 } });
+    // 25 hours, with Flint reviewing all that time: that one is late, and the criterion fails at once.
     await moveReview(urls, r4, ago(DAY), ago(DAY + 25 * HOUR));
     expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 4, scheduled: 3, lateOver24h: 1 } });
-    expect((await c(2)).detail).toBe('4 reviews over 10.0 days (3 scheduled); 1 ran over 24 h late; 0 goals over 24 h past due now (needs 30 days)');
-    // 23 hours is late for the panel, not for this criterion.
-    await moveReview(urls, r4, ago(DAY), ago(DAY + 23 * HOUR));
+    expect((await c(2)).detail).toBe('4 reviews over 10.0 days (3 scheduled); 0 ran over an hour late, 1 over 24 h; 0 goals over 24 h past due now (needs 30 days)');
+    // Had the Mac been asleep for twenty of those hours (the health check wrote no row), it waited five: not late.
+    await db.healthCheck.deleteMany({ where: { component: 'goals', at: { gt: ago(DAY + 24 * HOUR), lt: ago(DAY + 4 * HOUR) } } });
     expect(await c(2)).toMatchObject({ pass: null, values: { lateOver24h: 0 } });
 
-    // Had reviews begun 31 days ago, g2's five-day wait would have been a late review: the window is what makes it not one.
-    await moveReview(urls, r1, ago(31 * DAY), ago(31 * DAY + MIN));
-    expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 3, lateOver24h: 1, days: 30 } });
+    // Had Flint been reviewing for the five days g2 waited, that wait was a late review.
+    await reviewing(db, ago(15 * DAY), ago(10 * DAY + 10 * MIN));
+    expect(await c(2)).toMatchObject({ pass: false, values: { reviews: 4, lateOver24h: 1 } });
     await moveReview(urls, r2, ago(10 * DAY - MIN), ago(10 * DAY));
-    // Thirty days of reviews, none late, none overdue: passed.
+    expect(await c(2)).toMatchObject({ pass: null, values: { lateOver24h: 0 } });
+
+    // A review that really runs two hours late is marked late on its own audit entry, as the digest counts it: over
+    // an hour, and no outage.
+    await db.goal.update({ where: { id: g2.id }, data: { nextReviewAt: new Date(Date.now() - 2 * HOUR) } });
+    await reviewed(g2.id, 'scheduled');
+    expect(await c(2)).toMatchObject({ pass: null, values: { reviews: 5, scheduled: 4, lateOverHour: 1, lateOver24h: 0 } });
+
+    // Thirty days of reviews, none over 24 hours late, none overdue: passed. (The first review is now before the window.)
+    await moveReview(urls, r1, ago(31 * DAY), ago(31 * DAY + MIN));
     expect(await c(2)).toMatchObject({
-      pass: true, detail: '3 reviews over 30.0 days (2 scheduled); 0 ran over 24 h late; 0 goals over 24 h past due now',
-      values: { reviews: 3, scheduled: 2, lateOver24h: 0, overdueNow: 0, days: 30 },
+      pass: true, detail: '4 reviews over 30.0 days (3 scheduled); 1 ran over an hour late, 0 over 24 h; 0 goals over 24 h past due now',
+      values: { reviews: 4, scheduled: 3, lateOverHour: 1, lateOver24h: 0, overdueNow: 0, days: 30 },
     });
-    expect(await c(6)).toMatchObject({ pass: true, values: { reviews: 4, withoutForecast: 0 } });
+    expect(await c(6)).toMatchObject({ pass: true, values: { reviews: 5, withoutForecast: 0 } });
   });
 
   it('3: a watched item’s change to its review, in seconds; over 10 minutes fails', async () => {
@@ -199,7 +216,7 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     });
   });
 
-  it('4: every plan version has a signed card behind it; a review’s small changes on more than one card fail it', async () => {
+  it('4: every plan version has a signed card behind it; the small changes a review filed on more than one card fail it, a card it kept waiting does not', async () => {
     // g1's plan came with its signed goal card.
     expect(await c(4)).toMatchObject({ pass: true, values: { planVersions: 1, withoutCard: 0, reviewsWithCards: 0, splitMinor: 0 } });
     // Will adds a step: a plan change he signs. The old version is superseded, the new one active; both are counted.
@@ -220,10 +237,21 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       detail: '2 plan versions, 0 without a signed card behind it; 1 review filed cards, 0 with small changes on more than one',
       values: { planVersions: 2, withoutCard: 0, reviewsWithCards: 1, splitMinor: 0 },
     });
-    // Were a review's small changes ever split across two cards, the criterion would say so.
+    // The goal's next review found card A still waiting and kept it (a waiting card is Will's, and is not filed again),
+    // and filed its one new small change on a card of its own. Each review filed one small card: nothing was split.
+    const next = await reviewed(g1.id);
+    await db.goalReview.update({ where: { id: next }, data: { planner: 'ollama:test-model', diff: [minor('s1', 'prcardA'), minor('s3', 'prcardE')], proposalId: 'prcardE' } });
+    // And a review that only found cards waiting filed none.
+    const quiet = await reviewed(g1.id);
+    await db.goalReview.update({ where: { id: quiet }, data: { planner: 'ollama:test-model', diff: [minor('s1', 'prcardA'), minor('s3', 'prcardE'), material('prcardB')], proposalId: 'prcardA' } });
+    expect(await c(4)).toMatchObject({
+      pass: true, detail: '2 plan versions, 0 without a signed card behind it; 2 reviews filed cards, 0 with small changes on more than one',
+      values: { reviewsWithCards: 2, splitMinor: 0 },
+    });
+    // Were the small changes a review filed ever split across two cards, the criterion would say so.
     const split = await reviewed(g3.id);
     await db.goalReview.update({ where: { id: split }, data: { planner: 'ollama:test-model', diff: [minor('s1', 'prcardC'), minor('s2', 'prcardD')], proposalId: 'prcardC' } });
-    expect(await c(4)).toMatchObject({ pass: false, values: { reviewsWithCards: 2, splitMinor: 1 } });
+    expect(await c(4)).toMatchObject({ pass: false, values: { reviewsWithCards: 3, splitMinor: 1 } });
   });
 
   it('7: suggestions from chat, each resting on Will’s own quoted words (the database refuses any other)', async () => {

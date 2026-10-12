@@ -237,21 +237,22 @@ const PHASES: Record<Phase, PhaseOf> = {
     // The week was lived: reviews were on for each of the 7 whole local days before today (every time the
     // health check looked; a day with nothing due still counts: a weekly goal has no review on most days),
     // none ran over 24 hours late and none is that late now, and the local model answered at least one.
+    // Days on and lateness are both read from the health check's Goal Reviews rows, as goals/late.ts reads them.
     covered: async (db, now, tz) => {
-      const first = await firstReviewAt(db);
-      if (!first) return 'Flint has not reviewed a goal yet';
+      if (!(await firstReviewAt(db))) return 'Flint has not reviewed a goal yet';
       const { since, missing } = await daysNotRunning(db, tz, now, SHADOW_DAYS);
       if (missing.length) return `goal reviews were on all day on ${SHADOW_DAYS - missing.length} of the ${SHADOW_DAYS} days before today (not on ${missing.join(', ')})`;
-      const c = await reviewCounts(db, since, now, first);
+      const c = await reviewCounts(db, since, now);
       if (c.late) return `${count(c.late, 'review')} ran over 24 hours late`;
       const waiting = await overdueNow(db, now);
       if (waiting) return `${count(waiting, 'goal is', 'goals are')} over 24 hours past a review`;
       if (!c.answered) return 'the local model has not answered a review yet';
       return undefined;
     },
-    measured: async (db, first, now) => {
-      const c = await reviewCounts(db, new Date(now.getTime() - SHADOW_DAYS * DAY), now, first);
-      const late = c.late ? `${c.late} ${c.late === 1 ? 'was' : 'were'} late` : 'none was late';
+    measured: async (db, _first, now) => {
+      const c = await reviewCounts(db, new Date(now.getTime() - SHADOW_DAYS * DAY), now);
+      // Late as the digest counted it, day by day: over an hour. (Over 24 hours, the card is not filed at all.)
+      const late = c.lateHour ? `${c.lateHour} ${c.lateHour === 1 ? 'was' : 'were'} late` : 'none was late';
       // In the trial week a review files nothing: it records what it would have suggested.
       const suggested = `${c.shadow === c.reviews ? 'It would have suggested' : 'It suggested'} ${count(c.suggested, 'change')}.`;
       return `This week Flint reviewed your goals ${count(c.reviews, 'time')}, and ${late}. The local model answered ${c.answered}. ${suggested}`;

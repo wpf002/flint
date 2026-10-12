@@ -4,10 +4,12 @@
  * p3, goal reviews out of their trial week:
  *  - its only row is goal.review.local, ALONE, 20 a day;
  *  - refused before 7 days since Flint's first review; then until the week was
- *    lived: reviews on for each of the 7 days before today (a day with nothing
- *    due counts; a day the planner was off for any part of does not), no review
- *    over 24 hours late, no goal that late now, and the local model having
- *    answered;
+ *    lived: reviews on for each of the 7 days before today, by the health
+ *    check's own Goal Reviews rows (a day with nothing due counts; a day the
+ *    planner was off, or a rule stopped reviews, for any part of does not), no
+ *    review over 24 hours late, no goal that late now, and the local model
+ *    having answered. Late is time waited while Flint was reviewing, as part 3
+ *    counts it: a review that was due while reviews were off was waiting;
  *  - the card says what signing lets happen and what the week measured, in
  *    sentences of numbers only; filing it again is the same card;
  *  - signed, reviews resolve to ALONE and are no longer marked as trial.
@@ -26,10 +28,11 @@ import { activePolicies, approveProposal, expireProposals, Refused, rejectPropos
 import { PolicyArgs, runInternal } from '../src/governance/internal';
 import { NEVER_PROMOTED, P1_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS, P2_PROMOTIONS, P3C_PROMOTIONS, P3C_SHADOW_DAYS, P3_PROMOTIONS, PHASES_LIST, SHADOW_DAYS, promotionTable } from '../src/governance/promotion';
 import { runPlan } from '../src/goals/batch';
+import { REVIEWS_STOPPED } from '../src/goals/late';
 import { reviewStanding, runReview } from '../src/goals/review';
 import type { ReplyOp } from '../src/goals/steps';
 import { CANARY, DAY, FakeBus, goalFixture, type GoalFixture } from './goals/fixture';
-import { HOUR, daysBefore, goalReviewsRan, moveReview, noon } from './goals/weeks';
+import { HOUR, daysBefore, goalReviewsRan, moveReview, noon, reviewing } from './goals/weeks';
 
 const OLLAMA = { url: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b' };
 const op = (over: Partial<ReplyOp> = {}): ReplyOp => ({ op: 'none', step: '', template: 'none', ref: '', criterion: '', dueInDays: -1, status: 'none', after: '', ...over });
@@ -108,7 +111,7 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     await moveReview(urls, first, new Date(now.getTime() - 8 * DAY), new Date(now.getTime() - 8 * DAY - 60_000));
   });
 
-  it('then until reviews were on for each of the 7 days before today: a day with nothing due counts, a day they were off for any part of does not', async () => {
+  it('then until reviews were on for each of the 7 days before today, by the health check’s rows: a day with nothing due counts, a day they were off or stopped for any part of does not', async () => {
     const [d1, d2, d3, d4, d5, d6, d7] = week as [string, string, string, string, string, string, string];
     const said = (n: number, not: string[]) => `409: the shadow week does not count yet: goal reviews were on all day on ${n} of the 7 days before today (not on ${[...not].sort().join(', ')})`;
     // Begun eight days ago, and nothing since: the week was not lived.
@@ -116,8 +119,10 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     // The health check found Goal Reviews on, on five of the days. No review was due on any of them: a weekly goal has none on most days.
     await goalReviewsRan(db, [d1, d2, d4, d6, d7]);
     expect(await refusal(table())).toBe(said(5, [d3, d5]));
-    // A day the health check never ran (it has no rows) still counts if a review ran on it.
+    // A review that ran on a day is not the record of it: the health check's rows are (lateness is counted from the same rows).
     await moveReview(urls, await reviewed(b.id), noon(d5));
+    expect(await refusal(table())).toBe(said(5, [d3, d5]));
+    await goalReviewsRan(db, [d5]);
     expect(await refusal(table())).toBe(said(6, [d3]));
     // A day the planner was off for part of (Health said disabled at noon) is not a day they were on, whatever else it found.
     await goalReviewsRan(db, [d3], 'disabled');
@@ -127,36 +132,56 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     const onD3 = await reviewed(b.id);
     await moveReview(urls, onD3, new Date(noon(d3).getTime() + 7 * HOUR));
     expect(await refusal(table())).toBe(said(6, [d3]));
-    // Had they been on every time Health looked that day (degraded counts: on, with an issue), the week is whole.
+    // Nor is a day a rule stopped reviews for part of: Health says so in one fixed sentence, on a degraded row.
     await db.healthCheck.deleteMany({ where: { component: 'goals', status: 'disabled' } });
-    await goalReviewsRan(db, [d3], 'degraded');
+    await goalReviewsRan(db, [d3], 'degraded', REVIEWS_STOPPED);
+    expect(await refusal(table())).toBe(said(6, [d3]));
+    // Had they been on every time Health looked that day (degraded for any other reason counts: on, with an issue), the week is whole.
+    await db.healthCheck.deleteMany({ where: { component: 'goals', detail: REVIEWS_STOPPED } });
+    await goalReviewsRan(db, [d3], 'degraded', 'A goal’s review is over an hour late.');
     expect(await refusal(table())).not.toContain('all day');
     // Another component's checks say nothing about reviews.
     await db.healthCheck.create({ data: { component: 'triage', status: 'disabled', at: noon(d2) } });
     expect(await refusal(table())).not.toContain('all day');
   });
 
-  it('then while a review ran over 24 hours late, or a goal is that late now', async () => {
+  it('then while a review ran over 24 hours late, or a goal is that late now: late is time waited while Flint was reviewing', async () => {
+    const stuck = (goalId: string, at: Date) => withClient(urls.owner, async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SELECT set_config('flint.actor', 'runtime:goals', true)`);
+      await c.query('UPDATE "Goal" SET "nextReviewAt" = $2 WHERE id = $1', [goalId, at]);
+      await c.query('COMMIT');
+    });
     // Goal b's scheduled review ran two days ago, 30 hours after it was due.
     const late = await reviewed(b.id, 'scheduled');
     const ranAt = new Date(now.getTime() - 2 * DAY);
-    await moveReview(urls, late, ranAt, new Date(ranAt.getTime() - 30 * HOUR));
+    const due = new Date(ranAt.getTime() - 30 * HOUR);
+    await moveReview(urls, late, ranAt, due);
+    // The health check has a row or two a day so far and no stretch of reviewing: for all the record says, reviews
+    // were off or the Mac was asleep while it waited. It was waiting, not late.
+    expect(await refusal(table())).not.toContain('late');
+    // Flint was reviewing for all of those 30 hours: late, and the week does not count.
+    await reviewing(db, due, ranAt);
     expect(await refusal(table())).toBe('409: the shadow week does not count yet: 1 review ran over 24 hours late');
     // 23 hours is late for the panel, and not an outage.
     await moveReview(urls, late, ranAt, new Date(ranAt.getTime() - 23 * HOUR));
     expect(await refusal(table())).not.toContain('late');
 
-    // A goal whose review has been due for 30 hours right now (the tick has not reached it: reviews are stuck).
+    // A goal whose review has been due for 30 hours right now. With no reviewing on record for them, it is waiting.
     const next = (await db.goal.findUniqueOrThrow({ where: { id: a.id } })).nextReviewAt!;
-    const stuck = (at: Date) => withClient(urls.owner, async (c) => {
-      await c.query('BEGIN');
-      await c.query(`SELECT set_config('flint.actor', 'runtime:goals', true)`);
-      await c.query('UPDATE "Goal" SET "nextReviewAt" = $2 WHERE id = $1', [a.id, at]);
-      await c.query('COMMIT');
-    });
-    await stuck(new Date(now.getTime() - 30 * HOUR));
+    await stuck(a.id, new Date(now.getTime() - 30 * HOUR));
+    expect(await refusal(table())).not.toContain('past a review');
+    // Flint was reviewing all that time and never reached it (reviews are stuck): what Settings > Health shows as down.
+    await reviewing(db, new Date(now.getTime() - 30 * HOUR), now);
     expect(await refusal(table())).toBe('409: the shadow week does not count yet: 1 goal is over 24 hours past a review');
-    await stuck(next);
+    await stuck(a.id, next);
+
+    // A review that ran two hours late is late for the digest (its audit entry says so) and no outage: the week
+    // still counts, and the card will say it.
+    await stuck(b.id, new Date(Date.now() - 2 * HOUR));
+    const slow = await reviewed(b.id, 'scheduled');
+    expect(((await db.auditEntry.findFirstOrThrow({ where: { correlationId: slow, action: 'goal.review.local' } })).inputs as { late?: boolean }).late).toBe(true);
+    expect(await refusal(table())).not.toContain('late');
   });
 
   it('then until the local model has answered a review', async () => {
@@ -171,7 +196,7 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
       { db, bus, config: { tz: TZ, ollama: OLLAMA }, load: async () => 'proceed', fetch: model([op({ op: 'set_status', step: 's2', status: 'blocked' }), op({ op: 'add_step', template: 'review_progress', dueInDays: 3 })]) },
       { goalId: a.id, reviewId: answered },
     );
-    expect(out).toEqual({ outcome: 'planned', reviewId: answered, suggested: 2, filed: 0 });
+    expect(out).toEqual({ outcome: 'planned', reviewId: answered, suggested: 2, filed: 0, kept: 0 });
     expect(await db.proposal.count({ where: { action: 'plan.change', origin: 'runtime:goals' } })).toBe(0);
   });
 
@@ -184,8 +209,9 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     expect(Date.parse(t.rows[0]!.expiresAt) - Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toBe(175 * DAY);
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
     expect(card).toMatchObject({ kind: 'policy', origin: 'cli', action: 'policy.change', templateId: 'p3.promotion', tainted: false, sensitivity: 'ops', consequential: true, status: 'pending' });
-    // In the last 7 days: b's two reviews on quiet days, b's scheduled one, and a's two today. The first review, 8 days ago, is before the week.
-    expect(card.reason).toMatch(/^This lets Flint review your goals and send its plan suggestions as cards without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. This week Flint reviewed your goals 5 times, and none was late\. The local model answered 1\. It would have suggested 2 changes\.$/);
+    // In the last 7 days: b's two reviews on quiet days, b's two scheduled ones, and a's two today. The first review, 8 days ago, is
+    // before the week. Late is the digest's count (over an hour): the one that ran two hours late.
+    expect(card.reason).toMatch(/^This lets Flint review your goals and send its plan suggestions as cards without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. This week Flint reviewed your goals 6 times, and 1 was late\. The local model answered 1\. It would have suggested 2 changes\.$/);
     // Numbers only: no goal's words, no id.
     expect(card.reason).not.toContain(CANARY);
     for (const id of [a.id, b.id]) expect(JSON.stringify([card.reason, card.args, card.argsProvenance])).not.toContain(id);
@@ -218,7 +244,7 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     // Once promoted, the week's sentence says what reviews suggested, no longer what they would have.
     const again = await table({ now: new Date(now.getTime() + 120_000) });
     expect(again.deduped).toBe(false);
-    expect((await db.proposal.findUniqueOrThrow({ where: { id: again.proposalId } })).reason).toMatch(/This week Flint reviewed your goals 7 times, and none was late\. The local model answered 1\. It suggested 2 changes\.$/);
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: again.proposalId } })).reason).toMatch(/This week Flint reviewed your goals 8 times, and 1 was late\. The local model answered 1\. It suggested 2 changes\.$/);
   });
 });
 
