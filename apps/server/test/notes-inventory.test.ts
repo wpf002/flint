@@ -18,19 +18,22 @@
  *                                            apps/runtime/test/notes-inventory.test.ts has their words
  *   index.ts (the frontier breaker)          an outside AI is paused for something only Will can fix
  *   index.ts (the local model)               no local model is set, and Ollama has none to offer
+ *   index.ts (the deploy hold)               updates have been paused for a day (once per pause)
  *   apps/desktop-mac/update_app.sh           Flint.app was updated, or its update did not build
  *   apps/desktop-calendar/update_calendar.sh Flint Calendar's update did not build
  *   apps/responder/scripts/nexus-health.sh   a Nexus participant cannot take a turn
  */
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { PAID_VENDORS } from '@flint/core';
 import { ACTION_DONE, ACTION_WORDS, noteProblems } from '@flint/policy';
 import { actionDoneNote } from '../src/approval-routes';
+import { HOLD_NOTE_AFTER_MS, deployHoldNote, holdNoteDue, holdSince } from '../src/deploy-hold';
 import { breakerNote } from '../src/frontier-breaker';
 import { localDefaultNote } from '../src/local-model';
-import { PHONE_PING, signalNote, upcomingNote } from '../src/notifications';
+import { Notifications, PHONE_PING, signalNote, upcomingNote } from '../src/notifications';
 import { effectOf, thresholdNote, type BudgetLevel } from '../src/spend';
 
 const SRC = join(__dirname, '..', 'src');
@@ -68,6 +71,7 @@ describe('the server’s notes to Will', () => {
       'index.ts: n.title', // the runtime's, through /internal/notify
       'index.ts: note.title', // breakerNote
       'index.ts: note.title', // localDefaultNote
+      'index.ts: note.title', // holdNoteDue (deployHoldNote)
       'notifications.ts: r.title', // the Watcher's checks: upcomingNote, signalNote
       'spend.ts: note.title', // thresholdNote
     ]);
@@ -79,6 +83,7 @@ describe('the server’s notes to Will', () => {
     expect(checks).not.toMatch(/\btitle:|\bbody:/);
     expect(index.match(/const note = breakerNote\(e\);\n\s+if \(note\) notes\.push\(note\.title, note\.body,/g)).toHaveLength(1);
     expect(index.match(/const note = localDefaultNote\(\);\n\s+notes\.push\(note\.title, note\.body,/g)).toHaveLength(1);
+    expect(index.match(/const note = holdNoteDue\(homedir\(\), Date\.now\(\)\);\n\s+if \(note\) notes\.push\(note\.title, note\.body, 'system', note\.dedupe,/g)).toHaveLength(1);
     const routes = readFileSync(join(SRC, 'approval-routes.ts'), 'utf8');
     expect(routes.match(/const done = actionDoneNote\(/g)).toHaveLength(2);
     expect(readFileSync(join(SRC, 'spend.ts'), 'utf8')).toMatch(/const note = thresholdNote\(/);
@@ -138,6 +143,51 @@ describe('the server’s notes to Will', () => {
     const guess = localDefaultNote();
     plain('index.ts local default', guess.title, guess.body);
     expect(guess.title).toBe('Flint Is Guessing Its Local Model');
+  });
+
+  it('index.ts: a pause on updates gets one note once it has lasted a day, in plain words, and one per pause', () => {
+    const note = deployHoldNote();
+    plain('index.ts deploy hold', note.title, note.body);
+    expect(note).toEqual({ title: 'Updates Have Been Paused for a Day', body: 'Flint stays on the version it has until you resume them. The recovery runbook says how.' });
+    expect(note.title.length).toBeLessThanOrEqual(40);
+    // A scratch home: nothing here reads the real ~/.flint.
+    const home = mkdtempSync(join(tmpdir(), 'deploy-hold-'));
+    try {
+      mkdirSync(join(home, '.flint'));
+      const hold = join(home, '.flint', 'deploy-hold');
+      const now = Date.UTC(2026, 9, 12, 12);
+      const pausedAt = (ms: number) => {
+        writeFileSync(hold, 'Paused by rollback.sh.\n');
+        utimesSync(hold, ms / 1000, ms / 1000);
+      };
+      // Not paused: no note, however long ago anything was.
+      expect(holdSince(home)).toBeUndefined();
+      expect(holdNoteDue(home, now)).toBeUndefined();
+      // Paused for less than a day: Health shows it (the runtime), and no note yet.
+      pausedAt(now - HOLD_NOTE_AFTER_MS + 60_000);
+      expect(holdSince(home)).toBe(now - HOLD_NOTE_AFTER_MS + 60_000);
+      expect(holdNoteDue(home, now)).toBeUndefined();
+      // A day in: the note, under a key that is the pause's own, so every later check is a duplicate.
+      pausedAt(now - HOLD_NOTE_AFTER_MS);
+      const due = holdNoteDue(home, now)!;
+      expect(due).toEqual({ ...note, dedupe: `deploy-hold:${(now - HOLD_NOTE_AFTER_MS) / 1000}` });
+      expect(holdNoteDue(home, now + 9 * 86_400_000)).toEqual(due);
+      // The feed keeps its keys across restarts: a second push under the same key stores nothing.
+      const feed = () => new Notifications(join(home, '.flint', 'notifications.json'), { banner: () => {}, topic: () => undefined });
+      expect(feed().push(due.title, due.body, 'system', due.dedupe, { channels: ['inapp', 'push'] }).status).toBe('stored');
+      expect(feed().push(due.title, due.body, 'system', due.dedupe, { channels: ['inapp', 'push'] }).status).toBe('duplicate');
+      expect(feed().list()).toHaveLength(1);
+      // Resumed, then paused again later: a new pause, and a note of its own once it too has lasted a day.
+      rmSync(hold);
+      expect(holdNoteDue(home, now)).toBeUndefined();
+      pausedAt(now + 3 * 86_400_000);
+      expect(holdNoteDue(home, now + 3.5 * 86_400_000)).toBeUndefined();
+      const again = holdNoteDue(home, now + 5 * 86_400_000)!;
+      expect(again.dedupe).not.toBe(due.dedupe);
+      expect(feed().push(again.title, again.body, 'system', again.dedupe, { channels: ['inapp', 'push'] }).status).toBe('stored');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('notifications.ts: the Watcher’s notes are Flint’s words around someone else’s, and the phone ping says nothing of what happened', () => {

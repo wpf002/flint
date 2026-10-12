@@ -13,6 +13,10 @@
  *  - the last good local backup, the last encrypted copy offsite (off until
  *    Will's age key is here), the latest restore drill, open audit intents,
  *    the last retention run, a migration marked failed, triage;
+ *  - whether updates are paused (the deploy hold: degraded for as long as it is
+ *    there, with its age), and how the last rebuild rehearsal went (run weekly
+ *    and by the deploy gate; a pass over 8 days old is degraded, a failure is
+ *    down, none yet is unknown). Both are read from files the deploy scripts keep;
  *  - goal reviews (P3): disabled while the planner is off; degraded when an
  *    active goal's review is over an hour late, when a review gave up waiting
  *    for chat within the hour, or when a rule forbids reviews; down when one is
@@ -87,6 +91,59 @@ function offsiteWanted(home: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** What Automatic Updates and Rebuild Rehearsal say in Settings > Health: sentences from a time, never a file's words. */
+export const UPKEEP_HEALTH = {
+  paused: (ms: number) => {
+    const h = Math.floor(ms / 3_600_000);
+    return `Updates have been paused for ${h < 1 ? 'less than an hour' : h < 48 ? count(h, 'hour') : count(Math.floor(h / 24), 'day')}.`;
+  },
+  passed: (when: string) => `The rebuild rehearsal last passed ${when}.`,
+  failed: (when: string) => `The rebuild rehearsal failed ${when}.`,
+  never: 'The rebuild rehearsal has not run yet.',
+} as const;
+
+/** A weekly rehearsal, a day's grace: a last pass older than this is overdue. */
+export const REHEARSAL_STALE_DAYS = 8;
+
+/**
+ * Automatic updates: paused while ~/.flint/deploy-hold exists (apps/server/auto_deploy.sh skips every
+ * tick; apps/studio/rollback.sh makes the file after putting an earlier version back). A pause is
+ * meant to be short, and nothing else on screen would say it is still on, so it is an issue for as
+ * long as it lasts, with its age: the hold file's own time.
+ */
+export function deployHold(home: string, now: Date): ComponentCheck {
+  const component = 'deploy_hold';
+  try {
+    const since = statSync(join(home, '.flint', 'deploy-hold')).mtimeMs;
+    return { component, status: 'degraded', detail: UPKEEP_HEALTH.paused(Math.max(0, now.getTime() - since)) };
+  } catch {
+    return { component, status: 'ok' };
+  }
+}
+
+/**
+ * The rebuild rehearsal (apps/studio/run_rehearsal.sh: a made-up Flint backed up and rebuilt into a
+ * scratch folder, every Sunday and whenever a deploy changes what a rebuild is made of). Its last
+ * line in ~/.flint/rehearsal-result, "<passed|failed> <when, in seconds> <commit>", is all that is
+ * read. A failure is down: a rebuild would not work today. A line that cannot be read is no result.
+ */
+export function rebuildRehearsal(home: string, tz: string, now: Date): ComponentCheck {
+  const component = 'rebuild_rehearsal';
+  let line = '';
+  try {
+    line = readFileSync(join(home, '.flint', 'rehearsal-result'), 'utf8').split('\n')[0]!.trim();
+  } catch {
+    // No result yet.
+  }
+  const m = /^(passed|failed) (\d{9,11})(?: (?:[0-9a-f]{40}|-))?$/.exec(line);
+  if (!m) return { component, status: 'unknown', detail: UPKEEP_HEALTH.never };
+  const at = new Date(Number(m[2]) * 1000);
+  const days = calendarDaysBetween(tz, at, now);
+  const when = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${count(days, 'day')} ago`;
+  if (m[1] === 'failed') return { component, status: 'down', detail: UPKEEP_HEALTH.failed(when) };
+  return { component, status: (now.getTime() - at.getTime()) / 86_400_000 <= REHEARSAL_STALE_DAYS ? 'ok' : 'degraded', detail: UPKEEP_HEALTH.passed(when) };
 }
 
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
@@ -192,6 +249,9 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const marker = join(d.config.home, '.flint', 'runtime', 'migrate-failed');
   const failed = existsSync(marker) ? [...new Set(readFileSync(marker, 'utf8').split('\n').map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/.test(l)))] : [];
   out.push({ component: 'migrate_failed', status: failed.length ? 'down' : 'ok', ...(failed.length ? { detail: failed.length === 1 ? 'A database update failed and won’t be retried until it’s fixed.' : 'Several database updates failed and won’t be retried until they’re fixed.' } : {}) });
+
+  out.push(deployHold(d.config.home, now));
+  out.push(rebuildRehearsal(d.config.home, d.config.tz, now));
 
   if (!d.config.triage) out.push({ component: 'triage', status: 'disabled' });
   else {

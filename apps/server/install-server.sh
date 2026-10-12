@@ -52,6 +52,90 @@ calendar_changed() { # 0: changed since the last finished server deploy, or that
   files=$(git -C "$REPO" diff --name-only "$last" -- 2>/dev/null) || return 0
   print -r -- "$files" | grep -E "$CALENDAR_PATHS" >/dev/null
 }
+# The rebuild rehearsal (apps/studio/test/rebuild_rehearse.test.sh: a made-up Flint
+# backed up and rebuilt into a scratch folder, about 45 s) runs in the gate only
+# when this deploy changes something a rebuild is made of since the last server
+# deploy that finished, when that deploy is unknown, or when FLINT_REHEARSE=1 asks
+# for it, so a merge that touches none of it no longer waits for it. The other
+# studio tests always run. It runs through apps/studio/run_rehearsal.sh, with
+# FLINT_REQUIRE_REHEARSAL=1 (a missing tool fails it, never skips it), and its
+# result is kept for Settings > Health. The same script runs it every week
+# (com.flint.rebuild-rehearsal, below), so a rebuild that stopped working for a
+# reason no deploy shows is still found.
+REHEARSAL_PATHS='^(apps/studio/|docs/RECOVERY\.md$|apps/runtime/(src/backup/|src/cli\.ts$|src/config\.ts$|scripts/bootstrap-db\.ts$|prisma/|install-runtime\.sh$|package\.json$)|apps/server/(install-server\.sh$|auto_deploy\.sh$|src/(internal|access|mcp-config)\.ts$|com\.flint\.deploy\.plist$)|apps/evolve/com\.flint\.evolve\.plist$|packages/policy/src/(tiers|selfmod-paths)\.ts$|packages/mcp/connectors/|test-support/quiet-bin/|pnpm-lock\.yaml$|package\.json$|pnpm-workspace\.yaml$)'
+rehearsal_changed() { # 0: changed since the last finished server deploy, or that deploy is unknown; 1: not changed
+  local last files
+  last=$(grep -F '"component":"server"' "$DATA/deploy-events.jsonl" 2>/dev/null | grep -F '"stage":"deploy","outcome":"ok"' | tail -n 1 | sed -nE 's/.*"sha":"([0-9a-f]{40})".*/\1/p')
+  [ -n "$last" ] && git -C "$REPO" cat-file -e "$last^{commit}" 2>/dev/null || return 0
+  # Against the working tree, as calendar_changed does.
+  files=$(git -C "$REPO" diff --name-only "$last" -- 2>/dev/null) || return 0
+  print -r -- "$files" | grep -E "$REHEARSAL_PATHS" >/dev/null
+}
+# Which version each kept bundle is: one line, "<commit> <when it was installed, in
+# seconds>", in server.version for server.mjs and in server.version.prev for
+# server.mjs.prev. apps/studio/rollback.sh shows both before it goes back, and
+# auto_deploy.sh reads the first to tell what is installed. Each line moves with
+# its bundle. 0600; a line that cannot be worked out is left out, never guessed,
+# and none of this can fail the install.
+server_version() { # keep: the running bundle becomes .prev | set <sha>: server.mjs is this, installed now | back: .prev was put back
+  emulate -L zsh
+  setopt no_err_exit no_err_return no_pipefail
+  local line= last sha= at= made=
+  case $1 in
+    keep)
+      [[ -r $DATA/server.version ]] && IFS= read -r line < "$DATA/server.version"
+      if [[ ! $line =~ '^[0-9a-f]{40} [0-9]{9,11}$' ]]; then
+        # A bundle from before these lines were kept: it is the last server deploy that
+        # finished, when that deploy ended within minutes of the bundle being written.
+        line=
+        last=$(grep -F '"component":"server"' "$DATA/deploy-events.jsonl" 2>/dev/null | grep -F '"stage":"deploy","outcome":"ok"' | tail -n 1)
+        [[ $last =~ '"sha":"([0-9a-f]{40})"' ]] && sha=$match[1]
+        [[ $last =~ '"at":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)"' ]] && at=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$match[1]" +%s 2>/dev/null)
+        made=$(stat -f %m "$DATA/server.mjs" 2>/dev/null)
+        if [[ -n $sha && $at =~ '^[0-9]{9,11}$' && $made =~ '^[0-9]{9,11}$' ]] && (( at >= made - 60 && at - made <= 900 )); then line="$sha $made"; fi
+      fi
+      if [[ -n $line ]] && ( umask 077; print -r -- "$line" > "$DATA/server.version.prev" && chmod 600 "$DATA/server.version.prev" ) 2>/dev/null; then :; else rm -f "$DATA/server.version.prev"; fi ;;
+    set)
+      if [[ ${2:-} =~ '^[0-9a-f]{40}$' ]] && ( umask 077; print -r -- "$2 $(date +%s)" > "$DATA/server.version" && chmod 600 "$DATA/server.version" ) 2>/dev/null; then :; else rm -f "$DATA/server.version"; fi ;;
+    back)
+      if [[ -f $DATA/server.version.prev ]] && cp -p "$DATA/server.version.prev" "$DATA/server.version" 2>/dev/null; then :; else rm -f "$DATA/server.version"; fi ;;
+  esac
+  return 0
+}
+# The weekly rebuild rehearsal (apps/studio/run_rehearsal.sh, Sundays at 05:10): a
+# LaunchAgent written here and (re)loaded only when its file changes, the way
+# install-runtime.sh keeps the nightly database backup's. It runs from this
+# checkout and on a timer only (no RunAtLoad: loading it starts nothing). The
+# rehearsal keeps to scratch folders of its own, shows nothing, and leaves one
+# line in ~/.flint/rehearsal-result, which Settings > Health reads.
+REHEARSAL_LABEL="com.flint.rebuild-rehearsal"
+install_rehearsal_agent() {
+  local plist="$AGENTS/$REHEARSAL_LABEL.plist" node_bin pnpm_bin i
+  node_bin="$(command -v node)" && pnpm_bin="$(command -v pnpm)" && [ -n "$node_bin" ] && [ -n "$pnpm_bin" ] || return 1
+  cat > "$plist.new" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$REHEARSAL_LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>$REPO/apps/studio/run_rehearsal.sh</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$(dirname "$node_bin"):$(dirname "$pnpm_bin"):/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>5</integer><key>Minute</key><integer>10</integer></dict>
+  <key>StandardOutPath</key><string>$DATA/rehearsal.out.log</string>
+  <key>StandardErrorPath</key><string>$DATA/rehearsal.err.log</string>
+</dict></plist>
+PLIST
+  chmod 600 "$plist.new"
+  # A path that does not fit in a LaunchAgent file (a & or a < in a folder's name) is never loaded.
+  plutil -lint "$plist.new" >/dev/null 2>&1 || { rm -f "$plist.new"; return 1; }
+  if cmp -s "$plist.new" "$plist" && launchctl print "gui/$UID/$REHEARSAL_LABEL" >/dev/null 2>&1; then
+    rm -f "$plist.new"
+    return 0
+  fi
+  mv "$plist.new" "$plist"
+  launchctl bootout "gui/$UID/$REHEARSAL_LABEL" 2>/dev/null || true
+  for i in {1..20}; do launchctl print "gui/$UID/$REHEARSAL_LABEL" >/dev/null 2>&1 || break; sleep 0.25; done
+  launchctl bootstrap "gui/$UID" "$plist" && echo "weekly rebuild rehearsal agent loaded (Sundays 05:10)"
+}
 
 # The server records a failed gate (the workspace build counts: nothing deploys
 # without it) and a finished deploy. Past the gate, DEPLOY_STAGE is empty.
@@ -103,13 +187,29 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   # The nightly backup runs straight from this checkout, so its tests gate too.
   echo "gate: backup tests (offsite excludes, pruning, rotation, encryption)..."
   for t in "$REPO"/apps/studio/test/*.test.sh(N); do
+    [ "${t:t}" = rebuild_rehearse.test.sh ] && continue   # the rebuild rehearsal: below, and only when it is needed
     zsh "$t" || { echo "✗ $t failed — NOT deploying"; exit 1; }
   done
+  if [ "${FLINT_REHEARSE:-0}" = "1" ]; then
+    REHEARSE=1; echo "gate: the rebuild rehearsal was asked for (FLINT_REHEARSE=1), so it must run"
+  elif rehearsal_changed; then
+    REHEARSE=1; echo "gate: what a rebuild is made of changed since the last deploy, so the rebuild rehearsal must run"
+  else
+    REHEARSE=0; echo "gate: what a rebuild is made of is unchanged since the last deploy, so the rebuild rehearsal is skipped"
+  fi
+  if [ "$REHEARSE" = 1 ]; then
+    FLINT_REQUIRE_REHEARSAL=1 zsh "$REPO/apps/studio/run_rehearsal.sh" || { echo "✗ the rebuild rehearsal failed — NOT deploying"; exit 1; }
+  fi
 fi
 DEPLOY_STAGE=
 
 # The bundle running now, kept: a new one that does not come up is replaced by it.
-[ -f "$DATA/server.mjs" ] && cp -p "$DATA/server.mjs" "$DATA/server.mjs.prev"
+if [ -f "$DATA/server.mjs" ]; then
+  cp -p "$DATA/server.mjs" "$DATA/server.mjs.prev"
+  server_version keep
+else
+  rm -f "$DATA/server.version" "$DATA/server.version.prev"   # no bundle here yet: a line would be another Mac's
+fi
 echo "bundling server -> $DATA/server.mjs ..."
 ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f | head -1)"
 # NOTE: @anthropic-ai/sdk is bundled IN (no --external) — the server is the
@@ -118,6 +218,7 @@ ESBUILD="$(find "$REPO/node_modules/.pnpm" -path '*esbuild*/bin/esbuild' -type f
 "$ESBUILD" "$REPO/apps/server/src/index.ts" --bundle --platform=node --format=esm --target=node20 \
   --banner:js="import{createRequire as __cr}from'module';const require=__cr(import.meta.url);" \
   --outfile="$DATA/server.mjs"
+server_version set "$SHA"
 
 # ---- connectors --------------------------------------------------------------
 # The MCP connectors run from their own bundles in $DATA/connectors, and this
@@ -192,6 +293,7 @@ if [ "$up" != 1 ]; then
   if [ -f "$DATA/server.mjs.prev" ]; then
     echo "  going back to the previous bundle"
     cp -p "$DATA/server.mjs.prev" "$DATA/server.mjs"
+    server_version back
     [ -f "$DATA/console.html.prev" ] && cp -p "$DATA/console.html.prev" "$DATA/console.html"
     launchctl unload "$AGENTS/$PLIST" 2>/dev/null || true
     launchctl load -w "$AGENTS/$PLIST" || echo "✗ the previous bundle did not load either; load it with: launchctl load -w $AGENTS/$PLIST"
@@ -200,6 +302,7 @@ if [ "$up" != 1 ]; then
 fi
 curl -fsS -m 3 "http://localhost:$PORT_N/health"; echo
 deploy_event server deploy ok "$SHA"
+install_rehearsal_agent || echo "✗ the weekly rebuild rehearsal agent could not be (re)loaded (the server itself is up)" >&2
 
 # ---- TAILNET: only `tailscale serve` may reach Flint ---------------------------
 # Flint listens on ::1 (apps/server/src/access.ts): this Mac's userspace tailscaled

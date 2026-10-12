@@ -147,6 +147,94 @@ describe('install-runtime.sh', () => {
     expect(readdirSync(join(rt, 'releases')).sort()).toEqual(['r1', 'r4', 'r5', 'r6']);
   });
 
+  it('pruning never removes the release that ran before this one, however many newer folders there are', () => {
+    // r1 ran; r2, r3 and r4 never came up (their folders are still newer); r5 is the new release.
+    const prune = between('    ls -1dt "$RT"/releases/*(/N)', '    done\n');
+    const rt = mkdtempSync(join(tmpdir(), 'rt-releases-'));
+    ['r1', 'r2', 'r3', 'r4', 'r5'].forEach((n, i) => {
+      mkdirSync(join(rt, 'releases', n), { recursive: true });
+      const t = new Date(Date.UTC(2026, 9, 1, i));
+      utimesSync(join(rt, 'releases', n), t, t);
+    });
+    const r = zsh(`RT=${rt}\nREL=${rt}/releases/r5\nPREV=${rt}/releases/r1\n${prune}\necho END`);
+    expect(r.stdout).toContain('END');
+    expect(readdirSync(join(rt, 'releases')).sort()).toEqual(['r1', 'r3', 'r4', 'r5']);
+  });
+
+  // Review of the recovery PR: rollback.sh took "the next release folder by date" for the one that ran
+  // before, and could not say how old either was. The installer now writes both down.
+  describe('writes down which release is live and which ran before it (runtime/version, runtime/version.prev)', () => {
+    const fn = between('record_versions() {', '\n}');
+    const A = 'a'.repeat(40);
+    const B = 'b'.repeat(40);
+    const C = 'c'.repeat(40);
+    const setup = () => {
+      const rt = mkdtempSync(join(tmpdir(), 'rt-versions-'));
+      for (const sha of [A, B, C]) mkdirSync(join(rt, 'releases', sha), { recursive: true });
+      const made = new Date(Date.UTC(2026, 9, 1));
+      utimesSync(join(rt, 'releases', A), made, made);
+      const read = (f: string) => (existsSync(join(rt, f)) ? readFileSync(join(rt, f), 'utf8') : null);
+      const record = (sha: string, prev: string) => zsh(`RT=${rt}\nSHA=${sha}\n${fn}\nrecord_versions "${prev}"\necho END`);
+      return { rt, read, record, madeA: Math.floor(made.getTime() / 1000) };
+    };
+
+    it('runs once the new release answers, with the release that was live before the switch', () => {
+      const prev = SCRIPT.indexOf('PREV="$(readlink "$RT/current" 2>/dev/null || true)"');
+      const swap = SCRIPT.indexOf('ln -sfn "$REL" "$RT/current"');
+      expect(prev).toBeGreaterThan(0);
+      expect(prev).toBeLessThan(swap);
+      expect(SCRIPT).toMatch(/deploy_event runtime deploy ok "\$SHA"\n\s+record_versions "\$PREV"/);
+      expect(SCRIPT.match(/record_versions "/g)).toHaveLength(1);
+    });
+
+    it('a first install has nothing before it', () => {
+      const t = setup();
+      const before = Math.floor(Date.now() / 1000);
+      expect(t.record(A, '').stdout).toContain('END');
+      const [sha, at] = t.read('version')!.trim().split(' ');
+      expect(sha).toBe(A);
+      expect(Number(at)).toBeGreaterThanOrEqual(before);
+      expect(t.read('version.prev')).toBeNull();
+      expect(statSync(join(t.rt, 'version')).mode & 0o777).toBe(0o600);
+    });
+
+    it('the line of the release that was live becomes the line of the one before', () => {
+      const t = setup();
+      writeFileSync(join(t.rt, 'version'), `${A} 1760000000\n`);
+      writeFileSync(join(t.rt, 'version.prev'), `${C} 1750000000\n`);
+      expect(t.record(B, join(t.rt, 'releases', A)).stdout).toContain('END');
+      expect(t.read('version.prev')).toBe(`${A} 1760000000\n`);
+      expect(t.read('version')).toMatch(new RegExp(`^${B} \\d{10}\\n$`));
+      expect(statSync(join(t.rt, 'version.prev')).mode & 0o777).toBe(0o600);
+    });
+
+    it('a release from before the lines were kept, or a line about another release, is dated by its folder', () => {
+      const t = setup();
+      expect(t.record(B, join(t.rt, 'releases', A)).stdout).toContain('END');
+      expect(t.read('version.prev')).toBe(`${A} ${t.madeA}\n`);
+      // A line that is about some other release says nothing about this one.
+      writeFileSync(join(t.rt, 'version'), `${C} 1760000000\n`);
+      t.record(B, join(t.rt, 'releases', A));
+      expect(t.read('version.prev')).toBe(`${A} ${t.madeA}\n`);
+    });
+
+    it('the same commit installed again keeps what ran before it; a release that is gone leaves no line', () => {
+      const t = setup();
+      writeFileSync(join(t.rt, 'version'), `${B} 1760000000\n`);
+      writeFileSync(join(t.rt, 'version.prev'), `${A} 1750000000\n`);
+      t.record(B, join(t.rt, 'releases', B));
+      expect(t.read('version.prev')).toBe(`${A} 1750000000\n`);
+      expect(t.read('version')).toMatch(new RegExp(`^${B} \\d{10}\\n$`));
+      t.record(C, join(t.rt, 'releases', 'd'.repeat(40)));
+      expect(t.read('version.prev')).toBeNull();
+      // A folder that is not a release (current pointed somewhere by hand) is never written down.
+      mkdirSync(join(t.rt, 'releases', 'by-hand'));
+      writeFileSync(join(t.rt, 'version.prev'), `${A} 1750000000\n`);
+      t.record(C, join(t.rt, 'releases', 'by-hand'));
+      expect(t.read('version.prev')).toBeNull();
+    });
+  });
+
   it('keeps the nightly database backup agent installed: 02:15, its own script, no secrets, reloaded only when it changes', () => {
     const fn = between('BACKUP_LABEL=', '\n}');
     const dir = mkdtempSync(join(tmpdir(), 'rt-backup-agent-'));

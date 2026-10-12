@@ -27,6 +27,8 @@ com.flint.backup          file       apps/studio/com.flint.backup.plist         
 com.flint.evolve          file       apps/evolve/com.flint.evolve.plist                     load
 com.flint.deploy          file       apps/server/com.flint.deploy.plist                     last
 com.flint.searxng         installer  apps/studio/install_searxng.sh                         installer
+# The weekly rebuild rehearsal (apps/studio/run_rehearsal.sh): the server's installer writes and loads it on every deploy.
+com.flint.rebuild-rehearsal  installer  apps/server/install-server.sh                    installer
 # Flint Calendar: the deploy job builds the app; you load its agent when you choose Allow Full Access.
 com.flint.calendar        installer  apps/desktop-calendar/install_calendar.sh              no
 # Spends money, so it is switched on by hand.

@@ -721,6 +721,39 @@ describe('Settings: Health', () => {
     expect(run(`healthDetail('done.')`)).toBe('Done.');
   });
 
+  it('a pause on updates is one line among the issues, with its age; a rebuild rehearsal that failed or never ran is another', async () => {
+    routes['/runtime/health'] = report([
+      { component: 'postgres', status: 'ok', detail: null, at: AT },
+      { component: 'deploy_hold', status: 'degraded', detail: 'Updates have been paused for 26 hours.', at: AT },
+      { component: 'rebuild_rehearsal', status: 'down', detail: 'The rebuild rehearsal failed today.', at: AT },
+    ]);
+    run('loadHealth()');
+    await settle();
+    let top = ids.sethealth!.shown();
+    expect(top).toContain('2 Issues');
+    expect(top).toContain('Automatic UpdatesUpdates have been paused for 26 hours.');
+    expect(top).toContain('Rebuild RehearsalThe rebuild rehearsal failed today.');
+    expect(top).not.toMatch(/deploy_hold|rebuild_rehearsal|Deploy Hold/);
+    // Not paused, and a rehearsal that passed: both fold under All Components, and Health sits last again.
+    routes['/runtime/health'] = report([
+      { component: 'deploy_hold', status: 'ok', detail: null, at: AT },
+      { component: 'rebuild_rehearsal', status: 'ok', detail: 'The rebuild rehearsal last passed yesterday.', at: AT },
+    ]);
+    run('loadHealth()');
+    await settle();
+    top = ids.sethealth!.shown();
+    expect(top).toBe('');
+    const last = ids['sethealth-last']!.shown();
+    expect(last).toContain('All Systems Normal');
+    expect(last).toContain('All Components2');
+    expect(last).not.toMatch(/paused|rehearsal/i);
+    // One that has never run has not reported: unknown is never normal.
+    routes['/runtime/health'] = report([{ component: 'rebuild_rehearsal', status: 'unknown', detail: 'The rebuild rehearsal has not run yet.', at: AT }]);
+    run('loadHealth()');
+    await settle();
+    expect(ids.sethealth!.shown()).toContain('Rebuild RehearsalThe rebuild rehearsal has not run yet.');
+  });
+
   it('names the components as @flint/policy does, so the morning digest says the same names', () => {
     expect(JSON.parse(JSON.stringify(run('HEALTH_NAMES')))).toEqual(HEALTH_NAMES);
     expect(JSON.parse(JSON.stringify(run('SOURCE_NAMES')))).toEqual(SOURCE_NAMES);

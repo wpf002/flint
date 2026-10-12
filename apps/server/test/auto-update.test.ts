@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -67,6 +67,8 @@ describe('auto_deploy.sh retries a failed deploy', () => {
       `echo server >> "${marks}"`,
       `[ -e "${tmp}/server-gate" ] && { ${ev('server', 'gate', 'failed')}; exit 1; }`,
       `[ -e "${tmp}/server-health" ] && { ${ev('server', 'health', 'failed')}; exit 1; }`,
+      // The line the real installer keeps beside the bundle: which commit is installed, and when.
+      `echo "$(git rev-parse HEAD) $(date +%s)" > "${tmp}/.flint/server.version"`,
       ev('server', 'deploy', 'ok'),
       'exit 0',
     ].join('\n'));
@@ -389,6 +391,163 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.ran).toEqual(['server', 'runtime']);
     expect(git(deployDir, 'rev-parse', 'HEAD')).toBe(sha);
     expect(t.out).toContain(`deployed ${sha}`);
+  });
+
+  // Review of the recovery PR: rollback.sh put an earlier version back and paused updates. With no
+  // new push, removing the hold did nothing: the checkout was already at main's newest commit and
+  // its deploy was on record as finished, so the earlier version stayed installed for good.
+  describe('removing the hold installs the newest commit again when something else is installed', () => {
+    const installed = () => readFileSync(join(tmp, '.flint', 'server.version'), 'utf8').trim().split(' ')[0];
+    const hold = (on: boolean) => (on ? (mkdirSync(state, { recursive: true }), writeFileSync(join(state, 'deploy-hold'), '')) : rmSync(join(state, 'deploy-hold')));
+    const seen = () => existsSync(join(state, 'deploy-hold-seen'));
+    /** What rollback.sh leaves: the earlier server's version line, the earlier runtime release live, and the hold. */
+    const rollBackTo = (sha: string) => {
+      writeFileSync(join(tmp, '.flint', 'server.version'), `${sha} 1760000000\n`);
+      spawnSync('ln', ['-sfn', join(runtimeDir, 'releases', sha), join(runtimeDir, 'current')]);
+      hold(true);
+    };
+
+    it('after a rollback: the server and the runtime come back at the newest commit, once, with no new push', () => {
+      const good = push('v1 runtime', 'apps/runtime/x.ts');
+      tick();
+      const newest = push('v2 runtime', 'apps/runtime/x.ts');
+      tick();
+      expect([installed(), live()]).toEqual([newest, newest]);
+      rollBackTo(good);
+      for (let i = 0; i < 2; i++) expect(tick().ran).toEqual([]);
+      expect(seen()).toBe(true);
+      hold(false);
+      const t = tick();
+      expect(t.status).toBe(0);
+      expect(t.out).toContain(`updates resumed, and ${newest} is not what is installed (server,runtime)`);
+      expect(t.ran).toEqual(['server', 'runtime']);
+      expect([installed(), live()]).toEqual([newest, newest]);
+      expect(t.app).toBe(true);
+      expect(seen()).toBe(false);
+      // Once: the next tick has nothing to do.
+      const next = tick();
+      expect(next.ran).toEqual([]);
+      expect(next.out).toContain(`up to date (${newest})`);
+    });
+
+    it('only the part that was rolled back is installed again', () => {
+      push('v1 runtime', 'apps/runtime/x.ts');
+      tick();
+      const good = git(deployDir, 'rev-parse', 'HEAD');
+      const newest = push('v2 server only', 'apps/server/x.ts');
+      tick();
+      expect(live()).toBe(good);
+      // The server alone went back: the runtime was never at the newest commit, and nothing it is built from changed.
+      writeFileSync(join(tmp, '.flint', 'server.version'), `${good} 1760000000\n`);
+      hold(true);
+      tick();
+      hold(false);
+      expect(tick().ran).toEqual(['server']);
+      expect(installed()).toBe(newest);
+      expect(live()).toBe(good);
+    });
+
+    it('a runtime that alone was rolled back comes back alone', () => {
+      const good = push('v1 runtime', 'apps/runtime/x.ts');
+      tick();
+      const newest = push('v2 runtime', 'apps/runtime/x.ts');
+      tick();
+      spawnSync('ln', ['-sfn', join(runtimeDir, 'releases', good), join(runtimeDir, 'current')]);
+      hold(true);
+      tick();
+      hold(false);
+      const t = tick();
+      expect(t.out).toContain(`updates resumed, and ${newest} is not what is installed (runtime)`);
+      expect(t.ran).toEqual(['runtime']);
+      expect([installed(), live()]).toEqual([newest, newest]);
+    });
+
+    it('a pause that changed nothing resumes quietly: nothing is installed twice', () => {
+      const sha = push('v1');
+      tick();
+      hold(true);
+      tick();
+      expect(seen()).toBe(true);
+      hold(false);
+      const t = tick();
+      expect(t.ran).toEqual([]);
+      expect(t.out).toContain(`up to date (${sha})`);
+      expect(seen()).toBe(false);
+    });
+
+    it('with no line saying what is installed, it installs again: after a pause that is the safe answer', () => {
+      const sha = push('v1');
+      tick();
+      hold(true);
+      tick();
+      rmSync(join(tmp, '.flint', 'server.version'));
+      hold(false);
+      expect(tick().ran).toEqual(['server']);
+      expect(installed()).toBe(sha);
+    });
+
+    it('a newest commit that failed to install is installed again only once: its failure then waits for the next push, as always', () => {
+      const good = push('v1');
+      tick();
+      const newest = push('v2');
+      tick();
+      rollBackTo(good);
+      tick();
+      hold(false);
+      flag('server-health');
+      let t = tick();
+      expect(t.status).toBe(1);
+      expect(t.ran).toEqual(['server']);
+      expect(retry()).toBe(`${newest} server 0 0`);
+      t = tick();
+      expect(t.ran).toEqual([]);
+      expect(t.out).toContain(`server deploy FAILED at ${newest} (waiting for the next push)`);
+    });
+
+    it('a newest commit whose install had already failed past its gate is not tried again by lifting a pause', () => {
+      const good = push('v1 runtime', 'apps/runtime/x.ts');
+      tick();
+      const newest = push('v2 crashes on boot', 'apps/runtime/x.ts');
+      flag('server-health');
+      flag('runtime-health');
+      expect(tick().status).toBe(1);
+      flag('server-health', false);
+      flag('runtime-health', false);
+      // Both went back by themselves: the earlier server and the earlier runtime are what is installed.
+      expect([installed(), live()]).toEqual([good, good]);
+      hold(true);
+      tick();
+      hold(false);
+      const t = tick();
+      expect(t.ran).toEqual([]);
+      expect(t.out).not.toContain('updates resumed');
+      expect(t.out).toContain(`server deploy FAILED at ${newest} (waiting for the next push)`);
+      expect([installed(), live()]).toEqual([good, good]);
+      // The next push is what tries again.
+      const fix = push('v3 the fix', 'apps/runtime/x.ts');
+      expect(tick().ran).toEqual(['server', 'runtime']);
+      expect([installed(), live()]).toEqual([fix, fix]);
+    });
+
+    it('a tick that could not fetch keeps the check for the next one', () => {
+      const good = push('v1');
+      tick();
+      const newest = push('v2');
+      tick();
+      rollBackTo(good);
+      tick();
+      hold(false);
+      const origin = join(tmp, 'origin.git');
+      renameSync(origin, `${origin}.away`);
+      let t = tick();
+      expect(t.out).toContain('fetch failed');
+      expect(t.ran).toEqual([]);
+      expect(seen()).toBe(true);
+      renameSync(`${origin}.away`, origin);
+      t = tick();
+      expect(t.ran).toEqual(['server']);
+      expect(installed()).toBe(newest);
+    });
   });
 
   it('a retry file without a final newline never stops the deploys', () => {

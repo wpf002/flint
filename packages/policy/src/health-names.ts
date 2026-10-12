@@ -17,6 +17,8 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   audit_intents: 'Action Log',
   retention: 'Cleanup',
   migrate_failed: 'Updates',
+  deploy_hold: 'Automatic Updates',
+  rebuild_rehearsal: 'Rebuild Rehearsal',
   triage: 'Triage',
   goals: 'Goal Reviews',
   runtime: 'Runtime',
