@@ -1356,6 +1356,9 @@ function apprPredictIncludes(p,l){var money=l.named.some(function(x){return x.ki
   return l.unknown&&p.sensitivity&&p.sensitivity!=='ops'?'Sensitive numbers':'';}
 /* The Second Opinion fact: said only when the local model's own estimate is on the card. */
 function apprPredictOpinion(l){return !l.opinions?'':l.opinions>=l.total?'Local Model':'Local Model on '+l.opinions+' of '+l.total;}
+/* Behind Show Details, before the numbers: what turning predictions on does to what is already there. The first check
+   after this card settles every prediction Flint has made so far, and a recorded result is never deleted. */
+var APPR_PREDICT_ALSO='Turning this on also checks the predictions Flint has already made, and those results can’t be undone.';
 /* Behind Show Details: every number on its own line, in words. */
 function apprPredictDetails(p){var l=apprPredictList(p),ul=apprEl('ul');
   l.named.forEach(function(x){ul.appendChild(apprEl('li',null,x.name+(x.kind==='money'?' · Spending':x.kind==='calendar'?' · Calendar':'')+(x.opinion?' · Second Opinion':'')));});
@@ -1425,7 +1428,7 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   if(open){var dl=apprEl('dl','facts');apprFacts(p).forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});card.appendChild(dl);
     var det=apprEl('div','details');det.hidden=true;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
     /* The predictions card lists its numbers in words; every other card shows its raw args. */
-    if(p.fullName===APPR_PREDICT)det.appendChild(apprPredictDetails(p));
+    if(p.fullName===APPR_PREDICT){det.appendChild(apprEl('p',null,APPR_PREDICT_ALSO));det.appendChild(apprPredictDetails(p));}
     else{var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));}
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());

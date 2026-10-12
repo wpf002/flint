@@ -459,8 +459,9 @@ they are. This is also the first step of rolling P3 back.
   ledger's route takes neither a goal id nor that template, and the database
   ties a goal's forecast to the goals writer.
 - **A later part** must file the card that promotes reviews out of their trial
-  week, with the measured exit criteria, and resolve the forecasts at their
-  dates (today only Mark Goal Done and Abandon resolve them).
+  week, with the measured exit criteria. (Forecasts are now settled at their
+  dates by the prediction check, once predictions are on: see "Checking
+  predictions".)
 - **Suggestions from chat (part 5)** must, in the console:
   - mark a suggested goal's words as Outside Text when the goal is tainted;
   - show the links and the sensitivity "Make It a Goal" signs, before it signs;
@@ -522,9 +523,11 @@ they are. This is also the first step of rolling P3 back.
   days and the plan changes (you approve a card), Flint reviews the goal once
   for the new plan. Each needs your signature first, and a goal has at most 12
   such reviews a day.
-- **Forecasts wait for their dates.** A review's forecast is resolved today only
-  when you mark the goal done or abandon it. Until a later part resolves the
-  rest at their dates, they stay open in the ledger, one for each review.
+- **Forecasts wait for their dates.** When you mark a goal done or abandon
+  it, that card settles the goal's forecasts. A forecast whose date comes
+  with the goal not finished is recorded as not met by the prediction check
+  (see "Checking predictions"), which runs only once predictions are turned
+  on. Until then such forecasts stay open in the ledger, one for each review.
 - **A review's suggestions are a model's.** The rules bound what a suggestion
   can be (a template, a step, a date, a status that is never "done"), not
   whether it is a good idea. That is why each is a card, and why reviews start
@@ -604,6 +607,24 @@ Flint now settles and scores its own predictions. Until this part, nothing
 did: a prediction was recorded and then sat open for good. Both jobs below run
 only with the two switches on, so on deploy nothing runs.
 
+**Turning predictions on also checks what Flint has already predicted.** The
+first check after you sign the card goes over every prediction already in the
+ledger, not only new ones:
+
+- Triage's "this service will be healthy again" predictions, of any age, are
+  settled from how the service stood at the time.
+- Advice still waiting is decided from what you did with its note. Under
+  shadow triage you were shown none of it, so all of it lapses, and what each
+  piece promised is set aside as "condition unmet".
+- A goal's forecast whose date has passed with the goal not finished is
+  recorded as not met.
+- Your own predictions, the ones only you can answer, are left open. Flint
+  doesn't let one of yours run out before it has asked you.
+
+None of that can be undone: a result is never deleted, and nothing corrects
+one yet (see Known limits). The Turn On Predictions card says so under Show
+Details. Nothing is voided, and nothing is recorded as yours.
+
 **The sweep** runs every hour at :40. In order:
 
 1. It decides each piece of advice from what you did with its note. You
@@ -620,13 +641,50 @@ only with the two switches on, so on deploy nothing runs.
      that card settles the goal's forecasts, as it already did.
    - A prediction about advice you declined, or let lapse, is set aside as
      "condition unmet". If you took the advice, it's checked like the others.
-3. What can't be settled runs out: after 72 hours for a prediction Flint can
-   check itself, and after 14 days for one only you can answer.
+3. What can't be settled runs out. A prediction Flint can check itself runs
+   out 72 hours after its time. One only you can answer runs out 14 days
+   after Flint asked you about it, and never before it asked. Nothing asks
+   yet (the questions come with the console's panel), so until then yours
+   stay open.
 
 It never answers for you. A prediction only you resolve is never given to a
 resolver, and the database refuses any attempt. It never voids a prediction,
-which needs your signature. A prediction whose rule it doesn't know is left
-alone and counted. It writes one audit entry per run, with counts only.
+which needs your signature.
+
+**Whose a prediction is.** The check settles, counts and runs out only its
+own: a prediction whose rule is one of the four it knows, or that hangs on a
+piece of triage's advice. A prediction with no rule at all is nobody's, so
+nothing can ever settle it: it's counted, Health says so, and it runs out. A
+prediction that carries a rule this check doesn't know belongs to another
+part of Flint. It's left exactly as it is: not settled, not counted as a
+fault, and never run out from here, so a later part that settles its own
+predictions late finds them as it left them. The same goes for advice of any
+type but triage's.
+
+**A forgotten item** takes its predictions' words and rules with it. Those
+wait and then run out quietly. They aren't a fault, and Health doesn't
+report them.
+
+**Triage's first predictions** said they'd be judged by how the service stood
+"when it is next observed after the resolve time". Triage now says "at the
+resolve time", which is what Flint can read exactly. The older ones are still
+judged by their own sentence. Flint keeps a record each time a service's
+state changed, not each time it looked, so the state at that next look is
+either the one at the resolve time or the next recorded one. Where those two
+agree, the prediction is settled by its own rule. Where they differ, the
+records can't tell which the next look saw, and the prediction is left to
+run out. It's never settled by a rule it didn't state.
+
+**One check is one transaction.** Every row it changes and the audit entry
+that counts them are written together or not at all. A check that dies leaves
+nothing behind, and the next one starts from the same rows. A single write
+the database refuses is taken back alone, counted and left, and the check
+goes on. One check runs at a time: a second that starts while one is running
+does nothing. It writes one audit entry per run, with counts only.
+
+A check takes on at most 5,000 predictions. If it stops there, the ones it
+tried that are past their 72 hours still run out, so a backlog that can never
+be settled makes way for what's behind it.
 
 **The scores** are written every night at 03:45 for the last 90 days, one row
 per area, kind of claim, method, and yes/no or range:
@@ -637,6 +695,10 @@ per area, kind of claim, method, and yes/no or range:
   range was and how far off a miss landed.
 - Beside each: how many are open, ran out, were set aside, were voided, or
   were revised close to their date.
+- The unresolved rate: the share that never got a result. That's the ones
+  that ran out, plus revised predictions whose date passed more than 14 days
+  ago with no result. A revised prediction keeps its "superseded" status for
+  good, so it can't be marked as run out; the rate counts it anyway.
 - From 100 scored: the average calibration gap (ECE), and a 90% interval
   around the Brier score. The interval treats predictions that share a day, or
   a goal, as one result, so many predictions about the same week don't look
@@ -645,14 +707,25 @@ per area, kind of claim, method, and yes/no or range:
 
 The three actions behind this (`ledger.resolve.auto`, `ledger.expire`,
 `ledger.calibration.snapshot`) run in shadow: they write only Flint's own
-records and deliver nothing to you or to chat. A rule that forbids one stops
+records and send nothing to you or to chat. A rule that forbids one stops
 that part.
+
+**The scores can reach chat, when chat asks.** Chat has had a tool for this
+since the ledger was built (`ledger_calibration`), and it reads the latest
+night's rows. What it gets is totals only: counts and scores by area. Never a
+prediction's words, and never a number a prediction was about. Those totals
+go wherever the chat model runs, so with an outside model they leave this
+Mac. A group with nothing scored yet is given with no score at all, since a
+stored 0 would read as a perfect Brier score, or as a range that never held.
 
 **Settings > Health** has a row, **Prediction Checks**. It's Off until both
 switches are on. It needs a look when no check has run in 3 hours, when the
-database refused one of its writes, when a prediction has a rule Flint can't
-check, or when the scores are over two days old. It's Down when no check ran
-in 26 hours.
+database refused one of its writes, when a prediction has nothing Flint can
+check it by, when no scores have been written two days after you turned
+predictions on, or when the scores are over two days old. It's Down when no
+check ran in 26 hours. A restart buys 70 minutes and no more: a runtime that
+restarts every few hours and never checks still reads late, then Down. What
+ran out is said beside what was checked, never as checked.
 
 **Rolling it back:** turn `FLINT_PREDICT` off. The jobs are unscheduled at the
 next start. Resolutions already written stay (a resolution is never deleted),
@@ -734,6 +807,13 @@ action so named.
   prediction the two forecast writers make names its run and its series,
   carries the series' own unit, and is filed under the registry's domain for
   that series.
+- **The questions** (the console's panel) are what let a prediction of yours
+  run out: it runs out 14 days after its question was asked, and one that was
+  never asked about stays open.
+- **A part that settles its own predictions** gives them a rule of its own
+  shape in `resolverSpec` and settles them itself. The check leaves any rule
+  it doesn't know alone, for good. A rule the check should settle is added to
+  `ResolverSpec` in `predict/resolvers.ts`, with its resolver.
 - **The answer route** must set `flint.actor` to `will:console` in the same
   transaction as the answer and its resolution.
 - **A correction to a result** (`ResolutionCorrection`) has no id-only check
@@ -756,17 +836,31 @@ action so named.
   Three things are written by the runtime itself, so there the database
   catches a bug and can't catch a runtime gone wrong: a forecast run's own
   arithmetic (whether it beat a plain guess), the snapshot's scores, and the
-  `will:` label on an answer. An answer isn't signed on purpose. A wrong one
-  has a signed fix (`ledger.resolution.correct`).
+  `will:` label on an answer. An answer isn't signed on purpose.
+- **A wrong result can't be corrected yet.** The rules name a signed
+  correction (`ledger.resolution.correct`) and a signed void (`ledger.void`),
+  and the database has a place for each. Nothing carries either out yet, and
+  the scores don't read corrections. Until a later part does both, a result
+  stays as it was recorded.
 - **What an automatic check records.** The outcome of an automatic check is
   the runtime's own reading of its rows. The database holds it to the rest:
   who may resolve what, that the event isn't before the prediction or after
-  now, and that it's never recorded as yours. A wrong result has the same
-  signed fix as any other (`ledger.resolution.correct`).
+  now, and that it's never recorded as yours. A wrong one can't be corrected
+  yet (see above).
 - **What can't be checked runs out.** A service that was removed or forgotten
-  before its time came, a number that never arrived, and a goal forecast left
-  behind by a finished goal are not guessed at. They run out after 72 hours and
-  count against the unresolved rate.
+  before its time came, a number that never arrived, a goal forecast left
+  behind by a finished goal, and one of triage's first predictions whose own
+  rule the records can't answer are not guessed at. They run out after 72
+  hours and count against the unresolved rate.
+- **A revised prediction can't run out.** It stays "superseded", and the check
+  keeps trying it for 14 days after its date. A check that stops at its limit
+  can't clear those out of its way, so 5,000 of them that can never be settled
+  would hold up what's behind them until they age out. Flint revises a few
+  dozen a day at most.
+- **A late result can still set off a goal review, within a week.** A result
+  that came false sets off a review of a goal that watches the item only when
+  both the result and what it was about are from the last 7 days. So the
+  first check of old predictions sets off reviews only for last week's.
 - **Taking advice means acknowledging its note.** Flint reads "you took the
   advice" from the note being acknowledged before the prediction's time. It has
   no other way to know yet.
