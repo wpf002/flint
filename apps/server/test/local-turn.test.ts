@@ -9,6 +9,7 @@
  * The same check holds for an eval replay, which is exempt from budgets only.
  */
 import { describe, it, expect } from 'vitest';
+import { GoalsChat } from '../src/goals-chat';
 import { asLocalTurn, isLocalTurn, withTurnTaint } from '../src/turn-taint';
 import { TurnSpend, pausable } from '../src/spend';
 import { planQueries, DEFAULT_LIMITS } from '../src/deep-research';
@@ -18,6 +19,9 @@ import { makeAiError } from '@flint/core';
 const NOW = new Date('2026-10-12T15:00:00Z');
 const QUESTION = 'what did my doctor say about the scan';
 const PLANNED = '["doctor scan results explained", "what a radiology report means", "follow-up after an abnormal scan"]';
+
+/** What main() asks about the local turn (../src/goals-chat plannerHeld). Nothing else of it is used here. */
+const goalsChat = new GoalsChat({ memory: undefined as never, blocks: { goals: false, goalsToFrontier: false }, runtime: () => undefined, log: () => {} });
 
 /** The planner as main() wires it: budgets in `paused`, the local turn and the breaker in `never`. */
 function planner(opts: { budget?: string; breaker?: FrontierBreaker } = {}) {
@@ -29,7 +33,8 @@ function planner(opts: { budget?: string; breaker?: FrontierBreaker } = {}) {
     },
     () => opts.budget,
     () => {
-      if (isLocalTurn()) return 'the local model is answering this turn, so its question stays here';
+      const held = goalsChat.plannerHeld(true); // the planner is a frontier model
+      if (held) return held;
       const paused = opts.breaker?.paused('anthropic');
       return paused ? `the frontier is paused (${paused})` : undefined;
     },

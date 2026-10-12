@@ -187,6 +187,25 @@ export async function freshDb(): Promise<TestUrls> {
   return URLS;
 }
 
+/**
+ * Health checks dated as a test needs them (hours ago, a day last August). The
+ * database dates the runtime's own rows itself (HealthCheck_clock, P3 part 4),
+ * so a row in the past is written as the owner, the way a goal review is moved
+ * in time (test/goals/weeks.ts): no runtime role can.
+ */
+export async function healthRows(urls: Pick<TestUrls, 'owner'>, rows: ReadonlyArray<{ component: string; status: string; detail?: string | null; at: Date }>): Promise<void> {
+  if (!rows.length) return;
+  await withClient(urls.owner, async (c) => {
+    for (let i = 0; i < rows.length; i += 500) {
+      const part = rows.slice(i, i + 500);
+      await c.query(
+        `INSERT INTO "HealthCheck" (id, component, status, detail, at) SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[])`,
+        [part.map(() => id('hc')), part.map((r) => r.component), part.map((r) => r.status), part.map((r) => r.detail ?? null), part.map((r) => r.at)],
+      );
+    }
+  });
+}
+
 let n = 0;
 /** A unique id for a test row. */
 export const id = (prefix = 't'): string => `${prefix}${Date.now().toString(36)}${(n++).toString(36)}${Math.random().toString(36).slice(2, 8)}`;

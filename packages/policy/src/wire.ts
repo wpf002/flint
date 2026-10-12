@@ -24,8 +24,14 @@ const At = z.string().datetime({ offset: true });
 /** A tool or route name as it appears in chat (`server.tool`), never free text. */
 const Name = z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/);
 
-// Each part only when the server measured it (World now is sent only when it was added).
-const CtxTokens = z.object({ world: z.number().int().min(0).max(100_000).optional(), recall: z.number().int().min(0).max(100_000).optional(), history: z.number().int().min(0).max(1_000_000).optional() });
+// Each part only when the server measured it (World now is sent only when it was added; `goals`, P3,
+// only when Will's goals went into the prompt of the brain that was asked last).
+const CtxTokens = z.object({
+  world: z.number().int().min(0).max(100_000).optional(),
+  recall: z.number().int().min(0).max(100_000).optional(),
+  history: z.number().int().min(0).max(1_000_000).optional(),
+  goals: z.number().int().min(0).max(100_000).optional(),
+});
 
 export const ChatTurnEvent = z
   .object({

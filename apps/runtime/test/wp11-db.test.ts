@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { digestOf, localDay, localDayBounds, previousDay } from '@flint/policy';
-import { NO_DB, freshDb, withClient, type TestUrls } from './db';
+import { NO_DB, freshDb, healthRows, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { loadConfig, type Config } from '../src/config';
@@ -189,7 +189,7 @@ describe.skipIf(NO_DB)('the digest, retention, rollups and the report', () => {
     const now = new Date();
     const { start } = localDayBounds(TZ, '2026-08-20');
     const at = (h: number) => new Date(start.getTime() + h * 3_600_000);
-    await db.healthCheck.createMany({ data: [['ok', 1], ['ok', 2], ['ok', 3], ['down', 4], ['disabled', 5]].map(([s, h]) => ({ component: 'source:github', status: s as string, at: at(h as number) })) });
+    await healthRows(urls, [['ok', 1], ['ok', 2], ['ok', 3], ['down', 4], ['disabled', 5]].map(([s, h]) => ({ component: 'source:github', status: s as string, at: at(h as number) })));
     await db.metricSeries.create({ data: { key: 'test.latency.ms', unit: 'ms', freq: 'raw', sensitivity: 'ops', description: 'test latency' } });
     await db.metricSeries.create({ data: { key: 'test.spend.usd', unit: 'usd', freq: 'raw', sensitivity: 'financial', description: 'test spend' } });
     await db.metricPoint.createMany({ data: [[10, 1], [20, 2], [60, 3]].map(([v, h]) => ({ seriesKey: 'test.latency.ms', at: at(h!), value: v! })) });

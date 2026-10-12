@@ -51,6 +51,11 @@ export function withMemory(base: string, facts: readonly string[]): string {
  * Recall the facts relevant to `message` and build the context block from them.
  * Recall is best-effort: if it throws, the turn gets `base` alone and no facts.
  *
+ * `outside` is the same for a brain that is not on this Mac: without the facts
+ * Flint learned from a turn answered with Will's goals (./knowledge
+ * `fromGoals`). It is the very same block and list when no such fact was
+ * recalled, and always when the store does not tell them apart.
+ *
  * `skip` (an eval request's `recall: false`, ./eval-tools): don't read long-term
  * memory at all, so the turn has exactly the block it would have with nothing
  * recalled. apps/parity tasks hands each frontier competitor the data Flint had;
@@ -60,21 +65,38 @@ export function withMemory(base: string, facts: readonly string[]): string {
 export async function recallContext(
   base: string,
   message: string,
-  knowledge: { recall(query: string): Promise<string[]>; recallWithMode?(query: string): Promise<{ facts: string[]; mode: string }> },
+  knowledge: { recall(query: string): Promise<string[]>; recallWithMode?(query: string): Promise<{ facts: string[]; mode: string; outside?: string[] }> },
   opts: { skip?: boolean } = {},
-): Promise<{ block: string; facts: string[]; mode: string }> {
+): Promise<{ block: string; facts: string[]; mode: string; outside: { block: string; facts: string[] } }> {
   let facts: string[] = [];
+  let outside: string[] | undefined;
   let mode = opts.skip ? 'skipped' : 'none';
   if (!opts.skip) {
     try {
-      if (knowledge.recallWithMode) ({ facts, mode } = await knowledge.recallWithMode(message));
+      if (knowledge.recallWithMode) ({ facts, mode, outside } = await knowledge.recallWithMode(message));
       else facts = await knowledge.recall(message);
     } catch {
       /* memory recall is best-effort */
       mode = 'error';
+      facts = [];
+      outside = undefined;
     }
   }
-  return { block: withMemory(base, facts), facts, mode };
+  const block = withMemory(base, facts);
+  // The same objects when nothing was held back, so a caller can tell by comparing the blocks.
+  const same = !outside || (outside.length === facts.length && outside.every((f, i) => f === facts[i]));
+  return { block, facts, mode, outside: same ? { block, facts } : { block: withMemory(base, outside!), facts: outside! } };
+}
+
+/**
+ * `context` as a brain that is not on this Mac may have it. A turn's contexts
+ * all begin with its recalled block (`whole`); the outside one begins with
+ * `outside` instead, and keeps whatever followed (World now). A context that
+ * does not begin with `whole` is not one of this turn's: it gets `outside` alone.
+ */
+export function contextOutside(context: string, whole: string, outside: string): string {
+  if (whole === outside) return context;
+  return context.startsWith(whole) ? `${outside}${context.slice(whole.length)}` : outside;
 }
 
 /**

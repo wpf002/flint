@@ -1,10 +1,13 @@
 /**
  * The runtime's goal routes (P3 part 2), for the server's goals panel proxy.
- * Every one needs the `proposals` scope, which the runtime connector's token
- * (world:read|ledger) never holds: a model can never read a goal's words.
+ * Every one under /v1/goals needs the `proposals` scope, which the runtime
+ * connector's token (world:read|ledger) never holds: a model can never read a
+ * goal's words. The P3 report (part 4) is the one route here on `world:read`,
+ * like P2's and P2.5's reports: it holds numbers only.
  *
  *   GET  /v1/goals?tab=active|suggested|finished   a tab of the panel (GoalsPage)
  *   GET  /v1/goals/:id                             one goal, open (GoalView)
+ *   GET  /v1/goals/now                             the active goals for the server's chat block (GoalsNowAnswer, part 4)
  *   POST /v1/goals {draftKey, args}                a new goal's card
  *   POST /v1/goals/linkable {q}                    items a check may watch (a POST: q never lands in a log)
  *   POST /v1/goals/:id/edit|timing|done|abandon|resume|plan {args}   that card
@@ -12,6 +15,7 @@
  *   POST /v1/goals/:id/review                      Review Now: unsigned, audited; it sends the goal's review job (part 3)
  *   POST /v1/goals/:id/criteria/:cid {met}         unsigned, audited
  *   POST /v1/goals/:id/steps/:key {status}         unsigned, audited
+ *   GET  /v1/p3/report                             P3's exit criteria, measured now: numbers only (scope world:read)
  *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one of
  * GOAL_SAYS's sentences with its code, and a zod failure is logged by field
@@ -30,6 +34,7 @@ import {
   GoalDone,
   GoalFiled,
   GoalId,
+  GoalsNowAnswer,
   GoalsPage,
   Linkable,
   LinkableBody,
@@ -48,6 +53,8 @@ import { SAY } from '../goals/errors.js';
 import { linkable } from '../goals/items.js';
 import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, requestReview, setStep } from '../goals/service.js';
 import { goalView, goalsPage } from '../goals/view.js';
+import { goalsNow } from '../goals/now.js';
+import { p3Report } from '../report/p3.js';
 
 export interface GoalRouteDeps {
   db: Db;
@@ -108,6 +115,13 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
     return out(GoalsPage, await goalsPage(db, tab, new Date(), view));
   }));
 
+  // The active goals for the server's chat block (part 4): closed values, and a title only for a goal Will
+  // signed that carries no outside text. The same scope as the panel's: never the runtime connector's.
+  app.get('/v1/goals/now', pre, guarded(async (req) => {
+    parse(EmptyBody, req.query ?? {});
+    return out(GoalsNowAnswer, await goalsNow(db, tz));
+  }));
+
   app.get('/v1/goals/:id', pre, guarded(async (req) => {
     const { id } = parse(Goal, req.params);
     const goal = await goalView(db, id, tz, new Date(), view);
@@ -151,4 +165,7 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
     await setStep(db, id, key, status);
     return out(GoalDone, { ok: true });
   }));
+
+  // P3's exit criteria, measured now (part 4). Numbers only, so it is on world:read like P2's and P2.5's reports.
+  app.get('/v1/p3/report', { preHandler: need('world:read') }, async () => p3Report(db, { tz, planner: view.reviews }));
 }

@@ -32,7 +32,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { digestOf, type GoalView, type GoalsPage } from '@flint/policy';
-import { NO_DB, freshDb, withClient, pgConfig, id, HEX, type TestUrls } from './db';
+import { NO_DB, freshDb, healthRows, withClient, pgConfig, id, HEX, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { buildApp } from '../src/app';
 import { createDb, type Db } from '../src/db';
@@ -506,7 +506,7 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
       /** The Goal Reviews rows the health job keeps (every 5 minutes, reviews on): Flint has been reviewing for the last `minutes`. */
       const reviewingFor = async (minutes: number) => {
         await db.healthCheck.deleteMany({ where: { component: 'goals' } });
-        if (minutes) await db.healthCheck.createMany({ data: Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * 60_000) })) });
+        if (minutes) await healthRows(urls, Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * 60_000) })));
       };
       await reviewingFor(180);
       await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 59 * 60_000) } });

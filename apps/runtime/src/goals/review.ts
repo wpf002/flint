@@ -48,7 +48,7 @@ import { appendAudit } from '../governance/audit.js';
 import { claim, periodKey } from '../governance/counters.js';
 import { activePolicies } from '../governance/proposals.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
-import { REVIEW_LATE_MS } from '@flint/policy';
+import { REVIEW_DOWN_MS, REVIEW_LATE_MS } from '@flint/policy';
 import { reviewingLog, reviewingMs } from './late.js';
 import { GOALS_ACTOR, recordOnTrack } from './ontrack.js';
 import { activePlan } from './ops.js';
@@ -184,7 +184,10 @@ export async function runReview(d: ReviewDeps, job: ReviewJob): Promise<ReviewOu
         const next = job.kind === 'scheduled' && due ? nextReviewAt(cadence, d.tz, due, now, anchor) : g.nextReviewAt;
 
         // Late: it waited over an hour while Flint was reviewing (late.ts). The digest counts these, from the audit entry.
-        const late = job.kind === 'scheduled' && !!due && now.getTime() - due.getTime() > REVIEW_LATE_MS && reviewingMs(await reviewingLog(tx, due, now), due, now) > REVIEW_LATE_MS;
+        // Over a day of such waiting is marked too (`lateOverDay`): the P3 report and the promotion table read that mark,
+        // which stays true after retention has deleted the health rows the wait was counted from.
+        const waited = job.kind === 'scheduled' && !!due && now.getTime() - due.getTime() > REVIEW_LATE_MS ? reviewingMs(await reviewingLog(tx, due, now), due, now) : 0;
+        const late = waited > REVIEW_LATE_MS;
 
         const forecast = await recordOnTrack(tx, g, { progress: e.progress, overdueSteps: overdue, nextReviewAt: next }, d.tz, now);
         const reviewId = newReviewId(now);
@@ -201,7 +204,7 @@ export async function runReview(d: ReviewDeps, job: ReviewJob): Promise<ReviewOu
           actor: GOALS_ACTOR, context: 'autonomous', kind: 'action', action: REVIEW_ACTION, tier: standing.tier, decision: standing.shadow ? 'log' : 'act', outcome: 'ok', correlationId: reviewId,
           inputs: {
             goalId: g.id, reviewId, kind: job.kind, ...(job.triggerEventId ? { trigger: job.triggerEventId } : {}), met: e.met, total: e.total, unknown: e.unknown,
-            overdue, predictionId: forecast.id, superseded: forecast.superseded, shadow: standing.shadow, ...(late ? { late: true } : {}),
+            overdue, predictionId: forecast.id, superseded: forecast.superseded, shadow: standing.shadow, ...(late ? { late: true } : {}), ...(waited > REVIEW_DOWN_MS ? { lateOverDay: true } : {}),
           },
         }], now);
         // The plan stage's job, with the review it is for: both commit, or neither does.

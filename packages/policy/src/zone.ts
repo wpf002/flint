@@ -5,9 +5,31 @@
  * so none of them computes a day with toISOString() (a UTC day) by mistake.
  */
 
-/** The zone: FLINT_TZ, else the server's FLINT_USER_TZ, else America/Chicago; blank means unset, and an unknown zone is refused. */
-export function zoneFrom(flintTz?: string, userTz?: string): string {
-  const z = flintTz?.trim() || userTz?.trim() || 'America/Chicago';
+/**
+ * A time zone written as an offset from UTC ("+05:00", "-0600", "UTC+5",
+ * "GMT-6"), not as a place. JavaScript and Postgres read such a sign the
+ * opposite way (ISO east-positive against POSIX west-positive), so a day
+ * counted in one is not the day counted in the other.
+ */
+const NUMERIC_OFFSET = /^(?:(?:utc|gmt)\s*)?[+-]\s*\d/i;
+
+/**
+ * The zone: FLINT_TZ, else the server's FLINT_USER_TZ, else America/Chicago.
+ * Blank means unset. A zone is an IANA name ("America/Chicago", "UTC"): one
+ * written as a numeric offset is passed over with a warning, never used and
+ * never a reason not to start; a name that is no zone at all is refused.
+ */
+export function zoneFrom(flintTz?: string, userTz?: string, warn: (msg: string) => void = () => {}): string {
+  const named = (z: string | undefined, from: string): string | undefined => {
+    const t = z?.trim();
+    if (!t) return undefined;
+    if (NUMERIC_OFFSET.test(t)) {
+      warn(`[tz] ${from} is an offset from UTC, not a time zone's name, so it is not used: name the zone (America/Chicago)`);
+      return undefined;
+    }
+    return t;
+  };
+  const z = named(flintTz, 'FLINT_TZ') ?? named(userTz, 'FLINT_USER_TZ') ?? 'America/Chicago';
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: z }).format(0);
   } catch {

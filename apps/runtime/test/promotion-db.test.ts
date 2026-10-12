@@ -63,14 +63,14 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
   }
 
   it('is refused before 7 days of shadow decisions', async () => {
-    await expect(promotionTable(db)).rejects.toThrow(/shadow week is not over: 0 of 7/);
+    await expect(promotionTable(db, { tz: 'UTC' })).rejects.toThrow(/shadow week is not over: 0 of 7/);
     await shadowDecision(3);
-    await expect(promotionTable(db)).rejects.toThrow(Refused);
+    await expect(promotionTable(db, { tz: 'UTC' })).rejects.toThrow(Refused);
   });
 
   it('after the week: rows meet the policy rules, keep push at 3 a day, and leave out what stays at APPROVAL', async () => {
     await shadowDecision(8);
-    const t = await promotionTable(db, { drop: ['world.sync.knowledge'] });
+    const t = await promotionTable(db, { drop: ['world.sync.knowledge'], tz: 'UTC' });
     expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
     const patterns = t.rows.map((r) => r.pattern);
     for (const never of NEVER_PROMOTED) expect(patterns).not.toContain(never);
@@ -81,7 +81,7 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     expect(card.reason).toMatch(/^This lets Flint sort events, send its notes and run its upkeep without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Lately [\d.]+ items a day were important, and (you haven’t rated any yet|the one you rated (was|wasn’t) useful|\d+ of the \d+ you rated were useful)\.$/);
     // Filing it again, later and after more decisions, is the same card.
     await shadowDecision(1);
-    const again = await promotionTable(db, { drop: ['world.sync.knowledge'], now: new Date(Date.now() + 90_000) });
+    const again = await promotionTable(db, { drop: ['world.sync.knowledge'], now: new Date(Date.now() + 90_000), tz: 'UTC' });
     expect(again).toMatchObject({ proposalId: t.proposalId, deduped: true });
 
     // Signed, the database takes every row, and the actions resolve to ALONE.
@@ -97,7 +97,7 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
   });
 
   it('P1: refused before a week of chat reads; then chat\'s reads of the world model and the ledger, predictions kept at 10 a day', async () => {
-    await expect(promotionTable(db, { phase: 'p1' })).rejects.toThrow(/shadow week is not over: 0 of 7 days of chat reads/);
+    await expect(promotionTable(db, { phase: 'p1', tz: 'UTC' })).rejects.toThrow(/shadow week is not over: 0 of 7 days of chat reads/);
     // A chat read as chat files it, dated in the past (createProposal dates a card now, and the database refuses one born expired).
     const read = (daysAgo: number, tool = 'world_now', tainted = false) => {
       const at = new Date(Date.now() - daysAgo * DAY);
@@ -108,10 +108,10 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
       ));
     };
     await read(2);
-    await expect(promotionTable(db, { phase: 'p1' })).rejects.toThrow(/shadow week is not over: 2\.\d of 7 days of chat reads/);
+    await expect(promotionTable(db, { phase: 'p1', tz: 'UTC' })).rejects.toThrow(/shadow week is not over: 2\.\d of 7 days of chat reads/);
     await read(8, 'ledger_open');
     await read(1, 'world_entity', true);
-    const t = await promotionTable(db, { phase: 'p1' });
+    const t = await promotionTable(db, { phase: 'p1', tz: 'UTC' });
     expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
     expect(t.rows.map((r) => r.pattern).sort()).toEqual(P1_PROMOTIONS.map((r) => r.pattern).sort());
     expect(t.rows.find((r) => r.pattern === 'ledger_record_prediction')).toMatchObject({ dailyCap: 10, tier: 'alone' });

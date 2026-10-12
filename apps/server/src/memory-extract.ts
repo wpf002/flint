@@ -281,6 +281,13 @@ interface Item {
   will?: string[];
   /** The assistant's words as shown: a quote found only here grounds nothing. */
   assistant?: string[];
+  /**
+   * This turn, or the earlier one shown with it, was answered with Will's
+   * goals in its context. What is learned from it stays on this Mac
+   * (KnowledgeStore `fromGoals`), and it never shares a call with a turn that
+   * was not.
+   */
+  goals?: boolean;
 }
 
 /** Chars of a turn's own text, and of the previous turn's, that the model is shown. */
@@ -349,6 +356,14 @@ export interface ExtractorOptions {
    * into later, untainted turns.
    */
   isTainted?: (conversationId: string, turnId: string) => boolean;
+  /**
+   * Was this turn answered with Will's goals in its context (./goals-now)? A
+   * fact learned from such a turn is stored with that mark, and is then
+   * recalled only for a brain that may read his goals. Such turns are sent in
+   * calls of their own, and only those calls are shown the known facts that
+   * carry the mark: a call about any other turn holds nothing that stays here.
+   */
+  carriedGoals?: (conversationId: string, turnId: string) => boolean;
   now?: () => number;
 }
 
@@ -367,6 +382,7 @@ export class MemoryExtractor {
   private readonly gate: (() => string | undefined) | undefined;
   private readonly chatActive: (() => boolean) | undefined;
   private readonly isTainted: (conversationId: string, turnId: string) => boolean;
+  private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
   private readonly now: () => number;
   /** Whether the last pass left work queued (drives the faster backlog cadence). */
   private backlog = false;
@@ -402,6 +418,7 @@ export class MemoryExtractor {
     this.gate = opts.gate;
     this.chatActive = opts.chatActive;
     this.isTainted = opts.isTainted ?? (() => false);
+    this.carriedGoals = opts.carriedGoals ?? (() => false);
     this.now = opts.now ?? Date.now;
   }
 
@@ -520,6 +537,9 @@ export class MemoryExtractor {
         const batch: Item[] = [];
         let chars = 0;
         let turns = 0;
+        // A call is all turns answered with Will's goals, or none: what is learned from the first kind
+        // stays on this Mac, and a call that mixed them could not say which fact came from where.
+        let goals: boolean | undefined;
         // A batch that strikes have halved keeps that size until it goes through.
         const head = pending.slice(idx).find((it) => !it.skip);
         const struck = head && state.failures?.key === `${head.cid}@${head.at}` ? state.failures.cap : undefined;
@@ -529,10 +549,12 @@ export class MemoryExtractor {
           const it = pending[j]!;
           if (!it.skip) {
             if (sent + turns >= this.maxTurnsPerPass || turns >= cap) break;
+            if (goals !== undefined && goals !== !!it.goals) break;
             const size = it.chunk.length + TURN_HEADER;
             if (chars > 0 && chars + size > room.batchChars) break;
             chars += size;
             turns++;
+            goals = !!it.goals;
           }
           batch.push(it);
           j++;
@@ -723,6 +745,8 @@ export class MemoryExtractor {
               chunk: `${before}WILL: ${clip(user, WILL_CHARS)}\nASSISTANT: ${clip(asst, ASSISTANT_CHARS)}`,
               will: [head(user, WILL_CHARS), ...(context ? [head(userText(context), CONTEXT_CHARS)] : [])],
               assistant: [head(asst, ASSISTANT_CHARS), ...(context ? [head(assistantText(context), CONTEXT_CHARS)] : [])],
+              // The earlier turn's words are in the call too: either one having carried Will's goals marks it.
+              ...(this.carriedGoals(cid, t.id) || (context && this.carriedGoals(cid, context.id)) ? { goals: true } : {}),
             });
           }
         }
@@ -738,7 +762,8 @@ export class MemoryExtractor {
 
   /** The call's prompt, and the ids of the known facts it shows (the only ones a fact may supersede). */
   private prompt(items: Item[], room: Room): { text: string; shown: Set<string> } {
-    const known = this.knownFacts(items, room.knownChars);
+    // The known facts that stay on this Mac are shown only to a call whose turns do too.
+    const known = this.knownFacts(items, room.knownChars, items.some((i) => i.goals));
     const knownBlock = known.length
       ? known.map((f) => `${f.id}: ${f.text}`).join('\n')
       : '(none yet)';
@@ -758,8 +783,8 @@ export class MemoryExtractor {
   /** The known facts worth showing the model: all of them while they fit, else
    *  the ones sharing the most words with this batch, up to KNOWN_CAP and
    *  `maxChars`. */
-  private knownFacts(items: Item[], maxChars: number): Array<{ id: string; text: string }> {
-    const all = this.knowledge.all();
+  private knownFacts(items: Item[], maxChars: number, goals = false): Array<{ id: string; text: string }> {
+    const all = this.knowledge.all().filter((f) => goals || f.fromGoals !== true);
     const size = (f: { id: string; text: string }) => f.id.length + f.text.length + 3;
     if (all.length <= KNOWN_CAP && all.reduce((n, f) => n + size(f), 0) <= maxChars) return all;
     const words = new Set(items.flatMap((i) => i.chunk.toLowerCase().split(/[^a-z0-9]+/)).filter((w) => w.length > 3));
@@ -795,6 +820,8 @@ export class MemoryExtractor {
         conversationId: src.cid,
         sourceAt,
         ...(c.category ? { category: c.category } : {}),
+        // Learned from a turn answered with Will's goals: it stays on this Mac.
+        ...(src.goals ? { fromGoals: true } : {}),
       });
       if (res.status !== 'added') {
         stats.rejected[res.status] = (stats.rejected[res.status] ?? 0) + 1;

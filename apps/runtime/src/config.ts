@@ -203,7 +203,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: e.RUNTIME_PORT,
     tokens,
     ...(e.FLINT_RP_ID && origins.length ? { rp: { rpId: e.FLINT_RP_ID, origins } } : {}),
-    tz: zoneFrom(e.FLINT_TZ, e.FLINT_USER_TZ),
+    // An IANA name only: a numeric offset warns and is passed over (Postgres and JavaScript read its sign the opposite way).
+    tz: zoneFrom(e.FLINT_TZ, e.FLINT_USER_TZ, (m) => console.error(m)),
     home: e.HOME,
     ...(e.SERVER_INTERNAL_URL && e.SERVER_INTERNAL_TOKEN ? { server: { url: e.SERVER_INTERNAL_URL, token: e.SERVER_INTERNAL_TOKEN } } : {}),
     ...(e.GITHUB_APP_ID && e.GITHUB_APP_INSTALLATION_ID && e.GITHUB_APP_KEY_PATH

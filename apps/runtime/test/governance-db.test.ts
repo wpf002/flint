@@ -38,10 +38,12 @@ describe.skipIf(NO_DB)('governance in the database', () => {
   /** A pending proposal, as the runtime would create it. */
   async function proposal(over: { action?: string; kind?: string; args?: unknown; digest?: string; expiresIn?: string } = {}): Promise<string> {
     const pid = id('prop');
+    const action = over.action ?? 'world.sync.github';
+    // A policy change always asks on its own: the runtime sets the mark, and the database refuses one without it (Proposal_policy_floor, P3 part 4).
     await app(
-      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", "expiresAt")
-       VALUES ($1, $2, 'console', $3, $4, $5, '{}', now() + $6::interval)`,
-      [pid, over.kind ?? 'tool_call', over.action ?? 'world.sync.github', JSON.stringify(over.args ?? { a: 1 }), over.digest ?? DIGEST, over.expiresIn ?? '1 hour'],
+      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", "expiresAt", consequential)
+       VALUES ($1, $2, 'console', $3, $4, $5, '{}', now() + $6::interval, $7)`,
+      [pid, over.kind ?? 'tool_call', action, JSON.stringify(over.args ?? { a: 1 }), over.digest ?? DIGEST, over.expiresIn ?? '1 hour', action === 'policy.change'],
     );
     return pid;
   }

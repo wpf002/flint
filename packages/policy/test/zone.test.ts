@@ -7,6 +7,19 @@ describe('zone', () => {
     expect(zoneFrom(undefined, 'Europe/London')).toBe('Europe/London');
     expect(zoneFrom('Asia/Tokyo', 'Europe/London')).toBe('Asia/Tokyo');
     expect(() => zoneFrom('Mars/Olympus')).toThrow(/not a time zone/);
+    // A numeric offset is read with opposite signs by JavaScript and by Postgres: it is never used, it warns, and it never stops a start.
+    const warned: string[] = [];
+    for (const offset of ['+05:00', '-0600', 'UTC+5', 'gmt-6', ' +5 ', 'UTC -06:00']) {
+      expect(zoneFrom(offset, 'Europe/London', (m) => warned.push(m)), offset).toBe('Europe/London');
+      expect(zoneFrom(undefined, offset, (m) => warned.push(m)), offset).toBe('America/Chicago');
+    }
+    expect(warned).toHaveLength(12);
+    expect(warned[0]).toBe('[tz] FLINT_TZ is an offset from UTC, not a time zone\u2019s name, so it is not used: name the zone (America/Chicago)'.replace('\u2019', "'"));
+    expect(warned[1]).toMatch(/^\[tz\] FLINT_USER_TZ is an offset/);
+    // A zone's own name is used as it is, and warns about nothing: UTC, and the Etc zones Postgres and JavaScript read alike.
+    const quiet: string[] = [];
+    expect(['UTC', 'Etc/UTC', 'Etc/GMT+5', 'America/Chicago'].map((z) => zoneFrom(z, undefined, (m) => quiet.push(m)))).toEqual(['UTC', 'Etc/UTC', 'Etc/GMT+5', 'America/Chicago']);
+    expect(quiet).toEqual([]);
   });
 
   it('a 23-hour and a 25-hour day are exactly their length', () => {

@@ -34,8 +34,77 @@ describe('index.ts wiring', () => {
     expect(generate).not.toContain('chatLoad');
   });
 
-  it('World now is off unless FLINT_WORLD_NOW=1 (it costs tokens on every frontier turn)', () => {
-    expect(src).toContain("process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow(");
+  // P3 part 4: the context blocks are switched in one place (./context-blocks).
+  it('the context blocks are switched in one place: World now is off unless FLINT_WORLD_NOW=1, and FLINT_CONTEXT_BLOCKS=off turns every block off', () => {
+    // ./context-blocks reads the settings (test/context-blocks.test.ts has their rules); index.ts only obeys.
+    expect(src).toContain('const blocks = readContextBlocks(process.env, (m) => console.error(m));');
+    expect(src).toContain('const worldNow = blocks.world ? new WorldNow({ runtime: runtimeLink }) : undefined;');
+    expect(src.match(/new WorldNow\(/g)).toHaveLength(1);
+    expect(src).not.toMatch(/process\.env\.FLINT_(WORLD_NOW|GOALS_NOW|GOALS_TO_FRONTIER|CONTEXT_BLOCKS)/);
+  });
+
+  // The one source-text check on Will's goals in chat. What each of these calls DOES is tested by running it
+  // (test/goals-*.test.ts drive ../src/goals-chat, the same module, through whole chat turns); what is left to
+  // check here is that index.ts makes the calls, and decides nothing about what stays on this Mac itself.
+  it('index.ts hands every decision about what stays on this Mac to ./goals-chat, and makes none itself', () => {
+    expect(src).toContain("import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, recallForAnyBrain, toolsKeptHere } from './goals-chat';");
+    // It reaches none of the pieces the module is made of: not the gate, not the marks, not the tool filter, not the locality rule.
+    expect(src).not.toMatch(/from '\.\/(goals-now|goals-tools|ollama-locality)'/);
+    expect(src).not.toMatch(/\b(goalsForChat|GoalsNow|historyFor|staysHere|keptHere|carriedGoals|GOALS_TURN|contextOutside|withoutOutsideAi|isAiBacked|brainIsLocal|isLocalTurn|LOCAL_WIRES|onThisMachine|renderGoals|GoalsNowAnswer|windowHas)\b/);
+    expect(src).not.toContain('v1/goals/now');
+    // One GoalsChat, built from the context blocks before any brain is.
+    expect(src).toContain('const goalsChat = new GoalsChat<Persona>({ memory, blocks, runtime: runtimeLink, log: (m) => console.error(m) });');
+    expect(src.match(/new GoalsChat</g)).toHaveLength(1);
+    expect(src.indexOf('const blocks = readContextBlocks(process.env')).toBeLessThan(src.indexOf('new GoalsChat<'));
+    expect(src.indexOf('new GoalsChat<')).toBeLessThan(src.indexOf('new Flint('));
+    // Every Flint client reads the conversation through it: the local brain, an eval candidate, each frontier tier, the adopted brain.
+    expect(src).toContain('const historyOf = (p: ProviderAdapter, m: string) => goalsChat.history(p, m);');
+    expect(src.match(/new Flint\(/g)).toHaveLength(4);
+    expect(src.match(/new Flint\(\{[^}]*\bmemory: historyOf\([^)]*\), observer \}\)/g)).toHaveLength(4);
+    // The brains are named for it after the tiers exist, and again when the local brain is swapped.
+    expect(src.match(/goalsChat\.name\(\{ persona, provider, model \}, brains, keptTools\);/g)).toHaveLength(2);
+    expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('goalsChat.name('));
+    expect(between('const adoptLocal = (next: LocalBrain): void => {', 'if (!localBrain.settled) keepPickingLocal(')).toMatch(/persona = localPersonaFor\(flint, styles\.local, model\);[\s\S]*goalsChat\.name\(/);
+    // The tools an ask that stays here is offered are the module's, built from the server's own search tools, memory and gate.
+    expect(src).toContain('const keptTools = toolsKeptHere({ search: mcpTools, embedder, knowledge, specs: paidToolSpecs(process.env), gate: (list) => gateBuiltins(list, tierOpts) });');
+    expect(src.match(/deepResearchTool\(/g)).toHaveLength(1); // the server's own, with the frontier planner
+    expect(src.match(/rememberTool\(/g)).toHaveLength(1); // the server's own, saving an ordinary fact
+    // The planner's check, the extractor's rules and the embedder's are the module's.
+    expect(between('complete: pausable(', 'calculateTool(),')).toMatch(/const held = goalsChat\.plannerHeld\(plannerVendor !== undefined\);\s*if \(held\) return held;/);
+    expect(between('const startMemory = (): void => {', '// On the local model it reads the model that was settled')).toContain('...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),');
+    expect(src).toContain("const extractBrain = memoryPlan.kind === 'local' ? { provider: 'ollama', model: memoryPlan.model.model, baseURL: memoryPlan.model.baseURL } : brains && brainOf(brains.primary.provider, brains.primary.model);");
+    expect(src).toContain('{ embedderHere: () => embedderHere(embedHost) }');
+    // /speak asks it before the outside speech service is called.
+    const speak = between("url === '/speak'", "url === '/generate'");
+    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
+    expect(speak.indexOf('ctx.goals.speechStaysHere(')).toBeLessThan(speak.indexOf('speakWithinBudget('));
+    // /generate has no gate: recall as any brain may have it, and a tier on this Mac asked as a local model's turn.
+    expect(generate).toContain('const recalled = recallForAnyBrain(await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall }));');
+    expect(generate.match(/recallContext\(/g)).toHaveLength(1);
+    expect(generate).toContain('return ctx.goals.run(b, () => answered.ask(personas.frontier(b)));');
+    expect(generate.match(/\bctx\.goals\.[A-Za-z]+/g)).toEqual(['ctx.goals.run']);
+    // /chat: one turn from the module, and every ask of it made with what the module gave: its context, its tools, its mark.
+    expect(chat.match(/\bctx\.goals\.[A-Za-z]+/g)).toEqual(['ctx.goals.forTurn', 'ctx.goals.run']);
+    expect(chat).toContain('ctx.goals.forTurn(conversationId, message),');
+    expect(chat).toContain('const ctxBlock = withHistoryNote(recalled.block, history);');
+    expect(chat).toContain('const outsideCtx = withHistoryNote(recalled.outside, history);');
+    expect(chat).toContain('const asked = goals.ask(persona, { context, whole: ctxBlock, outside: outsideCtx, tools: selected });');
+    expect(chat).toMatch(/const events = persona\.chat\(\s*\{ conversationId, message, context: asked\.context, \.\.\.\(asked\.tools\.length \? \{ tools: \[\.\.\.asked\.tools\] \} : \{\}\), \.\.\.\(attachments\.length \? \{ attachments \} : \{\}\) \},\s*\{ signal: ac\.signal, \.\.\.asked\.mark \},\s*\);/);
+    expect(chat.match(/\.chat\(/g)).toHaveLength(1); // the pump's, for the persona being asked
+    expect(chat.match(/\bgoals\.[A-Za-z]+/g)).toEqual(['ctx.goals.forTurn', 'goals.ask', 'ctx.goals.run'].map((c) => c.replace('ctx.', '')));
+    // The turn's own tool list and recalled blocks go nowhere but into that ask.
+    expect(chat.match(/\bselected\b/g)).toHaveLength(2);
+    expect(chat.match(/\boutsideCtx\b/g)).toHaveLength(2);
+    // The client is told, ahead of the reply, whether it stays here; and a tier on this Mac is asked as a local model's turn.
+    expect(chat).toMatch(/const here = asked\.meta\(\);\s*if \(here\) res\.write\(`data: \$\{JSON\.stringify\(here\)\}\\n\\n`\);/);
+    expect(chat).toMatch(/await ctx\.goals\.run\(b, async \(\) => \{\s*await pump\(b\.persona, [^;]*, frontierCtx\);[^\n]*\n\s*\}\);/);
+    // What the [route] line and the chat.turn event report is the module's measure for the brain asked last.
+    expect(chat.match(/goalsTokens = /g)).toEqual(['goalsTokens = ', 'goalsTokens = ']);
+    expect(chat).toContain('goalsTokens = asked.tokens;');
+    expect(chat).toContain('...(world || goalsTokens ? { ctxTokens: { ...(world ? { world: estimateTokens(world) } : {}), ...(goalsTokens ? { goals: goalsTokens } : {}) } } : {}),');
+    expect(chat).toContain('...(goalsTokens ? { goalsTokens } : {}),');
+    // The frontier's own context is built without any of it, as before.
+    expect(chat).toContain('const frontierCtx = world ? `${ctxBlock}\\n\\n${world}` : ctxBlock;');
   });
 
   it('asks for World now only for a planned frontier turn, and hands it only to the frontier tiers', () => {
@@ -127,10 +196,13 @@ describe('index.ts wiring', () => {
       'provider = new OllamaProvider(next.options);',
       'model = next.model;',
       'localEnv = { ...process.env, ...next.env };',
-      'flint = new Flint({ provider, defaultModel: model, memory, observer });',
+      // Through historyOf, like every brain's: the adopted model reads the conversation by the same rule (./goals-chat).
+      'flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });',
       'persona = localPersonaFor(flint, styles.local, model);',
       'styled = makeStyled();',
       'backgroundBrain = makeBackground();',
+      // ...and who may read what stays on this Mac is named again, for the new local persona.
+      'goalsChat.name({ persona, provider, model }, brains, keptTools);',
       'noteLocalDefault(next);',
     ]) {
       expect(adopt, line).toContain(line);
@@ -251,7 +323,8 @@ describe('index.ts wiring', () => {
     const block = between('complete: pausable(', 'calculateTool(),');
     // The budget check is the one an eval replay is exempt from; the local turn and the breaker are for every turn.
     expect(block).toMatch(/\(\) => \(plannerVendor \? spend\.backgroundBlocked\(plannerVendor\) : undefined\),\s*\/\/ Whatever the turn, an eval replay included\./);
-    expect(block).toContain("if (plannerVendor && isLocalTurn()) return 'the local model is answering this turn, so its question stays here';");
+    // The local-turn check itself is ./goals-chat plannerHeld (run in test/local-turn.test.ts): asked first, of an outside planner.
+    expect(block).toMatch(/\(\) => \{\s*const held = goalsChat\.plannerHeld\(plannerVendor !== undefined\);\s*if \(held\) return held;\s*const paused = plannerProvider/);
   });
 
   it('an eval replay is not rerouted by the breaker; a local answer it gets during a pause is marked', () => {

@@ -20,3 +20,4 @@ export * from './health-names.js';
 export * from './goals.js';
 export * from './tokens.js';
 export * from './predict.js';
+export * from './goals-now.js';

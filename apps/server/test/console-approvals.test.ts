@@ -2,7 +2,7 @@
  * The console's Approvals panel (apps/console/index.html, its own <script
  * id="approvals-js">), run against a small fake DOM that refuses innerHTML:
  * every pending card the server lists says what it would do in words (the
- * open one with three facts or fewer, the raw args behind Show Details), with
+ * open one with three facts or fewer, the rest as sentences behind Show Details), with
  * outside text marked and inert; Approve and Reject go through the signed path
  * chat cards use; Approve All signs each card in turn and leaves a card with
  * outside text or money for its own prompt; a device without an approval key
@@ -14,7 +14,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { laterDay, pinLocale, shownDay } from './console-dates';
 import { ACTION_WORDS, noteProblems } from '@flint/policy';
+
+/** A rule's last day, and how the console shows it: a date with its year, whenever this runs. */
+const RULE_UNTIL = laterDay(3, 29);
+const RULE_DAY = shownDay(3, 29);
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -92,6 +97,8 @@ const card = (over: Record<string, unknown> = {}) => ({
   id: 'pr1', fullName: 'world.source.enable', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
   expiresAt: '2026-10-12T14:00:00.000Z', ...over,
 });
+/** An ordinary card, which may share one prompt with others in Approve All: a read chat asked for. (A card that turns a source on asks on its own.) */
+const plain = (over: Record<string, unknown> = {}) => card({ fullName: 'runtime.inbox_recent', args: { lane: 'relevant' }, origin: 'chat:c1', ...over });
 const textNode = (t: string) => Object.assign(new El('#text'), { textContent: t });
 
 beforeEach(() => {
@@ -139,6 +146,7 @@ beforeEach(() => {
     openSettings: () => void (panels.settings = true),
   };
   createContext(ctx);
+  pinLocale(ctx);
   runInContext(apprJs, ctx);
   // A Tuesday noon, so a restore test's card says the same thing whatever day the tests run.
   ctx.apprNow = () => new Date(2026, 9, 6, 12, 0);
@@ -156,7 +164,7 @@ describe('the console Approvals panel', () => {
       body: {
         signed: true,
         proposals: [
-          card({ id: 'pr0', fullName: 'policy.change', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'restore.drill', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'backup.offsite', expiresAt: '2027-03-29T00:00:00.000Z' }] } }),
+          card({ id: 'pr0', fullName: 'policy.change', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
           card(),
           card({ id: 'pr2', fullName: 'world.person.create', origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
         ],
@@ -169,15 +177,20 @@ describe('the console Approvals panel', () => {
     const first = rows[0]!.shown();
     expect(first).toContain('Run Backups on Their Own');
     // The open card shows its line too, as a sentence, and its facts.
-    expect(first).toContain('Run Backups on Their OwnIt lasts until Mar 29, 2027.');
-    expect(first).toContain('UntilMar 29, 2027');
-    expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite 1 a Day');
+    expect(first).toContain(`Run Backups on Their OwnIt lasts until ${RULE_DAY}.`);
+    expect(first).toContain(`Until${RULE_DAY}`);
+    expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite Copy 1 a Day');
     expect(first).toContain('Filed ByYou');
-    // The raw args and the reason wait behind Show Details.
+    // The reason and what each rule lets run wait behind Show Details, as sentences: a rule card never shows its rows as they are stored.
     expect(first).not.toContain('backup.local');
+    expect(first).not.toContain('The backup may run');
     rows[0]!.button('Show Details').onclick!();
-    expect(rows[0]!.shown()).toContain('"pattern": "backup.local"');
-    expect(rows[0]!.shown()).toContain('The shadow week: 1.2 relevant a day.');
+    const details = rows[0]!.shown();
+    expect(details).toContain('The shadow week: 1.2 relevant a day.');
+    expect(details).toContain(`The backup may run on its own, once a day, until ${RULE_DAY}.`);
+    expect(details).toContain(`The restore test may run on its own, once a week, until ${RULE_DAY}.`);
+    expect(details).toContain(`The offsite copy may be sent on its own, once a day, until ${RULE_DAY}.`);
+    expect(details).not.toMatch(/[{}"\[\]]|backup\.local|restore\.drill|pattern|expiresAt/);
     expect(rows[1]!.shown()).toContain('Turn On the Deploy Source');
     expect(rows[1]!.shown()).toContain('Turn On the Deploy SourceDeploy results are read every minute.');
     expect(rows[2]!.shown()).toContain('Add 1 Person from Calendar');
@@ -185,42 +198,50 @@ describe('the console Approvals panel', () => {
     // Opening a row shows its facts; the invitation's markup arrives as literal text.
     rows[2]!.onclick!();
     expect(ids.apprlist!.children[0]!.children[2]!.shown()).toContain('<img src=x onerror=alert(1)>Ada');
-    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 1.');
+    // Each asks on its own: the rules card would let backups run alone, the source card changes what Flint reads, and the person card holds outside text.
+    expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
+    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 3.');
     expect(ids.apprall!.textContent).toBe('Approve All with Password');
     expect(ids.apprhelp!.hidden).toBe(true);
   });
 
   it('Approve and Reject on the open card take the signed path chat cards use; outside text asks on its own', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', args: { people: [] } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', args: { people: [] } }), card({ id: 'pr3' })] } });
     await open();
     const first = ids.apprlist!.children[0]!.children[0]!;
     first.button('Approve with Password').onclick!();
     first.button('Reject').onclick!();
     // The args the card shows go with it: what is signed must hash to them (the main script checks the challenge).
-    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Turn On the Deploy Source', fresh: false, args: { source: 'deploy' } }]);
+    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Read What Triage Decided', fresh: false, args: { lane: 'relevant' } }]);
     expect(decided[1]).toEqual(['reject', 'pr1']);
     ids.apprlist!.children[0]!.children[1]!.onclick!();
     ids.apprlist!.children[0]!.children[1]!.button('Approve with Password').onclick!();
     expect(decided[2]![2]).toEqual({ reason: 'approve: Add 0 People from Calendar', fresh: true, args: { people: [] } });
+    // A card that turns a source on changes what Flint reads: a fresh touch for it too.
+    ids.apprlist!.children[0]!.children[2]!.onclick!();
+    ids.apprlist!.children[0]!.children[2]!.button('Approve with Password').onclick!();
+    expect(decided[3]![2]).toEqual({ reason: 'approve: Turn On the Deploy Source', fresh: true, args: { source: 'deploy' } });
   });
 
   it('Approve All signs each card in turn after one prompt, and leaves outside text and money for their own', async () => {
     answer = () => ({
       status: 200,
-      body: { signed: true, proposals: [card({ id: 'a' }), card({ id: 'b', args: { source: 'git' } }), card({ id: 't', tainted: true }), card({ id: 'm', fullName: 'spend.purchase' }), card({ id: 'c', args: { source: 'spend' } })] },
+      body: { signed: true, proposals: [plain({ id: 'a' }), plain({ id: 'b', args: { lane: 'quiet' } }), plain({ id: 't', tainted: true }), card({ id: 'm', fullName: 'spend.purchase' }), plain({ id: 'c', fullName: 'runtime.ledger_open', args: {} }), card({ id: 's' })] },
     });
     await open();
-    expect(noteSays()).toBe('You have 5 approvals waiting. Approve All skips 2.');
+    // Outside text, money and a source to turn on are each left for their own approval.
+    expect(noteSays()).toBe('You have 6 approvals waiting. Approve All skips 3.');
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b', 'c']);
-    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards', args: { source: 'deploy' } });
-    expect(decided[1]![2]).toEqual({ reason: 'approve: Turn On the Git Source', args: { source: 'git' } });
+    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards', args: { lane: 'relevant' } });
+    expect(decided[1]![2]).toEqual({ reason: 'approve: Read What Triage Decided', args: { lane: 'quiet' } });
     expect(ids.apprnote!.textContent).toBe('You approved 3 of 3.');
   });
 
   it('Approve All stops at the first card that is not approved, and says how far it got', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'a' }), card({ id: 'b' }), card({ id: 'c' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain({ id: 'a' }), plain({ id: 'b' }), plain({ id: 'c' })] } });
     await open();
     failApprove = 'b';
     run('approveAll()');
@@ -307,7 +328,8 @@ describe('the console Approvals panel', () => {
     await open();
     const shown = ids.apprlist!.children[0]!.children[0]!.shown();
     expect(shown).toContain('Add 3 People from Calendar');
-    expect(shown).toContain('PeopleKim, Alex (alex.kim@corp.example) · Mom (mallory@evil.example) · sam@corp.example');
+    expect(shown).toContain('PeopleKim, Alex, alex.kim@corp.example · Mom, mallory@evil.example · sam@corp.example');
+    expect(shown).not.toMatch(/[()]/);
     expect(shown).not.toContain('a'.repeat(64));
     expect(shown).toContain('Outside Text');
     // A card that names no calendar is Google's, as every P2.5 card was.
@@ -325,7 +347,7 @@ describe('the console Approvals panel', () => {
     };
     const apple = await shown({ people, source: 'apple_calendar' });
     expect(apple.text).toContain('They’re from Apple Calendar events you accepted or organized.');
-    expect(apple.facts).toEqual(['People', 'Ada Lovelace (ada@example.com)', 'Filed By', 'Flint', 'Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]);
+    expect(apple.facts).toEqual(['People', 'Ada Lovelace, ada@example.com', 'Filed By', 'Flint', 'Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]);
     expect((await shown({ people, source: 'google_calendar' })).text).toContain('They’re from Google Calendar events you accepted or organized.');
     expect((await shown({ people })).text).toContain('They’re from Google Calendar events you accepted or organized.');
   });
@@ -333,29 +355,36 @@ describe('the console Approvals panel', () => {
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'google', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }, { pattern: 'world.person.create', dailyCap: 20, expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Google Calendar · Add People from Calendar 20 a Day');
+    expect(rows[0]!.shown()).toContain('LimitsGoogle Calendar Reads · People from Your Calendar 20 a Day');
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Google Calendar is read every ${minutes} minutes.`);
+    // Neither rides Approve All: one lets Flint add people by itself, the other changes what Flint reads.
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
     run('approveAll()');
     await settle();
-    expect(decided.map((d) => d[1])).toEqual(['gc']);
+    expect(decided).toEqual([]);
   });
 
-  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and goes with Approve All', async () => {
+  it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and asks on its own, as every card that lets something run alone does', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', expiresAt: '2027-03-29T00:00:00.000Z' }] } });
+    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Apple Calendar');
-    // Reading alone adds no one, so it doesn't ask on its own.
-    expect(rows[0]!.shown()).not.toContain('Asks on Its Own');
+    expect(rows[0]!.shown()).toContain('LimitsApple Calendar Reads');
+    // It carries no mark here (an older server's card): the rows say it lets something run alone, and that is enough.
+    expect(promo).not.toHaveProperty('consequential', true);
+    expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
+    run('approveAll()');
+    await settle();
+    expect(decided).toEqual([]);
     expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Apple Calendar is read every ${minutes} minutes and when it changes.`);
   });
@@ -468,7 +497,7 @@ describe('the console Approvals panel', () => {
     expect(sub({ fullName: 'world.person.create', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
     expect(sub({ fullName: 'world.person.create', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
     expect(sub({ fullName: 'triage.rule.create', args: {} })).toBe('This adds a new rule.');
-    expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('ci-red');
+    expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
     expect(sub({ fullName: 'world.relation.write', args: {} })).toBe('Flint’s memory suggests this link.');
     expect(sub({ fullName: 'mcp.x', origin: 'console' })).toBe('You filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'runtime:knowledge' })).toBe('Flint filed this.');
@@ -479,7 +508,7 @@ describe('the console Approvals panel', () => {
   });
 
   it('one card waiting says so in the singular', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card()] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain()] } });
     await open();
     expect(noteSays()).toBe('You have 1 approval waiting.');
   });
@@ -519,8 +548,8 @@ describe('the console Approvals panel', () => {
     expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
     expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
     // The policy card names P3's rows in words.
-    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', dailyCap: 20 }, { pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }] } })[2])
-      .toContainEqual(['Limits', 'Review Your Goals 20 a Day · Suggest Goals from Chat 3 a Day · Add Commitments from Chat 10 a Day']);
+    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
+      .toContainEqual(['Limits', 'Goal Reviews 20 a Day · Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day']);
   });
 
   it('on a phone a card’s sentence wraps instead of being cut off, and the footer’s note has a line of its own above the button', () => {
@@ -582,7 +611,7 @@ describe('the console Approvals panel', () => {
           goalCard('px', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [{ op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } }] } }),
           goalCard('pw', 'plan.change', { consequential: true, args: { goalTitle: 'Synthetic goal', ops: [] } }),
           goalCard('gp', 'goal.propose', { origin: 'chat:c1', args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
-          card({ id: 'src' }),
+          plain({ id: 'src' }),
         ],
       },
     });
@@ -664,7 +693,7 @@ describe('the console Approvals panel', () => {
     // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', sensitivity: 'ops' })})`)).toBe(true);
-    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), card({ id: 'src' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), plain({ id: 'src' })] } });
     await open();
     expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
     const open1 = ids.apprlist!.children[0]!.children[0]!;
@@ -691,10 +720,18 @@ describe('the console Approvals panel', () => {
     open1.button('Show Details').onclick!();
     expect(details.hidden).toBe(false);
     expect(open1.shown()).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|[{}[\]"]/);
-    // Every other card still shows its raw args there.
+    // Every card's details are words, the others' too: what each holds, under a label, and never its args as they are stored.
     const other = ids.apprlist!.children[0]!.children[1]!;
     other.onclick!();
-    expect(ids.apprlist!.children[0]!.children[1]!.all().filter((e) => e.tagName === 'pre').map((e) => e.textContent)).toEqual([JSON.stringify({ source: 'deploy' }, null, 1)]);
+    const otherDetails = ids.apprlist!.children[0]!.children[1]!.all().find((e) => e.className === 'details')!;
+    expect(otherDetails.all().filter((e) => e.tagName === 'pre')).toEqual([]);
+    expect(otherDetails.all().filter((e) => e.tagName === 'dt' || e.tagName === 'dd').map((e) => e.textContent)).toEqual(['Lane', 'Relevant']);
+    // A number this page cannot name is counted in the list and given exactly, as a reference, behind Show Details:
+    // Will signs it, so he can see it. A card whose numbers are all known has no such group.
+    const refs = (p: Record<string, unknown>) => JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(p)}).refs`))) as string[][];
+    expect(refs(odd)).toEqual([['Unknown Numbers', 'daily.spend.acme.usd, x.y'], ['Unknown Second Opinions', 'x.y']]);
+    expect(refs(predict())).toEqual([]);
+    expect(JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(predict())})`)))).toEqual({ says: [also], facts: [], refs: [], withheld: '' });
     ids.apprlist!.children[0]!.children[0]!.onclick!();
     run('approveAll()');
     await settle();

@@ -23,7 +23,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { ON_TRACK_COUNTER, goalCodeOf, likelihoodOf, localDay, localWallTime, reviewCounter } from '@flint/policy';
 import { phrase } from '../../src/templates/escalations';
-import { NO_DB, freshDb, pgConfig, type TestUrls } from '../db';
+import { NO_DB, freshDb, healthRows, pgConfig, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Invalid, emitPrediction, EmitPredictionIn } from '../../src/ledger/emit';
 import { buildDigest } from '../../src/digest';
@@ -317,7 +317,7 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
     /** The Goal Reviews rows the health job writes every 5 minutes while reviews are on: Flint was reviewing for the last `minutes`. */
     const reviewingFor = async (minutes: number) => {
       await db.healthCheck.deleteMany({ where: { component: 'goals' } });
-      await db.healthCheck.createMany({ data: Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * MIN) })) });
+      await healthRows(urls, Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * MIN) })));
     };
     for (const g of [late, waited, asleep]) await db.goal.update({ where: { id: g.id }, data: { nextReviewAt: hoursAgo(2) } });
     // Review finding 7: these two were due two hours ago only because Flint was not reviewing then. Its first check has not

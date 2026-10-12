@@ -7,6 +7,9 @@
  * main() at import time and therefore could not be unit-tested at all.
  */
 
+import { isCloudModel } from './memory-brain';
+import { LOCALITY } from './ollama-locality';
+
 export type Brain = 'local' | 'frontier';
 
 /**
@@ -85,6 +88,104 @@ export function routeTurn(opts: {
     return { error: `The frontier brain configured here can't read ${what}.` };
   }
   return { brain: 'frontier', localFallback: false };
+}
+
+// ---------------------------------------------------------------------------
+// does a brain's prompt stay on this Mac?
+
+/** A brain as the locality rule sees it: whose wire it speaks, which model, and where its server is. */
+export interface AnsweringBrain {
+  /** The provider adapter's name: `ollama`, `anthropic`, `openai`, `perplexity`. */
+  provider: string;
+  model: string;
+  /** The server the provider sends its requests to (an Ollama client's base URL). Unknown: not local. */
+  baseURL?: string | undefined;
+  /** The context window the provider asks for on every call (an Ollama client's `num_ctx`), when it sets one. */
+  numCtx?: number | undefined;
+}
+
+/**
+ * The wires a model on this Mac can be reached by. Every other provider is an
+ * outside service, whatever else is true of it. A new local wire is added here,
+ * in a reviewed change, and nowhere else.
+ */
+export const LOCAL_WIRES: ReadonlySet<string> = new Set(['ollama']);
+
+/**
+ * The local wires whose server can also hand a request on to a model somewhere
+ * else (Ollama's cloud models). For these, brainIsLocal takes the server's own
+ * word that the model runs on it (./ollama-locality).
+ */
+const SERVES_REMOTE: ReadonlySet<string> = new Set(['ollama']);
+
+/** Is this URL's host the machine itself? Exactly 127.0.0.1, localhost or ::1: `127.0.0.1.example.com` is someone else's. */
+export function onThisMachine(baseURL: string | undefined): boolean {
+  if (!baseURL) return false;
+  let host: string;
+  try {
+    const u = new URL(baseURL);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    host = u.hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+}
+
+/**
+ * Does asking this brain keep the prompt on this Mac? The ONE place that is
+ * decided, for everything that may only be read locally (Will's goals in chat
+ * context, ./goals-now). It is asked about a BRAIN, not a turn, at the moment
+ * that brain is asked: a turn planned for the frontier can end on the local
+ * model, and a turn's first brain is not always the one that answers.
+ *
+ * Local means all four:
+ *  - the provider is a local wire (LOCAL_WIRES: Ollama's own API). The name
+ *    `local` on a route says nothing: the local persona can be on an Ollama on
+ *    another machine, and that is not local;
+ *  - the model is not named as one of Ollama's cloud models (`…-cloud`, `:cloud`),
+ *    which Ollama serves from its own machines (./memory-brain isCloudModel);
+ *  - its server is this Mac (a loopback address). An Ollama server elsewhere
+ *    (OLLAMA_HOST or a tier's host set to another machine) is not local, unless
+ *    the caller says a remote server is Will's own (`allowRemote`: nothing sets
+ *    it today; it is where a setting for a second machine of his plugs in);
+ *  - that Ollama itself says the model runs on it (./ollama-locality: its
+ *    listing gives the model no remote host). A name is not trusted: a cloud
+ *    model copied under another name still runs on Ollama's servers. This is
+ *    the check the model auto-picker already makes, cached, and it fails
+ *    closed: until Ollama has said so, and whenever it cannot be asked, the
+ *    model is not local.
+ * Anything unknown (no brain, another provider, no address, no listing) is not local.
+ */
+export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRemote?: boolean; listed?: (baseURL: string | undefined, model: string) => boolean } = {}): boolean {
+  if (!brain || !LOCAL_WIRES.has(brain.provider)) return false;
+  if (!brain.model || isCloudModel(brain.model)) return false;
+  if (opts.allowRemote !== true && !onThisMachine(brain.baseURL)) return false;
+  // Ollama can serve a model from its own servers under any name, so an Ollama is asked. (A wire whose
+  // server only ever runs its own models has nothing to ask.)
+  if (!SERVES_REMOTE.has(brain.provider)) return true;
+  return (opts.listed ?? ((url, model) => LOCALITY.runsHere(url, model)))(brain.baseURL, brain.model);
+}
+
+/**
+ * The address whose model listing decides whether this brain is local, when
+ * one does: an Ollama brain at an address that is this Mac. brainIsLocal reads
+ * what that Ollama last said (./ollama-locality); whoever names a brain has it
+ * asked.
+ */
+export function listedAt(brain: AnsweringBrain | undefined): string | undefined {
+  return brain && SERVES_REMOTE.has(brain.provider) && onThisMachine(brain.baseURL) ? brain.baseURL : undefined;
+}
+
+/** A provider adapter and its model as an AnsweringBrain: the adapter's own name, address and context size, never a label's. */
+export function brainOf(provider: { readonly name: string }, model: string): AnsweringBrain {
+  const { baseURL, numCtx } = provider as { readonly baseURL?: unknown; readonly numCtx?: unknown };
+  return {
+    provider: provider.name,
+    model,
+    ...(typeof baseURL === 'string' ? { baseURL } : {}),
+    ...(typeof numCtx === 'number' && Number.isInteger(numCtx) && numCtx > 0 ? { numCtx } : {}),
+  };
 }
 
 // The tool-name rules (isSafeTool and the sets behind it) moved to @flint/policy,

@@ -154,7 +154,13 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     const { PolicyArgs } = await import('./internal.js');
     const ok = PolicyArgs.safeParse(input.args);
     if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+    // It always asks on its own: never in Approve All, always with a fresh touch. The mark is not the
+    // filer's to leave off (the database refuses a policy change without it: Proposal_policy_floor).
+    input = { ...input, consequential: true };
   }
+  // A card that turns a source on changes what Flint reads, and a triage rule changes how it sorts what it
+  // reads: each asks on its own too, whoever files it.
+  if (input.action === 'world.source.enable' || input.action === 'triage.rule.create') input = { ...input, consequential: true };
   // So is a triage rule, against its source's allowlisted fields; and it is policy (kind `rule`).
   if (input.action === 'triage.rule.create') {
     const { refuseRule } = await import('./internal.js');

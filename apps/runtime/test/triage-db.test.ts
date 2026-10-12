@@ -163,6 +163,8 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
     expect(await db.proposal.count()).toBe(proposals);
     const rule = { name: 'big-issues', source: 'github', eventType: 'issue.state', predicate: { all: [{ path: 'entity.state.number', op: 'gt', value: 0.30000000000000004 }, { path: 'entity.state.number', op: 'lt', value: 1e21 }] }, action: 'log', lane: 'relevant', priority: 10, perSenderDailyCap: null, createdBy: 'will' };
     expect(await signed('triage.rule.create', { rule }, 'rule')).toEqual({ rule: 'big-issues' });
+    // It changes how Flint sorts what it reads, so its card asked on its own: filed without the mark, stored with it.
+    expect(await db.proposal.findFirstOrThrow({ where: { action: 'triage.rule.create' }, orderBy: { createdAt: 'desc' } })).toMatchObject({ consequential: true });
     const row = (await owner(`SELECT predicate::text AS p, enabled FROM "TriageRule" WHERE name = 'big-issues'`)).rows[0];
     expect(JSON.parse(row.p)).toEqual(rule.predicate);
     expect(row.enabled).toBe(true);

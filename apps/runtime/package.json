@@ -18,6 +18,7 @@
     "offsite": "tsx src/cli.ts offsite",
     "p2-report": "tsx src/cli.ts p2-report",
     "p25-report": "tsx src/cli.ts p25-report",
+    "p3-report": "tsx src/cli.ts p3-report",
     "promotion-table": "tsx src/cli.ts promotion-table",
     "restore-production": "tsx src/cli.ts restore-production",
     "restore-empty": "tsx src/cli.ts restore-empty",
