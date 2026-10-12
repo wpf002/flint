@@ -503,7 +503,27 @@ Approval cards now carry `kind`, `templateId` and `consequential`. The console n
 consequential card (every goal card, and a plan change that is not a review's small one) under
 an earlier prompt or in Approve All: each asks for its own touch. Which plan card is a small
 one the console reads from the card's operations as well (a status, a date moved by a week or
-less, a place), never from the template's name alone.
+less, a place), never from the template's name alone. A card that turns a source on, one that
+adds a triage rule, and any rule card that lets something run alone ask on their own too.
+
+**What you sign is what you can see.** Approve signs the card's stored args, whole, so Show
+Details shows all of them, without looking like a JSON file:
+
+- the card's own sentences (a goal's checks, a plan's changes, a rule), which quote only text
+  that can sit in a sentence whole and as written;
+- **DETAILS**: every other field under a Title Case label, its value in full. Text is never
+  clipped (it wraps; long text is all there, folded behind Show All with a line that says how
+  much more). A link and a file path are whole. A moment keeps its time and zone ("Oct 12,
+  10:04 PM CDT"); a day is a day;
+- **REFERENCES**: ids, refs, keys and hashes, each with its exact value. Nothing is hidden for
+  its shape: an order code, an IBAN or a hex string is content, and shows where it sits.
+
+One thing is kept back: the value under a key named for a secret (`token`, `secret`,
+`password`, `signature` and their kin) reads "Hidden" with its length. The card then says so
+in a sentence and asks on its own, and so does a card too large to list whole (past 300
+values, or 8 levels deep). A test walks every kind of card's stored args and finds each value
+on the opened card, and changes each one in turn to see the card change
+(test/console-card-details.test.ts).
 
 ### Goals in chat
 

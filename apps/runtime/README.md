@@ -496,14 +496,17 @@ the command counted, so the card never says a number the command did not see.
 Late there is the digest's count: a review that ran over an hour late. Under
 it, each rule the card signs is a sentence: "Goal reviews may run on their own,
 up to 20 a day, until Apr 5, 2027." Every rule card reads that way (the earlier
-tables' and the backups' too): its details never show the stored rows.
+tables' and the backups' too): its details never show the stored rows as they
+are stored, and list whatever a sentence leaves out (a row's reason, an action
+the console has no words for).
 
 Filing it twice is the same card, but only its own: one this command filed,
-with the very rules it would file now. A waiting card that only carries the
-table's name (another limit, another filer) is left where it is and a fresh
-one is filed beside it. If a card with exactly these rules is already waiting
-and this command did not file it, the command stops and names that card, for
-you to reject first.
+with the very rules it would file now and the reason this command writes (its
+fixed first sentence, then the gate's own sentence). A waiting card that only
+carries the table's name (another limit, another filer) is left where it is and
+a fresh one is filed beside it. If a card with exactly these rules is already
+waiting and this command did not file it, or it carries other words than the
+command's, the command stops and names that card, for you to reject first.
 
 `--phase p3c` is a second, later table, for goals Flint suggests from your
 chats (a later part builds those): it lets a suggestion land in Suggested
@@ -522,12 +525,16 @@ Two database rules keep those honest as far as they can be (the
 - a rule card always asks on its own, with a fresh touch, never in Approve
   All. The runtime sets that mark whoever files the card, the database refuses
   a rule card without it, and the console treats one as asking on its own
-  whatever it was sent.
+  whatever it was sent. A card that turns a source on, and one that adds a
+  triage rule, are marked the same way when they are filed: one changes what
+  Flint reads, the other how it sorts it.
 
 That is all they claim. Something with the runtime's own database access could
-still write a row dated now, or delete a health check. Nothing it writes turns a
+still write a row dated now, or delete a health check, or file a card under the
+command's own name with the command's own words. Nothing it writes turns a
 rule on: only your signature over the rows on the card does, and the card's
-details say each of them as a sentence.
+details say each of them as a sentence and list everything else the card
+holds, in full.
 
 ### Turning reviews on
 
