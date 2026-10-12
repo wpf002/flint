@@ -68,8 +68,9 @@ out["odd"] = v.read_reply([b"data: not json", b": comment", b'data: {"type":"met
       marked: ['Your goal is on track.', true, 'turn_abc'],
       plain: ['It is sunny.', false, 'turn_def'],
       fellBack: ['From the local model.', true, 't2'],
-      older: ['An older server.', false, null],
-      odd: ['ok', false, null],
+      // No word from the server that the reply may go out: it stays here.
+      older: ['An older server.', true, null],
+      odd: ['ok', true, null],
     });
   });
 

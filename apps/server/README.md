@@ -568,15 +568,24 @@ Six more things follow the block, so a goal's words don't leave by another door:
   that turn was given the block: the same mark, the same tools, the same rule for the
   extractor. That holds when the block did not fit, when the runtime did not answer, when no
   goal is active any more, and with `FLINT_GOALS_NOW` or every block turned off. A conversation
-  with no marked turn in its window is untouched. Tests: test/goals-carry.test.ts.
+  with no marked turn in its window is untouched. The read itself is tied to the turn: a model
+  on this Mac is handed marked turns only for a turn that is itself stored with the mark, so a
+  turn stored without it can never have read one, even when a marked turn finishes between the
+  moment an ask is built and the moment it reads its history. Tests: test/goals-carry.test.ts,
+  test/goals-history.test.ts.
 - **Spoken replies stay here.** `/speak` is OpenAI's speech service, so a reply that stays on
   this Mac is never sent to it. Ahead of each reply the chat stream's `meta` event says whether
   it stays here and which stored turn it is; the console then speaks it with the browser's own
   voice, and the hands-free client (apps/voice) with the Mac's `say`. The server refuses on
   its side too: `/speak` takes the conversation and the turn, and answers 409 with
   `fallback: "browser"` for a marked turn. A request that names a conversation and no turn is
-  about that conversation's newest turn. One that names nothing (an older client) cannot be
-  placed, so it is refused while any conversation's newest turn or recent history is marked.
+  about that conversation's newest turn. A request that cannot be placed (it names nothing, or
+  a conversation the store does not hold, or a turn that is not that conversation's) is held
+  to the strictest answer: it is refused while any conversation's newest turn is marked, or a
+  marked turn is among any conversation's last 12 turns of the last 48 hours. The first half
+  of that has no time limit: a conversation that ends on a marked turn holds every such
+  request until an ordinary turn follows it. Both clients start each reply as one that stays
+  here, and only the server's `meta` event saying it may go out clears that.
   Tests: test/goals-chat.test.ts, test/console-speech.test.ts, test/voice-client.test.ts.
 - **What Flint learns from it stays here.** A fact that memory extraction takes from such a
   turn is stored with a mark (`fromGoals` on the fact, in `knowledge.json`), and so is anything
@@ -668,7 +677,9 @@ model (not the size the block was meant to have); the runtime rolls it up daily
   neither. Nothing removes a mark; `FLINT_GOALS_TO_FRONTIER=on` lifts them all.
 - *A fact Will states twice.* If the very same words are saved again from a turn that does not
   stay here, they are no longer something only this Mac holds: the one fact loses its mark. A
-  rewording is stored as a second, ordinary fact beside the marked one.
+  rewording is stored as a second, ordinary fact beside the marked one. One answer is wrong
+  here: if the marked fact had already been replaced by a newer one, saving its words again
+  is answered "saved", but the old fact stays retired and is not recalled.
 - *The embedder still reads each question.* Recall embeds Will's message with the embedder at
   `OLLAMA_HOST` on every turn, as it always has. With that host on another machine, the
   question of a goals turn goes there too; only the marked facts are kept from it.
@@ -689,7 +700,8 @@ model (not the size the block was meant to have); the runtime rolls it up daily
   what.
 - *The browser's voice for those replies.* A reply that stays here is spoken by the browser or
   by the Mac's `say`, not by the neural voice. A client that does not say which reply it is
-  speaking gets that voice for every reply while any conversation has a recent marked turn.
+  speaking (or names one the store does not hold) gets that voice for every reply while any
+  conversation ends on a marked turn, with no time limit, or has one in its recent history.
 - *The sizes are estimates.* The prompt is measured at four characters a token, without the
   persona's lessons; the 256-token margin is for what that misses.
 - *A 30-second cache.* Goals read up to 30 seconds ago are still served: a goal finished

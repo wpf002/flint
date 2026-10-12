@@ -26,6 +26,7 @@ import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 import { brainOf } from '../src/policy';
 import { paidToolSpecs } from '../src/spend';
+import { asLocalTurn } from '../src/turn-taint';
 import { CANARY, HERE, answer, cleanup, goal, miniServer as server, storedTurn, tmpStore, type MiniOptions, type Step } from './goals-mini';
 
 let dir: string;
@@ -175,6 +176,60 @@ describe('a local turn that reads a goals turn in its history, and is given no g
       list.pop();
     }
   });
+});
+
+describe('two turns of one conversation at once: the mark is decided when the ask is built, the history is read later', () => {
+  it('an ask built while a marked turn is still being answered is an ordinary one, and is not handed that turn once it finishes', async () => {
+    const s = server({ frontier: claude, goals: answer([]) });
+    // A marked turn, begun and not yet complete (another request in the same conversation, still streaming).
+    await s.store.beginTurn({ conversationId: 'c1', turnId: 'A', createdAt: Date.now(), context: GOALS_TURN, userMessage: { id: 'A_u', role: 'user', content: 'how are my goals going?', timestamp: Date.now() } });
+    const turn = await s.goalsChat.forTurn('c1', 'and?');
+    const asked = asLocalTurn(() => turn.ask(s.localPersona, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] }));
+    expect(asked.mark).toEqual({}); // nothing marked is in its history yet
+    // The ask begins its turn (unmarked), the marked turn finishes, and only then is the history read.
+    const view = s.goalsChat.history(s.local.provider, s.local.model);
+    await view.beginTurn({ conversationId: 'c1', turnId: 'B', createdAt: Date.now(), userMessage: { id: 'B_u', role: 'user', content: 'and?', timestamp: Date.now() }, ...asked.mark });
+    await s.store.commitTurn({ conversationId: 'c1', turnId: 'A', updatedAt: Date.now(), usage: { input: 1, output: 1 }, responseMessages: [{ id: 'A_a', role: 'assistant', content: T1, timestamp: Date.now() }] });
+    const read = JSON.stringify(await view.getMessages('c1'));
+    expect(read).not.toContain(CANARY);
+    expect(read).toContain(HISTORY_GAP);
+  });
+
+  it('through whole turns, at every offset between a marked turn finishing and an overlapping local turn starting: a turn stored without the mark never read the marked one', async () => {
+    const long = `summarize ${'x'.repeat(14_000)}`; // no room for the block at 4,096: the second turn gets no block
+    const leaks: number[] = [];
+    let readIt = 0;
+    // The review found the gap at 26 and 27 microtask hops; the scan goes well past them on both sides.
+    for (let n = 0; n <= 80; n++) {
+      const s = server({ frontier: claude, local: { name: 'ollama', model: 'qwen2.5:14b', baseURL: HERE, numCtx: 4096, script: [{ say: T1 }, { say: 'second answer' }] } });
+      // Hold the local model's first answer (turn A) until it is released.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const real = s.local.provider.stream.bind(s.local.provider);
+      let calls = 0;
+      s.local.provider.stream = async function* (args) {
+        if (calls++ === 0) await gate;
+        yield* real(args);
+      };
+      const a = s.chat('local', 'how are my goals going?');
+      for (let i = 0; i < 50 && calls === 0; i++) await new Promise((r) => setTimeout(r, 0));
+      expect(calls).toBe(1); // A is at its provider: pending, and marked
+      release();
+      for (let i = 0; i < n; i++) await null; // n microtask hops later, B starts
+      const b = s.chat('local', long);
+      await Promise.all([a, b]);
+      const turns = (await s.store.getTurns('c1')).filter((t) => t.status === 'complete');
+      const tb = turns.find((t) => t.messages[0]!.content === long)!;
+      const bRequest = s.local.requests.find((r) => JSON.stringify(r.messages).includes('summarize'))!;
+      const bReadA = JSON.stringify(bRequest.messages).includes(CANARY);
+      if (bReadA) readIt++;
+      if (bReadA && !carriedGoals(tb)) leaks.push(n);
+      cleanup();
+    }
+    expect(leaks).toEqual([]);
+    // The scan does reach the offsets where B is built after A has finished: there it reads A, marked.
+    expect(readIt).toBeGreaterThan(0);
+  }, 60_000);
 });
 
 describe('the tools such a turn is offered', () => {

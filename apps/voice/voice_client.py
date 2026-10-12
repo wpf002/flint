@@ -76,8 +76,9 @@ def read_reply(lines):
     """One /chat reply from its event stream: (text, stays_here, turn_id).
     `stays_here` and `turn_id` are what the last `meta` event that spoke of them
     said: each brain asked in a turn says it for itself, and the last one asked
-    is the one whose text this is."""
-    text, here, turn = "", False, None
+    is the one whose text this is. A reply stays here until the server says it
+    may go out: with no such event (an older server) it is spoken on this Mac."""
+    text, here, turn = "", True, None
     for raw in lines:
         l = (raw.decode() if isinstance(raw, bytes) else raw).strip()
         if not l.startswith("data:"): continue

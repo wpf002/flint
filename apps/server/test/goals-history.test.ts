@@ -15,7 +15,7 @@ import { afterEach, describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Message, Turn } from '@flint/core';
+import { makeAiError, type Message, type Turn } from '@flint/core';
 import { GOALS_TURN, HISTORY_GAP, STAY_MARKS, carriedGoals, historyFor, keptHere, staysHere } from '../src/goals-now';
 import { PersistentStore } from '../src/persistent-store';
 import { CANARY, HERE, answer, cleanup, listed, miniServer as server, type Step } from './goals-mini';
@@ -161,8 +161,24 @@ describe('PersistentStore.viewWithout: the store as one reader sees it', () => {
 
 describe('historyFor: which brain reads what', () => {
   const here = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
-  const reads = async (view: { getMessages(cid: string): Promise<Message[]> }) => JSON.stringify(await view.getMessages('c'));
-  it('a brain on this Mac reads the whole store; any other reads it without the marked turns; unknown is not local', async () => {
+  type View = ReturnType<typeof historyFor>;
+  let seq = 0;
+  /** One turn begun through the view, as Flint.chat begins it (with the mark or without). */
+  const begin = async (view: View, marked: boolean) => {
+    const turnId = `r${++seq}`;
+    await view.beginTurn({ conversationId: 'c', turnId, createdAt: 9_000 + seq, ...(marked ? { context: GOALS_TURN } : {}), userMessage: { id: `ru${seq}`, role: 'user', content: `read ${seq}`, timestamp: 9_000 + seq } });
+    return turnId;
+  };
+  const end = (view: View, turnId: string) => view.failTurn({ conversationId: 'c', turnId, updatedAt: 9_999, error: makeAiError('internal', 'not answered', { retryable: false }) });
+  /** What a turn is handed as history: begun through the view, read, and ended. `reads(view)` is a turn that stays here. */
+  const reads = async (view: View, marked = true) => {
+    const turnId = await begin(view, marked);
+    const out = JSON.stringify(await view.getMessages('c'));
+    await end(view, turnId);
+    return out;
+  };
+
+  it('a brain on this Mac reads the whole store for a turn that stays here; any other brain reads it without the marked turns; unknown is not local', async () => {
     listed(HERE, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com' }]);
     const store = tmpStore();
     await turn(store, 1, true);
@@ -180,6 +196,64 @@ describe('historyFor: which brain reads what', () => {
     }
   });
 
+  it('the read is tied to the turn it is for: a turn stored without the mark never reads a marked one, even on this Mac', async () => {
+    listed(HERE, ['qwen2.5:14b']);
+    const store = tmpStore();
+    await turn(store, 1, true);
+    await turn(store, 2, false);
+    const view = historyFor(store, here, false);
+    const unmarked = await reads(view, false);
+    expect(unmarked).not.toContain(CANARY);
+    expect(unmarked).toContain(HISTORY_GAP);
+    expect(unmarked).toContain('question 2'); // the ordinary turns are all there
+    expect(await reads(view, true)).toContain(CANARY);
+    // A read with no turn begun for it through this view is nobody's: it is not handed the marked turns.
+    expect(JSON.stringify(await view.getMessages('c'))).not.toContain(CANARY);
+    // ...and a turn begun on the store itself, or through another brain's view, is not this view's turn.
+    await store.beginTurn({ conversationId: 'c', turnId: 'direct', createdAt: 1, context: GOALS_TURN, userMessage: { id: 'du', role: 'user', content: 'direct', timestamp: 1 } });
+    expect(JSON.stringify(await view.getMessages('c'))).not.toContain(CANARY);
+  });
+
+  it('a marked turn that finishes after an ordinary ask was built, and before that ask reads its history, is not handed to it', async () => {
+    listed(HERE, ['qwen2.5:14b']);
+    const store = tmpStore();
+    const view = historyFor(store, here, false);
+    // Turn A: marked, begun, still being answered.
+    await store.beginTurn({ conversationId: 'c', turnId: 'A', createdAt: 1, context: GOALS_TURN, userMessage: { id: 'Au', role: 'user', content: `goals? ${CANARY}`, timestamp: 1 } });
+    // Turn B's ask is built now: nothing marked is in its history yet, so it is an ordinary one.
+    expect(store.windowHas('c', carriedGoals)).toBe(false);
+    const b = await begin(view, false);
+    // A finishes before B reads.
+    await store.commitTurn({ conversationId: 'c', turnId: 'A', updatedAt: 2, usage: { input: 1, output: 1 }, responseMessages: [{ id: 'Aa', role: 'assistant', content: `answer ${CANARY}`, timestamp: 2 }] });
+    const read = JSON.stringify(await view.getMessages('c'));
+    expect(read).not.toContain(CANARY);
+    expect(read).toContain(HISTORY_GAP);
+    await end(view, b);
+  });
+
+  it('two turns begun at once in one conversation cannot be told apart, so neither is handed what only one may read, in either order', async () => {
+    listed(HERE, ['qwen2.5:14b']);
+    const store = tmpStore();
+    await turn(store, 1, true);
+    const view = historyFor(store, here, false);
+    for (const order of [[true, false], [false, true], [true, true]]) {
+      const ids = [await begin(view, order[0]!), await begin(view, order[1]!)];
+      const first = JSON.stringify(await view.getMessages('c'));
+      const second = JSON.stringify(await view.getMessages('c'));
+      expect(first, String(order)).not.toContain(CANARY);
+      expect(second, String(order)).not.toContain(CANARY);
+      for (const id of ids) await end(view, id);
+    }
+    // One at a time again, it is what it was.
+    expect(await reads(view, true)).toContain(CANARY);
+    // A turn that was begun and ended without ever reading leaves nothing behind for the next one.
+    await end(view, await begin(view, false));
+    expect(await reads(view, true)).toContain(CANARY);
+    // Another conversation's turn is no part of it.
+    await view.beginTurn({ conversationId: 'other', turnId: 'o1', createdAt: 3, userMessage: { id: 'ou', role: 'user', content: 'elsewhere', timestamp: 3 } });
+    expect(await reads(view, true)).toContain(CANARY);
+  });
+
   it('which of the two it reads is decided at each read: a brain is on this Mac only while its Ollama says so', async () => {
     const store = tmpStore();
     await turn(store, 1, true);
@@ -193,13 +267,15 @@ describe('historyFor: which brain reads what', () => {
     expect(await reads(view)).not.toContain(CANARY);
     // Writes go to the one store whichever it reads.
     await view.beginTurn({ conversationId: 'c', turnId: 't9', createdAt: 9, userMessage: { id: 'u9', role: 'user', content: 'nine', timestamp: 9 } });
-    expect(store.turnIds('c')).toEqual(['t1', 't9']);
+    expect(store.turnIds('c')).toContain('t9');
   });
 
   it('FLINT_GOALS_TO_FRONTIER=on lifts it for every brain that can be named; one that cannot is never given it', async () => {
     const store = tmpStore();
     await turn(store, 1, true);
-    expect(await reads(historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true))).toContain(CANARY);
+    // Lifted, the read needs no mark on its turn either: Will chose to send it all out.
+    expect(await reads(historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true), false)).toContain(CANARY);
+    expect(JSON.stringify(await historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true).getMessages('c'))).toContain(CANARY);
     expect(await reads(historyFor(store, undefined, true))).not.toContain(CANARY);
   });
 

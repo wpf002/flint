@@ -123,15 +123,18 @@ export class OllamaLocality {
 
   /**
    * Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`. A
-   * row with a remote host, or a remote model, runs elsewhere. A model listed
-   * twice is local only if every row says so.
+   * row that says anything of a remote host or a remote model (a string, a
+   * number, `true`, an object) runs elsewhere. A model listed twice is local
+   * only if every row says so.
    */
   learn(baseURL: string, rows: readonly ListedModel[], at: number = this.#now()): void {
     const models: Listing['models'] = [];
     for (const m of rows) {
       const name = typeof m?.name === 'string' && m.name.trim() ? m.name : typeof m?.model === 'string' ? m.model : '';
       if (!name.trim()) continue;
-      const remote = (typeof m.remote_host === 'string' && m.remote_host.length > 0) || (typeof m.remote_model === 'string' && m.remote_model.length > 0);
+      // Anything at all said of a remote host or model, of any type, means it runs elsewhere: only a row that says nothing is local.
+      const said = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+      const remote = said(m.remote_host) || said(m.remote_model);
       const seen = models.find((x) => sameModel(x.name, name));
       if (seen) seen.here = seen.here && !remote;
       else models.push({ name, here: !remote });

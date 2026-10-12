@@ -110,10 +110,14 @@ export function recallForAnyBrain(recall: Recalled): { block: string; facts: str
  * any mark (./goals-now keptHere).
  *
  * The client names the reply: the conversation, and the turn its `meta` event
- * gave it. A request that names a conversation and no turn the store holds is
- * about that conversation's newest turn. A request that names nothing cannot
- * be placed, so it is held to the strictest answer: it stays here while any
- * conversation's newest turn or recent history is marked.
+ * gave it. A request that names a conversation and no turn is about that
+ * conversation's newest turn. A request that cannot be placed is held to the
+ * strictest answer: it stays here while ANY conversation's newest turn is
+ * marked (however old that turn is), or a marked turn is in any
+ * conversation's history window. That is a request that names nothing, one
+ * that names a conversation the store does not hold, and one that names a
+ * turn its conversation does not hold: a wrong name is not a weaker claim
+ * than no name.
  */
 export function speechStaysHere(
   store: Pick<PersistentStore, 'matches' | 'turnIds' | 'windowHas' | 'conversationIds'>,
@@ -124,11 +128,14 @@ export function speechStaysHere(
     const last = ids[ids.length - 1];
     return last !== undefined && store.matches(cid, last, keptHere);
   };
+  const anywhere = (): boolean => store.conversationIds().some((c) => newest(c) || store.windowHas(c, keptHere));
   const cid = typeof said.conversationId === 'string' && said.conversationId ? said.conversationId : undefined;
-  if (cid === undefined) return store.conversationIds().some((c) => newest(c) || store.windowHas(c, keptHere));
-  const tid = typeof said.turnId === 'string' && said.turnId ? said.turnId : undefined;
-  if (tid !== undefined && store.turnIds(cid).includes(tid)) return store.matches(cid, tid, keptHere);
-  return newest(cid);
+  if (cid === undefined) return anywhere();
+  const held = store.turnIds(cid);
+  if (held.length === 0) return anywhere(); // a conversation the store does not hold
+  if (said.turnId === undefined || said.turnId === null || said.turnId === '') return newest(cid);
+  if (typeof said.turnId !== 'string' || !held.includes(said.turnId)) return anywhere(); // a turn that is not this conversation's
+  return store.matches(cid, said.turnId, keptHere);
 }
 
 /** What `/speak` answers instead of calling an outside speech service. The client then speaks with its own voice. */

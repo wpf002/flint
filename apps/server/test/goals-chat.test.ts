@@ -111,10 +111,44 @@ describe('speechStaysHere: a reply that stays on this Mac is never sent to an ou
     // A reply being streamed: its turn is pending, and marked from the moment it began.
     await s.store.beginTurn({ conversationId: 'c1', turnId: 'streaming', createdAt: Date.now(), context: GOALS_TURN, userMessage: { id: 'u', role: 'user', content: 'goals?', timestamp: Date.now() } });
     expect(s.goalsChat.speechStaysHere({ conversationId: 'c1' })).toBe(true);
-    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: 'no-such-turn' })).toBe(true);
-    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: 42 })).toBe(true);
-    // A conversation nobody has had holds nothing that stays here.
-    expect(s.goalsChat.speechStaysHere({ conversationId: 'elsewhere' })).toBe(false);
+    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: '' })).toBe(true);
+    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: null })).toBe(true);
+  });
+
+  it('a wrong name is not a weaker claim than no name: an unknown conversation, or a turn that is not the named conversation’s, is treated as naming nothing', async () => {
+    const store = tmpStore();
+    const ask = (said: Record<string, unknown>) => speechStaysHere(store, said);
+    await storedTurn(store, { conversationId: 'c2', id: 'plain', user: 'weather?', assistant: 'sunny' });
+    // Nothing anywhere is marked: every shape may go out.
+    for (const said of [{}, { conversationId: 'never-seen' }, { conversationId: 'c2', turnId: 'nope' }, { conversationId: 'c2' }]) expect(ask(said), JSON.stringify(said)).toBe(false);
+    await storedTurn(store, { conversationId: 'c1', id: 'old', user: 'hi', assistant: 'hello' });
+    await storedTurn(store, { conversationId: 'c1', id: 'marked', context: GOALS_TURN, user: 'goals?', assistant: T1 });
+    const answers = (cases: Array<[Record<string, unknown>, boolean]>) => {
+      for (const [said, stays] of cases) expect(ask(said), JSON.stringify(said)).toBe(stays);
+    };
+    answers([
+      // Named rightly: the turn decides, and the conversation's newest when no turn is named.
+      [{ conversationId: 'c1', turnId: 'marked' }, true], [{ conversationId: 'c1', turnId: 'old' }, false], [{ conversationId: 'c1' }, true], [{ conversationId: 'c2' }, false], [{ conversationId: 'c2', turnId: 'plain' }, false],
+      // Named wrongly, or not at all: held to the strictest answer, since somewhere a marked turn is newest.
+      [{}, true], [{ conversationId: 'never-seen' }, true], [{ conversationId: 'never-seen', turnId: 'marked' }, true], [{ conversationId: 'c2', turnId: 'marked' }, true],
+      [{ conversationId: 'c1', turnId: 'nope' }, true], [{ conversationId: 'c2', turnId: 'nope' }, true], [{ conversationId: 'c2', turnId: 42 }, true], [{ conversationId: 'c2', turnId: ['plain'] }, true],
+      [{ conversationId: 5 }, true], [{ conversationId: '' }, true], [{ conversationId: ['c1'] }, true], [{ turnId: 'marked' }, true],
+    ]);
+    // A newer ordinary turn after the marked one: the conversation alone names that newer turn; the marked turn's own name still holds.
+    await storedTurn(store, { conversationId: 'c1', id: 'after', user: 'thanks', assistant: 'ok' });
+    answers([[{ conversationId: 'c1' }, false], [{ conversationId: 'c1', turnId: 'marked' }, true], [{}, true], [{ conversationId: 'never-seen' }, true]]);
+  });
+
+  it('the rule for a request that cannot be placed is not bounded by time: a conversation that ends on a marked turn holds it for good', async () => {
+    const later = tmpStore({ history: { maxTurns: 12, maxAgeMs: 48 * 3600_000 }, now: () => Date.now() + 400 * 86_400_000 });
+    await storedTurn(later, { id: 'marked', context: GOALS_TURN, user: 'goals?', assistant: T1 });
+    expect(speechStaysHere(later, {})).toBe(true);
+    // Once a newer ordinary turn follows it, and it has left the history window, nothing unplaced is held any more.
+    const aged = tmpStore({ history: { maxTurns: 1, maxAgeMs: Number.POSITIVE_INFINITY } });
+    await storedTurn(aged, { id: 'marked', context: GOALS_TURN, user: 'goals?', assistant: T1 });
+    await storedTurn(aged, { id: 'after', user: 'thanks', assistant: 'ok' });
+    expect(speechStaysHere(aged, {})).toBe(false);
+    expect(speechStaysHere(aged, { conversationId: 'c1', turnId: 'marked' })).toBe(true);
   });
 
   it('a request that names nothing cannot be placed (an older client): it stays here while any conversation’s newest turn or recent history is marked', async () => {
@@ -216,10 +250,11 @@ describe('history: every Flint client reads the conversation through it', () => 
     const store = tmpStore();
     const chat = new GoalsChat<Persona>({ memory: store, blocks: { goals: true, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve() } });
     await storedTurn(store, { id: 'first', context: GOALS_TURN, user: 'how are my goals going?', assistant: T1 });
-    const ask = async (name: string, model: string, baseURL?: string) => {
-      const r = recording(name, ['answer'], baseURL ? { baseURL } : {});
+    // Each asks as a turn that stays here (the mark in the call's options), which is the most any of them could be given.
+    const ask = async (name: string, model: string, baseURL?: string, marked = true) => {
+      const r = recording(name, ['fail'], baseURL ? { baseURL } : {});
       const flint = new Flint({ provider: r.provider, defaultModel: model, memory: chat.history(r.provider, model), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });
-      for await (const _ev of flint.chat({ conversationId: 'c1', message: `and then? (${name}:${model})` })) void _ev;
+      for await (const _ev of flint.chat({ conversationId: 'c1', message: `and then? (${name}:${model})` }, marked ? { context: GOALS_TURN } : {})) void _ev;
       return r.seen();
     };
     // The frontier's client, an eval candidate that is a cloud model under a plain name, the adopted local brain.
@@ -229,6 +264,10 @@ describe('history: every Flint client reads the conversation through it', () => 
     expect(candidate).not.toContain(CANARY);
     expect(candidate).toContain(HISTORY_GAP);
     expect(await ask('ollama', 'qwen2.5:14b', HERE)).toContain(CANARY);
+    // ...and the brain on this Mac reads it only for a turn that is itself stored with the mark.
+    const unmarked = await ask('ollama', 'qwen2.5:14b', HERE, false);
+    expect(unmarked).not.toContain(CANARY);
+    expect(unmarked).toContain(HISTORY_GAP);
   });
 
   it('naming a brain has its Ollama asked what runs on it: this Mac’s address, and no other', () => {

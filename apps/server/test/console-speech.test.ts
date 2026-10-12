@@ -52,9 +52,25 @@ function page(status = 200) {
   };
   return { sent, call, skipUntil: () => runInContext('_ttsSkipUntil', ctx) as number };
 }
+/** A reply's voice state once the server has said it may go out (the page starts every reply as one that stays here). */
 const fresh = () => ({ displayed: '', gen: 0, conv: 'c1', here: false, turn: null as string | null });
 
 describe('the console’s voice: a reply that stays on this Mac', () => {
+  it('a reply starts as one that stays here: until the server says it may go out, nothing of it is sent to /speak', async () => {
+    const p = page();
+    // As the page makes it for each reply.
+    const vctx = { displayed: '', gen: 0, conv: 'c1', here: true, turn: null as string | null };
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A first sentence.', vctx })).toBeNull();
+    // The brain's own meta event (which model answers) says nothing of it, and neither does an older server.
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', brain: 'frontier' } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A second sentence.', vctx })).toBeNull();
+    expect(p.sent).toEqual([]);
+    // Only the server saying so clears it.
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: false, turn: 'turn_abc' } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A third sentence.', vctx })).toBe('mp3');
+    expect(p.sent).toEqual([{ url: 'http://flint.test/speak', body: { text: 'A third sentence.', conversationId: 'c1', turnId: 'turn_abc' } }]);
+  });
+
   it('the meta event sets it for the reply being streamed, with the turn it is stored as', () => {
     const p = page();
     const vctx = fresh();
@@ -107,7 +123,7 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
   });
 
   it('the page wires them in: each reply has its own voice state, the meta event feeds it, and speech goes through it', () => {
-    expect(html).toContain("var vctx={displayed:'',gen:_ttsGen,conv:convId,here:false,turn:null};");
+    expect(html).toContain("var vctx={displayed:'',gen:_ttsGen,conv:convId,here:true,turn:null};");
     expect(html).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain);voiceMeta(vctx,ev);}");
     expect(html).toContain('var blobP=_speechBlob(clean,vctx);');
     // /speak is asked from one place.

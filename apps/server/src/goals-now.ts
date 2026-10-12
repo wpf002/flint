@@ -193,10 +193,43 @@ export function staysHere(brain: AnsweringBrain | undefined, toFrontier: boolean
  * Which of the two a brain reads is decided at each read, not once when the
  * brain is built: whether it runs on this Mac is its Ollama's own word
  * (./policy brainIsLocal), and that is not known at boot and can change.
+ *
+ * And the read is tied to the turn it is for. A brain on this Mac is handed
+ * the whole store only for a turn that was begun, through this very view, with
+ * a mark that keeps it here: so a turn that is stored unmarked can never have
+ * read a marked one, whatever was decided when its ask was built (a marked
+ * turn that finished in between, a brain that became local in between). A
+ * read with no turn begun for it, and reads of two turns begun at once in one
+ * conversation (which cannot be told apart), get the view without the marked
+ * turns.
  */
 export function historyFor(store: PersistentStore, brain: AnsweringBrain | undefined, toFrontier: boolean): MemoryStore {
   const outside = store.viewWithout(keptHere, HISTORY_GAP);
-  return { ...outside, getMessages: (conversationId) => (staysHere(brain, toFrontier) ? store : outside).getMessages(conversationId) };
+  // Will chose to send goal text out: every brain that can be named reads everything, as before.
+  if (toFrontier) return { ...outside, getMessages: (conversationId) => (staysHere(brain, true) ? store : outside).getMessages(conversationId) };
+  /** The turns begun through this view whose history has not been read yet, by conversation, oldest first. */
+  const begun = new Map<string, Array<{ turnId: string; kept: boolean; apart: boolean }>>();
+  return {
+    ...outside,
+    beginTurn: async (input) => {
+      const turn = await store.beginTurn(input);
+      const waiting = begun.get(input.conversationId) ?? [];
+      waiting.push({ turnId: input.turnId, kept: keptHere({ context: input.context }), apart: true });
+      begun.set(input.conversationId, waiting);
+      return turn;
+    },
+    getMessages: (conversationId) => {
+      // Only turns that are still being answered can be waiting for their history.
+      const waiting = (begun.get(conversationId) ?? []).filter((w) => store.matches(conversationId, w.turnId, (t) => t.status === 'pending'));
+      // Two at once: this read could be either's, so neither is handed what only one of them may read.
+      if (waiting.length > 1) for (const w of waiting) w.apart = false;
+      const mine = waiting.shift();
+      if (waiting.length) begun.set(conversationId, waiting);
+      else begun.delete(conversationId);
+      const whole = mine !== undefined && mine.kept && mine.apart && staysHere(brain, false);
+      return (whole ? store : outside).getMessages(conversationId);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

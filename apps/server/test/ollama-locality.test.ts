@@ -41,6 +41,24 @@ describe('OllamaLocality', () => {
     expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
   });
 
+  it('a row that says anything at all of a remote host or model is not local, whatever type the value is', async () => {
+    const remotes: unknown[] = ['https://ollama.com', 1, 0, true, false, { url: 'https://ollama.com' }, [], ['x']];
+    for (const value of remotes) {
+      for (const key of ['remote_host', 'remote_model']) {
+        const l = new OllamaLocality();
+        l.learn(HERE, [{ name: 'm', [key]: value }, { name: 'plain' }]);
+        expect(l.runsHere(HERE, 'm'), `${key}: ${JSON.stringify(value)}`).toBe(false);
+        expect(l.runsHere(HERE, 'plain')).toBe(true);
+      }
+    }
+    // Only a row that says nothing of one is local: the key absent, null, or an empty string.
+    for (const value of [undefined, null, '']) {
+      const l = new OllamaLocality();
+      l.learn(HERE, [{ name: 'm', remote_host: value, remote_model: value }]);
+      expect(l.runsHere(HERE, 'm'), JSON.stringify(value)).toBe(true);
+    }
+  });
+
   it('an Ollama that is down, slow, or answers with something else teaches nothing', async () => {
     for (const fetchImpl of [
       async () => { throw new Error('ECONNREFUSED'); },
