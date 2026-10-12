@@ -479,13 +479,16 @@ in a request log. `/goals` is never reported back to the runtime as a `route.err
 Reviews (P3 part 3) run in the runtime, on its local model; the server only proxies. A goal's
 view carries when it is next reviewed, its forecast and its latest review, each checked
 against the contract (a review's suggestions are a step's title and closed sets, never free
-text); an answer from a runtime that has no reviews yet still reads. Review Now
-(`POST /goals/:id/review`, an empty body) is unsigned, and its refusals are the fixed
-sentences too.
+text, and each says whether it is on no card yet); an answer from a runtime that has no
+reviews yet still reads. Review Now (`POST /goals/:id/review`, an empty body) is unsigned,
+and its refusals are the fixed sentences too. After a yes the console reads the open goal
+again, quietly, twice.
 
 Approval cards now carry `kind`, `templateId` and `consequential`. The console never signs a
-consequential card (every goal card, and a plan change that is not a review's minor one) under
-an earlier prompt or in Approve All: each asks for its own touch.
+consequential card (every goal card, and a plan change that is not a review's small one) under
+an earlier prompt or in Approve All: each asks for its own touch. Which plan card is a small
+one the console reads from the card's operations as well (a status, a date moved by a week or
+less, a place), never from the template's name alone.
 
 ## Tools / integrations
 

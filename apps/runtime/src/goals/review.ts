@@ -48,6 +48,7 @@ import { appendAudit } from '../governance/audit.js';
 import { claim, periodKey } from '../governance/counters.js';
 import { activePolicies } from '../governance/proposals.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
+import { lateBefore } from './late.js';
 import { GOALS_ACTOR, recordOnTrack } from './ontrack.js';
 import { activePlan } from './ops.js';
 
@@ -57,7 +58,7 @@ export const PLAN_QUEUE = QUEUES.goals[1];
 export const REVIEW_ACTION = 'goal.review.local';
 const DAY = 86_400_000;
 
-/** What sets a review off, by id: version:<id>, step:<key>@<ms>, resolution:<id>, chat:<ref>. Never words. */
+/** What sets a review off, by id: version:<id>, step:<key>@<ms>.v<plan version>, resolution:<id>, chat:<ref>. Never words. */
 export const TriggerId = z.string().regex(/^[a-z]{1,20}:[A-Za-z0-9_:@.-]{1,99}$/);
 
 /** goals.review's data: ids and times only (pg-boss's tables sit outside retention and forget). */
@@ -70,9 +71,19 @@ export const ReviewJob = z
   });
 export type ReviewJob = z.infer<typeof ReviewJob>;
 
-/** goals.plan's data: the goal and the review whose plan stage it is, and how often it yielded to chat. */
+/**
+ * goals.plan's data: the goal and the review whose plan stage it is; how often
+ * it yielded to chat (`deferrals`) and how many model requests it had made by
+ * then (`requests`: the review's 2 are not given again to a run that comes
+ * back); how often it came back because the model was not there (`retries`);
+ * and whether it already holds its slot of the day's cap (`claimed`).
+ */
 export const PlanJob = z
-  .object({ goalId: GoalId, reviewId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/), deferrals: z.number().int().min(1).max(1000).optional(), claimed: z.literal(true).optional() })
+  .object({
+    goalId: GoalId, reviewId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/),
+    deferrals: z.number().int().min(1).max(1000).optional(), requests: z.number().int().min(1).max(10).optional(),
+    retries: z.number().int().min(1).max(10).optional(), claimed: z.literal(true).optional(),
+  })
   .strict();
 export type PlanJob = z.infer<typeof PlanJob>;
 
@@ -113,6 +124,8 @@ export interface ReviewDeps {
   bus: Pick<Bus, 'boss'>;
   tz: string;
   now?: () => Date;
+  /** Since when the tick has run without a gap (late.ts); undefined: not tracked. A scheduled review's audit entry says whether it ran late by it. */
+  since?: Date | null;
   /** Test seam: runs inside the transaction once the goal is locked, before anything else of it is read. */
   afterLock?: (tx: Tx) => Promise<void>;
 }
@@ -171,6 +184,10 @@ export async function runReview(d: ReviewDeps, job: ReviewJob): Promise<ReviewOu
         const anchor = Number(localDay(d.tz, g.activatedAt ?? g.createdAt).slice(8, 10));
         const next = job.kind === 'scheduled' && due ? nextReviewAt(cadence, d.tz, due, now, anchor) : g.nextReviewAt;
 
+        // Late: due for over an hour while the tick ran (late.ts). The digest counts these, from the audit entry.
+        const cut = lateBefore(now, d.since);
+        const late = job.kind === 'scheduled' && !!due && !!cut && due.getTime() < cut.getTime();
+
         const forecast = await recordOnTrack(tx, g, { progress: e.progress, overdueSteps: overdue, nextReviewAt: next }, d.tz, now);
         const reviewId = newReviewId(now);
         await tx.goalReview.create({
@@ -186,7 +203,7 @@ export async function runReview(d: ReviewDeps, job: ReviewJob): Promise<ReviewOu
           actor: GOALS_ACTOR, context: 'autonomous', kind: 'action', action: REVIEW_ACTION, tier: standing.tier, decision: standing.shadow ? 'log' : 'act', outcome: 'ok', correlationId: reviewId,
           inputs: {
             goalId: g.id, reviewId, kind: job.kind, ...(job.triggerEventId ? { trigger: job.triggerEventId } : {}), met: e.met, total: e.total, unknown: e.unknown,
-            overdue, predictionId: forecast.id, superseded: forecast.superseded, shadow: standing.shadow,
+            overdue, predictionId: forecast.id, superseded: forecast.superseded, shadow: standing.shadow, ...(late ? { late: true } : {}),
           },
         }], now);
         // The plan stage's job, with the review it is for: both commit, or neither does.

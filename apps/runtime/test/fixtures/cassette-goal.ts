@@ -24,7 +24,7 @@ export function cassetteFacts(): { facts: PlanFacts; state: PlanState } {
   const item = itemOf(CASSETTE_ITEM, CASSETTE_TZ, CASSETTE_NOW);
   const facts: PlanFacts = {
     today: localDay(CASSETTE_TZ, CASSETTE_NOW), finishBy: '2026-11-15',
-    title: 'Ship the synthetic widget page', why: 'A synthetic reason: the demo is next month.',
+    title: 'Ship the synthetic widget page', why: 'A synthetic reason: the demo is next month.', tainted: false,
     criteria: [
       { id: 'c1', text: 'The synthetic pull request is merged', state: 'unmet' },
       { id: 'c2', text: 'The synthetic copy is reviewed', state: 'unmet' },

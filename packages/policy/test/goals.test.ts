@@ -47,6 +47,8 @@ import {
   PlanOps,
   checkFits,
   composePlan,
+  classifyPlanOp,
+  MINOR_DUE_SHIFT_MS,
   isGoalSignedAction,
   jsonbSize,
   type PlanOp,
@@ -233,6 +235,33 @@ describe('plan operations', () => {
     expect(composePlan(prev, set('s1', { dependsOn: [] }, { dependsOn: ['s2'] }))).toEqual({ ok: false, why: 'circle' });
   });
 
+  it('a plan operation is a small change or a bigger one by rule, from the operation and the step as it stands', () => {
+    const DAY = 86_400_000;
+    const due = new Date(Date.parse('2026-10-12T14:02:00.000Z') + 3 * DAY).toISOString();
+    const at = (days: number) => new Date(Date.parse(due) + days * DAY).toISOString();
+    const horizon = at(30);
+    const step = { kind: 'will_task' as const, status: 'todo' as const, dueAt: due };
+    const one = (o: unknown) => PlanOps.parse([o])[0]!;
+    const set = (to: Record<string, unknown>, was = 'todo') => one({ op: 'set', key: 's1', from: { title: 'T', ...Object.fromEntries(Object.keys(to).map((k) => [k, k === 'dueAt' ? due : k === 'status' ? was : k === 'ordinal' ? 100 : k === 'title' ? 'T' : []])) }, to });
+    expect(MINOR_DUE_SHIFT_MS).toBe(7 * DAY);
+    // Small: a status among todo, in progress and blocked; a date moved by at most 7 days, not past the finish date; a place.
+    for (const to of [{ status: 'in_progress' }, { status: 'blocked' }, { dueAt: at(7) }, { dueAt: at(-7) }, { ordinal: 50 }, { status: 'blocked', dueAt: at(2), ordinal: 50 }]) {
+      expect(classifyPlanOp(set(to), step, horizon), JSON.stringify(to)).toBe('minor');
+    }
+    // Bigger: everything else.
+    for (const to of [{ status: 'skipped' }, { dueAt: at(8) }, { dueAt: at(-8) }, { dueAt: null }, { title: 'New words' }, { dependsOn: ['s2'] }, { status: 'blocked', dueAt: at(8) }]) {
+      expect(classifyPlanOp(set(to), step, horizon), JSON.stringify(to)).toBe('material');
+    }
+    expect(classifyPlanOp(set({ dueAt: at(5) }), step, at(4))).toBe('material');
+    expect(classifyPlanOp(set({ dueAt: at(5) }), step, null)).toBe('minor');
+    expect(classifyPlanOp(set({ dueAt: at(2) }), { ...step, dueAt: null }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'todo' }, 'skipped'), { ...step, status: 'skipped' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'blocked' }), { ...step, kind: 'decision' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ ordinal: 50 }), { ...step, kind: 'flint_action' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'blocked' }), undefined, horizon)).toBe('material');
+    expect(classifyPlanOp(one({ op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task' } }), undefined, horizon)).toBe('material');
+  });
+
   it('two cards on different steps compose in either order; a precondition on a dependency list ignores its order', () => {
     const prev = [step('s1'), step('s2'), step('s3', { dependsOn: ['s2', 's1'] })];
     const a = PlanOps.parse([{ op: 'set', key: 's1', from: { title: 'Synthetic step s1', status: 'todo' }, to: { status: 'blocked' } }]);
@@ -370,7 +399,7 @@ describe('goal reviews on the wire (P3 part 3)', () => {
     successCriteria: [crit('c1')], criteria: [{ id: 'c1', state: 'unmet' }], checks: { met: 0, total: 1, unknown: 0 }, horizonAt: null, reviewCadence: 'P1W',
     activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'on', late: false, ...over,
   });
-  const change = (over: Record<string, unknown> = {}) => ({ kind: 'due', title: 'Synthetic step', dueAt: AT, status: null, after: null, material: false, ...over });
+  const change = (over: Record<string, unknown> = {}) => ({ kind: 'due', title: 'Synthetic step', dueAt: AT, status: null, after: null, material: false, later: false, ...over });
   const review = (over: Record<string, unknown> = {}) => ({ at: AT, kind: 'scheduled', summary: '0 of 1 check is met.', shadow: true, planner: 'ok', changes: [change()], ...over });
 
   it('the budgets and counters are fixed, and the cap’s sentence says the same number', () => {
@@ -408,6 +437,11 @@ describe('goal reviews on the wire (P3 part 3)', () => {
       review({ changes: Array.from({ length: 21 }, () => change()) }),
     ]) expect(ReviewView.safeParse(bad).success, JSON.stringify(bad).slice(0, 120)).toBe(false);
     for (const kind of ['add', 'due', 'status', 'move', 'skip']) expect(ReviewChange.safeParse(change({ kind })).success, kind).toBe(true);
+    // Held back by a limit, on no card yet: a mark, true or false. A runtime that does not send it means not held.
+    expect(ReviewChange.parse(change({ later: true })).later).toBe(true);
+    const { later: _l, ...unmarked } = change();
+    expect(ReviewChange.parse(unmarked).later).toBe(false);
+    expect(ReviewChange.safeParse(change({ later: 'soon' })).success).toBe(false);
     expect(ReviewChange.safeParse(change({ kind: 'status', status: 'blocked', dueAt: null })).success).toBe(true);
     for (const bad of [change({ kind: 'done' }), change({ status: 'done' }), change({ status: 'skipped' }), change({ title: '' }), change({ title: 'x'.repeat(201) }), change({ reason: 'the model’s words' }), change({ dueAt: 'soon' })]) {
       expect(ReviewChange.safeParse(bad).success, JSON.stringify(bad).slice(0, 120)).toBe(false);

@@ -40,7 +40,7 @@ const view = (over: Record<string, unknown> = {}) => ({
 /** A goal's latest review as the runtime sends it: sentences from counts, and changes by a step's title. */
 const review = (over: Record<string, unknown> = {}) => ({
   at: AT, kind: 'scheduled', summary: 'Its check isn’t met yet.', shadow: true, planner: 'ok',
-  changes: [{ kind: 'due', title: `${CANARY} step`, dueAt: AT, status: null, after: null, material: false }], ...over,
+  changes: [{ kind: 'due', title: `${CANARY} step`, dueAt: AT, status: null, after: null, material: false, later: false }], ...over,
 });
 const args = (over: Record<string, unknown> = {}) => ({
   goalId: GID, owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: `${CANARY} title`, description: '',
@@ -137,6 +137,12 @@ describe('reads', () => {
     const { nextReviewAt: _n, onTrack: _o, review: _r, ...older } = view();
     answer = () => ({ status: 200, body: { goal: older } });
     expect(await get(`/goals/${GID}`)).toEqual({ status: 200, body: { goal: view() } });
+    // A suggestion held back by a limit says so (`later`); one from a runtime that does not send the mark reads as not held.
+    const held = { kind: 'skip', title: `${CANARY} step`, dueAt: null, status: null, after: null, material: true };
+    answer = () => ({ status: 200, body: { goal: view({ review: review({ changes: [{ ...held, later: true }, held] }) }) } });
+    expect(((await get(`/goals/${GID}`)).body as { goal: { review: { changes: Array<{ later: boolean }> } } }).goal.review.changes.map((c) => c.later)).toEqual([true, false]);
+    answer = () => ({ status: 200, body: { goal: view({ review: review({ changes: [{ ...held, later: 'soon' }] }) }) } });
+    expect((await get(`/goals/${GID}`)).status).toBe(502);
     // What does not fit the contract never reaches the console: a likelihood outside the closed set, a change of no known kind, a stray key.
     for (const bad of [
       view({ onTrack: { likelihood: `${CANARY} certain`, percent: 70, by: AT } }),
@@ -276,6 +282,9 @@ describe('writes', () => {
     expect(await post(`/goals/${GID}/review`)).toEqual({ status: 429, body: { error: 'Flint already reviewed this goal 12 times today. Try again tomorrow.', code: 'reviewCap' } });
     answer = () => ({ status: 409, body: { error: CANARY, code: 'reviewsOff' } });
     expect(await post(`/goals/${GID}/review`)).toEqual({ status: 409, body: { error: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.', code: 'reviewsOff' } });
+    // While a rule stops reviews (review finding 4): the runtime says no, and the console gets the fixed sentence.
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'reviewsStopped' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 409, body: { error: 'A rule stops goal reviews, so Flint can’t review this goal.', code: 'reviewsStopped' } });
     answer = () => ({ status: 409, body: { error: CANARY, code: 'notReady' } });
     expect((await post(`/goals/${GID}/review`)).body).toEqual({ error: 'Flint isn’t ready to review yet. Try again shortly.', code: 'notReady' });
     up = false;

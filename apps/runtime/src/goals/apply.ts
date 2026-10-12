@@ -23,6 +23,7 @@ import {
   GOAL_KIND,
   GOAL_REASONS,
   checkFits,
+  classifyPlanOp,
   composePlan,
   digestOf,
   isGoalSignedAction,
@@ -32,6 +33,8 @@ import {
   type GoalArgs,
   type GoalSignedAction,
   type Link,
+  type PlanOp,
+  type PlanStepState,
   type WebAuthnRelyingParty,
 } from '@flint/policy';
 import type { z } from 'zod';
@@ -41,6 +44,7 @@ import { Refused, claimIn, completeIn, contextOf, type CreateProposal } from '..
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, SAY, goalStatusWords, sanitize } from './errors.js';
 import { RATIONALE, activePlan, currentLinks, lastVersion, sameDefinition, sameLinks, sameTiming, syncLinks, writeDraft } from './ops.js';
+import { fromTemplate } from './steps.js';
 
 /** The templates a review files its plan cards under (Proposal_template_check needs one for a runtime origin). */
 export const PLAN_TEMPLATES: readonly string[] = ['plan.diff.minor', 'plan.diff.material'];
@@ -52,6 +56,34 @@ type CriteriaArgs = GoalArgs<'goal.criteria_change'>;
 type TimingArgs = GoalArgs<'goal.horizon_change'>;
 type FinishArgs = GoalArgs<'goal.done'>;
 type PlanArgs = GoalArgs<'plan.change'>;
+
+/** The template a review's small changes ride on: one card, no fresh touch. */
+const MINOR_TEMPLATE = 'plan.diff.minor';
+
+/**
+ * Why a review's card may not be filed or run as it is, or undefined. Checked
+ * against the plan as it stands, whoever calls the proposals contract: the
+ * template's name is a label the filer sets, so it is never taken on trust.
+ *  - A review adds a step only from its templates (steps.ts): never a Flint
+ *    action, and always one that waits for Will (tier approval).
+ *  - It changes only a step's status, due date or place: never its title or
+ *    what it depends on, and it never brings a skipped step back.
+ *  - A card under the small-change template holds no bigger change
+ *    (classifyPlanOp, @flint/policy): that one rides Approve All.
+ */
+function reviewCardProblem(ops: readonly PlanOp[], steps: readonly PlanStepState[], horizonAt: Date | null, templateId: string | null | undefined): string | undefined {
+  const byKey = new Map(steps.map((s) => [s.key, s]));
+  for (const o of ops) {
+    const step = byKey.get(o.key);
+    if (o.op === 'add') {
+      if (o.step.kind === 'flint_action' || o.step.tier !== 'approval' || o.step.dependsOn.length || !fromTemplate(o.step.title, o.step.kind)) return SAY.reviewStep;
+    } else if (Object.keys(o.to).some((k) => k !== 'status' && k !== 'dueAt' && k !== 'ordinal') || (o.to.status !== undefined && step?.status === 'skipped')) {
+      return SAY.reviewStep;
+    }
+    if (templateId === MINOR_TEMPLATE && classifyPlanOp(o, step, horizonAt?.toISOString() ?? null) === 'material') return SAY.minorCard;
+  }
+  return undefined;
+}
 
 /** A provenance ref on a goal card is an id: a proposal's provenance is kept for good, so it never holds words. */
 const PROVENANCE_REF = /^[A-Za-z0-9_.:@-]{1,120}$/;
@@ -168,8 +200,13 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     const a = args as PlanArgs;
     const g = live(goal);
     titled(g, a.goalTitle);
-    const c = composePlan((await activePlan(db, g.id))?.steps ?? [], a.ops);
+    const steps = (await activePlan(db, g.id))?.steps ?? [];
+    const c = composePlan(steps, a.ops);
     if (!c.ok) throw c.why === 'stale' ? new Refused(409, SAY.planLooked) : new Refused(400, COMPOSE_SAYS[c.why]);
+    if (context === 'autonomous') {
+      const why = reviewCardProblem(a.ops, steps, g.horizonAt, input.templateId);
+      if (why) throw new Refused(400, why);
+    }
     reason = context === 'autonomous' ? GOAL_REASONS.planFlint : GOAL_REASONS.planWill;
   }
   return {
@@ -178,9 +215,10 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     reason,
     // A goal is personal, or financial when it says so.
     sensitivity: action === 'goal.activate' ? (args as ActivateArgs).sensitivity : goal?.sensitivity === 'financial' ? 'financial' : 'personal',
-    // Marked for Will's fresh touch: every goal card, and every plan card but a review's minor ones (part 3
-    // says which). Nothing reads the mark yet: the console must (a README requirement for the goals panel).
-    consequential: action === 'plan.change' ? input.consequential || context !== 'autonomous' : true,
+    // Marked for Will's fresh touch: every goal card, and every plan card but a review's small ones. Which
+    // those are is decided above, by rule: a card under the small-change template holds only small changes,
+    // and every other one is marked whatever its filer said.
+    consequential: !(action === 'plan.change' && context === 'autonomous' && input.templateId === MINOR_TEMPLATE) || input.consequential,
   };
 }
 
@@ -189,6 +227,8 @@ interface ApplyContext {
   /** What Will signed: the stored args' digest. */
   argsDigest: string;
   origin: string;
+  /** The card's template (a review's), or null. */
+  templateId: string | null;
   now: Date;
   tz: string;
 }
@@ -331,11 +371,14 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
   // plan.change: lock the active version (a step tick waiting on it is then refused), check every
   // precondition, write the next version as a draft, supersede the old one, activate the new one.
   const a = args as PlanArgs;
+  const flint = ctx.origin.startsWith('runtime:');
   const cur = await activePlan(tx, goal.id, true);
   const next = composePlan(cur?.steps ?? [], a.ops);
-  if (!next.ok) return { refusal: ctx.origin.startsWith('runtime:') ? SAY.staleFlint : SAY.staleWill };
+  if (!next.ok) return { refusal: flint ? SAY.staleFlint : SAY.staleWill };
+  // A review's card, held to its rules again against the plan as it is now (a finish date moved since it
+  // was filed can make a small change a bigger one): it then needs a new card, with a fresh touch.
+  if (flint && reviewCardProblem(a.ops, cur?.steps ?? [], goal.horizonAt, ctx.templateId)) return { refusal: SAY.staleFlint };
   const version = (await lastVersion(tx, goal.id)) + 1;
-  const flint = ctx.origin.startsWith('runtime:');
   const planId = await writeDraft(tx, goal.id, version, next.steps, flint ? 'flint' : 'will', flint ? RATIONALE.flint : RATIONALE.will);
   if (cur) await tx.plan.update({ where: { id: cur.id }, data: { status: 'superseded' } });
   await tx.plan.update({ where: { id: planId }, data: { status: 'active', approvalId } });
@@ -373,7 +416,7 @@ export async function runGoal(db: Db, id: string, rp: WebAuthnRelyingParty | und
           : template
             ? await (async () => {
                 await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
-                return applyGoal(tx, c.claimed.action as GoalSignedAction, c.claimed.args, { approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, origin: p.origin, now, tz });
+                return applyGoal(tx, c.claimed.action as GoalSignedAction, c.claimed.args, { approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, origin: p.origin, templateId: p.templateId, now, tz });
               })()
             : ({ refusal: SAY.template } as const);
         if ('refusal' in r) {

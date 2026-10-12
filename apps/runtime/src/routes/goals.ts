@@ -46,6 +46,7 @@ import type { Bus } from '../bus.js';
 import { Refused } from '../governance/proposals.js';
 import { SAY } from '../goals/errors.js';
 import { linkable } from '../goals/items.js';
+import { tickingSince } from '../goals/late.js';
 import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, requestReview, setStep } from '../goals/service.js';
 import { goalView, goalsPage } from '../goals/view.js';
 
@@ -55,6 +56,8 @@ export interface GoalRouteDeps {
   tz: string;
   /** Flint reviews goals (FLINT_PLANNER is on). Off: the views say so, nothing is late, and Review Now is refused. */
   reviews?: boolean;
+  /** For the tests: since when the goal tick has run (late.ts's tickingSince otherwise). */
+  since?: () => Date | null | undefined;
   /** The bus, once it has started: Review Now sends the goal's review job through it. */
   bus?: () => Pick<Bus, 'boss'> | undefined;
 }
@@ -83,7 +86,9 @@ const Step = z.object({ id: GoalId, key: StepKey }).strict();
 
 export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void {
   const { db, need, tz } = d;
-  const view = { reviews: d.reviews ?? false };
+  const reviews = d.reviews ?? false;
+  /** As the views read it at each request: whether Flint reviews goals, and since when its tick has run (for "late"). */
+  const view = () => ({ reviews, since: (d.since ?? tickingSince)() });
   const pre = { preHandler: need('proposals') };
 
   /** A refusal as Will reads it, with its code (the server passes on only these); anything else to the app's handler. */
@@ -104,12 +109,12 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
 
   app.get('/v1/goals', pre, guarded(async (req) => {
     const { tab } = parse(Tab, req.query ?? {});
-    return out(GoalsPage, await goalsPage(db, tab, new Date(), view));
+    return out(GoalsPage, await goalsPage(db, tab, new Date(), view()));
   }));
 
   app.get('/v1/goals/:id', pre, guarded(async (req) => {
     const { id } = parse(Goal, req.params);
-    const goal = await goalView(db, id, tz, new Date(), view);
+    const goal = await goalView(db, id, tz, new Date(), view());
     if (!goal) throw new Refused(404, SAY.noGoal);
     return out(GoalAnswer, { goal });
   }));
@@ -128,7 +133,7 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
     const { id, verb } = parse(Verb, req.params);
     if (verb === 'pause' || verb === 'dismiss' || verb === 'review') {
       parse(EmptyBody, req.body ?? {});
-      if (verb === 'review') await requestReview(db, d.bus?.(), id, { reviews: view.reviews, tz });
+      if (verb === 'review') await requestReview(db, d.bus?.(), id, { reviews, tz });
       else await (verb === 'pause' ? pauseGoal(db, id) : dismissGoal(db, id));
       return out(GoalDone, { ok: true });
     }

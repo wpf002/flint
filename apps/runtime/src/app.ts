@@ -8,7 +8,7 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
-import { safeName, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, safeName, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Config, RuntimeScope } from './config.js';
 import type { Db } from './db.js';
 import { callerFor, type Caller } from './auth.js';
@@ -197,7 +197,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // ---- proposals ----------------------------------------------------------------
   app.post('/v1/proposals', { preHandler: need('proposals') }, async (req, reply) => {
-    const created = await createProposal(db, CreateProposal.parse(req.body), actor(req));
+    const body = CreateProposal.parse(req.body);
+    // A job's cards are filed by the job, in this process. Over the wire an origin is only a claim, and a
+    // `runtime:` one would file under a job's templates and its standing: refused, whoever holds the token.
+    if (body.origin.startsWith('runtime:')) throw new Refused(400, GOAL_SAYS.runtimeOrigin);
+    const created = await createProposal(db, body, actor(req));
     return reply.code(201).send(created);
   });
   app.get('/v1/proposals', { preHandler: need('proposals') }, async (req) => {

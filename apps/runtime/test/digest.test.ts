@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { digestBody, digestTitle, goalsSentence } from '../src/digest';
+import { noteProblems } from '@flint/policy';
 
 const zero = { relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 };
 
@@ -54,6 +55,9 @@ describe('the digest body', () => {
       'Today, 3 predictions resolve.',
     ]);
     for (const l of lines) expect(l).toMatch(/^[A-Z].*\.$/);
+    // It is a note's line like the others: plain words, by the same rules (@flint/policy's noteProblems).
+    for (const [reviewed, late] of [[1, 0], [1, 1], [3, 0], [3, 1], [12, 5]] as const) expect(noteProblems(digestTitle('2026-10-11'), goalsSentence(reviewed, late)), `${reviewed}/${late}`).toEqual([]);
+    expect(noteProblems(digestTitle('2026-10-11'), lines.join('\n'))).toEqual([]);
     // No goals reviewed: the digest is the four lines it always was.
     expect(digestBody({ ...zero, goalsReviewed: 0, goalsLate: 0 }, [])).toBe(digestBody(zero, []));
     // With every count large and every line at its longest, it still fits the note's 500 characters.

@@ -295,8 +295,11 @@ The third part is reviews, which ship off (see [Turning reviews on](#turning-rev
 With them on, Flint reviews each active goal on its own cadence, at 09:00 your
 time whatever the clocks do, and within minutes when something the goal watches
 changes: a watched field of an item, an item finished or reopened, a step due
-within two days, a forecast about the goal that came false, or you pressing
-**Review Now**. A review has two stages:
+within two days, a forecast about one of its items that came false, or you
+pressing **Review Now**. One review answers everything that was waiting when
+it ran: three steps that come due the same day are one review, not three. (A
+goal's own forecast coming false never sets one off, or a goal past its date
+would review itself every day.) A review has two stages:
 
 1. **The review itself** uses no model, so it never waits on one. It reads the
    checks as they stand, records how likely the goal is to be done in time, and
@@ -308,26 +311,65 @@ within two days, a forecast about the goal that came false, or you pressing
    templates, steps, items and checks by id. It never writes a step's title, or
    any other word that is stored or shown: a new step's title comes from a
    template ("Check on wpf002/flint #57"). One model request runs at a time
-   across triage and reviews, and each waits while a chat turn is running.
+   across triage and reviews, and each waits while a chat turn is running. A
+   review asks the model at most twice. If the model isn't there at all, the
+   plan stage comes back 2 minutes later, up to 3 times, before the review
+   says the model didn't answer.
 
 Every plan change is still a card you sign. A review's small changes (a status,
 a date moved by a week or less, the order) share one card, which can ride
 Approve All; each bigger one (a step added or skipped, a date moved further or
 past the finish date, anything on a decision or a Flint action) is a card of its
-own, signed with a fresh touch. A review files at most 2 bigger cards, Flint at
-most 9 plan cards a day, and a newer review withdraws the cards it did not
-suggest again. What you reject is not suggested again for a week.
+own, signed with a fresh touch. A review files at most 2 new bigger cards, and
+Flint at most 9 new plan cards a day. Small or bigger is decided by rule from
+what the card holds, never from what it is called: by the runtime when the card
+is filed and again when it runs, and by the console before Approve All.
+
+**Cards that wait are yours.** A later review does not clear them away:
+
+- A change a waiting card already asks for is that card. It is kept and not
+  filed again, whatever would hold a new card back (the day's 9, the review's
+  2). A due date within a week of the card's is the same change, so "in 3
+  days" tomorrow does not replace yesterday's card.
+- Flint withdraws a waiting card, unsigned ("A newer review replaced it."),
+  only when the plan has moved on so the card can no longer apply, or when a
+  newer review changes the same thing differently (another status, a date over
+  a week away, another place).
+- A review that suggests nothing, or whose model gave no usable answer,
+  withdraws nothing that still applies.
+- What you reject is not suggested again for a week. Rejecting a card that
+  moves a date and changes a status turns down each of them.
+- A suggestion that got no card because of a limit is listed under LATEST
+  REVIEW with "Flint will suggest this again at the next review."
 
 **The trial week.** Until you sign the card that promotes reviews (a later part
 files it), every review is in its trial week: it records what it found and what
-it would suggest, and files no card, Review Now included. The panel says so
-under LATEST REVIEW.
+it would suggest, and files no card. The panel says so under LATEST REVIEW.
+
+**Review Now in the trial week files no card either.** It runs a review right
+away, and you read what Flint would change under LATEST REVIEW; nothing lands
+in Approvals. That is on purpose: the trial week is for reading its suggestions
+before any of them asks for your signature. Review Now says yes only when a
+review will run; otherwise it says why in a sentence (reviews are off, a rule
+stops them, or the goal has had its 12 for the day). After a yes, the open goal
+refreshes itself twice, a few seconds and about a minute later.
 
 Flint reviews a goal on your request or a change at most 12 times a day; its
 scheduled reviews are never capped, and the local model is asked for at most 20
-reviews a day. Settings > Health lists **Goal Reviews**: off while the planner
-is off, an issue when a review is over an hour late, and down when one is over
-a day late (which should not happen while the runtime is up).
+reviews a day. Settings > Health lists **Goal Reviews**:
+
+- off while the planner is off;
+- an issue when a review has been due for over an hour while Flint was
+  reviewing, and down when it has been over a day. Time Flint was off, restarted
+  or asleep doesn't count: it catches up on those within minutes;
+- an issue when no local model is set up, or when the last few reviews that
+  asked the model (up to 3) all got no usable answer. Reviews still run then,
+  but suggest nothing.
+
+**On Track** is shown on a goal only when its forecast is for the goal's own
+finish date. A goal with no date, or one past its date, still gets a forecast
+in the ledger at every review, but for another day, so the panel shows its next
+review instead.
 
 ### The goal routes
 
@@ -343,8 +385,13 @@ waiting, whether it came from the console or the CLI); `POST /:id/pause|dismiss`
 lists items by a label made from their key or from what they are ("Nexus Thread
 from Oct 3", and "Nexus Thread 2 from Oct 3" for the second one first seen that
 day), never a title or a raw id. `POST /:id/review` is Review Now: unsigned and
-audited, it sends the goal's review job. A refusal is one of the fixed sentences
+audited, it sends the goal's review job, and says yes only when that job will
+review (not while a rule stops reviews). A refusal is one of the fixed sentences
 in @flint/policy (`GOAL_SAYS`) with its code.
+
+`POST /v1/proposals` refuses any card whose origin is `runtime:<job>`: a job's
+cards are filed by the job, inside the runtime. Over the wire an origin is only
+a claim, and nothing outside the runtime files under a job's name.
 
 ### Turning reviews on
 
@@ -363,7 +410,7 @@ Only `on` turns them on (any case, spaces around it ignored); anything else is
 off. Within a few minutes each active goal has its first review, and Settings >
 Health shows **Goal Reviews**. The plan stage asks the model triage uses
 (`FLINT_TRIAGE_MODEL`); without one, reviews still run and say the local model
-is off.
+is off, and Health lists it as an issue.
 
 ### Turning reviews off
 
@@ -385,7 +432,15 @@ they are. This is also the first step of rolling P3 back.
   transaction, and hold no lock while a model is asked or a card is filed.
 - **Nothing but a signed card changes a plan.** A review only files cards
   (`plan.change`, under its two templates); a later part that wants Flint to
-  act on a plan must do the same.
+  act on a plan must do the same. The card gate (`checkGoalCard`) holds every
+  such card to the review's rules, whoever calls it: a new step only from a
+  template, never a Flint action, always waiting for you; only a step's status,
+  date or place changed; nothing bigger under the small-change template. A part
+  that needs more (a Flint action step) must widen the gate on purpose, with
+  its own template and tests.
+- **A waiting review card is withdrawn only by the plan stage's rule** (it no
+  longer applies, or a newer review changes the same thing differently). A
+  later part must not clear a goal's waiting cards wholesale.
 - **A goal's forecast is its review's alone.** It is written only by the
   review, with the goal's own template and `auto_world` as its resolver; the
   ledger's route takes neither a goal id nor that template, and the database
@@ -439,9 +494,20 @@ they are. This is also the first step of rolling P3 back.
   chat turn before each request, and waits if there is one; a request it has
   already sent can hold chat up for as long as it runs (at most 90 seconds, and
   usually a few).
-- **Late, right after turning reviews on.** A goal's first review is due when it
-  starts. Turn reviews on days later and its goals show Late, and Goal Reviews
-  shows down, for the few minutes until the first reviews run.
+- **Late is counted from memory.** The runtime keeps, in memory, since when it
+  has been checking for due reviews, and a review is late only once it has been
+  due for over an hour of that. So turning reviews on, a restart or a sleep
+  never shows Late for what came due meanwhile. The other side of it: after a
+  restart, a review that really was stuck is not shown as late again until an
+  hour has passed.
+- **Waiting plan cards can add up.** Because a review no longer clears the
+  cards before it, a goal can have several days of suggestions waiting at once
+  (at most 9 new cards a day across all goals, each kept a week). Reject the
+  ones you don't want: they are then not suggested again for a week.
+- **A plan change can set off one more review.** When a step is due within two
+  days and the plan changes (you approve a card), Flint reviews the goal once
+  for the new plan. Each needs your signature first, and a goal has at most 12
+  such reviews a day.
 - **Forecasts wait for their dates.** A review's forecast is resolved today only
   when you mark the goal done or abandon it. Until a later part resolves the
   rest at their dates, they stay open in the ledger, one for each review.

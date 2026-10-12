@@ -24,7 +24,8 @@ export const STEP_TEMPLATES = {
   follow_up: { kind: 'will_task', about: 'item', title: (x: string) => `Follow up on ${x}` },
   wait_for_item: { kind: 'wait', about: 'item', title: (x: string) => `Wait for ${x} to change` },
   decide: { kind: 'decision', about: 'item', title: (x: string) => `Decide what to do about ${x}` },
-  work_on: { kind: 'will_task', about: 'criterion', title: (x: string) => `Work on “${x}”` },
+  // No quotation marks of its own: the panel puts a title in quotes when it says a change, and quotes never nest.
+  work_on: { kind: 'will_task', about: 'criterion', title: (x: string) => `Work on: ${x}` },
   review_progress: { kind: 'will_task', about: 'nothing', title: (_x: string) => 'Review your progress on this goal' },
 } as const satisfies Readonly<Record<string, { kind: StepKind; about: 'item' | 'criterion' | 'nothing'; title: (x: string) => string }>>;
 export type StepTemplateId = keyof typeof STEP_TEMPLATES;
@@ -46,6 +47,21 @@ export function stepTitle(template: StepTemplateId, about: { label?: string | un
   const x = t.about === 'item' ? about.label?.trim() : about.criterion?.replace(/\s+/g, ' ').trim();
   if (!x) return undefined;
   return t.title(t.about === 'criterion' ? clip(x, CRITERION_CLIP) : x).slice(0, 200);
+}
+
+const SHAPES = STEP_TEMPLATE_IDS.map((id) => {
+  const t = STEP_TEMPLATES[id];
+  const [before, after] = t.title('\u0000').split('\u0000');
+  return { kind: t.kind as StepKind, before: before ?? '', after: after ?? '', fixed: t.about === 'nothing' };
+});
+
+/**
+ * Could a step of this kind and title have come from a template? The card gate
+ * (apply.ts) asks before it files or runs a review's added step, so the
+ * templates hold whoever calls the proposals contract, not only this module.
+ */
+export function fromTemplate(title: string, kind: StepKind): boolean {
+  return SHAPES.some((x) => x.kind === kind && (x.fixed ? title === x.before : title.length > x.before.length + x.after.length && title.startsWith(x.before) && title.endsWith(x.after)));
 }
 
 /** 17:00 local, `days` calendar days from now's local day: a calendar step, never a multiple of 24 hours. */

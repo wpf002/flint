@@ -32,7 +32,8 @@ import { resolveTier, runsInShadow } from '@flint/policy';
 import { activePolicies } from './governance/proposals.js';
 import { z } from 'zod';
 import { failureClass } from './dbcodes.js';
-import { tick } from './goals/tick.js';
+import { TICK_CRON, tick } from './goals/tick.js';
+import { tickingSince } from './goals/late.js';
 import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
 
@@ -150,7 +151,7 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
       handler: async () => {
         if (!(await mayRun(ctx, 'health.check'))) return;
         const now = new Date();
-        const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources });
+        const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources, reviewsSince: tickingSince() });
         await recordChecks(ctx.db, checks, now);
         const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now), now, enqueue, await promoted(ctx));
         if (raised.length) ctx.log(`watchdog raised ${raised.length} event(s)`);
@@ -229,7 +230,7 @@ export function goalJobs(ctx: JobContext): JobSpec[] {
     {
       // Every 2 minutes: the reviews that are due, and the changes that set one off. It never asks the model.
       queue: 'goals.tick',
-      cron: '*/2 * * * *',
+      cron: TICK_CRON,
       handler: async () => {
         const r = await tick({ db: ctx.db, bus: ctx.bus, tz: ctx.config.tz });
         if (r.due || r.triggered || r.capped) ctx.log(`goals: ${r.due} scheduled and ${r.triggered} triggered review(s) sent; ${r.capped} left to the next scheduled one`);
@@ -241,7 +242,7 @@ export function goalJobs(ctx: JobContext): JobSpec[] {
       handler: async (jobs) => {
         for (const job of jobs) {
           const data = ReviewJob.safeParse(job.data);
-          if (data.success) await runReview({ db: ctx.db, bus: ctx.bus, tz: ctx.config.tz }, data.data);
+          if (data.success) await runReview({ db: ctx.db, bus: ctx.bus, tz: ctx.config.tz, since: tickingSince() }, data.data);
         }
       },
     },

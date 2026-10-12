@@ -8,7 +8,13 @@
  * Reviews run only while FLINT_PLANNER is on. Off, a view says so and nothing
  * is ever late: a goal's next review time is set when it starts, and showing
  * it as overdue while nothing reviews goals would be wrong. On, an active
- * goal is late once its review is over an hour past due.
+ * goal is late once its review has been due for over an hour while Flint was
+ * reviewing (late.ts): never for the time before reviews were turned on.
+ *
+ * On Track is shown only when the forecast is for the goal's own finish date.
+ * A goal with no date, one past its date, or one whose date is past the
+ * ledger's horizon still gets a forecast at every review, but for another day,
+ * and "Likely" with no day Will chose would say less than it seems to.
  *
  * A review's suggestions are kept as ids and enums (GoalReview.diff). Here they
  * get their words back for the panel: a step's own title, or a template's for a
@@ -21,7 +27,6 @@ import {
   GOAL_SIGNED_ACTIONS,
   GoalTitle,
   PLAN_STAGES,
-  REVIEW_LATE_MS,
   likelihoodOf,
   type Criterion,
   type GoalRow,
@@ -38,12 +43,15 @@ import {
 import type { Db, Tx } from '../db.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf, type ItemFacts, type StepFacts } from './criteria.js';
 import { conditionsOf, labelFor } from './items.js';
+import { lateBefore } from './late.js';
 import { stepState } from './ops.js';
 import { Diff, stepTitle, type DiffItem } from './steps.js';
 
-/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER). */
+/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER), and since when its tick has run. */
 export interface ViewOptions {
   reviews: boolean;
+  /** late.ts's tickingSince: null before the first tick (nothing is late yet); undefined: not tracked. */
+  since?: Date | null | undefined;
 }
 const NO_REVIEWS: ViewOptions = { reviews: false };
 /** A review whose plan stage has not reported for this long never will (its job is gone): it is shown as skipped, not as still running. */
@@ -74,9 +82,11 @@ interface GoalRecord {
   updatedAt: Date;
 }
 
-/** Over an hour past its review time, while Flint reviews goals. Never a paused or finished goal. */
-const isLate = (g: GoalRecord, now: Date, o: ViewOptions): boolean =>
-  o.reviews && g.status === 'active' && !!g.nextReviewAt && g.nextReviewAt.getTime() < now.getTime() - REVIEW_LATE_MS;
+/** Due for over an hour while Flint was reviewing goals (late.ts). Never a paused or finished goal, and never while reviews are off. */
+const isLate = (g: GoalRecord, now: Date, o: ViewOptions): boolean => {
+  const cut = o.reviews ? lateBefore(now, o.since) : null;
+  return !!cut && g.status === 'active' && !!g.nextReviewAt && g.nextReviewAt.getTime() < cut.getTime();
+};
 
 interface WaitingCard {
   id: string;
@@ -142,6 +152,8 @@ function stageOf(planner: string | null, createdAt: Date, now: Date): PlanStage 
 /**
  * A review's suggestions in the panel's terms: each with the step's title. One
  * that no longer fits the plan, or that Will already turned down, is left out.
+ * One held back by the review's limit or the day's cap is on no card yet, and
+ * says so (`later`).
  */
 async function changesOf(db: Db | Tx, diff: readonly DiffItem[], steps: readonly PlanStepState[] | null, criteria: readonly Criterion[], tz: string, now: Date): Promise<ReviewChange[]> {
   const shown = diff.filter((d) => d.held !== 'stale' && d.held !== 'rejected');
@@ -149,22 +161,22 @@ async function changesOf(db: Db | Tx, diff: readonly DiffItem[], steps: readonly
   const entities = ids.length
     ? await db.entity.findMany({ where: { id: { in: ids }, status: { not: 'forgotten' } }, select: { id: true, kind: true, key: true, name: true, taintedPaths: true, firstSeenAt: true } })
     : [];
-  const labels = new Map(entities.map((e) => [e.id, labelOf(e, tz, now)]));
+  const labels = new Map(await Promise.all(entities.map(async (e) => [e.id, await labelFor(db, e, tz, now)] as const)));
   const words = new Map(criteria.map((c) => [c.id, c.text]));
   const titles = new Map((steps ?? []).map((s) => [s.key, s.title]));
   return shown.flatMap((d): ReviewChange[] => {
     const c = d.change;
-    const material = d.class === 'material';
+    const rest = { material: d.class === 'material', later: d.held === 'limit' || d.held === 'cap' };
     if (c.op === 'add') {
       const title = stepTitle(c.template, { label: c.entityId ? labels.get(c.entityId) : undefined, criterion: c.criterion ? words.get(c.criterion) : undefined });
-      return title ? [{ kind: 'add', title, dueAt: c.dueAt, status: null, after: null, material }] : [];
+      return title ? [{ kind: 'add', title, dueAt: c.dueAt, status: null, after: null, ...rest }] : [];
     }
     const title = titles.get(c.key);
     if (!title) return [];
-    if (c.op === 'due') return [{ kind: 'due', title, dueAt: c.dueAt, status: null, after: null, material }];
-    if (c.op === 'status') return [{ kind: 'status', title, dueAt: null, status: c.status, after: null, material }];
-    if (c.op === 'skip') return [{ kind: 'skip', title, dueAt: null, status: null, after: null, material }];
-    return [{ kind: 'move', title, dueAt: null, status: null, after: c.after ? (titles.get(c.after) ?? null) : null, material }];
+    if (c.op === 'due') return [{ kind: 'due', title, dueAt: c.dueAt, status: null, after: null, ...rest }];
+    if (c.op === 'status') return [{ kind: 'status', title, dueAt: null, status: c.status, after: null, ...rest }];
+    if (c.op === 'skip') return [{ kind: 'skip', title, dueAt: null, status: null, after: null, ...rest }];
+    return [{ kind: 'move', title, dueAt: null, status: null, after: c.after ? (titles.get(c.after) ?? null) : null, ...rest }];
   });
 }
 
@@ -244,7 +256,10 @@ export async function goalView(db: Db | Tx, id: string, tz: string, now = new Da
     reviews: o.reviews ? 'on' : 'off',
     late: isLate(g, now, o),
     nextReviewAt: g.status === 'active' ? iso(g.nextReviewAt) : null,
-    onTrack: forecast && forecast.probability !== null ? { likelihood: likelihoodOf(forecast.probability), percent: Math.round(forecast.probability * 100), by: forecast.resolveBy.toISOString() } : null,
+    // Only a forecast for the goal's own finish date (see the note at the top).
+    onTrack: forecast && forecast.probability !== null && g.horizonAt && forecast.resolveBy.getTime() === g.horizonAt.getTime()
+      ? { likelihood: likelihoodOf(forecast.probability), percent: Math.round(forecast.probability * 100), by: forecast.resolveBy.toISOString() }
+      : null,
     review,
   };
 }

@@ -264,6 +264,34 @@ export function composePlan(prev: readonly PlanStepState[], ops: readonly PlanOp
   return { ok: true, steps: [...steps.values()].sort((a, b) => a.ordinal - b.ordinal || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) };
 }
 
+/** A due date moved by more than this is a bigger change. */
+export const MINOR_DUE_SHIFT_MS = 7 * 86_400_000;
+export type PlanOpClass = 'minor' | 'material';
+
+/**
+ * Is a plan operation a small change or a bigger one? Decided by rule from the
+ * operation and the step as it stands (undefined: the plan has no such step),
+ * never by whoever files the card. Small: a status moved among todo, in progress
+ * and blocked; a due date moved by at most 7 days and not past the goal's finish
+ * date; a step put in another place. Everything else is bigger: a step added,
+ * skipped or brought back; a due date set where there was none, taken away,
+ * moved further or past the finish date; a title or what a step depends on;
+ * anything on a Flint action or a decision.
+ */
+export function classifyPlanOp(op: PlanOp, step: Pick<PlanStepState, 'kind' | 'status' | 'dueAt'> | undefined, horizonAt: string | null): PlanOpClass {
+  if (op.op === 'add' || !step) return 'material';
+  if (step.kind === 'flint_action' || step.kind === 'decision') return 'material';
+  const { to } = op;
+  if (Object.keys(to).some((k) => k !== 'status' && k !== 'dueAt' && k !== 'ordinal')) return 'material';
+  if (to.status !== undefined && (to.status === 'skipped' || step.status === 'skipped' || step.status === 'done')) return 'material';
+  if (to.dueAt !== undefined) {
+    if (to.dueAt === null || !step.dueAt) return 'material';
+    if (Math.abs(Date.parse(to.dueAt) - Date.parse(step.dueAt)) > MINOR_DUE_SHIFT_MS) return 'material';
+    if (horizonAt && Date.parse(to.dueAt) > Date.parse(horizonAt)) return 'material';
+  }
+  return 'minor';
+}
+
 // ---- The cards' args ---------------------------------------------------------------------------
 
 const fits = (a: unknown) => jsonbSize(a) <= 65536;
@@ -440,6 +468,10 @@ export const GOAL_SAYS = {
   reviewCap: 'Flint already reviewed this goal 12 times today. Try again tomorrow.',
   notReady: 'Flint isn’t ready to review yet. Try again shortly.',
   replacedReview: 'A newer review replaced it.',
+  reviewsStopped: 'A rule stops goal reviews, so Flint can’t review this goal.',
+  minorCard: 'A small plan change can’t carry a bigger one.',
+  reviewStep: 'A review adds a step only from its templates, and changes only a step’s status, date or place.',
+  runtimeOrigin: 'Only Flint’s own jobs file their cards.',
 } as const;
 export type GoalSay = keyof typeof GOAL_SAYS;
 
@@ -612,6 +644,8 @@ export const ReviewChange = z
     status: z.enum(['todo', 'in_progress', 'blocked']).nullable(),
     after: StepTitle.nullable(),
     material: z.boolean(),
+    /** On no card yet (this review's limit, or the day's): Flint suggests it again at the next review. */
+    later: z.boolean().default(false),
   })
   .strict();
 export type ReviewChange = z.infer<typeof ReviewChange>;

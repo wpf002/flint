@@ -21,7 +21,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
-import { ON_TRACK_COUNTER, likelihoodOf, localDay, localWallTime, reviewCounter } from '@flint/policy';
+import { ON_TRACK_COUNTER, goalCodeOf, likelihoodOf, localDay, localWallTime, reviewCounter } from '@flint/policy';
 import { phrase } from '../../src/templates/escalations';
 import { NO_DB, freshDb, pgConfig, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
@@ -29,7 +29,8 @@ import { Invalid, emitPrediction, EmitPredictionIn } from '../../src/ledger/emit
 import { buildDigest } from '../../src/digest';
 import { onTrackProbability, onTrackResolveBy } from '../../src/goals/ontrack';
 import { ReviewJob, reviewSummary, runReview } from '../../src/goals/review';
-import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './fixture';
+import { requestReview } from '../../src/goals/service';
+import { DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './fixture';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,7 +77,7 @@ describe('the onTrack rule', () => {
   it('the panel’s word for a forecast is the one the ledger’s phrase uses for the same number', () => {
     for (let i = 0; i <= 100; i++) {
       const p = i / 100;
-      expect(phrase(p, undefined, 'UTC'), String(p)).toBe(`${likelihoodOf(p).replace(/_/g, ' ')} (~${i}%)`);
+      expect(phrase(p, undefined, 'UTC'), String(p)).toBe(`${likelihoodOf(p).replace(/_/g, ' ')}, around ${i}%`);
     }
   });
 
@@ -107,10 +108,11 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
   let db: Db;
   let fx: GoalFixture;
   const bus = new FakeBus();
-  const review = (job: Parameters<typeof runReview>[1], now = new Date(), tz = 'UTC') => runReview({ db, bus, tz, now: () => now }, job);
-  const scheduled = async (goalId: string, now = new Date(), tz = 'UTC') => {
+  const review = (job: Parameters<typeof runReview>[1], now = new Date(), tz = 'UTC', since?: Date | null) => runReview({ db, bus, tz, now: () => now, ...(since !== undefined ? { since } : {}) }, job);
+  /** `since`: since when the tick has run (late.ts); left out, the tick is taken as always running. */
+  const scheduled = async (goalId: string, now = new Date(), tz = 'UTC', since?: Date | null) => {
     const g = await db.goal.findUniqueOrThrow({ where: { id: goalId } });
-    return review({ goalId, kind: 'scheduled', dueAt: g.nextReviewAt!.toISOString() }, now, tz);
+    return review({ goalId, kind: 'scheduled', dueAt: g.nextReviewAt!.toISOString() }, now, tz, since);
   };
   const forecasts = (goalId: string) => db.prediction.findMany({ where: { goalId }, orderBy: { createdAt: 'asc' } });
 
@@ -310,14 +312,25 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
     const before = (await buildDigest(db, 'UTC', tomorrow)).counts;
     const onTime = await fx.activeGoal();
     const late = await fx.activeGoal();
-    // Its review was due two hours ago (the runtime was down): it runs now, late.
-    await db.goal.update({ where: { id: late.id }, data: { nextReviewAt: new Date(Date.now() - 2 * 3_600_000) } });
-    expect((await scheduled(onTime.id)).outcome).toBe('reviewed');
-    expect((await scheduled(late.id)).outcome).toBe('reviewed');
+    const waited = await fx.activeGoal();
+    const asleep = await fx.activeGoal();
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+    // Its review was due two hours ago and Flint was reviewing all that time (a job that kept dying): it runs now, late.
+    await db.goal.update({ where: { id: late.id }, data: { nextReviewAt: hoursAgo(2) } });
+    expect((await scheduled(onTime.id, new Date(), 'UTC', hoursAgo(5))).outcome).toBe('reviewed');
+    expect((await scheduled(late.id, new Date(), 'UTC', hoursAgo(5))).outcome).toBe('reviewed');
+    // Review finding 7: these two were also due two hours ago, but only because Flint was not reviewing then: reviews were
+    // turned on five minutes ago, or its first tick has not run yet. It caught up at once: neither is late.
+    await db.goal.update({ where: { id: waited.id }, data: { nextReviewAt: hoursAgo(2) } });
+    await db.goal.update({ where: { id: asleep.id }, data: { nextReviewAt: hoursAgo(2) } });
+    expect((await scheduled(waited.id, new Date(), 'UTC', new Date(Date.now() - 5 * MIN))).outcome).toBe('reviewed');
+    expect((await scheduled(asleep.id, new Date(), 'UTC', null)).outcome).toBe('reviewed');
+    const flag = async (goalId: string) => ((await db.auditEntry.findFirstOrThrow({ where: { action: 'goal.review.local', inputs: { path: ['goalId'], equals: goalId } }, orderBy: { seq: 'desc' } })).inputs as { late?: boolean }).late ?? false;
+    expect([await flag(onTime.id), await flag(late.id), await flag(waited.id), await flag(asleep.id)]).toEqual([false, true, false, false]);
     // Two reviews of one goal are one goal reviewed.
     expect((await review({ goalId: onTime.id, kind: 'requested' })).outcome).toBe('reviewed');
     const d = await buildDigest(db, 'UTC', tomorrow);
-    expect(d.counts.goalsReviewed).toBe(before.goalsReviewed! + 2);
+    expect(d.counts.goalsReviewed).toBe(before.goalsReviewed! + 4);
     expect(d.counts.goalsLate).toBe(before.goalsLate! + 1);
     expect(d.body).toMatch(new RegExp(`Flint reviewed ${d.counts.goalsReviewed} goals yesterday, and ${d.counts.goalsLate} (was|were) late\\.`));
     expect(d.body).not.toContain('CANARY');
@@ -338,5 +351,12 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
     expect((await review({ goalId: g.id, kind: 'requested' })).outcome).toBe('forbidden');
     expect((await scheduled(g.id)).outcome).toBe('forbidden');
     expect(await db.goalReview.count()).toBe(before);
+    // Review finding 4: so Review Now does not say yes. It refuses with a sentence, sends no job and audits no request.
+    bus.clear();
+    const asked = await db.auditEntry.count({ where: { action: 'goal.review.request' } });
+    await expect(requestReview(db, bus, g.id, { reviews: true, tz: 'UTC' })).rejects.toMatchObject({ status: 409, message: 'A rule stops goal reviews, so Flint can’t review this goal.' });
+    expect(bus.sent).toEqual([]);
+    expect(await db.auditEntry.count({ where: { action: 'goal.review.request' } })).toBe(asked);
+    expect(goalCodeOf('A rule stops goal reviews, so Flint can’t review this goal.')).toBe('reviewsStopped');
   });
 });

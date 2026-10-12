@@ -16,7 +16,7 @@
  *  - Recorded in shadow; delivered only once digest.daily and notify.inapp are
  *    promoted. A delivery that fails is audited as failed.
  */
-import { REVIEW_LATE_MS, healthName, localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
+import { healthName, localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { appendAudit } from './governance/audit.js';
@@ -65,11 +65,14 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
     db.escalation.count({ where: { status: 'open' } }),
     db.prediction.count({ where: { status: 'open', resolveBy: { gte: today.start, lt: today.end } } }),
     db.$queryRaw<Array<{ component: string; status: string }>>`SELECT DISTINCT ON (component) component, status FROM "HealthCheck" ORDER BY component, at DESC`,
-    // The goals Flint reviewed that day, and those whose scheduled review ran over an hour after it was due.
+    // The goals Flint reviewed that day, and those whose scheduled review ran late: due for over an hour while
+    // Flint was reviewing (goals/late.ts), as the review's own audit entry recorded when it ran. A review that
+    // was simply waiting for Flint to be turned on, restarted or woken is not late.
     db.$queryRaw<Array<{ reviewed: number; late: number }>>`
-      SELECT count(DISTINCT "goalId")::int AS reviewed,
-             count(DISTINCT "goalId") FILTER (WHERE kind = 'scheduled' AND "createdAt" > "dueAt" + ${REVIEW_LATE_MS} * interval '1 millisecond')::int AS late
-      FROM "GoalReview" WHERE "createdAt" >= ${start} AND "createdAt" < ${end}`,
+      SELECT count(DISTINCT gr."goalId")::int AS reviewed,
+             count(DISTINCT gr."goalId") FILTER (WHERE gr.kind = 'scheduled' AND EXISTS (
+               SELECT 1 FROM "AuditEntry" a WHERE a."correlationId" = gr.id AND a.action = 'goal.review.local' AND a.inputs->>'late' = 'true'))::int AS late
+      FROM "GoalReview" gr WHERE gr."createdAt" >= ${start} AND gr."createdAt" < ${end}`,
   ]);
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
   const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0 };

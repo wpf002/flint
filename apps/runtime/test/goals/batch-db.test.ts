@@ -8,11 +8,19 @@
  *  - Whatever the model does (off, capped, unavailable, invalid, chat busy 40
  *    times), the review and its forecast are already recorded; the review then
  *    says why it has no suggestions, and health says when it gave up on chat.
- *  - Promoted: every minor change of a review is on ONE card; each material
- *    one on its own, at most 2 a review and 9 plan cards a day; the same
- *    suggestion again is the same card; older waiting cards a newer review did
- *    not repeat are withdrawn unsigned; what Will rejected is not asked again.
- *    A card is kind plan, personal, kept 7 days, with a fixed reason.
+ *  - Promoted: every new minor change of a review is on ONE card; each
+ *    material one on its own, at most 2 a review and 9 plan cards a day. A
+ *    card is kind plan, personal, kept 7 days, with a fixed reason.
+ *  - The goal's waiting cards are Will's: a change one already asks for is that
+ *    card, kept and not filed again whatever would hold a new one back (the
+ *    day's cap, the review's limit, a filing that failed, a date that rolled
+ *    with the day). A card is withdrawn unsigned only when it no longer applies
+ *    or the review changes the same thing differently: never by an empty or
+ *    unusable reply. What Will rejected is not asked again, and Flint's own
+ *    withdrawals never crowd his rejections out.
+ *  - A model that is not there is asked again, 2 minutes later, at most 3
+ *    times; a run that yielded to chat keeps the review's request count; a run
+ *    that died after filing its cards files none twice.
  *  - Every plan change is a card Will signs: nothing here writes a plan, and
  *    no path marks a step done.
  *  - Lock order: each of the stage's transactions takes the goal FOR UPDATE
@@ -27,10 +35,10 @@ import pg from 'pg';
 import { GOAL_BUDGETS, PLAN_CARDS_COUNTER, localDay } from '@flint/policy';
 import { NO_DB, freshDb, pgConfig, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
-import { rejectProposal } from '../../src/governance/proposals';
+import { createProposal, rejectProposal } from '../../src/governance/proposals';
 import { checkComponents } from '../../src/health/checks';
 import { loadConfig } from '../../src/config';
-import { MAX_DEFERRALS, DEFER_SECONDS, runPlan, type PlanStageDeps } from '../../src/goals/batch';
+import { MAX_DEFERRALS, MAX_RETRIES, DEFER_SECONDS, RETRY_SECONDS, runPlan, type PlanStageDeps } from '../../src/goals/batch';
 import { PlanJob, runReview } from '../../src/goals/review';
 import { Diff, dueIn, type ReplyOp } from '../../src/goals/steps';
 import { goalView } from '../../src/goals/view';
@@ -91,14 +99,18 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     fx = await goalFixture(urls, db);
   });
   afterAll(async () => db?.$disconnect());
-  beforeEach(() => {
+  beforeEach(async () => {
     bus.clear();
     prompts = [];
+    // Each test starts with the day's budgets unused (the model-backed reviews, and the plan cards).
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local' OR action = $1`, [PLAN_CARDS_COUNTER]);
   });
 
   it('a plan job is the goal and the review, strictly', () => {
     expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'gr123' }).success).toBe(true);
     expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'gr123', deferrals: 3, claimed: true }).success).toBe(true);
+    expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'gr123', deferrals: 3, requests: 1, retries: 2, claimed: true }).success).toBe(true);
+    expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'gr123', requests: 0 }).success).toBe(false);
     expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'gr123', title: 'x' }).success).toBe(false);
     expect(PlanJob.safeParse({ goalId: 'gotestgoal0001', reviewId: 'a review’s words' }).success).toBe(false);
   });
@@ -111,7 +123,7 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
         op({ op: 'set_due', step: 's2', dueInDays: 4 }), op({ op: 'set_status', step: 's4', status: 'in_progress' }),
         op({ op: 'add_step', template: 'check_item', ref: g.ref, dueInDays: 1 }), op({ op: 'skip', step: 's3' }),
       ])]);
-      expect(out).toEqual({ outcome: 'planned', reviewId, suggested: 4, filed: 0 });
+      expect(out).toEqual({ outcome: 'planned', reviewId, suggested: 4, filed: 0, kept: 0 });
       const r = await row(reviewId);
       expect(r).toMatchObject({ shadow: true, planner: 'ollama:muse-glimmer:30b', proposalId: null });
       expect(await diffOf(reviewId)).toEqual([
@@ -128,10 +140,10 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     const v = (await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!;
     expect(v.review).toMatchObject({ shadow: true, planner: 'ok', kind: 'requested', summary: '0 of 2 checks are met. 1 step is due this week.' });
     expect(v.review!.changes).toEqual([
-      { kind: 'due', title: `${CANARY} step s2`, dueAt: dueIn('UTC', new Date(), 4), status: null, after: null, material: false },
-      { kind: 'status', title: `${CANARY} step s4`, dueAt: null, status: 'in_progress', after: null, material: false },
-      { kind: 'add', title: 'Check on wpf002/flint #201', dueAt: dueIn('UTC', new Date(), 1), status: null, after: null, material: true },
-      { kind: 'skip', title: `${CANARY} step s3`, dueAt: null, status: null, after: null, material: true },
+      { kind: 'due', title: `${CANARY} step s2`, dueAt: dueIn('UTC', new Date(), 4), status: null, after: null, material: false, later: false },
+      { kind: 'status', title: `${CANARY} step s4`, dueAt: null, status: 'in_progress', after: null, material: false, later: false },
+      { kind: 'add', title: 'Check on wpf002/flint #201', dueAt: dueIn('UTC', new Date(), 1), status: null, after: null, material: true, later: false },
+      { kind: 'skip', title: `${CANARY} step s3`, dueAt: null, status: null, after: null, material: true, later: false },
     ]);
     expect(v).toMatchObject({ reviews: 'on', late: false, onTrack: { likelihood: expect.any(String), percent: expect.any(Number), by: expect.any(String) }, nextReviewAt: expect.any(String) });
     // The local model read the goal's words (it is local), in <data> blocks; never the item's title.
@@ -168,10 +180,29 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect(await recorded(id)).toMatchObject({ planner: 'none:capped' });
     expect(prompts).toEqual([]);
     await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
-    // Ollama is not answering.
+    // Ollama is not answering: the stage comes back in 2 minutes, at most 3 times, holding its slot of the day's cap.
     id = await reviewed(g.id);
-    expect(await stage(g.id, id, [() => { throw new TypeError('fetch failed'); }])).toMatchObject({ outcome: 'none', why: 'unavailable' });
+    bus.clear();
+    const down = [() => { throw new TypeError('fetch failed'); }];
+    expect(await stage(g.id, id, down)).toEqual({ outcome: 'retrying', reviewId: id });
+    expect(bus.of('goals.plan')).toEqual([{ queue: 'goals.plan', data: { goalId: g.id, reviewId: id, retries: 1, claimed: true }, options: { singletonKey: g.id, startAfter: RETRY_SECONDS } }]);
+    expect((await row(id)).planner).toBeNull();
+    bus.clear();
+    expect(await stage(g.id, id, down, {}, { retries: MAX_RETRIES - 1, claimed: true })).toEqual({ outcome: 'retrying', reviewId: id });
+    expect(bus.of('goals.plan')[0]!.data).toEqual({ goalId: g.id, reviewId: id, retries: MAX_RETRIES, claimed: true });
+    // Each new attempt has its own 2 requests (the model was never reached), and the last one gives up.
+    prompts = [];
+    bus.clear();
+    expect(await stage(g.id, id, down, {}, { retries: MAX_RETRIES, claimed: true })).toMatchObject({ outcome: 'none', why: 'unavailable' });
+    expect(prompts).toHaveLength(2);
+    expect(bus.of('goals.plan')).toEqual([]);
     expect(await recorded(id)).toMatchObject({ planner: 'none:unavailable' });
+    expect([MAX_RETRIES, RETRY_SECONDS]).toEqual([3, 120]);
+    // A model that comes back in time answers the same review.
+    const back = await reviewed(g.id);
+    expect(await stage(g.id, back, down)).toMatchObject({ outcome: 'retrying' });
+    expect(await stage(g.id, back, [answer([], 'on_track')], {}, { retries: 1, claimed: true })).toMatchObject({ outcome: 'planned', reviewId: back });
+    expect((await row(back)).planner).toBe('ollama:muse-glimmer:30b');
     // It answers, but not with template operations: twice, and no more.
     id = await reviewed(g.id);
     prompts = [];
@@ -180,8 +211,8 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect(prompts).toHaveLength(2);
     expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: id, inputs: { path: ['stage'], equals: 'plan' } } }))).toMatchObject({ outcome: 'failed', inputs: { planner: 'invalid', requests: 2 } });
     expect(await cards(g.id)).toEqual([]);
-    // Each claimed its slot of the day's 20, counted even though it failed.
-    expect((await db.actionCounter.findUniqueOrThrow({ where: { action_day: { action: 'goal.review.local', day: day() } } })).count).toBe(2);
+    // Each review claimed one slot of the day's 20, counted even though it failed, and once however often it came back.
+    expect((await db.actionCounter.findUniqueOrThrow({ where: { action_day: { action: 'goal.review.local', day: day() } } })).count).toBe(3);
     await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
   });
 
@@ -198,7 +229,14 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     let asked = 0;
     bus.clear();
     await stage(g.id, id, ['not json'], { load: async () => (asked++ ? 'defer' : 'proceed') }, { deferrals: 1 });
-    expect(bus.of('goals.plan')[0]!.data).toEqual({ goalId: g.id, reviewId: id, deferrals: 2, claimed: true });
+    expect(bus.of('goals.plan')[0]!.data).toEqual({ goalId: g.id, reviewId: id, deferrals: 2, requests: 1, claimed: true });
+    // Chat still busy when it comes back: the count is handed on again, not reset.
+    const carried = PlanJob.parse(bus.of('goals.plan')[0]!.data);
+    prompts = [];
+    bus.clear();
+    await stage(g.id, id, ['not json'], busy, carried);
+    expect(prompts).toEqual([]);
+    expect(bus.of('goals.plan').map((j) => j.data)).toEqual([{ goalId: g.id, reviewId: id, deferrals: 3, requests: 1, claimed: true }]);
     // The 40th time is the last: then the review says so, and so does Settings > Health.
     bus.clear();
     expect(await stage(g.id, id, [answer([])], busy, { deferrals: MAX_DEFERRALS - 1 })).toMatchObject({ outcome: 'deferred' });
@@ -208,11 +246,16 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect((await row(id)).planner).toBe('none:deferred');
     const mark = await db.healthCheck.findFirstOrThrow({ where: { component: 'goals.deferral' } });
     expect(mark).toMatchObject({ status: 'degraded', detail: 'Chat was busy for 10 minutes, so a goal review suggested no plan changes.' });
-    const config = loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp', FLINT_TZ: 'UTC', FLINT_PLANNER: 'on' });
+    const config = loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp', FLINT_TZ: 'UTC', FLINT_PLANNER: 'on', FLINT_TRIAGE_MODEL: OLLAMA.model });
     // (Every goal reviewed so no review is late: the deferral is what health reports.)
     for (const goal of await db.goal.findMany({ where: { status: 'active' } })) await db.goal.update({ where: { id: goal.id }, data: { nextReviewAt: new Date(Date.now() + DAY) } });
     expect((await checkComponents({ db, config, now: new Date(), sources: [] })).find((c) => c.component === 'goals')).toEqual({ component: 'goals', status: 'degraded', detail: mark.detail });
-    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
+    // A review that comes back with one of its 2 requests used makes ONE more, not two (review finding 6).
+    const next = await reviewed(g.id);
+    prompts = [];
+    expect(await stage(g.id, next, ['not json', answer([])], {}, { deferrals: 1, requests: 1, claimed: true })).toEqual({ outcome: 'none', reviewId: next, why: 'invalid' });
+    expect(prompts).toHaveLength(1);
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: next, inputs: { path: ['stage'], equals: 'plan' } } })).inputs).toMatchObject({ planner: 'invalid', requests: 2 });
   });
 
   it('the latest review gets the plan stage; an older one still waiting is closed as skipped', async () => {
@@ -284,7 +327,7 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
       op({ op: 'add_step', template: 'check_item', ref: g.ref, dueInDays: 1 }), op({ op: 'skip', step: 's3' }),
       op({ op: 'add_step', template: 'work_on', criterion: 'c2' }),
     ])]);
-    expect(out).toEqual({ outcome: 'planned', reviewId, suggested: 5, filed: 3 });
+    expect(out).toEqual({ outcome: 'planned', reviewId, suggested: 5, filed: 3, kept: 0 });
     const filed = await cards(g.id);
     expect(filed.map((c) => [c.templateId, c.consequential, (c.args as { ops: unknown[] }).ops.length])).toEqual([['plan.diff.minor', false, 2], ['plan.diff.material', true, 1], ['plan.diff.material', true, 1]]);
     for (const c of filed) {
@@ -327,37 +370,140 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     const v = (await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!;
     expect(v.review).toMatchObject({ shadow: false, planner: 'ok' });
     expect(v.review!.changes).toHaveLength(5);
+    // The one past the review's limit is on no card yet, and the view says so; the rest are not marked.
+    expect(v.review!.changes.map((c) => c.later)).toEqual([false, false, false, false, true]);
+    expect(v.review!.changes[4]).toMatchObject({ kind: 'add', title: `Work on: ${CANARY} check c2` });
     expect(v.waiting).toEqual([{ id: filed[2]!.id, action: 'plan.change' }]);
     expect(await fx.everythingButGoals(bus)).not.toContain('CANARY');
   });
 
-  it('the same suggestion again is the same card; a newer review’s different one replaces it, unsigned', async () => {
+  it('the same suggestion again is the waiting card, kept and not filed again; only a different change to the same thing replaces it', async () => {
     const g = await planned(208);
+    const same = [answer([op({ op: 'set_status', step: 's4', status: 'blocked' })])];
     const first = await reviewed(g.id);
-    await stage(g.id, first, [answer([op({ op: 'set_status', step: 's4', status: 'blocked' })])]);
+    await stage(g.id, first, same);
     const [card] = await cards(g.id);
     const counted = await cardsToday();
-    // The next review suggests exactly that again: one card, counted once.
+    // The next review suggests exactly that again: the card is kept, nothing is filed, and it is counted once.
     const second = await reviewed(g.id);
-    expect(await stage(g.id, second, [answer([op({ op: 'set_status', step: 's4', status: 'blocked' })])])).toMatchObject({ filed: 1 });
+    expect(await stage(g.id, second, same)).toMatchObject({ suggested: 1, filed: 0, kept: 1 });
     expect((await cards(g.id)).map((c) => c.id)).toEqual([card!.id]);
     expect((await diffOf(second))[0]).toMatchObject({ card: card!.id, held: null });
+    expect(await row(second)).toMatchObject({ proposalId: card!.id });
     expect(await cardsToday()).toBe(counted);
-    // A newer review suggests something else: the old card is withdrawn by Flint, with a sentence, and no signature.
+    // A newer review changes the same step differently: the old card is withdrawn by Flint, with a sentence, and no signature.
     const third = await reviewed(g.id);
     await stage(g.id, third, [answer([op({ op: 'set_status', step: 's4', status: 'in_progress' })])]);
     const now = await cards(g.id);
     expect(now).toHaveLength(1);
     expect(now[0]!.id).not.toBe(card!.id);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: card!.id } })).toMatchObject({ status: 'rejected', error: 'A newer review replaced it.', approvalId: null });
-    // A review that suggests nothing withdraws what still waits; one with no answer leaves it alone.
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: third, inputs: { path: ['stage'], equals: 'plan' } } })).inputs).toMatchObject({ cards: 1, kept: 0, withdrawn: 1 });
+    // A review with no usable answer leaves the queue alone.
     const fourth = await reviewed(g.id);
-    await stage(g.id, fourth, [() => { throw new TypeError('fetch failed'); }]);
-    expect(await cards(g.id)).toHaveLength(1);
+    expect(await stage(g.id, fourth, [() => { throw new TypeError('fetch failed'); }], {}, { retries: MAX_RETRIES })).toMatchObject({ outcome: 'none', why: 'unavailable' });
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([now[0]!.id]);
+    const invalid = await reviewed(g.id);
+    expect(await stage(g.id, invalid, ['not json'])).toMatchObject({ outcome: 'none', why: 'invalid' });
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([now[0]!.id]);
+    // And so does a review that suggests nothing: an empty reply does not wipe what waits for Will.
     const fifth = await reviewed(g.id);
-    expect(await stage(g.id, fifth, [answer([], 'on_track')])).toMatchObject({ outcome: 'planned', suggested: 0, filed: 0 });
+    expect(await stage(g.id, fifth, [answer([], 'on_track')])).toMatchObject({ outcome: 'planned', suggested: 0, filed: 0, kept: 0 });
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([now[0]!.id]);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: now[0]!.id } })).toMatchObject({ status: 'pending', error: null });
+    // Unless the card can no longer apply (Will moved the step himself): then even an empty reply clears it away.
+    const plan = await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' } });
+    await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's4' } }, data: { status: 'blocked' } });
+    const sixth = await reviewed(g.id);
+    await stage(g.id, sixth, [answer([], 'on_track')]);
     expect(await cards(g.id)).toEqual([]);
-    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: now[0]!.id } })).toMatchObject({ status: 'rejected', error: 'A newer review replaced it.' });
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local' OR action LIKE 'goal.review:%'`);
+  });
+
+  it('review finding 1: with the day’s cap reached, the same suggestion keeps its waiting card (it was withdrawn)', async () => {
+    const g = await planned(301);
+    const same = [answer([op({ op: 'set_status', step: 's4', status: 'blocked' })])];
+    await stage(g.id, await reviewed(g.id), same);
+    const [card] = await cards(g.id);
+    await fx.owner(`INSERT INTO "ActionCounter" (action, day, count) VALUES ($1, $2, $3) ON CONFLICT (action, day) DO UPDATE SET count = $3`, [PLAN_CARDS_COUNTER, day(), GOAL_BUDGETS.planCardsPerDay]);
+    const second = await reviewed(g.id);
+    expect(await stage(g.id, second, same)).toMatchObject({ outcome: 'planned', suggested: 1, filed: 0, kept: 1 });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: card!.id } })).toMatchObject({ status: 'pending', error: null });
+    expect(await diffOf(second)).toEqual([{ change: { op: 'status', key: 's4', status: 'blocked' }, class: 'minor', card: card!.id, held: null }]);
+    // A NEW suggestion past the cap waits for the next review, and takes no waiting card with it.
+    const third = await reviewed(g.id);
+    await stage(g.id, third, [answer([op({ op: 'set_status', step: 's4', status: 'blocked' }), op({ op: 'skip', step: 's3' })])]);
+    expect((await diffOf(third)).map((d) => [d.change.op, d.card, d.held])).toEqual([['status', card!.id, null], ['skip', null, 'cap']]);
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([card!.id]);
+    expect((await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!.review!.changes.map((c) => [c.kind, c.later])).toEqual([['status', false], ['skip', true]]);
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
+  });
+
+  it('review finding 1: the same bigger suggestions in another order keep their cards; the one past the limit is filed when its turn comes', async () => {
+    const g = await planned(302);
+    await stage(g.id, await reviewed(g.id), [answer([op({ op: 'skip', step: 's3' }), op({ op: 'skip', step: 's4' }), op({ op: 'skip', step: 's2' })])]);
+    const first = await cards(g.id);
+    expect(first).toHaveLength(2);
+    const second = await reviewed(g.id);
+    expect(await stage(g.id, second, [answer([op({ op: 'skip', step: 's2' }), op({ op: 'skip', step: 's3' }), op({ op: 'skip', step: 's4' })])])).toMatchObject({ filed: 1, kept: 2 });
+    const now = await cards(g.id);
+    // Nothing was withdrawn: the two cards from before still wait, and the third change has its own now.
+    expect(now.map((c) => c.id).slice(0, 2)).toEqual(first.map((c) => c.id));
+    expect(now).toHaveLength(3);
+    expect(await db.proposal.count({ where: { action: 'plan.change', origin: 'runtime:goals', status: 'rejected', args: { path: ['goalId'], equals: g.id } } })).toBe(0);
+    expect((await diffOf(second)).map((d) => [d.change.op === 'skip' ? d.change.key : '', d.card, d.held])).toEqual([['s2', now[2]!.id, null], ['s3', first[0]!.id, null], ['s4', first[1]!.id, null]]);
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
+  });
+
+  it('review finding 1: a card that could not be filed costs no waiting card, and neither does a date that rolled with the day', async () => {
+    const g = await planned(303);
+    const first = await reviewed(g.id);
+    await stage(g.id, first, [answer([op({ op: 'set_status', step: 's4', status: 'blocked' }), op({ op: 'set_due', step: 's2', dueInDays: 4 }), op({ op: 'add_step', template: 'check_item', ref: g.ref, dueInDays: 3 })])]);
+    const before = await cards(g.id);
+    expect(before.map((c) => c.templateId)).toEqual(['plan.diff.minor', 'plan.diff.material']);
+    // The next review, a day later by its dates: the same three changes, each date one day on, and one new change whose card fails to file.
+    const second = await reviewed(g.id);
+    let tried = 0;
+    const failing: PlanStageDeps['file'] = async () => { tried += 1; throw new Error('synthetic: the database went away'); };
+    const logs: string[] = [];
+    const out = await stage(g.id, second, [answer([
+      op({ op: 'set_status', step: 's4', status: 'blocked' }), op({ op: 'set_due', step: 's2', dueInDays: 5 }), op({ op: 'add_step', template: 'check_item', ref: g.ref, dueInDays: 4 }), op({ op: 'skip', step: 's3' }),
+    ])], { file: failing, log: (m) => logs.push(m) });
+    expect(out).toMatchObject({ outcome: 'planned', suggested: 4, filed: 0, kept: 2 });
+    // Only the new change was tried; what already waited was not filed again.
+    expect(tried).toBe(1);
+    expect(logs).toEqual(['filing a plan card failed: Error']);
+    expect((await cards(g.id)).map((c) => c.id)).toEqual(before.map((c) => c.id));
+    expect(await db.proposal.count({ where: { action: 'plan.change', origin: 'runtime:goals', status: 'rejected', args: { path: ['goalId'], equals: g.id } } })).toBe(0);
+    // The review records the dates Will is asked to sign (the cards'), not today's roll of them.
+    expect(await diffOf(second)).toEqual([
+      { change: { op: 'status', key: 's4', status: 'blocked' }, class: 'minor', card: before[0]!.id, held: null },
+      { change: { op: 'due', key: 's2', dueAt: dueIn('UTC', new Date(), 4) }, class: 'minor', card: before[0]!.id, held: null },
+      { change: { op: 'add', template: 'check_item', entityId: g.pr, criterion: null, dueAt: dueIn('UTC', new Date(), 3), after: null }, class: 'material', card: before[1]!.id, held: null },
+      { change: { op: 'skip', key: 's3' }, class: 'material', card: null, held: 'stale' },
+    ]);
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
+  });
+
+  it('a run that died between filing its cards and writing the review files none twice when it runs again', async () => {
+    const g = await planned(304);
+    const reviewId = await reviewed(g.id);
+    const replies = [answer([op({ op: 'set_status', step: 's4', status: 'blocked' }), op({ op: 'skip', step: 's3' }), op({ op: 'add_step', template: 'review_progress' })])];
+    const before = await cardsToday();
+    // The cards are filed; then the process dies before the review says so (pg-boss runs the job again).
+    await expect(stage(g.id, reviewId, replies, { afterFiling: async () => { throw new Error('synthetic crash'); } })).rejects.toThrow('synthetic crash');
+    const filed = await cards(g.id);
+    expect(filed.map((c) => c.templateId)).toEqual(['plan.diff.minor', 'plan.diff.material', 'plan.diff.material']);
+    expect(await row(reviewId)).toMatchObject({ planner: null, diff: null, proposalId: null });
+    // The retry: the same answer, the same three cards, nothing new, nothing withdrawn, the day's count unchanged.
+    expect(await stage(g.id, reviewId, replies)).toEqual({ outcome: 'planned', reviewId, suggested: 3, filed: 0, kept: 3 });
+    expect((await cards(g.id)).map((c) => c.id)).toEqual(filed.map((c) => c.id));
+    expect(await db.proposal.count({ where: { action: 'plan.change', origin: 'runtime:goals', args: { path: ['goalId'], equals: g.id } } })).toBe(3);
+    expect(await cardsToday()).toBe(before + 3);
+    expect((await diffOf(reviewId)).map((d) => [d.card, d.held])).toEqual([[filed[0]!.id, null], [filed[1]!.id, null], [filed[2]!.id, null]]);
+    expect(await row(reviewId)).toMatchObject({ planner: 'ollama:muse-glimmer:30b', proposalId: filed[0]!.id });
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
   });
 
   it('what Will rejected is not asked again while its card says what it was; a card Flint withdrew does not count', async () => {
@@ -374,12 +520,37 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect((await cards(g.id)).map((c) => c.id)).toEqual([filed[0]!.id]);
     // It is not shown as a suggestion again either.
     expect((await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!.review!.changes.map((c) => c.kind)).toEqual(['status']);
+    // Flint's own withdrawals never crowd his no out: after more than 50 of them for this goal, the skip is still not asked again.
+    for (let i = 0; i < 52; i++) {
+      const c = await createProposal(db, {
+        kind: 'plan', origin: 'runtime:goals', action: 'plan.change', templateId: 'plan.diff.minor',
+        args: { goalId: g.id, goalTitle: g.title, ops: [{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, status: 'todo' }, to: { status: i % 2 ? 'blocked' : 'in_progress' } }] },
+        argsProvenance: { ops: { source: 'model', ref: 'goal.review.local', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 60,
+      }, 'runtime:goals');
+      await rejectProposal(db, c.id, { error: 'A newer review replaced it.' }, undefined, 'runtime:goals');
+    }
+    const crowded = await reviewed(g.id);
+    await stage(g.id, crowded, [answer([op({ op: 'skip', step: 's3' }), op({ op: 'set_status', step: 's2', status: 'blocked' })])]);
+    // (And a change Flint itself withdrew is not his no: it may be suggested again.)
+    expect((await diffOf(crowded)).map((d) => [d.change.op, d.held])).toEqual([['skip', 'rejected'], ['status', null]]);
+    // He turns down a card that changes a date AND a status of one step: either alone is his no too, whatever day the date names.
+    const combo = (await cards(g.id)).find((c) => JSON.stringify(c.args).includes('"s2"'))!;
+    await rejectProposal(db, combo.id, {}, undefined, 'server');
+    const both = await createProposal(db, {
+      kind: 'plan', origin: 'runtime:goals', action: 'plan.change', templateId: 'plan.diff.minor',
+      args: { goalId: g.id, goalTitle: g.title, ops: [{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, status: 'todo', dueAt: (await db.planStep.findFirstOrThrow({ where: { key: 's2', plan: { goalId: g.id, status: 'active' } } })).dueAt!.toISOString() }, to: { status: 'in_progress', dueAt: dueIn('UTC', new Date(), 5) } }] },
+      argsProvenance: { ops: { source: 'model', ref: 'goal.review.local', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 60,
+    }, 'runtime:goals');
+    await rejectProposal(db, both.id, {}, undefined, 'server');
+    const parts = await reviewed(g.id);
+    await stage(g.id, parts, [answer([op({ op: 'set_due', step: 's2', dueInDays: 6 }), op({ op: 'set_status', step: 's2', status: 'in_progress' })])]);
+    expect((await diffOf(parts)).map((d) => [d.change.op, d.held])).toEqual([['due', 'rejected'], ['status', 'rejected']]);
     // Once retention has cleared the rejected card's args, the suggestion may come back.
     await fx.owner(`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = $1`, [filed[1]!.id]);
     const third = await reviewed(g.id);
     await stage(g.id, third, [answer([op({ op: 'skip', step: 's3' })])]);
     expect((await diffOf(third)).map((d) => [d.change.op, d.held])).toEqual([['skip', null]]);
-    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
   });
 
   it('at most 9 plan cards a day across every goal; a suggestion the plan outran is stale', async () => {
@@ -415,7 +586,7 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect(prompts).toEqual([]);
     expect((await row(id)).planner).toBe('none:skipped');
     expect(await cards(g.id)).toEqual([]);
-    const config = loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp', FLINT_TZ: 'UTC', FLINT_PLANNER: 'on' });
+    const config = loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp', FLINT_TZ: 'UTC', FLINT_PLANNER: 'on', FLINT_TRIAGE_MODEL: OLLAMA.model });
     expect((await checkComponents({ db, config, now: new Date(), sources: [] })).find((c) => c.component === 'goals')).toEqual({ component: 'goals', status: 'degraded', detail: 'A rule stops goal reviews, so none are running.' });
   });
 });

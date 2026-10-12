@@ -43,6 +43,7 @@ import { syncOnce } from '../src/sources/sync';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
 import { GoalAnswer, GoalsPage as GoalsPageContract, reviewCounter } from '@flint/policy';
 import { runReview } from '../src/goals/review';
+import { resetTicking } from '../src/goals/late';
 import { FakeBus } from './goals/fixture';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -501,11 +502,21 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
       expect(after.review).toMatchObject({ kind: 'requested', summary: 'Its check isn’t met yet.', shadow: true, planner: 'pending', changes: [] });
       expect(GoalAnswer.safeParse({ goal: after }).success).toBe(true);
 
-      // Over an hour past its review time it is late, in the open goal and in the list; a paused goal never is.
+      // Over an hour past its review time while Flint was reviewing, it is late, in the open goal and in the list; a paused goal never is.
+      const lateNow = async () => ((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late;
+      resetTicking(new Date(Date.now() - 3 * 3_600_000));
       await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 59 * 60_000) } });
-      expect(((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late).toBe(false);
+      expect(await lateNow()).toBe(false);
       await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 61 * 60_000) } });
-      expect(((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late).toBe(true);
+      expect(await lateNow()).toBe(true);
+      // Review finding 7: not when Flint only just started reviewing (reviews turned on, a restart, a sleep), or has not ticked yet.
+      resetTicking(new Date(Date.now() - 5 * 60_000));
+      expect(await lateNow()).toBe(false);
+      resetTicking();
+      expect(await lateNow()).toBe(false);
+      expect(((await ask('GET', '/v1/goals?tab=active')).body as unknown as GoalsPage).goals.find((g) => g.id === gid)).toMatchObject({ late: false });
+      resetTicking(new Date(Date.now() - 3 * 3_600_000));
+      expect(await lateNow()).toBe(true);
       const list = (await ask('GET', '/v1/goals?tab=active')).body as unknown as GoalsPage;
       expect(list.reviews).toBe('on');
       expect(list.goals.find((g) => g.id === gid)).toMatchObject({ late: true });
@@ -536,7 +547,30 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
       // Nothing a job carried, and no audit entry of a request, holds a goal's words.
       expect(JSON.stringify(await db.auditEntry.findMany({ where: { action: 'goal.review.request' } }), (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v))).not.toContain('CANARY');
     } finally {
+      resetTicking();
       await on.close();
     }
+  });
+
+  it('review finding 2: over the wire an origin is only a claim, so a `runtime:` one is refused, whatever it files', async () => {
+    const dk = draftKey();
+    const gid = `go${dk}`;
+    const args = shown(dk);
+    await signRun((await call('POST', '/v1/goals', { draftKey: dk, args })).body.id as string);
+    const before = await db.proposal.count();
+    // The reviewer's reproduction, through the route: bigger operations under the small-change template.
+    const smuggled = await call('POST', '/v1/proposals', {
+      kind: 'plan', origin: 'runtime:goals', action: 'plan.change', templateId: 'plan.diff.minor',
+      args: { goalId: gid, goalTitle: args.title, ops: [{ op: 'add', key: 's9', step: { ordinal: 900, title: 'Synthetic free text nobody templated', kind: 'flint_action', tier: 'alone', dueAt: null, dependsOn: [] } }] },
+      argsProvenance: { ops: { source: 'model', ref: 'goal.review.local', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 60,
+    });
+    expect(smuggled).toMatchObject({ status: 400, body: { error: 'Only Flint’s own jobs file their cards.' } });
+    // Any job's name, and a well-formed card: still refused.
+    for (const origin of ['runtime:goals', 'runtime:triage', 'runtime:backup']) {
+      expect((await call('POST', '/v1/proposals', { kind: 'tool_call', origin, action: 'world.sync.github', templateId: 'plan.diff.minor', args: { source: 'github' }, argsProvenance: {}, sensitivity: 'ops' })).status, origin).toBe(400);
+    }
+    expect(await db.proposal.count()).toBe(before);
+    // The console, the CLI and chat file as before.
+    expect((await call('POST', '/v1/proposals', { kind: 'tool_call', origin: 'cli', action: 'world.sync.github', args: { source: 'github', n: Math.random() }, argsProvenance: {}, sensitivity: 'ops' })).status).toBe(201);
   });
 });

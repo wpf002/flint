@@ -11,8 +11,12 @@
  *    set a review off. The same version never does twice.
  *  - The cursor moves in the same transaction as the send: a send that fails
  *    leaves it where it was, and the change is seen again.
- *  - A step due within 48 hours sets a review off once per step and due time,
- *    across plan versions. A forecast that came false does once.
+ *  - A step due within 48 hours sets a review off; so does a forecast about a
+ *    linked item that came false (never the goal's own onTrack forecast). One
+ *    review answers every trigger that was there when it ran: three steps due
+ *    the same day, or a change, a false forecast and a due step together, are
+ *    one review. A new plan version, or a moved due time, is a new trigger.
+ *  - The tick notes each run, so "late" means late while Flint was reviewing.
  *  - Past a goal's 12 a day, a change is left to the next scheduled review.
  *  - A scheduled review is sent when the goal's time has come, once, with its
  *    due time; a job that died is sent again by the next tick.
@@ -29,7 +33,8 @@ import { loadConfig } from '../../src/config';
 import { goalJobs, type JobContext } from '../../src/jobs';
 import { emitPrediction } from '../../src/ledger/emit';
 import { ReviewJob, runReview } from '../../src/goals/review';
-import { COALESCE_SECONDS, tick } from '../../src/goals/tick';
+import { COALESCE_SECONDS, TICK_CRON, TICK_SECONDS, tick } from '../../src/goals/tick';
+import { TICK_GAP_MS, lateBefore, noteTick, resetTicking, tickingSince } from '../../src/goals/late';
 import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './fixture';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -93,7 +98,8 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     // The tick's schedule, as the runtime registers it: every 2 minutes.
     const specs = goalJobs({ db, bus, sources: [], log: () => {}, config: loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp', FLINT_TZ: 'UTC', FLINT_PLANNER: 'on' }) } as unknown as JobContext);
     expect(specs.find((s) => s.queue === 'goals.tick')!.cron).toBe('*/2 * * * *');
-    const TICK_MS = 2 * MIN;
+    expect([TICK_CRON, TICK_SECONDS]).toEqual(['*/2 * * * *', 120]);
+    const TICK_MS = TICK_SECONDS * 1000;
 
     // t0: the pull request merges (its sync archives it), just after a tick ran.
     await fx.pullRequest(101, 'merged');
@@ -212,35 +218,93 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     }
   });
 
-  it('a step due within 48 hours sets a review off once per step and due time, across plan versions', async () => {
+  it('a step due within 48 hours sets a review off once; a new plan version or a moved due time is a new trigger', async () => {
     const dueAt = new Date(Date.now() + 30 * 3_600_000).toISOString();
     const far = new Date(Date.now() + 20 * DAY).toISOString();
     const g = await fx.activeGoal({ successCriteria: [fx.crit('c1', { kind: 'steps', keys: ['s1'] })], plan: { ops: [fx.step('s1', { dueAt }), fx.step('s2', { dueAt: far })] } });
     await settle();
     bus.clear();
-    await run();
-    const trigger = `step:s1@${Date.parse(dueAt)}`;
-    expect(reviewJobs(g.id).map((j) => [j.data.kind, j.data.triggerEventId, j.options.startAfter])).toEqual([['triggered', trigger, COALESCE_SECONDS]]);
-    await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(bus.take('goals.review')!.data));
-    bus.clear();
+    // The goal's first review ran after its plan went active, with s1 already within 48 hours: it answered s1's trigger.
     await run();
     expect(reviewJobs(g.id)).toEqual([]);
-    // A new plan version copies the step: the same step and due time is the same trigger.
+    // A new plan version (Will adds a step): the plan changed with a step due soon, so one review, named by step, time and version.
     await fx.fileSignRun('plan.change', { goalId: g.id, goalTitle: g.title, ops: [fx.step('s3')] });
     expect((await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' } })).version).toBe(2);
     await run();
+    expect(reviewJobs(g.id).map((j) => [j.data.kind, j.data.triggerEventId, j.options.startAfter])).toEqual([['triggered', `step:s1@${Date.parse(dueAt)}.v2`, COALESCE_SECONDS]]);
+    expect(ReviewJob.safeParse(reviewJobs(g.id)[0]!.data).success).toBe(true);
+    expect((await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(bus.take('goals.review')!.data))).outcome).toBe('reviewed');
+    bus.clear();
+    await run();
     expect(reviewJobs(g.id)).toEqual([]);
-    // Its due time moves (still within 48 hours): a new trigger. A done step sets nothing off.
+    // Its due time moves (still within 48 hours), in a new version: a new trigger, and its review is never refused as a duplicate.
     const moved = new Date(Date.now() + 40 * 3_600_000).toISOString();
     await fx.fileSignRun('plan.change', { goalId: g.id, goalTitle: g.title, ops: [{ op: 'set', key: 's1', from: { title: `${CANARY} step s1`, dueAt }, to: { dueAt: moved } }] });
     await run();
-    expect(reviewJobs(g.id).map((j) => j.data.triggerEventId)).toEqual([`step:s1@${Date.parse(moved)}`]);
-    await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(bus.take('goals.review')!.data));
+    expect(reviewJobs(g.id).map((j) => j.data.triggerEventId)).toEqual([`step:s1@${Date.parse(moved)}.v3`]);
+    expect((await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(bus.take('goals.review')!.data))).outcome).toBe('reviewed');
+    // A done step sets nothing off.
+    await fx.fileSignRun('plan.change', { goalId: g.id, goalTitle: g.title, ops: [fx.step('s4')] });
     const plan = await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' } });
     await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's1' } }, data: { status: 'done', doneAt: new Date() } });
     bus.clear();
     await run();
     expect(reviewJobs(g.id)).toEqual([]);
+  });
+
+  it('review finding 3: three steps that come within 48 hours together are ONE review, not one each', async () => {
+    // Due 48 hours and 3 seconds from now: not within 48 hours yet, and they will be in a moment (the real clock: a review's row is written at the database's own time).
+    const soon = new Date(Date.now() + 48 * 3_600_000 + 3_000).toISOString();
+    const g = await fx.activeGoal({ plan: { ops: [fx.step('s1', { dueAt: soon }), fx.step('s2', { dueAt: soon }), fx.step('s3', { dueAt: soon }), fx.step('s4', { dueAt: new Date(Date.now() + 60 * 3_600_000).toISOString() })] } });
+    await settle();
+    bus.clear();
+    await run();
+    expect(reviewJobs(g.id)).toEqual([]);
+    await sleep(Math.max(0, Date.parse(soon) - 48 * 3_600_000 - Date.now()) + 300);
+    const forecasts = await db.prediction.count({ where: { goalId: g.id } });
+    const sent: string[] = [];
+    // Six ticks: the first sends one job for the three steps; after its review, no tick sends another.
+    for (let i = 0; i < 6; i++) {
+      bus.clear();
+      await run();
+      const jobs = reviewJobs(g.id);
+      for (const j of jobs) {
+        sent.push(String(j.data.triggerEventId));
+        expect((await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(j.data))).outcome).toBe('reviewed');
+      }
+    }
+    expect(sent).toEqual([`step:s1@${Date.parse(soon)}.v1`]);
+    expect(await db.goalReview.count({ where: { goalId: g.id, kind: 'triggered' } })).toBe(1);
+    expect(await db.prediction.count({ where: { goalId: g.id } })).toBe(forecasts + 1);
+  });
+
+  it('review finding 3: a change, a false forecast and a due step together are one review', async () => {
+    const dueAt = new Date(Date.now() + 30 * 3_600_000).toISOString();
+    const pr = await fx.pullRequest(121, 'open');
+    const g = await fx.activeGoal({
+      successCriteria: [fx.crit('c1', { kind: 'item', entityId: pr, key: 'state', value: 'merged' })], links: [{ entityId: pr, role: 'target', watchPaths: ['state'] }],
+      plan: { ops: [fx.step('s1')] },
+    });
+    await settle();
+    const p = await emitPrediction(db, {
+      template: { id: 'closed_by', params: { entity: `pull_request#${pr.slice(-6)}` } }, kind: 'binary', probability: 0.6, method: 'rule', domain: 'repos', type: 'event_occurs',
+      evidence: [], resolutionCriteria: 'Synthetic test criteria.', resolver: 'auto_world', resolveBy: new Date(Date.now() + DAY).toISOString(), subjectEntityId: pr, tainted: false,
+    }, 'runtime:test');
+    // All three at once: the item merges, the forecast about it comes false, and Will's plan change gives s1 a due time 30 hours out.
+    await fx.pullRequest(121, 'merged');
+    await fx.owner(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, false, now(), 'auto_world')`, [id('rs'), p.id]);
+    await fx.fileSignRun('plan.change', { goalId: g.id, goalTitle: g.title, ops: [{ op: 'set', key: 's1', from: { title: `${CANARY} step s1`, dueAt: null }, to: { dueAt } }] });
+    bus.clear();
+    const before = await db.goalReview.count({ where: { goalId: g.id } });
+    for (let i = 0; i < 5; i++) {
+      await run();
+      // A worker takes every job that waits; this goal's review runs.
+      for (let job = bus.take('goals.review'); job; job = bus.take('goals.review')) {
+        if (job.data.goalId === g.id) expect((await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(job.data))).outcome).toBe('reviewed');
+      }
+    }
+    expect(reviewJobs(g.id).map((j) => String(j.data.triggerEventId).split(':')[0])).toEqual(['version']);
+    expect(await db.goalReview.count({ where: { goalId: g.id } })).toBe(before + 1);
   });
 
   it('a forecast that came false, about the goal’s item, sets a review off once', async () => {
@@ -259,6 +323,21 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     bus.clear();
     await run();
     expect(reviewJobs(g.id)).toEqual([]);
+    // Two more come false before the next tick: one review answers both.
+    const again = [id('rs'), id('rs')];
+    for (const r of again) {
+      const more = await emitPrediction(db, {
+        template: { id: 'closed_by', params: { entity: `pull_request#${g.pr.slice(-6)}` } }, kind: 'binary', probability: 0.5 + again.indexOf(r) / 10, method: 'rule', domain: 'repos', type: 'event_occurs',
+        evidence: [], resolutionCriteria: 'Synthetic test criteria.', resolver: 'auto_world', resolveBy: new Date(Date.now() + (2 + again.indexOf(r)) * DAY).toISOString(), subjectEntityId: g.pr, tainted: false,
+      }, 'runtime:test');
+      await fx.owner(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, false, now(), 'auto_world')`, [r, more.id]);
+    }
+    await run();
+    expect(reviewJobs(g.id)).toHaveLength(1);
+    await runReview({ db, bus, tz: 'UTC' }, ReviewJob.parse(bus.take('goals.review')!.data));
+    bus.clear();
+    await run();
+    expect(reviewJobs(g.id)).toEqual([]);
     // A forecast that came true sets nothing off.
     const other = await watching(107);
     const q = await emitPrediction(db, {
@@ -268,6 +347,54 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     await fx.owner(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, now(), 'auto_world')`, [id('rs'), q.id]);
     await run();
     expect(reviewJobs(other.id)).toEqual([]);
+  });
+
+  it('review finding 3: a goal’s own onTrack forecast coming false sets nothing off (a goal past its date would review itself every day)', async () => {
+    // Every review writes the goal's forecast. Past the finish date each is for a day ahead, and comes false when that day does.
+    const pr = await fx.pullRequest(122, 'open');
+    const g = await fx.activeGoal({ links: [{ entityId: pr, role: 'watch', watchPaths: ['state'] }] });
+    await settle();
+    const own = await db.prediction.findFirstOrThrow({ where: { goalId: g.id, status: 'open' } });
+    expect(own).toMatchObject({ domain: 'goals', createdBy: 'runtime:goals', subjectEntityId: null });
+    await fx.owner(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, false, now(), 'auto_world')`, [id('rs'), own.id]);
+    bus.clear();
+    await run();
+    await run();
+    expect(reviewJobs(g.id)).toEqual([]);
+    expect(await db.goalReview.count({ where: { goalId: g.id } })).toBe(1);
+  });
+
+  it('review finding 7: the tick notes each run, and late means late while it ran', async () => {
+    resetTicking();
+    try {
+      expect(tickingSince()).toBeNull();
+      const t0 = new Date(Date.now() - 3 * 3_600_000);
+      // Before the first tick nothing is late; a run younger than an hour has not had the time to be late either.
+      expect(lateBefore(new Date(), null)).toBeNull();
+      await run(t0);
+      expect(tickingSince()).toEqual(t0);
+      expect(lateBefore(new Date(t0.getTime() + 59 * MIN), tickingSince())).toBeNull();
+      // Ticks 2 minutes apart are one run: an hour in, a review due before then is late.
+      for (let m = 2; m <= 62; m += 2) noteTick(new Date(t0.getTime() + m * MIN));
+      expect(tickingSince()).toEqual(t0);
+      const at = new Date(t0.getTime() + 62 * MIN);
+      expect(lateBefore(at, tickingSince())).toEqual(new Date(at.getTime() - 60 * MIN));
+      // A day's outage needs a day of ticking.
+      expect(lateBefore(at, tickingSince(), DAY)).toBeNull();
+      // A gap (a restart, the Mac asleep): the run starts over, so nothing that came due meanwhile is late yet.
+      const woke = new Date(at.getTime() + TICK_GAP_MS + MIN);
+      noteTick(woke);
+      expect(tickingSince()).toEqual(woke);
+      expect(lateBefore(new Date(woke.getTime() + 5 * MIN), tickingSince())).toBeNull();
+      // A caller that does not track the tick takes it as always running.
+      expect(lateBefore(at, undefined)).toEqual(new Date(at.getTime() - 60 * MIN));
+      // A FORBIDDEN-free tick through the job path notes itself too (tick() is what the job runs).
+      resetTicking();
+      await run();
+      expect(tickingSince()).not.toBeNull();
+    } finally {
+      resetTicking();
+    }
   });
 
   it('past a goal’s 12 a day, a change is left to the next scheduled review: the cursor moves and nothing is sent', async () => {

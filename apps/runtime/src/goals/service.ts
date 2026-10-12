@@ -30,7 +30,7 @@ import { Refused, createProposal, rejectProposal } from '../governance/proposals
 import { sqlState } from '../dbcodes.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
 import { SAY, goalStatusWords } from './errors.js';
-import { REVIEW_QUEUE, reviewsLeft, type ReviewJob } from './review.js';
+import { REVIEW_QUEUE, reviewStanding, reviewsLeft, type ReviewJob } from './review.js';
 
 /** Who the panel's writes are by. */
 export const CONSOLE_ACTOR = 'will:console';
@@ -192,15 +192,18 @@ export async function setStep(db: Db, id: string, key: string, status: 'todo' | 
 }
 
 /**
- * Review Now: ask for this goal's review. Refused, in a sentence, while reviews
- * are off, for a goal that is not active, past the day's 12, or before the job
- * queue is up. A review already waiting for the goal is the same review.
+ * Review Now: ask for this goal's review. It says yes only when a review will
+ * run: refused, in a sentence, while reviews are off, for a goal that is not
+ * active, while a rule stops reviews (the job would do nothing), past the
+ * day's 12, or before the job queue is up. A review already waiting for the
+ * goal is the same review.
  */
 export async function requestReview(db: Db, bus: Pick<Bus, 'boss'> | undefined, id: string, o: { reviews: boolean; tz: string }, now = new Date()): Promise<void> {
   if (!o.reviews) throw new Refused(409, SAY.reviewsOff);
   const g = await db.goal.findUnique({ where: { id }, select: { status: true } });
   if (!g) throw new Refused(404, SAY.noGoal);
   if (g.status !== 'active') throw new Refused(409, goalStatusWords(g.status));
+  if (!(await reviewStanding(db, now)).may) throw new Refused(409, SAY.reviewsStopped);
   if (!(await reviewsLeft(db, id, o.tz, now))) throw new Refused(429, SAY.reviewCap);
   if (!bus) throw new Refused(409, SAY.notReady);
   const job: ReviewJob = { goalId: id, kind: 'requested' };
