@@ -656,7 +656,7 @@ describe('approval routes', () => {
     const id = d.actions.capture({ server: 'gcal', tool: 'create_event', fullName: 'gcal.create_event', args: { t: 9 }, destructive: false });
     await serve(d);
     expect((await post('/proposals/approve', { id })).body.action).toMatchObject({ status: 'done' });
-    expect(pushed).toEqual([['Action done', 'An approved action is done.', 'action', `act:${id}`, { channels: ['inapp'] }]]);
+    expect(pushed).toEqual([['Action Done', 'An approved action is done.', 'action', `act:${id}`, { channels: ['inapp'] }]]);
   });
 
   it('a runtime proposal: wired tools are claimed, run in a scope as tainted as the proposal, and how they ended is reported (spooled if need be)', async () => {
@@ -717,7 +717,7 @@ describe('approval routes', () => {
     expect(nightlyRun('runtime:other')).toBeUndefined();
   });
 
-  it('the "Action done" note says what Flint did in a sentence, never a title as its subject', () => {
+  it('the "Action Done" note says what Flint did in a sentence, never a title as its subject', () => {
     expect(doneNote('runtime.world_now')).toBe('Flint checked what’s happening now.');
     expect(doneNote('runtime.world_entity')).toBe('Flint looked up one item.');
     expect(doneNote('gcal.create_event')).toBe('An approved action is done.');
@@ -795,7 +795,7 @@ describe('second review of #41', () => {
     const out = await executeApproved({ actions: new ActionQueue(isSafeTool), tools: [tool('runtime.world_now', () => 'services: 3')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'], notes: { push: (title: string, body: string, _k: string, _d: string, opts: unknown) => (notes.push([title, body, opts]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r' }, 'pr9');
     expect(out.status).toBe('done');
     // In the app only: Will just approved it, so no banner and no ping.
-    expect(notes).toEqual([['Action done', 'Flint checked what’s happening now.', { channels: ['inapp'] }]]);
+    expect(notes).toEqual([['Action Done', 'Flint checked what’s happening now.', { channels: ['inapp'] }]]);
   });
 
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {

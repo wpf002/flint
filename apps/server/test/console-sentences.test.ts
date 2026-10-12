@@ -4,12 +4,18 @@
  * functions run against small fakes: an error in Flint's words ends with a stop
  * and never doubles one; a reply that stops mid-stream says so in a sentence and
  * never prints the server's raw error (that goes to the console log); a refused
- * or unanswered message says so; and a Mac whose key was revoked can replace it.
+ * or unanswered message says so; a Mac whose key was revoked can replace it; and
+ * the line under a notification is complete sentences, whatever was stored.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { PAID_VENDORS } from '@flint/core';
+import { ACTION_DONE, jobFailedNote, noteProblems, type NightlyJob } from '@flint/policy';
+import { actionDoneNote } from '../src/approval-routes';
+import { PHONE_PING } from '../src/notifications';
+import { effectOf, thresholdNote } from '../src/spend';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const mainJs = /<script>\n\/\* ---------- config ---------- \*\/([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -181,5 +187,59 @@ describe('Settings: Approval Keys', () => {
     const none = keys({ seId: null, listed: [] });
     await settle();
     expect(none.resetse!.hidden).toBe(true);
+  });
+});
+
+describe('the line under a notification', () => {
+  const lanesJs = /<script id="lanes-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
+  const c: Record<string, unknown> = { document: { getElementById: () => null }, setInterval: () => 0, TOKEN: '', BASE: '', console };
+  createContext(c);
+  runInContext(lanesJs, c);
+  const title = (t: string) => runInContext(`noteTitle(${JSON.stringify(t)})`, c) as string;
+  const line = (b: string, kind = 'runtime') => runInContext(`noteBody(${JSON.stringify(b)}, ${JSON.stringify(kind)})`, c) as string;
+  /** Each line is one or more sentences: a capital (or a number) first, a stop last. */
+  const SENTENCES = /^[\p{Lu}\p{N}“$][^\n]*[.!?…]$/u;
+
+  it('is the note’s own sentences, untouched, for every note Flint posts today', () => {
+    const notes: Array<{ title: string; body: string }> = [
+      ...(['backup.local', 'backup.offsite', 'restore.drill'] as NightlyJob[]).flatMap((job) => [true, false].flatMap((alone) => [true, false].map((x) => jobFailedNote(job, { alone, icloud: x, mismatch: x })))),
+      ...Object.keys(ACTION_DONE).map(actionDoneNote),
+      actionDoneNote('trident.gmail_send'),
+      ...PAID_VENDORS.flatMap((v) => (['degrade', 'exhausted', 'notice'] as const).map((level) => thresholdNote(v, 'monthly', 80, 120.5, 150, effectOf(v, level)))),
+      { title: 'Daily Summary for Sun Oct 11', body: 'Yesterday, 3 items were important and 12 went to Other. Flint escalated 1.\nFlint did 2 things on its own. You have 1 approval and 3 open escalations waiting.\nThese need a look: Job Queue, Restore Test and GitHub.\nToday, 3 predictions resolve.' },
+      { title: 'The Server Is Down', body: 'The server has been down for 45 minutes. Recovery is somewhat unlikely, around 40% by Oct 2, 5:30 PM.' },
+      { title: 'On Your Calendar Tue Oct 6 at 2:30 PM', body: 'You have an event on Tue Oct 6 at 2:30 PM. Its title is in Activity, under Important.' },
+      { title: 'One of Your Rules Matched', body: 'A GitHub event matched your rule “ci-red”.' },
+      { title: PHONE_PING.title, body: PHONE_PING.body },
+    ];
+    for (const n of notes) {
+      expect(title(n.title), n.title).toBe(n.title);
+      expect(line(n.body), n.body).toBe(n.body);
+      for (const l of line(n.body).split('\n')) expect(l, l).toMatch(SENTENCES);
+      expect(noteProblems(title(n.title), line(n.body)), n.title).toEqual([]);
+    }
+  });
+
+  it('is still complete sentences once an older note’s file paths, commands and asides are left out', () => {
+    for (const [stored, shown] of [
+      ['Last night’s offsite copy failed. The details are in ~/.flint/runtime-backup.out.log.', 'Last night’s offsite copy failed.'],
+      ['The details are in ~/.flint/runtime-backup.out.log. Last night’s backup failed.', 'Last night’s backup failed.'],
+      ['The update failed (exit 2). Run `pnpm install` and try again. Flint kept the old version.', 'The update failed. Flint kept the old version.'],
+      ['It was told to stop with --force. It stopped.', 'It stopped.'],
+      ['Flint’s restore_drill job found 2 tables that differ.', 'Flint’s restore drill job found 2 tables that differ.'],
+      ['Nothing changed (see /Users/will/log.txt).', 'Nothing changed.'],
+      // Nothing left to say: the title stands alone, and no empty line is shown under it.
+      ['See ~/.flint/server.err.log.', ''],
+    ] as const) {
+      expect(line(stored), stored).toBe(shown);
+      if (shown) expect(shown).toMatch(SENTENCES);
+    }
+  });
+
+  it('the count after a repeated note is a sentence of its own', () => {
+    const code = lanesJs.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(code).toContain("'It has failed '+n.count+(n.every>NOTE_NIGHT?' weeks':' nights')+' in a row.'");
+    expect(code).toContain("'It happened '+n.count+' times.'");
+    for (const said of ['It has failed 5 nights in a row.', 'It has failed 2 weeks in a row.', 'It happened 3 times.']) expect(said).toMatch(SENTENCES);
   });
 });

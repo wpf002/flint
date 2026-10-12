@@ -248,14 +248,14 @@ describe('SpendGuard notifications', () => {
     expect(pushed).toHaveLength(0);
     spend(0.2); // 51%
     spend(0.1); // still 52%: no second notice
-    expect(pushed.map((p) => p.title)).toEqual(["Claude (Anthropic) budget: 50% of today's cap"]);
+    expect(pushed.map((p) => p.title)).toEqual(['Claude Budget at 50% for Today']);
     spend(3); // 82%
     spend(2); // 102%
     spend(1); // still over
     expect(pushed.map((p) => p.title)).toEqual([
-      "Claude (Anthropic) budget: 50% of today's cap",
-      "Claude (Anthropic) budget: 80% of today's cap",
-      "Claude (Anthropic) budget: 100% of today's cap",
+      'Claude Budget at 50% for Today',
+      'Claude Budget at 80% for Today',
+      'Claude Budget at 100% for Today',
     ]);
     expect(pushed[0]!.body).toBe('Flint has spent $5.10 of today’s $10.00 cap. Nothing is limited yet.');
     expect(pushed[1]!.body).toBe('Flint has spent $8.20 of today’s $10.00 cap. Harder questions use a cheaper model, and background work waits.');
@@ -270,7 +270,7 @@ describe('SpendGuard notifications', () => {
     const l = ledgerAt({ now: NOON });
     new SpendGuard(l, caps({ perplexity: { dailyUsd: 1 } }), n);
     l.record({ vendor: 'perplexity', model: 'sonar', kind: 'tool-perplexity', usd: 0.9 });
-    expect(pushed.map((p) => p.title)).toEqual(["Perplexity budget: 80% of today's cap"]);
+    expect(pushed.map((p) => p.title)).toEqual(['Perplexity Budget at 80% for Today']);
   });
 
   it('notifies again the next day, and for the monthly cap on its own key', () => {
@@ -294,7 +294,7 @@ describe('SpendGuard notifications', () => {
     const g = new SpendGuard(ledgerAt(t), caps({ openai: { dailyUsd: 3 } }), n);
     g.checkAll();
     g.checkAll();
-    expect(pushed.map((p) => p.title)).toEqual(["OpenAI budget: 80% of today's cap"]);
+    expect(pushed.map((p) => p.title)).toEqual(['OpenAI Budget at 80% for Today']);
   });
 });
 

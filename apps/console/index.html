@@ -302,6 +302,11 @@
   .frow .fx span{font-size:12px;line-height:16px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .frow .fx .more{white-space:normal;overflow:visible;margin-top:6px;color:var(--t2);display:flex;flex-direction:column;gap:4px;}
   .frow .fx .more>span{white-space:normal;overflow:visible;}
+  /* A notification is read here and nowhere else, so nothing of it is cut off: its title and every sentence
+     under it are shown whole (the morning digest keeps its four lines). */
+  #nlist .frow .fx b,#nlist .frow .fx span{overflow:visible;text-overflow:clip;overflow-wrap:anywhere;}
+  #nlist .frow .fx b{white-space:normal;}
+  #nlist .frow .fx span{white-space:pre-line;margin-top:2px;}
   .frow small{font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums;white-space:nowrap;margin-top:1px;}
   .frow .acts{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;}
   .frow .acts .ghost.on{color:var(--gold);}
@@ -985,9 +990,11 @@ function laneAgo(iso){var ms=Date.now()-(typeof iso==='number'?iso:Date.parse(is
 /* For a sentence: just now, 2m ago, 5h ago, yesterday, on Oct 1. */
 function agoPhrase(t){var a=laneAgo(t);return a==='Now'?'just now':a==='Yesterday'?'yesterday':/^\d/.test(a)?a+' ago':a?'on '+a:'';}
 function laneDay(t){var ms=typeof t==='number'?t:Date.parse(t);var s=new Date();s.setHours(0,0,0,0);return ms>=s.getTime()?'Today':'Earlier';}
-/* Apple's title style, for Flint's own short titles (never for user data). */
+/* Apple's title style, for Flint's own short titles (never for user data). A word with its own capitals or marks
+   (GitHub, iCloud, CI, 2:15) stays as written; a colon or a stop after a word is not such a mark. The same as
+   @flint/policy's titleCase, which the notes' producers write their titles with (a test keeps the two in step). */
 var SMALL={a:1,an:1,the:1,and:1,but:1,or:1,nor:1,for:1,so:1,yet:1,as:1,at:1,by:1,from:1,in:1,into:1,of:1,off:1,on:1,onto:1,out:1,over:1,to:1,up:1,with:1};
-function titleCase(s){var w=String(s||'').split(' ');return w.map(function(x,i){if(!x)return x;if(/[A-Z].*[A-Z]|\d|[_.:/@]/.test(x))return x;var l=x.toLowerCase();
+function titleCase(s){var w=String(s||'').split(' ');return w.map(function(x,i){if(!x)return x;if(/[A-Z].*[A-Z]|[a-z][A-Z]|\d|[_.:/@]/.test(x.replace(/[.:]+$/,'')))return x;var l=x.toLowerCase();
   if(i>0&&i<w.length-1&&SMALL[l])return l;return l.replace(/^(\P{L}*)(\p{L})/u,function(m,p,c){return p+c.toUpperCase();});}).join(' ');}
 function laneCall(path,body){
   var opts={headers:Object.assign({'content-type':'application/json'},auth())};
@@ -1012,18 +1019,49 @@ function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
   document.getElementById('lanelist').textContent='';document.getElementById('laneolder').hidden=true;laneMsg('');loadLane(false);}
 
 /* ---------- notifications ---------- */
+/* A note in plain words (Will, 2026-10-12): a Title Case title, and sentences under it. Never an action's internal
+   name ("backup.offsite"), a file path, a command, an id or an aside in parentheses, whatever an older Flint
+   stored: those details are in the logs. The jobs' names are @flint/policy's JOB_WORDS (a test keeps the two in
+   step). A calendar or market note carries someone else's words, which stay as they were written. */
+var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restore.drill':'Restore Test','maintenance.retention':'Cleanup'};
+var NOTE_OUTSIDE={calendar:1,signal:1};
+/* An internal name (lowercase parts joined by dots or underscores), an entity's ref (issue#24ehza), a file path. */
+var NOTE_NAME=/(^|[^A-Za-z0-9])([a-z][a-z0-9]*(?:[._][a-z0-9]+)+)/g,NOTE_REF=/[a-z_]{2,20}#[A-Za-z0-9]{1,12}\b/g,NOTE_PATH=/(^|[\s"'“(])~?\/[\w.~\/-]+/g;
+function noteWords(m,before,w){return before+(NOTE_JOBS[w]||laneWords(w));}
+function noteDay(y,m,d){return new Date(Date.UTC(+y,+m-1,+d,12)).toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'}).replace(',','');}
+function noteTitle(t){t=String(t||'').replace(/`/g,'').replace(/\s*\([^)]*\)/g,'');
+  /* The morning digest, as it was titled before ("Flint for 2026-10-11"). */
+  var d=/^Flint for (\d{4})-(\d\d)-(\d\d)$/.exec(t);if(d)return 'Daily Summary for '+noteDay(d[1],d[2],d[3]);
+  t=t.replace(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}(?= is down$)/,'A service').replace(NOTE_REF,'').replace(NOTE_PATH,'$1').replace(NOTE_NAME,noteWords);
+  return titleCase(t.replace(/\s+/g,' ').replace(/^[\s:]+|[\s:.]+$/g,''))||'Flint';}
+/* The body's sentences, without asides, without one that points at a file or a command (nothing Will can click),
+   and with an internal name in words. A probability keeps its number ("(~40%)" was the ledger's aside). */
+function noteBody(b,kind){b=String(b||'');if(NOTE_OUTSIDE[kind])return b;
+  return b.split('\n').map(function(line){line=line.replace(/\s*\(~(\d+)%\)/g,', around $1%').replace(/\s*\([^)]*\)/g,'');
+    return (line.match(/\S.*?(?:[.!?…]+(?=\s|$)|$)/g)||[]).filter(function(x){return !/(^|[\s"'“])~?\/[\w.~-]+|`|(^|\s)--[a-z]/.test(x);}).join(' ')
+      .replace(NOTE_REF,'').replace(NOTE_NAME,noteWords).replace(/\s+([.,:;])/g,'$1').replace(/\s+/g,' ').trim();
+  }).filter(Boolean).join('\n');}
+/* How often a job that says it failed runs: nightly, or weekly for the restore test (Sundays). 0: not such a note. */
+var NOTE_NIGHT=86400000;
+function noteEvery(t){for(var k in NOTE_JOBS)if(t===NOTE_JOBS[k]+' Failed')return k==='restore.drill'?7*NOTE_NIGHT:NOTE_NIGHT;return 0;}
 function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;document.getElementById('nbadge').hidden=!(d.unread>0);}).catch(function(){});}
 function loadNotifs(){var list=document.getElementById('nlist');if(!list.children.length){list.textContent='';list.appendChild(laneEmpty('Loading…',''));}
   fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
     list.textContent='';var items=(d&&d.items)||[];
     if(!d){list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));return;}
     if(!items.length){list.appendChild(laneEmpty('Nothing New',''));return;}
-    /* The same message again and again is one row with a count. The runtime's notes are each their own
-       escalation (two events at the same time read alike, as their titles stay out), so they never fold. */
-    var rows=[];items.forEach(function(n){var last=rows[rows.length-1];if(last&&n.kind!=='runtime'&&last.kind!=='runtime'&&last.title===n.title&&last.body===n.body&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&n.read;}else rows.push({title:n.title,body:n.body,kind:n.kind,ts:n.ts,read:!!n.read,count:1});});
+    var rows=[],streak={};items.forEach(function(n){var t=noteTitle(n.title),b=noteBody(n.body,n.kind),every=noteEvery(t),last=rows[rows.length-1],s=every?streak[t]:null;
+      /* A job that fails night after night is one row, the newest, saying how long it has gone on: a failure joins
+         the one after it when they are a night apart (a week, for the restore test). Two in one night count once. */
+      if(s&&s.first-n.ts<=every*1.5){if(s.first-n.ts>=every/2)s.count++;s.first=n.ts;s.read=s.read&&!!n.read;return;}
+      /* The same message again and again is one row with a count. The runtime's other notes are each their own
+         escalation (two events at the same time read alike, as their titles stay out), so they never fold. */
+      if(!every&&last&&!last.every&&n.kind!=='runtime'&&last.kind!=='runtime'&&last.title===t&&last.body===b&&laneDay(last.ts)===laneDay(n.ts)){last.count++;last.read=last.read&&!!n.read;return;}
+      var r={title:t,body:b,kind:n.kind,ts:n.ts,first:n.ts,read:!!n.read,count:1,every:every};rows.push(r);if(every)streak[t]=r;});
     var group='';rows.forEach(function(n){var g=laneDay(n.ts);if(g!==group){list.appendChild(laneEl('div','gsh fsh',g));group=g;}
       var row=laneEl('div','frow'+(n.read?' read':''));row.appendChild(laneEl('span','ud'+(n.read?' read':'')));
-      var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,titleCase(n.title)));fx.appendChild(laneEl('span',null,[n.body||'',n.count>1?'It happened '+n.count+' times.':''].filter(Boolean).join(' ')));row.appendChild(fx);
+      var again=n.count<2?'':n.every?'It has failed '+n.count+(n.every>NOTE_NIGHT?' weeks':' nights')+' in a row.':'It happened '+n.count+' times.';
+      var fx=laneEl('span','fx');fx.appendChild(laneEl('b',null,n.title));fx.appendChild(laneEl('span',null,[n.body,again].filter(Boolean).join(' ')));row.appendChild(fx);
       row.appendChild(laneEl('small',null,laneAgo(n.ts)));list.appendChild(row);});
     markAllRead(true);
   }).catch(function(){list.textContent='';list.appendChild(laneEmpty("Couldn't Load Activity",'Check the connection and try again.'));});}
