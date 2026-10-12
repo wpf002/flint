@@ -207,9 +207,22 @@ export async function catalogLines(c: pg.Client): Promise<string[]> {
 export interface CatalogDifference {
   /** What differs, each named as Will would read it; empty when nothing does. */
   objects: string[];
+  /** The same, every one of them, under what kind of thing it is: in the order they are said. */
+  groups: Array<{ title: string; items: string[] }>;
   /** How many lines differ in all. */
   lines: number;
 }
+
+/** What kind of thing a line is about, as a heading. Anything not named here is under the last. */
+const GROUPS: ReadonlyArray<{ title: string; kinds: readonly string[] }> = [
+  { title: 'Who may do what', kinds: ['privilege', 'default privilege', 'may'] },
+  { title: 'Tables, columns and views', kinds: ['schema', 'relation', 'column', 'view', 'sequence', 'type'] },
+  { title: 'Checks and indexes', kinds: ['constraint', 'index'] },
+  { title: 'Triggers and rules', kinds: ['trigger', 'rule', 'policy', 'event trigger'] },
+  { title: 'Functions', kinds: ['function'] },
+  { title: 'Everything else', kinds: [] },
+];
+const groupOf = (kind: string): string => GROUPS.find((g) => g.kinds.includes(kind))?.title ?? GROUPS[GROUPS.length - 1]!.title;
 
 /** How many `|` fields of a line say WHICH object it is (the rest say what it is like). */
 const NAMED_BY: Record<string, number> = { column: 2, constraint: 2, index: 2, trigger: 2, rule: 2, policy: 2, privilege: 3, 'default privilege': 3, may: 1 };
@@ -228,12 +241,12 @@ const WORDS: Record<string, (id: string[]) => string> = {
 /** A name from a catalog, cut to what a sentence can hold and to characters that are safe on a terminal. */
 const safe = (s: string): string => s.replace(/[^\w .,:()<>"=/-]/g, '?').slice(0, 120);
 
-function named(line: string): { key: string; words: string } {
+function named(line: string): { key: string; words: string; group: string } {
   const fields = line.split('|');
   const kind = fields[0] ?? '';
   const id = fields.slice(1, 1 + (NAMED_BY[kind] ?? 1));
   const words = WORDS[kind]?.(id) ?? `the ${kind} ${id.join(' ')}`;
-  return { key: `${kind}|${id.join('|')}`, words: safe(words) };
+  return { key: `${kind}|${id.join('|')}`, words: safe(words), group: groupOf(kind) };
 }
 
 /**
@@ -241,22 +254,60 @@ function named(line: string): { key: string; words: string } {
  * has and the restored database lacks is not a difference (a database holds the
  * months it has lived through); anything else on either side is.
  */
-export function catalogDifference(reference: readonly string[], restored: readonly string[]): CatalogDifference {
+export function catalogDifference(reference: readonly string[], restored: readonly string[], alternatives: ReadonlyArray<readonly string[]> = []): CatalogDifference {
   const ref = new Set(reference);
   const got = new Set(restored);
   const extra = restored.filter((l) => !ref.has(l));
   const missing = reference.filter((l) => !got.has(l) && !/<month>|<day>/.test(l));
-  const objects = new Map<string, string>();
+  const objects = new Map<string, { said: string; group: string }>();
   const extraKeys = new Set(extra.map((l) => named(l).key));
   for (const l of missing) {
     const n = named(l);
-    objects.set(n.key, extraKeys.has(n.key) ? `${n.words} is different` : `${n.words} is missing`);
+    objects.set(n.key, { said: extraKeys.has(n.key) ? `${n.words} is different` : `${n.words} is missing`, group: n.group });
   }
   for (const l of extra) {
     const n = named(l);
-    if (!objects.has(n.key)) objects.set(n.key, `${n.words} is not one Flint makes`);
+    if (!objects.has(n.key)) objects.set(n.key, { said: `${n.words} is not one Flint makes`, group: n.group });
   }
-  return { objects: [...objects.values()].sort(), lines: extra.length + missing.length };
+  // An object that is, whole, exactly as one of the alternatives has it is not a difference. (Postgres writes an
+  // expression back in one of two forms, depending on whether the database has been through a dump: a database
+  // that never was is compared with a reference of each kind.)
+  if (objects.size && alternatives.length) {
+    const byKey = (lines: readonly string[]): Map<string, Set<string>> => {
+      const m = new Map<string, Set<string>>();
+      for (const l of lines) {
+        const k = named(l).key;
+        if (!m.has(k)) m.set(k, new Set());
+        m.get(k)!.add(l);
+      }
+      return m;
+    };
+    const have = byKey(restored);
+    for (const alternative of alternatives) {
+      const want = byKey(alternative);
+      for (const key of [...objects.keys()]) {
+        const w = want.get(key) ?? new Set<string>();
+        const h = have.get(key) ?? new Set<string>();
+        const allThere = [...w].every((l) => h.has(l) || /<month>|<day>/.test(l));
+        const nothingMore = [...h].every((l) => w.has(l));
+        if (w.size > 0 && allThere && nothingMore) objects.delete(key);
+      }
+    }
+  }
+  const all = [...objects.values()];
+  const groups = GROUPS.map((g) => ({ title: g.title, items: all.filter((o) => o.group === g.title).map((o) => o.said).sort() })).filter((g) => g.items.length > 0);
+  return { objects: all.map((o) => o.said).sort(), groups, lines: all.length ? extra.length + missing.length : 0 };
+}
+
+/**
+ * A difference in full, for the terminal: every object, under what kind of
+ * thing it is, each a sentence. "Is missing": this copy of Flint builds it and
+ * the database lacks it. "Is not one Flint makes": the database has it and this
+ * copy of Flint would not build it. "Is different": both have it, in two forms.
+ */
+export function differenceLines(d: CatalogDifference): string[] {
+  const sentence = (s: string): string => `  ${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+  return d.groups.flatMap((g) => [`${g.title}:`, ...g.items.map(sentence)]);
 }
 
 /** A difference as one sentence: the first few objects by name, and how many more. */
@@ -384,3 +435,49 @@ export async function buildReference(c: pg.Client, applied: readonly Migration[]
   await c.query(PRISMA_TABLE);
   for (const m of [...applied].sort((a, b) => (a.name < b.name ? -1 : 1))) await c.query(m.sql);
 }
+
+/**
+ * Migrations a database may have had done to it by hand before the migration
+ * existed, so that its own record does not list them though the database is
+ * already as they leave it. Only a migration that takes rights away, or grants
+ * a role one it already held another way, may be named here (a test reads each
+ * file to be sure): a backup that is tighter than its record says is no danger,
+ * and the migration, still pending for it, is applied after the restore and
+ * changes nothing.
+ *
+ * `20261013000050_public_schema_floor`: the Mac Flint runs on had "everyone"
+ * taken off its public schema at first setup. Every backup made before that
+ * migration reached it is of such a database.
+ */
+export const ALREADY_BY_HAND: readonly string[] = ['20261013000050_public_schema_floor'];
+
+export interface Compared {
+  /** How the database differs from what this checkout builds for its record; no objects when it does not. */
+  difference: CatalogDifference;
+  /** The migrations found already in place though the record does not list them (ALREADY_BY_HAND); usually none. */
+  byHand: string[];
+}
+
+/**
+ * Compare a database's lines with what this checkout builds for the migrations
+ * it records. When they differ and a migration that may have been done by hand
+ * is still pending for it, it is compared once more with a reference that has
+ * those applied too: a database that matches that one is as Flint builds it.
+ */
+export async function compareWithReference(
+  lines: readonly string[],
+  state: MigrationState,
+  migrationsDir: string,
+  reference: (applied: readonly Migration[]) => Promise<string[]>,
+  /** The same reference in its other written form, for a database that has never been through a dump (see catalogDifference). */
+  alternative?: (applied: readonly Migration[]) => Promise<string[]>,
+): Promise<Compared> {
+  const against = async (applied: readonly Migration[]): Promise<CatalogDifference> => catalogDifference(await reference(applied), lines, alternative ? [await alternative(applied)] : []);
+  const difference = await against(state.applied);
+  if (!difference.objects.length) return { difference, byHand: [] };
+  const early = checkoutMigrations(migrationsDir).filter((m) => ALREADY_BY_HAND.includes(m.name) && state.pending.includes(m.name));
+  if (!early.length) return { difference, byHand: [] };
+  const withEarly = await against([...state.applied, ...early]);
+  return withEarly.objects.length ? { difference, byHand: [] } : { difference: withEarly, byHand: early.map((m) => m.name) };
+}
+

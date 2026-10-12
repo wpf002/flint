@@ -144,6 +144,14 @@ Other things to know:
   of your Flint backups. A later restore removes kept ones that are more than 14
   days old, and names them before you confirm.
 - If any check fails, it stops and nothing in use has changed.
+- If it says a backup "is not built the way this copy of Flint builds its
+  database", the backup's tables, guards or permissions are not the ones Flint's
+  own code makes, so it is not put into use. It names what differs. To see every
+  difference in the database in use at once, without restoring anything:
+
+  ```
+  ~/flint/apps/studio/restore_database.sh --compare
+  ```
 - If it is interrupted, run this. It opens the database again and starts Flint:
 
   ```

@@ -60,7 +60,10 @@ import { failureOf } from '../dbcodes.js';
 import { client, countRows, dumpDatabase, run, sha256File, targetOf, ToolFailed, type PgTarget, type Tools } from './backup.js';
 import { scramVerifier } from './bootstrap.js';
 import { carryForward, readCurrent, type CarryReport, type CurrentFacts } from './carry.js';
-import { OWNER, buildReference, catalogDifference, catalogLines, differenceSentence, migrationState, ownedByOthers, type Migration, type MigrationState } from './catalog.js';
+import {
+  OWNER, buildReference, catalogLines, checkoutMigrations, compareWithReference, differenceLines, differenceSentence, migrationState, ownedByOthers,
+  type CatalogDifference, type Migration, type MigrationState,
+} from './catalog.js';
 
 export { VOIDED_BY_RESTORE } from './carry.js';
 
@@ -368,6 +371,8 @@ async function databaseGrants(c: pg.Client, database: string): Promise<Grant[]> 
 /** A database built from this checkout's migrations: every line that says how it behaves, and the privileges on the database itself. */
 interface Reference {
   lines: string[];
+  /** The same lines read before the dump and restore: how a database that has never been through one reads. */
+  raw: string[];
   grants: Grant[];
 }
 /** Kept for this process: the same migrations on the same server always give the same reference. */
@@ -398,12 +403,13 @@ async function referenceOf(main: pg.Client, owner: PgTarget, name: string, appli
     await withClient(withDatabase(owner, name), (c) => buildReference(c, applied));
     // The privileges on the database itself are set by the first migration and live on the cluster: read before the round trip.
     const grants = await databaseGrants(main, name);
+    const raw = await withClient(withDatabase(owner, name), catalogLines);
     const file = join(dir, 'reference.dump');
     await run(tools.pgDump, ['-Fc', '--schema-only', ...on, '-f', file], owner.password);
     await fresh();
     await run(tools.pgRestore, ['--no-owner', '--exit-on-error', ...on, file], owner.password);
     await setDatabaseGrants(main, name, grants);
-    const made = { lines: await withClient(withDatabase(owner, name), catalogLines), grants };
+    const made = { lines: await withClient(withDatabase(owner, name), catalogLines), raw, grants };
     references.set(key, made);
     return made;
   } finally {
@@ -436,6 +442,10 @@ export interface Verified {
   /** What is wrong, each a short phrase; empty when nothing is. */
   problems: string[];
   migrations: MigrationState;
+  /** Every way it is not built as this checkout builds a database, when there is any: the whole list, grouped. */
+  difference?: CatalogDifference;
+  /** Migrations it already has in place though its record does not list them (catalog.ts, ALREADY_BY_HAND). */
+  byHand: string[];
 }
 
 /**
@@ -467,16 +477,25 @@ export async function verifyRestored(
   const migrations = await migrationState(c, o.migrationsDir);
   problems.push(...migrations.problems);
   // A record that is not ours gives no reference to compare with: it is refused on that alone.
+  let difference: CatalogDifference | undefined;
+  let byHand: string[] = [];
   if (migrations.problems.length === 0) {
-    const d = catalogDifference(await o.reference(migrations.applied), await catalogLines(c));
-    if (d.objects.length) problems.push(`it is not built the way this copy of Flint builds its database (${differenceSentence(d)})`);
+    const compared = await compareWithReference(await catalogLines(c), migrations, o.migrationsDir, o.reference);
+    byHand = compared.byHand;
+    if (compared.difference.objects.length) {
+      difference = compared.difference;
+      problems.push(`it is not built the way this copy of Flint builds its database (${differenceSentence(difference)})`);
+    }
   }
   if (o.owner) {
     const others = await ownedByOthers(c, o.owner, o.strangers ?? []);
     if (others.length) problems.push(`${others.length} thing(s) in it do not belong to the migration owner (${others.slice(0, 3).join('; ')})`);
   }
-  return { ok: problems.length === 0, tables: o.counts ? Object.keys(o.counts).length : 0, mismatches, problems, migrations };
+  return { ok: problems.length === 0, tables: o.counts ? Object.keys(o.counts).length : 0, mismatches, problems, migrations, ...(difference ? { difference } : {}), byHand };
 }
+
+/** The whole list behind "not built the way this copy of Flint builds its database", when the sentence had to cut it short. */
+const fullList = (v: Verified): string[] => (v.difference && v.difference.objects.length > 3 ? ['Every difference:', ...differenceLines(v.difference)] : []);
 
 // ---------------------------------------------------------------------------
 // The database's own settings (they live on the cluster, and a dump does not carry them)
@@ -598,16 +617,44 @@ async function onMaintenance<T>(t: PgTarget, fn: (c: pg.Client) => Promise<T>): 
   }
 }
 
-/** The encoding and locale of `database`, as CREATE DATABASE takes them, so a copy sorts and stores text the same way. */
+/**
+ * The encoding and locale of `database`, as CREATE DATABASE takes them, so a
+ * copy sorts and stores text the same way: whichever of Postgres's three ways
+ * of sorting the database was made with (the operating system's, ICU's, or
+ * Postgres's own), with the names it was given. `copied` is false when what it
+ * has cannot be written into a statement (a name with odd characters, sorting
+ * rules of its own): the copy then takes the server's defaults, and a restore
+ * and `--compare` both say so.
+ */
 async function localeOf(c: pg.Client, database: string): Promise<string> {
-  const r = (await c.query<{ enc: string; collate: string; ctype: string; provider: string }>(
-    `SELECT pg_encoding_to_char(encoding) AS enc, datcollate AS collate, datctype AS ctype, datlocprovider::text AS provider FROM pg_database WHERE datname = $1`,
+  return (await localeFacts(c, database)).clause;
+}
+
+interface LocaleFacts {
+  clause: string;
+  /** The clause says everything the database has; false when the copy would take the server's defaults instead. */
+  copied: boolean;
+  /** In words, for a sentence: `UTF8, sorted by ICU (en-US)`. */
+  words: string;
+}
+
+async function localeFacts(c: pg.Client, database: string): Promise<LocaleFacts> {
+  const r = (await c.query<{ enc: string; collate: string; ctype: string; provider: string; locale: string | null; rules: string | null }>(
+    `SELECT pg_encoding_to_char(encoding) AS enc, datcollate AS collate, datctype AS ctype, datlocprovider::text AS provider, datlocale AS locale, daticurules AS rules
+     FROM pg_database WHERE datname = $1`,
     [database],
   )).rows[0];
   const plain = /^[A-Za-z0-9_.@-]{1,60}$/;
-  // Only the ordinary case is spelled out; anything else takes the cluster's defaults.
-  if (!r || r.provider !== 'c' || !plain.test(r.enc) || !plain.test(r.collate) || !plain.test(r.ctype)) return '';
-  return ` ENCODING '${r.enc}' LC_COLLATE '${r.collate}' LC_CTYPE '${r.ctype}'`;
+  if (!r) return { clause: '', copied: false, words: 'unknown' };
+  const how = r.provider === 'i' ? `ICU (${r.locale ?? ''})` : r.provider === 'b' ? `Postgres itself (${r.locale ?? ''})` : `the system (${r.collate})`;
+  const words = `${r.enc}, sorted by ${how}`.replace(/[^\w .,()@-]/g, '?').slice(0, 120);
+  if (!plain.test(r.enc) || !plain.test(r.collate) || !plain.test(r.ctype)) return { clause: '', copied: false, words };
+  const base = ` ENCODING '${r.enc}' LC_COLLATE '${r.collate}' LC_CTYPE '${r.ctype}'`;
+  if (r.provider === 'c') return { clause: base, copied: true, words };
+  if (!r.locale || !plain.test(r.locale) || r.rules) return { clause: '', copied: false, words };
+  if (r.provider === 'i') return { clause: `${base} LOCALE_PROVIDER icu ICU_LOCALE '${r.locale}'`, copied: true, words };
+  if (r.provider === 'b') return { clause: `${base} LOCALE_PROVIDER builtin BUILTIN_LOCALE '${r.locale}'`, copied: true, words };
+  return { clause: '', copied: false, words };
 }
 
 /** Who is connected to `name` besides this session, in words: `flint_app (3 connections)`. */
@@ -1128,7 +1175,9 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
 
       // Before it is handed over: counts, the migrations it records, and every object against the reference.
       verified = await asRestorer((c) => verifyRestored(c, { ...(check.counts ? { counts: check.counts } : {}), migrationsDir: o.migrationsDir, reference: referenceFor }));
-      if (!verified.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${verified.problems.join('; ')}.`, { stage: 'verify' });
+      if (!verified.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${verified.problems.join('; ')}.`, { stage: 'verify', lines: fullList(verified) });
+      // A database that was tightened by hand before the update that does the same: accepted as it is, and said.
+      if (verified.byHand.length) notes.push('The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.');
 
       // The copy's own properties live on the cluster, where no comparison of its contents sees them, and its owner
       // (the backup's SQL, while it ran) could set them: a stored setting, a connection limit, the template mark.
@@ -1152,7 +1201,7 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
         }
       });
       const handed = await withClient(copyOwner, (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: referenceFor, owner: OWNER, strangers: [restorer.user] }));
-      if (!handed.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${handed.problems.join('; ')}.`, { stage: 'verify' });
+      if (!handed.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${handed.problems.join('; ')}.`, { stage: 'verify', lines: fullList(handed) });
       // And nothing of its own is left on it: no stored setting for anyone, no limit, not a template.
       const own = (await m.query<{ plain: boolean }>(
         `SELECT d.datconnlimit = -1 AND NOT d.datistemplate AND d.datallowconn AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s WHERE s.setdatabase = d.oid) AS plain FROM pg_database d WHERE d.datname = $1`,
@@ -1443,3 +1492,164 @@ export async function repairDatabase(o: RepairOptions): Promise<{ did: 'opened' 
   const runtimeStarted = await o.startRuntime().then(() => true, () => false);
   return { did, runtimeStarted };
 }
+
+// ---------------------------------------------------------------------------
+// Compare: how the database in use differs from what this checkout builds
+
+export interface CompareOptions {
+  /** flint_owner on the production database. */
+  owner: string;
+  /** flint_restore, for its name (the role checks) only: it is never signed in as here. */
+  restore: string;
+  tools: Tools;
+  migrationsDir: string;
+  say(line: string): void;
+  now?: Date;
+}
+
+export interface Comparison {
+  /** A backup of this database would pass a restore's comparison. */
+  same: boolean;
+  /** How many things differ. */
+  differences: number;
+  /** Migrations it already has in place by hand (catalog.ts, ALREADY_BY_HAND). */
+  byHand: string[];
+  /** How many sentences were said about the server-side setup (roles, the database's own rights and settings). */
+  notes: number;
+}
+
+/**
+ * Read the database in use and say every way it is not what this checkout
+ * builds, without a backup and without restoring anything. It is what a
+ * restore's own check compares, taken from the live database instead of from a
+ * restored copy: so every difference is listed at once, before one stops a
+ * restore.
+ *
+ * Nothing in the database in use is changed: it is read in sessions that
+ * refuse every write. One scratch database is made beside it (the reference,
+ * built from this checkout's migrations) and removed again.
+ *
+ * Said in three parts: what a backup would carry and a restore would refuse
+ * (the make-up of the database itself: tables, guards, privileges); what lives
+ * on the server and not in a backup (the database's own rights and settings,
+ * the roles), which a restore sets or checks itself; and how the copy a restore
+ * makes would be created.
+ */
+export async function compareDatabase(o: CompareOptions): Promise<Comparison> {
+  const owner = targetOf(o.owner);
+  const restorer = targetOf(o.restore);
+  const database = owner.database;
+  if (!DB_NAME.test(database) || RESERVED.has(database)) throw new RestoreRefused("The production database's name is not one Flint can compare.", { stage: 'config' });
+  const stamp = (o.now ?? new Date()).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'z').toLowerCase();
+  const reference = `${database}_reference_${stamp}`;
+  if (!DB_NAME.test(reference)) throw new RestoreRefused("The production database's name is too long to build a reference beside.", { stage: 'config' });
+  const m = await maintenance(owner);
+  try {
+    const locked = (await m.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1, $2) AS ok', [...LOCK])).rows[0]!.ok;
+    if (!locked) throw new RestoreRefused('A restore is running. Wait for it to finish.', { stage: 'lock' });
+    const state = await clusterState(m, database);
+    if (!state.production) throw new RestoreRefused(`There is no database named ${database} to compare.`, { stage: 'state' });
+    if (!state.production.open) throw new RestoreRefused(`The database ${database} is closed to connections: an earlier restore was stopped part-way.`, { stage: 'state', lines: ['Open it again with this command:', REPAIR] });
+    if ((await m.query('SELECT 1 FROM pg_database WHERE datname = $1', [reference])).rowCount) throw new RestoreRefused('A comparison from this same second is already there. Wait a moment and run this again.', { stage: 'state' });
+
+    // The database in use, read and never written: every statement of these sessions is refused a write by Postgres itself.
+    const readOnly = <T>(fn: (c: pg.Client) => Promise<T>): Promise<T> =>
+      withClient(owner, async (c) => {
+        await c.query('SET default_transaction_read_only = on');
+        await c.query(`SET search_path = ''`);
+        return fn(c);
+      });
+    const migrations = await readOnly((c) => migrationState(c, o.migrationsDir));
+    const lines = await readOnly((c) => catalogLines(c));
+    const strays = await readOnly((c) => ownedByOthers(c, OWNER, [restorer.user]));
+
+    const locale = await localeFacts(m, database);
+    const built = new Map<string, Reference>();
+    const referenceFor = async (applied: readonly Migration[]): Promise<Reference> => {
+      const key = applied.map((a) => a.name).join(',');
+      if (!built.has(key)) built.set(key, await referenceOf(m, owner, reference, applied, locale.clause, o.tools));
+      return built.get(key)!;
+    };
+
+    // 1. What a backup carries, and a restore compares.
+    let differences = 0;
+    let byHand: string[] = [];
+    if (migrations.problems.length) {
+      differences += migrations.problems.length;
+      o.say(`The database's own record of its updates is not one this copy of Flint can follow: ${migrations.problems.join('; ')}.`);
+      o.say('A restore would refuse a backup of it for that alone, so nothing else was compared.');
+    } else {
+      // The database in use has usually never been through a dump (it was built by the migrations themselves), and
+      // sometimes has (after a restore): each object may read as either kind of reference has it.
+      const compared = await compareWithReference(lines, migrations, o.migrationsDir, async (applied) => (await referenceFor(applied)).lines, async (applied) => (await referenceFor(applied)).raw);
+      byHand = compared.byHand;
+      differences += compared.difference.objects.length;
+      const recorded = `${migrations.applied.length} update${migrations.applied.length === 1 ? '' : 's'} on record${migrations.pending.length ? `, ${migrations.pending.length} still to apply` : ''}`;
+      if (!compared.difference.objects.length) {
+        o.say(`The database ${database} is built the way this copy of Flint builds one (${recorded}).`);
+        if (byHand.length) o.say('It was already set up as an update that is still to apply sets it, which a restore accepts.');
+      } else {
+        const n = compared.difference.objects.length;
+        o.say(`The database ${database} differs from the one this copy of Flint builds in ${n} way${n === 1 ? '' : 's'} (${recorded}).`);
+        o.say('"Is missing" means Flint builds it and the database lacks it. "Is not one Flint makes" means the database has it and Flint would not build it.');
+        for (const line of differenceLines(compared.difference)) o.say(line);
+      }
+    }
+    if (strays.length) {
+      o.say(`In it, ${strays.length} thing${strays.length === 1 ? ' does' : 's do'} not belong to the migration owner. A restore gives everything to the migration owner, so this stops nothing:`);
+      for (const stray of strays.slice(0, 20)) o.say(`  ${stray.charAt(0).toUpperCase()}${stray.slice(1)}.`);
+      if (strays.length > 20) o.say(`  And ${strays.length - 20} more.`);
+    }
+
+    // 2. What lives on the server, not in a backup.
+    let notes = 0;
+    const note = (line: string): void => {
+      notes += 1;
+      o.say(line);
+    };
+    const setup = await roleProblems(m, restorer.user);
+    if (state.production.owner !== OWNER) setup.push(`the database ${database} does not belong to ${OWNER}`);
+    for (const problem of setup) note(`A restore would stop at this: ${problem}.`);
+    const member = (await m.query<{ ok: boolean | null }>(`SELECT CASE WHEN to_regrole($2) IS NULL THEN NULL ELSE pg_has_role($1, $2, 'MEMBER') END AS ok`, [OWNER, restorer.user])).rows[0]!.ok;
+    if (member === false) note(`A restore would stop until the migration owner is given the restoring role (the command is printed by a restore).`);
+    if (migrations.problems.length === 0) {
+      const spec = (await referenceFor([...migrations.applied, ...checkoutMigrations(o.migrationsDir).filter((x) => byHand.includes(x.name))])).grants.filter((g) => SPEC_GRANTEES.has(g.grantee));
+      const mine = (await databaseGrants(m, database)).filter((g) => SPEC_GRANTEES.has(g.grantee));
+      const specKeys = new Set(spec.map(grantKey));
+      const mineKeys = new Set(mine.map(grantKey));
+      for (const g of mine) if (!specKeys.has(grantKey(g))) note(`On the database itself, ${g.grantee ?? 'everyone'} holds ${g.privilege}, which Flint's own setup does not give. A restored database follows Flint's setup.`);
+      for (const k of specKeys) if (!mineKeys.has(k)) note(`On the database itself, a right Flint's setup gives is missing (${k}). A restored database has it.`);
+      const others = (await databaseGrants(m, database)).filter((g) => !SPEC_GRANTEES.has(g.grantee) && g.grantee !== restorer.user);
+      if (others.length) note(`On the database itself, ${[...new Set(others.map((g) => g.grantee))].length} other role(s) hold rights you gave them. A restore carries those over.`);
+    }
+    const own = (await m.query<{ lim: number; tmpl: boolean; settings: string[] | null; roles: number }>(
+      `SELECT d.datconnlimit AS lim, d.datistemplate AS tmpl,
+              (SELECT array_agg(DISTINCT split_part(x, '=', 1) ORDER BY split_part(x, '=', 1)) FROM pg_db_role_setting s, unnest(s.setconfig) AS x WHERE s.setdatabase = d.oid AND s.setrole = 0) AS settings,
+              (SELECT count(*)::int FROM pg_db_role_setting s WHERE s.setdatabase = d.oid AND s.setrole <> 0) AS roles
+       FROM pg_database d WHERE d.datname = $1`,
+      [database],
+    )).rows[0]!;
+    const names = (own.settings ?? []).map((n) => n.replace(/[^\w.]/g, '?').slice(0, 60));
+    if (names.length) note(`The database has ${names.length} setting${names.length === 1 ? '' : 's'} of its own (${names.join(', ')}). A restore carries ${names.length === 1 ? 'it' : 'them'} over.`);
+    if (own.roles) note(`The database has settings stored for ${own.roles} single role(s). A restore cannot copy those, and says so.`);
+    if (own.lim !== -1) note(`The database has a connection limit of ${own.lim}. A restored database has none.`);
+    if (own.tmpl) note('The database is marked as a template. A restored database is not.');
+
+    // 3. How a restore would make its copy.
+    o.say(locale.copied
+      ? `A restored copy is made the way this database was: ${locale.words}.`
+      : `This database stores text as ${locale.words}, which Flint cannot copy exactly: a restored copy takes the database server's own defaults.`);
+
+    const same = differences === 0;
+    // The last word when it differs is the caller's: the command ends on it, as a refusal.
+    if (same) {
+      o.say('A backup of this database would pass the restore\'s comparison.');
+      o.say('Nothing was changed.');
+    }
+    return { same, differences, byHand, notes };
+  } finally {
+    await m.query(`DROP DATABASE IF EXISTS ${reference}`).catch(() => undefined);
+    await m.end().catch(() => {});
+  }
+}
+

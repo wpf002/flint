@@ -43,7 +43,7 @@ check "--list takes nothing after it" '[ "$st" = 1 ] && [[ "$err" == "--list tak
 run --auto
 check "the runtime's own refusal comes through, as one sentence, and so does how it ended" '[ "$st" = 1 ] && [[ "$out" == "Flint never restores its database on its own. Run this yourself in Terminal." ]] && [ -z "$err" ]'
 run --everything
-check "its options are the runtime's" '[ "$st" = 1 ] && [[ "$out" == "The only options are --dump followed by a backup file, --without-copy, --without-fingerprint, --check, and --repair." ]]'
+check "its options are the runtime's" '[ "$st" = 1 ] && [[ "$out" == "The only options are --dump followed by a backup file, --without-copy, --without-fingerprint, --check, --compare, and --repair." ]]'
 run
 check "with no one at a keyboard it is refused before anything is touched" '[ "$st" = 1 ] && [[ "$out" == "Run this yourself in Terminal: it asks you to confirm before it changes anything." ]]'
 run --dump ../../../etc/passwd --check

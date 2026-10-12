@@ -10,6 +10,9 @@
 #   restore_database.sh --list           The backups there are, newest first.
 #   restore_database.sh --dump <name>    Restore the backup with that file name instead.
 #   restore_database.sh --repair         Put right what a restore that was stopped part-way left.
+#   restore_database.sh --compare        Read the database in use and list every way it differs from
+#                                        the one this copy of Flint builds. Nothing is restored or
+#                                        changed. A restore refuses a backup that differs.
 #
 #   Also, passed on as they are: --without-copy (restore although the database in use could not be
 #   copied first) and --without-fingerprint (restore a backup no fingerprint was recorded for).

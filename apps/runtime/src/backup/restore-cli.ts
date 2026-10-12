@@ -35,7 +35,7 @@ import { resolveTier, type PolicyRow } from '@flint/policy';
 import type { RestoreConfig } from '../config.js';
 import { client, targetOf } from './backup.js';
 import { carryLines, type CarryReport } from './carry.js';
-import { KEEP_DAYS, REPAIR, RestoreRefused, repairDatabase, restoreDatabase, type RestoreOptions, type RestoreSummary } from './restore.js';
+import { KEEP_DAYS, REPAIR, RestoreRefused, compareDatabase, repairDatabase, restoreDatabase, type RestoreOptions, type RestoreSummary } from './restore.js';
 
 /** apps/runtime, whichever directory the command was started from. */
 const RUNTIME_DIR = fileURLToPath(new URL('../../', import.meta.url));
@@ -249,7 +249,7 @@ async function policies(ownerUrl: string): Promise<PolicyRow[] | undefined> {
   }
 }
 
-const OPTIONS = 'The only options are --dump followed by a backup file, --without-copy, --without-fingerprint, --check, and --repair.';
+const OPTIONS = 'The only options are --dump followed by a backup file, --without-copy, --without-fingerprint, --check, --compare, and --repair.';
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
 function sayReport(io: RestoreIo, r: CarryReport, tz: string, mode: 'production' | 'rebuild'): void {
@@ -270,6 +270,7 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
   let withoutFingerprint = false;
   let checkOnly = false;
   let repair = false;
+  let compare = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const next = argv[i + 1];
@@ -277,10 +278,19 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
     else if (a === '--without-fingerprint') withoutFingerprint = true;
     else if (a === '--check') checkOnly = true;
     else if (a === '--repair') repair = true;
+    else if (a === '--compare') compare = true;
     else if (a === '--dump' && next && !next.startsWith('--')) chosen = argv[++i];
     else throw new RestoreRefused(OPTIONS, { stage: 'options' });
   }
   if (repair && argv.length > 1) throw new RestoreRefused('--repair takes no other option.', { stage: 'options' });
+  if (compare && argv.length > 1) throw new RestoreRefused('--compare takes no other option.', { stage: 'options' });
+  // Reading only: how the database in use differs from what this copy of Flint builds. It needs no backup, restores
+  // nothing, asks nothing, and so needs no one at a keyboard. When a restore would refuse a backup of it, it ends as a refusal.
+  if (compare) {
+    const r = await compareDatabase({ owner: config.ownerUrl, restore: config.restoreUrl, tools: config.tools, migrationsDir: MIGRATIONS, say: io.say, ...(io.now ? { now: io.now } : {}) });
+    if (!r.same) throw new RestoreRefused('A restore would refuse a backup of this database until what is listed above is settled. Nothing was changed.', { stage: 'compare' });
+    return;
+  }
   const agent = runtimeAgent(config.home, io.uid, exec);
   const ask = io.ask;
 
