@@ -1634,8 +1634,9 @@ function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().split(/
 function apprDate(t){try{var d=new Date(t),utc=/T00:00:00(\.000)?Z$/.test(String(t));return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getUTCFullYear()===new Date().getFullYear()?undefined:'numeric',timeZone:utc?'UTC':undefined});}catch(e){return '';}}
 /* P4: the card that turns Flint's forecasts on (the same title as @flint/policy's ACTION_WORDS). It asks on its own,
    with a fresh touch: the card carries the mark (consequential), and its name holds the line for a server that does
-   not send it. It says WHICH numbers, by name: a card shows no series' values, no key and no JSON, on its face or
-   behind Show Details. */
+   not send it. It says WHICH numbers, by name: a card shows no series' values and no JSON, on its face or behind Show
+   Details. A number this page cannot name is counted on its face, and given by its key only behind Show Details, as a
+   reference (apprDetails): Will signs it, so he can see it. */
 var APPR_PREDICT='forecast.series.enable';
 /* The numbers Flint can forecast, in the registry's order (apps/runtime/src/predict/series.ts; a test holds the two
    together): each one's name, and its kind when it is a sensitive one ('money' is spending, 'calendar' the calendar). */
@@ -1644,7 +1645,7 @@ var APPR_SERIES=[['daily.spend.anthropic.usd','Anthropic Spend','money'],['daily
   ['daily.services.incident_minutes','Service Downtime',''],['daily.threads.open','Open Threads',''],['daily.calendar.hours','Calendar Hours','calendar']];
 function apprPredictCount(p){var x=p.args&&p.args.series;return Array.isArray(x)?x.length:0;}
 /* What a card lists, read once: its numbers by name in the registry's order ({name, kind, opinion}), how many it
-   lists that this page cannot name (never shown by their key), and how many get the local model's second opinion. */
+   lists that this page cannot name (never shown by their key here: apprDetails gives those exactly, as references), and how many get the local model's second opinion. */
 function apprPredictList(p){var a=p.args||{};var has=function(x,k){return Array.isArray(x)&&x.indexOf(k)>=0;};var named=[],known=0,opinions=0;
   APPR_SERIES.forEach(function(s){if(!has(a.series,s[0]))return;known++;var o=has(a.reason,s[0]);if(o)opinions++;named.push({name:s[1],kind:s[2],opinion:o});});
   var total=apprPredictCount(p),unknown=Math.max(0,total-known);
