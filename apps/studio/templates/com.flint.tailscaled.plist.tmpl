@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Flint's own Tailscale daemon, in userspace, kept running by launchd: it is how
+     the phone and the MacBook reach Flint (docs/REMOTE_ACCESS.md).
+     A TEMPLATE: apps/studio/rebuild.sh fills in __TAILSCALED__ (this Mac's tailscaled)
+     and __HOME__ and loads it. Don't copy this file by hand.
+     Its socket and state stay in ~/.flint, so every `tailscale` command for Flint
+     passes that socket (apps/studio/finish-tailscale.sh). The state file holds this
+     Mac's place on the tailnet; it is never backed up offsite, so a rebuilt Mac signs
+     in again. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.tailscaled</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__TAILSCALED__</string>
+    <string>--tun=userspace-networking</string>
+    <string>--socket=__HOME__/.flint/tailscaled.sock</string>
+    <string>--state=__HOME__/.flint/tailscaled.state</string>
+    <string>--statedir=__HOME__/.flint/tailscale</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.flint/tailscaled.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.flint/tailscaled.log</string>
+</dict>
+</plist>

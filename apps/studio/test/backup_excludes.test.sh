@@ -18,6 +18,7 @@ secret=(
   nexus-responder.json nexus-responder.sh nexus-responder.env legion/crossbar.sh
   token nexus-admin-token.txt tokens/voice.token memory/knowledge.json.bak-20260925
   google/token.json google/client.json
+  backup.env.before-offsite-20261012 secrets.env.copy runtime.env.prev
 )
 keep=(
   memory/conversations.json memory/knowledge.json training/corpus.jsonl notifications.json

@@ -29,6 +29,51 @@ Flags:
 | `studio_bootstrap.sh` | Studio | toolchain (brew/nvm/pnpm/uv/ollama), clone repo, rebuild server, load agents → Flint live. Never loads a training agent. |
 | `studio_roadmap.sh` | Studio | reports what the local brain serves, whether the training schedule is disabled, and what a training cycle would do (a dry run). Starts nothing. |
 | `install_searxng.sh` | Studio | keyless web search: SearXNG in `~/searxng` + the `com.flint.searxng` agent (see below) |
+| `rebuild.sh`, `restore_file.sh`, `rollback.sh` | MacBook / Studio | recovery: rebuild from the offsite backups, put one file back, go back a version (see "Rebuild and recovery") |
+
+## Rebuild and recovery
+
+What to do when something breaks is in [docs/RECOVERY.md](../../docs/RECOVERY.md).
+This is how the pieces behind it work.
+
+| File | Runs on | Does |
+|---|---|---|
+| `rebuild.sh --to you@new-mac.local` | **MacBook** | Opens the newest offsite backups with the key that lives there, sends the opened copies to the new Mac over SSH, and runs the rebuild there. The key is never sent. |
+| `rebuild.sh --from <folder>` | new Mac | The rebuild itself: Flint's files, your settings, new secrets, the database (roles, restore, checks), the LaunchAgents, remote access, the installers, and the list of what still needs you. Refuses a Mac that already has a Flint. |
+| `rebuild.sh --rehearse <folder>` | anywhere | The same rebuild into a scratch home folder and a scratch Postgres, with stand-ins for launchd and for anything that installs, signs in or shows something (`rehearsal/`). `rebuild.sh --stop <folder>` ends one left running. |
+| `settings.manifest` | — | Every setting, by name: restored, made new, re-entered by you, worked out at install, or retired. No values. A name that is not listed is treated as a secret. |
+| `settings_manifest.sh` | Studio, nightly | Saves the settings that are not secrets into `~/.flint/settings-snapshot.tsv`, so the offsite backup (which leaves out every settings file) still carries your switches. `--preview` says what it would save, by name, and writes nothing. `--check` names any setting on this Mac the manifest does not list. |
+| `agents.manifest`, `templates/` | — | Every `com.flint.*` LaunchAgent and where its file comes from: a template here (the server, the local model, Tailscale), a file kept in the repo, or an install script. |
+| `restore_file.sh memory` | Studio | Puts one of Flint's own files back from the newest local backup that holds a readable copy. The file as it was is kept. |
+| `rollback.sh` | Studio | Pauses updates (`~/.flint/deploy-hold`, which `apps/server/auto_deploy.sh` honours), then puts back the previous server and runtime. Never undoes a database update. |
+| `recovery_lib.sh` | — | Shared by the above: the manifest reader, the checks a setting's value must pass, and the template renderer. |
+
+The database side is in the runtime: `pnpm --filter @flint/runtime restore-production`
+(Will, at the keyboard; `apps/runtime/src/backup/restore.ts`), `restore-empty`
+(a rebuild's restore, into an empty database only) and `bootstrap-db` (the five
+roles and two databases, each password new).
+
+**What a rebuild trusts.** An offsite backup is encrypted to a public key, so it
+is private, but nothing proves who wrote it. The rebuild therefore runs nothing
+from a backup: settings are read as text and each value must match the shape its
+name is listed with and not look like a secret; restored scripts lose their
+execute bit; links are dropped; connectors are rebuilt from this repo; a file of
+a kind the backup leaves out as secret is never unpacked even if an archive
+carries one; and the database is restored as its owner role, never a superuser.
+
+**Checks.**
+
+```
+zsh apps/studio/test/rebuild_rehearse.test.sh       # the whole rebuild, rehearsed twice, and every refusal (about 45 s)
+zsh apps/studio/test/settings_manifest.test.sh      # the manifest and the nightly snapshot
+zsh apps/studio/test/plist_templates.test.sh        # the templates render and lint; every agent has a source
+zsh apps/studio/test/restore_file.test.sh
+zsh apps/studio/test/rollback.test.sh
+zsh apps/studio/test/live/settings_names.check.sh   # this Mac's setting, agent and secret-file NAMES against the manifests
+```
+
+All but the last run in the deploy gate. The last one reads the real Mac (names
+only), so it is run by hand after adding a setting, an agent or a secret file.
 
 ## Keyless search (SearXNG)
 

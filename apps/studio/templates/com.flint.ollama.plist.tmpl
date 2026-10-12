@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The local model server (Ollama), kept running by launchd.
+     A TEMPLATE: apps/studio/rebuild.sh fills in __OLLAMA__ (this Mac's ollama) and
+     __HOME__, adds the settings a rebuild restores (apps/studio/settings.manifest),
+     and loads it. Don't copy this file by hand.
+     Loopback only: OLLAMA_HOST stays on 127.0.0.1, so nothing off this Mac can reach
+     the model. Flint does not download models: `ollama pull` is yours to run. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.ollama</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__OLLAMA__</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key><string>__HOME__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>__HOME__</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>OLLAMA_HOST</key><string>127.0.0.1:11434</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.flint/ollama.out.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.flint/ollama.err.log</string>
+</dict>
+</plist>

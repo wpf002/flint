@@ -31,6 +31,7 @@ EXCLUDES=(
 # './*token*' here, it would take the adapters' tokenizer files with it.
 SECRETS=(
   --exclude './secrets.env' --exclude './*.env' --exclude './token'
+  --exclude './*.env.*'            # a copy of a settings file made by hand (backup.env.before-...): the same secrets
   --exclude './*token*.txt' --exclude './tailscaled.state*' --exclude './tailscale'
   # Found in every offsite archive on 2026-09-30, keys and tokens in plaintext:
   --exclude './*.bak*'             # secrets.env.bak*, plist and mcp.json backups, at any depth
@@ -90,6 +91,9 @@ rotate_logs() { # dir: any *.log over 20 MB becomes <log>.1.gz (keeping 3); copy
 [ -n "${FLINT_BACKUP_DEFINE_ONLY:-}" ] && return 0
 
 rotate_logs "$SRC"
+# The settings a rebuild puts back (settings_manifest.sh), saved into $SRC first so
+# tonight's archives carry them. Never secrets, and never a reason to skip a backup.
+[ -r "${0:A:h}/settings_manifest.sh" ] && { /bin/zsh "${0:A:h}/settings_manifest.sh" || true; }
 mkdir -p "$LOCAL"; chmod 700 "$LOCAL"
 tar -czf "$LOCAL/flint-$TS.tar.gz" -C "$SRC" "${EXCLUDES[@]}" .
 chmod 600 "$LOCAL/flint-$TS.tar.gz"

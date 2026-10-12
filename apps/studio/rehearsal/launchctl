@@ -1,0 +1,145 @@
+#!/bin/zsh
+# A stand-in for launchctl, for a rebuild REHEARSAL only (../rebuild.sh --rehearse).
+#
+# A rehearsal installs Flint into a scratch home folder with the real install
+# scripts, and those scripts load LaunchAgents. They must never reach the real
+# launchd: an agent loaded from the scratch folder would replace the live one
+# of the same label. So the rehearsal puts this folder first on PATH, and this
+# script answers instead. It keeps its own small record of what is "loaded",
+# starts the jobs launchd would start at load (as plain child processes, with
+# the environment their LaunchAgent file gives them) and stops only the
+# processes it started itself.
+#
+# It works only inside a rehearsal: without FLINT_REHEARSAL_STATE naming the
+# rehearsal's state folder it refuses every command.
+set -u
+STATE="${FLINT_REHEARSAL_STATE:-}"
+if [[ -z $STATE || ! -d $STATE || ! -O $STATE ]]; then
+  print -u2 -- "This launchctl is a stand-in for Flint's rebuild rehearsal, and there is no rehearsal here."
+  exit 64
+fi
+here=${0:A:h}
+source "${here:h}/recovery_lib.sh"
+QUIET="${here:h:h:h}/test-support/quiet-bin"
+mkdir -p "$STATE/loaded" "$STATE/pids" "$STATE/overrides"
+print -r -- "${(j: :)${(q-)@}}" >> "$STATE/calls.log"
+
+raw() { /usr/bin/plutil -extract "$2" raw -o - "$1" 2>/dev/null; }
+label_of() { # <plist>: its Label in REPLY
+  REPLY="$(raw "$1" Label)" || return 1
+  [[ $REPLY =~ '^com\.[a-z]+\.[a-z0-9.-]+$' ]]
+}
+is_loaded() { [[ -e $STATE/loaded/$1 ]]; }
+running_pid() { # <label>: the pid of the job this stand-in started, if it is still that process
+  local pid started
+  REPLY=
+  [[ -r $STATE/pids/$1 ]] || return 1
+  read -r pid < "$STATE/pids/$1" || return 1
+  [[ $pid =~ '^[0-9]+$' ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  started="$(ps -o lstart= -p "$pid" 2>/dev/null)"
+  [[ -n $started && $started == "$(<"$STATE/pids/$1.started")" ]] || return 1
+  REPLY=$pid
+}
+
+start_job() { # <label> <plist>: run it if launchd would at load (RunAtLoad or KeepAlive); a timed job is only recorded
+  local label=$1 plist=$2 i=0 arg name out err wd jobpath=/usr/bin:/bin:/usr/sbin:/sbin line
+  local -a argv envs
+  [[ "$(raw "$plist" RunAtLoad)" == true || "$(raw "$plist" KeepAlive)" == true ]] || return 0
+  while arg="$(raw "$plist" "ProgramArguments.$i")"; do argv+=("$arg"); i=$(( i + 1 )); done
+  (( ${#argv} > 0 )) || return 1
+  envs=("HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${LOGNAME:-$(id -un)}" "TMPDIR=${TMPDIR:-/tmp}" "FLINT_REHEARSAL_STATE=$STATE")
+  for name in ${(f)"$(plist_env_names "$plist")"}; do
+    [[ -n $name ]] || continue
+    plist_env_value "$plist" "$name" || continue
+    if [[ $name == PATH ]]; then jobpath=$REPLY; else envs+=("$name=$REPLY"); fi
+  done
+  # What the rehearsal sets for this job on top of its file (rebuild.sh writes it): ports that are the rehearsal's own.
+  if [[ -r $STATE/overrides/$label.env ]]; then
+    while IFS= read -r line; do
+      [[ $line =~ '^[A-Z][A-Z0-9_]*=' ]] && envs+=("$line")
+    done < "$STATE/overrides/$label.env"
+  fi
+  # This folder and the no-op stand-ins for anything that shows or says something come first:
+  # a job started in a rehearsal reaches neither the real launchd nor the screen.
+  envs+=("PATH=$here:$QUIET:$jobpath")
+  out="$(raw "$plist" StandardOutPath)" || out=/dev/null
+  err="$(raw "$plist" StandardErrorPath)" || err=/dev/null
+  wd="$(raw "$plist" WorkingDirectory)" || wd=/
+  [[ -d $wd ]] || wd=/
+  ( cd "$wd" && exec /usr/bin/env -i "${envs[@]}" "${argv[@]}" >>"$out" 2>>"$err" </dev/null ) &
+  local pid=$!
+  print -r -- "$pid" > "$STATE/pids/$label"
+  ps -o lstart= -p "$pid" > "$STATE/pids/$label.started" 2>/dev/null
+  return 0
+}
+
+stop_job() { # <label>: stop the process this stand-in started for it, and only that one
+  local label=$1 pid i
+  if running_pid "$label"; then
+    pid=$REPLY
+    kill -TERM "$pid" 2>/dev/null
+    for i in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  rm -f "$STATE/pids/$label" "$STATE/pids/$label.started"
+}
+
+load() { # <plist>: 0 loaded, 5 already loaded, 1 unreadable
+  local plist=$1 label
+  [[ -r $plist ]] && /usr/bin/plutil -lint "$plist" >/dev/null 2>&1 && label_of "$plist" || return 1
+  label=$REPLY
+  is_loaded "$label" && return 5
+  print -r -- "${plist:A}" > "$STATE/loaded/$label"
+  start_job "$label" "$plist"
+}
+unload() { # <label>: 0 unloaded, 3 was not loaded
+  is_loaded "$1" || return 3
+  stop_job "$1"
+  rm -f "$STATE/loaded/$1"
+}
+target_label() { REPLY=${1:t}; [[ $REPLY =~ '^com\.[a-z]+\.[a-z0-9.-]+$' ]]; }
+
+cmd=${1:-}
+(( $# > 0 )) && shift
+case $cmd in
+  load)
+    [[ ${1:-} == -w ]] && shift
+    load "${1:-}"; st=$?
+    [[ $st == 5 ]] && exit 0      # `launchctl load` of a loaded job complains and still succeeds
+    exit $st ;;
+  unload)
+    [[ ${1:-} == -w ]] && shift
+    label_of "${1:-}" || exit 1
+    unload "$REPLY"; exit 0 ;;
+  bootstrap)   # bootstrap gui/<uid> <plist>
+    load "${2:-}"; st=$?
+    [[ $st == 5 ]] && { print -u2 -- "Bootstrap failed: 5: Input/output error"; exit 5; }
+    exit $st ;;
+  bootout)     # bootout gui/<uid>/<label>   or   bootout gui/<uid> <plist>
+    if [[ -n ${2:-} ]]; then label_of "$2" || exit 1; else target_label "${1:-}" || exit 1; fi
+    unload "$REPLY"; exit $? ;;
+  print)       # print gui/<uid>/<label>
+    target_label "${1:-}" || exit 113
+    is_loaded "$REPLY" && exit 0
+    exit 113 ;;
+  kickstart)   # kickstart [-k] gui/<uid>/<label>
+    [[ ${1:-} == -k ]] && shift
+    target_label "${1:-}" || exit 113
+    is_loaded "$REPLY" || exit 113
+    stop_job "$REPLY"
+    start_job "$REPLY" "$(<"$STATE/loaded/$REPLY")"; exit $? ;;
+  list)
+    for f in "$STATE"/loaded/*(N); do
+      if running_pid "${f:t}"; then print -r -- "$REPLY"$'\t'"0"$'\t'"${f:t}"; else print -r -- "-"$'\t'"0"$'\t'"${f:t}"; fi
+    done
+    exit 0 ;;
+  print-disabled) print -r -- "disabled services = {"; print -r -- "}"; exit 0 ;;
+  enable|disable) exit 0 ;;
+  rehearsal-stop-all)   # the rehearsal's own: stop every job this stand-in started
+    for f in "$STATE"/loaded/*(N); do unload "${f:t}"; done
+    exit 0 ;;
+  *)
+    print -u2 -- "The rehearsal's launchctl stand-in does not know the command ${cmd:-(none)}."
+    exit 64 ;;
+esac
