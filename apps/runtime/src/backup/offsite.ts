@@ -18,6 +18,7 @@ import { basename, dirname } from 'node:path';
 import type { BackupConfig } from '../config.js';
 import type { Db } from '../db.js';
 import { encryptTo, NeedsSetup, newestDump, pruneOffsite } from './backup.js';
+import { fileBackup } from './record.js';
 
 /** How many encrypted copies stay offsite (the studio's own backup keeps 7 there too). */
 export const OFFSITE_KEEP = 7;
@@ -31,7 +32,9 @@ export async function sendOffsite(db: Pick<Db, 'backupRun'>, b: OffsiteConfig, n
   const dump = newestDump(b.dumpDir);
   if (!dump) throw new Error('no local dump to send');
   const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
-  await db.backupRun.create({ data: { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: BigInt(e.bytes), sha256: e.sha256, encrypted: true, status: 'ok', startedAt: now, finishedAt: new Date() } });
+  // One record for each copy: a dump sent again (last night's backup failed, so the newest dump is the one
+  // already sent) is the same file under the same name, and its record now says what is there.
+  await fileBackup(db, { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: e.bytes, sha256: e.sha256, startedAt: now });
   const counts = `${dump}.counts.json`;
   if (existsSync(counts)) {
     await encryptTo(counts, b.ageRecipient, b.tools, b.offsiteDir).catch((err: unknown) =>

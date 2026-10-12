@@ -97,6 +97,8 @@ PENDING="$(cd "$RT_SRC" && DATABASE_URL="$OWNER_URL" ./node_modules/.bin/prisma 
 if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been applied|following migration"; then
   echo "runtime: migrations pending; dumping first..."
   PG_DUMP=/opt/homebrew/opt/postgresql@17/bin/pg_dump
+  # Without large objects, as every dump of this database is taken (DUMP_FORMAT in src/backup/backup.ts says why:
+  # Flint keeps nothing in them, and one this role may not read would stop the dump, and so the deploy).
   # The URL (it carries a password) goes through the environment, never argv.
   BU="$BACKUP_URL" node -e '
     const u = new URL(process.env.BU);
@@ -104,7 +106,7 @@ if print -r -- "$PENDING" | grep -qiE "have not yet been applied|not yet been ap
   ' | { read -r H; read -r P; read -r U; read -r D;
     DUMP="$HOME/FlintBackups/pre-migrate/$SHA.dump"
     PGPASSWORD="$(BU="$BACKUP_URL" node -e 'process.stdout.write(decodeURIComponent(new URL(process.env.BU).password))')" \
-      "$PG_DUMP" -Fc -h "$H" -p "$P" -U "$U" -d "$D" -f "$DUMP.partial" && mv "$DUMP.partial" "$DUMP" && chmod 600 "$DUMP"; } \
+      "$PG_DUMP" -Fc --no-large-objects -h "$H" -p "$P" -U "$U" -d "$D" -f "$DUMP.partial" && mv "$DUMP.partial" "$DUMP" && chmod 600 "$DUMP"; } \
     || die "pre-migrate dump failed — NOT migrating"
 
   # 5. migrate: only from here is a failure a failed migration (the marker below, and the dump above, exist)

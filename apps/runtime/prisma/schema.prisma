@@ -353,7 +353,7 @@ model MetricPoint {
 
 model BackupRun {
   id              String    @id @default(cuid())
-  kind            String // CHECK pg_dump_flint|flint_tar|nexus_railway_dump
+  kind            String // CHECK pg_dump_flint|flint_tar|nexus_dump
   location        String // CHECK local|icloud
   path            String
   bytes           BigInt?
@@ -366,6 +366,8 @@ model BackupRun {
   restoreOk       Boolean?
   restoreDetail   Json?
 
+  /// One record for each backup file (P7): the files archive's lines are read more than once.
+  @@unique([kind, location, path])
   @@index([kind, startedAt])
 }
 

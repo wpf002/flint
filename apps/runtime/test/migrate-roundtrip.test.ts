@@ -120,6 +120,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
         AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
       [P5]: `(SELECT to_regclass('public."Asset"') IS NOT NULL)`,
+      '20261015000000_p7_resilience': `to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL`,
     };
     expect(applied[newest], `say what ${newest} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[newest]} AS t`)).rows[0]!.t);
@@ -177,6 +178,41 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
     // Re-applied on top of P3's body: P5's rule is back.
     if (newest === P5) expect((await functionsNamed(['plan_step_guard']))[0]!.prosrc).toContain(`NEW."kind" = 'asset_task'`);
+  });
+
+  // P7's one change, on rows that are there: a file recorded twice stops the migration with nothing changed and a
+  // sentence that says why; the kind named for a host Nexus has left is renamed, and gets its name back on the way down.
+  it('P7: a backup recorded twice stops the migration unchanged; the Nexus kind is renamed, and renamed back', async () => {
+    const P7 = '20261015000000_p7_resilience';
+    const sql = (file: string) => readFileSync(join(MIGRATIONS, P7, file), 'utf8');
+    const row = (id: string, kind: string, path: string) =>
+      `INSERT INTO "BackupRun" ("id", "kind", "location", "path", "encrypted", "status", "startedAt") VALUES ('${id}', '${kind}', 'local', '${path}', false, 'ok', now())`;
+    await withClient(owner, async (c) => {
+      await c.query(sql('down.sql'));
+      try {
+        await c.query(row('p7-a', 'pg_dump_flint', '/b/one.dump'));
+        await c.query(row('p7-b', 'pg_dump_flint', '/b/one.dump'));
+        await c.query(row('p7-n', 'nexus_railway_dump', '/b/nexus.dump'));
+        const refused = await pgError(c.query(sql('migration.sql')));
+        expect(refused.message).toBe('p7_resilience: 1 backup file(s) are recorded more than once (same kind, location and path); nothing was changed');
+        // Nothing was changed: the earlier list of kinds is still the one in force, and there is no index.
+        expect((await c.query(`SELECT "kind" FROM "BackupRun" WHERE "id" = 'p7-n'`)).rows).toEqual([{ kind: 'nexus_railway_dump' }]);
+        expect((await c.query(`SELECT to_regclass('public."BackupRun_kind_location_path_key"') AS t`)).rows[0].t).toBeNull();
+        await c.query(`DELETE FROM "BackupRun" WHERE "id" = 'p7-b'`);
+        await c.query(sql('migration.sql'));
+        expect((await c.query(`SELECT "kind" FROM "BackupRun" WHERE "id" = 'p7-n'`)).rows).toEqual([{ kind: 'nexus_dump' }]);
+        expect((await pgError(c.query(row('p7-c', 'pg_dump_flint', '/b/one.dump')))).code).toBe('23505');
+        expect((await pgError(c.query(row('p7-d', 'nexus_railway_dump', '/b/other.dump')))).code).toBe('23514');
+        await c.query(sql('down.sql'));
+        expect((await c.query(`SELECT "kind" FROM "BackupRun" WHERE "id" = 'p7-n'`)).rows).toEqual([{ kind: 'nexus_railway_dump' }]);
+      } finally {
+        await c.query(`DELETE FROM "BackupRun" WHERE "id" LIKE 'p7-%'`);
+      }
+    });
+    // Prisma's own record of it went with the rollback: the deploy puts the migration back.
+    await migrateUp(owner);
+    const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
+    expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   });
 
   // The floor: nobody reaches a Flint database, or its public schema, by default. The Mac Flint runs on had this

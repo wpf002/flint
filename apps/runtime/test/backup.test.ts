@@ -8,10 +8,11 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NO_DB, URLS, freshDb } from './db';
-import { execFileSync } from 'node:child_process';
+import { NO_DB, URLS, freshDb, withClient } from './db';
+import { execFileSync, spawnSync } from 'node:child_process';
+import type pg from 'pg';
 import { createHash, randomBytes } from 'node:crypto';
-import { dumpDatabase, encryptTo, needsSetup, NeedsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, STALE_PARTIAL_MS, type Tools } from '../src/backup/backup';
+import { DUMP_FORMAT, dumpDatabase, encryptTo, needsSetup, NeedsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, STALE_PARTIAL_MS, type Tools } from '../src/backup/backup';
 import { sendOffsite, type OffsiteConfig } from '../src/backup/offsite';
 
 const bin = (n: string) => ['/opt/homebrew/opt/postgresql@17/bin', '/usr/lib/postgresql/17/bin', '/opt/homebrew/bin', '/usr/bin'].map((d) => join(d, n)).find((p) => existsSync(p));
@@ -47,6 +48,20 @@ describe('offsite copies', () => {
     expect(pruneDumps(dir, 2)).toEqual(['flint-2026-09-01.dump']);
     expect(readdirSync(dir).sort()).toEqual(['flint-2026-09-02.dump', 'flint-2026-09-02.dump.counts.json', 'flint-2026-09-03.dump', 'flint-2026-09-03.dump.counts.json']);
     expect(newestDump(dir)).toBe(join(dir, 'flint-2026-09-03.dump'));
+  });
+});
+
+describe('how a dump is taken', () => {
+  it('every dump of Flint’s database is taken without large objects: the nightly one, and the deploy’s before a migration', () => {
+    expect([...DUMP_FORMAT]).toEqual(['-Fc', '--no-large-objects']);
+    const src = (f: string) => readFileSync(join(__dirname, '..', f), 'utf8');
+    // Each place pg_dump is run: with the format above, or for the schema alone (which never holds one).
+    const calls = ['src/backup/backup.ts', 'src/backup/restore.ts'].flatMap((f) => src(f).split('\n').filter((l) => /run\(tools\.pgDump,/.test(l)));
+    expect(calls.length).toBe(2);
+    for (const l of calls) expect(l).toMatch(/\.\.\.DUMP_FORMAT|'--schema-only'/);
+    const deploy = src('install-runtime.sh').split('\n').filter((l) => /"\$PG_DUMP" /.test(l));
+    expect(deploy).toHaveLength(1);
+    expect(deploy[0]).toContain('"$PG_DUMP" -Fc --no-large-objects ');
   });
 });
 
@@ -353,10 +368,14 @@ describe('the encrypted copies offsite', () => {
       const warned: string[] = [];
       const db = {
         backupRun: {
-          create: async ({ data }: { data: Row }) => {
+          // One record for each copy (record.ts): a copy written again under its name is the same row, saying what is there now.
+          upsert: async ({ where, create, update }: { where: { kind_location_path: { path: string } }; create: Row; update: Partial<Row> }) => {
+            const data = create;
             // When the row is written the copy is whole and under its name, and nothing has been pruned yet.
             steps.push(`row (copy there: ${existsSync(data.path)}, partial: ${existsSync(`${data.path}.partial`)}, manifest: ${existsSync(f.manifest)})`);
-            rows.push(data);
+            const at = rows.findIndex((r) => r.path === where.kind_location_path.path);
+            if (at === -1) rows.push(data);
+            else rows[at] = { ...rows[at]!, ...update };
             return data;
           },
           findMany: async () => (steps.push('rows read'), rows.map((r) => ({ path: r.path }))),
@@ -378,6 +397,20 @@ describe('the encrypted copies offsite', () => {
       expect(j.rows).toHaveLength(9);
       expect(j.rows.at(-1)).toMatchObject({ path: join(j.f.offsite, `${night(9)}.age`), location: 'icloud', encrypted: true, status: 'ok', bytes: BigInt(SEALED.length) });
       expect(readdirSync(j.f.offsite).sort()).toEqual([3, 4, 5, 6, 7, 8, 9].map((n) => `${night(n)}.age`));
+      expect(j.warned).toEqual([]);
+    });
+
+    it('a dump sent a second time (the next night made no new one) is still one record, of the copy that is there now', async () => {
+      const j = job();
+      writeFileSync(join(j.f.dumps, night(1)), 'PLAINTEXT 1');
+      await j.run();
+      const first = { ...j.rows[0]! };
+      await j.run();
+      expect(j.rows).toHaveLength(1);
+      expect(j.rows[0]).toMatchObject({ path: first.path, status: 'ok', bytes: BigInt(SEALED.length) });
+      // Whatever was known about the earlier file (a restore test of it) is not carried over to the one that replaced it.
+      expect(j.rows[0]).toMatchObject({ restoreTestedAt: null, restoreOk: null });
+      expect(readdirSync(j.f.offsite)).toEqual([`${night(1)}.age`]);
       expect(j.warned).toEqual([]);
     });
 
@@ -494,6 +527,32 @@ describe.skipIf(!READY)('dump and restore drill (flint_test)', () => {
     const r = await restoreDrill(dump, URLS!.restore!, tools);
     expect(r).toMatchObject({ ok: true, mismatches: [] });
     expect(r.tables).toBeGreaterThan(15);
+  });
+
+  // Any role that can connect can make a large object, and pg_dump stops at one its own role may not read. Flint
+  // keeps nothing in them, so every dump leaves them out (DUMP_FORMAT): one the runtime's role made costs no backup.
+  it('a large object the runtime’s role made does not stop the backup, and the restore test still passes', async () => {
+    const asApp = <T>(fn: (c: pg.Client) => Promise<T>) => withClient(URLS!.app, fn);
+    let oid: number | undefined;
+    try {
+      oid = await asApp(async (c) => (await c.query<{ oid: number }>(`SELECT lo_from_bytea(0, 'not Flint''s'::bytea) AS oid`)).rows[0]!.oid);
+      // What used to happen, to the letter: the same pg_dump without the flag refuses the object.
+      const t = new URL(URLS!.backup!);
+      const plain = spawnSync(tools.pgDump, ['-Fc', '-h', t.hostname.replace(/^\[|\]$/g, ''), '-p', t.port || '5432', '-U', decodeURIComponent(t.username), '-d', t.pathname.slice(1), '-f', join(dir, 'refused.dump')], {
+        env: { PATH: process.env.PATH ?? '', PGPASSWORD: decodeURIComponent(t.password) }, encoding: 'utf8',
+      });
+      expect(plain.status).not.toBe(0);
+      expect(plain.stderr).toMatch(/permission denied for large object/);
+      const d = await dumpDatabase(URLS!.backup!, dir, tools, new Date());
+      const r = await restoreDrill(d.path, URLS!.restore!, tools);
+      expect(r).toMatchObject({ ok: true, mismatches: [] });
+      // And it is not in the dump at all: nothing of another role's is carried into a restore.
+      expect(execFileSync(tools.pgRestore, ['-l', d.path], { encoding: 'utf8' })).not.toMatch(/BLOB|LARGE OBJECT/i);
+    } finally {
+      // Its maker takes it away again (only its owner may).
+      if (oid !== undefined) await asApp((c) => c.query('SELECT lo_unlink($1)', [oid])).catch(() => {});
+      rmSync(join(dir, 'refused.dump'), { force: true });
+    }
   });
 
   it('the drill catches a mismatch', async () => {
