@@ -197,6 +197,10 @@ print -r -- "FLINT_DB_URL=postgresql://flint_app:planted@db.example.com:5432/fli
 mkdir -p "$stage/runtime/releases/0000000000000000000000000000000000000000"; print -r -- "planted" > "$stage/runtime/releases/0000000000000000000000000000000000000000/runtime.mjs"
 print -r -- "../../../somewhere/else" > "$stage/offsite-backups.txt"
 print -r -- '{"anything":true}' > "$stage/autonomy.json"
+# And two lines added to the settings it carries: a model named by an address (the rebuild ends by saying
+# which models to download), and a limit loosened as far as its shape allows.
+print -r -- $'set\tsecrets.env\tFLINT_EMBED_MODEL\thf.co/someone/planted-model' >> "$stage/settings-snapshot.tsv"
+print -r -- $'set\tsecrets.env\tFLINT_HISTORY_MAX_AGE_HOURS\t99999' >> "$stage/settings-snapshot.tsv"
 # A folder whose name tar would read as a pattern, beside files that pattern would take: only the real
 # adapters folder is asked for, by its own plain name.
 mkdir -p "$stage/brain/adapters*"; print -r -- "inside-the-star-folder" > "$stage/brain/adapters*/x.txt"
@@ -325,6 +329,8 @@ check "it says how many settings it put back, and each one by name and value" '[
 check "it names the outside account that had a key, and where to revoke it" '[[ "$out" == *"Anthropic: revoke the old key at console.anthropic.com"* && "$out" == *"Connectors: the list of connectors holds keys"* ]]'
 check "it does not name accounts that were never set up" '[[ "$out" != *"OpenAI:"* && "$out" != *"Tavily:"* ]]'
 check "it names the connectors that were set up" '[[ "$out" == *"The connectors that were set up on the old Mac: web, runtime."* ]]'
+check "a model named by an address is not put back, and never becomes a command to run: it is said, for you to check" '[[ "$out" == *"The backup names the model hf.co/someone/planted-model for FLINT_EMBED_MODEL, which is not from the usual model library. Flint did not put that setting back. Set it yourself if that model is yours."* && "$out" != *"ollama pull hf.co"* ]] && ! grep -q "planted-model" "$ndata"/*.env "$nagents"/*.plist'
+check "the limits that came from the backup are said apart from the other settings, to be checked" '[[ "$out" == *$'"'"'\n'"'"'"These limits came from the backup. Check them:"$'"'"'\n'"'"'"  "*"FLINT_BUDGET_ANTHROPIC_DAILY_USD is 5."* && "${out#*These limits came from the backup. Check them:}" == *"  FLINT_HISTORY_MAX_AGE_HOURS is 99999."* && "${out%%These limits came from the backup. Check them:*}" != *"FLINT_BUDGET_ANTHROPIC_DAILY_USD"* ]]'
 check "it gives the model commands, each on its own line" '[[ "$out" == *$'"'"'\n'"'"'"  ollama pull fixture-model:1b"$'"'"'\n'"'"'"  ollama pull nomic-embed-text"* ]]'
 
 # LaunchAgents: every one written from the repo, valid, private, and for this home folder.

@@ -752,8 +752,11 @@ timed backups
 # Your settings, read out of the files backup before anything is unpacked, so that
 # whatever is missing is known while nothing has changed yet. Only the ones that are
 # not secrets are in there, and each is checked again here against settings.manifest.
-typeset -a SET_SECRETS SET_OVERRIDE SET_BACKUP SET_SERVER SET_OLLAMA NOT_RESTORED CONNECTORS PRESENT DEPLOYED
+typeset -a SET_SECRETS SET_OVERRIDE SET_BACKUP SET_SERVER SET_OLLAMA NOT_RESTORED CONNECTORS PRESENT DEPLOYED MODELS_LEFT
 RESTORED_PORT= RESTORED_MODEL= have_snapshot=0
+# A limit: how much Flint may spend, and how far back it reads its history. They are put back like any
+# other setting, and said apart from the rest, because a backup that was changed could have loosened them.
+is_limit() { [[ $1 == (FLINT_BUDGET_*|*_BUDGET_USD|FLINT_HISTORY_MAX_AGE_HOURS) ]]; }
 snapshot="$(mktemp "$TMP/flint-settings.XXXXXX")" || refuse "Flint could not make a working file."
 WORK_FILES+=("$snapshot")
 if /usr/bin/tar -xzOf "$BUNDLE/files.tar.gz" ./settings-snapshot.tsv > "$snapshot" 2>/dev/null && [[ -s $snapshot ]]; then
@@ -766,6 +769,10 @@ if /usr/bin/tar -xzOf "$BUNDLE/files.tar.gz" ./settings-snapshot.tsv > "$snapsho
           continue
         fi
         shape=$REPLY2
+        # A model's name with a slash in it is an address: it names whose model it is, somewhere on the internet.
+        # The rebuild ends by telling you which models to download, so a name like that is never taken from a
+        # backup: it is said, for you to check, and the setting is left for you.
+        if [[ $shape == model && $value == */* ]]; then MODELS_LEFT+=("$name=$value"); continue; fi
         # A rehearsal keeps its own addresses and ports: a restored one would point it at the real Flint.
         if (( REHEARSE )) && [[ $shape == (loopback|bindaddr|port) ]]; then continue; fi
         [[ $shape == homepath ]] && value="$HOME${value#\~}"
@@ -793,7 +800,12 @@ rm -f "$snapshot"
 model_restored=0
 [[ -n $MODEL ]] || { MODEL=$RESTORED_MODEL; [[ -n $MODEL ]] && model_restored=1; }
 if [[ -z $MODEL ]]; then
-  (( REHEARSE )) || refuse "The backup does not say which local model Flint uses. Nothing was changed. Run this again and add --model with its name, like this:" "  --model muse-glimmer:30b"
+  if (( ! REHEARSE )); then
+    if (( ${MODELS_LEFT[(I)OLLAMA_MODEL=*]} )); then
+      refuse "The backup names a local model that is not from the usual model library, so Flint did not take it from there. Nothing was changed. Run this again and add --model with the model you use, like this:" "  --model muse-glimmer:30b"
+    fi
+    refuse "The backup does not say which local model Flint uses. Nothing was changed. Run this again and add --model with its name, like this:" "  --model muse-glimmer:30b"
+  fi
   MODEL=rehearsal-model
 fi
 SET_SERVER+=("OLLAMA_MODEL=$MODEL")
@@ -1049,9 +1061,18 @@ restored=$(( ${#SET_SECRETS} + ${#SET_OVERRIDE} + ${#SET_BACKUP} + ${#SET_SERVER
 if (( have_snapshot )); then
   # Each one by name and value: they came from the backup, and none is a secret (settings.manifest says which may be saved).
   if (( restored > 0 )); then say "Flint put back $restored of your settings:"; else say "Flint put back none of your settings."; fi
+  limits=()
   for kv in $SET_SECRETS $SET_OVERRIDE $SET_BACKUP $SET_SERVER $SET_OLLAMA; do
     [[ $kv == OLLAMA_MODEL=* ]] && (( ! model_restored )) && continue
+    if is_limit "${kv%%=*}"; then limits+=("$kv"); continue; fi
     say "  ${kv%%=*} is ${kv#*=}."
+  done
+  if (( ${#limits} )); then
+    say "These limits came from the backup. Check them:"
+    for kv in $limits; do say "  ${kv%%=*} is ${kv#*=}."; done
+  fi
+  for kv in $MODELS_LEFT; do
+    say "The backup names the model ${kv#*=} for ${kv%%=*}, which is not from the usual model library. Flint did not put that setting back. Set it yourself if that model is yours."
   done
 else
   say "This backup was made before Flint saved your settings, so they start at their defaults."

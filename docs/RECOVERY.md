@@ -255,7 +255,9 @@ Skip the ones you never set up. The rebuild ends by naming the ones that were.
 4. When it prints an enrolment code, open `http://localhost:8080` on the new
    Mac, go to Settings › Approval Key, and enter the code.
 5. On the new Mac, run the `ollama pull` commands it printed. They are large
-   downloads.
+   downloads. Read the model names first: they are the ones you use. A model
+   named by an address is never taken from a backup, and the rebuild says so if
+   the backup held one.
 6. Go through the short list it printed of keys and sign-ins. Each one needs you
    once, and the list says where.
 7. On the phone, open Flint's address. It is the same if the new Mac took the
@@ -280,6 +282,9 @@ What comes back, what is new, and what needs you:
   over SSH, and they are removed from it when the rebuild is done or has failed.
 - A rebuild takes only your data from a backup. It never unpacks a settings
   file, a connector list, a token or a program, and it says what it left out.
+- It lists each switch it put back. The spend caps and the history limit are
+  listed apart, under "These limits came from the backup". Check that they are
+  the ones you set.
 - The rebuilt Flint is the version the old Mac was running, not a newer one,
   and the rebuild says which day that version is from. The one exception: if
   the way Flint rebuilds has changed since then, it installs the newest version
