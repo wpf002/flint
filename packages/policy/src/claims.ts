@@ -11,10 +11,13 @@ import { z } from 'zod';
 /** An entity reference: kind#shortId, never a title. */
 export const ClaimRef = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 
+/** A series key: lowercase segments, never words. */
+const SeriesRef = z.string().regex(/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/).max(80);
+
 export const CLAIM_TEMPLATE_PARAMS = {
   service_healthy: z.object({ entity: ClaimRef }).strict(),
   deploy_succeeds: z.object({ entity: ClaimRef }).strict(),
-  threshold: z.object({ series: z.string().regex(/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/).max(80), op: z.enum(['above', 'below']), value: z.number().finite() }).strict(),
+  threshold: z.object({ series: SeriesRef, op: z.enum(['above', 'below']), value: z.number().finite() }).strict(),
   closed_by: z.object({ entity: ClaimRef }).strict(),
   /**
    * A goal review's forecast (P3): the goal by its ref (goal#<last 6 of its id>, never its title) and a local
@@ -22,12 +25,28 @@ export const CLAIM_TEMPLATE_PARAMS = {
    * can fill it (the runtime refuses it there, and the database ties a goal's forecast to the goals writer).
    */
   goal_on_track: z.object({ goal: ClaimRef, by: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict(),
+  // P4, the runtime's own: a forecast's range for one step of a series. A registry key, two numbers and a local date.
+  series_range: z
+    .object({ series: SeriesRef, lo: z.number().finite(), hi: z.number().finite(), on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) })
+    .strict()
+    .refine((p) => p.lo <= p.hi, 'the range is upside down'),
 } as const;
 
 export type ClaimTemplateId = keyof typeof CLAIM_TEMPLATE_PARAMS;
 export const CLAIM_TEMPLATE_IDS = Object.keys(CLAIM_TEMPLATE_PARAMS) as ClaimTemplateId[];
+/**
+ * Templates only the runtime's own writers fill (a goal review's forecast, the
+ * forecaster's range). Chat is never offered them: they are not in ClaimTemplate
+ * below, which is what the connector shows the model and the chat gate checks,
+ * and the ledger's route takes chat's templates only.
+ */
+export const RUNTIME_CLAIM_TEMPLATE_IDS = ['goal_on_track', 'series_range'] as const satisfies readonly ClaimTemplateId[];
+/** The templates chat may fill. */
+export const CHAT_CLAIM_TEMPLATE_IDS = CLAIM_TEMPLATE_IDS.filter((id) => !(RUNTIME_CLAIM_TEMPLATE_IDS as readonly string[]).includes(id)) as Array<
+  Exclude<ClaimTemplateId, (typeof RUNTIME_CLAIM_TEMPLATE_IDS)[number]>
+>;
 
-/** A template with its params, as a tool takes it. goal_on_track is not one of them: only a goal's review fills it. */
+/** A template with its params, as a tool takes it (chat's four; never the runtime's own: only a goal's review fills goal_on_track, only the forecaster series_range). */
 export const ClaimTemplate = z.discriminatedUnion('id', [
   z.object({ id: z.literal('service_healthy'), params: CLAIM_TEMPLATE_PARAMS.service_healthy }).strict(),
   z.object({ id: z.literal('deploy_succeeds'), params: CLAIM_TEMPLATE_PARAMS.deploy_succeeds }).strict(),

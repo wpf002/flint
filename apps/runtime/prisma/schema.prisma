@@ -313,18 +313,27 @@ model SuppressedKey {
   @@id([source, externalIdHash])
 }
 
+/// P4 metric_series_guard: offBoxAllowed is false and stays false (no series
+/// leaves this Mac; there is no card for it); born under the label the database
+/// can tell (dollars and spend are financial, the calendar is never ops); its
+/// key, entity, unit, step and sensitivity never change; only a forget marks it
+/// forgotten, for good.
 model MetricSeries {
-  key           String        @id
-  entityId      String?
-  unit          String
-  freq          String // CHECK raw|D|W|M
-  sensitivity   String
-  offBoxAllowed Boolean       @default(false)
-  description   String
-  createdAt     DateTime      @default(now()) @db.Timestamptz(3)
-  points        MetricPoint[]
+  key            String          @id
+  entityId       String?
+  unit           String
+  freq           String // CHECK raw|D|W|M
+  sensitivity    String
+  offBoxAllowed  Boolean         @default(false)
+  description    String
+  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+  points         MetricPoint[]
+  forecastRuns   ForecastRun[]
+  forecastSeries ForecastSeries?
+  predictions    Prediction[]
 }
 
+/// P4 metric_point_valid: a refused point names its series, never its value.
 model MetricPoint {
   seriesKey String
   series    MetricSeries @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
@@ -357,12 +366,20 @@ model BackupRun {
 
 /// prediction_guard: only status, supersededAt, lateSupersession and voidApprovalId change.
 /// P3: goalId only on the goals writer's own predictions (Prediction_goal_check), and never changes.
+/// P4: the forecast fields are set at insert and never change. prediction_valid: a
+/// range has its numbers and a yes/no has none; a forecast's prediction names its
+/// run and its series together, and a row either forecast writer makes always
+/// names both. prediction_forecast_check: only while its number is on; with its
+/// series' unit, and under `spend` or `calendar` exactly when its series is one;
+/// `statistical` only on a run that beat naive, `base_rate` only on one that did
+/// not; nothing is recorded as `prophet`. A run backs one range, one question and one estimate
+/// (Prediction_run_forecast_key, Prediction_run_reason_key: partial, in the migration).
 model Prediction {
-  id                        String          @id @default(cuid())
+  id                        String              @id @default(cuid())
   claim                     String // <= 300
-  kind                      String          @default("binary") // CHECK binary|interval
+  kind                      String              @default("binary") // CHECK binary|interval
   probability               Float?
-  method                    String // CHECK model_reasoning|prophet|rule|base_rate|human
+  method                    String // CHECK model_reasoning|prophet|statistical|rule|base_rate|human (prophet: in the list, never recorded)
   model                     String?
   modelConfig               Json?
   domain                    String // CHECK services|deploys|spend|repos|projects|calendar|goals|assets|selfmod|triage|recommendation
@@ -372,32 +389,46 @@ model Prediction {
   resolver                  String // CHECK auto_world|auto_metric|will|conditional
   resolverSpec              Json?
   conditionRecommendationId String?
-  resolveBy                 DateTime        @db.Timestamptz(3)
+  resolveBy                 DateTime            @db.Timestamptz(3)
   subjectEntityId           String?
-  subjectEntity             Entity?         @relation(fields: [subjectEntityId], references: [id], onDelete: Restrict)
-  supersedesId              String?         @unique
-  supersedes                Prediction?     @relation("Supersede", fields: [supersedesId], references: [id], onDelete: Restrict)
-  supersededBy              Prediction?     @relation("Supersede")
-  supersededAt              DateTime?       @db.Timestamptz(3)
-  lateSupersession          Boolean         @default(false)
-  status                    String          @default("open") // CHECK open|resolved|expired|superseded|condition_unmet|void
+  subjectEntity             Entity?             @relation(fields: [subjectEntityId], references: [id], onDelete: Restrict)
+  supersedesId              String?             @unique
+  supersedes                Prediction?         @relation("Supersede", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy              Prediction?         @relation("Supersede")
+  supersededAt              DateTime?           @db.Timestamptz(3)
+  lateSupersession          Boolean             @default(false)
+  status                    String              @default("open") // CHECK open|resolved|expired|superseded|condition_unmet|void
   voidApprovalId            String?
-  tainted                   Boolean         @default(false)
+  tainted                   Boolean             @default(false)
   createdBy                 String
-  createdAt                 DateTime        @default(now()) @db.Timestamptz(3)
+  createdAt                 DateTime            @default(now()) @db.Timestamptz(3)
   goalId                    String?
-  goal                      Goal?           @relation(fields: [goalId], references: [id], onDelete: Restrict)
+  goal                      Goal?               @relation(fields: [goalId], references: [id], onDelete: Restrict)
+  pointEstimate             Float? // a range's middle
+  lower                     Float?
+  upper                     Float?
+  level                     Float? // the range's level, 0..1 (the run's)
+  unit                      String? // <= 20
+  seriesKey                 String?
+  series                    MetricSeries?       @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
+  forecastRunId             String?
+  forecastRun               ForecastRun?        @relation(fields: [forecastRunId], references: [id], onDelete: Restrict)
   resolution                Resolution?
-  recommendation            Recommendation? @relation("RecPrediction")
+  recommendation            Recommendation?     @relation("RecPrediction")
   goalReview                GoalReview?
+  question                  PredictionQuestion?
 
   @@index([status, resolveBy])
   @@index([domain, type, createdAt])
   @@index([subjectEntityId])
   @@index([goalId])
+  @@index([seriesKey, createdAt])
+  @@index([forecastRunId])
 }
 
 /// Append-only; resolution_leak_guard checks eventAt >= the prediction's createdAt.
+/// P4 resolution_will_check: a resolution recorded as Will's needs his answer to
+/// its question, or the signed card that finished its goal.
 model Resolution {
   id           String                 @id @default(cuid())
   predictionId String                 @unique
@@ -449,27 +480,36 @@ model Recommendation {
   @@index([domain, status, createdAt])
 }
 
+/// P4: one row per window, domain, type, method and kind. A yes/no row has its
+/// Brier score and base rate; a range row has its coverage and neither of those.
+/// ece and the Brier interval are stored only at n >= 100 (a CHECK).
 model CalibrationSnapshot {
-  id              String   @id @default(cuid())
-  computedAt      DateTime @default(now()) @db.Timestamptz(3)
-  windowStart     DateTime @db.Timestamptz(3)
-  windowEnd       DateTime @db.Timestamptz(3)
-  domain          String
-  type            String
-  method          String
-  n               Int
-  nOpen           Int
-  nExpired        Int
-  nConditionUnmet Int
-  nVoid           Int
-  nLateSuperseded Int
-  brier           Float
-  baseRate        Float
-  brierSkill      Float?
-  reliability     Json
-  unresolvedRate  Float
+  id               String   @id @default(cuid())
+  computedAt       DateTime @default(now()) @db.Timestamptz(3)
+  windowStart      DateTime @db.Timestamptz(3)
+  windowEnd        DateTime @db.Timestamptz(3)
+  domain           String
+  type             String
+  method           String
+  kind             String   @default("binary") // CHECK binary|interval
+  n                Int
+  nOpen            Int
+  nExpired         Int
+  nConditionUnmet  Int
+  nVoid            Int
+  nLateSuperseded  Int
+  brier            Float?
+  baseRate         Float?
+  brierSkill       Float?
+  reliability      Json
+  unresolvedRate   Float
+  intervalCoverage Float? // share of resolved ranges that held
+  pinball          Float? // mean scaled quantile loss
+  ece              Float? // only at n >= 100
+  brierCiLow       Float? // only at n >= 100
+  brierCiHigh      Float?
 
-  @@unique([windowEnd, domain, type, method])
+  @@unique([windowEnd, domain, type, method, kind])
 }
 
 // ---- P2: triage, surfacing and runtime health ---------------------------------------
@@ -711,6 +751,77 @@ model GoalApprovalUse {
   approvalId String   @id
   goalId     String
   action     String
-  xact       String // the transaction that used it (pg_current_xact_id)
+  xact       String // the transaction that used it (its id and when it began)
+  usedAt     DateTime @default(now()) @db.Timestamptz(3)
+}
+
+// ---------------------------------------------------------------------------
+// p4_forecasts
+// Forecast runs hold numbers from financial and personal series: a refused row
+// never reaches an error's text (forecast_run_valid, prediction_valid name the
+// row and the rule only).
+
+/// Append-only (guard_append_only). forecast_run_check: only for a series Will
+/// turned on, never a forgotten one. forecast_run_valid: its own rules, by id
+/// only (every run is local; points are numbers and ISO times; a failed run has
+/// a short code and no scores).
+model ForecastRun {
+  id            String       @id @default(cuid())
+  seriesKey     String
+  series        MetricSeries @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
+  provider      String // always "local": computed on this Mac
+  endpoint      String // "local:fc.v1": `local:` and a short name, never a URL
+  requestDigest String // sha256 hex of the canonical input
+  horizon       Int
+  level         Float
+  beatsNaive    Boolean? // null: too short to validate
+  naiveMase     Float?
+  modelMase     Float?
+  scale         Float? // the MASE scale; lets pinball loss be compared across units
+  points        Json // [{at, mean, lo, hi}], <= 64 KB
+  latencyMs     Int
+  ok            Boolean
+  error         String? // a short code, one word, <= 80
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+  predictions   Prediction[]
+
+  @@index([seriesKey, createdAt])
+}
+
+/// Which numbers Flint forecasts. forecast_series_guard: turned on only as the
+/// signed forecast.series.enable card whose approval it names says (a card at
+/// least as sensitive as the number), in that approval's one transaction
+/// (forecast_series_bind); turning off is free; never deleted. Its history (who
+/// turned it on or off) is in RowChange.
+model ForecastSeries {
+  seriesKey  String       @id
+  series     MetricSeries @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
+  on         Boolean      @default(false)
+  reason     Boolean      @default(false) // the local model estimates too
+  approvalId String // the card that last turned it on
+  enabledAt  DateTime     @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+}
+
+/// One of Will's yes/no questions. prediction_question_guard: asked once, only
+/// for a due yes/no prediction that Will resolves; answered once, as Will; never deleted.
+model PredictionQuestion {
+  predictionId String     @id
+  prediction   Prediction @relation(fields: [predictionId], references: [id], onDelete: Restrict)
+  askedAt      DateTime   @default(now()) @db.Timestamptz(3)
+  shadow       Boolean    @default(true)
+  answer       String? // CHECK yes|no|skip
+  answeredAt   DateTime?  @db.Timestamptz(3)
+
+  @@index([answeredAt, askedAt])
+}
+
+/// One-use approvals (p4_bind_approval): a signed forecast card acts in one
+/// transaction only, however long the card stays executing. Written only by that
+/// SECURITY DEFINER helper; flint_app has no grant on it.
+model ForecastApprovalUse {
+  approvalId String   @id
+  action     String
+  xact       String // the transaction that used it (its id and when it began)
   usedAt     DateTime @default(now()) @db.Timestamptz(3)
 }

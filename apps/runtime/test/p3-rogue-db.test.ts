@@ -482,4 +482,130 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
       expect(`${e2.message} ${e2.detail ?? ''}`).not.toContain('CANARY');
     });
   });
+
+  // P4 part 1 carried four hardenings back to P3's signed-card helpers (migration p4_forecasts).
+  describe('a card kept for later, an approval spent by hand, and a write that does nothing', () => {
+    const used = async (aid: string) => (await owner(`SELECT count(*)::int AS n FROM "GoalApprovalUse" WHERE "approvalId" = $1`, [aid])).rows[0].n as number;
+    async function item(): Promise<string> {
+      const eid = id('en');
+      await owner(`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", "lastObservedAt", "updatedAt") VALUES ($1, 'service', $2, $1, '{}', $3, now(), now())`, [eid, `service:test:${eid}`, HEX('d')]);
+      return eid;
+    }
+    const link = (entityId: string) => ({ entityId, role: 'target', watchPaths: [] as string[] });
+    const insertLink = (q: Q, gid: string, eid: string, extra = '') => q(`INSERT INTO "GoalEntity" ("goalId", "entityId", role, "watchPaths") VALUES ($1, $2, 'target', '{}') ${extra}`, [gid, eid]);
+
+    it('a card filed to outlive Will\'s signature by more than a week moves nothing: it cannot be signed now and kept for months', async () => {
+      for (const [action, run] of [
+        ['goal.activate', async (life: string) => {
+          const gid = await goal();
+          return outcome(activate(app, gid, await card('goal.activate', activateArgs(gid), life)));
+        }],
+        ['goal.done', async (life: string) => {
+          const gid = await goal();
+          await activate(app, gid, await card('goal.activate', activateArgs(gid)));
+          return outcome(app(`UPDATE "Goal" SET status = 'done', "approvalId" = $2 WHERE id = $1`, [gid, await card('goal.done', { goalId: gid, goalTitle: DEF.title }, life)]));
+        }],
+        ['plan.change', async (life: string) => {
+          const { gid, v1 } = await goalWithPlan([S('s1')]);
+          const aid = await card('plan.change', { goalId: gid, goalTitle: DEF.title, ops: [addOp(S('s2'))] }, life);
+          return outcome(inTx(async (q) => {
+            const v2 = id('pl');
+            await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 2, 'will')`, [v2, gid]);
+            await insertSteps(q, v2, [S('s1'), S('s2')]);
+            await q(`UPDATE "Plan" SET status = 'superseded' WHERE id = $1`, [v1]);
+            await q(`UPDATE "Plan" SET status = 'active', "approvalId" = $2 WHERE id = $1`, [v2, aid]);
+          }));
+        }],
+      ] as const) {
+        // The longest the runtime files a card for is a week: that still works. Sixty days does not.
+        expect(await run('60 days'), `${action}, 60 days`).toBe('42501');
+        expect(await run('7 days'), `${action}, 7 days`).toBe('ok');
+      }
+    });
+
+    it('calling the approval helper by hand uses nothing, even for the live card and its own goal and action: a runtime cannot burn a card Will signed', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid));
+      const e = (await pgError(app(`SELECT p3_bind_approval($1, $2, 'goal.activate')`, [aid, gid]))) as { code?: string; message: string };
+      expect([e.code, e.message]).toEqual(['42501', `goal ${gid}: an approval is used only by the change it signed`]);
+      // Nor from inside a statement that fires another table's triggers.
+      expect(await code(app(`WITH spend AS (SELECT p3_bind_approval($1, $2, 'goal.activate')) UPDATE "Goal" SET priority = 4 FROM spend WHERE id = $2`, [aid, gid]))).toBe('42501');
+      expect(await used(aid)).toBe(0);
+      await activate(app, gid, aid);
+      expect(await used(aid)).toBe(1);
+      expect((await app(`SELECT status FROM "Goal" WHERE id = $1`, [gid])).rows[0].status).toBe('active');
+    });
+
+    it('a link insert that meets a link already there and does nothing spends nothing; one that lands uses the approval, once', async () => {
+      const [gid, e1, e2] = [await goal(), await item(), await item()];
+      const first = await card('goal.activate', activateArgs(gid, { links: [link(e1)] }));
+      await inTx(async (q) => {
+        await insertLink(q, gid, e1);
+        await activate(q, gid, first);
+      });
+      // A new card that keeps the first link and adds a second.
+      const one = { title: 'Synthetic one', description: '', successCriteria: DEF.successCriteria, links: [link(e1), link(e2)].sort((a, b) => a.entityId.localeCompare(b.entityId)) };
+      const second = await card('goal.criteria_change', { goalId: gid, ...one });
+      // The link is there: the insert does nothing, in every shape, and the card is still unused.
+      await insertLink(app, gid, e1, 'ON CONFLICT DO NOTHING');
+      await insertLink(app, gid, e1, 'ON CONFLICT ("goalId", "entityId") DO NOTHING');
+      expect(await used(second)).toBe(0);
+      // A statement that fails after its guard passed leaves it unused too.
+      expect(await outcome(insertLink(app, gid, e1))).toBe('23505');
+      expect(await used(second)).toBe(0);
+      // The second link lands: the approval is used, by that transaction alone.
+      await insertLink(app, gid, e2);
+      expect(await used(second)).toBe(1);
+      expect(await code(app(`UPDATE "Goal" SET title = $2, description = $3, "approvalId" = $4 WHERE id = $1`, [gid, one.title, one.description, second]))).toBe('42501');
+      // A removal that lands is a use as well: a third card that drops the first link, in one transaction with its title.
+      const two = { ...one, title: 'Synthetic two', links: [link(e2)] };
+      const third = await card('goal.criteria_change', { goalId: gid, ...two });
+      await app(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, 'ennone']);
+      expect(await used(third)).toBe(0);
+      await inTx(async (q) => {
+        await q(`DELETE FROM "GoalEntity" WHERE "goalId" = $1 AND "entityId" = $2`, [gid, e1]);
+        await q(`UPDATE "Goal" SET title = $2, description = $3, "approvalId" = $4 WHERE id = $1`, [gid, two.title, two.description, third]);
+      });
+      expect(await used(third)).toBe(1);
+      expect((await app(`SELECT "entityId" FROM "GoalEntity" WHERE "goalId" = $1`, [gid])).rows).toEqual([{ entityId: e2 }]);
+    });
+
+    it('the transaction that used an approval is on record by its id and when it began; a use on record under a bare id is never this transaction\'s', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid));
+      await activate(app, gid, aid);
+      const xact = (await owner(`SELECT xact FROM "GoalApprovalUse" WHERE "approvalId" = $1`, [aid])).rows[0].xact as string;
+      // A transaction id, then its start in microseconds since 1970: the same form the forecast card's table holds.
+      expect(xact).toMatch(/^[0-9]+@[0-9]{16}$/);
+      // A transaction id comes round again after a restore into a new cluster. A use on record under this very
+      // transaction's id, bare (as P3 wrote it), would have let this transaction pass for the one that used the card.
+      const again = await goal();
+      const aid2 = await card('goal.activate', activateArgs(again));
+      const t = new pg.Client(pgConfig(urls.app));
+      await t.connect();
+      try {
+        await t.query('BEGIN');
+        const xid = (await t.query(`SELECT pg_current_xact_id()::text AS x`)).rows[0].x as string;
+        await owner(`INSERT INTO "GoalApprovalUse" ("approvalId", "goalId", "action", "xact") VALUES ($1, $2, 'goal.activate', $3)`, [aid2, again, xid]);
+        const e = (await pgError(activate((sql, params) => t.query(sql, params), again, aid2))) as { code?: string; message: string };
+        expect([e.code, e.message]).toEqual(['42501', `goal ${again}: approval ${aid2} was already used`]);
+        await t.query('ROLLBACK');
+      } finally {
+        await t.end();
+      }
+      expect((await app(`SELECT status FROM "Goal" WHERE id = $1`, [again])).rows[0].status).toBe('proposed');
+    });
+
+    it('a goal or plan statement that changes no row spends nothing either (their approval is used by the UPDATE that lands)', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid));
+      await app(`UPDATE "Goal" SET status = 'active', "approvalId" = $2, "nextReviewAt" = now() WHERE id = $1 AND false`, [gid, aid]);
+      await app(`INSERT INTO "Goal" (id, title, owner, origin, "updatedAt") VALUES ($1, 'Synthetic', 'will', 'will', now()) ON CONFLICT (id) DO UPDATE SET status = 'active', "approvalId" = $2 WHERE false`, [gid, aid]);
+      // One that is refused after its guard ran (a check the goal's own rules make) takes the use back with it.
+      expect(await outcome(app(`UPDATE "Goal" SET status = 'active', "approvalId" = $2, "nextReviewAt" = now(), priority = 99 WHERE id = $1`, [gid, aid]))).not.toBe('ok');
+      expect(await used(aid)).toBe(0);
+      await activate(app, gid, aid);
+      expect(await used(aid)).toBe(1);
+    });
+  });
 });

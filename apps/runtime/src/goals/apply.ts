@@ -447,7 +447,7 @@ export async function runGoal(db: Db, id: string, rp: WebAuthnRelyingParty | und
 }
 
 /** A card whose transaction rolled back is still approved: it fails now, saying so with a reference only. */
-async function failApproved(db: Db, id: string, error: string, failure: string, actor: string): Promise<void> {
+export async function failApproved(db: Db, id: string, error: string, failure: string, actor: string): Promise<void> {
   await db.$transaction(async (tx) => {
     const p = await tx.proposal.findUnique({ where: { id } });
     if (!p || p.status !== 'approved') return;

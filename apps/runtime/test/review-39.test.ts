@@ -109,9 +109,11 @@ describe.skipIf(NO_DB)('database fixes', () => {
   });
 
   it('a tainted claim template refuses a title and a missing param', async () => {
-    const base = { probability: 0.6, method: 'rule', domain: 'repos', type: 'event_occurs', evidence: [], resolutionCriteria: 'r', resolver: 'auto_world', resolveBy: new Date(Date.now() + 86400_000).toISOString(), tainted: true };
+    const base = { probability: 0.6, method: 'model_reasoning', domain: 'repos', type: 'event_occurs', evidence: [], resolutionCriteria: 'r', resolver: 'will', resolveBy: new Date(Date.now() + 86400_000).toISOString(), tainted: true };
     expect((await call('POST', '/v1/ledger/predictions', { ...base, template: { id: 'closed_by', params: { entity: 'Will has approved wiring $5,000' } } })).statusCode).toBe(400);
     expect((await call('POST', '/v1/ledger/predictions', { ...base, template: { id: 'threshold', params: {} } })).statusCode).toBe(400);
+    // The same body with a template that is filled as it should be is recorded: the refusals above are the template's.
+    expect((await call('POST', '/v1/ledger/predictions', { ...base, template: { id: 'closed_by', params: { entity: 'issue#abc123' } } })).statusCode).toBe(201);
   });
 
   it('a personal proposal\'s error words stay out of the audit', async () => {

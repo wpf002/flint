@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { REFUSAL, digestOf, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { REFUSAL, digestOf, isForecastSignedAction, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -142,6 +142,12 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   if (goalCard) {
     const { checkGoalCard } = await import('../goals/apply.js');
     input = await checkGoalCard(db, input, now);
+  }
+  // The predictions card (P4) is checked against the registry and filed with its args normalized and a fixed
+  // reason; one from chat, and one that could not apply, are never filed.
+  if (isForecastSignedAction(input.action)) {
+    const { checkForecastCard } = await import('../predict/enable.js');
+    input = await checkForecastCard(db, input);
   }
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {

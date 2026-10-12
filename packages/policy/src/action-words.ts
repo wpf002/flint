@@ -13,6 +13,8 @@ export const ACTION_WORDS: Readonly<Record<string, string>> = {
   'runtime.inbox_recent': 'Read What Triage Decided',
   'runtime.escalations_open': 'Read Open Escalations',
   'runtime.explain_decision': 'Explain a Triage Decision',
+  // P4: the card that turns Flint's forecasts on (the console's card says the same title).
+  'forecast.series.enable': 'Turn On Predictions',
 };
 
 /**
@@ -30,6 +32,7 @@ export const ACTION_DONE: Readonly<Record<string, string>> = {
   'runtime.inbox_recent': 'Flint read what triage decided.',
   'runtime.escalations_open': 'Flint read the open escalations.',
   'runtime.explain_decision': 'Flint explained a triage decision.',
+  'forecast.series.enable': 'Flint turned on predictions.',
 };
 
 /** The words for an action, or its name when it has none. */

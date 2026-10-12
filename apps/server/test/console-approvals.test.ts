@@ -616,6 +616,85 @@ describe('the console Approvals panel', () => {
     expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
   });
 
+  it('Turn On Predictions (P4) is in words, names each number it turns on, and asks on its own with a fresh touch and a plain prompt', async () => {
+    const three = ['daily.calendar.hours', 'daily.deploys.count', 'daily.spend.anthropic.usd'];
+    const predict = (over: Record<string, unknown> = {}) => card({
+      id: 'tp', fullName: 'forecast.series.enable', origin: 'console', sensitivity: 'financial', consequential: true,
+      args: { series: three, reason: [] }, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.', ...over,
+    });
+    /** The card's facts, read with plain spaces ("and 8 more" is held together with no-break ones). */
+    const facts = (p: Record<string, unknown>) => (JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(p)})`))) as string[][]).map((f) => f.map((x) => x.replace(/\u00a0/g, ' ')));
+    const say = (p: Record<string, unknown>) => [run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`), facts(p), run(`apprReason(${JSON.stringify(p)})`)];
+    // Which numbers, by name (in the registry's order, whatever order the card lists them in), and that spending and the calendar are among them.
+    expect(say(predict({ expiresAt: '2026-10-16T14:00:00.000Z' }))).toEqual([
+      'Turn On Predictions', 'Flint forecasts 3 of its own numbers each night, on this Mac.',
+      [['Numbers', 'Anthropic Spend · Deploys · Calendar Hours'], ['Includes', 'Spending and calendar numbers'], ['Filed By', 'You']], 'turn on predictions',
+    ]);
+    // The title is the one its notes use; one number reads right; a card whose args were cleared still reads as a sentence.
+    expect(run(`apprTitle(${JSON.stringify(predict())})`)).toBe(ACTION_WORDS['forecast.series.enable']);
+    const one = predict({ sensitivity: 'ops', args: { series: ['daily.deploys.count'], reason: [] } });
+    expect(say(one).slice(1, 3)).toEqual(['Flint forecasts 1 of its own numbers each night, on this Mac.', [['Numbers', 'Deploys'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]]]);
+    expect(say(predict({ args: null })).slice(0, 3)).toEqual(['Turn On Predictions', 'Flint forecasts its own numbers each night, on this Mac.', [['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-12T14:00:00.000Z')`)]]]);
+    // Includes is said only for what is there: spending alone, the calendar alone, or neither.
+    expect(facts(predict({ args: { series: ['daily.spend.openai.usd', 'daily.spend.tavily.usd'], reason: [] } })).slice(0, 2)).toEqual([['Numbers', 'OpenAI Spend · Tavily Spend'], ['Includes', 'Spending numbers']]);
+    expect(facts(predict({ sensitivity: 'personal', args: { series: ['daily.calendar.hours', 'daily.threads.open'], reason: [] } })).slice(0, 2)).toEqual([['Numbers', 'Open Threads · Calendar Hours'], ['Includes', 'Calendar numbers']]);
+    expect(facts(predict({ sensitivity: 'ops', args: { series: ['daily.threads.open', 'weekly.commits.flint.count'], reason: [] } })).map((f) => f[0])).toEqual(['Numbers', 'Filed By', 'Expires']);
+    // The local model's second opinion: said when it is on the card, for every number or for some.
+    expect(facts(predict({ args: { series: three, reason: three } }))).toEqual([['Numbers', 'Anthropic Spend · Deploys · Calendar Hours'], ['Includes', 'Spending and calendar numbers'], ['Second Opinion', 'Local Model']]);
+    expect(facts(predict({ sensitivity: 'ops', args: { series: ['daily.deploys.count', 'daily.threads.open'], reason: ['daily.deploys.count'] } }))).toEqual([['Numbers', 'Deploys · Open Threads'], ['Second Opinion', 'Local Model on 1 of 2'], ['Filed By', 'You']]);
+    // Up to six, every name. Past six, the first four and how many more: the whole list is behind Show Details.
+    const all = ['daily.calendar.hours', 'daily.deploys.count', 'daily.services.incident_minutes', 'daily.spend.anthropic.usd', 'daily.spend.openai.usd', 'daily.spend.perplexity.usd', 'daily.spend.tavily.usd',
+      'daily.threads.open', 'weekly.commits.flint.count', 'weekly.commits.helm.count', 'weekly.commits.nexus.count', 'weekly.commits.trident.count'];
+    expect(facts(predict({ args: { series: all.slice(3, 9), reason: [] } }))[0]).toEqual(['Numbers', 'Anthropic Spend · OpenAI Spend · Perplexity Spend · Tavily Spend · Flint Commits · Open Threads']);
+    expect(facts(predict({ args: { series: all.slice(2, 9), reason: [] } }))[0]).toEqual(['Numbers', 'Anthropic Spend · OpenAI Spend · Perplexity Spend · Tavily Spend · and 3 more']);
+    expect(run(`apprFacts(${JSON.stringify(predict({ args: { series: all, reason: [] } }))})[0][1]`)).toMatch(/ · and\u00a08\u00a0more$/);
+    expect(say(predict({ args: { series: all, reason: all.slice(3, 7) } })).slice(1, 3)).toEqual([
+      'Flint forecasts 12 of its own numbers each night, on this Mac.',
+      [['Numbers', 'Anthropic Spend · OpenAI Spend · Perplexity Spend · Tavily Spend · and 8 more'], ['Includes', 'Spending and calendar numbers'], ['Second Opinion', 'Local Model on 4 of 12']],
+    ]);
+    // A number this page cannot name is said to be one, and never shown by its key; on a card marked as more than ops data it counts as sensitive.
+    const odd = predict({ args: { series: ['daily.deploys.count', 'daily.spend.acme.usd', 'x.y'], reason: ['x.y'] } });
+    expect(facts(odd)).toEqual([['Numbers', 'Deploys · 2 Unknown Numbers'], ['Includes', 'Sensitive numbers'], ['Second Opinion', 'Local Model on 1 of 3']]);
+    expect(facts(predict({ sensitivity: 'ops', args: { series: ['x.y'], reason: [] } }))[0]).toEqual(['Numbers', '1 Unknown Number']);
+    for (const p of [predict(), predict({ args: { series: all, reason: all } }), odd]) {
+      expect(facts(p).length).toBeLessThanOrEqual(3);
+      // Never the action's internal name, a series' key, or JSON on the card's face.
+      expect(`${run(`apprTitle(${JSON.stringify(p)})`)} ${run(`apprSub(${JSON.stringify(p)})`)} ${facts(p).flat().join(' ')}`).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|acme|x\.y|[{}[\]"]/);
+    }
+    // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', sensitivity: 'ops' })})`)).toBe(true);
+    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), card({ id: 'src' })] } });
+    await open();
+    expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
+    const open1 = ids.apprlist!.children[0]!.children[0]!;
+    expect(open1.shown()).toContain('Turn On PredictionsFlint forecasts 12 of its own numbers each night, on this Mac.');
+    expect(open1.shown()).toContain('Asks on Its Own');
+    // Behind Show Details: why, then every number on its own line, in words. No raw args for this card: no key, no JSON.
+    const details = open1.all().find((e) => e.className === 'details')!;
+    expect(details.hidden).toBe(true);
+    expect(details.all().filter((e) => e.tagName === 'pre')).toEqual([]);
+    expect(details.all().filter((e) => e.tagName === 'p').map((e) => e.textContent)).toEqual(['Approving turns on Flint’s forecasts of these numbers, on this Mac.']);
+    expect(details.all().filter((e) => e.tagName === 'li').map((e) => e.textContent)).toEqual([
+      'Anthropic Spend · Spending · Second Opinion', 'OpenAI Spend · Spending', 'Perplexity Spend · Spending', 'Tavily Spend · Spending', 'Deploys · Second Opinion',
+      'Flint Commits', 'Nexus Commits', 'Trident Commits', 'Helm Commits', 'Service Downtime', 'Open Threads', 'Calendar Hours · Calendar',
+    ]);
+    open1.button('Show Details').onclick!();
+    expect(details.hidden).toBe(false);
+    expect(open1.shown()).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|[{}[\]"]/);
+    // Every other card still shows its raw args there.
+    const other = ids.apprlist!.children[0]!.children[1]!;
+    other.onclick!();
+    expect(ids.apprlist!.children[0]!.children[1]!.all().filter((e) => e.tagName === 'pre').map((e) => e.textContent)).toEqual([JSON.stringify({ source: 'deploy' }, null, 1)]);
+    ids.apprlist!.children[0]!.children[0]!.onclick!();
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['src']);
+    decided = [];
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    expect(decided.at(-1)).toEqual(['approve', 'tp', { reason: 'turn on predictions', fresh: true, args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }]);
+  });
+
   it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
     const told: string[] = [];
     ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);

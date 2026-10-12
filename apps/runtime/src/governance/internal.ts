@@ -1,17 +1,20 @@
 /**
  * Actions the runtime carries out itself once Will has approved them: turning a
  * source on, applying a signed policy change, adding a triage rule, writing a
- * proposed link, creating the people on a calendar card (P2.5), and changing a
- * goal or its plan (P3). Each goes through claimProposal (re-verification,
- * tier, cap, intent) and then completes, so the audit trail reads the same as
- * any other approved action; a goal card does all three in one transaction
- * (goals/apply.ts). The database checks the effect too: a cursor turns on only
+ * proposed link, creating the people on a calendar card (P2.5), changing a
+ * goal or its plan (P3), and turning predictions on (P4). Each goes through
+ * claimProposal (re-verification, tier, cap, intent) and then completes, so the
+ * audit trail reads the same as any other approved action; a goal card and the
+ * predictions card do all three in one transaction (goals/apply.ts,
+ * predict/enable.ts). The database checks the effect too: a cursor turns on only
  * under an executing enable proposal, a policy row must appear in the signed
- * proposal, and a goal moves only as its executing card says.
+ * proposal, a goal moves only as its executing card says, and a number is
+ * forecast only as the executing card's signed list says.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { GOAL_SIGNED_ACTIONS, SOURCES, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
+import { runForecastCard } from '../predict/enable.js';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
 import { dbRefused, failureReport } from '../dbcodes.js';
@@ -20,8 +23,10 @@ import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
 import { runGoalCard } from '../goals/apply.js';
 
+/** P4 adds forecast.series.enable (turning predictions on), and nothing else. */
 export const INTERNAL_ACTIONS: ReadonlySet<string> = new Set([
   'world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS,
+  'forecast.series.enable',
 ]);
 
 /**
@@ -94,6 +99,8 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
   if (!internal.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
   // P3: a goal card is claimed, applied and completed in one transaction.
   if (isGoalSignedAction(p.action)) return runGoalCard(db, id, rp, tz, actor);
+  // P4: so is the card that turns predictions on.
+  if (p.action === 'forecast.series.enable') return runForecastCard(db, id, rp, tz, actor);
   const claimed = await claimProposal(db, id, rp, tz, actor);
   try {
     if (claimed.action === 'world.source.enable') {

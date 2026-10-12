@@ -551,6 +551,190 @@ rolled back isn't carried out ("not carried out by the runtime") and stays
 approved. Any later deploy of P3 code applies the migration again. Claude runs
 `down.sql` only with your OK, after the dump.
 
+## Predictions (P4)
+
+Predictions arrive in parts. This first part is only the store and what the
+database guarantees about it. Nothing is forecast, checked or scored yet, and
+it changes nothing you see. Flint will forecast its own numbers on this Mac: no
+series is sent anywhere, and no part of this calls an outside service.
+
+What the database now holds to, whatever the runtime's code does:
+
+- **Nothing is forecast until you turn it on.** A number is forecast only after
+  you sign the Turn On Predictions card that lists it. The card acts once, in
+  one transaction, and only if it was filed to ask for your own touch. Turning a
+  number off needs no signature, and stops its forecasts at once.
+- **A forecast says what it earned.** A prediction is recorded as `statistical`
+  only when its forecast beat a plain guess in its own backtest, and as
+  `base_rate` only when it didn't.
+- **Spend and calendar numbers stay labeled.** A series' sensitivity can never
+  change. A series in dollars, or of spend, is financial, and a calendar series
+  is never ops data. Before this, a runtime could have relabeled a spend series
+  as ops data. The update also puts right any series that already was.
+- **No number leaves this Mac.** No series can be marked as allowed to leave,
+  by anyone, under any card. There's no such card. Every forecast is computed
+  here, and Flint has no action that calls an outside forecaster.
+- **Your predictions are yours to settle.** A prediction that only you resolve is
+  settled only by your answer to its question.
+- **Scores wait for enough results.** The finer accuracy measures are stored only
+  once 100 predictions in a group have been scored.
+- **A forecast's numbers stay out of errors and out of chat.** A forecast, a
+  daily number or a result that the database refuses names the row and the
+  rule, never a number. Chat's list of open predictions leaves forecasts out,
+  so a spend or calendar figure can't reach a chat model through it.
+
+### The two switches
+
+Both must be on before anything runs:
+
+1. `FLINT_PREDICT=on` in `~/.flint/runtime.override.env`. It's off by default,
+   and any other value is off. The prediction jobs read it when they arrive in
+   the next part; nothing reads it yet.
+2. The signed Turn On Predictions card. This is the real gate, and the database
+   enforces it. Nothing files that card for you yet: the console's panel comes
+   in a later part. Approvals already knows the card. It shows as Turn On
+   Predictions and names each number it covers. It says when spending or
+   calendar numbers are among them, and when the local model's second opinion
+   is included. It always asks on its own, with a fresh touch.
+
+### What changed on deploy
+
+Three things, and none changes anything you use:
+
+- `POST /v1/ledger/predictions` now takes only what chat's
+  `ledger_record_prediction` sends. It refuses any other method or resolver,
+  and any range, series or forecast field. Nothing sent those.
+- `GET /v1/ledger/open` leaves out predictions made from a forecast. There are
+  none yet.
+- A health check in `HEALTH_EXTRA` can't be named `spend` or `calendar`. Its
+  timing is kept as ops data under that name, and the database now reads those
+  two names as dollars and as the calendar, so it would refuse the series and
+  stop the health source. The runtime refuses the name at start instead, and
+  says so. Use a longer name, like `spend-api`.
+
+The update also resets `offBoxAllowed` on every series (no code ever set it)
+and fixes the label of any dollar, spend or calendar series stored wrong.
+
+### What this part changed for goal cards
+
+Four safeguards built for the predictions card now cover goal and plan cards
+too:
+
+- A card you sign can't be kept for later. It has to expire within a week of
+  your signature. Flint files every such card for a week at most, and a test
+  holds every place that files a card to that.
+- Your approval can't be used up without the change you approved being made.
+- A link that is already there doesn't use up an approval when it's written
+  again.
+- An approval that was used stays used after the database is restored from a
+  backup. Each use is recorded with when its transaction began, as well as
+  that transaction's number, which a restored database hands out again.
+
+Goal and plan cards work as before.
+
+### What this part fixed for the test database
+
+The `down.sql` files for P2, P2.5 and P2.6 failed on a database with nothing in
+it, which is where the test helpers start on a new machine. They now skip what
+isn't there.
+
+The action that will tell chat Flint's track record is named
+`calibration.note`. An earlier name for it, `persona.calibration_note`,
+contains "person", and Flint's rule against collecting on people forbids any
+action so named.
+
+### What the next parts must do
+
+- **The console's panel** must file the Turn On Predictions card from the
+  console. The database acts on that card only if it carries `consequential`
+  and is at least as sensitive as each number it lists, which the runtime sets
+  when it files one.
+- **A template only the runtime fills** goes in `RUNTIME_CLAIM_TEMPLATE_IDS`
+  in `packages/policy/src/claims.ts`, which keeps it out of chat's. A goal
+  review's `goal_on_track` and the forecaster's `series_range` are there. The
+  ledger route takes `ChatPrediction` and nothing wider.
+- **The forecaster** must write each run and its predictions at READ COMMITTED
+  (the database refuses them above it). A refused run means the number was
+  turned off: skip it, don't retry it. A run's provider is `local` and its
+  endpoint is `local:` and a short name (`local:fc.v1`), never a URL. Its
+  points are `{at, mean, lo, hi}` and nothing else, with `at` as
+  `Date#toISOString` writes it; build them with `JSON.stringify` from finite
+  numbers, so the database is never sent JSON it can't read (see Known
+  limits). A run takes one range and one yes/no question from the forecaster,
+  and one estimate from the local model; a second of any is refused. Every
+  prediction the two forecast writers make names its run and its series,
+  carries the series' own unit, and is filed under the registry's domain for
+  that series.
+- **The answer route** must set `flint.actor` to `will:console` in the same
+  transaction as the answer and its resolution.
+- **A correction to a result** (`ResolutionCorrection`) has no id-only check
+  yet, so a refused one could still print its value into Postgres's log.
+- **Whatever shows forecasts** must use its own routes, behind the `proposals`
+  scope. `GET /v1/ledger/open` is chat's and never lists them.
+- **A forget** doesn't reach forecast runs or a forecast's predictions yet. A
+  forgotten series gets no new runs or predictions, and its past numbers stay,
+  as its metric points do. Whether to blank them is still open.
+- **Goal reviews** must keep `auto_world` on a goal's forecasts, so the check at
+  each forecast's date can settle it. A forecast marked for you alone is settled
+  only by your answer, or by the card that finishes its goal.
+
+### Known limits
+
+- **What holds against a runtime that breaks the rules.** The rules bound to
+  your signature hold even then: which numbers are on and the one use of each
+  approval. So do the rules that need no signature because nothing may break
+  them: a series' sensitivity, and that no series leaves this Mac.
+  Three things are written by the runtime itself, so there the database
+  catches a bug and can't catch a runtime gone wrong: a forecast run's own
+  arithmetic (whether it beat a plain guess), the snapshot's scores, and the
+  `will:` label on an answer. An answer isn't signed on purpose. A wrong one
+  has a signed fix (`ledger.resolution.correct`).
+- **A series born under the wrong label.** A series' label can't change, so one
+  created wrong stays wrong. The database refuses the wrong labels it can
+  recognize: a dollar or spend series that isn't financial, and a calendar
+  series marked ops. For anything else, the Turn On card refuses a series whose
+  stored label isn't the registry's, so it's never forecast under that name.
+  The item a series is about is fixed when the series is made, too. It can't
+  be tied to one later, so forgetting an unrelated item never stops a number.
+  The Turn On card also refuses a registered number whose stored row is tied
+  to an item: Flint's own numbers are about no single item.
+- **Errors and Postgres's own log.** The id-only rule covers the `INSERT` and
+  `UPDATE` statements the runtime makes. Three things are outside it. `COPY`,
+  which the runtime never uses, quotes the line it refused. A value Postgres
+  can't read as its type at all is refused before any rule runs, and that
+  error quotes the text around the fault: malformed JSON for a run's points
+  (a `NaN`, say) shows the numbers beside it, and text that isn't a number
+  shows the text. The runtime sends typed values and builds JSON with
+  `JSON.stringify`, so it sends neither. And a Postgres set to log every
+  statement's values would log them all.
+- **An outside comparison would need its own update.** If Flint is ever to
+  compare its forecasts with an outside forecaster, a later database update
+  has to add a signed way for a series to leave. Nothing here can open one.
+- **Chat's own tools are a separate matter.** The rule against an outside
+  forecaster covers Flint's own actions. A tool that a connected service offers
+  to chat is judged by the rules for chat tools.
+- **A transaction held open.** A signed card acts in one transaction. A runtime
+  that kept that transaction open could delay when its changes land. A restart
+  of the runtime ends it.
+
+### Rolling P4 back
+
+The migration's `down.sql` (`20261013000000_p4_forecasts`) belongs to a rollback:
+
+1. First deploy a runtime from before P4, with `FLINT_PREDICT` off. P4's job bus
+   expects the six prediction queues that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. Forecast runs, which numbers
+   were on, and your questions and answers go with it. So do the scores only P4
+   keeps (range scores and the finer measures), which a later snapshot
+   recomputes. Every prediction and resolution stays, and so does each yes/no
+   score; a forecast's predictions lose their range and their link to the run.
+   The four safeguards on goal cards go back to how P3 had them.
+
+A Turn On Predictions card still waiting expires on its own. One you approve
+while P4 is rolled back isn't carried out ("not carried out by the runtime")
+and stays approved. Any later deploy of P4 code applies the migration again.
+Claude runs `down.sql` only with your OK, after the dump.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A

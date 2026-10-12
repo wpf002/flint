@@ -1,5 +1,7 @@
 /**
- * Calibration snapshots: one row per (window, domain, type, method). Scored
+ * Calibration snapshots: one row per (window, domain, type, method, kind). Only
+ * yes/no predictions are scored here so far (kind `binary`); ranges get their own
+ * rows, with their own measures, when the scoring for them arrives. Scored
  * means resolved, superseded ones included (a forecaster who revises does not
  * escape the score); open, expired, condition-unmet, void and late-superseded
  * predictions are counted beside it, and the unresolved rate is expired / (scored
@@ -33,6 +35,7 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
       domain,
       type,
       method,
+      kind: 'binary',
       n: s.n,
       nOpen: ps.filter((p) => p.status === 'open').length,
       nExpired,
@@ -47,7 +50,7 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
     };
     written.push(
       await db.calibrationSnapshot.upsert({
-        where: { windowEnd_domain_type_method: { windowEnd, domain, type, method } },
+        where: { windowEnd_domain_type_method_kind: { windowEnd, domain, type, method, kind: 'binary' } },
         create: data,
         update: { ...data, computedAt: new Date() },
       }),

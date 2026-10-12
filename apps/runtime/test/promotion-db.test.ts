@@ -4,7 +4,7 @@
  * APPROVAL is never in it; Will can drop a row; filing it twice is one card.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { GOAL_SIGNED_ACTIONS, resolveTier } from '@flint/policy';
+import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PREDICT_JOB_ACTIONS, PROPHET_ACTIONS, resolveTier } from '@flint/policy';
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
@@ -20,6 +20,24 @@ describe('P3 and the promotion tables', () => {
     const passkey = [...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision'];
     for (const a of passkey) {
       expect(NEVER_PROMOTED.has(a), a).toBe(true);
+      for (const rows of [P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS]) expect(rows.map((r) => r.pattern), a).not.toContain(a);
+    }
+  });
+});
+
+describe('P4 and the promotion tables', () => {
+  it('the signed predictions card and the outside forecaster\'s names are in no table, whatever is asked; no table offers a P4 job yet', () => {
+    for (const a of [...FORECAST_SIGNED_ACTIONS, ...PROPHET_ACTIONS]) {
+      expect(NEVER_PROMOTED.has(a), a).toBe(true);
+      for (const rows of [P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS]) expect(rows.map((r) => r.pattern), a).not.toContain(a);
+      // A signed policy row naming one does not make it run alone, in any context.
+      const policies = [{ pattern: a, tier: 'alone' as const, active: true, expiresAt: new Date(Date.now() + DAY) }];
+      for (const context of ['console', 'chat', 'autonomous'] as const) {
+        expect(resolveTier(a, { context, tainted: false, policies }).tier, `${a} ${context}`).not.toBe('alone');
+      }
+    }
+    // The prediction jobs get their own table once they have run in shadow (a later part): none is promoted by an older one.
+    for (const a of PREDICT_JOB_ACTIONS) {
       for (const rows of [P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS]) expect(rows.map((r) => r.pattern), a).not.toContain(a);
     }
   });

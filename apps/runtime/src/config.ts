@@ -104,6 +104,13 @@ const Env = z.object({
    * runtime.override.env, with Will's OK. Turning it off is its rollback.
    */
   FLINT_PLANNER: z.string().optional(),
+  /**
+   * Predictions (P4): `on` to run Flint's prediction jobs; anything else, blank
+   * included, is off, and nothing is forecast, resolved or scored. Off by
+   * default, like triage. On is not enough: nothing is forecast until Will also
+   * signs the Turn On Predictions card, which the database enforces.
+   */
+  FLINT_PREDICT: z.string().optional(),
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
@@ -143,10 +150,20 @@ export interface Config {
   triage: boolean;
   /** P3 goal reviews run (else goals are kept and nothing reviews them). */
   planner: boolean;
+  /** P4's prediction jobs may run (FLINT_PREDICT=on). The signed card is still what turns a number on. */
+  predict: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
   gitSha: string;
 }
+
+/**
+ * Names a health check may not have. Its latency is kept as the ops series
+ * `health.<name>.latency_ms`, and the database reads a `spend` segment as
+ * dollars (financial) and a `calendar` segment as the calendar (never ops): it
+ * would refuse the series, and the health source's run with it.
+ */
+const HEALTH_EXTRA_RESERVED: ReadonlySet<string> = new Set(['spend', 'calendar']);
 
 /** `name=https://host/path` pairs; https only, no credentials in the URL. */
 export function parseHealthExtra(raw: string | undefined): Array<{ name: string; url: string }> {
@@ -154,6 +171,7 @@ export function parseHealthExtra(raw: string | undefined): Array<{ name: string;
   return raw.split(',').map((pair, i) => {
     const m = pair.trim().match(/^([a-z0-9][a-z0-9_-]{0,40})=(https:\/\/[^\s,]+)$/);
     if (!m) throw new Error(`HEALTH_EXTRA entry ${i + 1} must be name=https://...`);
+    if (HEALTH_EXTRA_RESERVED.has(m[1]!)) throw new Error(`HEALTH_EXTRA entry ${i + 1} can't be named ${m[1]}: that name is kept for Flint's spend and calendar numbers (try ${m[1]}-api)`);
     const u = new URL(m[2]!);
     if (u.username || u.password || u.search) throw new Error(`HEALTH_EXTRA entry ${m[1]} must not carry credentials or a query`);
     return { name: m[1]!, url: u.toString() };
@@ -209,6 +227,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
     planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
+    predict: e.FLINT_PREDICT?.trim().toLowerCase() === 'on',
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),

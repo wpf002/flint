@@ -27,7 +27,7 @@ import {
   listProposals,
   rejectProposal,
 } from './governance/proposals.js';
-import { EmitPredictionIn, Invalid, emitPrediction } from './ledger/emit.js';
+import { ChatPrediction, FORECAST_WRITER, Invalid, REASON_WRITER, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
 import { registerP2Routes } from './routes/p2.js';
@@ -288,14 +288,27 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   // ---- ledger -----------------------------------------------------------------------
+  // Only what chat sends (ChatPrediction): the model's own yes/no estimate, which only Will resolves.
+  // Every other prediction (a forecast, a rule's, Will's own) is written by runtime code, never over HTTP.
   app.post('/v1/ledger/predictions', { preHandler: need('ledger') }, async (req, reply) => {
-    // The body names no goal and none of the runtime's own templates: a goal's forecast is its review's alone (P3).
-    const p = await emitPrediction(db, EmitPredictionIn.parse(req.body), actor(req));
+    const p = await emitPrediction(db, ChatPrediction.parse(req.body), actor(req));
     return reply.code(201).send({ id: p.id, claim: p.claim, resolveBy: p.resolveBy });
   });
   app.get('/v1/ledger/open', { preHandler: need('ledger') }, async (req) => {
     const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).strict().parse(req.query);
-    return { predictions: await db.prediction.findMany({ where: { status: 'open' }, orderBy: { resolveBy: 'asc' }, take: q.limit }) };
+    // Chat's token reads this route, and chat may run on a model off this Mac. A forecast's prediction holds a
+    // series' numbers (its range, and the same in its claim), financial and personal ones among them: none
+    // is ever listed here. A forecast's row is left out by every mark it has, not by one: its series, its run,
+    // its unit, its writer (the database makes each forecast writer's row name its run and series, so this is
+    // belt and braces), and a range of any kind. The console gets its own routes for them, behind the
+    // proposals scope.
+    return {
+      predictions: await db.prediction.findMany({
+        where: { status: 'open', kind: 'binary', seriesKey: null, forecastRunId: null, unit: null, createdBy: { notIn: [FORECAST_WRITER, REASON_WRITER] } },
+        orderBy: { resolveBy: 'asc' },
+        take: q.limit,
+      }),
+    };
   });
   app.get('/v1/ledger/calibration', { preHandler: need('ledger') }, async () => {
     const latest = await db.calibrationSnapshot.findFirst({ orderBy: { windowEnd: 'desc' }, select: { windowEnd: true } });

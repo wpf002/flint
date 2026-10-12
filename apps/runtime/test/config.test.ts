@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadBackupConfig, loadConfig, loadRuntimeConfig, offsiteFolder, parseTokens } from '../src/config';
+import { loadBackupConfig, loadConfig, loadRuntimeConfig, offsiteFolder, parseTokens, parseHealthExtra } from '../src/config';
 
 const DB = 'postgresql://flint_app:x@[::1]:5432/flint';
 const HOME = '/Users/test';
@@ -65,9 +65,31 @@ describe('runtime config', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, HOME, HEALTH_EXTRA: 'x=http://h.example/health' })).toThrow(/https/);
   });
 
+  it('a health check is never named spend or calendar: its latency series would be read as dollars or the calendar, and refused (P4)', () => {
+    // `health.spend.latency_ms` as ops data: the database takes a `spend` segment for dollars (financial) and a
+    // `calendar` segment for the calendar (never ops), and would refuse the series, and the health source's run with it.
+    for (const name of ['spend', 'calendar']) {
+      const load = () => loadConfig({ DATABASE_URL: DB, HOME, HEALTH_EXTRA: `nexus-mcp=https://nexus.example.app/health,${name}=https://h.example/health` });
+      expect(load, name).toThrow(`runtime config is invalid: HEALTH_EXTRA entry 2 can't be named ${name}: that name is kept for Flint's spend and calendar numbers (try ${name}-api)`);
+      expect(() => parseHealthExtra(`${name}=https://h.example/health`), name).toThrow(/entry 1 can't be named/);
+    }
+    // The error names the entry and the name, never the URL (it could hold a path that is private).
+    expect(() => parseHealthExtra('spend=https://h.example/private-path')).not.toThrow(/private-path|h\.example/);
+    // Only the bare names: a longer name is its own segment, and fine.
+    expect(parseHealthExtra('spend-api=https://h.example/health,calendar_sync=https://h.example/health,my-spend=https://h.example/health').map((h) => h.name)).toEqual(['spend-api', 'calendar_sync', 'my-spend']);
+  });
+
   it('passkey origins must be https', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_RP_ID: 'flint.example.ts.net', FLINT_RP_ORIGINS: 'http://flint.example.ts.net' })).toThrow(/https/);
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RP_ID: 'flint.example.ts.net', FLINT_RP_ORIGINS: 'https://flint.example.ts.net' }).rp).toEqual({ rpId: 'flint.example.ts.net', origins: ['https://flint.example.ts.net'] });
+  });
+
+  it('predictions (P4) are off unless FLINT_PREDICT is exactly on (trimmed, any case): unset, blank and every other word are off', () => {
+    expect(loadConfig({ DATABASE_URL: DB, HOME }).predict).toBe(false);
+    for (const v of ['', ' ', 'off', 'OFF', '1', 'yes', 'true', 'enabled', 'on!', 'o n', 'armed']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PREDICT: v }).predict, JSON.stringify(v)).toBe(false);
+    for (const v of ['on', 'ON', ' On ', 'on\n']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PREDICT: v }).predict, JSON.stringify(v)).toBe(true);
+    // It is its own switch: triage being on says nothing about predictions.
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: 'on' }).predict).toBe(false);
   });
 
   it('triage is off unless set to on; blank values mean the defaults', () => {
