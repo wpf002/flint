@@ -156,11 +156,15 @@ export async function connect<T>(to: string | pg.ClientConfig, fn: (c: pg.Client
 }
 
 const run = promisify(execFile);
-/** `prisma migrate deploy` against `ownerUrl` (the URL goes through the environment). */
-export async function migrate(ownerUrl: string, cwd = RUNTIME): Promise<void> {
+/**
+ * `prisma migrate deploy` against `ownerUrl` (the URL goes through the environment). `schema` names
+ * another schema file, whose own `migrations` folder beside it is then the one applied (a test's way
+ * of making a database that is some migrations behind, exactly as Prisma would have made it).
+ */
+export async function migrate(ownerUrl: string, schema?: string): Promise<void> {
   try {
-    await run(join(RUNTIME, 'node_modules', '.bin', 'prisma'), ['migrate', 'deploy'], {
-      cwd,
+    await run(join(RUNTIME, 'node_modules', '.bin', 'prisma'), ['migrate', 'deploy', ...(schema ? ['--schema', schema] : [])], {
+      cwd: RUNTIME,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', DATABASE_URL: ownerUrl, PRISMA_HIDE_UPDATE_MESSAGE: '1' },
       maxBuffer: 16 * 1024 * 1024,
     });

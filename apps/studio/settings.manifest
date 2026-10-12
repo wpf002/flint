@@ -143,6 +143,7 @@ server.plist  FLINT_BUDGET_KIND_SELFMOD_DAILY_CALLS restore   number
 # ---- the runtime: ~/.flint/runtime.override.env (yours) and runtime.env (rewritten on every install) ----
 runtime.override.env  FLINT_RUNTIME_TRIAGE          restore   onoff
 runtime.override.env  FLINT_PLANNER                 restore   onoff
+runtime.override.env  FLINT_PREDICT                 restore   onoff
 runtime.override.env  FLINT_SOURCE_GOOGLE_CALENDAR  restore   onoff
 runtime.override.env  FLINT_SOURCE_APPLE_CALENDAR   restore   onoff
 runtime.override.env  FLINT_TRIAGE_MODEL            restore   model

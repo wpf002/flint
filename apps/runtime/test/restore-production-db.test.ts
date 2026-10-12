@@ -809,10 +809,19 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
     });
 
     it('a backup from before a database update is checked as it is, brought up to date, and checked again before it goes live', async () => {
-      // A database one migration behind: the newest migration's own down.sql, then a dump of that.
-      const old = await production();
-      const newest = checkoutMigrations(MIGRATIONS).at(-1)!.name;
-      await connect(old.owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+      // A database one migration behind, made the way it would have been at the time: Prisma applying every
+      // migration but the newest, into a database of its own. Then a dump of that.
+      const all = checkoutMigrations(MIGRATIONS);
+      const newest = all.at(-1)!.name;
+      const earlier = join(scratchDir('flint-prisma-'), 'prisma');
+      mkdirSync(join(earlier, 'migrations'), { recursive: true });
+      cpSync(join(RUNTIME, 'prisma', 'schema.prisma'), join(earlier, 'schema.prisma'));
+      cpSync(join(MIGRATIONS, 'migration_lock.toml'), join(earlier, 'migrations', 'migration_lock.toml'));
+      for (const m of all.slice(0, -1)) cpSync(join(MIGRATIONS, m.name), join(earlier, 'migrations', m.name), { recursive: true });
+      await admin((c) => c.query('CREATE DATABASE flint_older OWNER flint_owner'));
+      await admin((c) => c.query('ALTER SCHEMA public OWNER TO flint_owner'), 'flint_older');
+      await migrate(onDb(urls.owner, 'flint_older'), join(earlier, 'schema.prisma'));
+      const old = { backup: onDb(urls.backup, 'flint_older') };
       const olderDumps = join(home, 'older');
       const d = await dumpDatabase(old.backup, olderDumps, cluster.tools, new Date(takenAt.getTime() - 2 * 86_400_000));
       writeDumpHash(d.path, d.sha256, keyFile);
