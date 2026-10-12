@@ -96,16 +96,32 @@ ago() { # <seconds since 1970>: how long ago that was, in words, in REPLY
   else REPLY="$(( s / 86400 )) days ago"; fi
 }
 # reverted_since <earlier commit> <running commit>: 0 when a change made after the earlier one,
-# up to the running one, is a revert (its title starts with Revert, as GitHub's Revert button and
-# git revert write it); 1 when none is; 2 when Flint cannot tell (it does not know a commit, or
-# the running one does not come after the earlier one).
+# up to the running one, is a revert; 1 when none is; 2 when Flint cannot tell (it does not know a
+# commit, or the running one does not come after the earlier one). A revert is known by what it
+# is in git, not only by what it is called:
+#  - its title starts with Revert (as GitHub's Revert button and git revert write it), or
+#  - its message says which commit it reverts ("This reverts commit <id>", git's own line), or
+#  - it leaves the files exactly as they were two changes earlier: it undoes the change before it,
+#    whatever it is called.
 reverted_since() {
   emulate -L zsh
-  local titles
+  local said i
+  local -a trees
   [[ $1 =~ '^[0-9a-f]{40}$' && $2 =~ '^[0-9a-f]{40}$' ]] || return 2
   git -C "$REPO" merge-base --is-ancestor "$1" "$2" 2>/dev/null || return 2
-  titles="$(git -C "$REPO" log --format=%s "$1..$2" 2>/dev/null)" || return 2
-  print -r -- "$titles" | grep -q '^Revert ' && return 0
+  said="$(git -C "$REPO" log --format=%s "$1..$2" 2>/dev/null)" || return 2
+  print -r -- "$said" | grep -q '^Revert ' && return 0
+  said="$(git -C "$REPO" log --format=%b "$1..$2" 2>/dev/null)" || return 2
+  print -r -- "$said" | grep -Eq 'This reverts commit [0-9a-f]{7,40}' && return 0
+  # The files after each change on main's own line, newest first: the changes since the earlier
+  # version, then the earlier version and the one before it. A change whose files equal those of
+  # two changes before is the undoing of the one between.
+  trees=(${(f)"$(git -C "$REPO" log --first-parent --format=%T "$2" --not "$1~2" 2>/dev/null || git -C "$REPO" log --first-parent --format=%T "$2" 2>/dev/null)"}) || return 2
+  local changes="$(git -C "$REPO" rev-list --first-parent --count "$1..$2" 2>/dev/null)"
+  [[ $changes == <-> ]] || return 2
+  for (( i = 1; i <= changes && i + 2 <= ${#trees}; i++ )); do
+    [[ -n ${trees[i]} && ${trees[i]} == ${trees[i+2]} ]] && return 0
+  done
   return 1
 }
 

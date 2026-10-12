@@ -54,14 +54,20 @@ mkrepo() { # <name> <the third commit's title>
   print -r -- one > "$r/a"; gitq -C "$r" add -A; gitq -C "$r" commit -q -m "The first change (#69)"
   print -r -- two > "$r/a"; gitq -C "$r" add -A; gitq -C "$r" commit -q -m "A change that broke Flint (#70)"
   case $1 in
-    revert) print -r -- one > "$r/a" ;;
+    revert|revert-unnamed) print -r -- one > "$r/a" ;;
+    revert-said) print -r -- "one, and a fix that came with it" > "$r/a" ;;
     migration) mkdir -p "$r/apps/runtime/prisma/migrations/20261012000000_x"; print -r -- "ALTER TABLE x ADD y int;" > "$r/apps/runtime/prisma/migrations/20261012000000_x/migration.sql" ;;
     *) print -r -- three > "$r/a" ;;
   esac
-  gitq -C "$r" add -A; gitq -C "$r" commit -q -m "$2"
+  # A third argument is the message under the title, with %s for the second commit's id.
+  if [[ -n ${3:-} ]]; then gitq -C "$r" add -A; gitq -C "$r" commit -q -m "$2" -m "${3//\%s/$(gitq -C "$r" rev-parse HEAD)}"
+  else gitq -C "$r" add -A; gitq -C "$r" commit -q -m "$2"; fi
 }
 mkrepo plain "A later change (#71)"
 mkrepo revert 'Revert "A change that broke Flint (#70)" (#71)'
+# A revert that is not called one: by what its message says it reverts, and by the files alone.
+mkrepo revert-said "Back out the change that broke Flint (#71)" "This reverts commit %s, and fixes a typo."
+mkrepo revert-unnamed "Put the earlier behaviour back (#71)"
 mkrepo migration "A database change (#71)"
 
 # A Flint three versions in: the server on the third (installed 12 minutes ago) with the second
@@ -145,6 +151,13 @@ check "ROLLBACK does not put the broken version back: nothing is touched" 'untou
 check "it never says it went back, and updates are not paused" '[[ "$out" != *"is back on"* && "$out" == *"Nothing was rolled back, so updates are not paused."* ]] && [ ! -e "$data/deploy-hold" ] && [ "$st" = 0 ]'
 run ROLLBACK ROLLBACK
 check "a second try is refused the same way" 'untouched && [[ "$out" == *"going back would undo that revert."* ]] && [ ! -e "$data/deploy-hold" ]'
+# A revert is known by what it is in git, whatever its title: its message naming the commit it reverts, or
+# its files being exactly those of two changes earlier.
+for kind in revert-said revert-unnamed; do
+  fresh $kind; run ROLLBACK ROLLBACK
+  check "a revert that is not called one is still known for one ($kind)" 'untouched && [[ "$out" == *"The version it is on now reverts a change that the earlier one still has, so going back would undo that revert."*"Type $s2 to go back to it anyway"* && "$out" != *"Type ROLLBACK"* ]] && [ ! -e "$data/deploy-hold" ]'
+done
+fresh revert
 run "$s2" ""
 check "typing the version's own name goes back to it: the choice is the owner's, made knowingly" '[ "$(<"$data/server.mjs")" = "server v2" ] && [[ "$out" == *"The server is back on version $s2, and it answers."* ]] && [ "$(live)" = "$C3" ] && [ -s "$data/deploy-hold" ]'
 
