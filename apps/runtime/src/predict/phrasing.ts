@@ -9,9 +9,11 @@
  *  - A chance: "likely, around 70% by Oct 12, 5:30 PM".
  *  - A range from a forecast that beat a plain guess: "about 4, with an 80%
  *    range of 2 to 6".
- *  - A range from one that did not: "no reliable trend, and recent days ran
- *    from 0 to 3, an 80% range". It never gives a middle: there is no forecast
- *    to give, only where the number has been.
+ *  - A range from one that did not: "no reliable trend, and a plain guess
+ *    gives an 80% range of 0 to 3". It never gives a middle, and it says what
+ *    the range is: a plain guess (the last value, the same day last week, or
+ *    the recent average) moved by how far such guesses have been off. It is
+ *    not where recent days ran.
  *
  * Values are said in their unit's words ("$1.20", "12 minutes", "3.5 hours"),
  * never as a key or a raw float. No parentheses: a note has none.
@@ -70,12 +72,12 @@ export function rangePhrase(r: RangeWords): string {
   return `about ${unitValue(r.point, r.unit)}, with ${leveled(r.level)} of ${unitSpan(r.lower, r.upper, r.unit)}`;
 }
 
-/** One that did not: "no reliable trend, and recent days ran from 0 to 3, an 80% range". */
-export function noTrendPhrase(r: Omit<RangeWords, 'point'>, step: 'day' | 'week' = 'day'): string {
-  return `no reliable trend, and recent ${step}s ran from ${unitSpan(r.lower, r.upper, r.unit)}, ${leveled(r.level)}`;
+/** One that did not: "no reliable trend, and a plain guess gives an 80% range of 0 to 3". The range is the plain guess's, from its own past errors. */
+export function noTrendPhrase(r: Omit<RangeWords, 'point'>): string {
+  return `no reliable trend, and a plain guess gives ${leveled(r.level)} of ${unitSpan(r.lower, r.upper, r.unit)}`;
 }
 
 /** A forecast's range in words, by what its run earned: a forecast only when it beat naive. */
-export function forecastPhrase(r: RangeWords & { beatsNaive: boolean | null }, step: 'day' | 'week' = 'day'): string {
-  return r.beatsNaive === true ? rangePhrase(r) : noTrendPhrase(r, step);
+export function forecastPhrase(r: RangeWords & { beatsNaive: boolean | null }): string {
+  return r.beatsNaive === true ? rangePhrase(r) : noTrendPhrase(r);
 }

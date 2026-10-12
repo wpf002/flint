@@ -26,6 +26,15 @@ describe('the phrase table', () => {
       expect(phraseBefore(p, BY, TZ)).toBe(said.replace(/, around (\d+%)/, ' (~$1)'));
     }
     expect([0.05, 0.2, 0.4, 0.5, 0.6, 0.8, 0.95].map((p) => chancePhrase(p, undefined, TZ).split(',')[0])).toEqual(['very unlikely', 'unlikely', 'somewhat unlikely', 'about even', 'somewhat likely', 'likely', 'very likely']);
+    // Where one word ends and the next begins, to the percent (phrase() is this same function now, so the loop above
+    // cannot see a boundary move: these can).
+    const word = (pct: number) => chancePhrase(pct / 100, undefined, TZ).split(',')[0];
+    expect([9, 10].map(word)).toEqual(['very unlikely', 'unlikely']);
+    expect([34, 35].map(word)).toEqual(['unlikely', 'somewhat unlikely']);
+    expect([44, 45].map(word)).toEqual(['somewhat unlikely', 'about even']);
+    expect([55, 56].map(word)).toEqual(['about even', 'somewhat likely']);
+    expect([64, 65].map(word)).toEqual(['somewhat likely', 'likely']);
+    expect([89, 90].map(word)).toEqual(['likely', 'very likely']);
   });
 
   it('a value is said in its unit\'s words, never as a raw float', () => {
@@ -39,8 +48,12 @@ describe('the phrase table', () => {
     expect(rangePhrase({ point: 4, lower: 2, upper: 6, level: 0.8, unit: 'count' })).toBe('about 4, with an 80% range of 2 to 6');
     expect(rangePhrase({ point: 1.2, lower: 0.8, upper: 1.75, level: 0.8, unit: 'usd' })).toBe('about $1.20, with an 80% range of $0.80 to $1.75');
     expect(rangePhrase({ point: 12, lower: 0, upper: 45, level: 0.5, unit: 'minutes' })).toBe('about 12 minutes, with a 50% range of 0 to 45 minutes');
-    expect(noTrendPhrase({ lower: 0, upper: 3, level: 0.8, unit: 'count' })).toBe('no reliable trend, and recent days ran from 0 to 3, an 80% range');
-    expect(noTrendPhrase({ lower: 2, upper: 9, level: 0.8, unit: 'count' }, 'week')).toBe('no reliable trend, and recent weeks ran from 2 to 9, an 80% range');
+    // It says what the range is: a plain guess's, from how far such guesses have been off. Never "recent days ran from":
+    // the last value plus or minus its past changes is not where recent days ran (review finding 14).
+    expect(noTrendPhrase({ lower: 0, upper: 3, level: 0.8, unit: 'count' })).toBe('no reliable trend, and a plain guess gives an 80% range of 0 to 3');
+    expect(noTrendPhrase({ lower: 498, upper: 502, level: 0.8, unit: 'usd' })).toBe('no reliable trend, and a plain guess gives an 80% range of $498.00 to $502.00');
+    expect(noTrendPhrase({ lower: 0, upper: 45, level: 0.5, unit: 'minutes' })).toBe('no reliable trend, and a plain guess gives a 50% range of 0 to 45 minutes');
+    expect(noTrendPhrase({ lower: 2, upper: 9, level: 0.8, unit: 'count' })).not.toMatch(/recent|ran from/);
     // By what the run earned: only a run that beat naive is said as a forecast. False and "too short to tell" are not.
     const r = { point: 4, lower: 2, upper: 6, level: 0.8, unit: 'count' as const };
     expect(forecastPhrase({ ...r, beatsNaive: true })).toBe(rangePhrase(r));
@@ -74,7 +87,7 @@ describe('the phrase table', () => {
     const phrases = [
       chancePhrase(0.7, BY, TZ), chancePhrase(0.05, undefined, TZ), chancePhrase(0.5, BY, TZ),
       rangePhrase({ point: 4, lower: 2, upper: 6, level: 0.8, unit: 'count' }), rangePhrase({ point: 1.2, lower: 0.8, upper: 1.75, level: 0.8, unit: 'usd' }),
-      noTrendPhrase({ lower: 0, upper: 3, level: 0.8, unit: 'count' }), noTrendPhrase({ lower: 0, upper: 45, level: 0.5, unit: 'minutes' }, 'week'),
+      noTrendPhrase({ lower: 0, upper: 3, level: 0.8, unit: 'count' }), noTrendPhrase({ lower: 0, upper: 45, level: 0.5, unit: 'minutes' }),
     ];
     for (const said of phrases) {
       const note = `Deploys today: ${said}.`;
