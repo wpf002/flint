@@ -19,7 +19,8 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/generate` (eval, no memory) | yes | `{ prompt, eval: true, recall: false }` | as above, answered without reading long-term memory (`grounding.memory` is empty), echoed as `recall: false`. A boolean; otherwise, or without `eval: true`, 400. Used by apps/parity `tasks` on every task whose point isn't memory: the frontier competitors get exactly Flint's data, which leaves Will's memory out (src/eval-tools.ts) |
 | GET | `/eval/tools` | yes | — | `{ tools: string[] }`: every wired tool's name, so apps/parity `build-tasks` can check its templates' expected tools |
 | POST | `/eval/tool` | yes | `{ eval: true, name, args? }` | `{ ok, name, isError, text }`: runs ONE tool from a fixed read-only discovery allowlist (`DISCOVERY_TOOLS` in src/eval-tools.ts: `meridian.list_tickers`, `vantage.top_scores`, `bellwether.list_industries`, …) to fill apps/parity task slots. Any other tool is a 403 before any handler runs, so it can't write or create a proposal; 404 if the tool isn't wired, 502 if it throws. Audited in the action log |
-| POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s |
+| POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s. Ahead of each brain's reply, a `meta` event says whether the reply stays on this Mac and which stored turn it is: `{ type: "meta", staysHere, turn }` (see "Goals in chat") |
+| POST | `/speak` | yes | `{ text, conversationId?, turnId? }` | The text as speech (`audio/mpeg`), from OpenAI. 409 with `fallback: "browser"` for a reply that stays on this Mac: the client speaks it with its own voice. 503 with no key, or with the cap spent |
 | GET | `/spend` | yes | — | Paid API spend today and this month per vendor, against the caps (see "Spend caps") |
 | GET | `/inbox?lane=relevant\|quiet&before=<ISO>&limit=1..100` | yes | — | A page of the runtime's triage decisions, newest first (`InboxPage` in @flint/policy: `{ items, next }`; `next` is the `before` of the older page). See "The runtime's lanes" |
 | POST | `/inbox/:id/feedback` | yes | `{ feedback: "should_escalate" \| "should_be_quiet" \| "ok" }` | `{ ok: true }`: Will's label on a decision |
@@ -61,7 +62,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
-| `FLINT_GOALS_NOW` | no | `1` adds Will's goals to chat turns that a model on this Mac answers, and to no other turn (see "Goals in chat"). At most 300 tokens, and never more than that model's real context has room for. Unset: off. |
+| `FLINT_GOALS_NOW` | no | `1` adds Will's goals to chat turns that a model on this Mac answers, and to no other turn (see "Goals in chat"). At most 300 tokens, and never more than that model's real context has room for. Unset, blank or `0`: off. Anything else is read as off and logged. |
 | `FLINT_GOALS_TO_FRONTIER` | no | `on` also sends the goals block to outside models. **This sends Will's goal text to whichever provider answers the turn** (Anthropic, OpenAI, Perplexity): the titles of his active goals, their counts and forecasts. It also lets those providers read the turns that were answered with the goals and the facts Flint learned from them, and offers every tool again. Only `on` turns it on, and only with `FLINT_GOALS_NOW=1`. Unset, or anything else: goals never leave this Mac. |
 | `FLINT_CONTEXT_BLOCKS` | no | `off` is the kill switch for every context block (World now and goals), whatever their own settings say. A value that is neither `on` nor `off` is read as `off` and logged, so a mistyped `off` still turns them off. Unset or `on`: each block follows its own setting. |
 | `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
@@ -513,29 +514,44 @@ active goals: a short block in the turn's context (src/goals-now.ts), from the r
 **Goal text is personal, so only a model on this Mac reads it.** The block is handed out per
 ask, not per turn: every time `/chat` asks a brain (a frontier tier, the next tier, the local
 model it falls back to), that brain gets the block only if it is local. Local is decided in one
-place, `brainIsLocal` in src/policy.ts, and means all three of:
+place, `brainIsLocal` in src/policy.ts, and means all four of:
 
 - the provider is Ollama's own API (never Anthropic, OpenAI or Perplexity);
-- the model runs here: not one of Ollama's cloud models (`...-cloud`, `:cloud`);
+- the model is not named as one of Ollama's cloud models (`...-cloud`, `:cloud`);
 - its server is this Mac (`127.0.0.1`, `localhost` or `::1`). An Ollama server on another
   machine (`OLLAMA_HOST`, `FLINT_TIER_OLLAMA_HOST` or `FLINT_FRONTIER_BASE_URL` set elsewhere)
-  is not local.
+  is not local;
+- that Ollama itself lists the model as running on it. A name is not trusted:
+  `ollama cp gpt-oss:120b-cloud mine` gives a cloud model a plain name, and Ollama's own listing
+  still says where it runs (the check the model picker already makes). The server asks each local
+  brain's Ollama at start and once a minute (src/ollama-locality.ts). It fails closed: until
+  that Ollama has answered, and once it has not answered for five minutes, none of its models
+  counts as local, and a model it does not list never does.
 
 So a turn Claude answers never holds a goal's words, an `ollama:` tier on this Mac does, and a
 frontier turn that fails over to the local model gets the block only on that last ask. A test
 proves it with a canary on real clients (test/goals-now.test.ts).
 
 **One mark for "a model on this Mac is answering".** The server already marks a turn the local
-model answers (`asLocalTurn` in src/turn-taint.ts), so nothing that turn sets off sends its
-question to an outside AI. The goals use that same mark: an ask is given what stays here only
-when its brain is on this Mac *and* the ask runs as a local model's turn. `/chat` enters the
-mark for the local model, as before, and now also for a tier whose brain is on this Mac
-(`ollama:` at a loopback address). The one change that brings: on a turn such a tier answers,
-deep research plans its searches by rule, as it does on any local model's turn, instead of
-asking the frontier planner. When the local model is swapped at run time (Ollama answered
-late), the gate is named again for the new one. Tests: test/goals-local-turn.test.ts.
+model answers (`asLocalTurn` in src/turn-taint.ts). On such a turn deep research does not send
+the question to its planner, a frontier model. That is all the mark does by itself: a plain
+local turn's deep research still asks Perplexity's search once. A turn that carries what stays
+here goes further, below: it is offered no tool an outside AI answers at all. The goals use
+that same mark: an ask is given what stays here only when its brain is on this Mac *and* the
+ask runs as a local model's turn. `/chat` and `/generate` enter the mark for the local model,
+as before, and now also for a tier whose brain is on this Mac (`ollama:` at a loopback
+address). The one change that brings: on a turn such a tier answers, deep research plans its
+searches by rule, as it does on any local model's turn. When the local model is swapped at run
+time (Ollama answered late), the gate is named again for the new one. Tests:
+test/goals-local-turn.test.ts.
 
-Four more things follow the block, so a goal's words don't leave by another door:
+**One module makes every one of these decisions** (src/goals-chat.ts): which history a brain
+reads, each ask's context, tools and mark, which asks run as a local model's turn, what the
+extractor skips, whether the research planner is asked, and what a reply may be spoken with.
+`index.ts` calls it and decides none of it; the tests drive the same module through whole chat
+turns (test/goals-mini.ts).
+
+Six more things follow the block, so a goal's words don't leave by another door:
 
 - **What the model then says stays here.** A turn whose brain was given the block is marked,
   with the turn, from the moment it begins (`context: { goals: true }` on the stored turn). A
@@ -544,7 +560,24 @@ Four more things follow the block, so a goal's words don't leave by another door
   this conversation isn't shown here.", as a placeholder exchange so every provider still gets
   alternating turns). A brain on this Mac reads the whole conversation. Memory extraction
   skips those turns too when its brain isn't on this Mac (`FLINT_MEMORY_BRAIN=frontier`, or a
-  local model on another machine). Tests: test/goals-history.test.ts.
+  local model on another machine), and does not show one as "earlier in this conversation"
+  beside the turn after it. Tests: test/goals-history.test.ts.
+- **The mark follows history.** A model on this Mac reads marked turns as history, so what it
+  says next may repeat them. Its turn is therefore marked too whenever a marked turn is in the
+  history it is handed (the store's window: 12 turns and 48 hours by default), whether or not
+  that turn was given the block: the same mark, the same tools, the same rule for the
+  extractor. That holds when the block did not fit, when the runtime did not answer, when no
+  goal is active any more, and with `FLINT_GOALS_NOW` or every block turned off. A conversation
+  with no marked turn in its window is untouched. Tests: test/goals-carry.test.ts.
+- **Spoken replies stay here.** `/speak` is OpenAI's speech service, so a reply that stays on
+  this Mac is never sent to it. Ahead of each reply the chat stream's `meta` event says whether
+  it stays here and which stored turn it is; the console then speaks it with the browser's own
+  voice, and the hands-free client (apps/voice) with the Mac's `say`. The server refuses on
+  its side too: `/speak` takes the conversation and the turn, and answers 409 with
+  `fallback: "browser"` for a marked turn. A request that names a conversation and no turn is
+  about that conversation's newest turn. One that names nothing (an older client) cannot be
+  placed, so it is refused while any conversation's newest turn or recent history is marked.
+  Tests: test/goals-chat.test.ts, test/console-speech.test.ts, test/voice-client.test.ts.
 - **What Flint learns from it stays here.** A fact that memory extraction takes from such a
   turn is stored with a mark (`fromGoals` on the fact, in `knowledge.json`), and so is anything
   the model saves with `remember` during it. A marked fact is recalled only for a brain that
@@ -556,7 +589,11 @@ Four more things follow the block, so a goal's words don't leave by another door
   it was on. The extractor sends goals turns in calls of their own, and only those calls are
   shown the marked facts it already knows. Facts stored before the mark existed have none and
   behave as before. One-shot `/generate` answers and eval replays never recall a marked fact.
-  Tests: test/goals-facts.test.ts.
+  A marked fact is sent to the embedder only when the embedder is on this Mac: with
+  `OLLAMA_HOST` on another machine it is stored without an embedding, and recall matches it by
+  its words. And a brain that may not know of a marked fact is answered as if it were not
+  there: `remember` on an ordinary turn says "saved", never "already known", for a marked
+  fact's words. Tests: test/goals-facts.test.ts.
 - **No tool an outside AI answers.** For an ask that carries the block or a marked fact, the
   tools an outside AI answers are not offered (src/goals-tools.ts): `trident.perplexity_search`,
   anything else the spend guard prices on an AI vendor, and any tool named for one.
@@ -569,9 +606,9 @@ Four more things follow the block, so a goal's words don't leave by another door
   reply's share (at most a quarter of the window), the rest of the ask's prompt (the persona's
   guide, the context, the tool schemas, the history and the message, at four characters a
   token) and a 256-token margin. With less room than the block needs, the block is shorter;
-  with no room for one goal, it is left out, and that ask is an ordinary one (every tool, no
-  mark). A prompt Ollama has to cut loses its start, which is the persona and the tools.
-  Tests: test/goals-room.test.ts.
+  with no room for one goal, it is left out. That ask is then an ordinary one (every tool, no
+  mark) unless a marked turn is in its history or a marked fact in its recall. A prompt Ollama
+  has to cut loses its start, which is the persona and the tools. Tests: test/goals-room.test.ts.
 
 The one way out of all of it is `FLINT_GOALS_TO_FRONTIER=on`: the block goes to every brain,
 the history and the recall are whole for every brain, and no tool is held back. The boot log
@@ -607,11 +644,13 @@ grep '\[goals-now\]' ~/.flint/server.err.log | tail -1
 
 The last line prints who reads the goals, in how large a context, and who never does, for example
 `[goals-now] on: Will's goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 4096-token context), never to anthropic:claude-opus-5-5`.
-If no brain here is local it says so, and nothing is fetched. To turn it off, remove the line
+It is written once Ollama has said which models run on it, a moment after start. If no brain
+here is known to be local it says so, and nothing is fetched. To turn it off, remove the line
 from `~/.flint/secrets.env` (or set `FLINT_CONTEXT_BLOCKS=off`) and kickstart again.
 
 **Measured** (P3 exit criterion 8): the block's size is on each turn's `[route]` line and in
-its `chat.turn` event as `ctxTokens.goals`; the runtime rolls it up daily
+its `chat.turn` event as `ctxTokens.goals`, measured on the context as it was sent to the
+model (not the size the block was meant to have); the runtime rolls it up daily
 (`p3.ctx_tokens.goals`, `p3.ctx_tokens.goals_max`) and `p3-report` checks the largest against
 300.
 
@@ -627,8 +666,15 @@ its `chat.turn` event as `ctxTokens.goals`; the runtime rolls it up daily
   context large enough for the block, that is most of what the local model's turns teach. A
   marked fact that replaces an older one retires it for everyone, so an outside model then has
   neither. Nothing removes a mark; `FLINT_GOALS_TO_FRONTIER=on` lifts them all.
-- *A fact Will states twice.* If Will says the same thing again in a turn without the goals,
-  the stored fact is a duplicate and keeps its mark.
+- *A fact Will states twice.* If the very same words are saved again from a turn that does not
+  stay here, they are no longer something only this Mac holds: the one fact loses its mark. A
+  rewording is stored as a second, ordinary fact beside the marked one.
+- *The embedder still reads each question.* Recall embeds Will's message with the embedder at
+  `OLLAMA_HOST` on every turn, as it always has. With that host on another machine, the
+  question of a goals turn goes there too; only the marked facts are kept from it.
+- *A model's place is known a minute late.* Which models run on this Mac is asked of Ollama
+  once a minute. A name re-pointed at a cloud model with `ollama cp` is treated as local until
+  the next listing.
 - *The training corpus keeps answers.* Each answered turn is logged for Flint's own training
   (`~/.flint/training/corpus.jsonl`, on this Mac), the marked ones included. An eval that sent
   corpus entries to an outside model would send those answers.
@@ -637,9 +683,13 @@ its `chat.turn` event as `ctxTokens.goals`; the runtime rolls it up daily
   the `[route]` line's `ctxTokens.goals` says what each turn got. A local model loaded with a
   larger context gets the whole block.
 - *Holes in an outside brain's history.* With goals on, every turn a local model answers with
-  the block (or with a marked fact) is marked, so an outside brain that answers a later turn
-  of the same conversation sees the placeholder instead. It is told something is missing,
-  never what.
+  the block (or with a marked fact) is marked, and so is every later local turn while one of
+  those is in the conversation's recent history. An outside brain that answers a later turn of
+  the same conversation sees the placeholder instead. It is told something is missing, never
+  what.
+- *The browser's voice for those replies.* A reply that stays here is spoken by the browser or
+  by the Mac's `say`, not by the neural voice. A client that does not say which reply it is
+  speaking gets that voice for every reply while any conversation has a recent marked turn.
 - *The sizes are estimates.* The prompt is measured at four characters a token, without the
   persona's lessons; the 256-token margin is for what that misses.
 - *A 30-second cache.* Goals read up to 30 seconds ago are still served: a goal finished

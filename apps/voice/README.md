@@ -9,6 +9,12 @@ captures your command → whisper-cli transcribes it → sends to Flint's `/chat
 plays the reply through `/speak` (onyx). No cloud wake-word service; reuses the
 STT/TTS Flint already has.
 
+`/speak` is an outside speech service (OpenAI). A reply Flint marks as staying on this Mac
+(a turn answered with Will's goals, or one that read such a turn: the chat stream's `meta`
+event says so) is never sent there. The client speaks it with the Mac's own `say` voice. Every
+other reply's request names its conversation and turn, so the server can refuse on its side
+too, and a refusal falls back to `say`.
+
 ## Install on the Mac Studio
 ```
 pip3 install sounddevice numpy
