@@ -4,6 +4,8 @@
  * ("restore_drill"). The console keeps the same maps (HEALTH_NAMES and
  * SOURCE_NAMES in apps/console/index.html; a test keeps the two in step).
  */
+import { nameWords, titleCase } from './notes.js';
+
 export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   postgres: 'Database',
   bus: 'Job Queue',
@@ -21,13 +23,8 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
 /** A source whose name is not its words in title case. */
 export const SOURCE_NAMES: Readonly<Record<string, string>> = { github: 'GitHub', imessage: 'iMessage' };
 
-/** Short words a title keeps lowercase inside it (the console's titleCase). */
-const SMALL = new Set(['a', 'an', 'the', 'and', 'but', 'or', 'nor', 'for', 'so', 'yet', 'as', 'at', 'by', 'from', 'in', 'into', 'of', 'off', 'on', 'onto', 'out', 'over', 'to', 'up', 'with']);
-
-function titleWords(s: string): string {
-  const w = s.replace(/[_.]+/g, ' ').trim().split(' ');
-  return w.map((x, i) => (i > 0 && i < w.length - 1 && SMALL.has(x.toLowerCase()) ? x.toLowerCase() : x.charAt(0).toUpperCase() + x.slice(1))).join(' ');
-}
+/** A name's parts in title case, as the console's titleCase(laneWords(name)) says them. */
+const titleWords = (s: string): string => titleCase(nameWords(s));
 
 /** A component's name: its own, a source's ("source:google_calendar" is Google Calendar), or its words in title case. */
 export function healthName(component: string): string {
