@@ -118,14 +118,14 @@ const newId = (prefix: string, now: Date) => `${prefix}${now.getTime().toString(
  * the transaction ran out of time) throws, and that ends the sweep with nothing written.
  */
 async function row<T>(tx: Tx, write: () => Promise<T>): Promise<{ ok: true; did: T } | { ok: false; err: unknown }> {
-  await tx.$executeRawUnsafe('SAVEPOINT ledger_row');
+  await tx.$executeRaw`SAVEPOINT ledger_row`;
   try {
     const did = await write();
-    await tx.$executeRawUnsafe('RELEASE SAVEPOINT ledger_row');
+    await tx.$executeRaw`RELEASE SAVEPOINT ledger_row`;
     return { ok: true, did };
   } catch (err) {
-    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT ledger_row');
-    await tx.$executeRawUnsafe('RELEASE SAVEPOINT ledger_row');
+    await tx.$executeRaw`ROLLBACK TO SAVEPOINT ledger_row`;
+    await tx.$executeRaw`RELEASE SAVEPOINT ledger_row`;
     return { ok: false, err };
   }
 }
