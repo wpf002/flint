@@ -7,11 +7,14 @@
  *
  *   series                           one step's value
  *   daily.spend.<vendor>.usd         the day's last reading of that vendor's running total
- *   daily.deploys.count              deployments first seen, or seen with a new sha, that day
- *   weekly.commits.<repo>.count      commits in Will's clone that week (git rev-list --count; never a fetch)
+ *   daily.deploys.count              deployments seen with a new sha that day, or first seen (but not on the first
+ *                                    day its source was read: those were already there)
+ *   weekly.commits.<repo>.count      commits that landed on the main branch of Will's clone that week
+ *                                    (git rev-list --count --first-parent; never a fetch)
  *   daily.services.incident_minutes  minutes any of Flint's or Nexus's services was down that day
  *   daily.threads.open               threads open at the day's end
- *   daily.calendar.hours             hours of accepted, confirmed events that day (never an all-day one)
+ *   daily.calendar.hours             distinct hours of accepted, confirmed events that day: two that overlap count
+ *                                    once, and a day never has more than 24 (never an all-day one)
  *
  * Rules that hold for all of them:
  *  - A day is the local day in Flint's zone, and its point is stamped with the
@@ -20,22 +23,27 @@
  *  - A number is written once and never rewritten (createMany, skipDuplicates),
  *    so a second run changes nothing and history does not move under a forecast.
  *  - It backfills: every past step its sources still cover, up to 400 days (60
- *    weeks), on the first run and after any gap.
+ *    weeks), on the first run.
  *  - A day the runtime was down for more than 20 hours is left MISSING, never
  *    written as zero: nothing was watching, so "no deploys" would be a guess.
  *    (A week of commits is read from the clone itself, so it needs no watcher.)
+ *  - Each number remembers where it was read to (MetricSeries.readTo), and the
+ *    next night reads on from there. A day it found nothing to record for is
+ *    not read again, and not counted again, every night after: the night's
+ *    work is the day that just ended, however long Flint has been running.
  *  - A forgotten series takes no more points.
  *
  * The world is read as it stood: a service's minutes from the versions valid
  * that day, a thread from the version valid at the day's end, an event from
  * how it stood when it ended (one cancelled before it ended is not counted).
  */
+import { Prisma } from '@prisma/client';
 import { addLocalDays, localDay, localDayBounds } from '@flint/policy';
 import type { Db } from '../db.js';
 import { uptime } from '../health/instance.js';
 import { isDown } from '../health/watchdog.js';
 import type { Run } from '../sources/exec.js';
-import { commitsBetween } from '../sources/git.js';
+import { commitsBetween, mainRef } from '../sources/git.js';
 import { FORECAST_SERIES, freqOf, type ForecastSeriesDef } from './series.js';
 
 const DAY_MS = 86_400_000;
@@ -124,21 +132,30 @@ async function spend(db: Db, tz: string, vendor: string, want: readonly string[]
   return out;
 }
 
-/** Deployments first seen, or seen with a new sha, per day. */
+/**
+ * Deployments seen with a new sha, or first seen, per day. A deployment's key says where it is deployed
+ * (deployment:<place>:<name>). On the day a place was first read, everything deployed there is seen for the first
+ * time at once: those were already there, and are not deploys. A deployment first seen on a later day is one.
+ */
 async function deploys(db: Db, tz: string, want: readonly string[]): Promise<Values> {
   const from = localDayBounds(tz, want[0]!).start;
   const to = localDayBounds(tz, want[want.length - 1]!).end;
-  const first = await db.entityVersion.findFirst({ where: { entity: { kind: 'deployment' } }, orderBy: { validFrom: 'asc' }, select: { validFrom: true } });
+  // One row for each deployment (its first version), so this does not grow with the deploys themselves.
+  const places = await db.$queryRaw<Array<{ place: string; first: Date }>>`
+    SELECT split_part(e.key, ':', 2) AS place, min(v."validFrom") AS first FROM "EntityVersion" v JOIN "Entity" e ON e.id = v."entityId"
+    WHERE e.kind = 'deployment' AND v.version = 1 GROUP BY 1`;
   const out: Values = new Map();
-  if (!first) return out;
-  const rows = await db.$queryRaw<Array<{ validFrom: Date }>>`
-    SELECT v."validFrom" FROM "EntityVersion" v JOIN "Entity" e ON e.id = v."entityId"
+  if (!places.length) return out;
+  const firstDay = new Map(places.map((p) => [p.place, localDay(tz, p.first)]));
+  const rows = await db.$queryRaw<Array<{ validFrom: Date; created: boolean; place: string }>>`
+    SELECT v."validFrom", v."changeKind" = 'created' AS created, split_part(e.key, ':', 2) AS place FROM "EntityVersion" v JOIN "Entity" e ON e.id = v."entityId"
     WHERE e.kind = 'deployment' AND v."validFrom" >= ${from} AND v."validFrom" < ${to}
       AND (v."changeKind" = 'created' OR (v.patch IS NOT NULL AND jsonb_typeof(v.patch) = 'object' AND v.patch ? 'sha'))`;
-  const since = localDay(tz, first.validFrom);
+  const since = [...firstDay.values()].sort()[0]!;
   for (const day of want) if (day >= since) out.set(day, 0);
   for (const r of rows) {
     const day = localDay(tz, r.validFrom);
+    if (r.created && day === firstDay.get(r.place)) continue;
     if (out.has(day)) out.set(day, out.get(day)! + 1);
   }
   return out;
@@ -155,34 +172,68 @@ function merged(spans: Array<[number, number]>): Array<[number, number]> {
   return out;
 }
 
+interface VersionRow {
+  entityId: string;
+  changeKind: string;
+  state: unknown;
+  validFrom: Date;
+}
+/**
+ * The versions that say how some items stood over a span of days: every version that began inside it, and for each
+ * item the one that was standing when it began. Never the item's whole history: the night's read is the day's
+ * changes and one row an item, however long Flint has been watching.
+ */
+async function versionsOver(db: Db, ids: readonly string[], from: Date, to: Date): Promise<Map<string, VersionRow[]>> {
+  const by = new Map<string, VersionRow[]>();
+  if (!ids.length) return by;
+  const standing = await db.$queryRaw<VersionRow[]>`
+    SELECT x."entityId", x."changeKind", x.state, x."validFrom" FROM unnest(${[...ids]}::text[]) AS item(id)
+    CROSS JOIN LATERAL (SELECT v."entityId", v."changeKind", v.state, v."validFrom" FROM "EntityVersion" v
+                        WHERE v."entityId" = item.id AND v."validFrom" < ${from} ORDER BY v.version DESC LIMIT 1) x`;
+  const inside = await db.entityVersion.findMany({
+    where: { entityId: { in: [...ids] }, validFrom: { gte: from, lt: to } }, orderBy: [{ entityId: 'asc' }, { version: 'asc' }],
+    select: { entityId: true, changeKind: true, state: true, validFrom: true },
+  });
+  for (const v of [...standing, ...inside]) {
+    const own = by.get(v.entityId);
+    if (own) own.push(v);
+    else by.set(v.entityId, [v]);
+  }
+  return by;
+}
+/** When the first of some items was first seen (its first version): before that day a number about them has nothing to say. */
+async function firstSeen(db: Db, ids: readonly string[]): Promise<Date | undefined> {
+  if (!ids.length) return undefined;
+  return (await db.entityVersion.findFirst({ where: { entityId: { in: [...ids] }, version: 1 }, orderBy: { validFrom: 'asc' }, select: { validFrom: true } }))?.validFrom;
+}
+
 /**
  * Minutes any watched service was down, per day: each service's versions, each
  * holding from when it became valid until the next one (the latest, until the
  * service was last seen), and down as the watchdog reads a state.
  */
 async function incidents(db: Db, tz: string, want: readonly string[]): Promise<Values> {
-  const services = (await db.entity.findMany({ where: { kind: 'service' }, select: { id: true, key: true, lastObservedAt: true, firstSeenAt: true } })).filter((e) => WATCHED.test(e.key));
+  const services = (await db.entity.findMany({ where: { kind: 'service' }, select: { id: true, key: true, lastObservedAt: true } })).filter((e) => WATCHED.test(e.key));
   const out: Values = new Map();
-  if (!services.length) return out;
-  const versions = await db.entityVersion.findMany({
-    where: { entityId: { in: services.map((e) => e.id) } }, orderBy: [{ entityId: 'asc' }, { version: 'asc' }],
-    select: { entityId: true, changeKind: true, state: true, validFrom: true },
-  });
+  const ids = services.map((e) => e.id);
+  const since = await firstSeen(db, ids);
+  if (!since) return out;
+  const from = localDayBounds(tz, want[0]!).start;
+  const to = localDayBounds(tz, want[want.length - 1]!).end;
+  const versions = await versionsOver(db, ids, from, to);
   const down: Array<[number, number]> = [];
-  let since = Infinity;
   for (const e of services) {
-    const own = versions.filter((v) => v.entityId === e.id);
+    const own = versions.get(e.id) ?? [];
     own.forEach((v, i) => {
-      since = Math.min(since, v.validFrom.getTime());
       const until = own[i + 1]?.validFrom.getTime() ?? e.lastObservedAt.getTime();
       // An archived or forgotten version says nothing; a state says down or not as the watchdog reads it.
       if (v.changeKind !== 'archived' && v.changeKind !== 'forgotten' && v.state !== null && isDown(e.key, v.state) === true) down.push([v.validFrom.getTime(), until]);
     });
   }
   const spans = merged(down);
-  const first = Number.isFinite(since) ? localDay(tz, new Date(since)) : undefined;
+  const first = localDay(tz, since);
   for (const day of want) {
-    if (!first || day < first) continue;
+    if (day < first) continue;
     const { start, end } = localDayBounds(tz, day);
     const ms = spans.reduce((t, [a, b]) => t + Math.max(0, Math.min(b, end.getTime()) - Math.max(a, start.getTime())), 0);
     out.set(day, Math.round(ms / 60_000));
@@ -192,19 +243,17 @@ async function incidents(db: Db, tz: string, want: readonly string[]): Promise<V
 
 /** Threads open at each day's end: by the version valid then. */
 async function threads(db: Db, tz: string, want: readonly string[]): Promise<Values> {
-  const versions = await db.$queryRaw<Array<{ entityId: string; changeKind: string; state: unknown; validFrom: Date }>>`
-    SELECT v."entityId", v."changeKind", v.state, v."validFrom" FROM "EntityVersion" v JOIN "Entity" e ON e.id = v."entityId"
-    WHERE e.kind = 'thread' ORDER BY v."entityId", v.version`;
+  const ids = (await db.entity.findMany({ where: { kind: 'thread' }, select: { id: true } })).map((e) => e.id);
   const out: Values = new Map();
-  if (!versions.length) return out;
-  const first = localDay(tz, new Date(Math.min(...versions.map((v) => v.validFrom.getTime()))));
-  const by = new Map<string, typeof versions>();
-  for (const v of versions) by.set(v.entityId, [...(by.get(v.entityId) ?? []), v]);
+  const since = await firstSeen(db, ids);
+  if (!since) return out;
+  const versions = await versionsOver(db, ids, localDayBounds(tz, want[0]!).start, localDayBounds(tz, want[want.length - 1]!).end);
+  const first = localDay(tz, since);
   for (const day of want) {
     if (day < first) continue;
     const end = localDayBounds(tz, day).end.getTime();
     let open = 0;
-    for (const own of by.values()) {
+    for (const own of versions.values()) {
       const then = [...own].reverse().find((v) => v.validFrom.getTime() < end);
       if (!then || then.changeKind === 'archived' || then.changeKind === 'forgotten' || then.state === null) continue;
       if ((then.state as { status?: unknown }).status !== 'archived') open += 1;
@@ -219,7 +268,11 @@ interface Stood {
   end: number;
   counts: boolean;
 }
-/** How an event stood when it ended: its last word before its own end. Undefined when it was taken off the calendar first. */
+/**
+ * How an event stood when it ended: its last word before its own end. Moved or stretched before it ended, it counts at
+ * its new time; changed after it ended (moved to another day, cancelled, put away), it counts as it was: what is done
+ * is done. Undefined when it was taken off the calendar before it ended.
+ */
 function stoodAtEnd(versions: ReadonlyArray<{ changeKind: string; state: unknown; validFrom: Date }>): Stood | undefined {
   let cur: Stood | undefined;
   for (const v of versions) {
@@ -240,7 +293,11 @@ function stoodAtEnd(versions: ReadonlyArray<{ changeKind: string; state: unknown
   return cur;
 }
 
-/** Hours of accepted (or organized), confirmed, timed events per day. A day with none is 0 once the calendar has ever been read. */
+/**
+ * Hours of accepted (or organized), confirmed, timed events per day: the hours that have an event in them, so two
+ * events that overlap count once, and a day never has more than 24. A day with none is 0 once the calendar has ever
+ * been read.
+ */
 async function calendar(db: Db, tz: string, want: readonly string[]): Promise<Values> {
   const out: Values = new Map();
   const first = await db.entityVersion.findFirst({ where: { entity: { kind: 'commitment' } }, orderBy: { validFrom: 'asc' }, select: { validFrom: true } });
@@ -257,28 +314,33 @@ async function calendar(db: Db, tz: string, want: readonly string[]): Promise<Va
   const by = new Map<string, typeof versions>();
   for (const v of versions) by.set(v.entityId, [...(by.get(v.entityId) ?? []), v]);
   const events = [...by.values()].map(stoodAtEnd).filter((e): e is Stood => !!e && e.counts);
+  // The time covered by any of them, each stretch once.
+  const busy = merged(events.map((e) => [e.start, e.end]));
   const since = localDay(tz, first.validFrom);
   for (const day of want) {
     if (day < since) continue;
     const { start, end } = localDayBounds(tz, day);
-    const ms = events.reduce((t, e) => t + Math.max(0, Math.min(e.end, end.getTime()) - Math.max(e.start, start.getTime())), 0);
-    out.set(day, Math.round((ms / 3_600_000) * 100) / 100);
+    const ms = busy.reduce((t, [a, b]) => t + Math.max(0, Math.min(b, end.getTime()) - Math.max(a, start.getTime())), 0);
+    out.set(day, Math.min(24, Math.round((ms / 3_600_000) * 100) / 100));
   }
   return out;
 }
 
 /**
- * Commits in a clone per week (keyed by the week's Monday). Until the series has its first number, weeks with no
- * commits are left out: the clone may not have existed yet. Once it has one, a quiet week is a 0.
+ * Commits that landed on a clone's main branch per week (keyed by the week's Monday). Until the series has its first
+ * number, weeks with no commits are left out: the clone may not have existed yet. Once it has one, a quiet week is a
+ * 0. Undefined when it could not be read at all: no way to run git, no such clone, a folder that is no clone, or a
+ * clone with no main branch. Those weeks are asked for again another night.
  */
-async function commits(d: MetricsDeps, repo: string, want: readonly string[], started: boolean): Promise<Values> {
+async function commits(d: MetricsDeps, repo: string, want: readonly string[], started: boolean): Promise<Values | undefined> {
   const out: Values = new Map();
   const path = d.repos?.find((r) => r.name === repo)?.path;
-  if (!d.run || !path) return out;
+  if (!d.run || !path) return undefined;
+  const ref = await mainRef(d.run, path);
+  if (!ref) return undefined;
   let seen = started;
   for (const monday of want) {
-    const n = await commitsBetween(d.run, path, localDayBounds(d.tz, monday).start, localDayBounds(d.tz, addLocalDays(monday, 6)).end);
-    if (n === undefined) return out;
+    const n = await commitsBetween(d.run, path, ref, localDayBounds(d.tz, monday).start, localDayBounds(d.tz, addLocalDays(monday, 6)).end);
     if (n > 0) seen = true;
     if (seen) out.set(monday, n);
   }
@@ -304,7 +366,7 @@ export async function materialise(d: MetricsDeps, keys: readonly string[]): Prom
   const now = d.now ?? new Date();
   const today = localDay(d.tz, now);
   const out: Materialised = { written: {}, skipped: 0, down: 0, failed: [] };
-  const rows = await d.db.metricSeries.findMany({ where: { key: { in: [...keys] } }, select: { key: true, description: true, freq: true } });
+  const rows = await d.db.metricSeries.findMany({ where: { key: { in: [...keys] } }, select: { key: true, description: true, freq: true, readTo: true } });
   const live = new Map(rows.filter((r) => r.description !== '[forgotten]').map((r) => [r.key, r]));
   for (const key of keys) {
     const def = FORECAST_SERIES.find((s) => s.key === key);
@@ -320,11 +382,20 @@ export async function materialise(d: MetricsDeps, keys: readonly string[]): Prom
       const steps = weekly ? days(start, end).filter((day) => weekOf(day) === day) : days(start, end);
       const have = new Set((await d.db.metricPoint.findMany({ where: { seriesKey: key, at: { gte: localDayBounds(d.tz, start).start } }, select: { at: true } })).map((p) => localDay(d.tz, p.at)));
       // Once a series has its first number, only what came after it is filled in: before it, its sources had nothing
-      // (a first run already wrote everything they covered), so the nightly run reads yesterday, not 400 days.
+      // (a first run already wrote everything they covered). And only what has not been read yet: a step this number
+      // was already read for, with or without a value to show for it, is not read again. So the nightly run reads
+      // yesterday, not 400 days, and a blank day stays one read.
       const began = [...have].sort()[0];
-      const want = steps.filter((day) => !have.has(day) && (!began || day > began));
+      const readTo = live.get(key)!.readTo?.getTime() ?? -Infinity;
+      const want = steps.filter((day) => !have.has(day) && (!began || day > began) && localDayBounds(d.tz, day).start.getTime() >= readTo);
+      // Everything that is over has now been read (or was already): the next run starts at this step.
+      const reached = localDayBounds(d.tz, end).start;
+      const mark = async () => {
+        if (reached.getTime() > readTo) await d.db.metricSeries.updateMany({ where: { key }, data: { readTo: reached } });
+      };
       if (!want.length) {
         out.written[key] = 0;
+        await mark();
         continue;
       }
       // Every step from the first missing one on, so a carried value (a vendor's running total) has its history.
@@ -337,6 +408,10 @@ export async function materialise(d: MetricsDeps, keys: readonly string[]): Prom
               : from.kind === 'threads' ? await threads(d.db, d.tz, span)
                 : from.kind === 'calendar' ? await calendar(d.db, d.tz, span)
                   : await commits(d, from.repo, want, have.size > 0);
+      if (!values) {
+        out.written[key] = 0;
+        continue;
+      }
       // A day nothing was watching is left missing (a week of commits is read from the clone itself).
       const up = weekly ? undefined : await upDays(d.db, d.tz, want.filter((day) => values.has(day)));
       const data = want.flatMap((day) => {
@@ -349,6 +424,7 @@ export async function materialise(d: MetricsDeps, keys: readonly string[]): Prom
         return [{ seriesKey: key, at: localDayBounds(d.tz, day).start, value }];
       });
       out.written[key] = data.length ? (await d.db.metricPoint.createMany({ data, skipDuplicates: true })).count : 0;
+      await mark();
     } catch {
       out.failed.push(key);
     }

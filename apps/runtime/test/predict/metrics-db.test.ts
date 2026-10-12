@@ -7,11 +7,16 @@
  *  - A 23-hour and a 25-hour day are each one day, stamped at its own midnight.
  *  - Idempotent: a second run writes nothing, and a number once written does
  *    not move.
- *  - It backfills on the first run, and then reads only what is new.
+ *  - It backfills on the first run, and then reads only what is new: each
+ *    number remembers where it was read to, so a blank day is read once and
+ *    the night's read does not grow with the history.
  *  - A day the runtime was down is missing, never zero.
  *  - A forgotten series takes no points; today's number is never written.
  * Synthetic rows only. America/Chicago, with "now" fixed in March 2026.
  */
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { NO_DB, freshDb, id, type TestUrls } from '../db';
 import { ledgerKit, type LedgerKit } from '../ledger/kit';
@@ -61,6 +66,9 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
   /** The runtime was up from `from` to `to`. */
   const up = (from: Date, to: Date) => k.db.runtimeInstance.create({ data: { id: id('ri'), gitSha: 'dev', startedAt: from, lastBeatAt: to, stoppedAt: to } });
   const run = (keys: string[], over: Partial<Parameters<typeof materialise>[0]> = {}) => materialise({ db: k.db, tz: TZ, now: NOW, ...over }, keys);
+  /** Where a number has been read to (the first instant not read yet), and a way to make it forget, so a test can read the past again. */
+  const readTo = async (key: string) => (await k.db.metricSeries.findUniqueOrThrow({ where: { key }, select: { readTo: true } })).readTo;
+  const unread = (key: string) => k.app(`UPDATE "MetricSeries" SET "readTo" = NULL WHERE key = $1`, [key]);
 
   beforeAll(async () => {
     urls = await freshDb();
@@ -114,7 +122,7 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     expect(await points(other)).toEqual({});
   });
 
-  it('deploys: a deployment first seen, or seen with a new sha, counts on the local day it was seen; a change of status alone does not', async () => {
+  it('deploys: a new sha counts on the local day it was seen, and so does a deployment first seen, but not on the first day its place was read; a change of status alone does not', async () => {
     const key = await registered('daily.deploys.count');
     const dep = (sha: string, status: string, at: Date) => observe('deployment', 'deployment:studio:flint', { target: 'studio', status, sha }, at, { source: 'git' });
     await dep('a'.repeat(40), 'success', chi('2026-03-02', '10:00'));
@@ -126,16 +134,27 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     // 01:30 and 03:30 on the 23-hour day are the same day (02:00 to 03:00 does not exist).
     await dep('e'.repeat(40), 'success', chi('2026-03-08', '03:30'));
     await dep('f'.repeat(40), 'failed', chi('2026-03-10', '09:00'));
+    // Railway is turned on on Tuesday the 10th: its two services are seen for the first time at once. They were already
+    // deployed: neither is a deploy (review finding 15). The next day one of them gets a new sha, and a third service
+    // is seen for the first time: on a later day than the place's first, that is one.
+    const rail = (name: string, sha: string, at: Date) => observe('deployment', `deployment:railway:${name}`, { target: 'railway', status: 'success', sha }, at, { source: 'railway' });
+    await rail('web', '1'.repeat(40), chi('2026-03-10', '14:00'));
+    await rail('api', '2'.repeat(40), chi('2026-03-10', '14:00'));
+    await rail('web', '3'.repeat(40), chi('2026-03-11', '09:00'));
+    await rail('jobs', '4'.repeat(40), chi('2026-03-11', '16:00'));
     const r = await run([key]);
     const p = await points(key);
-    // Monday the 2nd: first seen, and one new sha (the status change is not a deploy).
-    expect(p[chi('2026-03-02').toISOString()]).toBe(2);
+    // Monday the 2nd: the Studio's deployment is first seen (it was already there: not a deploy), then one new sha
+    // (the status change is not a deploy either).
+    expect(p[chi('2026-03-02').toISOString()]).toBe(1);
     expect(p[chi('2026-03-03').toISOString()]).toBe(0);
     expect(p[chi('2026-03-07').toISOString()]).toBe(1);
     expect(p[chi('2026-03-08').toISOString()]).toBe(2);
     expect(p[chi('2026-03-09').toISOString()]).toBe(0);
+    // Tuesday the 10th: the Studio's new sha, and not Railway's two first sightings.
     expect(p[chi('2026-03-10').toISOString()]).toBe(1);
-    expect(p[chi('2026-03-11').toISOString()]).toBe(0);
+    // Wednesday the 11th: Railway's new sha, and its new service.
+    expect(p[chi('2026-03-11').toISOString()]).toBe(2);
     // Before Flint ever saw a deployment there is nothing to count, and no zero is written.
     expect(p[chi('2026-03-01').toISOString()]).toBeUndefined();
     // Wednesday the 4th: the runtime was down all day. Nothing was watching: missing, never 0.
@@ -181,7 +200,8 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
 
   it('open threads: how many were open at the day\'s end; nothing at all until Flint has seen a thread', async () => {
     const key = await registered('daily.threads.open');
-    expect((await run([key])).written[key]).toBe(0);
+    // Before Flint has seen a thread (here: on the 1st) there is nothing to write.
+    expect((await run([key], { now: chi('2026-03-01', '10:00') })).written[key]).toBe(0);
     const thread = (n: number, status: 'open' | 'archived', at: Date) => observe('thread', `thread:nexus:t${n}`, { status }, at, { source: 'nexus', ...(status === 'archived' ? { status: 'archived' as const } : {}) });
     await thread(1, 'open', chi('2026-03-06', '09:00'));
     await thread(2, 'open', chi('2026-03-06', '23:59'));
@@ -195,7 +215,7 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     expect(p[chi('2026-03-05').toISOString()]).toBeUndefined();
   });
 
-  it('calendar hours: accepted or organized, confirmed, timed events, as each stood when it ended; one cancelled first is not counted', async () => {
+  it('calendar hours: the distinct hours of accepted or organized, confirmed, timed events, as each stood when it ended; one cancelled first is not counted', async () => {
     const key = await registered('daily.calendar.hours');
     const base = { source: 'apple_calendar', allDay: false, response: 'accepted', eventStatus: 'confirmed', confirmation: 'confirmed' };
     const event = (n: number, state: Record<string, unknown>, at: Date, status?: 'archived') =>
@@ -216,56 +236,107 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     await event(7, times('2026-03-11', '10:00', '11:30'), chi('2026-03-09', '20:00'));
     // Across midnight: Tuesday 22:00 to Wednesday 01:30 is two hours on Tuesday and one and a half on Wednesday.
     await event(8, times('2026-03-10', '22:00', '01:30', '2026-03-11'), chi('2026-03-05', '12:00'));
+    // Thursday the 5th (review finding 8): two that overlap, 14:00 to 15:00 and 14:30 to 15:30, are an hour and a half of
+    // the day, not two hours; one inside another (16:00 to 18:00 and 16:30 to 17:00) is two hours; and two that only
+    // touch (19:00 to 19:30, 19:30 to 20:00) are one.
+    await event(9, times('2026-03-05', '14:00', '15:00'), chi('2026-03-05', '12:00'));
+    await event(10, times('2026-03-05', '14:30', '15:30'), chi('2026-03-05', '12:00'));
+    await event(11, times('2026-03-05', '16:00', '18:00'), chi('2026-03-05', '12:00'));
+    await event(12, times('2026-03-05', '16:30', '17:00'), chi('2026-03-05', '12:00'));
+    await event(13, times('2026-03-05', '19:00', '19:30'), chi('2026-03-05', '12:00'));
+    await event(14, times('2026-03-05', '19:30', '20:00'), chi('2026-03-05', '12:00'));
+    // A timed block of 36 hours, Friday the 6th 08:00 to Saturday the 7th 20:00, with a meeting inside it on each day:
+    // Friday has the 16 hours from 08:00, Saturday its first 20, and neither counts the meeting twice.
+    await event(15, times('2026-03-06', '08:00', '20:00', '2026-03-07'), chi('2026-03-05', '12:00'));
+    await event(16, times('2026-03-06', '10:00', '11:00'), chi('2026-03-05', '12:00'));
+    await event(17, times('2026-03-07', '09:00', '12:00'), chi('2026-03-05', '12:00'));
+    // A block that covers the whole of the 23-hour Sunday the 8th and more, beside another that does too: 23 hours, never more.
+    await event(18, times('2026-03-07', '22:00', '06:00', '2026-03-09'), chi('2026-03-05', '12:00'));
+    await event(19, times('2026-03-07', '23:00', '05:00', '2026-03-09'), chi('2026-03-05', '12:00'));
+    // Moved after it began, before it ended: Wednesday the 11th, 14:00 to 15:00, moved at 14:20 to 16:00 to 17:00. It
+    // counts at its new time (an hour, once). Moved after it ended: 18:00 to 18:30 on the 11th, moved the next morning
+    // to the 12th. What is done is done: it counts on the 11th, as it stood when it ended.
+    await event(20, times('2026-03-11', '14:00', '15:00'), chi('2026-03-05', '12:00'));
+    await event(20, times('2026-03-11', '16:00', '17:00'), chi('2026-03-11', '14:20'));
+    await event(21, times('2026-03-11', '18:00', '18:30'), chi('2026-03-05', '12:00'));
+    await event(21, times('2026-03-12', '18:00', '18:30'), chi('2026-03-12', '08:00'));
     await run([key]);
     const p = await points(key);
-    expect(p[chi('2026-03-09').toISOString()]).toBe(2.5);
+    // Monday the 9th: its own 2.5 hours, and the 6 hours before 06:00 that the long block still covers.
+    expect(p[chi('2026-03-09').toISOString()]).toBe(8.5);
     expect(p[chi('2026-03-10').toISOString()]).toBe(2);
-    expect(p[chi('2026-03-11').toISOString()]).toBe(3);
-    // A day with nothing on it is 0, once the calendar has been read at all (from the 5th).
-    expect(p[chi('2026-03-06').toISOString()]).toBe(0);
+    // Wednesday the 11th: 00:00 to 01:30, 10:00 to 11:30, the moved hour at 16:00, and the half hour at 18:00.
+    expect(p[chi('2026-03-11').toISOString()]).toBe(4.5);
+    expect(p[chi('2026-03-05').toISOString()]).toBe(4.5);
+    expect(p[chi('2026-03-06').toISOString()]).toBe(16);
+    // Saturday the 7th: 00:00 to 20:00 of the block, and 22:00 to midnight of the next one.
+    expect(p[chi('2026-03-07').toISOString()]).toBe(22);
+    expect(p[chi('2026-03-08').toISOString()]).toBe(23);
+    for (const v of Object.values(p)) expect(v).toBeLessThanOrEqual(24);
+    // (A day with nothing on it is 0, once the calendar has been read at all: from the 5th. Here every day had something.)
     expect(p[chi('2026-03-03').toISOString()]).toBeUndefined();
     // No title, no attendee and no event id is anywhere in what was written: a point is a time and a number.
     expect(JSON.stringify(p)).not.toMatch(/commitment|apple|e\d/);
   });
 
-  it('weekly commits: one fixed git command per missing week, Monday to Monday; quiet weeks before the first commit are left out, later ones are 0', async () => {
+  it('weekly commits: the main branch\'s own, one fixed git command per missing week, Monday to Monday; quiet weeks before the first commit are left out, later ones are 0', async () => {
     const key = await registered('weekly.commits.flint.count');
     const calls: string[][] = [];
+    // A clone of its own (it has a .git), whose main branch is origin's.
+    const dir = mkdtempSync(join(tmpdir(), 'commits-'));
+    mkdirSync(join(dir, 'flint', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'plain'));
+    const path = join(dir, 'flint');
     // The clone had its first commit in the week of 2026-02-09; then 12, 0, 7, 3 a week.
     const byWeek: Record<string, number> = { '2026-02-09': 4, '2026-02-16': 12, '2026-02-23': 0, '2026-03-02': 7 };
     const git = async (_cmd: string, args: readonly string[]) => {
       calls.push([...args]);
+      if (args.includes('for-each-ref')) return 'refs/remotes/origin/main\nrefs/heads/main\n';
       const since = args.find((a) => a.startsWith('--since='))!.slice('--since='.length);
       const monday = Object.keys(byWeek).find((d) => chi(d).toISOString() === since);
       return `${monday ? byWeek[monday] : 0}\n`;
     };
-    const repos = [{ name: 'flint', path: '/' }];
+    const repos = [{ name: 'flint', path }];
     const r = await run([key], { run: git, repos });
     expect(r.failed).toEqual([]);
     const p = await points(key);
     expect(p).toEqual({
       [chi('2026-02-09').toISOString()]: 4, [chi('2026-02-16').toISOString()]: 12, [chi('2026-02-23').toISOString()]: 0, [chi('2026-03-02').toISOString()]: 7,
     });
-    // This week (it began Monday the 9th) is not over: never asked for, never written.
-    expect(calls).toHaveLength(60);
-    expect(calls.every((a) => a.slice(0, 5).join(' ') === '-C / rev-list --count --all')).toBe(true);
-    const last = calls[calls.length - 1]!;
-    expect(last.slice(5)).toEqual([`--since=${chi('2026-03-02').toISOString()}`, `--before=${chi('2026-03-09').toISOString()}`]);
+    // One question about which branch is main, then one count a week. This week (it began Monday the 9th) is not over:
+    // never asked for, never written.
+    expect(calls[0]!.slice(0, 3)).toEqual(['-C', path, 'for-each-ref']);
+    const counts = calls.slice(1);
+    expect(counts).toHaveLength(60);
+    expect(counts.every((a) => a.slice(0, 5).join(' ') === `-C ${path} rev-list --count --first-parent`)).toBe(true);
+    // Main only (review finding 9): never every ref the clone happens to hold. A week ends a second before the next begins.
+    expect(calls.flat()).not.toContain('--all');
+    const last = counts[counts.length - 1]!;
+    expect(last.slice(5)).toEqual([`--since=${chi('2026-03-02').toISOString()}`, `--before=${new Date(chi('2026-03-09').getTime() - 1000).toISOString()}`, 'refs/remotes/origin/main']);
     // The week the clocks moved is still Monday to Monday: 167 hours.
     expect((chi('2026-03-09').getTime() - chi('2026-03-02').getTime()) / 3_600_000).toBe(167);
-    // A week later: one more week is over, and only it is asked for. A quiet week is now a 0.
+    // A backfill and the night itself ask the same question of the same branch, so the series does not break at turn-on:
+    // a week later one more week is over, and only it is asked for, in the same words. A quiet week is now a 0.
     calls.length = 0;
     const next = await run([key], { run: git, repos, now: new Date('2026-03-17T15:00:00.000Z') });
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((a) => a.includes('rev-list'))).toHaveLength(1);
+    expect(calls.find((a) => a.includes('rev-list'))!.slice(0, 5)).toEqual(counts[0]!.slice(0, 5));
+    expect(calls.find((a) => a.includes('rev-list'))!.at(-1)).toBe('refs/remotes/origin/main');
     expect(next.written[key]).toBe(1);
     expect((await points(key))[chi('2026-03-09').toISOString()]).toBe(0);
-    // With no clone, or no way to run git, nothing is written and nothing fails.
+    // With no clone, no way to run git, a folder that is no clone of its own, or a clone with no main branch, nothing
+    // is written and nothing fails; and the weeks are asked for again another night (nothing was read).
     const nexus = await registered('weekly.commits.nexus.count');
     expect(await run([nexus], { run: git, repos })).toMatchObject({ written: { [nexus]: 0 }, failed: [] });
     expect(await run([nexus])).toMatchObject({ written: { [nexus]: 0 }, failed: [] });
-    // What git prints that is not a number is refused, and the series is counted as failed, not written.
-    expect(await run([nexus], { run: async () => 'fatal: not a repository', repos: [{ name: 'nexus', path: '/' }] })).toMatchObject({ failed: [nexus] });
+    expect(await run([nexus], { run: git, repos: [{ name: 'nexus', path: join(dir, 'plain') }] })).toMatchObject({ written: { [nexus]: 0 }, failed: [] });
+    expect(await run([nexus], { run: async () => 'refs/heads/feature\n', repos: [{ name: 'nexus', path }] })).toMatchObject({ written: { [nexus]: 0 }, failed: [] });
+    expect(await readTo(nexus)).toBeNull();
+    // What git prints for a count that is not a number is refused, and the series is counted as failed, not written.
+    const broken = async (_cmd: string, args: readonly string[]) => (args.includes('for-each-ref') ? 'refs/heads/main\n' : 'fatal: bad revision');
+    expect(await run([nexus], { run: broken, repos: [{ name: 'nexus', path }] })).toMatchObject({ failed: [nexus] });
     expect(await points(nexus)).toEqual({});
+    expect(await readTo(nexus)).toBeNull();
   });
 
   it('a 25-hour day is one day too, stamped at its own midnight', async () => {
@@ -273,19 +344,28 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     expect(chi('2025-11-02').toISOString()).toBe('2025-11-02T05:00:00.000Z');
     expect(chi('2025-11-03').toISOString()).toBe('2025-11-03T06:00:00.000Z');
     const key = 'daily.deploys.count';
-    // A deployment seen at 23:30 that day, 24.5 hours after its midnight, and one seen 30 minutes into the next day.
+    // A deployment that was there the day before, deployed again at 23:30 that day, 24.5 hours after its midnight, and
+    // once more 30 minutes into the next day.
     const dep = (sha: string, at: Date) => observe('deployment', 'deployment:railway:fall', { target: 'railway', status: 'success', sha }, at, { source: 'railway' });
+    await dep('0'.repeat(40), new Date('2025-11-01T15:00:00.000Z'));
     await dep('1'.repeat(40), new Date('2025-11-03T05:30:00.000Z'));
     await dep('2'.repeat(40), new Date('2025-11-03T06:30:00.000Z'));
-    // The points written so far begin in March: what came before the series' first number is not filled in afterwards.
+    // The points written so far begin in March: what came before the series' first number is not filled in afterwards,
+    // and what was read is not read again. So the number forgets both, and is read from the start.
     await k.past('MetricPoint', 'USER', (q) => q(`DELETE FROM "MetricPoint" WHERE "seriesKey" = $1`, [key]));
+    await unread(key);
     await run([key]);
     const p = await points(key);
+    // Saturday the 1st: first seen, on what is now Railway's first day. Not a deploy.
+    expect(p['2025-11-01T05:00:00.000Z']).toBe(0);
     expect(p['2025-11-02T05:00:00.000Z']).toBe(1);
     expect(p['2025-11-03T06:00:00.000Z']).toBe(1);
     expect(p['2025-11-04T06:00:00.000Z']).toBe(0);
-    // And March is as it was.
+    // And March is as it was, but for the 10th: read again with Railway known since November, its two services first
+    // seen that day are no longer the place's first day, so they count beside the Studio's.
     expect(p[chi('2026-03-08').toISOString()]).toBe(2);
+    expect(p[chi('2026-03-10').toISOString()]).toBe(3);
+    expect(p[chi('2026-03-11').toISOString()]).toBe(2);
     expect(p[chi('2026-03-04').toISOString()]).toBeUndefined();
   });
 
@@ -301,24 +381,80 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     for (const key of keys) expect(await points(key), key).toEqual(before[key]);
   });
 
-  it('the next night reads only what is new; a day the runtime was down stays missing, and the day after it is still written', async () => {
+  it('the next night reads only what is new; a day the runtime was down stays missing, is read once and counted once, and the day after it is still written', async () => {
     const key = 'daily.deploys.count';
+    // Read to the start of today (Thursday the 12th): everything before it has been read.
+    expect((await readTo(key))!.toISOString()).toBe(chi('2026-03-12').toISOString());
     await up(NOW, new Date('2026-03-13T15:00:00.000Z'));
     await observe('deployment', 'deployment:studio:flint', { target: 'studio', status: 'success', sha: '7'.repeat(40) }, chi('2026-03-12', '11:00'), { source: 'git' });
     const tomorrow = await run([key], { now: new Date('2026-03-13T15:00:00.000Z') });
-    expect(tomorrow.written[key]).toBe(1);
+    expect(tomorrow).toMatchObject({ written: { [key]: 1 }, down: 0 });
     expect((await points(key))[chi('2026-03-12').toISOString()]).toBe(1);
+    expect((await readTo(key))!.toISOString()).toBe(chi('2026-03-13').toISOString());
     // The runtime stops at 10:00 on Friday the 13th and stays off over the weekend. Friday had ten hours of it: written (0).
     // Saturday and Sunday had none: neither is written, by this run or any later one. Nor is the 4th, ever.
     const later = await run([key], { now: new Date('2026-03-16T15:00:00.000Z') });
-    expect(later).toMatchObject({ written: { [key]: 1 }, down: 3 });
+    // Two days left missing: the weekend. The 4th was read and counted the night it was found blank, and is not read
+    // or counted again (review finding 16: it was, every night, with everything after it).
+    expect(later).toMatchObject({ written: { [key]: 1 }, down: 2 });
     const p = await points(key);
     expect(p[chi('2026-03-13').toISOString()]).toBe(0);
     for (const day of ['2026-03-04', '2026-03-14', '2026-03-15']) expect(p[chi(day).toISOString()], day).toBeUndefined();
-    expect(await run([key], { now: new Date('2026-03-16T16:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 3 });
-    // Up for under four hours of a day is still a day nothing was watching.
+    expect((await readTo(key))!.toISOString()).toBe(chi('2026-03-16').toISOString());
+    // A second pass the same day reads nothing at all: no blank day is read or counted twice.
+    expect(await run([key], { now: new Date('2026-03-16T16:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 0 });
+    // Up for under four hours of a day is still a day nothing was watching: the one new day, counted once.
     await up(chi('2026-03-16', '20:30'), chi('2026-03-16', '23:59'));
-    expect(await run([key], { now: new Date('2026-03-17T15:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 4 });
+    expect(await run([key], { now: new Date('2026-03-17T15:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 1 });
+    expect(await run([key], { now: new Date('2026-03-17T18:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 0 });
+    // A reading that turns up later for a day already read does not move it: the day stays as it was left.
+    await observe('deployment', 'deployment:studio:flint', { target: 'studio', status: 'success', sha: '8'.repeat(40) }, chi('2026-03-14', '12:00'), { source: 'git' });
+    expect(await run([key], { now: new Date('2026-03-17T19:00:00.000Z') })).toMatchObject({ written: { [key]: 0 }, down: 0 });
+    expect((await points(key))[chi('2026-03-14').toISOString()]).toBeUndefined();
+  });
+
+  it('the night\'s read does not grow: a service\'s or a thread\'s whole history is never loaded, only the day\'s changes and where each stood', async () => {
+    // Service downtime and open threads used to load every version ever recorded, every night (review finding 16).
+    const read: Array<{ model: string; where: Record<string, unknown> }> = [];
+    const raw: string[] = [];
+    const watching = new Proxy(k.db, {
+      get(target, prop, receiver) {
+        if (prop === 'entityVersion') {
+          return new Proxy(target.entityVersion, {
+            get: (model, fn) => (fn === 'findMany' || fn === 'findFirst'
+              ? (args: { where: Record<string, unknown> }) => (read.push({ model: `entityVersion.${String(fn)}`, where: args.where }), (model[fn as 'findMany'] as (a: unknown) => unknown)(args))
+              : Reflect.get(model, fn)),
+          });
+        }
+        if (prop === '$queryRaw') return (strings: TemplateStringsArray, ...values: unknown[]) => (raw.push(strings.join('?')), target.$queryRaw(strings, ...values));
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const keys = ['daily.services.incident_minutes', 'daily.threads.open'];
+    const before = Object.fromEntries(await Promise.all(keys.map(async (key) => [key, await points(key)] as const)));
+    // The next night: one day is new.
+    await up(new Date('2026-03-17T15:00:00.000Z'), new Date('2026-03-18T15:00:00.000Z'));
+    const r = await materialise({ db: watching, tz: TZ, now: new Date('2026-03-18T15:00:00.000Z') }, keys);
+    expect(r.failed).toEqual([]);
+    // Every read of versions through the client is bounded: the first version of each item (when it was first seen),
+    // or the versions that began inside the days being read. None asks for all of them.
+    const from = chi('2026-03-12').getTime();
+    expect(read.length).toBeGreaterThanOrEqual(4);
+    for (const q of read) {
+      const w = q.where as { version?: number; validFrom?: { gte?: Date; lt?: Date } };
+      const bounded = w.version === 1 || (w.validFrom?.gte instanceof Date && w.validFrom.gte.getTime() >= from && w.validFrom.lt instanceof Date);
+      expect(bounded, JSON.stringify(q)).toBe(true);
+    }
+    // And where each item stood when those days began is one row an item, read backwards from its latest.
+    const standing = raw.filter((q) => q.includes('"EntityVersion"'));
+    expect(standing.length).toBeGreaterThanOrEqual(2);
+    for (const q of standing) expect(q).toMatch(/ORDER BY v\.version DESC LIMIT 1/);
+    // What it wrote is right: the days since the last read, and nothing before them moved.
+    const after = Object.fromEntries(await Promise.all(keys.map(async (key) => [key, await points(key)] as const)));
+    for (const key of keys) for (const [at, v] of Object.entries(before[key]!)) expect(after[key]![at], `${key} ${at}`).toBe(v);
+    // Threads 1 and 2 were archived before the 12th, thread 3 is still open: one open, by the version that stood then.
+    expect(after['daily.threads.open']![chi('2026-03-17').toISOString()]).toBe(1);
+    expect(after['daily.services.incident_minutes']![chi('2026-03-17').toISOString()]).toBe(0);
   });
 
   it('a forgotten series takes no more points; a key that is not registered, or whose row is not the registry\'s, is left alone', async () => {

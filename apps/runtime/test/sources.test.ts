@@ -15,7 +15,7 @@ import { createDb, type Db } from '../src/db';
 import { runtimeEnv } from '../src/config';
 import { parseLaunchctlList, parsePrintDisabled, launchdSource } from '../src/sources/launchd';
 import { healthSource, verdict } from '../src/sources/health';
-import { commitsBetween, gitSource, lastDeployed } from '../src/sources/git';
+import { MAIN_REFS, commitsBetween, gitSource, lastDeployed, mainRef } from '../src/sources/git';
 import { evalToday, level, spendSource, totals } from '../src/sources/spend';
 import { allowed, scopedFetch, EgressRefused } from '../src/policy/egress';
 import { syncOnce } from '../src/sources/sync';
@@ -105,26 +105,55 @@ describe('git', () => {
 });
 
 describe('git: counting commits (P4)', () => {
-  it('one fixed command, numbers only: rev-list --count over the refs the clone has, between two instants; never a fetch', async () => {
+  const since = new Date('2026-10-05T05:00:00.000Z');
+  const before = new Date('2026-10-12T05:00:00.000Z');
+  /** A folder that is a clone of its own (it has a .git), and one beside it that is not. */
+  const clone = () => {
     const dir = mkdtempSync(join(tmpdir(), 'git-count-'));
-    mkdirSync(join(dir, 'flint'));
+    mkdirSync(join(dir, 'flint', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'plain'));
+    return dir;
+  };
+
+  it('the main branch, as the clone has it: what origin calls its default, then origin\'s main, then its own main or master; one command, never a fetch', async () => {
+    const dir = clone();
+    const calls: Array<{ cmd: string; args: readonly string[] }> = [];
+    const has = (...refs: string[]) => async (cmd: string, args: readonly string[]) => (calls.push({ cmd, args }), `${refs.join('\n')}\n`);
+    expect([...MAIN_REFS]).toEqual(['refs/remotes/origin/HEAD', 'refs/remotes/origin/main', 'refs/heads/main', 'refs/heads/master']);
+    expect(await mainRef(has('refs/heads/main', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'), join(dir, 'flint'))).toBe('refs/remotes/origin/HEAD');
+    expect(calls).toEqual([{ cmd: '/usr/bin/git', args: ['-C', join(dir, 'flint'), 'for-each-ref', '--format=%(refname)', ...MAIN_REFS] }]);
+    expect(await mainRef(has('refs/heads/main', 'refs/remotes/origin/main'), join(dir, 'flint'))).toBe('refs/remotes/origin/main');
+    expect(await mainRef(has('refs/heads/master', 'refs/heads/main'), join(dir, 'flint'))).toBe('refs/heads/main');
+    expect(await mainRef(has('refs/heads/master'), join(dir, 'flint'))).toBe('refs/heads/master');
+    // A clone with none of them (only a feature branch) has no main branch to count.
+    expect(await mainRef(has(), join(dir, 'flint'))).toBeUndefined();
+    expect(await mainRef(has('refs/heads/feature', 'not a ref at all'), join(dir, 'flint'))).toBeUndefined();
+    // A folder that is not there, or is no clone of its own (a plain folder inside another repo would be counted as that repo), is asked nothing.
+    calls.length = 0;
+    expect(await mainRef(has('refs/heads/main'), join(dir, 'nope'))).toBeUndefined();
+    expect(await mainRef(has('refs/heads/main'), join(dir, 'plain'))).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it('one fixed command, numbers only: the commits on the main branch\'s own line between two instants, the second end not counted; never every ref', async () => {
+    const dir = clone();
     const calls: Array<{ cmd: string; args: readonly string[] }> = [];
     const run = async (cmd: string, args: readonly string[]) => (calls.push({ cmd, args }), '17\n');
-    const since = new Date('2026-10-05T05:00:00.000Z');
-    const before = new Date('2026-10-12T05:00:00.000Z');
-    expect(await commitsBetween(run, join(dir, 'flint'), since, before)).toBe(17);
-    expect(calls).toEqual([{ cmd: '/usr/bin/git', args: ['-C', join(dir, 'flint'), 'rev-list', '--count', '--all', '--since=2026-10-05T05:00:00.000Z', '--before=2026-10-12T05:00:00.000Z'] }]);
-    // The whole command is these arguments: no shell, no fetch or pull, no log or show (a commit's words are never read).
-    expect(calls[0]!.args.join(' ')).not.toMatch(/fetch|pull|log|show|format|remote|;|\||&/);
-    // A clone that is not there is asked nothing.
-    expect(await commitsBetween(run, join(dir, 'nope'), since, before)).toBeUndefined();
-    expect(calls).toHaveLength(1);
+    expect(await commitsBetween(run, join(dir, 'flint'), 'refs/remotes/origin/main', since, before)).toBe(17);
+    // --before counts its own second, so the span ends a second before the next week begins: a commit on the stroke of
+    // Monday is in one week, not two.
+    expect(calls).toEqual([{
+      cmd: '/usr/bin/git',
+      args: ['-C', join(dir, 'flint'), 'rev-list', '--count', '--first-parent', '--since=2026-10-05T05:00:00.000Z', '--before=2026-10-12T04:59:59.000Z', 'refs/remotes/origin/main'],
+    }]);
+    // The whole command is these arguments: no shell, no fetch or pull, no log or show (a commit's words are never read),
+    // and never --all (every branch the clone happens to hold today is not what landed on main that week).
+    expect(calls[0]!.args.join(' ')).not.toMatch(/fetch|pull|log|show|format|remote\b|--all|--branches|;|\||&/);
   });
 
   it('its answer is a whole number or it is refused: nothing else git prints becomes a count', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'git-count-'));
-    const at = [new Date('2026-10-05T05:00:00.000Z'), new Date('2026-10-12T05:00:00.000Z')] as const;
-    const says = (out: string) => commitsBetween(async () => out, dir, at[0], at[1]);
+    const dir = clone();
+    const says = (out: string) => commitsBetween(async () => out, join(dir, 'flint'), 'refs/heads/main', since, before);
     expect(await says('0\n')).toBe(0);
     expect(await says('  42  ')).toBe(42);
     for (const out of ['', 'fatal: not a git repository', '12 commits', '-3', '1.5', '1e3', '12\n13', 'NaN', '9999999999']) {
@@ -133,7 +162,7 @@ describe('git: counting commits (P4)', () => {
     // What it refused is not in the error: the words are fixed.
     await expect(says('fatal: bad revision SECRET')).rejects.not.toThrow(/SECRET/);
     // A command that fails is the caller's to count: it is not swallowed here.
-    await expect(commitsBetween(async () => { throw new Error('timeout'); }, dir, at[0], at[1])).rejects.toThrow('timeout');
+    await expect(commitsBetween(async () => { throw new Error('timeout'); }, join(dir, 'flint'), 'refs/heads/main', since, before)).rejects.toThrow('timeout');
   });
 });
 
