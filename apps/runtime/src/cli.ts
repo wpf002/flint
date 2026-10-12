@@ -4,6 +4,9 @@
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
+ *   pnpm --filter @flint/runtime prune    [--auto]   remove old copies taken before database updates
+ *                                                    (the newest 10 and the last 30 days are kept, and
+ *                                                    always the running release's); says what goes first
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
  *                                                    P2.5's exit criteria for a calendar, measured now (JSON)
@@ -45,7 +48,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
@@ -60,9 +63,11 @@ import { Refused } from './governance/proposals.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, attempt, gate, tellFailure, type Command } from './backup/nightly.js';
+import { ACTION, attempt, cardGate, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
+import { planPrune, prune } from './backup/prune.js';
+import { fileFailure } from './backup/record.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { sendOffsite } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
@@ -111,6 +116,57 @@ async function loginToGoogle(): Promise<void> {
     'and file its card, then sign it in the console\'s Approvals:',
     '  cd ~/flint && pnpm --filter @flint/runtime enable-source google_calendar',
   ].join('\n'));
+}
+
+/**
+ * `prune`: remove the old copies of the database that deploys took before a
+ * migration (backup/prune.ts says which stay). What would go is said first, by
+ * count and size, never by name. With nothing to remove it ends there: no card
+ * is filed for nothing. Run by hand it is Will acting. With --auto it is Flint:
+ * the action ships at APPROVAL, so it waits for a card he approves (one a
+ * night, only on a night there is something to remove), until he promotes it.
+ */
+async function pruneOldBackups(auto: boolean): Promise<void> {
+  const config = loadRuntimeConfig();
+  const now = new Date();
+  const plan = planPrune(config.home, now);
+  const megabytes = (bytes: number) => Math.max(1, Math.round(bytes / 1e6));
+  if (plan.held) {
+    console.log('backup.prune: not run (the running release could not be told, so nothing is removed)');
+    return;
+  }
+  if (!plan.remove.length) {
+    console.log(`backup.prune: nothing to remove (${plan.kept} kept)`);
+    return;
+  }
+  console.log(`backup.prune: ${plan.remove.length} old update backup(s) would be removed, ${megabytes(plan.bytes)} MB; ${plan.kept} are kept`);
+  const db = createDb(config.databaseUrl);
+  const action = 'backup.prune';
+  const actor = auto ? 'runtime' : 'will:cli';
+  try {
+    let proposalId: string | undefined;
+    if (auto) {
+      const g = await cardGate(db, { action, job: 'prune', templateId: 'nightly.prune' }, config.tz, config.rp, now);
+      if (!g.go) {
+        console.log(`${action}: not run (${g.why})`);
+        return;
+      }
+      proposalId = g.proposalId;
+    }
+    const done = prune(plan);
+    const ok = done.failed.length === 0;
+    const detail = { removed: done.removed.length, megabytes: megabytes(done.bytes), kept: plan.kept, failed: done.failed.length };
+    if (proposalId) {
+      await completeProposal(db, proposalId, { ok, ...(ok ? {} : { error: `${done.failed.length} could not be removed` }), result: detail }, actor).catch((err: unknown) =>
+        console.error(`${action}: could not complete its proposal: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
+    await appendAudit(db, [{ actor, context: auto ? 'autonomous' : 'console', kind: 'action', action, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs: detail, ...(proposalId ? { correlationId: proposalId } : {}) }]);
+    console.log(`${action}: ${ok ? 'ok' : 'FAILED'} ${JSON.stringify(detail)}`);
+    if (!ok) process.exitCode = 1;
+  } finally {
+    await db.$disconnect();
+  }
 }
 
 async function main(): Promise<void> {
@@ -240,8 +296,9 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (process.argv[2] === 'prune') return pruneOldBackups(process.argv.includes('--auto'));
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill|prune [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
@@ -249,10 +306,20 @@ async function main(): Promise<void> {
   const action = ACTION[cmd];
   const actor = auto ? 'runtime' : 'will:cli';
   const context = auto ? 'autonomous' : 'console';
+  // How Will is told, for a failure and for a run that stopped before it began.
+  const telling = {
+    tz: b.config.tz, rp: b.config.rp, now,
+    notify: (title, body) => notifyWill(b.config, title, body),
+  } satisfies Parameters<typeof tellFailure>[3];
   try {
     let proposalId: string | undefined;
     if (auto) {
-      const g = await gate(db, cmd, b.config.tz, b.config.rp, now);
+      // The first question to the database. With no answer the job cannot tell what it may do, and used to end
+      // here in a log line alone: Will is told once a night (tellStopped), and the error goes on to the log.
+      const g = await gate(db, cmd, b.config.tz, b.config.rp, now).catch(async (err: unknown) => {
+        await tellStopped(cmd, { icloud: b.offsiteICloud, tz: telling.tz, now, mark: join(b.config.home, '.flint', 'nightly-stopped'), notify: telling.notify }).catch(() => undefined);
+        throw err;
+      });
       if (!g.go) {
         console.log(`${action}: not run (${g.why})`);
         return;
@@ -281,6 +348,14 @@ async function main(): Promise<void> {
       return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length} table(s)` }) };
     });
     const { ok, error, detail } = o;
+    // A run that failed is on record beside the ones that worked (Health says "the last backup failed" from it,
+    // without waiting for the last good one to grow old). Only for a file that has no record: a failure never
+    // takes a good record's place. The database may be why it failed, so this is tried and no more.
+    if (!ok && cmd !== 'drill') {
+      const newest = cmd === 'offsite' ? newestDump(b.dumpDir) : undefined;
+      const path = cmd === 'backup' ? dumpPathAt(b.dumpDir, now) : newest && b.offsiteDir ? join(b.offsiteDir, `${basename(newest)}.age`) : undefined;
+      if (path) await fileFailure(db, { kind: 'pg_dump_flint', location: cmd === 'backup' ? 'local' : 'icloud', path, startedAt: now }).catch(() => undefined);
+    }
     if (proposalId) {
       // Recording the proposal's end must not cost the job's own audit row or the failure notice.
       await completeProposal(db, proposalId, { ok, ...(error ? { error } : {}), result: detail }, actor).catch((err: unknown) =>
@@ -297,9 +372,7 @@ async function main(): Promise<void> {
       //  - a job he promoted runs again at its next time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays);
       //  - one that ran on a card waits for his next approval, and that card is filed first, so it is there to approve.
       if (auto) {
-        await tellFailure(db, cmd, { setup: o.setup, mismatch: o.mismatch, icloud: b.offsiteICloud, ...(proposalId !== undefined ? { proposalId } : {}) }, {
-          tz: b.config.tz, rp: b.config.rp, now, notify: (title, body) => notifyWill(b.config, title, body),
-        });
+        await tellFailure(db, cmd, { setup: o.setup, mismatch: o.mismatch, icloud: b.offsiteICloud, ...(proposalId !== undefined ? { proposalId } : {}) }, telling);
       }
     }
   } finally {

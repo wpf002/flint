@@ -244,6 +244,51 @@ export const TEMPLATES = {
     fieldFreeTitle: 'One of Your Rules Matched',
     fieldFreeBody: `An event matched one of your rules. ${IN_ACTIVITY}`,
   }),
+  // ---- the Mac itself, and the copies off it (P7; the watchdog raises them) ----
+  disk_low: t({
+    fields: z.object({ gb: z.number().int().min(0).max(4) }).strict(),
+    title: () => 'This Mac Is Running Out of Space',
+    body: (f) => `${f.gb < 1 ? 'Less than 1 GB is' : `Only ${f.gb} GB is`} free. Backups and the database stop when the disk fills.`,
+    fieldFreeTitle: 'This Mac Is Running Out of Space',
+    fieldFreeBody: 'Very little space is free. Backups and the database stop when the disk fills.',
+  }),
+  offsite_stale: t({
+    fields: z.object({ days: z.number().int().min(3).max(10_000), what: z.enum(['database', 'files']), icloud: z.boolean(), local: z.boolean() }).strict(),
+    title: (f) => (f.icloud ? `No Backup Has Reached iCloud in ${f.days} Days` : `No Offsite Backup in ${f.days} Days`),
+    body: (f) =>
+      `${f.what === 'files' ? 'The copy of your files hasn’t gone offsite.' : 'No copy of the database has gone offsite.'}${f.local ? ' The backups on this Mac are current.' : ''} ${
+        f.icloud ? 'Check that iCloud Drive is signed in and has space.' : 'Check that the offsite folder is there and has space.'}`,
+    fieldFreeTitle: 'No Offsite Backup in Days',
+    fieldFreeBody: `No copy of Flint’s backups has gone offsite in days. ${IN_ACTIVITY}`,
+  }),
+  remote_access_expiring: t({
+    fields: z.object({ days: z.number().int().min(0).max(14) }).strict(),
+    title: (f) => (f.days === 0 ? 'Remote Access Expires Today' : `Remote Access Expires in ${count(f.days, 'Day')}`),
+    body: () => 'Sign in to Tailscale on the Mac Studio to keep reaching Flint from your phone.',
+    fieldFreeTitle: 'Remote Access Expires Soon',
+    fieldFreeBody: 'Sign in to Tailscale on the Mac Studio to keep reaching Flint from your phone.',
+  }),
+  remote_access_down: t({
+    fields: z.object({}).strict(),
+    title: () => 'Remote Access Is Down',
+    body: () => 'Your phone and MacBook can’t reach Flint. Flint on this Mac still works.',
+    fieldFreeTitle: 'Remote Access Is Down',
+    fieldFreeBody: 'Your phone and MacBook can’t reach Flint. Flint on this Mac still works.',
+  }),
+  updates_stalled: t({
+    fields: z.object({ hours: z.number().int().min(3).max(100_000) }).strict(),
+    title: () => 'Flint Stopped Checking for Updates',
+    body: (f) => `The last check was ${f.hours < 48 ? count(f.hours, 'hour') : count(Math.floor(f.hours / 24), 'day')} ago.`,
+    fieldFreeTitle: 'Flint Stopped Checking for Updates',
+    fieldFreeBody: 'Flint hasn’t checked for updates in hours.',
+  }),
+  offsite_drill_stale: t({
+    fields: z.object({ weeks: z.number().int().min(5).max(10_000) }).strict(),
+    title: (f) => `Your MacBook Hasn’t Tested a Backup in ${f.weeks} Weeks`,
+    body: () => 'Open your MacBook and leave it awake for 10 minutes.',
+    fieldFreeTitle: 'Your MacBook Hasn’t Tested a Backup in Weeks',
+    fieldFreeBody: 'Open your MacBook and leave it awake for 10 minutes.',
+  }),
 } as const;
 
 export type TemplateId = keyof typeof TEMPLATES;

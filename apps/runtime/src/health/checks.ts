@@ -43,6 +43,7 @@ import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
 import { uptime } from './instance.js';
+import { backupModelCheck, diskCheck, localModelCheck, remoteAccessCheck, type MachineReading } from './machine.js';
 import { CIRCUIT_FAILURES } from './circuits.js';
 import { REVIEWS_STOPPED, waitedMs } from '../goals/late.js';
 import { reviewStanding } from '../goals/review.js';
@@ -64,9 +65,15 @@ export const DEPLOY_WINDOW_MS = 10 * 60_000;
 
 export interface CheckDeps {
   db: Db;
-  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict'>>;
+  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict' | 'backupModel'>>;
   now: Date;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
+  /**
+   * What was read from the Mac itself for this run (machine.ts): free space,
+   * remote access, the local models. Absent (a test of the other checks), the
+   * components that need it are left out.
+   */
+  machine?: MachineReading;
 }
 
 const clip = (s: string) => redact(s).slice(0, 300);
@@ -98,7 +105,7 @@ function warned(lastError: string): { detail: string; degraded: boolean } {
 }
 
 /** Whether the nightly job sends an offsite copy at all: Will's age key is on this Mac (a file that is not empty). */
-function offsiteWanted(home: string): boolean {
+export function offsiteWanted(home: string): boolean {
   try {
     return statSync(join(home, '.flint', 'backup-age-recipient')).size > 0;
   } catch {
@@ -112,6 +119,16 @@ export const UPKEEP_HEALTH = {
     const h = Math.floor(ms / 3_600_000);
     return `Updates have been paused for ${h < 1 ? 'less than an hour' : h < 48 ? count(h, 'hour') : count(Math.floor(h / 24), 'day')}.`;
   },
+  /** How long ago the deploy job last looked for an update (it looks every two minutes). */
+  checked: (ms: number) => {
+    const m = Math.floor(ms / 60_000);
+    return `Flint checked for updates ${m < 1 ? 'less than a minute' : count(m, 'minute')} ago.`;
+  },
+  notChecked: (ms: number) => {
+    const h = Math.floor(ms / 3_600_000);
+    return `Flint hasn’t checked for updates in ${h < 48 ? count(Math.max(1, h), 'hour') : count(Math.floor(h / 24), 'day')}.`;
+  },
+  neverChecked: 'Flint hasn’t checked for updates since it was installed.',
   passed: (when: string) => `The rebuild rehearsal last passed ${when}.`,
   failed: (when: string) => `The rebuild rehearsal failed ${when}.`,
   never: 'The rebuild rehearsal has not run yet.',
@@ -159,13 +176,135 @@ export function rebuildRehearsal(home: string, tz: string, now: Date): Component
   return { component, status: (now.getTime() - at.getTime()) / 86_400_000 <= REHEARSAL_STALE_DAYS ? 'ok' : 'degraded', detail: UPKEEP_HEALTH.passed(when) };
 }
 
+/** How bad a status is, to say the worse of two. */
+const HEALTH_RANK: Record<Status, number> = { disabled: 0, ok: 1, unknown: 2, degraded: 3, down: 4 };
+
+/** What Database says in Settings > Health when it is up and something in it is not Flint's. */
+export const DATABASE_HEALTH = {
+  largeObjects: (n: number) => (n === 1 ? 'The database holds 1 large object that isn’t Flint’s. No backup includes it.' : `The database holds ${n} large objects that aren’t Flint’s. No backup includes them.`),
+} as const;
+
+/** What Backups, Files Backup, Offsite Backup and Offsite Restore Test say beyond a copy's age. */
+export const BACKUP_HEALTH = {
+  failed: 'The last backup failed.',
+  filesNone: 'No files backup is on record yet.',
+  filesFailed: 'The last files backup failed.',
+  filesAge: (hours: number) => `The last files backup is ${count(hours, 'hour')} old.`,
+  filesOffsiteNone: 'There’s no offsite copy of your files yet.',
+  filesOffsiteFailed: 'The last files copy didn’t go offsite.',
+  filesOffsiteAge: (hours: number) => `The offsite copy of your files is ${count(hours, 'hour')} old.`,
+  drillPassed: (when: string) => `Your MacBook restored an offsite copy ${when}.`,
+  drillFailed: (when: string) => `Your MacBook’s last test of an offsite copy failed ${when}.`,
+  drillLate: (days: number) => `Your MacBook hasn’t tested an offsite copy in ${days < 14 ? count(days, 'day') : count(Math.floor(days / 7), 'week')}.`,
+} as const;
+
+/** A copy older than this is late (degraded); older than the next, missing (down). The nightly jobs run a day apart. */
+const LATE_HOURS = 26;
+const MISSING_HOURS = 36;
+/** A weekly test, a day's grace. */
+export const OFFSITE_DRILL_STALE_DAYS = 8;
+/** The deploy job looks for an update every two minutes; a deploy's own checks can hold one look for a quarter of an hour. */
+export const UPDATE_LATE_MS = 60 * 60_000;
+/** A runtime that just started is given this long before a missing first look is said. */
+export const UPDATE_GRACE_MS = 15 * 60_000;
+
+type Backups = Pick<Db, 'backupRun'>;
+
+/** Did a run of this kind fail after `since` (the last good one), or ever, when there is no good one? */
+async function newerFailure(db: Backups, kind: string, location: string, since: Date | undefined): Promise<boolean> {
+  return (await db.backupRun.findFirst({ where: { kind, location, status: 'failed', ...(since ? { startedAt: { gt: since } } : {}) }, select: { id: true } })) !== null;
+}
+
+async function newestGood(db: Backups, kind: string, location: string): Promise<Date | undefined> {
+  return (await db.backupRun.findFirst({ where: { kind, location, status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } }))?.startedAt;
+}
+
+/**
+ * The nightly archive of Flint's files (apps/studio/backup_flint.sh), from the
+ * records the runtime reads out of that job's own lines (backup/ingest.ts). A
+ * run that failed since the last good archive is said at once; with nothing on
+ * record at all it has not reported yet (it does from its first night).
+ */
+async function filesBackup(db: Backups, now: Date): Promise<ComponentCheck> {
+  const component = 'files_backup';
+  const good = await newestGood(db, 'flint_tar', 'local');
+  const failed = await newerFailure(db, 'flint_tar', 'local', good);
+  if (!good && !failed) return { component, status: 'unknown', detail: BACKUP_HEALTH.filesNone };
+  const hours = good ? (now.getTime() - good.getTime()) / 3_600_000 : Infinity;
+  return {
+    component, status: hours > MISSING_HOURS ? 'down' : hours > LATE_HOURS || failed ? 'degraded' : 'ok',
+    detail: failed || !good ? BACKUP_HEALTH.filesFailed : BACKUP_HEALTH.filesAge(Math.round(hours)),
+  };
+}
+
+/** The files archive's encrypted copy offsite; undefined until the files backup has written its first record. */
+async function filesOffsite(db: Backups, now: Date): Promise<ComponentCheck | undefined> {
+  const component = 'offsite_backup';
+  if (!(await db.backupRun.findFirst({ where: { kind: 'flint_tar' }, select: { id: true } }))) return undefined;
+  const good = await newestGood(db, 'flint_tar', 'icloud');
+  const failed = await newerFailure(db, 'flint_tar', 'icloud', good);
+  const hours = good ? (now.getTime() - good.getTime()) / 3_600_000 : Infinity;
+  return {
+    component, status: hours > MISSING_HOURS ? 'down' : hours > LATE_HOURS || failed ? 'degraded' : 'ok',
+    detail: failed ? BACKUP_HEALTH.filesOffsiteFailed : good ? BACKUP_HEALTH.filesOffsiteAge(Math.round(hours)) : BACKUP_HEALTH.filesOffsiteNone,
+  };
+}
+
+/**
+ * The MacBook's own test of the offsite copies: it restores one and reports
+ * the result, which is kept on that copy's record. Off until a first result
+ * arrives (nothing reports one yet); from then on a failure is down and a week
+ * without one is late.
+ */
+async function offsiteDrill(db: Backups, tz: string, now: Date): Promise<ComponentCheck> {
+  const component = 'offsite_drill';
+  const t = await db.backupRun.findFirst({ where: { location: 'icloud', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
+  if (!t?.restoreTestedAt) return { component, status: 'disabled' };
+  const days = calendarDaysBetween(tz, t.restoreTestedAt, now);
+  const when = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${count(days, 'day')} ago`;
+  if (t.restoreOk === false) return { component, status: 'down', detail: BACKUP_HEALTH.drillFailed(when) };
+  if ((now.getTime() - t.restoreTestedAt.getTime()) / 86_400_000 <= OFFSITE_DRILL_STALE_DAYS) return { component, status: 'ok', detail: BACKUP_HEALTH.drillPassed(when) };
+  return { component, status: 'degraded', detail: BACKUP_HEALTH.drillLate(Math.max(days, OFFSITE_DRILL_STALE_DAYS + 1)) };
+}
+
+/** When the deploy job last looked for an update: the time on ~/.flint/deploy-tick, which it touches at every look. */
+export function lastUpdateCheck(home: string): number | undefined {
+  try {
+    return statSync(join(home, '.flint', 'deploy-tick')).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Automatic updates, whole: paused (deployHold), or not looking. The deploy job
+ * looks for an update every two minutes and leaves the time of each look; an
+ * hour without one means the job has stopped, and nothing else would say so.
+ * With no look on record at all, a runtime that just started says nothing yet.
+ */
+async function updates(d: CheckDeps): Promise<ComponentCheck> {
+  const hold = deployHold(d.config.home, d.now);
+  if (hold.status !== 'ok') return hold;
+  const component = hold.component;
+  const at = lastUpdateCheck(d.config.home);
+  if (at === undefined) {
+    const instance = await d.db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+    if (!instance || d.now.getTime() - instance.startedAt.getTime() <= UPDATE_GRACE_MS) return hold;
+    return { component, status: 'unknown', detail: UPKEEP_HEALTH.neverChecked };
+  }
+  const age = Math.max(0, d.now.getTime() - at);
+  return age > UPDATE_LATE_MS ? { component, status: 'degraded', detail: UPKEEP_HEALTH.notChecked(age) } : { component, status: 'ok', detail: UPKEEP_HEALTH.checked(age) };
+}
+
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const { db, now } = d;
   const out: ComponentCheck[] = [];
   const ago = (ms: number) => new Date(now.getTime() - ms);
   try {
-    await db.$queryRaw`SELECT 1`;
-    out.push({ component: 'postgres', status: 'ok' });
+    // Flint keeps nothing in large objects, and its backups leave them out (backup.ts, DUMP_FORMAT). One that is
+    // there was put there by something else, and is in no backup: said, so it is not found out at a restore.
+    const large = Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_largeobject_metadata`)[0]?.n ?? 0);
+    out.push(large === 0 ? { component: 'postgres', status: 'ok' } : { component: 'postgres', status: 'degraded', detail: DATABASE_HEALTH.largeObjects(large) });
   } catch {
     // Nothing else can be read: say so and stop.
     return [{ component: 'postgres', status: 'down' }];
@@ -184,9 +323,13 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   for (const [component, key] of [['server', 'service:endpoint:flint-server'], ['ollama', 'service:endpoint:ollama']] as const) {
     const e = await db.entity.findUnique({ where: { kind_key: { kind: 'service', key } }, select: { state: true, lastObservedAt: true } });
     const health = (e?.state as { health?: unknown } | null)?.health;
-    if (!e || e.lastObservedAt < ago(OBSERVATION_STALE_MS)) out.push({ component, status: 'unknown', detail: e ? 'It hasn’t been checked in 15 minutes.' : 'It hasn’t been checked yet.' });
-    else out.push({ component, status: health === 'ok' ? 'ok' : health === 'degraded' ? 'degraded' : 'down' });
+    const seen: ComponentCheck = !e || e.lastObservedAt < ago(OBSERVATION_STALE_MS)
+      ? { component, status: 'unknown', detail: e ? 'It hasn’t been checked in 15 minutes.' : 'It hasn’t been checked yet.' }
+      : { component, status: health === 'ok' ? 'ok' : health === 'degraded' ? 'degraded' : 'down' };
+    // "Ollama answers" is not "the model Flint asks is there": with the Mac's own reading, the local model says which.
+    out.push(component === 'ollama' && d.machine ? localModelCheck(seen, d.config.ollama?.model, d.machine.models) : seen);
   }
+  if (d.machine) out.push(backupModelCheck(d.config.backupModel, d.machine.models));
 
   const cursors = new Map((await db.sourceCursor.findMany()).map((c) => [c.source, c]));
   for (const s of d.sources) {
@@ -215,7 +358,13 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
 
   const backup = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
   const backupH = backup ? (now.getTime() - backup.startedAt.getTime()) / 3_600_000 : Infinity;
-  out.push({ component: 'backup', status: backupH <= 26 ? 'ok' : backupH <= 36 ? 'degraded' : 'down', detail: backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.' });
+  // A run that failed since the last good one is said at once, not left to show as a backup growing old.
+  const backupFailed = await newerFailure(db, 'pg_dump_flint', 'local', backup?.startedAt);
+  out.push({
+    component: 'backup', status: backupH > 36 ? 'down' : backupH > 26 || backupFailed ? 'degraded' : 'ok',
+    detail: backupFailed ? BACKUP_HEALTH.failed : backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.',
+  });
+  out.push(await filesBackup(db, now));
 
   // The encrypted copy off this Mac. The nightly job sends one only once Will's age key is here
   // (backup-nightly.sh), so without the key it is off, not failing. With it, a copy that is missing or
@@ -224,14 +373,19 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   else {
     const offsite = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'icloud', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
     const offsiteH = offsite ? (now.getTime() - offsite.startedAt.getTime()) / 3_600_000 : Infinity;
-    out.push({
+    const database: ComponentCheck = {
       component: 'offsite_backup', status: offsiteH <= 26 ? 'ok' : offsiteH <= 36 ? 'degraded' : 'down',
       detail: offsite ? `The last offsite copy is ${count(Math.round(offsiteH), 'hour')} old.` : 'There’s no offsite copy yet.',
-    });
+    };
+    // The files archive goes offsite too, by its own job. Its copy is looked at once that job has written its
+    // first record, and what is said is whichever of the two copies is worse off.
+    const files = await filesOffsite(db, now);
+    out.push(files && HEALTH_RANK[files.status] > HEALTH_RANK[database.status] ? files : database);
   }
 
   // The latest drill only: one that failed and was then passed is passed.
-  const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
+  // (The copies on this Mac: an offsite copy's test is the MacBook's, and has its own line below.)
+  const drill = await db.backupRun.findFirst({ where: { location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
   const drillD = drill?.restoreTestedAt ? (now.getTime() - drill.restoreTestedAt.getTime()) / 86_400_000 : Infinity;
   // "today" and "yesterday" are Will's calendar days, not 24-hour spans: a 2:15 AM test is "today" all that day.
   const days = drill?.restoreTestedAt ? calendarDaysBetween(d.config.tz, drill.restoreTestedAt, now) : 0;
@@ -240,6 +394,7 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     component: 'restore_drill', status: drill?.restoreOk === false ? 'down' : drillD <= 8 ? 'ok' : 'degraded',
     detail: !drill ? 'No restore test has run yet.' : drill.restoreOk === false ? `The last restore test failed ${tested}.` : `The last restore test was ${tested}.`,
   });
+  out.push(await offsiteDrill(db, d.config.tz, now));
 
   const open = Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM audit_open_intents`)[0]?.n ?? 0);
   out.push({ component: 'audit_intents', status: open === 0 ? 'ok' : 'degraded', ...(open ? { detail: open === 1 ? 'The log is missing the result for 1 action.' : `The log is missing results for ${open} actions.` } : {}) });
@@ -263,7 +418,11 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const failed = existsSync(marker) ? [...new Set(readFileSync(marker, 'utf8').split('\n').map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/.test(l)))] : [];
   out.push({ component: 'migrate_failed', status: failed.length ? 'down' : 'ok', ...(failed.length ? { detail: failed.length === 1 ? 'A database update failed and won’t be retried until it’s fixed.' : 'Several database updates failed and won’t be retried until they’re fixed.' } : {}) });
 
-  out.push(deployHold(d.config.home, now));
+  out.push(await updates(d));
+  if (d.machine) {
+    out.push(diskCheck(d.machine.freeBytes));
+    out.push(remoteAccessCheck(d.machine.remote, now));
+  }
   out.push(rebuildRehearsal(d.config.home, d.config.tz, now));
 
   if (!d.config.triage) out.push({ component: 'triage', status: 'disabled' });

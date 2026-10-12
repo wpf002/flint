@@ -163,13 +163,15 @@ export interface DumpResult {
  */
 export const DUMP_FORMAT = ['-Fc', '--no-large-objects'] as const;
 
+/** The file a dump taken at `now` is written to (its name is its time). */
+export const dumpPathAt = (outDir: string, now: Date): string => join(outDir, `flint-${now.toISOString().replace(/[:.]/g, '-')}.dump`);
+
 /** One consistent dump plus its counts. The file appears only when complete. */
 export async function dumpDatabase(backupUrl: string, outDir: string, tools: Tools, now: Date): Promise<DumpResult> {
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
   chmodSync(outDir, 0o700);
   const t = targetOf(backupUrl);
-  const stamp = now.toISOString().replace(/[:.]/g, '-');
-  const final = join(outDir, `flint-${stamp}.dump`);
+  const final = dumpPathAt(outDir, now);
   const partial = `${final}.partial`;
   const c = client(t);
   await c.connect();

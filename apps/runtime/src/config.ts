@@ -114,6 +114,12 @@ const Env = z.object({
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
+  /**
+   * The small local model chat falls back to when the main one is not answering
+   * (the server's own setting, by the same name). Named here too, Settings >
+   * Health says whether it is installed. The runtime never asks it anything.
+   */
+  FLINT_LOCAL_FALLBACK_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /** The server's num_ctx: a different one makes Ollama reload the model chat is using. */
   OLLAMA_NUM_CTX: z.coerce.number().int().min(512).max(262_144).optional(),
   /** The deployed commit (install-runtime.sh writes it). */
@@ -154,6 +160,10 @@ export interface Config {
   predict: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
+  /** Where Ollama is asked which models it has (this Mac's own address), for Settings > Health. */
+  ollamaUrl?: string;
+  /** The backup model, when one is named: Health says whether it is installed. */
+  backupModel?: string;
   gitSha: string;
 }
 
@@ -232,6 +242,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),
+    ollamaUrl: e.OLLAMA_URL ?? 'http://127.0.0.1:11434',
+    ...(e.FLINT_LOCAL_FALLBACK_MODEL ? { backupModel: e.FLINT_LOCAL_FALLBACK_MODEL } : {}),
     gitSha: e.RUNTIME_GIT_SHA && /^[0-9a-f]{40}$/.test(e.RUNTIME_GIT_SHA) ? e.RUNTIME_GIT_SHA : 'dev',
   };
 }

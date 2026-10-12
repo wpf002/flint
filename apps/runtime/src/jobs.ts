@@ -21,6 +21,8 @@ import { deliver } from './surface/deliver.js';
 import { expireEscalations } from './surface/expire.js';
 import { checkComponents, recordChecks } from './health/checks.js';
 import { raise, watchdog } from './health/watchdog.js';
+import { readMachine } from './health/machine.js';
+import { ingestBackupEvents } from './backup/ingest.js';
 import { circuitAllows, circuitEvents } from './health/circuits.js';
 import { pushSpend } from './spend/push.js';
 import { runDigest } from './digest.js';
@@ -161,9 +163,19 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
       handler: async () => {
         if (!(await mayRun(ctx, 'health.check'))) return;
         const now = new Date();
-        const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources });
+        // What the files backup wrote down since the last run (its own lines, one row for each archive): read
+        // first, so this run's checks see it. A file that cannot be read costs the checks nothing.
+        const lines = await ingestBackupEvents(ctx.db, ctx.config.home).catch((err: unknown) => {
+          ctx.log(`the files backup's record could not be read (${err instanceof Error ? err.name : 'error'})`);
+          return undefined;
+        });
+        if (lines?.skipped) ctx.log(`the files backup's record has ${lines.skipped} line(s) that are not its own, which were skipped`);
+        // The Mac itself, read once for the checks and the watchdog both: free space, remote access, the local models.
+        const wantsModels = ctx.config.ollama !== undefined || ctx.config.backupModel !== undefined;
+        const machine = await readMachine({ home: ctx.config.home, ...(wantsModels ? { ollama: { url: ctx.config.ollama?.url ?? ctx.config.ollamaUrl ?? 'http://127.0.0.1:11434' } } : {}) }, now);
+        const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources, machine });
         await recordChecks(ctx.db, checks, now);
-        const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now), now, enqueue, await promoted(ctx));
+        const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now, machine), now, enqueue, await promoted(ctx));
         if (raised.length) ctx.log(`watchdog raised ${raised.length} event(s)`);
       },
     },

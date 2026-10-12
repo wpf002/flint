@@ -22,5 +22,11 @@ export const EDGES: Record<TemplateId, unknown[]> = {
     { item: 'deadline#abc123', kind: 'deadline', date: '2028-02-29', time: null, until: '2028-03-01T06:00:00.000Z' },
   ],
   new_item: (['issue', 'pull_request', 'thread'] as const).flatMap((kind) => REASON_CODES.map((reasonCode) => ({ kind, item: `${kind}#abc123`, reasonCode }))),
+  disk_low: [{ gb: 0 }, { gb: 1 }, { gb: 4 }],
+  offsite_stale: [3, 10_000].flatMap((days) => (['database', 'files'] as const).flatMap((what) => [true, false].flatMap((icloud) => [true, false].map((local) => ({ days, what, icloud, local }))))),
+  remote_access_expiring: [{ days: 0 }, { days: 1 }, { days: 14 }],
+  remote_access_down: [{}],
+  updates_stalled: [{ hours: 3 }, { hours: 47 }, { hours: 48 }, { hours: 100_000 }],
+  offsite_drill_stale: [{ weeks: 5 }, { weeks: 10_000 }],
   rule_match: [{ rule: 'r'.repeat(80), source: 'github', eventType: 'issue.state', entity: 'issue#abc123' }, { rule: 'a', source: 'server', eventType: 'route.error', entity: null }],
 };

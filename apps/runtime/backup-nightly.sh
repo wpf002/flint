@@ -5,7 +5,10 @@
 #   - when an age recipient is set (~/.flint/backup-age-recipient): the encrypted
 #     copy off the box (`offsite --auto`), into iCloud Drive's FlintBackups/pg
 #     unless FLINT_OFFSITE_DIR names another folder; the newest 7 are kept there;
-#   - on Sundays: the restore drill into a scratch database (`drill --auto`).
+#   - on Sundays: the restore drill into a scratch database (`drill --auto`);
+#   - every night, last: old copies taken before database updates are removed
+#     (`prune --auto`; the newest 10 and the last 30 days stay). It asks for a card
+#     only on a night there is something to remove.
 # Each goes through the tier engine. While its action is at APPROVAL it runs only
 # on a card Will approved (the console's Approvals; one card a night); once he has
 # promoted it, it runs on its own under its cap. A failure posts Will a note.
@@ -24,4 +27,5 @@ run() {
 run backup
 [ -s "$DATA/backup-age-recipient" ] && run offsite
 [ "${FLINT_DOW:-$(date +%u)}" = 7 ] && run drill
+run prune
 exit 0

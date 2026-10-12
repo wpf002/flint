@@ -11,6 +11,7 @@ import { CAP_WORDS, jobFailedNote, localDay, resolveTier, type JobFailure, type 
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { needsSetup } from './backup.js';
 
 export type Command = 'backup' | 'offsite' | 'drill';
@@ -157,3 +158,32 @@ export async function tellFailure(
   await env.notify(note.title, note.body);
   return { ...note, next };
 }
+
+/**
+ * A nightly job that stopped before it could tell what it may do (its first
+ * question to the database had no answer): until now it ended in a log line
+ * and told no one. The words promise nothing about its next run and point at
+ * Health (jobFailedNote, `stopped`). One note a night: the backup, the offsite
+ * copy and the restore test run one after another, and all three stop on the
+ * same trouble. `mark` is a file that remembers the day one was sent.
+ */
+export async function tellStopped(
+  cmd: Command,
+  env: { icloud: boolean; tz: string; now: Date; mark: string; notify: (title: string, body: string) => Promise<unknown> },
+): Promise<{ title: string; body: string } | undefined> {
+  const day = localDay(env.tz, env.now);
+  try {
+    if (existsSync(env.mark) && readFileSync(env.mark, 'utf8').trim() === day) return undefined;
+  } catch {
+    // Unreadable: said again rather than not at all.
+  }
+  const note = jobFailedNote(ACTION[cmd], { next: 'stopped', icloud: env.icloud });
+  await env.notify(note.title, note.body);
+  try {
+    writeFileSync(env.mark, `${day}\n`, { mode: 0o600 });
+  } catch {
+    // The note went; a mark that cannot be written only means the next step says it too.
+  }
+  return note;
+}
+
