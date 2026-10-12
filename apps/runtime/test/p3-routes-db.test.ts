@@ -43,7 +43,6 @@ import { syncOnce } from '../src/sources/sync';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
 import { GoalAnswer, GoalsPage as GoalsPageContract, reviewCounter } from '@flint/policy';
 import { runReview } from '../src/goals/review';
-import { resetTicking } from '../src/goals/late';
 import { FakeBus } from './goals/fixture';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -504,19 +503,33 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
 
       // Over an hour past its review time while Flint was reviewing, it is late, in the open goal and in the list; a paused goal never is.
       const lateNow = async () => ((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late;
-      resetTicking(new Date(Date.now() - 3 * 3_600_000));
+      /** The Goal Reviews rows the health job keeps (every 5 minutes, reviews on): Flint has been reviewing for the last `minutes`. */
+      const reviewingFor = async (minutes: number) => {
+        await db.healthCheck.deleteMany({ where: { component: 'goals' } });
+        if (minutes) await db.healthCheck.createMany({ data: Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * 60_000) })) });
+      };
+      await reviewingFor(180);
       await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 59 * 60_000) } });
       expect(await lateNow()).toBe(false);
       await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 61 * 60_000) } });
       expect(await lateNow()).toBe(true);
-      // Review finding 7: not when Flint only just started reviewing (reviews turned on, a restart, a sleep), or has not ticked yet.
-      resetTicking(new Date(Date.now() - 5 * 60_000));
+      // Review finding 7: not when Flint only just started reviewing (reviews turned on, a restart after days off, the Mac just awake).
+      await reviewingFor(5);
       expect(await lateNow()).toBe(false);
-      resetTicking();
+      await reviewingFor(0);
       expect(await lateNow()).toBe(false);
       expect(((await ask('GET', '/v1/goals?tab=active')).body as unknown as GoalsPage).goals.find((g) => g.id === gid)).toMatchObject({ late: false });
-      resetTicking(new Date(Date.now() - 3 * 3_600_000));
+      // Review finding R3: and it is counted from those rows, not from this process's memory: a second runtime reading the
+      // same database (a restart) says the same.
+      await reviewingFor(180);
       expect(await lateNow()).toBe(true);
+      const restarted = buildApp({ db, config: { tz: 'UTC', planner: true, tokens: [{ name: 'server', sha256: sha(SERVER), scopes: new Set<RuntimeScope>(['proposals']) }] } });
+      try {
+        const r = await restarted.inject({ method: 'GET', url: `/v1/goals/${gid}`, headers: { authorization: `Bearer ${SERVER}` } });
+        expect((JSON.parse(r.body) as { goal: GoalView }).goal.late).toBe(true);
+      } finally {
+        await restarted.close();
+      }
       const list = (await ask('GET', '/v1/goals?tab=active')).body as unknown as GoalsPage;
       expect(list.reviews).toBe('on');
       expect(list.goals.find((g) => g.id === gid)).toMatchObject({ late: true });
@@ -547,7 +560,7 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
       // Nothing a job carried, and no audit entry of a request, holds a goal's words.
       expect(JSON.stringify(await db.auditEntry.findMany({ where: { action: 'goal.review.request' } }), (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v))).not.toContain('CANARY');
     } finally {
-      resetTicking();
+      await db.healthCheck.deleteMany({ where: { component: 'goals' } });
       await on.close();
     }
   });

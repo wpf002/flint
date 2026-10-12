@@ -70,6 +70,20 @@ export function labelOf(e: Labelled, tz: string, now = new Date(), nth = 1): str
 }
 
 /**
+ * Could `text` be this item's label? Its own label exactly; or, for an item
+ * named by what it is and when Flint first saw it, those words with any place
+ * and any day ("Nexus Thread 2 from Oct 3": the day's words depend on the zone
+ * and the year they are said in). The card gate asks, for a step a review adds.
+ */
+export function labelCouldBe(e: Labelled, text: string): boolean {
+  const own = ownLabel(e);
+  if (own) return text === own;
+  const source = SOURCE_WORDS[e.key.split(':')[1] ?? ''];
+  const head = `${source ? `${source} ` : ''}${KIND_WORDS[e.kind] ?? 'Item'}`;
+  return text.startsWith(head) && /^( [1-9]\d{0,5})? from [A-Z][a-z]{2} \d{1,2}(, \d{4})?$/.test(text.slice(head.length));
+}
+
+/**
  * labelOf, with the item's place among those of its kind and source that Flint
  * first saw the same day (by when, then by id): two threads from one sync never
  * share a label. The place is fixed once given: later items come after it, and a

@@ -57,7 +57,7 @@ describe('planDiff against the recorded Ollama reply', () => {
       dueAt: s.due ? `${s.due}T22:00:00.000Z` : null, dependsOn: [], doneAt: s.status === 'done' ? '2026-10-05T15:00:00.000Z' : null, doneAuditId: null, proposalId: null, taskId: null,
     }));
     const c = composeDiff(cassette.result.value.map((v) => TemplateOp.parse(v)), {
-      steps, horizonAt: '2026-11-16T05:59:00.000Z', labels: new Map([[CASSETTE_ITEM.id, 'wpf002/flint #77']]), criteria: new Map(facts.criteria.map((x) => [x.id, x.text])),
+      now: CASSETTE_NOW, steps, horizonAt: '2026-11-16T05:59:00.000Z', labels: new Map([[CASSETTE_ITEM.id, 'wpf002/flint #77']]), criteria: new Map(facts.criteria.map((x) => [x.id, x.text])),
     });
     expect(c.suggestions.every((s) => s.key !== null)).toBe(true);
     expect(c.ops.size).toBeGreaterThan(0);

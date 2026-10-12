@@ -48,7 +48,8 @@ import { appendAudit } from '../governance/audit.js';
 import { claim, periodKey } from '../governance/counters.js';
 import { activePolicies } from '../governance/proposals.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
-import { lateBefore } from './late.js';
+import { REVIEW_LATE_MS } from '@flint/policy';
+import { reviewingLog, reviewingMs } from './late.js';
 import { GOALS_ACTOR, recordOnTrack } from './ontrack.js';
 import { activePlan } from './ops.js';
 
@@ -124,8 +125,6 @@ export interface ReviewDeps {
   bus: Pick<Bus, 'boss'>;
   tz: string;
   now?: () => Date;
-  /** Since when the tick has run without a gap (late.ts); undefined: not tracked. A scheduled review's audit entry says whether it ran late by it. */
-  since?: Date | null;
   /** Test seam: runs inside the transaction once the goal is locked, before anything else of it is read. */
   afterLock?: (tx: Tx) => Promise<void>;
 }
@@ -184,9 +183,8 @@ export async function runReview(d: ReviewDeps, job: ReviewJob): Promise<ReviewOu
         const anchor = Number(localDay(d.tz, g.activatedAt ?? g.createdAt).slice(8, 10));
         const next = job.kind === 'scheduled' && due ? nextReviewAt(cadence, d.tz, due, now, anchor) : g.nextReviewAt;
 
-        // Late: due for over an hour while the tick ran (late.ts). The digest counts these, from the audit entry.
-        const cut = lateBefore(now, d.since);
-        const late = job.kind === 'scheduled' && !!due && !!cut && due.getTime() < cut.getTime();
+        // Late: it waited over an hour while Flint was reviewing (late.ts). The digest counts these, from the audit entry.
+        const late = job.kind === 'scheduled' && !!due && now.getTime() - due.getTime() > REVIEW_LATE_MS && reviewingMs(await reviewingLog(tx, due, now), due, now) > REVIEW_LATE_MS;
 
         const forecast = await recordOnTrack(tx, g, { progress: e.progress, overdueSteps: overdue, nextReviewAt: next }, d.tz, now);
         const reviewId = newReviewId(now);

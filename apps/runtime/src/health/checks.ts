@@ -31,7 +31,7 @@ import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
 import { uptime } from './instance.js';
 import { CIRCUIT_FAILURES } from './circuits.js';
-import { lateBefore } from '../goals/late.js';
+import { REVIEWS_STOPPED, waitedMs } from '../goals/late.js';
 import { reviewStanding } from '../goals/review.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
@@ -49,8 +49,6 @@ export interface CheckDeps {
   db: Db;
   config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama'>>;
   now: Date;
-  /** Since when the goal tick has run without a gap (goals/late.ts); undefined: not tracked. */
-  reviewsSince?: Date | null;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
 }
 
@@ -209,14 +207,26 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
 /** How many of the latest plan stages Health looks at. */
 const PLAN_STAGES_WATCHED = 3;
 
+/** What Goal Reviews says in Settings > Health: sentences from counts, never a goal's words. */
+export const GOAL_HEALTH = {
+  stopped: REVIEWS_STOPPED,
+  down: (n: number) => (n === 1 ? 'A goal’s review is over a day late.' : `${n} goals’ reviews are over a day late.`),
+  late: (n: number) => (n === 1 ? 'A goal’s review is over an hour late.' : `${n} goals’ reviews are over an hour late.`),
+  noModel: 'No local model is set up, so goal reviews suggest no plan changes.',
+  noAnswer: (n: number) => `The local model gave no usable answer to the last ${n === 1 ? 'goal review' : `${n} goal reviews`}, so Flint suggested no plan changes.`,
+} as const;
+
 /**
  * Goal reviews (P3): are they running, on time, and getting answers? Counts
  * only: a detail never names a goal.
  *  - A review is late against the goal's own next review time, which every
  *    scheduled review moves on, so a tick or a review job that died shows here
- *    within the hour. Late means due for over an hour WHILE Flint was reviewing
- *    (goals/late.ts): never the time before reviews were turned on, a restart
- *    or a sleep, which Flint catches up on within minutes.
+ *    within the hour. Late is counted in reviewing time (goals/late.ts): the
+ *    stretches this very check has been writing its row with reviews on. So the
+ *    time before reviews were turned on, a restart or a night asleep never
+ *    makes a review late, and a review stuck for days is down once it has
+ *    waited 24 hours of reviewing time, however many deploys and nights that
+ *    is spread over.
  *  - The plan stage: when the last few (up to 3) of the active goals' reviews
  *    that asked the local model all got no usable answer, reviews still run
  *    but suggest nothing, and nothing else would say so.
@@ -226,28 +236,23 @@ async function goalReviews(d: CheckDeps): Promise<ComponentCheck> {
   const component = 'goals';
   if (!d.config.planner) return { component, status: 'disabled' };
   // A FORBIDDEN rule on goal.review.local stops every review: said plainly, since nothing else would.
-  if (!(await reviewStanding(db, now)).may) return { component, status: 'degraded', detail: 'A rule stops goal reviews, so none are running.' };
-  const hour = lateBefore(now, d.reviewsSince, REVIEW_LATE_MS);
-  const day = lateBefore(now, d.reviewsSince, REVIEW_DOWN_MS);
-  const [late] = hour
-    ? await db.$queryRaw<Array<{ hour: number; day: number }>>`
-        SELECT count(*) FILTER (WHERE "nextReviewAt" < ${hour})::int AS hour,
-               count(*) FILTER (WHERE ${day !== null}::boolean AND "nextReviewAt" < ${day ?? hour})::int AS day
-        FROM "Goal" WHERE status = 'active'`
-    : [];
-  if (late?.day) return { component, status: 'down', detail: late.day === 1 ? 'A goal’s review is over a day late.' : `${late.day} goals’ reviews are over a day late.` };
-  if (late?.hour) return { component, status: 'degraded', detail: late.hour === 1 ? 'A goal’s review is over an hour late.' : `${late.hour} goals’ reviews are over an hour late.` };
+  if (!(await reviewStanding(db, now)).may) return { component, status: 'degraded', detail: GOAL_HEALTH.stopped };
+  const due = await db.goal.findMany({
+    where: { status: 'active', nextReviewAt: { lt: new Date(now.getTime() - REVIEW_LATE_MS) } }, orderBy: [{ nextReviewAt: 'asc' }, { id: 'asc' }], take: 500, select: { nextReviewAt: true },
+  });
+  const waited = await waitedMs(db, due.map((g) => g.nextReviewAt), now);
+  const day = waited.filter((ms) => ms > REVIEW_DOWN_MS).length;
+  const hour = waited.filter((ms) => ms > REVIEW_LATE_MS).length;
+  if (day) return { component, status: 'down', detail: GOAL_HEALTH.down(day) };
+  if (hour) return { component, status: 'degraded', detail: GOAL_HEALTH.late(hour) };
   // Reviews are on with no local model to ask (FLINT_TRIAGE_MODEL is not set): every plan stage would end `none:off`.
-  if (!d.config.ollama) return { component, status: 'degraded', detail: 'No local model is set up, so goal reviews suggest no plan changes.' };
+  if (!d.config.ollama) return { component, status: 'degraded', detail: GOAL_HEALTH.noModel };
   // The plan stages that asked the model, latest first: an answer, or none that could be used.
   const stages = await db.goalReview.findMany({
     where: { goal: { status: 'active' }, createdAt: { gt: new Date(now.getTime() - 14 * 86_400_000) }, OR: [{ planner: { startsWith: 'ollama:' } }, { planner: { in: ['none:unavailable', 'none:invalid'] } }] },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: PLAN_STAGES_WATCHED, select: { planner: true },
   });
-  if (stages.length && stages.every((r) => r.planner?.startsWith('none:'))) {
-    const n = stages.length;
-    return { component, status: 'degraded', detail: `The local model gave no usable answer to the last ${n === 1 ? 'goal review' : `${n} goal reviews`}, so Flint suggested no plan changes.` };
-  }
+  if (stages.length && stages.every((r) => r.planner?.startsWith('none:'))) return { component, status: 'degraded', detail: GOAL_HEALTH.noAnswer(stages.length) };
   // The plan stage's own mark (a review that gave up waiting for chat), within the hour.
   const deferred = await db.healthCheck.findFirst({ where: { component: 'goals.deferral', at: { gt: new Date(now.getTime() - 3_600_000) } }, select: { detail: true } });
   return { component, status: deferred ? 'degraded' : 'ok', ...(deferred?.detail ? { detail: clip(deferred.detail) } : {}) };

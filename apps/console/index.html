@@ -1611,53 +1611,74 @@ function goalStateOf(g,cid){for(var i=0;i<(g.criteria||[]).length;i++)if(g.crite
 function goalFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,label));row.appendChild(l);row.appendChild(gEl('span','val',value));return row;}
 /* The goal's links as a card states them: the item, its role and the fields it watches, in item order. */
 function goalRawLinks(g){return (g.links||[]).map(function(l){return {entityId:l.entityId,role:l.role,watchPaths:gSorted(l.watchPaths||[])};}).sort(gById);}
-function goalShow(g,note,keep){goalHead(g.title,true,false);var el=document.getElementById('goalbody'),top=keep?(el.scrollTop||0):0;var body=goalBody();
-  /* A note may depend on what was just read (Review Now's stays until the new review is here). */
-  if(typeof note==='function')note=note(g);
-  var c=g.checks||{met:0,total:0};
-  /* A late review says so right under the title, as its row in the list does. */
-  if(goalReviewed(g)&&g.late){var tg=gEl('div','gtags');tg.id='goaltags';tg.appendChild(gTag('Late',true));body.appendChild(tg);}
+/* The top of an open goal: Late, when its review is (right under the title, as its row in the list says it); then its three facts. */
+function goalTop(g,box){box.textContent='';var c=g.checks||{met:0,total:0};
+  if(goalReviewed(g)&&g.late){var tg=gEl('div','gtags');tg.id='goaltags';tg.appendChild(gTag('Late',true));box.appendChild(tg);}
   var facts=gEl('div','group');facts.appendChild(goalFact('Checks',c.met+' of '+c.total+' Met'));
   facts.appendChild(goalFact('Finish By',g.horizonAt?gDay(g.horizonAt):'No Date'));
   /* The third fact: how it ended; or, while Flint reviews it, how likely it is to be done by its finish date (the date in the
-     fact above: a goal with no date, or one past it, has no On Track) or when its next review is; else how often. */
+     fact above: a goal with no date, or one past it, has no On Track) or when its next review is; else how often.
+     A late review is said once, by the tag: the fact then says when the review was due. */
   if(g.endedAt)facts.appendChild(goalFact(g.status==='done'?'Done':g.status==='abandoned'?'Abandoned':'Dismissed',gDay(g.endedAt)));
   else if(goalReviewed(g)&&g.onTrack&&g.horizonAt)facts.appendChild(goalFact('On Track',(GOAL_LIKELY[g.onTrack.likelihood]||'About Even')+' · '+g.onTrack.percent+'%'));
-  else if(goalReviewed(g)&&g.nextReviewAt)facts.appendChild(goalFact('Next Review',goalNext(g)));
+  else if(goalReviewed(g)&&g.nextReviewAt)facts.appendChild(goalFact(g.late?'Review Due':'Next Review',goalNext(g)));
   else facts.appendChild(goalFact('Review Every',gCadence(g.reviewCadence)));
-  body.appendChild(facts);
+  box.appendChild(facts);}
+/* The latest review, with Review Now under it (as Add Step sits under the steps), and what waits for Will. Before its first
+   review an active goal says so here. */
+function goalReviewBox(g,box){box.textContent='';
+  if(g.review||goalReviewed(g)){box.appendChild(gEl('div','gsh','Latest Review'));box.appendChild(goalReview(g));
+    if(goalReviewed(g)){var ra=gEl('div','gact');ra.id='goalreviewnow';
+      /* Review Now asks for a review; it needs no signature (a review only records what it finds and suggests). */
+      ra.appendChild(gBtn('ghost','Review Now',function(b){goalPlain(gGoalPath(g,'/review'),{},b,function(){goalMsg(GOAL_REVIEWING,'ok');goalWatch(g,true);});}));box.appendChild(ra);}}
+  /* Cards, counted as cards: one may hold several changes. */
+  if((g.waiting||[]).length){var n=g.waiting.length;var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,n+(n===1?' approval waits':' approvals wait')+' for you.'));
+    wt.appendChild(gBtn('ghost','Open Approvals',function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));box.appendChild(wt);}}
+function goalShow(g,note,keep){goalHead(g.title,true,false);var el=document.getElementById('goalbody'),top=keep?(el.scrollTop||0):0;var body=goalBody();
+  /* A note may depend on what was just read. */
+  if(typeof note==='function')note=note(g);
+  var head=gEl('div');head.id='goaltop';goalTop(g,head);body.appendChild(head);
   if(g.description){body.appendChild(gEl('div','gsh','Why It Matters'));var w=gEl('div','group');var wr=gEl('div','row');var wl=gEl('span','lbl gwhy');wl.appendChild(gEl('span',null,g.description));wr.appendChild(wl);w.appendChild(wr);body.appendChild(w);}
   body.appendChild(gEl('div','gsh','Done When'));var checks=gEl('div','group');
   (g.successCriteria||[]).forEach(function(cr){checks.appendChild(goalCheckRow(g,cr));});body.appendChild(checks);
   body.appendChild(gEl('div','gsh','Steps'));var steps=gEl('div','group');var list=(g.plan&&g.plan.steps)||[];
-  if(!list.length){var e=gEl('div','row');var el=gEl('span','lbl');el.appendChild(gEl('span',null,'This goal has no steps yet.'));e.appendChild(el);steps.appendChild(e);}
+  if(!list.length){var e=gEl('div','row');var el2=gEl('span','lbl');el2.appendChild(gEl('span',null,'This goal has no steps yet.'));e.appendChild(el2);steps.appendChild(e);}
   list.forEach(function(s){steps.appendChild(goalStepRow(g,s));});body.appendChild(steps);
   if(goalLive(g)){var add=gEl('div','gact');add.id='goaladdstep';add.appendChild(gBtn('ghost','Add Step',function(){goalAddStep(g,add);}));body.appendChild(add);}
-  /* The latest review, and Review Now under it (as Add Step sits under the steps). Before its first review an active goal says so here. */
-  if(g.review||goalReviewed(g)){body.appendChild(gEl('div','gsh','Latest Review'));body.appendChild(goalReview(g));
-    if(goalReviewed(g)){var ra=gEl('div','gact');ra.id='goalreviewnow';
-      /* Review Now asks for a review; it needs no signature (a review only records what it finds and suggests). */
-      ra.appendChild(gBtn('ghost','Review Now',function(b){goalPlain(gGoalPath(g,'/review'),{},b,function(){goalMsg(GOAL_REVIEWING,'ok');goalReviewSoon(g);});}));body.appendChild(ra);}}
-  /* Cards, counted as cards: one may hold several changes. */
-  if((g.waiting||[]).length){var n=g.waiting.length;var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,n+(n===1?' approval waits':' approvals wait')+' for you.'));
-    wt.appendChild(gBtn('ghost','Open Approvals',function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));body.appendChild(wt);}
+  var rev=gEl('div');rev.id='goalrevbox';goalReviewBox(g,rev);body.appendChild(rev);
   /* The header keeps two lines of a title. Only when that cuts it short is it here too, in full. */
   var h=document.getElementById('goalsttl');if(h&&h.scrollHeight>h.clientHeight+1)body.insertBefore(gEl('div','gfull',g.title),body.children[0]||null);
-  el.scrollTop=top;goalActions(g);if(note)goalMsg(note,'ok');}
+  el.scrollTop=top;goalActions(g);if(note)goalMsg(note,'ok');
+  /* A review whose look at the plan is still running: the panel reads on, quietly, until it has ended. */
+  if(goalReviewed(g)&&g.review&&g.review.planner==='pending')goalWatch(g,false);}
 /* Flint reviews this goal now: reviews are on and it is active. */
 function goalReviewed(g){return g.reviews==='on'&&g.status==='active';}
-/* After a yes to Review Now the open goal is read again, quietly and where Will is, twice: the review itself lands in
-   seconds, and what it suggests for the plan within a couple of minutes. Only while he is still on that goal: once he
-   has gone anywhere else (even back to the same goal later), nothing more is read or said for it. */
+/* A review takes a while: the review itself lands in seconds, and what it suggests for the plan in a minute or two (longer
+   when chat is busy). So after a yes to Review Now, and whenever an open goal's latest review is still looking at the plan,
+   the panel reads the goal again, quietly: at 6 seconds, at 75, then every minute until the review has ended. It stops for
+   good once Will has gone anywhere else (even back to the same goal later), and after 32 reads (about half an hour, by when
+   the runtime itself says a stuck look at the plan was skipped).
+   A quiet read redraws only what a review changes, the facts and LATEST REVIEW, and never while Will is in the middle of
+   something here (Add Step is open, a write is on its way): it waits for the next read instead. */
 var GOAL_REVIEWING='Flint is reviewing this goal. It takes a few minutes.';
-var GOAL_REVIEW_WAITS=[6000,75000];
-function goalReviewSoon(g){var id=g.id,was=g.review?g.review.at:null,visit=GOALS.opened;
-  GOAL_REVIEW_WAITS.forEach(function(ms){setTimeout(function(){
-    if(!goalsOpen()||GOALS.view!=='goal'||!GOALS.goal||GOALS.goal.id!==id||GOALS.opened!==visit||GOALS.busy)return;
-    /* Until the new review is here, the footer still says Flint is on it. */
-    goalOpen(id,function(now){return (now.review?now.review.at:null)===was?GOAL_REVIEWING:null;},true);},ms);});}
-/* "Sunday at 9:00 AM": when it is next reviewed. A time already here means the review is about to run, or is late. */
-function goalNext(g){if(g.late)return 'Late';if(new Date(g.nextReviewAt).getTime()<=Date.now())return 'In a Few Minutes';return gWhen(g.nextReviewAt);}
+var GOAL_REVIEW_WAITS=[6000,69000],GOAL_REVIEW_MORE=60000,GOAL_REVIEW_MAX=32,GOAL_REVIEW_ASKED=6;
+function goalTyping(){var a=document.getElementById('goaladdstep');return !!GOALS.busy||!!(a&&a.className==='gadd');}
+function goalSaying(t){var m=document.getElementById('goalmsg');return !!m&&!m.hidden&&m.textContent===t;}
+/* `asked`: Will pressed Review Now, so the read is for a review newer than the one on screen. */
+function goalWatch(g,asked){var id=g.id,was=g.review?g.review.at:null,visit=GOALS.opened,token=GOALS.watch=(GOALS.watch||0)+1,n=0;
+  function gone(){return token!==GOALS.watch||!goalsOpen()||GOALS.view!=='goal'||!GOALS.goal||GOALS.goal.id!==id||GOALS.opened!==visit;}
+  function next(){if(n>=GOAL_REVIEW_MAX)return;var ms=n<GOAL_REVIEW_WAITS.length?GOAL_REVIEW_WAITS[n]:GOAL_REVIEW_MORE;n++;setTimeout(read,ms);}
+  function read(){if(gone())return;if(goalTyping()){next();return;}
+    gCall('/goals/'+encodeURIComponent(id)).then(function(d){if(gone())return;if(goalTyping()){next();return;}
+      var now=d.goal,head=document.getElementById('goaltop'),rev=document.getElementById('goalrevbox');
+      GOALS.goal=now;if(head)goalTop(now,head);if(rev)goalReviewBox(now,rev);
+      var here=!asked||(now.review?now.review.at:null)!==was;
+      /* The review Will asked for is here (or never came): the footer has nothing more to say about it. */
+      if((here||n>=GOAL_REVIEW_ASKED)&&goalSaying(GOAL_REVIEWING))goalMsg('');
+      if(here?!!(now.review&&now.review.planner==='pending'):n<GOAL_REVIEW_ASKED)next();},function(){next();});}
+  next();}
+/* "Sunday at 9:00 AM": when it is next reviewed. A time already here means the review is about to run; a late one says when it was due. */
+function goalNext(g){if(g.late)return gWhen(g.nextReviewAt);if(new Date(g.nextReviewAt).getTime()<=Date.now())return 'In a Few Minutes';return gWhen(g.nextReviewAt);}
 function goalNextLine(g){if(g.late)return 'The next review is late, and Flint runs it as soon as it can.';
   if(new Date(g.nextReviewAt).getTime()<=Date.now())return 'The next review runs in a few minutes.';return 'The next review is '+gWhen(g.nextReviewAt,true)+'.';}
 /* A title in quotation marks. Quotes never nest: marks inside the title become single ones. */

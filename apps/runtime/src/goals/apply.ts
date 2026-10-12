@@ -44,7 +44,8 @@ import { Refused, claimIn, completeIn, contextOf, type CreateProposal } from '..
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, SAY, goalStatusWords, sanitize } from './errors.js';
 import { RATIONALE, activePlan, currentLinks, lastVersion, sameDefinition, sameLinks, sameTiming, syncLinks, writeDraft } from './ops.js';
-import { fromTemplate } from './steps.js';
+import { labelCouldBe } from './items.js';
+import { fromTemplate, type TemplateWords } from './steps.js';
 
 /** The templates a review files its plan cards under (Proposal_template_check needs one for a runtime origin). */
 export const PLAN_TEMPLATES: readonly string[] = ['plan.diff.minor', 'plan.diff.material'];
@@ -64,25 +65,33 @@ const MINOR_TEMPLATE = 'plan.diff.minor';
  * Why a review's card may not be filed or run as it is, or undefined. Checked
  * against the plan as it stands, whoever calls the proposals contract: the
  * template's name is a label the filer sets, so it is never taken on trust.
- *  - A review adds a step only from its templates (steps.ts): never a Flint
- *    action, and always one that waits for Will (tier approval).
+ *  - A review adds a step only from its templates (steps.ts), about one of the
+ *    goal's own linked items or checks (`words`): never a Flint action, and
+ *    always one that waits for Will (tier approval).
  *  - It changes only a step's status, due date or place: never its title or
  *    what it depends on, and it never brings a skipped step back.
  *  - A card under the small-change template holds no bigger change
  *    (classifyPlanOp, @flint/policy): that one rides Approve All.
  */
-function reviewCardProblem(ops: readonly PlanOp[], steps: readonly PlanStepState[], horizonAt: Date | null, templateId: string | null | undefined): string | undefined {
+function reviewCardProblem(ops: readonly PlanOp[], steps: readonly PlanStepState[], horizonAt: Date | null, templateId: string | null | undefined, words: TemplateWords): string | undefined {
   const byKey = new Map(steps.map((s) => [s.key, s]));
   for (const o of ops) {
     const step = byKey.get(o.key);
     if (o.op === 'add') {
-      if (o.step.kind === 'flint_action' || o.step.tier !== 'approval' || o.step.dependsOn.length || !fromTemplate(o.step.title, o.step.kind)) return SAY.reviewStep;
+      if (o.step.kind === 'flint_action' || o.step.tier !== 'approval' || o.step.dependsOn.length || !fromTemplate(o.step.title, o.step.kind, words)) return SAY.reviewStep;
     } else if (Object.keys(o.to).some((k) => k !== 'status' && k !== 'dueAt' && k !== 'ordinal') || (o.to.status !== undefined && step?.status === 'skipped')) {
       return SAY.reviewStep;
     }
     if (templateId === MINOR_TEMPLATE && classifyPlanOp(o, step, horizonAt?.toISOString() ?? null) === 'material') return SAY.minorCard;
   }
   return undefined;
+}
+
+/** What a review's templates may be about, for this goal: its linked items (by label) and its checks' words. */
+async function templateWords(db: Db | Tx, goal: { id: string; successCriteria: unknown }): Promise<TemplateWords> {
+  const links = await db.goalEntity.findMany({ where: { goalId: goal.id }, select: { entity: { select: { id: true, kind: true, key: true, name: true, status: true, taintedPaths: true, firstSeenAt: true } } } });
+  const items = links.map((l) => l.entity).filter((e) => e.status !== 'forgotten');
+  return { label: (text) => items.some((e) => labelCouldBe(e, text)), criteria: ((goal.successCriteria ?? []) as Criterion[]).map((c) => c.text) };
 }
 
 /** A provenance ref on a goal card is an id: a proposal's provenance is kept for good, so it never holds words. */
@@ -204,7 +213,7 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     const c = composePlan(steps, a.ops);
     if (!c.ok) throw c.why === 'stale' ? new Refused(409, SAY.planLooked) : new Refused(400, COMPOSE_SAYS[c.why]);
     if (context === 'autonomous') {
-      const why = reviewCardProblem(a.ops, steps, g.horizonAt, input.templateId);
+      const why = reviewCardProblem(a.ops, steps, g.horizonAt, input.templateId, await templateWords(db, g));
       if (why) throw new Refused(400, why);
     }
     reason = context === 'autonomous' ? GOAL_REASONS.planFlint : GOAL_REASONS.planWill;
@@ -377,7 +386,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
   if (!next.ok) return { refusal: flint ? SAY.staleFlint : SAY.staleWill };
   // A review's card, held to its rules again against the plan as it is now (a finish date moved since it
   // was filed can make a small change a bigger one): it then needs a new card, with a fresh touch.
-  if (flint && reviewCardProblem(a.ops, cur?.steps ?? [], goal.horizonAt, ctx.templateId)) return { refusal: SAY.staleFlint };
+  if (flint && reviewCardProblem(a.ops, cur?.steps ?? [], goal.horizonAt, ctx.templateId, await templateWords(tx, goal))) return { refusal: SAY.staleFlint };
   const version = (await lastVersion(tx, goal.id)) + 1;
   const planId = await writeDraft(tx, goal.id, version, next.steps, flint ? 'flint' : 'will', flint ? RATIONALE.flint : RATIONALE.will);
   if (cur) await tx.plan.update({ where: { id: cur.id }, data: { status: 'superseded' } });

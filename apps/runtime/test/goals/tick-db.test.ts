@@ -16,7 +16,9 @@
  *    review answers every trigger that was there when it ran: three steps due
  *    the same day, or a change, a false forecast and a due step together, are
  *    one review. A new plan version, or a moved due time, is a new trigger.
- *  - The tick notes each run, so "late" means late while Flint was reviewing.
+ *  - Late is counted in reviewing time, from the Goal Reviews rows the health
+ *    job keeps: never from this process's memory, so it adds up across restarts
+ *    and nights.
  *  - Past a goal's 12 a day, a change is left to the next scheduled review.
  *  - A scheduled review is sent when the goal's time has come, once, with its
  *    due time; a job that died is sent again by the next tick.
@@ -34,7 +36,7 @@ import { goalJobs, type JobContext } from '../../src/jobs';
 import { emitPrediction } from '../../src/ledger/emit';
 import { ReviewJob, runReview } from '../../src/goals/review';
 import { COALESCE_SECONDS, TICK_CRON, TICK_SECONDS, tick } from '../../src/goals/tick';
-import { TICK_GAP_MS, lateBefore, noteTick, resetTicking, tickingSince } from '../../src/goals/late';
+import { EVIDENCE_GAP_MS, REVIEWS_STOPPED, reviewingLog, reviewingMs, waitedMs } from '../../src/goals/late';
 import { CANARY, DAY, FakeBus, MIN, goalFixture, type GoalFixture } from './fixture';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -364,36 +366,53 @@ describe.skipIf(NO_DB)('the goal tick on flint_test', () => {
     expect(await db.goalReview.count({ where: { goalId: g.id } })).toBe(1);
   });
 
-  it('review finding 7: the tick notes each run, and late means late while it ran', async () => {
-    resetTicking();
+  it('review findings 7 and R3: a review’s wait is counted in reviewing time, from the rows the health job keeps', async () => {
+    const t0 = new Date(Date.now() - 4 * DAY);
+    const at = (min: number) => new Date(t0.getTime() + min * MIN);
+    const every5 = (from: number, to: number) => Array.from({ length: Math.floor((to - from) / 5) + 1 }, (_, i) => at(from + 5 * i));
+    // Checks 5 minutes apart are one stretch: a review due at its start has waited its whole length, and up to now when the last check is recent.
+    expect(reviewingMs(every5(0, 60), at(0), at(60))).toBe(60 * MIN);
+    expect(reviewingMs(every5(0, 60), at(0), at(63))).toBe(63 * MIN);
+    expect(reviewingMs(every5(0, 60), at(20), at(60))).toBe(40 * MIN);
+    expect(reviewingMs(every5(0, 60), at(-300), at(60))).toBe(60 * MIN);
+    // No check at all (reviews just turned on), or none since it came due: it has waited nothing.
+    expect(reviewingMs([], at(-300), at(60))).toBe(0);
+    expect(reviewingMs(every5(0, 60), at(61), at(62))).toBe(1 * MIN);
+    expect(reviewingMs(every5(0, 60), at(0), at(60 + 13))).toBe(60 * MIN);
+    // A gap over 12 minutes (the Mac asleep, the runtime down) counts for nothing; a deploy's few minutes do.
+    expect(EVIDENCE_GAP_MS).toBe(12 * MIN);
+    const night = [...every5(0, 60), ...every5(600, 660)];
+    expect(reviewingMs(night, at(0), at(660))).toBe(120 * MIN);
+    expect(reviewingMs([...every5(0, 30), ...every5(38, 60)], at(0), at(60))).toBe(60 * MIN);
+    // A day of reviewing spread over three nights is a day: this is what lets a review stuck for days show as down.
+    const days = [0, 1, 2].flatMap((d) => every5(d * 1440, d * 1440 + 600));
+    expect(reviewingMs(days, at(0), at(2 * 1440 + 600))).toBe(30 * 60 * MIN);
+
+    // The log is what the health job wrote for Goal Reviews with reviews on: not `disabled`, and not stopped by a rule.
+    await db.healthCheck.deleteMany({ where: { component: 'goals' } });
+    await db.healthCheck.createMany({ data: [
+      ...every5(0, 30).map((t) => ({ component: 'goals', status: 'ok', at: t })),
+      ...every5(35, 60).map((t) => ({ component: 'goals', status: 'disabled', at: t })),
+      ...every5(65, 90).map((t) => ({ component: 'goals', status: 'degraded', detail: REVIEWS_STOPPED, at: t })),
+      ...every5(95, 120).map((t) => ({ component: 'goals', status: 'degraded', detail: 'A goal’s review is over an hour late.', at: t })),
+      { component: 'backup', status: 'ok', at: at(45) }, { component: 'goals.deferral', status: 'degraded', at: at(50) },
+    ] });
     try {
-      expect(tickingSince()).toBeNull();
-      const t0 = new Date(Date.now() - 3 * 3_600_000);
-      // Before the first tick nothing is late; a run younger than an hour has not had the time to be late either.
-      expect(lateBefore(new Date(), null)).toBeNull();
-      await run(t0);
-      expect(tickingSince()).toEqual(t0);
-      expect(lateBefore(new Date(t0.getTime() + 59 * MIN), tickingSince())).toBeNull();
-      // Ticks 2 minutes apart are one run: an hour in, a review due before then is late.
-      for (let m = 2; m <= 62; m += 2) noteTick(new Date(t0.getTime() + m * MIN));
-      expect(tickingSince()).toEqual(t0);
-      const at = new Date(t0.getTime() + 62 * MIN);
-      expect(lateBefore(at, tickingSince())).toEqual(new Date(at.getTime() - 60 * MIN));
-      // A day's outage needs a day of ticking.
-      expect(lateBefore(at, tickingSince(), DAY)).toBeNull();
-      // A gap (a restart, the Mac asleep): the run starts over, so nothing that came due meanwhile is late yet.
-      const woke = new Date(at.getTime() + TICK_GAP_MS + MIN);
-      noteTick(woke);
-      expect(tickingSince()).toEqual(woke);
-      expect(lateBefore(new Date(woke.getTime() + 5 * MIN), tickingSince())).toBeNull();
-      // A caller that does not track the tick takes it as always running.
-      expect(lateBefore(at, undefined)).toEqual(new Date(at.getTime() - 60 * MIN));
-      // A FORBIDDEN-free tick through the job path notes itself too (tick() is what the job runs).
-      resetTicking();
-      await run();
-      expect(tickingSince()).not.toBeNull();
+      const log = await reviewingLog(db, at(0), at(120));
+      expect(log.map((d) => (d.getTime() - t0.getTime()) / MIN)).toEqual([0, 5, 10, 15, 20, 25, 30, 95, 100, 105, 110, 115, 120]);
+      expect(reviewingMs(log, at(0), at(120))).toBe(55 * MIN);
+      // One read for several due times, and none when nothing has been due for an hour.
+      expect(await waitedMs(db, [at(0), null, at(100), at(119)], at(120))).toEqual([55 * MIN, 0, 0, 0]);
+      expect(await waitedMs(db, [at(0), at(20)], at(200))).toEqual([55 * MIN, 35 * MIN]);
+      // Nothing here is this process's memory: a runtime that just started reads the same rows, and so the same wait.
+      const other = createDb(urls.app);
+      try {
+        expect(await waitedMs(other, [at(0)], at(120))).toEqual([55 * MIN]);
+      } finally {
+        await other.$disconnect();
+      }
     } finally {
-      resetTicking();
+      await db.healthCheck.deleteMany({ where: { component: { in: ['goals', 'goals.deferral', 'backup'] }, at: { lt: new Date(Date.now() - DAY) } } });
     }
   });
 

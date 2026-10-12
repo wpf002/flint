@@ -8,8 +8,9 @@
  * Reviews run only while FLINT_PLANNER is on. Off, a view says so and nothing
  * is ever late: a goal's next review time is set when it starts, and showing
  * it as overdue while nothing reviews goals would be wrong. On, an active
- * goal is late once its review has been due for over an hour while Flint was
- * reviewing (late.ts): never for the time before reviews were turned on.
+ * goal is late once its review has waited over an hour while Flint was
+ * reviewing (late.ts): never for the time before reviews were turned on, and
+ * never for a night the Mac slept through.
  *
  * On Track is shown only when the forecast is for the goal's own finish date.
  * A goal with no date, one past its date, or one whose date is past the
@@ -27,6 +28,7 @@ import {
   GOAL_SIGNED_ACTIONS,
   GoalTitle,
   PLAN_STAGES,
+  REVIEW_LATE_MS,
   likelihoodOf,
   type Criterion,
   type GoalRow,
@@ -43,15 +45,13 @@ import {
 import type { Db, Tx } from '../db.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf, type ItemFacts, type StepFacts } from './criteria.js';
 import { conditionsOf, labelFor } from './items.js';
-import { lateBefore } from './late.js';
+import { waitedMs } from './late.js';
 import { stepState } from './ops.js';
 import { Diff, stepTitle, type DiffItem } from './steps.js';
 
-/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER), and since when its tick has run. */
+/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER). */
 export interface ViewOptions {
   reviews: boolean;
-  /** late.ts's tickingSince: null before the first tick (nothing is late yet); undefined: not tracked. */
-  since?: Date | null | undefined;
 }
 const NO_REVIEWS: ViewOptions = { reviews: false };
 /** A review whose plan stage has not reported for this long never will (its job is gone): it is shown as skipped, not as still running. */
@@ -82,11 +82,16 @@ interface GoalRecord {
   updatedAt: Date;
 }
 
-/** Due for over an hour while Flint was reviewing goals (late.ts). Never a paused or finished goal, and never while reviews are off. */
-const isLate = (g: GoalRecord, now: Date, o: ViewOptions): boolean => {
-  const cut = o.reviews ? lateBefore(now, o.since) : null;
-  return !!cut && g.status === 'active' && !!g.nextReviewAt && g.nextReviewAt.getTime() < cut.getTime();
-};
+/**
+ * Which of these goals are late: an active one whose review has waited over an
+ * hour while Flint was reviewing (late.ts). Never a paused or finished goal,
+ * and never while reviews are off.
+ */
+async function lateOnes(db: Db | Tx, goals: readonly GoalRecord[], now: Date, o: ViewOptions): Promise<boolean[]> {
+  if (!o.reviews) return goals.map(() => false);
+  const waited = await waitedMs(db, goals.map((g) => (g.status === 'active' ? g.nextReviewAt : null)), now);
+  return waited.map((ms) => ms > REVIEW_LATE_MS);
+}
 
 interface WaitingCard {
   id: string;
@@ -206,7 +211,8 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date(), o: 
     waitingCards(db, now),
     itemFacts(db, goals.flatMap((g) => checkedItems(criteriaOf(g)))),
   ]);
-  const rows = goals.map((g) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0, isLate(g, now, o)));
+  const late = await lateOnes(db, goals, now, o);
+  const rows = goals.map((g, i) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0, late[i]!));
   // A new goal Will filed and has not signed yet: its card's own title, as it will start.
   let waiting: GoalsPage['waiting'] = [];
   if (tab === 'active') {
@@ -254,7 +260,7 @@ export async function goalView(db: Db | Tx, id: string, tz: string, now = new Da
     // The oldest of its waiting cards: a goal with more still opens.
     waiting: waiting.slice(0, WAITING),
     reviews: o.reviews ? 'on' : 'off',
-    late: isLate(g, now, o),
+    late: (await lateOnes(db, [g], now, o))[0]!,
     nextReviewAt: g.status === 'active' ? iso(g.nextReviewAt) : null,
     // Only a forecast for the goal's own finish date (see the note at the top).
     onTrack: forecast && forecast.probability !== null && g.horizonAt && forecast.resolveBy.getTime() === g.horizonAt.getTime()

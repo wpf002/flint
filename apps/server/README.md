@@ -482,7 +482,9 @@ against the contract (a review's suggestions are a step's title and closed sets,
 text, and each says whether it is on no card yet); an answer from a runtime that has no
 reviews yet still reads. Review Now (`POST /goals/:id/review`, an empty body) is unsigned,
 and its refusals are the fixed sentences too. After a yes the console reads the open goal
-again, quietly, twice.
+again on its own until the review has finished (only the facts and LATEST REVIEW are redrawn,
+and never under an open Add Step). The proxy logs its own sentences as strings (`errorRef`),
+never an `Error` made up to carry one.
 
 Approval cards now carry `kind`, `templateId` and `consequential`. The console never signs a
 consequential card (every goal card, and a plan change that is not a review's small one) under

@@ -330,13 +330,20 @@ is filed and again when it runs, and by the console before Approve All.
 - A change a waiting card already asks for is that card. It is kept and not
   filed again, whatever would hold a new card back (the day's 9, the review's
   2). A due date within a week of the card's is the same change, so "in 3
-  days" tomorrow does not replace yesterday's card.
+  days" tomorrow does not replace yesterday's card. Once the card's day has
+  passed, though, it is replaced by a card with the fresh date: you are never
+  asked to sign a day that is already gone.
 - Flint withdraws a waiting card, unsigned ("A newer review replaced it."),
   only when the plan has moved on so the card can no longer apply, or when a
   newer review changes the same thing differently (another status, a date over
   a week away, another place).
 - A review that suggests nothing, or whose model gave no usable answer,
-  withdraws nothing that still applies.
+  withdraws nothing that still applies. A card that can no longer apply is
+  cleared away either way.
+- A card is never cut in two. When a review changes its mind about one of two
+  changes on a card and the day's 9 are used up, the whole card goes, and both
+  changes say they come back at the next review.
+- A step you already approved and still have open is not suggested again.
 - What you reject is not suggested again for a week. Rejecting a card that
   moves a date and changes a status turns down each of them.
 - A suggestion that got no card because of a limit is listed under LATEST
@@ -352,16 +359,21 @@ in Approvals. That is on purpose: the trial week is for reading its suggestions
 before any of them asks for your signature. Review Now says yes only when a
 review will run; otherwise it says why in a sentence (reviews are off, a rule
 stops them, or the goal has had its 12 for the day). After a yes, the open goal
-refreshes itself twice, a few seconds and about a minute later.
+reads itself again on its own: after a few seconds, after about a minute, then
+every minute until the review has finished looking at the plan. Only the facts
+and LATEST REVIEW are redrawn, never while you are typing in Add Step, and it
+stops when you go elsewhere.
 
 Flint reviews a goal on your request or a change at most 12 times a day; its
 scheduled reviews are never capped, and the local model is asked for at most 20
 reviews a day. Settings > Health lists **Goal Reviews**:
 
 - off while the planner is off;
-- an issue when a review has been due for over an hour while Flint was
-  reviewing, and down when it has been over a day. Time Flint was off, restarted
-  or asleep doesn't count: it catches up on those within minutes;
+- an issue when a review has waited over an hour while Flint was reviewing,
+  and down when it has waited over a day of that. Time Flint was off, restarted
+  or asleep doesn't count, so a review that came due overnight is not late in
+  the morning; but the waiting adds up across nights and deploys, so a review
+  stuck for days does show as down;
 - an issue when no local model is set up, or when the last few reviews that
   asked the model (up to 3) all got no usable answer. Reviews still run then,
   but suggest nothing.
@@ -434,8 +446,9 @@ they are. This is also the first step of rolling P3 back.
   (`plan.change`, under its two templates); a later part that wants Flint to
   act on a plan must do the same. The card gate (`checkGoalCard`) holds every
   such card to the review's rules, whoever calls it: a new step only from a
-  template, never a Flint action, always waiting for you; only a step's status,
-  date or place changed; nothing bigger under the small-change template. A part
+  template and only about one of the goal's own linked items or checks, never
+  a Flint action, always waiting for you; only a step's status, date or place
+  changed; nothing bigger under the small-change template. A part
   that needs more (a Flint action step) must widen the gate on purpose, with
   its own template and tests.
 - **A waiting review card is withdrawn only by the plan stage's rule** (it no
@@ -494,12 +507,13 @@ they are. This is also the first step of rolling P3 back.
   chat turn before each request, and waits if there is one; a request it has
   already sent can hold chat up for as long as it runs (at most 90 seconds, and
   usually a few).
-- **Late is counted from memory.** The runtime keeps, in memory, since when it
-  has been checking for due reviews, and a review is late only once it has been
-  due for over an hour of that. So turning reviews on, a restart or a sleep
-  never shows Late for what came due meanwhile. The other side of it: after a
-  restart, a review that really was stuck is not shown as late again until an
-  hour has passed.
+- **Late is counted from the health check's own rows.** How long a review has
+  waited "while Flint was reviewing" is added up from the Goal Reviews rows the
+  5-minute health check keeps in the database (rows at most 12 minutes apart
+  count as one stretch). Nothing is kept in memory, so a restart loses nothing.
+  The other side of it: if the health check itself is stopped (a rule forbids
+  it), no time is counted and nothing shows as late; and the rows are kept 30
+  days, which is far more than the day it takes to show as down.
 - **Waiting plan cards can add up.** Because a review no longer clears the
   cards before it, a goal can have several days of suggestions waiting at once
   (at most 9 new cards a day across all goals, each kept a week). Reject the

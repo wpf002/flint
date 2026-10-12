@@ -30,9 +30,6 @@
  * minutes to the tick, 60 seconds of waiting, then seconds of stage 1 (exit
  * criterion 3 allows 10 minutes).
  *
- * Every tick is noted (late.ts), so "late" can mean late while Flint was
- * reviewing, never late because it was off.
- *
  * Lock order: for anything beyond the scheduled read, the tick takes the goal
  * FOR UPDATE first (SKIP LOCKED: a goal busy with a card or a review is left for
  * the next tick), at READ COMMITTED, before it reads a link, a plan, a step or a
@@ -41,7 +38,6 @@
 import { Prisma } from '@prisma/client';
 import type { Db, Tx } from '../db.js';
 import { inTx, type Bus } from '../bus.js';
-import { noteTick } from './late.js';
 import { REVIEW_QUEUE, reviewStanding, reviewsLeft, type ReviewJob } from './review.js';
 
 /** A triggered review waits this long, so a burst of changes becomes one review. */
@@ -153,7 +149,6 @@ async function stepDue(tx: Tx, goalId: string, now: Date): Promise<string | unde
 export async function tick(d: TickDeps): Promise<TickCounts> {
   const now = d.now?.() ?? new Date();
   const counts: TickCounts = { due: 0, triggered: 0, capped: 0, busy: 0 };
-  noteTick(now);
   if (!(await reviewStanding(d.db, now)).may) return { ...counts, forbidden: true };
 
   // 1. Scheduled: the goal's own row says when (Goal_status_nextReviewAt_idx). A job already waiting for the goal is the same job.

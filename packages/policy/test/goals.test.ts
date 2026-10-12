@@ -55,6 +55,7 @@ import {
   type PlanStepState,
 } from '../src/goals';
 import { addLocalDays, addLocalMonths, localWallTime, nextReviewAt } from '../src/zone';
+import { noteProblems } from '../src/notes';
 
 // Synthetic text only: nothing here is anyone's real goal.
 const crit = (id: string, check: Record<string, unknown> = { kind: 'manual' }) => ({ id, text: `Synthetic check ${id}`, check });
@@ -419,6 +420,17 @@ describe('goal reviews on the wire (P3 part 3)', () => {
       'very_unlikely', 'unlikely', 'unlikely', 'somewhat_unlikely', 'somewhat_unlikely', 'about_even', 'about_even', 'about_even', 'somewhat_likely', 'somewhat_likely', 'likely', 'likely', 'very_likely', 'very_likely',
     ]);
     for (let p = 0; p <= 1.0001; p += 0.01) expect(LIKELIHOODS).toContain(likelihoodOf(p));
+  });
+
+  it('every refusal a goal card or a goal route answers with is a plain sentence, by the rules for a note', () => {
+    for (const code of ['reviewsOff', 'reviewCap', 'notReady', 'replacedReview', 'reviewsStopped', 'minorCard', 'reviewStep', 'runtimeOrigin'] as const) {
+      expect(goalSayOf(code)).toBe(GOAL_SAYS[code]);
+      expect(goalCodeOf(GOAL_SAYS[code])).toBe(code);
+    }
+    for (const [code, sentence] of [...Object.entries(GOAL_SAYS), ...Object.entries(GOAL_STATUS_SAYS)]) {
+      expect(noteProblems('Goals', sentence), code).toEqual([]);
+      expect(sentence, code).toMatch(/^[A-Z].*\.$/);
+    }
   });
 
   it('a view from a runtime without reviews still reads: next review, forecast and latest review default to nothing', () => {

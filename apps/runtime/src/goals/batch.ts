@@ -27,12 +27,20 @@
  *    filed again, whatever would have held a new one back (the day's cap, the
  *    review's limit). A due date within a week of the card's is the same
  *    change, so a date counted in days from today does not make yesterday's
- *    card a different one; the review then records the card's date.
+ *    card a different one; the review then records the card's date. Only while
+ *    the card's date is still ahead: a card asking for a day already past is
+ *    replaced by one with the fresh date.
  *  - A waiting card is withdrawn unsigned ("A newer review replaced it.") only
  *    when it can no longer apply to the plan as it stands, or when this review
  *    changes the same thing differently (another status, a date over a week
  *    away, another place). A review that suggests nothing, or whose model gave
- *    no usable answer, withdraws nothing that still applies.
+ *    no usable answer, withdraws nothing that still applies; a card that no
+ *    longer applies is withdrawn either way, so no dead card waits for Will.
+ *    A card is never split: when one of its changes is contradicted and the
+ *    day's cap holds the replacement back, the whole card goes and each of its
+ *    changes says it comes back at the next review.
+ *  - A step Flint already added (an open step with the same title) is not
+ *    suggested again under a new key.
  *  - A change Will turned down is not suggested again while its rejected card
  *    still holds its args (7 days): each part of it, so turning down a date and
  *    a status together turns down either alone.
@@ -90,6 +98,8 @@ import { STEP_TEMPLATES, STEP_TEMPLATES_REF, resolveReply, stepTitle, type DiffI
 const CARD_TTL_MINUTES = 7 * 24 * 60;
 export const DEFER_SECONDS = 15;
 export const MAX_DEFERRALS = 40;
+/** What Settings > Health says, for an hour, after a review gave up waiting for chat. */
+export const DEFERRAL_SAYS = `Chat was busy for ${(MAX_DEFERRALS * DEFER_SECONDS) / 60} minutes, so a goal review suggested no plan changes.`;
 /** The model was not there at all: the plan stage comes back this much later, at most this many times. */
 export const RETRY_SECONDS = 120;
 export const MAX_RETRIES = 3;
@@ -111,6 +121,8 @@ export interface OpPart {
   field: 'add' | 'dueAt' | 'status' | 'ordinal' | 'other';
   /** A status; a time in ms (null: no date); the key of the step it would follow ('' for first); null for an add. */
   value: string | number | null;
+  /** An added step's due time in ms (null: none). */
+  due?: number | null;
 }
 
 const inOrder = (steps: readonly PlanStepState[]) => [...steps].sort((a, b) => a.ordinal - b.ordinal || (a.key < b.key ? -1 : 1));
@@ -123,7 +135,7 @@ function followed(steps: readonly PlanStepState[], key: string, ordinal: number)
 
 /** An operation's parts, against the plan as it stands (a new place is told by the step it would follow). */
 export function partsOf(op: PlanOp, steps: readonly PlanStepState[] = []): OpPart[] {
-  if (op.op === 'add') return [{ slot: `add|${op.step.kind}|${op.step.title}`, field: 'add', value: null }];
+  if (op.op === 'add') return [{ slot: `add|${op.step.kind}|${op.step.title}`, field: 'add', value: null, due: op.step.dueAt ? Date.parse(op.step.dueAt) : null }];
   return Object.entries(op.to).flatMap(([k, v]): OpPart[] => {
     if (v === undefined) return [];
     const slot = `set|${op.key}|${k}`;
@@ -147,6 +159,12 @@ export function samePart(a: OpPart, b: OpPart): boolean {
   return a.value === b.value;
 }
 
+/** A waiting card's part whose date has come and gone: signing it would set a day already past. */
+export function pastDue(card: OpPart, now: Date): boolean {
+  const at = card.field === 'dueAt' ? card.value : card.field === 'add' ? card.due : null;
+  return typeof at === 'number' && at <= now.getTime();
+}
+
 /**
  * What Will's no to a part covers: an added step by its kind and title, a
  * status by its value, a date or a place by the field alone (he turned down
@@ -161,6 +179,8 @@ export interface WaitingCard {
 }
 
 export interface ComposeContext {
+  /** When the review composes: a waiting card's date is "the same change" only while it is still ahead of this. */
+  now: Date;
   steps: readonly PlanStepState[];
   horizonAt: string | null;
   /** The goal's linked items' labels, by entity id (made from their keys, items.ts). */
@@ -198,8 +218,9 @@ export interface Composition {
  *  1. each suggestion that still fits (its step there and open, something left
  *     to change) is one part;
  *  2. a part Will turned down is held (`rejected`);
- *  3. a waiting card that no longer applies, or that changes what a part
- *     changes but differently, is withdrawn;
+ *  3. a waiting card that no longer applies, that changes what a part changes
+ *     but differently, or that asks again for a date already past, is
+ *     withdrawn;
  *  4. a part a remaining waiting card already asks for is that card's: nothing
  *     new is filed for it, and it takes the card's date;
  *  5. the rest become new operations: an add gets the next key no step or
@@ -223,6 +244,8 @@ export function composeDiff(changes: readonly TemplateOp[], c: ComposeContext): 
     if (change.op === 'add') {
       const title = stepTitle(change.template, { ...(change.entityId ? { label: c.labels.get(change.entityId) } : {}), ...(change.criterion ? { criterion: c.criteria.get(change.criterion) } : {}) });
       if (!title) return null;
+      // The plan already has this step, still open (one Flint suggested and Will approved): it is not added again under a new key.
+      if (c.steps.some((x) => x.title === title && x.status !== 'done' && x.status !== 'skipped')) return null;
       w = { part: { slot: `add|${STEP_TEMPLATES[change.template].kind}|${title}`, field: 'add', value: null }, title };
     } else {
       // A done step stays done, and a skipped one comes back only by Will's own card.
@@ -250,12 +273,14 @@ export function composeDiff(changes: readonly TemplateOp[], c: ComposeContext): 
   const live = wanted.filter((w): w is Wanted => w !== null);
 
   // 3. The waiting cards: which still apply, and which this review changes differently.
+  /** Does the card's part still ask for what the review wants? The same change, and no date already past. */
+  const asks = (p: OpPart, w: Wanted) => samePart(p, w.part) && !pastDue(p, c.now);
   const withdraw: string[] = [];
   const kept: Array<{ id: string; ops: readonly PlanOp[]; parts: OpPart[] }> = [];
   for (const card of c.waiting ?? []) {
     const parts = card.ops.flatMap((o) => partsOf(o, c.steps));
     const applies = composePlan(c.steps, card.ops).ok;
-    const differs = parts.some((p) => live.some((w) => w.part.slot === p.slot && !samePart(w.part, p)));
+    const differs = parts.some((p) => live.some((w) => w.part.slot === p.slot && !asks(p, w)));
     if (!applies || differs) withdraw.push(card.id);
     else kept.push({ id: card.id, ops: card.ops, parts });
   }
@@ -265,12 +290,12 @@ export function composeDiff(changes: readonly TemplateOp[], c: ComposeContext): 
     if (!w) return;
     const s = suggestions[i]!;
     for (const card of kept) {
-      const at = card.parts.findIndex((p) => samePart(p, w.part));
+      const at = card.parts.findIndex((p) => asks(p, w));
       if (at < 0) continue;
       s.card = card.id;
       s.held = null;
       // The card's own date is the one Will is asked to sign: the review records that one.
-      const op = card.ops.find((o) => partsOf(o, c.steps).some((p) => samePart(p, w.part)))!;
+      const op = card.ops.find((o) => partsOf(o, c.steps).some((p) => asks(p, w)))!;
       const date = op.op === 'add' ? op.step.dueAt : op.to.dueAt;
       if (s.change.op === 'add') s.change = { ...s.change, dueAt: date ?? null };
       else if (s.change.op === 'due' && typeof date === 'string') s.change = { ...s.change, dueAt: date };
@@ -534,9 +559,11 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
 
   // 2. May it run, and is there a model to ask?
   const standing = await reviewStanding(db, now);
-  if (!standing.may) return settleNone(d, job.goalId, reviewId, 'skipped', standing.tier, now);
+  /** The trial week (this review's, or the rule's as it stands now): no card is filed, and none is touched. */
+  const shadow = snap.review.shadow || standing.shadow;
+  if (!standing.may) return settleNone(d, job.goalId, reviewId, 'skipped', standing.tier, now, true);
   const ollama = d.config.ollama;
-  if (!ollama) return settleNone(d, job.goalId, reviewId, 'off', standing.tier, now);
+  if (!ollama) return settleNone(d, job.goalId, reviewId, 'off', standing.tier, now, shadow);
   const cap = standing.cap ?? CODE_TABLE[REVIEW_ACTION]?.cap ?? { limit: 20, period: 'day' as const };
 
   // 3. The local model, one request at a time, yielding to chat.
@@ -561,7 +588,7 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
       return { outcome: 'deferred', reviewId };
     }
     // Chat has been busy for ten minutes: the review stands without a plan stage, and health says so.
-    await db.healthCheck.create({ data: { component: 'goals.deferral', status: 'degraded', detail: `Chat was busy for ${(MAX_DEFERRALS * DEFER_SECONDS) / 60} minutes, so a goal review suggested no plan changes.`, at: now } });
+    await db.healthCheck.create({ data: { component: 'goals.deferral', status: 'degraded', detail: DEFERRAL_SAYS, at: now } });
   }
   if (!planned.ok && planned.why === 'unavailable') {
     // The model was not there (Ollama stopped, a model still loading): a new attempt later, with its own 2 requests.
@@ -571,7 +598,7 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
       return { outcome: 'retrying', reviewId };
     }
   }
-  if (!planned.ok) return settleNone(d, job.goalId, reviewId, planned.why, standing.tier, now, { requests: planned.requests, modelMs: planned.modelMs });
+  if (!planned.ok) return settleNone(d, job.goalId, reviewId, planned.why, standing.tier, now, shadow, { requests: planned.requests, modelMs: planned.modelMs });
 
   // 4. The suggestions against the plan as it stands now (it may have changed while the model ran), the
   //    cards already waiting and what Will turned down.
@@ -584,12 +611,11 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
       await tx.goalReview.update({ where: { id: reviewId }, data: { planner: 'none:skipped' } });
       return undefined;
     }
-    const shadow = review.shadow || standing.shadow;
     const plan = await activePlan(tx, g.id);
     const steps = plan?.steps ?? [];
     const items = await linkedItems(tx, g.id, tz, now);
     const c = composeDiff(planned.value, {
-      steps, horizonAt: g.horizonAt?.toISOString() ?? null,
+      now, steps, horizonAt: g.horizonAt?.toISOString() ?? null,
       labels: new Map(items.map((i) => [i.entityId, i.label])), criteria: new Map(criteriaOf(g).map((x) => [x.id, x.text])),
       // The trial week files nothing and touches no card.
       waiting: shadow ? [] : await waitingCards(tx, g.id, now),
@@ -633,21 +659,31 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
   return { outcome: 'planned', reviewId, suggested: diff.length, filed: filed.length, kept: kept.length };
 }
 
-/** The review's plan stage ended without an answer: it says why, and so does the audit trail. No card is touched. */
+/**
+ * The review's plan stage ended without an answer: it says why, and so does the
+ * audit trail. No card that still applies is touched. One that no longer does
+ * (the plan moved on under it) is withdrawn all the same, outside the trial
+ * week: a dead card must not wait for Will because the model had nothing to say.
+ */
 async function settleNone(
   d: PlanStageDeps, goalId: string, reviewId: string, why: 'off' | 'capped' | 'unavailable' | 'invalid' | 'deferred' | 'skipped', tier: 'alone' | 'approval' | 'forbidden', now: Date,
-  model: { requests: number; modelMs: number } = { requests: 0, modelMs: 0 },
+  shadow: boolean, model: { requests: number; modelMs: number } = { requests: 0, modelMs: 0 },
 ): Promise<PlanOutcome> {
-  await d.db.$transaction(async (tx) => {
-    await lockGoal(tx, goalId);
+  const dead = await d.db.$transaction(async (tx) => {
+    const g = await lockGoal(tx, goalId);
     const review = await tx.goalReview.findUnique({ where: { id: reviewId }, select: { planner: true } });
-    if (!review || review.planner !== null) return;
+    if (!g || !review || review.planner !== null) return [];
+    const steps = shadow || g.status !== 'active' ? [] : ((await activePlan(tx, goalId))?.steps ?? []);
+    const gone = shadow || g.status !== 'active' ? [] : (await waitingCards(tx, goalId, now)).filter((c) => !composePlan(steps, c.ops).ok).map((c) => c.id);
     await tx.goalReview.update({ where: { id: reviewId }, data: { planner: `none:${why}` } });
     await appendAudit(tx, [{
       actor: GOALS_ACTOR, context: 'autonomous', kind: 'action', action: REVIEW_ACTION, tier, decision: 'log', outcome: why === 'invalid' || why === 'unavailable' ? 'failed' : 'skipped', correlationId: reviewId,
-      inputs: { goalId, reviewId, stage: 'plan', planner: why, requests: model.requests, modelMs: model.modelMs },
+      inputs: { goalId, reviewId, stage: 'plan', planner: why, requests: model.requests, modelMs: model.modelMs, withdrawn: gone.length },
     }], now);
+    return gone;
   }, READ_COMMITTED);
+  // No lock is held while a card is withdrawn.
+  for (const id of dead) await rejectProposal(d.db, id, { error: SAY.replacedReview }, undefined, GOALS_ACTOR).catch(() => {});
   return { outcome: 'none', reviewId, why };
 }
 

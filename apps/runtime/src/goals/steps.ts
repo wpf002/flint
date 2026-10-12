@@ -49,19 +49,31 @@ export function stepTitle(template: StepTemplateId, about: { label?: string | un
   return t.title(t.about === 'criterion' ? clip(x, CRITERION_CLIP) : x).slice(0, 200);
 }
 
-const SHAPES = STEP_TEMPLATE_IDS.map((id) => {
-  const t = STEP_TEMPLATES[id];
-  const [before, after] = t.title('\u0000').split('\u0000');
-  return { kind: t.kind as StepKind, before: before ?? '', after: after ?? '', fixed: t.about === 'nothing' };
-});
+/** What a goal gives a template to be about: is this text one of its linked items' labels, and its checks' words. */
+export interface TemplateWords {
+  label: (text: string) => boolean;
+  criteria: readonly string[];
+}
 
 /**
- * Could a step of this kind and title have come from a template? The card gate
- * (apply.ts) asks before it files or runs a review's added step, so the
- * templates hold whoever calls the proposals contract, not only this module.
+ * Did a step of this kind and title come from a template, about THIS goal? The
+ * card gate (apply.ts) asks before it files or runs a review's added step, so
+ * the templates hold whoever calls the proposals contract, not only this
+ * module. The shape alone is not enough ("Check on <any text>" has it): what a
+ * template is about must be one of the goal's linked items, by its label, or
+ * one of its checks, by its own words as stepTitle clips them.
  */
-export function fromTemplate(title: string, kind: StepKind): boolean {
-  return SHAPES.some((x) => x.kind === kind && (x.fixed ? title === x.before : title.length > x.before.length + x.after.length && title.startsWith(x.before) && title.endsWith(x.after)));
+export function fromTemplate(title: string, kind: StepKind, goal: TemplateWords): boolean {
+  return STEP_TEMPLATE_IDS.some((id) => {
+    const t = STEP_TEMPLATES[id];
+    if (t.kind !== kind) return false;
+    if (t.about === 'nothing') return title === t.title('');
+    if (t.about === 'criterion') return goal.criteria.some((c) => stepTitle(id, { criterion: c }) === title);
+    const [before = '', after = ''] = t.title('\u0000').split('\u0000');
+    if (title.length <= before.length + after.length || !title.startsWith(before) || !title.endsWith(after)) return false;
+    const label = title.slice(before.length, title.length - after.length);
+    return goal.label(label) && stepTitle(id, { label }) === title;
+  });
 }
 
 /** 17:00 local, `days` calendar days from now's local day: a calendar step, never a multiple of 24 hours. */

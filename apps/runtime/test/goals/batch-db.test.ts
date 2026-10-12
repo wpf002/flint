@@ -18,6 +18,11 @@
  *    or the review changes the same thing differently: never by an empty or
  *    unusable reply. What Will rejected is not asked again, and Flint's own
  *    withdrawals never crowd his rejections out.
+ *  - A kept card never asks for a day already past; a dead card is withdrawn
+ *    even when the model had nothing usable to say; a card is never split
+ *    (cap reached and one of its changes contradicted: it goes, and each
+ *    change says it comes back); a step Will already approved is not added
+ *    again; a review's new step is about the goal's own items and checks.
  *  - A model that is not there is asked again, 2 minutes later, at most 3
  *    times; a run that yielded to chat keeps the review's request count; a run
  *    that died after filing its cards files none twice.
@@ -203,14 +208,20 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect(await stage(g.id, back, down)).toMatchObject({ outcome: 'retrying' });
     expect(await stage(g.id, back, [answer([], 'on_track')], {}, { retries: 1, claimed: true })).toMatchObject({ outcome: 'planned', reviewId: back });
     expect((await row(back)).planner).toBe('ollama:muse-glimmer:30b');
-    // It answers, but not with template operations: twice, and no more.
+    // It answers, but not with template operations: twice, and no more. (A card left waiting from before the trial week,
+    // which the plan has since outrun, is not touched either: in the trial week the stage touches no card at all.)
+    const left = await waitingCard(g, [{ op: 'set', key: 's4', from: { title: `${CANARY} step s4`, status: 'todo' }, to: { status: 'blocked' } }]);
+    const outrun = await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' } });
+    await db.planStep.update({ where: { planId_key: { planId: outrun.id, key: 's4' } }, data: { status: 'in_progress' } });
     id = await reviewed(g.id);
     prompts = [];
     expect(await stage(g.id, id, [JSON.stringify({ reasonCode: 'slipping', ops: [{ ...op({ op: 'add_step', template: 'review_progress' }), title: 'A step in the model’s own words' }] })])).toMatchObject({ outcome: 'none', why: 'invalid' });
     expect(await recorded(id)).toMatchObject({ planner: 'none:invalid', diff: null });
     expect(prompts).toHaveLength(2);
-    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: id, inputs: { path: ['stage'], equals: 'plan' } } }))).toMatchObject({ outcome: 'failed', inputs: { planner: 'invalid', requests: 2 } });
-    expect(await cards(g.id)).toEqual([]);
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: id, inputs: { path: ['stage'], equals: 'plan' } } }))).toMatchObject({ outcome: 'failed', inputs: { planner: 'invalid', requests: 2, withdrawn: 0 } });
+    expect((await row(id)).shadow).toBe(true);
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([left.id]);
+    await rejectProposal(db, left.id, {}, undefined, 'server');
     // Each review claimed one slot of the day's 20, counted even though it failed, and once however often it came back.
     expect((await db.actionCounter.findUniqueOrThrow({ where: { action_day: { action: 'goal.review.local', day: day() } } })).count).toBe(3);
     await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
@@ -484,6 +495,143 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
       { change: { op: 'skip', key: 's3' }, class: 'material', card: null, held: 'stale' },
     ]);
     await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1 OR action = 'goal.review.local' OR action LIKE 'goal.review:%'`, [PLAN_CARDS_COUNTER]);
+  });
+
+  /** A review card filed straight through the proposals contract, as an earlier review would have left it waiting. */
+  const waitingCard = (g: { id: string; title: string }, ops: unknown[], templateId = 'plan.diff.minor') =>
+    createProposal(db, {
+      kind: 'plan', origin: 'runtime:goals', action: 'plan.change', templateId, args: { goalId: g.id, goalTitle: g.title, ops },
+      argsProvenance: { ops: { source: 'model', ref: 'goal.review.local', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: templateId !== 'plan.diff.minor', ttlMinutes: 60,
+    }, 'runtime:goals');
+  const dueOf = async (goalId: string, key: string) => (await db.planStep.findFirstOrThrow({ where: { key, plan: { goalId, status: 'active' } } })).dueAt!.toISOString();
+
+  it('R1: a waiting card that asks for a day already past is replaced by one with the fresh date, not kept', async () => {
+    const g = await planned(305);
+    // Filed by an earlier review for a day that has since gone by (yesterday, 17:00).
+    const yesterday = dueIn('UTC', new Date(Date.now() - DAY), 0);
+    const old = await waitingCard(g, [{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, dueAt: await dueOf(g.id, 's2') }, to: { dueAt: yesterday } }]);
+    expect(Date.parse(yesterday)).toBeLessThan(Date.now());
+    // Today's review names a day within a week of the card's: it was "the same change", and the card for yesterday was kept.
+    const reviewId = await reviewed(g.id);
+    expect(await stage(g.id, reviewId, [answer([op({ op: 'set_due', step: 's2', dueInDays: 3 })])])).toMatchObject({ outcome: 'planned', suggested: 1, filed: 1, kept: 0 });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ status: 'rejected', error: 'A newer review replaced it.' });
+    const [fresh] = await cards(g.id);
+    expect((fresh!.args as { ops: Array<{ to: { dueAt: string } }> }).ops[0]!.to.dueAt).toBe(dueIn('UTC', new Date(), 3));
+    expect(await diffOf(reviewId)).toEqual([{ change: { op: 'due', key: 's2', dueAt: dueIn('UTC', new Date(), 3) }, class: 'minor', card: fresh!.id, held: null }]);
+    // That card's day is still ahead: the next review keeps it.
+    const next = await reviewed(g.id);
+    expect(await stage(g.id, next, [answer([op({ op: 'set_due', step: 's2', dueInDays: 4 })])])).toMatchObject({ filed: 0, kept: 1 });
+    expect((await cards(g.id)).map((c) => c.id)).toEqual([fresh!.id]);
+  });
+
+  it('R4: a card that can no longer apply is withdrawn even when the model gave nothing usable; one that still applies stays', async () => {
+    const g = await planned(306);
+    const dead = await waitingCard(g, [{ op: 'set', key: 's4', from: { title: `${CANARY} step s4`, status: 'todo' }, to: { status: 'blocked' } }]);
+    const live = await waitingCard(g, [{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, status: 'todo' }, to: { status: 'in_progress' } }]);
+    // Will moves s4 on himself: the first card's precondition no longer holds.
+    const plan = await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' } });
+    await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's4' } }, data: { status: 'in_progress' } });
+    const statusOf = async (id: string) => (await db.proposal.findUniqueOrThrow({ where: { id } })).status;
+    // The model answers, but not with anything usable.
+    const reviewId = await reviewed(g.id);
+    expect(await stage(g.id, reviewId, ['not json'])).toMatchObject({ outcome: 'none', why: 'invalid' });
+    expect([await statusOf(dead.id), await statusOf(live.id)]).toEqual(['rejected', 'pending']);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: dead.id } })).toMatchObject({ error: 'A newer review replaced it.', approvalId: null });
+    expect((await db.auditEntry.findFirstOrThrow({ where: { correlationId: reviewId, inputs: { path: ['stage'], equals: 'plan' } } })).inputs).toMatchObject({ planner: 'invalid', withdrawn: 1 });
+    // The same when the model is not there at all, the day's cap is used up, or chat stayed busy: whatever ended the stage.
+    for (const [why, run] of [
+      ['unavailable', (id: string) => stage(g.id, id, [() => { throw new TypeError('fetch failed'); }], {}, { retries: MAX_RETRIES })],
+      ['deferred', (id: string) => stage(g.id, id, [answer([])], { load: async () => 'defer' as const }, { deferrals: MAX_DEFERRALS })],
+      ['off', (id: string) => runPlan({ db, bus, config: { tz: 'UTC' }, load: async () => 'proceed' }, { goalId: g.id, reviewId: id })],
+    ] as const) {
+      const again = await waitingCard(g, [{ op: 'set', key: 's4', from: { title: `${CANARY} step s4`, status: 'todo' }, to: { status: 'blocked' } }]).catch(() => null);
+      // (The gate refuses a card that cannot apply, so the dead one is made by moving the step back and forth.)
+      expect(again, why).toBeNull();
+      await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's4' } }, data: { status: 'todo' } });
+      const card = await waitingCard(g, [{ op: 'set', key: 's4', from: { title: `${CANARY} step s4`, status: 'todo' }, to: { status: 'blocked' } }]);
+      await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's4' } }, data: { status: 'in_progress' } });
+      expect(await run(await reviewed(g.id)), why).toMatchObject({ outcome: 'none', why });
+      expect([await statusOf(card.id), await statusOf(live.id)], why).toEqual(['rejected', 'pending']);
+    }
+    await db.healthCheck.deleteMany({ where: { component: 'goals.deferral' } });
+    // (In the trial week no card is touched, dead or not: the test of what the model does, above, holds that.)
+  });
+
+  it('R5: cap reached and one change of a two-change card contradicted: the card is never split, it goes, and both changes say they come back', async () => {
+    const g = await planned(307);
+    // One small card with two changes, and a second card of its own.
+    await stage(g.id, await reviewed(g.id), [answer([op({ op: 'set_status', step: 's4', status: 'blocked' }), op({ op: 'set_due', step: 's2', dueInDays: 4 }), op({ op: 'skip', step: 's3' })])]);
+    const [small, alone] = await cards(g.id);
+    expect([(small!.args as { ops: unknown[] }).ops.length, alone!.templateId]).toEqual([2, 'plan.diff.material']);
+    // The day's 9 are used. The next review still wants the date and the skip, and now wants s4 in progress instead of blocked.
+    await fx.owner(`INSERT INTO "ActionCounter" (action, day, count) VALUES ($1, $2, $3) ON CONFLICT (action, day) DO UPDATE SET count = $3`, [PLAN_CARDS_COUNTER, day(), GOAL_BUDGETS.planCardsPerDay]);
+    const second = await reviewed(g.id);
+    expect(await stage(g.id, second, [answer([op({ op: 'set_status', step: 's4', status: 'in_progress' }), op({ op: 'set_due', step: 's2', dueInDays: 4 }), op({ op: 'skip', step: 's3' })])])).toMatchObject({ suggested: 3, filed: 0, kept: 1 });
+    // The card that stands alone is kept, cap or no cap. The two-change card holds a change the review no longer wants: a
+    // signed card cannot be cut in two, so it is withdrawn whole, and nothing contradictory waits for Will.
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: alone!.id } })).toMatchObject({ status: 'pending' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: small!.id } })).toMatchObject({ status: 'rejected', error: 'A newer review replaced it.' });
+    expect((await diffOf(second)).map((d) => [d.change.op, d.card, d.held])).toEqual([['status', null, 'cap'], ['due', null, 'cap'], ['skip', alone!.id, null]]);
+    // The panel says so under each of the two: "Flint will suggest this again at the next review." (the `later` mark).
+    const v = (await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!;
+    expect(v.review!.changes.map((c) => [c.kind, c.later])).toEqual([['status', true], ['due', true], ['skip', false]]);
+    expect(v.waiting.map((w) => w.id)).toEqual([alone!.id]);
+    // The next review, with room again: both are on one new card.
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1`, [PLAN_CARDS_COUNTER]);
+    const third = await reviewed(g.id);
+    expect(await stage(g.id, third, [answer([op({ op: 'set_status', step: 's4', status: 'in_progress' }), op({ op: 'set_due', step: 's2', dueInDays: 4 }), op({ op: 'skip', step: 's3' })])])).toMatchObject({ filed: 1, kept: 1 });
+    const now = await cards(g.id);
+    expect(now.map((c) => [c.templateId, (c.args as { ops: unknown[] }).ops.length])).toEqual([['plan.diff.material', 1], ['plan.diff.minor', 2]]);
+    expect((await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!.review!.changes.map((c) => c.later)).toEqual([false, false, false]);
+  });
+
+  it('R6: a step Flint added and Will approved is not suggested again under a new key', async () => {
+    const g = await planned(308);
+    const add = [answer([op({ op: 'add_step', template: 'check_item', ref: g.ref, dueInDays: 2 })])];
+    await stage(g.id, await reviewed(g.id), add);
+    const [card] = await cards(g.id);
+    expect(await fx.signRun(card!.id)).toMatchObject({ version: 2, steps: 5 });
+    // The model suggests the same step again (it sees it in the plan, and may still say so).
+    const second = await reviewed(g.id);
+    expect(await stage(g.id, second, add)).toMatchObject({ outcome: 'planned', suggested: 1, filed: 0, kept: 0 });
+    expect(await cards(g.id)).toEqual([]);
+    expect((await diffOf(second)).map((d) => [d.change.op, d.card, d.held])).toEqual([['add', null, 'stale']]);
+    expect((await goalView(db, g.id, 'UTC', new Date(), { reviews: true }))!.review!.changes).toEqual([]);
+    const plan = await db.plan.findFirstOrThrow({ where: { goalId: g.id, status: 'active' }, include: { steps: true } });
+    expect(plan.steps.filter((x) => x.title === 'Check on wpf002/flint #308')).toHaveLength(1);
+    // Once Will has done it, the same check may be worth doing again: then it is a new step.
+    await db.planStep.update({ where: { planId_key: { planId: plan.id, key: 's5' } }, data: { status: 'done', doneAt: new Date() } });
+    const third = await reviewed(g.id);
+    expect(await stage(g.id, third, add)).toMatchObject({ filed: 1 });
+    expect(((await cards(g.id))[0]!.args as { ops: Array<{ key: string }> }).ops[0]!.key).toBe('s6');
+  });
+
+  it('R7: a review’s new step is about the goal’s own items and checks: the right shape about anything else is refused at the gate', async () => {
+    const g = await planned(309);
+    const other = await fx.pullRequest(310, 'open');
+    const add = (title: string, kind = 'will_task') => waitingCard(g, [{ op: 'add', key: 's9', step: { ordinal: 900, title, kind, tier: 'approval', dueAt: null, dependsOn: [] } }], 'plan.diff.material');
+    const refused = { status: 400, message: 'A review adds a step only from its templates, and changes only a step’s status, date or place.' };
+    // The shape of a template, about text that is none of this goal's: an item it is not linked to, any words at all.
+    await expect(add('Check on wpf002/flint #310')).rejects.toMatchObject(refused);
+    await expect(add('Check on wire $5,000 to the reviewer')).rejects.toMatchObject(refused);
+    await expect(add('Follow up on Synthetic free text nobody templated')).rejects.toMatchObject(refused);
+    await expect(add('Wait for the stranger’s title to change', 'wait')).rejects.toMatchObject(refused);
+    await expect(add('Work on: Synthetic words that are no check of this goal')).rejects.toMatchObject(refused);
+    // Never the item's own title (a stranger's words), even for the linked one.
+    await expect(add(`Check on ${INJECTION}`)).rejects.toMatchObject(refused);
+    expect(other).toBeTruthy();
+    expect(await cards(g.id)).toEqual([]);
+    // About its linked item, by its label, or one of its checks, by its own words: filed.
+    const filed = [await add('Check on wpf002/flint #309'), await add(`Work on: ${CANARY} check c2`), await add('Decide what to do about wpf002/flint #309', 'decision'), await add('Review your progress on this goal')];
+    expect(new Set(filed.map((f) => f.id)).size).toBe(4);
+    // And held to it again when the card runs: the link is gone by then (Will edited the goal), so the step is no longer about this goal.
+    const v = (await goalView(db, g.id, 'UTC'))!;
+    await fx.fileSignRun('goal.criteria_change', {
+      goalId: g.id, title: g.title, description: v.description, successCriteria: [fx.crit('c2', { kind: 'steps', keys: ['s1', 's2'] })], links: [],
+      from: { title: g.title, description: v.description, successCriteria: v.successCriteria, links: v.links.map((l) => ({ entityId: l.entityId, role: l.role, watchPaths: l.watchPaths })) },
+    });
+    await expect(fx.signRun(filed[0]!.id)).rejects.toMatchObject({ status: 409, message: 'The plan changed since Flint suggested this.' });
+    expect(await fx.signRun(filed[1]!.id)).toMatchObject({ steps: 5 });
   });
 
   it('a run that died between filing its cards and writing the review files none twice when it runs again', async () => {

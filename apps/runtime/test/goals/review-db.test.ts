@@ -108,11 +108,10 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
   let db: Db;
   let fx: GoalFixture;
   const bus = new FakeBus();
-  const review = (job: Parameters<typeof runReview>[1], now = new Date(), tz = 'UTC', since?: Date | null) => runReview({ db, bus, tz, now: () => now, ...(since !== undefined ? { since } : {}) }, job);
-  /** `since`: since when the tick has run (late.ts); left out, the tick is taken as always running. */
-  const scheduled = async (goalId: string, now = new Date(), tz = 'UTC', since?: Date | null) => {
+  const review = (job: Parameters<typeof runReview>[1], now = new Date(), tz = 'UTC') => runReview({ db, bus, tz, now: () => now }, job);
+  const scheduled = async (goalId: string, now = new Date(), tz = 'UTC') => {
     const g = await db.goal.findUniqueOrThrow({ where: { id: goalId } });
-    return review({ goalId, kind: 'scheduled', dueAt: g.nextReviewAt!.toISOString() }, now, tz, since);
+    return review({ goalId, kind: 'scheduled', dueAt: g.nextReviewAt!.toISOString() }, now, tz);
   };
   const forecasts = (goalId: string) => db.prediction.findMany({ where: { goalId }, orderBy: { createdAt: 'asc' } });
 
@@ -315,16 +314,23 @@ describe.skipIf(NO_DB)('a goal’s review on flint_test', () => {
     const waited = await fx.activeGoal();
     const asleep = await fx.activeGoal();
     const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
-    // Its review was due two hours ago and Flint was reviewing all that time (a job that kept dying): it runs now, late.
-    await db.goal.update({ where: { id: late.id }, data: { nextReviewAt: hoursAgo(2) } });
-    expect((await scheduled(onTime.id, new Date(), 'UTC', hoursAgo(5))).outcome).toBe('reviewed');
-    expect((await scheduled(late.id, new Date(), 'UTC', hoursAgo(5))).outcome).toBe('reviewed');
-    // Review finding 7: these two were also due two hours ago, but only because Flint was not reviewing then: reviews were
-    // turned on five minutes ago, or its first tick has not run yet. It caught up at once: neither is late.
-    await db.goal.update({ where: { id: waited.id }, data: { nextReviewAt: hoursAgo(2) } });
-    await db.goal.update({ where: { id: asleep.id }, data: { nextReviewAt: hoursAgo(2) } });
-    expect((await scheduled(waited.id, new Date(), 'UTC', new Date(Date.now() - 5 * MIN))).outcome).toBe('reviewed');
-    expect((await scheduled(asleep.id, new Date(), 'UTC', null)).outcome).toBe('reviewed');
+    /** The Goal Reviews rows the health job writes every 5 minutes while reviews are on: Flint was reviewing for the last `minutes`. */
+    const reviewingFor = async (minutes: number) => {
+      await db.healthCheck.deleteMany({ where: { component: 'goals' } });
+      await db.healthCheck.createMany({ data: Array.from({ length: Math.floor(minutes / 5) + 1 }, (_, i) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - (minutes - 5 * i) * MIN) })) });
+    };
+    for (const g of [late, waited, asleep]) await db.goal.update({ where: { id: g.id }, data: { nextReviewAt: hoursAgo(2) } });
+    // Review finding 7: these two were due two hours ago only because Flint was not reviewing then. Its first check has not
+    // run yet (reviews were just turned on, or the Mac just woke), or reviews came on five minutes ago. It catches up at
+    // once: neither is late.
+    await db.healthCheck.deleteMany({ where: { component: 'goals' } });
+    expect((await scheduled(asleep.id)).outcome).toBe('reviewed');
+    await reviewingFor(5);
+    expect((await scheduled(waited.id)).outcome).toBe('reviewed');
+    // This one was due two hours ago and Flint was reviewing all that time (a job that kept dying): it runs now, late.
+    await reviewingFor(180);
+    expect((await scheduled(onTime.id)).outcome).toBe('reviewed');
+    expect((await scheduled(late.id)).outcome).toBe('reviewed');
     const flag = async (goalId: string) => ((await db.auditEntry.findFirstOrThrow({ where: { action: 'goal.review.local', inputs: { path: ['goalId'], equals: goalId } }, orderBy: { seq: 'desc' } })).inputs as { late?: boolean }).late ?? false;
     expect([await flag(onTime.id), await flag(late.id), await flag(waited.id), await flag(asleep.id)]).toEqual([false, true, false, false]);
     // Two reviews of one goal are one goal reviewed.

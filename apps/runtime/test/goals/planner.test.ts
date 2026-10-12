@@ -29,7 +29,8 @@ import { join } from 'node:path';
 import { PlanOps, classifyPlanOp, composePlan, estimateTokens, type PlanOp, type PlanStepState } from '@flint/policy';
 import { MODEL_REQUESTS, PLAN_SCHEMA, PlanReply, REPLY_TOKENS, planDiff, planPrompt, promptBudget, type PlanFacts } from '../../src/goals/planner';
 import { STEP_TEMPLATES, STEP_TEMPLATE_IDS, dueIn, fromTemplate, resolveReply, stepTitle, type PlanState, type ReplyOp, type TemplateOp } from '../../src/goals/steps';
-import { classify, composeDiff, partsOf, refusalOf, samePart, type WaitingCard } from '../../src/goals/batch';
+import { classify, composeDiff, partsOf, pastDue, refusalOf, samePart, type WaitingCard } from '../../src/goals/batch';
+import { labelCouldBe, labelOf } from '../../src/goals/items';
 import { modelSlot } from '../../src/model/slot';
 import { judge } from '../../src/triage/judge';
 import { facts as eventFacts } from '../triage/helpers';
@@ -320,7 +321,7 @@ describe('templates, and suggestions as signed operations', () => {
   });
   const due = (days: number) => dueIn(TZ, NOW, days);
   const ctx = (steps: PlanStepState[], horizonAt: string | null = '2026-12-01T05:59:00.000Z') => ({
-    steps, horizonAt, labels: new Map([['enpr000abc123', 'wpf002/flint #57']]), criteria: new Map([['c1', 'Synthetic check: the race is run']]),
+    now: NOW, steps, horizonAt, labels: new Map([['enpr000abc123', 'wpf002/flint #57']]), criteria: new Map([['c1', 'Synthetic check: the race is run']]),
   });
 
   it('a step title comes from a template and nothing else', () => {
@@ -340,16 +341,49 @@ describe('templates, and suggestions as signed operations', () => {
     expect([STEP_TEMPLATES.check_item.kind, STEP_TEMPLATES.wait_for_item.kind, STEP_TEMPLATES.decide.kind]).toEqual(['will_task', 'wait', 'decision']);
   });
 
-  it('a title is told from a template’s by its shape and kind (what the card gate asks)', () => {
-    for (const id of STEP_TEMPLATE_IDS) expect(fromTemplate(stepTitle(id, { label: 'wpf002/flint #57', criterion: 'Synthetic check' })!, STEP_TEMPLATES[id].kind), id).toBe(true);
-    expect(fromTemplate('Synthetic free text nobody templated', 'will_task')).toBe(false);
-    // The right words under the wrong kind, a template with nothing in it, or words after a fixed title: not a template's.
-    expect(fromTemplate('Check on wpf002/flint #57', 'flint_action')).toBe(false);
-    expect(fromTemplate('Check on wpf002/flint #57', 'decision')).toBe(false);
-    expect(fromTemplate('Check on ', 'will_task')).toBe(false);
-    expect(fromTemplate('Wait for x to change', 'wait')).toBe(true);
-    expect(fromTemplate('Wait for  to change', 'wait')).toBe(false);
-    expect(fromTemplate('Review your progress on this goal and more', 'will_task')).toBe(false);
+  it('a title is a template’s only when it is about this goal: one of its linked items by label, or one of its checks by its own words', () => {
+    // What the card gate asks (review finding R7): the shape alone ("Check on <any text>") is not enough.
+    const goal = { label: (x: string) => x === 'wpf002/flint #57', criteria: ['Synthetic check', 'x'.repeat(300)] };
+    for (const id of STEP_TEMPLATE_IDS) expect(fromTemplate(stepTitle(id, { label: 'wpf002/flint #57', criterion: 'Synthetic check' })!, STEP_TEMPLATES[id].kind, goal), id).toBe(true);
+    // A check's words as stepTitle clips them.
+    expect(fromTemplate(`Work on: ${'x'.repeat(79)}…`, 'will_task', goal)).toBe(true);
+    // The right shape about something that is not this goal's: an item it is not linked to, words that are no check of its.
+    expect(fromTemplate('Check on wpf002/flint #58', 'will_task', goal)).toBe(false);
+    expect(fromTemplate('Check on Synthetic free text nobody templated', 'will_task', goal)).toBe(false);
+    expect(fromTemplate('Follow up on wire $5,000 to the reviewer', 'will_task', goal)).toBe(false);
+    expect(fromTemplate('Wait for anything at all to change', 'wait', goal)).toBe(false);
+    expect(fromTemplate('Decide what to do about ', 'decision', goal)).toBe(false);
+    expect(fromTemplate('Work on: other words', 'will_task', goal)).toBe(false);
+    expect(fromTemplate('Work on: Synthetic check and more', 'will_task', goal)).toBe(false);
+    // No shape at all, the right words under the wrong kind, or words after a fixed title.
+    expect(fromTemplate('Synthetic free text nobody templated', 'will_task', goal)).toBe(false);
+    expect(fromTemplate('Check on wpf002/flint #57', 'flint_action', goal)).toBe(false);
+    expect(fromTemplate('Check on wpf002/flint #57', 'decision', goal)).toBe(false);
+    expect(fromTemplate('Review your progress on this goal and more', 'will_task', goal)).toBe(false);
+    // A goal with no links and no such check has only the fixed template.
+    const bare = { label: () => false, criteria: [] };
+    expect(STEP_TEMPLATE_IDS.filter((id) => fromTemplate(stepTitle(id, { label: 'wpf002/flint #57', criterion: 'Synthetic check' })!, STEP_TEMPLATES[id].kind, bare))).toEqual(['review_progress']);
+  });
+
+  it('an item’s label is its own, or the words for what it is and when Flint first saw it, whatever the day’s words', () => {
+    const seen = new Date('2026-10-03T15:00:00.000Z');
+    const pr = { id: 'en1', kind: 'pull_request', key: 'pull_request:github:wpf002/flint#57', name: 'A stranger’s title', taintedPaths: ['name'], firstSeenAt: seen };
+    expect(labelCouldBe(pr, 'wpf002/flint #57')).toBe(true);
+    expect(labelCouldBe(pr, 'wpf002/flint #58')).toBe(false);
+    expect(labelCouldBe(pr, 'A stranger’s title')).toBe(false);
+    const service = { id: 'en2', kind: 'service', key: 'service:launchd:com.flint.runtime', name: 'com.flint.runtime', taintedPaths: [], firstSeenAt: seen };
+    expect(labelCouldBe(service, 'com.flint.runtime')).toBe(true);
+    expect(labelCouldBe(service, 'com.flint.server')).toBe(false);
+    // A Nexus thread's name is someone else's words: it is named by what it is and when, with its place among that day's.
+    const thread = { id: 'en3', kind: 'thread', key: 'thread:nexus:abc', name: 'Finish the goals panel review', taintedPaths: ['name'], firstSeenAt: seen };
+    for (const tz of ['UTC', 'America/Chicago', 'Pacific/Auckland']) expect(labelCouldBe(thread, labelOf(thread, tz, NOW)), tz).toBe(true);
+    expect(labelCouldBe(thread, labelOf(thread, 'UTC', NOW, 2))).toBe(true);
+    expect(labelCouldBe(thread, labelOf(thread, 'UTC', new Date('2027-03-01T00:00:00Z')))).toBe(true);
+    expect(labelCouldBe(thread, 'Nexus Thread from Oct 3')).toBe(true);
+    expect(labelCouldBe(thread, 'Nexus Thread 2 from Oct 3, 2026')).toBe(true);
+    for (const not of ['Finish the goals panel review', 'Nexus Thread', 'Nexus Thread from wire $5,000 to the reviewer', 'Nexus Thread from Oct 3 and more', 'GitHub Thread from Oct 3', 'Nexus Issue from Oct 3']) {
+      expect(labelCouldBe(thread, not), not).toBe(false);
+    }
   });
 
   it('a new step is due at 17:00 local on its day, across a DST change', () => {
@@ -527,6 +561,43 @@ describe('templates, and suggestions as signed operations', () => {
       expect(c.withdraw).toEqual([]);
       expect(c.ops.size).toBe(0);
       expect(c.suggestions.map((s) => [s.card, s.change.op === 'move' || s.change.op === 'status' || s.change.op === 'skip' ? null : s.change.dueAt])).toEqual([['prdate', due(3)], ['pradd', due(4)]]);
+    });
+
+    it('R1: a card that asks for a date already past is not kept: it is withdrawn, and the fresh date gets its own card', () => {
+      const past = (days: number) => dueIn(TZ, new Date(NOW.getTime() - days * 86_400_000), 0);
+      // Filed days ago for a day that has since gone by; today's review names a day within a week of it.
+      const waiting = [card('prdate', date('s2', past(1), due(2))), card('pradd', added('s5', 'Check on wpf002/flint #57', 500, past(2))), card('prfine', status('s4', 'blocked'))];
+      const c = composeDiff([
+        { op: 'due', key: 's2', dueAt: due(3) },
+        { op: 'add', template: 'check_item', entityId: 'enpr000abc123', criterion: null, dueAt: due(4), after: null },
+        { op: 'status', key: 's4', status: 'blocked' },
+      ], { ...ctx(steps()), waiting });
+      expect(c.withdraw).toEqual(['prdate', 'pradd']);
+      expect(c.suggestions.map((s) => [s.change.op, s.key, s.card])).toEqual([['due', 's2', null], ['add', 's5', null], ['status', null, 'prfine']]);
+      expect(c.ops.get('s2')!.op).toMatchObject({ to: { dueAt: due(3) } });
+      expect(c.ops.get('s5')!.op).toMatchObject({ op: 'add', step: { title: 'Check on wpf002/flint #57', dueAt: due(4) } });
+      // The same cards a moment before their dates: still the same change, kept as they are.
+      const before = composeDiff([{ op: 'due', key: 's2', dueAt: due(3) }], { ...ctx(steps()), now: new Date(Date.parse(past(1)) - 1), waiting });
+      expect(before).toMatchObject({ withdraw: [], suggestions: [{ card: 'prdate' }] });
+      // A card with a day gone by that the review does not ask for again is left to Will: only a fresh suggestion replaces it.
+      expect(composeDiff([], { ...ctx(steps()), waiting }).withdraw).toEqual([]);
+      // An added step with no date is never past.
+      const undated = [card('pradd', added('s5', 'Check on wpf002/flint #57', 500))];
+      expect(composeDiff([{ op: 'add', template: 'check_item', entityId: 'enpr000abc123', criterion: null, dueAt: due(4), after: null }], { ...ctx(steps()), waiting: undated })).toMatchObject({ withdraw: [], suggestions: [{ card: 'pradd' }] });
+      const one = (o: PlanOp) => partsOf(o, steps())[0]!;
+      expect([pastDue(one(date('s2', past(1), due(2))), NOW), pastDue(one(date('s2', due(1), due(2))), NOW), pastDue(one(status('s4', 'blocked')), NOW), pastDue(one(added('s5', 'T', 500)), NOW)]).toEqual([true, false, false, false]);
+    });
+
+    it('R6: a step the plan already has, still open, is not added again under a new key', () => {
+      // Flint suggested "Check on wpf002/flint #57", Will approved it, and it is now s5. The next review suggests it again.
+      const has = [...steps(), step('s5', { title: 'Check on wpf002/flint #57' })];
+      const again: TemplateOp = { op: 'add', template: 'check_item', entityId: 'enpr000abc123', criterion: null, dueAt: due(4), after: null };
+      const c = composeDiff([again, { op: 'add', template: 'follow_up', entityId: 'enpr000abc123', criterion: null, dueAt: null, after: null }], ctx(has));
+      expect(c.suggestions.map((s) => [s.key, s.held])).toEqual([[null, 'stale'], ['s6', null]]);
+      expect([...c.ops.keys()]).toEqual(['s6']);
+      // In progress or blocked is still open. Done or skipped is not: the same check may be worth doing again.
+      for (const status of ['in_progress', 'blocked'] as const) expect(composeDiff([again], ctx([...steps(), step('s5', { title: 'Check on wpf002/flint #57', status })])).ops.size, status).toBe(0);
+      for (const status of ['done', 'skipped'] as const) expect(composeDiff([again], ctx([...steps(), step('s5', { title: 'Check on wpf002/flint #57', status })])).ops.size, status).toBe(1);
     });
 
     it('part of a step’s change already waits: only the rest is new, with its own precondition', () => {

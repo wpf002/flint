@@ -56,6 +56,8 @@ let downUrl: string;
 let server: Server;
 let base: string;
 let logged: string[];
+/** What errorRef was handed, as it was handed. */
+let given: unknown[];
 let deps: GoalsDeps;
 let up: boolean;
 /** How long the stand-in runtime waits before it answers. */
@@ -101,12 +103,13 @@ afterAll(() => {
 beforeEach(() => {
   asked = [];
   logged = [];
+  given = [];
   up = true;
   delayMs = 0;
   drop = false;
   answer = () => ({ status: 200, body: { ok: true } });
   // The server's errorRef logs what it is given: here, a record of it.
-  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
+  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (given.push(err), logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
 });
 
 const get = async (p: string) => {
@@ -189,6 +192,17 @@ describe('reads', () => {
     expect(r).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
     expect(logged.join('\n')).toMatch(/goals\.0\.(late|title)/);
     expect(logged.join('\n')).not.toContain(CANARY);
+    // What goes to the log is a sentence of the server's own, as a string: never an Error made up to carry one (the
+    // server logs an error by its class, and a string as it is).
+    answer = () => ({ status: 500, body: { error: 'internal error' } });
+    await get('/goals?tab=active');
+    await post(`/goals/${GID}/pause`, { extra: CANARY });
+    expect(given.length).toBeGreaterThanOrEqual(3);
+    for (const e of given) expect(typeof e, String(e)).toBe('string');
+    expect(logged.some((l) => /^malformed list answer/.test(l)) && logged.some((l) => /^the runtime answered 500 for a list request$/.test(l)) && logged.some((l) => /^refused a .* request/.test(l)), logged.join(' | ')).toBe(true);
+    const src = readFileSync(join(__dirname, '..', 'src', 'goals-routes.ts'), 'utf8');
+    expect(src).not.toMatch(/errorRef\([^)]*new Error/);
+    expect(src.match(/deps\.errorRef\('goals', `/g)).toHaveLength(3);
   });
 });
 

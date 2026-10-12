@@ -28,7 +28,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
-import { GOAL_CARD_BODIES, NewGoalBody, digestOf } from '@flint/policy';
+import { GOAL_CARD_BODIES, NewGoalBody, digestOf, noteProblems } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const goalsJs = /<script id="goals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -1044,6 +1044,13 @@ describe('the Goals panel', () => {
     await settle();
     return g;
   };
+  /** Timers that wait to be fired by the test (the fake DOM's own fire at once), with how long each was set for. */
+  const heldTimers = () => {
+    const queue: Array<{ fire: () => void; ms: number }> = [];
+    const real = ctx.setTimeout;
+    ctx.setTimeout = (f: () => void, ms: number) => (queue.push({ fire: f, ms }), 0);
+    return { queue, restore: () => void (ctx.setTimeout = real), next: async () => { const t = queue.shift()!; t.fire(); await settle(); return t.ms; } };
+  };
   const section = () => body().all().find((e) => e.id === 'goalreview')!;
   const reviewLines = () => lines(section());
   const headers = () => body().visible().filter((e) => e.className === 'gsh').map((e) => e.textContent);
@@ -1097,11 +1104,21 @@ describe('the Goals panel', () => {
 
   it('an open goal whose review is late says Late right under its title; never a paused one, and never while reviews are off', async () => {
     const tags = () => body().all().find((e) => e.id === 'goaltags');
-    await openReviewed({ late: true, nextReviewAt: at(-1, 9, 0).toISOString() });
-    expect(body().children[0]!.id).toBe('goaltags');
+    await openReviewed({ late: true, horizonAt: null, nextReviewAt: at(-1, 9, 0).toISOString() });
+    expect(body().children[0]!.id).toBe('goaltop');
+    expect(body().children[0]!.children[0]!.id).toBe('goaltags');
     expect(tags()!.shown()).toBe('Late');
     expect(tags()!.children[0]!.className).toBe('tag gtag');
     expect(titleCase('Late')).toBe(true);
+    // Said once: the tag says Late, and the third fact says when the review was due (it said "Late" a second time).
+    expect(body().shown().match(/Late(?!st)/g)).toHaveLength(1);
+    expect(body().shown()).toContain('Finish ByNo DateReview DueYesterday at 9:00 AM');
+    expect(body().shown()).not.toContain('Next Review');
+    expect(titleCase('Review Due')).toBe(true);
+    // With a finish date and a forecast for it, the third fact is On Track as ever, and Late is still said once.
+    await openReviewed({ late: true, nextReviewAt: at(-1, 9, 0).toISOString(), onTrack: { likelihood: 'likely', percent: 70, by: FINISH.toISOString() }, review: reviewed({ at: at(-2, 9, 2).toISOString() }) });
+    expect(body().shown().match(/Late(?!st)/g)).toHaveLength(1);
+    expect(body().shown()).toContain('On TrackLikely · 70%');
     // On time, paused, or with reviews off: no tag at all.
     await openReviewed({ nextReviewAt: at(3, 9, 0).toISOString() });
     expect(tags()).toBeUndefined();
@@ -1135,8 +1152,10 @@ describe('the Goals panel', () => {
     expect(await fact({ nextReviewAt: at(1, 9, 0).toISOString() })).toBe('Tomorrow at 9:00 AM');
     expect(await fact({ nextReviewAt: at(20, 9, 0).toISOString() })).toBe(`${says(at(20, 9, 0))} at 9:00 AM`);
     expect(await fact({ nextReviewAt: new Date(Date.now() - 60_000).toISOString() })).toBe('In a Few Minutes');
-    expect(await fact({ nextReviewAt: new Date(Date.now() - 2 * 3_600_000).toISOString(), late: true })).toBe('Late');
-    for (const v of ['Tomorrow at 9:00 AM', 'In a Few Minutes', 'Late']) expect(titleCase(v), v).toBe(true);
+    // A late one says when it was due, under its own label (the Late tag above the facts says the rest).
+    await openReviewed({ nextReviewAt: at(-1, 9, 0).toISOString(), late: true });
+    expect(/Review Due(.*?)Why It Matters/.exec(body().shown())![1]).toBe('Yesterday at 9:00 AM');
+    for (const v of ['Tomorrow at 9:00 AM', 'In a Few Minutes', 'Yesterday at 9:00 AM']) expect(titleCase(v), v).toBe(true);
     // A paused goal, or reviews off: how often, as before, with no Review Now and no empty LATEST REVIEW.
     await openReviewed({ status: 'paused' });
     expect(body().shown()).toContain('Review EveryWeek');
@@ -1299,11 +1318,19 @@ describe('the Goals panel', () => {
   it('Review Now is unsigned: it posts /goals/:id/review and says what happens next in the footer; a refusal is the server’s sentence', async () => {
     await openReviewed({ nextReviewAt: at(3, 9, 0).toISOString(), review: reviewed() });
     calls = [];
-    body().button('Review Now').onclick!();
-    await settle();
+    const timers = heldTimers();
+    try {
+      body().button('Review Now').onclick!();
+      await settle();
+    } finally {
+      timers.restore();
+    }
     expect(posted()).toEqual([{ url: '/goals/gotestgoal0001/review', method: 'POST', body: {} }]);
     expect(signed).toEqual([]);
     expect(said()).toEqual(['Flint is reviewing this goal. It takes a few minutes.', 'res ok']);
+    // One quiet read of the goal is set for 6 seconds on, and nothing is read before then.
+    expect(timers.queue.map((t) => t.ms)).toEqual([6000]);
+    expect(calls.filter((c) => c.method === 'GET')).toEqual([]);
     // Past the day's 12, before reviews run, and while a rule stops them: the fixed sentences, in the footer, and the button works again.
     for (const [status, error, code] of [
       [429, 'Flint already reviewed this goal 12 times today. Try again tomorrow.', 'reviewCap'],
@@ -1318,9 +1345,8 @@ describe('the Goals panel', () => {
     }
   });
 
-  it('review finding 4: after a yes to Review Now the open goal is read again, quietly and in place, and says so until the new review is here', async () => {
-    // (The fake DOM's timers fire at once: both of the panel's two later reads happen right after the yes.)
-    expect(run('GOAL_REVIEW_WAITS')).toEqual([6000, 75000]);
+  it('review findings 4 and R2: after a yes to Review Now the open goal is read again quietly, only what a review changes is redrawn, and never under a half-typed Add Step', async () => {
+    expect([run('GOAL_REVIEW_WAITS'), run('GOAL_REVIEW_MORE'), run('GOAL_REVIEW_MAX'), run('GOAL_REVIEW_ASKED')]).toEqual([[6000, 69000], 60000, 32, 6]);
     const before = reviewed({ at: at(-1, 9, 2).toISOString() });
     const g = view({ reviews: 'on', nextReviewAt: at(3, 9, 0).toISOString(), onTrack: null, review: before });
     let latest: Record<string, unknown> = g;
@@ -1329,75 +1355,168 @@ describe('the Goals panel', () => {
     run(`goalOpen('${g.id}')`);
     await settle();
     ids.goalbody!.scrollTop = 420;
-    calls = [];
-    body().button('Review Now').onclick!();
-    await settle();
-    // One post, then the goal read again twice, with no "Loading…" and where Will had scrolled to.
-    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST /goals/gotestgoal0001/review', 'GET /goals/gotestgoal0001', 'GET /goals/gotestgoal0001']);
-    expect(body().shown()).not.toContain('Loading');
-    expect(ids.goalbody!.scrollTop).toBe(420);
-    // The review has not landed yet: the footer still says Flint is on it.
-    expect(section().shown()).toContain('Reviewed Yesterday at 9:02 AM');
-    expect(said()).toEqual(['Flint is reviewing this goal. It takes a few minutes.', 'res ok']);
-    // It lands: the next quiet read shows it, and the footer has nothing more to say.
-    latest = { ...g, review: reviewed({ at: at(0, 9, 30).toISOString(), planner: 'pending', changes: [] }) };
-    calls = [];
-    run(`goalReviewSoon(${JSON.stringify(g)})`);
-    await settle();
-    expect(section().shown()).toContain('Reviewed Today at 9:30 AM');
-    expect(reviewLines()).toContain('Flint is still looking at the plan.');
-    expect(said()).toBeNull();
-    expect(ids.goalbody!.scrollTop).toBe(420);
-    // Will has gone elsewhere (the list, the panel closed): nothing is read, and nothing is drawn over what he sees.
-    for (const away of [`goalList('active')`, `closeGoals()`]) {
-      run(away);
-      await settle();
-      calls = [];
-      const seen = body().shown();
-      run(`goalReviewSoon(${JSON.stringify(g)})`);
-      await settle();
-      expect(calls.filter((c) => c.url.startsWith('/goals/gotestgoal0001')), away).toEqual([]);
-      expect(body().shown(), away).toBe(seen);
-      await open();
-    }
-    // He left and came back to the same goal before the later read was due: that read belongs to the visit he left, so
-    // it does not happen, and the footer does not start saying "Flint is reviewing" again. (Real timers here: one that waits.)
-    const later: Array<() => void> = [];
-    const real = ctx.setTimeout;
-    ctx.setTimeout = (f: () => void) => (later.push(f), 0);
+    const gets = () => calls.filter((c) => c.method === 'GET').map((c) => c.url);
+    const part = (id: string) => body().all().find((e) => e.id === id)!;
+    const timers = heldTimers();
     try {
-      latest = g;
-      run(`goalOpen('${g.id}')`);
-      await settle();
+      calls = [];
       body().button('Review Now').onclick!();
       await settle();
-      expect(later).toHaveLength(2);
+      expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST /goals/gotestgoal0001/review']);
+      expect(timers.queue.map((t) => t.ms)).toEqual([6000]);
+
+      // 6 seconds on: the goal is read once. Only the facts and LATEST REVIEW are drawn again; everything else on the
+      // page is the very element it was (the checks, the steps, Add Step, the footer and its buttons), where Will had scrolled.
+      const kept = body().children.filter((e) => e.id !== 'goaltop' && e.id !== 'goalrevbox');
+      const footer = [...foot().children];
+      const [topWas, revWas] = [part('goaltop').children[0], part('goalrevbox').children[1]];
+      calls = [];
+      expect(await timers.next()).toBe(6000);
+      expect(gets()).toEqual(['/goals/gotestgoal0001']);
+      expect(body().children.filter((e) => e.id !== 'goaltop' && e.id !== 'goalrevbox')).toEqual(kept);
+      for (const [i, e] of kept.entries()) expect(body().children.filter((x) => x.id !== 'goaltop' && x.id !== 'goalrevbox')[i]).toBe(e);
+      for (const [i, e] of footer.entries()) expect(foot().children[i]).toBe(e);
+      expect(part('goaltop').children[0]).not.toBe(topWas);
+      expect(part('goalrevbox').children[1]).not.toBe(revWas);
+      expect(body().shown()).not.toContain('Loading');
+      expect(ids.goalbody!.scrollTop).toBe(420);
+      // The review has not landed yet: the footer still says Flint is on it, and the next read is set for 75 seconds after the yes.
+      expect(section().shown()).toContain('Reviewed Yesterday at 9:02 AM');
+      expect(said()).toEqual(['Flint is reviewing this goal. It takes a few minutes.', 'res ok']);
+      expect(timers.queue.map((t) => t.ms)).toEqual([69000]);
+
+      // Will opens Add Step and starts typing. The read that comes due does not happen: nothing is drawn under his hands.
+      body().button('Add Step').onclick!();
+      body().field('Step').value = 'Synthetic half-typed step';
+      body().field('Due').value = '2026-11-02';
+      calls = [];
+      expect(await timers.next()).toBe(69000);
+      expect(gets()).toEqual([]);
+      expect(body().field('Step').value).toBe('Synthetic half-typed step');
+      expect(body().field('Due').value).toBe('2026-11-02');
+      // It is tried again a minute later, and again waits for him: an open form with nothing in it yet is left alone too.
+      expect(timers.queue.map((t) => t.ms)).toEqual([60000]);
+      latest = { ...g, review: reviewed({ at: at(0, 9, 30).toISOString(), planner: 'pending', changes: [] }) };
+      body().field('Step').value = '';
+      await timers.next();
+      expect(gets()).toEqual([]);
+      expect(body().buttons()).toContain('Cancel');
+      // A write on its way holds it off as well.
+      run('GOALS.busy=true');
+      body().field('Step').value = 'Synthetic half-typed step';
+      await timers.next();
+      expect(gets()).toEqual([]);
+      run('GOALS.busy=false');
+
+      // He cancels the form. The next read happens: the new review is here, still looking at the plan. The footer has
+      // nothing more to say, and the panel reads on, a minute at a time, until that look has ended.
+      body().button('Cancel').onclick!();
+      await settle();
+      calls = [];
+      expect(await timers.next()).toBe(60000);
+      expect(gets()).toEqual(['/goals/gotestgoal0001']);
+      expect(section().shown()).toContain('Reviewed Today at 9:30 AM');
+      expect(reviewLines()).toContain('Flint is still looking at the plan.');
+      expect(said()).toBeNull();
+      expect(ids.goalbody!.scrollTop).toBe(420);
+      expect(timers.queue.map((t) => t.ms)).toEqual([60000]);
+      // Slower than 75 seconds: it does not stay "still looking" for good. The read after it has ended shows what it found, and is the last.
+      latest = { ...g, waiting: [{ id: 'pr1', action: 'plan.change' }], review: reviewed({ at: at(0, 9, 30).toISOString(), shadow: false, planner: 'ok' }) };
+      calls = [];
+      await timers.next();
+      expect(gets()).toEqual(['/goals/gotestgoal0001']);
+      expect(reviewLines()).not.toContain('Flint is still looking at the plan.');
+      expect(reviewLines()).toContain('Flint suggested these changes to the plan.');
+      expect(body().shown()).toContain('1 approval waits for you.Open Approvals');
+      expect(timers.queue).toEqual([]);
+
+      // A read that fails is tried again; Will gone elsewhere ends it for good, even once he is back on the same goal.
+      body().button('Review Now').onclick!();
+      await settle();
+      routes = (c) => (c.method === 'GET' && c.url.startsWith('/goals/') ? { status: 503, body: { error: 'x' } } : { status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'on' } });
+      const seen = body().shown();
+      await timers.next();
+      expect(body().shown()).toBe(seen);
+      expect(timers.queue.map((t) => t.ms)).toEqual([69000]);
+      routes = (c) => (c.method === 'GET' && c.url.startsWith('/goals/') ? { status: 200, body: { goal: latest } } : { status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'on' } });
+      for (const away of [`goalList('active')`, `closeGoals()`]) {
+        run(away);
+        await settle();
+        if (away.startsWith('close')) await open();
+        const there = body().shown();
+        calls = [];
+        while (timers.queue.length) await timers.next();
+        expect(gets().filter((u) => u.startsWith('/goals/gotestgoal0001')), away).toEqual([]);
+        expect(body().shown(), away).toBe(there);
+        run(`goalOpen('${g.id}')`);
+        await settle();
+        body().button('Review Now').onclick!();
+        await settle();
+      }
       run(`goalList('active')`);
       await settle();
       run(`goalOpen('${g.id}')`);
       await settle();
       calls = [];
-      for (const f of later) f();
-      await settle();
+      while (timers.queue.length) await timers.next();
       expect(calls).toEqual([]);
       expect(said()).toBeNull();
-      // Still on the goal when the read is due: it happens.
-      later.length = 0;
-      body().button('Review Now').onclick!();
-      await settle();
-      calls = [];
-      later[0]!();
-      await settle();
-      expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['GET /goals/gotestgoal0001']);
     } finally {
-      ctx.setTimeout = real;
+      timers.restore();
     }
-    // A refusal schedules nothing.
-    await openReviewed({ nextReviewAt: at(3, 9, 0).toISOString(), review: reviewed() }, () => ({ status: 409, body: { error: 'A rule stops goal reviews, so Flint can’t review this goal.', code: 'reviewsStopped' } }));
-    calls = [];
+  });
+
+  it('review finding R2: the quiet reads are bounded, and a look at the plan that is still running when a goal is opened is read on too', async () => {
+    // (The fake DOM's own timers fire at once, so every read the panel would ever make happens right here.)
+    const pending = view({ reviews: 'on', nextReviewAt: at(3, 9, 0).toISOString(), onTrack: null, review: reviewed({ planner: 'pending', changes: [] }) });
+    let n = 0;
+    let after = 3;
+    routes = (c) => {
+      if (c.method === 'GET' && c.url.startsWith('/goals/')) return { status: 200, body: { goal: ++n > after ? { ...pending, review: reviewed({ changes: [] }) } : pending } };
+      return c.method === 'GET' ? { status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'on' } } : { status: 200, body: { ok: true } };
+    };
+    await open();
+    // Opened while Flint is still looking at the plan: no Review Now needed. It reads on until the look has ended, then stops.
+    run(`goalOpen('${pending.id}')`);
+    await settle();
+    expect(n).toBe(4);
+    expect(reviewLines()).not.toContain('Flint is still looking at the plan.');
+    expect(reviewLines()).toContain('It would change nothing in the plan.');
+    // A look that never ends: 32 reads in all (about half an hour), and no more. By then the runtime itself says it was skipped.
+    n = 0;
+    after = 1000;
+    run(`goalOpen('${pending.id}')`);
+    await settle();
+    expect(n).toBe(1 + 32);
+    // Review Now, and the review never comes (the day's 12 were used between the tap and the job): 6 reads, and the footer stops saying Flint is on it.
+    const idle = view({ reviews: 'on', nextReviewAt: at(3, 9, 0).toISOString(), onTrack: null, review: reviewed() });
+    n = 0;
+    routes = (c) => (c.method === 'GET' && c.url.startsWith('/goals/') ? (n++, { status: 200, body: { goal: idle } }) : c.method === 'GET' ? { status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'on' } } : { status: 200, body: { ok: true } });
+    run(`goalOpen('${idle.id}')`);
+    await settle();
+    n = 0;
     body().button('Review Now').onclick!();
     await settle();
-    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST /goals/gotestgoal0001/review']);
+    expect(n).toBe(6);
+    expect(said()).toBeNull();
+    // A goal whose review is not pending, opened and left alone, is read once and never again.
+    n = 0;
+    run(`goalOpen('${idle.id}')`);
+    await settle();
+    expect(n).toBe(1);
+  });
+
+  it('the panel’s own new lines are plain sentences by the note rules too', () => {
+    for (const line of [
+      'Flint will suggest this again at the next review.', '2 approvals wait for you.', '1 approval waits for you.', run('GOAL_REVIEWING') as string,
+      'The next review is Sunday at 9:00 AM.', 'The next review is late, and Flint runs it as soon as it can.', 'The next review runs in a few minutes.',
+      'Flint is in its trial week, so it only shows what it would change.', 'Flint suggested these changes to the plan.', 'Flint suggested no changes to the plan.',
+      ...(Object.values(run('GOAL_PLAN_SAY') as Record<string, string>)),
+    ]) {
+      expect(noteProblems('Latest Review', line), line).toEqual([]);
+      expect(sentence(line), line).toBe(true);
+    }
+    for (const title of ['Latest Review', 'Review Now', 'Review Due', 'Next Review', 'On Track', 'Late', 'Trial Week', 'Open Approvals']) expect(noteProblems(title, ''), title).toEqual([]);
   });
 
   it('a goal just added says when its first review is, or that scheduled reviews start soon', async () => {
