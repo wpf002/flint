@@ -78,6 +78,11 @@ export class Persona {
     return this.config.styleGuide;
   }
 
+  /** The engine paragraph this persona adds after its guide, or undefined when it adds none. */
+  get engine(): string | undefined {
+    return this.config.engine?.trim() || undefined;
+  }
+
   /** Memory-backed, streaming — the persona's voice + your retrieved writing. */
   async *chat(
     input: PersonaChatInput,
@@ -142,8 +147,8 @@ export class Persona {
   }
 
   /**
-   * Assemble the system prompt: style guide + retrieved writing samples +
-   * accumulated lessons. The lessons section is how the persona evolves — what
+   * Assemble the system prompt: style guide + the engine paragraph (when
+   * configured) + retrieved writing samples + accumulated lessons. The lessons section is how the persona evolves — what
    * nightly reflection learns shows up here on every subsequent call.
    *
    * Returned split at the per-turn boundary rather than as one string: `stable`
@@ -157,6 +162,12 @@ export class Persona {
     context?: string,
   ): Promise<{ stable: string; context?: string }> {
     let system = this.config.styleGuide;
+
+    // Which model is answering, when the app says: after the guide, so it is the
+    // later word where the guide describes the engines in general. The same
+    // bytes on every call, so it sits inside the cacheable half.
+    const engine = this.config.engine?.trim();
+    if (engine) system += `\n\n${engine}`;
 
     if (this.config.retriever) {
       const k = this.config.retrieveK ?? 3;

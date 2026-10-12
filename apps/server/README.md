@@ -2,16 +2,17 @@
 
 The always-on shared Flint service. Wraps the Flint client (with the Flint
 persona) behind an authenticated HTTP/SSE API so your apps and devices talk to
-**one** Flint. Provider/memory/tools come from env — the same image runs with
-Anthropic (cloud) or a remote Ollama (rented GPU). The local model never moves
-here; Railway has no GPU.
+**one** Flint. Provider/memory/tools come from env. The local brain is always an
+Ollama model: this Mac's, or a remote Ollama at `OLLAMA_HOST` (a rented GPU). An
+outside model (Claude) answers only as a frontier tier, never as a default: see
+"The local brain is always Ollama" and "When the frontier keeps failing".
 
 ## Endpoints
 
 | Method | Path | Auth | Body | Returns |
 | --- | --- | --- | --- | --- |
 | GET | `/health` | no | — | `{ ok, provider, model, tools, servers, evalMode, styleVariants, groundingCharsMax, evalDiscovery, evalRecallOverride, … }` |
-| POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason }` |
+| POST | `/generate` | yes | `{ prompt }` | `{ text, usage, reason, brain, model, … }`. `brain` is `local` or `frontier`, `model` who answered; `frontierPaused` (e.g. `anthropic:credit`) is there when the breaker left outside brains out of the turn (see "When the frontier keeps failing") |
 | POST | `/generate` (eval) | yes | `{ prompt, eval: true }` | `{ text, usage, reason, brain, model, styleVariant, tools, grounding, proposed, eval, costUsd, costByVendor, paidCalls, budgetBlocked? }` — not logged to the training corpus, no `remember`, proposals auto-rejected (used by `apps/eval`). `costUsd` is what the replay's paid calls cost (every model pass and fallback attempt, the research planner, paid searches; see "Spend caps"), and error responses (500 / 502 / 503) carry it too; `budgetBlocked` lists the paid tools refused because Flint's own cap for them is spent. `grounding` is `{ memory: string[], tools: [{ name, isError, excerpt }] }`: the long-term facts recalled into that turn and its own tool results, never a concurrent turn's (each excerpt at most 800 chars), for apps/parity `--judge-grounding` (src/grounding.ts). Normal responses never carry it. |
 | POST | `/generate` (eval, style variant) | yes | `{ prompt, eval: true, styleVariant: "v2" }` | as above, answered with that style guide; `styleVariant` echoes the variant of the persona that answered, read from its own guide (not from the request). Unknown variant, or no `eval: true`: 400. `/health` lists the known ones as `styleVariants` (used by `apps/parity --flint-variant`) |
 | POST | `/generate` (eval, longer excerpts) | yes | `{ prompt, eval: true, groundingChars: 16000 }` | as above, with each `grounding` tool excerpt cut at `groundingChars` instead of 800, echoed as `groundingChars`. An integer from 800 to `/health`'s `groundingCharsMax` (32000); otherwise, or without `eval: true`, 400. Used by apps/parity `tasks`, which hands competitors the data Flint read (src/eval-tools.ts) |
@@ -43,8 +44,9 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | Var | Required | Purpose |
 | --- | --- | --- |
 | `FLINT_TOKEN` | **yes** | Bearer token clients must send. Server refuses to start without it. |
-| `ANTHROPIC_API_KEY` | one provider | Use Anthropic (model via `FLINT_MODEL`, default `claude-sonnet-4-6`). |
-| `OLLAMA_MODEL` + `OLLAMA_HOST` | one provider | Use a remote Ollama (e.g. a rented GPU). Takes precedence over Anthropic. |
+| `OLLAMA_MODEL` + `OLLAMA_HOST` | no | The local brain: an Ollama model at `OLLAMA_HOST` (default `http://127.0.0.1:11434`; a remote Ollama, e.g. a rented GPU, works the same). `OLLAMA_MODEL` unset: Ollama is asked which chat model it has (see "The local brain is always Ollama"). |
+| `ANTHROPIC_API_KEY` | no | Turns on the frontier (escalation) brain: Claude, `FLINT_FRONTIER_MODEL` or `claude-sonnet-4-6`, and any `FLINT_TIER_*` on Anthropic. It never becomes the local brain. Unset, with no other frontier configured: Flint runs local-only. |
+| `FLINT_FRONTIER_MAX_RETRIES` / `FLINT_FRONTIER_TIMEOUT_MS` | no | How the Anthropic client fails: its own retries of a failed request (default 0, up to 5) and how long it waits for a response to start (default 60000, from 1000 to 600000). See "When the frontier keeps failing". |
 | `OLLAMA_THINK` | no | `true` or `false`: Ollama's `think` flag for the local brain. `false` stops a thinking model (qwen3.8, muse-glimmer) reasoning before it answers, which is most of its answer time. It may still reason in the answer text itself (qwen3.8 sometimes self-corrects there, visibly), so check a no-think bake-off's answers before setting it live (apps/parity README). Unset, or any other value, sends no flag: the model's default, as before. Don't set `true` on a model that can't think: Ollama rejects every turn with a 400 (qwen2.5 says "does not support thinking"). `false` is harmless there. |
 | `FLINT_STYLE_VARIANT` | no | The frontier tiers' style guide: `v1` (`FLINT_STYLE_GUIDE`, today's), `v2` (`FLINT_STYLE_GUIDE_V2`) or `local-v1` (`FLINT_LOCAL_STYLE_GUIDE`). Unset: `v1`, as before. An unknown value is logged and ignored (`v1`). Set a variant live only after a judged parity A/B (`--flint-variant`) shows it wins. |
 | `FLINT_LOCAL_STYLE_VARIANT` | no | The same, for the local brain and the eval `localModel` override personas. Unset: `v1`, as before. |
@@ -56,6 +58,80 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
 | `PORT` | no | Injected by Railway. |
+
+## The local brain is always Ollama
+
+The local brain (private questions, Local-only, the answer when the frontier can't) is an Ollama
+model, whatever keys are in the environment (`chooseLocalBrain` in `src/local-model.ts`):
+
+- `OLLAMA_MODEL` names it.
+- Unset, the server asks Ollama at boot (two free list calls, nothing generated): the chat model
+  Ollama already has loaded, else the first one pulled, skipping embedders and Ollama cloud models;
+  with Ollama down or empty, `qwen2.5:7b`. The boot log says which and why
+  (`[brain] OLLAMA_MODEL is unset: the local brain is ...`).
+
+It used to become Anthropic's `claude-sonnet-4-6` whenever `OLLAMA_MODEL` was unset and
+`ANTHROPIC_API_KEY` was present: a missing setting quietly sent every "local" answer to an
+outside AI. `FLINT_MODEL`, which named that model, is no longer read (the boot log says so if it is
+still set). A deployment that relied on it (a host with no Ollama) needs `OLLAMA_HOST` pointed at
+one: its local turns fail, loudly, until then.
+
+**What powers this answer.** Every persona carries one paragraph after its style guide saying
+which model is answering (`engineLineFor` in `src/style-variant.ts`, `flintEngineLine` in
+@flint/persona): "an open model (muse-glimmer:30b) that Will runs himself with Ollama. It is not
+Claude" for the local brain, an eval `localModel` candidate and an `ollama:` tier; "Claude
+(claude-opus-5-5), Anthropic's model: a borrowed engine" for a Claude tier. The style guides
+themselves are unchanged (they are pinned by hash), and still say "Claude's model for most
+questions"; the paragraph is the later word, so a local model asked what it runs on no longer
+answers "Claude".
+
+## When the frontier keeps failing
+
+When an outside AI is going to keep failing, Flint stops asking it for a while and the local model
+answers at once (`src/frontier-breaker.ts`). Before this, every turn asked Opus, then Sonnet, got
+the same refusal from each, and only then asked the local model.
+
+| What happened | Opens after | Cool-down | Then |
+| --- | --- | --- | --- |
+| `credit`: a 400 saying the credit balance is too low (or OpenAI's spent quota) | 1 failed request | 1 hour | checked again every hour |
+| `auth`: 401 or 403, the key was rejected | 1 failed request | 1 hour | checked again every hour |
+| `transient`: 529 or any other 5xx, a timeout, a connection error | 3 failed requests in a row, no success between (Flint's own retries count) | 5 minutes | doubles with each failed check: 10, 20, 40, then 60 minutes |
+
+- **Per provider.** One key, one account: Opus failing for credit means Sonnet will too, so the
+  rest of that turn's Claude tiers are skipped, not asked. Another vendor's tier
+  (`FLINT_TIER_LAST_RESORT=openai:...`) or an `ollama:` tier is still tried. The local model is
+  never paused.
+- **While it is open**, a turn that would have gone to that provider is answered by the local model
+  from the start, on `/chat` and `/generate` alike, on every tier. The console marks the reply
+  **Local** (the `/chat` `meta` event says `brain: "local"`), `/generate` says `brain: "local"`,
+  and both carry `frontierPaused` with the provider and reason code. Research planning
+  (deep_research) falls back to its heuristic queries.
+- **One cheap check.** After the cool-down, the next turn that arrives is still answered locally
+  at once, and sets off a single one-token call to the cheapest brain on that provider (metered in
+  the spend ledger like any call). If it is answered, the provider is back in use from the next
+  turn; if not, the cool-down starts again. Any real call that succeeds closes it too. Nothing is
+  asked while nobody is chatting.
+- **A turn only the frontier can answer** (an image or a PDF) is not gated: it is asked as before,
+  since there is no local answer to give instead.
+- **Not counted:** a malformed request, an unknown model, a 429, a refusal, a closed tab.
+- **Will is told.** Out of credit or a rejected key puts one note in the console's notifications
+  ("Claude Is Out of Credit"), once a day, with no banner and no phone ping. A transient pause
+  clears itself and says nothing.
+- **In memory only.** A restart starts closed; one failing call opens it again. The log names the
+  provider and a reason code, never the provider's message:
+  `[breaker] anthropic paused (credit): the local model answers; next check in 60 min`.
+
+**One failing try is quick.** The Anthropic client no longer retries on its own
+(`FLINT_FRONTIER_MAX_RETRIES`, default 0; the SDK's default is 2) and waits 60 seconds for a
+response to start (`FLINT_FRONTIER_TIMEOUT_MS`; the SDK's default is 10 minutes). Flint's own loop
+already retries a retryable failure three times, so the two used to multiply: up to nine requests
+of up to ten minutes each before a turn fell back. Every call streams, so the 60 seconds is the
+wait for the response to begin (which includes uploading a turn's attachments), not for the whole
+answer.
+
+**`/chat` falls back like `/generate`.** An error from the last frontier tier, before any text has
+streamed, now goes to the local model (when it may answer the turn). It used to reach the console
+as a reply that stopped early; only earlier tiers' errors moved on.
 
 ## Memory extraction
 
@@ -160,18 +236,28 @@ switch: never call that vendor). A value that isn't a dollar amount is logged an
 The boot log prints the caps in force (`[spend] caps: ...`).
 
 **Background kinds** (Machine plan 3.0.8). The runtime holds no vendor keys; when it wants a
-frontier call it asks the server's internal listener (`POST /internal/complete`, `[::1]:8081`),
+model call it asks the server's internal listener (`POST /internal/complete`, `[::1]:8081`),
 under one of four kinds, each with its own caps:
 `FLINT_BUDGET_KIND_<RUNTIME|REVIEW|DISPATCH|SELFMOD>_DAILY_USD` / `_MONTHLY_USD`. Unlike a vendor
-cap, **unset is $0**: background spend is off until both periods are raised (the boot log prints
-them as `[spend] background kinds: ...`). A call is refused (402 with a `reason`) when its kind's
-spend plus the call's estimate would pass either cap (`kind_cap`), when its vendor is at 80% of
-Flint's own cap (`vendor_cap`), or on the runtime's unified view of the vendor (every account's
-spend): missing (`unified_missing`), older than 2 h (`unified_stale`), at 70% of Flint's cap
-(`unified_70`), or when Flint has no cap for that vendor to hold it against (`vendor_uncapped`).
-Otherwise a durable audit intent is written first (if it can't be, nothing runs), the call is
-made on the routine tier with no tools, metered in the ledger under its kind, and its outcome
-audited with the cost. One call at a time; every refusal is audited.
+cap, **unset is $0**: a kind is off until both periods are raised (the boot log prints them as
+`[spend] background kinds: ...`), and refused with 402 `kind_cap` until then.
+
+**The call is answered by the local model** (`src/background-complete.ts`): the chat brain's own
+Ollama model, at `OLLAMA_HOST` with the same `OLLAMA_NUM_CTX`, `think` off, no tools. A request
+may carry `schema` (a JSON schema), and the reply is then held to it. It used to go to the routine
+frontier tier (Sonnet) and answer 503 without one; nothing calls it yet, and every background call
+from here on stays on this machine. It yields to Will's chat like memory extraction: not started
+while he is chatting, and cut off the moment a turn starts (502, error class `ChatBusy`). It costs
+nothing, so nothing is added to the ledger and `costUsd` is 0; the kind's caps are simply its
+switch. With no local model to ask (the chat model is an Ollama cloud model, or `OLLAMA_HOST` is
+no URL) it answers 503 `no_local_model`.
+
+A durable audit intent is written first (if it can't be, nothing runs) and the outcome is audited.
+One call at a time; every refusal is audited. The gate keeps its money guards for any brain that
+bills, should one ever be put behind it: refused when its vendor is at 80% of Flint's own cap
+(`vendor_cap`), or on the runtime's unified view of the vendor (every account's spend): missing
+(`unified_missing`), older than 2 h (`unified_stale`), at 70% of Flint's cap (`unified_70`), or
+when Flint has no cap for that vendor to hold it against (`vendor_uncapped`).
 
 **Recommended values** (in `~/.flint/secrets.env` or the LaunchAgent's env; tune after a
 couple of weeks of `/spend`):
@@ -201,10 +287,9 @@ changed a turn: `/generate` adds `budget: "degraded" | "exhausted"` (and `degrad
 the `/chat` `meta` event carries the same fields. All of it is decided per turn by one tested
 function (`budgetTurn` in `src/spend.ts`); index.ts only applies it.
 
-Without `OLLAMA_MODEL` the "local" brain is itself Claude (`FLINT_MODEL`). It is then held to
-Claude's cap like the tiers: once Claude's budget is spent, a turn that would land on it gets a
-503 saying so (and naming the cap) instead of calling Claude past its cap, and the budget note
-names the brain that actually answers when it isn't the free local one.
+The local brain is always an Ollama model (see "The local brain is always Ollama"), so it is
+free and never held to a cap. (`budgetTurn` still refuses a local brain that bills once its
+vendor's budget is spent, with a 503 naming the cap; the server no longer builds one.)
 
 **Evals.** A parity replay (`/generate` with `eval: true`) is routed as if uncapped, and runs in
 its own spend scope (`TurnSpend`): every paid call made inside it, model passes, fallback
@@ -230,10 +315,9 @@ training scripts (`apps/train/mlx/bulk_seed.py`, `auto_grow.py`, `eval_judge.py`
 Anthropic directly; their `/chat` traffic to Flint IS counted), apps/ask, apps/responder
 and trident's own tools other than its searches.
 
-**Model choice (the Railway tradeoff):** Railway can't run the local 14B model.
-Pick one — `ANTHROPIC_API_KEY` (fast, always-on, cloud-backed) **or** point
-`OLLAMA_HOST` at a rented GPU box running your model. Swappable any time; it's
-just env.
+**Model choice (the Railway tradeoff):** Railway can't run a local model, and the local brain
+is never a hosted one. A hosted deployment points `OLLAMA_HOST` at a GPU box running the model
+(with `OLLAMA_MODEL`); `ANTHROPIC_API_KEY` then adds Claude as the frontier, on top of it.
 
 ## Route log
 
@@ -242,7 +326,9 @@ server log (`~/.flint/server.err.log` on the Studio): the tier it was sorted int
 moved it off the tier its words alone get (`movedBy`: `tools` when an appended tool is a
 confident match, `deep thread` past `LONG_CONVERSATION` turns), each appended tool with its
 similarity score, the tier the spend plan actually ran when a budget stepped it
-down (`planTier`), who answered (`answeredBy`, only when the outcome is `answered`; otherwise
+down (`planTier`), the outside providers the breaker had paused for this turn (`paused`, as
+`provider:reason` codes such as `anthropic:credit`; see "When the frontier keeps failing"),
+who answered (`answeredBy`, only when the outcome is `answered`; otherwise
 `tried` names the last brain asked), how many tiers declined first (`declined`), the outcome
 (`answered`, `unanswered` for the honest no-answer message, `empty`, `error`, `aborted` when the
 client hung up) and the time taken. It never holds the message, the conversation or anything
@@ -260,6 +346,14 @@ ask can score as low (0.603 for "How much have I spent on Claude today?"), so th
 low and the tool is still offered; only the tier waits for a clear match.
 
 To count tiers: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r .tier | sort | uniq -c`.
+
+A turn the local model answered because the frontier was paused, on either route:
+
+```
+[route] {"ts":"2026-10-12T15:00:00.000Z","path":"chat","tier":"hard","appended":[],"turns":0,"brain":"local","paused":"anthropic:credit","answeredBy":"muse-glimmer:30b","outcome":"answered","ms":2100}
+```
+
+To see how often: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r 'select(.paused) | .paused' | sort | uniq -c`.
 
 A frontier `/chat` turn that carried the "World now" block also has `ctxTokens: { world: n }`,
 the block's estimated tokens (plan 3.0.8: chat overhead is measured).
@@ -321,7 +415,8 @@ railway login
 railway init                 # or: railway link  (existing project)
 railway up                   # builds apps/server/Dockerfile from the repo root
 railway variables --set FLINT_TOKEN=$(openssl rand -hex 24) \
-                   --set ANTHROPIC_API_KEY=sk-ant-...   # or OLLAMA_MODEL + OLLAMA_HOST
+                   --set OLLAMA_HOST=https://your-gpu-box:11434 --set OLLAMA_MODEL=qwen2.5:14b
+                   # the local brain; add ANTHROPIC_API_KEY=sk-ant-... for a Claude frontier on top
 ```
 
 `railway.toml` (repo root) already points the build at this Dockerfile and uses

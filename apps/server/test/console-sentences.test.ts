@@ -183,3 +183,31 @@ describe('Settings: Approval Keys', () => {
     expect(none.resetse!.hidden).toBe(true);
   });
 });
+
+// While the frontier breaker has Claude paused (apps/server/src/frontier-breaker.ts), a /chat
+// turn's first `meta` event says brain "local": this is what the console does with it.
+describe('who answered, under a reply', () => {
+  function chip(brains: string[]) {
+    const tags: Array<{ cls: string; text: string }> = [];
+    const meta = {
+      querySelector: (sel: string) => (sel === '.tag' && tags.length ? { remove: () => tags.splice(0) } : null),
+      appendChild: (t: { cls: string; text: string }) => tags.push(t),
+    };
+    const body = { parentNode: { querySelector: (sel: string) => (sel === '.meta' ? meta : null) } };
+    const c: Record<string, unknown> = { el: (_tag: string, cls: string, text: string) => ({ cls, text }), applyLO: () => {}, body };
+    createContext(c);
+    runInContext(fn('setBrainChip'), c);
+    for (const b of brains) runInContext(`setBrainChip(body, ${JSON.stringify(b)})`, c);
+    return tags;
+  }
+
+  it('an answer from the local model is marked Local; one from the frontier carries no mark', () => {
+    expect(chip(['local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+    expect(chip(['frontier'])).toEqual([]);
+  });
+
+  it('a turn that started on the frontier and was handed to the local model ends marked Local, once', () => {
+    expect(chip(['frontier', 'local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+    expect(chip(['local', 'local'])).toEqual([{ cls: 'tag', text: 'Local' }]);
+  });
+});

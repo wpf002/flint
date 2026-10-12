@@ -5,6 +5,10 @@
  * fallback, never /generate); a chat.turn event ends each /chat turn and no
  * /generate turn; an eval replay's 5xx is not a route.error; memory extraction
  * waits for chat on the local model and is spend-gated only on the frontier.
+ *
+ * And the independence pieces: the local brain is never Anthropic; the frontier
+ * breaker sees every client's requests and gates both routes; each persona says
+ * which model answers; background calls go to the local model.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -64,12 +68,100 @@ describe('index.ts wiring', () => {
   });
 
   it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {
-    const block = between('const memoryPlan = chooseMemoryBrain(process.env', 'const servers = registry?.connectedServers()');
+    const block = between('const memoryPlan = chooseMemoryBrain(', 'const servers = registry?.connectedServers()');
+    // It is told the chat model main() resolved (OLLAMA_MODEL, or what Ollama had when that is unset).
+    expect(block).toContain('const memoryPlan = chooseMemoryBrain({ ...process.env, OLLAMA_MODEL: model }, {');
     expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
     expect(block).toContain('new MemoryExtractor(memory, knowledge, memoryPlan.brain,');
     expect(block).toContain("memoryPlan.kind === 'local'\n        ? { chatActive }\n        : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }");
     // The chat signal is the same ChatLoad /chat counts turns with, built before it.
     expect(src.indexOf('const chatLoad = new ChatLoad()')).toBeLessThan(src.indexOf('const chatActive = liveChat(chatLoad)'));
     expect(src.match(/new ChatLoad\(/g)).toHaveLength(1);
+  });
+
+  // ---- Flint stops waiting on Claude, and never quietly falls back to it ----
+
+  it('the local brain is an Ollama model whatever keys are set: index.ts never builds an Anthropic client itself', () => {
+    expect(src).not.toMatch(/AnthropicProvider|FLINT_MODEL\b/);
+    expect(src).toContain('const local = await chooseLocalBrain(process.env, {');
+    expect(src).toContain('return { provider: new OllamaProvider(local.options), model: local.model };');
+    expect(src).toContain('const { provider, model } = await buildProvider();');
+    // The legacy frontier is built by ./brains, with the client that fails fast.
+    expect(src).toContain('const frontierCfg = buildFrontierProvider(process.env,');
+  });
+
+  it('the breaker sees every provider request: its observer is on the one observer every Flint client shares', () => {
+    expect(src).toContain('const observer = combineObservers(actionLog, spendObserver(ledger), breaker.observer());');
+    expect(src.match(/new FrontierBreaker\(/g)).toHaveLength(1);
+    // Every Flint client main() builds is given that observer.
+    const clients = src.match(/new Flint\(\{[^}]*\}\)/g)!;
+    expect(clients.length).toBeGreaterThanOrEqual(3);
+    for (const c of clients) expect(c, c).toMatch(/\bobserver\b/);
+  });
+
+  it('both routes ask the breaker before any call, try only the brains it left, and skip one paused mid-turn', () => {
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      expect(route, name).toMatch(/const gate = gateTurn\(\{ brain: budget\.brain, chain: plan\?\.chain, canLocal: [^,]+, breaker: ctx\.breaker \}\);/);
+      expect(route, name).toContain('let brain = gate.brain;');
+      expect(route.indexOf('gateTurn('), name).toBeGreaterThan(route.indexOf('budgetTurn('));
+      expect(route, name).toContain('gate.attempt(');
+      // The spend plan's chain is only ever tried through the gate.
+      expect(route, name).not.toMatch(/(answerWithFallback|runWithFallback)\(\s*plan\.chain/);
+      // The [route] line and the response say what was left out, as a code.
+      expect(route, name).toContain('...(paused ? { paused } : {}),');
+      expect(route, name).toContain('frontierPaused: paused');
+    }
+    expect(generate).toMatch(/answerWithFallback\(\s*gate\.chain,\s*gate\.attempt\(/);
+    expect(chat).toMatch(/const chain = gate\.chain;\s*const won = await runWithFallback\(\s*chain,\s*gate\.attempt\(/);
+  });
+
+  it('a turn the local model may not answer (an image or PDF, or a spent paid local brain) is not gated', () => {
+    expect(generate).toContain('canLocal: route.localFallback && !budget.localRefusal');
+    expect(chat).toContain('const toLocal = route.localFallback && !budget.localRefusal;');
+    expect(chat).toContain('canLocal: toLocal');
+  });
+
+  it('/chat: an error from the last frontier tier goes to the local model when it may answer, as /generate\'s does', () => {
+    expect(chat).toContain("if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);");
+    expect(chat).toContain('if (answer.length === 0 && toLocal && !ac.signal.aborted) {');
+    // The console is told the local model is answering before its text streams.
+    expect(chat).toMatch(/brain = 'local';\s*lastTried = ctx\.model;\s*res\.write\(`data: \$\{JSON\.stringify\(\{ type: 'meta', brain,/);
+  });
+
+  it('the breaker\'s check is one token from the cheapest brain on that provider, tried once and metered', () => {
+    const block = between('checkFrontier = async (p, signal) => {', 'console.error(`[brain] frontier escalation ENABLED');
+    expect(block).toContain('const b = brains.cheapestOn(p);');
+    expect(block).toContain("await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });");
+  });
+
+  it('Will is told once a day, in the console only, when a provider is paused for something only he can fix', () => {
+    const block = between('const breaker = new FrontierBreaker({', 'const observer = combineObservers(');
+    expect(block).toContain('const note = breakerNote(e);');
+    expect(block).toContain("if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });");
+  });
+
+  it('research planning waits while the breaker has its provider paused', () => {
+    const block = between('complete: pausable(', 'calculateTool(),');
+    expect(block).toContain('const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;');
+    expect(src).toContain('plannerProvider = planner.provider.name;');
+  });
+
+  it('every persona says which model answers: the local brain, an eval candidate, each frontier tier', () => {
+    expect(src).toContain('engine: engineLineFor(provider, m),');
+    expect(src).toContain('const persona = localPersonaFor(flint, styles.local, model);');
+    expect(src).toContain('variant ?? styles.local, m),');
+    expect(src).toContain('buildLocal: (v) => localPersonaFor(flint, v, model),');
+    expect(src).toContain('engine: engineLineFor(fProvider, fModel),');
+    expect(src.match(/new Persona\(/g)).toHaveLength(2);
+    expect(src.match(/engine: engineLineFor\(/g)).toHaveLength(2);
+  });
+
+  it('background calls (/internal/complete) go to the local model, yielding to chat, and never to a frontier tier', () => {
+    const block = between('const backgroundModel = localBackgroundModel(', 'startInternal({');
+    expect(block).toContain('const backgroundModel = localBackgroundModel(process.env, model,');
+    expect(block).toContain('const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
+    expect(block).toContain('brain: () => backgroundBrain,');
+    expect(block).not.toMatch(/frontier|brains\b|spendContext/);
+    expect(src).not.toContain('backgroundFrontier');
   });
 });

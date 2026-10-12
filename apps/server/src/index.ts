@@ -46,7 +46,6 @@ async function synthesizeSpeech(text: string): Promise<Buffer | null> {
 }
 import {
   Flint,
-  AnthropicProvider,
   OllamaProvider,
   InMemoryStore,
   ActionLogObserver,
@@ -76,7 +75,8 @@ import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runti
 import { WorldNow, estimateTokens } from './world-now';
 import { inboxRoutes } from './inbox-routes';
 import { ChatLoad } from './chat-load';
-import { CompleteGate, type BackgroundFrontier } from './background-complete';
+import { CompleteGate, localBackgroundBrain, localBackgroundModel } from './background-complete';
+import { FrontierBreaker, FrontierPaused, breakerNote, gateTurn, pausedCode } from './frontier-breaker';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
 import { openConversationStore, type PersistentStore } from './persistent-store';
@@ -92,12 +92,12 @@ import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './ro
 import { ensureScopedTokens } from './scoped-tokens';
 import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
-import { STYLE_VARIANTS, StyledPersonas, echoStyle, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
+import { STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, parseStyleVariantRequest, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
 import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, liveOllamaOptions, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
+import { LocalPersonaCache, chooseLocalBrain, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
 import { chooseMemoryBrain, frontierExtractBrain, liveChat } from './memory-brain';
 import {
@@ -131,11 +131,11 @@ import {
 } from './attachments';
 
 /**
- * Hosted Flint — the always-on shared service (Railway). Wraps the Flint client
- * behind an authenticated HTTP/SSE API so your apps and devices can talk to one
- * Flint. Provider, memory, and tools all come from env, so the SAME image runs
- * with Anthropic (cloud, always-on) or a remote Ollama (rented GPU) — the local
- * model never moves here (Railway has no GPU).
+ * Hosted Flint — the always-on shared service. Wraps the Flint client behind an
+ * authenticated HTTP/SSE API so your apps and devices can talk to one Flint.
+ * Provider, memory, and tools all come from env. The local brain is always an
+ * Ollama model (this Mac's, or a remote Ollama at OLLAMA_HOST); an outside model
+ * answers only as a frontier tier Will configured, never as a default.
  *
  * Endpoints (all but /health require `Authorization: Bearer $FLINT_TOKEN`):
  *   GET  /health   → liveness + which provider/model/tools are active
@@ -180,54 +180,16 @@ function errorRef(tag: string, err: unknown): string {
   return ref;
 }
 
-function buildProvider(): { provider: ProviderAdapter; model: string } {
-  const ollamaModel = process.env.OLLAMA_MODEL?.trim();
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (ollamaModel) {
-    return {
-      // OLLAMA_HOST, OLLAMA_NUM_CTX (keep it at 4096, see liveOllamaOptions) and
-      // OLLAMA_THINK=true|false (unset sends no `think`, as before).
-      provider: new OllamaProvider(liveOllamaOptions(process.env)),
-      model: ollamaModel,
-    };
-  }
-  if (key) {
-    return { provider: new AnthropicProvider({ apiKey: key }), model: process.env.FLINT_MODEL ?? 'claude-sonnet-4-6' };
-  }
-  console.error('No provider configured. Set OLLAMA_MODEL (+ OLLAMA_HOST) or ANTHROPIC_API_KEY.');
-  process.exit(1);
-}
-
 /**
- * The escalation-brain provider — the swappable bridge toward independence.
- * Today it's Claude (ANTHROPIC_API_KEY). The day a bigger LOCAL model is good
- * enough, set FLINT_FRONTIER_PROVIDER=ollama + FLINT_FRONTIER_BASE_URL (e.g. a
- * 70B on a home box) + FLINT_FRONTIER_MODEL and escalation points there instead
- * — no other code changes, and Flint is fully independent. undefined → frontier
- * off (pure local).
+ * The local brain: an Ollama model, always (./local-model chooseLocalBrain).
+ * OLLAMA_MODEL names it; unset, Ollama is asked which chat model it has. It is
+ * never Anthropic, whatever keys are present.
  */
-function buildFrontierProvider(): { provider: ProviderAdapter; model: string } | undefined {
-  const kind = process.env.FLINT_FRONTIER_PROVIDER?.trim().toLowerCase();
-  const baseURL = process.env.FLINT_FRONTIER_BASE_URL?.trim();
-  if (kind === 'ollama' || (!kind && baseURL && !process.env.ANTHROPIC_API_KEY)) {
-    const model = process.env.FLINT_FRONTIER_MODEL?.trim();
-    if (!model) return undefined;
-    return {
-      provider: new OllamaProvider({
-        baseURL: baseURL ?? 'http://127.0.0.1:11434',
-        defaultOptions: { num_ctx: Number(process.env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
-      }),
-      model,
-    };
-  }
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (key) {
-    return {
-      provider: new AnthropicProvider({ apiKey: key }),
-      model: process.env.FLINT_FRONTIER_MODEL?.trim() || 'claude-sonnet-4-6',
-    };
-  }
-  return undefined;
+async function buildProvider(): Promise<{ provider: ProviderAdapter; model: string }> {
+  // OLLAMA_HOST, OLLAMA_NUM_CTX (keep it at 4096, see liveOllamaOptions) and
+  // OLLAMA_THINK=true|false (unset sends no `think`, as before).
+  const local = await chooseLocalBrain(process.env, { log: (m) => console.error(m) });
+  return { provider: new OllamaProvider(local.options), model: local.model };
 }
 
 /**
@@ -265,7 +227,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
-import { buildTiers, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
+import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -456,7 +418,7 @@ async function main(): Promise<void> {
       ? '[access] tailnet: only FLINT_TAILNET_USER may use Flint, and gets the console token'
       : '[access] FLINT_TAILNET_USER unset: the console carries its token only for this Mac; tailnet devices paste it in Settings',
   );
-  const { provider, model } = buildProvider();
+  const { provider, model } = await buildProvider();
   // Auditable action log (bounded ring buffer), exposed at GET /actions. Each entry is
   // also filed under the /generate turn that produced it (TurnLog), for eval grounding.
   const actionLog = new ActionLogObserver(recordTurnEntry, 2000);
@@ -483,8 +445,24 @@ async function main(): Promise<void> {
   const kindCaps = readKindCaps(process.env, (m) => console.error(`[spend] ${m}`));
   console.error(`[spend] background kinds: ${describeKindCaps(kindCaps)}`);
   spend.checkAll();
-  // Every Flint client shares this: the audit trail, plus one ledger row per paid provider pass.
-  const observer = combineObservers(actionLog, spendObserver(ledger));
+  // The frontier breaker (./frontier-breaker): an outside AI that keeps failing (no credit, a
+  // rejected key, an outage) is left alone for a cool-down and the local model answers at once.
+  // Its one-token check needs the tier set, which is built further down.
+  let checkFrontier: (provider: string, signal: AbortSignal) => Promise<void> = async () => {
+    throw new Error('no frontier brain');
+  };
+  const breaker = new FrontierBreaker({
+    probe: (p, signal) => checkFrontier(p, signal),
+    log: (m) => console.error(m),
+    // Out of credit, or a rejected key: only Will can fix it, so the console says so once a day (no banner, no ping).
+    onOpen: (e) => {
+      const note = breakerNote(e);
+      if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });
+    },
+  });
+  // Every Flint client shares this: the audit trail, one ledger row per paid provider pass,
+  // and each provider request's outcome for the breaker.
+  const observer = combineObservers(actionLog, spendObserver(ledger), breaker.observer());
   // Durable conversation memory — survives restarts/reboots/crashes (was RAM
   // only). Shared across both brains so a conversation stays coherent no matter
   // which one answers a given turn. Each turn is sent only the recent part of its
@@ -507,13 +485,16 @@ async function main(): Promise<void> {
   // Style guide per brain (./style-variant): FLINT_STYLE_VARIANT (frontier) and
   // FLINT_LOCAL_STYLE_VARIANT (local), both "v1" (FLINT_STYLE_GUIDE) when unset.
   const styles = readStyleDefaults(process.env, (m) => console.error(m));
-  const localPersonaFor = (f: Flint, variant: StyleVariant) =>
+  // Each persona also says which model is answering (engineLineFor): the guides name Claude as
+  // the engine "for most questions", and a local model must not take that for its own name.
+  const localPersonaFor = (f: Flint, variant: StyleVariant, m: string) =>
     new Persona(f, {
       name: 'Flint',
       styleGuide: styleGuideFor(variant),
+      engine: engineLineFor(provider, m),
       lessonStore,
     });
-  const persona = localPersonaFor(flint, styles.local);
+  const persona = localPersonaFor(flint, styles.local, model);
   // Eval-only local-model override (apps/parity --local-model / --local-think, see
   // local-model.ts): the same local persona, memory and action log, with a different
   // default model. Built lazily per (model, think, style variant); never used by normal traffic.
@@ -522,7 +503,7 @@ async function main(): Promise<void> {
   const localModels =
     provider.name === 'ollama'
       ? overridePersonaCache(process.env, (candidate, m, variant) =>
-          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory, observer }), variant ?? styles.local),
+          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory, observer }), variant ?? styles.local, m),
         )
       : undefined;
 
@@ -640,7 +621,7 @@ async function main(): Promise<void> {
   // (bare generate — no persona/style guide, a few hundred tokens); heuristics otherwise.
   let frontierFlint: Flint | undefined;
   let plannerVendor: ReturnType<typeof vendorOfProvider>; // whose budget frontierFlint spends
-  let backgroundFrontier: BackgroundFrontier | undefined; // what /internal/complete calls, once Will raises a kind cap
+  let plannerProvider: string | undefined; // ...and whose breaker it waits on
   // Perplexity / Tavily searches run in the MCP processes: metered per successful
   // call here, and refused with a routable error once their vendor's cap is spent.
   // deep_research gets the same wrapped tools, so its searches count too.
@@ -657,13 +638,18 @@ async function main(): Promise<void> {
     deepResearchTool({
       tools: mcpTools,
       embedder,
-      // Planning is optional (heuristic queries are the fallback): it waits at 80% of the cap.
+      // Planning is optional (heuristic queries are the fallback): it waits at 80% of the cap,
+      // and while the breaker has its provider paused.
       complete: pausable(
         async (prompt) => {
           if (!frontierFlint) throw new Error('no frontier brain');
           return (await frontierFlint.generate({ prompt }, { context: spendContext('plan') })).text;
         },
-        () => (plannerVendor ? spend.backgroundBlocked(plannerVendor) : undefined),
+        () => {
+          const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;
+          if (paused) return `the frontier is paused (${paused})`;
+          return plannerVendor ? spend.backgroundBlocked(plannerVendor) : undefined;
+        },
       ),
     }),
     calculateTool(),
@@ -680,7 +666,7 @@ async function main(): Promise<void> {
   // the local brain, so escalated turns can still reach your systems and the web.
   // Tiers (./brains): judgeBrain still decides local-vs-frontier; the tier set
   // decides WHICH frontier. No FLINT_TIER_* → every tier is this legacy frontier.
-  const frontierCfg = buildFrontierProvider();
+  const frontierCfg = buildFrontierProvider(process.env, (m) => console.error(`[brain] ${m}`));
   let frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   let extractFlint: Flint | undefined; // bare frontier (no persona): memory extraction, when Will opts it in (FLINT_MEMORY_BRAIN=frontier)
   const flintOf = new Map<Persona, Flint>();
@@ -698,6 +684,9 @@ async function main(): Promise<void> {
     const fPersona = new Persona(fFlint, {
       name: 'Flint',
       styleGuide: styleGuideFor(variant),
+      // Which model this tier is (an `ollama:` tier is not Claude, and says so). The same bytes
+      // on every call, so it sits inside the cached half of the prompt.
+      engine: engineLineFor(fProvider, fModel),
       lessonStore: new InMemoryLessonStore(),
       ...(fProvider.name === 'anthropic'
         ? { cache: { system: true, ...(router.coreLength > 0 ? { toolsThrough: router.coreLength - 1 } : {}) } }
@@ -716,7 +705,7 @@ async function main(): Promise<void> {
   // Eval requests may name another style variant; built per (brain, variant) on first use.
   const styled = new StyledPersonas<Persona>(styles, {
     local: persona,
-    buildLocal: (v) => localPersonaFor(flint, v),
+    buildLocal: (v) => localPersonaFor(flint, v, model),
     buildFrontier: frontierPersonaFor,
   });
   if (brains) {
@@ -728,19 +717,15 @@ async function main(): Promise<void> {
     const planner = brains.chain('routine')[0] ?? brains.primary;
     frontierFlint = flintOf.get(planner.persona);
     plannerVendor = vendorOfProvider(planner.provider.name);
-    // The runtime's background calls (/internal/complete) are light work too: the routine tier,
-    // bare (no persona, no tools), metered by the spend observer under the call's kind.
-    if (frontierFlint) {
-      const f = frontierFlint;
-      backgroundFrontier = {
-        vendor: plannerVendor,
-        model: planner.model,
-        generate: async (input, o) => {
-          const out = await f.generate(input, { context: spendContext(o.kind), maxTokens: o.maxTokens, signal: o.signal });
-          return { text: out.text, usage: out.usage };
-        },
-      };
-    }
+    plannerProvider = planner.provider.name;
+    // The breaker's check after a cool-down: one token from the cheapest brain on that provider,
+    // bare, tried once, metered like any other call.
+    checkFrontier = async (p, signal) => {
+      const b = brains.cheapestOn(p);
+      const f = b && flintOf.get(b.persona);
+      if (!f) throw new Error('no brain on that provider');
+      await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });
+    };
     console.error(`[brain] frontier escalation ENABLED -> ${brains.primary.label} (tiers: ${brains.describe()})`);
   } else {
     console.error('[brain] frontier disabled (set ANTHROPIC_API_KEY, or FLINT_FRONTIER_* for a local big model) — running local-only');
@@ -765,7 +750,8 @@ async function main(): Promise<void> {
   // background spend and pauses at 80% of its vendor's cap (./spend).
   const extractWith = extractFlint;
   const chatActive = liveChat(chatLoad);
-  const memoryPlan = chooseMemoryBrain(process.env, {
+  // The chat brain's model as main() resolved it: OLLAMA_MODEL, or what Ollama had when that is unset.
+  const memoryPlan = chooseMemoryBrain({ ...process.env, OLLAMA_MODEL: model }, {
     frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
     chatActive,
     log: (m) => console.error(m),
@@ -807,8 +793,11 @@ async function main(): Promise<void> {
       return cached;
     };
   })();
-  // The runtime's metered frontier calls (./background-complete): every kind $0 until Will raises it.
-  const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, frontier: () => backgroundFrontier, log: (m) => console.error(m) });
+  // The runtime's background calls (./background-complete): answered by the local model, never an
+  // outside one, yielding to Will's chat like memory extraction. Every kind is off until Will raises its cap.
+  const backgroundModel = localBackgroundModel(process.env, model, (m) => console.error(m));
+  const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
+  const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
   startInternal({
     tokenSha256: internalSha,
     // The runtime's words stay in the console; the phone only ever gets the content-free ping.
@@ -830,7 +819,7 @@ async function main(): Promise<void> {
     res.once('finish', () => {
       if (res.statusCode >= 500 && res.statusCode <= 599 && route && !turn?.eval) events.push({ type: 'route.error', route, status: res.statusCode });
     });
-    return handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, chatLoad, runtime: runtimeLink });
+    return handle(req, res, { persona, localModels, styled, provider, model, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, chatLoad, runtime: runtimeLink });
   })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
@@ -864,6 +853,8 @@ interface Ctx {
   convos: Convo[];
   frontier: { persona: Persona; model: string; media: MediaFlags } | undefined;
   brains: BrainSet<Persona> | undefined;
+  /** Which outside providers are paused after failures that will repeat (./frontier-breaker). */
+  breaker: FrontierBreaker;
   memory: PersistentStore;
   convTaint: ConversationTaint;
   knowledge: KnowledgeStore;
@@ -896,9 +887,16 @@ function toolsSince(ctx: Ctx, beforeLen: number): Array<{ tool: string; outcome?
     .map((a) => ({ tool: a.tool, outcome: a.isError ? 'error' : 'ok', ms: a.durationMs }));
 }
 
-/** One line per tier fallback, with the AiError kind that caused it. */
+/** One line per tier fallback, with the AiError kind that caused it (or that the breaker had the brain paused). */
 function logFallback(from: { label: string }, to: { label: string }, err: unknown): void {
-  console.error(`[brain] ${from.label} failed (${describeError(err)}) — falling back to ${to.label}`);
+  if (err instanceof FrontierPaused) console.error(`[brain] ${from.label} skipped (${err.message}) — moving on to ${to.label}`);
+  else console.error(`[brain] ${from.label} failed (${describeError(err)}) — falling back to ${to.label}`);
+}
+
+/** One line when the local model takes over a frontier turn: the error, or only the breaker's reason code. */
+function logToLocal(how: string, err: unknown): void {
+  if (err instanceof FrontierPaused) console.error(`[brain] ${err.brain.label} is paused (${err.brain.reason}); the local model answers`);
+  else console.error(`[brain] ${how}, falling back to local:`, err);
 }
 
 /** One log line when the spend guard changed a turn's route (./spend). */
@@ -1196,7 +1194,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!budget.ok) return json(res, budget.status, { error: budget.error });
     const { plan, note } = budget; // /generate is one-shot: each answer carries the note
     if (plan) logPlan(plan);
-    let brain = budget.brain;
+    // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
+    // out, and with none left the local model answers at once instead of after their failures.
+    const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: route.localFallback && !budget.localRefusal, breaker: ctx.breaker });
+    let brain = gate.brain;
+    let paused = gate.paused; // also set when a brain's provider is paused while the turn runs
     let answeredBy = local.model;
     // The [route] line (./route-log): tier, what moved it, who answered. Never the prompt.
     const moved = movedBy(prompt, tier, { toolsLikely });
@@ -1210,6 +1212,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           appended: scored.appended,
           ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
           brain,
+          ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
           outcome,
           recall: recalled.mode,
@@ -1243,11 +1246,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         try {
           // A refused / empty reply moves down the chain too; if the last one is, the honest message (./unanswered).
           const won = await answerWithFallback(
-            plan.chain,
-            (b) => {
+            gate.chain,
+            gate.attempt((b) => {
               lastTried = b.label;
               return answered.ask(personas.frontier(b));
-            },
+            }),
             { signal: abort.signal, onFallback: logFallback },
           );
           out = won.result;
@@ -1268,7 +1271,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
             logRoute('error');
             return json(res, 503, { error: `frontier failed. ${budget.localRefusal}`, ref: errorRef('generate', err), ...evalFields() });
           }
-          console.error('[brain] frontier failed, falling back to local:', err);
+          logToLocal('frontier failed', err);
+          if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
           brain = 'local';
           lastTried = local.model;
           out = await answered.ask(local.persona);
@@ -1300,6 +1304,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         ...(unanswered ? { unanswered } : {}),
         brain,
         ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
+        // `provider:reason` codes when the breaker left outside brains out of this turn.
+        ...(paused ? { frontierPaused: paused } : {}),
         model: answeredBy,
         // The `think` the answering persona's Ollama client sends (not the request's
         // localThink), so apps/parity can tell the flag reached Ollama, as it does for `model`.
@@ -1332,6 +1338,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       brain,
       ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
       ...budget.fields,
+      ...(paused ? { frontierPaused: paused } : {}),
       model: answeredBy,
       pending: proposed,
     });
@@ -1382,7 +1389,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       if (!budget.ok) return json(res, budget.status, { error: budget.error });
       const { plan, note } = budget;
       if (plan) logPlan(plan);
-      let brain = budget.brain;
+      // May the local model answer this turn if the frontier can't: no image or PDF on it, and
+      // (a paid local brain) its budget not spent.
+      const toLocal = route.localFallback && !budget.localRefusal;
+      // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
+      // out, and with none left the local model answers at once instead of after their failures.
+      const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal, breaker: ctx.breaker });
+      let brain = gate.brain;
+      let paused = gate.paused; // also set when a brain's provider is paused while the turn runs
       let answeredBy = ctx.model;
       let failed = false;
       let streamErrored = false; // a provider failure arrives as a streamed error event, not a throw
@@ -1423,9 +1437,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // The budget note rides just ahead of `done`: shown, but never stored as the answer.
           if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
           if (ev.type === 'text') answer += ev.delta;
-          // A provider error arrives as an event, not a throw. When another tier is
-          // left to try and no text has gone out, throw it to the tier fallback.
-          if (recoverable && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
+          // A provider error arrives as an event, not a throw. With no text out yet it is
+          // thrown instead: to the next tier, or, from the last frontier tier, to the local
+          // model when it may answer this turn (it used to reach Will as a stopped reply).
+          if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
           if (ev.type === 'error') streamErrored = true; // passed on to the client, so the turn failed
           res.write(`data: ${JSON.stringify(ev)}\n\n`);
         }
@@ -1433,29 +1448,30 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       try {
         if (brain === 'frontier' && plan) {
           try {
-            const chain = plan.chain;
+            const chain = gate.chain;
             const won = await runWithFallback(
               chain,
-              async (b) => {
+              gate.attempt(async (b) => {
                 lastTried = b.label;
-                res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields })}\n\n`);
+                res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
                 try {
-                  await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: errors as before, no answer → honest message
+                  await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: no answer → honest message; an error → the local model, when it may answer
                 } catch (err) {
                   if (answer.length > 0) throw new NoFallback(err); // text already streamed
                   throw err;
                 }
-              },
+              }),
               { signal: ac.signal, onFallback: logFallback },
             );
             answeredBy = won.brain.label;
           } catch (err) {
             // Only safe to fall back if nothing was streamed yet, and (a paid local brain) its budget isn't spent.
-            if (answer.length === 0 && route.localFallback && !ac.signal.aborted && !budget.localRefusal) {
-              console.error('[brain] frontier failed pre-output, falling back to local:', err);
+            if (answer.length === 0 && toLocal && !ac.signal.aborted) {
+              logToLocal('frontier failed pre-output', err);
+              if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
               brain = 'local';
               lastTried = ctx.model;
-              res.write(`data: ${JSON.stringify({ type: 'meta', brain })}\n\n`);
+              res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
               await pump(ctx.persona);
             } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
               stopWords = budget.localRefusal;
@@ -1466,7 +1482,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           }
         } else {
           lastTried = ctx.model;
-          res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
           await pump(ctx.persona);
         }
         if (answer.trim()) {
@@ -1495,6 +1511,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           turns,
           ...(plan && plan.tier !== tier ? { planTier: plan.tier } : {}),
           brain,
+          ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
           outcome,
           ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),

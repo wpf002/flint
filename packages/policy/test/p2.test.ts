@@ -59,9 +59,14 @@ describe('P2 wire contracts', () => {
     expect(NotifyRequest.safeParse({ title: 'x', channels: ['sms'] }).success).toBe(false);
   });
 
-  it('a background frontier call names its spend kind', () => {
+  it('a background model call names its spend kind, and may ask for a JSON reply', () => {
     expect(InternalCompleteRequest.safeParse({ kind: 'runtime', ref: 'es1', system: '', prompt: 'p', maxTokens: 100 }).success).toBe(true);
     expect(InternalCompleteRequest.safeParse({ kind: 'chat', ref: 'es1', system: '', prompt: 'p', maxTokens: 100 }).success).toBe(false);
+    // An optional JSON schema for the reply (the local model's format): an object, of bounded size.
+    const ask = { kind: 'runtime', ref: 'es1', system: '', prompt: 'p', maxTokens: 100 };
+    expect(InternalCompleteRequest.safeParse({ ...ask, schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] } }).success).toBe(true);
+    expect(InternalCompleteRequest.safeParse({ ...ask, schema: 'object' }).success).toBe(false);
+    expect(InternalCompleteRequest.safeParse({ ...ask, schema: { description: 'x'.repeat(8000) } }).success).toBe(false);
   });
 
   it('what the model sees about triage has no room for reasoning or a stranger\'s words', () => {

@@ -138,6 +138,9 @@ export { AnthropicProvider } from './provider/anthropic/index.js';
 export type { AnthropicProviderOptions } from './provider/anthropic/index.js';
 export { OllamaProvider } from './provider/ollama/index.js';
 export type { OllamaProviderOptions } from './provider/ollama/index.js';
+// The model an app uses when none is named: one of Ollama's own, never a hosted one.
+export { pickOllamaModel, isOllamaCloudModel, DEFAULT_OLLAMA_MODEL } from './provider/ollama/default-model.js';
+export type { PickedOllamaModel, PickOllamaModelOptions } from './provider/ollama/default-model.js';
 export { OpenAiProvider, OpenAiCompatibleProvider, openAiCapabilities } from './provider/openai/index.js';
 export type { OpenAiProviderOptions, ChatWire } from './provider/openai/index.js';
 export { PerplexityProvider, perplexityCapabilities } from './provider/perplexity/index.js';

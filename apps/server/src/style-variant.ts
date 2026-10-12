@@ -19,6 +19,9 @@
  *    override personas'). Unset, both are "v1", so nothing changes; an unknown
  *    value is logged and ignored (v1), so a typo can't take Flint down.
  *
+ * Whatever the variant, each persona also says which model is answering
+ * (engineLineFor): that is per brain, not part of any guide.
+ *
  * A requested variant applies to whichever brain answers: frontier, local, or a
  * local fallback after a frontier failure. Personas are built once per (brain,
  * variant) and reused. The default variant's persona is the one main() already
@@ -27,8 +30,8 @@
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
-import type { ProviderAdapter } from '@flint/core';
-import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
+import { isOllamaCloudModel, type ProviderAdapter } from '@flint/core';
+import { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, flintEngineLine, isFlintStyleVariant, type FlintStyleVariant } from '@flint/persona';
 import { resolveLocalPersona, type LocalPersonaCache, type OverridePersona } from './local-model';
 
 export type StyleVariant = FlintStyleVariant;
@@ -42,6 +45,18 @@ export const DEFAULT_STYLE_VARIANT: StyleVariant = 'v1';
 /** The style guide text for a variant. */
 export function styleGuideFor(variant: StyleVariant): string {
   return FLINT_STYLE_VARIANTS[variant];
+}
+
+/**
+ * The engine paragraph a brain's persona carries after its guide (@flint/persona
+ * flintEngineLine): which model is answering. The frontier guides say "Claude's
+ * model for most questions" in pinned text, and the same guide speaks for every
+ * brain, an `ollama:` tier and the local brain included; this is what keeps a
+ * local model from answering "Claude" when Will asks what it runs on. The guide
+ * itself is untouched, so styleVariantOf still names a persona by its guide.
+ */
+export function engineLineFor(provider: Pick<ProviderAdapter, 'name'>, model: string): string {
+  return flintEngineLine({ provider: provider.name, model, ollamaCloud: provider.name === 'ollama' && isOllamaCloudModel(model) });
 }
 
 export type StyleVariantRequest =

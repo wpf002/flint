@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DailyRow } from './measure.js';
-import { type Candidate, tierEnvVar } from './promote.js';
+import { type Candidate, localOnly, tierEnvVar } from './promote.js';
 
 /**
  * The I/O half of stage 3: put a candidate into the live config, let it be
@@ -14,6 +14,12 @@ import { type Candidate, tierEnvVar } from './promote.js';
  * mid-test — crash, power cut, SIGKILL — the next run finds the rollback file
  * and restores the old config before doing anything else. Flint is never left
  * on an unproven config because a script stopped halfway.
+ *
+ * LOCAL ONLY. The value written into FLINT_TIER_* is always `ollama:<model>`:
+ * applyCandidate checks that itself (promote.ts localOnly) before it touches a
+ * file, whatever the caller already checked. Restoring a previous value is the
+ * one write that may name an outside model, because it is Will's own setting
+ * being put back.
  */
 
 export interface Rollback {
@@ -85,8 +91,10 @@ export async function recoverIfNeeded(io: TryIo): Promise<string | undefined> {
   return `restored ${rb.envVar} after an interrupted try of ${rb.candidate}`;
 }
 
-/** Swap the candidate in, recording how to undo it first. */
+/** Swap the candidate in, recording how to undo it first. Throws, having written nothing, for anything but a local model. */
 export async function applyCandidate(io: TryIo, c: Candidate, now: string): Promise<void> {
+  const local = localOnly(c);
+  if (!local.ok) throw new Error(`refusing to write ${c.provider}:${c.model} into the config: ${local.reason}`);
   const envVar = tierEnvVar(c.tier);
   const content = existsSync(io.secretsPath) ? readFileSync(io.secretsPath, 'utf8') : '';
   const previous = readEnvLine(content, envVar);

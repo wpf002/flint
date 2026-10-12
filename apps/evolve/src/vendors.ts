@@ -1,9 +1,13 @@
 import type { ModelInfo, VendorCatalog } from './discover.js';
 
 /**
- * Each vendor's "what do you serve" endpoint. All of these are free; none of
- * them generate a token. That is the whole point of stage 1 — Flint can look at
- * the world every night without it costing anything.
+ * "What do you serve": the local Ollama's own list by default, and each
+ * vendor's only when asked for.
+ *
+ * All of these are free; none of them generate a token. But the vendor lists
+ * are still calls to outside AI companies, made with Will's keys, so they are
+ * off unless a run asks (`evolve discover --vendors`): by default Flint looks
+ * only at the models on its own machine.
  */
 
 const TIMEOUT_MS = 20_000;
@@ -88,12 +92,23 @@ export async function ollamaCatalog(host: string): Promise<VendorCatalog> {
   }
 }
 
-export async function allCatalogs(env: NodeJS.ProcessEnv): Promise<VendorCatalog[]> {
+/**
+ * The catalogs a run looks at: Ollama's alone, unless `vendors` asks for the
+ * outside vendors' model lists as well (off by default; no vendor is contacted
+ * and no key is read without it).
+ */
+export async function allCatalogs(env: NodeJS.ProcessEnv, opts: { vendors?: boolean } = {}): Promise<VendorCatalog[]> {
   const host = env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434';
+  if (!opts.vendors) return [await ollamaCatalog(host)];
   return Promise.all([
     openaiCatalog(env.OPENAI_API_KEY?.trim()),
     anthropicCatalog(env.ANTHROPIC_API_KEY?.trim()),
     googleCatalog(env.GEMINI_API_KEY?.trim()),
     ollamaCatalog(host),
   ]);
+}
+
+/** `evolve discover --vendors`: also list what the outside vendors serve. Anything else on the line is not it. */
+export function wantsVendors(args: readonly string[]): boolean {
+  return args.includes('--vendors');
 }

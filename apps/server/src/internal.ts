@@ -10,8 +10,8 @@
  *                                                           in-app note; omitted: all three, as in P1);
  *                                                           `ref` makes a resent note a duplicate
  *   POST /internal/load            {}                       {chatInFlight}: triage yields to chat
- *   POST /internal/complete        InternalCompleteRequest  a metered frontier call under a background
- *                                                           spend kind (./background-complete)
+ *   POST /internal/complete        InternalCompleteRequest  a model call under a background spend kind,
+ *                                                           answered by the local model (./background-complete)
  *   POST /internal/spend-external  {asOf, vendors: {...}}   unified spend totals (plan 3.0.8), for the
  *                                                           background stop rule
  * The request and answer shapes are @flint/policy's wire contracts, which the

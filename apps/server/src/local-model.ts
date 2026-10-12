@@ -18,7 +18,7 @@
  * how a bake-off measures them with it off. Accepted only with a valid
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
-import { OllamaProvider, type OllamaProviderOptions } from '@flint/core';
+import { OllamaProvider, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
 import type { StyleVariant } from './style-variant';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
@@ -89,6 +89,42 @@ export function liveOllamaOptions(env: Record<string, string | undefined>): Olla
     // OLLAMA_THINK=true|false sets Ollama's `think`; unset sends nothing (as before).
     ...thinkOption(parseOllamaThink(env.OLLAMA_THINK)),
   };
+}
+
+/** The local brain main() builds: its Ollama client's options, its model, and where the model's name came from. */
+export interface LocalBrain {
+  options: OllamaProviderOptions;
+  model: string;
+  /** `env`: OLLAMA_MODEL. Otherwise Ollama was asked: the chat model it had loaded, the first it had pulled, or the default. */
+  from: 'env' | PickedOllamaModel['from'];
+}
+
+/**
+ * The local brain. It is always Ollama: OLLAMA_MODEL names its model, and when
+ * that is unset Ollama is asked which it has (@flint/core pickOllamaModel: the
+ * chat model already loaded, else the first one pulled, else DEFAULT_OLLAMA_MODEL).
+ *
+ * It used to become Anthropic's claude-sonnet-4-6 whenever OLLAMA_MODEL was
+ * unset and a key was present: a missing setting quietly sent every "local"
+ * answer, the private ones included, to an outside AI. No key changes it now,
+ * and FLINT_MODEL, which named that model, is no longer read (said once at boot).
+ */
+export async function chooseLocalBrain(
+  env: Record<string, string | undefined>,
+  deps: { fetch?: typeof fetch; log?: (msg: string) => void } = {},
+): Promise<LocalBrain> {
+  const log = deps.log ?? (() => {});
+  const options = liveOllamaOptions(env);
+  if (env.FLINT_MODEL?.trim()) log('[brain] FLINT_MODEL is no longer read: the local brain is always an Ollama model (OLLAMA_MODEL)');
+  const named = env.OLLAMA_MODEL?.trim();
+  if (named) return { options, model: named, from: 'env' };
+  const picked = await pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) });
+  log(
+    picked.from === 'default'
+      ? `[brain] OLLAMA_MODEL is unset and Ollama listed no chat model: the local brain is ${picked.model} (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
+      : `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`,
+  );
+  return { options, model: picked.model, from: picked.from };
 }
 
 /**

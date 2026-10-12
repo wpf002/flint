@@ -1,14 +1,23 @@
 /**
- * POST /internal/complete (Machine plan P2, 3.0.8): a frontier call the runtime
- * asks for, metered under a background spend kind (runtime, review, dispatch,
- * selfmod). The runtime holds no vendor keys; the server makes the call, so the
- * server is where the money is guarded.
+ * POST /internal/complete (Machine plan P2, 3.0.8): a model call the runtime
+ * asks for, under a background kind (runtime, review, dispatch, selfmod). The
+ * runtime holds no vendor keys; the server makes the call.
  *
- * In order, before anything is spent:
+ * The call is answered by the LOCAL model (localBackgroundBrain): the chat
+ * brain's own Ollama model, with the reply held to a JSON schema when the
+ * request carries one, as memory extraction is (./memory-brain). It used to go
+ * to the routine frontier tier (Sonnet) and answer 503 without one; nothing
+ * calls it yet, and every background call from here on stays on this machine.
+ * It yields to Will's chat: not started while he is chatting, and cut off the
+ * moment a turn starts.
+ *
+ * The gate itself still guards money, for any brain that bills (the local one
+ * does not, so steps 2 and 3 pass it by). In order, before anything runs:
  *  1. the kind's own caps (FLINT_BUDGET_KIND_<KIND>_DAILY_USD / _MONTHLY_USD,
  *     $0 until Will raises both): refused at $0, or when what the kind has
  *     spent plus this call's estimate (prompt plus maxTokens of answer, priced
- *     high) would pass either cap;
+ *     high) would pass either cap. With a free brain this is the kind's switch:
+ *     off until both are raised;
  *  2. the vendor's own cap: refused once Flint's ledger is at 80% of it (the
  *     point where background work waits) or spent;
  *  3. the unified view the runtime pushes (every account's spend on that
@@ -17,21 +26,22 @@
  *     to hold the 70% against: fail closed);
  *  4. a durable audit intent (fsynced; if it cannot be written, nothing runs);
  *  then the call (no tools, a timeout), metered into the spend ledger under its
- *  kind, and its outcome audited with the cost.
+ *  kind when it bills, and its outcome audited with the cost.
  *
  * One call at a time, so two calls cannot both pass a cap that has room for
  * one; a few may wait, more are refused (busy). Every refusal is audited, with
  * its reason. Nothing the runtime sent (the prompt) reaches the audit trail:
  * ids, enums and numbers only, and a failed call's error as its class.
  *
- * Refusals answer 402 {error, reason} (a budget), 503 (no frontier, busy, no
- * audit) or 502 (the provider failed); the runtime reads any of them as "no
- * text". With the default $0 caps every call is refused.
+ * Refusals answer 402 {error, reason} (a budget), 503 (no local model, busy, no
+ * audit) or 502 (the call failed, or Will started chatting); the runtime reads
+ * any of them as "no text". With the default $0 caps every call is refused.
  */
 import { randomBytes } from 'node:crypto';
-import { estimateCost, type TokenUsage, type TokenVendor } from '@flint/core';
+import { OllamaProvider, estimateCost, type TokenUsage, type TokenVendor } from '@flint/core';
 import { InternalCompleteRequest, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { AuditSink } from './audit-sink';
+import { chatOllama, isCloudModel, type LocalMemoryModel } from './memory-brain';
 import { DEGRADE_AT, UNIFIED_BACKGROUND_STOP, atLeast, type KindCaps, type SpendGuard } from './spend';
 
 export type CompleteReason =
@@ -42,24 +52,29 @@ export type CompleteReason =
   | 'unified_missing'
   | 'unified_stale'
   | 'unified_70'
-  | 'no_frontier'
+  | 'no_local_model'
   | 'busy'
   | 'audit_unavailable'
   | 'provider_failed';
 
-/** The frontier brain background calls use. Its calls are metered by the server's spend observer under `kind`. */
-export interface BackgroundFrontier {
-  /** The paid vendor it bills, or undefined for a free (local) frontier. */
+/** The brain background calls use: the local model (localBackgroundBrain). A brain that bills is metered by the server's spend observer under `kind`. */
+export interface BackgroundBrain {
+  /** The paid vendor it bills, or undefined for a free (local) brain. */
   vendor: TokenVendor | undefined;
   model: string;
-  generate(input: { system: string; prompt: string }, opts: { kind: BackgroundKind; maxTokens: number; signal: AbortSignal }): Promise<{ text: string; usage: TokenUsage }>;
+  /** `schema`: a JSON schema the reply must match; omitted, the reply is plain text. */
+  generate(
+    input: { system: string; prompt: string; schema?: Record<string, unknown> },
+    opts: { kind: BackgroundKind; maxTokens: number; signal: AbortSignal },
+  ): Promise<{ text: string; usage: TokenUsage }>;
 }
 
 export interface CompleteGateDeps {
   guard: Pick<SpendGuard, 'ledger' | 'status' | 'unifiedView'>;
   kindCaps: KindCaps;
   audit: Pick<AuditSink, 'record'>;
-  frontier: () => BackgroundFrontier | undefined;
+  /** The brain to ask, or undefined when there is no local model to ask (503 no_local_model). */
+  brain: () => BackgroundBrain | undefined;
   now?: () => number;
   /** How long the call may take (default 120 s). */
   timeoutMs?: number;
@@ -72,6 +87,7 @@ export type CompleteResult =
   | { status: 200; body: { text: string; usage: TokenUsage; costUsd: number } }
   | { status: 400 | 402 | 502 | 503; body: { error: string; reason: CompleteReason } };
 
+// The audit action's name predates the move to the local model; it is kept so the trail stays one series.
 const ACTION = 'runtime.frontier.complete';
 
 /** An error's class for the audit trail, never its words. */
@@ -124,8 +140,8 @@ export class CompleteGate {
     if (!(caps.dailyUsd > 0) || !(caps.monthlyUsd > 0)) {
       return this.refuse(req, 402, 'kind_cap', `the ${req.kind} spend kind is capped at $0 (FLINT_BUDGET_KIND_${KIND}_DAILY_USD and _MONTHLY_USD)`);
     }
-    const f = this.deps.frontier();
-    if (!f) return this.refuse(req, 503, 'no_frontier', 'no frontier brain is configured');
+    const f = this.deps.brain();
+    if (!f) return this.refuse(req, 503, 'no_local_model', 'there is no local model to ask');
     const where = { vendor: f.vendor ?? 'free', model: f.model.slice(0, 120) };
     // ...and with room for this call's estimate (it errs high).
     const spent = this.deps.guard.ledger.kindTotals(req.kind, now);
@@ -167,7 +183,10 @@ export class CompleteGate {
       return { status: 503, body: { error: 'the intent could not be recorded, so nothing was run', reason: 'audit_unavailable' } };
     }
     try {
-      const out = await f.generate({ system: req.system, prompt: req.prompt }, { kind: req.kind, maxTokens: req.maxTokens, signal: AbortSignal.timeout(this.deps.timeoutMs ?? 120_000) });
+      const out = await f.generate(
+        { system: req.system, prompt: req.prompt, ...(req.schema ? { schema: req.schema } : {}) },
+        { kind: req.kind, maxTokens: req.maxTokens, signal: AbortSignal.timeout(this.deps.timeoutMs ?? 120_000) },
+      );
       const costUsd = f.vendor ? Math.round(this.deps.guard.ledger.priceTokens(f.vendor, f.model, out.usage) * 1e6) / 1e6 : 0;
       this.deps.audit.record({
         actor: 'runtime', context: 'autonomous', kind: 'spend', action: ACTION, decision: 'act', outcome: 'ok',
@@ -181,7 +200,119 @@ export class CompleteGate {
         actor: 'runtime', context: 'autonomous', kind: 'spend', action: ACTION, decision: 'act', outcome: 'failed',
         inputs: { ...inputs, error: cls }, reasoning: `the provider call failed (${cls})`, correlationId,
       });
-      return { status: 502, body: { error: `the frontier call failed (${cls})`, reason: 'provider_failed' } };
+      return { status: 502, body: { error: `the call failed (${cls})`, reason: 'provider_failed' } };
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// the local model as the background brain
+
+type Env = Record<string, string | undefined>;
+
+/**
+ * The local model background calls ask: the chat brain's own (`chatModel`, what
+ * main() resolved from OLLAMA_MODEL) at OLLAMA_HOST with the num_ctx the chat
+ * brain sends, so Ollama never reloads it between Will's chat and a call.
+ * Undefined, with the reason logged, when that model runs off this Mac (an
+ * Ollama cloud model) or OLLAMA_HOST is not an http(s) URL.
+ */
+export function localBackgroundModel(env: Env, chatModel: string, log: (msg: string) => void): LocalMemoryModel | undefined {
+  if (isCloudModel(chatModel)) {
+    log('[complete] the chat model is an Ollama cloud model, which runs off this Mac: background calls have no local model');
+    return undefined;
+  }
+  const live = chatOllama(env);
+  if (!live) {
+    log('[complete] OLLAMA_HOST is not an http(s) URL: background calls have no local model');
+    return undefined;
+  }
+  return { ...live, model: chatModel, unloadAfter: false };
+}
+
+/** Thrown when a background call gives way to Will's chat: audited by its name, like any failed call. */
+export class ChatBusy extends Error {
+  constructor() {
+    super('Will is chatting; the local model is his');
+    this.name = 'ChatBusy';
+  }
+}
+
+/** Requests one call may make: the provider's own retries of an empty or unparsable reply. */
+const BACKGROUND_MODEL_REQUESTS = 3;
+/** How often a running call checks whether Will started a chat turn. */
+const CHAT_POLL_MS = 500;
+
+export interface LocalBackgroundDeps {
+  /** Is Will chatting? Checked before the call, and every pollMs while it runs. */
+  chatActive?: () => boolean;
+  fetch?: typeof fetch;
+  pollMs?: number;
+}
+
+/**
+ * The local model as the BackgroundBrain, built the way memory extraction's is
+ * (./memory-brain localExtractBrain):
+ *  - OllamaProvider on the chat brain's host and num_ctx, `think` off,
+ *    temperature 0;
+ *  - a request's `schema` is Ollama's `format` (responseFormat): the reply is
+ *    JSON of that shape, or the call fails;
+ *  - only POST /api/chat on that host, at most BACKGROUND_MODEL_REQUESTS times;
+ *  - Will's chat comes first: not started while he is chatting, cut off the
+ *    moment a turn starts (ChatBusy either way).
+ * It bills nothing (`vendor` undefined), so nothing is metered.
+ */
+export function localBackgroundBrain(m: LocalMemoryModel, deps: LocalBackgroundDeps = {}): BackgroundBrain {
+  const chatActive = deps.chatActive ?? (() => false);
+  const base = deps.fetch ?? fetch;
+  return {
+    vendor: undefined,
+    model: m.model,
+    generate: async (input, o) => {
+      if (chatActive()) throw new ChatBusy();
+      const ac = new AbortController();
+      const cancel = () => ac.abort();
+      if (o.signal.aborted) cancel();
+      else o.signal.addEventListener('abort', cancel, { once: true });
+      let gaveWay = false;
+      const watch = setInterval(() => {
+        if (!chatActive()) return;
+        gaveWay = true;
+        ac.abort();
+      }, deps.pollMs ?? CHAT_POLL_MS);
+      watch.unref?.();
+      let requests = 0;
+      // Every request the provider makes, its own retries included, comes through here.
+      const gatedFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        const u = new URL(typeof url === 'string' || url instanceof URL ? String(url) : url.url);
+        if (u.origin !== m.baseURL || u.pathname !== '/api/chat' || (init?.method ?? 'GET').toUpperCase() !== 'POST') throw new Error('only /api/chat');
+        if (requests >= BACKGROUND_MODEL_REQUESTS) throw new Error('no more requests');
+        requests += 1;
+        return base(u.href, init);
+      }) as typeof fetch;
+      const provider = new OllamaProvider({
+        baseURL: m.baseURL,
+        fetch: gatedFetch,
+        think: false,
+        defaultOptions: { temperature: 0, ...(m.numCtx !== undefined ? { num_ctx: m.numCtx } : {}) },
+      });
+      try {
+        const r = await provider.generate({
+          model: m.model,
+          ...(input.system ? { system: input.system } : {}),
+          messages: [{ id: 'background', role: 'user', content: input.prompt, timestamp: Date.now() }],
+          ...(input.schema ? { responseFormat: { type: 'json_schema' as const, name: 'background_reply', schema: input.schema } } : {}),
+          maxTokens: o.maxTokens,
+          signal: ac.signal,
+        });
+        return { text: r.message.content, usage: r.usage };
+      } catch (err) {
+        if (gaveWay) throw new ChatBusy();
+        throw err;
+      } finally {
+        clearInterval(watch);
+        o.signal.removeEventListener('abort', cancel);
+      }
+    },
+  };
 }

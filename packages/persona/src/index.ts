@@ -18,6 +18,8 @@ export { FLINT_LOCAL_STYLE_GUIDE } from './flint-local.js';
 export { FLINT_LOCAL_STYLE_GUIDE_V2 } from './flint-local-v2.js';
 export { FLINT_STYLE_VARIANTS, FLINT_STYLE_VARIANT_NAMES, isFlintStyleVariant } from './flint-variants.js';
 export type { FlintStyleVariant } from './flint-variants.js';
+export { flintEngineLine } from './flint-engine.js';
+export type { FlintEngine } from './flint-engine.js';
 export {
   FLINT_CONSTITUTION,
   CONSTITUTION_CORE,

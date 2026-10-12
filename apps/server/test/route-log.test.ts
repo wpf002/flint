@@ -51,6 +51,17 @@ describe('routeLine', () => {
     );
   });
 
+  // While the breaker has an outside provider paused, the line says who really answered: the
+  // local model, by name, with the reason as a code (./frontier-breaker).
+  it('a turn the breaker moved to the local model names it as the answerer, with the reason code', () => {
+    const paused: RouteRecord = { path: 'generate', tier: 'hard', appended: [], brain: 'local', paused: 'anthropic:credit', ...attribution('answered', 'muse-glimmer:30b'), outcome: 'answered', ms: 900 };
+    const parsed = JSON.parse(routeLine(paused).slice('[route] '.length));
+    expect(parsed).toMatchObject({ tier: 'hard', brain: 'local', paused: 'anthropic:credit', answeredBy: 'muse-glimmer:30b', outcome: 'answered' });
+    expect(parsed).not.toHaveProperty('tried');
+    // A code, never the provider's words.
+    expect(routeLine(paused)).not.toMatch(/balance|credit balance|too low/i);
+  });
+
   // Plan 3.0.8: what each context block adds to a frontier prompt is measured, as a count.
   it('carries the context blocks\' token estimates when there are any', () => {
     const parsed = JSON.parse(routeLine({ ...rec, ctxTokens: { world: 118 } }).slice('[route] '.length));

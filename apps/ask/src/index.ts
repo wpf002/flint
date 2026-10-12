@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { say, transcribe, toWav16k, recordUtterance } from './voice.js';
 import { createInterface } from 'node:readline';
-import { Flint, AnthropicProvider, OllamaProvider, ActionLogObserver, type ProviderAdapter } from '@flint/core';
+import { Flint, OllamaProvider, ActionLogObserver, isOllamaCloudModel, pickOllamaModel, type ProviderAdapter } from '@flint/core';
 import {
   Persona,
   InMemoryRetriever,
@@ -13,6 +13,7 @@ import {
   reflect,
   consolidate,
   evaluateTriggers,
+  flintEngineLine,
   FLINT_STYLE_GUIDE,
   FLINT_VOICE_EXEMPLARS,
   type Trigger,
@@ -30,34 +31,41 @@ import { FileMemoryStore, FileLessonStore } from './stores.js';
  *   ask lessons             list what Flint has learned
  *   ask reset               wipe memory + lessons
  *
- * Provider: OLLAMA_MODEL (local, default 'qwen2.5:14b' if Ollama is up) or
- * ANTHROPIC_API_KEY. Data lives in ~/.flint/.
+ * Provider: always the local Ollama (OLLAMA_HOST). OLLAMA_MODEL names the model;
+ * unset, it is the chat model Ollama has loaded, else the first one pulled. Never
+ * a hosted model, whatever keys are in the environment. Data lives in ~/.flint/.
  */
 
 const DATA_DIR = join(homedir(), '.flint');
 const CONVERSATION = 'main';
 
-function buildProvider(): { provider: ProviderAdapter; model: string } {
-  const ollama = process.env.OLLAMA_MODEL?.trim();
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (ollama) {
-    // Default to 127.0.0.1 (not 'localhost') — Node's fetch can resolve
-    // localhost to IPv6 ::1 while Ollama binds IPv4, which surfaces as
-    // "fetch failed". The explicit IPv4 host avoids it.
-    return {
-      provider: new OllamaProvider({ baseURL: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' }),
-      model: ollama,
-    };
+/**
+ * The model `ask` talks to: an Ollama one, always. It used to fall back to
+ * Anthropic (claude-sonnet-4-6) whenever OLLAMA_MODEL was unset and a key was in
+ * the environment, and otherwise to qwen2.5:14b, which may not be pulled.
+ */
+async function buildProvider(): Promise<{ provider: ProviderAdapter; model: string }> {
+  // Default to 127.0.0.1 (not 'localhost') — Node's fetch can resolve
+  // localhost to IPv6 ::1 while Ollama binds IPv4, which surfaces as
+  // "fetch failed". The explicit IPv4 host avoids it.
+  const baseURL = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
+  const named = process.env.OLLAMA_MODEL?.trim();
+  if (named) return { provider: new OllamaProvider({ baseURL }), model: named };
+  // Ask Ollama what it has (@flint/core pickOllamaModel): two free list calls, no generation.
+  const picked = await pickOllamaModel({ baseURL });
+  if (picked.from === 'default') {
+    process.stderr.write(`[ask] OLLAMA_MODEL is unset and Ollama listed no chat model; trying ${picked.model} (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)\n`);
   }
-  if (key) return { provider: new AnthropicProvider({ apiKey: key }), model: 'claude-sonnet-4-6' };
-  // Default to local Ollama with the recommended model.
-  return { provider: new OllamaProvider(), model: 'qwen2.5:14b' };
+  // A model that is already loaded (the server's chat brain, usually) is asked with the
+  // context window it was loaded with: a different one would make Ollama reload it.
+  const options = picked.numCtx !== undefined ? { defaultOptions: { num_ctx: picked.numCtx } } : {};
+  return { provider: new OllamaProvider({ baseURL, ...options }), model: picked.model };
 }
 
-function buildFlint() {
+async function buildFlint() {
   const memory = new FileMemoryStore(join(DATA_DIR, 'memory.json'));
   const lessonStore = new FileLessonStore(join(DATA_DIR, 'lessons.json'));
-  const { provider, model } = buildProvider();
+  const { provider, model } = await buildProvider();
   // Audit log: append every request/tool-call/result/error to ~/.flint/actions.jsonl.
   const actionsPath = join(DATA_DIR, 'actions.jsonl');
   const observer = new ActionLogObserver((e) => {
@@ -87,11 +95,15 @@ async function buildRetriever() {
   return new InMemoryRetriever(FLINT_VOICE_EXEMPLARS);
 }
 
-async function buildPersona(): Promise<{ persona: Persona; flint: ReturnType<typeof buildFlint>['flint']; lessonStore: ReturnType<typeof buildFlint>['lessonStore'] }> {
-  const { flint, lessonStore } = buildFlint();
+type Built = Awaited<ReturnType<typeof buildFlint>>;
+
+async function buildPersona(): Promise<{ persona: Persona; flint: Built['flint']; lessonStore: Built['lessonStore'] }> {
+  const { flint, lessonStore, model, providerName } = await buildFlint();
   const persona = new Persona(flint, {
     name: 'Flint',
     styleGuide: FLINT_STYLE_GUIDE,
+    // The guide names Claude as the engine "for most questions"; this says what answers here.
+    engine: flintEngineLine({ provider: providerName, model, ollamaCloud: isOllamaCloudModel(model) }),
     retriever: await buildRetriever(),
     lessonStore,
   });
@@ -174,7 +186,7 @@ async function cmdChat(message: string): Promise<void> {
 }
 
 async function cmdReflect(): Promise<void> {
-  const { flint, lessonStore } = buildFlint();
+  const { flint, lessonStore } = await buildFlint();
   const messages = await flint.store.getMessages(CONVERSATION);
   if (messages.length === 0) {
     console.log('Nothing to reflect on yet. Have a conversation first.');
@@ -197,7 +209,7 @@ async function cmdReflect(): Promise<void> {
 }
 
 async function cmdConsolidate(): Promise<void> {
-  const { flint, lessonStore } = buildFlint();
+  const { flint, lessonStore } = await buildFlint();
   process.stderr.write('consolidating lessons...\n');
   const res = await consolidate({ flint, lessonStore, now: Date.now() });
   if (!res.changed) {
@@ -482,7 +494,7 @@ async function cmdLog(): Promise<void> {
 }
 
 async function cmdLessons(): Promise<void> {
-  const { lessonStore } = buildFlint();
+  const { lessonStore } = await buildFlint();
   const all = await lessonStore.all();
   if (all.length === 0) {
     console.log('No lessons yet. Run `ask reflect` after some conversations.');

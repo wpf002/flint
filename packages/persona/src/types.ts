@@ -28,6 +28,14 @@ export interface PersonaConfig {
   name: string;
   /** The style guide — becomes the core of the system prompt. Write this in YOUR voice. */
   styleGuide: string;
+  /**
+   * Which model answers through this persona, as a paragraph placed right after
+   * the style guide on every call (see flintEngineLine). One guide can then
+   * speak for every brain without telling a local model it is someone else's.
+   * It is not part of the guide: `styleGuide` stays the guide's own text.
+   * Omitted: nothing is added, and the prompt is exactly what it was.
+   */
+  engine?: string;
   /** Optional retriever of the user's own writing. Defaults to none (style guide only). */
   retriever?: Retriever;
   /** How many writing samples to pull into context per call. Default 3. */

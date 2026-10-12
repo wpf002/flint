@@ -28,8 +28,9 @@
  *    his turn never waits behind it;
  *  - failing, it says why (MemoryBrainError, see BrainFailure).
  */
-import { OllamaProvider, isFlintError } from '@flint/core';
+import { OllamaProvider, isFlintError, isOllamaCloudModel } from '@flint/core';
 import type { ChatLoad } from './chat-load';
+import { creditExhausted } from './frontier-breaker';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, liveOllamaOptions } from './local-model';
 import { FACTS_SCHEMA, MemoryBrainError, factsReply, type BrainFailure, type ExtractBrain, type FactEntry } from './memory-extract';
 
@@ -50,11 +51,7 @@ export function memoryBrainSetting(env: Env, log: (m: string) => void): MemoryBr
  * Those run on Ollama's servers: a pull is only a pointer to them.
  */
 export function isCloudModel(name: string): boolean {
-  const n = name.trim().toLowerCase();
-  const colon = n.lastIndexOf(':');
-  const base = colon === -1 ? n : n.slice(0, colon);
-  const tag = colon === -1 ? '' : n.slice(colon + 1);
-  return /(^|-)cloud$/.test(tag) || /-cloud$/.test(base);
+  return isOllamaCloudModel(name); // @flint/core's rule, shared with the default-model choice and evolve
 }
 
 export interface LocalMemoryModel {
@@ -92,18 +89,30 @@ export function localMemoryModel(env: Env, log: (m: string) => void): LocalMemor
     log('[memory-extract] OLLAMA_MODEL is not an Ollama model name');
     return undefined;
   }
-  const live = liveOllamaOptions(env);
-  let baseURL: string;
-  try {
-    const u = new URL(live.baseURL ?? '');
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('not http');
-    baseURL = u.origin;
-  } catch {
+  const live = chatOllama(env);
+  if (!live) {
     log('[memory-extract] OLLAMA_HOST is not an http(s) URL');
     return undefined;
   }
-  const n = live.defaultOptions?.num_ctx;
-  return { baseURL, model, numCtx: typeof n === 'number' ? n : undefined, unloadAfter: chat === undefined || !sameModel(model, chat) };
+  return { ...live, model, unloadAfter: chat === undefined || !sameModel(model, chat) };
+}
+
+/**
+ * The chat brain's Ollama as a background caller reaches it: its origin, and
+ * exactly the num_ctx the chat brain sends (liveOllamaOptions), so Ollama never
+ * reloads the model to switch between Will's chat and background work.
+ * Undefined when OLLAMA_HOST is not an http(s) URL.
+ */
+export function chatOllama(env: Env): { baseURL: string; numCtx: number | undefined } | undefined {
+  const live = liveOllamaOptions(env);
+  try {
+    const u = new URL(live.baseURL ?? '');
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;
+    const n = live.defaultOptions?.num_ctx;
+    return { baseURL: u.origin, numCtx: typeof n === 'number' ? n : undefined };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -187,10 +196,11 @@ export function frontierExtractBrain(
  * endpoint is unknown (404), too many requests (429), or the credit balance is
  * too low. Anthropic answers that last one with a plain 400 whose error type
  * (invalid_request_error) is a malformed request's too, so only the message
- * tells them apart; if its wording ever changes it falls back to a strike.
+ * tells them apart (creditExhausted, shared with the chat breaker in
+ * ./frontier-breaker); if its wording ever changes it falls back to a strike.
  */
 export function frontierOutage(status: number, message: string): boolean {
-  return [401, 403, 404, 429].includes(status) || (status === 400 && /credit balance is too low/i.test(message));
+  return [401, 403, 404, 429].includes(status) || (status === 400 && creditExhausted(message));
 }
 
 /** How long the local model stays Will's after a chat turn ends: his next message usually comes within it. */

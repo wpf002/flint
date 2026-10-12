@@ -63,16 +63,36 @@ describe('rollback safety', () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('writes the undo marker before changing the config', async () => {
-    await applyCandidate(io, { tier: 'hard', provider: 'openai', model: 'gpt-5.6-sol' }, 'now');
+    await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
     expect(existsSync(io.rollbackPath)).toBe(true);
-    expect(readFileSync(io.secretsPath, 'utf8')).toContain('FLINT_TIER_HARD=openai:gpt-5.6-sol');
+    expect(readFileSync(io.secretsPath, 'utf8')).toContain('FLINT_TIER_HARD=ollama:qwen3.8:27b');
     expect(restarts).toBe(1);
+  });
+
+  // `try` rewrites the live config, so the write itself refuses anything but a local model,
+  // whatever its caller checked: no marker, no change to the file, no restart.
+  it('never writes an outside model into the config', async () => {
+    const before = readFileSync(io.secretsPath, 'utf8');
+    for (const c of [
+      { tier: 'hard', provider: 'openai', model: 'gpt-5.6-sol' },
+      { tier: 'hard', provider: 'anthropic', model: 'claude-opus-5-5' },
+      { tier: 'code', provider: 'google', model: 'gemini-3.8-pro' },
+      { tier: 'routine', provider: 'perplexity', model: 'sonar' },
+      { tier: 'hard', provider: 'OLLAMA', model: 'qwen3.8:27b' }, // not the provider name Flint reads
+      { tier: 'hard', provider: 'ollama', model: 'gpt-oss:120b-cloud' }, // open weights, but on Ollama's servers
+    ]) {
+      await expect(applyCandidate(io, c, 'now'), `${c.provider}:${c.model}`).rejects.toThrow(/refusing to write/);
+    }
+    expect(readFileSync(io.secretsPath, 'utf8')).toBe(before);
+    expect(existsSync(io.rollbackPath)).toBe(false);
+    expect(restarts).toBe(0);
   });
 
   // The whole point: a run that dies mid-test must not leave Flint on an
   // unproven config.
+  // (The value put back may be an outside model: it is Will's own setting, restored, not chosen.)
   it('restores the previous config on the next run', async () => {
-    await applyCandidate(io, { tier: 'hard', provider: 'openai', model: 'gpt-5.6-sol' }, 'now');
+    await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
     const note = await recoverIfNeeded(io); // as if the process had died here
     expect(note).toContain('restored');
     expect(readFileSync(io.secretsPath, 'utf8')).toContain('FLINT_TIER_HARD=anthropic:claude-opus-5-5');
@@ -81,7 +101,7 @@ describe('rollback safety', () => {
 
   it('removes a tier that was not set before, rather than inventing one', async () => {
     writeFileSync(io.secretsPath, 'OTHER=keep\n', 'utf8');
-    await applyCandidate(io, { tier: 'code', provider: 'openai', model: 'gpt-5.5' }, 'now');
+    await applyCandidate(io, { tier: 'code', provider: 'ollama', model: 'qwen2.5:7b' }, 'now');
     await recoverIfNeeded(io);
     const out = readFileSync(io.secretsPath, 'utf8');
     expect(out).not.toContain('FLINT_TIER_CODE');
@@ -94,9 +114,9 @@ describe('rollback safety', () => {
   });
 
   it('keeping the candidate drops the marker and leaves the config in place', async () => {
-    await applyCandidate(io, { tier: 'hard', provider: 'openai', model: 'gpt-5.6-sol' }, 'now');
+    await applyCandidate(io, { tier: 'hard', provider: 'ollama', model: 'qwen3.8:27b' }, 'now');
     settleCandidate(io);
     expect(existsSync(io.rollbackPath)).toBe(false);
-    expect(readFileSync(io.secretsPath, 'utf8')).toContain('FLINT_TIER_HARD=openai:gpt-5.6-sol');
+    expect(readFileSync(io.secretsPath, 'utf8')).toContain('FLINT_TIER_HARD=ollama:qwen3.8:27b');
   });
 });

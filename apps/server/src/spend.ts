@@ -726,9 +726,10 @@ export function describePlan<P>(plan: FrontierPlan<P>): string | undefined {
 
 /**
  * The one line appended to a local answer when budgets moved the turn off the
- * frontier. `answeredBy` names a local brain that is itself a paid model (the
- * server without OLLAMA_MODEL runs its "local" persona on Claude), so the note
- * never calls a paid model's answer "my local brain".
+ * frontier. `answeredBy` names a local brain that is itself a paid model, so
+ * the note never calls a paid model's answer "my local brain". (The server's
+ * local brain is always Ollama now, ./local-model chooseLocalBrain, so main()
+ * no longer builds one; the rule stays for any caller that does.)
  */
 export function budgetNote(exhausted: { vendor: PaidVendor; binding: 'daily' | 'monthly' }, answeredBy?: string): string {
   const when = exhausted.binding === 'monthly' ? "this month's" : "today's";
@@ -774,7 +775,7 @@ export interface TurnBudgetInput<P> {
   guard: BudgetView & { blocked(vendor: PaidVendor): string | undefined };
   /** routeTurn's decision. */
   route: { brain: Brain; localFallback: boolean };
-  /** The local brain's provider name: `ollama` (free), or `anthropic` when OLLAMA_MODEL is unset. */
+  /** The local brain's provider name: `ollama` (free). A paid provider's name holds it to that vendor's cap. */
   localProvider: string;
   /** The local brain's model, for the note when it is a paid one. */
   localModel: string;

@@ -74,6 +74,36 @@ says he doesn't care about gets dropped. Don't resume
 a parity run (`--run`) started before that commit: its cached answers are from the
 old texts.
 
+### What powers this answer (the engine paragraph)
+
+v1 and v2 say, in pinned text, that Flint thinks on "borrowed engines — Claude's model for most
+questions, a local open model for private ones and outages". One guide speaks for every brain,
+so a local model asked what it runs on read that and could answer "Claude".
+
+The guides were not edited, and there is no `v3`: which model is answering is a fact about the
+brain, not about the voice, and it differs per brain under the same guide. It is passed beside
+the guide instead:
+
+```ts
+new Persona(flint, {
+  name: 'Flint',
+  styleGuide: FLINT_STYLE_VARIANTS.v1,
+  engine: flintEngineLine({ provider: 'ollama', model: 'muse-glimmer:30b' }),
+});
+```
+
+`flintEngineLine` writes one paragraph ("WHAT IS ANSWERING THIS MESSAGE. This reply comes from an
+open model (muse-glimmer:30b) that Will runs himself with Ollama. It is not Claude ..."), `Persona`
+places it right after the guide on every call, and it tells the model that it wins where the guide
+describes the engines differently. For a Claude tier it names Claude; for another vendor, that
+vendor. `persona.styleGuide` is still the guide's own text, so every pin above holds, the server
+still names a persona's variant by its guide, and a variant name still means one text. Without
+`engine` the prompt is byte-for-byte what it was.
+
+What does change is the whole system prompt the server sends: every brain's now ends its stable
+half with this paragraph. Don't resume a parity run (`--run`) started before that commit: its
+cached answers were given without it.
+
 ## Why it's a separate package
 
 `@flint/core` deliberately ships no personalization or retrieval (that's the

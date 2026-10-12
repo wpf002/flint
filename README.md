@@ -247,7 +247,10 @@ first, LoRA fine-tune only if needed) is written up in
 
 - **`apps/ask`** — a real consumer CLI: your personal Flint, running locally with
   **durable** file-backed memory + lessons (`~/.flint/`). Proves the full vision —
-  voice, tools, and nightly self-evolution — end to end, no cloud.
+  voice, tools, and nightly self-evolution — end to end, no cloud. It always
+  talks to the local Ollama: `OLLAMA_MODEL` names the model, and unset it uses
+  the one Ollama has loaded (else the first pulled). No key makes it call a
+  hosted model.
   ```bash
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask "your question"
   OLLAMA_MODEL=qwen2.5:14b pnpm --filter ask ask reflect   # distill nightly lessons

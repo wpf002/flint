@@ -29,6 +29,19 @@ export interface AnthropicProviderOptions {
   baseURL?: string;
   /** Fallback max_tokens when a call doesn't specify one. */
   defaultMaxTokens?: number;
+  /**
+   * How many times the SDK itself retries a failed request (a connection error,
+   * a 408, 409 or 429, any 5xx). Unset: the SDK's default, 2. Flint's own tool
+   * loop already retries a retryable failure (RetryPolicy), so an app that wants
+   * a failing call to fail fast sets 0 and the two no longer multiply.
+   */
+  maxRetries?: number;
+  /**
+   * How long the SDK waits for a response to start, in ms: the time until the
+   * response headers arrive, which for a streamed reply is before its first
+   * token, not the whole answer. Unset: the SDK's default, 10 minutes.
+   */
+  timeoutMs?: number;
 }
 
 const DEFAULT_MAX_TOKENS = 4096;
@@ -79,6 +92,8 @@ export class AnthropicProvider implements ProviderAdapter {
         new this.sdk.default({
           apiKey: this.opts.apiKey!,
           ...(this.opts.baseURL ? { baseURL: this.opts.baseURL } : {}),
+          ...(this.opts.maxRetries !== undefined ? { maxRetries: this.opts.maxRetries } : {}),
+          ...(this.opts.timeoutMs !== undefined ? { timeout: this.opts.timeoutMs } : {}),
         });
     }
     return { sdk: this.sdk, client: this.clientInstance };
