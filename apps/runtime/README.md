@@ -1300,15 +1300,18 @@ What the database now holds to, whatever the runtime's code does:
   needs no signature.
 - **The later signature stands.** When you've signed two cards about the same
   asset, task or review requirement, the later one counts, whichever one Flint
-  carries out first, and whatever happens to the later card afterwards. A card
-  you signed before you turned an asset off can't turn it back on. The database
-  records when you signed and what each signature was for, so nothing can put
-  your signatures in another order.
+  carries out first, and whatever happens to the later card afterwards. Signing
+  against a card counts the same as signing for one. This holds for a card that
+  was on record when you signed it. A card to turn an asset on that you signed
+  before you turned that asset off can't turn it back on. The database records
+  when you signed and what each signature was for, so nothing can put your
+  signatures in another order.
 - **A task runs only as the task you signed.** Its card carries the whole task:
   the asset, the title, what to do, the bar, any goal and step, the due time
   and the cost estimate. If any of them differs when Flint goes to run it, the
-  task doesn't run. Each run also needs its forecast on record first, naming
-  the task and the rule that settles it.
+  task doesn't run. It runs only while its asset is on, whenever you signed
+  its card. Each run also needs its forecast on record first, naming the task
+  and the rule that settles it.
 - **Paid work says its price first and its cost after.** A task for an asset
   that spends runs only on a spend card filed from the console that carries the
   same estimate, above zero, and it can't end without its cost. No asset that
@@ -1376,11 +1379,11 @@ Nothing files such a card today, and a card already on record is not held to
 these rules, so it can still be approved, rejected or expire.
 
 The time on each approval is now stamped by the database as the server records
-it. The server sent none before, so nothing changes for it. Each approval also
-records which asset, task or gate its card named (`Approval.signedFor`, a new
-column, empty for every approval so far and for every card that isn't one of
-these). A forget is now refused above READ COMMITTED, the default level.
-Nothing calls it yet.
+it. The server sent none before, so nothing changes for it. Each approval or
+signed rejection also records which asset, task or gate its card named
+(`Approval.signedFor`, a new column, empty for every approval so far and for
+every card that isn't one of these). A forget is now refused above READ
+COMMITTED, the default level. Nothing calls it yet.
 
 A card of any kind that breaks one of its own rules is now refused by name,
 with its id and the rule. Before, only goal, plan and task cards were. The
@@ -1401,14 +1404,19 @@ rules themselves are the same.
   checked when it is filed, so its args hold no number with a fraction. A spend
   card says an estimate above zero.
 - **The later signature wins.** A card acts only if it's the latest one you
-  signed about its asset, task or gate. If you've signed a later one, the
-  earlier one is refused as "signed before a later decision", even when the
-  later card failed or expired: ask for a new signature, don't retry. File and
-  sign each card when it's wanted, not ahead of time. File a card before its
-  signature is recorded: a signature recorded for a card that isn't there yet
-  acts on nothing. Write an asset's row before filing the card that turns it
-  on: a card signed before the row was written, or before the asset was last
-  turned off, doesn't turn it on.
+  signed about its asset, task or gate. If you've signed a later one, for it or
+  against it, the earlier one is refused as "signed before a later decision",
+  even when the later card failed or expired: ask for a new signature, don't
+  retry. File and sign each card when it's wanted, not ahead of time. Commit a
+  card before its signature is recorded: a signature recorded for a card that
+  isn't on record yet acts on nothing, and doesn't stand in an earlier card's
+  way. Write an asset's row before filing the card that turns it on: a card
+  signed before the row was written, or before the asset was last turned off,
+  doesn't turn it on.
+- **The subject on the card.** What a signature is for is read from the card as
+  the signature is recorded. Stamp the subject on the card itself as it's
+  filed, so the order check can read the later card and no longer depends on
+  the card being on record at that moment.
 - **Filing.** A spend card needs an estimate above zero. The route that files
   cards must answer 400 with a sentence for one that has none. The database
   refuses it, which would otherwise surface as a 500.
@@ -1445,10 +1453,13 @@ rules themselves are the same.
   unscoped policy row promotes `task.check_bar` (or `task.*`) and no live row
   holds it back. See the limit below: the runtime can switch such a row off.
 - **Outputs** are written while the task is `dispatched` or `running`, and are
-  always tainted. A task's `outputRef` is `out:` and the first 12 or more
-  characters of its output's digest. Write the output and hand the task in
-  under that reference in one transaction: a task is checked, and accepted,
-  only with that output on record. Retention may delete one, and clear a task's
+  always tainted. An output's digest is the database's own count over the body
+  as it stores it: `encode(sha256(convert_to(body::text, 'UTF8')), 'hex')`.
+  Compute it in the `INSERT` and read it back; any other digest is refused. A
+  task's `outputRef` is `out:` and the first 12 or more characters of that
+  digest. Write the output and hand the task in under that reference in one
+  transaction: a task is checked, and accepted, only with that output on
+  record. Retention may delete one, and clear a task's
   text (setting `textPurgedAt`), only once the task has ended. After that an
   override can still reject the result, but can no longer accept it. A task
   whose text was cleared takes no output and no review.
@@ -1498,8 +1509,9 @@ rules themselves are the same.
 - **A reviewer that can't answer.** With reviews required and the reviewer
   down, cards that need a review wait. That includes a card to turn another
   asset on. The way out is the card that stops requiring reviews.
-- **An output's digest is the runtime's.** The database checks its shape, and
-  that a review of the output names the same digest. It doesn't compute it.
+- **What an output says is the runtime's.** The database checks that an
+  output's digest is the digest of its body, and that a review of the output
+  names it. It can't check that the body is what the asset really returned.
 - **Errors and Postgres's own log.** As for P4: the id-only rule covers the
   `INSERT` and `UPDATE` statements the runtime makes, not `COPY` or a Postgres
   set to log every statement's values. One more limit: JSON that Postgres
@@ -1521,6 +1533,10 @@ rules themselves are the same.
   ids.
 - **A later card that didn't run.** If the later of two cards about the same
   thing fails or expires, the earlier one still doesn't act. You sign again.
+- **Signing waits for a change to the card table.** Recording a signature now
+  reads its card. A database update that changes the card table and is held
+  open, such as one queued behind the nightly dump, delays a signature until
+  it's done.
 - **What a forget leaves.** A task's title and a review's finding codes are
   kept, which is why both must hold no words of yours. A task or card filed
   after the forget that names the forgotten item isn't refused.
