@@ -403,6 +403,8 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.ran).toEqual([]);
     expect(t.out).toMatch(/updates are paused/);
     expect(existsSync(hold)).toBe(true);
+    // A restore's own pause is not remembered: when it ends, nothing is reinstalled on its account.
+    expect(existsSync(join(state, 'deploy-hold-seen'))).toBe(false);
     // One whose process is gone (no process has this id): its pause is over, and the tick deploys.
     writeFileSync(hold, 'restore 2147483646 2026-10-12T15:00:00.000Z\n');
     t = tick();

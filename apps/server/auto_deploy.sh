@@ -54,7 +54,11 @@ if [ -e "$HOLD" ]; then
   fi
 fi
 if [ -e "$HOLD" ]; then
-  [ -e "$HOLD_SEEN" ] || { mkdir -p "$STATE"; : > "$HOLD_SEEN"; }
+  # A restore's own short pause changes nothing that is installed, so it is not remembered: only a
+  # pause someone made (rollback.sh, or by hand) leads to the check, and the reinstall, when it ends.
+  if [ "$hold_kind" != restore ]; then
+    [ -e "$HOLD_SEEN" ] || { mkdir -p "$STATE"; : > "$HOLD_SEEN"; }
+  fi
   echo "$(ts) updates are paused: $HOLD exists (remove it to resume)"
   exit 0
 fi
