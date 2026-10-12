@@ -25,6 +25,11 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/inbox/:id/feedback` | yes | `{ feedback: "should_escalate" \| "should_be_quiet" \| "ok" }` | `{ ok: true }`: Will's label on a decision |
 | POST | `/escalations/:id/ack`, `/escalations/:id/dismiss` | yes | — | `{ ok: true }` |
 | GET | `/runtime/health` | yes | — | The runtime's health report (`HealthReport`) |
+| GET | `/goals?tab=active\|suggested\|finished`, `/goals/:id` | yes | — | Will's goals (`GoalsPage`, `{ goal: GoalView }` in @flint/policy). See "Goals" |
+| POST | `/goals` | yes | `{ draftKey, args }` | `{ id, deduped }`: a new goal's card, to sign in the console |
+| POST | `/goals/:id/edit\|timing\|done\|abandon\|resume\|plan` | yes | `{ args }` | `{ id, deduped }`: that change's card |
+| POST | `/goals/:id/pause\|dismiss`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime |
+| POST | `/goals/linkable` | yes | `{ q }` | `{ items }`: items a check may watch |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
 
@@ -456,6 +461,24 @@ both ways (Machine plan P2):
   open escalation. The runtime's health report is under Settings → Health. Through the routes in the table above (src/inbox-routes.ts), which check what the
   console sends and what the runtime answers against @flint/policy's wire contracts; a runtime
   that refuses the server's token is a 502, never a 401.
+
+## Goals
+
+The console's Goals panel (the target icon) reaches the runtime's goal routes through
+src/goals-routes.ts, with the console's full token only. Every id and body (up to 64 KB) is
+checked with @flint/policy's goal contracts before the runtime sees it, and every answer
+before the console does. A goal card is filed with the runtime at once and never spooled to
+disk, so a runtime that is down is a 503 and nothing changed. A write the runtime doesn't
+answer (in time, or because the connection dropped on the way) is a 504 that says Flint
+isn't sure it went through; filing the same card again is safe (it is the same card). A refusal reaches the console
+only as one of the fixed goal sentences, by its code. A runtime that refuses the server's
+token is a 502; a runtime without the routes answers 404, which is a 501 here, and the
+console then hides its Goals button. The item search is a POST, so what Will types never lands
+in a request log. `/goals` is never reported back to the runtime as a `route.error`.
+
+Approval cards now carry `kind`, `templateId` and `consequential`. The console never signs a
+consequential card (every goal card, and a plan change that is not a review's minor one) under
+an earlier prompt or in Approve All: each asks for its own touch.
 
 ## Tools / integrations
 

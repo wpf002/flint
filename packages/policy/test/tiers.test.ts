@@ -15,6 +15,7 @@ import {
 import { TAINTED_SOURCES } from '../src/taint';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createContext, runInContext } from 'node:vm';
 import { GOAL_SIGNED_ACTIONS, P3_ACTIONS } from '../src/goals';
 
 const chat: TierContext = { context: 'chat', tainted: false };
@@ -414,13 +415,27 @@ describe('P3: goals and plans', () => {
     expect(CODE_TABLE['nexus.remember_goal_decision']!.egress).toBe(true);
   });
 
-  it('no P3 name trips a step-1 rule (NEVER_AUTO, merge, people, policy., selfmod., google., apple.) or the console\'s money and delete words', () => {
+  it('no P3 name trips a step-1 rule (NEVER_AUTO, merge, people, policy., selfmod., google., apple.); the console asks a fresh touch for every goal card by its own rule, not by its money words', () => {
     for (const a of P3_ACTIONS) expect(forbiddenReason(a, {}), a).toBeUndefined();
-    // The console keeps a card out of Approve All when its name has a money or delete word (apprAlone).
     const html = readFileSync(join(__dirname, '..', '..', '..', 'apps', 'console', 'index.html'), 'utf8');
+    // A goal card is never mistaken for money or a deletion: none of its names has those words...
     const words = /function apprAlone\(p\)\{[^]*?\/([^/]+)\/i\.test\(String\(p\.fullName/.exec(html)?.[1];
     expect(words, 'apprAlone in the console').toBeTruthy();
     for (const a of P3_ACTIONS) expect(new RegExp(words!, 'i').test(a), a).toBe(false);
+    // ...and yet each one Will signs asks on its own, with a fresh touch, never in Approve All (apprAlone): by its
+    // name, and by the consequential mark its card carries. Only a review's minor plan change rides Approve All.
+    const js = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
+    const goals = /\nvar APPR_GOAL=\{[^\n]*\};/.exec(js)![0];
+    const alone = /\n(function apprAlone\(p\)\{[\s\S]*?)\nfunction /.exec(js)![1]!;
+    const c: Record<string, unknown> = {};
+    createContext(c);
+    runInContext(`${goals}\n${alone}`, c);
+    const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
+    for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
+    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false })).toBe(false);
+    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })).toBe(true);
+    expect(apprAlone({ fullName: 'world.source.enable', consequential: true })).toBe(true);
+    for (const a of ['goal.propose', 'world.commitment.from_chat']) expect(apprAlone({ fullName: a }), a).toBe(false);
   });
 
   it('no runtime chat tool or server built-in tool shares a P3 name (a same-named tool would run instead of the runtime)', () => {

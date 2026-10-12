@@ -11,7 +11,7 @@ import type { Db } from '../db.js';
 import { DEPLOY_WINDOW_MS } from '../health/checks.js';
 import { uptime } from '../health/instance.js';
 import { MEASUREMENTS } from '../triage/facts.js';
-import { hasLoosePrediction, phrase } from '../templates/escalations.js';
+import { hasLoosePrediction, phrase, phraseBefore } from '../templates/escalations.js';
 import { percentile, POLLED } from '../rollup.js';
 
 export interface Criterion {
@@ -79,7 +79,7 @@ export async function p2Report(db: Db, config: Pick<Config, 'tz' | 'home'>, now 
   const predictions = new Map((await db.prediction.findMany({ where: { id: { in: delivered.flatMap((e) => (e.predictionId ? [e.predictionId] : [])) } }, select: { id: true, probability: true, resolveBy: true } })).map((p) => [p.id, p]));
   const loose = delivered.filter((e) => {
     const p = e.predictionId ? predictions.get(e.predictionId) : undefined;
-    return hasLoosePrediction(`${e.title ?? ''}\n${e.body ?? ''}`, p?.probability != null ? [phrase(p.probability, p.resolveBy, config.tz)] : []);
+    return hasLoosePrediction(`${e.title ?? ''}\n${e.body ?? ''}`, p?.probability != null ? [phrase(p.probability, p.resolveBy, config.tz), phraseBefore(p.probability, p.resolveBy, config.tz)] : []);
   }).length;
   const missing = Number(noAudit?.n ?? 0);
   out.push({ n: 5, name: 'audit: every decision audited, pings content-free, no loose probability words', pass: missing === 0 && loose === 0, detail: `${missing} decision(s) without an audit entry; ${loose} delivered note(s) with a probability not from the ledger; pings carry no content by construction`, values: { unaudited: missing, looseNotes: loose } });

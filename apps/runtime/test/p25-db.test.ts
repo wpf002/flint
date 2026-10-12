@@ -226,7 +226,8 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     // The date and time are the event's own, worked out when triage decided (in Flint's zone, UTC here), never the title.
     const start = new Date(T0 + 3_600_000);
     const day = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(start).replace(',', '');
-    expect(d.escalation).toMatchObject({ templateId: 'calendar_upcoming', title: `On your calendar ${day} at ${start.toISOString().slice(11, 16)}` });
+    const clock = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' }).format(start).replace(/\s/g, ' ');
+    expect(d.escalation).toMatchObject({ templateId: 'calendar_upcoming', title: `On Your Calendar ${day} at ${clock}` });
     expect(d.escalation!.fields).toMatchObject({ date: start.toISOString().slice(0, 10), time: start.toISOString().slice(11, 16), until: start.toISOString() });
     expect(JSON.stringify(d.escalation)).not.toContain('CANARY');
     // Seen again (the next sync): the same occurrence, no second escalation.

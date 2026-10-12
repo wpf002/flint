@@ -26,7 +26,7 @@ import { inTx, QUEUES, type Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
 import { claim } from '../governance/counters.js';
 import { emitPrediction } from '../ledger/emit.js';
-import { displayName, fieldFreeTitle, isTemplateId, phrase, render, type Rendered } from '../templates/escalations.js';
+import { displayName, fieldFreeBody, fieldFreeTitle, isTemplateId, phrase, render, type Rendered } from '../templates/escalations.js';
 import type { EventFacts, Verdict } from '../triage/verdict.js';
 import { faultAt } from '../config.js';
 
@@ -73,7 +73,7 @@ function standing(action: string, c: SurfaceContext): Standing {
 function words(f: EventFacts, v: Verdict, c: SurfaceContext): { plain: Rendered; withLedger?: Rendered; prediction?: { by: Date } } {
   const t = v.template!;
   const names: Record<string, string> = f.entity ? { [entityRef(f.entity.kind, f.entity.id)]: displayName(f.entity) } : {};
-  if (!isTemplateId(t.id)) return { plain: { fields: {}, title: 'Something needs a look', body: 'The console has the details.', linted: true } };
+  if (!isTemplateId(t.id)) return { plain: { fields: {}, title: fieldFreeTitle(t.id), body: fieldFreeBody(t.id), linted: true } };
   try {
     const plain = render(t.id, t.fields, names);
     if (t.id !== 'service_down' || !f.entity) return { plain };
@@ -81,7 +81,7 @@ function words(f: EventFacts, v: Verdict, c: SurfaceContext): { plain: Rendered;
     return { plain, withLedger: render(t.id, t.fields, names, phrase(SERVICE_DOWN.healthyAnyway, by, c.tz)), prediction: { by } };
   } catch {
     // Fields that are not the template's: the note says only what is safe to say.
-    return { plain: { fields: {}, title: fieldFreeTitle(t.id), body: 'The console has the details.', linted: true } };
+    return { plain: { fields: {}, title: fieldFreeTitle(t.id), body: fieldFreeBody(t.id), linted: true } };
   }
 }
 

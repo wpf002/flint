@@ -31,6 +31,7 @@ import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
 import { registerP2Routes } from './routes/p2.js';
+import { registerGoalRoutes } from './routes/goals.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
 import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
@@ -298,6 +299,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
+  // P3 part 2: the goals panel (scope proposals: the runtime connector's token can never read a goal's words).
+  registerGoalRoutes(app, { db, need, tz: config.tz });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

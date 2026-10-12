@@ -59,11 +59,13 @@ const GONE = 'It no longer exists.';
 const NOT_WAITING = 'It’s no longer waiting.';
 
 /**
- * The "Action done" note's body: what Flint did, in a sentence of its own (a
+ * The "Action Done" note's body: what Flint did, in a sentence of its own (a
  * card's title is a command, "Check What’s Happening Now", and reads wrong as a
  * sentence's subject), or no name at all (never its internal one).
  */
 export const doneNote = (fullName: string): string => ACTION_DONE[fullName] ?? 'An approved action is done.';
+/** The note for an approved action that ran: its title, and what Flint did. */
+export const actionDoneNote = (fullName: string): { title: string; body: string } => ({ title: 'Action Done', body: doneNote(fullName) });
 
 /**
  * When the restore test runs next, in this Mac's local time (the LaunchAgent's):
@@ -106,8 +108,11 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         const [pending, approved] = await Promise.all([ctx.proposals.list('pending'), ctx.proposals.list('approved')]);
         const card = (p: RuntimeProposal) => ({
           id: p.id, fullName: p.action.replace(/^mcp:/, ''), args: p.args, tainted: p.tainted, provenance: p.argsProvenance, status: p.status, origin: p.origin, ts: Date.parse(p.createdAt),
-          // What makes a card ask on its own (the console's Approve All leaves it out): money, a destructive tool.
-          sensitivity: p.sensitivity, destructive: p.destructive === true,
+          // What makes a card ask on its own (the console's Approve All leaves it out): money, a destructive tool,
+          // or a card marked for Will's fresh touch (P3: every goal card, and a plan change that is not a review's minor one).
+          sensitivity: p.sensitivity, destructive: p.destructive === true, consequential: p.consequential === true,
+          // What kind of card it is, and the runtime template it came from (P3: a review's minor or material plan change).
+          ...(p.kind ? { kind: p.kind } : {}), ...(p.templateId ? { templateId: p.templateId } : {}),
           // What the card says about itself (the promotion table's week, a source's name), and when it lapses.
           ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
         });
@@ -304,7 +309,10 @@ export async function runRamApproval(
     ...(ok ? {} : { reasoning: 'the action did not complete (the console card has the details)' }), correlationId: `act:${pending.id}`,
   });
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
-  if (ok) ctx.notes.push('Action done', doneNote(result.fullName), 'action', `act:${result.id}`, { channels: ['inapp'] });
+  if (ok) {
+    const done = actionDoneNote(result.fullName);
+    ctx.notes.push(done.title, done.body, 'action', `act:${result.id}`, { channels: ['inapp'] });
+  }
   return { action: result };
 }
 
@@ -375,7 +383,10 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   }
   const where = await p.completeDurably(id, outcome);
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
-  if (outcome.ok) ctx.notes.push('Action done', doneNote(fullName), 'action', `act:${id}`, { channels: ['inapp'] });
+  if (outcome.ok) {
+    const done = actionDoneNote(fullName);
+    ctx.notes.push(done.title, done.body, 'action', `act:${id}`, { channels: ['inapp'] });
+  }
   const note =
     where === 'spooled' ? 'Flint will record the result once the runtime answers.'
     : where === 'refused' ? 'The runtime didn’t record the result, so it will show as unknown.'

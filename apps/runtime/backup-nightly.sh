@@ -3,7 +3,8 @@
 # com.flint.runtime-backup at 02:15, which install-runtime.sh keeps installed:
 #   - every night: a pg_dump (`backup --auto`);
 #   - when an age recipient is set (~/.flint/backup-age-recipient): the encrypted
-#     copy off the box (`offsite --auto`);
+#     copy off the box (`offsite --auto`), into iCloud Drive's FlintBackups/pg
+#     unless FLINT_OFFSITE_DIR names another folder; the newest 7 are kept there;
 #   - on Sundays: the restore drill into a scratch database (`drill --auto`).
 # Each goes through the tier engine. While its action is at APPROVAL it runs only
 # on a card Will approved (the console's Approvals; one card a night); once he has

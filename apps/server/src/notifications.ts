@@ -18,6 +18,20 @@ export interface Notification {
 export type Check = () => Promise<Array<{ title: string; body: string; kind: string; dedupe: string }>>;
 
 /**
+ * The Watcher's calendar reminder: "Dentist is on Tue, Oct 6 at 3:00 PM, at 123
+ * Main St." The event's name and place are whoever wrote the invitation's words,
+ * shown as they were written; the rest is Flint's.
+ */
+export function upcomingNote(e: { summary?: string | null; location?: string | null }, when: { day: string; time?: string }): { title: string; body: string } {
+  return { title: 'Upcoming', body: `${e.summary || 'An untitled event'} is on ${when.day}${when.time ? ` at ${when.time}` : ''}${e.location ? `, at ${e.location}` : ''}.` };
+}
+
+/** The Watcher's market note: the headline as its source wrote it. */
+export function signalNote(headline: string): { title: string; body: string } {
+  return { title: 'Market Signal', body: headline.slice(0, 200) };
+}
+
+/**
  * What push() did: `stored` (in the console's list, and sent on the other
  * channels asked for), `duplicate` (already pushed under that dedupe key, so
  * nothing new happened) or `refused` (not something Flint shows: a raw
@@ -135,7 +149,7 @@ export class Notifications {
 
   /**
    * The phone ping, content-free by construction: it takes no text, so no caller
-   * (the runtime, the Watcher, the spend guard, "Action done") can put words on
+   * (the runtime, the Watcher, the spend guard, "Action Done") can put words on
    * ntfy.sh. Returns whether a ping was sent off.
    */
   private deliverPhone(): boolean {

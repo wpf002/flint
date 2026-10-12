@@ -12,6 +12,7 @@
  *    retries it with backoff.
  *  - An escalation already dismissed, acted on or expired is not delivered.
  */
+import { noteProblems, shownProblems, titleCase } from '@flint/policy';
 import { faultAt, type Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
@@ -19,6 +20,25 @@ import { notifyServer, type NotifyOutcome } from '../notify.js';
 import { fieldFreeBody, fieldFreeTitle } from '../templates/escalations.js';
 
 export type Delivered = 'sent' | 'refused' | 'nothing' | 'withdrawn';
+
+/** The one title that shows a thing by the name it was given ("New Issue: wpf002/flint #60"): the name is not Flint's words. */
+const NAMED = /^(New (?:Issue|Pull Request|Thread): ).+$/i;
+
+/**
+ * The words that go out: the escalation's own, its title in Title Case (the
+ * database's forget leaves "Something needs a look"); a purged one's field-free
+ * words. A row stored before notes were held to Will's rules (an internal name
+ * or a file path in it, an aside in parentheses) goes out in its template's
+ * field-free words instead: nothing leaves here that noteProblems would refuse.
+ * A name someone gave a thing is held only to what no text may carry
+ * (shownProblems): a repo called "nexus-responder" is not a reason to drop a note.
+ */
+export function noteOf(e: { templateId: string; title: string | null; body: string | null }): { title: string; body: string } {
+  const plain = { title: fieldFreeTitle(e.templateId), body: fieldFreeBody(e.templateId) };
+  const said = { title: titleCase(e.title ?? plain.title), body: e.body ?? plain.body };
+  const bad = noteProblems(said.title.replace(NAMED, '$1Item'), said.body).length > 0 || shownProblems(said.title).length > 0;
+  return bad ? plain : said;
+}
 
 export async function deliver(
   db: Db,
@@ -42,7 +62,7 @@ export async function deliver(
     });
     return 'withdrawn';
   }
-  const r = await post({ title: e.title ?? fieldFreeTitle(e.templateId), body: e.body ?? fieldFreeBody(e.templateId), channels, ref: e.id });
+  const r = await post({ ...noteOf(e), channels, ref: e.id });
   faultAt('after_notify');
   if (r.status === 'retry') {
     await db.escalationDelivery.updateMany({ where: { escalationId: e.id, status: 'pending' }, data: { attempts: { increment: 1 }, lastError: `not delivered yet: ${r.why}`.slice(0, 200) } });

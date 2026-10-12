@@ -74,6 +74,7 @@ import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
 import { inboxRoutes } from './inbox-routes';
+import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
 import { FrontierBreaker, FrontierPaused, breakerNote, gateChain, gateTurn, pausedCode } from './frontier-breaker';
@@ -95,7 +96,7 @@ import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bea
 import { safeHandler } from './safe-handler';
 import { STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, parseStyleVariantRequest, promptRevision, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
-import { Notifications, Watcher, watcherEnabled, type Check } from './notifications';
+import { Notifications, Watcher, signalNote, upcomingNote, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, chooseLocalBrain, keepPickingLocal, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
@@ -361,14 +362,8 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
         .filter((e) => e.start && new Date(e.start).getTime() <= soon)
         .slice(0, 3)
         .map((e) => {
-          const when = fmtWhen(e.start as string);
-          return {
-            title: 'Upcoming',
-            // "Dentist is on Tue, Oct 6 at 3:00 PM, at 123 Main St."
-            body: `${e.summary || 'An untitled event'} is on ${when.day}${when.time ? ` at ${when.time}` : ''}${e.location ? `, at ${e.location}` : ''}.`,
-            kind: 'calendar',
-            dedupe: `cal:${e.id || e.summary}:${e.start}`,
-          };
+          // "Dentist is on Tue, Oct 6 at 3:00 PM, at 123 Main St."
+          return { ...upcomingNote(e, fmtWhen(e.start as string)), kind: 'calendar', dedupe: `cal:${e.id || e.summary}:${e.start}` };
         });
     });
   }
@@ -392,7 +387,7 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
       return rows
         .filter((r) => r && r.headline)
         .slice(0, 3)
-        .map((r) => ({ title: 'Market signal', body: String(r.headline).slice(0, 200), kind: 'signal', dedupe: `sig:${r.headline}` }));
+        .map((r) => ({ ...signalNote(String(r.headline)), kind: 'signal', dedupe: `sig:${r.headline}` }));
     });
   }
 
@@ -1659,6 +1654,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
 
   // The runtime's lanes, its health report, and Will's labels, acks and dismissals (./inbox-routes).
   if (await inboxRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
+
+  // Will's goals, for the console's Goals panel (./goals-routes): checked both ways, never spooled.
+  if (await goalsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {

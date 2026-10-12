@@ -144,7 +144,10 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
   } else if (action === 'goal.criteria_change') {
     const a = args as CriteriaArgs;
     const g = live(goal);
-    if (sameDefinition(g, a) && sameLinks(await currentLinks(db, g.id), a.links)) throw new Refused(400, SAY.nothing);
+    const links = await currentLinks(db, g.id);
+    // What it changes from (every such card says so, whoever files it) is the goal as it stands.
+    if (!(sameDefinition(g, a.from) && sameLinks(links, a.from.links))) throw new Refused(409, SAY.looked);
+    if (sameDefinition(g, a) && sameLinks(links, a.links)) throw new Refused(400, SAY.nothing);
     await items(a.links, a.successCriteria);
     const plan = await activePlan(db, g.id);
     if (!stepsKnown(a.successCriteria, new Set(plan?.steps.map((s) => s.key)))) throw new Refused(400, SAY.checkStep);
@@ -153,8 +156,10 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
     const a = args as TimingArgs;
     const g = live(goal);
     titled(g, a.goalTitle);
+    if (!sameTiming(g, a.from)) throw new Refused(409, SAY.looked);
     if (sameTiming(g, a)) throw new Refused(400, SAY.nothing);
-    if (a.horizonAt && Date.parse(a.horizonAt) <= now.getTime()) throw new Refused(400, SAY.future);
+    // Only a new date has to be in the future: an overdue goal keeps its date while its cadence changes.
+    if (a.horizonAt && a.horizonAt !== (g.horizonAt?.toISOString() ?? null) && Date.parse(a.horizonAt) <= now.getTime()) throw new Refused(400, SAY.future);
     reason = GOAL_REASONS.timing;
   } else if (action === 'goal.done' || action === 'goal.abandon') {
     titled(live(goal), (args as FinishArgs).goalTitle);
@@ -273,6 +278,8 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
 
   if (action === 'goal.criteria_change') {
     const a = args as CriteriaArgs;
+    // A card filed before a later change does not undo it: the goal must still be what the card changes from.
+    if (!(sameDefinition(goal, a.from) && sameLinks(await currentLinks(tx, goal.id), a.from.links))) return { refusal: SAY.goalChanged };
     const why = await itemProblem(tx, a.links, a.successCriteria);
     if (why) return { refusal: why };
     const links = await syncLinks(tx, goal.id, a.links);
@@ -288,6 +295,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
 
   if (action === 'goal.horizon_change') {
     const a = args as TimingArgs;
+    if (!sameTiming(goal, a.from)) return { refusal: SAY.goalChanged };
     if (sameTiming(goal, a)) return { result: { goalId: goal.id, unchanged: true } };
     if (a.horizonAt && new Date(a.horizonAt) <= goal.createdAt) return { refusal: SAY.passed };
     // A shorter cadence brings the next review forward: the earlier of the one already set and the new cadence's next slot.

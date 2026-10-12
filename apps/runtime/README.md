@@ -274,27 +274,59 @@ Any later deploy of P2.6 code applies the migration again.
 
 ## Goals (P3)
 
-Goals arrive in parts. This first part is only what the database guarantees,
-and it changes nothing you see: a goal starts, finishes, is abandoned, or
-changes what counts as done or its timing only with your signature, and every
-change to its plan is a card you sign. Nothing files a goal card yet, and
-nothing reviews goals.
+Goals arrive in parts. The first part is what the database guarantees: a goal
+starts, finishes, is abandoned, or changes what counts as done or its timing
+only with your signature, and every change to its plan is a card you sign.
+
+The second part is the Goals panel in the console (the target icon at the top
+right). You add a goal there, open it, and change it. Every signed change is a
+card you sign in place, with Touch ID each time, never as part of Approve All.
+Pausing, your marks on your own checks, and your steps' progress need no
+signature; each is in the audit trail with ids only. Checks on items (a pull
+request, an issue, CI, a service, a deploy, a thread) are read as the item
+stands: a merged pull request meets "Is Merged" even after GitHub archives it.
+Nothing reviews goals yet, so nothing is ever shown as late.
+
+A card you leave waiting can't undo a later change. A change to what counts as
+done, or to the timing, says what it changes from; if the goal has changed since,
+the card is refused ("The goal changed since this card was filed."). Filing a
+newer change of the same kind also rejects the older card still waiting.
+
+### The goal routes
+
+All under `/v1/goals`, with the `proposals` scope only: the runtime connector's
+token (`world:read|ledger`) can never read a goal's words. `GET ?tab=` and
+`GET /:id` answer the panel; `POST` files a new goal's card from the form's draft
+key (the goal's id is made from it, so the same form twice is one card, and a
+changed form's card replaces the one still waiting); `POST /:id/edit|timing|done|abandon|resume|plan`
+files that card with exactly the args the panel showed (`edit` and `timing`
+carry `from`, what the goal was, and replace an older card of theirs still
+waiting, whether it came from the console or the CLI); `POST /:id/pause|dismiss`,
+`/:id/criteria/:cid` and `/:id/steps/:key` are the unsigned writes; `POST /linkable`
+lists items by a label made from their key or from what they are ("Nexus Thread
+from Oct 3", and "Nexus Thread 2 from Oct 3" for the second one first seen that
+day), never a title or a raw id.
+A refusal is one of the fixed sentences in @flint/policy (`GOAL_SAYS`) with its
+code.
 
 ### What the next parts must do
 
-- **The goals panel (part 2)** must forward each card's `consequential` mark to
-  the console and ask for a fresh touch on every card that has it. Today the
-  console decides `fresh` from `apprAlone` alone, which doesn't look at it, so a
-  goal card could go through Approve All on one earlier touch. It must also pass
-  the args its card shows to `approveAction` (`{ args }`): the console signs
-  nothing unless the digest of what it showed is the one it is asked to sign.
-- **Reviews and step ticks (parts 2 and 3)** must take the goal `FOR UPDATE`
-  before touching any of its steps, plans or reviews, as the card executor does.
-  A step write already takes the goal `FOR NO KEY UPDATE` in the database, so two
-  ticks on one goal wait in turn; a writer that locked a plan or a step first
-  could still wait on another in a circle. They must also run at READ COMMITTED
-  (the database refuses plan writes above it) and write a plan version's draft
-  and its activation in one transaction.
+- **Reviews (part 3)** must take the goal `FOR UPDATE` before touching any of
+  its steps, plans or reviews, as the card executor and the panel's step ticks
+  and marks do (part 2). A step write already takes the goal `FOR NO KEY UPDATE`
+  in the database, so two ticks on one goal wait in turn; a writer that locked a
+  plan or a step first could still wait on another in a circle. They must also
+  run at READ COMMITTED (the database refuses plan writes above it) and write a
+  plan version's draft and its activation in one transaction.
+- **Reviews (part 3)** must turn lateness on in the panel's view (`reviews`,
+  `late`) only once they run: until then a goal's next review time is set but
+  nothing is due.
+- **Suggestions from chat (part 5)** must, in the console:
+  - mark a suggested goal's words as Outside Text when the goal is tainted;
+  - show the links and the sensitivity "Make It a Goal" signs, before it signs;
+  - make Dismiss undoable, or ask first (a dismissed goal is final today);
+  - give a suggested goal whose date has passed a way to start (today its card
+    is refused until the date is changed, and a suggested goal can't be edited).
 - **A later part** must add a way to forget a goal's words (a signed
   `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
 
@@ -310,6 +342,22 @@ nothing reviews goals.
   checks. Three rules are written by the runtime itself, so they catch its bugs,
   not a runtime gone wrong: the quote check on chat suggestions, the proof that a
   Flint action step was done, and the `runtime:goals` label on a goal's forecast.
+- **A fresh touch is the console's to keep.** A goal card is marked
+  `consequential`, and the console signs it only with a fresh Touch ID or
+  password prompt, on its own. Neither the server nor the runtime can tell a
+  fresh signature from one made under the Mac's 5-minute unlock: the Secure
+  Enclave signature is the same either way (a passkey always asks). A console
+  that ignored the mark could still sign a goal card on an earlier touch.
+- **Item titles in the picker.** To find an item, the panel shows its title
+  beside its label, marked as outside text. What is stored and signed is the
+  item's id and its label, never the title.
+- **What a change changes from is checked by the runtime, not the database.**
+  A card to change what counts as done, or the timing, signs `from` (what the
+  goal was), and the runtime refuses it when the goal no longer matches. The
+  database still compares only the new values with the row; checking `from`
+  there too would need a migration. Every such card must carry `from`, however
+  it is filed (the console, or the CLI straight at the runtime): one without it
+  is refused when filed and again when it runs.
 - **Older card kinds.** For goal and plan cards the database checks that the
   digest you sign is the digest of the stored args. For older kinds it doesn't
   yet (P1's `consume_approval` compares two digests, not args). For every kind,

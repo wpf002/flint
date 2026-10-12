@@ -2,7 +2,7 @@
  * The runtime's operator commands (plan P1 backups):
  *
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
- *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box
+ *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
@@ -36,9 +36,10 @@ import { proposeEnable } from './governance/internal.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, gate, type Command } from './backup/nightly.js';
+import { ACTION, attempt, gate, tellFailure, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, encryptTo, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { dumpDatabase, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { sendOffsite } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
 import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
@@ -160,39 +161,26 @@ async function main(): Promise<void> {
       }
       proposalId = g.proposalId;
     }
-    let detail: Record<string, string | number | boolean | null> = {};
-    let ok = true;
-    let error: string | undefined;
-    try {
+    // The job's own work. Whatever it throws is its failure, classified once (attempt): one another try
+    // could change, or one that stays until its setup is fixed.
+    const o = await attempt(async () => {
       if (cmd === 'backup') {
         const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
         const pruned = pruneDumps(b.dumpDir, 14);
         await db.backupRun.create({
           data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },
         });
-        detail = { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length };
-      } else if (cmd === 'offsite') {
-        if (!b.ageRecipient) throw new Error('no age recipient: put Will\'s public key in ~/.flint/backup-age-recipient');
-        if (!b.offsiteDir) throw new Error('FLINT_OFFSITE_DIR is not set');
-        const dump = newestDump(b.dumpDir);
-        if (!dump) throw new Error('no local dump to send');
-        const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
-        await db.backupRun.create({ data: { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: BigInt(e.bytes), sha256: e.sha256, encrypted: true, status: 'ok', startedAt: now, finishedAt: new Date() } });
-        detail = { bytes: e.bytes, sha256: e.sha256 };
-      } else {
-        const dump = newestDump(b.dumpDir);
-        if (!dump) throw new Error('no dump to restore');
-        const r = await restoreDrill(dump, b.restoreUrl, b.tools);
-        ok = r.ok;
-        const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
-        if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
-        detail = { tables: r.tables, mismatches: r.mismatches.length };
-        if (!r.ok) error = `row counts differ in ${r.mismatches.length} table(s)`;
+        return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length } };
       }
-    } catch (err) {
-      ok = false;
-      error = err instanceof Error ? err.message : String(err);
-    }
+      if (cmd === 'offsite') return { detail: await sendOffsite(db, b, now) };
+      const dump = newestDump(b.dumpDir);
+      if (!dump) throw new Error('no dump to restore');
+      const r = await restoreDrill(dump, b.restoreUrl, b.tools);
+      const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
+      if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
+      return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length} table(s)` }) };
+    });
+    const { ok, error, detail } = o;
     if (proposalId) {
       // Recording the proposal's end must not cost the job's own audit row or the failure notice.
       await completeProposal(db, proposalId, { ok, ...(error ? { error } : {}), result: detail }, actor).catch((err: unknown) =>
@@ -203,16 +191,21 @@ async function main(): Promise<void> {
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
     if (!ok) {
       process.exitCode = 1;
-      // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit.
-      if (auto) await notifyWill(b.config, `${action} failed`, `${FAILED_WORDS[cmd]} failed. The details are in ~/.flint/runtime-backup.out.log.`);
+      // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
+      // says what happened and what happens next, in Will's words, and promises only what is true (tellFailure):
+      //  - a failure another try cannot change says its setup needs fixing;
+      //  - a job he promoted runs again at its next time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays);
+      //  - one that ran on a card waits for his next approval, and that card is filed first, so it is there to approve.
+      if (auto) {
+        await tellFailure(db, cmd, { setup: o.setup, mismatch: o.mismatch, icloud: b.offsiteICloud, ...(proposalId !== undefined ? { proposalId } : {}) }, {
+          tz: b.config.tz, rp: b.config.rp, now, notify: (title, body) => notifyWill(b.config, title, body),
+        });
+      }
     }
   } finally {
     await db.$disconnect();
   }
 }
-
-/** Which run failed, for the note Will reads (the nightly LaunchAgent runs these at 02:15; the drill on Sundays). */
-const FAILED_WORDS: Record<Command, string> = { backup: 'Last night’s backup', offsite: 'Last night’s offsite copy', drill: 'This week’s restore test' };
 
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

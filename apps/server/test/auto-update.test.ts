@@ -490,10 +490,22 @@ describe('update_app.sh installs while Flint.app is open', () => {
     expect(u.built[0]).not.toContain('--if-closed');
     expect(u.out).toContain('installed (');
     expect(u.out).toContain('the open app restarts onto it when idle');
-    expect(u.said).toContain('Flint updated: App v1');
+    // A plain sentence for Will; the commit is the log's line, never the banner's.
+    expect(u.said.trim()).toBe('display notification "Flint was updated. The open app restarts onto the new version when you’re not using it." with title "Flint"');
+    expect(u.said).not.toContain('App v1');
     expect(readFileSync(join(state, 'app-installed-tree'), 'utf8').trim()).toBe(tree());
     // The same tree again: nothing to do.
     expect(update().built).toHaveLength(0);
+  });
+
+  it('with Flint closed, says it was updated and that opening it uses the new version', async () => {
+    fake!.kill();
+    await new Promise((r) => fake!.once('exit', r));
+    mkdirSync(state, { recursive: true });
+    const u = update();
+    expect(u.built).toHaveLength(1);
+    expect(u.out).toMatch(/installed \([0-9a-f]+ App v1\)$/m);
+    expect(u.said.trim()).toBe('display notification "Flint was updated. Open it to use the new version." with title "Flint"');
   });
 
   it('tells Will to reopen an open app from before self-restart, instead of promising a restart', () => {
@@ -501,7 +513,7 @@ describe('update_app.sh installs while Flint.app is open', () => {
     const u = update();
     expect(u.built).toHaveLength(1);
     expect(u.out).toContain('the open app is older and updates when reopened');
-    expect(u.said).toContain('Flint updated. Quit and reopen it once to finish.');
+    expect(u.said.trim()).toBe('display notification "Flint was updated. Quit and reopen it once to finish." with title "Flint"');
   });
 
   it('keeps the current app when a build fails, and does not retry the same tree', () => {
@@ -510,7 +522,7 @@ describe('update_app.sh installs while Flint.app is open', () => {
     let u = update();
     expect(u.status).toBe(0);
     expect(u.out).toContain('build failed');
-    expect(u.said).toContain('Flint update failed to build. Kept the current app.');
+    expect(u.said.trim()).toBe('display notification "A Flint update didn’t build, so the current app was kept." with title "Flint"');
     expect(readFileSync(join(state, 'app-failed-tree'), 'utf8').trim()).toBe(tree());
     expect(existsSync(join(state, 'app-installed-tree'))).toBe(false);
     u = update();

@@ -10,13 +10,14 @@
  *    open circuit (5 failures in a row) is down; a good run's warnings in
  *    words (degraded when Will has something to see to); Apple Calendar
  *    disconnected in Flint Calendar is ok, quiet on purpose, and never stale;
- *  - the last good local backup, the latest restore drill, open audit
- *    intents, the last retention run, a migration marked failed, triage.
+ *  - the last good local backup, the last encrypted copy offsite (off until
+ *    Will's age key is here), the latest restore drill, open audit intents,
+ *    the last retention run, a migration marked failed, triage.
  *
  * A detail is redacted and clipped to 300 characters: names and counts, never
  * a stranger's words. One audit entry per run carries the counts.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { localDay, redact, HEALTH_STATUS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
@@ -71,6 +72,15 @@ function warned(lastError: string): { detail: string; degraded: boolean } {
   const hits = WARNINGS.filter((w) => w.said.test(lastError));
   if (!hits.length) return { detail: 'The last read finished with a warning.', degraded: true };
   return { detail: hits.map((w) => w.detail).join(' '), degraded: hits.some((w) => w.degraded) };
+}
+
+/** Whether the nightly job sends an offsite copy at all: Will's age key is on this Mac (a file that is not empty). */
+function offsiteWanted(home: string): boolean {
+  try {
+    return statSync(join(home, '.flint', 'backup-age-recipient')).size > 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
@@ -130,6 +140,19 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   const backup = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
   const backupH = backup ? (now.getTime() - backup.startedAt.getTime()) / 3_600_000 : Infinity;
   out.push({ component: 'backup', status: backupH <= 26 ? 'ok' : backupH <= 36 ? 'degraded' : 'down', detail: backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.' });
+
+  // The encrypted copy off this Mac. The nightly job sends one only once Will's age key is here
+  // (backup-nightly.sh), so without the key it is off, not failing. With it, a copy that is missing or
+  // stale is an issue Settings > Health and the morning digest name, whatever the job's own note said.
+  if (!offsiteWanted(d.config.home)) out.push({ component: 'offsite_backup', status: 'disabled' });
+  else {
+    const offsite = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'icloud', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+    const offsiteH = offsite ? (now.getTime() - offsite.startedAt.getTime()) / 3_600_000 : Infinity;
+    out.push({
+      component: 'offsite_backup', status: offsiteH <= 26 ? 'ok' : offsiteH <= 36 ? 'degraded' : 'down',
+      detail: offsite ? `The last offsite copy is ${count(Math.round(offsiteH), 'hour')} old.` : 'There’s no offsite copy yet.',
+    });
+  }
 
   // The latest drill only: one that failed and was then passed is passed.
   const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });

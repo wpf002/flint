@@ -79,7 +79,7 @@ const check = async () => {
 };
 
 function boot(opts: { stamped?: string | null; resume?: unknown } = {}) {
-  els = Object.fromEntries(['input', 'think', 'transcript', 'thread', 'micbtn', 'filepick', 'settings', 'activity', 'approvals', 'ctitle'].map((id) => [id, new El()]));
+  els = Object.fromEntries(['input', 'think', 'transcript', 'thread', 'micbtn', 'filepick', 'settings', 'activity', 'approvals', 'goals', 'ctitle'].map((id) => [id, new El()]));
   listeners = {};
   doc = {
     hidden: false,
@@ -186,7 +186,7 @@ describe('the console updating itself', () => {
         () => void (els.transcript!.innerHTML = '<div class="propose"><div class="prow" style="opacity: 0.5"></div></div>'),
         () => void (els.transcript!.innerHTML = '<div class="propose"><div class="prow" style="display: none"></div></div>'),
       ],
-      ...['settings', 'activity', 'approvals'].map((id): [string, () => void, () => void] => [
+      ...['settings', 'activity', 'approvals', 'goals'].map((id): [string, () => void, () => void] => [
         `the ${id} panel`,
         () => void els[id]!.classes.add('open'),
         () => void els[id]!.classes.delete('open'),
@@ -294,5 +294,14 @@ describe('the console updating itself', () => {
     expect(els.thread!.innerHTML).toBe('<div class="msg you"><span class="who">You</span><span class="body">Hi</span></div>');
     // The scroller around the thread is left as it is, so the thread itself survives.
     expect(els.transcript!.innerHTML).toBe('');
+  });
+});
+
+describe('the Goals panel (P3) in the main script', () => {
+  it('is a panel like the others: in PANELS, the Escape chain, the menu’s openGoals, and flintBusy', () => {
+    expect(html).toContain("var PANELS=['approvals','settings','activity','goals'];");
+    expect(html).toContain("else if($('goals').classList.contains('open')&&typeof closeGoals==='function')closeGoals();");
+    expect(html).toContain("else if(name==='openGoals'&&typeof openGoals==='function')openGoals();");
+    expect(updateJs).toContain("return ['settings','activity','approvals','goals'].some(");
   });
 });
