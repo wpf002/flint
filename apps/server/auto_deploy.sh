@@ -31,6 +31,15 @@ RETRY_EVERY_MIN=30
 RETRY_MAX=6
 ts() { date '+%F %T'; }
 
+# Updates are paused while the hold file exists (apps/studio/rollback.sh makes it after putting
+# the previous version back; removing the file resumes them). Nothing is fetched, so the
+# checkout stays at what is running, and the app and Flint Calendar are left as they are.
+HOLD="$STATE/deploy-hold"
+if [ -e "$HOLD" ]; then
+  echo "$(ts) updates are paused: $HOLD exists (remove it to resume)"
+  exit 0
+fi
+
 before=$(git rev-parse HEAD 2>/dev/null || echo none)
 # A stalled connection used to hold the fetch ~3 minutes, past the next tick.
 # Abort once the transfer drops below 1 KB/s for 20s; the next run retries.

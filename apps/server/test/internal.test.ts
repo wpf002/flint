@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { LoadResponse, NotifyResponse, type NotifyChannel } from '@flint/policy';
-import { startInternal, type ExternalSpend, type InternalDeps } from '../src/internal';
+import { internalPort, startInternal, type ExternalSpend, type InternalDeps } from '../src/internal';
 import { Notifications, PHONE_PING } from '../src/notifications';
 
 const TOKEN = 'runtime-to-server-0123456789abcdef';
@@ -164,5 +164,19 @@ describe('/internal/load and /internal/complete', () => {
     expect(await refused.json()).toEqual({ error: 'the runtime spend kind is capped at $0', reason: 'kind_cap' });
     expect((await post('/internal/complete', { kind: 'review' })).status).toBe(200);
     expect(bodies).toHaveLength(2);
+  });
+});
+
+describe('the internal listener’s port', () => {
+  it('is 8081 unless FLINT_INTERNAL_PORT names another (a rebuild rehearsal runs a second Flint beside the real one)', () => {
+    expect(internalPort({})).toBe(8081);
+    expect(internalPort({ FLINT_INTERNAL_PORT: '18081' })).toBe(18081);
+    expect(internalPort({ FLINT_INTERNAL_PORT: ' 49152 ' })).toBe(49152);
+  });
+
+  it('ignores anything that is not a whole port above 1023', () => {
+    for (const bad of ['', '80', '1023', '65536', '99999', '8081x', '-8081', '8081.5', '0x1F91', 'eighty']) {
+      expect(internalPort({ FLINT_INTERNAL_PORT: bad }), bad).toBe(8081);
+    }
   });
 });

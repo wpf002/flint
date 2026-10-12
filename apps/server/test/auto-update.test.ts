@@ -367,6 +367,30 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.calendar).toBe(true);
   });
 
+  it('a hold file pauses updates: nothing is fetched, deployed or rebuilt until it is removed (apps/studio/rollback.sh)', () => {
+    const before = git(deployDir, 'rev-parse', 'HEAD');
+    const sha = push('v1');
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, 'deploy-hold'), '');
+    for (let i = 0; i < 2; i++) {
+      const t = tick();
+      expect(t.status).toBe(0);
+      expect(t.ran).toEqual([]);
+      expect(t.app || t.calendar).toBe(false);
+      expect(t.out).toMatch(/updates are paused: .*deploy-hold exists \(remove it to resume\)/);
+      expect(t.out).not.toContain('redeploying');
+    }
+    // The checkout stays at what is running: the new commit was never pulled.
+    expect(git(deployDir, 'rev-parse', 'HEAD')).toBe(before);
+    expect(retry()).toBeNull();
+    // Removed: the next tick deploys what was waiting.
+    rmSync(join(state, 'deploy-hold'));
+    const t = tick();
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(git(deployDir, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(t.out).toContain(`deployed ${sha}`);
+  });
+
   it('a retry file without a final newline never stops the deploys', () => {
     const sha = push('v1');
     flag('server-gate');

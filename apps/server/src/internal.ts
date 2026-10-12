@@ -119,11 +119,23 @@ export function internalHandler(deps: InternalDeps) {
   };
 }
 
-/** Listen on [::1] only. */
-export function startInternal(deps: InternalDeps, port = 8081): Server {
+/** Listen on [::1] only, on 8081 unless FLINT_INTERNAL_PORT names another port (internalPort). */
+export function startInternal(deps: InternalDeps, port = internalPort(process.env)): Server {
   const s = createServer((req, res) => {
     internalHandler(deps)(req, res).catch(() => send(res, 500, { error: 'internal error' }));
   });
   s.listen(port, '::1');
   return s;
+}
+
+/**
+ * The internal listener's port: 8081, or FLINT_INTERNAL_PORT when a second Flint
+ * shares this Mac. A rebuild rehearsal (apps/studio/rebuild.sh --rehearse) runs
+ * one beside the real one, and must never take the real one's port. Anything
+ * that is not a whole port number above 1023 is ignored.
+ */
+export function internalPort(env: Record<string, string | undefined>): number {
+  const raw = env.FLINT_INTERNAL_PORT?.trim() ?? '';
+  const n = /^\d{4,5}$/.test(raw) ? Number(raw) : NaN;
+  return n >= 1024 && n <= 65535 ? n : 8081;
 }
