@@ -724,6 +724,8 @@ BEGIN
       IF NOT ok THEN
         RAISE EXCEPTION 'task %: ending it against its check needs Will''s signed override', OLD."id" USING ERRCODE = 'insufficient_privilege';
       END IF;
+      -- Its forecast, locked (recording a resolution locks the prediction too): none lands under this override.
+      PERFORM 1 FROM "Prediction" WHERE "id" = OLD."predictionId" FOR SHARE;
       IF EXISTS (SELECT 1 FROM "Resolution" r WHERE r."predictionId" = OLD."predictionId") THEN
         RAISE EXCEPTION 'task %: its forecast is already scored', OLD."id" USING ERRCODE = 'insufficient_privilege';
       END IF;

@@ -352,6 +352,26 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       expect(await code(k.setStatus(app, t.id, 'rejected', `, "barCheckedBy" = 'will'`))).toBe('42501');
     });
 
+    it('an override does not slip in as the task\'s forecast is scored: it waits for the score, then finds the result final', async () => {
+      const t = await k.taskAt('checked', w);
+      await k.accept(t.id);
+      const forecastId = (await app(`SELECT "predictionId" FROM "Task" WHERE id = $1`, [t.id])).rows[0].predictionId as string;
+      const over = await k.card('task.bar_override', { taskId: t.id, to: 'rejected' });
+      const [score, o] = [await k.client(), await k.client()];
+      try {
+        await score.query('BEGIN');
+        await score.query(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, now(), 'auto_world')`, [id('rs'), forecastId]);
+        const overridden = k.outcome(k.setStatus(k.on(o), t.id, 'rejected', `, "barCheckedBy" = 'will'`));
+        await sleep(300);
+        await score.query('COMMIT');
+        expect(await overridden).toBe('42501');
+      } finally {
+        await score.end();
+        await o.end();
+      }
+      expect([await status(t.id), await k.used(over.aid)]).toEqual(['accepted', 0]);
+    });
+
     it('it cannot cancel what went out, replace or drop an output, or hand in a second one', async () => {
       const t = await k.taskAt('dispatched', w);
       expect(await code(k.setStatus(app, t.id, 'cancelled'))).toBe('42501');

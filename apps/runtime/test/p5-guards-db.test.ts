@@ -268,6 +268,8 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       // A JSON null is not a spec or a bar either.
       await refused(app(`INSERT INTO "Task" (id, "assetId", title, spec, acceptance, origin, "estCostUsd", "updatedAt") VALUES ($1, $2, 'T', 'null'::jsonb, $3::jsonb, 'will', 0, now())`, [t, w.id, JSON.stringify(BAR)]), '23514', invalid('spec'));
       expect((await app(`SELECT count(*)::int AS n FROM "Task" WHERE id = $1`, [t])).rows[0].n).toBe(0);
+      // (The rules on what an update sets are with the moves, below. Four rules sit behind a guard that refuses
+      // first, so no statement reaches them: status, approval, proof and purge. They are there for the day a guard changes.)
     });
   });
 
@@ -734,6 +736,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         ['time', { modelMs: -5 }],
       ] as const) await refused(of(over), '23514', `review ${rid}: its ${rule} is not valid`, `${rule} ${JSON.stringify(over).slice(0, 40)}`);
       expect(await k.outcome(of({ engine: 'trident_panel', costUsd: 0.4 }))).toBe('ok');
+      // (Its id, subject, digest and sensitivity are held first by the check on what it reviews, in the test above.)
     });
 
     it('what one found never changes and it is never deleted; its words are cleared, never rewritten; an override\'s forecast is attached once, to a block Will approved past', async () => {

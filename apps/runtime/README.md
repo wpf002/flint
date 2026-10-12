@@ -1303,8 +1303,8 @@ What the database now holds to, whatever the runtime's code does:
   task doesn't run. Each run also needs its forecast on record first.
 - **Paid work says its price first and its cost after.** A task for an asset
   that spends runs only on a spend card filed from the console that carries the
-  same estimate, and it can't end without its cost. No asset that spends is
-  built: this is the rule one would meet.
+  same estimate, and it can't end without its cost. No asset that spends
+  exists yet. The rule is in place for when one does.
 - **Flint doesn't accept its own work on its own say.** A task is accepted only
   with its check on record and, until you promote that check, only on a card
   you sign. Rejecting a result that passed, accepting one that failed, and
@@ -1321,11 +1321,11 @@ What the database now holds to, whatever the runtime's code does:
   The card that turns the requirement off again never waits for a review. The
   last reviewer can't be turned off while reviews are required.
 - **Which cards need a review is decided when a card is filed.** A card with
-  outside text in it, one that can't be undone, one that touches money, and any
-  card that spends, changes policy or a rule, opens a pull request, forgets or
-  voids always needs one. The runtime may mark more. Nothing can unmark one.
+  outside text in it, one that can't be undone, one about financial data, and
+  any card that spends, changes policy or a rule, opens a pull request, forgets
+  or voids always needs one. The runtime may mark more. Nothing can unmark one.
 - **A plan step that is a Flint task is done only when its task was accepted.**
-  Nobody can tick it, Flint included.
+  Nobody can tick it by hand, Flint included.
 - **A forget reaches all of it.** Forgetting an item clears the text of tasks
   about it, deletes their outputs, and clears the words of the reviews that
   read them. Outcomes and verdicts stay.
@@ -1336,10 +1336,12 @@ What the database now holds to, whatever the runtime's code does:
 
 ### What changed on deploy
 
-Nothing you use. Every card now records whether it needs a review, and cards
-of the kinds listed above are marked. Nothing reads the mark yet, and reviews
-aren't required, so every card is approved as before. Four job queues exist
-and nothing sends to them.
+Nothing you use. Every card filed from now on records whether it needs a
+review, and cards of the kinds listed above are marked. Nothing reads the mark
+yet, and reviews aren't required, so every card is approved as before. Cards
+filed before this update stay unmarked. Four job queues exist and nothing
+sends to them. No plan has a Flint task step yet, so the new rule on those
+steps holds nothing back.
 
 ### What the next parts must do
 
@@ -1393,7 +1395,10 @@ and nothing sends to them.
   to its question (or the card that finishes a goal). So a task's forecast is
   settled as `auto_world`, and "was the reviewer right" has to go through a
   question, which can be asked only once the forecast is due. A part that
-  wants either to work differently needs its own database rule.
+  wants either to work differently needs its own database rule. The job that
+  scores a task's forecast must lock the task's row first and read its status
+  after, so an override and a score never cross. The database doesn't hold a
+  score to the task's outcome: that is the scorer's to get right.
 
 ### Known limits
 
