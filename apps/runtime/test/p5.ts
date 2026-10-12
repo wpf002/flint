@@ -320,6 +320,32 @@ export async function p5Kit(urls: TestUrls) {
     return c;
   }
 
+  // ---- A goal with a plan (P3's own cards and guards) ----
+  const planStep = (key: string, kind: string) => ({ op: 'add', key, step: { ordinal: Number(key.slice(1)), title: `Synthetic step ${key}`, kind, tier: 'approval', dueAt: null, dependsOn: [] as string[] } });
+  /** An active goal whose first plan has these steps (key -> kind), under one signed goal.activate card. */
+  async function goalWithPlan(steps: Record<string, string>): Promise<{ gid: string; plan: string; steps: Record<string, string> }> {
+    const gid = id('go');
+    const criteria = [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }];
+    await app(`INSERT INTO "Goal" (id, title, owner, origin, "successCriteria", "updatedAt") VALUES ($1, 'Synthetic goal', 'will', 'will', $2::jsonb, now())`, [gid, JSON.stringify(criteria)]);
+    const go = await card('goal.activate', {
+      goalId: gid, owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: 'Synthetic goal', description: '', successCriteria: criteria,
+      horizonAt: null, reviewCadence: 'P1W', links: [], plan: { ops: Object.entries(steps).map(([key, kind]) => planStep(key, kind)) },
+    }, { kind: 'goal', sensitivity: 'personal' });
+    const plan = id('pl');
+    const ids: Record<string, string> = {};
+    await inTx(async (q) => {
+      await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 1, 'will')`, [plan, gid]);
+      for (const [key, kind] of Object.entries(steps)) {
+        ids[key] = id('ps');
+        await q(`INSERT INTO "PlanStep" (id, "planId", key, ordinal, title, kind) VALUES ($1, $2, $3, $4, $5, $6)`, [ids[key], plan, key, Number(key.slice(1)), `Synthetic step ${key}`, kind]);
+      }
+      await q(`UPDATE "Plan" SET status = 'active', "approvalId" = $2 WHERE id = $1`, [plan, go.aid]);
+      await q(`UPDATE "Goal" SET status = 'active', "approvalId" = $2, "nextReviewAt" = now() + interval '7 days' WHERE id = $1`, [gid, go.aid]);
+    });
+    await finish(go.pid);
+    return { gid, plan, steps: ids };
+  }
+
   // ---- The world, and a forget ----
   async function entity(kind = 'repo'): Promise<string> {
     const eid = id('en');
@@ -336,7 +362,7 @@ export async function p5Kit(urls: TestUrls) {
     urls, app, owner, approver, credentialId, client, on, inTx, code, outcome, one, approval, file, card, finish, used,
     asset, enableArgs, switchOn, switchOff, turnOn, onAsset,
     task, dispatchArgs, forecast, queue, dispatch, setStatus, outputDigest, putOutput, proof, taskAt, accept,
-    reviewFields, review, reviewed, approve, setGate, gate, enforce, entity, forget,
+    reviewFields, review, reviewed, approve, setGate, gate, enforce, planStep, goalWithPlan, entity, forget,
   };
 }
 export type P5Kit = Awaited<ReturnType<typeof p5Kit>>;

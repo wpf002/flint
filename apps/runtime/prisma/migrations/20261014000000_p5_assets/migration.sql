@@ -533,7 +533,8 @@ BEGIN
       IF NEW."textPurgedAt" IS NULL OR NOT (forgetting OR ended) THEN
         RAISE EXCEPTION 'task %: its % is cleared only once it has ended', OLD."id", k USING ERRCODE = 'insufficient_privilege';
       END IF;
-    ELSIF forgetting OR k IN ('spec', 'acceptance') OR (o -> k) <> 'null'::jsonb THEN
+    ELSIF forgetting OR OLD."textPurgedAt" IS NOT NULL OR k IN ('spec', 'acceptance') OR (o -> k) <> 'null'::jsonb THEN
+      -- (Nothing is written back once its text was cleared.)
       RAISE EXCEPTION 'task %: its % is written once', OLD."id", k USING ERRCODE = 'insufficient_privilege';
     END IF;
   END LOOP;
@@ -954,7 +955,6 @@ BEGIN
     -- The local engine is free; only the paid panel carries a cost.
     WHEN NOT coalesce((NEW."engine" = 'local_adj' AND coalesce(NEW."costUsd", 0) = 0) OR (NEW."engine" = 'trident_panel' AND NEW."costUsd" IS NOT NULL AND NEW."costUsd" >= 0), false) THEN 'cost'
     WHEN NOT coalesce(NEW."modelMs" IS NULL OR NEW."modelMs" >= 0, false) THEN 'time'
-    WHEN NOT coalesce(NEW."overridePredictionId" IS NULL OR NEW."overridePredictionId" ~ '^[A-Za-z0-9_-]{1,40}$', false) THEN 'forecast'
   END;
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'review %: its % is not valid', CASE WHEN NEW."id" ~ '^[A-Za-z0-9_-]{1,40}$' THEN NEW."id" ELSE '?' END, bad USING ERRCODE = 'check_violation';

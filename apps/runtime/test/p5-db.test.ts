@@ -344,23 +344,8 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
   describe('a plan step that is a Flint task', () => {
     it('names its task while it runs, and is done once that task is accepted; Will\'s own steps are ticked as before', async () => {
       const a = await k.onAsset();
-      const gid = id('go');
-      const criteria = [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }];
-      const step = (key: string, kind: string) => ({ op: 'add', key, step: { ordinal: Number(key.slice(1)), title: `Synthetic step ${key}`, kind, tier: 'approval', dueAt: null, dependsOn: [] } });
-      await app(`INSERT INTO "Goal" (id, title, owner, origin, "successCriteria", "updatedAt") VALUES ($1, 'Synthetic goal', 'will', 'will', $2::jsonb, now())`, [gid, JSON.stringify(criteria)]);
-      const go = await k.card('goal.activate', {
-        goalId: gid, owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: 'Synthetic goal', description: '', successCriteria: criteria,
-        horizonAt: null, reviewCadence: 'P1W', links: [], plan: { ops: [step('s1', 'asset_task'), step('s2', 'will_task')] },
-      }, { kind: 'goal', sensitivity: 'personal' });
-      const plan = id('pl');
-      const [s1, s2] = [id('ps'), id('ps')];
-      await k.inTx(async (q) => {
-        await q(`INSERT INTO "Plan" (id, "goalId", version, "createdBy") VALUES ($1, $2, 1, 'will')`, [plan, gid]);
-        await q(`INSERT INTO "PlanStep" (id, "planId", key, ordinal, title, kind) VALUES ($1, $3, 's1', 1, 'Synthetic step s1', 'asset_task'), ($2, $3, 's2', 2, 'Synthetic step s2', 'will_task')`, [s1, s2, plan]);
-        await q(`UPDATE "Plan" SET status = 'active', "approvalId" = $2 WHERE id = $1`, [plan, go.aid]);
-        await q(`UPDATE "Goal" SET status = 'active', "approvalId" = $2, "nextReviewAt" = now() + interval '7 days' WHERE id = $1`, [gid, go.aid]);
-      });
-      await k.finish(go.pid);
+      const { gid, steps } = await k.goalWithPlan({ s1: 'asset_task', s2: 'will_task' });
+      const [s1, s2] = [steps.s1!, steps.s2!];
 
       await app(`UPDATE "PlanStep" SET status = 'done', "doneAt" = now() WHERE id = $1`, [s2]);
       const t = await k.taskAt('checked', a, { goalId: gid, stepKey: 's1', sensitivity: 'personal' });
