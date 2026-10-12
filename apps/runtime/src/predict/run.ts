@@ -162,6 +162,7 @@ async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: stri
   });
   if (f.steady || !f.question) return 0;
   const first = f.steps[0]!;
+  // The step's end in the zone the forecast is made in. It goes into the rule, so the sweep settles this step and no other even if Flint's zone has changed by then.
   const end = stepEnd(o.tz, at, freqOf(def))!;
   const common = {
     method: f.beatsNaive === true ? ('statistical' as const) : ('base_rate' as const),
@@ -171,11 +172,11 @@ async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: stri
   await emitPrediction(tx, {
     ...common, kind: 'interval', type: 'trend', template: { id: 'series_range', params: { series: def.key, lo: first.lo, hi: first.hi, on: o.targetDay } },
     pointEstimate: first.mean, lower: first.lo, upper: first.hi, level: f.level,
-    resolutionCriteria: RANGE_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), op: 'range' },
+    resolutionCriteria: RANGE_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), end: end.toISOString(), op: 'range' },
   }, FORECAST_WRITER, o.now);
   await emitPrediction(tx, {
     ...common, kind: 'binary', type: 'threshold_cross', probability: f.question.probability, template: { id: 'threshold', params: { series: def.key, op: 'above', value: f.question.threshold } },
-    resolutionCriteria: QUESTION_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), op: 'above', value: f.question.threshold },
+    resolutionCriteria: QUESTION_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), end: end.toISOString(), op: 'above', value: f.question.threshold },
   }, FORECAST_WRITER, o.now);
   return 2;
 }

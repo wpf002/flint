@@ -185,7 +185,7 @@ describe.skipIf(NO_DB)('the forecast runner on flint_test', () => {
     expect(r.points[0].at).toBe(mondayStart.toISOString());
     expect(r.points[1].at).toBe(new Date(mondayStart.getTime() + 7 * DAY).toISOString());
     const [range] = await predictions(commits);
-    expect(range).toMatchObject({ domain: 'repos', unit: 'count', resolverSpec: { seriesKey: commits, at: mondayStart.toISOString(), op: 'range' } });
+    expect(range).toMatchObject({ domain: 'repos', unit: 'count', resolverSpec: { seriesKey: commits, at: mondayStart.toISOString(), end: new Date(mondayStart.getTime() + 7 * DAY).toISOString(), op: 'range' } });
     // Due once the week is over and its number is in.
     expect(range.resolveBy.toISOString()).toBe(new Date(mondayStart.getTime() + 7 * DAY + DUE_AFTER_MS).toISOString());
     // Any other night this week it is the same input: nothing more.
@@ -196,11 +196,11 @@ describe.skipIf(NO_DB)('the forecast runner on flint_test', () => {
   it('the rule on each prediction is one the sweep settles: with tomorrow\'s number in, the range gets its value and the question its answer', async () => {
     const deploys = 'daily.deploys.count';
     const [range, question] = await predictions(deploys);
-    const asDue = (p: Record<string, unknown>): DuePrediction => ({
-      id: p.id as string, kind: p.kind as string, status: p.status as string, resolver: p.resolver as string, resolverSpec: p.resolverSpec, resolveBy: p.resolveBy as Date, createdAt: p.createdAt as Date,
-      seriesKey: p.seriesKey as string, goalId: null, subjectEntityId: null, conditionRecommendationId: null,
-    });
-    const verdict = (p: Record<string, unknown>, now: Date) => k.db.$transaction((tx) => verdictFor(tx, asDue(p), { tz: TZ, now }));
+    // Each as the sweep itself reads it (kit.ts `due`).
+    const verdict = async (p: Record<string, unknown>, now: Date, tz = TZ) => {
+      const due: DuePrediction = await k.due(p.id as string);
+      return k.db.$transaction((tx) => verdictFor(tx, due, { tz, now }));
+    };
     // Tonight, before the day is over: not yet. Tomorrow morning with no number: it waits for it.
     expect(await verdict(range, new Date())).toEqual({ verdict: 'wait', why: 'step_not_over' });
     const tomorrow = new Date(dayStart(-1).getTime() + 4 * HOUR);
@@ -209,8 +209,18 @@ describe.skipIf(NO_DB)('the forecast runner on flint_test', () => {
     await k.point(deploys, dayStart(0), 72);
     expect(await verdict(range, tomorrow)).toMatchObject({ verdict: 'resolve', resolvedBy: 'auto_metric', outcomeValue: 72, outcome: null, eventAt: dayStart(-1) });
     expect(await verdict(question, tomorrow)).toMatchObject({ verdict: 'resolve', resolvedBy: 'auto_metric', outcome: true, eventAt: dayStart(-1) });
-    await k.owner(`ALTER TABLE "MetricPoint" DISABLE TRIGGER USER`);
-    await k.owner(`DELETE FROM "MetricPoint" WHERE "seriesKey" = $1 AND at = $2`, [deploys, dayStart(0)]).finally(() => k.owner(`ALTER TABLE "MetricPoint" ENABLE TRIGGER USER`));
+    // Each rule carries its step's own end, as it was in the zone the forecast was made in. So a zone changed since
+    // cannot move the step: settled in Auckland (13 hours ahead), it is still today's UTC day, ending at tomorrow's midnight.
+    for (const p of [range, question]) {
+      expect(p.resolverSpec).toMatchObject({ at: dayStart(0).toISOString(), end: dayStart(-1).toISOString() });
+      expect(ResolverSpec.safeParse(p.resolverSpec).success).toBe(true);
+    }
+    expect(await verdict(range, tomorrow, 'Pacific/Auckland')).toMatchObject({ verdict: 'resolve', outcomeValue: 72, eventAt: dayStart(-1) });
+    expect(await verdict(question, tomorrow, 'Pacific/Auckland')).toMatchObject({ verdict: 'resolve', outcome: true, eventAt: dayStart(-1) });
+    // Every prediction the forecaster has written carries one.
+    expect((await k.owner(`SELECT count(*)::int AS n FROM "Prediction" WHERE "createdBy" = 'runtime:forecast' AND NOT ("resolverSpec" ? 'end')`)).rows[0].n).toBe(0);
+    expect((await k.owner(`SELECT count(*)::int AS n FROM "Prediction" WHERE "createdBy" = 'runtime:forecast'`)).rows[0].n).toBeGreaterThan(0);
+    await k.past('MetricPoint', 'USER', (q) => q(`DELETE FROM "MetricPoint" WHERE "seriesKey" = $1 AND at = $2`, [deploys, dayStart(0)]));
   });
 
   it('a number turned off between the read and the write is refused by the database, counted, and not retried; the log has its key and a class', async () => {

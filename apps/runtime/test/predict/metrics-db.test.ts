@@ -278,8 +278,7 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     await dep('1'.repeat(40), new Date('2025-11-03T05:30:00.000Z'));
     await dep('2'.repeat(40), new Date('2025-11-03T06:30:00.000Z'));
     // The points written so far begin in March: what came before the series' first number is not filled in afterwards.
-    await k.owner(`ALTER TABLE "MetricPoint" DISABLE TRIGGER USER`);
-    await k.owner(`DELETE FROM "MetricPoint" WHERE "seriesKey" = $1`, [key]).finally(() => k.owner(`ALTER TABLE "MetricPoint" ENABLE TRIGGER USER`));
+    await k.past('MetricPoint', 'USER', (q) => q(`DELETE FROM "MetricPoint" WHERE "seriesKey" = $1`, [key]));
     await run([key]);
     const p = await points(key);
     expect(p['2025-11-02T05:00:00.000Z']).toBe(1);

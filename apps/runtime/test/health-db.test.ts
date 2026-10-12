@@ -42,7 +42,6 @@ import { CANARY, DAY, dayStart, ledgerKit } from './ledger/kit';
 import { sweep } from '../src/ledger/sweep';
 import { appendAudit } from '../src/governance/audit';
 import { runSnapshot } from '../src/ledger/calibration';
-import { appendAudit } from '../src/governance/audit';
 import { runForecasts, runSeries } from '../src/predict/run';
 import { forecastSeries } from '../src/predict/series';
 
@@ -605,10 +604,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     const H = 3_600_000;
     const at = (ms: number) => new Date(Date.now() + ms);
     const audit = (action: string, inputs: Record<string, number>) => appendAudit(db, [{ actor: 'runtime:forecast', context: 'autonomous', kind: 'action', action, tier: 'approval', outcome: 'ok', inputs }]);
-    const backdate = async (hours: number) => {
-      await owner(`ALTER TABLE "ForecastSeries" DISABLE TRIGGER USER`);
-      await owner(`UPDATE "ForecastSeries" SET "enabledAt" = now() - make_interval(hours => $1) WHERE "on"`, [hours]).finally(() => owner(`ALTER TABLE "ForecastSeries" ENABLE TRIGGER USER`));
-    };
+    const backdate = (hours: number) => k.past('ForecastSeries', 'USER', (q) => q(`UPDATE "ForecastSeries" SET "enabledAt" = now() - make_interval(hours => $1) WHERE "on"`, [hours]));
     try {
       // Whatever earlier tests turned on is turned off (no signature needed): with no number on, Forecasts is off.
       await k.inTx((q) => q(`UPDATE "ForecastSeries" SET "on" = false WHERE "on"`), { actor: 'will:console' });

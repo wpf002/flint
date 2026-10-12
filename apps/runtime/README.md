@@ -1020,10 +1020,15 @@ action so named.
   ledger route takes `ChatPrediction` and nothing wider.
 - **Anything else that writes a forecast's predictions** must do it as the
   runner does (`predict/run.ts`): the rule the sweep settles them by in
-  `resolverSpec` (`{seriesKey, at, op: 'range'}` or `{seriesKey, at, op:
-  'above' | 'below', value}`, with `at` the first instant of the day or week,
-  the same instant its metric point is stored under), and a `resolveBy` of
-  when that number will be there.
+  `resolverSpec` (`{seriesKey, at, end, op: 'range'}` or `{seriesKey, at, end,
+  op: 'above' | 'below', value}`, with `at` the first instant of the day or
+  week, the same instant its metric point is stored under, and `end` the
+  instant that day or week ends), and a `resolveBy` of when that number will
+  be there. The rule carries its own `end` so that the step it's about is
+  fixed when the forecast is made: if `FLINT_TZ` changes later, the forecast
+  is still settled against the day it was about. A rule without `end` is
+  still read, with the end worked out in the zone of the day; the runner
+  never writes one.
 - **The Predictions panel** must show a forecast's range only through the
   phrase table (`predict/phrasing.ts`): "about 4, with an 80% range of 2 to 6"
   when the run beat a plain guess, "no reliable trend" when it didn't. It also
