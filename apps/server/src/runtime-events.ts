@@ -69,10 +69,15 @@ export function chatTurnEvent(t: {
   tier?: string;
   recall?: string;
   worldTokens?: number;
+  /** The goals block's size in the prompt of the brain asked last (P3 exit 8); only when it was added. A size, never a word of it. */
+  goalsTokens?: number;
 }): EventDraft {
   const outcome = t.outcome === 'error' ? 'failed' : t.outcome;
   const tier = TIERS.find((x) => x === t.tier);
   const recall = RECALL.find((x) => x === t.recall);
+  const size = (n: number | undefined) => (n !== undefined && Number.isFinite(n) ? Math.min(100_000, Math.max(0, Math.round(n))) : undefined);
+  const world = size(t.worldTokens);
+  const goals = size(t.goalsTokens);
   return {
     type: 'chat.turn',
     brain: t.brain === 'frontier' ? 'frontier' : 'local',
@@ -82,7 +87,7 @@ export function chatTurnEvent(t: {
     tainted: t.tainted,
     ...(tier ? { tier } : {}),
     ...(recall ? { recall } : {}),
-    ...(t.worldTokens !== undefined && Number.isFinite(t.worldTokens) ? { ctxTokens: { world: Math.min(100_000, Math.max(0, Math.round(t.worldTokens))) } } : {}),
+    ...(world !== undefined || goals !== undefined ? { ctxTokens: { ...(world !== undefined ? { world } : {}), ...(goals !== undefined ? { goals } : {}) } } : {}),
   };
 }
 

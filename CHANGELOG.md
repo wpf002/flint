@@ -7,6 +7,9 @@ but are called out explicitly here.
 
 ### Added
 
+- **`OllamaProvider.baseURL`** is readable: the server every request goes to,
+  without a trailing slash. An app can tell a model on this machine from one on
+  a server elsewhere before it decides what to send it. Nothing else changes.
 - **`refusal` done reason.** Anthropic's `stop_reason: "refusal"` and OpenAI's
   `refusal` field / `content_filter` finish now end a stream with
   `done.reason === 'refusal'` instead of `complete`. A chat turn that ends this

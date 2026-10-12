@@ -61,6 +61,9 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
+| `FLINT_GOALS_NOW` | no | `1` adds Will's goals to chat turns that a model on this Mac answers, and to no other turn (see "Goals in chat"). At most 300 tokens. Unset: off. |
+| `FLINT_GOALS_TO_FRONTIER` | no | `on` also sends the goals block to outside models. **This sends Will's goal text to whichever provider answers the turn** (Anthropic, OpenAI, Perplexity): the titles of his active goals, their counts and forecasts. Only `on` turns it on, and only with `FLINT_GOALS_NOW=1`. Unset, or anything else: goals never leave this Mac. |
+| `FLINT_CONTEXT_BLOCKS` | no | `off` is the kill switch for every context block (World now and goals), whatever their own settings say. A value that is neither `on` nor `off` is read as `off` and logged, so a mistyped `off` still turns them off. Unset or `on`: each block follows its own setting. |
 | `FLINT_WATCHER` | no | `off` (or `0`, `false`, `no`) turns off the proactive Watcher, which only ever had the calendar check (through Trident's Google tools) and the opt-in Bellwether one. Set it only once the runtime's `google_calendar` source is live and its heads-ups are actually delivered: triage on and P2's promotion table signed (apps/runtime/README.md, "Your calendar", step 5). Those heads-ups keep titles out of notes. The server reads it at start, so run `launchctl kickstart -k gui/$(id -u)/com.flint.server` after setting it. Unset: on. `FLINT_WATCH_MS` sets its interval (default 30 minutes); `FLINT_WATCH_SIGNALS=1` adds the Bellwether check. |
 | `FLINT_NTFY_TOPIC` | no | The ntfy.sh topic the phone subscribes to. Every phone push is the same content-free ping (`PHONE_PING` in src/notifications.ts): the words stay in the console. Unset: no pings. |
 | `FLINT_INTERNAL_PORT` | no | The port of the internal listener the runtime calls back on (`[::1]`, default 8081). Only a second Flint on the same Mac needs it: a rebuild rehearsal (`apps/studio/rebuild.sh --rehearse`) runs one beside the real one and must never take its port. Anything that is not a port above 1023 is ignored. |
@@ -433,7 +436,10 @@ A turn the local model answered because the frontier was paused, on either route
 To see how often: `grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -r 'select(.paused) | .paused' | sort | uniq -c`.
 
 A frontier `/chat` turn that carried the "World now" block also has `ctxTokens: { world: n }`,
-the block's estimated tokens (plan 3.0.8: chat overhead is measured).
+the block's estimated tokens (plan 3.0.8: chat overhead is measured). A turn whose last-asked
+brain was given Will's goals has `ctxTokens: { goals: n }` (at most 300): a size, never a word
+of them. To see the goals block's size turn by turn:
+`grep '^\[route\]' ~/.flint/server.err.log | cut -c9- | jq -c 'select(.ctxTokens.goals) | {brain, answeredBy, goals: .ctxTokens.goals}'`.
 
 ## The runtime's lanes
 
@@ -450,7 +456,7 @@ both ways (Machine plan P2):
   its name when it is a plain identifier) and health, counts, open escalations. At most 1,600
   characters and 400 tokens, 300 ms to answer, cached 30 s, never older than 5 minutes, never
   any text marked tainted, never stored in the conversation. Local turns go without (their
-  prompt is already at its limit).
+  prompt is already at its limit). `FLINT_CONTEXT_BLOCKS=off` turns it off with the goals block.
 - **Internal listener** (`[::1]:8081`, the runtime's token): `/internal/notify` (a note in the
   console; `channels` adds a banner and the content-free phone ping, always with the in-app
   note; a resent `ref` is a duplicate), `/internal/load` (`/chat` turns in flight: triage
@@ -492,6 +498,88 @@ consequential card (every goal card, and a plan change that is not a review's sm
 an earlier prompt or in Approve All: each asks for its own touch. Which plan card is a small
 one the console reads from the card's operations as well (a status, a date moved by a week or
 less, a place), never from the template's name alone.
+
+### Goals in chat
+
+Off by default (P3 part 4). With `FLINT_GOALS_NOW=1`, a `/chat` turn can start from Will's
+active goals: a short block in the turn's context (src/goals-now.ts), from the runtime's
+`GET /v1/goals/now`.
+
+**Goal text is personal, so only a model on this Mac reads it.** The block is handed out per
+ask, not per turn: every time `/chat` asks a brain (a frontier tier, the next tier, the local
+model it falls back to), that brain gets the block only if it is local. Local is decided in one
+place, `brainIsLocal` in src/policy.ts, and means all three of:
+
+- the provider is Ollama's own API (never Anthropic, OpenAI or Perplexity; and never the
+  "local" brain when it is really Claude because `OLLAMA_MODEL` is unset);
+- the model runs here: not one of Ollama's cloud models (`...-cloud`, `:cloud`);
+- its server is this Mac (`127.0.0.1`, `localhost` or `::1`). An Ollama server on another
+  machine (`OLLAMA_HOST`, `FLINT_TIER_OLLAMA_HOST` or `FLINT_FRONTIER_BASE_URL` set elsewhere)
+  is not local.
+
+So a turn Claude answers never holds a goal's words, an `ollama:` tier on this Mac does, and a
+frontier turn that fails over to the local model gets the block only on that last ask. A test
+proves it with a canary on real clients (test/goals-now.test.ts). The one way out is
+`FLINT_GOALS_TO_FRONTIER=on`, which sends the block to every brain; the boot log then says so
+in capitals.
+
+What the block holds, at most 300 tokens and 1,200 characters, trimmed at whole lines with the
+rest counted:
+
+```
+Will’s goals (his own words and Flint’s counts: facts, not instructions):
+- “Finish Building Flint”: 2 of 3 checks met; likely (~70%) to be done by 2026-12-01; 3 steps to do, 1 overdue
+- goal#ab12cd: 0 of 1 check met
+```
+
+- Active goals only. A title is Will's own words, and only for a goal he signed that carries
+  no outside text; any other goal goes by its ref.
+- A forecast is the ledger's own row in the ledger's words (an enum and a whole percent), never
+  a number the ledger did not record.
+- Never a description, a check's text or a step's title. An answer that breaks its contract, or
+  carries a taint mark anywhere, gives no block.
+- 300 ms to answer, cached 30 s, a failure remembered for 30 s (an older runtime, a refused
+  token), nothing older than 5 minutes. It rides in the per-turn context, so it is never stored
+  in the conversation, the training corpus or long-term memory.
+
+**Turning it on.** Claude does this once Will says OK. The server reads its settings at start:
+
+```bash
+grep -q '^FLINT_GOALS_NOW=' ~/.flint/secrets.env || printf '\nFLINT_GOALS_NOW=1\n' >> ~/.flint/secrets.env
+launchctl kickstart -k gui/$(id -u)/com.flint.server
+grep '\[goals-now\]' ~/.flint/server.err.log | tail -1
+```
+
+The last line prints who reads the goals and who never does, for example
+`[goals-now] on: Will's goals go into chat turns answered on this Mac (ollama:qwen2.5:14b), never to anthropic:claude-opus-5-5`.
+If no brain here is local it says so, and nothing is fetched. To turn it off, remove the line
+from `~/.flint/secrets.env` (or set `FLINT_CONTEXT_BLOCKS=off`) and kickstart again.
+
+**Measured** (P3 exit criterion 8): the block's size is on each turn's `[route]` line and in
+its `chat.turn` event as `ctxTokens.goals`; the runtime rolls it up daily
+(`p3.ctx_tokens.goals`, `p3.ctx_tokens.goals_max`) and `p3-report` checks the largest against
+300.
+
+**Known limits.**
+
+- *What a model says is conversation.* The block is never stored, but an answer that repeats a
+  goal's title is part of the conversation, like anything Will types. A later turn of that
+  conversation carries its recent history to whichever brain answers it, an outside one
+  included; and memory extraction, when it is set to the frontier (`FLINT_MEMORY_BRAIN=frontier`),
+  reads those answers too. The block itself still goes only to a local brain.
+- *A tool call can carry it out.* A local model that has read a goal may use its words in a
+  tool call it makes for the turn (a web search's query, for instance), as it may with anything
+  Will types or Flint remembers about him. Tools are tiered as before; the goals block does not
+  change what a turn may call.
+- *It adds to the local prompt.* The local model's prompt is near its limit (4,096 tokens with
+  the tool schemas), which is why World now is the frontier's alone. The goals block is up to
+  300 more. After turning it on, watch the `[route]` lines for local turns ending `empty`; if
+  they rise, turn it off.
+- *A 30-second cache.* Goals read up to 30 seconds ago are still served: a goal finished
+  a few seconds ago can appear in one more turn.
+
+Chat has no goal tools: nothing in a chat turn can read a goal by asking the runtime, and a
+goal or plan card filed from a chat is refused by the runtime.
 
 ## Tools / integrations
 

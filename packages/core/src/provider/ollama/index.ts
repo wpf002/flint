@@ -73,7 +73,11 @@ interface OllamaChatChunk {
  */
 export class OllamaProvider implements ProviderAdapter {
   readonly name = 'ollama';
-  private readonly baseURL: string;
+  /**
+   * The server every request goes to, without a trailing slash. Readable, so a
+   * caller can tell a model on this machine from one on a server elsewhere.
+   */
+  readonly baseURL: string;
   private readonly fetchImpl: typeof fetch;
   private readonly defaultOptions: Record<string, unknown>;
   private readonly think: boolean | undefined;

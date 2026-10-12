@@ -73,6 +73,8 @@ import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
+import { goalsForChat, type GoalsNow } from './goals-now';
+import { readContextBlocks } from './context-blocks';
 import { inboxRoutes } from './inbox-routes';
 import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
@@ -170,6 +172,11 @@ const ALLOWED_HOSTS = process.env.FLINT_ALLOWED_HOSTS?.trim()
  * the token, but the console page no longer carries it (paste it in Settings).
  */
 let TAILNET_USER: string | undefined; // read in main(), after ~/.flint/secrets.env is loaded
+/**
+ * Will's goals for chat turns (./goals-now), built in main() when FLINT_GOALS_NOW=1; undefined: off.
+ * It hands the block out per ask, to a brain on this Mac only (unless Will set FLINT_GOALS_TO_FRONTIER=on).
+ */
+let GOALS: GoalsNow<Persona> | undefined;
 
 /** Small JSON bodies (approvals, speech text); attachments go through MAX_BODY_BYTES. */
 const SMALL_JSON_BYTES = 64 * 1024;
@@ -853,7 +860,12 @@ async function main(): Promise<void> {
   }).on('error', (err) => console.error(`[internal] listener failed (${errorSummary(err)})`));
   // "World now" in frontier chat context (./world-now). It adds tokens to every
   // frontier turn, so it is off until Will turns it on (FLINT_WORLD_NOW=1).
-  const worldNow = process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow({ runtime: runtimeLink }) : undefined;
+  // ./context-blocks reads every block's setting; FLINT_CONTEXT_BLOCKS=off turns them all off.
+  const blocks = readContextBlocks(process.env, (m) => console.error(m));
+  const worldNow = blocks.world ? new WorldNow({ runtime: runtimeLink }) : undefined;
+  // Will's goals in chat context (./goals-now, P3): FLINT_GOALS_NOW=1. Personal text, so a brain reads
+  // it only if it runs on this Mac (./policy brainIsLocal), unless Will also set FLINT_GOALS_TO_FRONTIER=on.
+  if (blocks.goals) GOALS = goalsForChat({ runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier, log: (m) => console.error(m) });
 
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
@@ -1501,14 +1513,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // "World now" (./world-now), fetched alongside recall, for frontier turns only: a local
       // turn's prompt is already at its limit with ~42 tool schemas (more text there and the
       // local model starts coming back empty, as the voice-exemplar note in main() records).
-      const [recalled, world] = await Promise.all([
+      const [recalled, world, goals] = await Promise.all([
         contextFor(asText, ctx.knowledge),
         brain === 'frontier' && plan && ctx.worldNow ? ctx.worldNow.block() : Promise.resolve(''),
+        // Will's goals (./goals-now), for whichever brain ends up asked: handed out per ask, in pump, never here.
+        GOALS?.forTurn(),
       ]);
       const ctxBlock = withHistoryNote(recalled.block, history);
       // It rides in the persona context (the system prompt's per-turn suffix): never stored in
       // the history, so the memory extractor never reads it, and a local fallback goes without.
       const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
+      // Will's goals ride with an ask only if THAT persona's brain may read them (./goals-now): one on
+      // this Mac, or any once Will set FLINT_GOALS_TO_FRONTIER=on. Every ask in /chat takes its context
+      // through here, so a frontier tier goes without and the local model it falls back to does not.
+      let goalsTokens = 0; // the block's size in the prompt of the brain asked last (0: it went without)
+      const forBrain = (persona: Persona, context: string): string => {
+        const asked = goals ? goals.ask(persona, context) : { context, tokens: 0 };
+        goalsTokens = asked.tokens;
+        return asked.context;
+      };
       const beforeLog = ctx.actionLog.actions().length;
 
       res.writeHead(200, {
@@ -1527,7 +1550,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
         lastPersona = persona;
         const events = persona.chat(
-          { conversationId, message, context, ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
+          { conversationId, message, context: forBrain(persona, context), ...(selected.length ? { tools: selected } : {}), ...(attachments.length ? { attachments } : {}) },
           { signal: ac.signal },
         );
         for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
@@ -1618,14 +1641,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           outcome,
           ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
           recall: recalled.mode,
-          ...(world ? { ctxTokens: { world: estimateTokens(world) } } : {}),
+          ...(world || goalsTokens ? { ctxTokens: { ...(world ? { world: estimateTokens(world) } : {}), ...(goalsTokens ? { goals: goalsTokens } : {}) } } : {}),
           ms: Date.now() - started,
         }),
       );
       // The turn, for the runtime's triage (./runtime-events): brain, outcome, tool names, time, taint.
       ctx.events.push(chatTurnEvent({
         brain, outcome, tools: turnTools(), ms: Date.now() - started, tainted: turnTainted(),
-        tier: plan?.tier ?? tier, recall: recalled.mode, ...(world ? { worldTokens: estimateTokens(world) } : {}),
+        tier: plan?.tier ?? tier, recall: recalled.mode, ...(world ? { worldTokens: estimateTokens(world) } : {}), ...(goalsTokens ? { goalsTokens } : {}),
       }));
       // A turn that ran tainted carries it on: with its own read's time, or the history's it inherited.
       if (turnTainted()) {

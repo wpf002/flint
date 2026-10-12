@@ -5,6 +5,7 @@
  *
  *   GET  /v1/goals?tab=active|suggested|finished   a tab of the panel (GoalsPage)
  *   GET  /v1/goals/:id                             one goal, open (GoalView)
+ *   GET  /v1/goals/now                             the active goals for the server's chat block (GoalsNowAnswer, part 4)
  *   POST /v1/goals {draftKey, args}                a new goal's card
  *   POST /v1/goals/linkable {q}                    items a check may watch (a POST: q never lands in a log)
  *   POST /v1/goals/:id/edit|timing|done|abandon|resume|plan {args}   that card
@@ -30,6 +31,7 @@ import {
   GoalDone,
   GoalFiled,
   GoalId,
+  GoalsNowAnswer,
   GoalsPage,
   Linkable,
   LinkableBody,
@@ -48,6 +50,7 @@ import { SAY } from '../goals/errors.js';
 import { linkable } from '../goals/items.js';
 import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, requestReview, setStep } from '../goals/service.js';
 import { goalView, goalsPage } from '../goals/view.js';
+import { goalsNow } from '../goals/now.js';
 
 export interface GoalRouteDeps {
   db: Db;
@@ -106,6 +109,13 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
   app.get('/v1/goals', pre, guarded(async (req) => {
     const { tab } = parse(Tab, req.query ?? {});
     return out(GoalsPage, await goalsPage(db, tab, new Date(), view));
+  }));
+
+  // The active goals for the server's chat block (part 4): closed values, and a title only for a goal Will
+  // signed that carries no outside text. The same scope as the panel's: never the runtime connector's.
+  app.get('/v1/goals/now', pre, guarded(async (req) => {
+    parse(EmptyBody, req.query ?? {});
+    return out(GoalsNowAnswer, await goalsNow(db, tz));
   }));
 
   app.get('/v1/goals/:id', pre, guarded(async (req) => {

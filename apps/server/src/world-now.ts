@@ -35,8 +35,8 @@ const KIND = /^[a-z_]{2,20}$/;
 const HEALTH = new Set(['ok', 'degraded', 'down', 'unknown']);
 const count = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 1_000_000 ? v : undefined);
 
-/** `tainted: true` or a non-empty `taintedPaths` anywhere in the answer. */
-function carriesTaint(v: unknown, depth = 0): boolean {
+/** `tainted: true` or a non-empty `taintedPaths` anywhere in the answer. (The goals block, ./goals-now, drops on the same mark.) */
+export function carriesTaint(v: unknown, depth = 0): boolean {
   if (depth > 8 || v === null || typeof v !== 'object') return false;
   if (Array.isArray(v)) return v.some((x) => carriesTaint(x, depth + 1));
   const o = v as Record<string, unknown>;

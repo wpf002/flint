@@ -49,6 +49,8 @@ const args = (over: Record<string, unknown> = {}) => ({
 const ROUTES: Array<['GET' | 'POST', string, unknown?]> = [
   ['GET', '/v1/goals?tab=active'],
   ['GET', `/v1/goals/${GOAL}`],
+  // Part 4: the goals block's own read. The runtime connector's token never reads it, so chat has no goal lookup.
+  ['GET', '/v1/goals/now'],
   ['POST', '/v1/goals', { draftKey: DRAFT, args: args() }],
   ['POST', '/v1/goals/linkable', { q: 'flint' }],
   ['POST', `/v1/goals/${GOAL}/done`, { args: { goalId: GOAL, goalTitle: 'x' } }],

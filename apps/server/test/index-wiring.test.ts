@@ -34,8 +34,47 @@ describe('index.ts wiring', () => {
     expect(generate).not.toContain('chatLoad');
   });
 
-  it('World now is off unless FLINT_WORLD_NOW=1 (it costs tokens on every frontier turn)', () => {
-    expect(src).toContain("process.env.FLINT_WORLD_NOW?.trim() === '1' ? new WorldNow(");
+  // P3 part 4: the context blocks are switched in one place (./context-blocks), and Will's goals reach a
+  // prompt only through the per-ask gate in /chat's pump (./goals-now): never /generate, never a context
+  // built for the frontier.
+  it('the context blocks are switched in one place: World now is off unless FLINT_WORLD_NOW=1, and FLINT_CONTEXT_BLOCKS=off turns every block off', () => {
+    // ./context-blocks reads the settings (test/context-blocks.test.ts has their rules); index.ts only obeys.
+    expect(src).toContain('const blocks = readContextBlocks(process.env, (m) => console.error(m));');
+    expect(src).toContain('const worldNow = blocks.world ? new WorldNow({ runtime: runtimeLink }) : undefined;');
+    expect(src.match(/new WorldNow\(/g)).toHaveLength(1);
+    expect(src).not.toMatch(/process\.env\.FLINT_(WORLD_NOW|GOALS_NOW|GOALS_TO_FRONTIER|CONTEXT_BLOCKS)/);
+  });
+
+  it('Will’s goals (P3) are built only when their block is on, with every brain /chat can ask named for the gate', () => {
+    expect(src).toContain('if (blocks.goals) GOALS = goalsForChat({ runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier, log: (m) => console.error(m) });');
+    expect(src.match(/\bGOALS = /g)).toHaveLength(1);
+    // After the tiers exist: a tier built later would be a persona the gate does not know (it would go without, never with).
+    expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('GOALS = goalsForChat('));
+    // index.ts holds no renderer, no contract and no route of its own: it cannot put a goal's words anywhere itself.
+    expect(src).not.toMatch(/renderGoals|GoalsNowAnswer|v1\/goals\/now|new GoalsNow/);
+  });
+
+  it('a goal’s words reach a prompt only through the per-ask gate in /chat’s pump: never /generate, never the frontier’s own context', () => {
+    expect(generate).not.toMatch(/GOALS|goalsTokens|\bgoals\b/);
+    // Fetched once a turn, for whichever brain ends up asked...
+    expect(chat.match(/GOALS\?\.forTurn\(\)/g)).toHaveLength(1);
+    expect(src.match(/\bGOALS\b[?.]/g)).toHaveLength(1);
+    // ...and read in exactly one place, naming the persona that is about to be asked.
+    expect(chat.match(/\bgoals\.[A-Za-z]+/g)).toEqual(['goals.ask']);
+    expect(chat).toMatch(/const forBrain = \(persona: Persona, context: string\): string => \{\s*const asked = goals \? goals\.ask\(persona, context\) : \{ context, tokens: 0 \};\s*goalsTokens = asked\.tokens;\s*return asked\.context;\s*\};/);
+    // Every ask in /chat is the pump's one persona.chat, and its context comes through that gate, for the persona being asked.
+    expect(chat.match(/\.chat\(/g)).toHaveLength(1);
+    expect(chat).toMatch(/const events = persona\.chat\(\s*\{ conversationId, message, context: forBrain\(persona, context\),/);
+    expect(chat.match(/forBrain\(/g)).toHaveLength(1);
+    // The frontier's context is built without them, as before.
+    expect(chat).toContain('const frontierCtx = world ? `${ctxBlock}\\n\\n${world}` : ctxBlock;');
+  });
+
+  it('the [route] line and the chat.turn event report the goals block’s size only when the brain asked last was given it', () => {
+    expect(chat).toContain('...(world || goalsTokens ? { ctxTokens: { ...(world ? { world: estimateTokens(world) } : {}), ...(goalsTokens ? { goals: goalsTokens } : {}) } } : {}),');
+    expect(chat).toContain('...(goalsTokens ? { goalsTokens } : {}),');
+    // Set to 0, then by each ask: a frontier tier that went without resets what an earlier ask reported.
+    expect(chat.match(/goalsTokens = /g)).toHaveLength(2);
   });
 
   it('asks for World now only for a planned frontier turn, and hands it only to the frontier tiers', () => {
