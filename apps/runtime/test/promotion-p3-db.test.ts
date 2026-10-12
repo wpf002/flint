@@ -21,7 +21,7 @@
  * Synthetic text only.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { CODE_TABLE, GOAL_SIGNED_ACTIONS, digestOf, resolveTier } from '@flint/policy';
+import { CODE_TABLE, GOAL_SIGNED_ACTIONS, digestOf, noteProblems, resolveTier } from '@flint/policy';
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { createDb, type Db } from '../src/db';
 import { activePolicies, approveProposal, expireProposals, Refused, rejectProposal } from '../src/governance/proposals';
@@ -212,6 +212,8 @@ describe.skipIf(NO_DB)('the P3 promotion table on flint_test', () => {
     // In the last 7 days: b's two reviews on quiet days, b's two scheduled ones, and a's two today. The first review, 8 days ago, is
     // before the week. Late is the digest's count (over an hour): the one that ran two hours late.
     expect(card.reason).toMatch(/^This lets Flint review your goals and send its plan suggestions as cards without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. This week Flint reviewed your goals 6 times, and 1 was late\. The local model answered 1\. It would have suggested 2 changes\.$/);
+    // Will's standard for words he reads (@flint/policy noteProblems): complete sentences, nothing internal, no parenthesis.
+    expect(noteProblems('Let Goal Reviews Run on Their Own', card.reason!)).toEqual([]);
     // Numbers only: no goal's words, no id.
     expect(card.reason).not.toContain(CANARY);
     for (const id of [a.id, b.id]) expect(JSON.stringify([card.reason, card.args, card.argsProvenance])).not.toContain(id);
@@ -294,6 +296,7 @@ describe.skipIf(NO_DB)('the later table, for goals suggested from chat (p3c)', (
     expect(card).toMatchObject({ templateId: 'p3c.promotion', kind: 'policy', origin: 'cli', consequential: true });
     // In the last 14 days: the one 8 days ago (expired), the one rejected, the one still waiting. The first, 15 days ago, is before them.
     expect(card.reason).toMatch(/^This lets Flint suggest goals from your chats without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. In the last 2 weeks Flint suggested 3 goals from chat: you approved 0, rejected 1, and 1 expired\.$/);
+    expect(noteProblems('Let Flint Suggest Goals from Chat', card.reason!)).toEqual([]);
     expect(card.reason).not.toContain(CANARY);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: waiting } })).toMatchObject({ status: 'pending' });
     expect(await table({ now: new Date(Date.now() + 60_000) })).toMatchObject({ proposalId: t.proposalId, deduped: true });

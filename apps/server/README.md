@@ -241,6 +241,11 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
   is asked again with half the turns (for the rest of that pass); only a single turn
   still cut off is a strike. Any failure but a bad reply backs the next pass off: 15
   minutes, doubling, up to 6 hours.
+- **What it learns from a goals turn stays here.** A turn answered with Will's goals
+  in its context (see "Goals in chat") is sent in a call of its own kind, never
+  beside an ordinary turn. A fact learned from it is stored with a mark and recalled
+  only for a model on this Mac, and only such a call is shown the marked facts already
+  known. A pass on a model that isn't on this Mac skips those turns.
 - **Logs carry ids and counts only**, never a fact, a quote or anything Will or Flint
   said. The boot log names the model (`[memory-extract] on the local model ...`), and
   each pass logs one line of counts.
