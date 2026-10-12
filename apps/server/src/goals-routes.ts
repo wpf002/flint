@@ -10,6 +10,7 @@
  *   POST /goals/linkable {q}                    -> items a check may watch (a POST: what Will types never lands in a request log)
  *   POST /goals/:id/edit|timing|done|abandon|resume|plan {args}   -> that card
  *   POST /goals/:id/pause|dismiss               -> unsigned
+ *   POST /goals/:id/review                      -> Review Now: unsigned (part 3; the runtime runs the review on its local model)
  *   POST /goals/:id/criteria/:cid {met}         -> unsigned
  *   POST /goals/:id/steps/:key {status}         -> unsigned
  *
@@ -155,19 +156,19 @@ function failed(res: ServerResponse, deps: GoalsDeps, a: { status: number; code?
   if (s === 409) return reply(res, 409, { error: GOALS_SAY.stuck });
   if (s === 413) return reply(res, 413, { error: GOALS_SAY.tooLarge });
   if (s === 429) return reply(res, 429, { error: GOALS_SAY.busy });
-  return reply(res, 502, { error: GOALS_SAY.failed, ref: deps.errorRef('goals', new Error(`the runtime answered ${s} for a ${what} request`)) });
+  return reply(res, 502, { error: GOALS_SAY.failed, ref: deps.errorRef('goals', `the runtime answered ${s} for a ${what} request`) });
 }
 
 const paths = (e: z.ZodError) => [...new Set(e.issues.map((i) => i.path.join('.') || '(root)'))].join(', ').slice(0, 300);
 
 /** The runtime answered 2xx with something that is not the contract: logged by field paths, never values. */
 function malformed(res: ServerResponse, deps: GoalsDeps, what: string, e: z.ZodError): true {
-  return reply(res, 502, { error: GOALS_SAY.unreadable, ref: deps.errorRef('goals', new Error(`malformed ${what} answer (${paths(e)})`)) });
+  return reply(res, 502, { error: GOALS_SAY.unreadable, ref: deps.errorRef('goals', `malformed ${what} answer (${paths(e)})`) });
 }
 
 /** The console sent something no goal route takes: refused here, before the runtime sees it, by field paths only. */
 function invalid(res: ServerResponse, deps: GoalsDeps, what: string, e?: z.ZodError): true {
-  if (e) deps.errorRef('goals', new Error(`refused a ${what} request (${paths(e)})`));
+  if (e) deps.errorRef('goals', `refused a ${what} request (${paths(e)})`);
   return reply(res, 400, { error: GOALS_SAY.invalid });
 }
 
@@ -181,7 +182,7 @@ async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: GoalsD
 }
 
 const CARD = /^\/goals\/([^/]+)\/(edit|timing|done|abandon|resume|plan)$/;
-const PLAIN = /^\/goals\/([^/]+)\/(pause|dismiss)$/;
+const PLAIN = /^\/goals\/([^/]+)\/(pause|dismiss|review)$/;
 const MARK = /^\/goals\/([^/]+)\/criteria\/([^/]+)$/;
 const STEP = /^\/goals\/([^/]+)\/steps\/([^/]+)$/;
 const ONE = /^\/goals\/([^/]+)$/;

@@ -9,6 +9,9 @@
  * set, with its fixed sentence; nothing is ever spooled to disk; a goal at the
  * contract's full size fits in any script; the search text travels in a POST
  * body, never a URL; and no goal text reaches a log line.
+ * Part 3: a goal's next review, forecast and latest review pass through checked
+ * (an answer from a runtime without reviews still reads); Review Now is a POST
+ * with an empty body, and its refusals are the fixed sentences.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -31,7 +34,13 @@ const row = (over: Record<string, unknown> = {}) => ({
 const view = (over: Record<string, unknown> = {}) => ({
   id: GID, title: `${CANARY} title`, description: '', status: 'active', owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null,
   successCriteria: [{ id: 'c1', text: `${CANARY} check`, check: { kind: 'manual' } }], criteria: [{ id: 'c1', state: 'unmet' }], checks: { met: 0, total: 1, unknown: 0 },
-  horizonAt: null, reviewCadence: 'P1W', activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'off', late: false, ...over,
+  horizonAt: null, reviewCadence: 'P1W', activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'off', late: false,
+  nextReviewAt: null, onTrack: null, review: null, ...over,
+});
+/** A goal's latest review as the runtime sends it: sentences from counts, and changes by a step's title. */
+const review = (over: Record<string, unknown> = {}) => ({
+  at: AT, kind: 'scheduled', summary: 'Its check isn’t met yet.', shadow: true, planner: 'ok',
+  changes: [{ kind: 'due', title: `${CANARY} step`, dueAt: AT, status: null, after: null, material: false, later: false }], ...over,
 });
 const args = (over: Record<string, unknown> = {}) => ({
   goalId: GID, owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: `${CANARY} title`, description: '',
@@ -47,6 +56,8 @@ let downUrl: string;
 let server: Server;
 let base: string;
 let logged: string[];
+/** What errorRef was handed, as it was handed. */
+let given: unknown[];
 let deps: GoalsDeps;
 let up: boolean;
 /** How long the stand-in runtime waits before it answers. */
@@ -92,12 +103,13 @@ afterAll(() => {
 beforeEach(() => {
   asked = [];
   logged = [];
+  given = [];
   up = true;
   delayMs = 0;
   drop = false;
   answer = () => ({ status: 200, body: { ok: true } });
   // The server's errorRef logs what it is given: here, a record of it.
-  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
+  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (given.push(err), logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
 });
 
 const get = async (p: string) => {
@@ -118,6 +130,35 @@ describe('reads', () => {
     answer = () => ({ status: 200, body: { goal: view() } });
     expect((await get(`/goals/${GID}`)).body).toEqual({ goal: view() });
     expect(asked.at(-1)!.url).toBe(`/v1/goals/${GID}`);
+  });
+
+  it('part 3: next review, forecast and latest review pass through, checked; an answer without them (an older runtime) still reads', async () => {
+    const full = view({ reviews: 'on', late: true, nextReviewAt: AT, onTrack: { likelihood: 'likely', percent: 70, by: AT }, review: review() });
+    answer = () => ({ status: 200, body: { goal: full } });
+    expect((await get(`/goals/${GID}`)).body).toEqual({ goal: full });
+    // A runtime from before reviews sends none of the three: they read as nothing, not as a malformed answer.
+    const { nextReviewAt: _n, onTrack: _o, review: _r, ...older } = view();
+    answer = () => ({ status: 200, body: { goal: older } });
+    expect(await get(`/goals/${GID}`)).toEqual({ status: 200, body: { goal: view() } });
+    // A suggestion held back by a limit says so (`later`); one from a runtime that does not send the mark reads as not held.
+    const held = { kind: 'skip', title: `${CANARY} step`, dueAt: null, status: null, after: null, material: true };
+    answer = () => ({ status: 200, body: { goal: view({ review: review({ changes: [{ ...held, later: true }, held] }) }) } });
+    expect(((await get(`/goals/${GID}`)).body as { goal: { review: { changes: Array<{ later: boolean }> } } }).goal.review.changes.map((c) => c.later)).toEqual([true, false]);
+    answer = () => ({ status: 200, body: { goal: view({ review: review({ changes: [{ ...held, later: 'soon' }] }) }) } });
+    expect((await get(`/goals/${GID}`)).status).toBe(502);
+    // What does not fit the contract never reaches the console: a likelihood outside the closed set, a change of no known kind, a stray key.
+    for (const bad of [
+      view({ onTrack: { likelihood: `${CANARY} certain`, percent: 70, by: AT } }),
+      view({ onTrack: { likelihood: 'likely', percent: 170, by: AT } }),
+      view({ review: review({ changes: [{ kind: 'rewrite', title: 'x', dueAt: null, status: null, after: null, material: false }] }) }),
+      view({ review: review({ planner: `${CANARY} model said` }) }),
+      view({ review: review({ note: CANARY }) }),
+      view({ review: review({ changes: [{ kind: 'status', title: 'x', dueAt: null, status: 'done', after: null, material: false }] }) }),
+    ]) {
+      answer = () => ({ status: 200, body: { goal: bad } });
+      expect(await get(`/goals/${GID}`)).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
+    }
+    expect(logged.join('\n')).not.toContain(CANARY);
   });
 
   it('bad input never reaches the runtime', async () => {
@@ -151,6 +192,17 @@ describe('reads', () => {
     expect(r).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
     expect(logged.join('\n')).toMatch(/goals\.0\.(late|title)/);
     expect(logged.join('\n')).not.toContain(CANARY);
+    // What goes to the log is a sentence of the server's own, as a string: never an Error made up to carry one (the
+    // server logs an error by its class, and a string as it is).
+    answer = () => ({ status: 500, body: { error: 'internal error' } });
+    await get('/goals?tab=active');
+    await post(`/goals/${GID}/pause`, { extra: CANARY });
+    expect(given.length).toBeGreaterThanOrEqual(3);
+    for (const e of given) expect(typeof e, String(e)).toBe('string');
+    expect(logged.some((l) => /^malformed list answer/.test(l)) && logged.some((l) => /^the runtime answered 500 for a list request$/.test(l)) && logged.some((l) => /^refused a .* request/.test(l)), logged.join(' | ')).toBe(true);
+    const src = readFileSync(join(__dirname, '..', 'src', 'goals-routes.ts'), 'utf8');
+    expect(src).not.toMatch(/errorRef\([^)]*new Error/);
+    expect(src.match(/deps\.errorRef\('goals', `/g)).toHaveLength(3);
   });
 });
 
@@ -232,6 +284,28 @@ describe('writes', () => {
     expect(logged.join('\n')).not.toContain(CANARY);
   });
 
+  it('Review Now is a POST with an empty body; its refusals are the fixed sentences, by code', async () => {
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 200, body: { ok: true } });
+    expect(asked).toEqual([{ method: 'POST', url: `/v1/goals/${GID}/review`, auth: `Bearer ${TOKEN}`, body: '{}' }]);
+    // Nothing rides along with it, and it is never a GET.
+    expect((await post(`/goals/${GID}/review`, { note: CANARY })).status).toBe(400);
+    expect((await post('/goals/not-a-goal/review')).status).toBe(400);
+    expect((await get(`/goals/${GID}/review`)).status).toBe(404);
+    expect(asked).toHaveLength(1);
+    answer = () => ({ status: 429, body: { error: CANARY, code: 'reviewCap' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 429, body: { error: 'Flint already reviewed this goal 12 times today. Try again tomorrow.', code: 'reviewCap' } });
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'reviewsOff' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 409, body: { error: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.', code: 'reviewsOff' } });
+    // While a rule stops reviews (review finding 4): the runtime says no, and the console gets the fixed sentence.
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'reviewsStopped' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 409, body: { error: 'A rule stops goal reviews, so Flint can’t review this goal.', code: 'reviewsStopped' } });
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'notReady' } });
+    expect((await post(`/goals/${GID}/review`)).body).toEqual({ error: 'Flint isn’t ready to review yet. Try again shortly.', code: 'notReady' });
+    up = false;
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 503, body: { error: 'The runtime isn’t answering, so nothing changed.' } });
+    expect(logged.join('\n')).not.toContain(CANARY);
+  });
+
   it('the item search is a POST: the words travel in its body, never a URL', async () => {
     answer = () => ({ status: 200, body: { items: [{ entityId: 'en1', kind: 'pull_request', label: 'wpf002/flint #57', status: 'active', title: 'Outside words', conditions: [{ key: 'state', value: 'merged' }] }] } });
     const r = await post('/goals/linkable', { q: `${CANARY} search` });
@@ -282,7 +356,7 @@ describe('writes', () => {
   });
 
   it('a goals route is never reported back to the runtime as a route.error', () => {
-    for (const p of ['/goals', '/goals?tab=active', `/goals/${GID}`, `/goals/${GID}/done`, '/goals/linkable']) expect(routeOf(p), p).toBeUndefined();
+    for (const p of ['/goals', '/goals?tab=active', `/goals/${GID}`, `/goals/${GID}/done`, `/goals/${GID}/review`, '/goals/linkable']) expect(routeOf(p), p).toBeUndefined();
     expect(routeOf('/goalsx')).toBe('other');
   });
 });

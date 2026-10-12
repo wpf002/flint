@@ -53,6 +53,7 @@ const ROUTES: Array<['GET' | 'POST', string, unknown?]> = [
   ['POST', '/v1/goals/linkable', { q: 'flint' }],
   ['POST', `/v1/goals/${GOAL}/done`, { args: { goalId: GOAL, goalTitle: 'x' } }],
   ['POST', `/v1/goals/${GOAL}/pause`, {}],
+  ['POST', `/v1/goals/${GOAL}/review`, {}],
   ['POST', `/v1/goals/${GOAL}/criteria/c1`, { met: true }],
   ['POST', `/v1/goals/${GOAL}/steps/s1`, { status: 'done' }],
 ];
@@ -101,6 +102,8 @@ describe('the goal routes, before the database', () => {
       ['POST', `/v1/goals/${GOAL}/resume`, { args: args({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 100, title: CANARY, kind: 'will_task' } }] } }) }],
       ['POST', `/v1/goals/${GOAL}/plan`, { args: { goalId: GOAL, goalTitle: CANARY, ops: [] } }],
       ['POST', `/v1/goals/${GOAL}/pause`, { why: CANARY }],
+      ['POST', `/v1/goals/${GOAL}/review`, { why: CANARY }],
+      ['POST', `/v1/goals/${GOAL}/review`, { kind: 'scheduled' }],
       ['POST', `/v1/goals/${GOAL}/criteria/c1`, { met: 'yes' }],
       ['POST', `/v1/goals/${GOAL}/steps/s1`, { status: 'skipped' }],
       ['POST', `/v1/goals/${GOAL}/steps/s1`, { status: 'done', note: CANARY }],
@@ -113,6 +116,15 @@ describe('the goal routes, before the database', () => {
     }
     expect(h.touched()).toBe(0);
     expect(h.lines.join('\n')).not.toContain(CANARY);
+    await h.app.close();
+  });
+
+  it('Review Now is refused in a sentence while reviews are off (the default), before the database', async () => {
+    const h = harness();
+    const r = await h.call('POST', `/v1/goals/${GOAL}/review`, {});
+    expect(r.statusCode).toBe(409);
+    expect(JSON.parse(r.body)).toEqual({ error: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.', code: 'reviewsOff' });
+    expect(h.touched()).toBe(0);
     await h.app.close();
   });
 

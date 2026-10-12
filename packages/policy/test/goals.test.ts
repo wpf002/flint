@@ -15,6 +15,19 @@ import {
   GOAL_STATUS_SAYS,
   GoalId,
   GoalsPage,
+  GoalView,
+  GOAL_BUDGETS,
+  GOAL_PLAIN_VERBS,
+  LIKELIHOODS,
+  PLAN_CARDS_COUNTER,
+  PLAN_STAGES,
+  REVIEW_DOWN_MS,
+  REVIEW_KINDS,
+  REVIEW_LATE_MS,
+  ReviewChange,
+  ReviewView,
+  likelihoodOf,
+  reviewCounter,
   Linkable,
   LinkableBody,
   MarkBody,
@@ -34,12 +47,15 @@ import {
   PlanOps,
   checkFits,
   composePlan,
+  classifyPlanOp,
+  MINOR_DUE_SHIFT_MS,
   isGoalSignedAction,
   jsonbSize,
   type PlanOp,
   type PlanStepState,
 } from '../src/goals';
 import { addLocalDays, addLocalMonths, localWallTime, nextReviewAt } from '../src/zone';
+import { noteProblems } from '../src/notes';
 
 // Synthetic text only: nothing here is anyone's real goal.
 const crit = (id: string, check: Record<string, unknown> = { kind: 'manual' }) => ({ id, text: `Synthetic check ${id}`, check });
@@ -220,6 +236,33 @@ describe('plan operations', () => {
     expect(composePlan(prev, set('s1', { dependsOn: [] }, { dependsOn: ['s2'] }))).toEqual({ ok: false, why: 'circle' });
   });
 
+  it('a plan operation is a small change or a bigger one by rule, from the operation and the step as it stands', () => {
+    const DAY = 86_400_000;
+    const due = new Date(Date.parse('2026-10-12T14:02:00.000Z') + 3 * DAY).toISOString();
+    const at = (days: number) => new Date(Date.parse(due) + days * DAY).toISOString();
+    const horizon = at(30);
+    const step = { kind: 'will_task' as const, status: 'todo' as const, dueAt: due };
+    const one = (o: unknown) => PlanOps.parse([o])[0]!;
+    const set = (to: Record<string, unknown>, was = 'todo') => one({ op: 'set', key: 's1', from: { title: 'T', ...Object.fromEntries(Object.keys(to).map((k) => [k, k === 'dueAt' ? due : k === 'status' ? was : k === 'ordinal' ? 100 : k === 'title' ? 'T' : []])) }, to });
+    expect(MINOR_DUE_SHIFT_MS).toBe(7 * DAY);
+    // Small: a status among todo, in progress and blocked; a date moved by at most 7 days, not past the finish date; a place.
+    for (const to of [{ status: 'in_progress' }, { status: 'blocked' }, { dueAt: at(7) }, { dueAt: at(-7) }, { ordinal: 50 }, { status: 'blocked', dueAt: at(2), ordinal: 50 }]) {
+      expect(classifyPlanOp(set(to), step, horizon), JSON.stringify(to)).toBe('minor');
+    }
+    // Bigger: everything else.
+    for (const to of [{ status: 'skipped' }, { dueAt: at(8) }, { dueAt: at(-8) }, { dueAt: null }, { title: 'New words' }, { dependsOn: ['s2'] }, { status: 'blocked', dueAt: at(8) }]) {
+      expect(classifyPlanOp(set(to), step, horizon), JSON.stringify(to)).toBe('material');
+    }
+    expect(classifyPlanOp(set({ dueAt: at(5) }), step, at(4))).toBe('material');
+    expect(classifyPlanOp(set({ dueAt: at(5) }), step, null)).toBe('minor');
+    expect(classifyPlanOp(set({ dueAt: at(2) }), { ...step, dueAt: null }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'todo' }, 'skipped'), { ...step, status: 'skipped' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'blocked' }), { ...step, kind: 'decision' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ ordinal: 50 }), { ...step, kind: 'flint_action' }, horizon)).toBe('material');
+    expect(classifyPlanOp(set({ status: 'blocked' }), undefined, horizon)).toBe('material');
+    expect(classifyPlanOp(one({ op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task' } }), undefined, horizon)).toBe('material');
+  });
+
   it('two cards on different steps compose in either order; a precondition on a dependency list ignores its order', () => {
     const prev = [step('s1'), step('s2'), step('s3', { dependsOn: ['s2', 's1'] })];
     const a = PlanOps.parse([{ op: 'set', key: 's1', from: { title: 'Synthetic step s1', status: 'todo' }, to: { status: 'blocked' } }]);
@@ -347,5 +390,77 @@ describe('the goals panel’s wire (P3 part 2)', () => {
     expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, extra: 1 }], waiting: [], reviews: 'off' }).success).toBe(false);
     expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, title: 'x'.repeat(121) }], waiting: [], reviews: 'off' }).success).toBe(false);
     expect(Linkable.safeParse({ items: [{ entityId: 'en1', kind: 'pull_request', label: 'wpf002/flint #57', status: 'active', title: null, conditions: [] }] }).success).toBe(true);
+  });
+});
+
+describe('goal reviews on the wire (P3 part 3)', () => {
+  const AT = '2026-10-12T14:02:00.000Z';
+  const view = (over: Record<string, unknown> = {}) => ({
+    id: 'gotest0001', title: 'Synthetic goal', description: '', status: 'active', owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null,
+    successCriteria: [crit('c1')], criteria: [{ id: 'c1', state: 'unmet' }], checks: { met: 0, total: 1, unknown: 0 }, horizonAt: null, reviewCadence: 'P1W',
+    activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'on', late: false, ...over,
+  });
+  const change = (over: Record<string, unknown> = {}) => ({ kind: 'due', title: 'Synthetic step', dueAt: AT, status: null, after: null, material: false, later: false, ...over });
+  const review = (over: Record<string, unknown> = {}) => ({ at: AT, kind: 'scheduled', summary: '0 of 1 check is met.', shadow: true, planner: 'ok', changes: [change()], ...over });
+
+  it('the budgets and counters are fixed, and the cap’s sentence says the same number', () => {
+    expect(GOAL_BUDGETS).toEqual({ reviewsPerGoalPerDay: 12, planCardsPerDay: 9, materialPerReview: 2, opsPerReview: 6 });
+    expect(GOAL_SAYS.reviewCap).toContain(` ${GOAL_BUDGETS.reviewsPerGoalPerDay} times today`);
+    expect(reviewCounter('gotest0001')).toBe('goal.review:gotest0001');
+    expect(PLAN_CARDS_COUNTER).toBe('goal.plan.cards');
+    expect([REVIEW_LATE_MS, REVIEW_DOWN_MS]).toEqual([3_600_000, 86_400_000]);
+    expect([...REVIEW_KINDS]).toEqual(['scheduled', 'triggered', 'requested']);
+    // Review Now is one of the unsigned writes.
+    expect([...GOAL_PLAIN_VERBS]).toEqual(['pause', 'dismiss', 'review']);
+    for (const code of ['reviewsOff', 'reviewCap', 'notReady', 'replacedReview']) expect(goalSayOf(code), code).toMatch(/^[A-Z].*\.$/);
+  });
+
+  it('how likely is one of seven words, cut where the ledger’s phrase cuts', () => {
+    expect([0.05, 0.1, 0.34, 0.35, 0.44, 0.45, 0.5, 0.55, 0.56, 0.64, 0.65, 0.89, 0.9, 0.95].map(likelihoodOf)).toEqual([
+      'very_unlikely', 'unlikely', 'unlikely', 'somewhat_unlikely', 'somewhat_unlikely', 'about_even', 'about_even', 'about_even', 'somewhat_likely', 'somewhat_likely', 'likely', 'likely', 'very_likely', 'very_likely',
+    ]);
+    for (let p = 0; p <= 1.0001; p += 0.01) expect(LIKELIHOODS).toContain(likelihoodOf(p));
+  });
+
+  it('every refusal a goal card or a goal route answers with is a plain sentence, by the rules for a note', () => {
+    for (const code of ['reviewsOff', 'reviewCap', 'notReady', 'replacedReview', 'reviewsStopped', 'minorCard', 'reviewStep', 'runtimeOrigin'] as const) {
+      expect(goalSayOf(code)).toBe(GOAL_SAYS[code]);
+      expect(goalCodeOf(GOAL_SAYS[code])).toBe(code);
+    }
+    for (const [code, sentence] of [...Object.entries(GOAL_SAYS), ...Object.entries(GOAL_STATUS_SAYS)]) {
+      expect(noteProblems('Goals', sentence), code).toEqual([]);
+      expect(sentence, code).toMatch(/^[A-Z].*\.$/);
+    }
+  });
+
+  it('a view from a runtime without reviews still reads: next review, forecast and latest review default to nothing', () => {
+    const older = GoalView.parse(view({ reviews: 'off' }));
+    expect(older).toMatchObject({ nextReviewAt: null, onTrack: null, review: null });
+    const full = view({ late: true, nextReviewAt: AT, onTrack: { likelihood: 'likely', percent: 70, by: AT }, review: review() });
+    expect(GoalView.parse(full)).toEqual(full);
+    expect(GoalView.safeParse(view({ extra: 1 })).success).toBe(false);
+  });
+
+  it('a review on the wire is strict: closed sets, counts and times, a step’s title, and never done', () => {
+    expect(ReviewView.safeParse(review()).success).toBe(true);
+    expect([...PLAN_STAGES]).toEqual(['pending', 'ok', 'off', 'capped', 'unavailable', 'invalid', 'deferred', 'skipped']);
+    for (const bad of [
+      review({ planner: 'ollama:muse-glimmer:30b' }), review({ kind: 'manual' }), review({ note: 'free text' }), review({ summary: '' }), review({ filed: 2 }), review({ at: '2026-10-12' }),
+      review({ changes: Array.from({ length: 21 }, () => change()) }),
+    ]) expect(ReviewView.safeParse(bad).success, JSON.stringify(bad).slice(0, 120)).toBe(false);
+    for (const kind of ['add', 'due', 'status', 'move', 'skip']) expect(ReviewChange.safeParse(change({ kind })).success, kind).toBe(true);
+    // Held back by a limit, on no card yet: a mark, true or false. A runtime that does not send it means not held.
+    expect(ReviewChange.parse(change({ later: true })).later).toBe(true);
+    const { later: _l, ...unmarked } = change();
+    expect(ReviewChange.parse(unmarked).later).toBe(false);
+    expect(ReviewChange.safeParse(change({ later: 'soon' })).success).toBe(false);
+    expect(ReviewChange.safeParse(change({ kind: 'status', status: 'blocked', dueAt: null })).success).toBe(true);
+    for (const bad of [change({ kind: 'done' }), change({ status: 'done' }), change({ status: 'skipped' }), change({ title: '' }), change({ title: 'x'.repeat(201) }), change({ reason: 'the model’s words' }), change({ dueAt: 'soon' })]) {
+      expect(ReviewChange.safeParse(bad).success, JSON.stringify(bad).slice(0, 120)).toBe(false);
+    }
+    // The forecast: a word from the closed set, a whole percent, a time.
+    expect(GoalView.safeParse(view({ onTrack: { likelihood: 'certain', percent: 100, by: AT } })).success).toBe(false);
+    expect(GoalView.safeParse(view({ onTrack: { likelihood: 'likely', percent: 70.5, by: AT } })).success).toBe(false);
+    expect(GoalView.safeParse(view({ onTrack: { likelihood: 'likely', percent: 70, by: AT, claim: 'x' } })).success).toBe(false);
   });
 });

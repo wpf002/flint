@@ -1,29 +1,61 @@
 /**
- * Goals as the console's panel shows them (P3 part 2): each goal's definition,
- * its checks evaluated now (criteria.ts), its links by label (items.ts), its
- * active plan, and the ids of its cards waiting for Will. Reviews don't exist
- * until part 3, so a view says they are off and nothing is ever late: a goal's
- * next review time is set when it starts, and showing it as overdue would be
- * wrong. Goal text is PERSONAL: these answers go only to the console (the
- * `proposals` scope), never to a model or a log.
+ * Goals as the console's panel shows them (P3 parts 2 and 3): each goal's
+ * definition, its checks evaluated now (criteria.ts), its links by label
+ * (items.ts), its active plan, the ids of its cards waiting for Will and, once
+ * Flint reviews goals, when it is next reviewed, its open onTrack forecast and
+ * its latest review.
+ *
+ * Reviews run only while FLINT_PLANNER is on. Off, a view says so and nothing
+ * is ever late: a goal's next review time is set when it starts, and showing
+ * it as overdue while nothing reviews goals would be wrong. On, an active
+ * goal is late once its review has waited over an hour while Flint was
+ * reviewing (late.ts): never for the time before reviews were turned on, and
+ * never for a night the Mac slept through.
+ *
+ * On Track is shown only when the forecast is for the goal's own finish date.
+ * A goal with no date, one past its date, or one whose date is past the
+ * ledger's horizon still gets a forecast at every review, but for another day,
+ * and "Likely" with no day Will chose would say less than it seems to.
+ *
+ * A review's suggestions are kept as ids and enums (GoalReview.diff). Here they
+ * get their words back for the panel: a step's own title, or a template's for a
+ * step Flint would add. Never a model's words: it wrote none.
+ *
+ * Goal text is PERSONAL: these answers go only to the console (the `proposals`
+ * scope), never to a log or an outside service.
  */
 import {
   GOAL_SIGNED_ACTIONS,
   GoalTitle,
+  PLAN_STAGES,
+  REVIEW_LATE_MS,
+  likelihoodOf,
+  type Criterion,
   type GoalRow,
   type GoalSignedAction,
   type GoalTab,
   type GoalView,
   type GoalsPage,
   type Link,
+  type PlanStage,
+  type PlanStepState,
+  type ReviewChange,
+  type ReviewView,
 } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf, type ItemFacts, type StepFacts } from './criteria.js';
 import { conditionsOf, labelFor } from './items.js';
+import { waitedMs } from './late.js';
 import { stepState } from './ops.js';
+import { Diff, stepTitle, type DiffItem } from './steps.js';
 
-/** Reviews are part 3's: until then they are off, and so is lateness. */
-const REVIEWS = 'off' as const;
+/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER). */
+export interface ViewOptions {
+  reviews: boolean;
+}
+const NO_REVIEWS: ViewOptions = { reviews: false };
+/** A review whose plan stage has not reported for this long never will (its job is gone): it is shown as skipped, not as still running. */
+const PLAN_STAGE_GIVEN_UP_MS = 30 * 60_000;
 /** The finished tab's length. */
 const FINISHED = 50;
 /** How many waiting cards a view names (GoalView.waiting and GoalsPage.waiting, @flint/policy). */
@@ -45,8 +77,20 @@ interface GoalRecord {
   criteriaMet: unknown;
   horizonAt: Date | null;
   reviewCadence: string;
+  nextReviewAt: Date | null;
   activatedAt: Date | null;
   updatedAt: Date;
+}
+
+/**
+ * Which of these goals are late: an active one whose review has waited over an
+ * hour while Flint was reviewing (late.ts). Never a paused or finished goal,
+ * and never while reviews are off.
+ */
+async function lateOnes(db: Db | Tx, goals: readonly GoalRecord[], now: Date, o: ViewOptions): Promise<boolean[]> {
+  if (!o.reviews) return goals.map(() => false);
+  const waited = await waitedMs(db, goals.map((g) => (g.status === 'active' ? g.nextReviewAt : null)), now);
+  return waited.map((ms) => ms > REVIEW_LATE_MS);
 }
 
 interface WaitingCard {
@@ -91,19 +135,71 @@ async function activeSteps(db: Db | Tx, goalIds: readonly string[]): Promise<Map
 
 const FINAL = new Set(['done', 'abandoned', 'rejected']);
 
-function row(g: GoalRecord, steps: StepFacts[] | null, items: ReadonlyMap<string, ItemFacts>, waiting: number): GoalRow {
+function row(g: GoalRecord, steps: StepFacts[] | null, items: ReadonlyMap<string, ItemFacts>, waiting: number, late: boolean): GoalRow {
   const e = evaluate(criteriaOf(g), marksOf(g), steps, items);
   return {
     id: g.id, title: g.title, status: g.status as GoalRow['status'], origin: g.origin as GoalRow['origin'],
     checks: { met: e.met, total: e.total, unknown: e.unknown },
     horizonAt: iso(g.horizonAt), reviewCadence: g.reviewCadence as GoalRow['reviewCadence'],
     endedAt: FINAL.has(g.status) ? g.updatedAt.toISOString() : null,
-    waiting, late: false, tainted: g.tainted,
+    waiting, late, tainted: g.tainted,
+  };
+}
+
+/** How a review's plan stage ended, from what the review row says. */
+function stageOf(planner: string | null, createdAt: Date, now: Date): PlanStage {
+  if (planner === null) return now.getTime() - createdAt.getTime() < PLAN_STAGE_GIVEN_UP_MS ? 'pending' : 'skipped';
+  if (planner.startsWith('ollama:')) return 'ok';
+  const why = planner.slice('none:'.length);
+  return (PLAN_STAGES as readonly string[]).includes(why) && why !== 'pending' && why !== 'ok' ? (why as PlanStage) : 'skipped';
+}
+
+/**
+ * A review's suggestions in the panel's terms: each with the step's title. One
+ * that no longer fits the plan, or that Will already turned down, is left out.
+ * One held back by the review's limit or the day's cap is on no card yet, and
+ * says so (`later`).
+ */
+async function changesOf(db: Db | Tx, diff: readonly DiffItem[], steps: readonly PlanStepState[] | null, criteria: readonly Criterion[], tz: string, now: Date): Promise<ReviewChange[]> {
+  const shown = diff.filter((d) => d.held !== 'stale' && d.held !== 'rejected');
+  const ids = shown.flatMap((d) => (d.change.op === 'add' && d.change.entityId ? [d.change.entityId] : []));
+  const entities = ids.length
+    ? await db.entity.findMany({ where: { id: { in: ids }, status: { not: 'forgotten' } }, select: { id: true, kind: true, key: true, name: true, taintedPaths: true, firstSeenAt: true } })
+    : [];
+  const labels = new Map(await Promise.all(entities.map(async (e) => [e.id, await labelFor(db, e, tz, now)] as const)));
+  const words = new Map(criteria.map((c) => [c.id, c.text]));
+  const titles = new Map((steps ?? []).map((s) => [s.key, s.title]));
+  return shown.flatMap((d): ReviewChange[] => {
+    const c = d.change;
+    const rest = { material: d.class === 'material', later: d.held === 'limit' || d.held === 'cap' };
+    if (c.op === 'add') {
+      const title = stepTitle(c.template, { label: c.entityId ? labels.get(c.entityId) : undefined, criterion: c.criterion ? words.get(c.criterion) : undefined });
+      return title ? [{ kind: 'add', title, dueAt: c.dueAt, status: null, after: null, ...rest }] : [];
+    }
+    const title = titles.get(c.key);
+    if (!title) return [];
+    if (c.op === 'due') return [{ kind: 'due', title, dueAt: c.dueAt, status: null, after: null, ...rest }];
+    if (c.op === 'status') return [{ kind: 'status', title, dueAt: null, status: c.status, after: null, ...rest }];
+    if (c.op === 'skip') return [{ kind: 'skip', title, dueAt: null, status: null, after: null, ...rest }];
+    return [{ kind: 'move', title, dueAt: null, status: null, after: c.after ? (titles.get(c.after) ?? null) : null, ...rest }];
+  });
+}
+
+/** The goal's latest review, or null. */
+async function latestReview(db: Db | Tx, goalId: string, steps: readonly PlanStepState[] | null, criteria: readonly Criterion[], tz: string, now: Date): Promise<ReviewView | null> {
+  const r = await db.goalReview.findFirst({ where: { goalId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+  if (!r) return null;
+  const diff = Diff.safeParse(r.diff ?? []);
+  const items = diff.success ? diff.data : [];
+  return {
+    at: r.createdAt.toISOString(), kind: r.kind as ReviewView['kind'], summary: r.summary, shadow: r.shadow,
+    planner: stageOf(r.planner, r.createdAt, now),
+    changes: await changesOf(db, items, steps, criteria, tz, now),
   };
 }
 
 /** One tab of the panel: active (with paused goals, and new goals whose card waits), suggested, or finished. */
-export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date()): Promise<GoalsPage> {
+export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date(), o: ViewOptions = NO_REVIEWS): Promise<GoalsPage> {
   const statuses = tab === 'active' ? ['active', 'paused'] : tab === 'suggested' ? ['proposed'] : ['done', 'abandoned', 'rejected'];
   const goals = await db.goal.findMany({
     where: { status: { in: statuses } },
@@ -115,7 +211,8 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date()): Pr
     waitingCards(db, now),
     itemFacts(db, goals.flatMap((g) => checkedItems(criteriaOf(g)))),
   ]);
-  const rows = goals.map((g) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0));
+  const late = await lateOnes(db, goals, now, o);
+  const rows = goals.map((g, i) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0, late[i]!));
   // A new goal Will filed and has not signed yet: its card's own title, as it will start.
   let waiting: GoalsPage['waiting'] = [];
   if (tab === 'active') {
@@ -123,11 +220,11 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date()): Pr
     const fresh = [...cards.entries()].flatMap(([goalId, list]) => (known.has(goalId) ? [] : list.filter((c) => c.action === 'goal.activate').map((c) => c.id)));
     waiting = await waitingGoals(db, fresh.slice(0, WAITING));
   }
-  return { tab, goals: rows, waiting, reviews: REVIEWS };
+  return { tab, goals: rows, waiting, reviews: o.reviews ? 'on' : 'off' };
 }
 
 /** One goal, open; null when there is none. */
-export async function goalView(db: Db | Tx, id: string, tz: string, now = new Date()): Promise<GoalView | null> {
+export async function goalView(db: Db | Tx, id: string, tz: string, now = new Date(), o: ViewOptions = NO_REVIEWS): Promise<GoalView | null> {
   const g = await db.goal.findUnique({ where: { id } });
   if (!g) return null;
   const [linkRows, planRow, cards] = await Promise.all([
@@ -139,6 +236,11 @@ export async function goalView(db: Db | Tx, id: string, tz: string, now = new Da
   const items = await itemFacts(db, checkedItems(criteria));
   const steps = planRow ? planRow.steps.map(stepState) : null;
   const e = evaluate(criteria, marksOf(g), steps, items);
+  const waiting = cards.get(id) ?? [];
+  const live = g.status === 'active' || g.status === 'paused';
+  // Its open forecast, from the ledger's own row: the number a review recorded, never a model's words.
+  const forecast = live ? await db.prediction.findFirst({ where: { goalId: id, domain: 'goals', status: 'open' }, orderBy: { createdAt: 'desc' }, select: { probability: true, resolveBy: true } }) : null;
+  const review = await latestReview(db, id, steps, criteria, tz, now);
   const links = await Promise.all(linkRows.map(async (l) => ({
     entityId: l.entityId, role: l.role as Link['role'], watchPaths: [...l.watchPaths].sort(),
     label: await labelFor(db, l.entity, tz, now), kind: l.entity.kind, status: l.entity.status as GoalView['links'][number]['status'],
@@ -156,8 +258,14 @@ export async function goalView(db: Db | Tx, id: string, tz: string, now = new Da
       ? { version: planRow.version, steps: steps.map((s) => ({ key: s.key, ordinal: s.ordinal, title: s.title, kind: s.kind, tier: s.tier, status: s.status, dueAt: s.dueAt, dependsOn: s.dependsOn })) }
       : null,
     // The oldest of its waiting cards: a goal with more still opens.
-    waiting: (cards.get(id) ?? []).slice(0, WAITING),
-    reviews: REVIEWS,
-    late: false,
+    waiting: waiting.slice(0, WAITING),
+    reviews: o.reviews ? 'on' : 'off',
+    late: (await lateOnes(db, [g], now, o))[0]!,
+    nextReviewAt: g.status === 'active' ? iso(g.nextReviewAt) : null,
+    // Only a forecast for the goal's own finish date (see the note at the top).
+    onTrack: forecast && forecast.probability !== null && g.horizonAt && forecast.resolveBy.getTime() === g.horizonAt.getTime()
+      ? { likelihood: likelihoodOf(forecast.probability), percent: Math.round(forecast.probability * 100), by: forecast.resolveBy.toISOString() }
+      : null,
+    review,
   };
 }

@@ -27,8 +27,12 @@ export const CLAIM_TEMPLATES = {
   deploy_succeeds: { params: CLAIM_TEMPLATE_PARAMS.deploy_succeeds, render: (p: { entity: string }) => `the next deployment of ${p.entity} succeeds` },
   threshold: { params: CLAIM_TEMPLATE_PARAMS.threshold, render: (p: { series: string; op: string; value: number }) => `${p.series} is ${p.op} ${p.value} at the resolve time` },
   closed_by: { params: CLAIM_TEMPLATE_PARAMS.closed_by, render: (p: { entity: string }) => `${p.entity} is closed by the resolve time` },
+  // A goal review's forecast (P3): the goal by its ref, never its title.
+  goal_on_track: { params: CLAIM_TEMPLATE_PARAMS.goal_on_track, render: (p: { goal: string; by: string }) => `${p.goal} meets its success criteria by ${p.by}` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
+/** Templates only the runtime's own writers fill: never one a caller of the ledger's route may send. */
+export const INTERNAL_TEMPLATES: ReadonlySet<string> = new Set<ClaimTemplate>(['goal_on_track']);
 
 const Evidence = z.array(z.object({ kind: z.string().min(1).max(40), ref: z.string().min(1).max(200), note: z.string().max(200).optional() }).strict()).max(20);
 
@@ -58,6 +62,13 @@ export const EmitPrediction = z
   })
   .strict();
 export type EmitPrediction = z.infer<typeof EmitPrediction>;
+
+/**
+ * A prediction as POST /v1/ledger/predictions takes it: never the runtime's own
+ * templates. (A goal's id is not in the body at all: it is strict, and the goal
+ * a forecast is about is an argument only the goals writer passes.)
+ */
+export const EmitPredictionIn = EmitPrediction.refine((p) => !p.template || !INTERNAL_TEMPLATES.has(p.template.id), { message: 'this template is the runtime’s own', path: ['template', 'id'] });
 
 export class Invalid extends Error {}
 
@@ -93,8 +104,14 @@ export function renderClaim(p: EmitPrediction): string {
   return p.claim!;
 }
 
-export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: string, now = new Date()) {
+/**
+ * Record a prediction. `own` is the runtime's alone, never read from a request:
+ * the goal a review's onTrack forecast is about (P3). A goal's forecast is the
+ * goals writer's (the database checks createdBy too) and uses its own template.
+ */
+export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: string, now = new Date(), own: { goalId?: string } = {}) {
   const why = validatePrediction(p, now);
+  if ((p.template?.id === 'goal_on_track') !== (own.goalId !== undefined)) why.push('a goal’s forecast uses the goal template, and only it does');
   if (why.length) throw new Invalid(why.join('; '));
   return db.prediction.create({
     data: {
@@ -117,6 +134,7 @@ export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: 
       supersedesId: p.supersedesId ?? null,
       tainted: p.tainted,
       createdBy,
+      ...(own.goalId ? { goalId: own.goalId } : {}),
     },
   });
 }

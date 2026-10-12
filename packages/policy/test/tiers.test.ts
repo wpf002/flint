@@ -11,12 +11,13 @@ import {
   runsInShadow,
   type PolicyRow,
   type TierContext,
+  ON_TRACK_COUNTER,
 } from '../src/tiers';
 import { TAINTED_SOURCES } from '../src/taint';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
-import { GOAL_SIGNED_ACTIONS, P3_ACTIONS } from '../src/goals';
+import { GOAL_SIGNED_ACTIONS, P3_ACTIONS, PlanOp, classifyPlanOp } from '../src/goals';
 
 const chat: TierContext = { context: 'chat', tainted: false };
 const auto: TierContext = { context: 'autonomous', tainted: false };
@@ -405,6 +406,19 @@ describe('P3: goals and plans', () => {
     }
   });
 
+  it('a review’s onTrack forecast is counted under its own counter, never the ledger’s daily cap, and the table says so', () => {
+    // The ledger's cap stands for everyone else.
+    expect(CODE_TABLE['ledger.prediction.record']).toMatchObject({ cap: { limit: 50, period: 'day' }, shadow: true });
+    // The exemption is written down where the cap is, and its counter is not an action: it has no tier and no cap to claim.
+    expect(CODE_TABLE['ledger.prediction.record']!.note).toContain(ON_TRACK_COUNTER);
+    expect(ON_TRACK_COUNTER).toBe('goal.on_track');
+    expect(CODE_TABLE[ON_TRACK_COUNTER]).toBeUndefined();
+    expect(AUTONOMOUS_ACTIONS.has(ON_TRACK_COUNTER)).toBe(false);
+    expect(ON_TRACK_COUNTER).not.toBe('ledger.prediction.record');
+    // As a name it would never be allowed to run on its own: it is only a counter's key.
+    expect(resolveTier(ON_TRACK_COUNTER, { ...auto, policies: [], now: NOW }).tier).toBe('forbidden');
+  });
+
   it('reviews run in shadow under 20 a day; the chat suggestions carry no code cap (claimed even at APPROVAL, it would stall a 4th card)', () => {
     expect(runsInShadow('goal.review.local')).toBe(true);
     expect(CODE_TABLE['goal.review.local']).toMatchObject({ write: false, cap: { limit: 20, period: 'day' } });
@@ -423,16 +437,40 @@ describe('P3: goals and plans', () => {
     expect(words, 'apprAlone in the console').toBeTruthy();
     for (const a of P3_ACTIONS) expect(new RegExp(words!, 'i').test(a), a).toBe(false);
     // ...and yet each one Will signs asks on its own, with a fresh touch, never in Approve All (apprAlone): by its
-    // name, and by the consequential mark its card carries. Only a review's minor plan change rides Approve All.
+    // name, and by the consequential mark its card carries. Only a review's small plan change rides Approve All, and
+    // which card is one is read from its operations (apprSmallPlan), never from its template's name alone.
     const js = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
     const goals = /\nvar APPR_GOAL=\{[^\n]*\};/.exec(js)![0];
+    const small = /\n(function apprSmallOp\(o\)\{[\s\S]*?\nfunction apprSmallPlan\(p\)\{[^\n]*)\n/.exec(js)![1]!;
     const alone = /\n(function apprAlone\(p\)\{[\s\S]*?)\nfunction /.exec(js)![1]!;
     const c: Record<string, unknown> = {};
     createContext(c);
-    runInContext(`${goals}\n${alone}`, c);
+    runInContext(`${goals}\n${small}\n${alone}`, c);
     const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
     for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
-    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false })).toBe(false);
+    const status = { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'blocked' } };
+    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: [status] } })).toBe(false);
+    // The name alone is not enough: a bigger operation under it, or none to read, asks on its own.
+    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false })).toBe(true);
+    expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: [status, { op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task' } }] } })).toBe(true);
+    // The console's reading agrees with the shared rule on every operation a review may file as small or bigger.
+    const step = { kind: 'will_task' as const, status: 'todo' as const, dueAt: '2026-10-14T22:00:00.000Z' };
+    const horizon = '2026-12-01T05:59:00.000Z';
+    const cases: Array<Record<string, unknown>> = [
+      status,
+      { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'in_progress' } },
+      { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } },
+      { op: 'set', key: 's1', from: { title: 'T', dueAt: step.dueAt }, to: { dueAt: '2026-10-20T22:00:00.000Z' } },
+      { op: 'set', key: 's1', from: { title: 'T', dueAt: step.dueAt }, to: { dueAt: '2026-10-30T22:00:00.000Z' } },
+      { op: 'set', key: 's1', from: { title: 'T', dueAt: step.dueAt }, to: { dueAt: null } },
+      { op: 'set', key: 's1', from: { title: 'T', ordinal: 100 }, to: { ordinal: 50 } },
+      { op: 'set', key: 's1', from: { title: 'T' }, to: { title: 'Synthetic retitled step' } },
+      { op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } },
+    ];
+    for (const op of cases) {
+      const shared = classifyPlanOp(PlanOp.parse(op), step, horizon) === 'minor';
+      expect(!apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: [op] } }), JSON.stringify(op)).toBe(shared);
+    }
     expect(apprAlone({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })).toBe(true);
     expect(apprAlone({ fullName: 'world.source.enable', consequential: true })).toBe(true);
     for (const a of ['goal.propose', 'world.commitment.from_chat']) expect(apprAlone({ fullName: a }), a).toBe(false);

@@ -440,6 +440,76 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     await expect(file('goal.propose', { goalId: id('go'), title: 'Synthetic', quote: 'too short' }, { kind: 'goal' })).rejects.toMatchObject({ status: 400, message: 'A suggestion from chat needs your own words, quoted.' });
   });
 
+  it('review finding 2: a review’s card is held to its rules at the gate, whatever its template’s name says', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    const s1 = { title: `${CANARY} step s1`, status: 'todo' };
+    const flint = (ops: unknown[], templateId = 'plan.diff.minor', over: Record<string, unknown> = {}) =>
+      file('plan.change', { goalId: gid, goalTitle, ops }, { origin: 'runtime:goals', templateId, argsProvenance: { ops: { source: 'model', ref: 'goal.review.local', tainted: false } }, ...over });
+    const templated = (key: string, over: Record<string, unknown> = {}) => ({ op: 'add', key, step: { ordinal: 900, title: 'Review your progress on this goal', kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [], ...over } });
+    const refused = (message: string) => ({ status: 400, message });
+
+    // The reviewer's reproduction: bigger operations under the small-change template, with free text, a Flint action and tier alone.
+    await expect(flint([
+      { op: 'add', key: 's9', step: { ordinal: 900, title: 'Synthetic free text nobody templated', kind: 'flint_action', tier: 'alone', dueAt: null, dependsOn: [] } },
+      { op: 'set', key: 's1', from: s1, to: { status: 'skipped', title: 'Synthetic retitled step' } },
+    ])).rejects.toMatchObject(refused(SAY.reviewStep));
+    // A small-change card holds no bigger change: a new step (even a templated one), a skip, a date where there was none.
+    await expect(flint([templated('s9')])).rejects.toMatchObject(refused(SAY.minorCard));
+    await expect(flint([{ op: 'set', key: 's1', from: s1, to: { status: 'skipped' } }])).rejects.toMatchObject(refused(SAY.minorCard));
+    await expect(flint([{ op: 'set', key: 's1', from: { title: s1.title, dueAt: null }, to: { dueAt: iso(Date.now() + 3 * DAY) } }])).rejects.toMatchObject(refused(SAY.minorCard));
+    await expect(flint([{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, status: 'todo' }, to: { status: 'blocked' } }, { op: 'set', key: 's1', from: s1, to: { status: 'skipped' } }])).rejects.toMatchObject(refused(SAY.minorCard));
+    // Under either template, a review adds a step only from its templates, never a Flint action, always one that waits for Will, and changes only a step's status, date or place.
+    for (const template of ['plan.diff.minor', 'plan.diff.material']) {
+      await expect(flint([templated('s9', { title: 'Synthetic free text nobody templated' })], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+      await expect(flint([templated('s9', { kind: 'flint_action' })], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+      await expect(flint([templated('s9', { tier: 'alone' })], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+      await expect(flint([templated('s9', { dependsOn: ['s1'] })], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+      await expect(flint([{ op: 'set', key: 's1', from: s1, to: { title: 'Synthetic retitled step' } }], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+      await expect(flint([{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, dependsOn: ['s1'] }, to: { dependsOn: [] } }], template), template).rejects.toMatchObject(refused(SAY.reviewStep));
+    }
+    expect(await db.proposal.count({ where: { origin: 'runtime:goals', args: { path: ['goalId'], equals: gid } } })).toBe(0);
+
+    // What a review may file: a bigger change is marked for a fresh touch whatever the filer said; a small one is not.
+    const bigger = await flint([templated('s9')], 'plan.diff.material', { consequential: false });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: bigger.id } })).toMatchObject({ templateId: 'plan.diff.material', consequential: true });
+    const skip = await flint([{ op: 'set', key: 's1', from: s1, to: { status: 'skipped' } }], 'plan.diff.material', { consequential: false });
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: skip.id } })).consequential).toBe(true);
+    const small = await flint([{ op: 'set', key: 's2', from: { title: `${CANARY} step s2`, status: 'todo' }, to: { status: 'blocked' } }]);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: small.id } })).toMatchObject({ templateId: 'plan.diff.minor', consequential: false });
+    // Will's own plan card is always marked, and may hold what a review's may not (his own words, a skip).
+    const own = await file('plan.change', { goalId: gid, goalTitle, ops: [{ op: 'set', key: 's1', from: s1, to: { title: `${CANARY} retitled`, status: 'skipped' } }] });
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: own.id } })).consequential).toBe(true);
+
+    // A bringing-back of a skipped step is Will's alone.
+    await sign(skip.id);
+    await run(skip.id);
+    await expect(flint([{ op: 'set', key: 's1', from: { title: s1.title, status: 'skipped' }, to: { status: 'todo' } }], 'plan.diff.material')).rejects.toMatchObject(refused(SAY.reviewStep));
+  });
+
+  it('review finding 2: a small date change is small against the plan and the finish date as they are, when filed and again when it runs', async () => {
+    const { args } = await newGoal();
+    const gid = args.goalId as string;
+    await fileSignRun('goal.activate', args);
+    const title = `${CANARY} step s1`;
+    const due = iso(Date.now() + 10 * DAY);
+    await fileSignRun('plan.change', { goalId: gid, goalTitle, ops: [{ op: 'set', key: 's1', from: { title, dueAt: null }, to: { dueAt: due } }] });
+    const move = (days: number) => file('plan.change', { goalId: gid, goalTitle, ops: [{ op: 'set', key: 's1', from: { title, dueAt: due }, to: { dueAt: iso(Date.now() + days * DAY) } }] }, { origin: 'runtime:goals', templateId: 'plan.diff.minor' });
+    // Over a week, or past the finish date (90 days out): bigger.
+    await expect(move(20)).rejects.toMatchObject({ status: 400, message: SAY.minorCard });
+    await expect(move(95)).rejects.toMatchObject({ status: 400, message: SAY.minorCard });
+    const small = await move(15);
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: small.id } })).consequential).toBe(false);
+    // Will then brings the finish date in, to before the new due date: the same card is a bigger change now, and does not ride through.
+    await fileSignRun('goal.horizon_change', { goalId: gid, goalTitle, horizonAt: iso(Date.now() + 12 * DAY), reviewCadence: 'P1W', from: timed(args) });
+    await sign(small.id);
+    const versions = await db.plan.count({ where: { goalId: gid } });
+    await expect(run(small.id)).rejects.toMatchObject({ status: 409, message: 'The plan changed since Flint suggested this.' });
+    expect(await db.plan.count({ where: { goalId: gid } })).toBe(versions);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: small.id } })).toMatchObject({ status: 'failed', error: 'The plan changed since Flint suggested this.' });
+  });
+
   it('nothing P3 keeps for good carries a goal\'s words: reasons, errors, results, audit entries, history', async () => {
     const leaks = await owner(`
       SELECT 'proposal' AS t, count(*)::int AS n FROM "Proposal" WHERE coalesce(reason, '') LIKE '%CANARY%' OR coalesce(error, '') LIKE '%CANARY%' OR coalesce(result::text, '') LIKE '%CANARY%'

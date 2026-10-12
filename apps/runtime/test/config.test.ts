@@ -48,6 +48,14 @@ describe('runtime config', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_SOURCE_APPLE_CALENDAR: ' On ' }).appleCalendar).toBe(true);
   });
 
+  it('goal reviews (P3) are off unless FLINT_PLANNER is exactly `on`, trimmed and in any case', () => {
+    for (const v of [undefined, '', '  ', 'off', ' Off ', '1', 'yes', 'true', 'enabled', 'on!']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PLANNER: v }).planner, String(v)).toBe(false);
+    for (const v of ['on', ' on ', 'ON', ' On\t']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PLANNER: v }).planner, v).toBe(true);
+    // Its own switch: triage on does not turn reviews on, nor the other way round.
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_RUNTIME_TRIAGE: 'on' })).toMatchObject({ triage: true, planner: false });
+    expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_PLANNER: 'on' })).toMatchObject({ triage: false, planner: true });
+  });
+
   it('reads caps and off-box health URLs, and refuses credentials in them', () => {
     const c = loadConfig({ DATABASE_URL: DB, HOME, FLINT_BUDGET_ANTHROPIC_DAILY_USD: '10', FLINT_BUDGET_ANTHROPIC_MONTHLY_USD: '150', HEALTH_EXTRA: 'nexus-mcp=https://nexus.example.app/health' });
     expect(c.caps.anthropic).toEqual({ dailyUsd: 10, monthlyUsd: 150 });

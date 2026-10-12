@@ -9,6 +9,7 @@
  *   POST /v1/goals/linkable {q}                    items a check may watch (a POST: q never lands in a log)
  *   POST /v1/goals/:id/edit|timing|done|abandon|resume|plan {args}   that card
  *   POST /v1/goals/:id/pause|dismiss               unsigned, audited
+ *   POST /v1/goals/:id/review                      Review Now: unsigned, audited; it sends the goal's review job (part 3)
  *   POST /v1/goals/:id/criteria/:cid {met}         unsigned, audited
  *   POST /v1/goals/:id/steps/:key {status}         unsigned, audited
  *
@@ -41,16 +42,21 @@ import {
 } from '@flint/policy';
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
+import type { Bus } from '../bus.js';
 import { Refused } from '../governance/proposals.js';
 import { SAY } from '../goals/errors.js';
 import { linkable } from '../goals/items.js';
-import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, setStep } from '../goals/service.js';
+import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, requestReview, setStep } from '../goals/service.js';
 import { goalView, goalsPage } from '../goals/view.js';
 
 export interface GoalRouteDeps {
   db: Db;
   need: (scope: RuntimeScope) => (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
   tz: string;
+  /** Flint reviews goals (FLINT_PLANNER is on). Off: the views say so, nothing is late, and Review Now is refused. */
+  reviews?: boolean;
+  /** The bus, once it has started: Review Now sends the goal's review job through it. */
+  bus?: () => Pick<Bus, 'boss'> | undefined;
 }
 
 /** An answer that broke its contract on the way out: the runtime's bug (a 500), never a leak. */
@@ -71,12 +77,14 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
 
 const Tab = z.object({ tab: z.enum(GOAL_TABS).default('active') }).strict();
 const Goal = z.object({ id: GoalId }).strict();
-const Verb = z.object({ id: GoalId, verb: z.enum(['pause', 'dismiss', ...(Object.keys(GOAL_CARD_VERBS) as GoalCardVerb[])]) }).strict();
+const Verb = z.object({ id: GoalId, verb: z.enum(['pause', 'dismiss', 'review', ...(Object.keys(GOAL_CARD_VERBS) as GoalCardVerb[])]) }).strict();
 const Criterion = z.object({ id: GoalId, cid: CriterionId }).strict();
 const Step = z.object({ id: GoalId, key: StepKey }).strict();
 
 export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void {
   const { db, need, tz } = d;
+  const reviews = d.reviews ?? false;
+  const view = { reviews };
   const pre = { preHandler: need('proposals') };
 
   /** A refusal as Will reads it, with its code (the server passes on only these); anything else to the app's handler. */
@@ -97,12 +105,12 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
 
   app.get('/v1/goals', pre, guarded(async (req) => {
     const { tab } = parse(Tab, req.query ?? {});
-    return out(GoalsPage, await goalsPage(db, tab));
+    return out(GoalsPage, await goalsPage(db, tab, new Date(), view));
   }));
 
   app.get('/v1/goals/:id', pre, guarded(async (req) => {
     const { id } = parse(Goal, req.params);
-    const goal = await goalView(db, id, tz);
+    const goal = await goalView(db, id, tz, new Date(), view);
     if (!goal) throw new Refused(404, SAY.noGoal);
     return out(GoalAnswer, { goal });
   }));
@@ -119,9 +127,10 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
 
   app.post('/v1/goals/:id/:verb', pre, guarded(async (req) => {
     const { id, verb } = parse(Verb, req.params);
-    if (verb === 'pause' || verb === 'dismiss') {
+    if (verb === 'pause' || verb === 'dismiss' || verb === 'review') {
       parse(EmptyBody, req.body ?? {});
-      await (verb === 'pause' ? pauseGoal(db, id) : dismissGoal(db, id));
+      if (verb === 'review') await requestReview(db, d.bus?.(), id, { reviews, tz });
+      else await (verb === 'pause' ? pauseGoal(db, id) : dismissGoal(db, id));
       return out(GoalDone, { ok: true });
     }
     const v = verb as GoalCardVerb;

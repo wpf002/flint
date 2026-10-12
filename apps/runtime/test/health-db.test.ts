@@ -7,7 +7,9 @@
  * said so); circuits open once and close once; details are redacted; the
  * spend view goes to the server. A calendar's warnings are said as they are
  * (only a skip, or no calendars, is an issue), and a disconnected Apple
- * Calendar is ok, never stale, and not in the digest.
+ * Calendar is ok, never stale, and not in the digest. Goal reviews (P3) are
+ * disabled while the planner is off; on, a review over an hour late is
+ * degraded and over a day late is down, said in counts, never a goal's words.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -33,6 +35,9 @@ import { appleCalendarSource } from '../src/sources/apple/calendar';
 import { CalendarInbox } from '../src/sources/apple/inbox';
 import { parseSnapshot } from '../src/sources/apple/wire';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
+import { healthName } from '@flint/policy';
+import { runReview } from '../src/goals/review';
+import { FakeBus, goalFixture } from './goals/fixture';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const MIN = 60_000;
@@ -337,5 +342,123 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     // A run that failed since (a live snapshot with calendar access off) is said, and judged as any source's.
     await owner(`UPDATE "SourceCursor" SET "consecutiveFailures" = 1 WHERE source = 'apple_calendar'`);
     expect(await check('apple_calendar', later)).toEqual({ status: 'down', detail: 'The last read failed.' });
+  });
+
+  it('goal reviews: disabled while the planner is off; over an hour late is degraded, over a day is down; counts only', async () => {
+    const fx = await goalFixture(urls, db);
+    const on = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_PLANNER: 'on', FLINT_TRIAGE_MODEL: 'muse-glimmer:30b' });
+    const goals = async (cfg: Config, now: Date) => (await checkComponents({ db, config: cfg, now, sources: [] })).find((c) => c.component === 'goals');
+    const now = new Date();
+    const H = 3_600_000;
+    const at = (ms: number) => new Date(now.getTime() + ms);
+    /** The Goal Reviews rows the health job would have written every 5 minutes over a stretch (by default: reviews on and fine). */
+    const reviewing = (from: number, to: number, over: { status?: string; detail?: string } = {}) =>
+      db.healthCheck.createMany({ data: Array.from({ length: Math.floor((to - from) / (5 * MIN)) + 1 }, (_, i) => ({ component: 'goals', status: over.status ?? 'ok', ...(over.detail ? { detail: over.detail } : {}), at: at(from + i * 5 * MIN) })) });
+    const forget = () => db.healthCheck.deleteMany({ where: { component: 'goals' } });
+    // Off (the default): shown as off, whatever the goals' review times say.
+    const g = await fx.activeGoal();
+    expect(await goals(config, at(48 * H))).toEqual({ component: 'goals', status: 'disabled' });
+    // On, and reviewing the whole time: a goal just started is due, not late. An hour on with no review it is late; a day on, an outage.
+    await forget();
+    await reviewing(-10 * MIN, 26 * H);
+    expect(await goals(on, now)).toEqual({ component: 'goals', status: 'ok' });
+    expect(await goals(on, at(59 * MIN))).toEqual({ component: 'goals', status: 'ok' });
+    expect(await goals(on, at(62 * MIN))).toEqual({ component: 'goals', status: 'degraded', detail: 'A goal’s review is over an hour late.' });
+    const other = await fx.activeGoal();
+    expect(await goals(on, at(3 * H))).toEqual({ component: 'goals', status: 'degraded', detail: '2 goals’ reviews are over an hour late.' });
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'down', detail: '2 goals’ reviews are over a day late.' });
+    // Review finding 7: late means late while Flint was reviewing. Reviews just turned on (no row yet), or on for minutes:
+    // the reviews that came due meanwhile are not late for that, and Flint runs them within minutes.
+    await forget();
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'ok' });
+    await reviewing(25 * H - 5 * MIN, 25 * H);
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'ok' });
+    await forget();
+    await reviewing(25 * H - 59 * MIN, 25 * H);
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'ok' });
+    // Still not reviewed after an hour of it: late.
+    await forget();
+    await reviewing(25 * H - 61 * MIN, 25 * H);
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'degraded', detail: '2 goals’ reviews are over an hour late.' });
+    // A day with reviews off, or stopped by a rule, is no reviewing time at all.
+    await forget();
+    await reviewing(0, 25 * H, { status: 'disabled' });
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'ok' });
+    await forget();
+    await reviewing(0, 25 * H, { status: 'degraded', detail: 'A rule stops goal reviews, so none are running.' });
+    expect(await goals(on, at(25 * H))).toEqual({ component: 'goals', status: 'ok' });
+    // Review finding R3: a review stuck for days shows as down, although the Mac sleeps every night and a deploy restarts the
+    // runtime every day, so it never runs 24 hours on end. Nine hours of reviewing a day, with an 8-minute restart in each.
+    await forget();
+    for (const day of [0, 1, 2]) {
+      await reviewing(day * 24 * H, day * 24 * H + 4 * H);
+      await reviewing(day * 24 * H + 4 * H + 8 * MIN, day * 24 * H + 9 * H);
+    }
+    const late = { component: 'goals', status: 'degraded', detail: '2 goals’ reviews are over an hour late.' };
+    expect(await goals(on, at(9 * H))).toEqual(late);
+    // The next morning, before the day's first check: nothing new has been waited, and it is still what it was.
+    expect(await goals(on, at(24 * H - 30 * MIN))).toEqual(late);
+    expect(await goals(on, at(33 * H))).toEqual(late);
+    expect(await goals(on, at(48 * H + 5 * H))).toEqual(late);
+    // 9 + 9 + 6 hours and a bit: a day of reviewing with the review still not done.
+    expect(await goals(on, at(48 * H + 6 * H + 15 * MIN))).toEqual({ component: 'goals', status: 'down', detail: '2 goals’ reviews are over a day late.' });
+    // (Back to reviewing the whole time, for what follows.)
+    await forget();
+    await reviewing(-25 * H - 10 * MIN, 26 * H);
+    // A paused goal is not reviewed, so it is never late.
+    await db.goal.update({ where: { id: other.id }, data: { status: 'paused' } });
+    expect(await goals(on, at(25 * 3_600_000))).toEqual({ component: 'goals', status: 'down', detail: 'A goal’s review is over a day late.' });
+    // Its scheduled review moves the goal on: on time again.
+    const due = (await db.goal.findUniqueOrThrow({ where: { id: g.id } })).nextReviewAt!;
+    expect((await runReview({ db, bus: new FakeBus(), tz: 'UTC' }, { goalId: g.id, kind: 'scheduled', dueAt: due.toISOString() })).outcome).toBe('reviewed');
+    expect(await goals(on, at(25 * 3_600_000))).toEqual({ component: 'goals', status: 'ok' });
+    // Reviews on with no local model to ask: every review would suggest nothing, so health says so.
+    const noModel = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_PLANNER: 'on' });
+    expect(await goals(noModel, now)).toEqual({ component: 'goals', status: 'degraded', detail: 'No local model is set up, so goal reviews suggest no plan changes.' });
+
+    // Review finding 5: the plan stage. When the last few reviews that asked the model got no usable answer, health says so.
+    const reviewNow = async (planner: string) => {
+      const r = await runReview({ db, bus: new FakeBus(), tz: 'UTC' }, { goalId: g.id, kind: 'requested' });
+      if (r.outcome !== 'reviewed') throw new Error(r.outcome);
+      await db.goalReview.update({ where: { id: r.reviewId }, data: { planner } });
+    };
+    const stages = () => goals(on, at(25 * 3_600_000));
+    // (The scheduled review above is still waiting for its plan stage: nothing to judge yet.)
+    expect(await stages()).toEqual({ component: 'goals', status: 'ok' });
+    await reviewNow('none:unavailable');
+    expect(await stages()).toEqual({ component: 'goals', status: 'degraded', detail: 'The local model gave no usable answer to the last goal review, so Flint suggested no plan changes.' });
+    await reviewNow('none:invalid');
+    expect(await stages()).toEqual({ component: 'goals', status: 'degraded', detail: 'The local model gave no usable answer to the last 2 goal reviews, so Flint suggested no plan changes.' });
+    // One answer among the last three is enough: a single bad reply is not a fault.
+    await reviewNow('ollama:muse-glimmer:30b');
+    expect(await stages()).toEqual({ component: 'goals', status: 'ok' });
+    await reviewNow('none:invalid');
+    await reviewNow('none:unavailable');
+    expect(await stages()).toEqual({ component: 'goals', status: 'ok' });
+    // A stage that never asked the model (chat was busy, the day's cap, a newer review took its place) is not the model's failure.
+    await reviewNow('none:deferred');
+    await reviewNow('none:capped');
+    await reviewNow('none:skipped');
+    expect(await stages()).toEqual({ component: 'goals', status: 'ok' });
+    await reviewNow('none:unavailable');
+    expect(await stages()).toEqual({ component: 'goals', status: 'degraded', detail: 'The local model gave no usable answer to the last 3 goal reviews, so Flint suggested no plan changes.' });
+    // It clears with the next answer, and a finished goal's old failures are nobody's problem.
+    await reviewNow('ollama:muse-glimmer:30b');
+    expect(await stages()).toEqual({ component: 'goals', status: 'ok' });
+    // In the report and the digest it is a component like any other, by its plain name.
+    await db.goal.update({ where: { id: g.id }, data: { nextReviewAt: at(-25 * 3_600_000) } });
+    await db.healthCheck.create({ data: { component: 'goals.deferral', status: 'degraded', detail: 'Chat was busy.', at: now } });
+    // (The stand-in rows for the hours ahead go: from here on the latest Goal Reviews row is the one the check itself writes.)
+    await db.healthCheck.deleteMany({ where: { component: 'goals', at: { gte: now } } });
+    await recordChecks(db, await checkComponents({ db, config: on, now, sources: [] }), now);
+    const report = await healthReport(db, on, now);
+    expect(report.components.find((c) => c.component === 'goals')).toMatchObject({ status: 'down', detail: 'A goal’s review is over a day late.' });
+    expect(report.components.map((c) => c.component)).not.toContain('goals.deferral');
+    const digest = await buildDigest(db, 'UTC', now);
+    expect(digest.degraded).toContain('goals');
+    expect(digest.degraded).not.toContain('goals.deferral');
+    expect(digest.body).toContain('Goal Reviews');
+    expect(healthName('goals')).toBe('Goal Reviews');
+    expect(JSON.stringify(report)).not.toContain('CANARY');
   });
 });

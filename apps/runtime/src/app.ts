@@ -8,7 +8,7 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
-import { safeName, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, safeName, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Config, RuntimeScope } from './config.js';
 import type { Db } from './db.js';
 import { callerFor, type Caller } from './auth.js';
@@ -27,7 +27,7 @@ import {
   listProposals,
   rejectProposal,
 } from './governance/proposals.js';
-import { EmitPrediction, Invalid, emitPrediction } from './ledger/emit.js';
+import { EmitPredictionIn, Invalid, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
 import { registerP2Routes } from './routes/p2.js';
@@ -67,7 +67,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -197,7 +197,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // ---- proposals ----------------------------------------------------------------
   app.post('/v1/proposals', { preHandler: need('proposals') }, async (req, reply) => {
-    const created = await createProposal(db, CreateProposal.parse(req.body), actor(req));
+    const body = CreateProposal.parse(req.body);
+    // A job's cards are filed by the job, in this process. Over the wire an origin is only a claim, and a
+    // `runtime:` one would file under a job's templates and its standing: refused, whoever holds the token.
+    if (body.origin.startsWith('runtime:')) throw new Refused(400, GOAL_SAYS.runtimeOrigin);
+    const created = await createProposal(db, body, actor(req));
     return reply.code(201).send(created);
   });
   app.get('/v1/proposals', { preHandler: need('proposals') }, async (req) => {
@@ -285,7 +289,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // ---- ledger -----------------------------------------------------------------------
   app.post('/v1/ledger/predictions', { preHandler: need('ledger') }, async (req, reply) => {
-    const p = await emitPrediction(db, EmitPrediction.parse(req.body), actor(req));
+    // The body names no goal and none of the runtime's own templates: a goal's forecast is its review's alone (P3).
+    const p = await emitPrediction(db, EmitPredictionIn.parse(req.body), actor(req));
     return reply.code(201).send({ id: p.id, claim: p.claim, resolveBy: p.resolveBy });
   });
   app.get('/v1/ledger/open', { preHandler: need('ledger') }, async (req) => {
@@ -300,7 +305,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
   // P3 part 2: the goals panel (scope proposals: the runtime connector's token can never read a goal's words).
-  registerGoalRoutes(app, { db, need, tz: config.tz });
+  // Part 3: with the planner on, the views say when a review is late and Review Now sends the goal's review job.
+  registerGoalRoutes(app, { db, need, tz: config.tz, reviews: config.planner ?? false, bus: () => deps.status?.bus });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

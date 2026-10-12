@@ -14,15 +14,23 @@
  *   digest.ts            the morning digest
  *   surface/deliver.ts   an escalation, in its template's words
  *
+ * Goal reviews (P3 part 3) post no note of their own. What they add to words
+ * Will reads is held to the same rules here: the digest's line about the
+ * goals Flint reviewed, what Goal Reviews says in Settings > Health, and the
+ * sentences a goal route or a goal card is refused with.
+ *
  * The server's own notes and the shell scripts' banners have theirs:
  * apps/server/test/notes-inventory.test.ts.
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { JOB_WORDS, jobFailedNote, noteProblems, shownProblems, type NightlyJob } from '@flint/policy';
+import { GOAL_SAYS, GOAL_STATUS_SAYS, HEALTH_NAMES, JOB_WORDS, jobFailedNote, noteProblems, shownProblems, type NightlyJob } from '@flint/policy';
 import { ACTION, nextAfterFailure } from '../src/backup/nightly';
-import { digestBody, digestTitle } from '../src/digest';
+import { digestBody, digestTitle, goalsSentence } from '../src/digest';
+import { DEFERRAL_SAYS } from '../src/goals/batch';
+import { REVIEWS_STOPPED } from '../src/goals/late';
+import { GOAL_HEALTH } from '../src/health/checks';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
 import { EDGES } from './surface/template-edges';
@@ -96,6 +104,11 @@ describe('the runtime’s notes to Will', () => {
     for (const day of ['2026-10-11', '2026-01-01', '2028-02-29']) {
       expect(digestTitle(day)).toMatch(/^Daily Summary for (Sun|Mon|Tue|Wed|Thu|Fri|Sat) [A-Z][a-z]{2} \d{1,2}$/);
       for (const c of counts) for (const d of degraded) plain('digest.ts', digestTitle(day), digestBody(c, d));
+      // On a day Flint reviewed goals the digest has a fifth line, and Goal Reviews may be among what needs a look.
+      for (const [goalsReviewed, goalsLate] of [[1, 0], [1, 1], [3, 0], [3, 1], [3, 3], [40, 12]] as const) {
+        for (const c of counts) for (const d of [[], ['goals'], ['backup', 'goals', 'source:github']]) plain('digest.ts', digestTitle(day), digestBody({ ...c, goalsReviewed, goalsLate }, d));
+        expect(digestBody({ ...zero, goalsReviewed, goalsLate }, [])).toContain(goalsSentence(goalsReviewed, goalsLate));
+      }
     }
     expect(digestTitle('2026-10-11')).toBe('Daily Summary for Sun Oct 11');
   });
@@ -172,6 +185,33 @@ describe('the runtime’s notes to Will', () => {
     expect(noteOf(stored[0]!)).toEqual({ title: 'A Database Update Failed', body: TEMPLATES.migrate_failed.fieldFreeBody });
     expect(noteOf(stored[1]!).title).toBe('One of Your Rules Matched');
     expect(noteOf(stored[7]!)).toEqual({ title: 'Something Needs a Look', body: TEMPLATES.calendar_upcoming.fieldFreeBody });
+  });
+
+  it('goal reviews: what Goal Reviews says in Settings > Health, and what a goal route or card is refused with, are plain sentences too', () => {
+    // Not notes (nothing here is posted), so they stay out of the producers' count; the words are held to the same rules.
+    const said = (from: string, title: string, body: string) => {
+      expect(noteProblems(title, body), `${from}: ${title} / ${body}`).toEqual([]);
+      for (const re of NEVER) expect(`${title}\n${body}`, `${from}: ${body}`).not.toMatch(re);
+      for (const line of body.split('\n')) expect(line, line).toMatch(/^[A-Z0-9“].*[.?]$/);
+    };
+    const health = [
+      GOAL_HEALTH.stopped, GOAL_HEALTH.noModel, DEFERRAL_SAYS,
+      ...[1, 2, 14].flatMap((n) => [GOAL_HEALTH.late(n), GOAL_HEALTH.down(n)]),
+      ...[1, 2, 3].map((n) => GOAL_HEALTH.noAnswer(n)),
+    ];
+    expect(health).toHaveLength(12);
+    for (const line of health) said('health/checks.ts goals', HEALTH_NAMES.goals!, line);
+    expect(HEALTH_NAMES.goals).toBe('Goal Reviews');
+    expect(GOAL_HEALTH.stopped).toBe(REVIEWS_STOPPED);
+    // Every sentence checks.ts can give for the component is one of these: none is put together where it is returned.
+    const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
+    const goalReviews = checks.slice(checks.indexOf('async function goalReviews('), checks.indexOf('export async function recordChecks'));
+    expect(goalReviews.match(/\bdetail: (?!true\b)/g)).toHaveLength(6);
+    expect(goalReviews.match(/detail: (GOAL_HEALTH\.\w+(\([\w.]+\))?|clip\(deferred\.detail\))/g)).toHaveLength(6);
+    // The refusals: every fixed sentence a goal card or a goal route answers with (the reviews' own among them).
+    const refusals = { ...GOAL_SAYS, ...GOAL_STATUS_SAYS };
+    for (const code of ['reviewsOff', 'reviewCap', 'notReady', 'replacedReview', 'reviewsStopped', 'minorCard', 'reviewStep', 'runtimeOrigin'] as const) expect(GOAL_SAYS[code], code).toBeTruthy();
+    for (const [code, sentence] of Object.entries(refusals)) said(`GOAL_SAYS.${code}`, 'Goals', sentence);
   });
 
   it('the inventory is not empty by accident', () => {

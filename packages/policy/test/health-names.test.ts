@@ -17,6 +17,13 @@ describe('healthName', () => {
     expect(healthName('offsite_backup')).toBe('Offsite Backup');
     expect(HEALTH_NAMES.offsite_backup).toBe(JOB_WORDS['backup.offsite']);
   });
+
+  it('goal reviews (P3) are a component by their plain name; a review’s deferral mark is not a component', () => {
+    expect(healthName('goals')).toBe('Goal Reviews');
+    expect(HEALTH_NAMES.goals).toBe('Goal Reviews');
+    // Every name is Title Case, as Settings > Health shows it.
+    for (const name of Object.values(HEALTH_NAMES)) expect(name, name).toMatch(/^[A-Z][A-Za-z]*( [A-Z][A-Za-z]*)*$/);
+  });
 });
 
 describe('serviceWords', () => {

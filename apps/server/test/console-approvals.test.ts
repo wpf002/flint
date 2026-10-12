@@ -86,6 +86,8 @@ const settle = async () => {
   for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0));
 };
 const run = (code: string) => runInContext(code, ctx);
+/** The footer's note, read with plain spaces (its second sentence is held together with no-break ones). */
+const noteSays = () => ids.apprnote!.textContent.replace(/\u00a0/g, ' ');
 const card = (over: Record<string, unknown> = {}) => ({
   id: 'pr1', fullName: 'world.source.enable', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
   expiresAt: '2026-10-12T14:00:00.000Z', ...over,
@@ -183,7 +185,7 @@ describe('the console Approvals panel', () => {
     // Opening a row shows its facts; the invitation's markup arrives as literal text.
     rows[2]!.onclick!();
     expect(ids.apprlist!.children[0]!.children[2]!.shown()).toContain('<img src=x onerror=alert(1)>Ada');
-    expect(ids.apprnote!.textContent).toBe('You have 3 approvals waiting. Approve All skips 1.');
+    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 1.');
     expect(ids.apprall!.textContent).toBe('Approve All with Password');
     expect(ids.apprhelp!.hidden).toBe(true);
   });
@@ -208,7 +210,7 @@ describe('the console Approvals panel', () => {
       body: { signed: true, proposals: [card({ id: 'a' }), card({ id: 'b', args: { source: 'git' } }), card({ id: 't', tainted: true }), card({ id: 'm', fullName: 'spend.purchase' }), card({ id: 'c', args: { source: 'spend' } })] },
     });
     await open();
-    expect(ids.apprnote!.textContent).toBe('You have 5 approvals waiting. Approve All skips 2.');
+    expect(noteSays()).toBe('You have 5 approvals waiting. Approve All skips 2.');
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b', 'c']);
@@ -289,7 +291,7 @@ describe('the console Approvals panel', () => {
     expect(rows[0]!.shown()).toContain('Can’t Be Undone');
     expect(rows[1]!.shown()).toContain('Approve World Unknown ThingYou filed this.');
     expect(rows[1]!.shown()).not.toContain('world.unknown.thing');
-    expect(ids.apprnote!.textContent).toBe('You have 2 approvals waiting. Approve All skips 1.');
+    expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['n']);
@@ -479,7 +481,7 @@ describe('the console Approvals panel', () => {
   it('one card waiting says so in the singular', async () => {
     answer = () => ({ status: 200, body: { signed: true, proposals: [card()] } });
     await open();
-    expect(ids.apprnote!.textContent).toBe('You have 1 approval waiting.');
+    expect(noteSays()).toBe('You have 1 approval waiting.');
   });
 
   it('P3’s cards in words: a title, a sentence and their facts for every goal and plan action; never the raw action name', async () => {
@@ -499,7 +501,12 @@ describe('the console Approvals panel', () => {
       .toEqual(['Change a Goal’s Timing', 'This changes its date or how often it’s reviewed.', [['Goal', 'Synthetic goal'], ['Finish By', 'No Date'], ['Review Every', '2 Weeks']]]);
     expect(say({ fullName: 'goal.done', args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
     expect(say({ fullName: 'goal.abandon', args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
-    const ops = [{ op: 'add', key: 's4' }, { op: 'set', key: 's1', to: { dueAt: h } }, { op: 'set', key: 's2', to: { dueAt: h } }, { op: 'set', key: 's3', to: { status: 'blocked' } }];
+    // A review's cards as the runtime files them: each change with the step as it is now (`from`). The dates move by two days.
+    const was = new Date(Date.parse(h) - 2 * 86_400_000).toISOString();
+    const ops = [
+      { op: 'add', key: 's4' }, { op: 'set', key: 's1', from: { title: 'Synthetic step one', dueAt: was }, to: { dueAt: h } },
+      { op: 'set', key: 's2', from: { title: 'Synthetic step two', dueAt: was }, to: { dueAt: h } }, { op: 'set', key: 's3', from: { title: 'Synthetic step three', status: 'todo' }, to: { status: 'blocked' } },
+    ];
     expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
       .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
     expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
@@ -516,6 +523,16 @@ describe('the console Approvals panel', () => {
       .toContainEqual(['Limits', 'Review Your Goals 20 a Day · Suggest Goals from Chat 3 a Day · Add Commitments from Chat 10 a Day']);
   });
 
+  it('on a phone a card’s sentence wraps instead of being cut off, and the footer’s note has a line of its own above the button', () => {
+    const css = /<style>([\s\S]*?)<\/style>/.exec(html)![1]!;
+    const phone = /@media \(max-width:600px\)\{([\s\S]*?)\n  \}/.exec(css)![1]!;
+    // A closed card's second line ("Flint suggests a bigger change.") was one line with an ellipsis.
+    expect(css).toContain('.ct .sub{display:block;font-size:12px;line-height:16px;color:var(--t3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}');
+    expect(phone).toContain('.ct .sub{white-space:normal;}');
+    // The note beside a wide button wrapped to three lines, the last a number alone.
+    expect(phone).toContain('#apprfoot{flex-wrap:wrap;} #apprfoot .note{flex-basis:100%;}');
+  });
+
   it('every goal card, and every consequential card, asks on its own with a fresh touch and a plain prompt; minor plan and chat suggestions ride Approve All', async () => {
     const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
     const alone = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon'];
@@ -524,16 +541,45 @@ describe('the console Approvals panel', () => {
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change' })})`)).toBe(true);
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', consequential: true })})`)).toBe(true);
-    for (const p of [{ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false }, { fullName: 'goal.propose' }, { fullName: 'world.commitment.from_chat' }]) {
+    const small = [{ op: 'set', key: 's1', from: { title: 'Synthetic step one', status: 'todo' }, to: { status: 'blocked' } }];
+    for (const p of [{ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } }, { fullName: 'goal.propose' }, { fullName: 'world.commitment.from_chat' }]) {
       expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName).toBe(false);
     }
+    // Review finding 2: which plan card is a small one is read from its operations, never from the template's name alone.
+    const due = '2026-10-20T22:00:00.000Z';
+    const minor = (ops: unknown[], over: Record<string, unknown> = {}) => ({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops }, ...over });
+    const says = (p: Record<string, unknown>) => [run(`apprAlone(${JSON.stringify(p)})`), run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`)];
+    // Small: a status among not started, in progress and blocked; a date moved by a week at most; a step put elsewhere.
+    expect(says(minor([
+      ...small, { op: 'set', key: 's2', from: { title: 'T', dueAt: '2026-10-14T22:00:00.000Z' }, to: { dueAt: due } }, { op: 'set', key: 's3', from: { title: 'T', ordinal: 300 }, to: { ordinal: 50 } },
+    ]))).toEqual([false, 'Update a Plan', 'Flint suggests 3 small changes.']);
+    // Anything bigger under the same name asks on its own, and is not called small.
+    const bigger: Array<[string, unknown[]]> = [
+      ['a step added', [{ op: 'add', key: 's9', step: { ordinal: 900, title: 'Synthetic free text nobody templated', kind: 'flint_action', tier: 'alone' } }]],
+      ['a step skipped', [{ op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } }]],
+      ['a skipped step brought back', [{ op: 'set', key: 's1', from: { title: 'T', status: 'skipped' }, to: { status: 'todo' } }]],
+      ['a title', [{ op: 'set', key: 's1', from: { title: 'T' }, to: { title: 'Synthetic retitled step' } }]],
+      ['what it depends on', [{ op: 'set', key: 's1', from: { title: 'T', dependsOn: [] }, to: { dependsOn: ['s2'] } }]],
+      ['a date where there was none', [{ op: 'set', key: 's1', from: { title: 'T', dueAt: null }, to: { dueAt: due } }]],
+      ['a date taken away', [{ op: 'set', key: 's1', from: { title: 'T', dueAt: due }, to: { dueAt: null } }]],
+      ['a date moved over a week', [{ op: 'set', key: 's1', from: { title: 'T', dueAt: '2026-10-01T22:00:00.000Z' }, to: { dueAt: due } }]],
+      ['a change that does not say what from', [{ op: 'set', key: 's1', to: { dueAt: due } }]],
+      ['one small change beside a bigger one', [...small, { op: 'add', key: 's9', step: { ordinal: 900, title: 'Check on wpf002/flint #57', kind: 'will_task' } }]],
+      ['nothing at all', []],
+    ];
+    for (const [what, ops] of bigger) expect(says(minor(ops)), what).toEqual([true, 'Change a Plan', 'Flint suggests a bigger change.']);
+    // The server's own mark wins too, and a card whose args were cleared is never taken for a small one.
+    expect(says(minor(small, { consequential: true }))[0]).toBe(true);
+    expect(says({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: null })[0]).toBe(true);
     answer = () => ({
       status: 200,
       body: {
         signed: true,
         proposals: [
           ...alone.map((a, i) => goalCard(`g${i}`, a, { consequential: true })),
-          goalCard('pm', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [] } }),
+          goalCard('pm', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: small } }),
+          // Named small, holding a skip: it does not ride Approve All.
+          goalCard('px', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [{ op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } }] } }),
           goalCard('pw', 'plan.change', { consequential: true, args: { goalTitle: 'Synthetic goal', ops: [] } }),
           goalCard('gp', 'goal.propose', { origin: 'chat:c1', args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
           card({ id: 'src' }),
@@ -541,7 +587,9 @@ describe('the console Approvals panel', () => {
       },
     });
     await open();
-    expect(ids.apprnote!.textContent).toBe('You have 9 approvals waiting. Approve All skips 6.');
+    expect(noteSays()).toBe('You have 10 approvals waiting. Approve All skips 7.');
+    // The second sentence is one unbreakable run, so a narrow footer never leaves "7." on a line of its own.
+    expect(ids.apprnote!.textContent).toBe('You have 10 approvals waiting. Approve\u00a0All\u00a0skips\u00a07.');
     // Approve All signs only the cards that may share one prompt.
     run('approveAll()');
     await settle();

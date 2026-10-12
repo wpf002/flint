@@ -16,12 +16,18 @@ export const CLAIM_TEMPLATE_PARAMS = {
   deploy_succeeds: z.object({ entity: ClaimRef }).strict(),
   threshold: z.object({ series: z.string().regex(/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/).max(80), op: z.enum(['above', 'below']), value: z.number().finite() }).strict(),
   closed_by: z.object({ entity: ClaimRef }).strict(),
+  /**
+   * A goal review's forecast (P3): the goal by its ref (goal#<last 6 of its id>, never its title) and a local
+   * day. The runtime's own: it is not in ClaimTemplate below, so no tool and no caller of the ledger's route
+   * can fill it (the runtime refuses it there, and the database ties a goal's forecast to the goals writer).
+   */
+  goal_on_track: z.object({ goal: ClaimRef, by: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict(),
 } as const;
 
 export type ClaimTemplateId = keyof typeof CLAIM_TEMPLATE_PARAMS;
 export const CLAIM_TEMPLATE_IDS = Object.keys(CLAIM_TEMPLATE_PARAMS) as ClaimTemplateId[];
 
-/** A template with its params, as a tool takes it. */
+/** A template with its params, as a tool takes it. goal_on_track is not one of them: only a goal's review fills it. */
 export const ClaimTemplate = z.discriminatedUnion('id', [
   z.object({ id: z.literal('service_healthy'), params: CLAIM_TEMPLATE_PARAMS.service_healthy }).strict(),
   z.object({ id: z.literal('deploy_succeeds'), params: CLAIM_TEMPLATE_PARAMS.deploy_succeeds }).strict(),
