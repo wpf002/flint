@@ -280,11 +280,12 @@ export class BrainSet<P> {
 
   /**
    * The cheapest brain configured on `provider`, for the breaker's one-token
-   * check: the routine chain's first on it, else any tier's, else the last resort.
+   * check: the routine chain's first on it, else any tier's, else the last
+   * resort. With `model`, the brain on that model (the one being checked).
    */
-  cheapestOn(provider: string): BrainTier<P> | undefined {
+  cheapestOn(provider: string, model?: string): BrainTier<P> | undefined {
     const all = [...this.chain('routine'), ...TIERS.map((t) => this.byTier[t]), ...(this.lastResort ? [this.lastResort] : [])];
-    return all.find((b) => b.provider.name === provider);
+    return all.find((b) => b.provider.name === provider && (model === undefined || b.model === model));
   }
 
   /** One line per tier for the boot log. */

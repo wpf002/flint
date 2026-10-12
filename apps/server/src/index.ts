@@ -448,16 +448,16 @@ async function main(): Promise<void> {
   // The frontier breaker (./frontier-breaker): an outside AI that keeps failing (no credit, a
   // rejected key, an outage) is left alone for a cool-down and the local model answers at once.
   // Its one-token check needs the tier set, which is built further down.
-  let checkFrontier: (provider: string, signal: AbortSignal) => Promise<void> = async () => {
+  let checkFrontier: (provider: string, signal: AbortSignal, model?: string) => Promise<void> = async () => {
     throw new Error('no frontier brain');
   };
   const breaker = new FrontierBreaker({
-    probe: (p, signal) => checkFrontier(p, signal),
+    probe: (p, signal, m) => checkFrontier(p, signal, m),
     log: (m) => console.error(m),
     // Out of credit, or a rejected key: only Will can fix it, so the console says so once a day (no banner, no ping).
     onOpen: (e) => {
       const note = breakerNote(e);
-      if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });
+      if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.model ?? ''}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });
     },
   });
   // Every Flint client shares this: the audit trail, one ledger row per paid provider pass,
@@ -718,10 +718,10 @@ async function main(): Promise<void> {
     frontierFlint = flintOf.get(planner.persona);
     plannerVendor = vendorOfProvider(planner.provider.name);
     plannerProvider = planner.provider.name;
-    // The breaker's check after a cool-down: one token from the cheapest brain on that provider,
-    // bare, tried once, metered like any other call.
-    checkFrontier = async (p, signal) => {
-      const b = brains.cheapestOn(p);
+    // The breaker's check after a cool-down: one token from the cheapest brain on that provider
+    // (or from the one model that was paused), bare, tried once, metered like any other call.
+    checkFrontier = async (p, signal, m) => {
+      const b = brains.cheapestOn(p, m);
       const f = b && flintOf.get(b.persona);
       if (!f) throw new Error('no brain on that provider');
       await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });
@@ -1055,6 +1055,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // That an eval /generate honours `recall: false` (apps/parity tasks: answer on the
       // same data the frontier competitors get, which leaves long-term memory out).
       evalRecallOverride: true,
+      // Outside providers (or one model) the breaker has paused, with a reason code and the
+      // seconds to its next check (./frontier-breaker). Empty: nothing is paused.
+      frontierPaused: ctx.breaker.snapshot(),
     });
   }
 

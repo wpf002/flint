@@ -141,15 +141,21 @@ describe('index.ts wiring', () => {
   });
 
   it('the breaker\'s check is one token from the cheapest brain on that provider, tried once and metered', () => {
-    const block = between('checkFrontier = async (p, signal) => {', 'console.error(`[brain] frontier escalation ENABLED');
-    expect(block).toContain('const b = brains.cheapestOn(p);');
+    const block = between('checkFrontier = async (p, signal, m) => {', 'console.error(`[brain] frontier escalation ENABLED');
+    // ...or from the one model that was paused, when it is a model's own pause.
+    expect(block).toContain('const b = brains.cheapestOn(p, m);');
     expect(block).toContain("await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });");
   });
 
   it('Will is told once a day, in the console only, when a provider is paused for something only he can fix', () => {
     const block = between('const breaker = new FrontierBreaker({', 'const observer = combineObservers(');
     expect(block).toContain('const note = breakerNote(e);');
-    expect(block).toContain("if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });");
+    expect(block).toContain("if (note) notes.push(note.title, note.body, 'brain', `breaker:${e.provider}:${e.model ?? ''}:${e.reason}:${ledger.period().day}`, { channels: ['inapp'] });");
+  });
+
+  it('/health shows what the breaker has paused, as codes', () => {
+    const health = between("url === '/health'", '// Auth for everything else');
+    expect(health).toContain('frontierPaused: ctx.breaker.snapshot(),');
   });
 
   it('research planning waits while the breaker has its provider paused', () => {

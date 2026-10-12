@@ -497,6 +497,9 @@ describe('BrainSet.cheapestOn (the brain the breaker\'s check asks)', () => {
     expect(set.cheapestOn('perplexity')?.label).toBe('perplexity:sonar');
     expect(set.cheapestOn('openai')?.label).toBe('openai:gpt-5');
     expect(set.cheapestOn('ollama')).toBeUndefined();
+    // One model's own pause is checked on that model.
+    expect(set.cheapestOn('anthropic', 'claude-opus-4-1')?.label).toBe('anthropic:claude-opus-4-1');
+    expect(set.cheapestOn('anthropic', 'claude-nope')).toBeUndefined();
   });
 
   it('with defaults it is the one legacy frontier', () => {

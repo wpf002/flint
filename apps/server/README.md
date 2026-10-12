@@ -93,14 +93,21 @@ the same refusal from each, and only then asked the local model.
 
 | What happened | Opens after | Cool-down | Then |
 | --- | --- | --- | --- |
-| `credit`: a 400 saying the credit balance is too low (or OpenAI's spent quota) | 1 failed request | 1 hour | checked again every hour |
-| `auth`: 401 or 403, the key was rejected | 1 failed request | 1 hour | checked again every hour |
-| `transient`: 529 or any other 5xx, a timeout, a connection error | 3 failed requests in a row, no success between (Flint's own retries count) | 5 minutes | doubles with each failed check: 10, 20, 40, then 60 minutes |
+| `credit`: a 400 saying the credit balance is too low, a 402, or OpenAI's spent quota | 1 failed request | 15 minutes | checked again every 15 minutes |
+| `auth`: 401 or 403, the key was rejected | 1 failed request | 15 minutes | checked again every 15 minutes |
+| `transient`: 529 or any other 5xx, a timeout, a connection error | 2 failed requests in a row on the provider, no success between | 5 minutes | doubles with each failed check: 10, 20, 40, then 60 minutes |
 
-- **Per provider.** One key, one account: Opus failing for credit means Sonnet will too, so the
-  rest of that turn's Claude tiers are skipped, not asked. Another vendor's tier
-  (`FLINT_TIER_LAST_RESORT=openai:...`) or an `ollama:` tier is still tried. The local model is
-  never paused.
+- **What counts as a request.** Flint retries a retryable failure three times by itself; those
+  share one request id and count once. So one model having a bad minute cannot pause the provider:
+  Opus returns 529, the turn moves on to Sonnet, and Sonnet's answer starts the count over. It
+  takes two different requests failing with nothing answered between them.
+- **Per provider.** One key, one account: Opus failing for credit or a rejected key means Sonnet
+  will too, so the rest of that turn's Claude tiers are skipped, not asked. An outage that opens
+  the breaker mid-turn skips nobody in that turn; the next turn is the one that goes local. Another
+  vendor's tier (`FLINT_TIER_LAST_RESORT=openai:...`) or an `ollama:` tier is still tried. The
+  local model is never paused.
+- **One model.** A 403 that is about a model, not the key ("does not have access to model ..."),
+  pauses that model alone; its siblings on the same key stay in use, and the check asks that model.
 - **While it is open**, a turn that would have gone to that provider is answered by the local model
   from the start, on `/chat` and `/generate` alike, on every tier. The console marks the reply
   **Local** (the `/chat` `meta` event says `brain: "local"`), `/generate` says `brain: "local"`,
@@ -109,17 +116,23 @@ the same refusal from each, and only then asked the local model.
 - **One cheap check.** After the cool-down, the next turn that arrives is still answered locally
   at once, and sets off a single one-token call to the cheapest brain on that provider (metered in
   the spend ledger like any call). If it is answered, the provider is back in use from the next
-  turn; if not, the cool-down starts again. Any real call that succeeds closes it too. Nothing is
-  asked while nobody is chatting.
+  turn; if not, the cool-down starts again. Credit and a rejected key are rechecked every 15
+  minutes, because a failed check costs nothing. Any real call that succeeds closes it too. Nothing
+  is asked while nobody is chatting. A check that hangs is cut off at 30 seconds and counts as an
+  outage; a check that breaks for a reason of its own leaves the pause as it was.
 - **A turn only the frontier can answer** (an image or a PDF) is not gated: it is asked as before,
   since there is no local answer to give instead.
 - **Not counted:** a malformed request, an unknown model, a 429, a refusal, a closed tab.
-- **Will is told.** Out of credit or a rejected key puts one note in the console's notifications
-  ("Claude Is Out of Credit"), once a day, with no banner and no phone ping. A transient pause
-  clears itself and says nothing.
-- **In memory only.** A restart starts closed; one failing call opens it again. The log names the
-  provider and a reason code, never the provider's message:
-  `[breaker] anthropic paused (credit): the local model answers; next check in 60 min`.
+- **Will is told.** Out of credit, a rejected key, or a model the key may not use puts one note in
+  the console's notifications ("Claude Is Out of Credit"), once a day, with no banner and no phone
+  ping; also when a check finds that an outage was one of those all along. A transient pause clears
+  itself and says nothing.
+- **`GET /health`** lists what is paused as `frontierPaused`:
+  `[{ "scope": "anthropic", "reason": "credit", "nextCheckInSec": 840, "checking": false }]`
+  (empty when nothing is). A model's own pause has the scope `openai:gpt-5`.
+- **In memory only.** A restart starts closed; one failing call opens it again. Cool-downs run on
+  the monotonic clock. The log names the provider and a reason code, never the provider's message:
+  `[breaker] anthropic paused (credit): the local model answers; next check in 15 min`.
 
 **One failing try is quick.** The Anthropic client no longer retries on its own
 (`FLINT_FRONTIER_MAX_RETRIES`, default 0; the SDK's default is 2) and waits 60 seconds for a

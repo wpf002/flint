@@ -7,21 +7,25 @@
  * then did the local model get the question. Nothing remembered that the turn
  * before had failed the same way, so every turn paid for the failure again.
  *
- * What opens it, per provider (one key, one account, one endpoint: a failure of
- * these kinds is every model's on it):
- *  - `credit`: a 400 that says the credit balance is too low (or OpenAI's
- *    insufficient_quota). At once.
- *  - `auth`: 401 or 403, the key was rejected. At once.
+ * What opens it:
+ *  - `credit`: a 400 that says the credit balance is too low, a 402, or
+ *    OpenAI's insufficient_quota. At once, for the whole provider (one account).
+ *  - `auth`: 401 or 403, the key was rejected. At once, for the whole provider;
+ *    unless it is a 403 about one model (modelScoped), which pauses that model
+ *    alone and leaves its siblings in use.
  *  - `transient`: 529 and any other 5xx, a timeout, a connection error. After
- *    BREAKER_THRESHOLD failed requests in a row with no success between them
- *    (Flint's own retries count: each is a request that failed).
+ *    BREAKER_THRESHOLD failed REQUESTS in a row on the provider with no success
+ *    between them. One request's own retries count once (they share a request
+ *    id), so one model having a bad minute cannot pause the provider by itself:
+ *    the turn moves on to a sibling, and its answer starts the count over.
  * Nothing else is counted: a malformed request, an unknown model, a 429, a
  * refusal or a closed tab says nothing about the next call.
  *
- * While it is open, `paused(provider)` gives the reason code, and a turn that
- * the local model may answer leaves that provider's brains out (gateTurn). The
+ * While it is open, `paused(provider, model)` gives the reason code, and a turn
+ * that the local model may answer leaves those brains out (gateTurn). The
  * cool-down is 5 minutes for `transient`, doubling up to 1 hour while checks
- * keep failing, and 1 hour for `credit` and `auth`.
+ * keep failing, and 15 minutes for `credit` and `auth` (a failed check costs
+ * nothing, so there is no reason to wait longer).
  *
  * After the cool-down, the next turn that comes along sets off ONE cheap check
  * (`probe`: a one-token call) and is itself still answered locally at once: no
@@ -35,8 +39,9 @@
  * the local Ollama model is the last resort and is never skipped.
  *
  * State is in memory only: a restart starts closed, and one failing call opens
- * it again. Log lines carry the provider and a reason code, never a provider's
- * message.
+ * it again. Time is the monotonic clock, so a clock change neither ends a
+ * cool-down early nor stretches it. Log lines carry the provider and a reason
+ * code, never a provider's message.
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
@@ -46,14 +51,14 @@ import type { Brain } from './policy';
 
 export type BreakerReason = 'credit' | 'auth' | 'transient';
 
-/** Failed requests in a row (no success between) before `transient` opens it. */
-export const BREAKER_THRESHOLD = 3;
+/** Failed requests in a row on a provider (no success between) before `transient` opens it. */
+export const BREAKER_THRESHOLD = 2;
 /** The first `transient` cool-down; each failed check doubles it. */
 export const TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000;
 /** Where the doubling stops. */
 export const MAX_COOLDOWN_MS = 60 * 60 * 1000;
-/** `credit` and `auth`: nothing changes until Will does something, so check hourly. */
-export const HARD_COOLDOWN_MS = 60 * 60 * 1000;
+/** `credit` and `auth`: nothing changes until Will does something, and a failed check is free, so check every 15 minutes. */
+export const HARD_COOLDOWN_MS = 15 * 60 * 1000;
 /** How long the one-token check may take before it counts as a `transient` failure. */
 export const PROBE_TIMEOUT_MS = 30 * 1000;
 
@@ -70,24 +75,42 @@ export function creditExhausted(message: string): boolean {
 /** The parts of an AiError the breaker reads. */
 export type Failure = Pick<AiError, 'kind' | 'message' | 'retryable'> & { providerCode?: string | undefined };
 
+/** The HTTP status an AiError carries as its providerCode, when it is one (OpenAI sends its own codes instead). */
+function statusOf(err: Failure): number | undefined {
+  const code = err.providerCode ?? '';
+  return /^\d{3}$/.test(code) ? Number(code) : undefined;
+}
+
 /**
  * Which kind of "will keep failing" this error is, or undefined when it is not
  * one. Read from the canonical AiError the adapters produce: `providerCode` is
  * the HTTP status for Anthropic, and OpenAI's own error code when it sent one.
  */
 export function breakerReason(err: Failure): BreakerReason | undefined {
-  const code = err.providerCode ?? '';
-  const status = /^\d{3}$/.test(code) ? Number(code) : undefined;
-  // OpenAI's spent quota is a 429 its adapter marks as not worth retrying.
-  if ((status === 400 && creditExhausted(err.message)) || code === 'insufficient_quota' || (status === 429 && err.kind === 'validation')) return 'credit';
+  const status = statusOf(err);
+  // 402 is Payment Required. OpenAI's spent quota is a 429 its adapter marks as not worth retrying.
+  if (status === 402 || (status === 400 && creditExhausted(err.message)) || err.providerCode === 'insufficient_quota' || (status === 429 && err.kind === 'validation')) return 'credit';
   if (status === 401 || status === 403 || /\(check the API key\)$/.test(err.message)) return 'auth';
   if (err.kind === 'provider_unavailable') return 'transient'; // 5xx (529 included), or no connection at all
   if (err.kind === 'timeout' && err.retryable) return 'transient'; // a deadline; a caller's own cancellation is not retryable
   return undefined;
 }
 
+/**
+ * Is this `auth` failure about ONE model, not the key? A permission error
+ * (never a 401, which is the key itself) whose message names the model asked
+ * for, or speaks of a model: "does not have access to model gpt-5". Its
+ * siblings on the same key still answer, so only that model is paused.
+ */
+export function modelScoped(err: Failure, model: string | undefined): boolean {
+  if (!model || statusOf(err) === 401) return false;
+  return err.message.includes(model) || /\bmodels?\b/i.test(err.message);
+}
+
 export interface BreakerEvent {
   provider: string;
+  /** Set when one model is paused and the rest of the provider is not. */
+  model?: string;
   reason: BreakerReason;
   cooldownMs: number;
 }
@@ -96,11 +119,13 @@ export interface BreakerOptions {
   /**
    * One cheap call to `provider` (a one-token generation): resolves when it was
    * answered, rejects with what the call threw. `signal` ends it at the timeout.
+   * `model` is set when it is that one model being checked.
    */
-  probe: (provider: string, signal: AbortSignal) => Promise<void>;
+  probe: (provider: string, signal: AbortSignal, model?: string) => Promise<void>;
+  /** Milliseconds on a clock that only goes forward (default performance.now). */
   now?: () => number;
   log?: (msg: string) => void;
-  /** Told when a provider is newly paused (not when a check fails on one already paused). */
+  /** Told when a provider is newly paused, and when a check finds another reason than the one it was paused for. */
   onOpen?: (e: BreakerEvent) => void;
   threshold?: number;
   probeTimeoutMs?: number;
@@ -115,13 +140,19 @@ interface Open {
   probing: boolean;
 }
 
+/** One breaker: a whole provider's, or one model's (a 403 about that model). */
 interface State {
-  /** `transient` failures in a row while closed. */
+  provider: string;
+  model?: string;
+  /** `transient` failures in a row while closed, one per request. */
   failures: number;
+  /** The request ids already counted, so a request's retries are one failure. */
+  counted: Set<string>;
   open?: Open;
 }
 
 const minutes = (ms: number): number => Math.round(ms / 60_000);
+const scopeOf = (provider: string, model?: string): string => (model === undefined ? provider : `${provider}:${model}`);
 
 export class FrontierBreaker {
   private readonly states = new Map<string, State>();
@@ -130,104 +161,156 @@ export class FrontierBreaker {
   private readonly threshold: number;
 
   constructor(private readonly opts: BreakerOptions) {
-    this.now = opts.now ?? Date.now;
+    this.now = opts.now ?? (() => performance.now());
     this.log = opts.log ?? (() => {});
     this.threshold = opts.threshold ?? BREAKER_THRESHOLD;
   }
 
   /**
-   * Why `provider` is not to be asked now (its reason code), or undefined when
-   * it may be. Past the cool-down this sets off the check, once, and the
-   * provider stays paused until that check is answered.
+   * Why `model` on `provider` is not to be asked now (the reason code), or
+   * undefined when it may be: the provider's own pause first, else that
+   * model's. Past the cool-down this sets off the check, once, and the pause
+   * holds until that check is answered.
    */
-  paused(provider: string): BreakerReason | undefined {
-    const open = this.states.get(provider)?.open;
-    if (!open) return undefined;
-    if (!open.probing && this.now() >= open.until) this.check(provider, open);
+  paused(provider: string, model?: string): BreakerReason | undefined {
+    return this.pausedAt(provider) ?? (model !== undefined ? this.pausedAt(scopeOf(provider, model)) : undefined);
+  }
+
+  private pausedAt(scope: string): BreakerReason | undefined {
+    const s = this.states.get(scope);
+    const open = s?.open;
+    if (!s || !open) return undefined;
+    if (!open.probing && this.now() >= open.until) this.check(s, open);
     return open.reason;
   }
 
-  /** A provider request failed. Opens the breaker when the failure is one that will repeat. */
-  failed(provider: string, err: Failure): void {
+  /**
+   * A provider request failed. Opens the breaker when the failure is one that
+   * will repeat. `at.requestId` is the request it belongs to (its retries share
+   * it, and count once); `at.model` the model asked.
+   */
+  failed(provider: string, err: Failure, at: { requestId?: string; model?: string } = {}): void {
     if (vendorOfProvider(provider) === undefined) return; // the local model is never paused
     const reason = breakerReason(err);
     if (!reason) return;
-    let s = this.states.get(provider);
-    if (!s) this.states.set(provider, (s = { failures: 0 }));
+    const model = reason === 'auth' && modelScoped(err, at.model) ? at.model : undefined;
+    const scope = scopeOf(provider, model);
+    let s = this.states.get(scope);
+    if (!s) this.states.set(scope, (s = { provider, ...(model !== undefined ? { model } : {}), failures: 0, counted: new Set() }));
     if (s.open) return; // already paused: a call that was in flight, or the check's own failure
-    if (reason === 'transient' && ++s.failures < this.threshold) return;
-    const cooldownMs = reason === 'transient' ? TRANSIENT_COOLDOWN_MS : HARD_COOLDOWN_MS;
-    s.failures = 0;
-    s.open = { reason, cooldownMs, until: this.now() + cooldownMs, probing: false };
-    this.log(`[breaker] ${provider} paused (${reason}): the local model answers; next check in ${minutes(cooldownMs)} min`);
-    try {
-      this.opts.onOpen?.({ provider, reason, cooldownMs });
-    } catch {
-      /* a listener's failure is not the breaker's */
+    if (reason === 'transient') {
+      if (at.requestId !== undefined) {
+        if (s.counted.has(at.requestId)) return; // this request's retry: already counted
+        s.counted.add(at.requestId);
+      }
+      if (++s.failures < this.threshold) return;
+    }
+    this.pause(s, reason, reason === 'transient' ? TRANSIENT_COOLDOWN_MS : HARD_COOLDOWN_MS, true);
+  }
+
+  /** A provider request was answered: the count starts over, and an open breaker (the provider's, and that model's) closes. */
+  succeeded(provider: string, model?: string): void {
+    for (const scope of model === undefined ? [provider] : [provider, scopeOf(provider, model)]) {
+      const s = this.states.get(scope);
+      if (!s) continue;
+      s.failures = 0;
+      s.counted.clear();
+      if (!s.open) continue;
+      delete s.open;
+      this.log(`[breaker] ${scope} answered: back in use`);
     }
   }
 
-  /** A provider request was answered: the count starts over, and an open breaker closes. */
-  succeeded(provider: string): void {
-    const s = this.states.get(provider);
-    if (!s) return;
-    s.failures = 0;
-    if (!s.open) return;
-    delete s.open;
-    this.log(`[breaker] ${provider} answered: back in use`);
+  /** What the breaker holds for a provider (or one model on it) right now. */
+  state(provider: string, model?: string): { failures: number; open?: { reason: BreakerReason; until: number; cooldownMs: number; probing: boolean } } {
+    const s = this.states.get(scopeOf(provider, model));
+    return { failures: s?.failures ?? 0, ...(s?.open ? { open: { ...s.open } } : {}) };
   }
 
-  /** What the breaker holds for a provider right now (tests, the boot log). */
-  state(provider: string): { failures: number; open?: { reason: BreakerReason; until: number; cooldownMs: number; probing: boolean } } {
-    const s = this.states.get(provider);
-    return { failures: s?.failures ?? 0, ...(s?.open ? { open: { ...s.open } } : {}) };
+  /** Every pause in force, for /health: what is paused, why (a code), and how long until its next check. Reads only: it starts no check. */
+  snapshot(): Array<{ scope: string; reason: BreakerReason; nextCheckInSec: number; checking: boolean }> {
+    const t = this.now();
+    return [...this.states.entries()]
+      .filter(([, s]) => s.open)
+      .map(([scope, s]) => ({ scope, reason: s.open!.reason, nextCheckInSec: Math.max(0, Math.ceil((s.open!.until - t) / 1000)), checking: s.open!.probing }));
   }
 
   /**
    * The observer that feeds the breaker from every request a Flint client
    * makes. Core emits `onError` once per failed provider request (each retry is
-   * its own) and `onResponse` once per answered pass; a pass that ended `error`
-   * or `aborted` reports what it was billed, not an answer.
+   * its own, under one request id) and `onResponse` once per answered pass; a
+   * pass that ended `error` or `aborted` reports what it was billed, not an answer.
    */
   observer(): AiObserver {
     return {
-      onError: (e) => this.failed(e.provider, e.error),
+      onError: (e) => this.failed(e.provider, e.error, { requestId: e.requestId, model: e.model }),
       onResponse: (e) => {
-        if (e.reason !== 'error' && e.reason !== 'aborted') this.succeeded(e.provider);
+        if (e.reason !== 'error' && e.reason !== 'aborted') this.succeeded(e.provider, e.model);
       },
     };
   }
 
-  /** The one check after a cool-down. Never throws, and nothing awaits it. */
-  private check(provider: string, open: Open): void {
+  /** Pause (or keep paused, for another reason or another cool-down). `tell`: this is news for Will. */
+  private pause(s: State, reason: BreakerReason, cooldownMs: number, tell: boolean): void {
+    const scope = scopeOf(s.provider, s.model);
+    s.failures = 0;
+    s.counted.clear();
+    s.open = { reason, cooldownMs, until: this.now() + cooldownMs, probing: false };
+    this.log(
+      tell
+        ? `[breaker] ${scope} paused (${reason}): ${s.model === undefined ? 'the local model answers' : 'its other models still answer'}; next check in ${minutes(cooldownMs)} min`
+        : `[breaker] ${scope} still failing (${reason}): next check in ${minutes(cooldownMs)} min`,
+    );
+    if (!tell) return;
+    try {
+      this.opts.onOpen?.({ provider: s.provider, ...(s.model !== undefined ? { model: s.model } : {}), reason, cooldownMs });
+    } catch {
+      /* a listener's failure is not the breaker's */
+    }
+  }
+
+  /**
+   * The one check after a cool-down. Never throws, and nothing awaits it. It
+   * races the call against its own deadline, so a check that never settles is a
+   * timeout like any other and cannot leave the breaker checking forever.
+   */
+  private check(s: State, open: Open): void {
     open.probing = true;
     const ac = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      ac.abort();
-    }, this.opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS);
-    timer.unref?.();
-    void Promise.resolve()
-      .then(() => this.opts.probe(provider, ac.signal))
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        resolve('timeout');
+      }, this.opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    const asked = Promise.resolve()
+      .then(() => this.opts.probe(s.provider, ac.signal, s.model))
       .then(
-        () => this.succeeded(provider),
-        (err: unknown) => {
-          const s = this.states.get(provider);
-          if (!s?.open || s.open !== open) return; // a real call closed it while the check ran
-          // Our own deadline is a timeout however the adapter words the abort.
-          const reason = timedOut ? 'transient' : isFlintError(err) ? breakerReason(err.error) : undefined;
-          if (!reason) {
-            // It answered, with something that is no outage (a 429, a 4xx of the check's own): real calls decide.
-            this.succeeded(provider);
-            return;
-          }
-          const cooldownMs = reason !== 'transient' ? HARD_COOLDOWN_MS : open.reason === 'transient' ? Math.min(MAX_COOLDOWN_MS, open.cooldownMs * 2) : TRANSIENT_COOLDOWN_MS;
-          s.open = { reason, cooldownMs, until: this.now() + cooldownMs, probing: false };
-          this.log(`[breaker] ${provider} still failing (${reason}): next check in ${minutes(cooldownMs)} min`);
-        },
-      )
-      .finally(() => clearTimeout(timer));
+        () => 'answered' as const,
+        (err: unknown) => ({ err }),
+      );
+    void Promise.race([asked, deadline]).then((outcome) => {
+      clearTimeout(timer);
+      if (s.open !== open) return; // a real call closed it (or opened it afresh) while the check ran
+      if (outcome === 'answered') return this.succeeded(s.provider, s.model);
+      // What the check found. Its own deadline is a timeout however the adapter words the abort. An
+      // error that is not the provider's (the check itself broke) is evidence of nothing: the pause
+      // stays as it was. A provider answer that is no outage (a 429, a 4xx of the check's own) means
+      // it is reachable and willing: real calls decide from here.
+      let found: BreakerReason;
+      if (outcome === 'timeout') found = 'transient';
+      else if (!isFlintError(outcome.err)) found = open.reason;
+      else {
+        const reason = breakerReason(outcome.err.error);
+        if (!reason) return this.succeeded(s.provider, s.model);
+        found = reason;
+      }
+      const cooldownMs = found !== 'transient' ? HARD_COOLDOWN_MS : open.reason === 'transient' ? Math.min(MAX_COOLDOWN_MS, open.cooldownMs * 2) : TRANSIENT_COOLDOWN_MS;
+      // Another reason than it was paused for (an outage that turns out to be no credit) is news: Will is told.
+      this.pause(s, found, cooldownMs, found !== open.reason);
+    });
   }
 }
 
@@ -241,12 +324,12 @@ export interface PausedBrain {
   reason: BreakerReason;
 }
 
-/** A turn's planned chain without the brains whose provider is paused, and which those were. */
+/** A turn's planned chain without the brains that are paused (their provider, or that one model), and which those were. */
 export function gateChain<P>(chain: readonly BrainTier<P>[], breaker: Pick<FrontierBreaker, 'paused'>): { chain: BrainTier<P>[]; paused: PausedBrain[] } {
   const open: BrainTier<P>[] = [];
   const paused: PausedBrain[] = [];
   for (const b of chain) {
-    const reason = breaker.paused(b.provider.name);
+    const reason = breaker.paused(b.provider.name, b.model);
     if (reason) paused.push({ label: b.label, provider: b.provider.name, reason });
     else open.push(b);
   }
@@ -260,9 +343,9 @@ export function pausedCode(paused: readonly PausedBrain[]): string | undefined {
 }
 
 /**
- * Thrown in place of asking a brain whose provider was paused while its turn
- * was already running (an earlier brain's failure opened the breaker), so the
- * chain moves on without paying for the same failure twice.
+ * Thrown in place of asking a brain whose provider was paused, for `credit` or
+ * `auth`, while its turn was already running (an earlier brain's failure opened
+ * the breaker), so the chain moves on without paying for the same failure twice.
  */
 export class FrontierPaused extends Error {
   constructor(
@@ -273,11 +356,17 @@ export class FrontierPaused extends Error {
   }
 }
 
-/** Wrap a chain's attempt (runWithFallback, answerWithFallback) so a paused provider's brain is skipped, not asked. */
+/**
+ * Wrap a chain's attempt (runWithFallback, answerWithFallback) so that a brain
+ * paused while the turn runs is skipped, not asked, when the reason is the
+ * account's (`credit`, `auth`): no sibling on that key will fare better. A
+ * `transient` pause opened mid-turn skips nobody in that turn: one model's bad
+ * minute says little about its siblings, and the turn is already under way.
+ */
 export function gated<P, T>(breaker: Pick<FrontierBreaker, 'paused'>, attempt: (brain: BrainTier<P>) => Promise<T>): (brain: BrainTier<P>) => Promise<T> {
   return async (brain) => {
-    const reason = breaker.paused(brain.provider.name);
-    if (reason) throw new FrontierPaused({ label: brain.label, provider: brain.provider.name, reason });
+    const reason = breaker.paused(brain.provider.name, brain.model);
+    if (reason && reason !== 'transient') throw new FrontierPaused({ label: brain.label, provider: brain.provider.name, reason });
     return attempt(brain);
   };
 }
@@ -300,7 +389,7 @@ export interface TurnGate<P> {
  *    the local brain not refused) leaves out the brains whose provider is
  *    paused; with none left it is a local turn from the start, answered at once;
  *  - while it runs, a brain whose provider an earlier brain's failure has just
- *    paused is skipped as well (`attempt`);
+ *    paused for `credit` or `auth` is skipped as well (`attempt`, see gated);
  *  - a turn only the frontier can answer is left exactly as planned: there is
  *    no local answer to hurry to, and its call may be the one that works.
  */
@@ -332,10 +421,13 @@ const NAMES: Record<string, string> = { anthropic: 'Claude', openai: 'OpenAI', p
  * The note for Will when a provider is paused for something only he can fix.
  * A `transient` pause clears itself in minutes and gets no note.
  */
-export function breakerNote(e: Pick<BreakerEvent, 'provider' | 'reason'>): { title: string; body: string } | undefined {
+export function breakerNote(e: Pick<BreakerEvent, 'provider' | 'reason' | 'model'>): { title: string; body: string } | undefined {
   const name = NAMES[e.provider] ?? e.provider;
-  const body = 'Flint is answering with the local model, and checks again every hour.';
+  const body = 'Flint is answering with the local model, and checks again every 15 minutes.';
   if (e.reason === 'credit') return { title: `${name} Is Out of Credit`, body };
-  if (e.reason === 'auth') return { title: `${name} Rejected Flint's Key`, body };
-  return undefined;
+  if (e.reason !== 'auth') return undefined;
+  if (e.model === undefined) return { title: `${name} Rejected Flint's Key`, body };
+  // Only a model id's characters: it is read from config, and is shown as is.
+  const model = e.model.replace(/[^A-Za-z0-9._:/-]/g, '').slice(0, 80);
+  return { title: `${name} Refused One Model`, body: `Flint's key can't use ${model}. Its other models still answer, and Flint checks again every 15 minutes.` };
 }
