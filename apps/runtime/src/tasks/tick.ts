@@ -74,7 +74,8 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
     if (live) continue;
     const done = await db.$transaction(async (tx) => {
       const r = await tx.task.updateMany({ where: { id: t.id, status: 'proposed' }, data: { status: 'cancelled' } });
-      if (r.count) await appendAudit(tx, [{ actor: TASKS_ORIGIN, context: 'autonomous', kind: 'decision', action: 'task.cancel', decision: 'log', outcome: 'ok', inputs: { taskId: t.id, why: 'card_gone' }, correlationId: `task:${t.id}`, tainted: false }], now);
+      // `now` decides what is overdue; what is written carries the time it is written.
+      if (r.count) await appendAudit(tx, [{ actor: TASKS_ORIGIN, context: 'autonomous', kind: 'decision', action: 'task.cancel', decision: 'log', outcome: 'ok', inputs: { taskId: t.id, why: 'card_gone' }, correlationId: `task:${t.id}`, tainted: false }]);
       return r.count > 0;
     }, RC);
     if (done) counts.cancelled += 1;

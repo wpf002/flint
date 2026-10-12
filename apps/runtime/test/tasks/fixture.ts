@@ -6,7 +6,7 @@
  * what was sent. Synthetic text only: any free text a test plants carries
  * CANARY, so a test can search a log, a job or an audit entry for it.
  */
-import { id, withClient, type TestUrls } from '../db';
+import { HEX, id, withClient, type TestUrls } from '../db';
 import { enrollTestKey } from '../sign';
 import { FakeBus } from '../goals/fixture';
 import type { Db } from '../../src/db';
@@ -74,6 +74,18 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
     return (await db.entity.findFirstOrThrow({ where: { key: k } })).id;
   }
 
+  /** An item written straight into the world model (a test's own: no source reads it). Returns its id. */
+  async function entity(kind: string, state: Record<string, unknown> = {}, over: { name?: string; taintedPaths?: string[]; sensitivity?: string } = {}): Promise<string> {
+    const eid = id('en');
+    await db.entity.create({ data: { id: eid, kind, key: `${kind}:test:${eid}`, name: over.name ?? 'synthetic', state: state as object, stateHash: HEX('d'), taintedPaths: over.taintedPaths ?? [], sensitivity: over.sensitivity ?? 'ops', lastObservedAt: new Date() } });
+    return eid;
+  }
+  /** Will forgets an item (a signed forget), through the database's own procedure. */
+  async function forget(entityId: string): Promise<void> {
+    const aid = await key.approve({ subjectType: 'forget', subjectId: entityId, action: 'world.forget', argsDigest: HEX('a') });
+    await withClient(urls.app, (c) => c.query(`SELECT forget_entity($1, $2)`, [entityId, aid]));
+  }
+
   /** The CI watcher, turned on by Will's signed card (once). */
   async function watcherOn(): Promise<void> {
     if ((await db.asset.findUnique({ where: { id: CI_WATCHER.id } }))?.enabled) return;
@@ -115,6 +127,6 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
     const resolutions = await db.resolution.findMany({ select: { evidence: true } });
     return JSON.stringify([bus.sent.map((j) => j.data), audits, cards, health, predictions, resolutions], (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
   }
-  return { key, bus, owner, sign, approve, signRun, signRunCard, file, ciRun, watcherOn, newTask, dispatched, checked, task, cardFor, policy, everythingButTasks };
+  return { key, bus, owner, sign, approve, signRun, signRunCard, file, ciRun, entity, forget, watcherOn, newTask, dispatched, checked, task, cardFor, policy, everythingButTasks };
 }
 export type TaskFixture = Awaited<ReturnType<typeof taskFixture>>;
