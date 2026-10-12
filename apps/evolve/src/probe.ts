@@ -14,6 +14,7 @@
  * to live here are gone: there is no code path from evolve's probe to a vendor.
  */
 import { localOnly } from './promote.js';
+import { tierOllamaHost } from './vendors.js';
 
 export interface ProbeResult {
   ok: boolean;
@@ -24,7 +25,9 @@ export interface ProbeResult {
 const TIMEOUT_MS = 120_000;
 
 /**
- * A one-token generation against the Ollama Flint would use (OLLAMA_HOST).
+ * A one-token generation against the Ollama the server's `ollama:` tier is
+ * served from (vendors.ts tierOllamaHost: FLINT_TIER_OLLAMA_HOST, else
+ * FLINT_FRONTIER_BASE_URL, else OLLAMA_HOST), the same one the screen listed.
  *
  * An empty completion still counts as alive: the call was accepted and the
  * model ran, which is what is being tested.
@@ -41,8 +44,7 @@ export async function probe(opts: {
   // Not a local model: refused here too, whoever called, before any request is made.
   if (!local.ok) return { ok: false, detail: local.reason };
   try {
-    const host = env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434';
-    const res = await (opts.fetch ?? fetch)(`${host.replace(/\/$/, '')}/api/chat`, {
+    const res = await (opts.fetch ?? fetch)(`${tierOllamaHost(env)}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], stream: false, options: { num_predict: 1 } }),

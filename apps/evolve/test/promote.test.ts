@@ -155,6 +155,15 @@ describe('probe', () => {
     expect(asked[0]!.body).toMatchObject({ model: 'qwen3.8:27b', options: { num_predict: 1 } });
   });
 
+  // The screen listed the tier's Ollama; the probe must ask that same one, or it proves nothing about the tier.
+  it('asks the Ollama the server\'s ollama: tier is served from, not the local brain\'s', async () => {
+    const { f, asked } = recording();
+    await probe({ provider: 'ollama', model: 'big:70b', env: { OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_TIER_OLLAMA_HOST: 'http://bigbox:11434/' }, fetch: f });
+    await probe({ provider: 'ollama', model: 'big:70b', env: { OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434' }, fetch: f });
+    await probe({ provider: 'ollama', model: 'big:70b', env: {}, fetch: f });
+    expect(asked.map((a) => a.url)).toEqual(['http://bigbox:11434/api/chat', 'http://frontier:11434/api/chat', 'http://127.0.0.1:11434/api/chat']);
+  });
+
   it('reports a model that does not answer', async () => {
     const { f } = recording(404);
     const r = await probe({ provider: 'ollama', model: 'qwen2.5:14b', env: {}, fetch: f });

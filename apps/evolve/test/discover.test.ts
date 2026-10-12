@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { analyse, compareVersions, familyOf, isServed, parseTier } from '../src/discover';
-import { allCatalogs, wantsVendors } from '../src/vendors';
+import { allCatalogs, tierOllamaHost, wantsVendors } from '../src/vendors';
 
 const cat = (vendor: string, ids: string[]) => ({ vendor, models: ids.map((id) => ({ id })) });
 
@@ -135,6 +137,23 @@ describe('allCatalogs (what discover asks)', () => {
     expect(asked.some((u) => u.startsWith('https://api.openai.com/'))).toBe(true);
     expect(asked.some((u) => u.startsWith('https://api.anthropic.com/'))).toBe(true);
     expect(asked).toHaveLength(4);
+  });
+
+  // The server builds an `ollama:` tier's client from FLINT_TIER_OLLAMA_HOST, else FLINT_FRONTIER_BASE_URL,
+  // else OLLAMA_HOST (apps/server/src/brains.ts envProviderFactory). The catalog and the probe read the same.
+  it('lists the Ollama the tiers are served from', async () => {
+    expect(tierOllamaHost({})).toBe('http://127.0.0.1:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434/' })).toBe('http://gpu:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434' })).toBe('http://frontier:11434');
+    expect(tierOllamaHost({ OLLAMA_HOST: 'http://gpu:11434', FLINT_FRONTIER_BASE_URL: 'http://frontier:11434', FLINT_TIER_OLLAMA_HOST: ' http://bigbox:11434 ' })).toBe('http://bigbox:11434');
+    const asked = recordFetch();
+    await allCatalogs({ OLLAMA_HOST: 'http://127.0.0.1:11434', FLINT_TIER_OLLAMA_HOST: 'http://bigbox:11434' });
+    expect(asked).toEqual(['http://bigbox:11434/api/tags']);
+  });
+
+  it('reads the host in the order the server does (this fails if the server\'s order changes)', () => {
+    const server = readFileSync(join(__dirname, '..', '..', 'server', 'src', 'brains.ts'), 'utf8');
+    expect(server.replace(/\s+/g, ' ')).toContain("env.FLINT_TIER_OLLAMA_HOST?.trim() || env.FLINT_FRONTIER_BASE_URL?.trim() || env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434'");
   });
 
   it('the flag is --vendors, exactly, and off without it', () => {

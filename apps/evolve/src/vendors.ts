@@ -93,12 +93,24 @@ export async function ollamaCatalog(host: string): Promise<VendorCatalog> {
 }
 
 /**
- * The catalogs a run looks at: Ollama's alone, unless `vendors` asks for the
- * outside vendors' model lists as well (off by default; no vendor is contacted
- * and no key is read without it).
+ * The Ollama an `ollama:` tier is served from, read exactly as the server reads
+ * it (apps/server/src/brains.ts envProviderFactory): FLINT_TIER_OLLAMA_HOST,
+ * else FLINT_FRONTIER_BASE_URL, else OLLAMA_HOST, else this machine. A
+ * candidate is listed and probed THERE: checking it against another Ollama
+ * says nothing about whether the tier would answer.
+ */
+export function tierOllamaHost(env: NodeJS.ProcessEnv): string {
+  return (env.FLINT_TIER_OLLAMA_HOST?.trim() || env.FLINT_FRONTIER_BASE_URL?.trim() || env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434').replace(/\/$/, '');
+}
+
+/**
+ * The catalogs a run looks at: Ollama's alone (the one the tiers are served
+ * from, tierOllamaHost), unless `vendors` asks for the outside vendors' model
+ * lists as well (off by default; no vendor is contacted and no key is read
+ * without it).
  */
 export async function allCatalogs(env: NodeJS.ProcessEnv, opts: { vendors?: boolean } = {}): Promise<VendorCatalog[]> {
-  const host = env.OLLAMA_HOST?.trim() || 'http://127.0.0.1:11434';
+  const host = tierOllamaHost(env);
   if (!opts.vendors) return [await ollamaCatalog(host)];
   return Promise.all([
     openaiCatalog(env.OPENAI_API_KEY?.trim()),

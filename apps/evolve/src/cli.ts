@@ -30,9 +30,8 @@ import type { DailyRow } from './measure.js';
  * Run it unattended; read the report in the morning.
  *
  * `evolve try <tier>=ollama:<model>` — stage 3. It only ever tries a model on
- * this Mac's Ollama (promote.ts localOnly): an outside model is refused before
- * the baseline is read, a model list is fetched, or anything is written or
- * spent (an interrupted earlier try is still put back first).
+ * the tiers' Ollama (promote.ts localOnly): an outside model is refused before
+ * anything is read, fetched, written or spent.
  */
 
 const FLINT_HOME = process.env.FLINT_HOME?.trim() || join(homedir(), '.flint');
@@ -301,16 +300,17 @@ async function runTry(spec: string): Promise<number> {
     waitHealthy: makeWaitHealthy(url),
   };
 
-  // Always first: a previous run may have died mid-test.
-  const recovered = await recoverIfNeeded(io);
-  if (recovered) console.log(recovered);
-
-  // Only a local model is ever tried: refused before the baseline is read or anything is asked.
+  // Only a local model is ever tried. A request for anything else is refused before any file is
+  // read or written: it does not even set off the recovery below.
   const local = localOnly(cand);
   if (!local.ok) {
-    console.log(`refused: ${local.reason}. Nothing was tried or spent.`);
+    console.log(`refused: ${local.reason}. Nothing was read, changed or spent.`);
     return 1;
   }
+
+  // Then: a previous run may have died mid-test. Its marker is checked before it is believed (run-try.ts readRollback).
+  const recovered = await recoverIfNeeded(io);
+  if (recovered) console.log(recovered);
 
   // Free and local, so before anything that costs: the measurement asks the
   // baseline's prompts, and a tier none of them is sent to never answers.

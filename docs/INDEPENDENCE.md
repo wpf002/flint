@@ -95,9 +95,13 @@ the streaming, the badge — stays identical.
 - **`evolve try` only tries local models.** It rewrites `FLINT_TIER_*` in the
   live config, and used to accept any provider. It now refuses anything but
   `ollama:<model>` (not an Ollama cloud model either), at four separate points,
-  the config write included. `evolve discover` lists the local Ollama's models;
-  the outside vendors' lists need `--vendors`. Putting a tier on an outside
-  model is Will's call, made by hand.
+  the config write included, and a refused request touches nothing. Undoing a
+  try writes no value of its own either: the line a tier had before is parked
+  as a comment in the config and un-parked, so the only tier values evolve can
+  put there are a local candidate and Will's own line. Its rollback marker is
+  checked before it is believed. `evolve discover` lists the models on the
+  Ollama the tiers use; the outside vendors' lists need `--vendors`. Putting a
+  tier on an outside model is Will's call, made by hand.
 
 ### Still on an outside AI
 
