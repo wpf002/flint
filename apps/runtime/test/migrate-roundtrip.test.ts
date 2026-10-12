@@ -308,6 +308,74 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   });
 
+  // A rolled-back database is one a backup may be taken of, and a restore compares what it restored with what
+  // the checkout's migrations build (src/backup/catalog.ts). So a down.sql leaves exactly what an install
+  // without its migration has: the same tables, columns, checks, indexes, triggers, functions and grants.
+  // Held for every migration from P4 on (the older ones predate the comparison, and two keep a wider list on
+  // purpose for rows that are never deleted).
+  const COMPARED_SINCE = '20261013000000_p4_forecasts';
+  it.each(migrationDirs().filter((d) => d >= COMPARED_SINCE))('%s: its down.sql leaves exactly what an install without it has', async (name) => {
+    const all = checkoutMigrations(MIGRATIONS);
+    await migrateDown(owner);
+    const without = await withClient(owner, async (c) => {
+      await buildReference(c, all.filter((m) => m.name < name));
+      return catalogLines(c);
+    });
+    await migrateDown(owner);
+    await migrateUp(owner);
+    try {
+      const rolledBack = await withClient(owner, async (c) => {
+        for (const d of migrationDirs().filter((x) => x >= name).reverse()) await c.query(readFileSync(join(MIGRATIONS, d, 'down.sql'), 'utf8'));
+        return catalogLines(c);
+      });
+      expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+    } finally {
+      // Whatever it found, the tests after this one get the whole schema back.
+      await migrateUp(owner);
+    }
+  });
+
+  // The one thing P4's rollback cannot put back: once a forecast is on record as `statistical` (never before Will
+  // signs the card that turns a number on), the list of methods has to go on allowing it, because a prediction
+  // is never deleted. The row stays, the wider list stays with it, and nothing else differs.
+  it('P4\'s down.sql keeps allowing a statistical prediction that is on record, and nothing else differs', async () => {
+    const P4 = '20261013000000_p4_forecasts';
+    const all = checkoutMigrations(MIGRATIONS);
+    await migrateDown(owner);
+    const without = await withClient(owner, async (c) => {
+      await buildReference(c, all.filter((m) => m.name < P4));
+      return catalogLines(c);
+    });
+    await migrateDown(owner);
+    await migrateUp(owner);
+    try {
+      const rolledBack = await withClient(owner, async (c) => {
+        // On record as the forecast job would have left it; its guards are P4's own subject, so they are stepped around here.
+        await c.query(`ALTER TABLE "Prediction" DISABLE TRIGGER USER`);
+        await c.query(
+          `INSERT INTO "Prediction" ("id", "claim", "method", "domain", "type", "evidence", "resolutionCriteria", "resolver", "resolveBy", "createdBy", "probability")
+           VALUES ('p-statistical', 'a number crosses a line', 'statistical', 'services', 'threshold_cross', '[]', 'the number, read on the day', 'auto_metric', now() + interval '1 day', 'runtime:forecast', 0.5)`);
+        await c.query(`ALTER TABLE "Prediction" ENABLE TRIGGER USER`);
+        for (const d of migrationDirs().filter((x) => x >= P4).reverse()) await c.query(readFileSync(join(MIGRATIONS, d, 'down.sql'), 'utf8'));
+        expect((await c.query(`SELECT "method" FROM "Prediction" WHERE "id" = 'p-statistical'`)).rows).toEqual([{ method: 'statistical' }]);
+        return catalogLines(c);
+      });
+      const check = (lines: string[]) => lines.filter((l) => l.startsWith('constraint|public.Prediction|Prediction_method_check|'));
+      expect(check(rolledBack).join()).toContain(`'statistical'`);
+      expect(check(without).join()).not.toContain(`'statistical'`);
+      const rest = (lines: string[]) => lines.filter((l) => !check(lines).includes(l));
+      expect({ gone: rest(without).filter((l) => !rolledBack.includes(l)), left: rest(rolledBack).filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+    } finally {
+      // The row is a test's: take it away (its guards say never, which is why they are stepped around), then the whole schema back.
+      await withClient(owner, async (c) => {
+        await c.query(`ALTER TABLE "Prediction" DISABLE TRIGGER USER`);
+        await c.query(`DELETE FROM "Prediction" WHERE "id" = 'p-statistical'`);
+        await c.query(`ALTER TABLE "Prediction" ENABLE TRIGGER USER`);
+      });
+      await migrateUp(owner);
+    }
+  });
+
   // A change to a grant is a security change: it shows up as a diff to
   // fixtures/grants.json in review. FLINT_UPDATE_GRANTS=1 rewrites the fixture.
   it('the grants are exactly the reviewed ones', async () => {

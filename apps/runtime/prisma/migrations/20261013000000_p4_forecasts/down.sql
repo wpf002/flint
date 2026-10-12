@@ -33,11 +33,29 @@ ALTER TABLE IF EXISTS "MetricSeries"
   DROP CONSTRAINT IF EXISTS "MetricSeries_money_check", DROP CONSTRAINT IF EXISTS "MetricSeries_calendar_check",
   DROP CONSTRAINT IF EXISTS "MetricSeries_onbox_check";
 
--- Prediction_method_check keeps `statistical`: predictions are never deleted, so
--- the list keeps allowing the rows that exist (as p25_google's down keeps its source).
 ALTER TABLE IF EXISTS "Prediction"
   DROP COLUMN IF EXISTS "forecastRunId", DROP COLUMN IF EXISTS "seriesKey", DROP COLUMN IF EXISTS "unit",
   DROP COLUMN IF EXISTS "level", DROP COLUMN IF EXISTS "upper", DROP COLUMN IF EXISTS "lower", DROP COLUMN IF EXISTS "pointEstimate";
+
+-- Prediction_method_check goes back to P1's own list, to the letter (20261001000200_p1_ledger), so a database
+-- rolled back to here is what an install without P4 has: a restore compares the two, and refuses a backup whose
+-- checks differ. One case cannot go back: predictions are never deleted, so once a forecast has been recorded
+-- as `statistical` the list has to keep allowing it. Then, and only then, the wider list stays and this says so;
+-- no forecast is recorded until Will signs the card that turns a number on, so a rollback before that is exact.
+DO $$
+BEGIN
+  IF to_regclass('public."Prediction"') IS NULL THEN
+    RETURN;
+  END IF;
+  IF EXISTS (SELECT 1 FROM "Prediction" WHERE "method" = 'statistical') THEN
+    RAISE NOTICE 'p4_forecasts down: statistical predictions exist, so Prediction_method_check keeps allowing them';
+    RETURN;
+  END IF;
+  ALTER TABLE "Prediction"
+    DROP CONSTRAINT IF EXISTS "Prediction_method_check",
+    ADD CONSTRAINT "Prediction_method_check" CHECK ("method" IN ('model_reasoning', 'prophet', 'rule', 'base_rate', 'human'));
+END;
+$$;
 
 -- Range rows are derived (any later snapshot recomputes them), and have no Brier
 -- score to put back under NOT NULL. This table is made by p1_ledger: when its down
