@@ -233,7 +233,7 @@ check "every line it printed is a sentence, or a command on its own line" '[[ -z
 [[ -n $bad_lines ]] && print -r -- "$bad_lines"
 check "it says it passed, and how long it took" '[[ "$out" == *"The rehearsal passed in "*" seconds: the backups opened, the files and the database came back and passed their checks, and both services answered."* ]]'
 check "it opened the newest of each backup" '[[ "$out" == *"Flint opened the files backup from 2026-10-12 at 02:30."* && "$out" == *"Flint opened the database backup from "* ]]'
-check "it says it starts from the backup, and what is in force afterwards" '[[ "$out" == *"This Mac starts from the backup, so anything you revoked, switched off or told Flint to forget after it was made is back."* && "$out" == *"Flint may do nothing on its own after this restore: every action asks you first."* ]]'
+check "it says it starts from the backup, and what is in force afterwards" '[[ "$out" == *"The rebuilt Flint starts from the backup, so anything you revoked, switched off or told Flint to forget after it was made is back."* && "$out" == *"Flint may do nothing on its own after this restore: every action asks you first."* ]]'
 
 report="$new/report.tsv"
 val() { awk -F'\t' -v k="$1" '$1 == k { print $2 }' "$report"; }

@@ -306,12 +306,14 @@ developer. The short form:
 | What happened | What to do |
 |---|---|
 | An update broke Flint | Revert the pull request on GitHub. If Flint is not back in 10 minutes, on the Studio: `~/flint/apps/studio/rollback.sh` |
-| The database is damaged | On the Studio: `cd ~/flint && pnpm --filter @flint/runtime restore-production`, then type `RESTORE`. |
-| A memory, history or notes file is damaged | On the Studio: `~/flint/apps/studio/restore_file.sh memory` (or `history`, or `notifications`), then type `RESTORE`. |
+| The database is damaged | On the Studio: `~/flint/apps/studio/restore_database.sh`. It shows what will be in force afterwards; then type `RESTORE`. |
+| A memory, history or notes file is damaged or emptied | On the Studio: `~/flint/apps/studio/restore_file.sh memory` (or `history`, or `notifications`), then type `RESTORE`. It passes over a backup whose copy was emptied; add a day, such as `2026-10-10`, to choose the backup yourself. |
 | The Mac Studio is lost, stolen or dead | On the MacBook: `cd ~/flint && git pull && ./apps/studio/rebuild.sh --to NAME@NEWMAC.local` |
 
-None of them deletes anything: whatever is replaced is kept under another name.
-The rebuild is rehearsed on every deploy, into a scratch folder and a scratch
+Whatever one of them replaces is kept under another name. (A database restore
+also removes kept databases from restores more than 14 days ago, and names them
+before you confirm.) The rebuild is rehearsed every week, and in every deploy
+that changes what a rebuild is made of, into a scratch folder and a scratch
 database (`apps/studio/test/rebuild_rehearse.test.sh`); how it works is in
 [apps/studio/README.md](apps/studio/README.md#rebuild-and-recovery).
 

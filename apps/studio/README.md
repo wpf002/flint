@@ -38,42 +38,73 @@ This is how the pieces behind it work.
 
 | File | Runs on | Does |
 |---|---|---|
-| `rebuild.sh --to you@new-mac.local` | **MacBook** | Opens the newest offsite backups with the key that lives there, sends the opened copies to the new Mac over SSH, and runs the rebuild there. The key is never sent. |
-| `rebuild.sh --from <folder>` | new Mac | The rebuild itself: Flint's files, your settings, new secrets, the database (roles, restore, checks), the LaunchAgents, remote access, the installers, and the list of what still needs you. Refuses a Mac that already has a Flint. |
+| `rebuild.sh --to you@new-mac.local` | **MacBook** | Asks the new Mac whether it is fit (FileVault on, someone logged in, no Flint there, not this Mac) before anything is opened or sent. Then opens the newest offsite backups with the key that lives there, sends the opened copies over SSH, sets the new Mac up at the version the old one was running, and runs the rebuild there. The key is never sent; the opened copies are removed from the new Mac when the rebuild ends or fails. |
+| `rebuild.sh --unseal <folder>` | MacBook | Opens the newest backups into a folder, and nothing more. The runbook uses it to prove the key works. |
+| `rebuild.sh --from <folder>` | new Mac | The rebuild itself: your data (unpacked by name: memory, training, eval, spend, the adapters, notifications, the settings snapshot), your settings, new secrets, the database (roles, restore, checks), the LaunchAgents, remote access, the installers, and the list of what still needs you. Refuses a Mac that already has a Flint; run again after it stopped part-way, it starts over. |
 | `rebuild.sh --rehearse <folder>` | anywhere | The same rebuild into a scratch home folder and a scratch Postgres, with stand-ins for launchd and for anything that installs, signs in or shows something (`rehearsal/`). `rebuild.sh --stop <folder>` ends one left running. |
 | `settings.manifest` | — | Every setting, by name: restored, made new, re-entered by you, worked out at install, or retired. No values. A name that is not listed is treated as a secret. |
 | `settings_manifest.sh` | Studio, nightly | Saves the settings that are not secrets into `~/.flint/settings-snapshot.tsv`, so the offsite backup (which leaves out every settings file) still carries your switches. `--preview` says what it would save, by name, and writes nothing. `--check` names any setting on this Mac the manifest does not list. |
 | `agents.manifest`, `templates/` | — | Every `com.flint.*` LaunchAgent and where its file comes from: a template here (the server, the local model, Tailscale), a file kept in the repo, or an install script. |
-| `restore_file.sh memory` | Studio | Puts one of Flint's own files back from the newest local backup that holds a readable copy. The file as it was is kept. |
-| `rollback.sh` | Studio | Pauses updates (`~/.flint/deploy-hold`, which `apps/server/auto_deploy.sh` honours), then puts back the previous server and runtime. Never undoes a database update. |
+| `restore_file.sh memory` | Studio | Lists what every local backup holds, then puts one of Flint's own files back from the newest backup whose copy was not emptied, or from the day you add (`restore_file.sh memory 2026-10-10`). The file as it was is kept. |
+| `restore_database.sh` | Studio | The database's one command: `--check` (a trial run), no option (restore the newest whole backup, after you type `RESTORE`), `--list`, `--dump <name>`, `--repair`. It runs the runtime's own `restore-production` directly, so nothing but that command's sentences is printed. |
+| `rollback.sh` | Studio | Names the running version and the one before it, asks before going back, refuses to undo a revert unless told to by name, and pauses updates (`~/.flint/deploy-hold`) only when it went back. Never undoes a database update. |
+| `run_rehearsal.sh` | Studio | Runs the rebuild rehearsal and writes how it went to `~/.flint/rehearsal-result` for Settings > Health. Run weekly by `com.flint.rebuild-rehearsal`, and by the deploy gate when a deploy changes what a rebuild is made of. |
 | `recovery_lib.sh` | — | Shared by the above: the manifest reader, the checks a setting's value must pass, and the template renderer. |
 
-The database side is in the runtime: `pnpm --filter @flint/runtime restore-production`
-(Will, at the keyboard; `apps/runtime/src/backup/restore.ts`), `restore-empty`
-(a rebuild's restore, into an empty database only) and `bootstrap-db` (the five
-roles and two databases, each password new).
+The database side is in the runtime (`apps/runtime/README.md`, "Putting the
+database back from a backup"): `restore-production` (Will, at the keyboard, through
+`restore_database.sh`), `restore-empty` (a rebuild's step: the same path, into an
+empty database only) and `bootstrap-db` (the five roles and two databases, each
+password new).
 
 **What a rebuild trusts.** An offsite backup is encrypted to a public key, so it
-is private, but nothing proves who wrote it. The rebuild therefore runs nothing
-from a backup: settings are read as text and each value must match the shape its
-name is listed with and not look like a secret; restored scripts lose their
-execute bit; links are dropped; connectors are rebuilt from this repo; a file of
-a kind the backup leaves out as secret is never unpacked even if an archive
-carries one; and the database is restored as its owner role, never a superuser.
+is private, but nothing proves who wrote it: whoever can write to the offsite
+folder can put a file there that opens with the key. So a rebuild trusts nothing
+in a backup to be what Flint wrote.
+
+- Only the folders that hold your data are unpacked, by name. A settings file, a
+  connector list (whose commands the server would run), a token, tailnet state
+  or a program in the archive stays in it, whatever case its name is written
+  in. What was unpacked is checked again on the disk, and an archive that holds
+  two names for one place, a path out of its folder, or more than a backup
+  could, is refused.
+- Settings are read as text; each value must match the shape its name is listed
+  with and not look like a secret. Who may reach Flint over the tailnet is read
+  from the Tailscale sign-in, never from the backup.
+- Nothing unpacked can run, links are dropped, and connectors are rebuilt from
+  this repo.
+- The key future backups are encrypted to is worked out from your key on the
+  MacBook, never read from the archive.
+- The database is restored by a role that owns nothing else, compared object by
+  object with a database built from this repo's migrations, and only then put
+  into use. A promotion your signature does not cover is switched off, and the
+  keys that can approve are shown.
+- The code installed is the commit the old Mac was running, as its backup names
+  it; when it names none, main's newest is tested before it is installed.
+
+What is left: forged rows that need no signature (a made-up memory, a key row
+that the rebuild shows you and cannot judge). Signing the backups on the Studio
+would close that, and is not done yet.
 
 **Checks.**
 
 ```
-zsh apps/studio/test/rebuild_rehearse.test.sh       # the whole rebuild, rehearsed twice, and every refusal (about 45 s)
+zsh apps/studio/test/rebuild_rehearse.test.sh       # the whole rebuild, rehearsed three times, and every refusal (about 70 s)
+zsh apps/studio/test/run_rehearsal.test.sh          # the runner that records how the rehearsal went
 zsh apps/studio/test/settings_manifest.test.sh      # the manifest and the nightly snapshot
+zsh apps/studio/test/settings_names_static.test.sh  # every FLINT_ setting the code reads is in the manifest
 zsh apps/studio/test/plist_templates.test.sh        # the templates render and lint; every agent has a source
 zsh apps/studio/test/restore_file.test.sh
+zsh apps/studio/test/restore_database.test.sh
 zsh apps/studio/test/rollback.test.sh
+zsh apps/studio/test/runbook.test.sh                # every command the runbook gives exists
 zsh apps/studio/test/live/settings_names.check.sh   # this Mac's setting, agent and secret-file NAMES against the manifests
 ```
 
-All but the last run in the deploy gate. The last one reads the real Mac (names
-only), so it is run by hand after adding a setting, an agent or a secret file.
+All but the first and the last run in every deploy's gate. The rehearsal runs in
+the gate only when a deploy changes what a rebuild is made of, and every Sunday
+(`run_rehearsal.sh`). The last one reads the real Mac (names only), so it is run
+by hand after adding a setting, an agent or a secret file.
 
 ## Keyless search (SearXNG)
 

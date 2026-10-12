@@ -205,5 +205,14 @@ env -i HOME="$home" PATH=/usr/bin:/bin FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP
 chmod 700 "$data"
 check "a snapshot that cannot be saved does not stop the backup" '[ -f "$fx/local/flint-20261012-0231.tar.gz" ]'
 
+# ---- 6. everything a rebuild leaves to the owner has a sentence saying what to do ----------------------
+# A setting or file marked `reenter` is named at the end of a rebuild by its detail word. Each of those
+# words must have a sentence in rebuild.sh, or the owner would be told nothing about it.
+details=(${(u)${(f)"$(awk '$3 == "reenter" { print $4 }' "$here/../settings.manifest")"}})
+check "the manifest has things a rebuild leaves to the owner" '(( ${#details} >= 8 ))'
+for d in $details; do
+  check "a rebuild says what to do about: $d" 'grep -qE "^  $d +\"[A-Z][^\"]*\\.\"$" "$here/../rebuild.sh"'
+done
+
 (( fail )) && exit 1
 print "ok: the settings manifest holds names only, and the snapshot keeps ${#want_set} plain settings and no secret"
