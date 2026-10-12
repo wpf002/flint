@@ -287,6 +287,11 @@ request, an issue, CI, a service, a deploy, a thread) are read as the item
 stands: a merged pull request meets "Is Merged" even after GitHub archives it.
 Nothing reviews goals yet, so nothing is ever shown as late.
 
+A card you leave waiting can't undo a later change. A change to what counts as
+done, or to the timing, says what it changes from; if the goal has changed since,
+the card is refused ("The goal changed since this card was filed."). Filing a
+newer change of the same kind also rejects the older card still waiting.
+
 ### The goal routes
 
 All under `/v1/goals`, with the `proposals` scope only: the runtime connector's
@@ -294,10 +299,13 @@ token (`world:read|ledger`) can never read a goal's words. `GET ?tab=` and
 `GET /:id` answer the panel; `POST` files a new goal's card from the form's draft
 key (the goal's id is made from it, so the same form twice is one card, and a
 changed form's card replaces the one still waiting); `POST /:id/edit|timing|done|abandon|resume|plan`
-files that card with exactly the args the panel showed; `POST /:id/pause|dismiss`,
-`/:id/criteria/:cid` and `/:id/steps/:key` are the unsigned writes; `POST /linkable`
-lists items by a label made from their key, never a title. A refusal is one of
-the fixed sentences in @flint/policy (`GOAL_SAYS`) with its code.
+files that card with exactly the args the panel showed (`edit` and `timing` must
+carry `from`, what the goal was, and replace an older card of theirs still
+waiting); `POST /:id/pause|dismiss`, `/:id/criteria/:cid` and `/:id/steps/:key`
+are the unsigned writes; `POST /linkable` lists items by a label made from their
+key or from what they are ("Nexus Thread from Oct 3"), never a title or a raw id.
+A refusal is one of the fixed sentences in @flint/policy (`GOAL_SAYS`) with its
+code.
 
 ### What the next parts must do
 
@@ -311,6 +319,12 @@ the fixed sentences in @flint/policy (`GOAL_SAYS`) with its code.
 - **Reviews (part 3)** must turn lateness on in the panel's view (`reviews`,
   `late`) only once they run: until then a goal's next review time is set but
   nothing is due.
+- **Suggestions from chat (part 5)** must, in the console:
+  - mark a suggested goal's words as Outside Text when the goal is tainted;
+  - show the links and the sensitivity "Make It a Goal" signs, before it signs;
+  - make Dismiss undoable, or ask first (a dismissed goal is final today);
+  - give a suggested goal whose date has passed a way to start (today its card
+    is refused until the date is changed, and a suggested goal can't be edited).
 - **A later part** must add a way to forget a goal's words (a signed
   `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
 
@@ -334,7 +348,13 @@ the fixed sentences in @flint/policy (`GOAL_SAYS`) with its code.
   that ignored the mark could still sign a goal card on an earlier touch.
 - **Item titles in the picker.** To find an item, the panel shows its title
   beside its label, marked as outside text. What is stored and signed is the
-  item's id and a label made from its key, never the title.
+  item's id and its label, never the title.
+- **What a change changes from is checked by the runtime, not the database.**
+  A card to change what counts as done, or the timing, signs `from` (what the
+  goal was), and the runtime refuses it when the goal no longer matches. The
+  database still compares only the new values with the row; checking `from`
+  there too would need a migration. The contract leaves `from` optional so part
+  1's cards read as before, but the goal routes refuse a card without it.
 - **Older card kinds.** For goal and plan cards the database checks that the
   digest you sign is the digest of the stored args. For older kinds it doesn't
   yet (P1's `consume_approval` compares two digests, not args). For every kind,

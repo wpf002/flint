@@ -237,11 +237,14 @@
   .res.ok{color:var(--gold);} .res.bad{color:var(--orange);}
 
   /* goals: the panel's rows, checks, steps and form, in the same components */
-  #goalsttl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #goals .mh{height:auto;min-height:56px;padding-top:6px;padding-bottom:6px;}
+  #goalsttl{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;}
+  .gfull{font-size:15px;line-height:20px;font-weight:600;color:var(--t1);margin:4px 4px 12px;overflow-wrap:anywhere;}
   .tag.gtag{color:var(--gold);}
   .row .tag{flex:none;}
   .gnote{color:var(--t3);font-size:12px;line-height:16px;margin:12px 4px 0;}
   .gact{display:flex;align-items:center;gap:8px;margin-top:8px;}
+  .gadd{margin-top:8px;} .gadd .gact{justify-content:flex-end;}
   .empty .gact{justify-content:center;margin-top:16px;}
   .gwait{display:flex;align-items:center;gap:8px;margin-top:16px;color:var(--t2);font-size:12px;line-height:16px;}
   .gwait span{flex:1;}
@@ -251,13 +254,16 @@
   .gform .formrow+.formrow{padding-top:0;}
   .fl{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;}
   .fl>span{font-size:12px;line-height:16px;font-weight:500;color:var(--t3);}
-  .fl>b{font-weight:500;line-height:32px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .gitem{display:flex;align-items:center;gap:8px;min-height:32px;}
+  .gitem b{flex:1;min-width:0;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   textarea.field{height:auto;min-height:60px;padding:8px 10px;line-height:18px;resize:vertical;}
   select.field{padding:0 8px;}
+  .field.gempty::-webkit-datetime-edit{opacity:.45;}
   .gfound{padding:0 0 8px;}
   .gcheck,.gstep{position:relative;}
   .gcheck.gxr>.formrow,.gstep{padding-right:48px;}
   .gx{position:absolute;top:6px;right:8px;}
+  .gform .formrow+.gstep>.gx{top:-6px;}
   .row.gwrap{padding-top:8px;padding-bottom:8px;}
   .gwrap .lbl b,.gwrap .lbl span{white-space:normal;overflow:visible;}
   .gfound .gnote{margin:0 16px 8px;}
@@ -265,7 +271,8 @@
   .gconfirm{display:flex;flex-direction:column;}
   .gconfirm b{color:var(--t1);font-weight:600;}
   .gleft{display:flex;flex-wrap:wrap;gap:4px;flex:1;}
-  #goalfoot .res{flex:1;margin:0;}
+  #goalfoot{flex-wrap:wrap;}
+  #goalfoot #goalmsg{flex-basis:100%;margin:0;}
 
   /* a card Flint proposes in chat */
   .propose{margin-top:12px;border-radius:8px;background:var(--s2);padding:14px 16px;font-size:13px;line-height:18px;}
@@ -323,7 +330,9 @@
     .row{min-height:48px;font-size:17px;} .btn,.ghost{height:44px;}
     .cf{flex-wrap:wrap;padding-left:0;} .cf .ghost{flex-basis:100%;margin-right:0;justify-content:flex-start;padding-left:26px;} .cf .btn{flex:1;justify-content:center;height:44px;}
     .facts{grid-template-columns:88px minmax(0,1fr);}
-    .gform .formrow{flex-wrap:wrap;} .gform .fl{flex-basis:100%;} #goalfoot{flex-wrap:wrap;} #goalfoot .gleft{flex-basis:100%;}
+    .gform .formrow{flex-wrap:wrap;} .gform .fl{flex-basis:100%;} #goalfoot .gleft{flex-basis:100%;}
+    .ct{align-items:flex-start;} .ct b{white-space:normal;} .ct svg.i{margin-top:2px;}
+    .row.gwrap{flex-wrap:wrap;} .row.gwrap .lbl{flex:1 1 55%;} .row.gwrap>.ghost{margin-left:auto;}
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
@@ -1166,13 +1175,19 @@ function apprNow(){return new Date();}
    All), and so does a plan change that is not a review's minor one; the card carries the mark (consequential), and the
    names below hold the line for a server that does not send it. Title, sentence, and what the prompt says Flint is doing. */
 var APPR_GOAL={'goal.activate':1,'goal.criteria_change':1,'goal.horizon_change':1,'goal.done':1,'goal.abandon':1};
-var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what counts as done.','change what counts as done for this goal'],
-  'goal.horizon_change':['Change a Goal’s Timing','This changes its date or how often it’s reviewed.','change this goal’s timing'],
-  'goal.done':['Mark a Goal Done','Flint stops reviewing it.','mark this goal done'],
-  'goal.abandon':['Abandon a Goal','Flint stops reviewing it, and it can’t be restarted.','abandon this goal'],
-  'goal.propose':['Suggest a Goal from Chat','You said this in a chat.','add this suggested goal'],
-  'world.commitment.from_chat':['Add a Commitment from Chat','You said this in a chat.','add this commitment']};
-var APPR_CADENCE={P1D:'Day',P3D:'3 Days',P1W:'Week',P2W:'2 Weeks',P1M:'Month'};
+/* One table each for this panel and the Goals panel (goals-js reads them): how often a goal is reviewed, and what the
+   Touch ID or password prompt says Flint is trying to do. */
+var APPR_CADENCES=[['P1D','Day'],['P3D','3 Days'],['P1W','Week'],['P2W','2 Weeks'],['P1M','Month']];
+var APPR_PROMPTS={add:'add this goal',start:'start this goal',resume:'resume this goal',edit:'change what counts as done for this goal',timing:'change this goal’s timing',
+  done:'mark this goal done',abandon:'abandon this goal',plan:'change this goal’s plan',step:'add a step to this goal',propose:'add this suggested goal',commitment:'add this commitment'};
+/* Each card's title, its sentence, and its prompt (a key of APPR_PROMPTS). */
+var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what counts as done.','edit'],
+  'goal.horizon_change':['Change a Goal’s Timing','This changes its date or how often it’s reviewed.','timing'],
+  'goal.done':['Mark a Goal Done','Flint stops reviewing it.','done'],
+  'goal.abandon':['Abandon a Goal','Flint stops reviewing it, and it can’t be restarted.','abandon'],
+  'goal.propose':['Suggest a Goal from Chat','You said this in a chat.','propose'],
+  'world.commitment.from_chat':['Add a Commitment from Chat','You said this in a chat.','commitment']};
+function apprCadence(c){for(var i=0;i<APPR_CADENCES.length;i++)if(APPR_CADENCES[i][0]===c)return APPR_CADENCES[i][1];return '';}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
 var APPR_RESUMES='Approving resumes this goal.';
 function apprGoalCard(p){return !!APPR_GOAL[p.fullName]||p.fullName==='plan.change'||!!APPR_GOAL_WORDS[p.fullName];}
@@ -1197,7 +1212,7 @@ function apprChecks(cs){var n=Array.isArray(cs)?cs.length:0;return n?n+' Check'+
 function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?apprDate(t):'No Date';};
   if(p.fullName==='goal.activate')f=[['Goal',a.title],['Checks',apprChecks(a.successCriteria)],['Finish By',a.title?when(a.horizonAt):'']];
   else if(p.fullName==='goal.criteria_change')f=[['Goal',a.title],['Checks',apprChecks(a.successCriteria)]];
-  else if(p.fullName==='goal.horizon_change')f=[['Goal',a.goalTitle],['Finish By',a.goalTitle?when(a.horizonAt):''],['Review Every',APPR_CADENCE[a.reviewCadence]]];
+  else if(p.fullName==='goal.horizon_change')f=[['Goal',a.goalTitle],['Finish By',a.goalTitle?when(a.horizonAt):''],['Review Every',apprCadence(a.reviewCadence)]];
   else if(p.fullName==='plan.change')f=[['Goal',a.goalTitle],['Changes',apprChanges(a.ops)],['Filed By',apprFrom(p.origin)]];
   else if(p.fullName==='goal.propose')f=[['Goal',a.title],['You Said',a.quote]];
   else if(p.fullName==='world.commitment.from_chat')f=[['You Said',a.quote],['Due',a.quote?when(a.dueAt):'']];
@@ -1205,9 +1220,9 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
   /* A card whose args were cleared keeps only what it still knows. */
   return f.filter(function(x){return typeof x[1]==='string'&&x[1];}).slice(0,3);}
 /* What the Touch ID or password prompt says Flint is trying to do, in plain words. */
-function apprReason(p){if(p.fullName==='goal.activate')return p.reason===APPR_RESUMES?'resume this goal':(p.args&&p.args.origin==='flint')?'start this goal':'add this goal';
-  if(p.fullName==='plan.change')return 'change this goal’s plan';
-  return APPR_GOAL_WORDS[p.fullName]?APPR_GOAL_WORDS[p.fullName][2]:'approve: '+apprTitle(p);}
+function apprReason(p){if(p.fullName==='goal.activate')return APPR_PROMPTS[p.reason===APPR_RESUMES?'resume':(p.args&&p.args.origin==='flint')?'start':'add'];
+  if(p.fullName==='plan.change')return APPR_PROMPTS.plan;
+  return APPR_GOAL_WORDS[p.fullName]?APPR_PROMPTS[APPR_GOAL_WORDS[p.fullName][2]]:'approve: '+apprTitle(p);}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
 function apprWhen(name){var n=APPR_NIGHTLY[name];if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
   if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
@@ -1349,22 +1364,22 @@ pollApprovals();setInterval(pollApprovals,60000);
  * its steps) and adds or changes one. Everything that changes what a goal is, or its plan, is a card
  * Will signs here, in place, with a fresh touch each time: the panel files the card through the server
  * (/goals) and signs exactly the args it showed (approveAction checks their digest against what it is
- * asked to sign). Pausing, his own marks and his steps' progress need no signature. Goal text is his
- * own and is shown as text only, never HTML; an item is named by its key, and its title (outside text)
- * appears only in the picker, marked. ES5, no confirm(), alert() or prompt(): the Mac app's web view has
- * none. Reviews come in a later part: until then nothing is late. */
-var GOALS={tab:'active',view:'list',page:null,suggested:0,goal:null,form:null,busy:false,seq:0,note:null,timer:null};
-var GOAL_CADENCES=[['P1D','Day'],['P3D','3 Days'],['P1W','Week'],['P2W','2 Weeks'],['P1M','Month']];
+ * asked to sign). A change to what counts as done, or to the timing, says what it changes from, so a
+ * card left waiting can never undo a later change. Pausing, his own marks and his steps' progress need
+ * no signature. Goal text is his own and is shown as text only, never HTML; an item is named by its
+ * label, and its title (outside text) appears only in the picker, marked. What the panel has to say
+ * (an error, an outcome, "Waiting for your approval.") is said in the footer, which never scrolls away.
+ * A half-typed New Goal is kept until it is added or cleared. ES5, no confirm(), alert() or prompt():
+ * the Mac app's web view has none. Reviews come in a later part: until then nothing is late. */
+var GOALS={tab:'active',view:'list',page:null,suggested:0,goal:null,form:null,draft:null,busy:false,seq:0,nav:0,note:null,timer:null};
 var GOAL_METHODS=[['manual','You Mark It'],['steps','When Its Steps Are Done'],['item','When an Item Changes']];
-/* When an item counts as done: the picker's words, and the sentence's ("Flint checks this: wpf002/flint #57 is merged."). */
-var GOAL_CONDS={'pull_request state merged':['Is Merged','is merged'],'pull_request state closed':['Is Closed','is closed'],'issue state closed':['Is Closed','is closed'],
-  'ci_run conclusion success':['Passes','passes'],'service health ok':['Is Healthy','is healthy'],'deployment status success':['Succeeds','succeeds'],
-  'thread status archived':['Is Closed','is closed'],'project status archived':['Is Closed','is closed']};
-var GOAL_KINDS={pull_request:'A pull request.',issue:'An issue.',ci_run:'A CI run.',service:'A service.',deployment:'A deploy.',thread:'A Nexus thread.',project:'A project.'};
+/* A condition's words by its field and value: the picker's, and the sentence's ("Flint checks this: wpf002/flint #57
+   is merged."). Which conditions an item offers comes with the item, from the runtime. */
+var GOAL_WORDS={'state merged':['Is Merged','is merged'],'state closed':['Is Closed','is closed'],'conclusion success':['Passes','passes'],
+  'health ok':['Is Healthy','is healthy'],'status success':['Succeeds','succeeds'],'status archived':['Is Closed','is closed']};
+var GOAL_KINDS={pull_request:'It’s a pull request.',issue:'It’s an issue.',ci_run:'It’s a CI run.',service:'It’s a service.',deployment:'It’s a deploy.',thread:'It’s a Nexus thread.',project:'It’s a project.'};
 var GOAL_STATE={met:['Met','ok'],unmet:['Not Yet','off'],unknown:['Unknown','unknown']};
-/* What the Touch ID or password prompt says Flint is trying to do. */
-var GOAL_PROMPTS={add:'add this goal',resume:'resume this goal',start:'start this goal',done:'mark this goal done',abandon:'abandon this goal',timing:'change this goal’s timing',edit:'change what counts as done for this goal',plan:'add a step to this goal'};
-var GOAL_DONE_SAY={done:'Your goal is done.',abandon:'You abandoned this goal.',resume:'Your goal is active again.',start:'Your goal is active.',timing:'Its timing changed.',edit:'What counts as done changed.',plan:'The step is added.'};
+var GOAL_DONE_SAY={done:'Your goal is done.',abandon:'You abandoned this goal.',resume:'Your goal is active again.',start:'Your goal is active.',timing:'Its timing changed.',edit:'What counts as done changed.',step:'The step is added.'};
 var GOAL_MAX=10;
 
 function gEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
@@ -1377,12 +1392,16 @@ function gCall(path,body){var o={headers:Object.assign({'content-type':'applicat
   return fetch((typeof BASE==='string'?BASE:'')+path,o).then(function(r){return r.json().catch(function(){return {};}).then(function(d){
     if(!r.ok){var e=new Error(r.status===401?'The access token was rejected. Check Settings.':((d&&d.error)||('Flint returned error '+r.status+'.')));e.status=r.status;e.code=d&&d.code;throw e;}
     return d;});});}
-function gDate(t,opts){try{return new Date(t).toLocaleDateString([],opts||{month:'short',day:'numeric'});}catch(e){return '';}}
-function gDay(t){return gDate(t,{month:'short',day:'numeric'});}
+/* Oct 14, and the year when it isn't this one: Dec 1, 2027. */
+function gDay(t){try{var d=new Date(t);return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getFullYear()===new Date().getFullYear()?undefined:'numeric'});}catch(e){return '';}}
 function gLocalDay(d){d=d||new Date();var p=function(n){return (n<10?'0':'')+n;};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());}
 /* A form's date as an instant: a finish date at the end of that day, a step due at 5 PM. */
 function gAt(day,h,m){var x=/^(\d{4})-(\d{2})-(\d{2})$/.exec(day||'');if(!x)return null;return new Date(+x[1],+x[2]-1,+x[3],h,m,0,0).toISOString();}
-function gCadence(c){for(var i=0;i<GOAL_CADENCES.length;i++)if(GOAL_CADENCES[i][0]===c)return GOAL_CADENCES[i][1];return 'Week';}
+/* The review cadences and the prompts' words are the Approvals panel's tables (approvals-js): one of each for both panels. */
+function gCadences(){return typeof APPR_CADENCES!=='undefined'?APPR_CADENCES:[];}
+function gCadence(c){var t=gCadences();for(var i=0;i<t.length;i++)if(t[i][0]===c)return t[i][1];return '';}
+function gPrompt(k){return (typeof APPR_PROMPTS!=='undefined'&&APPR_PROMPTS[k])||'change this goal';}
+function gWords(key,value){return GOAL_WORDS[key+' '+value]||['Changes','changes'];}
 function gDraftKey(){var b=new Uint8Array(12),s='';try{crypto.getRandomValues(b);}catch(e){for(var j=0;j<12;j++)b[j]=Math.floor(Math.random()*256);}
   for(var i=0;i<b.length;i++)s+=('0'+b[i].toString(16)).slice(-2);return s;}
 function gKeyed(){return (typeof canEnclave==='function'&&canEnclave())||(typeof canPasskey==='function'&&canPasskey());}
@@ -1390,8 +1409,9 @@ function gKeyed(){return (typeof canEnclave==='function'&&canEnclave())||(typeof
 function gLabel(verb){var l=typeof approveLabel==='function'?approveLabel():'Approve';var i=l.indexOf(' with ');return i>0?verb+l.slice(i):verb;}
 function gSorted(xs){var seen={},out=[];xs.forEach(function(x){if(!seen[x]){seen[x]=1;out.push(x);}});return out.sort();}
 function gById(a,b){return a.entityId<b.entityId?-1:a.entityId>b.entityId?1:0;}
-function gTag(text,gold){var t=gEl('span','tag'+(gold?' gtag':''),text);return t;}
-function gCount(n,one,many){return n+' '+(n===1?one:many);}
+function gTag(text,gold){return gEl('span','tag'+(gold?' gtag':''),text);}
+function gClean(s){return String(s||'').replace(/\s+/g,' ').trim();}
+function gGoalPath(g,rest){return '/goals/'+encodeURIComponent(g.id)+(rest||'');}
 
 /* ---------- the panel ---------- */
 function goalsShown(on){var b=document.getElementById('goalsbtn');if(b)b.hidden=!on;}
@@ -1399,25 +1419,37 @@ function goalsShown(on){var b=document.getElementById('goalsbtn');if(b)b.hidden=
 function goalsDot(proposals){var d=document.getElementById('goalsdot');if(!d)return;var n=(proposals||[]).filter(function(p){return p.status==='pending'&&/^(goal\.|plan\.change$)/.test(String(p.fullName||''));}).length;d.hidden=!(n>0);}
 /* An older runtime (or none) answers 501: no Goals button at all. */
 function goalsProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall('/goals?tab=active').then(function(){goalsShown(true);},function(e){goalsShown(e.status!==501&&e.status!==401);});}
+function goalsOpen(){var p=document.getElementById('goals');return !!(p&&p.classList&&p.classList.contains('open'));}
+/* Each view Will goes to takes a new number. An answer that comes back after he has gone elsewhere finds the number
+   changed (or the panel closed), and neither pulls him back nor writes into a view that is gone. */
+function goalNav(view){GOALS.view=view;return ++GOALS.nav;}
+function goalHere(){var n=GOALS.nav;return function(){return GOALS.nav===n&&goalsOpen();};}
 function openGoals(){if(typeof TOKEN!=='undefined'&&!TOKEN){if(typeof openSettings==='function')openSettings();return;}
   if(typeof showPanel==='function')showPanel('goals',true);if(typeof loadCreds==='function')loadCreds();goalList(GOALS.tab);}
-function closeGoals(){if(typeof showPanel==='function')showPanel('goals',false);GOALS.view='list';GOALS.form=null;if(typeof pollApprovals==='function')pollApprovals();}
+/* Closing keeps a half-typed New Goal (GOALS.draft): it is there when New Goal opens again. */
+function closeGoals(){if(typeof showPanel==='function')showPanel('goals',false);goalNav('list');GOALS.form=null;if(typeof pollApprovals==='function')pollApprovals();}
 function goalHead(title,back,add){document.getElementById('goalsttl').textContent=title;document.getElementById('goalback').hidden=!back;document.getElementById('goaladd').hidden=!add;}
-function goalFoot(){var f=document.getElementById('goalfoot');f.textContent='';f.hidden=true;return f;}
+/* The footer: what the panel has to say, on a line of its own that never scrolls away, then the view's buttons. */
+function goalFoot(){var f=document.getElementById('goalfoot');f.textContent='';f.hidden=true;var m=gEl('div','res');m.id='goalmsg';m.hidden=true;m.setAttribute('role','status');f.appendChild(m);return f;}
+/* kind: bad (an error, the default), ok (an outcome) or wait (in progress). An empty message leaves a footer with nothing else hidden. */
+function goalMsg(t,kind){var f=document.getElementById('goalfoot'),m=document.getElementById('goalmsg');if(!f||!m)return;
+  m.textContent=t||'';m.hidden=!t;m.className='res '+(kind||'bad');if(t)f.hidden=false;else if(f.children.length<2)f.hidden=true;}
 function goalBody(){var b=document.getElementById('goalbody');b.textContent='';return b;}
 function goalBack(){if((GOALS.view==='edit'||GOALS.view==='timing')&&GOALS.goal){goalOpen(GOALS.goal.id);return;}goalList(GOALS.tab);}
 function goalEmpty(title,line,btn){var e=gEl('div','empty');e.appendChild(gEl('b',null,title));if(line)e.appendChild(gEl('span',null,line));if(btn){var w=gEl('div','gact');w.appendChild(btn);e.appendChild(w);}return e;}
 function goalFailed(e,again){var line=e&&e.status===503?'The runtime isn’t answering, so goals can’t load.':e&&e.status===501?'This needs a newer runtime.':gSay(e);
   return goalEmpty('Couldn’t Load Goals',line,gBtn('ghost','Try Again',again));}
+function goalNeedsKey(){var f=goalFoot();f.hidden=false;f.appendChild(gEl('span','note','This device needs an approval key.'));
+  f.appendChild(gBtn('btn pri','Open Settings',function(){closeGoals();if(typeof openSettings==='function')openSettings();}));}
 
 /* ---------- the list ---------- */
-function goalList(tab){GOALS.view='list';GOALS.tab=tab||'active';GOALS.goal=null;GOALS.form=null;var seq=++GOALS.seq;
+function goalList(tab){goalNav('list');GOALS.tab=tab||'active';GOALS.goal=null;GOALS.form=null;var seq=++GOALS.seq;
   goalHead('Goals',false,true);goalFoot();var body=goalBody();
   var seg=gEl('div','seg');seg.id='goalseg';
   [['active','Active'],['suggested','Suggested'],['finished','Finished']].forEach(function(t){var b=gBtn(t[0]===GOALS.tab?'on':'',t[1],function(){goalList(t[0]);});b.id='goaltab-'+t[0];
     if(t[0]==='suggested')b.hidden=!(GOALS.suggested>0||GOALS.tab==='suggested');seg.appendChild(b);});
   body.appendChild(seg);var list=gEl('div');list.id='goallist';list.appendChild(gEl('div','empty','Loading…'));body.appendChild(list);
-  if(GOALS.note){var n=gEl('div','res ok',GOALS.note);GOALS.note=null;body.insertBefore(n,list);}
+  if(GOALS.note){goalMsg(GOALS.note,'ok');GOALS.note=null;}
   gCall('/goals?tab='+GOALS.tab).then(function(d){if(seq!==GOALS.seq)return;goalsShown(true);GOALS.page=d;goalRender(list,d);
     /* Suggested shows only when Flint has suggested something. */
     if(GOALS.tab!=='suggested')gCall('/goals?tab=suggested').then(function(s){GOALS.suggested=(s.goals||[]).length;var b=document.getElementById('goaltab-suggested');if(b)b.hidden=!(GOALS.suggested>0);},function(){});
@@ -1432,28 +1464,34 @@ function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.
   waiting.forEach(function(w){g.appendChild(goalRow(w.title,'It starts once you approve it.',[gTag('Waiting for You',true)],function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));});
   goals.forEach(function(x){g.appendChild(goalRow(x.title,goalLine(x),goalTags(x),function(){goalOpen(x.id);}));});
   list.appendChild(g);
-  if(GOALS.tab==='active'&&d.reviews==='off'&&goals.length)list.appendChild(gEl('p','gnote','Goal reviews are off, so Flint isn’t checking on your goals yet.'));}
-function goalRow(title,line,tags,open){var row=gEl('div','row two click');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,title));l.appendChild(gEl('span',null,line));row.appendChild(l);
+  if(GOALS.tab==='active'&&d.reviews==='off'&&goals.length)list.appendChild(gEl('p','gnote','Flint checks your goals when you open them. Scheduled reviews start soon.'));}
+function goalRow(title,line,tags,open){var row=gEl('div','row two click gwrap');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,title));l.appendChild(gEl('span',null,line));row.appendChild(l);
   (tags||[]).forEach(function(t){row.appendChild(t);});row.appendChild(gIcon('chev'));
   row.onclick=open;row.onkeydown=function(e){if(e&&e.key==='Enter')open();};return row;}
+/* How many of its checks are met, as a sentence whose verb agrees with the count. */
+function goalChecksLine(c){c=c||{met:0,total:0};if(c.total&&c.met===c.total)return c.total===1?'Its check is met.':'All of its checks are met.';
+  if(c.total===1)return 'Its check isn’t met yet.';
+  return c.met+' of '+c.total+' checks '+(c.met===1?'is':'are')+' met.';}
 /* One sentence per goal: the first that applies. Lateness waits for reviews (a later part). */
-function goalLine(x){if(x.status==='done')return 'Done '+gDay(x.endedAt)+'.';if(x.status==='abandoned')return 'Abandoned '+gDay(x.endedAt)+'.';if(x.status==='rejected')return 'Dismissed '+gDay(x.endedAt)+'.';
+function goalLine(x){if(x.status==='done')return 'It was done on '+gDay(x.endedAt)+'.';if(x.status==='abandoned')return 'It was abandoned on '+gDay(x.endedAt)+'.';if(x.status==='rejected')return 'It was dismissed on '+gDay(x.endedAt)+'.';
   if(x.status==='proposed')return 'Flint suggested this from a chat.';
-  if(x.status==='paused')return 'Paused. Flint won’t review it until you resume it.';
-  var c=x.checks||{met:0,total:0};if(c.total&&c.met===c.total)return 'All of its checks are met.';
-  return c.met+' of '+gCount(c.total,'check is','checks are')+' met.';}
+  if(x.status==='paused')return 'It’s paused, so Flint won’t review it until you resume it.';
+  return goalChecksLine(x.checks);}
 function goalTags(x){var t=[];if(x.status==='paused')t.push(gTag('Paused'));if(x.origin==='flint')t.push(gTag('From Chat'));if(x.waiting>0)t.push(gTag('Waiting for You',true));return t;}
 
 /* ---------- one goal, open ---------- */
-function goalOpen(id,note){GOALS.view='goal';var seq=++GOALS.seq;goalHead('Goals',true,false);goalFoot();var body=goalBody();body.appendChild(gEl('div','empty','Loading…'));
+function goalOpen(id,note){goalNav('goal');GOALS.form=null;var seq=++GOALS.seq;goalHead('Goals',true,false);goalFoot();var body=goalBody();body.appendChild(gEl('div','empty','Loading…'));
   gCall('/goals/'+encodeURIComponent(id)).then(function(d){if(seq!==GOALS.seq)return;GOALS.goal=d.goal;goalShow(d.goal,note);},
     function(e){if(seq!==GOALS.seq)return;var b=goalBody();b.appendChild(goalFailed(e,function(){goalOpen(id);}));});}
 function goalLive(g){return g.status==='active'||g.status==='paused';}
 function goalLinkOf(g,entityId){for(var i=0;i<(g.links||[]).length;i++)if(g.links[i].entityId===entityId)return g.links[i];return null;}
 function goalStateOf(g,cid){for(var i=0;i<(g.criteria||[]).length;i++)if(g.criteria[i].id===cid)return g.criteria[i].state;return 'unknown';}
 function goalFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,label));row.appendChild(l);row.appendChild(gEl('span','val',value));return row;}
+/* The goal's links as a card states them: the item, its role and the fields it watches, in item order. */
+function goalRawLinks(g){return (g.links||[]).map(function(l){return {entityId:l.entityId,role:l.role,watchPaths:gSorted(l.watchPaths||[])};}).sort(gById);}
 function goalShow(g,note){goalHead(g.title,true,false);var body=goalBody();
-  if(note){var n=gEl('div','res ok',note);body.appendChild(n);}
+  /* The header keeps two lines of a title: a longer one is here in full. */
+  if(String(g.title).length>36)body.appendChild(gEl('div','gfull',g.title));
   var c=g.checks||{met:0,total:0};
   var facts=gEl('div','group');facts.appendChild(goalFact('Checks',c.met+' of '+c.total+' Met'));
   facts.appendChild(goalFact('Finish By',g.horizonAt?gDay(g.horizonAt):'No Date'));
@@ -1467,11 +1505,9 @@ function goalShow(g,note){goalHead(g.title,true,false);var body=goalBody();
   if(!list.length){var e=gEl('div','row');var el=gEl('span','lbl');el.appendChild(gEl('span',null,'This goal has no steps yet.'));e.appendChild(el);steps.appendChild(e);}
   list.forEach(function(s){steps.appendChild(goalStepRow(g,s));});body.appendChild(steps);
   if(goalLive(g)){var add=gEl('div','gact');add.id='goaladdstep';add.appendChild(gBtn('ghost','Add Step',function(){goalAddStep(g,add);}));body.appendChild(add);}
-  if((g.waiting||[]).length){var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,gCount(g.waiting.length,'change waits','changes wait')+' for you in Approvals.'));
+  if((g.waiting||[]).length){var n=g.waiting.length;var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,n+(n===1?' change waits':' changes wait')+' for you in Approvals.'));
     wt.appendChild(gBtn('ghost','Open Approvals',function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));body.appendChild(wt);}
-  var msg=gEl('div','err');msg.id='goalmsg';msg.hidden=true;body.appendChild(msg);
-  goalActions(g);}
-function goalMsg(t,ok){var m=document.getElementById('goalmsg');if(!m)return;m.textContent=t||'';m.hidden=!t;m.className=ok?'res ok':'err';}
+  goalActions(g);if(note)goalMsg(note,'ok');}
 function goalCheckRow(g,cr){var st=goalStateOf(g,cr.id),w=GOAL_STATE[st]||GOAL_STATE.unknown;var row=gEl('div','row two gwrap');
   var dot=gEl('span','st '+w[1]);dot.appendChild(gEl('i'));row.appendChild(dot);
   var l=gEl('span','lbl');l.appendChild(gEl('b',null,cr.text));l.appendChild(gEl('span',null,goalCheckLine(g,cr)));row.appendChild(l);
@@ -1480,12 +1516,12 @@ function goalCheckRow(g,cr){var st=goalStateOf(g,cr.id),w=GOAL_STATE[st]||GOAL_S
   return row;}
 function goalCheckLine(g,cr){var k=cr.check||{};if(k.kind==='manual')return 'You mark this one.';
   if(k.kind==='steps'){var steps=(g.plan&&g.plan.steps)||[],done=0;(k.keys||[]).forEach(function(key){steps.forEach(function(s){if(s.key===key&&(s.status==='done'||s.status==='skipped'))done++;});});
-    var n=(k.keys||[]).length;return done===n?'Flint checks this: its steps are done.':'Flint checks this: '+done+' of '+gCount(n,'step is','steps are')+' done.';}
-  var link=goalLinkOf(g,k.entityId);var w=GOAL_CONDS[(link?link.kind:'')+' '+k.key+' '+k.value];
-  return 'Flint checks this: '+(link?link.label:'its item')+' '+(w?w[1]:'changes')+'.';}
-var GOAL_STEP_LINES={todo:'',in_progress:'It’s in progress.',blocked:'It’s blocked.',done:'It’s done.',skipped:'It was skipped.'};
-function goalStepLine(s){if(s.status==='done'||s.status==='skipped'||s.status==='blocked'||s.status==='in_progress')return GOAL_STEP_LINES[s.status];
-  return s.dueAt?'It’s due '+gDay(s.dueAt)+'.':'It has no due date.';}
+    var n=(k.keys||[]).length;if(done===n)return n===1?'Flint checks this: its step is done.':'Flint checks this: its steps are done.';
+    if(n===1)return 'Flint checks this: its step isn’t done yet.';
+    return 'Flint checks this: '+done+' of '+n+' steps '+(done===1?'is':'are')+' done.';}
+  var link=goalLinkOf(g,k.entityId);return 'Flint checks this: '+(link?link.label:'its item')+' '+gWords(k.key,k.value)[1]+'.';}
+var GOAL_STEP_LINES={in_progress:'It’s in progress.',blocked:'It’s blocked.',done:'It’s done.',skipped:'It was skipped.'};
+function goalStepLine(s){if(GOAL_STEP_LINES[s.status])return GOAL_STEP_LINES[s.status];return s.dueAt?'It’s due '+gDay(s.dueAt)+'.':'It has no due date.';}
 var GOAL_TICKABLE={will_task:1,wait:1,decision:1};
 function goalStepRow(g,s){var row=gEl('div','row two gwrap');var dot=gEl('span','st '+(s.status==='done'?'ok':s.status==='blocked'?'degraded':'off'));dot.appendChild(gEl('i'));row.appendChild(dot);
   var l=gEl('span','lbl');l.appendChild(gEl('b',null,s.title));l.appendChild(gEl('span',null,goalStepLine(s)));row.appendChild(l);
@@ -1493,218 +1529,223 @@ function goalStepRow(g,s){var row=gEl('div','row two gwrap');var dot=gEl('span',
   return row;}
 
 /* ---------- unsigned: marks, steps, pause, dismiss ---------- */
-function goalPlain(path,body,b,after){if(GOALS.busy)return;GOALS.busy=true;if(b)b.disabled=true;
-  gCall(path,body).then(function(){GOALS.busy=false;after();},function(e){GOALS.busy=false;if(b)b.disabled=false;goalMsg(gSay(e));});}
-function goalMark(g,cid,met,b){goalPlain('/goals/'+encodeURIComponent(g.id)+'/criteria/'+cid,{met:met},b,function(){goalOpen(g.id);});}
-function goalTick(g,key,status,b){goalPlain('/goals/'+encodeURIComponent(g.id)+'/steps/'+key,{status:status},b,function(){goalOpen(g.id);});}
+/* An answer that comes back after Will has left this goal changes nothing he sees. */
+function goalPlain(path,body,b,after){if(GOALS.busy)return;GOALS.busy=true;if(b)b.disabled=true;var here=goalHere();
+  gCall(path,body).then(function(){GOALS.busy=false;if(here())after();},function(e){GOALS.busy=false;if(b)b.disabled=false;if(here())goalMsg(gSay(e));});}
+function goalMark(g,cid,met,b){goalPlain(gGoalPath(g,'/criteria/'+cid),{met:met},b,function(){goalOpen(g.id);});}
+function goalTick(g,key,status,b){goalPlain(gGoalPath(g,'/steps/'+key),{status:status},b,function(){goalOpen(g.id);});}
 
 /* ---------- signed: a card filed, then signed here with a fresh touch ---------- */
 /* approveAction writes its outcome into a card's .prow and .res: the panel gives it one of its own, out of sight, and says the outcome in its own words. */
 function goalHost(){var h=gEl('div');var row=gEl('div','prow');row.hidden=true;var res=gEl('div','res');res.hidden=true;h.appendChild(row);h.appendChild(res);
   h.querySelector=function(sel){return sel==='.prow'?row:sel==='.res'?res:null;};return h;}
 function goalCancelled(e){return gSay(e)==='Cancelled.'||(e&&e.name==='NotAllowedError');}
-/* File the card, then sign exactly the args the panel showed: nothing is signed unless their digest is the one asked for. */
-function goalSign(path,args,prompt,buttons,done,failed){
-  if(!gKeyed()){failed('This device needs an approval key.',true);return;}
-  if(GOALS.busy)return;GOALS.busy=true;(buttons||[]).forEach(function(b){b.disabled=true;});var filed=false;
-  var end=function(){GOALS.busy=false;(buttons||[]).forEach(function(b){b.disabled=false;});};
-  gCall(path,{args:args}).then(function(d){filed=true;
-    if(typeof approveAction!=='function')throw new Error('This device needs an approval key.');
-    return approveAction(d.id,goalHost(),{fresh:true,reason:prompt,args:args});
-  }).then(function(r){end();var a=(r&&r.action)||{};
-    if(a.status==='done')done();else failed(a.status==='approved'?'Approved. It hasn’t run yet.':gSay(a.error||'It failed.'));
-  },function(e){end();failed(filed&&goalCancelled(e)?'Cancelled. It’s waiting in Approvals.':gSay(e));});}
-function goalNeedsKey(foot){var n=gEl('span','note','This device needs an approval key.');foot.appendChild(n);
-  foot.appendChild(gBtn('btn pri','Open Settings',function(){closeGoals();if(typeof openSettings==='function')openSettings();}));}
+/* File the card (o.path, o.body), then sign exactly o.args, the args the panel showed: nothing is signed unless their
+   digest is the one asked for. While the prompt is up the buttons are off and the footer says it is waiting. o.done runs
+   when it ran and Will is still here; o.away when it ran after he went elsewhere. */
+function goalSign(o){
+  if(!gKeyed()){goalNeedsKey();return;}
+  if(GOALS.busy)return;GOALS.busy=true;var buttons=o.buttons||[];buttons.forEach(function(b){b.disabled=true;});var filed=false,here=goalHere();
+  goalMsg('Waiting for your approval.','wait');
+  var end=function(){GOALS.busy=false;buttons.forEach(function(b){b.disabled=false;});};
+  gCall(o.path,o.body).then(function(d){filed=true;if(typeof approveAction!=='function')throw new Error('This device needs an approval key.');
+    return approveAction(d.id,goalHost(),{fresh:true,reason:o.prompt,args:o.args});
+  }).then(function(r){end();var a=(r&&r.action)||{},ok=a.status==='done';
+    if(!here()){if(ok&&o.away)o.away();return;}
+    if(ok)o.done();else goalMsg(a.status==='approved'?'Approved. It hasn’t run yet.':gSay(a.error||'It failed.'));
+  },function(e){end();if(here())goalMsg(filed&&goalCancelled(e)?'Cancelled. It’s waiting in Approvals.':gSay(e));});}
 
 /* The open goal's buttons: change it, pause or resume it, finish it. */
 function goalActions(g){var f=goalFoot();
   if(g.status==='proposed'){f.hidden=false;f.appendChild(gEl('span','note'));
-    f.appendChild(gBtn('btn','Dismiss',function(b){goalPlain('/goals/'+encodeURIComponent(g.id)+'/dismiss',{},b,function(){GOALS.note='You dismissed it.';goalList('finished');});}));
-    var mk=gBtn('btn pri',gLabel('Make It a Goal'),function(b){goalResume(g,'start',[b]);});f.appendChild(mk);return;}
+    f.appendChild(gBtn('btn','Dismiss',function(b){goalPlain(gGoalPath(g,'/dismiss'),{},b,function(){GOALS.note='You dismissed it.';goalList('finished');});}));
+    f.appendChild(gBtn('btn pri',gLabel('Make It a Goal'),function(b){goalResume(g,'start',[b]);}));return;}
   if(!goalLive(g))return;f.hidden=false;
   var left=gEl('span','gleft');
   left.appendChild(gBtn('ghost','Edit Goal',function(){goalEdit(g);}));
   left.appendChild(gBtn('ghost','Change Timing',function(){goalTiming(g);}));
-  if(g.status==='active')left.appendChild(gBtn('ghost','Pause',function(b){goalPlain('/goals/'+encodeURIComponent(g.id)+'/pause',{},b,function(){goalOpen(g.id,'Paused. Flint won’t review it until you resume it.');});}));
+  if(g.status==='active')left.appendChild(gBtn('ghost','Pause',function(b){goalPlain(gGoalPath(g,'/pause'),{},b,function(){goalOpen(g.id,'It’s paused, so Flint won’t review it until you resume it.');});}));
   f.appendChild(left);
   f.appendChild(gBtn('btn','Abandon Goal',function(){goalConfirm(g,'abandon');}));
   if(g.status==='paused')f.appendChild(gBtn('btn pri',gLabel('Resume'),function(b){goalResume(g,'resume',[b]);}));
-  else f.appendChild(gBtn('btn','Mark Done',function(){goalConfirm(g,'done');}));}
-/* Mark Done and Abandon ask in place, then sign. */
+  else f.appendChild(gBtn('btn','Mark Goal Done',function(){goalConfirm(g,'done');}));}
+/* Mark Goal Done and Abandon Goal ask in place, then sign. */
 function goalConfirm(g,what){var f=goalFoot();f.hidden=false;var c=g.checks||{met:0,total:0},open=c.total-c.met;
   var t=gEl('span','note gconfirm');t.appendChild(gEl('b',null,what==='done'?'Mark This Goal Done':'Abandon This Goal'));
-  t.appendChild(gEl('span',null,what==='abandon'?'Flint stops reviewing it, and it can’t be restarted.':open>0?gCount(open,'of its checks isn’t','of its checks aren’t')+' met yet.':'All of its checks are met.'));
+  t.appendChild(gEl('span',null,what==='abandon'?'Flint stops reviewing it, and it can’t be restarted.':open>0?open+' of its checks '+(open===1?'isn’t':'aren’t')+' met yet.':c.total===1?'Its check is met.':'All of its checks are met.'));
   f.appendChild(t);var cancel=gBtn('btn','Cancel',function(){goalActions(g);});f.appendChild(cancel);
-  var go=gBtn('btn pri',gLabel(what==='done'?'Mark Done':'Abandon'),function(){
-    goalSign('/goals/'+encodeURIComponent(g.id)+'/'+what,{goalId:g.id,goalTitle:g.title},GOAL_PROMPTS[what],[go,cancel],
-      function(){goalOpen(g.id,GOAL_DONE_SAY[what]);},function(m,key){goalActions(g);if(key){var ff=goalFoot();ff.hidden=false;goalNeedsKey(ff);}goalMsg(m);});});
+  var args={goalId:g.id,goalTitle:g.title};
+  var go=gBtn('btn pri',gLabel(what==='done'?'Mark Goal Done':'Abandon'),function(){
+    goalSign({path:gGoalPath(g,'/'+what),body:{args:args},args:args,prompt:gPrompt(what),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY[what]);}});});
   f.appendChild(go);}
 /* Resuming a paused goal (or starting one Flint suggested) signs exactly what the goal is, and no plan. */
 function goalResumeArgs(g){return {goalId:g.id,owner:g.owner,origin:g.origin,sensitivity:g.sensitivity,tainted:g.tainted,nexusProjectId:g.nexusProjectId,title:g.title,description:g.description,
-  successCriteria:g.successCriteria,horizonAt:g.horizonAt,reviewCadence:g.reviewCadence,
-  links:(g.links||[]).map(function(l){return {entityId:l.entityId,role:l.role,watchPaths:gSorted(l.watchPaths||[])};}).sort(gById),plan:null};}
-function goalResume(g,what,buttons){goalSign('/goals/'+encodeURIComponent(g.id)+'/resume',goalResumeArgs(g),GOAL_PROMPTS[what],buttons,
-  function(){goalOpen(g.id,GOAL_DONE_SAY[what]);},function(m){goalMsg(m);});}
+  successCriteria:g.successCriteria,horizonAt:g.horizonAt,reviewCadence:g.reviewCadence,links:goalRawLinks(g),plan:null};}
+function goalResume(g,what,buttons){var args=goalResumeArgs(g);
+  goalSign({path:gGoalPath(g,'/resume'),body:{args:args},args:args,prompt:gPrompt(what),buttons:buttons,done:function(){goalOpen(g.id,GOAL_DONE_SAY[what]);}});}
 
 /* Add Step: a field and its date, signed as a plan change. */
-function goalAddStep(g,box){box.textContent='';var grp=gEl('div','group gform');
-  var row=gEl('div','formrow');var t=goalField('Step','input','What’s next',200);var due=goalField('Due','date');row.appendChild(t.wrap);row.appendChild(due.wrap);grp.appendChild(row);box.appendChild(grp);
+function goalAddStep(g,box){box.textContent='';box.className='gadd';goalMsg('');var grp=gEl('div','group gform');
+  var row=gEl('div','formrow');var t=goalField('Step','input','What’s next',200);var due=goalField('Due','date',null,null,'');row.appendChild(t.wrap);row.appendChild(due.wrap);grp.appendChild(row);box.appendChild(grp);
   var act=gEl('div','gact');var cancel=gBtn('ghost','Cancel',function(){goalShow(g);});
-  var go=gBtn('btn pri',gLabel('Add'),function(){var title=String(t.input.value||'').replace(/\s+/g,' ').trim();
+  var go=gBtn('btn pri',gLabel('Add'),function(){var title=gClean(t.input.value);
     if(!title){goalMsg('Give the step a name.');return;}
     if(due.input.value&&due.input.value<gLocalDay()){goalMsg('Pick a step date that isn’t past.');return;}
     var steps=(g.plan&&g.plan.steps)||[],n=0,ord=0;steps.forEach(function(s){n=Math.max(n,Number(s.key.slice(1))||0);ord=Math.max(ord,s.ordinal);});
     if(n>=999||steps.length>=1000){goalMsg('This plan has no room for another step.');return;}
-    var args={goalId:g.id,goalTitle:g.title,ops:[{op:'add',key:'s'+(n+1),step:{ordinal:Math.min(1000000,ord+100),title:title,kind:'will_task',tier:'approval',dueAt:due.input.value?gAt(due.input.value,17,0):null,dependsOn:[]}}]};
-    goalSign('/goals/'+encodeURIComponent(g.id)+'/plan',args,GOAL_PROMPTS.plan,[go,cancel],function(){goalOpen(g.id,GOAL_DONE_SAY.plan);},function(m){goalMsg(m);});});
+    var args={goalId:g.id,goalTitle:g.title,ops:[{op:'add',key:'s'+(n+1),step:{ordinal:Math.min(1000000,ord+100),title:title.slice(0,200),kind:'will_task',tier:'approval',dueAt:due.input.value?gAt(due.input.value,17,0):null,dependsOn:[]}}]};
+    goalSign({path:gGoalPath(g,'/plan'),body:{args:args},args:args,prompt:gPrompt('step'),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY.step);}});});
   act.appendChild(cancel);act.appendChild(go);box.appendChild(act);if(t.input.focus)t.input.focus();}
 
-/* Change Timing: its finish date and how often it is reviewed. */
-function goalTiming(g){GOALS.view='timing';goalHead(g.title,true,false);var body=goalBody();
+/* Change Timing: its finish date and how often it is reviewed. The card says what it changes from. */
+function goalTiming(g){goalNav('timing');goalHead(g.title,true,false);var body=goalBody();
   body.appendChild(gEl('div','gsh','Timing'));var grp=gEl('div','group gform');var row=gEl('div','formrow');
   var cur=g.horizonAt?gLocalDay(new Date(g.horizonAt)):'';
-  var date=goalField('Finish By','date');date.input.value=cur;var every=goalSelect('Review Every',GOAL_CADENCES,g.reviewCadence);
+  var date=goalField('Finish By','date',null,null,cur);var every=goalSelect('Review Every',gCadences(),g.reviewCadence);
   row.appendChild(date.wrap);row.appendChild(every.wrap);grp.appendChild(row);body.appendChild(grp);
-  var msg=gEl('div','err');msg.id='goalmsg';msg.hidden=true;body.appendChild(msg);
-  var f=goalFoot();f.hidden=false;var cancel=gBtn('btn','Cancel',function(){GOALS.view='goal';goalShow(g);});
+  if(!gKeyed()){goalNeedsKey();return;}
+  var f=goalFoot();f.hidden=false;var cancel=gBtn('btn','Cancel',function(){goalNav('goal');goalShow(g);});
   var go=gBtn('btn pri',gLabel('Change'),function(){var day=date.input.value||'';
-    if(day&&day<=gLocalDay()){goalMsg('Pick a date after today.');return;}
+    /* Only a new date has to be after today: an overdue goal keeps its date while its cadence changes. */
+    if(day&&day!==cur&&day<=gLocalDay()){goalMsg('Pick a date after today.');return;}
     /* The same date keeps the same instant: only what Will changed changes. */
     var at=!day?null:day===cur?g.horizonAt:gAt(day,23,59);
     if(at===g.horizonAt&&every.input.value===g.reviewCadence){goalMsg('It changes nothing.');return;}
-    goalSign('/goals/'+encodeURIComponent(g.id)+'/timing',{goalId:g.id,goalTitle:g.title,horizonAt:at,reviewCadence:every.input.value},GOAL_PROMPTS.timing,[go,cancel],
-      function(){goalOpen(g.id,GOAL_DONE_SAY.timing);},function(m,key){if(key){f.textContent='';goalNeedsKey(f);}goalMsg(m);});});
-  f.appendChild(gEl('span','note'));f.appendChild(cancel);f.appendChild(go);
-  if(!gKeyed()){f.textContent='';goalNeedsKey(f);}}
+    var args={goalId:g.id,goalTitle:g.title,horizonAt:at,reviewCadence:every.input.value,from:{horizonAt:g.horizonAt,reviewCadence:g.reviewCadence}};
+    goalSign({path:gGoalPath(g,'/timing'),body:{args:args},args:args,prompt:gPrompt('timing'),buttons:[go,cancel],done:function(){goalOpen(g.id,GOAL_DONE_SAY.timing);}});});
+  f.appendChild(gEl('span','note'));f.appendChild(cancel);f.appendChild(go);}
 
 /* ---------- the form: New Goal, and Edit Goal ---------- */
-function goalField(label,kind,placeholder,max){var wrap=gEl('label','fl');wrap.appendChild(gEl('span',null,label));
+/* Each control has a key (data-k), so a form drawn again (a check added, a method changed, an item picked) can put the
+   cursor back where Will's next keystroke belongs. What he typed lives in the form's state, never only in the page. */
+function gKey(el,k){el.setAttribute('data-k',k);return el;}
+function goalFocus(k){var b=document.getElementById('goalbody');var e=k&&b&&b.querySelector?b.querySelector('[data-k="'+k+'"]'):null;if(e&&e.focus)e.focus();}
+function goalField(label,kind,placeholder,max,value){var wrap=gEl('label','fl');wrap.appendChild(gEl('span',null,label));
   var input=gEl(kind==='textarea'?'textarea':'input','field');if(kind==='date')input.type='date';else if(kind!=='textarea')input.type='text';
-  if(placeholder)input.placeholder=placeholder;if(max)input.maxLength=max;input.setAttribute('aria-label',label);input.setAttribute('autocomplete','off');wrap.appendChild(input);return {wrap:wrap,input:input};}
+  if(placeholder)input.placeholder=placeholder;if(max)input.maxLength=max;input.setAttribute('aria-label',label);input.setAttribute('autocomplete','off');
+  if(value!==undefined&&value!==null)input.value=value;
+  /* A date not set yet shows the browser's own hint: dimmed, so it never reads as a date Will chose. */
+  if(kind==='date'){var dim=function(){input.classList.toggle('gempty',!input.value);};dim();if(input.addEventListener){input.addEventListener('input',dim);input.addEventListener('change',dim);}}
+  wrap.appendChild(input);return {wrap:wrap,input:input};}
 function goalSelect(label,options,value){var wrap=gEl('label','fl');wrap.appendChild(gEl('span',null,label));var s=gEl('select','field');s.setAttribute('aria-label',label);
   options.forEach(function(o){var op=gEl('option',null,o[1]);op.value=o[0];s.appendChild(op);});s.value=value;wrap.appendChild(s);return {wrap:wrap,input:s};}
-function goalCheck(){return {id:null,text:'',method:'manual',item:null,cond:'',orig:null};}
-function goalNew(){GOALS.form={mode:'new',draftKey:gDraftKey(),title:'',why:'',checks:[goalCheck()],finishBy:'',cadence:'P1W',steps:[{title:'',due:''}],error:'',done:false};goalForm();}
+function goalCheck(){return {id:null,text:'',method:'manual',item:null,cond:'',q:'',orig:null};}
+function goalBlank(){return {mode:'new',draftKey:gDraftKey(),title:'',why:'',checks:[goalCheck()],finishBy:'',cadence:'P1W',steps:[{title:'',due:''}],done:false};}
+/* New Goal opens on the draft Will left, if he left one: Escape, a click outside and Back all keep it; Clear starts over. */
+function goalNew(){if(!GOALS.draft||GOALS.draft.done)GOALS.draft=goalBlank();GOALS.form=GOALS.draft;goalNav('form');goalForm('name');}
+function goalClear(){GOALS.draft=goalBlank();GOALS.form=GOALS.draft;goalForm('name');}
 function goalEdit(g){var checks=(g.successCriteria||[]).map(function(c){var k=c.check||{},link=k.kind==='item'?goalLinkOf(g,k.entityId):null;
-    return {id:c.id,text:c.text,method:k.kind,item:k.kind==='item'?{entityId:k.entityId,label:link?link.label:'its item',kind:link?link.kind:''}:null,cond:k.kind==='item'?k.key+' '+k.value:'',orig:c};});
-  GOALS.form={mode:'edit',goal:g,title:g.title,why:g.description,checks:checks,error:'',done:false};goalForm();}
-function goalForm(){var f=GOALS.form;GOALS.view=f.mode==='edit'?'edit':'form';goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false);var body=goalBody();
+    return {id:c.id,text:c.text,method:k.kind,q:'',orig:c,cond:k.kind==='item'?k.key+' '+k.value:'',
+      item:k.kind==='item'?{entityId:k.entityId,label:link?link.label:'its item',kind:link?link.kind:'',conditions:(link&&link.conditions&&link.conditions.length)?link.conditions:[{key:k.key,value:k.value}]}:null};});
+  GOALS.form={mode:'edit',goal:g,title:g.title,why:g.description,checks:checks,done:false};goalNav('edit');goalForm('name');}
+function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false);
+  var body=document.getElementById('goalbody'),top=body.scrollTop||0;body.textContent='';
   if(f.done){goalFormDone(body);return;}
   var form=gEl('div','gform');
   form.appendChild(gEl('div','gsh','Goal'));var g1=gEl('div','group');
-  var r1=gEl('div','formrow');var title=goalField('Goal','input','Run a half marathon',120);title.input.value=f.title;title.input.oninput=function(){f.title=title.input.value;};r1.appendChild(title.wrap);g1.appendChild(r1);
-  var r2=gEl('div','formrow');var why=goalField('Why It Matters','textarea','Optional',1000);why.input.value=f.why;why.input.oninput=function(){f.why=why.input.value;};r2.appendChild(why.wrap);g1.appendChild(r2);
+  var r1=gEl('div','formrow');var title=goalField('Name','input','Run a half marathon',120);gKey(title.input,'name');title.input.value=f.title;title.input.oninput=function(){f.title=title.input.value;};r1.appendChild(title.wrap);g1.appendChild(r1);
+  var r2=gEl('div','formrow');var why=goalField('Why It Matters','textarea','Optional',1000);gKey(why.input,'why');why.input.value=f.why;why.input.oninput=function(){f.why=why.input.value;};r2.appendChild(why.wrap);g1.appendChild(r2);
   form.appendChild(g1);
   form.appendChild(gEl('div','gsh','Done When'));
   f.checks.forEach(function(c,i){form.appendChild(goalCheckForm(f,c,i));});
-  if(f.checks.length<GOAL_MAX){var more=gEl('div','gact');more.appendChild(gBtn('ghost','Add Another',function(){f.checks.push(goalCheck());goalForm();}));form.appendChild(more);}
+  if(f.checks.length<GOAL_MAX){var more=gEl('div','gact');more.appendChild(gKey(gBtn('ghost','Add Check',function(){f.checks.push(goalCheck());goalForm('check:'+(f.checks.length-1)+':text');}),'addcheck'));form.appendChild(more);}
   if(f.mode==='new'){
     form.appendChild(gEl('div','gsh','Timing'));var g3=gEl('div','group');var r3=gEl('div','formrow');
-    var fin=goalField('Finish By','date');fin.input.value=f.finishBy;fin.input.oninput=fin.input.onchange=function(){f.finishBy=fin.input.value;};
-    var every=goalSelect('Review Every',GOAL_CADENCES,f.cadence);every.input.onchange=function(){f.cadence=every.input.value;};
+    var fin=goalField('Finish By','date',null,null,f.finishBy);gKey(fin.input,'finish');fin.input.oninput=fin.input.onchange=function(){f.finishBy=fin.input.value;};
+    var every=goalSelect('Review Every',gCadences(),f.cadence);gKey(every.input,'every');every.input.onchange=function(){f.cadence=every.input.value;};
     r3.appendChild(fin.wrap);r3.appendChild(every.wrap);g3.appendChild(r3);form.appendChild(g3);
     form.appendChild(gEl('div','gsh','First Steps'));var g4=gEl('div','group');
-    f.steps.forEach(function(s,i){var r=gEl('div','formrow'+(f.steps.length>1?' gstep':''));var t=goalField('Step','input','Sign up for a race',200);t.input.value=s.title;t.input.oninput=function(){s.title=t.input.value;};
-      var d=goalField('Due','date');d.input.value=s.due;d.input.oninput=d.input.onchange=function(){s.due=d.input.value;};r.appendChild(t.wrap);r.appendChild(d.wrap);
-      if(f.steps.length>1){var x=gBtn('xb gx','',function(){f.steps.splice(i,1);goalForm();});x.setAttribute('aria-label','Remove Step');x.appendChild(gIcon('x'));r.appendChild(x);}
+    f.steps.forEach(function(s,i){var r=gEl('div','formrow'+(f.steps.length>1?' gstep':''));var t=goalField('Step','input','Sign up for a race',200);gKey(t.input,'step:'+i+':title');t.input.value=s.title;t.input.oninput=function(){s.title=t.input.value;};
+      var d=goalField('Due','date',null,null,s.due);gKey(d.input,'step:'+i+':due');d.input.oninput=d.input.onchange=function(){s.due=d.input.value;};r.appendChild(t.wrap);r.appendChild(d.wrap);
+      if(f.steps.length>1){var x=gBtn('xb gx','',function(){f.steps.splice(i,1);goalForm('addstep');});x.setAttribute('aria-label','Remove Step');x.appendChild(gIcon('x'));r.appendChild(x);}
       g4.appendChild(r);});
     form.appendChild(g4);
-    if(f.steps.length<GOAL_MAX){var ms=gEl('div','gact');ms.appendChild(gBtn('ghost','Add Step',function(){f.steps.push({title:'',due:''});goalForm();}));form.appendChild(ms);}}
-  var msg=gEl('div','err');msg.id='goalmsg';msg.hidden=!f.error;msg.textContent=f.error||'';form.appendChild(msg);
-  body.appendChild(form);goalFormFoot();}
+    if(f.steps.length<GOAL_MAX){var ms=gEl('div','gact');ms.appendChild(gKey(gBtn('ghost','Add Step',function(){f.steps.push({title:'',due:''});goalForm('step:'+(f.steps.length-1)+':title');}),'addstep'));form.appendChild(ms);}}
+  body.appendChild(form);goalFormFoot();body.scrollTop=top;goalFocus(focus);}
 function goalCheckForm(f,c,i){var g=gEl('div','group gcheck'+(f.checks.length>1?' gxr':''));
-  var r1=gEl('div','formrow');var t=goalField('Done When','input','You cross the finish line',200);t.input.value=c.text;t.input.oninput=function(){c.text=t.input.value;};r1.appendChild(t.wrap);
-  var how=goalSelect('How It’s Checked',GOAL_METHODS,c.method);how.input.onchange=function(){c.method=how.input.value;goalForm();};r1.appendChild(how.wrap);g.appendChild(r1);
-  if(f.checks.length>1){var x=gBtn('xb gx','',function(){f.checks.splice(i,1);goalForm();});x.setAttribute('aria-label','Remove Check');x.appendChild(gIcon('x'));g.appendChild(x);}
+  var r1=gEl('div','formrow');var t=goalField('Check','input','You cross the finish line',200);gKey(t.input,'check:'+i+':text');t.input.value=c.text;t.input.oninput=function(){c.text=t.input.value;};r1.appendChild(t.wrap);
+  var how=goalSelect('How It’s Checked',GOAL_METHODS,c.method);gKey(how.input,'check:'+i+':how');how.input.onchange=function(){c.method=how.input.value;goalForm('check:'+i+':how');};r1.appendChild(how.wrap);g.appendChild(r1);
+  if(f.checks.length>1){var x=gBtn('xb gx','',function(){f.checks.splice(i,1);goalForm('addcheck');});x.setAttribute('aria-label','Remove Check');x.appendChild(gIcon('x'));g.appendChild(x);}
   if(c.method==='item'){
-    if(c.item){var r3=gEl('div','formrow');var pick=gEl('span','fl');pick.appendChild(gEl('span',null,'Item'));pick.appendChild(gEl('b','gitem',c.item.label));r3.appendChild(pick);
-      var conds=[];Object.keys(GOAL_CONDS).forEach(function(k){if(k.indexOf(c.item.kind+' ')===0)conds.push([k.slice(c.item.kind.length+1),GOAL_CONDS[k][0]]);});
+    if(c.item){var r3=gEl('div','formrow');var cell=gEl('span','fl');cell.appendChild(gEl('span',null,'Item'));var it=gEl('div','gitem');it.appendChild(gEl('b',null,c.item.label));
+      it.appendChild(gKey(gBtn('ghost','Change',function(){c.item=null;c.cond='';goalForm('check:'+i+':find');}),'check:'+i+':change'));cell.appendChild(it);r3.appendChild(cell);
+      var conds=(c.item.conditions||[]).map(function(k){return [k.key+' '+k.value,gWords(k.key,k.value)[0]];});
       if(!c.cond&&conds.length)c.cond=conds[0][0];
-      var when=goalSelect('Condition',conds,c.cond);when.input.onchange=function(){c.cond=when.input.value;};r3.appendChild(when.wrap);
-      r3.appendChild(gBtn('ghost','Change',function(){c.item=null;c.cond='';goalForm();}));g.appendChild(r3);}
-    else{var r4=gEl('div','formrow gpick');var q=goalField('Choose an Item','input','Find a pull request, issue, service or deploy',80);r4.appendChild(q.wrap);g.appendChild(r4);
+      var when=goalSelect('Condition',conds,c.cond);gKey(when.input,'check:'+i+':cond');when.input.onchange=function(){c.cond=when.input.value;};r3.appendChild(when.wrap);g.appendChild(r3);}
+    else{var r4=gEl('div','formrow gpick');var q=goalField('Choose an Item','input','Find an item',80);gKey(q.input,'check:'+i+':find');q.input.value=c.q||'';r4.appendChild(q.wrap);g.appendChild(r4);
       var found=gEl('div','gfound');g.appendChild(found);
-      q.input.oninput=function(){if(GOALS.timer)clearTimeout(GOALS.timer);GOALS.timer=setTimeout(function(){goalFind(q.input.value,found,c);},250);};
-      goalFind('',found,c);}}
+      q.input.oninput=function(){c.q=q.input.value;if(GOALS.timer)clearTimeout(GOALS.timer);GOALS.timer=setTimeout(function(){goalFind(c.q,found,c,i);},250);};
+      goalFind(c.q||'',found,c,i);}}
   return g;}
 /* The item search is a POST, so what Will types never lands in a request log. Titles are outside text: marked, and never stored. */
-function goalFind(q,box,c){var seq=box.seq=(box.seq||0)+1;box.textContent='';box.appendChild(gEl('div','gnote','Searching…'));
+function goalFind(q,box,c,i){var seq=box.seq=(box.seq||0)+1;box.textContent='';box.appendChild(gEl('div','gnote','Searching…'));
   gCall('/goals/linkable',{q:String(q||'').slice(0,80)}).then(function(d){if(seq!==box.seq)return;box.textContent='';var items=(d&&d.items)||[];
     if(!items.length){box.appendChild(gEl('div','gnote',q?'Nothing matches that.':'Flint isn’t tracking any items yet.'));return;}
     items.slice(0,8).forEach(function(it){var row=gEl('div','row two click');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,it.label));
-      l.appendChild(gEl('span',null,it.title||GOAL_KINDS[it.kind]||'An item Flint tracks.'));row.appendChild(l);
+      l.appendChild(gEl('span',null,it.title||GOAL_KINDS[it.kind]||'Flint tracks this item.'));row.appendChild(l);
       if(it.title){var o=gEl('span','outside');o.appendChild(gEl('i'));o.appendChild(document.createTextNode('Outside Text'));row.appendChild(o);}
-      if(it.status==='archived')row.appendChild(gEl('span','val','Finished'));
-      var pick=function(){c.item={entityId:it.entityId,label:it.label,kind:it.kind};var first=(it.conditions||[])[0];c.cond=first?first.key+' '+first.value:'';goalForm();};
+      if(it.status==='archived')row.appendChild(gTag('Finished'));
+      var pick=function(){c.item={entityId:it.entityId,label:it.label,kind:it.kind,conditions:it.conditions||[]};var first=c.item.conditions[0];c.cond=first?first.key+' '+first.value:'';c.q='';goalForm('check:'+i+':cond');};
       row.onclick=pick;row.onkeydown=function(e){if(e&&e.key==='Enter')pick();};box.appendChild(row);});
   },function(e){if(seq!==box.seq)return;box.textContent='';box.appendChild(gEl('div','err',gSay(e)));});}
-function goalFormFoot(){var f=GOALS.form,foot=goalFoot();foot.hidden=false;
-  if(!gKeyed()){goalNeedsKey(foot);return;}
-  foot.appendChild(gEl('span','note'));
-  var cancel=gBtn('btn','Cancel',function(){if(f.mode==='edit'){GOALS.view='goal';GOALS.form=null;goalShow(f.goal);}else goalList(GOALS.tab);});
+function goalFormFoot(){var f=GOALS.form;if(!gKeyed()){goalNeedsKey();return;}
+  var foot=goalFoot();foot.hidden=false;var left=gEl('span','gleft');if(f.mode==='new')left.appendChild(gBtn('ghost','Clear',function(){goalClear();}));foot.appendChild(left);
+  var cancel=gBtn('btn','Cancel',function(){if(f.mode==='edit'){goalNav('goal');GOALS.form=null;goalShow(f.goal);}else goalList(GOALS.tab);});
   var go=gBtn('btn pri',gLabel(f.mode==='edit'?'Save':'Add Goal'),function(){goalSubmit([go,cancel]);});
   foot.appendChild(cancel);foot.appendChild(go);}
-function goalFormError(t){var f=GOALS.form;f.error=t;var m=document.getElementById('goalmsg');if(m){m.textContent=t;m.hidden=!t;m.className='err';}}
+/* What the form cannot file, said in the footer; the cursor goes to the field it is about. */
+function goalFormError(t,focus){goalMsg(t);goalFocus(focus);}
 /* What counts as done, as the form says it: each check with its words (an item's own words are its label and condition). */
-function goalCriteria(f,stepKeys){var out=[],used={},ids=[],err='';
+function goalCriteria(f,stepKeys){var out=[],used={},err='',at='';
   f.checks.forEach(function(c){if(c.id)used[c.id]=1;});
   var nextId=function(){for(var i=1;i<=GOAL_MAX;i++)if(!used['c'+i]){used['c'+i]=1;return 'c'+i;}return null;};
-  f.checks.forEach(function(c){if(err)return;var text=String(c.text||'').replace(/\s+/g,' ').trim();
-    if(c.method==='item'&&!c.item){err='Choose an item for this check.';return;}
+  f.checks.forEach(function(c,i){if(err)return;var text=gClean(c.text);
+    if(c.method==='item'&&!c.item){err='Choose an item for this check.';at='check:'+i+':find';return;}
     if(!text&&c.method!=='item')return;
     var check;
     if(c.method==='manual')check={kind:'manual'};
-    else if(c.method==='steps'){if(!stepKeys.length){err=f.mode==='edit'?'This goal has no steps yet.':'Add a first step for this check.';return;}check={kind:'steps',keys:gSorted(stepKeys)};}
-    else{var kv=String(c.cond||'').split(' ');if(kv.length!==2){err='Choose an item for this check.';return;}
-      var w=GOAL_CONDS[c.item.kind+' '+c.cond];if(!text)text=c.item.label+' '+(w?w[1]:'changes');check={kind:'item',entityId:c.item.entityId,key:kv[0],value:kv[1]};}
+    else if(c.method==='steps'){if(!stepKeys.length){err=f.mode==='edit'?'This goal has no steps yet.':'Add a first step for this check.';at=f.mode==='edit'?'check:'+i+':how':'step:0:title';return;}check={kind:'steps',keys:gSorted(stepKeys)};}
+    else{var kv=String(c.cond||'').split(' ');if(kv.length!==2){err='Choose an item for this check.';at='check:'+i+':cond';return;}
+      if(!text)text=c.item.label+' '+gWords(kv[0],kv[1])[1];check={kind:'item',entityId:c.item.entityId,key:kv[0],value:kv[1]};}
     /* A check kept as it was keeps its id and exactly its check (so Will's mark on it stays). */
-    if(c.orig&&c.orig.check&&c.orig.check.kind===check.kind&&(check.kind!=='steps'||c.method==='steps')&&(check.kind!=='item'||(c.orig.check.entityId===check.entityId&&c.orig.check.key===check.key&&c.orig.check.value===check.value)))check=c.orig.check;
-    var id=c.id||nextId();ids.push(id);out.push({id:id,text:text.slice(0,200),check:check});});
-  return {criteria:out,error:err};}
+    if(c.orig&&c.orig.check&&c.orig.check.kind===check.kind&&(check.kind!=='item'||(c.orig.check.entityId===check.entityId&&c.orig.check.key===check.key&&c.orig.check.value===check.value)))check=c.orig.check;
+    out.push({id:c.id||nextId(),text:text.slice(0,200),check:check});});
+  return {criteria:out,error:err,at:at};}
 /* Links: every item a check looks at, watching that field; links that are not a check's target stay as they were. */
 function goalLinks(criteria,current){var by={};(current||[]).forEach(function(l){if(l.role!=='target')by[l.entityId]={entityId:l.entityId,role:l.role,watchPaths:gSorted(l.watchPaths||[])};});
   var cur={};(current||[]).forEach(function(l){cur[l.entityId]=l;});
   criteria.forEach(function(c){if(c.check.kind!=='item')return;var id=c.check.entityId,l=by[id]||(cur[id]?{entityId:id,role:cur[id].role,watchPaths:gSorted(cur[id].watchPaths||[])}:{entityId:id,role:'target',watchPaths:[]});
     l.watchPaths=gSorted(l.watchPaths.concat([c.check.key]));by[id]=l;});
   return Object.keys(by).map(function(k){return by[k];}).sort(gById);}
-function goalSubmit(buttons){var f=GOALS.form;if(GOALS.busy)return;goalFormError('');
-  var title=String(f.title||'').replace(/\s+/g,' ').trim();if(!title){goalFormError('Give the goal a name.');return;}
-  var path,args,prompt;
+function goalSubmit(buttons){var f=GOALS.form;if(!f||GOALS.busy)return;goalMsg('');
+  var title=gClean(f.title);if(!title){goalFormError('Give the goal a name.','name');return;}
   if(f.mode==='new'){
-    var steps=f.steps.filter(function(s){return String(s.title||'').trim();});
-    var keys=steps.map(function(s,i){return 's'+(i+1);});
-    var cr=goalCriteria(f,keys);if(cr.error){goalFormError(cr.error);return;}
-    if(!cr.criteria.length){goalFormError('Add at least one way to know it’s done.');return;}
-    if(f.finishBy&&f.finishBy<=gLocalDay()){goalFormError('Pick a date after today.');return;}
-    for(var i=0;i<steps.length;i++)if(steps[i].due&&steps[i].due<gLocalDay()){goalFormError('Pick a step date that isn’t past.');return;}
-    args={goalId:'go'+f.draftKey,owner:'will',origin:'will',sensitivity:'personal',tainted:false,nexusProjectId:null,title:title,description:String(f.why||'').trim(),
+    var steps=f.steps.filter(function(s){return gClean(s.title);});
+    var cr=goalCriteria(f,steps.map(function(s,i){return 's'+(i+1);}));if(cr.error){goalFormError(cr.error,cr.at);return;}
+    if(!cr.criteria.length){goalFormError('Add at least one way to know it’s done.','check:0:text');return;}
+    if(f.finishBy&&f.finishBy<=gLocalDay()){goalFormError('Pick a date after today.','finish');return;}
+    for(var i=0;i<steps.length;i++)if(steps[i].due&&steps[i].due<gLocalDay()){goalFormError('Pick a step date that isn’t past.','step:'+f.steps.indexOf(steps[i])+':due');return;}
+    var args={goalId:'go'+f.draftKey,owner:'will',origin:'will',sensitivity:'personal',tainted:false,nexusProjectId:null,title:title,description:String(f.why||'').trim(),
       successCriteria:cr.criteria,horizonAt:f.finishBy?gAt(f.finishBy,23,59):null,reviewCadence:f.cadence,links:goalLinks(cr.criteria,[]),
-      plan:steps.length?{ops:steps.map(function(s,j){return {op:'add',key:'s'+(j+1),step:{ordinal:(j+1)*100,title:String(s.title).replace(/\s+/g,' ').trim().slice(0,200),kind:'will_task',tier:'approval',dueAt:s.due?gAt(s.due,17,0):null,dependsOn:[]}};})}:null};
-    path='/goals';prompt=GOAL_PROMPTS.add;
-  }else{var g=f.goal;var live=((g.plan&&g.plan.steps)||[]).filter(function(s){return s.status!=='skipped';}).map(function(s){return s.key;});
-    var ce=goalCriteria(f,live);if(ce.error){goalFormError(ce.error);return;}
-    if(!ce.criteria.length){goalFormError('Add at least one way to know it’s done.');return;}
-    args={goalId:g.id,title:title,description:String(f.why||'').trim(),successCriteria:ce.criteria,links:goalLinks(ce.criteria,g.links)};
-    var same={goalId:g.id,title:g.title,description:g.description,successCriteria:g.successCriteria,links:goalLinks(g.successCriteria||[],g.links)};
-    var unchanged=false;try{unchanged=typeof canonJson==='function'&&canonJson(args)===canonJson(same);}catch(e){unchanged=false;}
-    if(unchanged){goalFormError('It changes nothing.');return;}
-    path='/goals/'+encodeURIComponent(g.id)+'/edit';prompt=GOAL_PROMPTS.edit;}
-  goalFileSign(path,args,prompt,buttons);}
-function goalFileSign(path,args,prompt,buttons){var f=GOALS.form;
-  if(!gKeyed()){goalFormError('This device needs an approval key.');return;}
-  if(GOALS.busy)return;GOALS.busy=true;buttons.forEach(function(b){b.disabled=true;});var filed=false;
-  var body=f.mode==='new'?{draftKey:f.draftKey,args:args}:{args:args};
-  var end=function(){GOALS.busy=false;buttons.forEach(function(b){b.disabled=false;});};
-  gCall(path,body).then(function(d){filed=true;if(typeof approveAction!=='function')throw new Error('This device needs an approval key.');
-    return approveAction(d.id,goalHost(),{fresh:true,reason:prompt,args:args});
-  }).then(function(r){end();var a=(r&&r.action)||{};
-    if(a.status==='done'){if(f.mode==='edit'){goalOpen(f.goal.id,GOAL_DONE_SAY.edit);return;}f.done=true;goalForm();}
-    else goalFormError(a.status==='approved'?'Approved. It hasn’t run yet.':gSay(a.error||'It failed.'));
-  },function(e){end();goalFormError(filed&&goalCancelled(e)?'Cancelled. It’s waiting in Approvals.':gSay(e));});}
-/* Added: say so, then Add Another or Done. */
-function goalFormDone(body){var e=goalEmpty('Goal Added','Your goal is active.');body.appendChild(e);var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
-  foot.appendChild(gBtn('btn','Done',function(){goalList('active');}));foot.appendChild(gBtn('btn pri','Add Another',function(){goalNew();}));}
+      plan:steps.length?{ops:steps.map(function(s,j){return {op:'add',key:'s'+(j+1),step:{ordinal:(j+1)*100,title:gClean(s.title).slice(0,200),kind:'will_task',tier:'approval',dueAt:s.due?gAt(s.due,17,0):null,dependsOn:[]}};})}:null};
+    /* Added: the draft is spent. If Will has gone back to the list meanwhile, the list shows the new goal. */
+    var spent=function(){f.done=true;if(GOALS.draft===f)GOALS.draft=null;};
+    goalSign({path:'/goals',body:{draftKey:f.draftKey,args:args},args:args,prompt:gPrompt('add'),buttons:buttons,done:function(){spent();goalForm();},
+      away:function(){spent();if(GOALS.view==='list'&&goalsOpen())goalList(GOALS.tab);}});
+    return;}
+  var g=f.goal;var live=((g.plan&&g.plan.steps)||[]).filter(function(s){return s.status!=='skipped';}).map(function(s){return s.key;});
+  var ce=goalCriteria(f,live);if(ce.error){goalFormError(ce.error,ce.at);return;}
+  if(!ce.criteria.length){goalFormError('Add at least one way to know it’s done.','check:0:text');return;}
+  /* What it changes from is the goal as the panel showed it: the card does not apply to a goal that has since changed. */
+  var from={title:g.title,description:g.description,successCriteria:g.successCriteria,links:goalRawLinks(g)};
+  var next={title:title,description:String(f.why||'').trim(),successCriteria:ce.criteria,links:goalLinks(ce.criteria,g.links)};
+  var unchanged=false;try{unchanged=typeof canonJson==='function'&&canonJson(next)===canonJson(from);}catch(e){unchanged=false;}
+  if(unchanged){goalFormError('It changes nothing.','name');return;}
+  var edit={goalId:g.id,title:next.title,description:next.description,successCriteria:next.successCriteria,links:next.links,from:from};
+  goalSign({path:gGoalPath(g,'/edit'),body:{args:edit},args:edit,prompt:gPrompt('edit'),buttons:buttons,done:function(){goalOpen(g.id,GOAL_DONE_SAY.edit);}});}
+/* Added: say so; Done is the likelier next step, Add Another the other. */
+function goalFormDone(body){body.appendChild(goalEmpty('Goal Added','Your goal is active.'));var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
+  foot.appendChild(gBtn('btn','Add Another',function(){goalNew();}));foot.appendChild(gBtn('btn pri','Done',function(){goalList('active');}));}
 
 goalsProbe();
 </script>
