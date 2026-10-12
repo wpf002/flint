@@ -756,8 +756,9 @@ deploy is tried again (as any deploy that fails its checks is).
 What to type is in [docs/RECOVERY.md](../../docs/RECOVERY.md). This is how it works
 (`src/backup/restore.ts`, `catalog.ts`, `carry.ts`).
 
-- **`pnpm --silent --filter @flint/runtime restore-production`** replaces the
-  production database with a nightly dump. It is the action
+- **`restore-production`** (Will runs it as `apps/studio/restore_database.sh`,
+  which starts it directly so that nothing but its own sentences is printed)
+  replaces the production database with a nightly dump. It is the action
   `restore.production`: APPROVAL in code for Will at the keyboard, never
   promotable, FORBIDDEN from chat and for Flint on its own, and refused when a
   policy row of Will's own forbids it (the command reads his rows from the

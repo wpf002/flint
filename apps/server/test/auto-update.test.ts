@@ -393,6 +393,33 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.out).toContain(`deployed ${sha}`);
   });
 
+  it('a pause a database restore left when it was killed is lifted; one whose restore is still running holds', () => {
+    const sha = push('v1');
+    mkdirSync(state, { recursive: true });
+    const hold = join(state, 'deploy-hold');
+    // A restore that is running (this process stands in for it): updates wait.
+    writeFileSync(hold, `restore ${process.pid} 2026-10-12T15:00:00.000Z\n`);
+    let t = tick();
+    expect(t.ran).toEqual([]);
+    expect(t.out).toMatch(/updates are paused/);
+    expect(existsSync(hold)).toBe(true);
+    // One whose process is gone (no process has this id): its pause is over, and the tick deploys.
+    writeFileSync(hold, 'restore 2147483646 2026-10-12T15:00:00.000Z\n');
+    t = tick();
+    expect(t.out).toContain('a database restore that is no longer running had paused updates: the pause is lifted');
+    expect(existsSync(hold)).toBe(false);
+    expect(t.ran).toEqual(['server', 'runtime']);
+    expect(git(deployDir, 'rev-parse', 'HEAD')).toBe(sha);
+    // A pause of any other kind is never lifted that way, whatever it says.
+    for (const text of ['Paused by rollback.sh', 'restore not-a-number x', 'restored 2147483646', '']) {
+      push(`after ${text}`);
+      writeFileSync(hold, `${text}\n`);
+      t = tick();
+      expect(t.ran, text).toEqual([]);
+      expect(existsSync(hold), text).toBe(true);
+    }
+  });
+
   // Review of the recovery PR: rollback.sh put an earlier version back and paused updates. With no
   // new push, removing the hold did nothing: the checkout was already at main's newest commit and
   // its deploy was on record as finished, so the earlier version stayed installed for good.

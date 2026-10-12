@@ -42,6 +42,17 @@ HOLD="$STATE/deploy-hold"
 # put an earlier version back, and with no new push nothing else would bring the newest one
 # back (the checkout is already at it, and its deploy is on record as finished).
 HOLD_SEEN="$STATE/deploy-hold-seen"
+# A database restore pauses updates only while it runs, and says so in the file ("restore <its
+# process> <when>"; apps/runtime, restore-production). One that was killed outright cannot lift its
+# own pause: its process is gone, so the pause is over, and this tick goes on as if it had not been there.
+if [ -e "$HOLD" ]; then
+  hold_kind= hold_pid= hold_rest=
+  read -r hold_kind hold_pid hold_rest < "$HOLD" 2>/dev/null || true
+  if [ "$hold_kind" = restore ] && [[ "$hold_pid" =~ '^[0-9]+$' ]] && ! kill -0 "$hold_pid" 2>/dev/null; then
+    rm -f "$HOLD"
+    echo "$(ts) a database restore that is no longer running had paused updates: the pause is lifted"
+  fi
+fi
 if [ -e "$HOLD" ]; then
   [ -e "$HOLD_SEEN" ] || { mkdir -p "$STATE"; : > "$HOLD_SEEN"; }
   echo "$(ts) updates are paused: $HOLD exists (remove it to resume)"

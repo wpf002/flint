@@ -70,7 +70,7 @@ const emptyReport: CarryReport = {
 describe('the command is Will’s alone', () => {
   const config = {
     home: '/nonexistent', tz: 'America/Chicago', ownerUrl: 'postgresql://flint_owner:x@[::1]:1/flint', appUrl: 'postgresql://flint_app:x@[::1]:1/flint', restoreUrl: 'postgresql://flint_restore:x@[::1]:1/postgres',
-    dumpDir: '/nonexistent/pg', copyDir: '/nonexistent/pre', fingerprintKey: '/nonexistent/key', holdFile: '/nonexistent/hold', deployMarker: '/nonexistent/marker', recordFile: '/nonexistent/record',
+    dumpDir: '/nonexistent/pg', copyDir: '/nonexistent/pre', fingerprintKey: '/nonexistent/key', holdFile: '/nonexistent/hold', recordFile: '/nonexistent/record',
     tools: { pgDump: 'x', pgRestore: 'x' }, path: '', launchctl: false,
   } satisfies RestoreConfig;
   const said: string[] = [];
@@ -165,7 +165,7 @@ describe('the command is Will’s alone', () => {
     for (const l of lines) expect(l, l).toMatch(/^([A-Z].*[.:]|  pnpm .*)$/);
     // When the database in use could not be read, or there is none (a rebuild), that is said first.
     expect(carryLines({ ...emptyReport, currentRead: false }, 'UTC', 'production')[0]).toMatch(/could not read the database in use, so anything you revoked, switched off or told Flint to forget after this backup may be back/);
-    expect(carryLines({ ...emptyReport, currentRead: false }, 'UTC', 'rebuild')[0]).toMatch(/This Mac starts from the backup/);
+    expect(carryLines({ ...emptyReport, currentRead: false }, 'UTC', 'rebuild')[0]).toMatch(/The rebuilt Flint starts from the backup/);
     // No key at all: the command that enrols one, on a line of its own.
     const bare = carryLines(emptyReport, 'UTC', 'production');
     expect(bare).toContain('No approval key is live after this restore. Enrol one with this command:');
@@ -1219,7 +1219,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
         `There is no database named ${p.name} right now.`,
         `The restored copy is still there as ${copy}.`,
         'Put things back with this command:',
-        '  pnpm --silent --filter @flint/runtime restore-production --repair',
+        '  ~/flint/apps/studio/restore_database.sh --repair',
         'If that does not work, open the database by hand with this command:',
         `  psql -d postgres -c 'ALTER DATABASE ${p.name} ALLOW_CONNECTIONS true'`,
       ]);
@@ -1251,7 +1251,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       });
       const closed = await refusal(restoreDatabase(options(p)));
       expect(closed.message).toBe(`The database ${p.name} is closed to connections: an earlier restore was stopped part-way.`);
-      expect(closed.lines).toEqual(['Open it again with this command:', '  pnpm --silent --filter @flint/runtime restore-production --repair']);
+      expect(closed.lines).toEqual(['Open it again with this command:', '  ~/flint/apps/studio/restore_database.sh --repair']);
       const lines: string[] = [];
       let asked = false;
       let started = 0;
@@ -1278,7 +1278,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const missing = await refusal(restoreDatabase(options(q)));
       expect(missing.message).toBe(`There is no database named ${q.name}, and ${kept} is there: an earlier restore was stopped part-way.`);
       expect(missing.message).not.toMatch(/rebuild/i);
-      expect(missing.lines).toEqual(['Put it back with this command:', '  pnpm --silent --filter @flint/runtime restore-production --repair']);
+      expect(missing.lines).toEqual(['Put it back with this command:', '  ~/flint/apps/studio/restore_database.sh --repair']);
       // Giving a kept copy the production name back is Will's to confirm.
       lines.length = 0;
       await expect(repair(q.owner, false)).rejects.toThrow('Nothing was changed.');
@@ -1382,7 +1382,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect((await admin(async (c) => (await c.query<{ ok: boolean }>(`SELECT has_database_privilege('flint_app', $1, 'TEMP') AS ok`, [p.name])).rows[0]))!.ok).toBe(false);
       // The promotions that came back are said, and that what was taken away since is back with them.
       const text = carryLines(r.report, 'UTC', 'rebuild').join('\n');
-      expect(text).toMatch(/^This Mac starts from the backup/);
+      expect(text).toMatch(/^The rebuilt Flint starts from the backup/);
       expect(text).toContain('Flint may do 3 things on its own: backup.local, digest.send, world.sync.github (5 a day).');
 
       // Run again with the same backup (a rebuild that stopped later and was restarted): nothing is done, and it says so.
@@ -1438,7 +1438,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       });
     const config = (p: { owner: string; app: string; backup?: string }, over: Partial<RestoreConfig> = {}): RestoreConfig => ({
       home, tz: 'UTC', ownerUrl: p.owner, appUrl: p.app, restoreUrl: urls.restore, ...(p.backup ? { backupUrl: p.backup } : {}), dumpDir, copyDir, fingerprintKey: keyFile,
-      holdFile: join(home, '.flint', 'deploy-hold'), deployMarker: join(home, '.flint', 'deploy-running'), recordFile: join(home, '.flint', 'restore-log.jsonl'),
+      holdFile: join(home, '.flint', 'deploy-hold'), recordFile: join(home, '.flint', 'restore-log.jsonl'),
       tools: cluster.tools, path: process.env.PATH ?? '', launchctl: false, ...over,
     });
     const noLaunchd = async (_bin: string, args: string[]) => { if (args[0] === 'print') throw new Error('not loaded'); return ''; };
@@ -1552,7 +1552,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(r.status).toBe(0);
       const lines = r.stdout.trim().split('\n');
       expect(lines[0]).toMatch(/^The database restored and passed its checks: \d+ tables match the backup's own counts\.$/);
-      expect(lines[1]).toMatch(/^This Mac starts from the backup/);
+      expect(lines[1]).toMatch(/^The rebuilt Flint starts from the backup/);
       for (const l of lines) expect(l, l).toMatch(/^[A-Z].*\.$/);
       for (const secret of [new URL(urls.owner).password, new URL(urls.app).password, 'postgresql://']) expect(r.stdout.includes(secret)).toBe(false);
       const again = cli(['restore-empty', '--from-rebuild', '--dump', dump, '--sha256', dumpSha], env);

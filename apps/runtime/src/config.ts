@@ -391,9 +391,8 @@ export interface RestoreConfig {
   copyDir: string;
   /** The key fingerprint files are sealed with. */
   fingerprintKey: string;
-  /** The file that pauses updates, and the one the deploy job keeps while it installs one. */
+  /** The file that pauses updates (apps/server/auto_deploy.sh looks for it before it does anything). */
   holdFile: string;
-  deployMarker: string;
   /** The local record of restores (0600). */
   recordFile: string;
   /** The passkey settings signatures are verified against, when the runtime has them. */
@@ -403,7 +402,7 @@ export interface RestoreConfig {
   tools: { pgDump: string; pgRestore: string };
   /** For the tools the restore starts (prisma, git): the caller's PATH. */
   path: string;
-  /** May launchctl be run? Never under a test runner. */
+  /** May launchctl be run, and the Mac's running programs be looked at? Never under a test runner. */
   launchctl: boolean;
 }
 
@@ -483,7 +482,6 @@ export function loadRestoreConfig(): RestoreConfig {
     copyDir: join(home, 'FlintBackups', 'pre-restore'),
     fingerprintKey: fingerprintKeyFile(home),
     holdFile: join(home, '.flint', 'deploy-hold'),
-    deployMarker: join(home, '.flint', 'deploy-running'),
     recordFile: join(home, '.flint', 'restore-log.jsonl'),
     ...(rpId && /^[a-z0-9.-]+$/.test(rpId) && origins.length ? { rp: { rpId, origins } } : {}),
     ...(dataDir ? { dataDir } : {}),

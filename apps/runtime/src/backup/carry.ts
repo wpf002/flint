@@ -433,7 +433,7 @@ const plain = (s: string, max = 60): string => s.replace(/[^\w .,:*@()/-]/g, '?'
 export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'rebuild'): string[] {
   const out: string[] = [];
   if (mode === 'rebuild') {
-    out.push('This Mac starts from the backup, so anything you revoked, switched off or told Flint to forget after it was made is back.');
+    out.push('The rebuilt Flint starts from the backup, so anything you revoked, switched off or told Flint to forget after it was made is back.');
     out.push("Check your approval keys and what Flint may do on its own in the console's Settings, and forget those things again.");
   } else if (!r.currentRead) {
     out.push('Flint could not read the database in use, so anything you revoked, switched off or told Flint to forget after this backup may be back.');

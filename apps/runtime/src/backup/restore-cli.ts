@@ -27,7 +27,7 @@
  * is ever printed.
  */
 import { execFile, spawn } from 'node:child_process';
-import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, readdirSync, readlinkSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -42,16 +42,19 @@ const RUNTIME_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const MIGRATIONS = join(RUNTIME_DIR, 'prisma', 'migrations');
 const LABEL = 'com.flint.runtime';
 const LAUNCHCTL = '/bin/launchctl';
+const PGREP = '/usr/bin/pgrep';
 
 export type Exec = (bin: string, args: string[]) => Promise<string>;
 /**
- * Run a program with fixed arguments. launchctl is run only where the config
- * says it may be: a test, or anything else that builds its own config, can never
- * reach the real one.
+ * Run a program with fixed arguments. launchctl, and the look at what else is
+ * running on this Mac, happen only where the config says they may: a test, or
+ * anything else that builds its own config, can never reach the real launchd,
+ * and is never stopped by an update that happens to be installing on the Mac
+ * the tests run on (the deploy gate runs them from inside one).
  */
-export const execFor = (launchctl: boolean): Exec => (bin, args) =>
-  bin === LAUNCHCTL && !launchctl
-    ? Promise.reject(new Error('launchctl is not run here'))
+export const execFor = (machine: boolean): Exec => (bin, args) =>
+  (bin === LAUNCHCTL || bin === PGREP) && !machine
+    ? Promise.reject(new Error(`${bin === LAUNCHCTL ? 'launchctl' : 'pgrep'} is not run here`))
     : new Promise((resolveP, reject) => execFile(bin, args, { timeout: 30_000 }, (err, stdout) => (err ? reject(err) : resolveP(String(stdout)))));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -159,22 +162,14 @@ async function updateWaiting(home: string, exec: Exec): Promise<boolean> {
   }
 }
 
-/** Is the deploy job installing an update right now? It writes its process id to a file while it runs (apps/server/auto_deploy.sh). */
-async function deployRunning(marker: string, exec: Exec): Promise<boolean> {
-  let pid: number;
-  try {
-    pid = Number(readFileSync(marker, 'utf8').trim().split(/\s+/)[0]);
-  } catch {
-    return false;
-  }
-  if (!Number.isInteger(pid) || pid <= 1) return false;
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false; // That process is gone: the file was left by a run that was killed.
-  }
-  // A process id is reused in time: it counts only while it is still the deploy job.
-  return exec('/bin/ps', ['-p', String(pid), '-o', 'command=']).then((out) => /auto_deploy|install-(server|runtime)/.test(out), () => true);
+/**
+ * Is an update being installed right now? The deploy job and the two installers are looked for by
+ * name, as apps/studio/rollback.sh does. Together with the pause this restore puts on updates
+ * before it asks (the deploy job looks for the pause before it does anything), a deploy and a
+ * restore cannot run across each other: whichever started second sees the first.
+ */
+async function deployRunning(exec: Exec): Promise<boolean> {
+  return exec(PGREP, ['-f', 'auto_deploy\\.sh|install-server\\.sh|install-runtime\\.sh']).then((out) => out.trim() !== '', () => false);
 }
 
 /** One line to the local record of restores (0600, appended): what was tried and how it ended. Never a secret, never a row. */
@@ -345,7 +340,7 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
     say: io.say,
     ...(io.now ? { now: io.now } : {}),
     holdFile: config.holdFile,
-    deployRunning: () => deployRunning(config.deployMarker, exec),
+    deployRunning: () => deployRunning(exec),
     ...(config.dataDir ? { dataDir: config.dataDir } : {}),
     ...(io.onSignal ? { onSignal: io.onSignal } : {}),
     ...(io.exit ? { exit: io.exit } : {}),

@@ -90,7 +90,7 @@ export const KEEP_DAYS = 14;
 /** Two numbers no other program on this cluster takes an advisory lock on: "FLNT", and this job. */
 const LOCK = [0x464c4e54, 7] as const;
 /** What repairs a database an earlier run left closed or renamed. */
-const REPAIR = '  pnpm --silent --filter @flint/runtime restore-production --repair';
+const REPAIR = '  ~/flint/apps/studio/restore_database.sh --repair';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`;
