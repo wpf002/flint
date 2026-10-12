@@ -12,14 +12,22 @@
  *    the brain that will read it.
  *  - A brain may read it when it runs on this Mac (./policy brainIsLocal, the
  *    one place that is decided): an Ollama model at a loopback address that is
- *    not one of Ollama's cloud models. Never Anthropic, OpenAI or Perplexity,
- *    never a "local" brain that is really Claude, never a persona this server
- *    did not build.
+ *    not one of Ollama's cloud models, and that its Ollama itself lists as
+ *    running there (a name is not trusted). Never Anthropic, OpenAI or
+ *    Perplexity, never a "local" brain that is really Claude, never a persona
+ *    this server did not build.
  *  - What the model then SAYS stays here too. A turn whose brain was given the
  *    block is marked (GOALS_TURN, stored with the turn), and a brain that is
  *    not on this Mac never gets that turn back as history: its question and
  *    its answer are left out, with one neutral line where they were
  *    (historyFor).
+ *  - The mark follows history. A brain on this Mac reads marked turns as
+ *    history, so what it says next may repeat them. Its ask is therefore one
+ *    that carries what stays here whenever a marked turn is in the history it
+ *    is handed (`Ask.carried`, from the store's own window): the same tools,
+ *    the same mark on its turn. That holds with no goals block at all: when it
+ *    did not fit, when the runtime did not answer, when no goal is active, and
+ *    after the block is turned off.
  *  - For that ask, the tools an outside AI answers are not offered
  *    (./goals-tools), so a goal's words cannot leave through a tool call to
  *    another company's model.
@@ -145,6 +153,21 @@ export function carriedGoals(turn: { context?: unknown }): boolean {
   return !!c && typeof c === 'object' && (c as { goals?: unknown }).goals === true;
 }
 
+/**
+ * Every mark that keeps a stored turn on this Mac, as the test that reads it.
+ * There is one today: the turn was answered with Will's goals in its context.
+ * A second kind of turn that stays here (one Will asked to keep private) is
+ * added to this list and nowhere else: the history a brain is handed, what a
+ * later local turn carries, the extractor's rule and the speech rule all go
+ * through `keptHere`.
+ */
+export const STAY_MARKS: ReadonlyArray<(turn: { context?: unknown }) => boolean> = [carriedGoals];
+
+/** Is this stored turn marked to stay on this Mac, by any mark? */
+export function keptHere(turn: { context?: unknown }): boolean {
+  return STAY_MARKS.some((marked) => marked(turn));
+}
+
 /** What stands in an outside brain's history where such turns were. It says nothing of what they held. */
 export const HISTORY_GAP = '[An earlier part of this conversation isn’t shown here.]';
 
@@ -161,14 +184,19 @@ export function staysHere(brain: AnsweringBrain | undefined, toFrontier: boolean
 /**
  * The conversation store as one brain may read it. A brain that may read what
  * stays here reads all of it. Any other brain reads it without the turns that
- * were answered with Will's goals in their context: the question and the
- * answer are both left out (the answer may repeat a goal, and the question may
- * be about one), and HISTORY_GAP stands where they were.
+ * are marked to stay here (keptHere): the question and the answer are both
+ * left out (the answer may repeat a goal, and the question may be about one),
+ * and HISTORY_GAP stands where they were.
  * FLINT_GOALS_TO_FRONTIER=on lifts this, as it lifts the block's own rule: Will
  * chose to send goal text out.
+ *
+ * Which of the two a brain reads is decided at each read, not once when the
+ * brain is built: whether it runs on this Mac is its Ollama's own word
+ * (./policy brainIsLocal), and that is not known at boot and can change.
  */
 export function historyFor(store: PersistentStore, brain: AnsweringBrain | undefined, toFrontier: boolean): MemoryStore {
-  return staysHere(brain, toFrontier) ? store : store.viewWithout(carriedGoals, HISTORY_GAP);
+  const outside = store.viewWithout(keptHere, HISTORY_GAP);
+  return { ...outside, getMessages: (conversationId) => (staysHere(brain, toFrontier) ? store : outside).getMessages(conversationId) };
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +270,13 @@ export interface Ask {
    * instead. Left out, or the same text: nothing recalled stays here.
    */
   here?: string;
+  /**
+   * A turn that stays on this Mac is in the history this conversation's next
+   * message carries (the store's `windowHas(conversationId, keptHere)`). A
+   * brain that may read it has then read it, so its ask carries what stays
+   * here whether or not it is also given the goals or a fact.
+   */
+  carried?: boolean;
   /** The tools the turn would offer. */
   tools?: readonly Tool[];
   /**
@@ -286,19 +321,15 @@ export class TurnGoals<P> {
     this.#rules = rules;
   }
 
-  /** Does this persona's brain run on this Mac (./policy brainIsLocal)? Its ask is then a local model's turn. */
-  onThisMac(persona: P): boolean {
-    return brainIsLocal(this.#rules.brainOf(persona));
-  }
-
   /**
    * This ask, with what stays on this Mac only when this persona's brain may
    * read it and the ask runs as a local model's turn: the recalled facts that
    * stay here (`here`), and Will's goals after them while the brain's real
-   * context has room. When it carries either, it also carries only the tools
-   * that keep them here, and the mark that keeps the turn out of an outside
-   * brain's history and what is learned from it out of an outside brain's
-   * recall. Every other ask is the one any brain may be given.
+   * context has room. When it carries either, or its history holds a turn that
+   * stays here (`carried`), it also carries only the tools that keep them
+   * here, and the mark that keeps the turn out of an outside brain's history
+   * and what is learned from it out of an outside brain's recall. Every other
+   * ask is the one any brain may be given.
    */
   ask(persona: P, a: Ask): Asked {
     const offered = a.tools ?? [];
@@ -308,8 +339,9 @@ export class TurnGoals<P> {
     const base = a.here ?? a.context;
     const tools = this.#rules.tools(offered);
     const text = this.#answer ? render(this.#answer, promptRoom(brain, (a.promptChars ?? 0) + base.length + toolChars(tools))) : '';
-    // Neither a fact that stays here nor the goals: an ordinary ask, with every tool and no mark.
-    if (!text && base === a.context) return without;
+    // Neither a fact that stays here, nor the goals, nor a turn that stays here in its history: an ordinary
+    // ask, with every tool and no mark.
+    if (!text && base === a.context && a.carried !== true) return without;
     return { context: text ? (base ? `${base}\n\n${text}` : text) : base, tools, tokens: text ? estimateTokens(text) : 0, mark: { context: GOALS_TURN } };
   }
 }
@@ -335,6 +367,11 @@ export interface GoalsNowOptions<P> {
   localTurn?: () => boolean;
   /** What an ask that carries the block is offered, from what the turn would offer (./goals-tools). Default: the same tools. */
   tools?: (offered: readonly Tool[]) => readonly Tool[];
+  /**
+   * Is there, right now, a brain that may read the goals? Asked each turn:
+   * with none, the runtime is not asked for them. Default: yes.
+   */
+  readers?: () => boolean;
   fetchImpl?: typeof fetch;
   /** How long an answer (or a failure) is reused (default 30 s). */
   ttlMs?: number;
@@ -373,8 +410,8 @@ export class GoalsNow<P> {
 
   /** This turn's goals, fetched or cached once; each ask of a brain then goes through `TurnGoals.ask`. */
   async forTurn(): Promise<TurnGoals<P>> {
-    // The block is off: nothing is fetched, and the turn's asks are still made by the same rules.
-    if (this.opts.on === false) return new TurnGoals(undefined, this.#rules);
+    // The block is off, or no brain may read it: nothing is fetched, and the turn's asks are still made by the same rules.
+    if (this.opts.on === false || this.opts.readers?.() === false) return new TurnGoals(undefined, this.#rules);
     // A turn that arrives while another's fetch is out waits for that one (still within its 300 ms).
     if (!this.inflight && this.now() - this.triedAt >= (this.opts.ttlMs ?? 30_000)) {
       this.inflight = this.refresh().finally(() => {
@@ -425,45 +462,48 @@ export interface GoalsForChat<P> {
   tools?: (offered: readonly Tool[]) => readonly Tool[];
   /** Is the ask being made running as a local model's turn (./turn-taint isLocalTurn)? */
   localTurn: () => boolean;
-  log: (msg: string) => void;
   fetchImpl?: typeof fetch;
 }
 
 /**
  * What stays on this Mac in chat, for this server's brains, as main() wires
- * it: every persona /chat can ask is named with its brain (chatBrains), and
- * the boot log says which of them read Will's goals, in how large a context,
- * and which never do. It is built again whenever the local brain is swapped
+ * it (through ./goals-chat): every persona /chat can ask is named with its
+ * brain (chatBrains). It is built again whenever the local brain is swapped
  * (main()'s adoptLocal), so the brain it names is the one that answers.
  *
  * It is always there, whether or not the goals block is on: the turns that
  * were answered with the goals, and the facts learned from them, are held to
- * the same rules after the block is turned off. With the block off, or with no
- * brain that may read it, the runtime is never asked. Log lines carry brain
- * labels and sizes only, never an address and never a goal's words.
+ * the same rules after the block is turned off. With the block off, or while
+ * no brain may read it, the runtime is never asked.
  */
 export function goalsForChat<P>(o: GoalsForChat<P>): GoalsNow<P> {
   const brains = chatBrains(o.local, o.tiers);
-  // A local wire that is not local (an Ollama cloud model, or a server on another machine) is said so: its label alone would not.
-  const label = (b: ChatBrain) => `${b.provider}:${b.model}${LOCAL_WIRES.has(b.provider) && !brainIsLocal(b) ? ' (not on this Mac)' : ''}`;
-  const labels = (list: ChatBrain[], say: (b: ChatBrain) => string = label) => [...new Set(list.map(say))];
-  const all = labels([...brains.values()]);
-  // For the brains that read them: the context each really has, since that decides how much of the block fits.
-  const here = labels([...brains.values()].filter((b) => brainIsLocal(b)), (b) => `${label(b)}${b.window ? `, ${b.window}-token context` : ''}`);
-  const elsewhere = labels([...brains.values()].filter((b) => !brainIsLocal(b)));
-  let on = o.on;
-  if (!o.on) {
-    // Off is the default, and is not news.
-  } else if (o.toFrontier) {
-    o.log(`[goals-now] on, with FLINT_GOALS_TO_FRONTIER=on: Will's goals are SENT to every brain that answers a chat turn (${all.join(', ')})`);
-  } else if (here.length === 0) {
-    o.log(`[goals-now] on, but no brain here runs on this Mac (${all.join(', ')}), so no chat turn gets Will's goals`);
-    on = false; // nothing to fetch them for
-  } else {
-    o.log(`[goals-now] on: Will's goals go into chat turns answered on this Mac (${here.join('; ')})${elsewhere.length ? `, never to ${elsewhere.join(', ')}` : ''}`);
-  }
   return new GoalsNow<P>({
-    on, runtime: o.runtime, brainOf: (p) => brains.get(p), toFrontier: o.toFrontier, localTurn: o.localTurn,
+    on: o.on, runtime: o.runtime, brainOf: (p) => brains.get(p), toFrontier: o.toFrontier, localTurn: o.localTurn,
+    // Asked each turn: which brains run on this Mac is their Ollama's word, and it is not known at boot.
+    readers: () => [...brains.values()].some((b) => staysHere(b, o.toFrontier)),
     ...(o.tools ? { tools: o.tools } : {}), ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
   });
+}
+
+/**
+ * The boot log's line about Will's goals in chat: which brains read them, in
+ * how large a context, and which never do. Nothing when the block is off (off
+ * is the default, and is not news). Brain labels and sizes only, never an
+ * address and never a goal's words. It says what is true when it is asked, so
+ * it is asked once each brain's Ollama has said what runs on it.
+ */
+export function describeGoals<P>(o: Pick<GoalsForChat<P>, 'on' | 'local' | 'tiers' | 'toFrontier'>): string | undefined {
+  if (!o.on) return undefined;
+  const brains = [...chatBrains(o.local, o.tiers).values()];
+  // A local wire that is not local (an Ollama cloud model, a server on another machine, a model its Ollama does not run) is said so: its label alone would not.
+  const label = (b: ChatBrain) => `${b.provider}:${b.model}${LOCAL_WIRES.has(b.provider) && !brainIsLocal(b) ? ' (not on this Mac)' : ''}`;
+  const labels = (list: ChatBrain[], say: (b: ChatBrain) => string = label) => [...new Set(list.map(say))];
+  const all = labels(brains);
+  if (o.toFrontier) return `[goals-now] on, with FLINT_GOALS_TO_FRONTIER=on: Will's goals are SENT to every brain that answers a chat turn (${all.join(', ')})`;
+  // For the brains that read them: the context each really has, since that decides how much of the block fits.
+  const here = labels(brains.filter((b) => brainIsLocal(b)), (b) => `${label(b)}${b.window ? `, ${b.window}-token context` : ''}`);
+  const elsewhere = labels(brains.filter((b) => !brainIsLocal(b)));
+  if (here.length === 0) return `[goals-now] on, but no brain here is known to run on this Mac (${all.join(', ')}), so no chat turn gets Will's goals`;
+  return `[goals-now] on: Will's goals go into chat turns answered on this Mac (${here.join('; ')})${elsewhere.length ? `, never to ${elsewhere.join(', ')}` : ''}`;
 }

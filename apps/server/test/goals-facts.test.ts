@@ -23,6 +23,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Tool, Turn } from '@flint/core';
+import { embedderHere } from '../src/goals-chat';
 import { carriedGoals } from '../src/goals-now';
 import { withoutOutsideAi } from '../src/goals-tools';
 import { contextOutside, recallContext } from '../src/grounding';
@@ -40,7 +41,7 @@ const downEmbedder: Emb = {
 };
 /** A tiny deterministic "semantic" embedder: one dimension per keyword. */
 const KEYS = ['cabin', 'codename', 'dentist', 'coffee', 'sister', 'garage'];
-const vec = (t: string): number[] => KEYS.map((k) => (t.toLowerCase().includes(k) ? 1 : 0)).concat([0.01]);
+const vec = (t: string): number[] => [...KEYS.map((k) => (t.toLowerCase().includes(k) ? 1 : 0)), 0.01];
 const upEmbedder: Emb = { embed: async (texts: string[]) => texts.map(vec) };
 
 const FACT_CANARY = 'CANARY-p3facts';
@@ -82,7 +83,8 @@ describe('the mark on a fact', () => {
 
 describe('recall, for a brain on this Mac and for one that is not', () => {
   async function filled(embedder: Emb) {
-    const k = new KnowledgeStore(kpath(), embedder);
+    // The embedder is on this Mac, so a fact that stays here may be embedded.
+    const k = new KnowledgeStore(kpath(), embedder, undefined, undefined, { embedderHere: () => true });
     await k.add(SECRET, 'history', { fromGoals: true });
     await k.add('Will’s cabin trip is in the spring.', 'history');
     await k.add(OPEN, 'history');
@@ -156,7 +158,7 @@ describe('the `remember` tool an ask that carries the goals is offered', () => {
     const standard = rememberTool(k);
     const local = rememberTool(k, { fromGoals: true });
     expect(local.definition).toEqual(standard.definition);
-    const call = (t: Tool, fact: string) => t.handler({ id: 'c', name: 'remember', args: { fact } } as Parameters<Tool['handler']>[0], {} as Parameters<Tool['handler']>[1]);
+    const call = (t: Tool, fact: string) => t.handler({ id: 'c', toolName: 'remember', args: { fact } });
     await call(standard, OPEN);
     await call(local, SECRET);
     expect(k.all().map((f) => [f.text, f.fromGoals ?? false])).toEqual([[OPEN, false], [SECRET, true]]);
@@ -268,6 +270,144 @@ describe('memory extraction: what is learned from a goals turn is marked', () =>
   });
 });
 
+describe('memory extraction: a turn the extractor may not read is not context for the next one either', () => {
+  const spath = () => join(dir, 'extract-state.json');
+
+  it('a frontier extractor mining the plain turn after a goals turn is not shown the goals turn as "earlier in this conversation"', async () => {
+    const k = new KnowledgeStore(kpath(), downEmbedder);
+    const goalsTurn = turn('c1', SAY_SECRET, `Noted: Bluebird ${FACT_CANARY}.`);
+    const plain = turn('c1', SAY_OPEN);
+    const c = curator();
+    const carried = (_cid: string, tid: string) => tid === goalsTurn.id;
+    const ex = new MemoryExtractor(source({ c1: [goalsTurn, plain] }), k, c.brain, spath(), { kind: 'frontier', isTainted: carried, carriedGoals: carried });
+    await ex.run();
+    expect(ex.lastStats.skippedTainted).toBe(1);
+    expect(c.prompts).toHaveLength(1);
+    expect(c.prompts[0]).toContain('Dr Okafor');
+    expect(c.prompts[0]).not.toContain('earlier in this conversation');
+    expect(c.prompts.join('\n')).not.toContain(FACT_CANARY);
+    expect(c.prompts.join('\n')).not.toContain('Bluebird');
+    // What it learned there is an ordinary fact: nothing of the goals turn was in the call.
+    expect(k.all().map((f) => [f.text, f.fromGoals ?? false])).toEqual([[OPEN, false]]);
+  });
+
+  it('with nothing held back, the earlier turn is shown as context, as it always was', async () => {
+    const first = turn('c1', SAY_GARAGE);
+    const second = turn('c1', SAY_OPEN);
+    const c = curator();
+    await new MemoryExtractor(source({ c1: [first, second] }), new KnowledgeStore(kpath(), downEmbedder), c.brain, spath(), { kind: 'frontier' }).run();
+    expect(c.prompts.join('\n')).toContain('(earlier in this conversation — WILL: I keep my garage door code in the blue notebook');
+  });
+});
+
+describe('a fact that stays here and the embedder', () => {
+  /** An embedder that keeps every text it is sent. */
+  const recordingEmbedder = () => {
+    const sent: string[] = [];
+    return { sent, embedder: { embed: async (texts: string[]) => (sent.push(...texts), texts.map(vec)) } as Emb };
+  };
+  const vectors = () => (JSON.parse(readFileSync(kpath(), 'utf8')) as { facts: Array<{ text: string; vector: number[] }> }).facts.map((f) => [f.text, f.vector.length > 0]);
+
+  it('with the embedder on another machine (a remote OLLAMA_HOST), it is stored without an embedding and never sent there; ordinary facts are embedded as before', async () => {
+    const e = recordingEmbedder();
+    const k = new KnowledgeStore(kpath(), e.embedder, undefined, undefined, { embedderHere: () => embedderHere('http://rented-gpu.example.com:11434') });
+    await k.add(SECRET, 'history', { fromGoals: true });
+    await k.add(OPEN, 'history');
+    expect(e.sent).toEqual([OPEN]);
+    expect(vectors()).toEqual([[SECRET, false], [OPEN, true]]);
+    // Recall still finds it, by its words, for a brain that may read it; and recall does not send it off to be embedded later.
+    const r = await k.recallWithMode('what is my cabin trip codename?');
+    expect(r.facts).toContain(SECRET);
+    expect(r.outside.join(' ')).not.toContain(FACT_CANARY);
+    expect(await k.reembedMissing()).toBe(0);
+    expect(e.sent.join(' ')).not.toContain(FACT_CANARY);
+    expect(vectors()).toEqual([[SECRET, false], [OPEN, true]]);
+  });
+
+  it('with the embedder on this Mac, it is embedded like any fact', async () => {
+    const e = recordingEmbedder();
+    const k = new KnowledgeStore(kpath(), e.embedder, undefined, undefined, { embedderHere: () => embedderHere('http://127.0.0.1:11434') });
+    await k.add(SECRET, 'history', { fromGoals: true });
+    expect(e.sent).toEqual([SECRET]);
+    expect(vectors()).toEqual([[SECRET, true]]);
+  });
+
+  it('an embedder nobody vouched for is not here: the default holds a marked fact back', async () => {
+    const e = recordingEmbedder();
+    const k = new KnowledgeStore(kpath(), e.embedder);
+    await k.add(SECRET, 'history', { fromGoals: true });
+    expect(e.sent).toEqual([]);
+    expect(embedderHere(undefined)).toBe(false);
+    expect(embedderHere('http://localhost:11434')).toBe(true);
+    expect(embedderHere('http://10.0.0.7:11434')).toBe(false);
+  });
+
+  it('a marked fact stored while the embedder was down is healed only by an embedder on this Mac', async () => {
+    const down = new KnowledgeStore(kpath(), downEmbedder, undefined, undefined, { embedderHere: () => true });
+    await down.add(SECRET, 'history', { fromGoals: true });
+    await down.add(OPEN, 'history');
+    const away = recordingEmbedder();
+    expect(await new KnowledgeStore(kpath(), away.embedder, undefined, undefined, { embedderHere: () => false }).reembedMissing()).toBe(1);
+    expect(away.sent).toEqual([OPEN]);
+    const here = recordingEmbedder();
+    expect(await new KnowledgeStore(kpath(), here.embedder, undefined, undefined, { embedderHere: () => true }).reembedMissing()).toBe(1);
+    expect(here.sent).toEqual([SECRET]);
+  });
+});
+
+describe('`remember` from a brain that may not know of a fact that stays here', () => {
+  const call = (t: Tool, fact: string) => t.handler({ id: 'c', toolName: 'remember', args: { fact } });
+
+  it('the standard build answers "saved" for the very words of a marked fact, as it would if the fact were not there', async () => {
+    const k = new KnowledgeStore(kpath(), downEmbedder);
+    await k.add(SECRET, 'history', { fromGoals: true });
+    const standard = rememberTool(k);
+    expect(await call(standard, SECRET)).toEqual({ ok: true, remembered: true, note: 'saved' });
+    // Those words are no longer something only this Mac holds: the one fact has lost its mark, and is recalled for any brain.
+    expect(k.all().map((f) => [f.text, f.fromGoals ?? false])).toEqual([[SECRET, false]]);
+    expect((await k.recallWithMode('what is my cabin trip codename?')).outside).toEqual([SECRET]);
+    // Told again, it is known, as any saved fact is.
+    expect(await call(standard, SECRET)).toEqual({ ok: true, remembered: false, note: 'already known' });
+  });
+
+  it('nor does a close rewording get "already known": the marked fact is not counted, and stays marked', async () => {
+    const k = new KnowledgeStore(kpath(), downEmbedder);
+    await k.add(SECRET, 'history', { fromGoals: true });
+    const reworded = SECRET.replace('codename is', 'codename is now');
+    expect((await k.addDetailed(reworded, 'history')).status).toBe('added');
+    expect(k.all().map((f) => f.fromGoals ?? false)).toEqual([true, false]);
+    // Against an ordinary fact the rule is what it was.
+    const plain = new KnowledgeStore(join(dir, 'plain.json'), downEmbedder);
+    await plain.add(OPEN, 'history');
+    expect((await plain.addDetailed(OPEN, 'history')).status).toBe('duplicate');
+    expect((await plain.addDetailed(OPEN.replace('dentist is', 'dentist is now'), 'history')).status).toBe('near-duplicate');
+    // ...and a marked add counts every fact, as before.
+    expect((await k.addDetailed(SECRET.replace('codename is', 'codename is just'), 'history', { fromGoals: true })).status).toBe('near-duplicate');
+  });
+
+  it('the build an ask that stays here is offered knows every fact: it answers "already known" for a marked one and for an ordinary one', async () => {
+    const k = new KnowledgeStore(kpath(), downEmbedder);
+    await k.add(SECRET, 'history', { fromGoals: true });
+    await k.add(OPEN, 'history');
+    const local = rememberTool(k, { fromGoals: true });
+    expect(await call(local, SECRET)).toEqual({ ok: true, remembered: false, note: 'already known' });
+    expect(await call(local, OPEN)).toEqual({ ok: true, remembered: false, note: 'already known' });
+    // An ordinary fact does not become one that stays here by being told again on such an ask.
+    expect(k.all().map((f) => f.fromGoals ?? false)).toEqual([true, false]);
+  });
+
+  it('what the extractor learns from an ordinary turn is held to the same rule', async () => {
+    const k = new KnowledgeStore(kpath(), downEmbedder);
+    await k.add(SECRET, 'history', { fromGoals: true });
+    const c = curator();
+    const ex = new MemoryExtractor(source({ c2: [turn('c2', SAY_SECRET)] }), k, c.brain, join(dir, 'extract-state.json'), { kind: 'frontier' });
+    await ex.run();
+    // The frontier extractor was not shown the marked fact as a known one, and its own find is an ordinary fact.
+    expect(c.prompts[0]!.split('TURNS:')[0]).not.toContain(FACT_CANARY);
+    expect(k.all().map((f) => [f.text, f.fromGoals ?? false])).toEqual([[SECRET, false]]);
+  });
+});
+
 describe('the canary: a fact learned from a goals turn, then other turns', () => {
   const claudeThenGpt = [{ name: 'anthropic', model: 'claude-opus-5-5' }, { name: 'openai', model: 'gpt-5.2' }];
   const ASK = 'what is my cabin trip codename?';
@@ -280,8 +420,8 @@ describe('the canary: a fact learned from a goals turn, then other turns', () =>
     const extract = () =>
       new MemoryExtractor(s.store, knowledge, c.brain, join(dir, `extract-${Math.random()}.json`), {
         kind: 'local',
-        // As main(): a turn answered with Will's goals in its context.
-        carriedGoals: (cid, tid) => s.store.matches(cid, tid, carriedGoals),
+        // As main(): the extractor's rules for the turns that stay here, for the brain it runs on (the local model).
+        ...s.goalsChat.extractor({ brain: { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE }, tainted: () => false }),
       }).run();
     return { ...s, knowledge, extract, curator: c };
   }
@@ -340,7 +480,7 @@ describe('the canary: a fact learned from a goals turn, then other turns', () =>
   });
 
   it('such an ask is offered no tool an outside AI answers, like one that carries the goals; an ask given no such fact is offered everything', async () => {
-    const stub = (name: string): Tool => ({ definition: { name, description: name, inputSchema: { type: 'object', properties: {} } }, handler: async () => ({ ok: true }) });
+    const stub = (name: string): Tool => ({ definition: { name, description: name, inputSchema: { type: 'object', properties: {} }, idempotent: true }, handler: async () => ({ ok: true }) });
     const tools = [stub('remember'), stub('web.web_search'), stub('trident.perplexity_search')];
     const knowledge = new KnowledgeStore(kpath(), downEmbedder);
     await knowledge.add(SECRET, 'history', { fromGoals: true });
@@ -396,14 +536,17 @@ describe('the canary: a fact learned from a goals turn, then other turns', () =>
 
   it('the gate needs the local model’s turn as well as its brain: asked outside one, even the local persona is given neither the fact nor the goals', async () => {
     const s = withMemory({ goals: answer() });
-    const turnGoals = await s.GOALS.forTurn();
-    const ask = () => turnGoals.ask(s.localPersona, { context: '[outside]', here: `[whole] ${SECRET}`, tools: [] });
-    expect(ask()).toEqual({ context: '[outside]', tools: [], tokens: 0, mark: {} });
-    const inTurn = asLocalTurn(ask);
+    const turn = await s.goalsChat.forTurn('c1', ASK);
+    // As /chat's pump asks: the turn's whole context, its recalled block, and that block's outside twin.
+    const whole = `[whole] ${SECRET}`;
+    const ask = (persona = s.localPersona) => turn.ask(persona, { context: whole, whole, outside: '[outside]', tools: [] });
+    expect(ask()).toMatchObject({ context: '[outside]', tools: [], tokens: 0, mark: {}, staysHere: false });
+    const inTurn = asLocalTurn(() => ask());
     expect(inTurn.context).toContain(SECRET);
     expect(inTurn.context).toContain('Will’s goals');
     expect(inTurn.mark).toEqual({ context: { goals: true } });
+    expect(inTurn.staysHere).toBe(true);
     // A frontier tier, in or out of a local turn, gets the outside context alone.
-    expect(asLocalTurn(() => turnGoals.ask(s.chain[0]!.persona, { context: '[outside]', here: `[whole] ${SECRET}`, tools: [] }))).toEqual({ context: '[outside]', tools: [], tokens: 0, mark: {} });
+    expect(asLocalTurn(() => ask(s.chain[0]!.persona))).toMatchObject({ context: '[outside]', tools: [], tokens: 0, mark: {}, staysHere: false });
   });
 });

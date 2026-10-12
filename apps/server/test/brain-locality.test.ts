@@ -1,21 +1,70 @@
 /**
  * Does a brain's prompt stay on this Mac? (./policy brainIsLocal, the one place
- * that is decided.) Local is a local wire, a model that runs here, and a server
- * at a loopback address: all three. Anything unknown is not local.
+ * that is decided.) Local is a local wire, a model that is not named as a
+ * cloud model, a server at a loopback address, and that server's own word that
+ * the model runs on it: all four. Anything unknown is not local.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { AnthropicProvider, OllamaProvider, OpenAiProvider, PerplexityProvider } from '@flint/core';
-import { LOCAL_WIRES, brainIsLocal, brainOf, onThisMachine } from '../src/policy';
+import { LOCAL_WIRES, brainIsLocal, brainOf, listedAt, onThisMachine } from '../src/policy';
 import { liveOllamaOptions } from '../src/local-model';
 import { buildTiers, envProviderFactory } from '../src/brains';
+import { LOCALITY } from '../src/ollama-locality';
+import { listed } from './goals-mini';
 
 const here = 'http://127.0.0.1:11434';
+const LOOPBACKS = [here, 'http://localhost:11434', 'http://[::1]:11434', 'http://LOCALHOST:11434', 'https://127.0.0.1:8443', 'http://127.0.0.1:11434/'];
+const PULLED = ['qwen2.5:14b', 'qwen2.5:72b', 'cloudy-7b:latest'];
+
+// The Ollama at each of this Mac's addresses lists these models as its own (./ollama-locality).
+beforeEach(() => {
+  for (const url of LOOPBACKS) listed(url, PULLED);
+});
+afterEach(() => LOCALITY.clear());
 
 describe('brainIsLocal', () => {
   it('an Ollama model on this Mac is local, at any loopback address', () => {
-    for (const baseURL of [here, 'http://localhost:11434', 'http://[::1]:11434', 'http://LOCALHOST:11434', 'https://127.0.0.1:8443', 'http://127.0.0.1:11434/']) {
+    for (const baseURL of LOOPBACKS) {
       expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL }), baseURL).toBe(true);
     }
+  });
+
+  it('a name is not trusted: a cloud model copied under a plain name is not local, because its Ollama says where it runs', () => {
+    // `ollama cp gpt-oss:120b-cloud mine`: the listing still gives it a remote host.
+    listed(here, ['qwen2.5:14b', { name: 'mine:latest', remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }, { name: 'other', remote_model: 'glm-4.6' }]);
+    expect(brainIsLocal({ provider: 'ollama', model: 'mine', baseURL: here })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'mine:latest', baseURL: here })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'other', baseURL: here })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(true);
+    // The same name listed twice, once as remote: not local.
+    listed(here, [{ name: 'twice:7b' }, { name: 'twice:7b', remote_host: 'https://ollama.com' }]);
+    expect(brainIsLocal({ provider: 'ollama', model: 'twice:7b', baseURL: here })).toBe(false);
+  });
+
+  it('it fails closed: a model its Ollama does not list, and an Ollama nobody has heard from, are not local', () => {
+    expect(brainIsLocal({ provider: 'ollama', model: 'never-pulled:7b', baseURL: here })).toBe(false);
+    LOCALITY.clear();
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(false);
+    // What one address lists says nothing of another.
+    listed('http://localhost:11434', ['qwen2.5:14b']);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://localhost:11434' })).toBe(true);
+    // A caller's own listing is asked instead of the server's, and is asked for this brain.
+    const asked: Array<[string | undefined, string]> = [];
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here }, { listed: (url, model) => (asked.push([url, model]), true) })).toBe(true);
+    expect(asked).toEqual([[here, 'qwen2.5:14b']]);
+    // ...and it is not asked at all about a brain the other rules already ruled out.
+    expect(brainIsLocal({ provider: 'anthropic', model: 'claude-opus-5-5', baseURL: here }, { listed: () => true })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: here }, { listed: () => true })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://studio:11434' }, { listed: () => true })).toBe(false);
+  });
+
+  it('the address whose listing decides is the brain’s own, and only when it is an Ollama on this Mac', () => {
+    expect(listedAt({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(here);
+    expect(listedAt({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://studio:11434' })).toBeUndefined();
+    expect(listedAt({ provider: 'anthropic', model: 'claude-opus-5-5', baseURL: here })).toBeUndefined();
+    expect(listedAt({ provider: 'ollama', model: 'qwen2.5:14b' })).toBeUndefined();
+    expect(listedAt(undefined)).toBeUndefined();
   });
 
   it('no outside provider is local, whatever its model or address says', () => {
@@ -49,7 +98,11 @@ describe('brainIsLocal', () => {
   });
 
   it('a remote Ollama server counts only when the caller says it is Will’s own, and never a cloud model or another provider', () => {
+    // Not yet: that server has not said the model runs on it.
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://studio:11434' }, { allowRemote: true })).toBe(false);
+    listed('http://studio:11434', ['qwen2.5:72b']);
     expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://studio:11434' }, { allowRemote: true })).toBe(true);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://studio:11434' })).toBe(false);
     expect(brainIsLocal({ provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: 'http://studio:11434' }, { allowRemote: true })).toBe(false);
     expect(brainIsLocal({ provider: 'anthropic', model: 'claude-opus-5-5', baseURL: here }, { allowRemote: true })).toBe(false);
   });

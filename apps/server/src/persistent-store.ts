@@ -216,6 +216,16 @@ export class PersistentStore implements MemoryStore {
   }
 
   /**
+   * Does the history the conversation's next message carries (the window's
+   * complete turns, as `getMessages` hands them out) hold a turn that passes
+   * `test`? A brain that reads the whole store has then read that turn. It
+   * reads nothing out and triggers no history check.
+   */
+  windowHas(conversationId: string, test: (turn: Turn) => boolean): boolean {
+    return this.windowed(this.completeTurns(conversationId)).some((t) => test(t));
+  }
+
+  /**
    * How many characters of text the conversation's next message carries as
    * history (the window's complete turns), for sizing a prompt before it is
    * sent. It reads nothing out and triggers no history check.

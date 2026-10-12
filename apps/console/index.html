@@ -758,7 +758,7 @@ function send(speakBack){
   if(!$('thread').children.length&&msg)setTitle(msg.replace(/\s+/g,' ').slice(0,60));
   var you=addMsg('you');you.textContent=msg;if(atts.length)renderSentAtts(you,atts);
   var body=addMsg('flint');body.innerHTML='<span class="thinking"><i></i>Thinking…</span>';
-  var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen};$('think').textContent='responding';setTalk(1);
+  var raw='',spoken=0;if(sb)stopSpeech();var vctx={displayed:'',gen:_ttsGen,conv:convId,here:false,turn:null};$('think').textContent='responding';setTalk(1);
   fetch(BASE+'/chat',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({conversationId:convId,message:msg,localOnly:LOCAL_ONLY,attachments:atts.map(function(a){return {name:a.name,type:a.type,data:a.data};})})})
   .then(function(res){
     if(res.status===401){body.textContent='The access token was rejected. Add the current one in Settings.';$('think').textContent='';setTalk(0);tokenRejected();return;}
@@ -769,7 +769,7 @@ function send(speakBack){
       if(r.done){$('think').textContent='';setTalk(0);loadThreads();if(!raw)body.textContent='';if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
-        if(ev.type==='meta'){setBrainChip(body,ev.brain);}
+        if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain);voiceMeta(vctx,ev);}
         if(ev.type==='pending'){renderProposals(ev.actions,body);}
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}
@@ -863,7 +863,14 @@ function _localSpeak(clean){return new Promise(function(res){try{var u=new Speec
 // A 503 (no TTS key, or OpenAI's spend cap reached) means the browser voice for a while:
 // skip the neural request for 10 minutes instead of asking again every sentence.
 var _ttsSkipUntil=0;
-function _neuralFetch(clean){if(Date.now()<_ttsSkipUntil)return Promise.reject(new Error('no-tts'));return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean})}).then(function(r){if(r.status===503)_ttsSkipUntil=Date.now()+600000;if(!r.ok)throw new Error('no-tts');return r.blob();});}
+// The request names the reply (its conversation, and the stored turn the server's `meta` event gave), so the
+// server can refuse one that stays on this Mac. Its 409 means this reply only: no skip, the next reply asks again.
+function _neuralFetch(clean,vctx){if(Date.now()<_ttsSkipUntil)return Promise.reject(new Error('no-tts'));return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean,conversationId:(vctx&&vctx.conv)||undefined,turnId:(vctx&&vctx.turn)||undefined})}).then(function(r){if(r.status===503)_ttsSkipUntil=Date.now()+600000;if(!r.ok)throw new Error('no-tts');return r.blob();});}
+// The server's `meta` event says whether the reply being streamed stays on this Mac, and which stored turn it is.
+function voiceMeta(vctx,ev){if(ev.staysHere===true||ev.staysHere===false){vctx.here=ev.staysHere;vctx.turn=typeof ev.turn==='string'?ev.turn:null;}}
+// The neural voice's audio for a sentence, or null for this device's own voice. A reply that stays on this Mac
+// is never sent to the speech service: the browser speaks it.
+function _speechBlob(clean,vctx){return(clean&&!vctx.here)?_neuralFetch(clean,vctx).catch(function(){return null;}):Promise.resolve(null);}
 // Speak a sentence AND reveal its text in sync — the words appear on screen the
 // instant Flint starts saying them. Audio for the next sentence is prefetched
 // while the current one plays, so there are no gaps. Sentences play in order.
@@ -882,7 +889,7 @@ function speakForVoice(s){
 function speakSynced(sentence,body,vctx){
   var clean=speakForVoice(sentence);
   var reveal=function(){vctx.displayed+=sentence;body.innerHTML=md(vctx.displayed);var tr=document.getElementById('transcript');if(tr)tr.scrollTop=9e9;};
-  var blobP=clean?_neuralFetch(clean).catch(function(){return null;}):Promise.resolve(null); // fetch NOW (parallel prefetch)
+  var blobP=_speechBlob(clean,vctx); // fetch NOW (parallel prefetch)
   var g=vctx.gen;if(g===_ttsGen)_ttsQueued++;var spoken=function(){if(g===_ttsGen&&_ttsQueued>0)_ttsQueued--;};
   _ttsChain=_ttsChain.then(function(){
     if(vctx.gen!==_ttsGen)return;

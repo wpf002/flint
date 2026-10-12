@@ -14,11 +14,14 @@
  */
 import { afterEach, describe, it, expect } from 'vitest';
 import type { Tool } from '@flint/core';
+import { join } from 'node:path';
 import { deepResearchTool } from '../src/deep-research';
+import { toolsKeptHere } from '../src/goals-chat';
 import { aiBackedTools, isAiBacked, withoutOutsideAi } from '../src/goals-tools';
+import { KnowledgeStore, rememberTool } from '../src/knowledge';
 import { paidToolSpecs } from '../src/spend';
 import { asLocalTurn } from '../src/turn-taint';
-import { CANARY, answer, cleanup, miniServer as server, type Step } from './goals-mini';
+import { CANARY, answer, cleanup, miniServer as server, tmpDir, type Step } from './goals-mini';
 
 afterEach(cleanup);
 
@@ -95,9 +98,13 @@ describe('deep_research in its local build, as main() builds it', () => {
     const quiet = () => {};
     // The server's own: plans with a frontier model, asks every search tool it has.
     const standard = deepResearchTool({ tools: mcpTools, fetchPage, log: quiet, complete: async (prompt) => (planned.push(prompt), '["one query","another query","a third query"]') });
-    // The local build (index.ts): no planner, and only the tools no outside AI answers.
-    const local = deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, specs)), fetchPage, log: quiet });
-    return { web, perplexity, planned, standard, local };
+    // The local build, from the function main() calls (../src/goals-chat toolsKeptHere): what an ask that
+    // carries what stays here is given in the standard one's place.
+    const knowledge = new KnowledgeStore(join(tmpDir(), 'k.json'), { embed: async () => Promise.reject(new Error('down')) });
+    const gated: string[] = [];
+    const kept = toolsKeptHere({ search: mcpTools, knowledge, specs, gate: (list) => (gated.push(...names(list) as string[]), list) });
+    const local = kept([standard])[0]!;
+    return { web, perplexity, planned, standard, local, kept, knowledge, gated };
   }
   const run = (t: Tool) => t.handler({ id: 'r1', toolName: 'deep_research', args: { question } });
 
@@ -124,6 +131,19 @@ describe('deep_research in its local build, as main() builds it', () => {
   it('is the same tool to the model: one name, one description, one schema', () => {
     const w = wired();
     expect(w.local.definition).toEqual(w.standard.definition);
+    expect(w.local).not.toBe(w.standard);
+  });
+
+  it('the other local build is `remember`: what it saves is a fact that stays here; both builds pass the server’s gate for built-in tools', async () => {
+    const w = wired();
+    const standard = rememberTool(w.knowledge);
+    const [local, plain, gone] = w.kept([standard, stub('web.web_search').tool, stub('trident.perplexity_search').tool]);
+    expect(names([local!, plain!])).toEqual(['remember', 'web.web_search']);
+    expect(gone).toBeUndefined(); // the tool an outside AI answers is not offered
+    expect(local).not.toBe(standard);
+    await local!.handler({ id: 'r2', toolName: 'remember', args: { fact: `Will’s next step is ${CANARY}.` } });
+    expect(w.knowledge.all().map((f) => f.fromGoals ?? false)).toEqual([true]);
+    expect(w.gated).toEqual(['deep_research', 'remember']);
   });
 });
 
@@ -172,10 +192,11 @@ describe('on the server in miniature: who is offered what, ask by ask', () => {
     const standard = stub('deep_research').tool;
     const local = stub('deep_research').tool;
     const s = server({ frontier: claude, tools: [standard], goalsTools: withoutOutsideAi({ specs, local: [local] }) });
-    const turn = await s.GOALS.forTurn();
+    const turn = await s.goalsChat.forTurn('c1', 'hello');
+    const ask = (persona = s.localPersona) => turn.ask(persona, { context: '', whole: '', outside: '', tools: [standard] });
     // As /chat asks the local model: as its own turn (./turn-taint asLocalTurn).
-    expect(asLocalTurn(() => turn.ask(s.localPersona, { context: '', tools: [standard] })).tools).toEqual([local]);
-    expect(turn.ask(s.chain[0]!.persona, { context: '', tools: [standard] }).tools).toEqual([standard]);
+    expect(asLocalTurn(() => ask()).tools).toEqual([local]);
+    expect(ask(s.chain[0]!.persona).tools).toEqual([standard]);
   });
 
   it('FLINT_GOALS_TO_FRONTIER=on lifts it: Will chose to send goal text out, so no tool is held back', async () => {

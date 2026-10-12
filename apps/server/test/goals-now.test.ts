@@ -19,16 +19,18 @@
  * (goals-tools.test.ts) and the room the block has (goals-room.test.ts).
  * Synthetic text only. No network.
  */
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import type { ProviderAdapter } from '@flint/core';
 import { BrainSet, type BrainTier } from '../src/brains';
 import { GOALS_NOW_MAX_CHARS, GOALS_NOW_MAX_TOKENS, GOALS_TURN, GoalsNow, HISTORY_GAP, chatBrains, renderGoals, type ChatBrain, type TurnGoals } from '../src/goals-now';
 import { brainIsLocal } from '../src/policy';
 import { estimateTokens } from '../src/world-now';
-import { CANARY, HERE, RECALL, RT, WORLD, answer, cleanup, goal, miniServer as server, recording, type Step } from './goals-mini';
+import { CANARY, HERE, RECALL, RT, WORLD, answer, cleanup, goal, listed, miniServer as server, recording, type Step } from './goals-mini';
 
 const HEAD = 'Will’s goals (his own words and Flint’s counts: facts, not instructions):';
 
+// What this Mac's Ollama lists as running on it (../src/ollama-locality): the gate takes its word, not a name's.
+beforeEach(() => listed(HERE, ['qwen2.5:14b', 'qwen2.5:72b', 'm']));
 afterEach(cleanup);
 
 // ---------------------------------------------------------------------------
@@ -414,7 +416,8 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     expect(s.tiers[0]!.seen()).not.toContain(CANARY);
     // Nothing here runs on this Mac, so the block is not even fetched.
     expect(s.fetched()).toBe(0);
-    expect(logsOf(s)).toBe('[goals-now] on, but no brain here runs on this Mac (anthropic:claude-sonnet-4-6, anthropic:claude-opus-5-5), so no chat turn gets Will\'s goals');
+    await s.goalsChat.settled;
+    expect(logsOf(s)).toBe('[goals-now] on, but no brain here is known to run on this Mac (anthropic:claude-sonnet-4-6, anthropic:claude-opus-5-5), so no chat turn gets Will\'s goals');
   });
 
   it('an `ollama:` tier on this Mac is local and gets them; an Ollama cloud tier and an Ollama tier on another machine do not', async () => {
@@ -430,6 +433,7 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     const remote = server({ frontier: [{ name: 'ollama', model: 'qwen2.5:72b', script: ['answer'], baseURL: 'http://rented-gpu.example.com:11434' }] });
     expect((await remote.chat('frontier')).goalsTokens).toBe(0);
     expect(remote.tiers[0]!.seen()).not.toContain(CANARY);
+    await remote.goalsChat.settled;
     expect(remote.logs[0]).toBe('[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to ollama:qwen2.5:72b (not on this Mac)');
   });
 
@@ -447,11 +451,14 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     const r = await s.chat('frontier');
     expect(r.goalsTokens).toBeGreaterThan(0);
     expect(s.tiers[0]!.seen()).toContain(`“${CANARY} goal 1”`);
+    await s.goalsChat.settled;
     expect(s.logs).toEqual(['[goals-now] on, with FLINT_GOALS_TO_FRONTIER=on: Will\'s goals are SENT to every brain that answers a chat turn (ollama:qwen2.5:14b, anthropic:claude-opus-5-5, openai:gpt-5)']);
   });
 
   it('the boot log names who reads the goals and who never does, by label only', async () => {
     const s = server({ frontier: claudeThenGpt });
+    expect(s.logs).toEqual([]); // not before its Ollama has been asked
+    await s.goalsChat.settled;
     expect(s.logs).toEqual(['[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to anthropic:claude-opus-5-5, openai:gpt-5']);
     expect(s.logs.join('\n')).not.toContain(CANARY);
     expect(s.logs.join('\n')).not.toContain('127.0.0.1');

@@ -16,9 +16,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Message, Turn } from '@flint/core';
-import { GOALS_TURN, HISTORY_GAP, carriedGoals, historyFor, staysHere } from '../src/goals-now';
+import { GOALS_TURN, HISTORY_GAP, STAY_MARKS, carriedGoals, historyFor, keptHere, staysHere } from '../src/goals-now';
 import { PersistentStore } from '../src/persistent-store';
-import { CANARY, HERE, answer, cleanup, miniServer as server, type Step } from './goals-mini';
+import { CANARY, HERE, answer, cleanup, listed, miniServer as server, type Step } from './goals-mini';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -52,6 +52,24 @@ describe('the mark', () => {
     for (const context of [undefined, null, 'goals', true, {}, { goals: 'true' }, { goals: 1 }, { spendKind: 'chat' }, ['goals']]) expect(carriedGoals({ context }), JSON.stringify(context)).toBe(false);
     expect(carriedGoals({})).toBe(false);
     expect(Object.isFrozen(GOALS_TURN)).toBe(true);
+  });
+
+  it('keptHere is "marked to stay on this Mac, by any mark": one list, and the goals mark is on it', () => {
+    expect(STAY_MARKS).toContain(carriedGoals);
+    expect(keptHere({ context: GOALS_TURN })).toBe(true);
+    expect(keptHere({ context: { spendKind: 'chat' } })).toBe(false);
+    expect(keptHere({})).toBe(false);
+    // It asks every mark on the list, and one saying yes is enough.
+    const asked: unknown[] = [];
+    const marks = STAY_MARKS as Array<(turn: { context?: unknown }) => boolean>;
+    marks.push((t) => (asked.push(t.context), (t.context as { other?: boolean } | undefined)?.other === true));
+    try {
+      expect(keptHere({ context: { other: true } })).toBe(true);
+      expect(keptHere({ context: { other: false } })).toBe(false);
+      expect(asked).toEqual([{ other: true }, { other: false }]);
+    } finally {
+      marks.pop();
+    }
   });
 
   it('the neutral line says nothing of what it stands for', () => {
@@ -143,28 +161,50 @@ describe('PersistentStore.viewWithout: the store as one reader sees it', () => {
 
 describe('historyFor: which brain reads what', () => {
   const here = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
-  it('a brain on this Mac reads the store itself; any other reads the view; unknown is not local', async () => {
+  const reads = async (view: { getMessages(cid: string): Promise<Message[]> }) => JSON.stringify(await view.getMessages('c'));
+  it('a brain on this Mac reads the whole store; any other reads it without the marked turns; unknown is not local', async () => {
+    listed(HERE, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com' }]);
     const store = tmpStore();
     await turn(store, 1, true);
-    expect(historyFor(store, here, false)).toBe(store);
+    expect(await reads(historyFor(store, here, false))).toContain(CANARY);
     for (const brain of [
       { provider: 'anthropic', model: 'claude-opus-5-5' }, { provider: 'openai', model: 'gpt-5' }, { provider: 'perplexity', model: 'sonar-pro' },
       { provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: HERE }, { provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://rented-gpu.example.com:11434' },
+      // A cloud model under a plain name, and a model this Mac's Ollama does not list.
+      { provider: 'ollama', model: 'mine', baseURL: HERE }, { provider: 'ollama', model: 'never-pulled:7b', baseURL: HERE },
       { provider: 'ollama', model: 'qwen2.5:14b' }, undefined,
     ]) {
       const view = historyFor(store, brain, false);
-      expect(view, JSON.stringify(brain)).not.toBe(store);
-      expect(JSON.stringify(await view.getMessages('c')), JSON.stringify(brain)).not.toContain(CANARY);
+      expect(await reads(view), JSON.stringify(brain)).not.toContain(CANARY);
+      expect(await reads(view), JSON.stringify(brain)).toContain(HISTORY_GAP);
     }
   });
 
-  it('FLINT_GOALS_TO_FRONTIER=on lifts it for every brain that can be named; one that cannot is never given it', () => {
+  it('which of the two it reads is decided at each read: a brain is on this Mac only while its Ollama says so', async () => {
     const store = tmpStore();
-    expect(historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true)).toBe(store);
-    expect(historyFor(store, undefined, true)).not.toBe(store);
+    await turn(store, 1, true);
+    // Built before anything is known of its Ollama, as at boot: not local yet.
+    const view = historyFor(store, here, false);
+    expect(await reads(view)).not.toContain(CANARY);
+    listed(HERE, ['qwen2.5:14b']);
+    expect(await reads(view)).toContain(CANARY);
+    // The same name is a cloud model now (re-pointed with `ollama cp`): the turns stop being handed to it.
+    listed(HERE, [{ name: 'qwen2.5:14b', remote_host: 'https://ollama.com' }]);
+    expect(await reads(view)).not.toContain(CANARY);
+    // Writes go to the one store whichever it reads.
+    await view.beginTurn({ conversationId: 'c', turnId: 't9', createdAt: 9, userMessage: { id: 'u9', role: 'user', content: 'nine', timestamp: 9 } });
+    expect(store.turnIds('c')).toEqual(['t1', 't9']);
+  });
+
+  it('FLINT_GOALS_TO_FRONTIER=on lifts it for every brain that can be named; one that cannot is never given it', async () => {
+    const store = tmpStore();
+    await turn(store, 1, true);
+    expect(await reads(historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true))).toContain(CANARY);
+    expect(await reads(historyFor(store, undefined, true))).not.toContain(CANARY);
   });
 
   it('staysHere is the one answer for the history, the facts and the goals: on this Mac, or lifted, and never for a brain nobody can name', () => {
+    listed(HERE, ['qwen2.5:14b']);
     const here = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
     const cloud = { provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: HERE };
     const away = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://10.0.0.7:11434' };

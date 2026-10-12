@@ -8,6 +8,7 @@
  */
 
 import { isCloudModel } from './memory-brain';
+import { LOCALITY } from './ollama-locality';
 
 export type Brain = 'local' | 'frontier';
 
@@ -110,6 +111,13 @@ export interface AnsweringBrain {
  */
 export const LOCAL_WIRES: ReadonlySet<string> = new Set(['ollama']);
 
+/**
+ * The local wires whose server can also hand a request on to a model somewhere
+ * else (Ollama's cloud models). For these, brainIsLocal takes the server's own
+ * word that the model runs on it (./ollama-locality).
+ */
+const SERVES_REMOTE: ReadonlySet<string> = new Set(['ollama']);
+
 /** Is this URL's host the machine itself? Exactly 127.0.0.1, localhost or ::1: `127.0.0.1.example.com` is someone else's. */
 export function onThisMachine(baseURL: string | undefined): boolean {
   if (!baseURL) return false;
@@ -131,22 +139,42 @@ export function onThisMachine(baseURL: string | undefined): boolean {
  * that brain is asked: a turn planned for the frontier can end on the local
  * model, and a turn's first brain is not always the one that answers.
  *
- * Local means all three:
+ * Local means all four:
  *  - the provider is a local wire (LOCAL_WIRES: Ollama's own API). The name
- *    `local` on a route says nothing: with OLLAMA_MODEL unset the "local" brain
- *    is Claude, and that is not local;
- *  - the model runs here: not one of Ollama's cloud models (`…-cloud`, `:cloud`),
+ *    `local` on a route says nothing: the local persona can be on an Ollama on
+ *    another machine, and that is not local;
+ *  - the model is not named as one of Ollama's cloud models (`…-cloud`, `:cloud`),
  *    which Ollama serves from its own machines (./memory-brain isCloudModel);
  *  - its server is this Mac (a loopback address). An Ollama server elsewhere
  *    (OLLAMA_HOST or a tier's host set to another machine) is not local, unless
  *    the caller says a remote server is Will's own (`allowRemote`: nothing sets
- *    it today; it is where a setting for a second machine of his plugs in).
- * Anything unknown (no brain, another provider, no address) is not local.
+ *    it today; it is where a setting for a second machine of his plugs in);
+ *  - that Ollama itself says the model runs on it (./ollama-locality: its
+ *    listing gives the model no remote host). A name is not trusted: a cloud
+ *    model copied under another name still runs on Ollama's servers. This is
+ *    the check the model auto-picker already makes, cached, and it fails
+ *    closed: until Ollama has said so, and whenever it cannot be asked, the
+ *    model is not local.
+ * Anything unknown (no brain, another provider, no address, no listing) is not local.
  */
-export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRemote?: boolean } = {}): boolean {
+export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRemote?: boolean; listed?: (baseURL: string | undefined, model: string) => boolean } = {}): boolean {
   if (!brain || !LOCAL_WIRES.has(brain.provider)) return false;
   if (!brain.model || isCloudModel(brain.model)) return false;
-  return opts.allowRemote === true || onThisMachine(brain.baseURL);
+  if (opts.allowRemote !== true && !onThisMachine(brain.baseURL)) return false;
+  // Ollama can serve a model from its own servers under any name, so an Ollama is asked. (A wire whose
+  // server only ever runs its own models has nothing to ask.)
+  if (!SERVES_REMOTE.has(brain.provider)) return true;
+  return (opts.listed ?? ((url, model) => LOCALITY.runsHere(url, model)))(brain.baseURL, brain.model);
+}
+
+/**
+ * The address whose model listing decides whether this brain is local, when
+ * one does: an Ollama brain at an address that is this Mac. brainIsLocal reads
+ * what that Ollama last said (./ollama-locality); whoever names a brain has it
+ * asked.
+ */
+export function listedAt(brain: AnsweringBrain | undefined): string | undefined {
+  return brain && SERVES_REMOTE.has(brain.provider) && onThisMachine(brain.baseURL) ? brain.baseURL : undefined;
 }
 
 /** A provider adapter and its model as an AnsweringBrain: the adapter's own name, address and context size, never a label's. */

@@ -4,12 +4,15 @@
  * runtime rolls up each day. A size only, at most 300, and only on a turn whose
  * last-asked brain was given Will's goals. Never a word of them.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { ChatTurnEvent, GOALS_BLOCK_MAX_TOKENS, ServerEvent } from '@flint/policy';
 import { GOALS_NOW_MAX_TOKENS, GoalsNow, renderGoals } from '../src/goals-now';
 import { routeLine, type RouteRecord } from '../src/route-log';
 import { chatTurnEvent } from '../src/runtime-events';
 import { estimateTokens } from '../src/world-now';
+import { cleanup, listed } from './goals-mini';
+
+afterEach(cleanup);
 
 const CANARY = 'CANARY-p3spend';
 const rec: RouteRecord = { path: 'chat', tier: 'routine', appended: [], turns: 1, brain: 'local', answeredBy: 'qwen2.5:14b', outcome: 'answered', ms: 900 };
@@ -29,6 +32,7 @@ describe('the [route] line', () => {
   it('for the fullest block the server can build: a number within 300, and the line holds no goal text', async () => {
     const answer = { goals: Array.from({ length: 20 }, (_, i) => goal(i + 1)), more: 30 };
     const local = { name: 'local' };
+    listed('http://127.0.0.1:11434', ['qwen2.5:14b']);
     const g = new GoalsNow<{ name: string }>({
       runtime: () => ({ url: 'http://[::1]:8090', token: 'c'.repeat(64) }),
       brainOf: () => ({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://127.0.0.1:11434' }),

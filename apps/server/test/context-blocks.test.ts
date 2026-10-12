@@ -25,6 +25,20 @@ describe('readContextBlocks', () => {
     }
   });
 
+  it('a block set to something that is not understood is off, and says so by name: FLINT_GOALS_NOW=true is not silently off', () => {
+    for (const v of ['true', 'on', 'yes', '11', ' TRUE ']) {
+      expect(read({ FLINT_GOALS_NOW: v }), v).toEqual({
+        blocks: { world: false, goals: false, goalsToFrontier: false },
+        warned: ['[context] FLINT_GOALS_NOW is not "1" or "0"; reading it as off (no goals in chat)'],
+      });
+      expect(read({ FLINT_WORLD_NOW: v }).warned, v).toEqual(['[context] FLINT_WORLD_NOW is not "1" or "0"; reading it as off (no World now block)']);
+    }
+    // Off said plainly, blank or unset is not news; nor is on.
+    for (const v of ['0', ' 0 ', '', '  ', '1']) expect(read({ FLINT_GOALS_NOW: v, FLINT_WORLD_NOW: v }).warned, v).toEqual([]);
+    // Under the kill switch nothing is read, so nothing is said of it.
+    expect(read({ FLINT_GOALS_NOW: 'true', FLINT_CONTEXT_BLOCKS: 'off' }).warned).toEqual([]);
+  });
+
   it('goals stay with the local model unless FLINT_GOALS_TO_FRONTIER is exactly on', () => {
     expect(read({ FLINT_GOALS_NOW: '1', FLINT_GOALS_TO_FRONTIER: 'on' })).toEqual({ blocks: { world: false, goals: true, goalsToFrontier: true }, warned: [] });
     expect(read({ FLINT_GOALS_NOW: '1', FLINT_GOALS_TO_FRONTIER: ' ON ' }).blocks.goalsToFrontier).toBe(true);

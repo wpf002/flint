@@ -8,7 +8,7 @@
  * prompt Ollama has to cut loses its start, the persona and the tools.
  * Synthetic text only. No network.
  */
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { AnthropicProvider, OllamaProvider, type Tool } from '@flint/core';
 import { envProviderFactory } from '../src/brains';
 import { GOALS_NOW_MAX_TOKENS, GOALS_PROMPT_MARGIN, GOALS_TURN, GoalsNow, chatBrain, promptRoom, renderGoals, type ChatBrain } from '../src/goals-now';
@@ -16,8 +16,10 @@ import { withoutOutsideAi } from '../src/goals-tools';
 import { liveOllamaOptions } from '../src/local-model';
 import { paidToolSpecs } from '../src/spend';
 import { estimateTokens } from '../src/world-now';
-import { CANARY, GUIDE, HERE, RT, answer, cleanup, goal, miniServer as server, type Step } from './goals-mini';
+import { CANARY, GUIDE, HERE, RT, answer, cleanup, goal, listed, miniServer as server, type Step } from './goals-mini';
 
+// What this Mac's Ollama lists as running on it (../src/ollama-locality): the gate takes its word, not a name's.
+beforeEach(() => listed(HERE, ['qwen2.5:14b', 'qwen2.5:72b', 'm', 'x']));
 afterEach(cleanup);
 
 describe('chatBrain: the context a brain really has', () => {
@@ -175,9 +177,10 @@ describe('on the server in miniature: a local model with a 4,096-token context',
       expect((req.system ?? '').includes('Will’s goals'), `turn ${i}`).toBe(sizes[i]! > 0);
       expect(req.system, `turn ${i}`).toContain(GUIDE);
     }
-    // A turn that went without the goals is not marked: it is ordinary history, to any brain.
+    // The turn that went without the block is marked all the same: the local model read the marked turns before
+    // it as history, so what it said may repeat them (the mark follows history).
     const marks = (await s.store.getTurns('c1')).map((t) => (t.context as { goals?: boolean } | undefined)?.goals === true);
-    expect(marks).toEqual(sizes.map((n) => n > 0));
+    expect(marks).toEqual([true, true, true, true]);
   });
 
   it('the same conversation on a model with a 32,768-token context keeps the whole block on every turn', async () => {
@@ -186,8 +189,9 @@ describe('on the server in miniature: a local model with a 4,096-token context',
     for (let i = 0; i < 4; i++) expect((await s.chat('local', `question ${i}`)).goalsTokens, `turn ${i}`).toBe(whole);
   });
 
-  it('the boot log says the context each local brain really has', () => {
+  it('the boot log says the context each local brain really has', async () => {
     const s = server({ frontier: claude, local: wordy(4096) });
+    await s.goalsChat.settled;
     expect(s.logs).toEqual(['[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 4096-token context), never to anthropic:claude-opus-5-5']);
   });
 });

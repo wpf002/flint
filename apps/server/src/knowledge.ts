@@ -20,8 +20,10 @@ interface Fact {
   /**
    * Learned from a turn that was answered with Will's goals in its context
    * (./goals-now). Such a fact stays on this Mac: it is recalled only for a
-   * brain that may read his goals. Absent on every other fact, and on every
-   * fact stored before this mark existed.
+   * brain that may read his goals, it is embedded only by an embedder on this
+   * Mac, and a caller that may not know of it is answered as if it were not
+   * there. Absent on every other fact, and on every fact stored before this
+   * mark existed.
    */
   fromGoals?: true;
   /** Set when a newer fact replaced this one. Kept for audit, never recalled. */
@@ -48,6 +50,16 @@ export interface Recall {
    */
   outside: string[];
   mode: RecallMode;
+}
+
+export interface KnowledgeOptions {
+  /**
+   * Is the embedder on this Mac? A fact that stays here (`fromGoals`) is sent
+   * to the embedder only when it is: with OLLAMA_HOST on another machine such
+   * a fact is stored without a vector, and recall matches it by its words.
+   * Asked each time. Default: no (an embedder nobody vouched for is not here).
+   */
+  embedderHere?: () => boolean;
 }
 
 /** Why `addDetailed` did or didn't store a fact — the extractor counts these. */
@@ -135,8 +147,14 @@ export class KnowledgeStore {
     private readonly embedder: Embedder,
     private readonly floor = Number(process.env.FLINT_MEMORY_FLOOR ?? 0.45),
     private readonly embedTimeoutMs = Number(process.env.FLINT_MEMORY_EMBED_TIMEOUT_MS ?? 2500),
+    private readonly opts: KnowledgeOptions = {},
   ) {
     this.load();
+  }
+
+  /** May this fact's text be sent to the embedder? Any fact that may leave this Mac; one that stays here only when the embedder is here too. */
+  private mayEmbed(f: { fromGoals?: true }): boolean {
+    return mayLeave(f) || this.opts.embedderHere?.() === true;
   }
 
   /** Active (not superseded) facts. */
@@ -169,17 +187,33 @@ export class KnowledgeStore {
     }
     const n = KnowledgeStore.norm(clean);
     if (this.rejected.has(n)) return { status: 'rejected' }; // user rejected this; stays rejected
+    // A fact that stays on this Mac does not exist for a source that is not held here (the standard
+    // `remember`, which any brain may call, and what is learned from an ordinary turn): "already known"
+    // would tell an outside model that such a fact is there.
+    const stays = meta.fromGoals === true;
+    const known = (f: Fact) => stays || mayLeave(f);
     // Superseded facts count too: an old transcript must not resurrect a fact a
     // newer one already replaced.
-    if (this.facts.some((f) => KnowledgeStore.norm(f.text) === n)) return { status: 'duplicate' };
+    const twin = this.facts.find((f) => KnowledgeStore.norm(f.text) === n);
+    if (twin && known(twin)) return { status: 'duplicate' };
+    if (twin) {
+      // The very same words, now from a source that is not held here: they are no longer something only
+      // this Mac holds. The fact loses its mark, and the answer is the one a new fact gets.
+      delete twin.fromGoals;
+      this.save();
+      return { status: 'added', id: twin.id };
+    }
     const toks = contentTokens(clean);
-    if (this.facts.some((f) => jaccard(toks, contentTokens(f.text)) >= 0.85)) return { status: 'near-duplicate' };
+    if (this.facts.some((f) => known(f) && jaccard(toks, contentTokens(f.text)) >= 0.85)) return { status: 'near-duplicate' };
 
     let vector: number[] = [];
-    try {
-      vector = (await withTimeout(this.embedder.embed([clean]), this.embedTimeoutMs))[0] ?? [];
-    } catch (err) {
-      logError('[memory] embed failed for new fact (storing without vector; recall matches it lexically):', err);
+    // A fact that stays here goes to the embedder only when the embedder is on this Mac too.
+    if (this.mayEmbed(stays ? { fromGoals: true } : {})) {
+      try {
+        vector = (await withTimeout(this.embedder.embed([clean]), this.embedTimeoutMs))[0] ?? [];
+      } catch (err) {
+        logError('[memory] embed failed for new fact (storing without vector; recall matches it lexically):', err);
+      }
     }
     const fact: Fact = { id: `k${++this.seq}`, text: clean, source, ts: Date.now(), vector };
     if (meta.conversationId) fact.conversationId = meta.conversationId;
@@ -243,8 +277,8 @@ export class KnowledgeStore {
       return { facts: found, outside: open.length === facts.length ? found : texts(open), mode: mode === 'semantic' ? 'lexical' : mode };
     }
 
-    // Embedder is up: opportunistically heal facts stored while it was down.
-    if (facts.some((f) => f.vector.length === 0)) void this.reembedMissing();
+    // Embedder is up: opportunistically heal facts stored while it was down (never one it may not be sent).
+    if (facts.some((f) => f.vector.length === 0 && this.mayEmbed(f))) void this.reembedMissing();
 
     const semantic = facts
       .filter((f) => f.vector.length > 0)
@@ -283,7 +317,7 @@ export class KnowledgeStore {
   private async heal(limit: number): Promise<number> {
     let healed = 0;
     try {
-      for (const f of this.facts.filter((x) => x.vector.length === 0).slice(0, limit)) {
+      for (const f of this.facts.filter((x) => x.vector.length === 0 && this.mayEmbed(x)).slice(0, limit)) {
         const v = (await withTimeout(this.embedder.embed([f.text]), this.embedTimeoutMs))[0] ?? [];
         if (v.length === 0) break;
         f.vector = v;

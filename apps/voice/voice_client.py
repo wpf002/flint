@@ -5,13 +5,22 @@ Runs on the Mac Studio next to Flint. Flow: listen -> hear the wake word
 in his onyx voice. Reuses whisper-cli (STT) + Flint's /speak (TTS); no cloud
 wake-word service.
 
+/speak is an outside speech service (OpenAI). A reply Flint marks as staying on
+this Mac (its chat stream's `meta` event says so: a turn answered with Will's
+goals, or one that read such a turn) is never sent there: it is spoken with
+this Mac's own `say` voice instead. Every other reply's request names its
+conversation and turn, so the server can refuse on its side too.
+
 Deps:  pip install sounddevice numpy   (whisper-cli + afplay already on macOS)
 Run:   python3 voice_client.py          (tune WAKE_RMS on real hardware)
 Env:   FLINT_URL, FLINT_TOKEN, WAKE_WORDS, WHISPER_BIN, WHISPER_MODEL
 """
 import os, sys, json, subprocess, tempfile, time, urllib.request, wave
-import numpy as np
-import sounddevice as sd
+try:
+    import numpy as np
+    import sounddevice as sd
+except ImportError:   # the reply and speech helpers below need neither, and are tested without them
+    np = sd = None
 
 FLINT_URL   = os.environ.get("FLINT_URL", "http://localhost:8080")  # Flint listens on ::1
 # voice's own token (chat and speech only), made by the server; then FLINT_TOKEN.
@@ -61,21 +70,45 @@ def transcribe(audio):
         except: pass
     return txt.strip()
 
+CONVERSATION = "voice"
+
+def read_reply(lines):
+    """One /chat reply from its event stream: (text, stays_here, turn_id).
+    `stays_here` and `turn_id` are what the last `meta` event that spoke of them
+    said: each brain asked in a turn says it for itself, and the last one asked
+    is the one whose text this is."""
+    text, here, turn = "", False, None
+    for raw in lines:
+        l = (raw.decode() if isinstance(raw, bytes) else raw).strip()
+        if not l.startswith("data:"): continue
+        try: e = json.loads(l[5:])
+        except ValueError: continue
+        if not isinstance(e, dict): continue
+        if e.get("type") == "text": text += e.get("delta", "")
+        elif e.get("type") == "meta" and isinstance(e.get("staysHere"), bool):
+            here = e["staysHere"]
+            turn = e.get("turn") if isinstance(e.get("turn"), str) else None
+    return text.strip(), here, turn
+
 def ask_flint(msg):
-    body = json.dumps({"conversationId":"voice","message":msg}).encode()
+    body = json.dumps({"conversationId":CONVERSATION,"message":msg}).encode()
     req = urllib.request.Request(FLINT_URL+"/chat", data=body,
         headers={"authorization":"Bearer "+FLINT_TOKEN,"content-type":"application/json"})
-    t=""
-    for raw in urllib.request.urlopen(req, timeout=90):
-        l=raw.decode().strip()
-        if l.startswith("data:"):
-            e=json.loads(l[5:])
-            if e.get("type")=="text": t+=e.get("delta","")
-    return t.strip()
+    return read_reply(urllib.request.urlopen(req, timeout=90))
 
-def speak(text):
-    body = json.dumps({"text":text}).encode()
-    req = urllib.request.Request(FLINT_URL+"/speak", data=body,
+def say_here(text):
+    """This Mac's own voice: nothing leaves the machine."""
+    subprocess.run(["say","-v","Daniel", text[:400]])
+
+def speak(text, here=False, turn=None):
+    """Speak a reply. One that stays on this Mac (`here`) is never sent to
+    /speak. Any other is, naming its conversation and turn; if the server
+    refuses or fails, this Mac's own voice speaks it."""
+    if here:
+        say_here(text); return
+    said = {"text":text, "conversationId":CONVERSATION}
+    if turn: said["turnId"] = turn
+    req = urllib.request.Request(FLINT_URL+"/speak", data=json.dumps(said).encode(),
         headers={"authorization":"Bearer "+FLINT_TOKEN,"content-type":"application/json"})
     try:
         data = urllib.request.urlopen(req, timeout=60).read()
@@ -83,7 +116,7 @@ def speak(text):
             f.write(data); mp3=f.name
         subprocess.run(["afplay", mp3]); os.remove(mp3)
     except Exception:
-        subprocess.run(["say","-v","Daniel", text[:400]])   # fallback voice
+        say_here(text)   # fallback voice
 
 def strip_wake(text):
     low = text.lower()
@@ -94,6 +127,7 @@ def strip_wake(text):
     return False, ""
 
 def main():
+    if sd is None: sys.exit("voice_client needs sounddevice and numpy: pip install sounddevice numpy")
     print(f"Hey-Flint listening… (wake words: {WAKE_WORDS})", flush=True)
     while True:
         heard = transcribe(record_utterance())
@@ -107,11 +141,11 @@ def main():
         if not cmd: continue
         print("you:", cmd, flush=True)
         try:
-            reply = ask_flint(cmd)
+            reply, here, turn = ask_flint(cmd)
         except Exception as e:
-            reply = "I couldn't reach my server."
+            reply, here, turn = "I couldn't reach my server.", False, None
         print("flint:", reply[:120], flush=True)
-        if reply: speak(reply)
+        if reply: speak(reply, here, turn)
 
 if __name__ == "__main__":
     main()
