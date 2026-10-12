@@ -17,6 +17,7 @@ import type { Tool } from '@flint/core';
 import { deepResearchTool } from '../src/deep-research';
 import { aiBackedTools, isAiBacked, withoutOutsideAi } from '../src/goals-tools';
 import { paidToolSpecs } from '../src/spend';
+import { asLocalTurn } from '../src/turn-taint';
 import { CANARY, answer, cleanup, miniServer as server, type Step } from './goals-mini';
 
 afterEach(cleanup);
@@ -171,8 +172,9 @@ describe('on the server in miniature: who is offered what, ask by ask', () => {
     const standard = stub('deep_research').tool;
     const local = stub('deep_research').tool;
     const s = server({ frontier: claude, tools: [standard], goalsTools: withoutOutsideAi({ specs, local: [local] }) });
-    const turn = await s.GOALS!.forTurn();
-    expect(turn.ask(s.localPersona, { context: '', tools: [standard] }).tools).toEqual([local]);
+    const turn = await s.GOALS.forTurn();
+    // As /chat asks the local model: as its own turn (./turn-taint asLocalTurn).
+    expect(asLocalTurn(() => turn.ask(s.localPersona, { context: '', tools: [standard] })).tools).toEqual([local]);
     expect(turn.ask(s.chain[0]!.persona, { context: '', tools: [standard] }).tools).toEqual([standard]);
   });
 

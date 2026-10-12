@@ -1,8 +1,10 @@
 /**
- * The tools an ask is offered when its brain was given Will's goals (Machine
- * plan P3 part 4). A local model that has read a goal can put its words in a
- * tool call. So for that ask, the tools an OUTSIDE AI answers are not offered:
- * the goal's words must not reach another company's model through a side door.
+ * The tools an ask is offered when its brain was given what stays on this Mac
+ * (Machine plan P3 part 4): Will's goals, or a fact Flint learned from a turn
+ * answered with them. A local model that has read a goal can put its words in
+ * a tool call. So for that ask, the tools an OUTSIDE AI answers are not
+ * offered: the goal's words must not reach another company's model through a
+ * side door.
  *
  * Which tools those are:
  *  - a paid tool whose vendor sells a model's tokens, as the spend guard knows
@@ -15,6 +17,10 @@
  *    frontier model and asks Perplexity once. It is not dropped, it is swapped
  *    for a local build of the same tool (no planner, so it plans by rule, and
  *    only the search tools that are left), under the same name and schema.
+ *
+ * One more tool is swapped, for another reason: `remember`. What the model
+ * saves from such an ask is a fact learned from it, so the local build stores
+ * it with the mark that keeps it on this Mac (./knowledge `fromGoals`).
  *
  * What this does not do: a local model may still put a goal's words in a plain
  * web search's query. That goes to a search engine, not to a model, and is the
@@ -41,10 +47,10 @@ export function aiBackedTools(tools: readonly Tool[], specs: readonly PaidToolSp
 }
 
 /**
- * What an ask that carries Will's goals is offered, from what the turn would
- * have offered: the same tools in the same order, without the ones an outside
- * AI answers, and with each `local` tool in place of the one that shares its
- * name (deep_research's local build).
+ * What an ask that carries what stays here is offered, from what the turn
+ * would have offered: the same tools in the same order, without the ones an
+ * outside AI answers, and with each `local` tool in place of the one that
+ * shares its name (the local builds of deep_research and remember).
  */
 export function withoutOutsideAi(o: { specs: readonly PaidToolSpec[]; local?: readonly Tool[] }): (offered: readonly Tool[]) => Tool[] {
   const swap = new Map((o.local ?? []).map((t) => [t.definition.name, t] as const));

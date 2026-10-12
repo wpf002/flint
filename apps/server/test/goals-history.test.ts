@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Message, Turn } from '@flint/core';
-import { GOALS_TURN, HISTORY_GAP, carriedGoals, historyFor } from '../src/goals-now';
+import { GOALS_TURN, HISTORY_GAP, carriedGoals, historyFor, staysHere } from '../src/goals-now';
 import { PersistentStore } from '../src/persistent-store';
 import { CANARY, HERE, answer, cleanup, miniServer as server, type Step } from './goals-mini';
 
@@ -158,10 +158,19 @@ describe('historyFor: which brain reads what', () => {
     }
   });
 
-  it('FLINT_GOALS_TO_FRONTIER=on lifts it for every brain', () => {
+  it('FLINT_GOALS_TO_FRONTIER=on lifts it for every brain that can be named; one that cannot is never given it', () => {
     const store = tmpStore();
     expect(historyFor(store, { provider: 'anthropic', model: 'claude-opus-5-5' }, true)).toBe(store);
-    expect(historyFor(store, undefined, true)).toBe(store);
+    expect(historyFor(store, undefined, true)).not.toBe(store);
+  });
+
+  it('staysHere is the one answer for the history, the facts and the goals: on this Mac, or lifted, and never for a brain nobody can name', () => {
+    const here = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
+    const cloud = { provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: HERE };
+    const away = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://10.0.0.7:11434' };
+    const claude = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    expect([here, cloud, away, claude, undefined].map((b) => staysHere(b, false))).toEqual([true, false, false, false, false]);
+    expect([here, cloud, away, claude, undefined].map((b) => staysHere(b, true))).toEqual([true, true, true, true, false]);
   });
 });
 

@@ -45,51 +45,71 @@ describe('index.ts wiring', () => {
     expect(src).not.toMatch(/process\.env\.FLINT_(WORLD_NOW|GOALS_NOW|GOALS_TO_FRONTIER|CONTEXT_BLOCKS)/);
   });
 
-  it('Will’s goals (P3) are built only when their block is on, with every brain /chat can ask named for the gate', () => {
-    const wiring = between('if (blocks.goals) {', '// One request is one turn');
-    expect(wiring).toMatch(/GOALS = goalsForChat\(\{\s*runtime: runtimeLink, local: \{ persona, provider, model \}, tiers: brains, toFrontier: blocks\.goalsToFrontier,\s*tools: withoutOutsideAi\(\{ specs, local: localResearch \}\), log: \(m\) => console\.error\(m\),\s*\}\);/);
-    expect(src.match(/\bGOALS = /g)).toHaveLength(1);
+  it('what stays on this Mac has one gate (P3), always built, with every brain /chat can ask named for it, and named again when the local brain is swapped', () => {
+    const wiring = between('// What stays on this Mac in chat (./goals-now, P3)', '// One request is one turn');
+    // Built whether or not the goals block is on (`on`): the turns and the facts are held to the same rules after it is turned off.
+    expect(wiring).toMatch(/const makeGoals = \(\) =>\s*goalsForChat\(\{\s*on: blocks\.goals, runtime: runtimeLink, local: \{ persona, provider, model \}, tiers: brains, toFrontier: blocks\.goalsToFrontier,\s*tools: withoutOutsideAi\(\{ specs: paidSpecs, local: localBuilds \}\), localTurn: isLocalTurn, log: \(m\) => console\.error\(m\),\s*\}\);\s*GOALS = makeGoals\(\);/);
+    expect(src.match(/goalsForChat\(/g)).toHaveLength(1);
+    // Twice: at boot, and when Ollama's own answer is adopted (#62's adoptLocal swaps provider, model, flint and persona).
+    expect(src.match(/\bGOALS = /g)).toEqual(['GOALS = ', 'GOALS = ']);
+    const adopt = between('const adoptLocal = (next: LocalBrain): void => {', 'if (!localBrain.settled) keepPickingLocal(');
+    expect(adopt).toMatch(/flint = new Flint\(\{ provider, defaultModel: model, memory: historyOf\(provider, model\), observer \}\);\s*persona = localPersonaFor\(flint, styles\.local, model\);[\s\S]*GOALS = makeGoals\(\);/);
     // After the tiers exist: a tier built later would be a persona the gate does not know (it would go without, never with).
-    expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('GOALS = goalsForChat('));
+    expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('goalsForChat('));
     // index.ts holds no renderer, no contract and no route of its own: it cannot put a goal's words anywhere itself.
     expect(src).not.toMatch(/renderGoals|GoalsNowAnswer|v1\/goals\/now|new GoalsNow/);
   });
 
-  it('an ask that carries the goals is offered no tool an outside AI answers: deep_research in a local build, with no planner and no AI-backed search', () => {
-    const wiring = between('if (blocks.goals) {', '// One request is one turn');
-    // The local build: the same tool, gated like every built-in, over the tools that are left, and with no `complete` (no frontier planner).
-    expect(wiring).toContain('const specs = paidToolSpecs(process.env);');
-    expect(wiring).toContain('const localResearch = gateBuiltins([deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, specs)), embedder })], tierOpts);');
+  it('an ask that carries what stays here is offered no tool an outside AI answers, and local builds of two: deep_research with no planner, and `remember` saving a fact that stays here', () => {
+    const wiring = between('// What stays on this Mac in chat (./goals-now, P3)', '// One request is one turn');
+    // The local builds: the same tools, gated like every built-in. deep_research over the tools that are left, and with no `complete` (no frontier planner).
+    expect(wiring).toContain('const paidSpecs = paidToolSpecs(process.env);');
+    expect(wiring).toMatch(/const localBuilds = gateBuiltins\(\[\s*deepResearchTool\(\{ tools: mcpTools\.filter\(\(t\) => !isAiBacked\(t\.definition\.name, paidSpecs\)\), embedder \}\),\s*rememberTool\(knowledge, \{ fromGoals: true \}\),\s*\], tierOpts\);/);
     expect(wiring).not.toContain('complete');
-    // The server's own deep_research is the one with the frontier planner: there is one of each.
+    // The server's own tools are the ones with the frontier planner and the ordinary fact: there is one of each.
     expect(src.match(/deepResearchTool\(/g)).toHaveLength(2);
     expect(src.match(/complete: pausable\(/g)).toHaveLength(1);
+    expect(src.match(/rememberTool\(/g)).toEqual(['rememberTool(', 'rememberTool(']);
+    expect(src).toContain('    rememberTool(knowledge),');
   });
 
   it('each brain reads the conversation through historyFor: the turns answered with Will’s goals never go back out to a brain that is not on this Mac', () => {
     // Decided from the same settings, read once, before any brain is built.
     expect(src.match(/readContextBlocks\(/g)).toHaveLength(1);
-    expect(src.indexOf('const blocks = readContextBlocks(process.env')).toBeLessThan(src.indexOf('const flint = new Flint('));
+    expect(src.indexOf('const blocks = readContextBlocks(process.env')).toBeLessThan(src.indexOf('let flint = new Flint('));
     expect(src).toContain('const historyOf = (p: ProviderAdapter, m: string) => historyFor(memory, brainOf(p, m), blocks.goalsToFrontier);');
-    // The local brain (it is Claude when OLLAMA_MODEL is unset, and then it is not local) and every frontier tier's.
-    expect(src).toContain('const flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });');
+    // The local brain (an Ollama on another machine, or a cloud model, is not local), the one adopted later, and every frontier tier's.
+    expect(src).toContain('let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });');
+    expect(src.match(/flint = new Flint\(\{ provider, defaultModel: model, memory: historyOf\(provider, model\), observer \}\);/g)).toHaveLength(2);
     expect(src).toContain('const fFlint = new Flint({ provider: fProvider, defaultModel: fModel, memory: historyOf(fProvider, fModel), observer });');
     // No /chat brain is built on the whole store: the only other client is the eval override's, which never chats.
     expect(src.match(/new Flint\(\{[^}]*\bmemory, observer \}\)/g)).toEqual(['new Flint({ provider: candidate, defaultModel: m, memory, observer })']);
-    // Memory extraction on a brain that is not on this Mac skips those turns too.
-    expect(src).toContain("const extractOutside = memoryPlan.kind === 'frontier' && !blocks.goalsToFrontier && !(brains && brainIsLocal(brainOf(brains.primary.provider, brains.primary.model)));");
-    expect(src).toContain('isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (extractOutside && memory.matches(cid, tid, carriedGoals)),');
+    expect(src.match(/new Flint\(/g)).toHaveLength(4);
   });
 
-  it('a goal’s words reach a prompt only through the per-ask gate in /chat’s pump: never /generate, never the frontier’s own context', () => {
+  it('memory extraction marks what it learns from a goals turn, and a brain that may not read such a turn never mines one', () => {
+    const start = between('const startMemory = (): void => {', '// On the local model it reads the model that was settled');
+    // The extractor's own brain, by the one rule (staysHere): the frontier's primary tier, or the local model at ITS address.
+    expect(start).toMatch(/const extractHere = staysHere\(\s*memoryPlan\.kind === 'local' \? \{ provider: 'ollama', model: memoryPlan\.model\.model, baseURL: memoryPlan\.model\.baseURL \} : brains && brainOf\(brains\.primary\.provider, brains\.primary\.model\),\s*blocks\.goalsToFrontier,\s*\);/);
+    expect(start).toContain('isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (!extractHere && memory.matches(cid, tid, carriedGoals)),');
+    expect(start).toContain('carriedGoals: (cid, tid) => memory.matches(cid, tid, carriedGoals),');
+  });
+
+  it('what stays here reaches a prompt only through the per-ask gate in /chat’s pump: never /generate, never the frontier’s own context', () => {
     expect(generate).not.toMatch(/GOALS|goalsTokens|\bgoals\b/);
+    // /generate has no gate, so it is given recall as any brain may have it, and its eval grounding is that same list.
+    expect(generate).toContain('const recalled = { ...recall.outside, mode: recall.mode };');
+    expect(generate.match(/\brecall\.[a-z]+/g)).toEqual(['recall.outside', 'recall.mode']);
     // Fetched once a turn, for whichever brain ends up asked...
     expect(chat.match(/GOALS\?\.forTurn\(\)/g)).toHaveLength(1);
     expect(src.match(/\bGOALS\b[?.]/g)).toHaveLength(1);
     // ...and read in exactly one place, naming the persona that is about to be asked, with what the rest of its prompt takes.
-    expect(chat.match(/\bgoals\.[A-Za-z]+/g)).toEqual(['goals.ask']);
+    expect(chat.match(/\bgoals\??\.[A-Za-z]+/g)).toEqual(['goals.ask', 'goals?.onThisMac']);
     expect(chat).toContain('const restChars = message.length + ctx.memory.historyChars(conversationId);');
-    expect(chat).toMatch(/const chatArgs = \(persona: Persona, context: string\): Parameters<Persona\['chat'\]> => \{\s*const asked = goals\s*\? goals\.ask\(persona, \{ context, tools: selected, promptChars: persona\.styleGuide\.length \+ restChars \}\)\s*: \{ context, tools: selected, tokens: 0, mark: \{\} \};\s*goalsTokens = asked\.tokens;/);
+    // The whole recalled block is the gate's to hand out: every ask is first given its outside twin.
+    expect(chat).toContain('const ctxBlock = withHistoryNote(recalled.block, history);');
+    expect(chat).toContain('const outsideCtx = withHistoryNote(recalled.outside, history);');
+    expect(chat).toMatch(/const chatArgs = \(persona: Persona, context: string\): Parameters<Persona\['chat'\]> => \{\s*\/\/[^\n]*\n\s*const open = contextOutside\(context, ctxBlock, outsideCtx\);\s*const asked = goals\s*\? goals\.ask\(persona, \{ context: open, here: context, tools: selected, promptChars: persona\.styleGuide\.length \+ \(persona\.engine\?\.length \?\? 0\) \+ restChars \}\)\s*: \{ context: open, tools: selected, tokens: 0, mark: \{\} \};\s*goalsTokens = asked\.tokens;/);
     // What the ask is made with is all the gate's: its context, its tools, and the mark that goes with the turn.
     expect(chat).toContain("{ conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}), ...(attachments.length ? { attachments } : {}) },");
     expect(chat).toContain('{ signal: ac.signal, ...asked.mark },');
@@ -101,6 +121,19 @@ describe('index.ts wiring', () => {
     expect(chat.match(/\bselected\b/g)).toHaveLength(3);
     // The frontier's context is built without them, as before.
     expect(chat).toContain('const frontierCtx = world ? `${ctxBlock}\\n\\n${world}` : ctxBlock;');
+  });
+
+  it('a model on this Mac answering is one mark: #62’s local turn, entered for the local persona and for a tier whose brain is on this Mac, and asked by the gate', () => {
+    // The gate is told the mark (it gives what stays here only inside one)...
+    expect(src).toContain('localTurn: isLocalTurn,');
+    // ...and a tier on this Mac is asked inside it, by the fact the gate itself holds (./policy brainIsLocal, through onThisMac).
+    expect(chat).toContain('const asHere = <T>(persona: Persona, ask: () => T): T => (goals?.onThisMac(persona) ? asLocalTurn(ask) : ask());');
+    expect(chat).toMatch(/await asHere\(b\.persona, async \(\) => \{\s*await pump\(b\.persona, [^;]*, frontierCtx\);[^\n]*\n\s*\}\);/);
+    expect(chat.match(/asHere\(/g)).toHaveLength(1);
+    // The local persona's two asks are #62's own, unchanged.
+    expect(chat.match(/await asLocalTurn\(\(\) => pump\(ctx\.persona\)\)/g)).toHaveLength(2);
+    // index.ts decides locality nowhere itself.
+    expect(src).not.toMatch(/brainIsLocal\(|\bbrainIsLocal,|LOCAL_WIRES|onThisMachine/);
   });
 
   it('the [route] line and the chat.turn event report the goals block’s size only when the brain asked last was given it', () => {
@@ -199,10 +232,13 @@ describe('index.ts wiring', () => {
       'provider = new OllamaProvider(next.options);',
       'model = next.model;',
       'localEnv = { ...process.env, ...next.env };',
-      'flint = new Flint({ provider, defaultModel: model, memory, observer });',
+      // Through historyOf, like every brain's: the adopted model reads the conversation by the same rule (./goals-now).
+      'flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });',
       'persona = localPersonaFor(flint, styles.local, model);',
       'styled = makeStyled();',
       'backgroundBrain = makeBackground();',
+      // ...and who may read what stays on this Mac is named again, for the new local persona.
+      'GOALS = makeGoals();',
       'noteLocalDefault(next);',
     ]) {
       expect(adopt, line).toContain(line);

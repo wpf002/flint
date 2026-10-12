@@ -412,8 +412,8 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     expect(s.local.requests).toHaveLength(2);
     expect(s.local.seen()).not.toContain(CANARY);
     expect(s.tiers[0]!.seen()).not.toContain(CANARY);
-    // Nothing here runs on this Mac, so the block is not even fetched: main() is told there is nothing to wire.
-    expect(s.GOALS).toBeUndefined();
+    // Nothing here runs on this Mac, so the block is not even fetched.
+    expect(s.fetched()).toBe(0);
     expect(logsOf(s)).toBe('[goals-now] on, but no brain here runs on this Mac (anthropic:claude-sonnet-4-6, anthropic:claude-opus-5-5), so no chat turn gets Will\'s goals');
   });
 

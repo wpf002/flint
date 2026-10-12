@@ -73,10 +73,10 @@ import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
-import { carriedGoals, goalsForChat, historyFor, type GoalsNow } from './goals-now';
+import { carriedGoals, goalsForChat, historyFor, staysHere, type GoalsNow } from './goals-now';
 import { isAiBacked, withoutOutsideAi } from './goals-tools';
 import { readContextBlocks } from './context-blocks';
-import { brainIsLocal, brainOf } from './policy';
+import { brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
 import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
@@ -127,7 +127,7 @@ import {
   pausable,
   type FrontierPlan,
 } from './spend';
-import { TurnLog, recallContext, recordTurnEntry } from './grounding';
+import { TurnLog, contextOutside, recallContext, recordTurnEntry } from './grounding';
 import { GROUNDING_CHARS_MAX, parseGroundingCharsRequest, parseRecallRequest, runDiscoveryTool, wiredToolNames } from './eval-tools';
 import {
   parseAttachments,
@@ -409,9 +409,10 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
 
 /** Build the per-request context block, injecting any long-term memory that's
  *  relevant to this message so Flint "remembers" without bloating the prompt. */
-async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string }> {
+async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string; outside: string }> {
   const r = await recallContext(userContext(), message, knowledge);
-  return { block: r.block, mode: r.mode };
+  // `outside`: the same block without the facts that stay on this Mac (./knowledge fromGoals).
+  return { block: r.block, mode: r.mode, outside: r.outside.block };
 }
 
 async function main(): Promise<void> {
@@ -812,7 +813,12 @@ async function main(): Promise<void> {
       return;
     }
     const extractVendor = memoryPlan.kind === 'frontier' && brains ? vendorOfProvider(brains.primary.provider.name) : undefined;
-    const extractOutside = memoryPlan.kind === 'frontier' && !blocks.goalsToFrontier && !(brains && brainIsLocal(brainOf(brains.primary.provider, brains.primary.model)));
+    // May the extractor's brain read what stays on this Mac (./goals-now staysHere)? The frontier's primary tier,
+    // or the local model at its own address: an Ollama on another machine is not here either.
+    const extractHere = staysHere(
+      memoryPlan.kind === 'local' ? { provider: 'ollama', model: memoryPlan.model.model, baseURL: memoryPlan.model.baseURL } : brains && brainOf(brains.primary.provider, brains.primary.model),
+      blocks.goalsToFrontier,
+    );
     console.error(
       memoryPlan.kind === 'local'
         ? `[memory-extract] on the local model ${memoryPlan.model.model} (num_ctx ${memoryPlan.model.numCtx ?? 'unset'}); it waits for Will's chat`
@@ -823,9 +829,11 @@ async function main(): Promise<void> {
       ...(memoryPlan.kind === 'local'
         ? { chatActive }
         : { gate: () => (extractVendor ? spend.backgroundBlocked(extractVendor) : undefined) }),
-      // A turn answered with Will's goals in its context is skipped too when the extractor's brain is not on this
-      // Mac (./goals-now): what it would read there is what an outside brain is never sent as history.
-      isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (extractOutside && memory.matches(cid, tid, carriedGoals)),
+      // A turn answered with Will's goals in its context is skipped too when the extractor's brain may not read
+      // what stays here (./goals-now): what it would read there is what an outside brain is never sent as history.
+      isTainted: (cid, tid) => convTaint.isTainted(cid, tid) || (!extractHere && memory.matches(cid, tid, carriedGoals)),
+      // What a brain that may read such a turn learns from it is marked, and stays on this Mac (./knowledge fromGoals).
+      carriedGoals: (cid, tid) => memory.matches(cid, tid, carriedGoals),
     }).start();
   };
   // On the local model it reads the model that was settled, so it starts once there is one: now,
@@ -874,18 +882,26 @@ async function main(): Promise<void> {
   // frontier turn, so it is off until Will turns it on (FLINT_WORLD_NOW=1).
   // (`blocks`, read above by ./context-blocks; FLINT_CONTEXT_BLOCKS=off turns every block off.)
   const worldNow = blocks.world ? new WorldNow({ runtime: runtimeLink }) : undefined;
-  // Will's goals in chat context (./goals-now, P3): FLINT_GOALS_NOW=1. Personal text, so a brain reads
-  // it only if it runs on this Mac (./policy brainIsLocal), unless Will also set FLINT_GOALS_TO_FRONTIER=on.
-  if (blocks.goals) {
-    // An ask that carries them is offered no tool an outside AI answers, and deep_research in a local
-    // build: no frontier planner, and only the search tools that are left (./goals-tools).
-    const specs = paidToolSpecs(process.env);
-    const localResearch = gateBuiltins([deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, specs)), embedder })], tierOpts);
-    GOALS = goalsForChat({
-      runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier,
-      tools: withoutOutsideAi({ specs, local: localResearch }), log: (m) => console.error(m),
+  // What stays on this Mac in chat (./goals-now, P3): Will's goals in chat context (FLINT_GOALS_NOW=1), the turns
+  // answered with them, and the facts Flint learned from those turns. Personal text, so a brain is given any of it
+  // only if it runs on this Mac (./policy brainIsLocal) and its ask is a local model's turn (./turn-taint
+  // isLocalTurn), unless Will also set FLINT_GOALS_TO_FRONTIER=on. Built whether or not the block is on: the
+  // turns and the facts are held to the same rules after it is turned off.
+  // An ask that carries any of it is offered no tool an outside AI answers, and local builds of two tools
+  // (./goals-tools): deep_research with no frontier planner and only the search tools that are left, and
+  // `remember` saving what it is told as a fact that stays here.
+  const paidSpecs = paidToolSpecs(process.env);
+  const localBuilds = gateBuiltins([
+    deepResearchTool({ tools: mcpTools.filter((t) => !isAiBacked(t.definition.name, paidSpecs)), embedder }),
+    rememberTool(knowledge, { fromGoals: true }),
+  ], tierOpts);
+  // Named for the local brain as it is NOW: made again when Ollama's own answer is adopted (adoptLocal).
+  const makeGoals = () =>
+    goalsForChat({
+      on: blocks.goals, runtime: runtimeLink, local: { persona, provider, model }, tiers: brains, toFrontier: blocks.goalsToFrontier,
+      tools: withoutOutsideAi({ specs: paidSpecs, local: localBuilds }), localTurn: isLocalTurn, log: (m) => console.error(m),
     });
-  }
+  GOALS = makeGoals();
 
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
@@ -915,10 +931,12 @@ async function main(): Promise<void> {
     provider = new OllamaProvider(next.options);
     model = next.model;
     localEnv = { ...process.env, ...next.env };
-    flint = new Flint({ provider, defaultModel: model, memory, observer });
+    flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });
     persona = localPersonaFor(flint, styles.local, model);
     styled = makeStyled();
     backgroundBrain = makeBackground();
+    // The local brain is another one now: who may read what stays here is named again (./goals-now).
+    GOALS = makeGoals();
     noteLocalDefault(next);
     if (!memoryStarted) startMemory();
   };
@@ -1284,7 +1302,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const routed = scored.tools;
     const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
-    const recalled = await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall });
+    // A one-shot answer gets recall as ANY brain may have it: without the facts that stay on this Mac
+    // (./knowledge fromGoals). Only /chat's per-ask gate hands those out, to a brain that may read them; here
+    // there is no such gate, and an eval replay's answer and grounding go on to its judges.
+    const recall = await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall });
+    const recalled = { ...recall.outside, mode: recall.mode };
     const ctxBlock = recalled.block;
     const toolsLikely = ctx.router.toolsLikely(scored.appended);
     const tier = classifyMessage(prompt, { toolsLikely });
@@ -1540,26 +1562,37 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         GOALS?.forTurn(),
       ]);
       const ctxBlock = withHistoryNote(recalled.block, history);
+      // The same block as a brain that is not on this Mac may have it: without the recalled facts that stay
+      // here (./knowledge fromGoals). The very same text when none was recalled.
+      const outsideCtx = withHistoryNote(recalled.outside, history);
       // It rides in the persona context (the system prompt's per-turn suffix): never stored in
       // the history, so the memory extractor never reads it, and a local fallback goes without.
       const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
-      // Will's goals ride with an ask only if THAT persona's brain may read them (./goals-now): one on
-      // this Mac, or any once Will set FLINT_GOALS_TO_FRONTIER=on. Every ask in /chat is made with
-      // these arguments, so a frontier tier goes without and the local model it falls back to does not.
-      // An ask that carries them is sized to that brain's real context, is offered only the tools that
-      // keep them here, and marks its turn, which keeps the turn out of an outside brain's history.
+      // What stays on this Mac rides with an ask only if THAT persona's brain may read it (./goals-now): one on
+      // this Mac, asked as a local model's turn, or any once Will set FLINT_GOALS_TO_FRONTIER=on. That is Will's
+      // goals, and the recalled facts Flint learned from a turn answered with them. Every ask in /chat is made
+      // with these arguments, so a frontier tier goes without and the local model it falls back to does not.
+      // An ask that carries any of it is sized to that brain's real context, is offered only the tools that keep
+      // it here, and marks its turn, which keeps the turn out of an outside brain's history and recall.
       let goalsTokens = 0; // the block's size in the prompt of the brain asked last (0: it went without)
-      const restChars = message.length + ctx.memory.historyChars(conversationId); // with the persona's guide: the rest of the prompt
+      const restChars = message.length + ctx.memory.historyChars(conversationId); // with the persona's own words: the rest of the prompt
       const chatArgs = (persona: Persona, context: string): Parameters<Persona['chat']> => {
+        // `context` is the turn's whole context. Any brain may be given its outside twin; only the gate hands out the whole one.
+        const open = contextOutside(context, ctxBlock, outsideCtx);
         const asked = goals
-          ? goals.ask(persona, { context, tools: selected, promptChars: persona.styleGuide.length + restChars })
-          : { context, tools: selected, tokens: 0, mark: {} };
+          ? goals.ask(persona, { context: open, here: context, tools: selected, promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + restChars })
+          : { context: open, tools: selected, tokens: 0, mark: {} };
         goalsTokens = asked.tokens;
         return [
           { conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}), ...(attachments.length ? { attachments } : {}) },
           { signal: ac.signal, ...asked.mark },
         ];
       };
+      // A tier whose brain is on this Mac (./goals-now onThisMac, which asks ./policy brainIsLocal) answers as a
+      // local model too: its ask runs as a local model's turn (./turn-taint asLocalTurn), like the local persona's
+      // below. One mark, then, for "a model on this Mac is answering": it is what an ask needs to be given
+      // anything that stays here, and what keeps the turn's question from an outside AI.
+      const asHere = <T>(persona: Persona, ask: () => T): T => (goals?.onThisMac(persona) ? asLocalTurn(ask) : ask());
       const beforeLog = ctx.actionLog.actions().length;
 
       res.writeHead(200, {
@@ -1604,7 +1637,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
                 lastTried = b.label;
                 res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
                 try {
-                  await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: no answer → honest message; an error → the local model, when it may answer
+                  await asHere(b.persona, async () => {
+                    await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: no answer → honest message; an error → the local model, when it may answer
+                  });
                 } catch (err) {
                   if (answer.length > 0) throw new NoFallback(err); // text already streamed
                   throw err;

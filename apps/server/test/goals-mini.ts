@@ -13,8 +13,11 @@ import { Flint, makeAiError, type GenerateArgs, type ProviderAdapter, type Strea
 import { Persona } from '@flint/persona';
 import { BrainSet, NoFallback, runWithFallback, type BrainTier } from '../src/brains';
 import { goalsForChat, historyFor } from '../src/goals-now';
+import { contextOutside, recallContext } from '../src/grounding';
+import type { KnowledgeStore } from '../src/knowledge';
 import { PersistentStore } from '../src/persistent-store';
 import { brainOf } from '../src/policy';
+import { asLocalTurn, isLocalTurn } from '../src/turn-taint';
 
 export const CANARY = 'CANARY-p3goals';
 export const RT = { url: 'http://[::1]:8090', token: 'c'.repeat(64) };
@@ -41,6 +44,8 @@ export type Step = 'answer' | 'fail' | { say: string };
 export interface Recorded {
   provider: ProviderAdapter & { baseURL?: string; numCtx?: number };
   requests: GenerateArgs[];
+  /** For each request, whether it was made as a local model's turn (./turn-taint isLocalTurn): what a tool it called would see. */
+  localTurns: boolean[];
   /** Everything this provider was ever sent, as text: the system prompt, every message, every tool. */
   seen: () => string;
 }
@@ -48,6 +53,7 @@ export interface Recorded {
 /** A provider that keeps every request it is given and plays `script`, one step per request. */
 export function recording(name: string, script: Step[], o: { baseURL?: string; numCtx?: number; maxContext?: number; maxOutput?: number } = {}): Recorded {
   const requests: GenerateArgs[] = [];
+  const localTurns: boolean[] = [];
   const provider: Recorded['provider'] = {
     name,
     ...(o.baseURL ? { baseURL: o.baseURL } : {}),
@@ -57,6 +63,7 @@ export function recording(name: string, script: Step[], o: { baseURL?: string; n
     generate: () => Promise.reject(new Error('stream only')),
     async *stream(args: GenerateArgs): AsyncIterable<StreamEvent> {
       requests.push(args);
+      localTurns.push(isLocalTurn());
       const step = script[Math.min(requests.length - 1, script.length - 1)]!;
       if (step === 'fail') {
         yield { type: 'error', error: makeAiError('provider_unavailable', '529 Overloaded', { retryable: false, providerCode: '529' }) };
@@ -66,7 +73,7 @@ export function recording(name: string, script: Step[], o: { baseURL?: string; n
       yield { type: 'done', reason: 'complete', usage: { input: 3, output: 2 } };
     },
   };
-  return { provider, requests, seen: () => JSON.stringify(requests.map(({ signal: _signal, ...rest }) => rest)) };
+  return { provider, requests, localTurns, seen: () => JSON.stringify(requests.map(({ signal: _signal, ...rest }) => rest)) };
 }
 
 const dirs: string[] = [];
@@ -97,6 +104,10 @@ export interface MiniOptions {
   tools?: Tool[];
   /** What an ask that carries the goals is offered (./goals-tools). */
   goalsTools?: (offered: readonly Tool[]) => readonly Tool[];
+  /** FLINT_GOALS_NOW: is the goals block on? Default: on. */
+  goalsOn?: boolean;
+  /** Long-term memory, recalled into each turn's context as main() does. Default: none (the context is the RECALL mark alone). */
+  knowledge?: KnowledgeStore;
   /** The conversation store's file, to reopen one a server before this one wrote. */
   storePath?: string;
 }
@@ -121,33 +132,46 @@ export function miniServer(o: MiniOptions) {
   const first = brains[0];
   const set = first ? new BrainSet<Persona>({ routine: first, standard: first, hard: first, code: first }, brains[1]) : undefined;
   const chain = set ? set.chain('standard') : [];
+  let fetched = 0;
   const GOALS = goalsForChat<Persona>({
+    on: o.goalsOn ?? true,
     runtime: () => RT,
     local: { persona: localPersona, provider: local.provider, model: local.model },
     tiers: set,
     toFrontier,
     ...(o.goalsTools ? { tools: o.goalsTools } : {}),
+    // As main(): the mark #62 put on a local model's turn.
+    localTurn: isLocalTurn,
     log: (m) => logs.push(m),
-    fetchImpl: (async () => new Response(JSON.stringify(o.goals ?? answer([goal(1), goal(2)])))) as unknown as typeof fetch,
+    fetchImpl: (async () => {
+      fetched++;
+      return new Response(JSON.stringify(o.goals ?? answer([goal(1), goal(2)])));
+    }) as unknown as typeof fetch,
   });
   const selected = o.tools ?? [];
 
   /** One /chat turn: `brain` is the route's choice; a frontier turn that fails before any text falls back to the local model. */
   async function chat(brain: 'frontier' | 'local', message = 'how are my goals going?', conversationId = 'c1') {
-    const ctxBlock = `[Context] ${RECALL}`;
+    const base = `[Context] ${RECALL}`;
+    // Recall, as contextFor: the whole block, and its twin without the facts that stay on this Mac.
+    const recalled = o.knowledge ? await recallContext(base, message, o.knowledge) : { block: base, outside: { block: base } };
+    const ctxBlock = recalled.block;
+    const outsideCtx = recalled.outside.block;
     // World now is the frontier's only; Will's goals are fetched for whichever brain ends up asked.
-    const [world, goals] = await Promise.all([brain === 'frontier' ? WORLD : '', GOALS?.forTurn()]);
+    const [world, goals] = await Promise.all([brain === 'frontier' ? WORLD : '', GOALS.forTurn()]);
     const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
     let goalsTokens = 0;
     const restChars = message.length + store.historyChars(conversationId);
     // The arguments of every ask, as index.ts builds them.
     const chatArgs = (persona: Persona, context: string): Parameters<Persona['chat']> => {
+      const open = contextOutside(context, ctxBlock, outsideCtx);
       const asked = goals
-        ? goals.ask(persona, { context, tools: selected, promptChars: persona.styleGuide.length + restChars })
-        : { context, tools: selected, tokens: 0, mark: {} };
+        ? goals.ask(persona, { context: open, here: context, tools: selected, promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + restChars })
+        : { context: open, tools: selected, tokens: 0, mark: {} };
       goalsTokens = asked.tokens;
       return [{ conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}) }, { ...asked.mark }];
     };
+    const asHere = <T>(persona: Persona, ask: () => T): T => (goals?.onThisMac(persona) ? asLocalTurn(ask) : ask());
     let answerText = '';
     let answeredBy = brain;
     const pump = async (persona: Persona, _recoverable = false, tried?: number, context = ctxBlock) => {
@@ -163,7 +187,9 @@ export function miniServer(o: MiniOptions) {
       try {
         await runWithFallback(chain, async (b) => {
           try {
-            await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx);
+            await asHere(b.persona, async () => {
+              await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx);
+            });
           } catch (err) {
             if (answerText.length > 0) throw new NoFallback(err);
             throw err;
@@ -171,12 +197,12 @@ export function miniServer(o: MiniOptions) {
         });
       } catch {
         answeredBy = 'local';
-        await pump(localPersona);
+        await asLocalTurn(() => pump(localPersona));
       }
     } else {
-      await pump(localPersona);
+      await asLocalTurn(() => pump(localPersona));
     }
     return { answer: answerText, answeredBy, goalsTokens };
   }
-  return { chat, tiers, local, logs, GOALS, store, storePath, chain, localPersona };
+  return { chat, tiers, local, logs, GOALS, store, storePath, chain, localPersona, fetched: () => fetched };
 }

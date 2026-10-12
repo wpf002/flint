@@ -17,6 +17,13 @@ interface Fact {
   sourceAt?: number;
   /** Coarse kind — project, preference, person, system, decision, goal, … */
   category?: string;
+  /**
+   * Learned from a turn that was answered with Will's goals in its context
+   * (./goals-now). Such a fact stays on this Mac: it is recalled only for a
+   * brain that may read his goals. Absent on every other fact, and on every
+   * fact stored before this mark existed.
+   */
+  fromGoals?: true;
   /** Set when a newer fact replaced this one. Kept for audit, never recalled. */
   supersededBy?: string;
   supersededAt?: number;
@@ -26,6 +33,21 @@ export interface FactMeta {
   conversationId?: string;
   sourceAt?: number;
   category?: string;
+  /** The turn it was learned from was answered with Will's goals in its context: the fact stays on this Mac. */
+  fromGoals?: boolean;
+}
+
+/** A recall, and the part of it any brain may be given. */
+export interface Recall {
+  /** The most relevant facts, for a brain that may read everything Flint knows. */
+  facts: string[];
+  /**
+   * The most relevant facts for a brain that is not on this Mac: chosen the
+   * same way from the facts that carry no `fromGoals` mark. The same list as
+   * `facts` when none of those were marked.
+   */
+  outside: string[];
+  mode: RecallMode;
 }
 
 /** Why `addDetailed` did or didn't store a fact — the extractor counts these. */
@@ -72,6 +94,9 @@ function jaccard(a: string[], b: string[]): number {
 
 /** How a recall found its facts. */
 export type RecallMode = 'semantic' | 'lexical' | 'timeout' | 'none';
+
+/** May a brain that is not on this Mac be given this fact? */
+const mayLeave = (f: { fromGoals?: true }) => f.fromGoals !== true;
 
 /** Resolve `p`, or throw after `ms`. The embedder has no timeout of its own, and
  *  a wedged Ollama (e.g. mid training run) must not hang every chat turn. */
@@ -160,6 +185,7 @@ export class KnowledgeStore {
     if (meta.conversationId) fact.conversationId = meta.conversationId;
     if (meta.sourceAt !== undefined) fact.sourceAt = meta.sourceAt;
     if (meta.category) fact.category = meta.category;
+    if (meta.fromGoals === true) fact.fromGoals = true;
     this.facts.push(fact);
     this.save();
     return { status: 'added', id: fact.id };
@@ -191,10 +217,15 @@ export class KnowledgeStore {
    * recall, plus how it was done, for the [route] line: `semantic` (embeddings),
    * `lexical` (the embedder failed), `timeout` (it did not answer in time) or
    * `none` (no facts, or nothing to look for).
+   *
+   * `outside` is the same recall for a brain that is not on this Mac: the facts
+   * learned from a turn answered with Will's goals (`fromGoals`) are left out,
+   * and the next most relevant take their place. One embedding serves both.
    */
-  async recallWithMode(query: string, k = Number(process.env.FLINT_MEMORY_K ?? 5)): Promise<{ facts: string[]; mode: RecallMode }> {
+  async recallWithMode(query: string, k = Number(process.env.FLINT_MEMORY_K ?? 5)): Promise<Recall> {
     const facts = this.active();
-    if (facts.length === 0 || !query.trim()) return { facts: [], mode: 'none' };
+    if (facts.length === 0 || !query.trim()) return { facts: [], outside: [], mode: 'none' };
+    const open = facts.filter(mayLeave);
 
     let qv: number[] = [];
     let mode: RecallMode = 'semantic';
@@ -205,7 +236,12 @@ export class KnowledgeStore {
       mode = err instanceof Error && /^timed out after/.test(err.message) ? 'timeout' : 'lexical';
     }
 
-    if (qv.length === 0) return { facts: this.lexical(query, facts, k), mode: mode === 'semantic' ? 'lexical' : mode }; // embedder down → lexical, never nothing
+    // Embedder down → lexical, never nothing. The same corpus weighs both views' words.
+    if (qv.length === 0) {
+      const texts = (pool: Fact[]) => this.lexicalFacts(query, pool, facts, k).map((f) => f.text);
+      const found = texts(facts);
+      return { facts: found, outside: open.length === facts.length ? found : texts(open), mode: mode === 'semantic' ? 'lexical' : mode };
+    }
 
     // Embedder is up: opportunistically heal facts stored while it was down.
     if (facts.some((f) => f.vector.length === 0)) void this.reembedMissing();
@@ -217,17 +253,22 @@ export class KnowledgeStore {
       .sort((a, b) => b.score - a.score)
       .map((x) => x.f);
     // Facts without a vector yet can't be scored semantically — match them lexically.
-    const unvectored = facts.filter((f) => f.vector.length === 0);
-    const lex = unvectored.length ? this.lexicalFacts(query, unvectored, facts, k) : [];
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const f of [...semantic, ...lex]) {
-      if (seen.has(f.id)) continue;
-      seen.add(f.id);
-      out.push(f.text);
-      if (out.length >= k) break;
-    }
-    return { facts: out, mode: 'semantic' };
+    const top = (pool: Fact[]): string[] => {
+      const scored = pool.length === facts.length ? semantic : semantic.filter(mayLeave);
+      const unvectored = pool.filter((f) => f.vector.length === 0);
+      const lex = unvectored.length ? this.lexicalFacts(query, unvectored, facts, k) : [];
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const f of [...scored, ...lex]) {
+        if (seen.has(f.id)) continue;
+        seen.add(f.id);
+        out.push(f.text);
+        if (out.length >= k) break;
+      }
+      return out;
+    };
+    const all = top(facts);
+    return { facts: all, outside: open.length === facts.length ? all : top(open), mode: 'semantic' };
   }
 
   /** Embed facts that have no vector (stored while the embedder was down). */
@@ -254,10 +295,6 @@ export class KnowledgeStore {
       if (healed > 0) this.save();
     }
     return healed;
-  }
-
-  private lexical(query: string, pool: Fact[], k: number): string[] {
-    return this.lexicalFacts(query, pool, pool, k).map((f) => f.text);
   }
 
   /**
@@ -388,7 +425,7 @@ export class KnowledgeStore {
  * Kate", "we decided to ship Friday"). Read-only-classified by the gate regex so
  * it runs freely; it only writes to Flint's own memory, never the outside world.
  */
-export function rememberTool(store: KnowledgeStore): Tool {
+export function rememberTool(store: KnowledgeStore, opts: { fromGoals?: boolean } = {}): Tool {
   return {
     definition: {
       name: 'remember',
@@ -406,7 +443,8 @@ export function rememberTool(store: KnowledgeStore): Tool {
     handler: async (call) => {
       const fact = String((call.args as { fact?: unknown })?.fact ?? '').trim();
       if (!fact) return { ok: false, error: 'no fact provided' };
-      const added = await store.add(fact, 'user', { sourceAt: Date.now() });
+      // `fromGoals`: the build an ask that carries Will's goals is offered (./goals-tools). What it saves stays on this Mac.
+      const added = await store.add(fact, 'user', { sourceAt: Date.now(), ...(opts.fromGoals ? { fromGoals: true } : {}) });
       return { ok: true, remembered: added, note: added ? 'saved' : 'already known' };
     },
   };
