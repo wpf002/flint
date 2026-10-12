@@ -23,7 +23,10 @@ but are called out explicitly here.
 - **`pickOllamaModel`, `isOllamaCloudModel`, `DEFAULT_OLLAMA_MODEL`**: the model
   an app uses when none is named. It asks Ollama (`/api/ps`, then `/api/tags`)
   for the chat model already loaded, else the first one pulled, skipping
-  embedders and cloud models; never a hosted model.
+  embedders and cloud models; never a hosted model. The result says where the
+  model came from (`from`), the context size a loaded model has (`numCtx`, so
+  asking it does not make Ollama reload it), and whether Ollama answered at all
+  (`answered`, to tell "down" from "empty").
 
 ### Changed
 
