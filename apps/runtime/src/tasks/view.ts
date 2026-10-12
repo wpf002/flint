@@ -80,7 +80,7 @@ export async function taskView(db: Db, id: string, tz: string, now = new Date())
   const forecast = t.predictionId ? await db.prediction.findUnique({ where: { id: t.predictionId }, select: { probability: true } }) : null;
   // His card for this task that is waiting: the newest of any kind (to run it, to accept it, to stop it, to overrule its check).
   const card = await db.proposal.findFirst({
-    where: { status: 'pending', expiresAt: { gt: now }, args: { path: ['taskId'], equals: id }, OR: [{ action: { startsWith: 'task.' } }] },
+    where: { status: 'pending', expiresAt: { gt: now }, action: { startsWith: 'task.' }, args: { path: ['taskId'], equals: id } },
     orderBy: { createdAt: 'desc' }, select: { id: true },
   });
   const can = async (to: 'accepted' | 'rejected') => !(await overrideProblem(db, t, to));

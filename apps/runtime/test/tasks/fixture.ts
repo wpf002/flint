@@ -30,7 +30,7 @@ const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new Abor
 /** A New Task form's key. */
 export const draft = (): string => id('d').replace(/[^A-Za-z0-9]/g, '').padEnd(16, '0').slice(0, 24);
 
-export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
+export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o: { source?: boolean } = {}) {
   const key = await enrollTestKey(urls);
   const owner = (sql: string, params: unknown[] = []) => withClient(urls.owner, (c) => c.query(sql, params));
 
@@ -55,9 +55,12 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
       kind: 'task', origin: 'console', action, args, argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60, ...over,
     } as Parameters<typeof createProposal>[1], 'test');
 
-  // The GitHub source, turned on by its own card: the CI watcher reads the runs it keeps.
-  const enable = await file('world.source.enable', { source: 'github' }, { kind: 'tool_call' });
-  await signRun(enable.id);
+  /** The GitHub source, turned on by its own card: the CI watcher reads the runs it keeps. */
+  async function sourceOn(): Promise<void> {
+    const enable = await file('world.source.enable', { source: 'github' }, { kind: 'tool_call' });
+    await signRun(enable.id);
+  }
+  if (o.source !== false) await sourceOn();
   const observed = new Map<string, SourceObservation>();
   const github: Source = { name: 'github', cadenceMs: 300_000, run: async () => ({ observations: [...observed.values()], metrics: [] }) };
   let clock = Date.now() - 3_600_000;
@@ -78,6 +81,17 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
   async function entity(kind: string, state: Record<string, unknown> = {}, over: { name?: string; taintedPaths?: string[]; sensitivity?: string } = {}): Promise<string> {
     const eid = id('en');
     await db.entity.create({ data: { id: eid, kind, key: `${kind}:test:${eid}`, name: over.name ?? 'synthetic', state: state as object, stateHash: HEX('d'), taintedPaths: over.taintedPaths ?? [], sensitivity: over.sensitivity ?? 'ops', lastObservedAt: new Date() } });
+    return eid;
+  }
+  /** Someone from Will's calendar (a person exists only with that source's row). Returns the item's id. */
+  async function person(): Promise<string> {
+    const eid = id('en');
+    await withClient(urls.owner, async (c) => {
+      await c.query('BEGIN');
+      await c.query(`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", sensitivity, "lastObservedAt", "updatedAt") VALUES ($1, 'person', $2, 'Synthetic Person', '{}', $3, 'personal', now(), now())`, [eid, `person:test:${eid}`, HEX('d')]);
+      await c.query(`INSERT INTO "EntitySource" (id, "entityId", source, "externalId", "accountOwner", "lastSyncedAt") VALUES ($1, $2, 'google_calendar', $3, 'will', now())`, [id('es'), eid, `person:${eid}`]);
+      await c.query('COMMIT');
+    });
     return eid;
   }
   /** Will forgets an item (a signed forget), through the database's own procedure. */
@@ -127,6 +141,6 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus()) {
     const resolutions = await db.resolution.findMany({ select: { evidence: true } });
     return JSON.stringify([bus.sent.map((j) => j.data), audits, cards, health, predictions, resolutions], (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
   }
-  return { key, bus, owner, sign, approve, signRun, signRunCard, file, ciRun, entity, forget, watcherOn, newTask, dispatched, checked, task, cardFor, policy, everythingButTasks };
+  return { key, bus, owner, sign, approve, signRun, signRunCard, file, sourceOn, ciRun, entity, person, forget, watcherOn, newTask, dispatched, checked, task, cardFor, policy, everythingButTasks };
 }
 export type TaskFixture = Awaited<ReturnType<typeof taskFixture>>;
