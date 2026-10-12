@@ -229,7 +229,11 @@
   .details{margin:10px 0 0 26px;}
   .details p{color:var(--t2);font-size:12px;line-height:18px;margin-top:6px;}
   .details ul{list-style:none;margin:6px 0 0;padding:0;color:var(--t2);font-size:12px;line-height:20px;}
-  .details .facts,.pargs .facts{margin:8px 0 0 0;} .details .facts dd,.pargs .facts dd{font-size:12px;color:var(--t2);}
+  .details .facts,.pargs .facts{margin:8px 0 0 0;} .details .facts dd,.pargs .facts dd{font-size:12px;color:var(--t2);white-space:pre-wrap;}
+  .details .dh,.pargs .dh{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);margin:14px 0 0;}
+  .facts.refs dt,.details .facts.refs dd,.pargs .facts.refs dd{color:var(--t3);}
+  .facts dd .more{color:var(--t3);} .facts dd button.ghost{display:inline;padding:0;font-size:12px;line-height:18px;}
+  .details p.held,.pargs p.held{color:var(--t1);}
   .cf{display:flex;align-items:center;gap:8px;margin-top:14px;padding-left:16px;}
   .cf .ghost{margin-right:auto;}
   .outside{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);}
@@ -1303,166 +1307,266 @@ var APPR_RULES={'goal.review.local':['Goal Reviews','run',2],'goal.propose':['Go
   'health.check':['Health Checks','run',2],'health.report':['Health Reports','be sent',2],'digest.daily':['Daily Summary','be sent',1],'maintenance.retention':['Nightly Cleanup','run',1],
   'backup.local':['Backup','run',1,['1 a Day','once a day']],'backup.offsite':['Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill':['Restore Test','run',1,['1 a Week','once a week']]};
 function apprRule(pat){return apprGet(APPR_RULES,pat)||null;}
-/* A name as it reads inside a sentence: lower case, but for the names that are someone's ("Google Calendar reads"). */
-var APPR_PROPER=/\b(Google Calendar|Apple Calendar|Nexus|Flint|GitHub|Railway|Mac|CI)\b/g;
-function apprPhrase(name){var keep=[];var low=String(name||'').replace(APPR_PROPER,function(m){keep.push(m);return '\x01'+(keep.length-1)+'\x01';}).toLowerCase();
-  return low.replace(/\x01(\d+)\x01/g,function(_m,i){return keep[+i];});}
+/* Names that are written their own way. ONE map for every place this panel makes words out of a stored name (a
+   title, a label, a value, a sentence): GitHub is never "Github". It holds every name the lanes and the health
+   panel use (@flint/policy SOURCE_NAMES and SERVICE_SHORT; a test keeps it so). */
+var APPR_NAMES={github:'GitHub',gitlab:'GitLab',icloud:'iCloud',imessage:'iMessage',gmail:'Gmail',mcp:'MCP',api:'API',ci:'CI',db:'DB',ui:'UI',gpu:'GPU',tts:'TTS',ai:'AI',url:'URL',id:'ID',ids:'IDs',cc:'CC',bcc:'BCC',iban:'IBAN',
+  nexus:'Nexus',flint:'Flint',railway:'Railway',mac:'Mac',google:'Google',apple:'Apple',ollama:'Ollama',openai:'OpenAI',anthropic:'Anthropic',claude:'Claude',perplexity:'Perplexity',tavily:'Tavily',
+  trident:'Trident',tailscale:'Tailscale',oauth:'OAuth',sms:'SMS',pdf:'PDF',json:'JSON',http:'HTTP',https:'HTTPS',ssh:'SSH',utc:'UTC',ios:'iOS',macos:'macOS'};
+/* One word, capitalised: its own way when it is a name. */
+function apprCap(w){w=String(w||'');return apprGet(APPR_NAMES,w.toLowerCase())||w.replace(/\b\w/g,function(c){return c.toUpperCase();});}
+/* A name as it reads inside a sentence: lower case, but for the names that are someone's ("Google Calendar reads", "GitHub reads"). */
+var APPR_PROPER=/\b(Google Calendar|Apple Calendar)\b/g;
+function apprPhrase(name){var keep=[];var s=String(name||'').replace(APPR_PROPER,function(m){keep.push(m);return '\x01'+(keep.length-1)+'\x01';});
+  s=s.split(' ').map(function(w){var core=w.replace(/[’'][sS]$/,'');return core&&apprGet(APPR_NAMES,core.toLowerCase())===core?w:w.toLowerCase();}).join(' ');
+  return s.replace(/\x01(\d+)\x01/g,function(_m,i){return keep[+i];});}
 /* A rule's name in Title Case words: its own, a chat tool's title, or, for a rule this panel has no words for, its parts. */
 function apprRuleWords(pat){pat=String(pat||'');var e=apprRule(pat),t=apprGet(APPR_TOOLS,'runtime.'+pat);return e?e[0]:t?t[0]:apprWords(pat);}
 /* ...as the Limits fact says it, with its limit: the job's own, or the rule's cap for a day (0 a day is a limit too).
    A row that makes Flint ask, or stops it, has no limit to say: it is named, and no more. */
-function apprLimitSays(r){r=r||{};var e=apprRule(r.pattern),runs=r.tier!=='approval'&&r.tier!=='forbidden';
-  return apprRuleWords(r.pattern)+(!runs?'':e&&e[3]?' '+e[3][0]:typeof r.dailyCap==='number'?' '+r.dailyCap+' a Day':'');}
+function apprLimitSays(r){r=r||{};var pat=String(r.pattern||''),e=apprRule(pat),runs=r.tier!=='approval'&&r.tier!=='forbidden';
+  return (apprFamily(pat)?'Every '+apprRuleWords(apprFamily(pat))+' Action':apprRuleWords(pat))+(!runs?'':e&&e[3]?' '+e[3][0]:typeof r.dailyCap==='number'?' '+r.dailyCap+' a Day':'');}
+/* A row for a whole family of actions ("world.sync.*"): the family's name, or nothing for a row that names one action. */
+function apprFamily(pat){pat=String(pat||'');return /\.\*$/.test(pat)?pat.replace(/\.\*$/,''):'';}
+/* How many actions a card's rows name, for its title: "1 Action", "3 Actions", "Every World Sync Action" (a family is
+   every action under it, never one action), "2 Actions and 1 Group of Actions". `one`: it reads as a single thing. */
+function apprHowMany(rows){rows=rows||[];var fam=rows.filter(function(r){return !!apprFamily(r&&r.pattern);}),n=rows.length-fam.length;
+  if(!fam.length)return {text:n===1?'1 Action':n+' Actions',one:n===1};
+  if(!n&&fam.length===1)return {text:'Every '+apprRuleWords(apprFamily(fam[0].pattern))+' Action',one:true};
+  return {text:(n?(n===1?'1 Action':n+' Actions')+' and ':'')+(fam.length===1?'1 Group':fam.length+' Groups')+' of Actions',one:false};}
 /* The Limits fact: each rule by name. Over 6 of them, how many there are (Show Details lists them), so the card stays short. */
 var APPR_LIMITS_SHOWN=6;
 function apprLimits(rows){rows=rows||[];return rows.length>APPR_LIMITS_SHOWN?rows.length+' actions, listed under Show Details.':rows.map(apprLimitSays).join(' · ');}
 /* ...and inside a sentence, for a rule that tightens or that this panel has no words for: named in quotes, a whole family ("world.sync.*") as every action under its name. */
-function apprRuleName(pat,none){var all=/\.\*$/.test(pat);return (all?(none?'any':'every')+' action under “':'“')+apprRuleWords(pat.replace(/\.\*$/,''))+'”';}
+function apprRuleName(pat,none){var fam=apprFamily(pat);return (fam?(none?'any':'every')+' action under “':'“')+apprRuleWords(fam||pat)+'”';}
 /* Show Details on a rule card (policy.change): each row Will would sign, as a sentence. What it lets run, its limit and
    its last day: "Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027." Never the row itself: an
-   approval card never looks like a JSON file. */
+   approval card never looks like a JSON file. What a row carries that its sentence does not say (its reason, a cap the
+   sentence has no place for, a pattern this panel has no words for) is listed under DETAILS, so nothing signed is unseen. */
+/* A rule's last day: a policy's midnight-UTC expiry is that date; any other moment keeps its time. */
+function apprUntil(t){return /T00:00:00(\.0+)?Z$/.test(String(t))?apprDate(t):apprMoment(String(t));}
+/* Does the row's sentence say its cap? Only a row that lets something run has one to say, and a job with a limit of its own says that instead. */
+function apprCapSaid(r){var e=apprRule(String(r.pattern||''));return r.tier!=='forbidden'&&r.tier!=='approval'&&!(e&&e[3])&&typeof r.dailyCap==='number';}
 function apprRuleSays(r){r=r||{};var pat=String(r.pattern||''),e=apprRule(pat),tool=apprGet(APPR_TOOLS,'runtime.'+pat),s,own='';
   if(r.tier==='forbidden')s='Flint may not run '+apprRuleName(pat,true);
   else if(r.tier==='approval')s='You approve '+apprRuleName(pat)+' each time';
   else if(e){var ph=apprPhrase(e[0]);s=(e[2]===1?'The '+ph:ph.charAt(0).toUpperCase()+ph.slice(1))+' may '+e[1]+' on '+(e[2]===2?'their':'its')+' own';own=e[3]?', '+e[3][1]:'';}
   else if(tool)s='Chat may '+apprPhrase(tool[0])+' on its own';
   else{var n=apprRuleName(pat);s=n.charAt(0).toUpperCase()+n.slice(1)+' may run on its own';}
-  var cap=r.tier==='forbidden'||r.tier==='approval'?'':own||(typeof r.dailyCap==='number'?', up to '+r.dailyCap+' a day':'');
-  var until=r.expiresAt?apprDate(r.expiresAt):'';
+  var cap=own||(apprCapSaid(r)?', up to '+r.dailyCap+' a day':'');
+  var until=r.expiresAt?apprUntil(r.expiresAt):'';
   return s+cap+(until?(cap?', until ':' until ')+until:'')+'.';}
-/* What a scoped rule covers, as a sentence. Its list in plain words (apprPlain: a stored name as words, a link as
-   its site, a path as its last part), under its key as a label. Never the object, never an id: a list of ids, or
-   one under a key that holds ids, is said only as "part of what it names". */
-function apprScopeSays(sc){var out=[],part='It covers only part of what it names.';if(!sc||typeof sc!=='object'||Array.isArray(sc))return out;
+/* What a scoped rule covers. A list of plain words is said in a sentence, as it is written; anything else it names
+   (ids, a group inside it, text that cannot sit in a sentence) is listed whole under DETAILS and REFERENCES, and the
+   row says so once. */
+function apprScopeInto(sc,path,says,took){if(!sc||typeof sc!=='object'||Array.isArray(sc))return;var below=false;
   Object.keys(sc).forEach(function(k){var v=sc[k],list=Array.isArray(v)?v:[v],label=apprLabel(k).toLowerCase();
-    var flat=list.length>0&&list.every(function(x){return typeof x==='string'||typeof x==='number';});
-    var words=flat&&label&&!apprIdKey(k)?list.map(apprPlain).filter(function(x){return !!x;}):[];
-    if(!words.length){out.push(part);return;}
-    var hid=list.length-words.length,shown=words.slice(0,8),rest=hid+(words.length-shown.length);
-    out.push('It covers only these '+label+': '+apprText(shown.join(', '),240)+(rest>0?', and '+rest+' more':'')+'.');});
-  return out;}
-/* Every line of a rule card's details: one sentence a row, and a scoped row's cover after it. */
-function apprRulesSay(p){var out=[];((p.args&&p.args.rows)||[]).forEach(function(r){out.push(apprRuleSays(r));apprScopeSays(r&&r.scope).forEach(function(t){out.push(t);});});return out;}
+    var words=list.length>0&&!!label&&!apprIdKey(k)&&!apprSecretKey(k)&&list.every(function(x){return typeof x==='number'||(apprInline(x,80)&&x.indexOf(',')<0);});
+    if(words){took(path+'.'+k);says.push('It covers only these '+label+': '+list.map(apprShown).join(', ')+'.');}else below=true;});
+  if(below)says.push('It covers only part of what it names, listed below.');}
+/* A rule card's sentences, and (through `took`) which of its fields they state. */
+function apprRulesInto(a,says,took){var rows=a&&Array.isArray(a.rows)?a.rows:[];
+  rows.forEach(function(r,i){r=r&&typeof r==='object'?r:{};var at='rows.'+i,pat=String(r.pattern||'');
+    says.push(apprRuleSays(r));
+    /* A rule this panel has words for is named by them. Any other is named in words too, and given as written below. */
+    if(typeof r.pattern==='string'&&(apprRule(pat)||apprGet(APPR_TOOLS,'runtime.'+pat)))took(at+'.pattern');
+    if(r.tier==='alone'||r.tier==='approval'||r.tier==='forbidden')took(at+'.tier');
+    if(apprCapSaid(r))took(at+'.dailyCap');
+    if(typeof r.expiresAt==='string'&&r.expiresAt)took(at+'.expiresAt');
+    apprScopeInto(r.scope,at+'.scope',says,took);});}
+/* Every sentence of a rule card's details: one a row, and what a scoped row covers after it. */
+function apprRulesSay(p){var out=[];apprRulesInto((p&&p.args)||{},out,function(){});return out;}
 function apprCadence(c){for(var i=0;i<APPR_CADENCES.length;i++)if(APPR_CADENCES[i][0]===c)return APPR_CADENCES[i][1];return '';}
-/* ---------- Show Details: what a card would do, in sentences and labelled facts ----------
+/* ---------- Show Details: everything a card would do, in sentences and labelled values ----------
  * Display only. What Will signs is still the stored args: approveAction is handed p.args and checks their digest
- * against what the server says he would sign, and nothing here is part of that. A card never shows the args as they
- * are stored: no braces, no quoted keys, no ids, no paths. A kind this panel has words for says them (a goal's
- * checks, a plan's changes, the people a card adds); whatever else the card holds is a Title Case label and a
- * plain value. */
+ * against what the server says he would sign, and nothing here is part of that.
+ *
+ * WHAT HE SIGNS IS WHAT HE CAN SEE. A card never shows its args as they are stored (no braces, no quoted keys), and
+ * it never drops, clips or shortens any of them either:
+ *  - a card's own sentences say what they can say whole (a goal's checks, a plan's changes, a rule);
+ *  - DETAILS lists every other field, each under a Title Case label, its value in full: text as it is written, a
+ *    link and a path whole, a moment with its time;
+ *  - REFERENCES lists what is there to point at something (ids, refs, keys, hashes), each with its exact value;
+ *  - a secret's value (a key named token, secret, password, signature) is the one thing not shown: it reads
+ *    "Hidden", with its length, the card says so in a sentence, and the card then asks on its own (apprAlone).
+ *    So does a card too large to list whole.
+ * Nothing is hidden by its shape: an order code, an IBAN or a hex string is content, and shows where it sits. */
 /* A step's status in a sentence: the Goals panel's own words (GOAL_STEP_WORDS; a test keeps the two the same). */
 var APPR_STEP_WORDS={todo:'not started',in_progress:'in progress',blocked:'blocked'};
 /* Short words a label keeps lower case inside it, as the console's titles do. */
 var APPR_SMALL={a:1,an:1,the:1,and:1,but:1,or:1,nor:1,'for':1,so:1,yet:1,as:1,at:1,by:1,from:1,'in':1,into:1,of:1,off:1,on:1,onto:1,out:1,over:1,to:1,up:1,'with':1};
-/* A stored key as a label: "resolveBy" and "resolve_by" are Resolve By. */
+/* A stored key as a label: "resolveBy" and "resolve_by" are Resolve By, "threadId" is Thread ID. */
 function apprLabel(k){var w=String(k||'').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[^A-Za-z0-9]+/g,' ').trim().toLowerCase().split(' ');
-  return w.map(function(x,i){return i>0&&i<w.length-1&&APPR_SMALL[x]===1?x:x.charAt(0).toUpperCase()+x.slice(1);}).join(' ');}
-/* Text someone wrote, made plain for a card: one line, no braces, typographic quotation marks, clipped with an ellipsis. */
-function apprText(s,max){var n=0;s=String(s===null||s===undefined?'':s).replace(/\s+/g,' ').trim().replace(/[{}]/g,'').replace(/"/g,function(){return (n++%2)?'”':'“';});
-  max=max||160;return s.length>max?s.slice(0,max-1).replace(/\s+\S*$/,'')+'…':s;}
-/* ...and inside one of Flint's sentences, in quotation marks. Quotes never nest: marks inside become single ones. */
-function apprQ(s,max){return '“'+apprText(s,max).replace(/[“”]/g,function(m){return m==='“'?'‘':'’';})+'”';}
+  return w.map(function(x,i){return i>0&&i<w.length-1&&APPR_SMALL[x]===1?x:apprGet(APPR_NAMES,x)||(x.charAt(0).toUpperCase()+x.slice(1));}).join(' ');}
+/* May someone's text sit inside one of Flint's sentences, whole and exactly as written? One line, no quotation
+   marks or braces of its own, short enough to read there. Anything else is listed whole under DETAILS instead: a
+   sentence never clips or rewrites what it quotes. */
+function apprInline(s,max){return typeof s==='string'&&s.length>0&&s.length<=(max||200)&&!/[\n\r\t“”"{}]/.test(s)&&s===s.replace(/\s+/g,' ').trim();}
+function apprQ(s){return '“'+s+'”';}
 /* A sentence that ends on someone's quoted words: its stop, unless theirs already ended them. */
 function apprEnds(s){return /[.!?…]”$/.test(s)?s:s+'.';}
-/* A key that holds an id (goalId, entity_id, key, digest): never shown. */
-function apprIdKey(k){k=String(k||'');return /^(id|ids|ref|refs|key|keys|digest|hash|token|nonce|secret|signature)$/i.test(k)||/[a-z0-9](Id|Ids|Ref|Refs|Key|Keys|Digest|Hash|Token|Nonce|Secret|Signature)$/.test(k)||/[_.-](id|ids|ref|refs|key|keys|digest|hash|token|nonce|secret|signature)$/i.test(k);}
-/* A value shaped like an id, whatever its key. Only the shapes something here mints: a UUID, alone or after a short
-   prefix (turn_, msg_, call:); 16 or more letters and digits in one run with both in it (a record's id, a digest, a
-   token), alone or after such a prefix; a commit as git and the runtime write one (7, 8, 12 or 40 hex digits, with a
-   digit and a letter). Never a word, however long, and never words joined by hyphens or underscores. */
-function apprIdLike(s){s=String(s||'');var core=s.replace(/^[a-z]{2,8}[_:]/,'');
-  if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(core))return true;
-  if(/^[A-Za-z0-9]{16,}$/.test(core)&&/\d/.test(core)&&/[A-Za-z]/.test(core))return true;
-  return /^([0-9a-f]{7}|[0-9a-f]{8}|[0-9a-f]{12}|[0-9a-f]{40})$/.test(s)&&/\d/.test(s)&&/[a-f]/.test(s);}
-/* An item named by its ref ("issue#24ehza"): its kind in words, never the ref. */
-function apprItem(s){var m=/^([a-z_]{2,20})#[A-Za-z0-9]{1,12}$/.exec(String(s||''));return m?'One '+apprLabel(m[1]):'';}
-/* A share of 1 under a key that says it is one (probability, confidence), as a percent: 0.7 is 70%. */
-function apprShare(k,v){return typeof v==='number'&&isFinite(v)&&v>=0&&v<=1&&/(^|[a-z0-9_.-])(probability|confidence|likelihood|chance)$/i.test(String(k||''))?Math.round(v*100)+'%':'';}
-var APPR_SITES={com:1,org:1,net:1,io:1,dev:1,ai:1,app:1,co:1,us:1,uk:1,edu:1,gov:1};
-/* One stored value, said plainly: a date as a date, a span of time in the panel's words, a link as its site, a path
-   as its last part, a stored name (in_progress) as words, and anything shaped like an id as nothing at all. */
-function apprPlain(v){if(v===null||v===undefined)return '';if(typeof v==='boolean')return v?'Yes':'No';if(typeof v==='number')return isFinite(v)?String(v):'';if(typeof v!=='string')return '';
-  var s=v.replace(/\s+/g,' ').trim();if(!s)return '';
-  var item=apprItem(s);if(item)return item;
-  if(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/.test(s))return apprDate(s.length===10?s+'T00:00:00.000Z':s);
-  if(/^P(T?\d+[YMWDHS])+$/.test(s))return apprCadence(s);
-  if(/^[a-z][a-z0-9+.-]*:\/\//i.test(s))return s.replace(/^[a-z][a-z0-9+.-]*:\/\/([^\/?#@]*@)?([^\/?#:]+).*$/i,'$2');
-  if(/^(~|\.{1,2})?\//.test(s)||/^[A-Za-z]:\\/.test(s))return apprText(s.replace(/[\/\\]+$/,'').split(/[\/\\]/).pop(),80);
-  if(apprIdLike(s))return '';
-  if(/^[a-z][a-z0-9]*([_.-][a-z0-9]+)*$/.test(s)&&s.length<=40&&APPR_SITES[s.split('.').pop()]!==1)return apprLabel(s);
-  return apprText(s,160);}
-/* Everything else a card holds, as labelled facts. A list is joined with commas; what is inside a group or a list of
-   groups is named by where it is ("Rule Name", "Items 2 Title"). At most 24 facts: `more` says there were others. */
-var APPR_FACTS_MAX=24;
-function apprFactsOf(obj,skip){var out=[],more=false;
-  var add=function(label,v){if(out.length>=APPR_FACTS_MAX){more=true;return;}if(v)out.push([label,v]);};
-  var walk=function(o,prefix,depth,top){if(!o||typeof o!=='object')return;
-    Object.keys(o).forEach(function(k){if(top&&skip&&skip[k]===1)return;var v=o[k],label=(prefix?prefix+' ':'')+apprLabel(k);
-      if(apprIdKey(k)){var it=typeof v==='string'?apprItem(v):'';if(it)add(prefix?prefix+' Item':'Item',it);return;}
-      if(Array.isArray(v)){var flat=v.every(function(x){return x===null||typeof x!=='object';});
-        if(flat){var parts=v.map(apprPlain).filter(function(x){return !!x;});if(parts.length>12)parts=parts.slice(0,12).concat(['and '+(parts.length-12)+' more']);add(label,apprText(parts.join(', '),240));}
-        else if(depth<3)v.slice(0,8).forEach(function(x,i){walk(x,label+' '+(i+1),depth+1,false);});
-        else more=true;
-        if(!flat&&v.length>8)more=true;return;}
-      if(v&&typeof v==='object'){if(depth<3)walk(v,label,depth+1,false);else more=true;return;}
-      add(label,apprShare(k,v)||apprPlain(v));});};
-  walk(obj,'',0,true);return {list:out,more:more};}
-/* How a check is made, after its words. */
-function apprCheckSays(c,i){c=c||{};var k=c.check||{},how;
-  if(k.kind==='steps'){var n=(k.keys||[]).length;how=n===1?'Flint checks this when its step is done.':'Flint checks this when its '+n+' steps are done.';}
-  else if(k.kind==='item')how='Flint checks this when an item it tracks '+(typeof gWords==='function'?gWords(k.key,k.value)[1]:'changes')+'.';
-  else how='You mark this one.';
-  return apprEnds('Check '+(i+1)+' is '+apprQ(c.text))+' '+how;}
+/* A key whose value is a secret (token, password): the value is never shown. */
+var APPR_SECRET='token|secret|password|passwd|passphrase|signature|credential|authorization|cookie';
+function apprSecretKey(k){k=String(k||'');return new RegExp('^('+APPR_SECRET+')s?$','i').test(k)||new RegExp('[a-z0-9]('+APPR_SECRET.replace(/\b[a-z]/g,function(c){return c.toUpperCase();})+')s?$').test(k)||
+  new RegExp('[_.-]('+APPR_SECRET+')s?$','i').test(k)||/(api|private|secret|access|ssh|signing|encryption|auth)[_.-]?keys?$/i.test(k);}
+/* A key whose value points at something (goalId, entity_id, key, digest): shown under REFERENCES, exactly. */
+function apprIdKey(k){k=String(k||'');return /^(id|ids|ref|refs|key|keys|digest|hash|nonce|sha|uuid|guid|checksum|etag|cursor)$/i.test(k)||/[a-z0-9](Id|Ids|Ref|Refs|Key|Keys|Digest|Hash|Nonce|Sha|Uuid|Guid|Checksum|Etag|Cursor)$/.test(k)||/[_.-](id|ids|ref|refs|key|keys|digest|hash|nonce|sha|uuid|guid|checksum|etag|cursor)$/i.test(k);}
+/* A share of 1 under a key that says it is one (probability, confidence), as a percent: 0.7 is 70%, 0.805 is 80.5%. */
+function apprShare(k,v){return typeof v==='number'&&isFinite(v)&&v>=0&&v<=1&&/(^|[a-z0-9_.-])(probability|confidence|likelihood|chance)$/i.test(String(k||''))?parseFloat((v*100).toPrecision(12))+'%':'';}
+/* A moment, plainly: its day and its time on this device, and the zone when the value names one ("Oct 12, 10:04 PM
+   CDT"). Its seconds are said when it has any. A value finer than a second, or one that is no real moment, is shown
+   as it is written. */
+function apprMoment(s){s=String(s);var m=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(s);if(!m)return s;
+  if(m[7]&&/[1-9]/.test(m[7]))return s;
+  var d=new Date(s);if(isNaN(d.getTime()))return s;
+  try{return d.toLocaleString([],{month:'short',day:'numeric',year:d.getFullYear()===new Date().getFullYear()?undefined:'numeric',hour:'numeric',minute:'2-digit',second:m[6]&&m[6]!=='00'?'2-digit':undefined,timeZoneName:m[8]?'short':undefined});}catch(e){return s;}}
+/* A day or a moment inside a sentence. */
+function apprWhenSays(t){t=String(t);if(/^\d{4}-\d{2}-\d{2}$/.test(t)){var d=new Date(t+'T00:00:00.000Z');return isNaN(d.getTime())?t:apprDate(t+'T00:00:00.000Z');}return apprMoment(t);}
+/* One stored value, in full. A day is a day and a moment keeps its time; a span of time is in the panel's words; one
+   of Flint's own stored names (in_progress, google_calendar: lower-case words joined by underscores) is its words.
+   Everything else is shown exactly as it is written: text, a link, a path, a code, a model's name, a version. A value
+   that holds a digit, a dot or a hyphen is never turned into words. */
+function apprShown(v){if(v===null||v===undefined)return 'None';if(typeof v==='boolean')return v?'Yes':'No';if(typeof v==='number')return String(v);if(typeof v!=='string')return '';
+  if(v==='')return 'Empty';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)||/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v))return apprWhenSays(v);
+  if(/^P(T?\d+[YMWDHS])+$/.test(v))return apprCadence(v)||v;
+  if(/^[a-z]+(_[a-z]+)*$/.test(v)&&v.length<=32)return apprLabel(v);
+  return v;}
+/* A reference's value, exactly. */
+function apprExact(v){return v===null||v===undefined?'None':v===''?'Empty':String(v);}
+/* Everything a card holds that its sentences did not state (`said`: the paths they did), as labelled values in two
+   groups: `facts` for DETAILS and `refs` for REFERENCES. A list of short plain values is one line; any other list is
+   a line an item; what is inside a group is named by where it is ("Attachments 1 Path"). `names` gives a card's own
+   words for some of its keys. Nothing is left out but a secret's value (`secret`) and whatever is past the limits
+   below (`more`): either one is said on the card, and makes it ask on its own. */
+var APPR_FACTS_MAX=300,APPR_DEPTH_MAX=8;
+function apprFactsOf(obj,said,names,exact){var o={facts:[],refs:[],n:0,secret:false,more:false};said=said||{};names=names||{};exact=exact||{};
+  var put=function(group,label,value){if(o.n>=APPR_FACTS_MAX){o.more=true;return;}o.n++;o[group].push([label||'Value',value]);};
+  var walk=function(v,path,label,key,depth){if(path&&said[path]===1)return;
+    /* A secret is text, or a group of it. (A number under such a name, maxTokens, is a count.) */
+    if(key!==null&&apprSecretKey(key)&&(typeof v==='string'||(v!==null&&typeof v==='object'))){o.secret=true;put('refs',label,'Hidden'+(typeof v==='string'?', '+apprCount(v.length,'character'):''));return;}
+    var ref=key!==null&&apprIdKey(key),group=ref?'refs':'facts';
+    if(v===null||typeof v!=='object'){put(group,label,ref||(key!==null&&apprGet(exact,key)===1)?apprExact(v):(apprShare(key,v)||apprShown(v)));return;}
+    if(depth>=APPR_DEPTH_MAX){o.more=true;return;}
+    if(Array.isArray(v)){if(!v.length){put(group,label,'None');return;}
+      if(v.every(function(x){return x===null||typeof x!=='object';})){var parts=v.map(function(x){return ref?apprExact(x):apprShown(x);});
+        if(parts.every(function(x){return x.length<=60&&!/[,\n]/.test(x);}))put(group,label,parts.join(', '));
+        else parts.forEach(function(x,i){put(group,label+' '+(i+1),x);});
+        return;}
+      v.forEach(function(x,i){walk(x,path+'.'+i,(label?label+' ':'')+(i+1),x!==null&&typeof x==='object'?null:key,depth+1);});return;}
+    var ks=Object.keys(v);if(!ks.length){if(path)put(group,label,'None');return;}
+    ks.forEach(function(k){var own=apprGet(names,k),many=apprGet(APPR_MANY,k),w=Array.isArray(v[k])&&!v[k].length&&own!==undefined&&many?many:own===undefined?apprLabel(k):own;
+      walk(v[k],path?path+'.'+k:k,[label,w].filter(function(x){return !!x;}).join(' '),k,depth+1);});};
+  walk(obj,'','',null,0);return o;}
+/* How a check is made, after its words. `at` is the check's place in the card, for `took`. */
+function apprCheckSays(c,i,at,took){c=c||{};took=took||function(){};var k=c.check||{},how;
+  if(k.kind==='steps'){var n=(k.keys||[]).length;took(at+'.check.kind');how=n===1?'Flint checks this when its step is done.':'Flint checks this when its '+n+' steps are done.';}
+  else if(k.kind==='item'){took(at+'.check.kind');how='Flint checks this when an item it tracks '+(typeof gWords==='function'?gWords(k.key,k.value)[1]:'changes')+'.';}
+  else if(k.kind==='manual'||k.kind===undefined){if(k.kind==='manual')took(at+'.check.kind');how='You mark this one.';}
+  else how='How it is checked is listed below.';
+  if(!apprInline(c.text))return 'Check '+(i+1)+' is listed below. '+how;
+  took(at+'.text');return apprEnds('Check '+(i+1)+' is '+apprQ(c.text))+' '+how;}
 /* One operation on a plan as a sentence, in the Goals panel's words for a suggested change (goalChangeLine). A step
-   is named by its title: a new step's own, or the one the operation says the step has now. */
-function apprOpSays(o){o=o||{};if(o.op==='add'){var st=o.step||{};return (st.dueAt?'Add the step '+apprQ(st.title)+', due '+apprDate(st.dueAt)+'.':apprEnds('Add the step '+apprQ(st.title)))+(st.kind==='flint_action'?' Flint would do this step.':'');}
-  var to=o.to||{},from=o.from||{},t=from.title?apprQ(from.title):'a step',out=[];
-  if(to.status==='skipped')out.push('Skip '+t+'.');else if(to.status!==undefined)out.push('Mark '+t+' '+(apprGet(APPR_STEP_WORDS,to.status)||'not started')+'.');
-  if(to.dueAt!==undefined)out.push(to.dueAt?'Move '+t+' to '+apprDate(to.dueAt)+'.':'Take the due date off '+t+'.');
-  if(to.title!==undefined)out.push(apprEnds('Rename '+t+' to '+apprQ(to.title)));
+   is named by its title: a new step's own, or the one the operation says the step has now. What the sentence cannot
+   say (where a step moves to, what it waits on, who may do it) is listed under DETAILS. */
+function apprOpSays(o,at,took){o=o||{};at=at||'';took=took||function(){};
+  var named=function(sub,title){if(!apprInline(title))return '';took(at+sub);return apprQ(title);};
+  if(o.op==='add'){var st=o.step||{},nm=named('.step.title',st.title),s=nm?'Add the step '+nm:'Add a step, listed below';took(at+'.op');
+    if(st.dueAt){took(at+'.step.dueAt');s+=', due '+apprWhenSays(st.dueAt)+'.';}else s=apprEnds(s);
+    if(st.kind==='flint_action'){took(at+'.step.kind');s+=' Flint would do this step.';}
+    return s;}
+  var to=o.to||{},from=o.from||{},t=named('.from.title',from.title)||'a step',out=[];
+  if(o.op==='set')took(at+'.op');
+  if(to.status==='skipped'){took(at+'.to.status');out.push('Skip '+t+'.');}
+  else if(to.status!==undefined){var w=apprGet(APPR_STEP_WORDS,to.status);if(w){took(at+'.to.status');out.push('Mark '+t+' '+w+'.');}else out.push('Change the status of '+t+'.');}
+  if(to.dueAt!==undefined){took(at+'.to.dueAt');out.push(to.dueAt?'Move '+t+' to '+apprWhenSays(to.dueAt)+'.':'Take the due date off '+t+'.');}
+  if(to.title!==undefined){var nt=named('.to.title',to.title);out.push(nt?apprEnds('Rename '+t+' to '+nt):'Rename '+t+'.');}
   if(to.ordinal!==undefined)out.push('Move '+t+' to another place in the plan.');
   if(to.dependsOn!==undefined)out.push('Change what '+t+' waits on.');
   return out.join(' ')||'Change '+t+'.';}
 function apprCount(n,one,many){return n+' '+(n===1?one:many||one+'s');}
-/* What a card would do: `says` are sentences, `facts` labelled values, `more` that the card holds more than is shown. */
-function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'?p.args:{},f=p.fullName,says=[],skip={};
-  var took=function(){for(var i=0;i<arguments.length;i++)skip[arguments[i]]=1;};
+/* A card's own words for some of its keys, where the stored name would not read: by the kind of card. */
+var APPR_KEYS_GOAL={successCriteria:'Check',check:'',links:'Link',ops:'Change',from:'Current',to:'New',dueAt:'Due',horizonAt:'Finish By',reviewCadence:'Review Every',dependsOn:'Waits On',watchPaths:'Watches',ordinal:'Order'};
+/* A list whose items are numbered under one word ("Link 1") goes by that word's plural when it is empty: "Links: None". */
+var APPR_MANY={successCriteria:'Checks',links:'Links',ops:'Changes',people:'People',rows:'Rules'};
+var APPR_KEYS_RULE={rows:'Rule',pattern:'Action',dailyCap:'Limit a Day',expiresAt:'Last Day'};
+/* ...and the keys whose value is shown exactly as it is stored even where it looks like one of Flint's names: an action's own name. */
+var APPR_EXACT_RULE={pattern:1};
+var APPR_KEYS_PERSON={people:'Person'};
+/* What a card would do: `says` are sentences; `facts` (DETAILS) and `refs` (REFERENCES) are everything else it holds,
+   in full; `withheld` is the sentence for a card that does not show all of itself (it then asks on its own). */
+function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.isArray(p.args)?p.args:{},f=p.fullName,says=[],said={},lead=[],names={},t;
+  var took=function(){for(var i=0;i<arguments.length;i++)said[arguments[i]]=1;};
+  /* Someone's text inside a sentence, when it can sit there whole (then the sentence has stated it). */
+  var q=function(at,text,max){if(!apprInline(text,max))return '';took(at);return apprQ(text);};
+  var when=function(at,v){took(at);return apprWhenSays(v);};
   var every=function(c){var w=apprCadence(c);return w?'every '+w.toLowerCase():'';};
-  if(f==='policy.change')return {says:apprRulesSay(p),facts:[],more:false};
-  if(f==='goal.activate'||f==='goal.criteria_change'){var from=f==='goal.criteria_change'&&a.from&&typeof a.from==='object'?a.from:null;
-    took('title','description','successCriteria','horizonAt','reviewCadence','links','plan','owner','origin','sensitivity','tainted','from');
-    if(a.title)says.push(apprEnds(from&&from.title&&from.title!==a.title?'Its title changes from '+apprQ(from.title)+' to '+apprQ(a.title):'The goal is '+apprQ(a.title)));
-    if(f==='goal.activate'&&a.origin==='flint')says.push('Flint suggested it.');
-    if(a.description&&(!from||from.description!==a.description))says.push(apprEnds((from?'Its description changes to ':'Its description is ')+apprQ(a.description,200)));
-    if(f==='goal.activate'){says.push(a.horizonAt?'It should be done by '+apprDate(a.horizonAt)+'.':'It has no finish date.');if(every(a.reviewCadence))says.push('Flint reviews it '+every(a.reviewCadence)+'.');}
+  if(f==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[];names=APPR_KEYS_RULE;apprRulesInto(a,says,took);
+    /* One reason for every rule is said once, not once a rule. */
+    var why=rows.length>1&&rows[0]&&typeof rows[0].reason==='string'?rows[0].reason:'';
+    if(why&&rows.every(function(r){return r&&r.reason===why;})){rows.forEach(function(_r,i){took('rows.'+i+'.reason');});lead.push(['Reason for Every Rule',why]);}}
+  else if(f==='goal.activate'||f==='goal.criteria_change'){var from=f==='goal.criteria_change'&&a.from&&typeof a.from==='object'?a.from:null;names=APPR_KEYS_GOAL;
+    if(typeof a.title==='string'&&a.title){
+      if(from&&typeof from.title==='string'&&from.title!==a.title){
+        if(apprInline(from.title)&&apprInline(a.title)){took('title','from.title');says.push(apprEnds('Its title changes from '+apprQ(from.title)+' to '+apprQ(a.title)));}else says.push('Its title changes.');}
+      else if((t=q('title',a.title))){says.push(apprEnds('The goal is '+t));if(from&&from.title===a.title)took('from.title');}}
+    if(f==='goal.activate'&&a.origin==='flint'){took('origin');says.push('Flint suggested it.');}
+    if(typeof a.description==='string'&&a.description&&(!from||from.description!==a.description)){t=q('description',a.description,300);
+      says.push(t?apprEnds((from?'Its description changes to ':'Its description is ')+t):from?'Its description changes.':'Its description is listed below.');}
+    if(f==='goal.activate'){if(a.horizonAt)says.push('It should be done by '+when('horizonAt',a.horizonAt)+'.');else{took('horizonAt');says.push('It has no finish date.');}
+      if(every(a.reviewCadence)){took('reviewCadence');says.push('Flint reviews it '+every(a.reviewCadence)+'.');}}
     var cs=Array.isArray(a.successCriteria)?a.successCriteria:[];
     if(from&&Array.isArray(from.successCriteria))says.push('It will have '+apprCount(cs.length,'check')+', and it has '+from.successCriteria.length+' now.');
-    cs.forEach(function(c,i){says.push(apprCheckSays(c,i));});
+    cs.forEach(function(c,i){says.push(apprCheckSays(c,i,'successCriteria.'+i,took));});
     var ls=Array.isArray(a.links)?a.links.length:0,was=from&&Array.isArray(from.links)?from.links.length:-1;
     if(ls||was>0)says.push((from?'It will watch ':'It watches ')+apprCount(ls,'item')+' for changes'+(was>=0&&was!==ls?', and it watches '+was+' now':'')+'.');
     var ops=a.plan&&Array.isArray(a.plan.ops)?a.plan.ops:[];
-    if(ops.length){says.push('Its plan starts with '+apprCount(ops.length,'step')+'.');ops.forEach(function(o){says.push(apprOpSays(o));});}
-    if(a.sensitivity==='financial')says.push('It’s marked as financial.');}
-  else if(f==='goal.horizon_change'){var was2=a.from&&typeof a.from==='object'?a.from:null;took('goalTitle','horizonAt','reviewCadence','from');
-    if(a.goalTitle)says.push(apprEnds('The goal is '+apprQ(a.goalTitle)));
-    if(!was2)says.push(a.horizonAt?'It should be done by '+apprDate(a.horizonAt)+'.':'It has no finish date.');
-    else if((was2.horizonAt||null)!==(a.horizonAt||null))says.push(!a.horizonAt?'Its finish date is taken off.':!was2.horizonAt?'It gets a finish date of '+apprDate(a.horizonAt)+'.':'Its finish date moves from '+apprDate(was2.horizonAt)+' to '+apprDate(a.horizonAt)+'.');
-    if(every(a.reviewCadence)&&(!was2||was2.reviewCadence!==a.reviewCadence))says.push('Flint will review it '+every(a.reviewCadence)+(was2&&every(was2.reviewCadence)?', and it is '+every(was2.reviewCadence)+' now':'')+'.');}
-  else if(f==='goal.done'||f==='goal.abandon'){took('goalTitle');if(a.goalTitle)says.push(apprEnds('The goal is '+apprQ(a.goalTitle)));}
-  else if(f==='plan.change'){took('goalTitle','ops');if(a.goalTitle)says.push(apprEnds('The goal is '+apprQ(a.goalTitle)));(Array.isArray(a.ops)?a.ops:[]).forEach(function(o){says.push(apprOpSays(o));});}
-  else if(f==='goal.propose'||f==='world.commitment.from_chat'){took('title','quote','dueAt');
-    if(a.title)says.push(apprEnds('The goal would be '+apprQ(a.title)));if(a.quote)says.push(apprEnds('You said '+apprQ(a.quote,300)));if(a.dueAt)says.push('It’s due '+apprDate(a.dueAt)+'.');}
-  else if(f==='world.person.create'){took('people','source');
-    (Array.isArray(a.people)?a.people:[]).forEach(function(x){x=x||{};var nm=apprText(x.name,80),em=apprText(x.email,120);
-      if(nm&&em&&nm!==em)says.push('Flint adds '+nm+', whose address is '+em+'.');else if(em)says.push('Flint adds the person at '+em+'.');else if(nm)says.push('Flint adds '+nm+'.');});
-    var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');if(cal)says.push('They come from '+cal+'.');}
-  var rest=apprFactsOf(a,skip);
-  if(!says.length&&!rest.list.length&&!p.reason)says.push('This card holds nothing more.');
-  return {says:says,facts:rest.list,more:rest.more};}
-/* The details into an element, as text: a line for each sentence, then the labelled facts. */
+    if(ops.length){says.push('Its plan starts with '+apprCount(ops.length,'step')+'.');ops.forEach(function(o,i){says.push(apprOpSays(o,'plan.ops.'+i,took));});}
+    if(a.sensitivity==='financial'){took('sensitivity');says.push('It’s marked as financial.');}}
+  else if(f==='goal.horizon_change'){var was2=a.from&&typeof a.from==='object'?a.from:null;names=APPR_KEYS_GOAL;
+    if((t=q('goalTitle',a.goalTitle)))says.push(apprEnds('The goal is '+t));
+    if(!was2){if(a.horizonAt)says.push('It should be done by '+when('horizonAt',a.horizonAt)+'.');else{took('horizonAt');says.push('It has no finish date.');}}
+    else if((was2.horizonAt||null)!==(a.horizonAt||null)){took('horizonAt');
+      if(!a.horizonAt)says.push('Its finish date is taken off.');
+      else if(!was2.horizonAt)says.push('It gets a finish date of '+apprWhenSays(a.horizonAt)+'.');
+      else{took('from.horizonAt');says.push('Its finish date moves from '+apprWhenSays(was2.horizonAt)+' to '+apprWhenSays(a.horizonAt)+'.');}}
+    if(every(a.reviewCadence)&&(!was2||was2.reviewCadence!==a.reviewCadence)){took('reviewCadence');var now2=was2?every(was2.reviewCadence):'';if(now2)took('from.reviewCadence');
+      says.push('Flint will review it '+every(a.reviewCadence)+(now2?', and it is '+now2+' now':'')+'.');}}
+  else if(f==='goal.done'||f==='goal.abandon'){names=APPR_KEYS_GOAL;if((t=q('goalTitle',a.goalTitle)))says.push(apprEnds('The goal is '+t));}
+  else if(f==='plan.change'){names=APPR_KEYS_GOAL;if((t=q('goalTitle',a.goalTitle)))says.push(apprEnds('The goal is '+t));(Array.isArray(a.ops)?a.ops:[]).forEach(function(o,i){says.push(apprOpSays(o,'ops.'+i,took));});}
+  else if(f==='goal.propose'||f==='world.commitment.from_chat'){names=APPR_KEYS_GOAL;
+    if((t=q('title',a.title)))says.push(apprEnds('The goal would be '+t));
+    if(typeof a.quote==='string'&&a.quote){t=q('quote',a.quote,300);says.push(t?apprEnds('You said '+t):'What you said is listed below.');}
+    if(a.dueAt)says.push('It’s due '+when('dueAt',a.dueAt)+'.');}
+  else if(f==='world.person.create'){names=APPR_KEYS_PERSON;
+    (Array.isArray(a.people)?a.people:[]).forEach(function(x,i){x=x&&typeof x==='object'?x:{};var at='people.'+i,nm=apprInline(x.name,80)?x.name:'',em=apprInline(x.email,120)?x.email:'';
+      if(nm&&em&&nm!==em){took(at+'.name',at+'.email');says.push('Flint adds '+nm+', whose address is '+em+'.');}
+      else if(em){took(at+'.email');if(x.name===x.email)took(at+'.name');says.push('Flint adds the person at '+em+'.');}
+      else if(nm){took(at+'.name');says.push('Flint adds '+nm+'.');}
+      else says.push('Flint adds a person, listed below.');});
+    var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');if(cal){if(typeof a.source==='string')took('source');says.push('They come from '+cal+'.');}}
+  var rest=apprFactsOf(a,said,names,f==='policy.change'?APPR_EXACT_RULE:null);
+  var facts=lead.concat(rest.facts);
+  if(!says.length&&!facts.length&&!rest.refs.length&&!p.reason)says.push('This card holds nothing more.');
+  var withheld=rest.secret&&rest.more?'Some of this card is not shown here, so it asks on its own.':rest.secret?'A secret this card carries is hidden, so it asks on its own.':rest.more?'This card holds more than is shown here, so it asks on its own.':'';
+  return {says:says,facts:facts,refs:rest.refs,withheld:withheld};}
+/* Does the card show less than all of itself (a secret's value, or more than it can list)? Then it asks on its own. */
+function apprWithheld(p){return !!apprDetails(p).withheld;}
+/* A value into its place, whole: it wraps, and nothing of it is cut. A long one starts folded, with ALL of its text
+   already there: the line after it says how much more there is, and one press of Show All shows it. */
+var APPR_LONG=600,APPR_LONG_SHOWN=400;
+function apprValueInto(host,text){text=String(text);if(text.length<=APPR_LONG){host.appendChild(document.createTextNode(text));return;}
+  var cut=APPR_LONG_SHOWN,c=text.charCodeAt(cut-1);if(c>=0xD800&&c<=0xDBFF)cut--;
+  var rest=apprEl('span',null,text.slice(cut));rest.hidden=true;
+  var note=apprEl('span','more',' '+apprCount(text.length-cut,'more character')+'. ');
+  var all=apprEl('button','ghost','Show All');all.onclick=function(){rest.hidden=false;note.hidden=true;all.hidden=true;};
+  host.appendChild(document.createTextNode(text.slice(0,cut)));host.appendChild(rest);host.appendChild(note);host.appendChild(all);}
+/* The details into an element, as text: a line for each sentence, then DETAILS, then REFERENCES. */
+function apprGroupInto(host,title,list,cls){if(!list.length)return;host.appendChild(apprEl('h4','dh',title));var dl=apprEl('dl','facts'+(cls?' '+cls:''));
+  list.forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));var dd=apprEl('dd');apprValueInto(dd,x[1]);dl.appendChild(dd);});host.appendChild(dl);}
 function apprDetailsInto(host,p){var d=apprDetails(p);d.says.forEach(function(t){host.appendChild(apprEl('p',null,t));});
-  if(d.facts.length){var dl=apprEl('dl','facts');d.facts.forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});host.appendChild(dl);}
-  if(d.more)host.appendChild(apprEl('p',null,'This card holds more than is shown here.'));}
+  apprGroupInto(host,'DETAILS',d.facts,'');apprGroupInto(host,'REFERENCES',d.refs,'refs');
+  if(d.withheld)host.appendChild(apprEl('p','held',d.withheld));}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
 var APPR_RESUMES='Approving resumes this goal.';
 function apprGoalCard(p){return !!apprGet(APPR_GOAL,p.fullName)||p.fullName==='plan.change'||!!apprGet(APPR_GOAL_WORDS,p.fullName);}
@@ -1517,7 +1621,7 @@ function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(name
    (a card that names none is Google's, as every P2.5 card was). */
 var APPR_CALENDARS={google_calendar:'Google Calendar',apple_calendar:'Apple Calendar'};
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
-function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace(/\b\w/g,function(c){return c.toUpperCase();});}
+function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().split(/\s+/).map(apprCap).join(' ');}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
 function apprDate(t){try{var d=new Date(t),utc=/T00:00:00(\.000)?Z$/.test(String(t));return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getUTCFullYear()===new Date().getFullYear()?undefined:'numeric',timeZone:utc?'UTC':undefined});}catch(e){return '';}}
 /* P4: the card that turns Flint's forecasts on (the same title as @flint/policy's ACTION_WORDS). It asks on its own,
@@ -1566,12 +1670,13 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   if(p.fullName==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[],kind=apprRowsKind(rows),c=rows.length;
     /* Only rows that let something run are titled so. A row that makes Flint ask, or stops it, says that instead. */
-    if(kind==='approval')return c===1?'Ask Before 1 Action':'Ask Before '+c+' Actions';
-    if(kind==='forbidden')return c===1?'Stop 1 Action':'Stop '+c+' Actions';
+    var many=apprHowMany(rows);
+    if(kind==='approval')return 'Ask Before '+many.text;
+    if(kind==='forbidden')return 'Stop '+many.text;
     if(kind!=='alone')return c===1?'Change 1 Rule':'Change '+c+' Rules';
     if(rows.every(function(r){return /^(backup\.|restore\.)/.test(String(r.pattern||''));}))return 'Run Backups on Their Own';
     var pr=apprPromotes(rows);if(pr)return pr[0];
-    return c===1?'Let 1 Action Run on Its Own':'Let '+c+' Actions Run on Their Own';}
+    return 'Let '+many.text+' Run on '+(many.one?'Its':'Their')+' Own';}
   if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'Person':'People')+' from Calendar';
   if(p.fullName==='triage.rule.create')return 'Add a Triage Rule';
   if(p.fullName==='world.relation.write')return 'Link Two Things';
@@ -1590,7 +1695,7 @@ function apprSub(p){var a=p.args||{};
     if(pr)return until+pr[1]+'.';
     return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create'){var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
-  if(p.fullName==='triage.rule.create')return a.rule&&a.rule.name?a.rule.name:'This adds a new rule.';
+  if(p.fullName==='triage.rule.create')return a.rule&&apprInline(a.rule.name,80)?apprEnds('This adds the rule '+apprQ(a.rule.name)):'This adds a new rule.';
   if(apprGet(APPR_NIGHTLY,p.fullName))return 'It runs '+apprWhen(p.fullName)+' if you approve it.';
   if(p.fullName==='world.relation.write')return 'Flint’s memory suggests this link.';
   var tool=apprGet(APPR_TOOLS,p.fullName);if(tool)return tool[1];
@@ -1616,8 +1721,11 @@ function apprFacts(p){var a=p.args||{},f=[];
 /* Asks on its own, never in Approve All, with a fresh touch: outside text, money, every card marked consequential
    (each goal card, a plan change that is not a review's small one: apprSmallPlan; turning predictions on), and every rule card that would let
    anything run on its own. That last one is read from the card's rows, whatever its mark says: a card that widens what
-   Flint may do alone is never signed in a batch, even one a server sent without the mark. */
-function apprAlone(p){return !!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||p.fullName===APPR_PREDICT||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
+   Flint may do alone is never signed in a batch, even one a server sent without the mark. So are the cards that change
+   what Flint reads and how it sorts it (APPR_ASKS), by their names; and so is any card that does not show all of
+   itself (apprWithheld: a secret's value, or more than it can list): what cannot all be read is never signed in a batch. */
+var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1};
+function apprAlone(p){return !!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&Array.isArray(p.args.rows)&&p.args.rows)||[]).some(function(r){return !!r&&(r.tier==='alone'||r.pattern==='world.person.create');}));}
 function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
 

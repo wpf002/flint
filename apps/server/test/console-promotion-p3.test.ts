@@ -245,9 +245,9 @@ describe('Show Details on every rule card, old and new', () => {
   it('a scoped rule says what it covers, as a list in a sentence, never as the object', () => {
     const scoped = card([{ pattern: 'world.sync.git' }], 'x');
     (scoped.args.rows[0] as Record<string, unknown>).scope = { endpoints: ['github', 'gitlab'] };
-    expect(details(scoped)).toEqual([`Repo reads may run on their own until ${date}.`, 'It covers only these endpoints: Github, Gitlab.']);
+    expect(details(scoped)).toEqual([`Repo reads may run on their own until ${date}.`, 'It covers only these endpoints: GitHub, GitLab.']);
     (scoped.args.rows[0] as Record<string, unknown>).scope = { series: { nested: true } };
-    expect(details(scoped)[1]).toBe('It covers only part of what it names.');
+    expect(details(scoped)[1]).toBe('It covers only part of what it names, listed below.');
     for (const line of details(scoped)) expect(line).not.toMatch(/[{}\[\]"]/);
   });
 });
@@ -333,6 +333,9 @@ describe('a card can name anything: every table is read by its own entries only'
     expect(c.sub).toBe(`It lasts until ${date}.`);
     expect(c.facts).toEqual([['Until', date], ['Limits', 'Constructor 5 a Day'], ['Filed By', 'You']]);
     expect(details(card([{ pattern: 'constructor', dailyCap: 5 }], 'x'))).toEqual([`“Constructor” may run on its own, up to 5 a day, until ${date}.`]);
+    // The sentence names it in words; DETAILS gives the action exactly as it is stored, never as words of its own.
+    const listed = JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(card([{ pattern: 'constructor' }, { pattern: 'in_progress' }], 'x'))})`))) as { facts: Array<[string, string]> };
+    expect(listed.facts).toEqual(expect.arrayContaining([['Rule 1 Action', 'constructor'], ['Rule 2 Action', 'in_progress']]));
     for (const pattern of ODD) {
       const one = say(card([{ pattern }], 'x'));
       const lines = details(card([{ pattern }], 'x'));
@@ -356,7 +359,8 @@ describe('a card can name anything: every table is read by its own entries only'
       expect(run(`apprWhen(${JSON.stringify(name)})`), name).toBe('');
       expect(say({ fullName: 'world.source.enable', origin: 'cli', args: { source: name } }).sub, name).toBe('Flint starts reading this source.');
       expect(say({ fullName: 'world.person.create', origin: 'runtime:x', args: { people: [], source: name } }).sub, name).toBe('They’re from events you accepted or organized.');
-      expect(run(`apprOpSays(${JSON.stringify({ op: 'set', from: { title: 'Ship it' }, to: { status: name } })})`), name).toBe('Mark “Ship it” not started.');
+      // A status the panel has no words for is not called "not started": the sentence says it changes, and the card lists to what.
+      expect(run(`apprOpSays(${JSON.stringify({ op: 'set', from: { title: 'Ship it' }, to: { status: name } })})`), name).toBe('Change the status of “Ship it”.');
       expect(run(`apprGet(APPR_RULES,${JSON.stringify(name)})`), name).toBeUndefined();
     }
     // The guard is one function, and no table a card indexes is read any other way.
@@ -437,46 +441,85 @@ describe('every rule the panel has words for', () => {
   });
 });
 
-describe('a scoped rule: what it covers, in plain words', () => {
-  const scopeSays = (scope: unknown) => JSON.parse(JSON.stringify(run(`apprScopeSays(${JSON.stringify(scope)})`))) as string[];
+describe('a scoped rule: what it covers', () => {
+  /** A one-rule card with this scope: what it says, and what it lists below. */
+  const scoped = (scope: unknown) => {
+    const c = card([{ pattern: 'world.sync.git' }], 'x');
+    (c.args.rows[0] as Record<string, unknown>).scope = scope;
+    const d = JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(c)})`))) as { says: string[]; facts: Array<[string, string]>; refs: Array<[string, string]> };
+    // (The row's own sentence comes first, and its reason is always listed.)
+    return { says: d.says.slice(1), facts: d.facts.filter(([label]) => label !== 'Rule 1 Reason'), refs: d.refs };
+  };
 
-  it('names what it covers as words: a stored name as words, a link as its site, a path as its last part', () => {
-    expect(scopeSays({ endpoints: ['github', 'gitlab'] })).toEqual(['It covers only these endpoints: Github, Gitlab.']);
-    expect(scopeSays({ source_kinds: ['google_calendar', 'in_progress'] })).toEqual(['It covers only these source kinds: Google Calendar, In Progress.']);
-    expect(scopeSays({ sites: ['https://example.com/a/b?token=abc', '/Users/will/notes/Plan.md'] })).toEqual(['It covers only these sites: example.com, Plan.md.']);
-    expect(scopeSays({ calendars: ['Work', 'Family'], days: [1, 5] })).toEqual(['It covers only these calendars: Work, Family.', 'It covers only these days: 1, 5.']);
+  it('a list of plain words is said in a sentence, each as it is written', () => {
+    expect(scoped({ endpoints: ['github', 'gitlab'] })).toEqual({ says: ['It covers only these endpoints: GitHub, GitLab.'], facts: [], refs: [] });
+    expect(scoped({ source_kinds: ['google_calendar', 'in_progress'] }).says).toEqual(['It covers only these source kinds: Google Calendar, In Progress.']);
+    expect(scoped({ calendars: ['Work', 'Family'], days: [1, 5] }).says).toEqual(['It covers only these calendars: Work, Family.', 'It covers only these days: 1, 5.']);
+    // A link and a path are whole: they are what the rule covers.
+    expect(scoped({ sites: ['https://example.com/a/b?x=1', '/Users/will/notes/Plan.md'] }).says).toEqual(['It covers only these sites: https://example.com/a/b?x=1, /Users/will/notes/Plan.md.']);
+    // Eleven are eleven: no list is cut.
+    const many = Array.from({ length: 11 }, (_, i) => `Calendar ${i + 1}`);
+    expect(scoped({ calendars: many }).says).toEqual([`It covers only these calendars: ${many.join(', ')}.`]);
   });
 
-  it('never an id, a key that holds ids, or the object', () => {
+  it('anything else it names is not summed up: the row says it is listed below, once, and it is, with each id exactly', () => {
     const ID = 'cmg1x9k2p0001abcd2345wxyz';
-    expect(scopeSays({ calendarIds: ['Work', ID] })).toEqual(['It covers only part of what it names.']);
-    expect(scopeSays({ calendars: [ID, '3f2a9c1e-5b7d-4e2a-9c1e-5b7d4e2a9c1e'] })).toEqual(['It covers only part of what it names.']);
-    // Some of the list is ids: the words are said, and the rest only counted.
-    expect(scopeSays({ calendars: ['Work', ID, 'turn_3f2a9c1e-5b7d-4e2a-9c1e-5b7d4e2a9c1e'] })).toEqual(['It covers only these calendars: Work, and 2 more.']);
-    expect(scopeSays({ series: { nested: true } })).toEqual(['It covers only part of what it names.']);
-    expect(scopeSays({ items: [] })).toEqual(['It covers only part of what it names.']);
-    expect(scopeSays({ items: [{ id: ID }] })).toEqual(['It covers only part of what it names.']);
-    for (const none of [null, undefined, 'calendars', 7, ['Work']]) expect(scopeSays(none)).toEqual([]);
-    // A long list is cut, and says how many it left out.
-    const many = scopeSays({ calendars: Array.from({ length: 11 }, (_, i) => `Calendar ${i + 1}`) })[0]!;
-    expect(many).toBe('It covers only these calendars: Calendar 1, Calendar 2, Calendar 3, Calendar 4, Calendar 5, Calendar 6, Calendar 7, Calendar 8, and 3 more.');
+    expect(scoped({ calendarIds: ['Work', ID] })).toEqual({ says: ['It covers only part of what it names, listed below.'], facts: [], refs: [['Rule 1 Scope Calendar IDs', `Work, ${ID}`]] });
+    expect(scoped({ series: { nested: true } })).toEqual({ says: ['It covers only part of what it names, listed below.'], facts: [['Rule 1 Scope Series Nested', 'Yes']], refs: [] });
+    expect(scoped({ items: [] })).toEqual({ says: ['It covers only part of what it names, listed below.'], facts: [['Rule 1 Scope Items', 'None']], refs: [] });
+    expect(scoped({ items: [{ id: ID, name: 'One' }] })).toEqual({ says: ['It covers only part of what it names, listed below.'], facts: [['Rule 1 Scope Items 1 Name', 'One']], refs: [['Rule 1 Scope Items 1 ID', ID]] });
+    // Text that cannot sit in a sentence as written (a comma of its own, a quotation mark) is listed whole instead.
+    expect(scoped({ names: ['Lovelace, Ada', 'Grace'] })).toEqual({ says: ['It covers only part of what it names, listed below.'], facts: [['Rule 1 Scope Names 1', 'Lovelace, Ada'], ['Rule 1 Scope Names 2', 'Grace']], refs: [] });
+    // Several such parts in one scope: the sentence is said once, never twice in a row.
+    expect(scoped({ calendars: ['Work'], calendarIds: [ID], repoIds: [ID], nested: { a: 1 } }).says).toEqual(['It covers only these calendars: Work.', 'It covers only part of what it names, listed below.']);
+    for (const none of [null, undefined, 'calendars', 7, ['Work']]) expect(scoped(none).says, JSON.stringify(none)).toEqual([]);
   });
 
-  it('every such line is a sentence by the notes’ standard, with nothing internal in it', () => {
+  it('the "listed below" line is one a row at most; two rows that read alike are still two rows, each with its sentence', () => {
     const ID = 'cmg1x9k2p0001abcd2345wxyz';
-    const lines = [
-      ...scopeSays({ endpoints: ['github', 'gitlab'] }), ...scopeSays({ source_kinds: ['google_calendar'] }), ...scopeSays({ calendarIds: [ID] }),
-      ...scopeSays({ calendars: ['Work', ID] }), ...scopeSays({ sites: ['https://example.com/a/b', '/Users/will/notes/Plan.md'] }), ...scopeSays({ series: { nested: true } }),
-    ];
-    expect(lines).toHaveLength(6);
-    for (const line of lines) {
-      expect(noteProblems('Rule', line), line).toEqual([]);
-      expect(line, line).not.toMatch(/[{}\[\]"_]|cmg1x|\/Users|https?:/);
+    const c = card([{ pattern: 'world.sync.git' }, { pattern: 'world.sync.git' }], 'x');
+    for (const row of c.args.rows as Array<Record<string, unknown>>) row.scope = { repoIds: [ID], entityIds: [ID] };
+    const d = JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(c)})`))) as { says: string[]; refs: Array<[string, string]> };
+    // Nothing signed goes unsaid because it was said before: Will signs both rows.
+    expect(d.says).toEqual([
+      `Repo reads may run on their own until ${date}.`, 'It covers only part of what it names, listed below.',
+      `Repo reads may run on their own until ${date}.`, 'It covers only part of what it names, listed below.',
+    ]);
+    expect(d.refs).toEqual([['Rule 1 Scope Repo IDs', ID], ['Rule 1 Scope Entity IDs', ID], ['Rule 2 Scope Repo IDs', ID], ['Rule 2 Scope Entity IDs', ID]]);
+    expect(say(c).title).toBe('Let 2 Actions Run on Their Own');
+  });
+
+  it('every such line is a sentence by the notes’ standard', () => {
+    const ID = 'cmg1x9k2p0001abcd2345wxyz';
+    const lines = [...scoped({ endpoints: ['github', 'gitlab'] }).says, ...scoped({ source_kinds: ['google_calendar'] }).says, ...scoped({ calendarIds: [ID] }).says, ...scoped({ calendars: ['Work'], nested: { a: 1 } }).says];
+    expect(lines).toHaveLength(5);
+    for (const line of lines) expect(noteProblems('Rule', line), line).toEqual([]);
+  });
+});
+
+describe('a row for a whole family of actions is every action under it, never one action', () => {
+  it('in the title, the Limits fact and the sentence', () => {
+    const one = say(card([{ pattern: 'world.sync.*' }], 'x'));
+    expect(one.title).toBe('Let Every World Sync Action Run on Its Own');
+    expect(one.facts[1]).toEqual(['Limits', 'Every World Sync Action']);
+    expect(details(card([{ pattern: 'world.sync.*', dailyCap: 5 }], 'x'))).toEqual([`Every action under “World Sync” may run on its own, up to 5 a day, until ${date}.`]);
+    expect(say(card([{ pattern: 'world.sync.*', dailyCap: 5 }], 'x')).facts[1]).toEqual(['Limits', 'Every World Sync Action 5 a Day']);
+    // With other rows it is a group beside them, not one more action.
+    expect(say(card([{ pattern: 'goal.review.local' }, { pattern: 'world.sync.*' }], 'x')).title).toBe('Let 1 Action and 1 Group of Actions Run on Their Own');
+    expect(say(card([{ pattern: 'goal.review.local' }, { pattern: 'notify.push' }, { pattern: 'world.sync.*' }, { pattern: 'mcp:github.*' }], 'x')).title).toBe('Let 2 Actions and 2 Groups of Actions Run on Their Own');
+    expect(say(card([{ pattern: 'world.sync.*' }, { pattern: 'mcp:github.*' }], 'x')).title).toBe('Let 2 Groups of Actions Run on Their Own');
+    // Stopping one, and asking before one.
+    expect(say(card([{ pattern: 'world.sync.*', tier: 'forbidden' }], 'x')).title).toBe('Stop Every World Sync Action');
+    expect(say(card([{ pattern: 'mcp:github.*', tier: 'approval' }], 'x')).title).toBe('Ask Before Every MCP GitHub Action');
+    expect(say(card([{ pattern: 'notify.push', tier: 'forbidden' }, { pattern: 'world.sync.*', tier: 'forbidden' }], 'x')).title).toBe('Stop 1 Action and 1 Group of Actions');
+    for (const rows of [[{ pattern: 'world.sync.*' }], [{ pattern: 'goal.review.local' }, { pattern: 'world.sync.*' }], [{ pattern: 'world.sync.*', tier: 'forbidden' }]]) {
+      const c = say(card(rows, 'x'));
+      expect(titleCase(c.title), c.title).toBe(true);
+      expect(noteProblems(c.title, c.sub), c.title).toEqual([]);
     }
-    // On the card: after the row's own sentence.
-    const scoped = card([{ pattern: 'world.sync.git' }], 'x');
-    (scoped.args.rows[0] as Record<string, unknown>).scope = { endpoints: ['github'], repoIds: [ID] };
-    expect(details(scoped)).toEqual([`Repo reads may run on their own until ${date}.`, 'It covers only these endpoints: Github.', 'It covers only part of what it names.']);
+    // The family's own pattern is listed as it is written, since the panel has no words of its own for it.
+    const d = JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(card([{ pattern: 'world.sync.*' }], 'x'))})`))) as { facts: Array<[string, string]> };
+    expect(d.facts).toContainEqual(['Rule 1 Action', 'world.sync.*']);
   });
 });
 
@@ -504,7 +547,7 @@ describe('asks on its own: read from what the card would sign, whatever mark it 
     expect(alone({ fullName: 'policy.change', args: { rows: [null, 7, 'alone'] } })).toBe(false);
     expect(alone({ fullName: 'policy.change', args: {} })).toBe(false);
     // The rule is about rule cards: another card with such a row inside it is not one.
-    expect(alone({ fullName: 'world.source.enable', args: { rows: [{ pattern: 'x', tier: 'alone' }] } })).toBe(false);
+    expect(alone({ fullName: 'runtime.inbox_recent', args: { rows: [{ pattern: 'x', tier: 'alone' }] } })).toBe(false);
   });
 });
 

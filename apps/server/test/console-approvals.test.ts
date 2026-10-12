@@ -97,6 +97,8 @@ const card = (over: Record<string, unknown> = {}) => ({
   id: 'pr1', fullName: 'world.source.enable', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
   expiresAt: '2026-10-12T14:00:00.000Z', ...over,
 });
+/** An ordinary card, which may share one prompt with others in Approve All: a read chat asked for. (A card that turns a source on asks on its own.) */
+const plain = (over: Record<string, unknown> = {}) => card({ fullName: 'runtime.inbox_recent', args: { lane: 'relevant' }, origin: 'chat:c1', ...over });
 const textNode = (t: string) => Object.assign(new El('#text'), { textContent: t });
 
 beforeEach(() => {
@@ -196,44 +198,50 @@ describe('the console Approvals panel', () => {
     // Opening a row shows its facts; the invitation's markup arrives as literal text.
     rows[2]!.onclick!();
     expect(ids.apprlist!.children[0]!.children[2]!.shown()).toContain('<img src=x onerror=alert(1)>Ada');
-    // Two ask on their own: the person card (outside text), and the rules card, which would let backups run alone.
+    // Each asks on its own: the rules card would let backups run alone, the source card changes what Flint reads, and the person card holds outside text.
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
-    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 2.');
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
+    expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 3.');
     expect(ids.apprall!.textContent).toBe('Approve All with Password');
     expect(ids.apprhelp!.hidden).toBe(true);
   });
 
   it('Approve and Reject on the open card take the signed path chat cards use; outside text asks on its own', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', args: { people: [] } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', args: { people: [] } }), card({ id: 'pr3' })] } });
     await open();
     const first = ids.apprlist!.children[0]!.children[0]!;
     first.button('Approve with Password').onclick!();
     first.button('Reject').onclick!();
     // The args the card shows go with it: what is signed must hash to them (the main script checks the challenge).
-    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Turn On the Deploy Source', fresh: false, args: { source: 'deploy' } }]);
+    expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Read What Triage Decided', fresh: false, args: { lane: 'relevant' } }]);
     expect(decided[1]).toEqual(['reject', 'pr1']);
     ids.apprlist!.children[0]!.children[1]!.onclick!();
     ids.apprlist!.children[0]!.children[1]!.button('Approve with Password').onclick!();
     expect(decided[2]![2]).toEqual({ reason: 'approve: Add 0 People from Calendar', fresh: true, args: { people: [] } });
+    // A card that turns a source on changes what Flint reads: a fresh touch for it too.
+    ids.apprlist!.children[0]!.children[2]!.onclick!();
+    ids.apprlist!.children[0]!.children[2]!.button('Approve with Password').onclick!();
+    expect(decided[3]![2]).toEqual({ reason: 'approve: Turn On the Deploy Source', fresh: true, args: { source: 'deploy' } });
   });
 
   it('Approve All signs each card in turn after one prompt, and leaves outside text and money for their own', async () => {
     answer = () => ({
       status: 200,
-      body: { signed: true, proposals: [card({ id: 'a' }), card({ id: 'b', args: { source: 'git' } }), card({ id: 't', tainted: true }), card({ id: 'm', fullName: 'spend.purchase' }), card({ id: 'c', args: { source: 'spend' } })] },
+      body: { signed: true, proposals: [plain({ id: 'a' }), plain({ id: 'b', args: { lane: 'quiet' } }), plain({ id: 't', tainted: true }), card({ id: 'm', fullName: 'spend.purchase' }), plain({ id: 'c', fullName: 'runtime.ledger_open', args: {} }), card({ id: 's' })] },
     });
     await open();
-    expect(noteSays()).toBe('You have 5 approvals waiting. Approve All skips 2.');
+    // Outside text, money and a source to turn on are each left for their own approval.
+    expect(noteSays()).toBe('You have 6 approvals waiting. Approve All skips 3.');
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b', 'c']);
-    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards', args: { source: 'deploy' } });
-    expect(decided[1]![2]).toEqual({ reason: 'approve: Turn On the Git Source', args: { source: 'git' } });
+    expect(decided[0]![2]).toEqual({ reason: 'approve 3 Flint cards', args: { lane: 'relevant' } });
+    expect(decided[1]![2]).toEqual({ reason: 'approve: Read What Triage Decided', args: { lane: 'quiet' } });
     expect(ids.apprnote!.textContent).toBe('You approved 3 of 3.');
   });
 
   it('Approve All stops at the first card that is not approved, and says how far it got', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'a' }), card({ id: 'b' }), card({ id: 'c' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain({ id: 'a' }), plain({ id: 'b' }), plain({ id: 'c' })] } });
     await open();
     failApprove = 'b';
     run('approveAll()');
@@ -355,9 +363,11 @@ describe('the console Approvals panel', () => {
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Google Calendar is read every ${minutes} minutes.`);
+    // Neither rides Approve All: one lets Flint add people by itself, the other changes what Flint reads.
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
     run('approveAll()');
     await settle();
-    expect(decided.map((d) => d[1])).toEqual(['gc']);
+    expect(decided).toEqual([]);
   });
 
   it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and asks on its own, as every card that lets something run alone does', async () => {
@@ -371,9 +381,10 @@ describe('the console Approvals panel', () => {
     // It carries no mark here (an older server's card): the rows say it lets something run alone, and that is enough.
     expect(promo).not.toHaveProperty('consequential', true);
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
+    expect(rows[1]!.shown()).toContain('Asks on Its Own');
     run('approveAll()');
     await settle();
-    expect(decided.map((d) => d[1])).toEqual(['ac']);
+    expect(decided).toEqual([]);
     expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Apple Calendar is read every ${minutes} minutes and when it changes.`);
   });
@@ -486,7 +497,7 @@ describe('the console Approvals panel', () => {
     expect(sub({ fullName: 'world.person.create', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
     expect(sub({ fullName: 'world.person.create', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
     expect(sub({ fullName: 'triage.rule.create', args: {} })).toBe('This adds a new rule.');
-    expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('ci-red');
+    expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
     expect(sub({ fullName: 'world.relation.write', args: {} })).toBe('Flint’s memory suggests this link.');
     expect(sub({ fullName: 'mcp.x', origin: 'console' })).toBe('You filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'runtime:knowledge' })).toBe('Flint filed this.');
@@ -497,7 +508,7 @@ describe('the console Approvals panel', () => {
   });
 
   it('one card waiting says so in the singular', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card()] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain()] } });
     await open();
     expect(noteSays()).toBe('You have 1 approval waiting.');
   });
@@ -600,7 +611,7 @@ describe('the console Approvals panel', () => {
           goalCard('px', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [{ op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } }] } }),
           goalCard('pw', 'plan.change', { consequential: true, args: { goalTitle: 'Synthetic goal', ops: [] } }),
           goalCard('gp', 'goal.propose', { origin: 'chat:c1', args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
-          card({ id: 'src' }),
+          plain({ id: 'src' }),
         ],
       },
     });

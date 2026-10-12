@@ -440,16 +440,17 @@ describe('P3: goals and plans', () => {
     // ...and yet each one Will signs asks on its own, with a fresh touch, never in Approve All (apprAlone): by its
     // name, and by the consequential mark its card carries. Only a review's small plan change rides Approve All, and
     // which card is one is read from its operations (apprSmallPlan), never from its template's name alone.
+    // The panel's own script, whole (its rule reads what a card would show as well as its name), with no page behind it.
     const js = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
-    const goals = /\nvar APPR_GOAL=\{[^\n]*\};/.exec(js)![0];
-    const small = /\n(function apprSmallOp\(o\)\{[\s\S]*?\nfunction apprSmallPlan\(p\)\{[^\n]*)\n/.exec(js)![1]!;
-    const predict = /\nvar APPR_PREDICT='[^'\n]*';/.exec(js)![0];
-    const alone = /\n(function apprAlone\(p\)\{[\s\S]*?)\nfunction /.exec(js)![1]!;
-    // (The panel reads each of its tables through one guarded lookup.)
-    const get = /\n(function apprGet\(table,key\)\{[^\n]*)\n/.exec(js)![1]!;
-    const c: Record<string, unknown> = {};
+    const noop = () => {};
+    const el = () => ({ appendChild: noop, classList: { add: noop, remove: noop, toggle: noop }, style: {}, setAttribute: noop });
+    const c: Record<string, unknown> = {
+      console, setInterval: () => 0, setTimeout: () => 0, BASE: '', TOKEN: '', auth: () => ({}),
+      fetch: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+      document: { getElementById: () => null, createElement: el, createTextNode: el, querySelectorAll: () => [] },
+    };
     createContext(c);
-    runInContext(`${get}\n${goals}\n${small}\n${predict}\n${alone}`, c);
+    runInContext(js, c);
     const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
     for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
     const status = { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'blocked' } };
