@@ -193,14 +193,22 @@ export async function p4Kit(urls: TestUrls) {
     );
     return v.id as string;
   }
+  /**
+   * What a forecast's row says of its series, as the forecaster will say it: the series' own unit, and the domain
+   * the database can tell from it (spend for a financial series, calendar for a calendar one; deploys otherwise).
+   */
+  async function seriesSays(seriesKey: string | null): Promise<{ unit: string; domain: string }> {
+    const s = (await owner(`SELECT unit, sensitivity, key ~ '(^|[.])calendar([.]|$)' AS calendar FROM "MetricSeries" WHERE key = $1`, [seriesKey])).rows[0] as { unit: string; sensitivity: string; calendar: boolean } | undefined;
+    return { unit: s?.unit ?? 'count', domain: s?.sensitivity === 'financial' ? 'spend' : s?.calendar ? 'calendar' : 'deploys' };
+  }
   /** The forecaster's yes/no question on a run. */
-  const question = (seriesKey: string, forecastRunId: string, over: Record<string, unknown> = {}, q: Q = app) =>
-    prediction({ method: 'statistical', domain: 'deploys', type: 'threshold_cross', resolver: 'auto_metric', createdBy: 'runtime:forecast', seriesKey, forecastRunId, unit: 'count', ...over }, q);
+  const question = async (seriesKey: string, forecastRunId: string, over: Record<string, unknown> = {}, q: Q = app) =>
+    prediction({ method: 'statistical', type: 'threshold_cross', resolver: 'auto_metric', createdBy: 'runtime:forecast', seriesKey, forecastRunId, ...(await seriesSays(seriesKey)), ...over }, q);
   /** The forecaster's range on a run. */
-  const range = (seriesKey: string, forecastRunId: string, over: Record<string, unknown> = {}, q: Q = app) =>
+  const range = async (seriesKey: string, forecastRunId: string, over: Record<string, unknown> = {}, q: Q = app) =>
     prediction({
-      kind: 'interval', probability: null, method: 'statistical', domain: 'deploys', type: 'trend', resolver: 'auto_metric', createdBy: 'runtime:forecast',
-      seriesKey, forecastRunId, unit: 'count', pointEstimate: 4, lower: 2, upper: 6, level: 0.8, ...over,
+      kind: 'interval', probability: null, method: 'statistical', type: 'trend', resolver: 'auto_metric', createdBy: 'runtime:forecast',
+      seriesKey, forecastRunId, ...(await seriesSays(seriesKey)), pointEstimate: 4, lower: 2, upper: 6, level: 0.8, ...over,
     }, q);
 
   return {

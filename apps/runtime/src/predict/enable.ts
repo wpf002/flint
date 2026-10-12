@@ -65,14 +65,17 @@ function registered(keys: readonly string[]): ForecastSeriesDef[] | undefined {
 /**
  * Why a series' stored row would stop it being forecast: it was forgotten, or
  * it is not what the registry says it is (a row made under another unit, step
- * or sensitivity is never forecast under the registry's name).
+ * or sensitivity is never forecast under the registry's name). Nor is one tied
+ * to an item: a registered number is Flint's own, about no single item, and a
+ * row made with a link (the database fixes it at birth) would stop for good
+ * when that item is forgotten.
  */
 async function storedProblem(db: Db | Tx, defs: readonly ForecastSeriesDef[]): Promise<string | undefined> {
-  const rows = await db.metricSeries.findMany({ where: { key: { in: defs.map((d) => d.key) } }, select: { key: true, unit: true, freq: true, sensitivity: true, description: true } });
+  const rows = await db.metricSeries.findMany({ where: { key: { in: defs.map((d) => d.key) } }, select: { key: true, entityId: true, unit: true, freq: true, sensitivity: true, description: true } });
   for (const r of rows) {
     const d = forecastSeries(r.key)!;
     if (r.description === FORGOTTEN) return SAY.forgotten;
-    if (r.unit !== d.unit || r.freq !== freqOf(d) || r.sensitivity !== d.sensitivity) return SAY.mislabeled;
+    if (r.unit !== d.unit || r.freq !== freqOf(d) || r.sensitivity !== d.sensitivity || r.entityId !== null) return SAY.mislabeled;
   }
   return undefined;
 }

@@ -198,6 +198,10 @@ describe.skipIf(NO_DB)('P4: Turn On Predictions, as the runtime runs it', () => 
       const repo = id('en');
       await owner(`INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", "lastObservedAt", "updatedAt") VALUES ($1, 'repo', $2, 'synthetic', '{}', $3, now(), now())`, [repo, `repo:test:${repo}`, 'd'.repeat(64)]);
       await asApp(`INSERT INTO "MetricSeries" (key, "entityId", unit, freq, sensitivity, description) VALUES ($1, $2, 'count', 'W', 'ops', 'How many commits land in Helm each week.')`, [gone, repo]);
+      // Before any forget: a registered number is about no single item, so a row made under its key and tied to one
+      // (the tie is fixed at birth) is not turned on. Its forget would otherwise stop the number for good.
+      await expect(file({ series: [gone], reason: [] })).rejects.toMatchObject({ status: 409, message: SAY.mislabeled });
+      expect(await switches([gone])).toEqual({});
       await asApp(`SELECT forget_entity($1, $2)`, [repo, await key.approve({ subjectType: 'forget', subjectId: repo, action: 'world.forget', argsDigest: 'a'.repeat(64) })]);
       expect((await db.metricSeries.findUniqueOrThrow({ where: { key: gone } })).description).toBe('[forgotten]');
       await expect(file({ series: [gone], reason: [] })).rejects.toMatchObject({ status: 409, message: SAY.forgotten });

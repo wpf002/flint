@@ -15,7 +15,7 @@
 -- out by the runtime"). The record of used approvals goes with its table, so a
 -- forecast card left executing could act once more after a re-deploy, until it
 -- expires (a week at most after it was signed). P3's signed-card helpers go back
--- to P3's own bodies, without the three hardenings this migration gave them, and
+-- to P3's own bodies, without the four hardenings this migration gave them, and
 -- MetricPoint loses its id-only refusal. It also removes its own row from
 -- _prisma_migrations, so the next deploy re-applies it. Every statement tolerates
 -- a half-applied state, and an empty database.

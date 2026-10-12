@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { SeriesKey } from '@flint/policy';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { DOMAINS } from '../../src/ledger/emit';
 import { FORECAST_SERIES, FORECAST_SERIES_KEYS, forecastSeries, freqOf } from '../../src/predict/series';
 
@@ -46,6 +47,14 @@ describe('the forecast series registry', () => {
     ]);
   });
 
+  it('each number\'s domain is one the database accepts for it: spend exactly for the financial ones, calendar exactly for the calendar one', () => {
+    // prediction_forecast_check holds a forecast's prediction to this (and to the series' unit), so the registry must agree.
+    for (const s of FORECAST_SERIES) {
+      expect(s.domain === 'spend', s.key).toBe(s.sensitivity === 'financial');
+      expect(s.domain === 'calendar', s.key).toBe(/(^|\.)calendar(\.|$)/.test(s.key));
+    }
+  });
+
   it('names are Title Case and descriptions are fixed sentences with no number in them', () => {
     for (const s of FORECAST_SERIES) {
       for (const word of s.name.split(' ')) expect(word[0], s.name).toBe(word[0]!.toUpperCase());
@@ -53,6 +62,18 @@ describe('the forecast series registry', () => {
       expect(s.description, s.key).not.toMatch(/\d/);
       expect(s.description.length, s.key).toBeLessThanOrEqual(120);
     }
+  });
+
+  it('the console names the same numbers: its table is the registry, in order, with spending and the calendar marked', () => {
+    // The Turn On Predictions card says which numbers it turns on, by these names (apps/console/index.html, APPR_SERIES).
+    const html = readFileSync(join(__dirname, '..', '..', '..', 'console', 'index.html'), 'utf8');
+    const table = /\nvar APPR_SERIES=(\[\[[^;]*\]\]);/.exec(html)?.[1];
+    expect(table, 'APPR_SERIES in the console').toBeTruthy();
+    const rows = runInNewContext(`(${table})`) as Array<[string, string, string]>;
+    const kind = (s: (typeof FORECAST_SERIES)[number]) => (s.sensitivity === 'financial' ? 'money' : /(^|\.)calendar(\.|$)/.test(s.key) ? 'calendar' : '');
+    expect(rows.map((r) => [...r])).toEqual(FORECAST_SERIES.map((s) => [s.key, s.name, kind(s)]));
+    // Every sensitive number has a kind the card can say: a new one that is neither spending nor the calendar needs its own words there.
+    for (const s of FORECAST_SERIES) expect(kind(s) !== '', s.key).toBe(s.sensitivity !== 'ops');
   });
 
   it('a key outside the list is not a series; lookups do not reach object internals', () => {

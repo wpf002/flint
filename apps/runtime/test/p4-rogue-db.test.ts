@@ -20,7 +20,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { NO_DB, freshDb, id, HEX } from './db';
-import { p4Kit, refusal, sleep, type P4Kit, type Q } from './p4';
+import { CANARY, p4Kit, refusal, sleep, type P4Kit, type Q } from './p4';
 
 describe.skipIf(NO_DB)('P4 against a runtime that breaks the rules', () => {
   let k: P4Kit;
@@ -368,6 +368,140 @@ describe.skipIf(NO_DB)('P4 against a runtime that breaks the rules', () => {
       expect((await refusal(app(`CREATE TEMP TABLE "ForecastSeries" ("seriesKey" text, "on" boolean)`))).message).toMatch(/permission denied/);
       expect((await refusal(app(`CREATE TABLE public."ForecastSeriesShadow" (k text)`))).message).toMatch(/permission denied/);
       expect((await app(`SELECT count(*)::int AS n FROM "ForecastRun" WHERE id = $1`, [rid])).rows[0].n).toBe(1);
+    });
+  });
+
+  // Each of these was a working attack in an independent review of this migration. Each is now refused.
+  describe('what an independent review found', () => {
+    it('tie a number to an unrelated item, so that Will\'s forget of that item stops the number for good: refused, by every statement shape', async () => {
+      const key = await k.onSeries();
+      const unrelated = await k.entity('account');
+      const linked = async () => (await app(`SELECT "entityId", description FROM "MetricSeries" WHERE key = $1`, [key])).rows[0];
+      const attempts: Array<[string, () => Promise<unknown>]> = [
+        ['an update', () => app(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [key, unrelated])],
+        ['an upsert', () => app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, description) VALUES ($1, 'count', 'D', 'ops', 'x') ON CONFLICT (key) DO UPDATE SET "entityId" = $2`, [key, unrelated])],
+        ['a merge', () => app(`MERGE INTO "MetricSeries" m USING (SELECT $1::text AS key) s ON m.key = s.key WHEN MATCHED THEN UPDATE SET "entityId" = $2`, [key, unrelated])],
+        ['a CTE', () => app(`WITH tie AS (UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1 RETURNING 1) SELECT count(*) FROM tie`, [key, unrelated])],
+        ['with a new description in the same statement', () => app(`UPDATE "MetricSeries" SET "entityId" = $2, description = 'tied' WHERE key = $1`, [key, unrelated])],
+        ['as the owner', () => owner(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [key, unrelated])],
+      ];
+      for (const [name, attempt] of attempts) {
+        const e = await refusal(attempt());
+        expect([e.code, e.message, e.detail], name).toEqual(['42501', `series ${key}: its entityId never changes`, undefined]);
+      }
+      expect(await linked()).toEqual({ entityId: null, description: 'a synthetic series' });
+      // Will forgets that item, as he may. The number is not its series: it is still there, on, and forecast.
+      await k.forget(unrelated);
+      expect(await linked()).toEqual({ entityId: null, description: 'a synthetic series' });
+      expect(await isOn(key)).toEqual({ on: true, reason: false });
+      expect(await k.outcome(k.run(key))).toBe('ok');
+    });
+
+    it('record a series\' numbers as a loose prediction (the forecaster\'s own, with no run and no series), which chat\'s list of open predictions would show: refused', async () => {
+      const fin = await k.onSeries({ unit: 'usd', sensitivity: 'financial', key: `daily.spend.${id('v')}.usd` });
+      const before = (await app(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n as number;
+      const range = { kind: 'interval', probability: null, method: 'base_rate', domain: 'spend', type: 'trend', resolver: 'auto_metric', unit: 'usd', pointEstimate: CANARY, lower: 1, upper: 99999, level: 0.8, claim: `${fin} is between 1 and ${CANARY}` };
+      const yesNo = { method: 'base_rate', domain: 'spend', type: 'threshold_cross', resolver: 'auto_metric', claim: `${fin} is above ${CANARY}` };
+      for (const createdBy of ['runtime:forecast', 'runtime:reason']) {
+        for (const [name, row] of [['a range', range], ['a yes/no', yesNo], ['a yes/no the local model made', { ...yesNo, method: 'model_reasoning' }], ['one with a series and no run', { ...yesNo, seriesKey: fin }]] as const) {
+          const e = await refusal(k.prediction({ ...row, createdBy }));
+          expect([e.code, e.detail], `${createdBy}: ${name}`).toEqual(['23514', undefined]);
+          expect(e.message, `${createdBy}: ${name}`).toMatch(/^prediction pd[a-z0-9]+: its run and series is not valid$/);
+          // The refusal never holds the number, or the series it came from.
+          expect(e.text, `${createdBy}: ${name}`).not.toMatch(/31337|4242|daily\.spend/);
+        }
+      }
+      // Nor through a merge, which fires the same trigger.
+      expect(await code(app(
+        `MERGE INTO "Prediction" p USING (SELECT $1::text AS id) s ON p.id = s.id WHEN NOT MATCHED THEN
+           INSERT (id, claim, kind, probability, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdBy")
+           VALUES (s.id, $2, 'binary', 0.6, 'base_rate', 'spend', 'threshold_cross', '[]', 'r', 'auto_metric', now() + interval '1 day', 'runtime:forecast')`,
+        [id('pd'), yesNo.claim]))).toBe('23514');
+      expect((await app(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n).toBe(before);
+      // What chat's list reads (GET /v1/ledger/open) holds none of it. A forecast's own rows are all it may write.
+      expect((await app(`SELECT count(*)::int AS n FROM "Prediction" WHERE "createdBy" IN ('runtime:forecast', 'runtime:reason') AND ("forecastRunId" IS NULL OR "seriesKey" IS NULL OR unit IS NULL)`)).rows[0].n).toBe(0);
+      const rid = await k.run(fin, { beatsNaive: false, naiveMase: 1, modelMase: 2 });
+      expect(await k.outcome(k.range(fin, rid, { method: 'base_rate' }))).toBe('ok');
+    });
+
+    it('record a forecast of dollars as a count of deploys (another unit, another domain): refused, and so is a spend or calendar domain on a number that is neither', async () => {
+      const fin = await k.onSeries({ unit: 'usd', sensitivity: 'financial', key: `daily.spend.${id('v')}.usd` });
+      const cal = await k.onSeries({ unit: 'hours', sensitivity: 'personal', key: `daily.calendar.${id('v')}` });
+      const ops = await k.onSeries();
+      const losing = { beatsNaive: false, naiveMase: 1, modelMase: 2 };
+      const said = async (key: string, over: Record<string, unknown>) => {
+        const e = await refusal(k.range(key, await k.run(key, losing), { method: 'base_rate', pointEstimate: CANARY, lower: 1, upper: 99999, ...over }));
+        expect(e.text, JSON.stringify(over)).not.toMatch(/31337|4242/);
+        expect(e.detail, JSON.stringify(over)).toBeUndefined();
+        return [e.code, e.message.replace(/pd[a-z0-9]+/, 'pd…')];
+      };
+      // The review's attack, as it ran: dollars on record as a count, under deploys.
+      expect(await said(fin, { unit: 'count', domain: 'deploys' })).toEqual(['23514', `prediction pd…: it carries the unit of its series (${fin})`]);
+      expect(await said(fin, { unit: null })).toEqual(['23514', `prediction pd…: it carries the unit of its series (${fin})`]);
+      expect(await said(fin, { unit: 'USD' })).toEqual(['23514', 'prediction pd…: its unit is not valid']);
+      for (const domain of ['deploys', 'services', 'calendar', 'goals']) expect(await said(fin, { domain }), domain).toEqual(['23514', `prediction pd…: its domain is not that of its series (${fin})`]);
+      for (const domain of ['deploys', 'spend']) expect(await said(cal, { domain }), domain).toEqual(['23514', `prediction pd…: its domain is not that of its series (${cal})`]);
+      // And the other way: an ops number is never filed as spend or as the calendar.
+      for (const domain of ['spend', 'calendar']) expect(await said(ops, { domain }), domain).toEqual(['23514', `prediction pd…: its domain is not that of its series (${ops})`]);
+      // A yes/no question and the local model's estimate are held to the same.
+      expect(await code(k.question(fin, await k.run(fin, losing), { method: 'base_rate', unit: 'count', domain: 'deploys' }))).toBe('23514');
+      // Said rightly, each is recorded.
+      expect(await k.outcome(k.range(fin, await k.run(fin, losing), { method: 'base_rate', unit: 'usd', domain: 'spend' }))).toBe('ok');
+      expect(await k.outcome(k.range(cal, await k.run(cal, losing), { method: 'base_rate', unit: 'hours', domain: 'calendar' }))).toBe('ok');
+      expect(await k.outcome(k.range(ops, await k.run(ops, losing), { method: 'base_rate', unit: 'count', domain: 'repos' }))).toBe('ok');
+      expect((await app(`SELECT count(*)::int AS n FROM "Prediction" p JOIN "MetricSeries" s ON s.key = p."seriesKey" WHERE p.unit IS DISTINCT FROM s.unit`)).rows[0].n).toBe(0);
+    });
+
+    it('record a run as local while naming somewhere else as where it was made: refused (a local run names a local forecaster, never a URL, a host or a path)', async () => {
+      const fin = await k.onSeries({ unit: 'usd', sensitivity: 'financial', key: `daily.spend.${id('v')}.usd` });
+      for (const endpoint of [
+        'https://prophet.example.com/v1/forecast', 'http://127.0.0.1:8000/forecast', 'prophet.example.com', 'localhost:11434', '/forecast/adhoc', 'local:', 'local', 'local:fc/v1', 'local:fc.v1/../prophet',
+        'local:https://prophet.example.com', 'local:FC.V1', 'local:fc v1', ' local:fc.v1', 'local:fc.v1 ', 'local:fc.v1\n', 'LOCAL:fc.v1', `local:${'a'.repeat(61)}`, '', null,
+      ]) {
+        const e = await refusal(k.run(fin, { endpoint: endpoint as string }));
+        expect([e.code, e.detail], JSON.stringify(endpoint)).toEqual(['23514', undefined]);
+        expect(e.message, JSON.stringify(endpoint)).toMatch(/^forecast run fr[a-z0-9]+: its endpoint is not valid$/);
+      }
+      for (const endpoint of ['local:fc.v1', 'local:ets-2', 'local:seasonal_naive', `local:${'a'.repeat(60)}`]) expect(await k.outcome(k.run(fin, { endpoint })), endpoint).toBe('ok');
+      expect((await app(`SELECT DISTINCT provider FROM "ForecastRun" WHERE "seriesKey" = $1`, [fin])).rows).toEqual([{ provider: 'local' }]);
+      expect((await app(`SELECT count(*)::int AS n FROM "ForecastRun" WHERE endpoint !~ '^local:[a-z0-9._-]{1,60}$'`)).rows[0].n).toBe(0);
+    });
+
+    it('the two one-use tables name the transaction that used an approval the same way: its id and when it began, never a bare id', async () => {
+      const key = await k.series();
+      const c = await k.card('forecast.series.enable', enableArgs([key]));
+      await k.switchOn(app, key, c.aid);
+      const use = (await owner(`SELECT xact FROM "ForecastApprovalUse" WHERE "approvalId" = $1`, [c.aid])).rows[0].xact as string;
+      // A transaction id, then its start in microseconds since 1970 (16 digits until the year 2286).
+      expect(use).toMatch(/^[0-9]+@[0-9]{16}$/);
+      const fns = (await owner(
+        `SELECT proname, position('pg_current_xact_id()::text || ''@'' || (extract(epoch FROM transaction_timestamp()) * 1000000)::bigint::text' in prosrc) > 0 AS named,
+                (length(prosrc) - length(replace(prosrc, 'pg_current_xact_id()', ''))) / length('pg_current_xact_id()') AS reads
+         FROM pg_proc WHERE proname IN ('p3_bind_approval', 'p4_bind_approval') ORDER BY proname`)).rows;
+      // Each reads the transaction's id once, in that one expression: neither compares or stores a bare id.
+      expect(fns).toEqual([{ proname: 'p3_bind_approval', named: true, reads: 1 }, { proname: 'p4_bind_approval', named: true, reads: 1 }]);
+      // A use on record under a bare id (as before this migration, or the id of this very transaction) is not this transaction's.
+      const again = await k.series();
+      const c2 = await k.card('forecast.series.enable', enableArgs([again]));
+      const t = await k.client();
+      try {
+        await t.query('BEGIN');
+        const xid = (await t.query(`SELECT pg_current_xact_id()::text AS x`)).rows[0].x as string;
+        await owner(`INSERT INTO "ForecastApprovalUse" ("approvalId", "action", "xact") VALUES ($1, 'forecast.series.enable', $2)`, [c2.aid, xid]);
+        expect(await code(k.switchOn(k.on(t), again, c2.aid))).toBe('42501');
+        await t.query('ROLLBACK');
+      } finally {
+        await t.end();
+      }
+      expect(await isOn(again)).toBeNull();
+    });
+
+    it('a new ops series named for spend or the calendar is refused at birth, which is why no health check may be called that (HEALTH_EXTRA)', async () => {
+      for (const key of ['health.spend.latency_ms', 'health.calendar.latency_ms']) {
+        const e = await refusal(app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, description) VALUES ($1, 'ms', 'raw', 'ops', 'x') ON CONFLICT (key) DO NOTHING`, [key]));
+        expect(e.code, key).toBe('23514');
+      }
+      expect((await app(`SELECT count(*)::int AS n FROM "MetricSeries" WHERE key IN ('health.spend.latency_ms', 'health.calendar.latency_ms')`)).rows[0].n).toBe(0);
     });
   });
 

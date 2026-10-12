@@ -358,6 +358,36 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect(ids.length).toBeGreaterThanOrEqual(2);
       expect(open.json().predictions.every((p: { seriesKey: string | null; forecastRunId: string | null }) => p.seriesKey === null && p.forecastRunId === null)).toBe(true);
     });
+
+    it('chat\'s list leaves a forecast out by every mark it has, not by its run and series alone: its writer, its unit, a range of any kind', async () => {
+      const app2 = (sql: string, params: unknown[]) => withClient(URLS!.app, (c) => c.query(sql, params));
+      const tag = Date.now().toString(36);
+      const loose = (id: string, createdBy: string, cols: string, values: string, q = app2) => q(
+        `INSERT INTO "Prediction" (id, claim, method, domain, type, evidence, "resolutionCriteria", resolver, "resolveBy", "createdBy"${cols})
+         VALUES ($1, 'daily.spend.x.usd is near 31337.4242', 'base_rate', 'spend', 'trend', '[]', 'synthetic', 'auto_metric', now() + interval '1 hour', $2${values})`, [id, createdBy]);
+      // The database refuses a forecast writer's row that names no run and no series...
+      await expect(loose(`pdw${tag}`, 'runtime:forecast', ', kind, probability', `, 'binary', 0.6`)).rejects.toMatchObject({ code: '23514' });
+      // ...and the route does not lean on that: a row from before the rule (here, written with the rule off) is left out by its writer.
+      await owner(`ALTER TABLE "Prediction" DISABLE TRIGGER "Prediction_valid"`);
+      try {
+        await loose(`pdw${tag}`, 'runtime:forecast', ', kind, probability', `, 'binary', 0.6`);
+        await loose(`pdv${tag}`, 'runtime:reason', ', kind, probability', `, 'binary', 0.6`);
+      } finally {
+        await owner(`ALTER TABLE "Prediction" ENABLE TRIGGER "Prediction_valid"`);
+      }
+      expect((await owner(`SELECT tgenabled FROM pg_trigger WHERE tgname = 'Prediction_valid'`)).rows).toEqual([{ tgenabled: 'O' }]);
+      // Another writer's row with a unit, and another writer's range with no run: left out by the unit, and by being a range.
+      await loose(`pdu${tag}`, 'runtime:other', ', kind, probability, unit', `, 'binary', 0.6, 'usd'`);
+      await loose(`pdi${tag}`, 'runtime:other', ', kind, "pointEstimate", lower, upper, level', `, 'interval', 31337.4242, 1, 99999, 0.8`);
+      expect((await owner(`SELECT count(*)::int AS n FROM "Prediction" WHERE id = ANY ($1) AND status = 'open'`, [[`pdw${tag}`, `pdv${tag}`, `pdu${tag}`, `pdi${tag}`]])).rows[0].n).toBe(4);
+      const open = await call('GET', '/v1/ledger/open?limit=200');
+      expect(open.statusCode).toBe(200);
+      const ids = open.json().predictions.map((p: { id: string }) => p.id);
+      for (const id of [`pdw${tag}`, `pdv${tag}`, `pdu${tag}`, `pdi${tag}`]) expect(ids, id).not.toContain(id);
+      expect(open.body).not.toContain('31337');
+      expect(open.json().predictions.every((p: { kind: string; unit: string | null; createdBy: string }) => p.kind === 'binary' && p.unit === null && !/^runtime:(forecast|reason)$/.test(p.createdBy))).toBe(true);
+      expect(ids.length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   describe('review of the server integration (PR #41)', () => {

@@ -368,9 +368,11 @@ model BackupRun {
 /// P3: goalId only on the goals writer's own predictions (Prediction_goal_check), and never changes.
 /// P4: the forecast fields are set at insert and never change. prediction_valid: a
 /// range has its numbers and a yes/no has none; a forecast's prediction names its
-/// run and its series together. prediction_forecast_check: only while its number
-/// is on; `statistical` only on a run that beat naive, `base_rate` only on one
-/// that did not; nothing is recorded as `prophet`. A run backs one range, one question and one estimate
+/// run and its series together, and a row either forecast writer makes always
+/// names both. prediction_forecast_check: only while its number is on; with its
+/// series' unit, and under `spend` or `calendar` exactly when its series is one;
+/// `statistical` only on a run that beat naive, `base_rate` only on one that did
+/// not; nothing is recorded as `prophet`. A run backs one range, one question and one estimate
 /// (Prediction_run_forecast_key, Prediction_run_reason_key: partial, in the migration).
 model Prediction {
   id                        String              @id @default(cuid())
@@ -768,7 +770,7 @@ model ForecastRun {
   seriesKey     String
   series        MetricSeries @relation(fields: [seriesKey], references: [key], onDelete: Restrict)
   provider      String // always "local": computed on this Mac
-  endpoint      String // "local:fc.v1"
+  endpoint      String // "local:fc.v1": `local:` and a short name, never a URL
   requestDigest String // sha256 hex of the canonical input
   horizon       Int
   level         Float

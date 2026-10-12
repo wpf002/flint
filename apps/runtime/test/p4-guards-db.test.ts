@@ -19,7 +19,12 @@
  * Synthetic series only.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { digestOf } from '@flint/policy';
+import { parseHealthExtra } from '../src/config';
+import { healthSeries } from '../src/retention';
+import { LOCAL_HEALTH } from '../src/sources/registry';
 import { NO_DB, freshDb, id, HEX } from './db';
 import { CANARY, p4Kit, refusal, sleep, type P4Kit, type Q } from './p4';
 
@@ -108,7 +113,27 @@ describe.skipIf(NO_DB)('P4 guards in the database', () => {
         .toEqual(['MetricSeries_calendar_check', 'MetricSeries_money_check']);
     });
 
-    it('its key, unit, step, sensitivity and birth time never change; its entity is set once; its description may', async () => {
+    it('every ops series the runtime already writes is still born: health checks, calendar lag, daily health shares and the daily rollups', async () => {
+      // The names a health check may have (HEALTH_EXTRA refuses `spend` and `calendar`: see config.test.ts), and what is built in.
+      const extra = parseHealthExtra('nexus-mcp=https://nexus.example.app/health,spend-api=https://h.example/health,calendar_sync=https://h.example/health');
+      const rollups = [...readFileSync(join(__dirname, '..', 'src', 'rollup.ts'), 'utf8').matchAll(/^  '(p2\.[a-z0-9_.]+)': \{ unit: '([a-z]+)'/gm)].map((m) => [m[1]!, m[2]!] as const);
+      expect(rollups.length).toBeGreaterThanOrEqual(7);
+      const keys: Array<readonly [string, string, string]> = [
+        ...[...LOCAL_HEALTH, ...extra].map((h) => [`health.${h.name}.latency_ms`, 'ms', 'raw'] as const),
+        ...['google_calendar', 'apple_calendar'].map((source) => [`${source}.lag_ms`, 'ms', 'raw'] as const),
+        ...['postgres', 'bus', 'server', 'backup', 'offsite_backup', 'triage', 'goals', 'source:spend', 'source:google_calendar', 'source:apple_calendar', 'source:health'].map((c) => [healthSeries(c), 'share', 'D'] as const),
+        ...rollups.map(([key, unit]) => [key, unit, 'D'] as const),
+      ];
+      for (const [key, unit, freq] of keys) {
+        // As the writers send it: an upsert that changes nothing when the row is there.
+        const insert = () => app(`INSERT INTO "MetricSeries" (key, unit, freq, sensitivity, description) VALUES ($1, $2, $3, 'ops', 'synthetic') ON CONFLICT (key) DO NOTHING`, [key, unit, freq]);
+        expect(await k.outcome(insert()), key).toBe('ok');
+        expect(await k.outcome(insert()), key).toBe('ok');
+      }
+      expect((await app(`SELECT count(*)::int AS n FROM "MetricSeries" WHERE key = ANY ($1) AND sensitivity = 'ops'`, [keys.map(([key]) => key)])).rows[0].n).toBe(keys.length);
+    });
+
+    it('its key, unit, step, sensitivity, birth time and entity never change; its description may', async () => {
       const fin = await k.series({ unit: 'usd', sensitivity: 'financial' });
       // The hole this closes: relabel a financial series as ops (then clear it to leave).
       const e = await refusal(app(`UPDATE "MetricSeries" SET sensitivity = 'ops' WHERE key = $1`, [fin]));
@@ -121,11 +146,17 @@ describe.skipIf(NO_DB)('P4 guards in the database', () => {
       expect(await code(owner(`UPDATE "MetricSeries" SET sensitivity = 'ops' WHERE key = $1`, [fin]))).toBe('42501');
       expect(await k.outcome(app(`UPDATE "MetricSeries" SET description = 'another synthetic description' WHERE key = $1`, [fin]))).toBe('ok');
       expect((await app(`SELECT sensitivity, unit, freq FROM "MetricSeries" WHERE key = $1`, [fin])).rows[0]).toEqual({ sensitivity: 'financial', unit: 'usd', freq: 'D' });
-      // The entity: set once, never changed or cleared (unlinking a series would hide it from a forget).
+      // The entity is fixed at birth, both ways. A series born about none is never tied to one later (a forget of
+      // that item would then stop the number for good); one born about an item is never moved or unlinked
+      // (unlinking it would hide it from a forget). For the owner too.
       const [a, b] = [await k.entity(), await k.entity()];
-      expect(await k.outcome(app(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [fin, a]))).toBe('ok');
-      expect(await code(app(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [fin, b]))).toBe('42501');
-      expect(await code(app(`UPDATE "MetricSeries" SET "entityId" = NULL WHERE key = $1`, [fin]))).toBe('42501');
+      const late = await refusal(app(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [fin, a]));
+      expect([late.code, late.message]).toEqual(['42501', `series ${fin}: its entityId never changes`]);
+      expect(await code(owner(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [fin, a]))).toBe('42501');
+      const born = await k.series({ entityId: a });
+      expect(await code(app(`UPDATE "MetricSeries" SET "entityId" = $2 WHERE key = $1`, [born, b]))).toBe('42501');
+      expect(await code(app(`UPDATE "MetricSeries" SET "entityId" = NULL WHERE key = $1`, [born]))).toBe('42501');
+      expect((await app(`SELECT key, "entityId" FROM "MetricSeries" WHERE key IN ($1, $2) ORDER BY "entityId" NULLS FIRST`, [fin, born])).rows).toEqual([{ key: fin, entityId: null }, { key: born, entityId: a }]);
     });
 
     it('only a forget marks a series forgotten, and a forgotten series stays forgotten', async () => {
@@ -654,9 +685,14 @@ describe.skipIf(NO_DB)('P4 guards in the database', () => {
       const next = await k.run(key);
       expect(await k.outcome(k.question(key, next))).toBe('ok');
       expect(await k.outcome(estimate({ forecastRunId: next }))).toBe('ok');
-      // Predictions that name no run are not counted against any.
-      expect(await k.outcome(k.prediction({ createdBy: 'runtime:forecast' }))).toBe('ok');
-      expect(await k.outcome(k.prediction({ createdBy: 'runtime:forecast' }))).toBe('ok');
+      // Predictions that name no run are not counted against any (another writer's: a forecast writer's always names one).
+      expect(await k.outcome(k.prediction())).toBe('ok');
+      expect(await k.outcome(k.prediction())).toBe('ok');
+      for (const createdBy of ['runtime:forecast', 'runtime:reason']) {
+        const loose = await refusal(k.prediction({ createdBy }));
+        expect([loose.code, loose.detail], createdBy).toEqual(['23514', undefined]);
+        expect(loose.message, createdBy).toMatch(/^prediction pd[a-z0-9]+: its run and series is not valid$/);
+      }
     });
 
     it('none for a series that was forgotten since its run', async () => {

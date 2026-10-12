@@ -4,7 +4,7 @@
  * claim template, and the one shape the HTTP route takes.
  */
 import { describe, it, expect } from 'vitest';
-import { CLAIM_TEMPLATES, ChatPrediction, EmitPrediction, FORECAST_WRITER, METHODS, REASON_WRITER, renderClaim, validatePrediction } from '../../src/ledger/emit';
+import { CLAIM_TEMPLATES, ChatPrediction, EmitPrediction, EmitPredictionIn, FORECAST_WRITER, INTERNAL_TEMPLATES, METHODS, REASON_WRITER, renderClaim, validatePrediction } from '../../src/ledger/emit';
 
 const soon = () => new Date(Date.now() + 86_400_000).toISOString();
 const base = () => ({
@@ -12,7 +12,8 @@ const base = () => ({
   evidence: [], resolutionCriteria: 'synthetic criteria', resolver: 'auto_world' as const, resolveBy: soon(), tainted: false,
 });
 const why = (over: Record<string, unknown>, createdBy?: string) => validatePrediction(EmitPrediction.parse({ ...base(), ...over }), new Date(), createdBy);
-const onRun = { seriesKey: 'daily.deploys.count', forecastRunId: 'frtest0001', resolver: 'auto_metric', method: 'statistical' };
+// A forecast's row says what its series is: the registry's unit and domain for daily.deploys.count.
+const onRun = { seriesKey: 'daily.deploys.count', forecastRunId: 'frtest0001', resolver: 'auto_metric', method: 'statistical', unit: 'count', domain: 'deploys' };
 const range = { kind: 'interval', probability: undefined, pointEstimate: 4, lower: 2, upper: 6, level: 0.8 };
 
 describe('emit: P4\'s rules', () => {
@@ -60,13 +61,41 @@ describe('emit: P4\'s rules', () => {
     expect(said).not.toContain('31337');
   });
 
+  it('a forecast says what its series is: the registry\'s unit and domain, never another\'s; and only a registered series is forecast', () => {
+    const spend = { ...onRun, seriesKey: 'daily.spend.anthropic.usd', unit: 'usd', domain: 'spend' };
+    expect(why(spend, FORECAST_WRITER)).toEqual([]);
+    // Dollars are never on record as a count of deploys (where whatever reads forecasts would take them for ops data).
+    expect(why({ ...spend, unit: 'count' }, FORECAST_WRITER)).toEqual(["a forecast carries its series' unit"]);
+    expect(why({ ...spend, unit: undefined }, FORECAST_WRITER)).toEqual(["a forecast carries its series' unit"]);
+    expect(why({ ...spend, domain: 'deploys' }, FORECAST_WRITER)).toEqual(["a forecast is filed under its series' domain"]);
+    expect(why({ ...spend, unit: 'count', domain: 'deploys' }, FORECAST_WRITER)).toEqual(["a forecast carries its series' unit", "a forecast is filed under its series' domain"]);
+    expect(why({ ...onRun, domain: 'spend' }, FORECAST_WRITER)).toEqual(["a forecast is filed under its series' domain"]);
+    expect(why({ ...onRun, seriesKey: 'daily.calendar.hours', unit: 'hours', domain: 'calendar' }, FORECAST_WRITER)).toEqual([]);
+    expect(why({ ...onRun, seriesKey: 'daily.spend.acme.usd', unit: 'usd', domain: 'spend' }, FORECAST_WRITER)).toEqual(['a forecast is of a registered series']);
+  });
+
+  it('a forecast writer records only a forecast\'s predictions: a row of its own with no run and series is refused', () => {
+    for (const writer of [FORECAST_WRITER, REASON_WRITER]) {
+      expect(why({}, writer), writer).toEqual([`${writer} records only a forecast's predictions, each with its run and series`]);
+      expect(why({ method: 'base_rate', domain: 'spend', claim: 'a synthetic claim about spend' }, writer), writer).toEqual([`${writer} records only a forecast's predictions, each with its run and series`]);
+    }
+    // Every other writer's plain prediction is as it was.
+    for (const writer of ['runtime:triage', 'runtime:goals', 'client:server', undefined]) expect(why({}, writer), String(writer)).toEqual([]);
+  });
+
   it('the forecaster\'s claim is a template: a series key, two numbers and a date', () => {
     const p = EmitPrediction.parse({ ...base(), ...onRun, ...range, claim: undefined, template: { id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } } });
     expect(validatePrediction(p, new Date(), FORECAST_WRITER)).toEqual([]);
     expect(renderClaim(p)).toBe('daily.deploys.count is between 2 and 6 on 2026-10-14');
     const bad = EmitPrediction.parse({ ...base(), ...onRun, ...range, claim: undefined, template: { id: 'series_range', params: { series: 'Deploys today', lo: 6, hi: 2, on: 'soon' } } });
     expect(validatePrediction(bad).join(' ')).toMatch(/^template series_range: /);
-    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'series_range', 'service_healthy', 'threshold']);
+    // Chat's four, and the runtime's own two (a goal review's forecast, the forecaster's range).
+    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'goal_on_track', 'series_range', 'service_healthy', 'threshold']);
+    expect([...INTERNAL_TEMPLATES].sort()).toEqual(['goal_on_track', 'series_range']);
+    // The wider shape P3's review holds to: neither of the runtime's templates, from any caller of the route.
+    for (const template of [{ id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } }, { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } }]) {
+      expect(EmitPredictionIn.safeParse({ ...base(), claim: undefined, template }).success, template.id).toBe(false);
+    }
   });
 });
 
@@ -94,8 +123,9 @@ describe('the HTTP route\'s shape: only what chat sends', () => {
       { subjectEntityId: 'entest0001' }, { supersedesId: 'pdtest0001' }, { conditionRecommendationId: 'rctest0001' }, { resolverSpec: { entityId: 'x' } },
       { model: 'some-model' }, { modelConfig: { temperature: 0 } }, { createdBy: 'will' }, { goalId: 'gotest0001' },
     ]) expect(ok(extra), JSON.stringify(extra)).toBe(false);
-    // The forecaster's own template is not chat's to fill.
+    // The runtime's own templates are not chat's to fill: the forecaster's range, a goal review's forecast.
     expect(ok({ claim: undefined, template: { id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } } })).toBe(false);
+    expect(ok({ claim: undefined, template: { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } } })).toBe(false);
     // What the body must say: whether the turn read outside text, and a probability.
     expect(ok({ tainted: undefined })).toBe(false);
     expect(ok({ probability: undefined })).toBe(false);

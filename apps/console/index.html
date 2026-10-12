@@ -223,12 +223,13 @@
   .ct small{font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums;}
   .ct .sub{display:block;font-size:12px;line-height:16px;color:var(--t3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .card.open .ct .sub{white-space:normal;}
-  .facts{display:grid;grid-template-columns:88px minmax(0,1fr);gap:6px 12px;margin:12px 0 0 26px;}
+  .facts{display:grid;grid-template-columns:minmax(88px,max-content) minmax(0,1fr);gap:6px 12px;margin:12px 0 0 26px;}
   .facts dt{font-size:12px;line-height:18px;color:var(--t3);}
   .facts dd{margin:0;font-size:13px;line-height:18px;overflow-wrap:anywhere;}
   .details{margin:10px 0 0 26px;}
   .details pre{font:12px/18px var(--mono);color:var(--t2);white-space:pre-wrap;word-break:break-word;background:var(--bg);border-radius:6px;padding:10px 12px;margin-top:6px;max-height:240px;overflow:auto;}
   .details p{color:var(--t2);font-size:12px;line-height:18px;margin-top:6px;}
+  .details ul{list-style:none;margin:6px 0 0;padding:0;color:var(--t2);font-size:12px;line-height:20px;}
   .cf{display:flex;align-items:center;gap:8px;margin-top:14px;padding-left:16px;}
   .cf .ghost{margin-right:auto;}
   .outside{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);}
@@ -339,7 +340,7 @@
     .mf .btn.pri{flex:1;height:50px;border-radius:12px;font-size:17px;justify-content:center;}
     .row{min-height:48px;font-size:17px;} .btn,.ghost{height:44px;}
     .cf{flex-wrap:wrap;padding-left:0;} .cf .ghost{flex-basis:100%;margin-right:0;justify-content:flex-start;padding-left:26px;} .cf .btn{flex:1;justify-content:center;height:44px;}
-    .facts{grid-template-columns:88px minmax(0,1fr);}
+    .facts{grid-template-columns:minmax(88px,max-content) minmax(0,1fr);}
     .gform .formrow{flex-wrap:wrap;} .gform .fl{flex-basis:100%;} #goalfoot .gleft{flex-basis:100%;}
     .ct{align-items:flex-start;} .ct b{white-space:normal;} .ct .sub{white-space:normal;} .ct svg.i{margin-top:2px;}
     #apprfoot{flex-wrap:wrap;} #apprfoot .note{flex-basis:100%;}
@@ -1233,7 +1234,8 @@ pollNotifs();setInterval(pollNotifs,60000);
 /* ---------- approvals: the cards waiting for Will's signature ----------
  * Every pending proposal the server lists (the runtime's, in runtime mode): one open
  * card at a time says what would run in words (three facts or fewer, the raw args
- * behind Show Details), the rest wait as rows. Approve and Reject go through the
+ * behind Show Details; the predictions card lists its numbers by name there instead),
+ * the rest wait as rows. Approve and Reject go through the
  * same signed path as a card in chat (approveAction / rejectAction). Approve All
  * signs each card in turn after one prompt (the Mac app keeps the key unlocked for
  * 5 minutes); a card with outside text or money, or one marked consequential (every
@@ -1325,9 +1327,40 @@ function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().replace
 function apprDate(t){try{var d=new Date(t),utc=/T00:00:00(\.000)?Z$/.test(String(t));return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getUTCFullYear()===new Date().getFullYear()?undefined:'numeric',timeZone:utc?'UTC':undefined});}catch(e){return '';}}
 /* P4: the card that turns Flint's forecasts on (the same title as @flint/policy's ACTION_WORDS). It asks on its own,
    with a fresh touch: the card carries the mark (consequential), and its name holds the line for a server that does
-   not send it. How many numbers it lists is all it says of them: a card shows no series' values, and no key. */
+   not send it. It says WHICH numbers, by name: a card shows no series' values, no key and no JSON, on its face or
+   behind Show Details. */
 var APPR_PREDICT='forecast.series.enable';
+/* The numbers Flint can forecast, in the registry's order (apps/runtime/src/predict/series.ts; a test holds the two
+   together): each one's name, and its kind when it is a sensitive one ('money' is spending, 'calendar' the calendar). */
+var APPR_SERIES=[['daily.spend.anthropic.usd','Anthropic Spend','money'],['daily.spend.openai.usd','OpenAI Spend','money'],['daily.spend.perplexity.usd','Perplexity Spend','money'],['daily.spend.tavily.usd','Tavily Spend','money'],
+  ['daily.deploys.count','Deploys',''],['weekly.commits.flint.count','Flint Commits',''],['weekly.commits.nexus.count','Nexus Commits',''],['weekly.commits.trident.count','Trident Commits',''],['weekly.commits.helm.count','Helm Commits',''],
+  ['daily.services.incident_minutes','Service Downtime',''],['daily.threads.open','Open Threads',''],['daily.calendar.hours','Calendar Hours','calendar']];
 function apprPredictCount(p){var x=p.args&&p.args.series;return Array.isArray(x)?x.length:0;}
+/* What a card lists, read once: its numbers by name in the registry's order ({name, kind, opinion}), how many it
+   lists that this page cannot name (never shown by their key), and how many get the local model's second opinion. */
+function apprPredictList(p){var a=p.args||{};var has=function(x,k){return Array.isArray(x)&&x.indexOf(k)>=0;};var named=[],known=0,opinions=0;
+  APPR_SERIES.forEach(function(s){if(!has(a.series,s[0]))return;known++;var o=has(a.reason,s[0]);if(o)opinions++;named.push({name:s[1],kind:s[2],opinion:o});});
+  var total=apprPredictCount(p),unknown=Math.max(0,total-known);
+  if(Array.isArray(a.reason))a.reason.forEach(function(k){if(has(a.series,k)&&!APPR_SERIES.some(function(s){return s[0]===k;}))opinions++;});
+  return {named:named,unknown:unknown,total:total,opinions:opinions};}
+function apprUnknownNumbers(n){return n+' Unknown Number'+(n===1?'':'s');}
+/* The Numbers fact: every name up to six; past that the first four and how many more (Show Details lists them all).
+   "and 8 more" is held together with no-break spaces, so it never breaks across two lines. */
+function apprPredictNumbers(l){var names=l.named.map(function(x){return x.name;});if(l.unknown)names.push(apprUnknownNumbers(l.unknown));
+  if(l.total<=6)return names.join(' · ');var first=l.named.slice(0,4).map(function(x){return x.name;});
+  return first.concat(['and\u00a0'+(l.total-first.length)+'\u00a0more']).join(' · ');}
+/* The Includes fact: said only when a spending or calendar number is on the card (or one this page cannot name, on a
+   card the server marks as more than ops data). */
+function apprPredictIncludes(p,l){var money=l.named.some(function(x){return x.kind==='money';}),cal=l.named.some(function(x){return x.kind==='calendar';});
+  if(money&&cal)return 'Spending and calendar numbers';if(money)return 'Spending numbers';if(cal)return 'Calendar numbers';
+  return l.unknown&&p.sensitivity&&p.sensitivity!=='ops'?'Sensitive numbers':'';}
+/* The Second Opinion fact: said only when the local model's own estimate is on the card. */
+function apprPredictOpinion(l){return !l.opinions?'':l.opinions>=l.total?'Local Model':'Local Model on '+l.opinions+' of '+l.total;}
+/* Behind Show Details: every number on its own line, in words. */
+function apprPredictDetails(p){var l=apprPredictList(p),ul=apprEl('ul');
+  l.named.forEach(function(x){ul.appendChild(apprEl('li',null,x.name+(x.kind==='money'?' · Spending':x.kind==='calendar'?' · Calendar':'')+(x.opinion?' · Second Opinion':'')));});
+  if(l.unknown)ul.appendChild(apprEl('li',null,apprUnknownNumbers(l.unknown)));
+  return ul;}
 /* What a card would do, in words: a Title Case fragment. */
 function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)?x.length:0;};
   if(apprGoalCard(p))return apprGoalTitle(p);
@@ -1345,7 +1378,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
 /* One line under the title: a sentence (a rule's name is its own, and stays as it is). */
 function apprSub(p){var a=p.args||{};
   if(apprGoalCard(p))return apprGoalSub(p);
-  if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of its own number'+(k===1?'':'s'):'its own numbers')+' each night, on this Mac.';}
+  if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of ':'')+'its own numbers each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return APPR_SOURCES[a.source]||'Flint starts reading this source.';
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create'){var cal=APPR_CALENDARS[a.source||'google_calendar'];return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
@@ -1368,7 +1401,8 @@ function apprFacts(p){var a=p.args||{},f=[];
     var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
-  else if(p.fullName===APPR_PREDICT){if(apprPredictCount(p))f.push(['Numbers',String(apprPredictCount(p))]);}
+  else if(p.fullName===APPR_PREDICT){var l=apprPredictList(p);if(l.total)f.push(['Numbers',apprPredictNumbers(l)]);
+    if(apprPredictIncludes(p,l))f.push(['Includes',apprPredictIncludes(p,l)]);if(apprPredictOpinion(l))f.push(['Second Opinion',apprPredictOpinion(l)]);}
   /* The invitation chose the name; the address is what is stored. ' · ' keeps a 'Last, First' name whole.
      The calendar is in the subtitle (apprSub), so the third fact stays Expires. */
   else if(p.fullName==='world.person.create')f.push(['People',(a.people||[]).map(function(x){var nm=String(x.name||'').trim(),em=String(x.email||'').trim();return !nm||nm===em?em:em?nm+' ('+em+')':nm;}).join(' · ')]);
@@ -1390,7 +1424,9 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
   if(open){var dl=apprEl('dl','facts');apprFacts(p).forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});card.appendChild(dl);
     var det=apprEl('div','details');det.hidden=true;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
-    var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));
+    /* The predictions card lists its numbers in words; every other card shows its raw args. */
+    if(p.fullName===APPR_PREDICT)det.appendChild(apprPredictDetails(p));
+    else{var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));}
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
     no.onclick=function(){rejectAction(p.id,card);setTimeout(loadApprovals,1200);};

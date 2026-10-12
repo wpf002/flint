@@ -22,6 +22,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { CHAT_CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_PARAMS, RUNTIME_CLAIM_TEMPLATE_IDS, SeriesKey } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
+import { forecastSeries } from '../predict/series.js';
 
 export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation'] as const;
 export const TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept'] as const;
@@ -165,6 +166,8 @@ export function validatePrediction(p: EmitPrediction, now = new Date(), createdB
     why.push('a yes/no prediction carries no range');
   }
   if ((p.forecastRunId === undefined) !== (p.seriesKey === undefined)) why.push('a forecast names its run and its series together');
+  // A forecast writer's row always names its run and series: neither has a way to record a series' numbers loose.
+  if ((createdBy === FORECAST_WRITER || createdBy === REASON_WRITER) && p.forecastRunId === undefined) why.push(`${createdBy} records only a forecast's predictions, each with its run and series`);
   if (p.method === 'prophet') why.push('no prediction is recorded as prophet: Flint forecasts on this Mac');
   if (p.method === 'statistical' && p.forecastRunId === undefined) why.push('a statistical prediction names its forecast run');
   if (p.forecastRunId !== undefined) {
@@ -174,6 +177,14 @@ export function validatePrediction(p: EmitPrediction, now = new Date(), createdB
     if (p.subjectEntityId !== undefined) why.push("a forecast's prediction is about a series, not an entity");
     const writer = p.method === 'model_reasoning' ? REASON_WRITER : FORECAST_WRITER;
     if (createdBy !== undefined && createdBy !== writer) why.push(`a forecast's ${p.method} prediction is written by ${writer}`);
+    // It says what its series is (the registry is the authority; the database holds the unit, and the two
+    // domains it can tell from a series, to the same): a forecast of dollars is never on record as a count.
+    const def = p.seriesKey === undefined ? undefined : forecastSeries(p.seriesKey);
+    if (!def) why.push('a forecast is of a registered series');
+    else {
+      if (p.unit !== def.unit) why.push("a forecast carries its series' unit");
+      if (p.domain !== def.domain) why.push("a forecast is filed under its series' domain");
+    }
   }
   return why;
 }

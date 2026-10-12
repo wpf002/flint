@@ -483,7 +483,7 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
     });
   });
 
-  // P4 part 1 carried three hardenings back to P3's signed-card helpers (migration p4_forecasts).
+  // P4 part 1 carried four hardenings back to P3's signed-card helpers (migration p4_forecasts).
   describe('a card kept for later, an approval spent by hand, and a write that does nothing', () => {
     const used = async (aid: string) => (await owner(`SELECT count(*)::int AS n FROM "GoalApprovalUse" WHERE "approvalId" = $1`, [aid])).rows[0].n as number;
     async function item(): Promise<string> {
@@ -568,6 +568,32 @@ describe.skipIf(NO_DB)('P3 against a runtime that breaks the rules', () => {
       });
       expect(await used(third)).toBe(1);
       expect((await app(`SELECT "entityId" FROM "GoalEntity" WHERE "goalId" = $1`, [gid])).rows).toEqual([{ entityId: e2 }]);
+    });
+
+    it('the transaction that used an approval is on record by its id and when it began; a use on record under a bare id is never this transaction\'s', async () => {
+      const gid = await goal();
+      const aid = await card('goal.activate', activateArgs(gid));
+      await activate(app, gid, aid);
+      const xact = (await owner(`SELECT xact FROM "GoalApprovalUse" WHERE "approvalId" = $1`, [aid])).rows[0].xact as string;
+      // A transaction id, then its start in microseconds since 1970: the same form the forecast card's table holds.
+      expect(xact).toMatch(/^[0-9]+@[0-9]{16}$/);
+      // A transaction id comes round again after a restore into a new cluster. A use on record under this very
+      // transaction's id, bare (as P3 wrote it), would have let this transaction pass for the one that used the card.
+      const again = await goal();
+      const aid2 = await card('goal.activate', activateArgs(again));
+      const t = new pg.Client(pgConfig(urls.app));
+      await t.connect();
+      try {
+        await t.query('BEGIN');
+        const xid = (await t.query(`SELECT pg_current_xact_id()::text AS x`)).rows[0].x as string;
+        await owner(`INSERT INTO "GoalApprovalUse" ("approvalId", "goalId", "action", "xact") VALUES ($1, $2, 'goal.activate', $3)`, [aid2, again, xid]);
+        const e = (await pgError(activate((sql, params) => t.query(sql, params), again, aid2))) as { code?: string; message: string };
+        expect([e.code, e.message]).toEqual(['42501', `goal ${again}: approval ${aid2} was already used`]);
+        await t.query('ROLLBACK');
+      } finally {
+        await t.end();
+      }
+      expect((await app(`SELECT status FROM "Goal" WHERE id = $1`, [again])).rows[0].status).toBe('proposed');
     });
 
     it('a goal or plan statement that changes no row spends nothing either (their approval is used by the UPDATE that lands)', async () => {

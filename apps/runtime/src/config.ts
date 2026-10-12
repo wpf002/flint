@@ -157,12 +157,21 @@ export interface Config {
   gitSha: string;
 }
 
+/**
+ * Names a health check may not have. Its latency is kept as the ops series
+ * `health.<name>.latency_ms`, and the database reads a `spend` segment as
+ * dollars (financial) and a `calendar` segment as the calendar (never ops): it
+ * would refuse the series, and the health source's run with it.
+ */
+const HEALTH_EXTRA_RESERVED: ReadonlySet<string> = new Set(['spend', 'calendar']);
+
 /** `name=https://host/path` pairs; https only, no credentials in the URL. */
 export function parseHealthExtra(raw: string | undefined): Array<{ name: string; url: string }> {
   if (!raw?.trim()) return [];
   return raw.split(',').map((pair, i) => {
     const m = pair.trim().match(/^([a-z0-9][a-z0-9_-]{0,40})=(https:\/\/[^\s,]+)$/);
     if (!m) throw new Error(`HEALTH_EXTRA entry ${i + 1} must be name=https://...`);
+    if (HEALTH_EXTRA_RESERVED.has(m[1]!)) throw new Error(`HEALTH_EXTRA entry ${i + 1} can't be named ${m[1]}: that name is kept for Flint's spend and calendar numbers (try ${m[1]}-api)`);
     const u = new URL(m[2]!);
     if (u.username || u.password || u.search) throw new Error(`HEALTH_EXTRA entry ${m[1]} must not carry credentials or a query`);
     return { name: m[1]!, url: u.toString() };

@@ -160,7 +160,6 @@
   "flint_app UPDATE public.EscalationDelivery.sentAt",
   "flint_app UPDATE public.EscalationDelivery.status",
   "flint_app UPDATE public.ForecastSeries.approvalId",
-  "flint_app UPDATE public.ForecastSeries.enabledAt",
   "flint_app UPDATE public.ForecastSeries.on",
   "flint_app UPDATE public.ForecastSeries.reason",
   "flint_app UPDATE public.ForecastSeries.updatedAt",

@@ -11,7 +11,7 @@
 --  - ECE and the Brier interval are stored only at 100 or more scored.
 -- A forecast's numbers come from financial and personal series: a row refused on
 -- INSERT or UPDATE never puts them in the error's message or DETAIL. Also the six
--- prediction job queues (nothing sends to them yet). It also carries three
+-- prediction job queues (nothing sends to them yet). It also carries four
 -- hardenings back to P3's signed-card helpers (at the end of this file), and
 -- gives MetricPoint the same id-only refusal. The only P4 migration. Reversed by
 -- down.sql in this directory.
@@ -291,12 +291,15 @@ $$;
 -- never born already forgotten, and it is born under the label the database can
 -- tell from it: a series in dollars (or with a `spend` segment in its key) is
 -- financial, and one with a `calendar` segment is never ops. What it is never
--- changes: its key, its unit, its step, when it was made and, above all, its
--- SENSITIVITY (before this, a runtime could relabel a financial series as ops
--- and then mark it as allowed to leave). Its entity is set once (unlinking it
--- would hide it from a forget). Only a forget marks it forgotten (as
--- flint_owner, inside forget_entity: a runtime that wrote the mark itself would
--- stop a number for good), and a forgotten series stays forgotten.
+-- changes: its key, its unit, its step, when it was made, the entity it is
+-- about (or that it is about none) and, above all, its SENSITIVITY (before
+-- this, a runtime could relabel a financial series as ops and then mark it as
+-- allowed to leave). The entity is fixed at birth both ways: unlinking a series
+-- would hide it from a forget, and linking one later would let a runtime tie
+-- any number to an unrelated item, whose forget would then stop that number
+-- for good. Only a forget marks it forgotten (as flint_owner, inside
+-- forget_entity: a runtime that wrote the mark itself would stop a number for
+-- good), and a forgotten series stays forgotten.
 CREATE FUNCTION metric_series_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
@@ -319,14 +322,11 @@ BEGIN
     END IF;
     RETURN NEW;
   END IF;
-  FOREACH k IN ARRAY ARRAY['key', 'unit', 'freq', 'sensitivity', 'createdAt'] LOOP
+  FOREACH k IN ARRAY ARRAY['key', 'entityId', 'unit', 'freq', 'sensitivity', 'createdAt'] LOOP
     IF (to_jsonb(NEW) -> k) IS DISTINCT FROM (to_jsonb(OLD) -> k) THEN
       RAISE EXCEPTION 'series %: its % never changes', OLD."key", k USING ERRCODE = 'insufficient_privilege';
     END IF;
   END LOOP;
-  IF OLD."entityId" IS NOT NULL AND NEW."entityId" IS DISTINCT FROM OLD."entityId" THEN
-    RAISE EXCEPTION 'series %: its entity is set once', OLD."key" USING ERRCODE = 'insufficient_privilege';
-  END IF;
   IF OLD."description" = '[forgotten]' AND NEW."description" IS DISTINCT FROM OLD."description" THEN
     RAISE EXCEPTION 'series %: it was forgotten and stays forgotten', OLD."key" USING ERRCODE = 'insufficient_privilege';
   END IF;
@@ -486,8 +486,10 @@ END;
 $$;
 
 -- A run's own rules (the CHECKs it would otherwise have), naming the rule, never a
--- value. It was computed on this Mac (its provider is `local`, and nothing
--- else). Its points are numbers and times only: [{at, mean, lo, hi}], nothing else
+-- value. It was computed on this Mac: its provider is `local`, and nothing
+-- else, and its endpoint names the local forecaster that made it (`local:` and
+-- a short name; never a URL, a host or a path, so a run recorded as local
+-- cannot name somewhere else). Its points are numbers and times only: [{at, mean, lo, hi}], nothing else
 -- in them. A run that failed says a short code for why (one word of letters,
 -- digits, `_ . : -`; never a sentence) and has no points, no scores and no
 -- verdict; a verdict has both error scores, and a run that beat naive has the
@@ -503,7 +505,7 @@ BEGIN
   bad := CASE
     WHEN NEW."seriesKey" IS NULL OR NEW."points" IS NULL OR NEW."ok" IS NULL OR NEW."createdAt" IS NULL THEN 'a required field'
     WHEN NOT coalesce(NEW."provider" = 'local', false) THEN 'provider'
-    WHEN NOT coalesce(NEW."endpoint" ~ '^[A-Za-z0-9._:/-]{1,80}$', false) THEN 'endpoint'
+    WHEN NOT coalesce(NEW."endpoint" ~ '^local:[a-z0-9._-]{1,60}$', false) THEN 'endpoint'
     WHEN NOT coalesce(NEW."requestDigest" ~ '^[0-9a-f]{64}$', false) THEN 'digest'
     WHEN NOT coalesce(NEW."horizon" BETWEEN 1 AND 720, false) THEN 'horizon'
     WHEN NOT coalesce(NEW."level" > 0 AND NEW."level" < 1, false) THEN 'level'
@@ -552,12 +554,19 @@ $$;
 -- on a run that did not (false, or too short to tell): the method on the record
 -- is what the backtest earned. The local model's estimate
 -- may ride on any ok run, but only for a number whose `reason` switch Will
--- signed and has not turned off. A range carries the run's level. At READ COMMITTED.
+-- signed and has not turned off. A range carries the run's level. And the row
+-- says what its series is: it carries the series' own unit, and it is filed
+-- under `spend` exactly when its series is financial, and under `calendar`
+-- exactly when its series is a calendar one (the two domains the database can
+-- tell from a series), so a forecast of dollars is never on record as a count
+-- of deploys, where whatever reads forecasts by unit or domain would take it
+-- for ops data. At READ COMMITTED.
 CREATE FUNCTION prediction_forecast_check() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   r "ForecastRun"%ROWTYPE;
   f "ForecastSeries"%ROWTYPE;
+  s "MetricSeries"%ROWTYPE;
   pid text := CASE WHEN NEW."id" ~ '^[A-Za-z0-9_-]{1,40}$' THEN NEW."id" ELSE '?' END;
 BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
@@ -571,8 +580,16 @@ BEGIN
   IF NOT FOUND OR NOT f."on" THEN
     RAISE EXCEPTION 'prediction %: series % is not turned on', pid, r."seriesKey" USING ERRCODE = 'insufficient_privilege';
   END IF;
-  IF EXISTS (SELECT 1 FROM "MetricSeries" s WHERE s."key" = r."seriesKey" AND s."description" = '[forgotten]') THEN
+  SELECT * INTO s FROM "MetricSeries" WHERE "key" = r."seriesKey";
+  IF NOT FOUND OR s."description" = '[forgotten]' THEN
     RAISE EXCEPTION 'prediction %: its series was forgotten', pid USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW."unit" IS DISTINCT FROM s."unit" THEN
+    RAISE EXCEPTION 'prediction %: it carries the unit of its series (%)', pid, s."key" USING ERRCODE = 'check_violation';
+  END IF;
+  IF (NEW."domain" IS NOT DISTINCT FROM 'spend') <> (s."sensitivity" = 'financial')
+     OR (NEW."domain" IS NOT DISTINCT FROM 'calendar') <> (s."key" ~ '(^|[.])calendar([.]|$)') THEN
+    RAISE EXCEPTION 'prediction %: its domain is not that of its series (%)', pid, s."key" USING ERRCODE = 'check_violation';
   END IF;
   IF NEW."method" = 'statistical' AND NOT coalesce(r."beatsNaive", false) THEN
     RAISE EXCEPTION 'prediction %: statistical only on a run that beat naive (run %)', pid, r."id" USING ERRCODE = 'insufficient_privilege';
@@ -591,10 +608,11 @@ END;
 $$;
 
 -- A forecast's row (it names a run or a series, carries a range's numbers or a
--- unit, is a range, or claims a forecast method) is checked here against EVERY
--- rule a prediction has, P1's and P3's CHECKs included, before any of them
--- could refuse it and write its numbers into an error. Any other prediction is
--- left to the plain constraints. P4's own rules:
+-- unit, is a range, claims a forecast method, or was written by one of the two
+-- forecast writers) is checked here against EVERY rule a prediction has, P1's
+-- and P3's CHECKs included, before any of them could refuse it and write its
+-- numbers into an error. Any other prediction is left to the plain
+-- constraints. P4's own rules:
 --  - a range has its middle, both ends and a level (finite, lower <= middle <=
 --    upper, 0 < level < 1); a yes/no has none of them;
 --  - a run and a series are named together; `statistical` needs a run, and nothing
@@ -602,7 +620,12 @@ $$;
 --    list for a later comparison, if one is ever built);
 --  - a prediction with a run was written by the forecaster (runtime:forecast) or,
 --    for the local model's estimate, by runtime:reason; it resolves by itself
---    from the metric, is untainted, and is about no goal and no entity.
+--    from the metric, is untainted, and is about no goal and no entity;
+--  - and the other way round: a row either writer makes ALWAYS names its run
+--    and its series (and so meets every rule prediction_forecast_check holds a
+--    forecast to: the number is on, the run is its own, the unit is the
+--    series'). A forecast writer has no way to record a series' numbers as a
+--    loose prediction, which chat's list of open predictions would then show.
 -- BEFORE INSERT: prediction_guard lets none of these columns change afterwards
 -- (prediction_update_valid, below, covers what an UPDATE can still get wrong).
 CREATE FUNCTION prediction_valid() RETURNS trigger
@@ -612,7 +635,8 @@ DECLARE
   n integer := (NEW."pointEstimate" IS NOT NULL)::int + (NEW."lower" IS NOT NULL)::int + (NEW."upper" IS NOT NULL)::int + (NEW."level" IS NOT NULL)::int;
 BEGIN
   IF NOT (NEW."forecastRunId" IS NOT NULL OR NEW."seriesKey" IS NOT NULL OR NEW."unit" IS NOT NULL OR n > 0
-          OR coalesce(NEW."kind" = 'interval', false) OR coalesce(NEW."method" IN ('statistical', 'prophet'), false)) THEN
+          OR coalesce(NEW."kind" = 'interval', false) OR coalesce(NEW."method" IN ('statistical', 'prophet'), false)
+          OR coalesce(NEW."createdBy" IN ('runtime:forecast', 'runtime:reason'), false)) THEN
     RETURN NEW;
   END IF;
   IF NOT coalesce(NEW."id" ~ '^[A-Za-z0-9_-]{1,40}$', false) THEN
@@ -644,6 +668,7 @@ BEGIN
            NEW."lower" > '-Infinity'::float8 AND NEW."upper" < 'Infinity'::float8 AND NEW."lower" <= NEW."pointEstimate" AND NEW."pointEstimate" <= NEW."upper"
            AND NEW."level" > 0 AND NEW."level" < 1, false) THEN 'range'
     WHEN (NEW."forecastRunId" IS NULL) <> (NEW."seriesKey" IS NULL) THEN 'run and series'
+    WHEN NEW."createdBy" IN ('runtime:forecast', 'runtime:reason') AND NEW."forecastRunId" IS NULL THEN 'run and series'
     WHEN NEW."method" = 'prophet' THEN 'method'
     WHEN NEW."method" = 'statistical' AND NEW."forecastRunId" IS NULL THEN 'run'
     WHEN NOT coalesce(NEW."unit" IS NULL OR NEW."unit" ~ '^[a-z_]{1,20}$', false) THEN 'unit'
@@ -851,7 +876,7 @@ CREATE TRIGGER "Proposal_digest_check_forecast" BEFORE INSERT ON "Proposal"
   FOR EACH ROW WHEN (NEW."action" = 'forecast.series.enable') EXECUTE FUNCTION proposal_digest_check();
 
 -- ---- P3's signed cards, with what the forecast card's helper learned ---------------------------------
--- Three hardenings, carried back to the goal and plan cards. CREATE OR REPLACE keeps
+-- Four hardenings, carried back to the goal and plan cards. CREATE OR REPLACE keeps
 -- each function's owner, its grants and its REVOKE FROM PUBLIC; down.sql puts P3's own
 -- bodies back to the letter.
 --  1. The 7-day bound (p3_signed_proposal): a card expires no later than 7 days after
@@ -866,6 +891,11 @@ CREATE TRIGGER "Proposal_digest_check_forecast" BEFORE INSERT ON "Proposal"
 --     guard an UPDATE, whose BEFORE trigger fires only for a row that is then
 --     written (or the statement fails, and the use goes with it), so there the
 --     approval is already used only by a change that lands.
+--  4. Which transaction used it (p3_bind_approval): recorded as its id AND when it
+--     began, as p4_bind_approval records it. A transaction id comes round again
+--     after a restore into a new cluster, and a bare id would then let another
+--     transaction pass for the one that used the card. A use recorded before this
+--     (a bare id) never equals the new form, so it stays used.
 CREATE OR REPLACE FUNCTION p3_signed_proposal(p_approval text, p_goal text, p_actions text[]) RETURNS "Proposal"
 LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
 DECLARE
@@ -895,16 +925,18 @@ CREATE OR REPLACE FUNCTION p3_bind_approval(p_approval text, p_goal text, p_acti
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   u "GoalApprovalUse"%ROWTYPE;
+  -- This transaction, named as p4_bind_approval names it: its id, and when it began.
+  me text := pg_current_xact_id()::text || '@' || (extract(epoch FROM transaction_timestamp()) * 1000000)::bigint::text;
 BEGIN
   IF pg_trigger_depth() < 1 THEN
     RAISE EXCEPTION 'goal %: an approval is used only by the change it signed', left(p_goal, 40) USING ERRCODE = 'insufficient_privilege';
   END IF;
   PERFORM p3_signed_proposal(p_approval, p_goal, ARRAY[p_action]);
   INSERT INTO "GoalApprovalUse" ("approvalId", "goalId", "action", "xact")
-  VALUES (p_approval, p_goal, p_action, pg_current_xact_id()::text)
+  VALUES (p_approval, p_goal, p_action, me)
   ON CONFLICT ("approvalId") DO NOTHING;
   SELECT * INTO u FROM "GoalApprovalUse" WHERE "approvalId" = p_approval;
-  IF NOT coalesce(u."xact" = pg_current_xact_id()::text AND u."goalId" = p_goal AND u."action" = p_action, false) THEN
+  IF NOT coalesce(u."xact" = me AND u."goalId" = p_goal AND u."action" = p_action, false) THEN
     RAISE EXCEPTION 'goal %: approval % was already used', p_goal, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
 END;
@@ -1000,5 +1032,6 @@ REVOKE ALL ON "ForecastRun", "ForecastSeries", "PredictionQuestion", "ForecastAp
 GRANT EXECUTE ON FUNCTION p4_signed_proposal(text, text), p4_bind_approval(text, text) TO flint_app;
 
 GRANT SELECT, INSERT ON "ForecastRun" TO flint_app;
-GRANT SELECT, INSERT, UPDATE ("on", "reason", "approvalId", "enabledAt", "updatedAt") ON "ForecastSeries" TO flint_app;
+-- enabledAt is the database's to stamp (forecast_series_guard, on each signed change): the runtime never updates it.
+GRANT SELECT, INSERT, UPDATE ("on", "reason", "approvalId", "updatedAt") ON "ForecastSeries" TO flint_app;
 GRANT SELECT, INSERT, UPDATE ("answer", "answeredAt") ON "PredictionQuestion" TO flint_app;
