@@ -771,42 +771,105 @@ read and nothing sent anywhere:
 | Number | What one day (or week) is |
 |---|---|
 | Anthropic, OpenAI, Perplexity, Tavily Spend | The day's last reading of that vendor's running total. |
-| Deploys | Deployments first seen, or seen with a new commit, that day. |
-| Flint, Nexus, Trident, Helm Commits | Commits in your clone that week (a count from git; it never fetches). |
+| Deploys | Deployments seen with a new commit that day, and deployments seen for the first time. The day a place (the Studio, Railway) is first read, everything deployed there is seen for the first time at once: those were already there and aren't counted. |
+| Flint, Nexus, Trident, Helm Commits | Commits that landed on the main branch of your clone that week. A branch's commits count when they land on main, as one merge, never before. The count is from git and never fetches. |
 | Service Downtime | Minutes any of Flint's or Nexus's services was down that day. |
 | Open Threads | Threads open at the end of the day. It has no numbers until the Nexus source is on. |
-| Calendar Hours | Hours of events you accepted, or made, that day. All-day events and ones cancelled before they ended don't count. |
+| Calendar Hours | The hours of the day that had an event you accepted, or made. Two events that overlap count once, so a day never has more than 24. All-day events and ones cancelled before they ended don't count. An event moved before it ended counts at its new time. |
 
 A day is your local day, so a 23- or 25-hour day is one day. A number is
 written once and never rewritten. The first run fills in what Flint still has
 (up to 400 days, or 60 weeks). A day the runtime was down for more than 20
 hours is left blank, never written as zero, because nothing was watching.
 
-**The forecast.** A number needs 14 days of history (8 weeks for a weekly
-one). Flint then tries a few simple forecasters against that number's own
-past, and compares the best of them with a plain guess: the last value, the
-same weekday last week, or the recent average.
+Each number remembers where it was read to. The next night reads on from
+there, so the night's work is the day that just ended, however long Flint has
+been running. A blank day is read once and stays blank.
 
-- If a forecaster beats the plain guess by 5% or more, the forecast is recorded
-  as `statistical`.
-- If none does, or there's too little history to tell, it's recorded as
-  `base_rate`, and Flint's words for it are "no reliable trend".
-- Either way it records an 80% range, taken from how far off that forecaster
-  was in the past, and a yes/no question: will today be above the usual?
+Commits are counted on main only because that's the one count that is the
+same whenever it's taken. Counting every branch in the clone gave 79 for a
+week that had 15 on main, and a different answer for the same week a month
+later.
+
+**The forecast.** A number needs 24 days of history (19 weeks for a weekly
+one). That's what it takes to have ten past errors to build a range from.
+Flint then tries a few simple forecasters against that number's own past, and
+compares the best of them with a plain guess: the last value, the same
+weekday last week, or the recent average.
+
+- **Yesterday's number has to be in.** A forecast leans hardest on its latest
+  value, so Flint never makes one from a value it filled in. If yesterday's
+  number is missing, that number waits a night. Older gaps of a day or two are
+  filled from the week before, but never more than a fifth of the history,
+  and each forecast records how many of its days were filled.
+- **A forecaster has to earn its place.** It's kept over the plain guess only
+  with 56 days of history (26 weeks), only if it beat the plain guess by 5%,
+  and only if that edge is more than chance. Then the forecast is recorded as
+  `statistical`.
+- **Otherwise it's the plain guess,** recorded as `base_rate`, and Flint's
+  words for it are "no reliable trend".
+- **Either way it records an 80% range,** taken from how far off that
+  forecaster has been. A range needs ten past errors behind it. With fewer,
+  Flint states none.
+- **Weekdays get their own range when that fits better.** If a number's busy
+  days and quiet days differ, one range for all of them is too wide on the
+  quiet days and too narrow on the busy ones. Flint tries it both ways
+  against the number's own past and uses the one that held up better.
+- **A yes/no question: will today be above the usual?** Its chance is how
+  often recent days were above the usual. Flint says more than that only when
+  the forecast has shown, on this number's own past, that it knows more, and
+  never more than its record supports: it takes 26 right calls in a row
+  before it may say 90%.
+- **One forecast per number per day (or week).** If one is already waiting to
+  be scored, Flint doesn't make a second.
 - A number that hasn't changed in 28 days gets no prediction. A range of 0 to 0
   would be right every day and flatter every score.
 
 It's arithmetic in the runtime: no outside service, no model, and the same
-numbers always give the same forecast. About 25 ms per number.
+numbers always give the same forecast. Under 2 ms for a number with four
+months of history, about 20 ms for one with 400 days.
+
+**How honest it is.** These rules came from measuring the first version on
+made-up numbers shaped like the real ones (a forecast every night for 100
+days, 120 series of each shape). A test repeats the measurement on every
+change. When the question said "90% or more":
+
+| Shape of number | First version | Now |
+|---|---|---|
+| Mostly zero with rare bursts (downtime) | 747 nights, came true 10% | Never says it |
+| Sparse counts (deploys) | 639 nights, 26% | Never |
+| Nothing to find (counts, dollars, hours) | 289 nights, 32% to 56% | Never |
+| Busy weekdays, quiet weekends | 4,154 nights, 53% to 77% | Never |
+| A number that drifts (open threads) | 2,903 nights, 97% | 179 nights, 98% |
+
+On the burst shape the question now scores the same as always saying the base
+rate (0.092; the first version scored 0.156, where lower is better). The cost
+is that it says less where it did know something: on the drifting number its
+score went from 0.085 to 0.150, still half the base rate's 0.303.
+
+A forecaster was kept by luck on numbers with nothing to find in up to 19% of
+runs at day 22. Now it's 0% to 5%, at day 56, and none before. The cost: on
+numbers with a real weekday pattern a forecaster is kept about half the time
+after day 56 (it was three times in four), so more of those are said as "no
+reliable trend" for longer.
+
+The 80% range held on busy days 75% of the time and on quiet days 97% to 100%.
+Now it's 77% to 78% on busy days and 88% to 89% on quiet ones. Whole counts
+can't be cut that fine: a Sunday that's 0 three weeks in four still gets a
+range that holds 98% of the time.
 
 **What you see.** Nothing yet. The numbers, forecasts and results are kept
 (the actions run in shadow), and the Predictions panel that shows them is the
 next part. Forecast numbers never go into chat, notes or logs.
 
 **Settings > Health** has a row, **Forecasts**. It's Off until a number is on.
-It needs a look when last night's forecasts or numbers didn't run, or when one
-failed. It's Down after two nights. A number still waiting for enough history
-is said, and isn't a fault.
+It needs a look when last night's forecasts or numbers didn't run, when a
+forecast failed, when the database refused one, or when the night stopped at
+its daily limit. Each says which. It's Down after two nights. "Ran" is said
+only of a run in the last 26 hours, and never of zero numbers. A restart buys
+70 minutes and no more, so a forecaster that has stopped doesn't read Normal
+because the runtime restarted. A number still waiting for enough history, or
+for yesterday's number, is said, and isn't a fault.
 
 ### Turning predictions on
 
@@ -821,15 +884,19 @@ Two steps. Claude does the first with your OK; only you can do the second.
 
    That files one Turn On Predictions card for all twelve numbers (or name the
    ones you want after the command). It prints what it filed. Run again, it
-   returns the same card.
+   returns the same card. If `FLINT_PREDICT` isn't on, it files nothing, says
+   so, and fails, because a card signed then would start nothing. It also
+   fails, with Flint's own sentence, if a number it was given can't be
+   forecast.
 2. You open Flint, click **Approvals** in the top bar, open **Turn On
    Predictions**, check the numbers it names, and approve it with Touch ID. It
    asks on its own, never in Approve All, and expires in 7 days.
 
-The first forecasts appear the night after a number has 14 days of history.
-Spend, deploys, downtime and calendar hours are filled in from what Flint
-already has, so most start that night. To turn a number off again there's no
-button yet; ask Claude, and no signature is needed.
+The first forecasts appear the night after a number has 24 days of history
+(19 weeks for commits). Spend, deploys, downtime, commits and calendar hours
+are filled in from what Flint already has, so most start that night. To turn a
+number off again there's no button yet; ask Claude, and no signature is
+needed.
 
 ### Checking predictions
 
@@ -964,7 +1031,12 @@ sweep wrote it. Parts 2 and 3 have no database update of their own.
 
 ### What changed on deploy
 
-Three things, and none changes anything you use:
+Three things from the first part, and one from the third. None changes
+anything you use:
+
+- The third part has a small database update of its own: two new columns
+  (see "Rolling P4 back"). Both start empty and are written only by the two
+  nightly jobs, which don't run until predictions are on.
 
 - `POST /v1/ledger/predictions` now takes only what chat's
   `ledger_record_prediction` sends. It refuses any other method or resolver,
@@ -1016,8 +1088,11 @@ action so named.
   when it files one.
 - **A template only the runtime fills** goes in `RUNTIME_CLAIM_TEMPLATE_IDS`
   in `packages/policy/src/claims.ts`, which keeps it out of chat's. A goal
-  review's `goal_on_track` and the forecaster's `series_range` are there. The
-  ledger route takes `ChatPrediction` and nothing wider.
+  review's `goal_on_track` and the forecaster's `series_range` and
+  `series_above` are there. The ledger route takes `ChatPrediction` and
+  nothing wider. A forecast's question says "on" its day (`series_above`),
+  since it's about the whole day or week; chat's `threshold` says "at the
+  resolve time" and is left as it is.
 - **Anything else that writes a forecast's predictions** must do it as the
   runner does (`predict/run.ts`): the rule the sweep settles them by in
   `resolverSpec` (`{seriesKey, at, end, op: 'range'}` or `{seriesKey, at, end,
@@ -1031,12 +1106,31 @@ action so named.
   never writes one.
 - **The Predictions panel** must show a forecast's range only through the
   phrase table (`predict/phrasing.ts`): "about 4, with an 80% range of 2 to 6"
-  when the run beat a plain guess, "no reliable trend" when it didn't. It also
-  needs a Turn Off button (turning a number off needs no signature).
+  when the run beat a plain guess, and "no reliable trend, and a plain guess
+  gives an 80% range of 0 to 3" when it didn't. It also needs a Turn Off
+  button (turning a number off needs no signature), and words for the two
+  ways a number waits: for more history (24 days, 19 weeks), and for
+  yesterday's number. A run may hold fewer than seven days ahead: only the
+  days it has ten past errors for.
+- **The next database update** should take two things this part holds in code
+  only:
+  - A recorded day can still be changed or deleted by the runtime's own
+    database role, and a point that isn't a number, is negative, or is dated
+    ahead is accepted. The numbers job never does any of that ("written once"
+    is its own rule), but the database doesn't refuse it.
+  - A day is stored under its first instant in the zone of the time. If
+    `FLINT_TZ` changes, older days read as the day before, and the first night
+    writes a second point for a day that already has one. A forecast made
+    before the change is still settled against the day it was about (its rule
+    carries that day's end); the history it's read from is what moves. Don't
+    change `FLINT_TZ` with predictions on until the days are stored by their
+    date.
 - **The local model's estimate** (a later part) is the only file under
   `predict/` that may reach anything, and only loopback Ollama through
   `scopedFetch`. `test/predict/no-egress.test.ts` lists every file there and
-  must name that one.
+  must name that one. `test/predict/no-egress-db.test.ts` runs the night's
+  jobs with the network taken away and every command recorded: a new command,
+  or anything that reaches for the network, fails it.
 - **Whatever writes a run** (the runner does; the local model's estimate will)
   must write it and its predictions at READ COMMITTED
   (the database refuses them above it). A refused run means the number was
@@ -1104,6 +1198,23 @@ action so named.
   that came false sets off a review of a goal that watches the item only when
   both the result and what it was about are from the last 7 days. So the
   first check of old predictions sets off reviews only for last week's.
+- **The question says less than it could.** To never say "90%" of something
+  that happens one night in ten, the yes/no question now says the plain share
+  of recent days unless the forecast has earned more on that number's own
+  past, and it needs 26 right calls in a row before it may say 90%. On a
+  number that really does drift, that's a blunter answer for the first few
+  months than the first version gave.
+- **The honesty numbers are from made-up series.** Every coverage and
+  calibration figure above is measured on simulated numbers shaped like the
+  real ones. Your own numbers get their real scores from the nightly check,
+  once predictions are on.
+- **Commits are what your clone has.** The count is of the main branch as the
+  clone last fetched it. A clone that isn't fetched for a week counts that
+  week low, and the number, once written, stays.
+- **A deployment that was already there isn't a deploy, by place.** The first
+  day a place is read, none of its first sightings count. A deployment added
+  to that place later counts on the day it's first seen, even if it had been
+  running elsewhere.
 - **Taking advice means acknowledging its note.** Flint reads "you took the
   advice" from the note being acknowledged before the prediction's time. It has
   no other way to know yet.
@@ -1137,11 +1248,20 @@ action so named.
 
 ### Rolling P4 back
 
-The migration's `down.sql` (`20261013000000_p4_forecasts`) belongs to a rollback:
+P4 has two database updates, and each has a `down.sql` that belongs to a
+rollback. They're run newest first:
+
+- `20261014000000_p4_forecast_inputs` (this part): two columns, how many days
+  of each forecast were filled in and where each number was read to. Its
+  `down.sql` drops them and loses nothing else. Run alone, it needs a runtime
+  from before this part.
+- `20261013000000_p4_forecasts` (the store). Its `down.sql` is the real
+  rollback:
 
 1. First deploy a runtime from before P4, with `FLINT_PREDICT` off. P4's job bus
    expects the six prediction queues that `down.sql` drops.
-2. Then take a dump and run `down.sql` by hand. Forecast runs, which numbers
+2. Then take a dump and run the two `down.sql` files by hand, the newer one
+   first. Forecast runs, which numbers
    were on, and your questions and answers go with it. So do the scores only P4
    keeps (range scores and the finer measures), which a later snapshot
    recomputes. Every prediction and resolution stays, and so does each yes/no
