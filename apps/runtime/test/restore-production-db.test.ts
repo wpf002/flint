@@ -63,7 +63,7 @@ const refusal = async (p: Promise<unknown>): Promise<RestoreRefused> => {
   return err;
 };
 const emptyReport: CarryReport = {
-  currentRead: true, revoked: 0, mismatched: 0, keysNotCarried: [], policiesOff: 0, rulesOff: 0, unsignedPolicies: [], unsignedRules: [], approvals: 0, proposals: 0,
+  currentRead: true, revoked: 0, mismatched: 0, keysNeverHeld: [], keysNotCarried: [], policiesOff: 0, rulesOff: 0, unsignedPolicies: [], unsignedRules: [], approvals: 0, proposals: 0,
   deliveries: 0, jobs: 0, counters: 0, forgets: [], reappearing: { cards: 0, ran: 0 }, liveKeys: [], promotions: [], rules: [],
 };
 
@@ -142,7 +142,8 @@ describe('the command is Will’s alone', () => {
       keysNotCarried: [{ label: 'New phone', factor: 'webauthn', enrolledAt: new Date('2026-10-11T00:00:00Z') }],
       unsignedPolicies: [{ pattern: 'backup.*', why: 'the key that signed it is revoked' }], unsignedRules: [{ name: 'quiet_ci', why: 'it is not in the card you signed' }],
       forgets: [{ id: 'e1', kind: 'person' }, { id: 'e2', kind: 'thread' }], reappearing: { cards: 2, ran: 1 },
-      liveKeys: [{ label: 'Stranger\u001b[31m', factor: 'webauthn', enrolledAt: new Date('2026-10-02T00:00:00Z'), known: false }],
+      keysNeverHeld: [{ label: 'Stranger\u001b[31m', factor: 'webauthn', enrolledAt: new Date('2026-10-02T00:00:00Z'), known: false }],
+      liveKeys: [{ label: 'Studio', factor: 'secure_enclave', enrolledAt: new Date('2026-10-02T00:00:00Z'), known: true }],
       promotions: [{ pattern: 'world.sync.github', tier: 'alone', dailyCap: null, expiresAt: new Date() }, { pattern: 'mcp:*', tier: 'forbidden', dailyCap: null, expiresAt: new Date() }], rules: ['quiet_ci'],
     };
     const lines = carryLines(r, 'UTC', 'production');
@@ -157,12 +158,14 @@ describe('the command is Will’s alone', () => {
     expect(text).toContain('You dealt with 2 cards after this backup, and they are waiting again; 1 of them had already run. Reject what you do not want done twice.');
     expect(text).toContain('You told Flint to forget 2 things after this backup, and they are back (person, thread). Forget them again in the console.');
     expect(text).toContain('Notes and jobs that were waiting when the backup was made were closed, so nothing is sent twice.');
-    // A key the database in use does not hold is pointed out; a label cannot put control characters on the terminal.
-    expect(text).toContain('This key can approve: "Stranger??31m", a passkey, enrolled October 2, 2026. It is not in the database in use now: revoke it if you do not know it.');
+    // A key the database in use never held is revoked, and said by name; a label cannot put control characters on the terminal.
+    expect(text).toContain('Flint revoked the approval key "Stranger??31m" from the backup, because the database in use never held it. Enrol it again if it is yours.');
+    expect(text).toContain('This key can approve: "Studio", this Mac\'s key, enrolled October 2, 2026.');
+    expect(text).not.toMatch(/revoke it if you do not know it/);
     expect(text).toContain('Flint may do 1 thing on its own: world.sync.github.');
     expect(text).toContain('You have 1 limit in force: mcp:*.');
     expect(text).toContain('You have 1 triage rule in force: quiet_ci.');
-    for (const l of lines) expect(l, l).toMatch(/^([A-Z].*[.:]|  pnpm .*)$/);
+    for (const l of lines) expect(l, l).toMatch(/^([A-Z].*[.:]|  cd ~\/flint && pnpm .*)$/);
     // When the database in use could not be read, or there is none (a rebuild), that is said first.
     expect(carryLines({ ...emptyReport, currentRead: false }, 'UTC', 'production')[0]).toMatch(/could not read the database in use, so anything you revoked, switched off or told Flint to forget after this backup may be back/);
     expect(carryLines({ ...emptyReport, currentRead: false }, 'UTC', 'rebuild')[0]).toMatch(/The rebuilt Flint starts from the backup/);
@@ -547,7 +550,15 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const foreign = copyOf();
       const otherKey = join(scratchDir('flint-key-'), 'key');
       writeDumpHash(foreign, dumpSha, otherKey);
-      await expect(check(foreign)).rejects.toThrow(/was not written by this Mac's Flint/);
+      const notOurs = await refusal(check(foreign));
+      expect(notOurs.message).toBe("The fingerprint saved with that backup was not written by this Mac's Flint. Choose another backup.");
+      expect(notOurs.lines).toEqual(["If this Mac's Flint was rebuilt since that backup, its fingerprints can no longer be checked. To restore it all the same, add --without-fingerprint to the command."]);
+      // The key is made new when Flint is rebuilt on the same Mac, and every dump from before is sealed with the old
+      // one. Told to go on without a fingerprint, a seal that cannot be checked is no record at all, not a refusal.
+      expect((await check(foreign, { withoutFingerprint: true })).fingerprint).toBe('none');
+      // A record that CAN be checked still counts, and still has to match, whatever was said.
+      expect((await check(foreign, { withoutFingerprint: true, recorded: [dumpSha] })).fingerprint).toBe('matches');
+      await expect(check(foreign, { withoutFingerprint: true, recorded: ['b'.repeat(64)] })).rejects.toThrow(/has changed since it was written/);
       const renamed = copyOf(dumpNameAt(new Date(takenAt.getTime() - 2 * 86_400_000)));
       cpSync(`${dump}.sha256`, `${renamed}.sha256`);
       await expect(check(renamed)).rejects.toThrow(/was not written by this Mac's Flint/);
@@ -921,6 +932,51 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       writeFileSync(holdFile, 'paused by rollback\n');
       await restoreDatabase(options(p, { holdFile, checkOnly: true }));
       expect(readFileSync(holdFile, 'utf8')).toBe('paused by rollback\n');
+      // So is one a restore that is still running holds (this very process stands in for it).
+      writeFileSync(holdFile, `restore ${process.pid} 2026-10-01T00:00:00.000Z\n`);
+      await restoreDatabase(options(p, { holdFile, checkOnly: true }));
+      expect(readFileSync(holdFile, 'utf8')).toBe(`restore ${process.pid} 2026-10-01T00:00:00.000Z\n`);
+    });
+
+    it('a pause left by a restore that was killed is replaced by this run’s own, so no update is installed across it', async () => {
+      const p = await production();
+      const holdFile = join(scratchDir('flint-hold-'), 'deploy-hold');
+      // A process id nothing has: the deploy job would lift this pause at its next tick, and then deploy.
+      const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+      expect(dead).toMatch(/^\d+$/);
+      writeFileSync(holdFile, `restore ${dead} 2026-10-01T00:00:00.000Z\n`);
+      let during = '';
+      await restoreDatabase(options(p, { holdFile, checkOnly: false, confirm: async () => { during = readFileSync(holdFile, 'utf8'); return false; } })).catch(() => undefined);
+      expect(during).toMatch(new RegExp(`^restore ${process.pid} `));
+      // Its own pause is lifted when it ends.
+      expect(existsSync(holdFile)).toBe(false);
+    });
+
+    it('an update that starts while the backup is being checked stops the swap: asked again before the runtime is stopped, and once more before the database is closed', async () => {
+      const p = await production();
+      const before = await databases();
+      // The second time it is asked (the checks are done, nothing in use touched yet): the runtime is never stopped.
+      fresh();
+      let asked = 0;
+      const early = await refusal(restoreDatabase(options(p, { deployRunning: () => ++asked >= 2 })));
+      expect(early.message).toBe('An update is being installed, so Flint did not swap the databases. Nothing was changed.');
+      expect(early.lines).toEqual(['Wait for it to finish, then run this again.']);
+      expect(calls).toEqual([]);
+      expect(asked).toBe(2);
+      // The third time (the runtime is stopped, the database still open): the runtime is started again.
+      fresh();
+      asked = 0;
+      const late = await refusal(restoreDatabase(options(p, { deployRunning: () => ++asked >= 3 })));
+      expect(late.message).toBe('An update is being installed, so Flint did not swap the databases. Nothing was changed.');
+      expect(calls).toEqual(['stop', 'start']);
+      expect(await isOpen(p.name)).toBe(true);
+      expect(await statusOf(p.owner, p.marker)).toMatchObject({ status: 'pending' });
+      expect(await databases()).toEqual(before);
+      // Never while it is not: three questions, three times no, and it restores.
+      fresh();
+      asked = 0;
+      await restoreDatabase(options(p, { deployRunning: () => (++asked, false) }));
+      expect(asked).toBe(3);
     });
   });
 
@@ -1004,7 +1060,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(await databases()).toEqual(before);
     });
 
-    it('a promotion Will’s signature does not cover is switched off, and a key the database in use never held is pointed out', async () => {
+    it('a promotion Will’s signature does not cover is switched off, and a key the database in use never held is revoked', async () => {
       // The forger adds a promotion to a card Will really signed, and a whole chain of their own: key, card, approval, promotion.
       const bad = await production();
       const roles = { owner: bad.owner, app: bad.app, approver: bad.approver };
@@ -1022,13 +1078,22 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const r = await restoreDatabase(options(p, { dump: d.path }));
       expect(r.report.unsignedPolicies).toEqual(expect.arrayContaining([
         { pattern: 'selfmod.*', why: 'it is not in the card you signed' },
-        { pattern: 'mcp:shell.run', why: 'the key that signed it is not in the database in use' },
+        // (Its key was revoked a step earlier, for never having been in the database in use: see below.)
+        { pattern: 'mcp:shell.run', why: 'the key that signed it is revoked' },
       ]));
       const active = await connect(p.owner, async (c) => (await c.query<{ pattern: string }>(`SELECT pattern FROM "ActionPolicy" WHERE active ORDER BY 1`)).rows.map((x) => x.pattern));
       expect(active).toEqual(['backup.local', 'digest.send', 'world.sync.github']);
-      // The forger's key is still a row in the backup: it is pointed out, by label, for Will to revoke.
-      expect(r.report.liveKeys.find((k) => k.label === 'Not Will')).toMatchObject({ known: false });
-      expect(carryLines(r.report, 'UTC', 'production').join('\n')).toMatch(/"Not Will", this Mac's key, enrolled .* It is not in the database in use now: revoke it if you do not know it\./);
+      // The forger's key is a row in the backup. Keys are never deleted, so one the database in use never held was never
+      // enrolled here: it is revoked, by name, and cannot approve anything.
+      expect(r.report.keysNeverHeld.map((k) => k.label)).toEqual(['Not Will']);
+      expect(r.report.liveKeys.map((k) => k.label).sort()).toEqual(['Old laptop', 'Studio']);
+      expect((await one<{ revoked: boolean }>(p.owner, `SELECT "revokedAt" IS NOT NULL AS revoked FROM "ApprovalCredential" WHERE label = 'Not Will'`))!.revoked).toBe(true);
+      const lines = carryLines(r.report, 'UTC', 'production').join('\n');
+      expect(lines).toContain('Flint revoked the approval key "Not Will" from the backup, because the database in use never held it. Enrol it again if it is yours.');
+      expect(lines).not.toMatch(/This key can approve: "Not Will"/);
+      // It is in the audit's count of what was revoked.
+      const audited = await connect(p.app, async (c) => (await c.query<{ inputs: { revoked: number } }>(`SELECT inputs FROM "AuditEntry" WHERE action = 'restore.production' ORDER BY at DESC LIMIT 1`)).rows[0]!);
+      expect(audited.inputs.revoked).toBe(1);
     });
   });
 
@@ -1659,7 +1724,8 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       holdFile: join(home, '.flint', 'deploy-hold'), recordFile: join(home, '.flint', 'restore-log.jsonl'),
       tools: cluster.tools, path: process.env.PATH ?? '', launchctl: false, ...over,
     });
-    const noLaunchd = async (_bin: string, args: string[]) => { if (args[0] === 'print') throw new Error('not loaded'); return ''; };
+    // A launchd that may not be asked, as under any test runner: nothing is said about the runtime either way.
+    const noLaunchd = async (_bin: string, args: string[]) => { if (args[0] === 'print') throw new NotRunHere('launchctl is not run here'); return ''; };
 
     it('restore-production --check runs with no one at the keyboard, changes nothing in use, and says how long a restore takes and what would be in force', async () => {
       const before = await databases();

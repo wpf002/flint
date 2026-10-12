@@ -132,6 +132,8 @@ export interface CarryReport {
   revoked: number;
   /** Approval keys revoked because the backup's copy of the key is not the one in use. */
   mismatched: number;
+  /** Approval keys in the backup that the database in use never held, revoked: a key is never deleted, so such a key was never Will's here. */
+  keysNeverHeld: KeyLine[];
   /** Keys enrolled since the backup: not in the restored copy. */
   keysNotCarried: KeyLine[];
   /** Promotions and triage rules switched off since the backup, switched off again. */
@@ -302,9 +304,18 @@ export async function carryForward(c: pg.Client, o: CarryOptions): Promise<Carry
     const curKeys = new Map((cur?.credentials ?? []).map((k) => [k.credentialId, k]));
     let revoked = 0;
     let mismatched = 0;
+    const keysNeverHeld: KeyLine[] = [];
     for (const k of restoredKeys) {
       const now = curKeys.get(k.credentialId);
-      if (!now) continue;
+      if (!now) {
+        // The database in use was read and has no such key. Keys are never deleted there, so this one was never
+        // enrolled on this Flint: it is revoked, not left for Will to notice. (Unread, nothing can be told.)
+        if (cur && !k.revokedAt) {
+          await c.query(`UPDATE public."ApprovalCredential" SET "revokedAt" = $2 WHERE "credentialId" = $1 AND "revokedAt" IS NULL`, [k.credentialId, o.now]);
+          keysNeverHeld.push(keyLine(k, false));
+        }
+        continue;
+      }
       const sameKey = Buffer.compare(now.publicKey, k.publicKey) === 0;
       if (!k.revokedAt && (now.revokedAt || !sameKey)) {
         await c.query(`UPDATE public."ApprovalCredential" SET "revokedAt" = $2, "signCount" = GREATEST("signCount", $3) WHERE "credentialId" = $1 AND "revokedAt" IS NULL`, [
@@ -410,7 +421,7 @@ export async function carryForward(c: pg.Client, o: CarryOptions): Promise<Carry
 
     await c.query('COMMIT');
     return {
-      currentRead: cur !== undefined, revoked, mismatched, keysNotCarried, policiesOff, rulesOff, unsignedPolicies, unsignedRules,
+      currentRead: cur !== undefined, revoked, mismatched, keysNeverHeld, keysNotCarried, policiesOff, rulesOff, unsignedPolicies, unsignedRules,
       approvals: a.rowCount ?? 0, proposals: p.rowCount ?? 0, deliveries, jobs, counters, forgets, reappearing, liveKeys, promotions, rules: rulesOn,
     };
   } catch (err) {
@@ -441,6 +452,7 @@ export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'reb
   }
   if (r.revoked) out.push(r.revoked === 1 ? 'The approval key you revoked after this backup stays revoked.' : `The ${r.revoked} approval keys you revoked after this backup stay revoked.`);
   if (r.mismatched) out.push(`Flint revoked ${count(r.mismatched, 'approval key', 'approval keys')} from the backup, because ${r.mismatched === 1 ? 'it is' : 'they are'} not the same as in the database in use.`);
+  for (const k of r.keysNeverHeld) out.push(`Flint revoked the approval key "${plain(k.label)}" from the backup, because the database in use never held it. Enrol it again if it is yours.`);
   for (const k of r.keysNotCarried) out.push(`The approval key "${plain(k.label)}" was enrolled after this backup, so it is not in it. Enrol it again.`);
   if (r.policiesOff + r.rulesOff) out.push(`What you switched off after this backup stays off: ${count(r.policiesOff + r.rulesOff, 'permission', 'permissions')}.`);
   const unsigned = [...r.unsignedPolicies.map((p) => ({ what: `Flint doing ${plain(p.pattern)} on its own`, why: p.why })), ...r.unsignedRules.map((u) => ({ what: `the triage rule ${plain(u.name)}`, why: u.why }))];
@@ -464,7 +476,7 @@ export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'reb
     out.push('  cd ~/flint && pnpm --silent --filter @flint/runtime enroll --replace');
   }
   for (const k of r.liveKeys) {
-    out.push(`This key can approve: "${plain(k.label)}", ${kindOfKey(k.factor)}, enrolled ${day(k.enrolledAt, tz)}.${k.known === false ? ' It is not in the database in use now: revoke it if you do not know it.' : ''}`);
+    out.push(`This key can approve: "${plain(k.label)}", ${kindOfKey(k.factor)}, enrolled ${day(k.enrolledAt, tz)}.`);
   }
   const alone = r.promotions.filter((p) => p.tier === 'alone');
   const limits = r.promotions.filter((p) => p.tier !== 'alone');

@@ -258,12 +258,21 @@ export async function checkDump(dump: string, tools: Tools, opts: DumpCheckOptio
     if (mac !== undefined && key) {
       if (!HEX64.test(mac) || counts === undefined || !(counts === '-' || HEX64.test(counts))) throw unreadable();
       const want = Buffer.from(seal(key, basename(dump), sha256, counts), 'hex');
-      if (!timingSafeEqual(want, Buffer.from(mac, 'hex'))) {
-        throw new RestoreRefused("The fingerprint saved with that backup was not written by this Mac's Flint. Choose another backup.", { stage: 'fingerprint' });
+      const sealed = timingSafeEqual(want, Buffer.from(mac, 'hex'));
+      // A seal this Mac's key did not make is a refusal, unless Will has said to go on without a fingerprint: then it
+      // is no record at all. (The key is made new when Flint is rebuilt on the same Mac, and the dumps from before
+      // are still his: without this, losing the key would leave every one of them unrestorable.)
+      if (!sealed && !opts.withoutFingerprint) {
+        throw new RestoreRefused("The fingerprint saved with that backup was not written by this Mac's Flint. Choose another backup.", {
+          stage: 'fingerprint',
+          lines: ["If this Mac's Flint was rebuilt since that backup, its fingerprints can no longer be checked. To restore it all the same, add --without-fingerprint to the command."],
+        });
       }
-      const countsNow = existsSync(countsFile) ? hashOf(countsFile) : '-';
-      if (counts !== countsNow) throw new RestoreRefused('The row counts beside that backup have changed since they were written. Choose another backup.', { stage: 'fingerprint' });
-      recorded += 1;
+      if (sealed) {
+        const countsNow = existsSync(countsFile) ? hashOf(countsFile) : '-';
+        if (counts !== countsNow) throw new RestoreRefused('The row counts beside that backup have changed since they were written. Choose another backup.', { stage: 'fingerprint' });
+        recorded += 1;
+      }
     }
   }
   // 2. Every other record of it.
@@ -841,8 +850,28 @@ async function alreadyRestored(c: pg.Client, sha256: string): Promise<boolean> {
 
 /** The file that pauses updates, taken for this run unless one is already there (then it is someone else's, and left alone). */
 function takeHold(file: string | undefined): () => void {
-  if (!file || existsSync(file) || !existsSync(dirname(file))) return () => {};
+  if (!file || !existsSync(dirname(file))) return () => {};
   const mine = `restore ${process.pid} `;
+  // A pause left by a restore that is no longer running is nobody's: the deploy job would lift it at its next tick
+  // and then install an update across this restore. It is replaced by this run's own. Anyone else's pause (a
+  // rollback's, one made by hand, a restore that is still running) is left exactly as it is.
+  try {
+    const held = /^restore (\d{1,10}) /.exec(readFileSync(file, 'utf8'));
+    if (!held) return () => {};
+    const pid = Number(held[1]);
+    let alive = pid === process.pid;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch (err) {
+      // EPERM: there is such a process, and it is someone else's. Anything else: no such process.
+      alive = alive || (err as { code?: string }).code === 'EPERM';
+    }
+    if (alive) return () => {};
+    unlinkSync(file);
+  } catch {
+    // No pause there (the usual case), or it went as it was read.
+  }
   try {
     writeFileSync(file, `${mine}${new Date().toISOString()}\n`, { mode: 0o600, flag: 'wx' });
   } catch {
@@ -1222,6 +1251,10 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     try {
       if (prodOid === undefined || copyOid === undefined) throw new Error('a database this needs is gone');
       stopIfAsked();
+      // Asked again, now that the checks (which take a while) are behind: an update started by hand does not look
+      // at the pause, and nothing may be installed across the swap.
+      const installing = (): RestoreRefused => new RestoreRefused('An update is being installed, so Flint did not swap the databases.', { stage: 'deploy', lines: ['Wait for it to finish, then run this again.'] });
+      if (await o.deployRunning?.()) throw installing();
       try {
         await o.stopRuntime();
         stopped = true;
@@ -1234,10 +1267,12 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
       const late = await readNow();
       if (late) {
         const again = await withClient(copyOwner, (c) => carryForward(c, { current: late, ...(o.rp ? { rp: o.rp } : {}), now: new Date() }));
-        report = { ...again, approvals: report.approvals, proposals: report.proposals, deliveries: report.deliveries, jobs: report.jobs, revoked: report.revoked + again.revoked, mismatched: report.mismatched + again.mismatched,
+        report = { ...again, approvals: report.approvals, proposals: report.proposals, deliveries: report.deliveries, jobs: report.jobs, revoked: report.revoked + again.revoked, mismatched: report.mismatched + again.mismatched, keysNeverHeld: [...report.keysNeverHeld, ...again.keysNeverHeld],
           policiesOff: report.policiesOff + again.policiesOff, rulesOff: report.rulesOff + again.rulesOff, counters: report.counters + again.counters,
           unsignedPolicies: [...report.unsignedPolicies, ...again.unsignedPolicies], unsignedRules: [...report.unsignedRules, ...again.unsignedRules] };
       }
+      // And once more at the last moment before anything in use is touched.
+      if (await o.deployRunning?.()) throw installing();
       if (production) o.say('Flint is waiting for everything else to let go of the database. This can take up to a minute.');
       await m.query(`ALTER DATABASE ${database} ALLOW_CONNECTIONS false`);
       await o.at?.('closed');
@@ -1324,7 +1359,7 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     const seconds = Math.round((Date.now() - started) / 1000);
     const inputs: AuditInputs = {
       mode: o.mode, sha256: check.sha256, fingerprint: check.fingerprint, tables: verified.tables, pending: pending.length,
-      approvals: report.approvals, proposals: report.proposals, revoked: report.revoked + report.mismatched, switchedOff: report.policiesOff + report.rulesOff + report.unsignedPolicies.length + report.unsignedRules.length,
+      approvals: report.approvals, proposals: report.proposals, revoked: report.revoked + report.mismatched + report.keysNeverHeld.length, switchedOff: report.policiesOff + report.rulesOff + report.unsignedPolicies.length + report.unsignedRules.length,
       currentRead: report.currentRead, copied: copy !== undefined, keptAs, seconds,
     };
     recorded = true;
