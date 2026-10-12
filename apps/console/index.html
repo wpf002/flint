@@ -1560,14 +1560,14 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
 /* Does the card show less than all of itself (a secret's value, or more than it can list)? Then it asks on its own. */
 function apprWithheld(p){return !!apprDetails(p).withheld;}
 /* A value into its place, whole: it wraps, and nothing of it is cut. A long one starts folded, with ALL of its text
-   already there: the line after it says how much more there is, and one press of Show All shows it. */
+   already there: the line under it says how much more there is, and one press of Show All shows it. */
 var APPR_LONG=600,APPR_LONG_SHOWN=400;
 function apprValueInto(host,text){text=String(text);if(text.length<=APPR_LONG){host.appendChild(document.createTextNode(text));return;}
   var cut=APPR_LONG_SHOWN,c=text.charCodeAt(cut-1);if(c>=0xD800&&c<=0xDBFF)cut--;
   var rest=apprEl('span',null,text.slice(cut));rest.hidden=true;
-  var note=apprEl('span','more',' '+apprCount(text.length-cut,'more character')+'. ');
-  var all=apprEl('button','ghost','Show All');all.onclick=function(){rest.hidden=false;note.hidden=true;all.hidden=true;};
-  host.appendChild(document.createTextNode(text.slice(0,cut)));host.appendChild(rest);host.appendChild(note);host.appendChild(all);}
+  var gap=apprEl('br'),note=apprEl('span','more','\u2026 '+apprCount(text.length-cut,'more character')+'. ');
+  var all=apprEl('button','ghost','Show All');all.onclick=function(){rest.hidden=false;gap.hidden=true;note.hidden=true;all.hidden=true;};
+  host.appendChild(document.createTextNode(text.slice(0,cut)));host.appendChild(rest);host.appendChild(gap);host.appendChild(note);host.appendChild(all);}
 /* The details into an element, as text: a line for each sentence, then DETAILS, then REFERENCES. */
 function apprGroupInto(host,title,list,cls){if(!list.length)return;host.appendChild(apprEl('h4','dh',title));var dl=apprEl('dl','facts'+(cls?' '+cls:''));
   list.forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));var dd=apprEl('dd');apprValueInto(dd,x[1]);dl.appendChild(dd);});host.appendChild(dl);}

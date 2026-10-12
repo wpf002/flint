@@ -745,15 +745,17 @@ describe('a card this panel has no words for: every field, in full', () => {
     const o = says('a mail to send');
     const dds = o.details.all().filter((e) => e.tagName === 'dd');
     const body = dds.find((dd) => dd.children.some((c) => c.className === 'more'))!;
-    const [shownPart, rest, note, button] = body.children as [El, El, El, El];
+    const [shownPart, rest, gap, note, button] = body.children as [El, El, El, El, El];
     // The whole text is in the element before anything is pressed.
     expect(`${shownPart.textContent}${rest.textContent}`).toBe(BODY);
     expect(shownPart.textContent).toHaveLength(400);
     expect([rest.hidden, note.hidden, button.hidden]).toEqual([true, false, false]);
-    expect(note.textContent).toBe(' 500 more characters. ');
+    // The note sits on a line of its own, after an ellipsis where the shown part stops.
+    expect([gap.tagName, !!gap.hidden]).toEqual(['br', false]);
+    expect(note.textContent).toBe('\u2026 500 more characters. ');
     expect([button.tagName, button.textContent]).toEqual(['button', 'Show All']);
     button.onclick!();
-    expect([rest.hidden, note.hidden, button.hidden]).toEqual([false, true, true]);
+    expect([rest.hidden, gap.hidden, note.hidden, button.hidden]).toEqual([false, true, true, true]);
     // Text up to 600 characters is never folded; nothing is ever cut, at any length.
     const fold = (n: number) => {
       const host = new El('dd');
@@ -761,7 +763,7 @@ describe('a card this panel has no words for: every field, in full', () => {
       return { children: host.children.length, text: valueOf(host) };
     };
     expect(fold(600)).toEqual({ children: 1, text: 'x'.repeat(600) });
-    expect(fold(601)).toMatchObject({ children: 4, text: 'x'.repeat(601) });
+    expect(fold(601)).toMatchObject({ children: 5, text: 'x'.repeat(601) });
     expect(fold(50_000).text).toHaveLength(50_000);
   });
 
