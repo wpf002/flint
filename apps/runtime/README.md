@@ -1278,6 +1278,160 @@ while P4 is rolled back isn't carried out ("not carried out by the runtime")
 and stays approved. Any later deploy of P4 code applies the updates again.
 Claude runs a `down.sql` only with your OK, after the dump.
 
+## Assets, tasks and reviews (P5)
+
+This arrives in parts. The first part is only the store and what the database
+guarantees about it. Nothing writes to it yet, and it changes nothing you see.
+
+Three things will live here:
+
+- **Assets** are what Flint may hand work to. The first will be the local model
+  on this Mac.
+- **Tasks** are single pieces of work handed to an asset. Each has a written
+  bar and ends with a record of whether it met it.
+- **Reviews** are an argued verdict on a card, written before you approve it.
+  A review is advice. It never rejects anything.
+
+What the database now holds to, whatever the runtime's code does:
+
+- **An asset is off until you turn it on.** It's turned on only by the card you
+  sign for it, once, and only as exactly what that card describes: its kind,
+  what it can do, and whether it spends. Turning it off needs no signature.
+- **A task runs only as the task you signed.** Its card carries the whole task:
+  the asset, the title, what to do, the bar, any goal and step, the due time
+  and the cost estimate. If any of them differs when Flint goes to run it, the
+  task doesn't run. Each run also needs its forecast on record first.
+- **Paid work says its price first and its cost after.** A task for an asset
+  that spends runs only on a spend card filed from the console that carries the
+  same estimate, and it can't end without its cost. No asset that spends is
+  built: this is the rule one would meet.
+- **Flint doesn't accept its own work on its own say.** A task is accepted only
+  with its check on record and, until you promote that check, only on a card
+  you sign. Rejecting a result that passed, accepting one that failed, and
+  cancelling a task that has gone out each take your signed card too. An
+  override says the call was yours, and is possible until the task's forecast
+  is scored.
+- **A review is of the card you're shown.** It's written once, only while the
+  card is still waiting, of exactly that card's contents. What it found never
+  changes. Its words can be cleared later, never rewritten.
+- **Requiring reviews is your switch.** It's off. A card you sign turns it on,
+  and only while a reviewer is on. Once it's on, a card that needs a review
+  can't be approved without one, and your signature names the review and the
+  verdict you saw. So approving past a warning is on record as your choice.
+  The card that turns the requirement off again never waits for a review. The
+  last reviewer can't be turned off while reviews are required.
+- **Which cards need a review is decided when a card is filed.** A card with
+  outside text in it, one that can't be undone, one that touches money, and any
+  card that spends, changes policy or a rule, opens a pull request, forgets or
+  voids always needs one. The runtime may mark more. Nothing can unmark one.
+- **A plan step that is a Flint task is done only when its task was accepted.**
+  Nobody can tick it, Flint included.
+- **A forget reaches all of it.** Forgetting an item clears the text of tasks
+  about it, deletes their outputs, and clears the words of the reviews that
+  read them. Outcomes and verdicts stay.
+- **Task and review text stays out of errors and history.** A task, an output,
+  a review or a task card that the database refuses names the row and the
+  rule, never a title, a spec or a model's words. History keeps only how long
+  the text was.
+
+### What changed on deploy
+
+Nothing you use. Every card now records whether it needs a review, and cards
+of the kinds listed above are marked. Nothing reads the mark yet, and reviews
+aren't required, so every card is approved as before. Four job queues exist
+and nothing sends to them.
+
+### What the next parts must do
+
+- **Cards.** A card that turns an asset on (`asset.enable`) or changes the
+  review requirement (`review.enforce`) acts only if it's a `policy` card filed
+  from the console or the CLI, untainted, with `consequential` set. A
+  cancellation (`task.cancel`) and an override (`task.bar_override`) are `task`
+  cards from the console or the CLI. A dispatch and an acceptance
+  (`task.check_bar`) are `task` cards from the console, the CLI or a runtime
+  job, never from chat. Every one of them must expire within 7 days of your
+  signature, and its digest must be its args' digest. `card-ttl.test.ts` must
+  learn each new file that files a card.
+- **What each card's args hold.** `asset.enable`: `assetId`, `kind`,
+  `externalRef`, `name`, `capabilities`, `dispatchAction`, `spends`, exactly as
+  the asset's row has them. A dispatch: `taskId`, `assetId`, `assetKind`,
+  `title`, `spec`, `acceptance`, `goalId`, `stepKey`, `dueAt`, `sensitivity`,
+  `tainted`, `estCostMicros`, with `dueAt` as `Date#toISOString` writes it (or
+  null) and money as whole micro-dollars. The card's own `sensitivity` and
+  `tainted` must equal the task's. `task.cancel` and `task.check_bar`:
+  `taskId`. `task.bar_override`: `taskId` and `to`. `review.enforce`: `gate`
+  (`proposal`) and `enforced`.
+- **Transactions.** Each signed change is written at READ COMMITTED, in the
+  transaction that claims and completes its card. An approval is used by the
+  first transaction that makes its change and by no other.
+- **The dispatch** must write the task's forecast first (`assets`,
+  `task_meets_bar`, created by `runtime:tasks`) and set it with the move to
+  `queued`. A forecast belongs to one task.
+- **The check** must set `metBar` and `barCheckedBy` in one write while the task
+  is `checking`. Acceptance names an audit entry of kind `action`, outcome
+  `ok`, action `task.check_bar` (or `task.bar_override`), correlated
+  `task:<id>`. A failed task gives one of the classes the database knows
+  (`unavailable`, `invalid`, `capped`, `timeout`, `asset_off`, `budget`,
+  `expired`, `error`).
+- **Promotion.** The database lets Flint accept on its own only while a live,
+  unscoped policy row promotes `task.check_bar` (or `task.*`) and no live row
+  holds it back.
+- **Outputs** are written while the task is `dispatched` or `running`, and are
+  always tainted. Retention may delete one, and clear a task's text (setting
+  `textPurgedAt`), only once the task has ended.
+- **A task's title is kept for good.** Keep it to template text, with none of
+  your words in it.
+- **Reviews** must be written, and attached to the card, in one transaction
+  while the card is still pending, with the card's own digest, at least its
+  taint and exactly its sensitivity. A review of a task's output is written
+  while the task is `checking`, by the output's digest, and is always tainted.
+  Only `attack`, `defense` and `verdictReason` can ever be cleared, so `findings`
+  and `reasonCodes` must hold codes and `models` names, never words.
+- **Signing with reviews required.** The server must put `reviewId` and
+  `verdict` in the signed payload's `fields`.
+- **Scoring.** P4's rule stands: a result recorded as yours needs your answer
+  to its question (or the card that finishes a goal). So a task's forecast is
+  settled as `auto_world`, and "was the reviewer right" has to go through a
+  question, which can be asked only once the forecast is due. A part that
+  wants either to work differently needs its own database rule.
+
+### Known limits
+
+- **What holds against a runtime that breaks the rules.** The rules bound to
+  your signature hold even then: which assets are on, which task runs, whether
+  reviews are required, and the one use of each approval. What the runtime
+  writes itself, the database can only check for shape: whether a check was
+  honest (which is why accepting waits for you until you promote it), what a
+  review found, how good a forecast is, what a paid task cost, who asked for a
+  task, and which items it lists.
+- **A reviewer that can't answer.** With reviews required and the reviewer
+  down, cards that need a review wait. That includes a card to turn another
+  asset on. The way out is the card that stops requiring reviews.
+- **An output's digest is the runtime's.** The database checks its shape, and
+  that a review of the output names the same digest. It doesn't compute it.
+- **Errors and Postgres's own log.** As for P4: the id-only rule covers the
+  `INSERT` and `UPDATE` statements the runtime makes, not `COPY` or a Postgres
+  set to log every statement's values.
+- **A transaction held open.** A signed card acts in one transaction. A runtime
+  that kept that transaction open could delay when its changes land. A restart
+  of the runtime ends it.
+
+### Rolling P5 back
+
+The migration's `down.sql` (`20261014000000_p5_assets`) belongs to a rollback:
+
+1. First deploy a runtime from before P5. P5's job bus expects the four queues
+   that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. Assets, tasks and their outputs,
+   reviews and the review requirement go with it. Every card stays, without its
+   review or its mark. Task forecasts stay in the ledger. A plan step that is a
+   Flint task goes back to being held by the console alone.
+
+A task or asset card still waiting expires on its own. One you approve while P5
+is rolled back isn't carried out ("not carried out by the runtime") and stays
+approved. Any later deploy of P5 code applies the migration again. Claude runs
+`down.sql` only with your OK, after the dump.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A
