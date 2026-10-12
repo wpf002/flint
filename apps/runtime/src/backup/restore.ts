@@ -18,11 +18,19 @@
  *     Without a recorded fingerprint nothing is restored unless Will says so.
  *  4. It is restored into a database of its own, by a role that owns nothing
  *     else (flint_restore): the SQL in a backup file runs as that role, which
- *     can reach no other database.
+ *     can reach no other database. What that role may still change about
+ *     itself (its password, its stored settings, databases it makes) is looked
+ *     at again after every pg_restore and put back; a file that did any of it
+ *     is refused.
  *  5. The copy is compared, object by object, with a database built from this
  *     checkout's own migrations (./catalog.ts): tables, triggers, functions,
  *     every privilege. Any difference is a refusal that names the object.
+ *     Until it has passed, the copy is read only as flint_restore, with nothing
+ *     on the search path: a view or a function a backup defines never runs as
+ *     the migration owner.
  *  6. Only then is it handed to the migration owner, and brought up to date.
+ *     What the copy's owner could set on the database itself (a stored
+ *     setting, a connection limit, the template mark) is cleared first.
  *  7. What Will took away after the backup is carried forward, what was signed
  *     and not finished is set aside, and every promotion is checked against
  *     his signature (./carry.ts).
@@ -50,6 +58,7 @@ import type { WebAuthnRelyingParty } from '@flint/policy';
 import pg from 'pg';
 import { failureOf } from '../dbcodes.js';
 import { client, countRows, dumpDatabase, run, sha256File, targetOf, ToolFailed, type PgTarget, type Tools } from './backup.js';
+import { scramVerifier } from './bootstrap.js';
 import { carryForward, readCurrent, type CarryReport, type CurrentFacts } from './carry.js';
 import { OWNER, buildReference, catalogDifference, catalogLines, differenceSentence, migrationState, ownedByOthers, type Migration, type MigrationState } from './catalog.js';
 
@@ -66,11 +75,14 @@ export class RestoreRefused extends Error {
   readonly stage: string;
   /** The runtime was stopped and did not start again. */
   readonly runtimeDown: boolean;
-  constructor(message: string, o: { lines?: string[]; stage?: string; runtimeDown?: boolean } = {}) {
+  /** Its sentence already says what was changed and what was not: "Nothing was changed" is never added to it. */
+  readonly asIs: boolean;
+  constructor(message: string, o: { lines?: string[]; stage?: string; runtimeDown?: boolean; asIs?: boolean } = {}) {
     super(message);
     this.lines = o.lines ?? [];
     this.stage = o.stage ?? 'refused';
     this.runtimeDown = o.runtimeDown ?? false;
+    this.asIs = o.asIs ?? false;
   }
 }
 
@@ -600,6 +612,96 @@ async function connected(c: pg.Client, name: string): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// The role that restores, before and after a backup's SQL has run as it
+
+/** What the restoring role is on the cluster: the databases it owns, and the settings stored for it (kept as they are stored, never shown). */
+interface RestorerState {
+  databases: string[];
+  settings: Array<{ database: string | null; config: string }>;
+}
+
+async function restorerState(c: pg.Client, role: string): Promise<RestorerState> {
+  const databases = (await c.query<{ datname: string }>('SELECT datname FROM pg_database WHERE datdba = $1::regrole ORDER BY 1', [role])).rows.map((r) => r.datname);
+  const settings = (await c.query<{ database: string | null; config: string }>(
+    `SELECT d.datname AS database, array_to_string(s.setconfig, chr(10)) AS config
+     FROM pg_db_role_setting s LEFT JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = $1::regrole ORDER BY 1 NULLS FIRST`,
+    [role],
+  )).rows;
+  return { databases, settings };
+}
+
+/** Can this role still sign in with the password Flint has saved for it? Undefined: the server could not be asked. */
+async function signsIn(t: PgTarget): Promise<boolean | undefined> {
+  for (const database of ['postgres', 'template1']) {
+    try {
+      await withClient(withDatabase(t, database), (c) => c.query('SELECT 1'));
+      return true;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === '28P01' || code === '28000') return false;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A backup's SQL runs as the role that restores it, in a database of its own.
+ * Three things on the cluster are still within that role's reach, because a
+ * role may always change them about itself: its password, the settings stored
+ * for it, and what databases it makes. So after EVERY pg_restore, passed or
+ * failed, each is looked at again and put back:
+ *  - its password, through `guard`, a session of its own that was open before
+ *    the backup's SQL ran (the verifier is sent, never the password);
+ *  - its stored settings, cleared;
+ *  - a database it made besides the copy, removed.
+ * `changed` says what the backup did, in words; `unfixed` what could not be put
+ * back. A Flint backup does none of this: any of it is a refusal.
+ */
+async function restorerAfter(
+  m: pg.Client,
+  guard: pg.Client | undefined,
+  restorer: PgTarget,
+  before: RestorerState,
+  copy: string,
+): Promise<{ changed: string[]; unfixed: Array<'password' | 'settings' | 'database'> }> {
+  const changed: string[] = [];
+  const unfixed: Array<'password' | 'settings' | 'database'> = [];
+  const role = quote(restorer.user);
+  // The guard first (it signed in before anything changed); a new session only if the guard is gone.
+  const asRole = async (sql: string): Promise<boolean> => {
+    if (guard && (await guard.query(sql).then(() => true, () => false))) return true;
+    return onMaintenance(restorer, (c) => c.query(sql)).then(() => true, () => false);
+  };
+
+  if ((await signsIn(restorer)) === false) {
+    changed.push('its password');
+    const verifier = scramVerifier(restorer.password);
+    const put = /^SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/.test(verifier) && (await asRole(`ALTER ROLE ${role} PASSWORD '${verifier}'`));
+    if (!put || (await signsIn(restorer)) !== true) unfixed.push('password');
+  }
+
+  const key = (st: RestorerState): string => JSON.stringify(st.settings);
+  let now = await restorerState(m, restorer.user);
+  if (key(now) !== key(before)) {
+    changed.push('its own settings');
+    await asRole(`ALTER ROLE ${role} RESET ALL`);
+    for (const row of now.settings) if (row.database !== null) await asRole(`ALTER ROLE ${role} IN DATABASE ${quote(row.database)} RESET ALL`);
+    now = await restorerState(m, restorer.user);
+    if (now.settings.length) unfixed.push('settings');
+  }
+
+  const made = now.databases.filter((d) => d !== copy && !before.databases.includes(d));
+  if (made.length) {
+    changed.push(made.length === 1 ? 'a database of its own' : `${made.length} databases of its own`);
+    for (const d of made) {
+      await m.query(`ALTER DATABASE ${quote(d)} IS_TEMPLATE false`).catch(() => undefined);
+      if (!(await m.query(`DROP DATABASE IF EXISTS ${quote(d)}`).then(() => true, () => false)) && !unfixed.includes('database')) unfixed.push('database');
+    }
+  }
+  return { changed, unfixed };
+}
+
+// ---------------------------------------------------------------------------
 // The restore
 
 export interface RestoreSummary {
@@ -843,6 +945,8 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     }
     const dropDatabase = async (name: string): Promise<boolean> => {
       try {
+        // A backup's SQL could have marked its own copy a template, which Postgres will not drop: that mark goes first.
+        await m.query(`ALTER DATABASE ${name} IS_TEMPLATE false`).catch(() => undefined);
         await m.query(`DROP DATABASE IF EXISTS ${name}`);
         return true;
       } catch {
@@ -930,6 +1034,16 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     // 5 to 7. Restore beside it, as the role that owns nothing else, and check everything there.
     const locale = await localeOf(m, database);
     const copyOwner = withDatabase(owner, scratch);
+    /**
+     * Until the copy has passed its checks, what is in it is the backup's own: a view or a function there runs as
+     * whoever reads it. So it is read only as the role that restored it, which owns nothing else, and with nothing
+     * on the search path (a name of the backup's can stand in for none of Postgres's own).
+     */
+    const asRestorer = <T>(fn: (c: pg.Client) => Promise<T>): Promise<T> =>
+      withClient(withDatabase(restorer, scratch), async (c) => {
+        await c.query(`SET search_path = ''`);
+        return fn(c);
+      });
     let verified: Verified;
     let pending: string[];
     let report: CarryReport;
@@ -937,20 +1051,57 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     const readNow = async (): Promise<CurrentFacts | undefined> => (production ? withClient(owner, (c) => readCurrent(c, check.takenAt)).catch(() => undefined) : undefined);
     try {
       await onMaintenance(restorer, (c) => c.query(`CREATE DATABASE ${scratch} TEMPLATE template0${locale}`));
-      await run(o.tools.pgRestore, ['--no-owner', '--exit-on-error', '-h', restorer.host, '-p', String(restorer.port), '-U', restorer.user, '-d', scratch, o.dump], restorer.password);
+      // What the restoring role is before the backup's SQL runs as it, and a session of its own that signed in before.
+      const roleBefore = await restorerState(m, restorer.user);
+      const guard = await maintenance(restorer).catch(() => undefined);
+      let restoreFailed: unknown;
+      let role: Awaited<ReturnType<typeof restorerAfter>>;
+      try {
+        await run(o.tools.pgRestore, ['--no-owner', '--exit-on-error', '-h', restorer.host, '-p', String(restorer.port), '-U', restorer.user, '-d', scratch, o.dump], restorer.password).catch((err: unknown) => {
+          restoreFailed = err ?? new Error('pg_restore failed');
+        });
+        // Whether it passed or failed: is the restoring role still what it was?
+        role = await restorerAfter(m, guard, restorer, roleBefore, scratch);
+      } finally {
+        await guard?.end().catch(() => {});
+      }
+      if (role.changed.length) {
+        const lines: string[] = [];
+        if (role.unfixed.includes('password')) {
+          lines.push(
+            'Restores, and the weekly restore test, will not work until that role has its password again.',
+            'Set it with this command, and type the password from the line FLINT_DB_RESTORE_URL in ~/.flint/backup.env when it asks:',
+            `  psql -d postgres -c '\\password ${restorer.user}'`,
+          );
+        }
+        if (role.unfixed.includes('settings')) lines.push('The settings it stored for that role are still there.');
+        if (role.unfixed.includes('database')) lines.push('A database it made is still there.');
+        throw new RestoreRefused(
+          `That file is not one of Flint's backups: restoring it changed the role Flint restores with (${role.changed.join(', ')}). ${role.unfixed.length ? 'Flint could not put all of that back.' : 'Flint put that back.'} The database in use was not touched.`,
+          { stage: 'restorer', asIs: true, lines },
+        );
+      }
+      if (restoreFailed) throw restoreFailed;
       // The file that was restored is the file that was checked.
       if ((await sha256File(o.dump)) !== check.sha256) throw new RestoreRefused('The backup file changed while it was being restored.', { stage: 'fingerprint' });
 
       const referenceFor = async (applied: readonly Migration[]) => (await referenceOf(m, owner, reference, applied, locale, o.tools)).lines;
       // The privileges on the database itself live on the cluster, not in the dump: Flint's own setup, read from a reference.
-      const head = await withClient(copyOwner, (c) => migrationState(c, o.migrationsDir));
+      const head = await asRestorer((c) => migrationState(c, o.migrationsDir));
       if (head.problems.length) throw new RestoreRefused(`The restored copy did not pass its checks: ${head.problems.join('; ')}.`, { stage: 'verify' });
       const spec = (await referenceOf(m, owner, reference, head.applied, locale, o.tools)).grants;
       notes.push(...(await carryDatabaseGrants(m, scratch, spec, production ? await databaseGrants(m, database) : undefined, [OWNER, restorer.user])));
 
       // Before it is handed over: counts, the migrations it records, and every object against the reference.
-      verified = await withClient(copyOwner, (c) => verifyRestored(c, { ...(check.counts ? { counts: check.counts } : {}), migrationsDir: o.migrationsDir, reference: referenceFor }));
+      verified = await asRestorer((c) => verifyRestored(c, { ...(check.counts ? { counts: check.counts } : {}), migrationsDir: o.migrationsDir, reference: referenceFor }));
       if (!verified.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${verified.problems.join('; ')}.`, { stage: 'verify' });
+
+      // The copy's own properties live on the cluster, where no comparison of its contents sees them, and its owner
+      // (the backup's SQL, while it ran) could set them: a stored setting, a connection limit, the template mark.
+      // They are cleared before the migration owner first connects to it; production's own settings are carried
+      // over at the end (carryDatabaseSettings).
+      await m.query(`ALTER DATABASE ${scratch} RESET ALL`);
+      await m.query(`ALTER DATABASE ${scratch} WITH CONNECTION LIMIT -1 IS_TEMPLATE false`);
 
       // Handed to the migration owner. Any other database the restore role owns (a restore drill's) is given straight back.
       await withClient(copyOwner, async (c) => {
@@ -968,6 +1119,12 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
       });
       const handed = await withClient(copyOwner, (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: referenceFor, owner: OWNER, strangers: [restorer.user] }));
       if (!handed.ok) throw new RestoreRefused(`The restored copy did not pass its checks: ${handed.problems.join('; ')}.`, { stage: 'verify' });
+      // And nothing of its own is left on it: no stored setting for anyone, no limit, not a template.
+      const own = (await m.query<{ plain: boolean }>(
+        `SELECT d.datconnlimit = -1 AND NOT d.datistemplate AND d.datallowconn AND NOT EXISTS (SELECT 1 FROM pg_db_role_setting s WHERE s.setdatabase = d.oid) AS plain FROM pg_database d WHERE d.datname = $1`,
+        [scratch],
+      )).rows[0];
+      if (!own?.plain) throw new RestoreRefused('The restored copy carries settings of its own that Flint could not clear.', { stage: 'verify' });
 
       // Brought up to date, and checked again against this checkout's whole list.
       pending = verified.migrations.pending;
@@ -987,6 +1144,8 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     } catch (err) {
       const dropped = await dropDatabase(scratch);
       const left = dropped ? [] : [`Flint could not remove the copy ${scratch}. The next restore removes it.`];
+      // A refusal that says for itself what was changed (the backup's SQL changed the restoring role) is passed on as it is.
+      if (err instanceof RestoreRefused && err.asIs) throw new RestoreRefused(err.message, { stage: err.stage, asIs: true, lines: [...err.lines, ...left] });
       if (err instanceof RestoreRefused) throw new RestoreRefused(`${err.message} Nothing was changed.`, { stage: err.stage, lines: [...err.lines, ...left] });
       throw new RestoreRefused(`The backup could not be restored (${reasonOf(err)}). Nothing was changed.`, { stage: 'restore', lines: left });
     }

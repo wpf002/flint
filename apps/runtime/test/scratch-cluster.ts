@@ -46,7 +46,7 @@ export interface ScratchCluster {
   port: number;
   /** The cluster's superuser, over TCP with its password. */
   admin: pg.ClientConfig;
-  /** The server's log, with every statement in it (log_statement = all). */
+  /** The server's log, with every statement in it (log_statement = all), each line saying who ran it, where, and with what program (`role@database program`). */
   log(): string;
   tools: { pgDump: string; pgRestore: string };
   stop(): void;
@@ -86,7 +86,7 @@ export async function startScratchCluster(): Promise<ScratchCluster> {
   const quiet = { stdio: 'pipe' as const, env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC' } };
   execFileSync(bin('initdb'), ['-D', data, '-U', 'scratch_admin', '--auth-host=scram-sha-256', '--auth-local=reject', `--pwfile=${pwfile}`, '-E', 'UTF8', '--locale=C', '--no-sync'], quiet);
   const port = await freePort();
-  appendFileSync(join(data, 'postgresql.conf'), `\nlisten_addresses = '::1'\nport = ${port}\nunix_socket_directories = ''\nfsync = off\nlog_statement = 'all'\nmax_connections = 60\n`);
+  appendFileSync(join(data, 'postgresql.conf'), `\nlisten_addresses = '::1'\nport = ${port}\nunix_socket_directories = ''\nfsync = off\nlog_statement = 'all'\nlog_line_prefix = '%m [%p] %u@%d %a '\nmax_connections = 60\n`);
   let stopped = false;
   const stop = () => {
     if (stopped) return;

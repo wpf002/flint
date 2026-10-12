@@ -191,10 +191,12 @@ const evenOut = (line: string): string => line.replace(/AuditEntry_\d{4}_\d{2}/g
  * whoever asks.
  */
 export async function catalogLines(c: pg.Client): Promise<string[]> {
-  const lines = (await grantLines(c)).map((g) => `may|${g}`);
+  const lines: string[] = [];
   await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   try {
+    // First of all: from here no name resolves to anything but Postgres's own, whatever the database holds.
     await c.query(`SET LOCAL search_path = ''`);
+    lines.push(...(await grantLines(c)).map((g) => `may|${g}`));
     for (const sql of QUERIES) for (const r of (await c.query<{ l: string | null }>(sql)).rows) if (r.l !== null) lines.push(r.l);
   } finally {
     await c.query('ROLLBACK').catch(() => {});

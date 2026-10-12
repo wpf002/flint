@@ -22,13 +22,13 @@
  * old, so a test with a date written into it stops passing a month later.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import pg from 'pg';
-import { bootstrapDb } from '../src/backup/bootstrap';
-import { ToolFailed, dumpDatabase, toolError } from '../src/backup/backup';
+import { bootstrapDb, scramVerifier } from '../src/backup/bootstrap';
+import { ToolFailed, countRows, dumpDatabase, sha256File, toolError } from '../src/backup/backup';
 import { carryLines, type CarryReport } from '../src/backup/carry';
 import { catalogDifference, catalogLines, checkoutMigrations, differenceSentence, migrationState } from '../src/backup/catalog';
 import { grantLines } from '../src/backup/grants';
@@ -39,7 +39,7 @@ import {
 import { refusalLines, restoreEmptyCommand, restoreProductionCommand, runtimeAgent, summaryLines, terminal } from '../src/backup/restore-cli';
 import type { RestoreConfig } from '../src/config';
 import {
-  GRANTS_FIXTURE, MIGRATIONS, NO_CLUSTER, RUNTIME, connect, enrollKey, id, migrate, onDb, readEnv, signedPolicy, signedRule, startScratchCluster,
+  GRANTS_FIXTURE, MIGRATIONS, NO_CLUSTER, RUNTIME, connect, enrollKey, id, migrate, onDb, pgConfig, readEnv, signedPolicy, signedRule, startScratchCluster,
   type ScratchCluster, type TestKey,
 } from './scratch-cluster';
 
@@ -648,6 +648,27 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       // The lock is let go, and the role that restored the copy owns nothing.
       expect((await admin(async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'`)).rows[0])).n).toBe(0);
       expect((await admin(async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_database WHERE datdba = 'flint_restore'::regrole`)).rows[0])).n).toBe(0);
+
+      // The two claims everything else rests on, read from what the server itself saw.
+      const log = cluster.log().split('\n');
+      const copyName = `flint_restoring_${stampOf(now)}`;
+      // 1. The two names changed in ONE transaction: one statement holds both renames, and neither was ever sent alone.
+      const renames = log.filter((l) => /statement: .*ALTER DATABASE \S+ RENAME TO /.test(l) && (l.includes(keptAs) || l.includes(`ALTER DATABASE ${copyName} RENAME`)));
+      expect(renames).toHaveLength(1);
+      expect(renames[0]).toMatch(new RegExp(`statement: BEGIN; ALTER DATABASE flint RENAME TO ${keptAs}; ALTER DATABASE ${copyName} RENAME TO flint; COMMIT;$`));
+      // 2. The backup's own SQL ran as the role that owns nothing else: every statement pg_restore sent to the copy was flint_restore's.
+      const restored = log.filter((l) => l.includes(`@${copyName} pg_restore `));
+      expect(restored.length).toBeGreaterThan(50);
+      expect(restored.filter((l) => !l.includes(` flint_restore@${copyName} pg_restore `))).toEqual([]);
+      // (The migration owner runs pg_restore too, but only into the reference, which holds nothing but this checkout's own migrations.)
+      expect(log.filter((l) => / pg_restore /.test(l) && !/ flint_restore@\S+ pg_restore /.test(l) && !/ flint_owner@flint\w*_reference_\w+ pg_restore /.test(l))).toEqual([]);
+      // And until it had passed its checks, nobody but that role read it: the migration owner's first statement in
+      // the copy comes after the copy's own properties were cleared.
+      const cleared = log.findIndex((l) => l.includes(`statement: ALTER DATABASE ${copyName} RESET ALL`));
+      const ownerFirst = log.findIndex((l) => l.includes(` flint_owner@${copyName} `));
+      expect(cleared).toBeGreaterThan(-1);
+      expect(ownerFirst).toBeGreaterThan(cleared);
+      expect(log.slice(0, cleared).some((l) => l.includes(` flint_restore@${copyName} `) && l.includes(`statement: SET search_path = ''`))).toBe(true);
     });
 
     it('what comes back is built exactly as Flint builds it: the reviewed grants, the migration owner’s, and usable by the runtime and no more', async () => {
@@ -998,6 +1019,182 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       // The forger's key is still a row in the backup: it is pointed out, by label, for Will to revoke.
       expect(r.report.liveKeys.find((k) => k.label === 'Not Will')).toMatchObject({ known: false });
       expect(carryLines(r.report, 'UTC', 'production').join('\n')).toMatch(/"Not Will", this Mac's key, enrolled .* It is not in the database in use now: revoke it if you do not know it\./);
+    });
+  });
+
+  describe('what a backup’s own SQL can reach', () => {
+    /**
+     * A dump of `source` with SQL added to what restoring it runs: the forgery pg_dump itself never writes, made the
+     * way an attacker with the file would make it. `after` goes straight after one table's definition (in the same
+     * statement batch); `instead` takes the place of one index's definition (a statement on its own).
+     */
+    const forged = async (source: Scenario, daysAgo: number, change: { after?: string; instead?: string }): Promise<string> => {
+      const t = pgConfig(source.backup);
+      // Through a pipe, so the archive carries no offsets and its list of contents can change length.
+      let raw: Buffer = execFileSync(cluster.tools.pgDump, ['-Fc', '-h', String(t.host), '-p', String(t.port), '-U', String(t.user), '-d', String(t.database)], {
+        env: { PATH: process.env.PATH ?? '', PGPASSWORD: String(t.password) }, maxBuffer: 256 * 1024 * 1024,
+      });
+      // A string in the list of contents: a sign byte, its length in four bytes, then its bytes.
+      const edit = (marker: string, make: (was: Buffer) => Buffer): void => {
+        // The first place the marker begins such a string (the same words inside a function's body do not).
+        const whole = (i: number): boolean => i > 5 && raw[i - 5] === 0 && raw.readUInt32LE(i - 4) > marker.length && raw.readUInt32LE(i - 4) < 20_000 && /;\n$/.test(raw.subarray(i, i + raw.readUInt32LE(i - 4)).toString('utf8'));
+        let at = raw.indexOf(Buffer.from(marker));
+        while (at !== -1 && !whole(at)) at = raw.indexOf(Buffer.from(marker), at + 1);
+        expect(at, marker).toBeGreaterThan(5);
+        const length = raw.readUInt32LE(at - 4);
+        const was = raw.subarray(at, at + length);
+        const now = make(was);
+        const head = Buffer.alloc(4);
+        head.writeUInt32LE(now.length);
+        raw = Buffer.concat([raw.subarray(0, at - 4), head, now, raw.subarray(at + length)]);
+      };
+      if (change.after) edit('CREATE TABLE public."Proposal" (', (was) => Buffer.concat([was, Buffer.from(`${change.after}\n`)]));
+      if (change.instead) edit('CREATE INDEX ', () => Buffer.from(`${change.instead}\n`));
+      const dir = join(home, `forged-${++n}`);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const file = join(dir, dumpNameAt(new Date(takenAt.getTime() - daysAgo * 86_400_000)));
+      writeFileSync(file, raw, { mode: 0o600 });
+      writeFileSync(`${file}.counts.json`, JSON.stringify(await connect(source.backup, (c) => countRows(c))), { mode: 0o600 });
+      // Sealed as this Mac seals its own: the fingerprint is not what stops this file.
+      writeDumpHash(file, await sha256File(file), keyFile);
+      return file;
+    };
+    const restoreRole = () => admin(async (c) => (await c.query<{ databases: number; settings: number }>(
+      `SELECT (SELECT count(*)::int FROM pg_database WHERE datdba = 'flint_restore'::regrole) AS databases,
+              (SELECT count(*)::int FROM pg_db_role_setting WHERE setrole = 'flint_restore'::regrole) AS settings`)).rows[0]!);
+    const signsIn = () => connect(urls.restore, (c) => c.query('SELECT 1')).then(() => true, () => false);
+
+    it('a view named like a table the checks read is refused, and the function inside it never runs as the migration owner', async () => {
+      const bad = await production();
+      await connect(bad.owner, async (c) => {
+        await c.query('ALTER TABLE _prisma_migrations RENAME TO _pm');
+        await c.query(`CREATE FUNCTION public.n1_probe() RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN RAISE LOG 'n1-probe ran as %', current_user; RETURN true; END $f$`);
+        await c.query('CREATE VIEW public._prisma_migrations AS SELECT * FROM public._pm WHERE public.n1_probe()');
+      });
+      const d = await dumpDatabase(bad.backup, join(home, 'n1'), cluster.tools, new Date(takenAt.getTime() - 5 * 86_400_000));
+      writeDumpHash(d.path, d.sha256, keyFile);
+      const p = await production();
+      fresh();
+      const before = await databases();
+      const err = await refusal(restoreDatabase(options(p, { dump: d.path })));
+      expect(err.message).toMatch(/did not pass its checks: it is not built the way this copy of Flint builds its database .*Nothing was changed\.$/);
+      expect(err.stage).toBe('verify');
+      expect(calls).toEqual([]);
+      expect(await databases()).toEqual(before);
+      // The view was read (so this is not passing for want of a reader), and only ever by the role that owns nothing else.
+      const ran = cluster.log().split('\n').flatMap((l) => /LOG: {2}n1-probe ran as (\w+)$/.exec(l)?.[1] ?? []);
+      expect(ran.length).toBeGreaterThan(0);
+      expect([...new Set(ran)]).toEqual(['flint_restore']);
+    });
+
+    it('a setting, a connection limit and the template mark a backup put on its own copy are cleared before it goes live', async () => {
+      const p = await production();
+      // What Will himself set on the database in use is still carried over, after the clearing.
+      await admin((c) => c.query(`ALTER DATABASE ${p.name} SET statement_timeout = '45s'`));
+      const dump = await forged(p, 6, {
+        after: `DO $f$ BEGIN
+          EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '7MB');
+          EXECUTE format('ALTER DATABASE %I SET default_transaction_read_only = on', current_database());
+          EXECUTE format('ALTER DATABASE %I SET search_path = pg_temp, public', current_database());
+          EXECUTE format('ALTER DATABASE %I WITH CONNECTION LIMIT 40 IS_TEMPLATE true', current_database());
+          RAISE LOG 'n2-probe ran in % as %', current_database(), current_user;
+        END $f$;`,
+      });
+      fresh();
+      const now = tick();
+      const r = await restoreDatabase(options(p, { dump, now }));
+      expect(r).toMatchObject({ database: p.name, fingerprint: 'matches', runtimeStarted: true });
+      // The backup's SQL did run, in the copy, as the restoring role...
+      expect(cluster.log()).toContain(`n2-probe ran in ${p.name}_restoring_${stampOf(now)} as flint_restore`);
+      // ...and none of what it set is on the database now in use: only what was there before.
+      const live = await admin(async (c) => (await c.query<{ lim: number; tmpl: boolean; open: boolean; settings: string[] | null }>(
+        `SELECT d.datconnlimit AS lim, d.datistemplate AS tmpl, d.datallowconn AS open,
+                (SELECT array_agg(x ORDER BY x) FROM pg_db_role_setting s, unnest(s.setconfig) AS x WHERE s.setdatabase = d.oid) AS settings
+         FROM pg_database d WHERE d.datname = $1`, [p.name])).rows[0]!);
+      expect(live).toEqual({ lim: -1, tmpl: false, open: true, settings: ['statement_timeout=45s'] });
+      expect(await restoreRole()).toEqual({ databases: 0, settings: 0 });
+    });
+
+    it('a backup that fails its checks after marking its copy a template is still removed whole: nothing was changed, and that is true', async () => {
+      const p = await production();
+      const dump = await forged(p, 7, {
+        after: `DO $f$ BEGIN
+          EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '7MB');
+          EXECUTE format('ALTER DATABASE %I WITH CONNECTION LIMIT 40 IS_TEMPLATE true', current_database());
+        END $f$;
+        CREATE FUNCTION public.backdoor() RETURNS void LANGUAGE sql SECURITY DEFINER AS $b$ SELECT 1 $b$;`,
+      });
+      fresh();
+      const before = await databases();
+      const err = await refusal(restoreDatabase(options(p, { dump })));
+      expect(err.message).toMatch(/the function public\.backdoor\(\) is not one Flint makes.*\)\. Nothing was changed\.$/);
+      expect(err.lines).toEqual([]);
+      expect(await databases()).toEqual(before);
+      expect((await admin(async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_db_role_setting s WHERE NOT EXISTS (SELECT 1 FROM pg_database d WHERE d.oid = s.setdatabase) AND s.setdatabase <> 0`)).rows[0])).n).toBe(0);
+      expect(calls).toEqual([]);
+    });
+
+    it('a backup that changes the restoring role’s password, its settings, or makes a database is refused, the role is put back, and it never says nothing was changed', async () => {
+      const p = await production();
+      const dump = await forged(p, 8, {
+        after: `ALTER ROLE flint_restore PASSWORD 'set-by-the-backup-0000'; ALTER ROLE flint_restore SET work_mem = '9MB';
+          DO $f$ BEGIN EXECUTE format('ALTER ROLE flint_restore IN DATABASE %I SET statement_timeout = %L', current_database(), '1s'); END $f$;`,
+        instead: 'CREATE DATABASE made_by_the_backup;',
+      });
+      fresh();
+      const before = await databases('');
+      const err = await refusal(restoreDatabase(options(p, { dump })));
+      expect(err.message).toBe(
+        "That file is not one of Flint's backups: restoring it changed the role Flint restores with (its password, its own settings, a database of its own). Flint put that back. The database in use was not touched.",
+      );
+      expect(err.stage).toBe('restorer');
+      expect(err.message).not.toMatch(/Nothing was changed/);
+      expect(err.lines).toEqual([]);
+      expect(calls).toEqual([]);
+      // Put back: the saved password signs in, nothing is stored for the role, and neither the copy nor the database it made is there.
+      expect(await signsIn()).toBe(true);
+      expect(await restoreRole()).toEqual({ databases: 0, settings: 0 });
+      expect(await databases('')).toEqual(before);
+      expect(records.at(-1)).toMatchObject({ outcome: 'failed', stage: 'restorer' });
+      // The password went to the server as a verifier, never as itself.
+      expect(cluster.log()).toMatch(/statement: ALTER ROLE "flint_restore" PASSWORD 'SCRAM-SHA-256\$4096:/);
+      expect(cluster.log().includes(pgConfig(urls.restore).password as string)).toBe(false);
+      // And the next restore works.
+      const ok = await restoreDatabase(options(p, { checkOnly: true }));
+      expect(ok).toMatchObject({ checkedOnly: true });
+    });
+
+    it('when the role cannot be put back (the backup also ended the session that would have), it says so, with the command', async () => {
+      const p = await production();
+      const dump = await forged(p, 9, {
+        after: `ALTER ROLE flint_restore PASSWORD 'set-by-the-backup-0001';
+          SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'flint_restore' AND pid <> pg_backend_pid();`,
+      });
+      fresh();
+      const before = await databases('');
+      try {
+        const err = await refusal(restoreDatabase(options(p, { dump })));
+        expect(err.message).toBe(
+          "That file is not one of Flint's backups: restoring it changed the role Flint restores with (its password). Flint could not put all of that back. The database in use was not touched.",
+        );
+        expect(err.lines).toEqual([
+          'Restores, and the weekly restore test, will not work until that role has its password again.',
+          'Set it with this command, and type the password from the line FLINT_DB_RESTORE_URL in ~/.flint/backup.env when it asks:',
+          "  psql -d postgres -c '\\password flint_restore'",
+        ]);
+        expect(err.message).not.toMatch(/Nothing was changed/);
+        expect(await signsIn()).toBe(false);
+        // The copy is gone all the same (the migration owner removes it), and nothing in use was touched.
+        expect(await databases('')).toEqual(before);
+        expect(calls).toEqual([]);
+        // The next run says the same thing in its own words, before it reads any backup.
+        const next = await refusal(restoreDatabase(options(p, { checkOnly: true })));
+        expect(next.message).toMatch(/no longer let the role flint_restore sign in/);
+      } finally {
+        // What Will would do by hand, for the tests that follow.
+        await admin((c) => c.query(`ALTER ROLE flint_restore PASSWORD '${scramVerifier(pgConfig(urls.restore).password as string)}'`));
+      }
+      expect(await signsIn()).toBe(true);
     });
   });
 
