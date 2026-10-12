@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { GOAL_SAYS, REFUSAL, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, REFUSAL, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -118,15 +118,32 @@ interface ProposalFacts {
   tainted: boolean;
   sensitivity: string;
   destructive: boolean;
+  /** The card's args: the tier engine reads the pool a dispatch names from them, and nothing else. */
+  args?: unknown;
+}
+
+/**
+ * The pool a card's args name, for the tier engine's trading-pool rule (step 1).
+ * As it is written when it is shaped like a name; otherwise only whether it
+ * trades, so that no other text from a card's args reaches a refusal or the
+ * audit trail.
+ */
+export function poolOf(args: unknown): string | undefined {
+  const pool = args !== null && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>).pool : undefined;
+  if (typeof pool !== 'string' || !pool) return undefined;
+  if (/^[A-Za-z0-9_.:-]{1,80}$/.test(pool)) return pool;
+  return /trad|broker|exchange/i.test(pool) ? 'trading' : undefined;
 }
 
 async function tierOf(db: Db | Tx, p: ProposalFacts, now: Date, readOnlyHint?: boolean): Promise<TierDecision> {
   const mcp = mcpOf(p.action, { destructive: p.destructive, ...(readOnlyHint ? { readOnlyHint } : {}) });
+  const pool = poolOf(p.args);
   return resolveTier(p.action, {
     context: contextOf(p.origin),
     tainted: p.tainted,
     sensitivity: p.sensitivity as TierContext['sensitivity'] & string,
     ...(mcp ? { mcp } : {}),
+    ...(pool ? { pool } : {}),
     policies: await activePolicies(db, now),
     now,
   });
@@ -177,6 +194,12 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   if (isForecastSignedAction(input.action)) {
     const { checkForecastCard } = await import('../predict/enable.js');
     input = await checkForecastCard(db, input);
+  }
+  // A task or asset card (P5) is checked against the task and the asset as they stand, and filed with its
+  // args normalized and a fixed reason; one from chat, and one that could not apply, are never filed.
+  if (isTaskCard(input.action)) {
+    const { checkTaskCard } = await import('../tasks/card.js');
+    input = await checkTaskCard(db, input);
   }
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {

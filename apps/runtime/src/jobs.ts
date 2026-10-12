@@ -37,6 +37,9 @@ import { failureClass } from './dbcodes.js';
 import { TICK_CRON, tick } from './goals/tick.js';
 import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
+import { TASK_TICK_CRON, taskTick } from './tasks/tick.js';
+import { TaskJob, runTaskJob } from './tasks/run.js';
+import { checkTaskJob } from './tasks/check.js';
 import { predictionsStarted, sweep } from './ledger/sweep.js';
 import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
 import { runForecasts, runSeries } from './predict/run.js';
@@ -370,9 +373,52 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/**
+ * Tasks (P5). Always scheduled, unless they are switched off for a rollback
+ * (FLINT_ASSETS=off: then this is empty, startJobs unschedules the tick and
+ * nothing is worked). With no asset on there is no task, and the jobs idle:
+ * what is on is Will's signed cards, not a setting. Job data is a task's id,
+ * checked strictly; log lines carry ids, classes and counts.
+ */
+export function taskJobs(ctx: JobContext): JobSpec[] {
+  if (!ctx.config.assets) return [];
+  const log = (msg: string) => ctx.log(msg);
+  return [
+    {
+      // Every 2 minutes: tasks still out are sent again or ended, and ended ones' forecasts scored. It runs no adapter.
+      queue: 'tasks.tick',
+      cron: TASK_TICK_CRON,
+      handler: async () => {
+        const r = await taskTick({ db: ctx.db, bus: ctx.bus, log });
+        if (r.failed || r.cancelled || r.scored) ctx.log(`tasks: ${r.failed} ended as failed, ${r.cancelled} cancelled, ${r.scored} forecast(s) scored`);
+      },
+    },
+    {
+      // One task's run on its asset.
+      queue: 'tasks.run',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = TaskJob.safeParse(job.data);
+          if (data.success) await runTaskJob({ db: ctx.db, bus: ctx.bus, log }, data.data);
+        }
+      },
+    },
+    {
+      // One result against its bar; a passing one is offered to Will on a card, or accepted once he has promoted that.
+      queue: 'tasks.check',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = TaskJob.safeParse(job.data);
+          if (data.success) await checkTaskJob({ db: ctx.db, log }, data.data);
+        }
+      },
+    },
+  ];
+}
+
 /** The job set this runtime runs. */
 export function jobSpecs(ctx: JobContext): JobSpec[] {
-  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx), ...goalJobs(ctx), ...predictJobs(ctx)];
+  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx), ...goalJobs(ctx), ...predictJobs(ctx), ...taskJobs(ctx)];
 }
 
 /** What failed, not what it said (dbcodes.ts; kept here for the modules that import it from the jobs). */

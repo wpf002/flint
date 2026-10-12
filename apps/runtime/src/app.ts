@@ -8,7 +8,7 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
-import { GOAL_SAYS, safeName, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, TASK_SAYS, isTaskCard, safeName, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Config, RuntimeScope } from './config.js';
 import type { Db } from './db.js';
 import { callerFor, type Caller } from './auth.js';
@@ -34,6 +34,7 @@ import { isChatCommitmentKey } from './world/kinds.js';
 import { registerP2Routes } from './routes/p2.js';
 import { registerGoalRoutes } from './routes/goals.js';
 import { registerPredictionRoutes } from './routes/predictions.js';
+import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
 import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
@@ -69,7 +70,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -91,6 +92,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   const { db, config } = deps;
   const rp: WebAuthnRelyingParty | undefined = config.rp;
+  // P5: tasks and assets work unless they are switched off for a rollback (FLINT_ASSETS=off).
+  const assetsOn = config.assets ?? true;
   // BigInt columns (AuditEntry.seq, BackupRun.bytes) have no JSON form of their own.
   app.setReplySerializer((payload) => JSON.stringify(payload, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)));
 
@@ -205,6 +208,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // A job's cards are filed by the job, in this process. Over the wire an origin is only a claim, and a
     // `runtime:` one would file under a job's templates and its standing: refused, whoever holds the token.
     if (body.origin.startsWith('runtime:')) throw new Refused(400, GOAL_SAYS.runtimeOrigin);
+    // Switched off for a rollback: no task or asset card is filed.
+    if (!assetsOn && isTaskCard(body.action)) throw new Refused(409, TASK_SAYS.off);
     const created = await createProposal(db, body, actor(req));
     return reply.code(201).send(created);
   });
@@ -246,7 +251,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // Approved actions the runtime carries out itself (turning a source on, a signed policy change).
   app.post('/v1/proposals/:id/run', { preHandler: need('proposals') }, async (req) => {
     const { id } = Id.parse(req.params);
-    return runInternal(db, id, rp, config.tz, actor(req));
+    return runInternal(db, id, rp, config.tz, actor(req), INTERNAL_ACTIONS, { assets: assetsOn, bus: deps.status?.bus });
   });
   // A tool's result can be large (a fetched page): this route takes up to 1 MB and truncates what it stores.
   app.post('/v1/proposals/:id/complete', { preHandler: need('proposals'), bodyLimit: 1024 * 1024 }, async (req) => {
@@ -345,6 +350,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // P4 part 4: the Predictions panel (scope proposals: the runtime connector's token can never read a forecast's
   // numbers or a question's words, nor answer one for Will).
   registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false });
+  // P5: assets and tasks (scope proposals: no model reads a task's words, and chat has no tool that files or runs one).
+  registerTaskRoutes(app, { db, need, tz: config.tz, on: assetsOn });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

@@ -2,18 +2,20 @@
  * Actions the runtime carries out itself once Will has approved them: turning a
  * source on, applying a signed policy change, adding a triage rule, writing a
  * proposed link, creating the people on a calendar card (P2.5), changing a
- * goal or its plan (P3), and turning predictions on (P4). Each goes through
- * claimProposal (re-verification, tier, cap, intent) and then completes, so the
- * audit trail reads the same as any other approved action; a goal card and the
- * predictions card do all three in one transaction (goals/apply.ts,
- * predict/enable.ts). The database checks the effect too: a cursor turns on only
- * under an executing enable proposal, a policy row must appear in the signed
- * proposal, a goal moves only as its executing card says, and a number is
- * forecast only as the executing card's signed list says.
+ * goal or its plan (P3), turning predictions on (P4), and the seven asset and
+ * task cards (P5). Each goes through claimProposal (re-verification, tier, cap,
+ * intent) and then completes, so the audit trail reads the same as any other
+ * approved action; a goal card, the predictions card and a task card do all
+ * three in one transaction (goals/apply.ts, predict/enable.ts, tasks/card.ts).
+ * The database checks the effect too: a cursor turns on only under an executing
+ * enable proposal, a policy row must appear in the signed proposal, a goal moves
+ * only as its executing card says, a number is forecast only as the executing
+ * card's signed list says, and an asset turns on, and a task goes out or is
+ * accepted, only as its executing card says.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, SOURCES, isChatSuggestion, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, SOURCES, TASK_SIGNED_ACTIONS, isChatSuggestion, isGoalSignedAction, isTaskSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
 import { runForecastCard } from '../predict/enable.js';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
@@ -23,14 +25,16 @@ import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
 import { runGoalCard } from '../goals/apply.js';
 import { runSuggestionCard } from '../goals/candidates.js';
+import { runTaskCard, type TaskCardDeps } from '../tasks/card.js';
 
 /**
  * P4 adds forecast.series.enable (turning predictions on), and nothing else. P3 part 5 adds the two suggestions
- * from chat: an approved one adds a proposed goal, or an unconfirmed commitment.
+ * from chat: an approved one adds a proposed goal, or an unconfirmed commitment. P5 adds its seven: never a
+ * dispatch that spends, which nothing carries out.
  */
 export const INTERNAL_ACTIONS: ReadonlySet<string> = new Set([
   'world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS,
-  'forecast.series.enable', ...CHAT_SUGGESTION_ACTIONS,
+  'forecast.series.enable', ...CHAT_SUGGESTION_ACTIONS, ...TASK_SIGNED_ACTIONS,
 ]);
 
 /**
@@ -95,9 +99,10 @@ export const PolicyArgs = z
 /**
  * Carry out an approved action the runtime runs itself. `internal` is the set it
  * takes (INTERNAL_ACTIONS; a test passes a wider one to show that a listed action
- * without a branch below fails closed).
+ * without a branch below fails closed). `tasks` is what a task card needs from
+ * the process: whether tasks are switched off, and the bus to send a run on.
  */
-export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, internal: ReadonlySet<string> = INTERNAL_ACTIONS) {
+export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, internal: ReadonlySet<string> = INTERNAL_ACTIONS, tasks: TaskCardDeps = {}) {
   const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
   if (!p) throw new Refused(404, GONE);
   if (!internal.has(p.action)) throw new Refused(409, `${p.action} is not carried out by the runtime`);
@@ -107,6 +112,8 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
   if (p.action === 'forecast.series.enable') return runForecastCard(db, id, rp, tz, actor);
   // P3 part 5: and a suggestion from chat (a proposed goal, or an unconfirmed commitment).
   if (isChatSuggestion(p.action)) return runSuggestionCard(db, id, rp, tz, actor);
+  // P5: so is each asset and task card.
+  if (isTaskSignedAction(p.action)) return runTaskCard(db, id, rp, tz, actor, tasks);
   const claimed = await claimProposal(db, id, rp, tz, actor);
   try {
     if (claimed.action === 'world.source.enable') {
