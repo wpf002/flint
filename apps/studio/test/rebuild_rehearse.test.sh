@@ -542,6 +542,7 @@ ic6="$fx/icloud6/FlintBackups"; mkdir -p "${ic6:h}"; cp -R "$icloud" "$ic6"
 mv "$ic6/flint-20261012-0230.tar.gz.age" "$fx/held-back.age"; : > "$ic6/.flint-20261012-0230.tar.gz.age.icloud"
 u_out="$(FLINT_ICLOUD_WAIT=1 /bin/zsh "$rebuild" --unseal "$fx/b6" --offsite "$ic6" --key "$key" 2>&1)"; st=$?
 check "an archive still in iCloud is passed over after waiting" '[ "$st" = 0 ] && [[ "$u_out" == *"The files backup from 2026-10-12 at 02:30 has not come down from iCloud, so Flint is using the one before it."* ]]'
+check "it says it is waiting before it waits, and for how long at most" '[[ "$u_out" == "A backup has not come down from iCloud yet. Flint asked for it and is waiting, for up to 1 minute."$'"'"'\n'"'"'* ]]'
 
 # An opened folder that changed after it was opened (its fingerprints no longer match).
 tamper() { rm -rf "${fx:?}/tampered"; cp -Rp "$fx/good" "$fx/tampered"; }

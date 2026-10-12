@@ -343,6 +343,12 @@ No key, token or password is ever in the iCloud copies.
   one: it takes only your data from it, checks the database against Flint's own
   code, switches off any permission your signature does not cover, and shows you
   which keys can approve. Signing the backups is not done yet.
+- A database backup is restored by a database role that owns nothing else, and
+  nothing in it is read by any other role until it has passed its checks. If a
+  file changes that role itself, the restore refuses it, puts the role back,
+  and says so.
+- A restore over the database in use revokes any approval key in the backup
+  that the database in use never held. Enrol it again if it was yours.
 - The first connection to a new Mac trusts the fingerprint you compare in entry
   4, step 2, and that Mac's password.
 
