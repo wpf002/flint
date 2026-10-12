@@ -73,7 +73,7 @@ describe('P3’s promotion cards', () => {
     const c = say(card(rows, 'p3.promotion'));
     expect(c.title).toBe('Let Goal Reviews Run on Their Own');
     expect(c.sub).toBe(`Until ${date}, Flint files its plan suggestions as cards you sign.`);
-    expect(c.facts).toEqual([['Until', date], ['Limits', 'Review Your Goals 20 a Day'], ['Filed By', 'You']]);
+    expect(c.facts).toEqual([['Until', date], ['Limits', 'Goal Reviews 20 a Day'], ['Filed By', 'You']]);
     expect(c.alone).toBe(true);
     expect(c.prompt).toBe('approve: Let Goal Reviews Run on Their Own');
   });
@@ -84,7 +84,7 @@ describe('P3’s promotion cards', () => {
     const c = say(card(rows, 'p3c.promotion'));
     expect(c.title).toBe('Let Flint Suggest Goals from Chat');
     expect(c.sub).toBe(`Until ${date}, Flint adds goals it hears in chat to Suggested.`);
-    expect(c.facts).toEqual([['Until', date], ['Limits', 'Suggest Goals from Chat 3 a Day'], ['Filed By', 'You']]);
+    expect(c.facts).toEqual([['Until', date], ['Limits', 'Goal Suggestions from Chat 3 a Day'], ['Filed By', 'You']]);
     expect(c.alone).toBe(true);
   });
 
@@ -111,7 +111,7 @@ describe('P3’s promotion cards', () => {
     expect(other.sub).toBe(`It lasts until ${date}.`);
     const both = say(card([...reviews, { pattern: 'notify.push', dailyCap: 3 }], 'p3.promotion'));
     expect(both.title).toBe('Let 2 Actions Run on Their Own');
-    expect(both.facts[1]).toEqual(['Limits', 'Review Your Goals 20 a Day · Notify Push 3 a Day']);
+    expect(both.facts[1]).toEqual(['Limits', 'Goal Reviews 20 a Day · Phone Pings 3 a Day']);
   });
 
   it('a card whose rows carry no date still reads as a sentence', () => {
@@ -123,15 +123,21 @@ describe('P3’s promotion cards', () => {
   it('Show Details: each of the two cards says its row as a sentence, its limit and its last day', () => {
     expect(date).toBe('Apr 5, 2027');
     expect(details(card(rowsOf('P3_PROMOTIONS'), 'p3.promotion'))).toEqual(['Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027.']);
-    expect(details(card(rowsOf('P3C_PROMOTIONS'), 'p3c.promotion'))).toEqual(['Flint may add goals it hears in chat to Suggested on its own, up to 3 a day, until Apr 5, 2027.']);
+    expect(details(card(rowsOf('P3C_PROMOTIONS'), 'p3c.promotion'))).toEqual(['Goal suggestions from chat may be filed on their own, up to 3 a day, until Apr 5, 2027.']);
   });
 
-  it('a rule card’s details are built from sentences, never from its stored rows: only the other cards still show theirs', () => {
-    // The card's renderer: a rule card's rows go through apprRulesSay, as text; the stored args are for every other card.
-    expect(apprJs).toContain("if(p.fullName==='policy.change')apprRulesSay(p).forEach(function(t){det.appendChild(apprEl('p',null,t));});");
-    expect(apprJs).toContain("else{var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));}");
-    expect(apprJs.match(/JSON\.stringify\(p\.args/g)).toHaveLength(1);
-    // (test/console-approvals.test.ts opens a rule card in a DOM and reads its details.)
+  it('no card’s details are built from its stored args: the panel and the chat card both go through apprDetails, and nothing prints the args', () => {
+    expect(apprJs).toContain('apprDetailsInto(det,p);');
+    expect(apprJs).not.toMatch(/JSON\.stringify\(/);
+    expect(apprJs).not.toMatch(/apprEl\('pre'/);
+    // The card in a chat: the same lines, and no stored args either.
+    const chatCard = /\nfunction renderProposals\([\s\S]*?\n\/\* -{10} Will.s approval key/.exec(html)![0];
+    expect(chatCard).toContain("var pargs=el('div','pargs');if(typeof apprDetailsInto==='function')apprDetailsInto(pargs,a);card.appendChild(pargs);");
+    expect(chatCard).not.toMatch(/JSON\.stringify/);
+    // What is signed is untouched: both hand the stored args to the signed path, which checks their digest.
+    expect(apprJs).toContain('approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args})');
+    expect(chatCard).toContain("approveAction(a.id,card,{reason:'approve: '+title,fresh:typeof apprAlone==='function'?apprAlone(a):true,args:a.args});");
+    // (test/console-card-details.test.ts opens every kind of card in a DOM and reads what it shows.)
   });
 
   it('no table of P3’s holds a signed goal or plan action', () => {
@@ -167,19 +173,49 @@ describe('Show Details on every rule card, old and new', () => {
     expect(seen.size).toBe(TABLES.reduce((n, t) => n + rowsOf(t).length, 0));
     const backups = details(card(BACKUPS, 'x'));
     expect(backups).toEqual([
-      `The nightly backup may run on its own, once a day, until ${date}.`,
+      `The backup may run on its own, once a day, until ${date}.`,
       `The offsite copy may be sent on its own, once a day, until ${date}.`,
       `The restore test may run on its own, once a week, until ${date}.`,
     ]);
     for (const line of backups) expect(noteProblems('Rule', line), line).toEqual([]);
   });
 
+  it('one name for each rule: the Limits fact says it, and the details’ sentence is built from it, so the two cannot drift', () => {
+    const tool = (pattern: string) => run(`!!APPR_TOOLS['runtime.'+${JSON.stringify(pattern)}]`) as boolean;
+    const BACKUP_LIMITS: Record<string, string> = { 'backup.local': 'Backup 1 a Day', 'backup.offsite': 'Offsite Copy 1 a Day', 'restore.drill': 'Restore Test 1 a Week' };
+    for (const row of [...TABLES.flatMap((t) => rowsOf(t)), ...BACKUPS] as Array<{ pattern: string; dailyCap?: number }>) {
+      const words = run(`apprRuleWords(${JSON.stringify(row.pattern)})`) as string;
+      const limit = run(`apprLimitSays(${JSON.stringify(row)})`) as string;
+      // The name is the panel's own, never spelled out of the action's internal name, and it is a Title Case title by the notes' standard.
+      expect(words, row.pattern).not.toBe(run(`apprWords(${JSON.stringify(row.pattern)})`));
+      // (Chat's tools keep the titles they share with the notes, @flint/policy's ACTION_WORDS: "Look Up One Item" is a verb with its "Up".)
+      expect(noteProblems(limit, '').filter((why) => !(tool(row.pattern) && why.includes('Title Case'))), limit).toEqual([]);
+      expect(plain(limit), limit).toBe(true);
+      expect(limit).toBe(BACKUP_LIMITS[row.pattern] ?? `${words}${row.dailyCap ? ` ${row.dailyCap} a Day` : ''}`);
+      // The sentence says those very words.
+      expect(says({ ...row, tier: 'alone', expiresAt: UNTIL }).toLowerCase(), row.pattern).toContain(words.toLowerCase());
+    }
+    // The table holds a name and how it reads, never a second wording of the sentence.
+    const table = /\nvar APPR_RULES=\{([\s\S]*?)\};\n/.exec(apprJs)![1]!;
+    expect(table).not.toMatch(/may |on its own|on their own/);
+    // Over 6 rules, the fact counts them instead of listing them.
+    const p2 = say(card(rowsOf('P2_PROMOTIONS'), 'p2.promotion'));
+    expect(p2.facts).toEqual([['Until', date], ['Limits', '15 actions, listed under Show Details.'], ['Filed By', 'You']]);
+    expect(noteProblems('Limits', p2.facts[1]![1])).toEqual([]);
+    const p1 = say(card(rowsOf('P1_PROMOTIONS'), 'p1.promotion'));
+    expect(p1.facts[1]).toEqual(['Limits', 'Check What’s Happening Now · Look Up One Item · Read Open Predictions · Check Prediction Accuracy · Record a Prediction 10 a Day']);
+  });
+
   it('reads as the tables are written: a few of them, word for word', () => {
     const one = (pattern: string, dailyCap?: number) => says({ pattern, tier: 'alone', ...(dailyCap ? { dailyCap } : {}), expiresAt: UNTIL });
-    expect(one('world.sync.google_calendar')).toBe('Flint may read your Google Calendar on its own until Apr 5, 2027.');
-    expect(one('world.person.create', 20)).toBe('Flint may add people from your calendar on its own, up to 20 a day, until Apr 5, 2027.');
-    expect(one('notify.push', 3)).toBe('Flint may ping your phone on its own, up to 3 a day, until Apr 5, 2027.');
-    expect(one('triage.rule')).toBe('Triage rules may run on their own until Apr 5, 2027.');
+    expect(one('goal.review.local', 20)).toBe('Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027.');
+    expect(one('world.sync.google_calendar')).toBe('Google Calendar reads may run on their own until Apr 5, 2027.');
+    expect(one('world.person.create', 20)).toBe('People from your calendar may be added on their own, up to 20 a day, until Apr 5, 2027.');
+    expect(one('notify.push', 3)).toBe('Phone pings may be sent on their own, up to 3 a day, until Apr 5, 2027.');
+    expect(one('notify.inapp')).toBe('In-app notes may be posted on their own until Apr 5, 2027.');
+    expect(one('world.sync.nexus_inbox')).toBe('The Nexus inbox may be read on its own until Apr 5, 2027.');
+    expect(one('triage.local_model')).toBe('Local model triage may run on its own until Apr 5, 2027.');
+    expect(one('digest.daily')).toBe('The daily summary may be sent on its own until Apr 5, 2027.');
     expect(one('ledger_record_prediction', 10)).toBe('Chat may record a prediction on its own, up to 10 a day, until Apr 5, 2027.');
     expect(one('world_now')).toBe('Chat may check what’s happening now on its own until Apr 5, 2027.');
   });
@@ -193,15 +229,15 @@ describe('Show Details on every rule card, old and new', () => {
   });
 
   it('a rule that tightens says so: one that asks each time, and one that stops an action', () => {
-    expect(says({ pattern: 'goal.review.local', tier: 'approval', expiresAt: UNTIL })).toBe('You approve “Review Your Goals” each time until Apr 5, 2027.');
-    expect(says({ pattern: 'notify.push', tier: 'forbidden', dailyCap: 3, expiresAt: UNTIL })).toBe('Flint may not run “Notify Push” until Apr 5, 2027.');
+    expect(says({ pattern: 'goal.review.local', tier: 'approval', expiresAt: UNTIL })).toBe('You approve “Goal Reviews” each time until Apr 5, 2027.');
+    expect(says({ pattern: 'notify.push', tier: 'forbidden', dailyCap: 3, expiresAt: UNTIL })).toBe('Flint may not run “Phone Pings” until Apr 5, 2027.');
     expect(says({ pattern: 'world.sync.*', tier: 'forbidden' })).toBe('Flint may not run any action under “World Sync”.');
   });
 
   it('a scoped rule says what it covers, as a list in a sentence, never as the object', () => {
     const scoped = card([{ pattern: 'world.sync.git' }], 'x');
     (scoped.args.rows[0] as Record<string, unknown>).scope = { endpoints: ['github', 'gitlab'] };
-    expect(details(scoped)).toEqual([`Flint may read your repos on its own until ${date}.`, 'It covers only these endpoints: github, gitlab.']);
+    expect(details(scoped)).toEqual([`Repo reads may run on their own until ${date}.`, 'It covers only these endpoints: github, gitlab.']);
     (scoped.args.rows[0] as Record<string, unknown>).scope = { series: { nested: true } };
     expect(details(scoped)[1]).toBe('It covers only part of what it names.');
     for (const line of details(scoped)) expect(line).not.toMatch(/[{}\[\]"]/);

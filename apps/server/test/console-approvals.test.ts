@@ -2,7 +2,7 @@
  * The console's Approvals panel (apps/console/index.html, its own <script
  * id="approvals-js">), run against a small fake DOM that refuses innerHTML:
  * every pending card the server lists says what it would do in words (the
- * open one with three facts or fewer, the raw args behind Show Details), with
+ * open one with three facts or fewer, the rest as sentences behind Show Details), with
  * outside text marked and inert; Approve and Reject go through the signed path
  * chat cards use; Approve All signs each card in turn and leaves a card with
  * outside text or money for its own prompt; a device without an approval key
@@ -171,15 +171,15 @@ describe('the console Approvals panel', () => {
     // The open card shows its line too, as a sentence, and its facts.
     expect(first).toContain('Run Backups on Their OwnIt lasts until Mar 29, 2027.');
     expect(first).toContain('UntilMar 29, 2027');
-    expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite 1 a Day');
+    expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite Copy 1 a Day');
     expect(first).toContain('Filed ByYou');
     // The reason and what each rule lets run wait behind Show Details, as sentences: a rule card never shows its rows as they are stored.
     expect(first).not.toContain('backup.local');
-    expect(first).not.toContain('The nightly backup');
+    expect(first).not.toContain('The backup may run');
     rows[0]!.button('Show Details').onclick!();
     const details = rows[0]!.shown();
     expect(details).toContain('The shadow week: 1.2 relevant a day.');
-    expect(details).toContain('The nightly backup may run on its own, once a day, until Mar 29, 2027.');
+    expect(details).toContain('The backup may run on its own, once a day, until Mar 29, 2027.');
     expect(details).toContain('The restore test may run on its own, once a week, until Mar 29, 2027.');
     expect(details).toContain('The offsite copy may be sent on its own, once a day, until Mar 29, 2027.');
     expect(details).not.toMatch(/[{}"\[\]]|backup\.local|restore\.drill|pattern|expiresAt/);
@@ -342,7 +342,7 @@ describe('the console Approvals panel', () => {
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Google Calendar · Add People from Calendar 20 a Day');
+    expect(rows[0]!.shown()).toContain('LimitsGoogle Calendar Reads · People from Your Calendar 20 a Day');
     expect(rows[0]!.shown()).toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Google Calendar Source');
     expect(rows[1]!.shown()).toContain(`Your Google Calendar is read every ${minutes} minutes.`);
@@ -358,7 +358,7 @@ describe('the console Approvals panel', () => {
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
-    expect(rows[0]!.shown()).toContain('LimitsRead Your Apple Calendar');
+    expect(rows[0]!.shown()).toContain('LimitsApple Calendar Reads');
     // Reading alone adds no one, so it doesn't ask on its own.
     expect(rows[0]!.shown()).not.toContain('Asks on Its Own');
     expect(rows[1]!.shown()).toContain('Turn On the Apple Calendar Source');
@@ -525,7 +525,7 @@ describe('the console Approvals panel', () => {
     expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
     // The policy card names P3's rows in words.
     expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', dailyCap: 20 }, { pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }] } })[2])
-      .toContainEqual(['Limits', 'Review Your Goals 20 a Day · Suggest Goals from Chat 3 a Day · Add Commitments from Chat 10 a Day']);
+      .toContainEqual(['Limits', 'Goal Reviews 20 a Day · Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day']);
   });
 
   it('on a phone a card’s sentence wraps instead of being cut off, and the footer’s note has a line of its own above the button', () => {
