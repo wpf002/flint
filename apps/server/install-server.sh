@@ -62,7 +62,7 @@ calendar_changed() { # 0: changed since the last finished server deploy, or that
 # result is kept for Settings > Health. The same script runs it every week
 # (com.flint.rebuild-rehearsal, below), so a rebuild that stopped working for a
 # reason no deploy shows is still found.
-REHEARSAL_PATHS='^(apps/studio/|docs/RECOVERY\.md$|apps/runtime/(src/backup/|src/cli\.ts$|src/config\.ts$|scripts/bootstrap-db\.ts$|prisma/|install-runtime\.sh$|package\.json$)|apps/server/(install-server\.sh$|auto_deploy\.sh$|src/(internal|access|mcp-config)\.ts$|com\.flint\.deploy\.plist$)|apps/evolve/com\.flint\.evolve\.plist$|packages/policy/src/(tiers|selfmod-paths)\.ts$|packages/mcp/connectors/|test-support/quiet-bin/|pnpm-lock\.yaml$|package\.json$|pnpm-workspace\.yaml$)'
+REHEARSAL_PATHS='^(apps/studio/|docs/RECOVERY\.md$|apps/runtime/(src/backup/|src/cli\.ts$|src/config\.ts$|src/index\.ts$|scripts/bootstrap-db\.ts$|prisma/|install-runtime\.sh$|package\.json$)|apps/server/(install-server\.sh$|auto_deploy\.sh$|src/(index|internal|access|mcp-config)\.ts$|com\.flint\.deploy\.plist$)|apps/evolve/com\.flint\.evolve\.plist$|packages/policy/src/|packages/mcp/connectors/|test-support/quiet-bin/|pnpm-lock\.yaml$|package\.json$|pnpm-workspace\.yaml$)'
 rehearsal_changed() { # 0: changed since the last finished server deploy, or that deploy is unknown; 1: not changed
   local last files
   last=$(grep -F '"component":"server"' "$DATA/deploy-events.jsonl" 2>/dev/null | grep -F '"stage":"deploy","outcome":"ok"' | tail -n 1 | sed -nE 's/.*"sha":"([0-9a-f]{40})".*/\1/p')

@@ -667,6 +667,9 @@ if (( REHEARSE )); then
   finish_rehearsal() {
     local st=$?
     trap - EXIT INT TERM
+    # The holder of the rehearsal's ports, if it is still there: told to stop, and stopped.
+    [[ -n ${HOLD:-} && -d $HOLD ]] && : > "$HOLD/stop" 2>/dev/null
+    [[ -n ${HOLDER:-} ]] && kill "$HOLDER" 2>/dev/null
     if (( KEEP_RUNNING )) && [[ $st == 0 ]]; then exit 0; fi
     if [[ $st != 0 && -d $SCRATCH/log ]]; then
       # What went wrong is in the logs: they outlive the rehearsal's folder, which holds opened backups and must go.
@@ -678,10 +681,32 @@ if (( REHEARSE )); then
   }
   trap finish_rehearsal EXIT
   trap 'exit 130' INT TERM
-  ports=(${(f)"$(node -e '
-    const net = require("net"); const servers = []; let left = 4;
-    for (let i = 0; i < 4; i++) { const s = net.createServer(); servers.push(s); s.listen(0, "::1", () => { if (--left === 0) { console.log(servers.map((x) => x.address().port).join("\n")); servers.forEach((x) => x.close()); } }); }
-  ' 2>/dev/null)"})
+  # Four free ports on this Mac's own address, each HELD until the moment it is needed. A port that is
+  # picked and let go can be taken by anything else on this Mac before the rehearsal's own service binds
+  # it (other checkouts' tests run here too), and the rehearsal would fail for no reason of its own. So a
+  # small holder keeps all four bound, and lets one go when it is asked to (release_port, below), an
+  # instant before the service that wants it starts. It ends when all four are let go, when it is told
+  # to stop, or when this script is gone.
+  HOLD="$SCRATCH/state/ports"
+  mkdir -p -m 700 "$HOLD" || refuse "The rehearsal could not make a folder for its ports."
+  node -e '
+    const net = require("net"), fs = require("fs"), dir = process.argv[1], parent = process.ppid, born = Date.now();
+    const servers = []; let left = 4, held = 4;
+    const end = () => { for (const s of servers) { try { s.close(); } catch {} } process.exit(0); };
+    for (let i = 0; i < 4; i++) {
+      const s = net.createServer(); servers.push(s);
+      s.on("error", () => process.exit(1));
+      s.listen(0, "::1", () => { if (--left === 0) { fs.writeFileSync(dir + "/ports.new", servers.map((x) => x.address().port).join("\n") + "\n"); fs.renameSync(dir + "/ports.new", dir + "/ports"); } });
+    }
+    setInterval(() => {
+      if (process.ppid !== parent || Date.now() - born > 30 * 60000 || fs.existsSync(dir + "/stop")) end();
+      // Let go, then said: only once the port is really free, and the last one before this ends.
+      servers.forEach((s, i) => { if (s.listening && fs.existsSync(dir + "/release-" + (i + 1))) s.close(() => { try { fs.writeFileSync(dir + "/released-" + (i + 1), ""); } catch {} if (--held === 0) end(); }); });
+    }, 20);
+  ' "$HOLD" >/dev/null 2>&1 &
+  HOLDER=$!
+  for i in {1..200}; do [[ -s $HOLD/ports ]] && break; sleep 0.025; done
+  ports=(${(f)"$(<"$HOLD/ports")"}) 2>/dev/null
   (( ${#ports} == 4 )) || refuse "The rehearsal could not find free ports on this Mac."
   PG_PORT=$ports[1] SERVER_PORT=$ports[2] RUNTIME_PORT=$ports[3] INTERNAL_PORT=$ports[4]
   PG_SOCKET="$(mktemp -d "$TMP/flint-rh.XXXXXX")" || refuse "The rehearsal could not make a folder for its database's socket."
@@ -877,9 +902,20 @@ pg_ready() { # [tries]: is the server answering on its socket?
   for i in {1..${1:-60}}; do "$TOOL_pg_isready" -q -h "$PG_SOCKET" -p "$PG_PORT" && return 0; sleep 0.5; done
   return 1
 }
+# release_port <1: the database | 2: the server | 3: the runtime | 4: the server's own listener>: a rehearsal's
+# port is let go now, because the service that binds it starts next. Anywhere else this does nothing.
+release_port() {
+  emulate -L zsh
+  local i
+  (( REHEARSE )) && [[ -n ${HOLD:-} && -d $HOLD && ! -e $HOLD/released-$1 ]] || return 0
+  : > "$HOLD/release-$1"
+  for i in {1..120}; do [[ -e $HOLD/released-$1 ]] && return 0; sleep 0.025; done
+  return 0
+}
 pg_start() { # <start|restart>
   emulate -L zsh
   if (( REHEARSE )); then
+    release_port 1
     # LC_ALL=C, as Homebrew's own service sets it: without a valid locale Postgres will not start on a Mac.
     LC_ALL=C "$TOOL_pg_ctl" -D "$PG_DATA" -l "$LOG/postgres.log" -w -t 60 "$1" >"$LOG/pg_ctl.log" 2>&1 || return 1
   else
@@ -1215,9 +1251,11 @@ if (( REHEARSE )) || { [[ -n $head_commit ]] && (( ${DEPLOYED[(Ie)$head_commit]}
 else
   say "Flint is testing its code before installing it, because it is not a version the old Mac was running. This takes several minutes."
 fi
+release_port 3
 ( cd "$REPO" && env "${install_env[@]}" ./apps/runtime/install-runtime.sh ) >"$LOG/install-runtime.log" 2>&1 \
   || refuse "The runtime did not come up. The details are in $LOG/install-runtime.log."
 say "Flint's runtime is built and answering."
+release_port 2; release_port 4
 ( cd "$REPO" && env "${install_env[@]}" ./apps/server/install-server.sh ) >"$LOG/install-server.log" 2>&1 \
   || refuse "The server did not come up. The details are in $LOG/install-server.log."
 say "Flint's server is built and answering."

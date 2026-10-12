@@ -89,7 +89,7 @@ describe('install-server.sh runs the rebuild rehearsal only when a deploy change
   it('skips it for a deploy that touches nothing a rebuild is made of', () => {
     deployed(commit('v0', 'README.md'));
     for (const path of ['docs/ARCHITECTURE.md', 'README.md', 'apps/server/src/router.ts', 'apps/server/test/router.test.ts', 'apps/console/index.html', 'apps/runtime/src/triage/triage.ts',
-      'apps/runtime/src/sources/github.ts', 'apps/runtime/test/backup.test.ts', 'packages/policy/src/notes.ts', 'packages/core/src/index.ts', 'packages/mcp/src/gate.ts', 'apps/desktop-mac/Flint.swift',
+      'apps/runtime/src/sources/github.ts', 'apps/runtime/test/backup.test.ts', 'packages/policy/test/tiers.test.ts', 'packages/policy/package.json', 'packages/core/src/index.ts', 'packages/mcp/src/gate.ts', 'apps/desktop-mac/Flint.swift',
       'apps/server/package.json', 'apps/runtime/scripts/other.ts', 'docs/RECOVERY.md.bak', 'apps/server/src/internal.test.ts']) {
       commit(`change ${path}`, path);
       expect(needed(), path).toBe(false);
@@ -102,6 +102,10 @@ describe('install-server.sh runs the rebuild rehearsal only when a deploy change
       'apps/runtime/src/backup/restore.ts', 'apps/runtime/src/cli.ts', 'apps/runtime/src/config.ts', 'apps/runtime/scripts/bootstrap-db.ts', 'apps/runtime/prisma/migrations/20261012000000_x/migration.sql',
       'apps/runtime/prisma/schema.prisma', 'apps/runtime/install-runtime.sh', 'apps/runtime/package.json', 'apps/server/install-server.sh', 'apps/server/auto_deploy.sh', 'apps/server/src/internal.ts',
       'apps/server/src/access.ts', 'apps/server/src/mcp-config.ts', 'apps/server/com.flint.deploy.plist', 'apps/evolve/com.flint.evolve.plist', 'packages/policy/src/tiers.ts', 'packages/policy/src/selfmod-paths.ts',
+      // The restore's own checks read the approval and action rules from here: the whole of the package's source counts.
+      'packages/policy/src/approval.ts', 'packages/policy/src/notes.ts', 'packages/policy/src/wire.ts',
+      // Where the runtime and the server start: what a rebuilt Flint runs first.
+      'apps/runtime/src/index.ts', 'apps/server/src/index.ts',
       'packages/mcp/connectors/web-server.ts', 'test-support/quiet-bin/osascript', 'pnpm-lock.yaml', 'package.json', 'pnpm-workspace.yaml']) {
       const sha = commit(`change ${path}`, path);
       expect(needed(), path).toBe(true);
