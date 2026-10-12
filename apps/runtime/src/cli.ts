@@ -54,7 +54,7 @@ import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
-import { cardFiledSays, proposeForecasts } from './predict/enable.js';
+import { PREDICTIONS_OFF_SAYS, cardFiledSays, proposeForecasts } from './predict/enable.js';
 import { FORECAST_SERIES_KEYS } from './predict/series.js';
 import { Refused } from './governance/proposals.js';
 import { SOURCES } from '@flint/policy';
@@ -132,14 +132,22 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'predictions-on') {
     const keys = process.argv.slice(3);
     const config = loadRuntimeConfig();
+    // Switched off on this Mac: said, nothing is filed, and the command fails (as enable-source does for a bad name).
+    if (!config.predict) {
+      console.log(PREDICTIONS_OFF_SAYS);
+      process.exitCode = 1;
+      return;
+    }
     const db = createDb(config.databaseUrl);
     try {
       const p = await proposeForecasts(db, keys.length ? keys : FORECAST_SERIES_KEYS);
       console.log(cardFiledSays(p, keys.length ? new Set(keys).size : FORECAST_SERIES_KEYS.length));
     } catch (err) {
-      // A refusal is Flint's own sentence ("That number can’t be forecast."): said as it is, with nothing filed.
-      if (err instanceof Refused) return void console.log(`Not filed: ${err.message}`);
-      throw err;
+      // A refusal is Flint's own sentence ("That number can’t be forecast."): said as it is, with nothing filed, and
+      // the command fails.
+      if (!(err instanceof Refused)) throw err;
+      console.log(`Not filed: ${err.message}`);
+      process.exitCode = 1;
     } finally {
       await db.$disconnect();
     }

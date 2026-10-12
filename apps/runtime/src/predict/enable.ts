@@ -179,14 +179,27 @@ export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAS
   }, 'will:cli', now);
 }
 
-/** What the command prints once the card is filed: what it is, and how Will approves it. No key and no id of a number. */
-export function cardFiledSays(p: { id: string; deduped: boolean }, numbers: number): string {
+/**
+ * What the command prints once the card is filed: what it is, and how Will approves it. Held to the notes' rules, as
+ * everything Flint says to him is: no key, no id (the card's or a number's), nothing in parentheses.
+ */
+export function cardFiledSays(p: { deduped: boolean }, numbers: number): string {
   return [
-    `${p.deduped ? 'Already filed' : 'Filed'}: the Turn On Predictions card, for ${numbers} ${numbers === 1 ? 'number' : 'numbers'} (proposal ${p.id}).`,
+    `${p.deduped ? 'Already filed' : 'Filed'}: the Turn On Predictions card, for ${numbers} ${numbers === 1 ? 'number' : 'numbers'}.`,
     'To approve it: open Flint, click Approvals in the top bar, open Turn On Predictions, and approve it with Touch ID.',
     'It asks on its own, never in Approve All. It expires in 7 days. Nothing is forecast until it is approved.',
   ].join('\n');
 }
+
+/**
+ * What the command prints when predictions are switched off on this Mac. A card filed and signed then would turn
+ * numbers on that nothing forecasts, and say "nothing is forecast until it is approved" of something approval would
+ * not start either. So nothing is filed, and it says why and where the how-to is.
+ */
+export const PREDICTIONS_OFF_SAYS = [
+  'Not filed: predictions are switched off on this Mac.',
+  'Switch them on first, then run this again. The runtime’s README says how, under The Two Switches.',
+].join('\n');
 
 /** Test seams: a fault injected after the writes, before the card completes. */
 export interface ForecastHooks {
