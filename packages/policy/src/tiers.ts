@@ -117,10 +117,11 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'backup.local': approval({ cap: { limit: 1, period: 'day' } }),
   'restore.drill': approval({ cap: { limit: 1, period: 'week' }, note: 'into a scratch database' }),
   'backup.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, note: 'age-encrypted, to iCloud' }),
-  // Replacing the production database with a backup (P7). Never promoted and never
-  // autonomous: Will runs the command himself and types the confirmation. It cannot
-  // wait on an approval card, because the cards live in the database it replaces.
-  'restore.production': fixed({ note: 'Will runs it at the keyboard and confirms; never promoted, never autonomous' }),
+  // Replacing the production database with a backup (P7). Never promoted, never
+  // autonomous, and never from chat (CONSOLE_ONLY below): Will runs the command
+  // himself and types the confirmation. It cannot wait on an approval card, because
+  // the cards live in the database it replaces.
+  'restore.production': fixed({ note: 'Will runs it at the keyboard and confirms; never promoted, never autonomous, never from chat' }),
   // Housekeeping the runtime does to its own tables.
   'maintenance.retention': approval({ note: 'nulls payloads and args past their retention' }),
   'maintenance.partitions': approval({ note: 'creates audit partitions; dropping one is partition_drop' }),
@@ -480,6 +481,13 @@ export const RUNTIME_CHAT_TOOLS: ReadonlySet<string> = new Set([
   'inbox_recent', 'escalations_open', 'explain_decision',
 ]);
 
+/**
+ * Actions that exist only for Will at the keyboard. In any other context
+ * (a chat turn included) they are FORBIDDEN, not merely waiting for approval:
+ * nothing but the command he runs himself may even ask for them.
+ */
+export const CONSOLE_ONLY: ReadonlySet<string> = new Set(['restore.production']);
+
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const key = actionKey(action, ctx.mcp);
@@ -488,6 +496,11 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   // 1. Forbidden in code.
   const why = forbiddenReason(action, ctx);
   if (why) return { tier: 'forbidden', rule: 'forbidden', reason: why, key };
+
+  // 1b. For Will at the keyboard only.
+  if (!ctx.mcp && CONSOLE_ONLY.has(action) && ctx.context !== 'console') {
+    return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is run by Will at the keyboard, and from nowhere else`, key };
+  }
 
   // 2a. Autonomous: the closed list, and never an MCP tool. Any context that is
   // not exactly chat or console is treated as autonomous (fail closed).
