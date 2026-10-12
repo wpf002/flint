@@ -20,7 +20,7 @@ BEGIN
     END IF;
   END LOOP;
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
-    DELETE FROM _prisma_migrations WHERE migration_name = '20261013000050_public_schema_floor';
+    DELETE FROM _prisma_migrations WHERE migration_name = '20261013000150_public_schema_floor';
   END IF;
 END;
 $$;

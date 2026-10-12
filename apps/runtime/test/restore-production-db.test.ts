@@ -1364,7 +1364,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
   });
 
   describe('a database that was set up by hand, as the one Flint runs on was', () => {
-    const FLOOR = '20261013000050_public_schema_floor';
+    const FLOOR = '20261013000150_public_schema_floor';
     /** Who holds what on the public schema and on the database, the owner's own left out. */
     const rights = (name: string) => admin(async (c) => (await c.query<{ r: string }>(
       `SELECT 'schema ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type AS r

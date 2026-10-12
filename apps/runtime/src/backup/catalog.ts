@@ -449,11 +449,11 @@ export async function buildReference(c: pg.Client, applied: readonly Migration[]
  * and the migration, still pending for it, is applied after the restore and
  * changes nothing.
  *
- * `20261013000050_public_schema_floor`: the Mac Flint runs on had "everyone"
+ * `20261013000150_public_schema_floor`: the Mac Flint runs on had "everyone"
  * taken off its public schema at first setup. Every backup made before that
  * migration reached it is of such a database.
  */
-export const ALREADY_BY_HAND: readonly string[] = ['20261013000050_public_schema_floor'];
+export const ALREADY_BY_HAND: readonly string[] = ['20261013000150_public_schema_floor'];
 
 export interface Compared {
   /** How the database differs from what this checkout builds for its record; no objects when it does not. */

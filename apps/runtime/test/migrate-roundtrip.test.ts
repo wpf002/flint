@@ -80,7 +80,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
     const newest = migrationDirs().at(-1)!;
     // Something true only while the newest migration is applied, to see it go and come back. A new migration names its own here.
-    const applied: Record<string, string> = { '20261013000050_public_schema_floor': `NOT has_schema_privilege('public', 'public', 'USAGE')` };
+    const applied: Record<string, string> = { '20261013000150_public_schema_floor': `NOT has_schema_privilege('public', 'public', 'USAGE')` };
     expect(applied[newest], `say what ${newest} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[newest]} AS t`)).rows[0]!.t);
     expect(await there()).toBe(true);
@@ -100,7 +100,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   // done by hand at first setup, so the migration must change nothing there, and its down.sql must give back
   // exactly what a database built without it has (a restore compares the two, line by line).
   describe('the public schema floor', () => {
-    const FLOOR = '20261013000050_public_schema_floor';
+    const FLOOR = '20261013000150_public_schema_floor';
     const sql = (file: string) => readFileSync(join(MIGRATIONS, FLOOR, file), 'utf8');
     /** Who holds what on the public schema and on the database itself, the owner's own left out: `who=rights`, sorted. */
     const acl = () => withClient(owner, async (c) => (await c.query<{ on: string; who: string; rights: string }>(
