@@ -361,3 +361,66 @@ export type FaultPoint = 'after_event' | 'after_decision' | 'after_notify';
 export function faultAt(point: FaultPoint): void {
   if (process.env.NODE_ENV === 'test' && process.env.FLINT_TEST_FAULT === point) process.kill(process.pid, 'SIGKILL');
 }
+
+/**
+ * What `restore-production` and a rebuild's `restore-empty` need (P7), and
+ * nothing more: the migration owner's URL and the runtime's own, from
+ * ~/.flint/secrets.env (0600; the runtime's installer reads them there too), and
+ * the read-only backup role's from backup.env. Only those keys are taken from
+ * either file, and every URL must name this Mac: a restore never reaches
+ * another machine's database.
+ */
+export interface RestoreConfig {
+  home: string;
+  tz: string;
+  ownerUrl: string;
+  appUrl: string;
+  backupUrl?: string;
+  /** The nightly dumps (~/FlintBackups/pg). */
+  dumpDir: string;
+  /** Where the copy taken before a production restore goes (~/FlintBackups/pre-restore). */
+  copyDir: string;
+  tools: { pgDump: string; pgRestore: string };
+  /** For the tools the restore starts (prisma, launchctl): the caller's PATH. */
+  path: string;
+}
+
+export function loadRestoreConfig(): RestoreConfig {
+  const home = process.env.HOME ?? '';
+  if (!home) throw new Error('restore config is invalid: HOME is not set');
+  const pick = (file: string, keys: string[]): Record<string, string | undefined> => {
+    const all = runtimeEnv(file, {});
+    return Object.fromEntries(keys.map((k) => [k, all[k]]));
+  };
+  const secrets = pick(process.env.FLINT_SECRETS_FILE ?? join(home, '.flint', 'secrets.env'), ['FLINT_DB_OWNER_URL', 'FLINT_DB_URL', 'FLINT_TZ', 'FLINT_USER_TZ']);
+  const backupEnv = pick(process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env'), ['FLINT_DB_BACKUP_URL']);
+  const local = z
+    .string()
+    .url()
+    .refine((u) => /^postgres(ql)?:/.test(u), 'must be a postgres URL')
+    .refine((u) => ['::1', '[::1]', '127.0.0.1', 'localhost'].includes(new URL(u).hostname), 'must be a database on this Mac');
+  const R = z
+    .object({ FLINT_DB_OWNER_URL: local, FLINT_DB_URL: local, FLINT_DB_BACKUP_URL: local.optional() })
+    .safeParse({
+      FLINT_DB_OWNER_URL: process.env.FLINT_DB_OWNER_URL ?? secrets.FLINT_DB_OWNER_URL,
+      FLINT_DB_URL: process.env.FLINT_DB_URL ?? secrets.FLINT_DB_URL,
+      FLINT_DB_BACKUP_URL: process.env.FLINT_DB_BACKUP_URL ?? backupEnv.FLINT_DB_BACKUP_URL,
+    });
+  // Names and reasons only: a value here is a URL with a password in it.
+  if (!R.success) throw new Error(`restore config is invalid: ${R.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  const bin = (name: string) => ['/opt/homebrew/opt/postgresql@17/bin', '/opt/homebrew/bin', '/usr/local/bin'].map((d) => join(d, name)).find((p) => existsSync(p));
+  const pgDump = bin('pg_dump');
+  const pgRestore = bin('pg_restore');
+  if (!pgDump || !pgRestore) throw new Error('pg_dump/pg_restore not found (brew install postgresql@17)');
+  return {
+    home,
+    tz: zoneFrom(process.env.FLINT_TZ ?? secrets.FLINT_TZ, process.env.FLINT_USER_TZ ?? secrets.FLINT_USER_TZ),
+    ownerUrl: R.data.FLINT_DB_OWNER_URL,
+    appUrl: R.data.FLINT_DB_URL,
+    ...(R.data.FLINT_DB_BACKUP_URL ? { backupUrl: R.data.FLINT_DB_BACKUP_URL } : {}),
+    dumpDir: join(home, 'FlintBackups', 'pg'),
+    copyDir: join(home, 'FlintBackups', 'pre-restore'),
+    tools: { pgDump, pgRestore },
+    path: process.env.PATH ?? '/usr/bin:/bin',
+  };
+}

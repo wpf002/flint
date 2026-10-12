@@ -750,3 +750,47 @@ commit isn't tried again until you clear it:
 If the copy itself can't be taken, the deploy stops before the migration and
 the note is "The runtime did not deploy" instead: nothing changed, and the
 deploy is tried again (as any deploy that fails its checks is).
+
+## Putting the database back from a backup
+
+What to type is in [docs/RECOVERY.md](../../docs/RECOVERY.md). This is how it works
+(`src/backup/restore.ts`).
+
+- **`pnpm --filter @flint/runtime restore-production`** replaces the production
+  database with a nightly dump. It is the action `restore.production`: APPROVAL
+  in code, never promotable, and not an autonomous action, so Flint is refused it
+  on its own whatever a policy row says. It cannot wait on an approval card (the
+  cards live in the database it replaces), so the approval is Will at a
+  terminal, typing `RESTORE`: there is no `--auto`, and it refuses to read the
+  answer from a pipe. What it does, in order:
+  1. checks the dump: its name, that only its owner can write it, its
+     fingerprint (the `.sha256` the nightly backup now writes beside each dump,
+     else the `BackupRun` row), that `pg_restore` can read it, and its counts;
+  2. asks; then takes a copy of the database as it is
+     (`~/FlintBackups/pre-restore`);
+  3. restores into a database of its own beside the one in use, as
+     `flint_owner`, and checks it there: every table's row count against the
+     counts taken in the dump's snapshot, that `flint_owner` owns everything,
+     the grants the governance rules depend on, and the migrations;
+  4. applies any migration made since the backup, so the copy matches the code
+     that is running;
+  5. marks every unused approval used, and every card that was approved and had
+     not finished as failed, so nothing signed before the backup can act after
+     it; and writes its own audit entry as the runtime's role;
+  6. only then stops the runtime, renames the database in use to
+     `flint_damaged_<time>`, gives the restored one its name, and starts the
+     runtime. Nothing is dropped. Any failure before the rename leaves the
+     database in use exactly as it was.
+- **`restore-production --check`** is a trial run: steps 1, 3, 4 and 5 on the
+  copy, which is then dropped. Nothing changes, and it says how long a real
+  restore would take.
+- **`restore-empty --dump <file>`** is the rebuild's restore
+  (`apps/studio/rebuild.sh`): into an empty database only.
+- **`bootstrap-db --port <n>`** makes the five roles and the `flint` and
+  `flint_test` databases on a rebuilt Mac (`src/backup/bootstrap.ts`). Every
+  password is new, reaches the server only as a SCRAM verifier, and is written
+  only to `~/.flint/secrets.env` and `backup.env`. It refuses a Mac that
+  already has them.
+
+The tests for all four run against a throwaway Postgres of their own
+(`test/scratch-cluster.ts`), never against `flint` or `flint_test`.

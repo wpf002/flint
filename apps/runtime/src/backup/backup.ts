@@ -42,7 +42,7 @@ export function targetOf(url: string): PgTarget {
   };
 }
 
-const client = (t: PgTarget) => new pg.Client({ host: t.host, port: t.port, user: t.user, password: t.password, database: t.database });
+export const client = (t: PgTarget) => new pg.Client({ host: t.host, port: t.port, user: t.user, password: t.password, database: t.database });
 
 export interface Tools {
   pgDump: string;
@@ -50,7 +50,7 @@ export interface Tools {
   age?: string;
 }
 
-function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string } = {}): Promise<void> {
+export function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', PGPASSWORD: password, PGCONNECT_TIMEOUT: '10' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
@@ -62,14 +62,14 @@ function run(bin: string, args: string[], password: string, opts: { stdoutFile?:
   });
 }
 
-async function sha256File(path: string): Promise<string> {
+export async function sha256File(path: string): Promise<string> {
   const h = createHash('sha256');
   for await (const chunk of createReadStream(path)) h.update(chunk as Buffer);
   return h.digest('hex');
 }
 
 /** Row counts of every table in public and flint_part (partitions counted through their parent). */
-async function countRows(c: pg.Client): Promise<Record<string, number>> {
+export async function countRows(c: pg.Client): Promise<Record<string, number>> {
   const tables = await c.query<{ name: string }>(`
     SELECT format('%I.%I', n.nspname, c.relname) AS name
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -125,6 +125,7 @@ export function pruneDumps(dir: string, keep: number): string[] {
   for (const f of gone) {
     rmSync(join(dir, f), { force: true });
     rmSync(join(dir, `${f}.counts.json`), { force: true });
+    rmSync(join(dir, `${f}.sha256`), { force: true });
   }
   return gone;
 }
