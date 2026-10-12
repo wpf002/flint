@@ -14,6 +14,14 @@
  *    server as a SCRAM verifier (so the password itself is in no statement and
  *    no server log), and ~/.flint/secrets.env and backup.env (0600). Nothing
  *    prints one.
+ *  - The order keeps a password from being set and then lost: both files are
+ *    written first, whole and flushed, under a `.partial` name; then every role
+ *    is made or changed in ONE transaction; then the files take their names. A
+ *    run that dies in between leaves either the old passwords everywhere, or the
+ *    new ones in Postgres and in the `.partial` files.
+ *  - The migration owner is made a member of flint_restore, so it can take over
+ *    a database that role restored (restore.ts): the restoring role owns
+ *    nothing else, and the SQL in a backup runs as it.
  *
  * Refused when any of the roles or the `flint` database is already there: that
  * is a machine with a Flint on it, not a fresh one. `rotate` is the explicit way
@@ -21,7 +29,7 @@
  * It never drops a role or a database.
  */
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 
@@ -46,8 +54,22 @@ export function scramVerifier(password: string, salt: Buffer = randomBytes(16), 
   return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
 }
 
-/** KEY=value lines set or replaced in an env file; every other line is kept. The file ends 0600, written whole. */
-export function upsertEnv(file: string, values: Record<string, string>): void {
+interface Staged {
+  /** Give the staged file its name. */
+  commit(): void;
+  /** Remove it: nothing changed. */
+  discard(): void;
+}
+
+/**
+ * The new contents of an env file, written whole and flushed under
+ * `<file>.partial` (0600), ready to take its name: KEY=value lines set or
+ * replaced, every other line kept. A `.partial` already there is replaced only
+ * when it is plainly a leftover of this script's own (a plain file of this
+ * user's that no one else can read); a link, or one others can read, is
+ * refused.
+ */
+export function stageEnv(file: string, values: Record<string, string>): Staged {
   for (const [k, v] of Object.entries(values)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(k)) throw new Error(`not a setting name: ${k}`);
     if (/[\r\n]/.test(v)) throw new Error(`the value of ${k} has a line break`);
@@ -63,9 +85,47 @@ export function upsertEnv(file: string, values: Record<string, string>): void {
   while (kept.length && kept[kept.length - 1] === '') kept.pop();
   const body = [...kept, ...Object.entries(values).map(([k, v]) => `${k}=${v}`)].join('\n');
   const partial = `${file}.partial`;
-  writeFileSync(partial, `${body}\n`, { mode: 0o600 });
-  chmodSync(partial, 0o600);
-  renameSync(partial, file);
+  let st;
+  try {
+    st = lstatSync(partial);
+  } catch {
+    st = undefined;
+  }
+  if (st) {
+    if (!st.isFile() || st.uid !== process.getuid?.() || st.mode & 0o077) {
+      throw new BootstrapRefused(`A half-written settings file that is not Flint's own is in the way (${partial.split('/').pop()}). Remove it, then run this again.`);
+    }
+    rmSync(partial);
+  }
+  // Made new and never followed: a link put there in the meantime is an error, not a place to write passwords.
+  const fd = openSync(partial, 'wx', 0o600);
+  try {
+    writeSync(fd, `${body}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    commit: () => {
+      renameSync(partial, file);
+      chmodSync(file, 0o600);
+      // The new name itself is flushed, so a power cut does not bring the old file back.
+      const d = openSync(dir, 'r');
+      try {
+        fsyncSync(d);
+      } catch {
+        // Not every filesystem flushes a folder; the file's own contents are flushed already.
+      } finally {
+        closeSync(d);
+      }
+    },
+    discard: () => rmSync(partial, { force: true }),
+  };
+}
+
+/** KEY=value lines set or replaced in an env file; every other line is kept. The file ends 0600, written whole. */
+export function upsertEnv(file: string, values: Record<string, string>): void {
+  stageEnv(file, values).commit();
 }
 
 export interface BootstrapOptions {
@@ -92,11 +152,19 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
   if (existsSync(dataDir) && statSync(dataDir).mode & 0o077) chmodSync(dataDir, 0o700);
 
   const admin = new pg.Client({ ...o.admin, database: o.admin.database ?? 'postgres' });
+  // A connection the server drops while it sits idle must not take the process down.
+  admin.on('error', () => {});
   await admin.connect();
   const passwords = Object.fromEntries(ROLES.map((r) => [r, randomBytes(24).toString('hex')])) as Record<Role, string>;
+  const url = (role: Role, db: string) => `postgresql://${role}:${passwords[role]}@[::1]:${o.port}/${db}`;
+  const secrets = join(dataDir, 'secrets.env');
+  const backup = join(dataDir, 'backup.env');
   const created: Role[] = [];
   const rotated: Role[] = [];
   const databases: string[] = [];
+  const staged: Staged[] = [];
+  /** Postgres holds the new passwords: from here the staged files are the only other place they are, and are never removed. */
+  let rolesChanged = false;
   try {
     const me = await admin.query<{ able: boolean }>('SELECT rolsuper OR (rolcreaterole AND rolcreatedb) AS able FROM pg_roles WHERE rolname = current_user');
     if (!me.rows[0]?.able) throw new BootstrapRefused('This database login may not create roles and databases.');
@@ -107,26 +175,70 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
       throw new BootstrapRefused("Flint's database is already set up on this Mac. Nothing was changed.");
     }
 
-    for (const role of ROLES) {
-      const verifier = scramVerifier(passwords[role]);
-      // The role names are the fixed identifiers above. The verifier is base64 and punctuation that needs no quoting; checked all the same.
-      if (!/^SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/.test(verifier)) throw new Error('unexpected verifier');
-      const attrs = `LOGIN NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS ${CREATEDB.has(role) ? 'CREATEDB' : 'NOCREATEDB'} PASSWORD '${verifier}'`;
-      if (haveRoles.has(role)) {
-        await admin.query(`ALTER ROLE ${role} ${attrs}`);
-        rotated.push(role);
-      } else {
-        await admin.query(`CREATE ROLE ${role} ${attrs}`);
-        created.push(role);
+    // 1. The passwords are saved (whole, flushed, under a .partial name) before Postgres is told any of them.
+    staged.push(
+      stageEnv(secrets, {
+        FLINT_DB_URL: url('flint_app', 'flint'),
+        FLINT_DB_OWNER_URL: url('flint_owner', 'flint'),
+        FLINT_DB_APPROVER_URL: url('flint_approver', 'flint'),
+        FLINT_DB_BACKUP_URL: url('flint_backup', 'flint'),
+        FLINT_DB_TEST_URL: url('flint_app', 'flint_test'),
+        FLINT_DB_TEST_OWNER_URL: url('flint_owner', 'flint_test'),
+      }),
+    );
+    staged.push(
+      stageEnv(backup, {
+        FLINT_DB_BACKUP_URL: url('flint_backup', 'flint'),
+        FLINT_DB_RESTORE_URL: url('flint_restore', 'postgres'),
+      }),
+    );
+
+    // 2. Every role, in one transaction: all of them get their new password, or none does.
+    await admin.query('BEGIN');
+    try {
+      for (const role of ROLES) {
+        const verifier = scramVerifier(passwords[role]);
+        // The role names are the fixed identifiers above. The verifier is base64 and punctuation that needs no quoting; checked all the same.
+        if (!/^SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/.test(verifier)) throw new Error('unexpected verifier');
+        const attrs = `LOGIN NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS ${CREATEDB.has(role) ? 'CREATEDB' : 'NOCREATEDB'} PASSWORD '${verifier}'`;
+        if (haveRoles.has(role)) {
+          await admin.query(`ALTER ROLE ${role} ${attrs}`);
+          rotated.push(role);
+        } else {
+          await admin.query(`CREATE ROLE ${role} ${attrs}`);
+          created.push(role);
+        }
       }
+      await admin.query('GRANT pg_read_all_data TO flint_backup');
+      // The migration owner may take over what the restoring role made (and gains nothing by it: it may create databases already).
+      await admin.query('GRANT flint_restore TO flint_owner');
+      await admin.query('COMMIT');
+      rolesChanged = true;
+    } catch (err) {
+      await admin.query('ROLLBACK').catch(() => {});
+      throw err;
     }
-    await admin.query('GRANT pg_read_all_data TO flint_backup');
+
+    // 3. Postgres has them: the files take their names.
+    while (staged.length) {
+      staged[0]!.commit();
+      staged.shift();
+    }
 
     for (const db of DATABASES) {
       if (haveDbs.has(db)) continue;
       await admin.query(`CREATE DATABASE ${db} OWNER flint_owner`);
       databases.push(db);
     }
+  } catch (err) {
+    if (!rolesChanged) {
+      // Postgres was told none of these passwords: the staged files go, and everything is as it was.
+      for (const f of staged) f.discard();
+    } else if (staged.length) {
+      // Postgres has them and a file could not take its name: the passwords stay in the .partial files, and a rotation replaces both.
+      throw new BootstrapRefused('The new passwords are set, but Flint could not put its settings files in place. Run this again with --rotate.');
+    }
+    throw err;
   } finally {
     await admin.end().catch(() => {});
   }
@@ -134,6 +246,7 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
   // The public schema of each new database belongs to the migration owner, as on the Studio and in CI.
   for (const db of databases) {
     const c = new pg.Client({ ...o.admin, database: db });
+    c.on('error', () => {});
     await c.connect();
     try {
       await c.query('ALTER SCHEMA public OWNER TO flint_owner');
@@ -141,21 +254,5 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
       await c.end().catch(() => {});
     }
   }
-
-  const url = (role: Role, db: string) => `postgresql://${role}:${passwords[role]}@[::1]:${o.port}/${db}`;
-  const secrets = join(dataDir, 'secrets.env');
-  const backup = join(dataDir, 'backup.env');
-  upsertEnv(secrets, {
-    FLINT_DB_URL: url('flint_app', 'flint'),
-    FLINT_DB_OWNER_URL: url('flint_owner', 'flint'),
-    FLINT_DB_APPROVER_URL: url('flint_approver', 'flint'),
-    FLINT_DB_BACKUP_URL: url('flint_backup', 'flint'),
-    FLINT_DB_TEST_URL: url('flint_app', 'flint_test'),
-    FLINT_DB_TEST_OWNER_URL: url('flint_owner', 'flint_test'),
-  });
-  upsertEnv(backup, {
-    FLINT_DB_BACKUP_URL: url('flint_backup', 'flint'),
-    FLINT_DB_RESTORE_URL: url('flint_restore', 'postgres'),
-  });
   return { created, rotated, databases, files: [secrets, backup] };
 }

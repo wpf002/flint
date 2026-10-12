@@ -23,6 +23,7 @@ bootstrapDb({ admin: {}, port, home: homedir(), rotate })
     console.log(`Flint's database has its ${roles} roles, each with a new password.`);
     if (r.databases.length) console.log(`Flint made ${r.databases.length === 1 ? 'the database' : 'the databases'} ${r.databases.join(' and ')}.`);
     console.log("The new passwords are saved in Flint's own settings files, which only you can read.");
+    if (r.rotated.length) console.log("Flint's services keep the old passwords until they are installed again.");
   })
   .catch((err: unknown) => {
     // A refusal is a sentence. Anything else: the error's code or class, never its text (a connection error can name a URL).
