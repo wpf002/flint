@@ -7,7 +7,7 @@
  * only (backup-nightly.sh), so its card lives a week and two hours: approved
  * any time that week, the next Sunday's run claims it.
  */
-import { CAP_WORDS, localDay, resolveTier, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
+import { CAP_WORDS, localDay, resolveTier, type JobFailure, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
@@ -40,8 +40,6 @@ export async function cardGate(
     return { go: true, why: 'promoted' };
   }
   // APPROVAL: run an approved proposal for it, or file one (one a day) and wait.
-  // Flint's day, not UTC's: a card offered at 23:30 Chicago time is that night's.
-  const day = localDay(tz, now);
   const approved = await db.proposal.findFirst({ where: { action, origin: `runtime:${cmd}`, status: 'approved', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
   let refused: string | undefined;
   if (approved) {
@@ -53,11 +51,26 @@ export async function cardGate(
       refused = err instanceof Error ? err.message : String(err);
     }
   }
-  // Each night offers one card, living 26 hours: approved any time before the
-  // next run (even across a 25-hour night), that run claims it. The drill's
-  // next run is a week away (Sundays only), so its card lives a week and two
-  // hours (a 169-hour DST week included). Older pending cards are withdrawn,
-  // so Will never approves one that would expire first.
+  await offerCard(db, job, tz, rp, now);
+  return { go: false, why: refused ? `the approved proposal could not be claimed (${refused}); asked again` : 'waiting for Will to approve (or promote) it' };
+}
+
+/**
+ * Tonight's card for a nightly job at APPROVAL, filed unless it is waiting
+ * already. Each night offers one card, living 26 hours: approved any time
+ * before the next run (even across a 25-hour night), that run claims it. The
+ * drill's next run is a week away (Sundays only), so its card lives a week and
+ * two hours (a 169-hour DST week included). Older pending cards are withdrawn,
+ * so Will never approves one that would expire first.
+ *
+ * Also filed straight after a run on a card has failed (cli.ts), so the note
+ * that says "approve its next card" points at a card that is there.
+ */
+export async function offerCard(db: Db, job: { action: string; job: string; templateId: string }, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
+  const { action } = job;
+  const cmd = job.job;
+  // Flint's day, not UTC's: a card offered at 23:30 Chicago time is that night's.
+  const day = localDay(tz, now);
   const pending = await db.proposal.findMany({ where: { action, origin: `runtime:${cmd}`, status: 'pending', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
   const tonight = pending.find((p) => (p.args as { day?: unknown } | null)?.day === day);
   if (!tonight) {
@@ -74,5 +87,19 @@ export async function cardGate(
       console.error(`${action}: could not withdraw an older card: ${err instanceof Error ? err.message : String(err)}`),
     );
   }
-  return { go: false, why: refused ? `the approved proposal could not be claimed (${refused}); asked again` : 'waiting for Will to approve (or promote) it' };
+}
+
+/** The next card for a backup job whose run on a card just failed: in Approvals now, for the next run to claim. */
+export async function offerNextCard(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
+  await offerCard(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
+}
+
+/**
+ * What a failed job's note may promise (jobFailedNote): nothing but that its
+ * setup needs fixing when another try cannot help; another try by itself only
+ * for a job Will promoted; otherwise his next card, which is in Approvals if it
+ * could be filed and comes with the next run if it could not.
+ */
+export function nextAfterFailure(f: { setup: boolean; onCard: boolean; cardFiled: boolean }): JobFailure['next'] {
+  return f.setup ? 'setup' : !f.onCard ? 'retry' : f.cardFiled ? 'card' : 'card_later';
 }

@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { digestOf, localDay } from '@flint/policy';
@@ -199,6 +199,42 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
       expect(await at('2030-06-02T08:00:00Z')).toBe('The last restore test was today.');
     } finally {
       await owner(`DELETE FROM "BackupRun" WHERE id = 'dr2030'`);
+    }
+  });
+
+  it('the offsite copy: off until Will’s age key is here; after that a missing or stale copy is an issue by its own name, in Health and in the morning digest', async () => {
+    const keyFile = join(home, '.flint', 'backup-age-recipient');
+    mkdirSync(join(home, '.flint'), { recursive: true });
+    const offsite = async (at: Date) => (await checkComponents({ db, config, now: at, sources: [] })).find((c) => c.component === 'offsite_backup');
+    const now = new Date();
+    try {
+      // No key, or an empty file: the nightly job sends no copy (backup-nightly.sh), so it is off, not failing.
+      rmSync(keyFile, { force: true });
+      expect(await offsite(now)).toEqual({ component: 'offsite_backup', status: 'disabled' });
+      writeFileSync(keyFile, '');
+      expect(await offsite(now)).toEqual({ component: 'offsite_backup', status: 'disabled' });
+      // The key is here and no copy was ever made (five nights of "Offsite Backup Failed"): down, and said plainly.
+      writeFileSync(keyFile, 'age1example\n');
+      expect(await offsite(now)).toEqual({ component: 'offsite_backup', status: 'down', detail: 'There’s no offsite copy yet.' });
+      // A failed run's row is not a copy; a local backup is not an offsite one.
+      await owner(`INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt") VALUES ('offbad', 'pg_dump_flint', 'icloud', '/o/bad.age', true, 'failed', $1), ('offlocal', 'pg_dump_flint', 'local', '/l/x.dump', false, 'ok', $1)`, [now]);
+      expect((await offsite(now))!.status).toBe('down');
+      await owner(`INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt") VALUES ('off1', 'pg_dump_flint', 'icloud', '/o/x.age', true, 'ok', $1)`, [new Date(now.getTime() - 3_600_000)]);
+      expect(await offsite(now)).toEqual({ component: 'offsite_backup', status: 'ok', detail: 'The last offsite copy is 1 hour old.' });
+      // A night missed is degraded; two are down.
+      expect(await offsite(new Date(now.getTime() + 29 * 3_600_000))).toEqual({ component: 'offsite_backup', status: 'degraded', detail: 'The last offsite copy is 30 hours old.' });
+      expect(await offsite(new Date(now.getTime() + 39 * 3_600_000))).toEqual({ component: 'offsite_backup', status: 'down', detail: 'The last offsite copy is 40 hours old.' });
+      // The morning digest names it as Settings > Health does.
+      await owner(`UPDATE "BackupRun" SET "startedAt" = $1 WHERE id = 'off1'`, [new Date(now.getTime() - 40 * 3_600_000)]);
+      await recordChecks(db, await checkComponents({ db, config, now, sources: [] }), now);
+      const digest = await buildDigest(db, 'UTC', now);
+      expect(digest.degraded).toContain('offsite_backup');
+      expect(digest.body).toMatch(/need(s)? a look: [^\n]*Offsite Backup/);
+      expect(digest.body).not.toContain('offsite_backup');
+    } finally {
+      rmSync(keyFile, { force: true });
+      await owner(`DELETE FROM "BackupRun" WHERE id IN ('off1', 'offbad', 'offlocal')`);
+      await owner(`DELETE FROM "HealthCheck" WHERE at >= $1`, [now]);
     }
   });
 

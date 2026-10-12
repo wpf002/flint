@@ -20,8 +20,8 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { JOB_WORDS, jobFailedNote, noteProblems, type NightlyJob } from '@flint/policy';
-import { ACTION } from '../src/backup/nightly';
+import { JOB_WORDS, jobFailedNote, noteProblems, shownProblems, type NightlyJob } from '@flint/policy';
+import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle } from '../src/digest';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
@@ -62,16 +62,16 @@ describe('the runtime’s notes to Will', () => {
 
   it('cli.ts: a nightly job that failed says what happened and what happens next, by the job’s words', () => {
     const cli = readFileSync(join(SRC, 'cli.ts'), 'utf8');
-    // The note is jobFailedNote's, whole: no words are put together at the call.
-    expect(cli).toMatch(/const note = jobFailedNote\(action, \{[^}]*\}\);\s*await notifyWill\(b\.config, note\.title, note\.body\);/);
+    // The note is jobFailedNote's, whole, and what it promises is nextAfterFailure's: no words are put together at the call.
+    expect(cli).toMatch(/const note = jobFailedNote\(action, \{ next: nextAfterFailure\(\{[^}]*\}\)[^}]*\}\);\s*await notifyWill\(b\.config, note\.title, note\.body\);/);
     expect(cli).not.toMatch(/notifyWill\([^)]*[`'"]/);
     const jobs = Object.values(ACTION) as NightlyJob[];
     expect(jobs.sort()).toEqual(['backup.local', 'backup.offsite', 'restore.drill']);
     for (const job of jobs) {
-      for (const alone of [true, false]) {
+      for (const next of ['retry', 'card', 'card_later', 'setup'] as const) {
         for (const icloud of [true, false]) {
           for (const mismatch of [true, false]) {
-            const note = jobFailedNote(job, { alone, icloud, mismatch });
+            const note = jobFailedNote(job, { next, icloud, mismatch });
             plain(`cli.ts ${job}`, note.title, note.body);
             expect(note.title).toBe(`${JOB_WORDS[job]} Failed`);
             expect(note.title.length).toBeLessThanOrEqual(40);
@@ -79,6 +79,11 @@ describe('the runtime’s notes to Will', () => {
         }
       }
     }
+    // What the note may promise: another try only for a job that runs on its own and can succeed.
+    expect(nextAfterFailure({ setup: false, onCard: false, cardFiled: false })).toBe('retry');
+    expect(nextAfterFailure({ setup: false, onCard: true, cardFiled: true })).toBe('card');
+    expect(nextAfterFailure({ setup: false, onCard: true, cardFiled: false })).toBe('card_later');
+    for (const onCard of [true, false]) for (const cardFiled of [true, false]) expect(nextAfterFailure({ setup: true, onCard, cardFiled })).toBe('setup');
   });
 
   it('digest.ts: the morning digest, for any counts and any component that needs a look', () => {
@@ -93,24 +98,38 @@ describe('the runtime’s notes to Will', () => {
   });
 
   it('surface/deliver.ts: every escalation template, at its edges, under any name a service or an item may have', () => {
-    const names = [
+    // Names Flint says in its own words (a service's), or that read as plain words: the whole note is held to the rule.
+    const plainNames = [
       {},
       { 'service#abc123': 'com.flint.server', 'issue#abc123': 'wpf002/flint #60', 'pull_request#abc123': 'wpf002/flint #61', 'thread#abc123': 'Deploy plan' },
       { 'service#abc123': 'com.nexus.responder' },
       { 'service#abc123': 'org.example.sync_agent' },
       { 'service#abc123': 'trident-api' },
-      // Names no note may show as they are: the note falls back to its field-free words.
-      { 'service#abc123': 'api (staging) ~/bin/api', 'issue#abc123': 'see `rm -rf` in /Users/will', 'pull_request#abc123': '{"title": "x"}', 'thread#abc123': 'runtime.world_now' },
+      { 'service#abc123': 'npm' },
+      { 'service#abc123': 'worker-4aef4bf9c2' },
+      // Names no note may show as they are: a service is still said in words, any other thing by its kind.
+      { 'service#abc123': 'api (staging) ~/bin/api', 'issue#abc123': 'see `rm -rf` in /Users/will', 'pull_request#abc123': '{"title": "x"}', 'thread#abc123': 'see https://example.com/x' },
     ];
+    // Someone's own name for a thing (a repo with a hyphen, a version): shown as it is, and held to what no text may carry.
+    const ownNames = { 'issue#abc123': 'wpf002/nexus-responder #12', 'pull_request#abc123': 'v2.1 plan', 'thread#abc123': 'runtime.world_now rename' };
     for (const id of TEMPLATE_IDS) {
       for (const fields of EDGES[id]) {
-        for (const n of names) {
+        for (const n of plainNames) {
           const r = render(id, fields, n);
+          // Never the field-free words for a name's sake: only the note's own facts.
+          expect(r.linted, `${id} ${JSON.stringify(fields)} ${JSON.stringify(n)}`).toBe(false);
           plain(`deliver.ts ${id}`, r.title, r.body);
         }
+        const own = render(id, fields, ownNames);
+        expect(own.linted, `${id} ${JSON.stringify(fields)}`).toBe(false);
+        expect(shownProblems(`${own.title}\n${own.body}`), `${own.title} / ${own.body}`).toEqual([]);
+        for (const re of NEVER.slice(1)) expect(`${own.title}\n${own.body}`).not.toMatch(re);
       }
       plain(`deliver.ts ${id} (field-free)`, TEMPLATES[id].fieldFreeTitle, TEMPLATES[id].fieldFreeBody);
+      // The job's own failure note is folded by its title in the console: no escalation may share one.
+      for (const job of Object.values(JOB_WORDS)) expect(TEMPLATES[id].fieldFreeTitle).not.toBe(`${job} Failed`);
     }
+    expect(render('new_item', { kind: 'issue', item: 'issue#abc123', reasonCode: 'fyi' }, ownNames).title).toBe('New Issue: wpf002/nexus-responder #12');
     // With the ledger's phrase, at each word it has.
     for (const p of [0.02, 0.2, 0.4, 0.5, 0.6, 0.8, 0.97]) {
       const r = render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': 'com.flint.server' }, phrase(p, new Date('2026-10-02T22:30:00Z'), 'America/Chicago'));
@@ -141,6 +160,11 @@ describe('the runtime’s notes to Will', () => {
     }
     // One that only lacked Title Case keeps its words; one with a path or an internal name goes out field-free.
     expect(noteOf(stored[5]!)).toEqual({ title: 'The Restore Drill Failed', body: stored[5]!.body });
+    // A name someone gave a thing is not Flint's words: a hyphen or a dot in it never costs the note.
+    const named = { templateId: 'new_item', title: 'New Pull Request: wpf002/nexus-responder #12', body: 'Flint flagged it as worth knowing. It’s in Activity, under Important.' };
+    expect(noteOf(named)).toEqual({ title: named.title, body: named.body });
+    expect(noteOf({ ...named, title: 'New thread: v2.1 plan for claude.ai' }).title).toBe('New Thread: v2.1 Plan for claude.ai');
+    expect(noteOf({ ...named, title: 'New issue: see /Users/will/notes' }).title).toBe('Something New Needs a Look');
     expect(noteOf(stored[4]!).title).toBe('Anthropic Spend Is at Its Cap');
     expect(noteOf(stored[0]!)).toEqual({ title: 'A Database Update Failed', body: TEMPLATES.migrate_failed.fieldFreeBody });
     expect(noteOf(stored[1]!).title).toBe('One of Your Rules Matched');

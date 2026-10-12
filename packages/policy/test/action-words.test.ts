@@ -45,32 +45,46 @@ describe('JOB_WORDS', () => {
 
 describe('jobFailedNote', () => {
   const JOBS: NightlyJob[] = ['backup.local', 'backup.offsite', 'restore.drill'];
+  const NEXT = ['retry', 'card', 'card_later', 'setup'] as const;
 
   it('says what happened and what happens next, in Will’s words', () => {
-    expect(jobFailedNote('backup.offsite', { alone: true, icloud: true })).toEqual({ title: 'Offsite Backup Failed', body: 'Last night’s encrypted copy to iCloud didn’t finish. Flint tries again tonight.' });
-    expect(jobFailedNote('backup.local', { alone: true })).toEqual({ title: 'Backup Failed', body: 'Last night’s database backup didn’t finish. Flint tries again tonight.' });
-    expect(jobFailedNote('restore.drill', { alone: true, mismatch: true })).toEqual({ title: 'Restore Test Failed', body: 'This week’s practice restore found a problem. Flint tries again next Sunday.' });
+    expect(jobFailedNote('backup.offsite', { next: 'retry', icloud: true })).toEqual({ title: 'Offsite Backup Failed', body: 'Last night’s encrypted copy to iCloud didn’t finish. Flint tries again tonight.' });
+    expect(jobFailedNote('backup.local', { next: 'retry' })).toEqual({ title: 'Backup Failed', body: 'Last night’s database backup didn’t finish. Flint tries again tonight.' });
+    expect(jobFailedNote('restore.drill', { next: 'retry', mismatch: true })).toEqual({ title: 'Restore Test Failed', body: 'This week’s practice restore found a problem. Flint tries again next Sunday.' });
     // It stopped before it could compare anything: it did not finish, which is not "found a problem".
-    expect(jobFailedNote('restore.drill', { alone: true }).body).toBe('This week’s practice restore didn’t finish. Flint tries again next Sunday.');
+    expect(jobFailedNote('restore.drill', { next: 'retry' }).body).toBe('This week’s practice restore didn’t finish. Flint tries again next Sunday.');
     // A folder Will set himself is not called iCloud.
-    expect(jobFailedNote('backup.offsite', { alone: true, icloud: false }).body).toBe('Last night’s encrypted offsite copy didn’t finish. Flint tries again tonight.');
+    expect(jobFailedNote('backup.offsite', { next: 'retry', icloud: false }).body).toBe('Last night’s encrypted offsite copy didn’t finish. Flint tries again tonight.');
   });
 
-  it('never promises another try for a job that waits on Will’s card: it says where the card is', () => {
+  it('a failure another try cannot change never says "tries again": it says its setup needs fixing', () => {
     for (const job of JOBS) {
-      const note = jobFailedNote(job, { alone: false, icloud: true, mismatch: true });
-      expect(note.body).toMatch(/ It runs again once you approve its next card in Approvals\.$/);
-      expect(note.body).not.toMatch(/tries again/);
+      const note = jobFailedNote(job, { next: 'setup', icloud: true });
+      expect(note.body).toMatch(/ It won’t work until its setup is fixed, so tell Claude\.$/);
+      expect(note.body).not.toMatch(/tries again|approve/);
     }
+    expect(jobFailedNote('backup.offsite', { next: 'setup', icloud: true }).body).toBe('Last night’s encrypted copy to iCloud didn’t finish. It won’t work until its setup is fixed, so tell Claude.');
+  });
+
+  it('a job that waits on Will’s card points at a card that is there, or says when it will be', () => {
+    for (const job of JOBS) {
+      // The next card was filed when the run failed: it is in Approvals now.
+      expect(jobFailedNote(job, { next: 'card' }).body).toMatch(/ It runs again once you approve its next card in Approvals\.$/);
+      expect(jobFailedNote(job, { next: 'card' }).body).not.toMatch(/tries again/);
+    }
+    // It could not be filed: the next run files it, and the note says when that is.
+    expect(jobFailedNote('backup.local', { next: 'card_later' }).body).toBe('Last night’s database backup didn’t finish. Its next card will be in Approvals tomorrow morning.');
+    expect(jobFailedNote('backup.offsite', { next: 'card_later', icloud: true }).body).toMatch(/ Its next card will be in Approvals tomorrow morning\.$/);
+    expect(jobFailedNote('restore.drill', { next: 'card_later' }).body).toBe('This week’s practice restore didn’t finish. Its next card will be in Approvals next Sunday.');
   });
 
   it('every variant is a note fit to show', () => {
     for (const job of JOBS) {
-      for (const alone of [true, false]) {
+      for (const next of NEXT) {
         for (const icloud of [true, false]) {
           for (const mismatch of [true, false]) {
-            const note = jobFailedNote(job, { alone, icloud, mismatch });
-            expect(noteProblems(note.title, note.body), `${job} ${JSON.stringify({ alone, icloud, mismatch })}`).toEqual([]);
+            const note = jobFailedNote(job, { next, icloud, mismatch });
+            expect(noteProblems(note.title, note.body), `${job} ${JSON.stringify({ next, icloud, mismatch })}`).toEqual([]);
             expect(note.title).toBe(`${JOB_WORDS[job]} Failed`);
           }
         }

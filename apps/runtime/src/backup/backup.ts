@@ -18,7 +18,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import pg from 'pg';
 
@@ -130,37 +130,91 @@ export function pruneDumps(dir: string, keep: number): string[] {
 }
 
 /**
+ * A failure another try cannot change: no key, no `age`, nowhere to send the
+ * copy, a write macOS refuses. The job's note says its setup needs fixing
+ * instead of promising to try again (needsSetup; apps/runtime/src/cli.ts).
+ */
+export class NeedsSetup extends Error {}
+
+/** Whether a nightly job failed for a reason that stays until someone fixes its setup. */
+export function needsSetup(err: unknown): boolean {
+  if (err instanceof NeedsSetup) return true;
+  const e = err as { code?: unknown; message?: unknown } | null;
+  // The write refused (macOS, or a read-only or mistaken folder); a role that cannot sign in or lacks the
+  // right; a database that is not there.
+  if (typeof e?.code === 'string' && ['EPERM', 'EACCES', 'EROFS', 'ENOTDIR', '28P01', '28000', '3D000', '42501'].includes(e.code)) return true;
+  return /password authentication failed|role "[^"]*" does not exist|database "[^"]*" does not exist|permission denied|malformed recipient|unknown recipient/i.test(String(e?.message ?? ''));
+}
+
+/** How every age file begins: what is written offsite starts with it, or is not kept. */
+const AGE_HEADER = Buffer.from('age-encryption.org/v1\n');
+
+/**
  * age-encrypt `src` to `recipient`, writing the ciphertext to `dest` and taking
  * its size and hash as it goes by. Nothing is read back from `dest`: launchd may
- * write into iCloud Drive by path, and that is all this asks of it.
+ * write into iCloud Drive by path, and that is all this asks of it. What is
+ * written must begin as an age file does (a stand-in that passed the dump
+ * through would not), and it is flushed to disk before it counts.
  */
 function seal(age: string, recipient: string, src: string, dest: string): Promise<{ bytes: number; sha256: string }> {
   return new Promise((resolve, reject) => {
+    let fd: number;
+    try {
+      fd = openSync(dest, 'w', 0o600);
+    } catch (err) {
+      reject(err);
+      return;
+    }
     // No -o: age writes the ciphertext to its stdout, which is a pipe here, never a terminal.
     const child = spawn(age, ['-r', recipient, src], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    const out = createWriteStream(dest, { mode: 0o600 });
+    const out = createWriteStream(dest, { fd, autoClose: false });
     const hash = createHash('sha256');
+    const head: Buffer[] = [];
+    let headBytes = 0;
     let bytes = 0;
     let err = '';
     let exited: number | null | undefined;
     let written = false;
+    let settled = false;
+    const end = (failure?: unknown) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (!failure) fsyncSync(fd);
+      } catch (e) {
+        failure = e;
+      }
+      try {
+        closeSync(fd);
+      } catch {
+        // Closed already: the result stands.
+      }
+      if (failure) reject(failure);
+      else resolve({ bytes, sha256: hash.digest('hex') });
+    };
     // Both must have ended: age (its exit code says whether the stream is whole) and the file.
     const settle = () => {
       if (exited === undefined || !written) return;
-      if (exited !== 0) reject(new Error(`age exited ${exited}: ${err.trim().split('\n').pop() ?? ''}`));
-      else if (bytes === 0) reject(new Error('age wrote nothing'));
-      else resolve({ bytes, sha256: hash.digest('hex') });
+      // age's own error is its first line; the last is where to report one.
+      const said = err.split('\n').find((l) => l.startsWith('age: error:')) ?? err.trim().split('\n').pop() ?? '';
+      if (exited !== 0) end(new Error(`age exited ${exited}: ${said}`));
+      else if (!Buffer.concat(head).subarray(0, AGE_HEADER.length).equals(AGE_HEADER)) end(new NeedsSetup('age did not write an age file, so nothing was kept'));
+      else end();
     };
     child.stdout.on('data', (d: Buffer) => {
       hash.update(d);
       bytes += d.length;
+      if (headBytes < AGE_HEADER.length) {
+        head.push(d);
+        headBytes += d.length;
+      }
     });
     child.stdout.pipe(out);
     child.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
-    child.on('error', reject);
+    child.on('error', end);
     out.on('error', (e) => {
       child.kill();
-      reject(e);
+      end(e);
     });
     out.on('finish', () => {
       written = true;
@@ -179,8 +233,8 @@ function seal(age: string, recipient: string, src: string, dest: string): Promis
  * is ever written there.
  */
 export async function encryptTo(path: string, recipient: string, tools: Tools, outDir: string): Promise<{ path: string; bytes: number; sha256: string }> {
-  if (!/^age1[0-9a-z]{50,}$/.test(recipient)) throw new Error('the age recipient is not an age public key');
-  if (!tools.age || !existsSync(tools.age)) throw new Error('age is not installed (brew install age)');
+  if (!/^age1[0-9a-z]{50,}$/.test(recipient)) throw new NeedsSetup('the age recipient is not an age public key');
+  if (!tools.age || !existsSync(tools.age)) throw new NeedsSetup('age is not installed (brew install age)');
   mkdirSync(outDir, { recursive: true });
   const out = join(outDir, `${basename(path)}.age`);
   const partial = `${out}.partial`;
@@ -198,41 +252,63 @@ export async function encryptTo(path: string, recipient: string, tools: Tools, o
 const OFFSITE_COPY = /^flint-[0-9A-Za-z-]+\.dump\.age$/;
 
 /**
- * Record `name` as the newest encrypted copy offsite and keep the newest `keep`.
- * The offsite folder is never listed: launchd may write into iCloud Drive by
- * path, but macOS does not let it list the folder (apps/studio/backup_flint.sh
- * found its own pruning matched nothing there). The copies are tracked by name
- * in `manifest` instead, oldest first, one to a line.
+ * Record `name` as the newest encrypted copy offsite and keep the newest `keep`
+ * (at least one). The offsite folder is never listed: launchd may write into
+ * iCloud Drive by path, but macOS does not let it list the folder
+ * (apps/studio/backup_flint.sh found its own pruning matched nothing there).
+ * The copies are tracked by name in `manifest` instead, one to a line.
  *
  *  - Called only after a new copy is safely written, so a night that cannot
  *    encrypt never costs an older copy.
- *  - With no manifest yet it starts from the local dumps' names: a copy is
- *    written under its dump's name, and removing a name that was never written
- *    offsite does nothing.
+ *  - A copy's name holds its time, so the oldest are the first by name,
+ *    whatever order the manifest is in.
+ *  - The manifest heals itself. `recorded` (the names of the copies the
+ *    database has a row for) stands in for one that is missing, empty or cut
+ *    short, and a copy no record names (its run died before it was recorded)
+ *    is found by asking for it by its local dump's name. So a lost manifest
+ *    never leaves copies nothing will prune.
+ *  - Only names this code writes (flint-*.dump.age) are ever removed, and only
+ *    from `offsiteDir`; so is one left half-written (.partial).
  *  - A copy that will not delete stays in the manifest and is tried again.
  *
- * Returns the names removed.
+ * Returns the names of the files it actually removed.
  */
-export function pruneOffsite(offsiteDir: string, manifest: string, name: string, keep: number, dumpDir?: string): string[] {
+export function pruneOffsite(offsiteDir: string, manifest: string, name: string, keep: number, from: { recorded?: readonly string[]; dumpDir?: string } = {}): string[] {
   if (!OFFSITE_COPY.test(name)) throw new Error('not an encrypted copy’s name');
-  const known = existsSync(manifest)
-    ? readFileSync(manifest, 'utf8').split('\n').map((l) => l.trim())
-    : dumpDir && existsSync(dumpDir)
-      ? readdirSync(dumpDir).filter((f) => /^flint-.*\.dump$/.test(f)).sort().map((f) => `${f}.age`)
-      : [];
-  const names = [...new Set(known.filter((n) => OFFSITE_COPY.test(n) && n !== name)), name];
+  if (!Number.isInteger(keep) || keep < 1) throw new Error('at least one encrypted copy is kept');
+  const there = (file: string): boolean => existsSync(join(offsiteDir, file));
+  let listed: string[] = [];
+  try {
+    listed = readFileSync(manifest, 'utf8').split('\n').map((l) => l.trim());
+  } catch {
+    // No manifest (a first run, or it was lost): what the database recorded stands in.
+  }
+  const local = from.dumpDir && existsSync(from.dumpDir) ? readdirSync(from.dumpDir).filter((f) => /^flint-.*\.dump$/.test(f)).map((f) => `${f}.age`) : [];
+  const known = new Set([...listed, ...(from.recorded ?? []), name].filter((n) => OFFSITE_COPY.test(n)));
+  // A copy with no record at all counts only if it is really there.
+  for (const n of local) if (OFFSITE_COPY.test(n) && !known.has(n) && there(n)) known.add(n);
+  const all = [...known].sort();
   const gone: string[] = [];
   const stuck: string[] = [];
-  for (const old of names.slice(0, Math.max(0, names.length - keep))) {
+  for (const old of all.slice(0, -keep)) {
     try {
+      const was = there(old);
       rmSync(join(offsiteDir, old), { force: true });
-      gone.push(old);
+      if (was) gone.push(old);
     } catch {
       stuck.push(old);
     }
   }
+  // A half-written copy left by a run that died (never this run's: its own was renamed into place).
+  for (const n of new Set([...all, ...local.filter((x) => OFFSITE_COPY.test(x))])) {
+    try {
+      if (there(`${n}.partial`)) rmSync(join(offsiteDir, `${n}.partial`), { force: true });
+    } catch {
+      // Tried again next time.
+    }
+  }
   const partial = `${manifest}.partial`;
-  writeFileSync(partial, [...stuck, ...names.slice(-keep)].map((n) => `${n}\n`).join(''), { mode: 0o600 });
+  writeFileSync(partial, [...stuck, ...all.slice(-keep)].map((n) => `${n}\n`).join(''), { mode: 0o600 });
   renameSync(partial, manifest);
   return gone;
 }

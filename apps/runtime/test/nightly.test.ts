@@ -5,11 +5,11 @@
  * Sundays only, so its card lives a week and two hours.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { NO_DB, freshDb, type TestUrls } from './db';
+import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
-import { gate } from '../src/backup/nightly';
-import { approveProposal, createProposal } from '../src/governance/proposals';
+import { gate, offerNextCard } from '../src/backup/nightly';
+import { approveProposal, completeProposal, createProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 
 describe.skipIf(NO_DB)('nightly gate', () => {
@@ -58,6 +58,40 @@ describe.skipIf(NO_DB)('nightly gate', () => {
     // Approved on the day it was filed, it is still there for the run a week on.
     const nextSunday = new Date(sunday.getTime() + 7 * 24 * 3600_000);
     expect(await gate(db, 'drill', 'UTC', undefined, nextSunday)).toMatchObject({ go: true, proposalId: card.id });
+  });
+
+  it('a run on a card that fails files its next card at once, so "approve its next card in Approvals" points at one that is there', async () => {
+    const pendingCards = () => db.proposal.findMany({ where: { origin: 'runtime:offsite', status: 'pending' }, orderBy: { createdAt: 'asc' } });
+    const key = await enrollTestKey(urls);
+    const sign = async (id: string) => {
+      const p = await db.proposal.findUniqueOrThrow({ where: { id } });
+      await approveProposal(db, id, await key.approve({ subjectId: id, action: 'backup.offsite', argsDigest: p.argsDigest }), undefined, 'test');
+    };
+    // Night one files tonight's card; Will approves it; the next run claims it and runs.
+    const night1 = new Date();
+    expect(await gate(db, 'offsite', 'UTC', undefined, night1)).toMatchObject({ go: false });
+    const [first] = await pendingCards();
+    await sign(first!.id);
+    const night2 = new Date(night1.getTime() + 60_000);
+    expect(await gate(db, 'offsite', 'UTC', undefined, night2)).toMatchObject({ go: true, proposalId: first!.id });
+    // That run claimed its card and filed no other: until now, nothing was in Approvals after a failure.
+    expect(await pendingCards()).toEqual([]);
+    // It fails. cli.ts records that and files the next card straight away.
+    await completeProposal(db, first!.id, { ok: false, error: 'age is not installed', result: {} }, 'runtime');
+    await offerNextCard(db, 'offsite', 'UTC', undefined, night2);
+    const [next, ...others] = await pendingCards();
+    expect(others).toEqual([]);
+    expect(next).toMatchObject({ action: 'backup.offsite', status: 'pending', reason: 'It waits for your approval each night until you let it run on its own.' });
+    expect(next!.id).not.toBe(first!.id);
+    // It outlives the next night's run, and offering it again is the same card.
+    expect(next!.expiresAt.getTime() - next!.createdAt.getTime()).toBeGreaterThanOrEqual(26 * 3600_000 - 1000);
+    await offerNextCard(db, 'offsite', 'UTC', undefined, night2);
+    expect((await pendingCards()).map((c) => c.id)).toEqual([next!.id]);
+    // Will approves it that day; the next night's run claims it and runs: the note's promise, kept.
+    await sign(next!.id);
+    // The next night is another day's cap of one (the test cannot wait a night: the owner clears today's count).
+    await withClient(urls.owner, (c) => c.query(`DELETE FROM "ActionCounter" WHERE action = 'backup.offsite'`));
+    expect(await gate(db, 'offsite', 'UTC', undefined, new Date())).toEqual({ go: true, proposalId: next!.id, why: 'approved by Will' });
   });
 
   it('promoted, a job runs once in its period, and a second run says so in real words: the daily cap, never "dayly"', async () => {

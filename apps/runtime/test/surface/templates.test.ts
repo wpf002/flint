@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { noteProblems } from '@flint/policy';
+import { noteProblems, shownProblems } from '@flint/policy';
 import { TEMPLATES, TEMPLATE_IDS, displayName, hasLoosePrediction, phrase, phraseBefore, render, fieldFreeBody, fieldFreeTitle, type TemplateId } from '../../src/templates/escalations';
 import { EDGES } from './template-edges';
 
@@ -50,12 +50,15 @@ describe('escalation templates', () => {
     expect(down('ollama').body).toBe('The local model has been down for 35 minutes.');
     expect(down('searxng').body).toBe('Web search has been down for 35 minutes.');
     // Any other keeps its name, in a sentence that starts with a capital.
-    expect(down('com.nexus.responder')).toMatchObject({ title: 'Nexus’s Responder Service Is Down', body: 'Nexus’s responder service has been down for 35 minutes.' });
-    expect(down('com.flint.retrain').body).toBe('Flint’s retrain service has been down for 35 minutes.');
-    expect(down('trident-api')).toMatchObject({ title: 'The Trident-api Service Is Down', body: 'The trident-api service has been down for 35 minutes.' });
-    // A dotted or underscored label of someone else's is said in words, never as it is written.
-    expect(down('org.example.sync_agent')).toMatchObject({ linted: false, title: 'The Org Example Sync Agent Service Is Down', body: 'The org example sync agent service has been down for 35 minutes.' });
-    expect(down('com.flint.evolve_measure').body).toBe('Flint’s evolve measure service has been down for 35 minutes.');
+    // Any other by its own name, said as words: its parts capitalized, a short form in capitals, its marks unsaid.
+    expect(down('com.nexus.responder')).toMatchObject({ title: 'Nexus’s Responder Service Is Down', body: 'Nexus’s Responder service has been down for 35 minutes.' });
+    expect(down('com.flint.retrain').body).toBe('Flint’s Retrain service has been down for 35 minutes.');
+    expect(down('trident-api')).toMatchObject({ linted: false, title: 'The Trident API Service Is Down', body: 'The Trident API service has been down for 35 minutes.' });
+    expect(down('com.nexus.worker-2')).toMatchObject({ linted: false, title: 'Nexus’s Worker 2 Service Is Down', body: 'Nexus’s Worker 2 service has been down for 35 minutes.' });
+    expect(down('org.example.sync_agent')).toMatchObject({ linted: false, title: 'The Org Example Sync Agent Service Is Down', body: 'The Org Example Sync Agent service has been down for 35 minutes.' });
+    expect(down('com.flint.evolve_measure').body).toBe('Flint’s Evolve Measure service has been down for 35 minutes.');
+    expect(down('com.flint.deploy')).toMatchObject({ title: 'Auto-deploy Is Down', body: 'Auto-deploy has been down for 35 minutes.' });
+    expect(down('searxng')).toMatchObject({ title: 'Web Search Is Down', body: 'Web search has been down for 35 minutes.' });
     // No clean name: "A Service", never its ref.
     expect(render('service_down', { service: 'service#abc123', downMinutes: 31 }).title).toBe('A Service Is Down');
     expect(body('drill_failed', { mismatches: 1 })).toBe('The last restore test found 1 table that differs from the backup, so the backups may not restore.');
@@ -70,18 +73,24 @@ describe('escalation templates', () => {
     expect(body('route_errors', { count: 6, minutes: 10 })).toBe('In the last 10 minutes, 6 requests to Flint failed.');
     expect(body('route_errors', { count: 1, minutes: 1 })).toBe('In the last minute, 1 request to Flint failed.');
     expect(body('new_item', { kind: 'issue', item: 'issue#abc123', reasonCode: 'needs_will' })).toBe('Flint flagged it as needing you. It’s in Activity, under Important.');
-    expect(body('rule_match', { rule: 'ci-red', source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched your rule “ci-red”.');
+    expect(body('rule_match', { rule: 'ci-red', source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched your rule “ci red”.');
     expect(body('rule_match', { rule: 'x', source: 'imessage', eventType: 'message.new', entity: null })).toBe('An iMessage event matched your rule “x”.');
     expect(body('rule_match', { rule: 'x', source: 'google_calendar', eventType: 'commitment.state', entity: null })).toBe('A Google Calendar event matched your rule “x”.');
     // A rule's name is Will's own, said in words: its marks are not shown.
     expect(body('rule_match', { rule: 'ci_red.main', source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched your rule “ci red main”.');
-    expect(body('handoff_unaccepted', { handoff: null, namespace: 'trident_api' })).toBe('A Nexus handoff to Flint from trident api has not been accepted in 24 hours.');
+    // A rule named with marks alone has no words to put in quotes.
+    for (const rule of ['...', '-', '_._']) expect(body('rule_match', { rule, source: 'github', eventType: 'ci_run.state', entity: null })).toBe('A GitHub event matched one of your rules.');
+    // A Nexus namespace by its own words, like a service.
+    expect(body('handoff_unaccepted', { handoff: null, namespace: 'trident_api' })).toBe('A Nexus handoff to Flint from Trident API has not been accepted in 24 hours.');
+    expect(render('handoff_unaccepted', { handoff: null, namespace: 'trident-api' })).toMatchObject({ linted: false, title: 'A Handoff from Trident API Is Waiting' });
+    expect(render('handoff_unaccepted', { handoff: null, namespace: '4aef4bf9c2' })).toMatchObject({ linted: false, title: 'A Handoff Is Waiting', body: 'A Nexus handoff to Flint has not been accepted in 24 hours.' });
   });
 
   it('every title is a short Title Case phrase in plain words: a vendor by its name, a job by its words, never an internal name, an event type or a ref', () => {
     const title = (id: TemplateId, f: unknown, names: Record<string, string> = {}) => render(id, f, names).title;
     expect(title('backup_stale', { hoursSince: 40 })).toBe('Backups Have Stopped');
-    expect(title('drill_failed', { mismatches: 2 })).toBe('Restore Test Failed');
+    // Never the nightly job's own title ("Restore Test Failed"): the console folds that one, and this is another note.
+    expect(title('drill_failed', { mismatches: 2 })).toBe('The Last Restore Test Failed');
     expect(title('vendor_cap', { vendor: 'anthropic' })).toBe('Claude Spending Cap Reached');
     expect(title('vendor_cap', { vendor: 'openai' })).toBe('OpenAI Spending Cap Reached');
     expect(title('deploy_failed', { component: 'server', stage: 'gate', sha: null })).toBe('The Server Did Not Deploy');
@@ -107,12 +116,40 @@ describe('escalation templates', () => {
     }
   });
 
-  it('a field that would put a path, an id or an aside on screen falls back to the field-free wording', () => {
-    const odd = (name: string) => render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': name });
-    for (const name of ['api (staging)', '~/bin/api', 'api 4aef4bf9c2', 'api `x`']) {
-      expect(odd(name), name).toMatchObject({ linted: true, title: 'A Service Is Down', body: TEMPLATES.service_down.fieldFreeBody });
+  it('an odd name never costs the note: a service is still named in words, and a thing whose name may not be shown is said by its kind', () => {
+    const down = (name: string) => render('service_down', { service: 'service#abc123', downMinutes: 45 }, { 'service#abc123': name });
+    // A tool's name, a hash in a name, an aside, a path: the service is still named, and the note keeps its facts.
+    expect(down('npm')).toMatchObject({ linted: false, title: 'The Npm Service Is Down', body: 'The Npm service has been down for 45 minutes.' });
+    expect(down('psql')).toMatchObject({ linted: false, title: 'The Psql Service Is Down' });
+    expect(down('brew')).toMatchObject({ linted: false, title: 'The Brew Service Is Down' });
+    expect(down('worker-4aef4bf9c2')).toMatchObject({ linted: false, title: 'The Worker Service Is Down', body: 'The Worker service has been down for 45 minutes.' });
+    expect(down('api (staging)')).toMatchObject({ linted: false, title: 'The API Staging Service Is Down' });
+    expect(down('~/bin/api `x`')).toMatchObject({ linted: false, title: 'The Bin API X Service Is Down' });
+    // Nothing sayable in it: "A Service", with its minutes.
+    expect(down('4aef4bf9c2')).toMatchObject({ linted: false, title: 'A Service Is Down', body: 'A service has been down for 45 minutes.' });
+    // Someone's own name for a thing may have a hyphen, a dot or a version in it: it is shown, and nothing is swapped.
+    const item = (name: string, kind = 'issue') => render('new_item', { kind, item: `${kind}#abc123`, reasonCode: 'fyi' }, { [`${kind}#abc123`]: name });
+    for (const name of ['wpf002/nexus-responder #12', 'wpf002/flint.js #60', 'v2.1 plan', 'claude.ai outage', 'my_thread']) {
+      const r = item(name);
+      expect(r, name).toMatchObject({ linted: false, body: 'Flint flagged it as worth knowing. It’s in Activity, under Important.' });
+      expect(r.title.toLowerCase(), name).toBe(`new issue: ${name}`.toLowerCase());
+      expect(shownProblems(`${r.title}\n${r.body}`), name).toEqual([]);
     }
-    expect(render('new_item', { kind: 'issue', item: 'issue#abc123', reasonCode: 'fyi' }, { 'issue#abc123': 'see /Users/will/notes' })).toMatchObject({ linted: true, title: 'Something New Needs a Look' });
+    // One that may not be shown at all (a path, a command, raw JSON, a link) is left out: the thing is said by its kind.
+    for (const name of ['see /Users/will/notes', 'fix `rm -rf`', '{"title": "x"}', 'see https://example.com', 'api (staging)']) {
+      expect(item(name, 'pull_request'), name).toMatchObject({ linted: false, title: 'A New Pull Request', body: 'Flint flagged it as worth knowing. It’s in Activity, under Important.' });
+    }
+  });
+
+  it('Flint’s own words are still held to the rule: a template that wrote an internal name would fall back', () => {
+    // The check runs on the template's words with every name masked, so only Flint's words can fail it.
+    for (const id of TEMPLATE_IDS) {
+      for (const fields of EDGES[id]) {
+        const masked = render(id, fields, { 'service#abc123': 'Item', 'issue#abc123': 'Item', 'pull_request#abc123': 'Item', 'thread#abc123': 'Item' });
+        expect(masked.linted, `${id} ${JSON.stringify(fields)}`).toBe(false);
+        expect(noteProblems(masked.title, masked.body), `${id} ${JSON.stringify(fields)}`).toEqual([]);
+      }
+    }
   });
 
   it('a lint hit in a field falls back to the field-free wording, and never throws', () => {

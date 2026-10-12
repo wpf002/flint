@@ -313,7 +313,7 @@ describe.skipIf(NO_DB)('surfacing on flint_test', () => {
     await owner(`UPDATE "Escalation" SET title = NULL, body = NULL, fields = '{}'::jsonb, "contentPurgedAt" = now() WHERE id = $1`, [esc.id]);
     let sent: { title?: string; body?: string } = {};
     expect(await deliver(db, config, esc.id, undefined, async (req) => ((sent = req), { status: 'stored', pinged: false }))).toBe('sent');
-    expect(sent).toMatchObject({ title: 'Restore Test Failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
+    expect(sent).toMatchObject({ title: 'The Last Restore Test Failed', body: 'The last restore test didn’t match the backup, so the backups may not restore.' });
   });
 
   it('expiry: past the prediction\'s resolve time, the escalation expires and its unsent deliveries close', async () => {

@@ -14,13 +14,18 @@
  *  - A title is a short Title Case phrase and a body is complete sentences,
  *    both in the console's words ("restore test", "database update",
  *    Activity's tabs): never an internal name, a file path, an id or an aside
- *    in parentheses (@flint/policy's noteProblems). A field that would put one
- *    there (an odd service name, say) falls back to the field-free wording too.
+ *    in parentheses (@flint/policy's noteProblems).
+ *  - A name never costs a note its facts. A service is said in words made
+ *    from its name (serviceWords: "the Trident API service"); a thing shown
+ *    by the name it was given (a repo, a thread) is shown only if that name
+ *    may be shown at all (shownProblems), and by its kind otherwise. Flint's
+ *    own words are checked with every name masked, so a hyphen in a repo's
+ *    name is never mistaken for an internal name.
  *
  * A self-modification PR may not touch this directory (P6 allowlist).
  */
 import { z } from 'zod';
-import { REASON_CODES, healthName, nameWords, noteProblems, safeName, titleCase } from '@flint/policy';
+import { REASON_CODES, healthName, noteProblems, plainName, properWords, safeName, serviceWords, shownProblems, titleCase } from '@flint/policy';
 
 const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 const Sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -66,35 +71,14 @@ const clockTime = (hhmm: string) => {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 };
 /**
- * The services the watchdog watches, as Will knows them: the health source's
- * endpoints (sources/registry.ts) and Flint's own LaunchAgents.
+ * A service in words (@flint/policy's serviceWords: "the server", "Nexus’s
+ * Responder service", "the Trident API service"); "a service" when it has no
+ * name, or only a raw ref (kind#id). `cap`: to start a sentence.
  */
-const SERVICE_WORDS: Readonly<Record<string, string>> = {
-  'flint-server': 'The server',
-  'com.flint.server': 'The server',
-  'com.flint.runtime': 'The runtime',
-  ollama: 'The local model',
-  'com.flint.ollama': 'The local model',
-  searxng: 'Web search',
-  'com.flint.searxng': 'Web search',
-  'com.flint.deploy': 'Auto-deploy',
-  'com.flint.runtime-backup': 'The nightly backup job',
-  'com.flint.voice': 'Voice',
-};
-/**
- * A service, to start a sentence: its plain name, or one built around the name it
- * has ("Nexus’s responder service", "The trident-api service"), never a lowercase
- * label leading it or a dotted one inside it; "A service" when there is none, or
- * only a raw ref (kind#id).
- */
-function serviceWords(ref: string | null, show: Show): string {
-  const shown = ref ? show(ref, '') : '';
-  if (!shown || Ref.safeParse(shown).success) return 'A service';
-  const known = SERVICE_WORDS[shown];
-  if (known) return known;
-  const agent = /^com\.(flint|nexus)\.(.+)$/.exec(shown);
-  if (agent) return `${agent[1] === 'flint' ? 'Flint' : 'Nexus'}’s ${nameWords(agent[2]!)} service`;
-  return `The ${nameWords(shown)} service`;
+function service(ref: string | null, show: Show, cap = false): string {
+  const name = ref ? show.raw(ref) : undefined;
+  const said = !name || Ref.safeParse(name).success ? 'a service' : serviceWords(name);
+  return cap ? said.charAt(0).toUpperCase() + said.slice(1) : said;
 }
 /** "1 minute", "10 minutes". */
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -106,8 +90,13 @@ const REASON_WORDS: Record<(typeof REASON_CODES)[number], string> = {
   failure: 'a failure', fyi: 'worth knowing', routine: 'routine', noise: 'noise',
 };
 
-/** How a field is shown: an entity ref by its clean name, everything else as it is. */
-type Show = (ref: string | null, fallback: string) => string;
+/**
+ * How a field is shown: an entity ref by the name it was given (when that name
+ * may be shown at all: shownProblems), everything else as it is. `raw` is the
+ * name as it is written, for a template that says it in its own words (a
+ * service's) rather than showing it.
+ */
+type Show = ((ref: string | null, fallback: string) => string) & { raw: (ref: string) => string | undefined };
 
 /** Where every escalation is, for a note that cannot say more: the Important tab lists it with what it is about. */
 const IN_ACTIVITY = 'It’s in Activity, under Important.';
@@ -139,8 +128,8 @@ export const TEMPLATES = {
   service_down: t({
     fields: z.object({ service: Ref.nullable(), downMinutes: Count }).strict(),
     // A service by its words ("The Server Is Down"); one with no clean name is "A Service", never its ref.
-    title: (f, show) => `${serviceWords(f.service, show)} is down`,
-    body: (f, show, ledger) => `${serviceWords(f.service, show)} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
+    title: (f, show) => `${service(f.service, show)} is down`,
+    body: (f, show, ledger) => `${service(f.service, show, true)} has been down for ${count(f.downMinutes, 'minute')}.${ledger ? ` Recovery is ${ledger}.` : ''}`,
     fieldFreeTitle: 'A Service Is Down',
     fieldFreeBody: `A service has been down for more than 30 minutes. ${IN_ACTIVITY}`,
   }),
@@ -153,13 +142,15 @@ export const TEMPLATES = {
   }),
   drill_failed: t({
     fields: z.object({ mismatches: Count }).strict(),
-    title: () => 'Restore Test Failed',
+    // Not "Restore Test Failed": that is the nightly job's own note (jobFailedNote), which says what happens
+    // next. The console folds that one night after night; this one stays its own row.
+    title: () => 'The Last Restore Test Failed',
     // A drill that failed without a count (it defaults to 0) says only that it failed.
     body: (f) =>
       f.mismatches
         ? `The last restore test found ${count(f.mismatches, 'table')} that ${f.mismatches === 1 ? 'differs' : 'differ'} from the backup, so the backups may not restore.`
         : DRILL_FAILED,
-    fieldFreeTitle: 'Restore Test Failed',
+    fieldFreeTitle: 'The Last Restore Test Failed',
     fieldFreeBody: DRILL_FAILED,
   }),
   vendor_cap: t({
@@ -205,8 +196,9 @@ export const TEMPLATES = {
   }),
   handoff_unaccepted: t({
     fields: z.object({ handoff: Ref.nullable(), namespace: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/).nullable() }).strict(),
-    title: (f) => `A handoff${f.namespace ? ` from ${nameWords(f.namespace)}` : ''} is waiting`,
-    body: (f) => `A Nexus handoff to Flint${f.namespace ? ` from ${nameWords(f.namespace)}` : ''} has not been accepted in 24 hours.`,
+    // The namespace by its words ("trident-api" is Trident API); one with nothing sayable in it is left out.
+    title: (f) => `A handoff${f.namespace && properWords(f.namespace) ? ` from ${properWords(f.namespace)}` : ''} is waiting`,
+    body: (f) => `A Nexus handoff to Flint${f.namespace && properWords(f.namespace) ? ` from ${properWords(f.namespace)}` : ''} has not been accepted in 24 hours.`,
     fieldFreeTitle: 'A Handoff Is Waiting',
     fieldFreeBody: 'A Nexus handoff to Flint has not been accepted in 24 hours.',
   }),
@@ -243,11 +235,13 @@ export const TEMPLATES = {
     fields: z
       .object({ rule: z.string().regex(/^[a-z0-9_.-]{1,80}$/), source: z.string().regex(/^[a-z_]{1,40}$/), eventType: z.string().regex(/^[a-z_]{1,40}(\.[a-z0-9_]{1,40}){0,3}$/), entity: Ref.nullable() })
       .strict(),
-    // The rule by the name Will gave it, in words ("ci_red" is “ci red”); what it matched is in Activity.
+    // The rule by the name Will gave it, in words ("ci_red" and "ci-red" are “ci red”); one named with
+    // marks alone has no words to say. What it matched is in Activity.
     title: () => 'One of Your Rules Matched',
     body: (f) => {
       const source = healthName(`source:${f.source}`);
-      return `${/^[aeiou]/i.test(source) ? 'An' : 'A'} ${source} event matched your rule “${nameWords(f.rule)}”.`;
+      const rule = plainName(f.rule);
+      return `${/^[aeiou]/i.test(source) ? 'An' : 'A'} ${source} event matched ${rule ? `your rule “${rule}”` : 'one of your rules'}.`;
     },
     fieldFreeTitle: 'One of Your Rules Matched',
     fieldFreeBody: `An event matched one of your rules. ${IN_ACTIVITY}`,
@@ -288,11 +282,18 @@ const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n).replac
 export function render(id: TemplateId, rawFields: unknown, names: Readonly<Record<string, string>> = {}, ledger?: string): Rendered {
   const tpl = TEMPLATES[id] as unknown as Template<Record<string, unknown>>;
   const fields = tpl.fields.parse(rawFields);
-  const show: Show = (ref, fallback) => (ref ? names[ref] ?? ref : fallback);
+  // A name is shown only if it may be shown at all (no path, command, link or aside in it); otherwise its
+  // ref stands for it, and the template says the thing by its kind ("A New Issue").
+  const shown = (ref: string) => (names[ref] !== undefined && shownProblems(names[ref]!).length === 0 ? names[ref]! : ref);
+  const show: Show = Object.assign((ref: string | null, fallback: string) => (ref ? shown(ref) : fallback), { raw: (ref: string) => names[ref] });
   const title = clip(titleCase(tpl.title(fields, show)), 80);
   const body = clip(tpl.body(fields, show, ledger), 500);
-  // A loose probability, or a field that put an internal name, a path, an id or an aside on screen.
-  if (hasLoosePrediction(`${title}\n${body}`, ledger ? [ledger] : []) || noteProblems(title, body).length > 0) {
+  // Flint's own words, checked with every name masked: a repo called "nexus-responder" or a thread called
+  // "v2.1 plan" is someone's name for a thing, never a reason to drop the whole note.
+  const masked: Show = Object.assign((ref: string | null, fallback: string) => (ref ? (shown(ref) === ref ? ref : 'Item') : fallback), { raw: (ref: string) => (names[ref] === undefined ? undefined : 'item') });
+  const own = noteProblems(clip(titleCase(tpl.title(fields, masked)), 80), clip(tpl.body(fields, masked, ledger), 500));
+  // A loose probability, or words of Flint's that put an internal name, a path, an id or an aside on screen.
+  if (hasLoosePrediction(`${title}\n${body}`, ledger ? [ledger] : []) || own.length > 0 || shownProblems(`${title}\n${body}`).length > 0) {
     return { fields, title: tpl.fieldFreeTitle, body: tpl.fieldFreeBody, linted: true };
   }
   return { fields, title, body, linted: false };

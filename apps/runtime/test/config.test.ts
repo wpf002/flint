@@ -107,14 +107,31 @@ describe('runtime config', () => {
       expect(offsiteFolder(h, '/Volumes/Vault/flint')).toEqual({ dir: '/Volumes/Vault/flint', icloud: false });
       expect(offsiteFolder(h, join(h, ...DRIVE, 'Elsewhere'))).toEqual({ dir: join(h, ...DRIVE, 'Elsewhere'), icloud: true });
       expect(offsiteFolder(mac(false), '/Volumes/Vault/flint')).toEqual({ dir: '/Volumes/Vault/flint', icloud: false });
+      // A path that only passes through iCloud Drive's name is not in it.
+      expect(offsiteFolder(h, `${join(h, ...DRIVE)}-old/x`).icloud).toBe(false);
+      expect(offsiteFolder(h, `${join(h, ...DRIVE)}/../../Elsewhere`)).toEqual({ dir: join(h, 'Library', 'Elsewhere'), icloud: false });
+    });
+
+    it('a setting under Will’s home may be written ~/…; one that is not a whole path is refused, never guessed at', () => {
+      const h = mac(true);
+      expect(offsiteFolder(h, '~/Vault/flint')).toEqual({ dir: join(h, 'Vault', 'flint'), icloud: false });
+      expect(offsiteFolder(h, '~')).toEqual({ dir: h, icloud: false });
+      expect(offsiteFolder(h, '~/Library/Mobile Documents/com~apple~CloudDocs/Elsewhere')).toEqual({ dir: join(h, ...DRIVE, 'Elsewhere'), icloud: true });
+      for (const relative of ['Vault/flint', './flint', '../flint', '~will/flint', 'C:\\flint']) {
+        const r = offsiteFolder(h, relative);
+        // No folder at all, not iCloud's by default: Will set one, and it is wrong.
+        expect(r.dir, relative).toBeUndefined();
+        expect(r.icloud, relative).toBe(false);
+        expect(r.problem, relative).toMatch(/FLINT_OFFSITE_DIR is not an absolute path/);
+      }
     });
 
     it('nowhere without iCloud Drive: no folder is made up, and a file by that name is not a folder', () => {
-      expect(offsiteFolder(mac(false), undefined)).toBeUndefined();
+      expect(offsiteFolder(mac(false), undefined)).toEqual({ icloud: false });
       const h = mac(false);
       mkdirSync(join(h, 'Library', 'Mobile Documents'), { recursive: true });
       writeFileSync(join(h, ...DRIVE), '');
-      expect(offsiteFolder(h, undefined)).toBeUndefined();
+      expect(offsiteFolder(h, undefined)).toEqual({ icloud: false });
     });
 
     describe('loadBackupConfig', () => {
@@ -151,9 +168,16 @@ describe('runtime config', () => {
         expect(loadBackupConfig()).toMatchObject({ offsiteDir: '/Volumes/Vault/flint', offsiteICloud: false });
         process.env.FLINT_OFFSITE_DIR = '/Volumes/Other';
         expect(loadBackupConfig().offsiteDir).toBe('/Volumes/Other');
+        // A setting that is not a whole path: no folder, and why, for the job to say its setup needs fixing.
+        process.env.FLINT_OFFSITE_DIR = 'Vault/flint';
+        const wrong = loadBackupConfig();
+        expect(wrong.offsiteDir).toBeUndefined();
+        expect(wrong.offsiteProblem).toMatch(/not an absolute path/);
+        delete process.env.FLINT_OFFSITE_DIR;
         home(false);
         const none = loadBackupConfig();
         expect(none.offsiteDir).toBeUndefined();
+        expect(none.offsiteProblem).toBeUndefined();
         expect(none.offsiteICloud).toBe(false);
       });
     });

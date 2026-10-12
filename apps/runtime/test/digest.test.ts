@@ -33,6 +33,11 @@ describe('the digest body', () => {
     ]);
   });
 
+  it('names the offsite copy as Settings > Health does', () => {
+    expect(digestBody(zero, ['offsite_backup']).split('\n')[2]).toBe('This needs a look: Offsite Backup.');
+    expect(digestBody(zero, ['backup', 'offsite_backup']).split('\n')[2]).toBe('These need a look: Backups and Offsite Backup.');
+  });
+
   it('names six components and counts the rest', () => {
     const many = ['audit_intents', 'backup', 'bus', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'];
     expect(digestBody(zero, many).split('\n')[2]).toBe('These need a look: Action Log, Backups, Job Queue, Updates, Local Model, Restore Test and 2 more.');

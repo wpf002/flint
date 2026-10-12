@@ -25,7 +25,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
@@ -36,9 +36,10 @@ import { proposeEnable } from './governance/internal.js';
 import { SOURCES, jobFailedNote } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, gate, type Command } from './backup/nightly.js';
+import { ACTION, gate, nextAfterFailure, offerNextCard, type Command } from './backup/nightly.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, encryptTo, newestDump, pruneDumps, pruneOffsite, restoreDrill } from './backup/backup.js';
+import { dumpDatabase, needsSetup, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { sendOffsite } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
 import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
@@ -165,6 +166,8 @@ async function main(): Promise<void> {
     let error: string | undefined;
     /** The restore drill ran to its end and the restored copy differed from the backup (not a run that stopped early). */
     let mismatch = false;
+    /** It failed for a reason another try cannot change (no key, no folder, a write macOS refuses). */
+    let setup = false;
     try {
       if (cmd === 'backup') {
         const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
@@ -174,20 +177,7 @@ async function main(): Promise<void> {
         });
         detail = { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length };
       } else if (cmd === 'offsite') {
-        if (!b.ageRecipient) throw new Error('no age recipient: put Will\'s public key in ~/.flint/backup-age-recipient');
-        if (!b.offsiteDir) throw new Error('nowhere to send it: iCloud Drive is not on this Mac and FLINT_OFFSITE_DIR is not set');
-        const dump = newestDump(b.dumpDir);
-        if (!dump) throw new Error('no local dump to send');
-        const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
-        await db.backupRun.create({ data: { kind: 'pg_dump_flint', location: 'icloud', path: e.path, bytes: BigInt(e.bytes), sha256: e.sha256, encrypted: true, status: 'ok', startedAt: now, finishedAt: new Date() } });
-        // The new copy is safe: now the older ones may go (the newest 7 stay). The copy counts even if this does not.
-        let pruned = 0;
-        try {
-          pruned = pruneOffsite(b.offsiteDir, b.offsiteManifest, basename(e.path), OFFSITE_KEEP, b.dumpDir).length;
-        } catch (err) {
-          console.error(`${action}: the copy is written, but the older copies were not pruned: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        detail = { bytes: e.bytes, sha256: e.sha256, pruned };
+        detail = await sendOffsite(db, b, now);
       } else {
         const dump = newestDump(b.dumpDir);
         if (!dump) throw new Error('no dump to restore');
@@ -202,6 +192,7 @@ async function main(): Promise<void> {
     } catch (err) {
       ok = false;
       error = err instanceof Error ? err.message : String(err);
+      setup = needsSetup(err);
     }
     if (proposalId) {
       // Recording the proposal's end must not cost the job's own audit row or the failure notice.
@@ -214,11 +205,19 @@ async function main(): Promise<void> {
     if (!ok) {
       process.exitCode = 1;
       // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
-      // says what happened and what happens next, in Will's words: a job he promoted runs again at its next
-      // time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays); one that ran on a card waits for
-      // the next card he approves.
+      // says what happened and what happens next, in Will's words, and promises only what is true:
+      //  - a failure another try cannot change says its setup needs fixing;
+      //  - a job he promoted runs again at its next time by itself (the nightly LaunchAgent, 02:15; the drill on Sundays);
+      //  - one that ran on a card waits for his next approval, and that card is filed now, so it is there to approve.
       if (auto) {
-        const note = jobFailedNote(action, { alone: proposalId === undefined, icloud: b.offsiteICloud, mismatch });
+        let card = false;
+        if (proposalId !== undefined) {
+          card = await offerNextCard(db, cmd, b.config.tz, b.config.rp, now).then(() => true, (err: unknown) => {
+            console.error(`${action}: could not file its next card: ${err instanceof Error ? err.message : String(err)}`);
+            return false;
+          });
+        }
+        const note = jobFailedNote(action, { next: nextAfterFailure({ setup, onCard: proposalId !== undefined, cardFiled: card }), icloud: b.offsiteICloud, mismatch });
         await notifyWill(b.config, note.title, note.body);
       }
     }
@@ -226,9 +225,6 @@ async function main(): Promise<void> {
     await db.$disconnect();
   }
 }
-
-/** How many encrypted copies stay offsite (the studio's own backup keeps 7 there too). */
-const OFFSITE_KEEP = 7;
 
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

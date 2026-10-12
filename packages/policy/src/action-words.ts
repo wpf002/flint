@@ -56,11 +56,14 @@ export type NightlyJob = 'backup.local' | 'backup.offsite' | 'restore.drill';
 
 export interface JobFailure {
   /**
-   * The job runs on its own (Will promoted it), so the next night's run is
-   * certain. Otherwise it ran on a card he approved and runs again only on
-   * another: the note says so, never "tries again".
+   * What happens next, which is all the note promises:
+   *  - `retry`: the job runs on its own (Will promoted it), so its next run is certain;
+   *  - `card`: it ran on a card he approved, and its next card is in Approvals now;
+   *  - `card_later`: the same, but the next card could not be filed: the next run files it;
+   *  - `setup`: it failed for a reason another try cannot change (no key, no folder, a
+   *    write macOS refuses): it says so, never "tries again".
    */
-  alone: boolean;
+  next: 'retry' | 'card' | 'card_later' | 'setup';
   /** backup.offsite: the copy goes to iCloud Drive (the default folder), not a folder Will set. */
   icloud?: boolean;
   /** restore.drill: it finished and the restored copy differed from the backup. */
@@ -77,7 +80,11 @@ export function jobFailedNote(job: NightlyJob, f: JobFailure): { title: string; 
     : job === 'backup.offsite' ? `Last night’s encrypted ${f.icloud ? 'copy to iCloud' : 'offsite copy'} didn’t finish.`
     : f.mismatch ? 'This week’s practice restore found a problem.'
     : 'This week’s practice restore didn’t finish.';
-  const when = job === 'restore.drill' ? 'next Sunday' : 'tonight';
-  const next = f.alone ? `Flint tries again ${when}.` : 'It runs again once you approve its next card in Approvals.';
+  const weekly = job === 'restore.drill';
+  const next =
+    f.next === 'setup' ? 'It won’t work until its setup is fixed, so tell Claude.'
+    : f.next === 'retry' ? `Flint tries again ${weekly ? 'next Sunday' : 'tonight'}.`
+    : f.next === 'card' ? 'It runs again once you approve its next card in Approvals.'
+    : `Its next card will be in Approvals ${weekly ? 'next Sunday' : 'tomorrow morning'}.`;
   return { title: `${JOB_WORDS[job]!} Failed`, body: `${what} ${next}` };
 }

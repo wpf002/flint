@@ -202,14 +202,16 @@ describe('the line under a notification', () => {
 
   it('is the note’s own sentences, untouched, for every note Flint posts today', () => {
     const notes: Array<{ title: string; body: string }> = [
-      ...(['backup.local', 'backup.offsite', 'restore.drill'] as NightlyJob[]).flatMap((job) => [true, false].flatMap((alone) => [true, false].map((x) => jobFailedNote(job, { alone, icloud: x, mismatch: x })))),
+      ...(['backup.local', 'backup.offsite', 'restore.drill'] as NightlyJob[]).flatMap((job) => (['retry', 'card', 'card_later', 'setup'] as const).flatMap((next) => [true, false].map((x) => jobFailedNote(job, { next, icloud: x, mismatch: x })))),
       ...Object.keys(ACTION_DONE).map(actionDoneNote),
       actionDoneNote('trident.gmail_send'),
       ...PAID_VENDORS.flatMap((v) => (['degrade', 'exhausted', 'notice'] as const).map((level) => thresholdNote(v, 'monthly', 80, 120.5, 150, effectOf(v, level)))),
       { title: 'Daily Summary for Sun Oct 11', body: 'Yesterday, 3 items were important and 12 went to Other. Flint escalated 1.\nFlint did 2 things on its own. You have 1 approval and 3 open escalations waiting.\nThese need a look: Job Queue, Restore Test and GitHub.\nToday, 3 predictions resolve.' },
       { title: 'The Server Is Down', body: 'The server has been down for 45 minutes. Recovery is somewhat unlikely, around 40% by Oct 2, 5:30 PM.' },
       { title: 'On Your Calendar Tue Oct 6 at 2:30 PM', body: 'You have an event on Tue Oct 6 at 2:30 PM. Its title is in Activity, under Important.' },
-      { title: 'One of Your Rules Matched', body: 'A GitHub event matched your rule “ci-red”.' },
+      { title: 'One of Your Rules Matched', body: 'A GitHub event matched your rule “ci red”.' },
+      { title: 'The Trident API Service Is Down', body: 'The Trident API service has been down for 35 minutes.' },
+      { title: 'The Last Restore Test Failed', body: 'The last restore test found 2 tables that differ from the backup, so the backups may not restore.' },
       { title: PHONE_PING.title, body: PHONE_PING.body },
     ];
     for (const n of notes) {
@@ -236,10 +238,31 @@ describe('the line under a notification', () => {
     }
   });
 
-  it('the count after a repeated note is a sentence of its own', () => {
-    const code = lanesJs.replace(/\/\*[\s\S]*?\*\//g, '');
-    expect(code).toContain("'It has failed '+n.count+(n.every>NOTE_NIGHT?' weeks':' nights')+' in a row.'");
-    expect(code).toContain("'It happened '+n.count+' times.'");
-    for (const said of ['It has failed 5 nights in a row.', 'It has failed 2 weeks in a row.', 'It happened 3 times.']) expect(said).toMatch(SENTENCES);
+  it('the count after a repeated note is a sentence of its own, in the tense that is true', () => {
+    const again = (n: Record<string, unknown>, cut = 0) => runInContext(`noteAgain(${JSON.stringify(n)}, ${cut})`, c) as string;
+    const NIGHT = 86_400_000;
+    const now = Date.now();
+    const row = (over: Record<string, unknown>) => ({ count: 2, every: NIGHT, ts: now - 3_600_000, first: now - NIGHT - 3_600_000, ...over });
+    const said = [
+      again({ count: 3, every: 0 }),
+      again(row({})),
+      again(row({ count: 5, first: now - 4 * NIGHT - 3_600_000 })),
+      // Its newest failure is four nights old: it is over.
+      again(row({ count: 3, ts: now - 4 * NIGHT, first: now - 6 * NIGHT })),
+      again(row({ count: 2, every: 7 * NIGHT, first: now - 7 * NIGHT - 3_600_000 })),
+      // The list was cut a night before the streak's oldest failure.
+      again(row({ count: 50, first: now - 49 * NIGHT - 3_600_000 }), now - 50 * NIGHT),
+    ];
+    expect(said).toEqual([
+      'It happened 3 times.',
+      'It has failed 2 nights in a row.',
+      'It has failed 5 nights in a row. It needs a look.',
+      'It failed 3 nights in a row.',
+      'It has failed 2 weeks in a row.',
+      'It has failed at least 50 nights in a row. It needs a look.',
+    ]);
+    for (const line of said) for (const sentence of line.split(/(?<=\.) /)) expect(sentence).toMatch(SENTENCES);
+    // Once is not a streak.
+    expect(again(row({ count: 1 }))).toBe('');
   });
 });
