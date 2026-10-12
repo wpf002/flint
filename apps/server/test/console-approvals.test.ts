@@ -173,11 +173,16 @@ describe('the console Approvals panel', () => {
     expect(first).toContain('UntilMar 29, 2027');
     expect(first).toContain('LimitsBackup 1 a Day · Restore Test 1 a Week · Offsite 1 a Day');
     expect(first).toContain('Filed ByYou');
-    // The raw args and the reason wait behind Show Details.
+    // The reason and what each rule lets run wait behind Show Details, as sentences: a rule card never shows its rows as they are stored.
     expect(first).not.toContain('backup.local');
+    expect(first).not.toContain('The nightly backup');
     rows[0]!.button('Show Details').onclick!();
-    expect(rows[0]!.shown()).toContain('"pattern": "backup.local"');
-    expect(rows[0]!.shown()).toContain('The shadow week: 1.2 relevant a day.');
+    const details = rows[0]!.shown();
+    expect(details).toContain('The shadow week: 1.2 relevant a day.');
+    expect(details).toContain('The nightly backup may run on its own, once a day, until Mar 29, 2027.');
+    expect(details).toContain('The restore test may run on its own, once a week, until Mar 29, 2027.');
+    expect(details).toContain('The offsite copy may be sent on its own, once a day, until Mar 29, 2027.');
+    expect(details).not.toMatch(/[{}"\[\]]|backup\.local|restore\.drill|pattern|expiresAt/);
     expect(rows[1]!.shown()).toContain('Turn On the Deploy Source');
     expect(rows[1]!.shown()).toContain('Turn On the Deploy SourceDeploy results are read every minute.');
     expect(rows[2]!.shown()).toContain('Add 1 Person from Calendar');

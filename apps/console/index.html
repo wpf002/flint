@@ -1272,6 +1272,47 @@ var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what 
 var APPR_PROMOTES={'goal.review.local':['Let Goal Reviews Run on Their Own','Flint files its plan suggestions as cards you sign'],
   'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested']};
 function apprPromotes(rows){return (rows&&rows.length===1&&rows[0]&&APPR_PROMOTES[rows[0].pattern])||null;}
+/* Show Details on a rule card (policy.change): each row Will would sign, as a sentence. What it lets run, its limit and
+   its last day: "Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027." Never the row itself: an
+   approval card never looks like a JSON file. Each entry is how the sentence starts for a rule that lets something run
+   on its own; a clause that already says how often (the nightly jobs' own limits) is given no second limit. */
+var APPR_RULES={'goal.review.local':'Goal reviews may run on their own','goal.propose':'Flint may add goals it hears in chat to Suggested on its own',
+  'world.commitment.from_chat':'Flint may add commitments it hears in chat on its own',
+  'world.sync.google_calendar':'Flint may read your Google Calendar on its own','world.sync.apple_calendar':'Flint may read your Apple Calendar on its own',
+  'world.person.create':'Flint may add people from your calendar on its own',
+  'world.sync.deploy':'Flint may read deploy results on its own','world.sync.knowledge':'Flint may read the new facts in its memory on its own',
+  'world.sync.nexus_inbox':'Flint may read your Nexus inbox on its own','world.sync.launchd':'Flint may check your Mac’s background services on its own',
+  'world.sync.health':'Flint may check that its services are up on its own','world.sync.git':'Flint may read your repos on its own','world.sync.spend':'Flint may check spend against your caps on its own',
+  'triage.rule':'Triage rules may run on their own','triage.local_model':'The local model may sort what comes in on its own',
+  'notify.inapp':'Flint may post notes in the console on its own','notify.banner':'Flint may show banners on its own','notify.push':'Flint may ping your phone on its own',
+  'health.check':'Health checks may run on their own','health.report':'Flint may tell you about health issues on its own','digest.daily':'The daily summary may go out on its own',
+  'maintenance.retention':'The nightly cleanup may run on its own, once a night',
+  'backup.local':'The nightly backup may run on its own, once a day','backup.offsite':'The offsite copy may be sent on its own, once a day','restore.drill':'The restore test may run on its own, once a week',
+  'world_now':'Chat may check what’s happening now on its own','world_entity':'Chat may look up one item on its own','ledger_open':'Chat may read open predictions on its own',
+  'ledger_calibration':'Chat may check prediction accuracy on its own','ledger_record_prediction':'Chat may record a prediction on its own',
+  'inbox_recent':'Chat may read what triage decided on its own','escalations_open':'Chat may read open escalations on its own','explain_decision':'Chat may explain a triage decision on its own'};
+/* A rule's name in Title Case words, as the Limits fact says it: its own words, chat's tools by their titles, anything else by its parts. */
+var APPR_RULE_WORDS={'world.sync.google_calendar':'Read Your Google Calendar','world.sync.apple_calendar':'Read Your Apple Calendar','world.person.create':'Add People from Calendar',
+  'goal.review.local':'Review Your Goals','goal.propose':'Suggest Goals from Chat','world.commitment.from_chat':'Add Commitments from Chat'};
+function apprRuleWords(pat){pat=String(pat||'');var t=APPR_TOOLS['runtime.'+pat];return Object.prototype.hasOwnProperty.call(APPR_RULE_WORDS,pat)?APPR_RULE_WORDS[pat]:t?t[0]:apprWords(pat);}
+/* ...and inside a sentence, for a rule this panel has no sentence for: named in quotes, a whole family ("world.sync.*") as every action under its name. */
+function apprRuleName(pat,none){var all=/\.\*$/.test(pat);return (all?(none?'any':'every')+' action under “':'“')+apprRuleWords(pat.replace(/\.\*$/,''))+'”';}
+function apprRuleSays(r){r=r||{};var pat=String(r.pattern||''),s,limited=false;
+  if(r.tier==='forbidden')s='Flint may not run '+apprRuleName(pat,true);
+  else if(r.tier==='approval')s='You approve '+apprRuleName(pat)+' each time';
+  else if(Object.prototype.hasOwnProperty.call(APPR_RULES,pat)){s=APPR_RULES[pat];limited=/, once a (day|night|week)$/.test(s);}
+  else{var n=apprRuleName(pat);s=n.charAt(0).toUpperCase()+n.slice(1)+' may run on its own';}
+  var cap=typeof r.dailyCap==='number'&&!limited&&r.tier!=='forbidden'?', up to '+r.dailyCap+' a day':'';
+  var until=r.expiresAt?apprDate(r.expiresAt):'';
+  return s+cap+(until?(cap||limited?', until ':' until ')+until:'')+'.';}
+/* What a scoped rule covers, as a sentence: its list as it is written, never the object. */
+function apprScopeSays(sc){var out=[];if(!sc||typeof sc!=='object')return out;
+  Object.keys(sc).forEach(function(k){var v=sc[k],list=Array.isArray(v)?v:[v];
+    var ok=list.length>0&&list.every(function(x){return typeof x==='string'||typeof x==='number';});
+    out.push(ok?'It covers only these '+apprWords(k).toLowerCase()+': '+list.join(', ')+'.':'It covers only part of what it names.');});
+  return out;}
+/* Every line of a rule card's details: one sentence a row, and a scoped row's cover after it. */
+function apprRulesSay(p){var out=[];((p.args&&p.args.rows)||[]).forEach(function(r){out.push(apprRuleSays(r));apprScopeSays(r&&r.scope).forEach(function(t){out.push(t);});});return out;}
 function apprCadence(c){for(var i=0;i<APPR_CADENCES.length;i++)if(APPR_CADENCES[i][0]===c)return APPR_CADENCES[i][1];return '';}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
 var APPR_RESUMES='Approving resumes this goal.';
@@ -1406,10 +1447,7 @@ function apprFacts(p){var a=p.args||{},f=[];
   if(apprGoalCard(p))return apprGoalFacts(p);
   if(p.fullName==='policy.change'){var rows=a.rows||[];var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
     var lim={'backup.local':'Backup 1 a Day','restore.drill':'Restore Test 1 a Week','backup.offsite':'Offsite 1 a Day'};
-    var words={'world.sync.google_calendar':'Read Your Google Calendar','world.sync.apple_calendar':'Read Your Apple Calendar','world.person.create':'Add People from Calendar',
-      'goal.review.local':'Review Your Goals','goal.propose':'Suggest Goals from Chat','world.commitment.from_chat':'Add Commitments from Chat'};
-    Object.keys(APPR_TOOLS).forEach(function(k){words[k.replace(/^runtime\./,'')]=APPR_TOOLS[k][0];});
-    var named=rows.map(function(r){return lim[r.pattern]||((words[r.pattern]||apprWords(r.pattern))+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
+    var named=rows.map(function(r){return lim[r.pattern]||(apprRuleWords(r.pattern)+(r.dailyCap?' '+r.dailyCap+' a Day':''));});
     f.push(['Limits',named.join(' · ')]);}
   else if(p.fullName==='world.source.enable')f.push(['Source',apprWords(a.source)]);
   else if(p.fullName===APPR_PREDICT){var l=apprPredictList(p);if(l.total)f.push(['Numbers',apprPredictNumbers(l)]);
@@ -1435,8 +1473,10 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
   if(open){var dl=apprEl('dl','facts');apprFacts(p).forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});card.appendChild(dl);
     var det=apprEl('div','details');det.hidden=true;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
-    /* The predictions card lists its numbers in words; every other card shows its raw args. */
+    /* The predictions card lists its numbers in words, and a rule card says its rows in sentences (apprRulesSay); the
+       others still show what would be signed as it is stored. */
     if(p.fullName===APPR_PREDICT){det.appendChild(apprEl('p',null,APPR_PREDICT_ALSO));det.appendChild(apprPredictDetails(p));}
+    else if(p.fullName==='policy.change')apprRulesSay(p).forEach(function(t){det.appendChild(apprEl('p',null,t));});
     else{var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));}
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());

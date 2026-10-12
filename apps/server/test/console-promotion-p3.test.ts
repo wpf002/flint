@@ -5,11 +5,18 @@
  * never an action's internal name, an id, JSON or a parenthesis. Each asks on
  * its own, with a fresh touch. The rows are the runtime's own (read from
  * governance/promotion.ts), so the card and the table cannot drift apart.
+ *
+ * Show Details says each row Will would sign as a sentence ("Goal reviews may
+ * run on their own, up to 20 a day, until Apr 5, 2027."), for every promotion
+ * table and the backups' card alike: an approval card never looks like a JSON
+ * file. Each sentence is held to the notes' own standard (@flint/policy
+ * noteProblems).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { noteProblems } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -49,6 +56,10 @@ const say = (c: object) => ({
   prompt: run(`apprReason(${JSON.stringify(c)})`) as string,
 });
 const date = run(`apprDate('${UNTIL}')`) as string;
+/** The lines Show Details adds under the card's reason: one sentence a row. */
+const details = (c: object) => JSON.parse(JSON.stringify(run(`apprRulesSay(${JSON.stringify(c)})`))) as string[];
+/** One row's sentence. */
+const says = (row: object) => run(`apprRuleSays(${JSON.stringify(row)})`) as string;
 
 /** Title Case as the console writes it: every word capitalised but the short joining ones. */
 const titleCase = (t: string) => t.split(' ').every((w, i) => /^[A-Z0-9]/.test(w) || (i > 0 && ['on', 'from', 'a', 'the', 'to', 'of', 'in', 'and'].includes(w)));
@@ -109,8 +120,91 @@ describe('P3’s promotion cards', () => {
     expect(say(c).sub).toBe('Flint files its plan suggestions as cards you sign.');
   });
 
+  it('Show Details: each of the two cards says its row as a sentence, its limit and its last day', () => {
+    expect(date).toBe('Apr 5, 2027');
+    expect(details(card(rowsOf('P3_PROMOTIONS'), 'p3.promotion'))).toEqual(['Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027.']);
+    expect(details(card(rowsOf('P3C_PROMOTIONS'), 'p3c.promotion'))).toEqual(['Flint may add goals it hears in chat to Suggested on its own, up to 3 a day, until Apr 5, 2027.']);
+  });
+
+  it('a rule card’s details are built from sentences, never from its stored rows: only the other cards still show theirs', () => {
+    // The card's renderer: a rule card's rows go through apprRulesSay, as text; the stored args are for every other card.
+    expect(apprJs).toContain("if(p.fullName==='policy.change')apprRulesSay(p).forEach(function(t){det.appendChild(apprEl('p',null,t));});");
+    expect(apprJs).toContain("else{var args='';try{args=JSON.stringify(p.args,null,1);}catch(e){args=String(p.args);}det.appendChild(apprEl('pre',null,args));}");
+    expect(apprJs.match(/JSON\.stringify\(p\.args/g)).toHaveLength(1);
+    // (test/console-approvals.test.ts opens a rule card in a DOM and reads its details.)
+  });
+
   it('no table of P3’s holds a signed goal or plan action', () => {
     const signed = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon', 'plan.change', 'nexus.remember_goal_decision'];
     for (const name of ['P3_PROMOTIONS', 'P3C_PROMOTIONS']) for (const r of rowsOf(name)) expect(signed, name).not.toContain(r.pattern);
   });
 });
+
+describe('Show Details on every rule card, old and new', () => {
+  const TABLES = ['P1_PROMOTIONS', 'P2_PROMOTIONS', 'P25_PROMOTIONS', 'P26_PROMOTIONS', 'P3_PROMOTIONS', 'P3C_PROMOTIONS'] as const;
+  const BACKUPS = [{ pattern: 'backup.local' }, { pattern: 'backup.offsite' }, { pattern: 'restore.drill' }];
+  /** A sentence that fell back to a quoted name: the panel had no words of its own for the rule. */
+  const fellBack = (t: string) => /[“”]/.test(t);
+
+  it('every row of every promotion table, and the backups’ card, has its own sentence: no quoted fallback, no internal name, nothing shaped like JSON', () => {
+    const seen = new Set<string>();
+    for (const name of TABLES) {
+      const rows = rowsOf(name);
+      expect(rows.length, name).toBeGreaterThan(0);
+      const lines = details(card(rows, 'x.promotion'));
+      expect(lines, name).toHaveLength(rows.length);
+      lines.forEach((line, i) => {
+        const row = rows[i]!;
+        expect(fellBack(line), `${name} ${row.pattern}: ${line}`).toBe(false);
+        // The notes' own standard: a complete sentence, with no internal name, id, path, JSON or parenthesis.
+        expect(noteProblems('Rule', line), line).toEqual([]);
+        expect(plain(line), line).toBe(true);
+        expect(line.endsWith(`${row.dailyCap ? `, up to ${row.dailyCap} a day, until` : / once a (day|night|week)$/.test(line.replace(/, until .*$/, '')) ? ', until' : ' until'} ${date}.`), line).toBe(true);
+        seen.add(line);
+      });
+    }
+    // Each rule reads differently: no two rows share a sentence.
+    expect(seen.size).toBe(TABLES.reduce((n, t) => n + rowsOf(t).length, 0));
+    const backups = details(card(BACKUPS, 'x'));
+    expect(backups).toEqual([
+      `The nightly backup may run on its own, once a day, until ${date}.`,
+      `The offsite copy may be sent on its own, once a day, until ${date}.`,
+      `The restore test may run on its own, once a week, until ${date}.`,
+    ]);
+    for (const line of backups) expect(noteProblems('Rule', line), line).toEqual([]);
+  });
+
+  it('reads as the tables are written: a few of them, word for word', () => {
+    const one = (pattern: string, dailyCap?: number) => says({ pattern, tier: 'alone', ...(dailyCap ? { dailyCap } : {}), expiresAt: UNTIL });
+    expect(one('world.sync.google_calendar')).toBe('Flint may read your Google Calendar on its own until Apr 5, 2027.');
+    expect(one('world.person.create', 20)).toBe('Flint may add people from your calendar on its own, up to 20 a day, until Apr 5, 2027.');
+    expect(one('notify.push', 3)).toBe('Flint may ping your phone on its own, up to 3 a day, until Apr 5, 2027.');
+    expect(one('triage.rule')).toBe('Triage rules may run on their own until Apr 5, 2027.');
+    expect(one('ledger_record_prediction', 10)).toBe('Chat may record a prediction on its own, up to 10 a day, until Apr 5, 2027.');
+    expect(one('world_now')).toBe('Chat may check what’s happening now on its own until Apr 5, 2027.');
+  });
+
+  it('a rule this panel has no words for is still a sentence: named in quotes, a whole family as every action under its name', () => {
+    expect(says({ pattern: 'some.new_action', tier: 'alone', dailyCap: 5, expiresAt: UNTIL })).toBe('“Some New Action” may run on its own, up to 5 a day, until Apr 5, 2027.');
+    expect(says({ pattern: 'world.sync.*', tier: 'alone', expiresAt: UNTIL })).toBe('Every action under “World Sync” may run on its own until Apr 5, 2027.');
+    // A row with no date, and a card with no rows.
+    expect(says({ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 })).toBe('Goal reviews may run on their own, up to 20 a day.');
+    expect(details({ fullName: 'policy.change', args: {} })).toEqual([]);
+  });
+
+  it('a rule that tightens says so: one that asks each time, and one that stops an action', () => {
+    expect(says({ pattern: 'goal.review.local', tier: 'approval', expiresAt: UNTIL })).toBe('You approve “Review Your Goals” each time until Apr 5, 2027.');
+    expect(says({ pattern: 'notify.push', tier: 'forbidden', dailyCap: 3, expiresAt: UNTIL })).toBe('Flint may not run “Notify Push” until Apr 5, 2027.');
+    expect(says({ pattern: 'world.sync.*', tier: 'forbidden' })).toBe('Flint may not run any action under “World Sync”.');
+  });
+
+  it('a scoped rule says what it covers, as a list in a sentence, never as the object', () => {
+    const scoped = card([{ pattern: 'world.sync.git' }], 'x');
+    (scoped.args.rows[0] as Record<string, unknown>).scope = { endpoints: ['github', 'gitlab'] };
+    expect(details(scoped)).toEqual([`Flint may read your repos on its own until ${date}.`, 'It covers only these endpoints: github, gitlab.']);
+    (scoped.args.rows[0] as Record<string, unknown>).scope = { series: { nested: true } };
+    expect(details(scoped)[1]).toBe('It covers only part of what it names.');
+    for (const line of details(scoped)) expect(line).not.toMatch(/[{}\[\]"]/);
+  });
+});
+

@@ -485,7 +485,10 @@ The command refuses, and says why, until the week has been lived:
 The card's details say what the week measured, in numbers: "This week Flint
 reviewed your goals 9 times, and none was late. The local model answered 7. It
 would have suggested 5 changes." Late there is the digest's count: a review
-that ran over an hour late. Filing it twice is the same card.
+that ran over an hour late. Under it, each rule the card signs is a sentence:
+"Goal reviews may run on their own, up to 20 a day, until Apr 5, 2027." Every
+rule card reads that way (the earlier tables' and the backups' too): its
+details never show the stored rows. Filing it twice is the same card.
 
 `--phase p3c` is a second, later table, for goals Flint suggests from your
 chats (a later part builds those): it lets a suggestion land in Suggested
