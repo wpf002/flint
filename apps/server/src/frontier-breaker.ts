@@ -104,7 +104,12 @@ export function breakerReason(err: Failure): BreakerReason | undefined {
  */
 export function modelScoped(err: Failure, model: string | undefined): boolean {
   if (!model || statusOf(err) === 401) return false;
-  return err.message.includes(model) || /\bmodels?\b/i.test(err.message);
+  return err.message.includes(model) || aboutAModel(err);
+}
+
+/** Does a permission error speak of a model (never a 401, which is the key itself)? */
+function aboutAModel(err: Failure): boolean {
+  return statusOf(err) !== 401 && /\bmodels?\b/i.test(err.message);
 }
 
 export interface BreakerEvent {
@@ -305,6 +310,10 @@ export class FrontierBreaker {
       else {
         const reason = breakerReason(outcome.err.error);
         if (!reason) return this.succeeded(s.provider, s.model);
+        // A provider-wide check that is told "not that model" was answered by a provider that is up,
+        // with a key it accepts: the provider is back. The model's own pause is its own affair (the
+        // observer has opened it), and must not be taken for the whole provider's.
+        if (s.model === undefined && reason === 'auth' && aboutAModel(outcome.err.error)) return this.succeeded(s.provider);
         found = reason;
       }
       const cooldownMs = found !== 'transient' ? HARD_COOLDOWN_MS : open.reason === 'transient' ? Math.min(MAX_COOLDOWN_MS, open.cooldownMs * 2) : TRANSIENT_COOLDOWN_MS;

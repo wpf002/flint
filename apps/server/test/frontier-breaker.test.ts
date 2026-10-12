@@ -522,7 +522,7 @@ describe('the cool-down and the one check after it', () => {
 
 /** A stand-in vendor: every model on it answers, or fails as `fail` says (only the model `failOnly` names, when set). Counts requests per model. */
 function vendor(name = 'anthropic') {
-  const state: { fail: (() => AiError) | undefined; failOnly: string | undefined; requests: string[] } = { fail: undefined, failOnly: undefined, requests: [] };
+  const state: { fail: (() => AiError) | undefined; failOnly: string | undefined; failBy: Record<string, () => AiError>; requests: string[] } = { fail: undefined, failOnly: undefined, failBy: {}, requests: [] };
   const provider: ProviderAdapter = {
     name,
     getCapabilities: () => ({ toolCalling: 'native', structuredOutput: 'native', streaming: 'full', maxContextTokens: 100_000, maxOutputTokens: 1_000 }),
@@ -530,8 +530,10 @@ function vendor(name = 'anthropic') {
     generate: () => Promise.reject(new Error('stream only')),
     async *stream(args): AsyncIterable<StreamEvent> {
       state.requests.push(args.model);
-      if (state.fail && (state.failOnly === undefined || state.failOnly === args.model)) {
-        yield { type: 'error', error: state.fail() };
+      // `failBy` is one model's own, lasting failure (a key that may not use it), whatever the rest do.
+      const fail = state.failBy[args.model] ?? (state.fail && (state.failOnly === undefined || state.failOnly === args.model) ? state.fail : undefined);
+      if (fail) {
+        yield { type: 'error', error: fail() };
         return;
       }
       yield { type: 'text', delta: `answer from ${args.model}` };
@@ -545,7 +547,8 @@ function vendor(name = 'anthropic') {
 function server(env: Record<string, string> = { FLINT_TIER_HARD: 'anthropic:opus', FLINT_TIER_CODE: 'anthropic:opus', FLINT_TIER_ROUTINE: 'anthropic:haiku' }) {
   const t = make({
     probe: async (p, signal, model) => {
-      const b = brains.cheapestOn(p, model)!;
+      // As index.ts: a provider-wide check asks a brain with no pause of its own.
+      const b = brains.cheapestOn(p, model, (brain) => !t.breaker.state(p, brain.model).open)!;
       await b.persona.generate({ prompt: 'ping' }, { maxTokens: 1, signal, retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });
     },
   });
@@ -752,6 +755,63 @@ describe.each(['generate', 'chat'] as const)('a /%s turn while the frontier keep
       await settle();
       expect(s.claude.state.requests).toHaveLength(n);
     }
+  });
+});
+
+// The review's case: the cheapest model is one the key may not use. Every provider-wide check asked it,
+// got its 403, and paused the whole provider again as a rejected key: it could never be seen to be back.
+describe('a provider-wide check and a model with a pause of its own', () => {
+  const noAccess = (): AiError => makeAiError('validation', 'anthropic: 403 this key does not have access to model haiku (check the API key)', { retryable: false, providerCode: '403' });
+
+  it('the check asks the cheapest brain that has no pause of its own, so the provider comes back', async () => {
+    const s = server();
+    s.claude.state.failBy.haiku = noAccess;
+    // A routine turn finds out: haiku is paused alone, Sonnet answers.
+    expect(await s.generate('routine')).toMatchObject({ brain: 'frontier', model: 'anthropic:sonnet' });
+    expect(s.breaker.paused('anthropic', 'haiku')).toBe('auth');
+    expect(s.breaker.paused('anthropic')).toBeUndefined();
+    // Then an outage pauses the whole provider.
+    s.claude.state.fail = overloaded;
+    expect(await s.generate('hard')).toMatchObject({ brain: 'local' });
+    expect(s.breaker.paused('anthropic')).toBe('transient');
+    // The outage ends. Haiku is still not this key's to use.
+    s.claude.state.fail = undefined;
+    s.claude.state.requests.length = 0;
+    s.advance(5 * MIN);
+    expect(await s.generate('hard')).toMatchObject({ brain: 'local' });
+    await settle();
+    expect(s.claude.state.requests).toEqual(['sonnet']); // the check: not haiku
+    expect(s.breaker.paused('anthropic')).toBeUndefined();
+    expect(s.breaker.paused('anthropic', 'haiku')).toBe('auth'); // its own pause is its own affair
+    expect(await s.generate('hard')).toMatchObject({ brain: 'frontier', model: 'anthropic:opus' });
+  });
+
+  it('cheapestOn leaves out what the check may not use, and still finds one model by name', () => {
+    const s = server();
+    const ok = (b: BrainTier<Flint>) => b.model !== 'haiku';
+    expect(s.brains.cheapestOn('anthropic')?.model).toBe('haiku');
+    expect(s.brains.cheapestOn('anthropic', undefined, ok)?.model).toBe('sonnet');
+    expect(s.brains.cheapestOn('anthropic', 'haiku', ok)?.model).toBe('haiku'); // a model's own check asks that model
+    expect(s.brains.cheapestOn('anthropic', undefined, () => false)).toBeUndefined();
+  });
+
+  it('a provider-wide check that is told "not that model" has found the provider up: it closes, and is not re-paused as a rejected key', async () => {
+    const t = make();
+    fail(t, overloaded);
+    t.checksFail(noAccess());
+    t.advance(5 * MIN);
+    t.breaker.paused('anthropic');
+    await settle();
+    expect(t.breaker.paused('anthropic')).toBeUndefined();
+    expect(t.opened.map((e) => e.reason)).toEqual(['transient']); // no "Rejected Flint's Key" note for it
+    // A 403 about the key itself still pauses the provider.
+    const k = make();
+    fail(k, overloaded);
+    k.checksFail(badKey(403));
+    k.advance(5 * MIN);
+    k.breaker.paused('anthropic');
+    await settle();
+    expect(k.breaker.state('anthropic').open).toMatchObject({ reason: 'auth' });
   });
 });
 

@@ -282,10 +282,13 @@ export class BrainSet<P> {
    * The cheapest brain configured on `provider`, for the breaker's one-token
    * check: the routine chain's first on it, else any tier's, else the last
    * resort. With `model`, the brain on that model (the one being checked).
+   * `usable` leaves brains out: a provider-wide check must not ask a model
+   * that has a pause of its own (the key may not use it), or that model's 403
+   * would be read as the provider's answer, every time.
    */
-  cheapestOn(provider: string, model?: string): BrainTier<P> | undefined {
+  cheapestOn(provider: string, model?: string, usable: (brain: BrainTier<P>) => boolean = () => true): BrainTier<P> | undefined {
     const all = [...this.chain('routine'), ...TIERS.map((t) => this.byTier[t]), ...(this.lastResort ? [this.lastResort] : [])];
-    return all.find((b) => b.provider.name === provider && (model === undefined || b.model === model));
+    return all.find((b) => b.provider.name === provider && (model === undefined ? usable(b) : b.model === model));
   }
 
   /** One line per tier for the boot log. */

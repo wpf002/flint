@@ -145,8 +145,9 @@ describe('index.ts wiring', () => {
 
   it('the breaker\'s check is one token from the cheapest brain on that provider, tried once and metered', () => {
     const block = between('checkFrontier = async (p, signal, m) => {', 'console.error(`[brain] frontier escalation ENABLED');
-    // ...or from the one model that was paused, when it is a model's own pause.
-    expect(block).toContain('const b = brains.cheapestOn(p, m);');
+    // ...or from the one model that was paused, when it is a model's own pause. A provider-wide
+    // check never asks a brain that has a pause of its own.
+    expect(block).toContain('const b = brains.cheapestOn(p, m, (brain) => !breaker.state(p, brain.model).open);');
     expect(block).toContain("await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });");
   });
 

@@ -738,7 +738,9 @@ async function main(): Promise<void> {
     // The breaker's check after a cool-down: one token from the cheapest brain on that provider
     // (or from the one model that was paused), bare, tried once, metered like any other call.
     checkFrontier = async (p, signal, m) => {
-      const b = brains.cheapestOn(p, m);
+      // A provider-wide check asks a brain with no pause of its own: one the key may not use would
+      // answer 403 every time, and the provider would never be seen to be back.
+      const b = brains.cheapestOn(p, m, (brain) => !breaker.state(p, brain.model).open);
       const f = b && flintOf.get(b.persona);
       if (!f) throw new Error('no brain on that provider');
       await f.generate({ prompt: 'ping' }, { maxTokens: 1, signal, context: spendContext('chat'), retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 } });
