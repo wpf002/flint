@@ -12,14 +12,18 @@
  *    disconnected in Flint Calendar is ok, quiet on purpose, and never stale;
  *  - the last good local backup, the last encrypted copy offsite (off until
  *    Will's age key is here), the latest restore drill, open audit intents,
- *    the last retention run, a migration marked failed, triage.
+ *    the last retention run, a migration marked failed, triage;
+ *  - goal reviews (P3): disabled while the planner is off; degraded when an
+ *    active goal's review is over an hour late, when a review gave up waiting
+ *    for chat within the hour, or when a rule forbids reviews; down when one is
+ *    over a day late (which must not happen in normal operation).
  *
  * A detail is redacted and clipped to 300 characters: names and counts, never
  * a stranger's words. One audit entry per run carries the counts.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { localDay, redact, HEALTH_STATUS, type HealthReport } from '@flint/policy';
+import { localDay, redact, HEALTH_STATUS, REVIEW_DOWN_MS, REVIEW_LATE_MS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
@@ -27,6 +31,7 @@ import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
 import { uptime } from './instance.js';
 import { CIRCUIT_FAILURES } from './circuits.js';
+import { reviewStanding } from '../goals/review.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
 export interface ComponentCheck {
@@ -41,7 +46,7 @@ export const DEPLOY_WINDOW_MS = 10 * 60_000;
 
 export interface CheckDeps {
   db: Db;
-  config: Pick<Config, 'home' | 'triage' | 'tz'>;
+  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner'>>;
   now: Date;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
 }
@@ -193,7 +198,32 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     const deferred = await db.healthCheck.findFirst({ where: { component: 'triage.deferral', at: { gt: ago(3_600_000) } }, select: { detail: true } });
     out.push({ component: 'triage', status: deferred ? 'degraded' : 'ok', ...(deferred?.detail ? { detail: clip(deferred.detail) } : {}) });
   }
+
+  out.push(await goalReviews(d));
   return out;
+}
+
+/**
+ * Goal reviews (P3): are they running, and on time? Counts only: a detail never
+ * names a goal. A review is late against the goal's own next review time, which
+ * every scheduled review moves on, so a tick or a review job that died shows
+ * here within the hour.
+ */
+async function goalReviews(d: CheckDeps): Promise<ComponentCheck> {
+  const { db, now } = d;
+  const component = 'goals';
+  if (!d.config.planner) return { component, status: 'disabled' };
+  // A FORBIDDEN rule on goal.review.local stops every review: said plainly, since nothing else would.
+  if (!(await reviewStanding(db, now)).may) return { component, status: 'degraded', detail: 'A rule stops goal reviews, so none are running.' };
+  const [late] = await db.$queryRaw<Array<{ hour: number; day: number }>>`
+    SELECT count(*) FILTER (WHERE "nextReviewAt" < ${new Date(now.getTime() - REVIEW_LATE_MS)})::int AS hour,
+           count(*) FILTER (WHERE "nextReviewAt" < ${new Date(now.getTime() - REVIEW_DOWN_MS)})::int AS day
+    FROM "Goal" WHERE status = 'active'`;
+  if (late?.day) return { component, status: 'down', detail: late.day === 1 ? 'A goal’s review is over a day late.' : `${late.day} goals’ reviews are over a day late.` };
+  if (late?.hour) return { component, status: 'degraded', detail: late.hour === 1 ? 'A goal’s review is over an hour late.' : `${late.hour} goals’ reviews are over an hour late.` };
+  // The plan stage's own mark (a review that gave up waiting for chat), within the hour.
+  const deferred = await db.healthCheck.findFirst({ where: { component: 'goals.deferral', at: { gt: new Date(now.getTime() - 3_600_000) } }, select: { detail: true } });
+  return { component, status: deferred ? 'degraded' : 'ok', ...(deferred?.detail ? { detail: clip(deferred.detail) } : {}) };
 }
 
 export async function recordChecks(db: Db, checks: ComponentCheck[], at: Date): Promise<void> {
@@ -207,9 +237,10 @@ export async function recordChecks(db: Db, checks: ComponentCheck[], at: Date): 
 
 /**
  * The report the console shows (GET /v1/health/report): each component's latest check.
- * A dotted name is a mark of its own (the triage worker's 'triage.deferral'), not a
- * component: nothing writes it an ok row, so it is left out, as the digest leaves it
- * out. The 'triage' row already reflects a deferral within the hour.
+ * A dotted name is a mark of its own (the triage worker's 'triage.deferral', a goal
+ * review's 'goals.deferral'), not a component: nothing writes it an ok row, so it is
+ * left out, as the digest leaves it out. The 'triage' and 'goals' rows already
+ * reflect a deferral within the hour.
  */
 export async function healthReport(db: Db, config: Pick<Config, 'triage'>, now = new Date()): Promise<z.infer<typeof HealthReport>> {
   const rows = await db.$queryRaw<Array<{ component: string; status: Status; detail: string | null; at: Date }>>`

@@ -97,7 +97,14 @@ const Env = z.object({
    * runtime.override.env, once the chat baseline it is measured against exists.
    */
   FLINT_RUNTIME_TRIAGE: z.string().optional(),
-  /** The local model triage asks (Ollama), on loopback only. */
+  /**
+   * Goal reviews (P3): `on` to run the planner (the review tick, each goal's
+   * review and its local-model plan stage); anything else, blank included, is
+   * off, and then nothing is scheduled. Off by default: it is turned on, in
+   * runtime.override.env, with Will's OK. Turning it off is its rollback.
+   */
+  FLINT_PLANNER: z.string().optional(),
+  /** The local model triage and goal reviews ask (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /** The server's num_ctx: a different one makes Ollama reload the model chat is using. */
@@ -134,7 +141,9 @@ export interface Config {
   caps: Record<'anthropic' | 'openai' | 'perplexity' | 'tavily', { dailyUsd?: number; monthlyUsd?: number }>;
   /** P2 triage runs (else the sources run and nothing is triaged). */
   triage: boolean;
-  /** The local model triage asks; absent, triage is rules only. */
+  /** P3 goal reviews run (else goals are kept and nothing reviews them). */
+  planner: boolean;
+  /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
   gitSha: string;
 }
@@ -199,6 +208,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       tavily: cap(e.FLINT_BUDGET_TAVILY_DAILY_USD, e.FLINT_BUDGET_TAVILY_MONTHLY_USD),
     },
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
+    planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),

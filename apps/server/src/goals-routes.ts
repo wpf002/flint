@@ -10,6 +10,7 @@
  *   POST /goals/linkable {q}                    -> items a check may watch (a POST: what Will types never lands in a request log)
  *   POST /goals/:id/edit|timing|done|abandon|resume|plan {args}   -> that card
  *   POST /goals/:id/pause|dismiss               -> unsigned
+ *   POST /goals/:id/review                      -> Review Now: unsigned (part 3; the runtime runs the review on its local model)
  *   POST /goals/:id/criteria/:cid {met}         -> unsigned
  *   POST /goals/:id/steps/:key {status}         -> unsigned
  *
@@ -181,7 +182,7 @@ async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: GoalsD
 }
 
 const CARD = /^\/goals\/([^/]+)\/(edit|timing|done|abandon|resume|plan)$/;
-const PLAIN = /^\/goals\/([^/]+)\/(pause|dismiss)$/;
+const PLAIN = /^\/goals\/([^/]+)\/(pause|dismiss|review)$/;
 const MARK = /^\/goals\/([^/]+)\/criteria\/([^/]+)$/;
 const STEP = /^\/goals\/([^/]+)\/steps\/([^/]+)$/;
 const ONE = /^\/goals\/([^/]+)$/;

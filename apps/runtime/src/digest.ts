@@ -6,7 +6,9 @@
  *    (each action that ended ok, counted once however many rows it wrote, and
  *    never one Will approved or clicked) and what waits on Will
  *    (pending proposals, open escalations); the lanes; what is not healthy,
- *    by the names Settings > Health uses; the predictions that resolve today.
+ *    by the names Settings > Health uses; the predictions that resolve today;
+ *    and, when Flint reviewed goals that day, how many and how many were late
+ *    (counts only: never a goal's words).
  *    Each line is a sentence in the console's words (Important, Other, approvals).
  *  - Once a local day: the day's claim and the delivery intent are written
  *    together; a retried job finds them and finishes the delivery (the server
@@ -14,7 +16,7 @@
  *  - Recorded in shadow; delivered only once digest.daily and notify.inapp are
  *    promoted. A delivery that fails is audited as failed.
  */
-import { healthName, localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
+import { REVIEW_LATE_MS, healthName, localDay, localDayBounds, previousDay, resolveTier, runsInShadow, type PolicyRow } from '@flint/policy';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { appendAudit } from './governance/audit.js';
@@ -54,7 +56,7 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
   const { start, end } = localDayBounds(tz, day);
   const today = localDayBounds(tz, localDay(tz, now));
   const window = { gte: start, lt: end };
-  const [relevant, quiet, escalated, did, queued, open, due, latest] = await Promise.all([
+  const [relevant, quiet, escalated, did, queued, open, due, latest, goals] = await Promise.all([
     db.triageDecision.count({ where: { lane: 'relevant', createdAt: window } }),
     db.triageDecision.count({ where: { lane: 'quiet', createdAt: window } }),
     db.escalation.count({ where: { createdAt: window } }),
@@ -63,10 +65,22 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
     db.escalation.count({ where: { status: 'open' } }),
     db.prediction.count({ where: { status: 'open', resolveBy: { gte: today.start, lt: today.end } } }),
     db.$queryRaw<Array<{ component: string; status: string }>>`SELECT DISTINCT ON (component) component, status FROM "HealthCheck" ORDER BY component, at DESC`,
+    // The goals Flint reviewed that day, and those whose scheduled review ran over an hour after it was due.
+    db.$queryRaw<Array<{ reviewed: number; late: number }>>`
+      SELECT count(DISTINCT "goalId")::int AS reviewed,
+             count(DISTINCT "goalId") FILTER (WHERE kind = 'scheduled' AND "createdAt" > "dueAt" + ${REVIEW_LATE_MS} * interval '1 millisecond')::int AS late
+      FROM "GoalReview" WHERE "createdAt" >= ${start} AND "createdAt" < ${end}`,
   ]);
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
-  const counts = { relevant, quiet, escalated, did, queued, open, due };
+  const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0 };
   return { day, title: digestTitle(day), body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
+}
+
+/** "Flint reviewed 3 goals yesterday, and none was late.": counts only. '' when it reviewed none. */
+export function goalsSentence(reviewed: number, late: number): string {
+  if (!reviewed) return '';
+  if (reviewed === 1) return `Flint reviewed 1 goal yesterday, ${late ? 'and it was late' : 'on time'}.`;
+  return `Flint reviewed ${reviewed} goals yesterday, and ${late ? `${late} ${late === 1 ? 'was' : 'were'} late` : 'none was late'}.`;
 }
 
 /**
@@ -80,16 +94,20 @@ export function digestTitle(day: string): string {
 }
 
 /**
- * The digest's four lines, each a sentence. The title carries the day; the console's
- * tabs are Important and Other, it calls a proposal an approval, and Health's names
- * stand for the components.
+ * The digest's lines, each a sentence: four, and a fifth on a day Flint reviewed
+ * goals. The title carries the day; the console's tabs are Important and Other, it
+ * calls a proposal an approval, and Health's names stand for the components.
  */
-export function digestBody(c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number }, degraded: string[]): string {
+export function digestBody(
+  c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number; goalsReviewed?: number; goalsLate?: number },
+  degraded: string[],
+): string {
   const waiting = [c.queued ? plural(c.queued, 'approval') : '', c.open ? plural(c.open, 'open escalation') : ''].filter(Boolean);
   const names = degraded.slice(0, 6).map(healthName).concat(degraded.length > 6 ? [`${degraded.length - 6} more`] : []);
   return [
     `Yesterday, ${c.relevant ? plural(c.relevant, 'item') : 'no items'} ${c.relevant === 1 ? 'was' : 'were'} important and ${c.quiet || 'none'} went to Other.${c.escalated ? ` Flint escalated ${c.escalated}.` : ''}`,
     `${c.did ? `Flint did ${plural(c.did, 'thing')} on its own.` : 'Flint did nothing on its own.'} ${waiting.length ? `You have ${waiting.join(' and ')} waiting.` : 'Nothing is waiting on you.'}`,
+    ...(c.goalsReviewed ? [goalsSentence(c.goalsReviewed, c.goalsLate ?? 0)] : []),
     degraded.length ? `${degraded.length === 1 ? 'This needs' : 'These need'} a look: ${listOf(names)}.` : 'Everything checked is healthy.',
     c.due ? `Today, ${plural(c.due, 'prediction')} ${c.due === 1 ? 'resolves' : 'resolve'}.` : 'No predictions resolve today.',
   ].join('\n');

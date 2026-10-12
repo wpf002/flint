@@ -11,6 +11,7 @@ import {
   runsInShadow,
   type PolicyRow,
   type TierContext,
+  ON_TRACK_COUNTER,
 } from '../src/tiers';
 import { TAINTED_SOURCES } from '../src/taint';
 import { readFileSync } from 'node:fs';
@@ -403,6 +404,19 @@ describe('P3: goals and plans', () => {
     for (const a of SUGGESTIONS) {
       expect(resolveTier(a, { ...chat, policies: [row(a, 'alone', { dailyCap: 3 })], now: NOW })).toMatchObject({ tier: 'alone', cap: { limit: 3, period: 'day' } });
     }
+  });
+
+  it('a review’s onTrack forecast is counted under its own counter, never the ledger’s daily cap, and the table says so', () => {
+    // The ledger's cap stands for everyone else.
+    expect(CODE_TABLE['ledger.prediction.record']).toMatchObject({ cap: { limit: 50, period: 'day' }, shadow: true });
+    // The exemption is written down where the cap is, and its counter is not an action: it has no tier and no cap to claim.
+    expect(CODE_TABLE['ledger.prediction.record']!.note).toContain(ON_TRACK_COUNTER);
+    expect(ON_TRACK_COUNTER).toBe('goal.on_track');
+    expect(CODE_TABLE[ON_TRACK_COUNTER]).toBeUndefined();
+    expect(AUTONOMOUS_ACTIONS.has(ON_TRACK_COUNTER)).toBe(false);
+    expect(ON_TRACK_COUNTER).not.toBe('ledger.prediction.record');
+    // As a name it would never be allowed to run on its own: it is only a counter's key.
+    expect(resolveTier(ON_TRACK_COUNTER, { ...auto, policies: [], now: NOW }).tier).toBe('forbidden');
   });
 
   it('reviews run in shadow under 20 a day; the chat suggestions carry no code cap (claimed even at APPROVAL, it would stall a 4th card)', () => {

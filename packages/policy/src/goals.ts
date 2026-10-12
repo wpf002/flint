@@ -435,6 +435,11 @@ export const GOAL_SAYS = {
   noPlan: 'This goal has no steps yet.',
   replaced: 'A newer version of this card replaced it.',
   busy: 'Flint is busy with this goal. Try again shortly.',
+  // Reviews (P3 part 3).
+  reviewsOff: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.',
+  reviewCap: 'Flint already reviewed this goal 12 times today. Try again tomorrow.',
+  notReady: 'Flint isn’t ready to review yet. Try again shortly.',
+  replacedReview: 'A newer review replaced it.',
 } as const;
 export type GoalSay = keyof typeof GOAL_SAYS;
 
@@ -505,8 +510,8 @@ export const GOAL_CARD_VERBS = {
   plan: 'plan.change',
 } as const satisfies Readonly<Record<string, GoalSignedAction>>;
 export type GoalCardVerb = keyof typeof GOAL_CARD_VERBS;
-/** The unsigned writes on a goal: they move progress only, never what a goal is. */
-export const GOAL_PLAIN_VERBS = ['pause', 'dismiss'] as const;
+/** The unsigned writes on a goal: they move progress only, never what a goal is. `review` asks for a review now (part 3). */
+export const GOAL_PLAIN_VERBS = ['pause', 'dismiss', 'review'] as const;
 
 /**
  * POST /goals: a new goal's card, exactly as the panel shows it. A goal Will adds
@@ -552,7 +557,80 @@ const CheckCounts = z.object({ met: Count, total: Count, unknown: Count }).stric
 /** The conditions an item offers a check (GOAL_CONDITIONS for its kind). */
 const ItemConditions = z.array(z.object({ key: z.string().max(40), value: z.string().max(40) }).strict()).max(10);
 
-/** One goal in a list. `late` stays false until reviews exist (part 3). */
+// ---- Reviews (P3 part 3) ---------------------------------------------------------------------------------
+// Flint reviews each active goal on its cadence, and when something it watches changes. A review is
+// deterministic (the checks as they stand, an onTrack forecast from a rule); its plan stage asks the local
+// model for changes built only from templates, and every change it files is a card Will signs.
+
+export const REVIEW_KINDS = ['scheduled', 'triggered', 'requested'] as const;
+export type ReviewKind = (typeof REVIEW_KINDS)[number];
+
+/** What a review may spend. Scheduled reviews are never capped: a goal is always reviewed on its cadence. */
+export const GOAL_BUDGETS = {
+  /** Triggered and requested reviews of one goal in a local day; past it, the next scheduled review covers them. */
+  reviewsPerGoalPerDay: 12,
+  /** Plan cards a day, across every goal. */
+  planCardsPerDay: 9,
+  /** Bigger (material) plan cards one review files; the rest wait for the next review. */
+  materialPerReview: 2,
+  /** Operations one review's plan stage may suggest. */
+  opsPerReview: 6,
+} as const;
+/** The counter a goal's triggered and requested reviews are claimed under, by local day. */
+export const reviewCounter = (goalId: string): string => `goal.review:${goalId}`;
+/** The counter a review's plan cards are claimed under, by local day. */
+export const PLAN_CARDS_COUNTER = 'goal.plan.cards';
+/** A review this long past due is late (Settings > Health says degraded, the panel says Late). */
+export const REVIEW_LATE_MS = 60 * 60_000;
+/** A review this long past due is an outage (Health says down): it must not happen in normal operation. */
+export const REVIEW_DOWN_MS = 24 * 60 * 60_000;
+
+/** How likely, in the ledger's words (the runtime's phrase(), templates/escalations.ts, cuts at the same points). */
+export const LIKELIHOODS = ['very_unlikely', 'unlikely', 'somewhat_unlikely', 'about_even', 'somewhat_likely', 'likely', 'very_likely'] as const;
+export type Likelihood = (typeof LIKELIHOODS)[number];
+export function likelihoodOf(p: number): Likelihood {
+  return p < 0.1 ? 'very_unlikely' : p < 0.35 ? 'unlikely' : p < 0.45 ? 'somewhat_unlikely' : p <= 0.55 ? 'about_even' : p < 0.65 ? 'somewhat_likely' : p < 0.9 ? 'likely' : 'very_likely';
+}
+/** A goal's open onTrack forecast, from its Prediction row: never a model's words. */
+export const OnTrack = z.object({ likelihood: z.enum(LIKELIHOODS), percent: z.number().int().min(0).max(100), by: IsoMs }).strict();
+export type OnTrack = z.infer<typeof OnTrack>;
+
+/** How a review's plan stage ended: still running, the model's answer taken, or why there was none. */
+export const PLAN_STAGES = ['pending', 'ok', 'off', 'capped', 'unavailable', 'invalid', 'deferred', 'skipped'] as const;
+export type PlanStage = (typeof PLAN_STAGES)[number];
+
+/**
+ * One change a review suggests, for the panel to say in a sentence. `title` is the
+ * step's: Will's own words, or a template's for a step Flint would add (never a
+ * model's). `after` is the step a moved one would follow (null: first).
+ */
+export const ReviewChange = z
+  .object({
+    kind: z.enum(['add', 'due', 'status', 'move', 'skip']),
+    title: StepTitle,
+    dueAt: IsoMs.nullable(),
+    status: z.enum(['todo', 'in_progress', 'blocked']).nullable(),
+    after: StepTitle.nullable(),
+    material: z.boolean(),
+  })
+  .strict();
+export type ReviewChange = z.infer<typeof ReviewChange>;
+
+/** A goal's latest review. `shadow`: made in the trial week, so it only shows what it would change. */
+export const ReviewView = z
+  .object({
+    at: IsoMs,
+    kind: z.enum(REVIEW_KINDS),
+    /** Sentences made from counts ("2 of 3 checks are met."), never a goal's words. */
+    summary: z.string().min(1).max(1000),
+    shadow: z.boolean(),
+    planner: z.enum(PLAN_STAGES),
+    changes: z.array(ReviewChange).max(20),
+  })
+  .strict();
+export type ReviewView = z.infer<typeof ReviewView>;
+
+/** One goal in a list. `late`: its review is over an hour past due (never while reviews are off). */
 export const GoalRow = z
   .object({
     id: GoalId,
@@ -578,7 +656,7 @@ export const GoalsPage = z
     tab: z.enum(GOAL_TABS),
     goals: z.array(GoalRow).max(200),
     waiting: z.array(WaitingGoal).max(50),
-    /** Whether Flint reviews goals (part 3). Off, nothing is ever late. */
+    /** Whether Flint reviews goals (FLINT_PLANNER). Off, nothing is ever late. */
     reviews: z.enum(['off', 'on']),
   })
   .strict();
@@ -621,6 +699,13 @@ export const GoalView = z
     waiting: z.array(z.object({ id: ProposalRef, action: z.enum(GOAL_SIGNED_ACTIONS) }).strict()).max(50),
     reviews: z.enum(['off', 'on']),
     late: z.boolean(),
+    // Part 3. Each has a default, so an answer from a runtime that has no reviews yet still reads.
+    /** When an active goal is next reviewed. */
+    nextReviewAt: IsoMs.nullable().default(null),
+    /** Its open onTrack forecast, once a review has made one. */
+    onTrack: OnTrack.nullable().default(null),
+    /** Its latest review. */
+    review: ReviewView.nullable().default(null),
   })
   .strict();
 export type GoalView = z.infer<typeof GoalView>;

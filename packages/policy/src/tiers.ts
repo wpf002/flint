@@ -93,7 +93,8 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'world.forget': fixed({ note: 'stays APPROVAL (passkey)' }),
   // Ledger (P1).
   // In shadow at APPROVAL: a prediction is Flint's own row, recorded with the decision that made it.
-  'ledger.prediction.record': approval({ cap: { limit: 50, period: 'day' }, shadow: true }),
+  // A goal review's onTrack forecast is not claimed here: it is counted under ON_TRACK_COUNTER (below).
+  'ledger.prediction.record': approval({ cap: { limit: 50, period: 'day' }, shadow: true, note: 'not claimed by a goal review’s onTrack forecast, which is counted under goal.on_track' }),
   'ledger.resolve.auto': approval({ note: 'world or metric resolution; cannot VOID' }),
   'ledger.expire': approval({ note: 'marks predictions past resolveBy as expired' }),
   'ledger.calibration.snapshot': approval(),
@@ -199,6 +200,17 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'goal.review.local',
   'plan.change',
 ]);
+
+/**
+ * Counted, never capped (P3): the counter a goal review's onTrack forecast is
+ * counted under, one per review, by local day. A review writes its forecast in
+ * the same transaction (the database refuses a review without one), so it must
+ * never wait on ledger.prediction.record's 50 a day, nor use up the predictions
+ * chat and triage record under that cap. Its volume is bounded by the reviews
+ * themselves (each goal's cadence, plus 12 triggered or requested reviews a goal
+ * a day) and shows under this counter. Not an action: it has no tier and no cap.
+ */
+export const ON_TRACK_COUNTER = 'goal.on_track';
 
 /** Does an autonomous run of this action, at APPROVAL, happen in shadow (record only)? */
 export function runsInShadow(action: string): boolean {

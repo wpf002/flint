@@ -9,6 +9,9 @@
  * set, with its fixed sentence; nothing is ever spooled to disk; a goal at the
  * contract's full size fits in any script; the search text travels in a POST
  * body, never a URL; and no goal text reaches a log line.
+ * Part 3: a goal's next review, forecast and latest review pass through checked
+ * (an answer from a runtime without reviews still reads); Review Now is a POST
+ * with an empty body, and its refusals are the fixed sentences.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -31,7 +34,13 @@ const row = (over: Record<string, unknown> = {}) => ({
 const view = (over: Record<string, unknown> = {}) => ({
   id: GID, title: `${CANARY} title`, description: '', status: 'active', owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null,
   successCriteria: [{ id: 'c1', text: `${CANARY} check`, check: { kind: 'manual' } }], criteria: [{ id: 'c1', state: 'unmet' }], checks: { met: 0, total: 1, unknown: 0 },
-  horizonAt: null, reviewCadence: 'P1W', activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'off', late: false, ...over,
+  horizonAt: null, reviewCadence: 'P1W', activatedAt: AT, endedAt: null, links: [], plan: null, waiting: [], reviews: 'off', late: false,
+  nextReviewAt: null, onTrack: null, review: null, ...over,
+});
+/** A goal's latest review as the runtime sends it: sentences from counts, and changes by a step's title. */
+const review = (over: Record<string, unknown> = {}) => ({
+  at: AT, kind: 'scheduled', summary: 'Its check isn’t met yet.', shadow: true, planner: 'ok',
+  changes: [{ kind: 'due', title: `${CANARY} step`, dueAt: AT, status: null, after: null, material: false }], ...over,
 });
 const args = (over: Record<string, unknown> = {}) => ({
   goalId: GID, owner: 'will', origin: 'will', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: `${CANARY} title`, description: '',
@@ -118,6 +127,29 @@ describe('reads', () => {
     answer = () => ({ status: 200, body: { goal: view() } });
     expect((await get(`/goals/${GID}`)).body).toEqual({ goal: view() });
     expect(asked.at(-1)!.url).toBe(`/v1/goals/${GID}`);
+  });
+
+  it('part 3: next review, forecast and latest review pass through, checked; an answer without them (an older runtime) still reads', async () => {
+    const full = view({ reviews: 'on', late: true, nextReviewAt: AT, onTrack: { likelihood: 'likely', percent: 70, by: AT }, review: review() });
+    answer = () => ({ status: 200, body: { goal: full } });
+    expect((await get(`/goals/${GID}`)).body).toEqual({ goal: full });
+    // A runtime from before reviews sends none of the three: they read as nothing, not as a malformed answer.
+    const { nextReviewAt: _n, onTrack: _o, review: _r, ...older } = view();
+    answer = () => ({ status: 200, body: { goal: older } });
+    expect(await get(`/goals/${GID}`)).toEqual({ status: 200, body: { goal: view() } });
+    // What does not fit the contract never reaches the console: a likelihood outside the closed set, a change of no known kind, a stray key.
+    for (const bad of [
+      view({ onTrack: { likelihood: `${CANARY} certain`, percent: 70, by: AT } }),
+      view({ onTrack: { likelihood: 'likely', percent: 170, by: AT } }),
+      view({ review: review({ changes: [{ kind: 'rewrite', title: 'x', dueAt: null, status: null, after: null, material: false }] }) }),
+      view({ review: review({ planner: `${CANARY} model said` }) }),
+      view({ review: review({ note: CANARY }) }),
+      view({ review: review({ changes: [{ kind: 'status', title: 'x', dueAt: null, status: 'done', after: null, material: false }] }) }),
+    ]) {
+      answer = () => ({ status: 200, body: { goal: bad } });
+      expect(await get(`/goals/${GID}`)).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
+    }
+    expect(logged.join('\n')).not.toContain(CANARY);
   });
 
   it('bad input never reaches the runtime', async () => {
@@ -232,6 +264,25 @@ describe('writes', () => {
     expect(logged.join('\n')).not.toContain(CANARY);
   });
 
+  it('Review Now is a POST with an empty body; its refusals are the fixed sentences, by code', async () => {
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 200, body: { ok: true } });
+    expect(asked).toEqual([{ method: 'POST', url: `/v1/goals/${GID}/review`, auth: `Bearer ${TOKEN}`, body: '{}' }]);
+    // Nothing rides along with it, and it is never a GET.
+    expect((await post(`/goals/${GID}/review`, { note: CANARY })).status).toBe(400);
+    expect((await post('/goals/not-a-goal/review')).status).toBe(400);
+    expect((await get(`/goals/${GID}/review`)).status).toBe(404);
+    expect(asked).toHaveLength(1);
+    answer = () => ({ status: 429, body: { error: CANARY, code: 'reviewCap' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 429, body: { error: 'Flint already reviewed this goal 12 times today. Try again tomorrow.', code: 'reviewCap' } });
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'reviewsOff' } });
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 409, body: { error: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.', code: 'reviewsOff' } });
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'notReady' } });
+    expect((await post(`/goals/${GID}/review`)).body).toEqual({ error: 'Flint isn’t ready to review yet. Try again shortly.', code: 'notReady' });
+    up = false;
+    expect(await post(`/goals/${GID}/review`)).toEqual({ status: 503, body: { error: 'The runtime isn’t answering, so nothing changed.' } });
+    expect(logged.join('\n')).not.toContain(CANARY);
+  });
+
   it('the item search is a POST: the words travel in its body, never a URL', async () => {
     answer = () => ({ status: 200, body: { items: [{ entityId: 'en1', kind: 'pull_request', label: 'wpf002/flint #57', status: 'active', title: 'Outside words', conditions: [{ key: 'state', value: 'merged' }] }] } });
     const r = await post('/goals/linkable', { q: `${CANARY} search` });
@@ -282,7 +333,7 @@ describe('writes', () => {
   });
 
   it('a goals route is never reported back to the runtime as a route.error', () => {
-    for (const p of ['/goals', '/goals?tab=active', `/goals/${GID}`, `/goals/${GID}/done`, '/goals/linkable']) expect(routeOf(p), p).toBeUndefined();
+    for (const p of ['/goals', '/goals?tab=active', `/goals/${GID}`, `/goals/${GID}/done`, `/goals/${GID}/review`, '/goals/linkable']) expect(routeOf(p), p).toBeUndefined();
     expect(routeOf('/goalsx')).toBe('other');
   });
 });

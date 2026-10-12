@@ -28,7 +28,7 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | GET | `/goals?tab=active\|suggested\|finished`, `/goals/:id` | yes | — | Will's goals (`GoalsPage`, `{ goal: GoalView }` in @flint/policy). See "Goals" |
 | POST | `/goals` | yes | `{ draftKey, args }` | `{ id, deduped }`: a new goal's card, to sign in the console |
 | POST | `/goals/:id/edit\|timing\|done\|abandon\|resume\|plan` | yes | `{ args }` | `{ id, deduped }`: that change's card |
-| POST | `/goals/:id/pause\|dismiss`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime |
+| POST | `/goals/:id/pause\|dismiss\|review`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime (`review` is Review Now) |
 | POST | `/goals/linkable` | yes | `{ q }` | `{ items }`: items a check may watch |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
@@ -475,6 +475,13 @@ only as one of the fixed goal sentences, by its code. A runtime that refuses the
 token is a 502; a runtime without the routes answers 404, which is a 501 here, and the
 console then hides its Goals button. The item search is a POST, so what Will types never lands
 in a request log. `/goals` is never reported back to the runtime as a `route.error`.
+
+Reviews (P3 part 3) run in the runtime, on its local model; the server only proxies. A goal's
+view carries when it is next reviewed, its forecast and its latest review, each checked
+against the contract (a review's suggestions are a step's title and closed sets, never free
+text); an answer from a runtime that has no reviews yet still reads. Review Now
+(`POST /goals/:id/review`, an empty body) is unsigned, and its refusals are the fixed
+sentences too.
 
 Approval cards now carry `kind`, `templateId` and `consequential`. The console never signs a
 consequential card (every goal card, and a plan change that is not a review's minor one) under

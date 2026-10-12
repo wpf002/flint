@@ -16,15 +16,21 @@
  * transaction that takes the goal FOR UPDATE before it touches any plan or step
  * (the lock order the README sets), at READ COMMITTED (the database refuses
  * step writes above it).
+ *
+ * Review Now (part 3) is unsigned too: it only asks for a review, which writes
+ * what every review writes. It sends the goal's review job (ids only) and its
+ * audit entry; the review itself claims one of the goal's 12 a day.
  */
 import { Prisma } from '@prisma/client';
 import { GOAL_CARD_VERBS, GOAL_KIND, localDay, type Criterion, type GoalCardVerb, type GoalSignedAction } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
+import type { Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
 import { Refused, createProposal, rejectProposal } from '../governance/proposals.js';
 import { sqlState } from '../dbcodes.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
 import { SAY, goalStatusWords } from './errors.js';
+import { REVIEW_QUEUE, reviewsLeft, type ReviewJob } from './review.js';
 
 /** Who the panel's writes are by. */
 export const CONSOLE_ACTOR = 'will:console';
@@ -183,4 +189,21 @@ export async function setStep(db: Db, id: string, key: string, status: 'todo' | 
     await tx.goal.update({ where: { id }, data: { progress } });
     await audit(tx, 'goal.step.status', `${id}.step.${key}`, { goalId: id, stepKey: key, status, from: step.status }, now);
   });
+}
+
+/**
+ * Review Now: ask for this goal's review. Refused, in a sentence, while reviews
+ * are off, for a goal that is not active, past the day's 12, or before the job
+ * queue is up. A review already waiting for the goal is the same review.
+ */
+export async function requestReview(db: Db, bus: Pick<Bus, 'boss'> | undefined, id: string, o: { reviews: boolean; tz: string }, now = new Date()): Promise<void> {
+  if (!o.reviews) throw new Refused(409, SAY.reviewsOff);
+  const g = await db.goal.findUnique({ where: { id }, select: { status: true } });
+  if (!g) throw new Refused(404, SAY.noGoal);
+  if (g.status !== 'active') throw new Refused(409, goalStatusWords(g.status));
+  if (!(await reviewsLeft(db, id, o.tz, now))) throw new Refused(429, SAY.reviewCap);
+  if (!bus) throw new Refused(409, SAY.notReady);
+  const job: ReviewJob = { goalId: id, kind: 'requested' };
+  await bus.boss.send(REVIEW_QUEUE, job, { singletonKey: id });
+  await appendAudit(db, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: 'goal.review.request', outcome: 'ok', correlationId: `${id}.review`, tainted: false, inputs: { goalId: id } }], now);
 }

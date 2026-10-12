@@ -32,6 +32,9 @@ import { resolveTier, runsInShadow } from '@flint/policy';
 import { activePolicies } from './governance/proposals.js';
 import { z } from 'zod';
 import { failureClass } from './dbcodes.js';
+import { tick } from './goals/tick.js';
+import { PlanJob, ReviewJob, runReview } from './goals/review.js';
+import { runPlan } from './goals/batch.js';
 
 const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 
@@ -214,9 +217,50 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/**
+ * Goal reviews (P3), only while the planner is on (FLINT_PLANNER). Off, this is
+ * empty: startJobs unschedules the tick, nothing is worked, and no review runs.
+ * Job data is ids and times only, checked strictly; a job that is not its
+ * queue's shape is nobody's and does nothing. Log lines carry counts and ids.
+ */
+export function goalJobs(ctx: JobContext): JobSpec[] {
+  if (!ctx.config.planner) return [];
+  return [
+    {
+      // Every 2 minutes: the reviews that are due, and the changes that set one off. It never asks the model.
+      queue: 'goals.tick',
+      cron: '*/2 * * * *',
+      handler: async () => {
+        const r = await tick({ db: ctx.db, bus: ctx.bus, tz: ctx.config.tz });
+        if (r.due || r.triggered || r.capped) ctx.log(`goals: ${r.due} scheduled and ${r.triggered} triggered review(s) sent; ${r.capped} left to the next scheduled one`);
+      },
+    },
+    {
+      // Stage 1, one goal at a time: the checks, the forecast and the review's row. No model.
+      queue: 'goals.review',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = ReviewJob.safeParse(job.data);
+          if (data.success) await runReview({ db: ctx.db, bus: ctx.bus, tz: ctx.config.tz }, data.data);
+        }
+      },
+    },
+    {
+      // Stage 2, one at a time: the local model's plan suggestions, as cards or (in the trial week) as a record.
+      queue: 'goals.plan',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = PlanJob.safeParse(job.data);
+          if (data.success) await runPlan({ db: ctx.db, bus: ctx.bus, config: ctx.config, log: ctx.log }, data.data);
+        }
+      },
+    },
+  ];
+}
+
 /** The job set this runtime runs. */
 export function jobSpecs(ctx: JobContext): JobSpec[] {
-  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx)];
+  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx), ...goalJobs(ctx)];
 }
 
 /** What failed, not what it said (dbcodes.ts; kept here for the modules that import it from the jobs). */

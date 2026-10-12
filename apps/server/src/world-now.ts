@@ -19,22 +19,14 @@
  *    so it is never stored in history and the memory extractor never sees it;
  *    index.ts adds it to frontier turns only, never an eval replay.
  */
-import { entityRef } from '@flint/policy';
+import { entityRef, estimateTokens } from '@flint/policy';
 import type { Runtime } from './audit-sink';
 
 export const WORLD_NOW_MAX_CHARS = 1600;
 export const WORLD_NOW_MAX_TOKENS = 400;
 
-/**
- * Tokens a text costs, estimated a little high: letters at four to a token,
- * every digit and every symbol a token of its own (ids and refs are where a
- * chars/4 estimate runs low).
- */
-export function estimateTokens(text: string): number {
-  let n = 0;
-  for (const m of text.matchAll(/[A-Za-z]+|[^\sA-Za-z]/g)) n += /^[A-Za-z]/.test(m[0]) ? Math.ceil(m[0].length / 4) : 1;
-  return n;
-}
+/** The estimate lives in @flint/policy (the runtime's local-model prompts measure by it too); it is still offered from here. */
+export { estimateTokens };
 
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 /** A service name shown as it is: a plain identifier, nothing a sentence could hide in. */

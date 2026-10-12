@@ -7,7 +7,9 @@
  * said so); circuits open once and close once; details are redacted; the
  * spend view goes to the server. A calendar's warnings are said as they are
  * (only a skip, or no calendars, is an issue), and a disconnected Apple
- * Calendar is ok, never stale, and not in the digest.
+ * Calendar is ok, never stale, and not in the digest. Goal reviews (P3) are
+ * disabled while the planner is off; on, a review over an hour late is
+ * degraded and over a day late is down, said in counts, never a goal's words.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -33,6 +35,9 @@ import { appleCalendarSource } from '../src/sources/apple/calendar';
 import { CalendarInbox } from '../src/sources/apple/inbox';
 import { parseSnapshot } from '../src/sources/apple/wire';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
+import { healthName } from '@flint/policy';
+import { runReview } from '../src/goals/review';
+import { FakeBus, goalFixture } from './goals/fixture';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const MIN = 60_000;
@@ -337,5 +342,43 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     // A run that failed since (a live snapshot with calendar access off) is said, and judged as any source's.
     await owner(`UPDATE "SourceCursor" SET "consecutiveFailures" = 1 WHERE source = 'apple_calendar'`);
     expect(await check('apple_calendar', later)).toEqual({ status: 'down', detail: 'The last read failed.' });
+  });
+
+  it('goal reviews: disabled while the planner is off; over an hour late is degraded, over a day is down; counts only', async () => {
+    const fx = await goalFixture(urls, db);
+    const on = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_PLANNER: 'on' });
+    const goals = async (cfg: Config, now: Date) => (await checkComponents({ db, config: cfg, now, sources: [] })).find((c) => c.component === 'goals');
+    const now = new Date();
+    const at = (ms: number) => new Date(now.getTime() + ms);
+    // Off (the default): shown as off, whatever the goals' review times say.
+    const g = await fx.activeGoal();
+    expect(await goals(config, at(48 * 3_600_000))).toEqual({ component: 'goals', status: 'disabled' });
+    // On: a goal just started is due, not late. An hour on with no review it is late; a day on, an outage.
+    expect(await goals(on, now)).toEqual({ component: 'goals', status: 'ok' });
+    expect(await goals(on, at(59 * MIN))).toEqual({ component: 'goals', status: 'ok' });
+    expect(await goals(on, at(62 * MIN))).toEqual({ component: 'goals', status: 'degraded', detail: 'A goal’s review is over an hour late.' });
+    const other = await fx.activeGoal();
+    expect(await goals(on, at(3 * 3_600_000))).toEqual({ component: 'goals', status: 'degraded', detail: '2 goals’ reviews are over an hour late.' });
+    expect(await goals(on, at(25 * 3_600_000))).toEqual({ component: 'goals', status: 'down', detail: '2 goals’ reviews are over a day late.' });
+    // A paused goal is not reviewed, so it is never late.
+    await db.goal.update({ where: { id: other.id }, data: { status: 'paused' } });
+    expect(await goals(on, at(25 * 3_600_000))).toEqual({ component: 'goals', status: 'down', detail: 'A goal’s review is over a day late.' });
+    // Its scheduled review moves the goal on: on time again.
+    const due = (await db.goal.findUniqueOrThrow({ where: { id: g.id } })).nextReviewAt!;
+    expect((await runReview({ db, bus: new FakeBus(), tz: 'UTC' }, { goalId: g.id, kind: 'scheduled', dueAt: due.toISOString() })).outcome).toBe('reviewed');
+    expect(await goals(on, at(25 * 3_600_000))).toEqual({ component: 'goals', status: 'ok' });
+    // In the report and the digest it is a component like any other, by its plain name.
+    await db.goal.update({ where: { id: g.id }, data: { nextReviewAt: at(-25 * 3_600_000) } });
+    await db.healthCheck.create({ data: { component: 'goals.deferral', status: 'degraded', detail: 'Chat was busy.', at: now } });
+    await recordChecks(db, await checkComponents({ db, config: on, now, sources: [] }), now);
+    const report = await healthReport(db, on, now);
+    expect(report.components.find((c) => c.component === 'goals')).toMatchObject({ status: 'down', detail: 'A goal’s review is over a day late.' });
+    expect(report.components.map((c) => c.component)).not.toContain('goals.deferral');
+    const digest = await buildDigest(db, 'UTC', now);
+    expect(digest.degraded).toContain('goals');
+    expect(digest.degraded).not.toContain('goals.deferral');
+    expect(digest.body).toContain('Goal Reviews');
+    expect(healthName('goals')).toBe('Goal Reviews');
+    expect(JSON.stringify(report)).not.toContain('CANARY');
   });
 });

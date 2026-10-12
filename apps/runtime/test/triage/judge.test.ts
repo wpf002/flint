@@ -1,7 +1,9 @@
 /**
  * The local model's judgement against a stub Ollama: exactly two requests
- * however they fail, each behind the chat-load check and the hour cap, and the
- * load check itself failing closed (except when nothing is listening).
+ * however they fail, each behind the process's model slot (one request at a
+ * time, shared with a goal review's plan stage), the chat-load check and the
+ * hour cap, and the load check itself failing closed (except when nothing is
+ * listening).
  */
 import { describe, it, expect } from 'vitest';
 import { judge, judgePrompt, needsJudgement, MODEL_REQUESTS } from '../../src/triage/judge';
@@ -97,6 +99,36 @@ describe('judge (stub Ollama)', () => {
     expect(s.calls).toHaveLength(0);
     expect(claims).toBe(0);
     expect(await decide(issue(), { rules: [], code: noCode, rulesAllowed: true, judge: () => Promise.resolve(j) })).toEqual({ defer: true });
+  });
+
+  it('one request at a time: two judgements share the process’s model slot, and what each sends is unchanged', async () => {
+    let inFlight = 0;
+    let most = 0;
+    const slow = () => async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight -= 1;
+      return reply(JSON.stringify({ relevance: 0.2, reasonCode: 'fyi', reasoning: 'r' }));
+    };
+    const a = stub([slow() as unknown as () => Response]);
+    const b = stub([slow() as unknown as () => Response]);
+    const [ja, jb] = await Promise.all([judge(issue(), { ollama: OLLAMA, ...always, fetch: a.fetch }), judge(issue(), { ollama: OLLAMA, ...always, fetch: b.fetch })]);
+    expect(ja.ok && jb.ok).toBe(true);
+    expect(most).toBe(1);
+    // The slot decides when a request goes, never what it says (the cassette test pins the whole body).
+    expect(a.calls[0]!.body).toEqual(b.calls[0]!.body);
+    expect(a.calls[0]!.body).toMatchObject({ model: 'muse-glimmer:30b', think: false, stream: false, options: { temperature: 0, num_predict: 400 } });
+    // A chat turn that starts while a judgement waits its turn is seen when its turn comes.
+    let chat = false;
+    const first = stub([(async () => { chat = true; return reply(JSON.stringify({ relevance: 0.2, reasonCode: 'fyi', reasoning: 'r' })); }) as unknown as () => Response]);
+    const second = stub([() => reply('{}')]);
+    const [, waited] = await Promise.all([
+      judge(issue(), { ollama: OLLAMA, ...always, fetch: first.fetch }),
+      judge(issue(), { ollama: OLLAMA, load: async () => (chat ? 'defer' : 'proceed'), claim: async () => true, fetch: second.fetch }),
+    ]);
+    expect(waited).toMatchObject({ ok: false, why: 'deferred', requests: 0 });
+    expect(second.calls).toHaveLength(0);
   });
 
   it('the model may not act, and without a model the event is logged', async () => {

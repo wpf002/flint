@@ -10,6 +10,8 @@
  *    reply cut off at its token limit, JSON that is not the shape. Each one
  *    first checks that no chat turn is running and claims a slot of the
  *    120-an-hour cap (triage.local_model), and so is counted even when it fails.
+ *  - One request at a time: each takes the process's model slot first
+ *    (model/slot.ts), which a goal review's plan stage shares.
  *  - Text someone else wrote goes only inside a <data> block, clipped.
  *  - Failing, it says why: invalid (replies, none usable), unavailable (no
  *    reply at all), capped, or deferred (chat is busy: try again later).
@@ -18,6 +20,7 @@ import { z } from 'zod';
 import { OllamaProvider } from '@flint/core/ollama';
 import { dataBlock, entityRef, REASON_CODES } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
+import { modelSlot } from '../model/slot.js';
 import type { Load } from './load.js';
 import type { EventFacts } from './verdict.js';
 
@@ -95,22 +98,24 @@ export async function judge(f: EventFacts, d: JudgeDeps): Promise<Judged> {
   let requests = 0;
   let replied = false;
   let stopped: 'capped' | 'deferred' | undefined;
-  // Every request the provider makes, its own retries included, comes through here.
-  const gated = (async (url: string | URL | Request, init?: RequestInit) => {
-    if (requests >= MODEL_REQUESTS) throw new Stop('no more requests');
-    if ((await d.load()) === 'defer') {
-      stopped = 'deferred';
-      throw new Stop('chat is busy');
-    }
-    if (!(await d.claim())) {
-      stopped = 'capped';
-      throw new Stop('the hour cap is used up');
-    }
-    requests += 1;
-    const res = await post(String(url), init);
-    if (res.ok) replied = true;
-    return res;
-  }) as typeof fetch;
+  // Every request the provider makes, its own retries included, comes through here: one local-model
+  // request at a time in this process (a goal review's plan stage shares the slot), then the checks.
+  const gated = ((url: string | URL | Request, init?: RequestInit) =>
+    modelSlot(async () => {
+      if (requests >= MODEL_REQUESTS) throw new Stop('no more requests');
+      if ((await d.load()) === 'defer') {
+        stopped = 'deferred';
+        throw new Stop('chat is busy');
+      }
+      if (!(await d.claim())) {
+        stopped = 'capped';
+        throw new Stop('the hour cap is used up');
+      }
+      requests += 1;
+      const res = await post(String(url), init);
+      if (res.ok) replied = true;
+      return res;
+    })) as typeof fetch;
   const provider = new OllamaProvider({ baseURL: origin, fetch: gated, think: false, defaultOptions: { temperature: 0, ...(d.ollama.numCtx ? { num_ctx: d.ollama.numCtx } : {}) } });
   const { system, user } = judgePrompt(f);
   while (requests < MODEL_REQUESTS && !stopped) {

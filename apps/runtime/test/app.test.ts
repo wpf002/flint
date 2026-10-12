@@ -252,6 +252,23 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect(templated.json().claim).toBe('issue#abc123 is closed by the resolve time');
       expect((await call('GET', '/v1/ledger/open')).json().predictions.length).toBeGreaterThanOrEqual(2);
     });
+
+    it('a goal’s forecast is its review’s alone: the route takes no goal id and refuses the goal template (P3)', async () => {
+      const base = {
+        probability: 0.8, method: 'rule', domain: 'goals', type: 'deadline_met', evidence: [],
+        resolutionCriteria: 'the goal is done', resolver: 'auto_world', resolveBy: new Date(Date.now() + 86400_000).toISOString(),
+      };
+      const before = (await call('GET', '/v1/ledger/open?limit=200')).json().predictions.length;
+      // The runtime's own template, which only a review fills.
+      expect((await call('POST', '/v1/ledger/predictions', { ...base, template: { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } } })).statusCode).toBe(400);
+      // A goal's id is not a field of the body at all (it is strict), under any name.
+      for (const extra of [{ goalId: 'gotestgoal0001' }, { goal: 'gotestgoal0001' }, { own: { goalId: 'gotestgoal0001' } }]) {
+        expect((await call('POST', '/v1/ledger/predictions', { ...base, claim: 'a goal is done', ...extra })).statusCode, JSON.stringify(extra)).toBe(400);
+      }
+      expect((await call('GET', '/v1/ledger/open?limit=200')).json().predictions.length).toBe(before);
+      // A plain prediction in the goals domain, about no goal, is still anyone's to record.
+      expect((await call('POST', '/v1/ledger/predictions', { ...base, claim: 'a goal is done' })).statusCode).toBe(201);
+    });
   });
 
   describe('review of the server integration (PR #41)', () => {

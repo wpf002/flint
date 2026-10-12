@@ -19,8 +19,13 @@
  *  - A linked pull request whose sync sets state merged and status archived
  *    makes "Is Merged" met (finished items count).
  *  - A step tick takes the goal's lock before it touches the plan.
- *  - Reviews are off and nothing is late. No goal text in the Fastify log, an
- *    audit entry, or a card's reason.
+ *  - Reviews are off by default and then nothing is late. No goal text in the
+ *    Fastify log, an audit entry, or a card's reason.
+ *  - With the planner on (part 3): the views say when a review is late (over an
+ *    hour past due, never a paused goal), when the next one is, the forecast and
+ *    the latest review; Review Now is unsigned, audited, sends the goal's review
+ *    job (ids only) and is refused in a sentence past the day's 12, for a goal
+ *    that is not active, or before the job queue is up.
  * Synthetic text only.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
@@ -36,6 +41,9 @@ import { approveProposal, createProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { syncOnce } from '../src/sources/sync';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
+import { GoalAnswer, GoalsPage as GoalsPageContract, reviewCounter } from '@flint/policy';
+import { runReview } from '../src/goals/review';
+import { FakeBus } from './goals/fixture';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SERVER = 'server-token-0123456789abcdef';
@@ -453,6 +461,82 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
     } finally {
       await holder.end();
       await prober.end();
+    }
+  });
+
+  it('with the planner on: lateness, the next review, the forecast and the latest review in the views; Review Now is unsigned and bounded', async () => {
+    const bus = new FakeBus();
+    const status = { problems: new Set<string>(), busStartedAt: new Date(), bus } as unknown as NonNullable<Parameters<typeof buildApp>[0]['status']>;
+    const on = buildApp({
+      db, logger: true, logStream: { write: (l: string) => void lines.push(l) }, status,
+      config: { tz: 'UTC', planner: true, tokens: [{ name: 'server', sha256: sha(SERVER), scopes: new Set<RuntimeScope>(['events', 'audit', 'proposals', 'world:read', 'ledger', 'counters']) }] },
+    });
+    const ask = async (method: 'GET' | 'POST', url: string, body?: unknown) => {
+      const r = await on.inject({ method, url, ...(body !== undefined ? { payload: body as object } : {}), headers: { authorization: `Bearer ${SERVER}` } });
+      return { status: r.statusCode, body: r.body ? (JSON.parse(r.body) as Record<string, unknown>) : {} };
+    };
+    try {
+      const dk = draftKey();
+      const gid = `go${dk}`;
+      await signRun((await call('POST', '/v1/goals', { draftKey: dk, args: shown(dk) })).body.id as string);
+      // Just started: its first review is due now, which is not late. No review yet, so no forecast.
+      const first = (await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView;
+      expect(first).toMatchObject({ reviews: 'on', late: false, onTrack: null, review: null });
+      expect(Math.abs(Date.parse(first.nextReviewAt!) - Date.now())).toBeLessThan(60_000);
+      expect(GoalAnswer.safeParse({ goal: first }).success).toBe(true);
+      // The same goal through an app without the planner: reviews off, never late.
+      expect(await view(gid)).toMatchObject({ reviews: 'off', late: false });
+
+      // Review Now: unsigned, audited as Will in the console, and the goal's review job is sent with ids only.
+      expect(await ask('POST', `/v1/goals/${gid}/review`, {})).toEqual({ status: 200, body: { ok: true } });
+      expect(bus.of('goals.review')).toEqual([{ queue: 'goals.review', data: { goalId: gid, kind: 'requested' }, options: { singletonKey: gid } }]);
+      expect(await db.auditEntry.findFirstOrThrow({ where: { action: 'goal.review.request', inputs: { path: ['goalId'], equals: gid } } })).toMatchObject({ actor: 'will:console', context: 'console', kind: 'action', outcome: 'ok' });
+      // Asked again while that one waits: the same review, and still a yes.
+      expect((await ask('POST', `/v1/goals/${gid}/review`, {})).status).toBe(200);
+      expect(bus.of('goals.review')).toHaveLength(1);
+      // The review runs: the view has its forecast and its latest review, in the contract's shape.
+      expect((await runReview({ db, bus, tz: 'UTC' }, { goalId: gid, kind: 'requested' })).outcome).toBe('reviewed');
+      const after = (await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView;
+      expect(after.onTrack).toMatchObject({ likelihood: expect.stringMatching(/^[a-z_]+$/), percent: expect.any(Number), by: after.horizonAt });
+      expect(after.review).toMatchObject({ kind: 'requested', summary: 'Its check isn’t met yet.', shadow: true, planner: 'pending', changes: [] });
+      expect(GoalAnswer.safeParse({ goal: after }).success).toBe(true);
+
+      // Over an hour past its review time it is late, in the open goal and in the list; a paused goal never is.
+      await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 59 * 60_000) } });
+      expect(((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late).toBe(false);
+      await db.goal.update({ where: { id: gid }, data: { nextReviewAt: new Date(Date.now() - 61 * 60_000) } });
+      expect(((await ask('GET', `/v1/goals/${gid}`)).body.goal as GoalView).late).toBe(true);
+      const list = (await ask('GET', '/v1/goals?tab=active')).body as unknown as GoalsPage;
+      expect(list.reviews).toBe('on');
+      expect(list.goals.find((g) => g.id === gid)).toMatchObject({ late: true });
+      expect(GoalsPageContract.safeParse(list).success).toBe(true);
+      expect((await page('active')).goals.find((g) => g.id === gid)).toMatchObject({ late: false });
+      expect((await ask('POST', `/v1/goals/${gid}/pause`, {})).status).toBe(200);
+      expect((await ask('GET', `/v1/goals/${gid}`)).body.goal).toMatchObject({ status: 'paused', late: false, nextReviewAt: null });
+      // A paused goal is not reviewed: Review Now says so.
+      expect(await ask('POST', `/v1/goals/${gid}/review`, {})).toEqual({ status: 409, body: { error: 'This goal is paused.', code: 'status.paused' } });
+      expect((await ask('POST', '/v1/goals/goNoSuchGoal00001/review', {})).body).toMatchObject({ code: 'noGoal' });
+
+      // Past the day's 12 for a goal: a sentence, and no job.
+      const dk2 = draftKey();
+      const g2 = `go${dk2}`;
+      await signRun((await call('POST', '/v1/goals', { draftKey: dk2, args: shown(dk2) })).body.id as string);
+      await owner(`INSERT INTO "ActionCounter" (action, day, count) VALUES ($1, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD'), 12)`, [reviewCounter(g2)]);
+      bus.clear();
+      expect(await ask('POST', `/v1/goals/${g2}/review`, {})).toEqual({ status: 429, body: { error: 'Flint already reviewed this goal 12 times today. Try again tomorrow.', code: 'reviewCap' } });
+      expect(bus.sent).toEqual([]);
+      // Before the job queue is up: a sentence, nothing sent, nothing audited as asked.
+      await owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = $1`, [reviewCounter(g2)]);
+      delete (status as { bus?: unknown }).bus;
+      const asked = await db.auditEntry.count({ where: { action: 'goal.review.request' } });
+      expect(await ask('POST', `/v1/goals/${g2}/review`, {})).toEqual({ status: 409, body: { error: 'Flint isn’t ready to review yet. Try again shortly.', code: 'notReady' } });
+      expect(await db.auditEntry.count({ where: { action: 'goal.review.request' } })).toBe(asked);
+      // Without the planner the route refuses, whatever the goal.
+      expect(await call('POST', `/v1/goals/${g2}/review`, {})).toEqual({ status: 409, body: { error: 'Scheduled reviews haven’t started yet, so Flint can’t review this goal.', code: 'reviewsOff' } });
+      // Nothing a job carried, and no audit entry of a request, holds a goal's words.
+      expect(JSON.stringify(await db.auditEntry.findMany({ where: { action: 'goal.review.request' } }), (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v))).not.toContain('CANARY');
+    } finally {
+      await on.close();
     }
   });
 });

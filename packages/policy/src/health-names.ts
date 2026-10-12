@@ -18,6 +18,7 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   retention: 'Cleanup',
   migrate_failed: 'Updates',
   triage: 'Triage',
+  goals: 'Goal Reviews',
   runtime: 'Runtime',
 };
 
