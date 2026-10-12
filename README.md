@@ -292,7 +292,10 @@ first, LoRA fine-tune only if needed) is written up in
   ```json
   { "servers": [ { "name": "demo", "command": "tsx", "args": ["path/to/server.ts"] } ] }
   ```
-- **`apps/playground`** — in-repo demos (`start` / `voice` / `tools` / `eval` / `reflect`).
+- **`apps/playground`** — in-repo demos (`start` / `voice` / `tools` / `eval` / `reflect`). They
+  talk to a local Ollama model: `OLLAMA_MODEL`, or the one Ollama has loaded or pulled. An
+  `ANTHROPIC_API_KEY` in the environment selects nothing by itself; for the run that compares a
+  local model against Claude, ask by name: `PLAYGROUND_PROVIDER=anthropic`.
 
 ## Development
 
@@ -302,7 +305,7 @@ pnpm build          # tsup → ESM + CJS + .d.ts
 pnpm test           # vitest (offline, cassette-backed)
 pnpm test:contracts # the cross-provider contract suite
 pnpm typecheck
-pnpm --filter playground start  # end-to-end consumption demo (offline mock if no key)
+pnpm --filter playground start  # end-to-end consumption demo (a local Ollama model; the offline mock without one)
 
 # local private registry (Verdaccio)
 pnpm registry:start   # serve @flint/core on http://localhost:4873

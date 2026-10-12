@@ -1,14 +1,8 @@
 import 'dotenv/config';
-import {
-  Flint,
-  AnthropicProvider,
-  OllamaProvider,
-  type AiObserver,
-  type ProviderAdapter,
-  type Tool,
-} from '@flint/core';
+import { Flint, type AiObserver, type ProviderAdapter, type Tool } from '@flint/core';
 import { Persona, InMemoryRetriever, FLINT_STYLE_GUIDE, FLINT_VOICE_EXEMPLARS } from '@flint/persona';
 import { MockProvider } from './mock-provider.js';
+import { pickProvider } from './provider.js';
 
 /**
  * Playground — proves @flint/core works when consumed as a separate package
@@ -16,29 +10,17 @@ import { MockProvider } from './mock-provider.js';
  * streaming, tool calling, and memory-backed multi-turn chat — all through
  * Flint, with the provider swappable underneath.
  *
- * Provider is chosen by env, and NOTHING below the selection changes:
- *   OLLAMA_MODEL=llama3.1   → local Ollama (no Anthropic, no cloud)
- *   ANTHROPIC_API_KEY=...   → Anthropic
- *   (neither)               → in-app mock, offline
+ * Provider is chosen by env (./provider.ts), and NOTHING below the selection changes:
+ *   OLLAMA_MODEL=llama3.1          → that local Ollama model (no Anthropic, no cloud)
+ *   (nothing set)                  → the chat model Ollama has loaded or pulled, when it is running
+ *   PLAYGROUND_PROVIDER=anthropic  → Anthropic, asked for by name (with ANTHROPIC_API_KEY)
+ *   (no Ollama, nothing asked)     → in-app mock, offline
+ * An ANTHROPIC_API_KEY in the environment is not a request: by itself it selects nothing.
  */
 
-const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-const ollamaModel = process.env.OLLAMA_MODEL?.trim();
-
-let provider: ProviderAdapter;
-let defaultModel: string;
-if (ollamaModel) {
-  provider = new OllamaProvider({
-    ...(process.env.OLLAMA_HOST ? { baseURL: process.env.OLLAMA_HOST } : {}),
-  });
-  defaultModel = ollamaModel;
-} else if (apiKey) {
-  provider = new AnthropicProvider({ apiKey });
-  defaultModel = 'claude-sonnet-4-6';
-} else {
-  provider = new MockProvider();
-  defaultModel = 'mock-model';
-}
+const chosen = await pickProvider();
+const provider: ProviderAdapter = chosen?.provider ?? new MockProvider();
+const defaultModel: string = chosen?.model ?? 'mock-model';
 
 // The default observer is a no-op; here we wire a tiny console observer to show
 // that ALL observability flows through the injected seam (Flint never logs).

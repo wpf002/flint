@@ -81,6 +81,8 @@ the streaming, the badge — stays identical.
   server (and the `ask` CLI) used to make Anthropic's Sonnet the "local" brain
   whenever a key was present. They ask Ollama which model it has instead; no
   key changes that. See "The local brain is always Ollama" in the same README.
+- **The `playground` demos** got the same rule: a local model, and Anthropic
+  only when asked for by name (`PLAYGROUND_PROVIDER=anthropic`).
 - **Flint says what is actually answering.** Each brain's prompt names its own
   model after the style guide, so a local model asked what it runs on no longer
   answers "Claude" (packages/persona/README.md, "What powers this answer").
