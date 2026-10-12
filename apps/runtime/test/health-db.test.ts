@@ -38,6 +38,9 @@ import type { Source, SourceObservation, SourceRun } from '../src/sources/types'
 import { healthName } from '@flint/policy';
 import { runReview } from '../src/goals/review';
 import { FakeBus, goalFixture } from './goals/fixture';
+import { CANARY, DAY, dayStart, ledgerKit } from './ledger/kit';
+import { sweep } from '../src/ledger/sweep';
+import { runSnapshot } from '../src/ledger/calibration';
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const MIN = 60_000;
@@ -460,5 +463,90 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
     expect(digest.body).toContain('Goal Reviews');
     expect(healthName('goals')).toBe('Goal Reviews');
     expect(JSON.stringify(report)).not.toContain('CANARY');
+  });
+  it('prediction checks (P4): off until Will turns predictions on; late after 3 hours, down after 26; a refused write, a rule nobody knows and stale scores are said in counts', async () => {
+    const k = await ledgerKit(urls);
+    /** A rule Will signed that forbids an action. */
+    const forbid = async (pattern: string) => {
+      const args = { rows: [{ pattern, tier: 'forbidden', expiresAt: new Date(Date.now() + 30 * DAY).toISOString() }] };
+      const p = await createProposal(db, { kind: 'policy', origin: 'console', action: 'policy.change', args, argsProvenance: { rows: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+      await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: digestOf(args) }), undefined, 'test');
+      await runInternal(db, p.id, undefined, 'UTC', 'test');
+    };
+    const on = loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_TZ: 'UTC', FLINT_PREDICT: 'on' });
+    const ledger = async (cfg: Config, now = new Date()) => (await checkComponents({ db, config: cfg, now, sources: [] })).find((c) => c.component === 'ledger');
+    const H = 3_600_000;
+    const at = (ms: number) => new Date(Date.now() + ms);
+    try {
+      // The switch off (the default): off, whatever is there. The switch on with no number ever turned on: still off.
+      expect(await ledger(config)).toEqual({ component: 'ledger', status: 'disabled' });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'disabled' });
+      // Will signs the card (a number is turned on). No check has run yet: it starts within the hour.
+      const series = await k.onSeries();
+      expect(await ledger(config)).toEqual({ component: 'ledger', status: 'disabled' });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'ok', detail: 'Prediction checks start within the hour.' });
+      expect(await ledger(on, at(2 * H))).toMatchObject({ status: 'ok' });
+      // Three hours on with no check, it is late; a day on, it is down.
+      expect(await ledger(on, at(3 * H + MIN))).toEqual({ component: 'ledger', status: 'degraded', detail: 'Prediction checks haven’t run in 3 hours.' });
+      expect(await ledger(on, at(8 * H + MIN))).toEqual({ component: 'ledger', status: 'degraded', detail: 'Prediction checks haven’t run in 8 hours.' });
+      expect(await ledger(on, at(26 * H + MIN))).toEqual({ component: 'ledger', status: 'down', detail: 'Prediction checks didn’t run in the last day.' });
+      // A check runs, with nothing to do.
+      await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'ok', detail: 'Flint had no predictions to check in the last day.' });
+      // Then with something: one resolved and one run out are two checked. A number a series took is never in the words.
+      const day = dayStart(1);
+      await k.point(series, day, CANARY);
+      await k.range(series, day, {}, { madeAgo: Date.now() - day.getTime() - H, dueAgo: MIN });
+      await k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server' }, { madeAgo: 20 * DAY, dueAgo: 15 * DAY });
+      expect(await sweep(db, { tz: 'UTC', resolve: true, expire: true })).toMatchObject({ resolved: 1, expired: 1 });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'ok', detail: 'Flint checked 2 predictions in the last day.' });
+      // The hours are counted from the last check: late again three hours after it, down a day after.
+      expect(await ledger(on, at(3 * H + MIN))).toMatchObject({ status: 'degraded', detail: 'Prediction checks haven’t run in 3 hours.' });
+      expect(await ledger(on, at(27 * H))).toMatchObject({ status: 'down' });
+      // A restart is not a missed check: with this runtime up for ten minutes, a quiet day reads as starting.
+      const inst = await db.runtimeInstance.create({ data: { id: `ri${Date.now().toString(36)}`, gitSha: 'dev', startedAt: at(27 * H - 10 * MIN), lastBeatAt: at(27 * H) } });
+      expect(await ledger(on, at(27 * H))).toEqual({ component: 'ledger', status: 'ok', detail: 'Prediction checks start within the hour.' });
+      await db.runtimeInstance.update({ where: { id: inst.id }, data: { stoppedAt: at(27 * H) } });
+      // A prediction with a rule no resolver knows: said, in a count, since it will run out unchecked.
+      await k.prediction({ resolverSpec: { check: 'vibes' } }, { madeAgo: 3 * H, dueAgo: H });
+      await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'degraded', detail: 'Flint can’t check 1 prediction, so it will run out unchecked.' });
+      await k.prediction({ resolverSpec: null }, { madeAgo: 3 * H, dueAgo: H });
+      await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'degraded', detail: 'Flint can’t check 2 predictions, so they will run out unchecked.' });
+      // A write the database refused in the latest check (here: the sweep's clock a day ahead of the database's).
+      await k.point(series, dayStart(0), 3);
+      await k.range(series, dayStart(0), {}, { madeAgo: 2 * MIN, dueAgo: MIN });
+      expect(await sweep(db, { tz: 'UTC', resolve: true, expire: false, now: at(DAY) })).toMatchObject({ refused: 1 });
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'degraded', detail: 'The database refused 1 prediction check.' });
+      // The night's scores: fine for two days after predictions were turned on, then said to be old; a run puts it right.
+      await owner(`UPDATE "Prediction" SET status = 'expired' WHERE status = 'open' AND "resolveBy" < now()`);
+      await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+      expect((await ledger(on))!.status).toBe('ok');
+      await owner(`ALTER TABLE "ForecastSeries" DISABLE TRIGGER USER`);
+      await owner(`UPDATE "ForecastSeries" SET "enabledAt" = now() - interval '3 days'`).finally(() => owner(`ALTER TABLE "ForecastSeries" ENABLE TRIGGER USER`));
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'degraded', detail: 'Flint’s accuracy scores are 3 days old.' });
+      await runSnapshot(db, { tz: 'UTC' });
+      expect((await ledger(on))!.status).toBe('ok');
+      // A rule that forbids the scores: not Flint's lateness, so not said. One that forbids both checks: said plainly.
+      await forbid('ledger.calibration.snapshot');
+      expect((await ledger(on))!.status).toBe('ok');
+      await forbid('ledger.expire');
+      expect((await ledger(on))!.status).toBe('ok');
+      await forbid('ledger.resolve.auto');
+      expect(await ledger(on)).toEqual({ component: 'ledger', status: 'degraded', detail: 'A rule stops Flint from checking its predictions.' });
+      // Recorded and reported under its plain name; the digest lists it when it needs a look.
+      const now = new Date();
+      await recordChecks(db, await checkComponents({ db, config: on, now, sources: [] }), now);
+      const report = await healthReport(db, on, now);
+      expect(report.components.find((c) => c.component === 'ledger')).toMatchObject({ status: 'degraded', detail: 'A rule stops Flint from checking its predictions.' });
+      expect(healthName('ledger')).toBe('Prediction Checks');
+      expect((await buildDigest(db, 'UTC', now)).degraded).toContain('ledger');
+      // Nothing Health wrote holds a number, a series' key or a prediction's id.
+      const details = (await db.healthCheck.findMany({ where: { component: 'ledger' }, select: { detail: true } })).map((c) => c.detail).join(' ');
+      expect(details).not.toMatch(/31337|4242|daily\.|test\.|pd[a-z0-9]{8}/);
+    } finally {
+      await k.db.$disconnect();
+    }
   });
 });

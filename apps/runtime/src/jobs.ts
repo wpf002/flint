@@ -35,6 +35,8 @@ import { failureClass } from './dbcodes.js';
 import { TICK_CRON, tick } from './goals/tick.js';
 import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
+import { predictionsStarted, sweep } from './ledger/sweep.js';
+import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
 
 const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 
@@ -132,10 +134,15 @@ async function promoted(ctx: JobContext): Promise<boolean> {
   return ctx.config.triage && alone('triage.rule') && alone('notify.inapp');
 }
 
+/** An autonomous action's tier now, and whether it may run: promoted, or in shadow at APPROVAL. */
+async function standingOf(ctx: JobContext, action: string): Promise<{ may: boolean; tier: 'alone' | 'approval' | 'forbidden' }> {
+  const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(ctx.db) });
+  return { may: t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action)), tier: t.tier };
+}
+
 /** May an autonomous action run now: promoted, or in shadow at APPROVAL. */
 async function mayRun(ctx: JobContext, action: string): Promise<boolean> {
-  const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(ctx.db) });
-  return t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action));
+  return (await standingOf(ctx, action)).may;
 }
 
 /** Housekeeping that runs whether triage is on or not. */
@@ -258,9 +265,57 @@ export function goalJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/** When the sweep runs: hourly at :40, so the 03:40 run settles the night's numbers before the 03:45 snapshot scores them. */
+export const SWEEP_CRON = '40 * * * *';
+/** When the snapshot runs: 03:45 local, after the sweep. */
+export const SNAPSHOT_CRON = '45 3 * * *';
+
+/**
+ * Predictions (P4), only while FLINT_PREDICT is on. Off, this is empty:
+ * startJobs unschedules both and nothing is checked or scored. On is not
+ * enough either: each job does nothing until Will has signed the Turn On
+ * Predictions card (predictionsStarted), so "ships off" does not depend on a
+ * setting being remembered.
+ *
+ *  - ledger.sweep: Flint checks its own predictions (ledger/sweep.ts).
+ *  - ledger.snapshot: the night's scores (ledger/calibration.ts).
+ * Neither has job data. Log lines carry counts and ids.
+ */
+export function predictJobs(ctx: JobContext): JobSpec[] {
+  if (!ctx.config.predict) return [];
+  return [
+    {
+      queue: 'ledger.sweep',
+      cron: SWEEP_CRON,
+      handler: async () => {
+        if (!(await predictionsStarted(ctx.db))) return;
+        const [resolve, expire] = [await standingOf(ctx, 'ledger.resolve.auto'), await standingOf(ctx, 'ledger.expire')];
+        // A rule forbids both: nothing runs, and Health says a rule stops the checks.
+        if (!resolve.may && !expire.may) return;
+        const c = await sweep(ctx.db, { tz: ctx.config.tz, resolve: resolve.may, expire: expire.may, tiers: { resolve: resolve.tier, expire: expire.tier }, log: ctx.log });
+        if (c.resolved || c.expired || c.conditionUnmet || c.unknownSpec || c.refused) {
+          ctx.log(`ledger: ${c.resolved} resolved, ${c.expired} expired, ${c.conditionUnmet} condition unmet; ${c.unknownSpec} with a rule no resolver knows, ${c.refused} refused, ${c.waiting} waiting`);
+        }
+      },
+    },
+    {
+      queue: 'ledger.snapshot',
+      cron: SNAPSHOT_CRON,
+      missed: 'once',
+      handler: async () => {
+        if (!(await predictionsStarted(ctx.db))) return;
+        const s = await standingOf(ctx, SNAPSHOT_ACTION);
+        if (!s.may) return;
+        const c = await runSnapshot(ctx.db, { tz: ctx.config.tz, tier: s.tier });
+        ctx.log(`ledger: scored ${c.scored} yes/no prediction(s) and ${c.ranges} range(s) in ${c.groups} group(s)`);
+      },
+    },
+  ];
+}
+
 /** The job set this runtime runs. */
 export function jobSpecs(ctx: JobContext): JobSpec[] {
-  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx), ...goalJobs(ctx)];
+  return [...syncJobs(ctx), ...triageJobs(ctx), ...housekeepingJobs(ctx), ...goalJobs(ctx), ...predictJobs(ctx)];
 }
 
 /** What failed, not what it said (dbcodes.ts; kept here for the modules that import it from the jobs). */

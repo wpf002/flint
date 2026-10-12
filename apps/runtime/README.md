@@ -553,9 +553,10 @@ approved. Any later deploy of P3 code applies the migration again. Claude runs
 
 ## Predictions (P4)
 
-Predictions arrive in parts. This first part is only the store and what the
-database guarantees about it. Nothing is forecast, checked or scored yet, and
-it changes nothing you see. Flint will forecast its own numbers on this Mac: no
+Predictions arrive in parts. The first part was the store and what the
+database guarantees about it. The second is Flint checking its own predictions
+(see "Checking predictions" below). Nothing is forecast yet, and nothing here
+changes what you see. Flint will forecast its own numbers on this Mac: no
 series is sent anywhere, and no part of this calls an outside service.
 
 What the database now holds to, whatever the runtime's code does:
@@ -588,14 +589,75 @@ What the database now holds to, whatever the runtime's code does:
 Both must be on before anything runs:
 
 1. `FLINT_PREDICT=on` in `~/.flint/runtime.override.env`. It's off by default,
-   and any other value is off. The prediction jobs read it when they arrive in
-   the next part; nothing reads it yet.
+   and any other value is off. Off, the prediction jobs aren't scheduled at
+   all. On, they're scheduled and still do nothing until the card is signed.
 2. The signed Turn On Predictions card. This is the real gate, and the database
    enforces it. Nothing files that card for you yet: the console's panel comes
    in a later part. Approvals already knows the card. It shows as Turn On
    Predictions and names each number it covers. It says when spending or
    calendar numbers are among them, and when the local model's second opinion
    is included. It always asks on its own, with a fresh touch.
+
+### Checking predictions
+
+Flint now settles and scores its own predictions. Until this part, nothing
+did: a prediction was recorded and then sat open for good. Both jobs below run
+only with the two switches on, so on deploy nothing runs.
+
+**The sweep** runs every hour at :40. In order:
+
+1. It decides each piece of advice from what you did with its note. You
+   acknowledged it before its time was up: taken. You dismissed it: declined.
+   You left it: lapsed.
+2. It settles every prediction that is due and can be checked without you:
+   - A forecast is checked against its own number for that day or week, once
+     the day or week is over and the number is there.
+   - Triage's "this service will be healthy again" is checked against how the
+     service stood at that time, never how it stands now, and only once Flint
+     has seen the service again.
+   - A goal's "on track" forecast that reaches its date with the goal not
+     finished is recorded as not met. When you mark a goal done or abandon it,
+     that card settles the goal's forecasts, as it already did.
+   - A prediction about advice you declined, or let lapse, is set aside as
+     "condition unmet". If you took the advice, it's checked like the others.
+3. What can't be settled runs out: after 72 hours for a prediction Flint can
+   check itself, and after 14 days for one only you can answer.
+
+It never answers for you. A prediction only you resolve is never given to a
+resolver, and the database refuses any attempt. It never voids a prediction,
+which needs your signature. A prediction whose rule it doesn't know is left
+alone and counted. It writes one audit entry per run, with counts only.
+
+**The scores** are written every night at 03:45 for the last 90 days, one row
+per area, kind of claim, method, and yes/no or range:
+
+- Yes/no predictions: the Brier score, the usual rate, and how the stated
+  chances compared with what happened, in ten bins.
+- Ranges: how often the range held, and a loss that grows with how wide the
+  range was and how far off a miss landed.
+- Beside each: how many are open, ran out, were set aside, were voided, or
+  were revised close to their date.
+- From 100 scored: the average calibration gap (ECE), and a 90% interval
+  around the Brier score. The interval treats predictions that share a day, or
+  a goal, as one result, so many predictions about the same week don't look
+  like more evidence than they are. With results from fewer than 10 days (or
+  goals) there's no interval.
+
+The three actions behind this (`ledger.resolve.auto`, `ledger.expire`,
+`ledger.calibration.snapshot`) run in shadow: they write only Flint's own
+records and deliver nothing to you or to chat. A rule that forbids one stops
+that part.
+
+**Settings > Health** has a row, **Prediction Checks**. It's Off until both
+switches are on. It needs a look when no check has run in 3 hours, when the
+database refused one of its writes, when a prediction has a rule Flint can't
+check, or when the scores are over two days old. It's Down when no check ran
+in 26 hours.
+
+**Rolling it back:** turn `FLINT_PREDICT` off. The jobs are unscheduled at the
+next start. Resolutions already written stay (a resolution is never deleted),
+and each says in its evidence that the sweep wrote it. This part has no
+database update of its own.
 
 ### What changed on deploy
 
@@ -653,6 +715,13 @@ action so named.
   in `packages/policy/src/claims.ts`, which keeps it out of chat's. A goal
   review's `goal_on_track` and the forecaster's `series_range` are there. The
   ledger route takes `ChatPrediction` and nothing wider.
+- **The forecaster's predictions** must carry the rule the sweep settles them
+  by, in `resolverSpec`: `{seriesKey, at, op: 'range'}` for a range and
+  `{seriesKey, at, op: 'above' | 'below', value}` for a question, where `at` is
+  the first instant of the day or week the claim is about, the same instant its
+  metric point is stored under. `resolveBy` should be when that number will be
+  there (the next morning's run), since the sweep reads a prediction only once
+  it's due.
 - **The forecaster** must write each run and its predictions at READ COMMITTED
   (the database refuses them above it). A refused run means the number was
   turned off: skip it, don't retry it. A run's provider is `local` and its
@@ -689,6 +758,18 @@ action so named.
   arithmetic (whether it beat a plain guess), the snapshot's scores, and the
   `will:` label on an answer. An answer isn't signed on purpose. A wrong one
   has a signed fix (`ledger.resolution.correct`).
+- **What an automatic check records.** The outcome of an automatic check is
+  the runtime's own reading of its rows. The database holds it to the rest:
+  who may resolve what, that the event isn't before the prediction or after
+  now, and that it's never recorded as yours. A wrong result has the same
+  signed fix as any other (`ledger.resolution.correct`).
+- **What can't be checked runs out.** A service that was removed or forgotten
+  before its time came, a number that never arrived, and a goal forecast left
+  behind by a finished goal are not guessed at. They run out after 72 hours and
+  count against the unresolved rate.
+- **Taking advice means acknowledging its note.** Flint reads "you took the
+  advice" from the note being acknowledged before the prediction's time. It has
+  no other way to know yet.
 - **A series born under the wrong label.** A series' label can't change, so one
   created wrong stays wrong. The database refuses the wrong labels it can
   recognize: a dollar or spend series that isn't financial, and a calendar
