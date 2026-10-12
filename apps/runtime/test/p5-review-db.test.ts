@@ -35,12 +35,16 @@
  *  - When Will signed is stamped by the database.
  *  - A reviewer is not turned off under a review being written; a score waits
  *    for an override and is then refused.
+ *  - The ledger's own sweep leaves a task's forecast alone, however late.
  * Synthetic text only.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { digestOf } from '@flint/policy';
 import { NO_DB, freshDb, id, HEX } from './db';
 import { p5Kit, refusal, sleep, CANARY, type AssetRow, type P5Kit, type Q } from './p5';
+import { HOUR, backdatePrediction } from './ledger/kit';
+import { createDb } from '../src/db';
+import { AUTO_GRACE_MS, sweep } from '../src/ledger/sweep';
 
 describe.skipIf(NO_DB)('P5: what an independent review found', () => {
   let k: P5Kit;
@@ -798,6 +802,34 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
       // The owner still can (a restore, a test's fixture), as it can do anything.
       const old = await k.approval(c.pid, 'mcp:web.fetch_url', c.digest, { at: `now() - interval '2 hours'`, as: owner });
       expect(await recent(old)).toBeGreaterThan(3_600_000);
+    });
+
+    it('the ledger\'s own sweep leaves a task\'s forecast alone, however late: it does not settle it, and does not let it run out', async () => {
+      const db = createDb(k.urls.app);
+      const predictionStatus = async (pid: string) => (await app(`SELECT status FROM "Prediction" WHERE id = $1`, [pid])).rows[0].status as string;
+      try {
+        // A task that is still out, and its forecast, due 100 hours ago: the sweep lets a prediction nothing can settle run out 72 hours after its date.
+        const t = await k.taskAt('dispatched', w);
+        const f = await forecastOf(t.id);
+        // Beside it, the same forecast with no rule at all (what a dispatch no longer takes).
+        const bare = await k.forecast();
+        expect(100 * HOUR).toBeGreaterThan(AUTO_GRACE_MS);
+        for (const pid of [f, bare]) await backdatePrediction(k.urls, pid, { madeAgo: 124 * HOUR, dueAgo: 100 * HOUR });
+        const counts = await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+        expect(counts.others).toBeGreaterThanOrEqual(1);
+        expect(counts.refused).toBe(0);
+        expect([await predictionStatus(f), await scoredAs(f), await predictionStatus(bare)]).toEqual(['open', [], 'expired']);
+        // A second sweep changes nothing.
+        await sweep(db, { tz: 'UTC', resolve: true, expire: true });
+        expect([await predictionStatus(f), await scoredAs(f)]).toEqual(['open', []]);
+        // So it is still there for its own score, a day after its task has ended, as it ended.
+        await k.setStatus(app, t.id, 'failed', `, failure = 'timeout'`);
+        await k.endedAgo(t.id);
+        await resolve(app, f, false);
+        expect([await predictionStatus(f), await scoredAs(f)]).toEqual(['resolved', [false]]);
+      } finally {
+        await db.$disconnect();
+      }
     });
 
     describe('the two locks', () => {
