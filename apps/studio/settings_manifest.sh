@@ -17,7 +17,9 @@
 # value has the shape that name is listed with, and the value does not look like
 # a secret. Everything else is left out, and the snapshot records the name alone.
 # For a key or sign-in from outside it records only that one was set, so a
-# rebuild can name the accounts the old Mac could reach.
+# rebuild can name the accounts the old Mac could reach. It also records which
+# commit of Flint's code the server and the runtime are running, so a rebuild
+# installs that version and not whatever is newest.
 # Env files and LaunchAgent files are read as text; nothing in them is ever run.
 set -u
 here=${0:A:h}
@@ -36,7 +38,7 @@ esac
 
 manifest_load || exit 1
 
-typeset -a saved skipped unknown connectors present
+typeset -a saved skipped unknown connectors present deployed
 home_tilde() { # a path under this home folder, written with ~ so it fits another one
   emulate -L zsh
   if [[ $1 == $HOME/* ]]; then REPLY="~${1#$HOME}"; else REPLY=$1; fi
@@ -101,6 +103,16 @@ if [[ -r $DATA/mcp.json ]]; then
   done
 fi
 
+# The commit each part is running, as its installer wrote it down (apps/server/install-server.sh,
+# apps/runtime/install-runtime.sh): "<commit> <when>". The runtime's release folder is named by it too.
+commit=
+[[ -r $DATA/server.version ]] && { read -r commit rest < "$DATA/server.version" || true; }
+[[ $commit =~ '^[0-9a-f]{40}$' ]] && deployed+=("server"$'\t'"$commit")
+commit=
+[[ -r $DATA/runtime/version ]] && { read -r commit rest < "$DATA/runtime/version" || true; }
+[[ $commit =~ '^[0-9a-f]{40}$' ]] || commit="$(readlink "$DATA/runtime/current" 2>/dev/null)" && commit=${commit:t}
+[[ $commit =~ '^[0-9a-f]{40}$' ]] && deployed+=("runtime"$'\t'"$commit")
+
 if [[ $mode == check ]]; then
   if (( ${#unknown} == 0 )); then
     say "Every setting on this Mac is listed in the settings manifest."
@@ -132,6 +144,7 @@ fi
     for s in $unknown; do print -r -- "unknown"$'\t'"$s"; done
     for s in ${(o)present}; do print -r -- "present"$'\t'"$s"; done
     for s in $connectors; do print -r -- "connector"$'\t'"$s"; done
+    for s in $deployed; do print -r -- "deployed"$'\t'"$s"; done
   } > "$SNAPSHOT.partial"
 ) 2>/dev/null || refuse "Flint could not save the settings snapshot."
 chmod 600 "$SNAPSHOT.partial" && mv -f "$SNAPSHOT.partial" "$SNAPSHOT" || refuse "Flint could not save the settings snapshot."

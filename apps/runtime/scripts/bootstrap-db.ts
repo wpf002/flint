@@ -2,7 +2,7 @@
  * Make Flint's database roles and databases on a rebuilt Mac (P7;
  * src/backup/bootstrap.ts says what and why). apps/studio/rebuild.sh runs it:
  *
- *   pnpm --filter @flint/runtime bootstrap-db --port 5432 [--rotate]
+ *   pnpm --filter @flint/runtime bootstrap-db --port 5432 [--rotate] [--from-rebuild]
  *
  * It connects as whoever the standard PG* variables name (PGHOST, PGPORT,
  * PGUSER, and PGPASSFILE or PGPASSWORD; the pg client reads them itself), so no
@@ -23,7 +23,8 @@ bootstrapDb({ admin: {}, port, home: homedir(), rotate })
     console.log(`Flint's database has its ${roles} roles, each with a new password.`);
     if (r.databases.length) console.log(`Flint made ${r.databases.length === 1 ? 'the database' : 'the databases'} ${r.databases.join(' and ')}.`);
     console.log("The new passwords are saved in Flint's own settings files, which only you can read.");
-    if (r.rotated.length) console.log("Flint's services keep the old passwords until they are installed again.");
+    // A rebuild installs the services next, with the new passwords: only a rotation run by hand needs saying.
+    if (r.rotated.length && !args.includes('--from-rebuild')) console.log("Flint's services keep the old passwords until they are installed again.");
   })
   .catch((err: unknown) => {
     // A refusal is a sentence. Anything else: the error's code or class, never its text (a connection error can name a URL).

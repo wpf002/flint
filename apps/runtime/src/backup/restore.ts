@@ -896,7 +896,7 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
 
     // A rebuild restores only into the empty database it made. One that already holds this very backup is done.
     if (!production && (await withClient(owner, userObjects)) > 0) {
-      if (!(await withClient(owner, (c) => alreadyRestored(c, check.sha256)))) throw new RestoreRefused('The database to restore into is not empty.', { stage: 'state' });
+      if (!(await withClient(owner, (c) => alreadyRestored(c, check.sha256)))) throw new RestoreRefused('The database to restore into is not empty.', { stage: 'not-empty' });
       const again = await withClient(owner, async (c) => verifyRestored(c, { migrationsDir: o.migrationsDir, reference: async (applied) => (await referenceOf(m, owner, reference, applied, '', o.tools)).lines, owner: OWNER, strangers: [restorer.user] }));
       if (!again.ok) throw new RestoreRefused(`The database restored earlier does not pass its checks: ${again.problems.join('; ')}.`, { stage: 'verify' });
       const report = await withClient(owner, (c) => carryForward(c, { ...(o.rp ? { rp: o.rp } : {}), now: new Date() }));

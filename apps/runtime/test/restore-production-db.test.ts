@@ -1562,7 +1562,8 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       await admin((c) => c.query('CREATE DATABASE flint_other OWNER flint_owner'));
       await connect(onDb(urls.owner, 'flint_other'), (c) => c.query('CREATE TABLE something (id integer)'));
       const refused = cli(['restore-empty', '--from-rebuild', '--dump', dump, '--sha256', dumpSha], { FLINT_DB_OWNER_URL: onDb(urls.owner, 'flint_other'), FLINT_DB_URL: onDb(urls.app, 'flint_other'), FLINT_DB_BACKUP_URL: onDb(urls.backup, 'flint_other') });
-      expect(refused.status).toBe(1);
+      // Its own way of ending (3), so the rebuild script can tell it from every other refusal: that script made the database.
+      expect(refused.status).toBe(3);
       expect(refused.stdout.trim()).toBe('The database to restore into is not empty.');
     });
 

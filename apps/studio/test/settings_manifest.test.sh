@@ -112,16 +112,21 @@ plist_set_env "$agents/com.flint.ollama.plist" OLLAMA_KEEP_ALIVE 24h
 plist_set_env "$agents/com.flint.ollama.plist" OLLAMA_HOST 0.0.0.0:11434
 print -r -- '{"servers":[{"name":"web","command":"node","env":{"SEARCH_API_KEY":"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"}},{"name":"runtime","command":"node"},{"name":"Bad Name!","command":"x"}]}' > "$data/mcp.json"
 
+# The commit each part is running, as its installer writes it down; and a line that is not one.
+sha_server=$(printf 'a1b2c3d4e5%.0s' 1 2 3 4); sha_runtime=$(printf '0f9e8d7c6b%.0s' 1 2 3 4)
+print -r -- "$sha_server 1700000000" > "$data/server.version"
+mkdir -p "$data/runtime/releases/$sha_runtime"; ln -s "$data/runtime/releases/$sha_runtime" "$data/runtime/current"
+print -r -- 'not-a-commit; rm -rf ~' > "$data/runtime/version"
+
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" 2>"$fx/err.log"); st=$?
 snap="$data/settings-snapshot.tsv"
 check "the snapshot run succeeds" '[ "$st" = 0 ]'
-check "it says what it did, in one sentence" '[[ "$out" == "Flint saved 13 settings for a rebuild. It left out 7 it does not know or whose value looks like a secret." ]]'
+check "it says what it did, in one sentence" '[[ "$out" == "Flint saved 12 settings for a rebuild. It left out 7 it does not know or whose value looks like a secret." ]]'
 check "the snapshot is 0600" '[ "$(stat -f %Lp "$snap")" = 600 ]'
 check "nothing was left half-written" '[ ! -e "$snap.partial" ]'
 T=$'\t'
 want_set=(
   "secrets.env${T}FLINT_RUNTIME_URL${T}http://[::1]:8090"
-  "secrets.env${T}FLINT_TAILNET_USER${T}someone@example.com"
   "secrets.env${T}FLINT_TIER_HARD${T}openai:gpt-5"
   "secrets.env${T}FLINT_WORLD_NOW${T}1"
   "runtime.override.env${T}FLINT_RUNTIME_TRIAGE${T}on"
@@ -136,6 +141,12 @@ want_set=(
 )
 for w in $want_set; do check "saved: ${${w#*$T}%%$T*}" 'grep -qxF "set${T}$w" "$snap"'; done
 check "exactly those were saved, and nothing else" '[ "$(grep -c "^set${T}" "$snap")" = "${#want_set}" ]'
+# Who may reach Flint over the tailnet is never saved: a rebuild reads it from the Tailscale sign-in.
+check "the tailnet account is not saved, by value or by name" '! grep -q "TAILNET" "$snap" && ! grep -q "example.com" "$snap"'
+# Which version was running, so a rebuild installs that one: the server's from its installer's line, the
+# runtime's from its release folder when its line is not a commit.
+check "the commits that were running are saved" 'grep -qxF "deployed${T}server${T}$sha_server" "$snap" && grep -qxF "deployed${T}runtime${T}$sha_runtime" "$snap" && [ "$(grep -c "^deployed${T}" "$snap")" = 2 ]'
+check "a line that is not a commit is never saved" '! grep -q "not-a-commit" "$snap"'
 # A value that looks like a secret is left out under ANY name, and only its name is recorded.
 for n in "secrets.env${T}FLINT_TTS_VOICE" "secrets.env${T}PARITY_GOOGLE_MODEL" "secrets.env${T}FLINT_TIER_CODE" "server.plist${T}FLINT_STYLE_VARIANT" "ollama.plist${T}OLLAMA_HOST"; do
   check "left out, by name: ${n#*$T}" 'grep -qxF "skipped${T}$n" "$snap"'
@@ -160,7 +171,7 @@ for n in "secrets.env${T}ANTHROPIC_API_KEY" "runtime.override.env${T}NEXUS_READ_
   check "recorded as present, by name: ${n#*$T}" 'grep -qxF "present${T}$n" "$snap"'
 done
 check "nothing Flint makes for itself is recorded as present" '! grep -E "^present${T}.*(FLINT_TOKEN|FLINT_DB_|DATABASE_URL)" "$snap"'
-check "every line is one of the five kinds" '! grep -vE "^(#|set${T}|skipped${T}|unknown${T}|present${T}|connector${T})" "$snap"'
+check "every line is one of the six kinds" '! grep -vE "^(#|set${T}|skipped${T}|unknown${T}|present${T}|connector${T}|deployed${T})" "$snap"'
 
 # ---- 4. --check: names only -----------------------------------------------------------------------
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --check 2>&1); st=$?
@@ -173,7 +184,7 @@ out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --check 2>&1); s
 check "--check passes when every name is listed" '[ "$st" = 0 ] && [[ "$out" == "Every setting on this Mac is listed in the settings manifest." ]]'
 rm -f "$snap"
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --preview 2>&1); st=$?
-check "--preview names what would be saved and what would not, and writes nothing" '[ "$st" = 0 ] && [ ! -e "$snap" ] && [[ "$out" == *"Flint would save 13 settings for a rebuild: "*"OLLAMA_MODEL"*"It would leave out 5 whose value has an unexpected shape or looks like a secret: "*"FLINT_TTS_VOICE"*"It would leave out 0 it does not know: none."*"ANTHROPIC_API_KEY"*"The connectors it would name: web, runtime."* ]]'
+check "--preview names what would be saved and what would not, and writes nothing" '[ "$st" = 0 ] && [ ! -e "$snap" ] && [[ "$out" == *"Flint would save 12 settings for a rebuild: "*"OLLAMA_MODEL"*"It would leave out 5 whose value has an unexpected shape or looks like a secret: "*"FLINT_TTS_VOICE"*"It would leave out 0 it does not know: none."*"ANTHROPIC_API_KEY"*"The connectors it would name: web, runtime."* ]]'
 check "--preview prints names, never values" '[[ "$out" != *"$hex"* && "$out" != *hunter* && "$out" != *"muse-glimmer"* && "$out" != *"sk-ant"* && "$out" != *"example.com"* ]]'
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --everything 2>&1); st=$?
 check "an unknown option is refused with a sentence" '[ "$st" = 1 ] && [[ "$out" == *"with no option"* ]]'
@@ -186,7 +197,7 @@ env -i HOME="$home" PATH=/usr/bin:/bin FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP
   FLINT_BACKUP_TS=20261012-0230 /bin/zsh "$here/../backup_flint.sh" >"$fx/backup.out" 2>"$fx/backup.err"
 check "the nightly backup ran" '[ -f "$fx/local/flint-20261012-0230.tar.gz" ]'
 check "and its archive carries the snapshot" 'tar -tzf "$fx/local/flint-20261012-0230.tar.gz" | grep -qx "./settings-snapshot.tsv"'
-check "and said so in its log" 'grep -q "Flint saved 13 settings for a rebuild" "$fx/backup.out"'
+check "and said so in its log" 'grep -q "Flint saved 12 settings for a rebuild" "$fx/backup.out"'
 # A snapshot that cannot be written never stops the backup.
 chmod 500 "$data"; rm -f "$fx/local/flint-20261012-0231.tar.gz"
 env -i HOME="$home" PATH=/usr/bin:/bin FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP_OFFSITE="$fx/icloud/FlintBackups" FLINT_BACKUP_MANIFEST="$fx/offsite.txt" \

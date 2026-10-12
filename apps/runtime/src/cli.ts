@@ -189,7 +189,8 @@ async function main(): Promise<void> {
       if (!(err instanceof RestoreRefused)) throw err;
       console.log(err.message);
       for (const line of err.lines) console.log(line);
-      process.exitCode = 1;
+      // 3: a rebuild's database is not empty. The rebuild script, which made that database, tells it from every other refusal.
+      process.exitCode = err.stage === 'not-empty' ? 3 : 1;
     }
     return;
   }

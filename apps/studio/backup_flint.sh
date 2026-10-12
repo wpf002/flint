@@ -41,6 +41,7 @@ SECRETS=(
   --exclude './tokens'             # per-client token files
   --exclude './enroll-code'        # the one-time code for registering an approval key
   --exclude './google'             # the Google OAuth client and refresh token (P2.5 calendar)
+  --exclude './backup-fingerprint.key'   # seals each database dump's fingerprint (apps/runtime restore.ts)
 )
 
 # The offsite copy is encrypted to an age public key whose private half lives OFF
@@ -60,6 +61,9 @@ prune() { # dir keep
   ls -1t "$1"/flint-*.tar.gz 2>/dev/null | tail -n +$(( $2 + 1 )) | while read -r f; do rm -f "$f"; done
 }
 
+# A snapshot's own name, and nothing else: no folder in it, no other kind of file.
+offsite_name() { [[ $1 =~ '^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age)?$' ]]; }
+
 prune_offsite() { # by name from the manifest; never lists $OFFSITE
   local total=$(wc -l < "$MANIFEST" | tr -d ' ') kept="$MANIFEST.tmp" name
   local drop=$(( total > KEEP_OFFSITE ? total - KEEP_OFFSITE : 0 ))
@@ -68,10 +72,13 @@ prune_offsite() { # by name from the manifest; never lists $OFFSITE
   # while there was nothing to drop.
   if [ "$drop" -gt 0 ]; then
     head -n "$drop" "$MANIFEST" | while read -r name; do
+      # Only a name this script writes is ever removed: a line that is anything else (a path, a file of
+      # another kind, something put there by hand or by a restored copy of this list) is dropped unread.
+      offsite_name "$name" || continue
       rm -f "$OFFSITE/$name" 2>/dev/null || { echo "$(date '+%F %T') offsite prune FAILED: $name" >&2; echo "$name" >> "$kept"; }
     done
   fi
-  tail -n "$KEEP_OFFSITE" "$MANIFEST" >> "$kept"
+  tail -n "$KEEP_OFFSITE" "$MANIFEST" | while read -r name; do offsite_name "$name" && echo "$name"; done >> "$kept"
   mv "$kept" "$MANIFEST"
 }
 

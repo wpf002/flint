@@ -17,7 +17,8 @@
 #                                            folder and a scratch database, with no
 #                                            launchd, no installs and no sign-ins.
 #                                            apps/studio/test/rebuild_rehearse.test.sh
-#                                            runs it on every deploy.
+#                                            runs it every week, and in every deploy
+#                                            that changes what a rebuild is made of.
 #     rebuild.sh --stop <scratch folder>     Stop a rehearsal left running and remove it.
 #
 #   Options:
@@ -39,56 +40,96 @@
 #     approval key) are never in a backup: the rebuild ends by naming them.
 #
 # Safety: a backup is opened only into a folder nobody else can read, and its
-# opened copy is removed when the rebuild ends. Nothing from a backup is ever
-# run: settings are read as text and checked against settings.manifest, scripts
-# lose their execute bit, links are dropped, and connectors are rebuilt from
-# this repo. The database is restored as its owner role, never a superuser. A
-# rebuild never replaces a Flint database that is already there (that is
+# opened copy is removed when the rebuild ends. A backup is encrypted, not
+# signed: whoever can write to the offsite folder can put a file there that
+# opens with your key. So nothing from a backup is trusted to be what Flint
+# wrote:
+#   - only the folders that hold your data are unpacked, by name (UNPACK below).
+#     Everything else in the archive stays in it: settings files, connector
+#     lists, tokens, code, whatever case their names are written in;
+#   - settings are read as text and checked one by one against
+#     settings.manifest; scripts lose their execute bit; links are dropped;
+#     connectors are rebuilt from this repo;
+#   - the key future backups are encrypted to is worked out from YOUR key on the
+#     MacBook, never read from the backup;
+#   - the database is restored by a role that owns nothing else, compared with a
+#     database built from this repo's migrations, and only then put into use
+#     (apps/runtime, restore.ts).
+# A rebuild never replaces a Flint database that is already there (that is
 # `restore-production`, docs/RECOVERY.md). Every line this prints is a sentence;
 # no secret is ever printed (one exception, by design: the one-time code for
 # enrolling your approval key).
 set -u
 setopt pipefail
+umask 077   # everything this makes is its owner's alone unless it says otherwise
 
 NODE_VERSION="v24.15.0"   # matches the PATH baked into the repo's LaunchAgent files
 
 # ==== the toolchain: runs on the new Mac before the repo is there, so it stands alone ====
+# checkout_deployed <checkout> [<commit> [<commit>]]: set Flint's code to the commit the old Mac was
+# running: the later of the ones the backup names, when main holds any of them; otherwise main's
+# newest, which is then tested before it is installed. A checkout with changes of its own (files
+# changed, or commits main does not have) is left exactly as it is, and that is a refusal.
+checkout_deployed() {
+  emulate -L zsh
+  local dir=$1 want= sha
+  git -C "$dir" fetch --quiet origin main || { print -r -- "Flint's code could not be brought up to date."; return 1; }
+  if [[ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]] || ! git -C "$dir" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    print -r -- "The flint folder on the new Mac has changes of its own, so Flint left it alone and stopped. Nothing was changed."
+    return 1
+  fi
+  for sha in "${2:-}" "${3:-}"; do
+    [[ $sha =~ '^[0-9a-f]{40}$' ]] && git -C "$dir" merge-base --is-ancestor "$sha" origin/main 2>/dev/null || continue
+    if [[ -z $want ]] || git -C "$dir" merge-base --is-ancestor "$want" "$sha" 2>/dev/null; then want=$sha; fi
+  done
+  if [[ -n $want ]]; then
+    git -C "$dir" checkout --quiet -B main "$want" || { print -r -- "Flint's code could not be set to the version the old Mac was running."; return 1; }
+    print -r -- "Flint's code is the version the old Mac was running."
+  else
+    git -C "$dir" checkout --quiet -B main origin/main || { print -r -- "Flint's code could not be brought up to date."; return 1; }
+    print -r -- "The backup does not say which version the old Mac was running, so Flint uses the newest and tests it before installing it."
+  fi
+}
+# (For the test of that alone: it needs no Mac set up, only a checkout.)
+if [[ ${1:-} == --checkout-deployed ]]; then checkout_deployed "${2:-}" "${3:-}" "${4:-}"; exit $?; fi
+
+# toolchain <repo address> [<commit> [<commit>]]: what Flint runs on, and Flint's code at the
+# commit the old Mac was running. It never resets or overwrites a checkout that is already there
+# with changes of its own.
 toolchain() {
   emulate -L zsh
-  local repo_url=${1:-https://github.com/wpf002/flint.git}
+  local repo_url=${1:-https://github.com/wpf002/flint.git} formula
   [[ $repo_url =~ '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(\.git)?$' ]] || { print -r -- "That is not a GitHub address Flint can clone from."; return 1; }
   [[ "$(uname -s)" == Darwin ]] || { print -r -- "Flint rebuilds only onto a Mac."; return 1; }
   if ! command -v brew >/dev/null 2>&1 && [[ ! -x /opt/homebrew/bin/brew ]]; then
-    print -r -- "Installing Homebrew needs this Mac's password once."
+    print -r -- "Installing Homebrew needs the new Mac's password once."
     sudo -v || { print -r -- "Flint could not get permission to install Homebrew."; return 1; }
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >/dev/null 2>&1 \
-      || { print -r -- "Homebrew did not install. Install it from brew.sh and run this again."; return 1; }
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >/dev/null 2>&1
+    # The download can fail and leave bash with nothing to run, which is not an error to bash.
+    [[ -x /opt/homebrew/bin/brew ]] || command -v brew >/dev/null 2>&1 || { print -r -- "Homebrew did not install. Install it from brew.sh and run this again."; return 1; }
   fi
   eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)"
   print -r -- "Flint is installing what it runs on. This takes a few minutes."
-  local formula
   for formula in git postgresql@17 ollama tailscale age uv; do
     brew list --formula "$formula" >/dev/null 2>&1 || brew install --quiet "$formula" >/dev/null 2>&1 \
       || { print -r -- "The package $formula did not install. Run this to see why:"; print -r -- "  brew install $formula"; return 1; }
   done
   export NVM_DIR="$HOME/.nvm"
   [[ -s $NVM_DIR/nvm.sh ]] || curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh 2>/dev/null | PROFILE=/dev/null bash >/dev/null 2>&1
-  [[ -s $NVM_DIR/nvm.sh ]] || { print -r -- "Node's installer did not finish. Check this Mac's internet connection and run this again."; return 1; }
+  [[ -s $NVM_DIR/nvm.sh ]] || { print -r -- "Node's installer did not finish. Check the new Mac's internet connection and run this again."; return 1; }
   source "$NVM_DIR/nvm.sh"
   nvm install "$NODE_VERSION" >/dev/null 2>&1 && nvm alias default "$NODE_VERSION" >/dev/null 2>&1 && nvm use "$NODE_VERSION" >/dev/null 2>&1 \
     || { print -r -- "Node $NODE_VERSION did not install."; return 1; }
   corepack enable >/dev/null 2>&1 || true
-  if [[ -d $HOME/flint/.git ]]; then
-    git -C "$HOME/flint" fetch --quiet origin main && git -C "$HOME/flint" reset --hard --quiet origin/main \
-      || { print -r -- "Flint's code could not be brought up to date."; return 1; }
-  else
+  if [[ ! -d $HOME/flint/.git ]]; then
     git clone --quiet "$repo_url" "$HOME/flint" || { print -r -- "Flint's code could not be downloaded."; return 1; }
   fi
+  checkout_deployed "$HOME/flint" "${2:-}" "${3:-}" || return 1
   ( cd "$HOME/flint" && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm install --frozen-lockfile >/dev/null 2>&1 ) \
     || { print -r -- "Flint's code downloaded, and its packages did not install."; return 1; }
-  print -r -- "This Mac has what Flint runs on, and Flint's code."
+  print -r -- "The new Mac has what Flint runs on, and Flint's code."
 }
-if [[ ${1:-} == --toolchain ]]; then toolchain "${2:-}"; exit $?; fi
+if [[ ${1:-} == --toolchain ]]; then toolchain "${2:-}" "${3:-}" "${4:-}"; exit $?; fi
 
 SELF=${0:A}
 HERE=${0:A:h}
@@ -97,9 +138,10 @@ source "$HERE/recovery_lib.sh"
 QUIET="$REPO/test-support/quiet-bin"
 STANDINS="$HERE/rehearsal"
 TMP="${${TMPDIR:-/tmp}%/}"
+TMP=${TMP:A}
 
 # ==== arguments ====
-MODE= ARG= OFFSITE= KEY= GIVEN_BUNDLE= MODEL= WITHOUT_DB=0 REPLACE=0 KEEP_RUNNING=0
+MODE= ARG= OFFSITE= KEY= GIVEN_BUNDLE= MODEL= WITHOUT_DB=0 REPLACE=0 KEEP_RUNNING=0 VIA_TO=0
 usage="Run this as rebuild.sh --to you@new-mac.local on the MacBook. The top of the script lists the other ways to run it."
 while (( $# > 0 )); do
   case $1 in
@@ -114,6 +156,7 @@ while (( $# > 0 )); do
     --without-database) WITHOUT_DB=1; shift ;;
     --replace-existing) REPLACE=1; shift ;;
     --keep-running) KEEP_RUNNING=1; shift ;;
+    --from-another-mac) VIA_TO=1; shift ;;   # --to adds it: what this prints is read on the MacBook's screen
     *) refuse "$usage" ;;
   esac
 done
@@ -132,7 +175,8 @@ timed() { # <name>: record how long the step since the last call took (the rehea
 abs() { # a path made absolute, in REPLY (the path itself need not exist yet)
   emulate -L zsh
   if [[ $1 == /* ]]; then REPLY=$1; else REPLY="$PWD/$1"; fi
-  REPLY=${REPLY:a}
+  # :A, not :a: a link in the way is followed, so two names for one folder compare equal.
+  REPLY=${REPLY:A}
 }
 empty_or_absent() { [[ ! -e $1 ]] || { [[ -d $1 && ! -L $1 ]] && [[ -z "$(ls -A "$1" 2>/dev/null)" ]]; }; }
 private() { (( ( 8#$(/usr/bin/stat -f %Lp "$1") & 8#077 ) == 0 )); }   # nobody but its owner can read or write it
@@ -185,7 +229,9 @@ age_open() {
   errf="$(mktemp "$TMP/flint-age.XXXXXX")" || return 3
   ( umask 077; "$AGE" -d -i "$1" -o "$3.partial" -- "$2" ) 2>"$errf"; st=$?
   if [[ $st == 0 && -s $3.partial ]]; then
-    rm -f "$errf"; chmod 600 "$3.partial" && mv -f "$3.partial" "$3"; return 0
+    rm -f "$errf"
+    chmod 600 "$3.partial" && mv -f "$3.partial" "$3" && return 0
+    rm -f "$3.partial"; return 3
   fi
   rm -f "$3.partial"
   if grep -q 'no identity matched' "$errf" 2>/dev/null; then rm -f "$errf"; return 2; fi
@@ -195,39 +241,81 @@ age_open() {
 # Every member of a files archive must stay inside the folder it is unpacked
 # into: a plain file, a folder or a link, never a path that climbs out, and
 # never a path that passes through a link the same archive carries (the way an
-# archive writes outside its folder). Links themselves are dropped after unpacking.
+# archive writes outside its folder). Names are compared as the disk will see
+# them: `./a`, `a` and `a/` are one name, and so are `MCP.json` and `mcp.json`
+# (this disk does not tell upper case from lower), so an archive that holds two
+# names for one place is refused. Links themselves are dropped after unpacking.
+# An archive larger than any backup of Flint's could be is refused too.
+# On success ARCHIVE_NAMES holds its members' names (as the disk will see them,
+# in their own case) and ARCHIVE_BYTES what they add up to unpacked.
+ARCHIVE_MAX_BYTES=$(( 200 * 1024 * 1024 * 1024 ))   # unpacked; the adapters are the bulk of a real one
+ARCHIVE_MAX_FILES=2000000
+typeset -ga ARCHIVE_NAMES
+ARCHIVE_BYTES=0
 archive_is_safe() {
   emulate -L zsh
-  local -a kinds names links
-  local i link
+  local -a kinds names links fields
+  local -A seen
+  local i link name total=0 size
+  ARCHIVE_NAMES=() ARCHIVE_BYTES=0
   kinds=("${(@f)$(/usr/bin/tar -tvzf "$1" 2>/dev/null)}") || return 1
   names=("${(@f)$(/usr/bin/tar -tzf "$1" 2>/dev/null)}") || return 1
-  (( ${#names} > 0 && ${#names} == ${#kinds} )) || return 1
+  (( ${#names} > 0 && ${#names} == ${#kinds} && ${#names} <= ARCHIVE_MAX_FILES )) || return 1
   for (( i = 1; i <= ${#names}; i++ )); do
     [[ ${kinds[i][1]} == [-dl] ]] || return 1
     [[ ${kinds[i]} == *' link to '* ]] && return 1
-    [[ ${names[i]} == /* || ${names[i]} == .. || ${names[i]} == ../* || ${names[i]} == */../* || ${names[i]} == */.. ]] && return 1
-    [[ ${kinds[i][1]} == l ]] && links+=("${names[i]%/}")
+    name=${names[i]}
+    [[ $name == /* || $name == .. || $name == ../* || $name == */../* || $name == */.. || $name == *$'\n'* ]] && return 1
+    # As the disk will see it: no leading ./, no doubled or trailing slash.
+    while [[ $name == ./* ]]; do name=${name#./}; done
+    while [[ $name == *//* ]]; do name=${name//\/\//\/}; done
+    name=${name%/}
+    [[ $name == */./* || $name == */. ]] && return 1
+    names[i]=$name
+    [[ -z $name || $name == . ]] && continue   # the folder itself
+    # A folder may be listed more than once; a file or a link may not share its place with anything, in any case.
+    if [[ -n ${seen[${name:l}]:-} ]]; then
+      [[ ${seen[${name:l}]} == "d $name" && ${kinds[i][1]} == d ]] || return 1
+    fi
+    seen[${name:l}]="${kinds[i][1]} $name"
+    [[ ${kinds[i][1]} == l ]] && links+=("${name:l}")
+    if [[ ${kinds[i][1]} == - ]]; then
+      fields=(${=kinds[i]})
+      size=${fields[5]:-0}
+      [[ $size == <-> ]] || return 1
+      total=$(( total + size ))
+    fi
   done
+  (( total <= ARCHIVE_MAX_BYTES )) || return 1
   for link in $links; do
     for (( i = 1; i <= ${#names}; i++ )); do
-      [[ ${names[i]} == $link/* ]] && return 1
+      [[ ${names[i]:l} == $link/* ]] && return 1
     done
   done
+  ARCHIVE_NAMES=("${(@)names:#}")
+  ARCHIVE_BYTES=$total
   return 0
 }
 
+BUNDLE_VERSION=2   # what --unseal writes and --from reads: a folder made by another version is opened again, never guessed at
+UNSEALING=         # the folder --unseal is filling, removed if it is interrupted
 unseal() { # <offsite folder> <key file> <bundle folder>
   emulate -L zsh
-  local offsite=$1 key=$2 bundle=$3 name st when files_from= dump_from= dump_dir counts_note=
-  need_tool age "The program age is not installed, and Flint needs it to open a backup. Install it with: brew install age"; AGE=$REPLY
+  local offsite=$1 key=$2 bundle=$3 name st when files_from= dump_from= dump_dir counts_note= recipient
+  need_tool age "The program age is not installed, and Flint needs it to open a backup. Install it with this command:" "  brew install age"; AGE=$REPLY
+  need_tool age-keygen "The program age-keygen is not installed, and Flint needs it to read your backup key. Install it with this command:" "  brew install age"; AGE_KEYGEN=$REPLY
   [[ -f $key && ! -L $key ]] || refuse "The backup key file is not there. Name it with --key, followed by the file."
   [[ -O $key ]] || refuse "The backup key file belongs to someone else on this Mac, so Flint will not use it."
-  private "$key" || refuse "Others on this Mac can read your backup key. Fix that first with: chmod 600 ${(q-)key}"
+  private "$key" || refuse "Others on this Mac can read your backup key. Fix that first with this command:" "  chmod 600 ${(q-)key}"
   grep -q '^AGE-SECRET-KEY-1' "$key" 2>/dev/null || refuse "That file is not an age key."
+  # The public half, worked out from the key itself: what the rebuilt Mac encrypts its backups to.
+  # It is never read from a backup, where anyone who can write to the offsite folder could have put their own.
+  recipient="$("$AGE_KEYGEN" -y "$key" 2>/dev/null)" && [[ $recipient =~ '^age1[0-9a-z]{50,80}$' ]] || refuse "That file is not an age key."
   [[ -d $offsite ]] || refuse "The backup folder is not there. Check that iCloud Drive is signed in on this Mac, or name the folder with --offsite."
   empty_or_absent "$bundle" || refuse "The folder to open the backups into is not empty. Choose a new one."
   mkdir -p -m 700 "$bundle" && chmod 700 "$bundle" || refuse "Flint could not make the folder to open the backups into."
+  # Interrupted part-way, the half-made folder of opened backups goes: they are not encrypted.
+  UNSEALING=$bundle
 
   # 1. Flint's files: the newest archive that opens and is whole.
   for name in ${(f)"$(candidates "$offsite" "$FILES_NAME")"}; do
@@ -242,7 +330,12 @@ unseal() { # <offsite folder> <key file> <bundle folder>
       rm -rf "${bundle:?}"
       refuse "This key does not open the backups. They were made for a different key."
     fi
-    if [[ $st == 0 ]] && archive_is_safe "$bundle/files.tar.gz"; then files_from=$name; break; fi
+    if [[ $st == 0 ]]; then
+      if archive_is_safe "$bundle/files.tar.gz"; then files_from=$name; break; fi
+      rm -f "$bundle/files.tar.gz"
+      say "The files backup from $when holds something a backup of Flint's never does, so Flint did not use it and is using the one before it."
+      continue
+    fi
     rm -f "$bundle/files.tar.gz"
     say "The files backup from $when is damaged, so Flint is using the one before it."
   done
@@ -285,9 +378,10 @@ unseal() { # <offsite folder> <key file> <bundle folder>
   (
     umask 077
     {
-      print -r -- "version=1"
+      print -r -- "version=$BUNDLE_VERSION"
       print -r -- "files=$files_from"
       print -r -- "database=${dump_from:-none}"
+      print -r -- "recipient=$recipient"
     } > "$bundle/bundle.info"
     : > "$bundle/MANIFEST.sha256"
     for name in "$bundle"/*(N); do
@@ -296,6 +390,7 @@ unseal() { # <offsite folder> <key file> <bundle folder>
       print -r -- "$REPLY  ${name:t}" >> "$bundle/MANIFEST.sha256"
     done
   ) || { rm -rf "${bundle:?}"; refuse "Flint could not finish the folder of opened backups."; }
+  UNSEALING=
   when_of "$files_from"
   say "Flint opened the files backup from $REPLY."
   if [[ -n $dump_from ]]; then
@@ -312,7 +407,7 @@ unseal() { # <offsite folder> <key file> <bundle folder>
 verify_bundle() {
   emulate -L zsh
   local bundle=$1 line sum name
-  local -A listed
+  local -A listed sums
   [[ -d $bundle && ! -L $bundle && -O $bundle ]] || refuse "The folder of opened backups is not there, or is not yours."
   private "$bundle" || refuse "Others on this Mac can read the folder of opened backups. Open the backups again into a new folder."
   [[ -f $bundle/MANIFEST.sha256 && -f $bundle/bundle.info && -f $bundle/files.tar.gz ]] || refuse "That folder is not one that rebuild.sh --unseal made."
@@ -321,25 +416,35 @@ verify_bundle() {
     sum=$match[1] name=$match[2]
     [[ -f $bundle/$name && ! -L $bundle/$name ]] || refuse "The opened backups are incomplete. Open the backups again."
     sha_of "$bundle/$name" && [[ $REPLY == $sum ]] || refuse "An opened backup has changed since it was opened, so Flint will not restore from it. Open the backups again."
-    listed[$name]=1
+    listed[$name]=1 sums[$name]=$sum
   done < "$bundle/MANIFEST.sha256"
   for name in "$bundle"/*(DN); do
     [[ ${name:t} == MANIFEST.sha256 || -n ${listed[${name:t}]:-} ]] || refuse "The folder of opened backups holds a file that was not there when it was made. Open the backups again."
   done
   [[ -n ${listed[files.tar.gz]:-} && -n ${listed[bundle.info]:-} ]] || refuse "The opened backups are incomplete. Open the backups again."
+  env_value "$bundle/bundle.info" version && [[ $REPLY == $BUNDLE_VERSION ]] || refuse "The opened backups were made by another version of this script. Open the backups again."
+  env_value "$bundle/bundle.info" recipient && [[ $REPLY =~ '^age1[0-9a-z]{50,80}$' ]] || refuse "The opened backups are incomplete. Open the backups again."
+  BUNDLE_RECIPIENT=$REPLY
   env_value "$bundle/bundle.info" database || refuse "The opened backups are incomplete. Open the backups again."
-  BUNDLE_DUMP=
+  BUNDLE_DUMP= BUNDLE_DUMP_SHA=
   if [[ $REPLY != none ]]; then
     [[ $REPLY =~ $DUMP_NAME && -n ${listed[${REPLY%.age}]:-} ]] || refuse "The opened backups are incomplete. Open the backups again."
     BUNDLE_DUMP="$bundle/${REPLY%.age}"
+    # The dump's fingerprint, taken when the MacBook opened it: the restore checks the file against it again.
+    BUNDLE_DUMP_SHA=${sums[${REPLY%.age}]}
   fi
 }
 
 # ==== --stop: end a rehearsal that was left running, and remove it ====
+# The marker a rehearsal leaves in its folder names that folder, so a marker copied or
+# planted somewhere else stops nothing. The socket folder it names must be one this
+# script makes: directly inside the temp folder, with its own prefix and nothing else.
 stop_rehearsal() {
   emulate -L zsh
-  local dir=$1 sock
-  [[ -n $dir && -f $dir/.flint-rehearsal && -O $dir/.flint-rehearsal ]] || refuse "That folder is not a Flint rebuild rehearsal, so Flint left it alone."
+  local dir=$1 sock marked
+  [[ -n $dir && -d $dir && ! -L $dir && -f $dir/.flint-rehearsal && ! -L $dir/.flint-rehearsal && -O $dir/.flint-rehearsal ]] || refuse "That folder is not a Flint rebuild rehearsal, so Flint left it alone."
+  marked="$(<"$dir/.flint-rehearsal")"
+  [[ $marked == $dir ]] || refuse "That folder is not a Flint rebuild rehearsal, so Flint left it alone."
   FLINT_REHEARSAL_STATE="$dir/state" /bin/zsh "$STANDINS/launchctl" rehearsal-stop-all 2>/dev/null
   if [[ -f $dir/pg/postmaster.pid ]]; then
     need_tool pg_ctl "The program pg_ctl is missing, so Flint could not stop the rehearsal's database."
@@ -347,9 +452,10 @@ stop_rehearsal() {
   fi
   if [[ -r $dir/state/socket-dir ]]; then
     sock="$(<"$dir/state/socket-dir")"
-    [[ $sock == $TMP/flint-rh.* ]] && rm -rf "${sock:?}"
+    [[ ${sock:h} == $TMP && ${sock:t} =~ '^flint-rh\.[A-Za-z0-9]{6}$' && -d $sock && ! -L $sock && -O $sock ]] && rm -rf "${sock:?}"
   fi
   rm -rf "${dir:?}"
+  [[ ! -e $dir ]] || refuse "Flint could not remove the rehearsal's folder."
 }
 
 # ==== the modes that only open or move backups ====
@@ -366,37 +472,98 @@ if [[ $MODE == unseal ]]; then
   abs "$ARG"; bundle=$REPLY
   [[ -n $OFFSITE ]] || { default_offsite; OFFSITE=$REPLY; }
   [[ -n $KEY ]] || { default_key; KEY=$REPLY; }
+  trap '[[ -n $UNSEALING ]] && rm -rf "${UNSEALING:?}"' EXIT
+  trap 'exit 130' INT TERM HUP
   unseal "$OFFSITE" "$KEY" "$bundle"
   say "The opened backups are in ${bundle}. They are not encrypted: remove that folder when the rebuild is done."
   exit 0
 fi
 
+# What the new Mac is asked before anything is sent to it. Fixed text, run by /bin/sh there with
+# one argument (1 when --replace-existing was given). It prints the Mac's own id and ends with:
+#   0 fit for a rebuild; 10 not a Mac; 11 FileVault is off; 12 nobody is logged in at its screen;
+#   13 it already has Flint's files; 15 Flint is running on it.
+# One line, so that it is one line wherever it is written down. In order: a Mac; its own id; FileVault;
+# a login session; a rebuild that stopped part-way here is run again whatever it left (its own marker
+# says so); Flint running; Flint's files, unless the owner said to rebuild over them.
+REMOTE_PREFLIGHT='[ "$(uname -s)" = Darwin ] || exit 10; id="$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | /usr/bin/awk -F\" "/IOPlatformUUID/ { print \$4 }")"; echo "flint-preflight id=$id"; /usr/bin/fdesetup status 2>/dev/null | /usr/bin/grep -q "FileVault is On" || exit 11; /bin/launchctl print "gui/$(/usr/bin/id -u)" >/dev/null 2>&1 || exit 12; [ -f "$HOME/.flint/.rebuild-in-progress" ] && exit 0; /bin/launchctl list 2>/dev/null | /usr/bin/grep -q "com\.flint\." && exit 15; if [ "$1" != 1 ]; then [ -e "$HOME/.flint" ] && exit 13; ls "$HOME/Library/LaunchAgents"/com.flint.*.plist >/dev/null 2>&1 && exit 13; fi; exit 0'
+
+# The commits the old Mac was running, as its nightly backup wrote them into the settings snapshot
+# (settings_manifest.sh): up to two, each checked for shape. Nothing else is read from the archive here.
+deployed_commits() { # <files archive>: the commits in REPLY, space-separated (empty when the backup names none)
+  emulate -L zsh
+  local kind what sha rest
+  local -a found
+  /usr/bin/tar -xzOf "$1" ./settings-snapshot.tsv 2>/dev/null | while IFS=$'\t' read -r kind what sha rest; do
+    [[ $kind == deployed && $what == (server|runtime) && $sha =~ '^[0-9a-f]{40}$' && -z $rest ]] && found+=("$sha")
+  done
+  REPLY="${(j: :)${(u)found}}"
+}
+
 if [[ $MODE == to ]]; then
-  # The MacBook's half: open here, send the opened copies, rebuild there. The key is never sent.
+  # The MacBook's half: ask the new Mac whether it is fit, open the backups here, send the opened
+  # copies, rebuild there. The key is never sent, and nothing is sent to a Mac that is not fit.
   target=$ARG
   [[ $target =~ '^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9.-]{0,252}$' ]] || refuse "Name the new Mac as you@its-name, for example willfoti@new-studio.local."
   [[ -n $OFFSITE ]] || { default_offsite; OFFSITE=$REPLY; }
   [[ -n $KEY ]] || { default_key; KEY=$REPLY; }
   work="$(mktemp -d "$TMP/flint-rebuild.XXXXXX")" || refuse "Flint could not make a working folder."
   chmod 700 "$work"
-  ssh_opts=(-o ConnectTimeout=20 -o ControlMaster=auto -o "ControlPath=$work/ssh-%C" -o ControlPersist=900)
-  cleanup_to() { ssh "${ssh_opts[@]}" -O exit -- "$target" >/dev/null 2>&1; rm -rf "${work:?}"; }
+  # The connection's own socket: its path must be short, and the temp folder's is not.
+  ctl="$(mktemp -d /tmp/flint-ssh.XXXXXX)" || refuse "Flint could not make a working folder."
+  chmod 700 "$ctl"
+  ssh_opts=(-o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ControlMaster=auto -o "ControlPath=$ctl/%C" -o ControlPersist=900)
+  sent=0 finished=0
+  cleanup_to() {
+    # The opened backups are not encrypted: they leave the new Mac again unless the rebuild there finished
+    # (which removes them itself), and they always leave this one.
+    if (( sent && ! finished )); then
+      ssh "${ssh_opts[@]}" -- "$target" 'rm -rf flint-rebuild-bundle flint-rebuild-toolchain.sh' >/dev/null 2>&1 \
+        || say "The opened backups may still be in the folder flint-rebuild-bundle in the new Mac's home folder. Running this again removes them first."
+    fi
+    ssh "${ssh_opts[@]}" -O exit -- "$target" >/dev/null 2>&1
+    rm -rf "${work:?}" "${ctl:?}"
+  }
   trap cleanup_to EXIT
-  trap 'exit 130' INT TERM
+  trap 'exit 130' INT TERM HUP
+  # This Mac stays awake for as long as this runs: a rebuild is long, and a sleeping MacBook drops the connection.
+  [[ -x /usr/bin/caffeinate ]] && /usr/bin/caffeinate -ims -w $$ >/dev/null 2>&1 &!
+
+  say "Flint is connecting to the new Mac. Enter that Mac's password when it asks."
+  replace_word=0; (( REPLACE )) && replace_word=1
+  answer="$(ssh "${ssh_opts[@]}" -- "$target" "/bin/sh -c ${(q-)REMOTE_PREFLIGHT} flint-preflight $replace_word")"; st=$?
+  case $st in
+    0) ;;
+    10) refuse "Flint rebuilds only onto a Mac. Nothing was sent." ;;
+    11) refuse "FileVault is off on the new Mac, and a rebuild puts your memory and history on its disk. Turn FileVault on there in System Settings, then run this again. Nothing was sent." ;;
+    12) refuse "Log in at the new Mac's own screen first, and leave it logged in. Flint runs in your login session. Nothing was sent." ;;
+    13) refuse "That Mac already has Flint's files. Nothing was sent, and nothing there was changed. A rebuild is for a new Mac: to rebuild over what is there, add --replace-existing." ;;
+    15) refuse "Flint is running on that Mac, so it is not a new Mac. Nothing was sent, and nothing there was changed." ;;
+    *) refuse "Flint could not reach the new Mac. Turn on Remote Login there (System Settings, General, Sharing), check its name, and run this again. Nothing was sent." ;;
+  esac
+  [[ $answer =~ 'flint-preflight id=([A-Za-z0-9-]{8,64})' ]] || refuse "Flint could not check the new Mac, so it sent nothing."
+  their_id=$match[1]
+  my_id="$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | /usr/bin/awk -F'"' '/IOPlatformUUID/ { print $4 }')"
+  [[ $their_id != $my_id ]] || refuse "That is this Mac. Name the new Mac. Nothing was changed."
+
   unseal "$OFFSITE" "$KEY" "$work/bundle"
   repo_url="$(git -C "$REPO" remote get-url origin 2>/dev/null)" || repo_url=
   [[ $repo_url =~ '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(\.git)?$' ]] || repo_url=https://github.com/wpf002/flint.git
-  say "Flint is connecting to the new Mac. Enter that Mac's password when it asks."
-  ssh "${ssh_opts[@]}" -- "$target" 'mkdir -p -m 700 flint-rebuild-bundle && chmod 700 flint-rebuild-bundle && [ -z "$(ls -A flint-rebuild-bundle)" ]' \
-    || refuse "Flint could not reach the new Mac, or a rebuild's files are already there. Turn on Remote Login on the new Mac, remove the folder flint-rebuild-bundle from its home folder, and run this again."
-  sent=("$work/bundle"/*(DN))
+  deployed_commits "$work/bundle/files.tar.gz"; commits=(${=REPLY})
+  # A folder left there by an earlier try is this script's own, and goes first.
+  ssh "${ssh_opts[@]}" -- "$target" 'rm -rf flint-rebuild-bundle flint-rebuild-toolchain.sh && mkdir -m 700 flint-rebuild-bundle' \
+    || refuse "Flint could not make a folder for the backups on the new Mac. Nothing was sent."
+  sent=1
+  files=("$work/bundle"/*(DN))
   # ${target}, in braces: a bare $target:f... would be read by zsh as a modifier on the name.
-  scp -q "${ssh_opts[@]}" -- "${sent[@]}" "${target}:flint-rebuild-bundle/" || refuse "The backups did not reach the new Mac. Nothing there was changed."
+  scp -q "${ssh_opts[@]}" -- "${files[@]}" "${target}:flint-rebuild-bundle/" || refuse "The backups did not reach the new Mac. Nothing there was changed."
   scp -q "${ssh_opts[@]}" -- "$SELF" "${target}:flint-rebuild-toolchain.sh" || refuse "The backups did not reach the new Mac. Nothing there was changed."
   say "The backups are on the new Mac. Flint is setting it up."
-  ssh -t "${ssh_opts[@]}" -- "$target" "/bin/zsh flint-rebuild-toolchain.sh --toolchain ${(q-)repo_url}; st=\$?; rm -f flint-rebuild-toolchain.sh; exit \$st" \
-    || refuse "The new Mac could not be set up. The opened backups are still in flint-rebuild-bundle in its home folder: remove that folder if you are not trying again."
-  remote_args=(--from flint-rebuild-bundle)
+  toolchain_args=("$repo_url" "${commits[@]}")
+  quoted_toolchain=(${(q-)toolchain_args})
+  ssh -t "${ssh_opts[@]}" -- "$target" "/bin/zsh flint-rebuild-toolchain.sh --toolchain ${(j: :)quoted_toolchain}; st=\$?; rm -f flint-rebuild-toolchain.sh; exit \$st" \
+    || refuse "The new Mac could not be set up. What it printed above says why. Running this command again starts it over."
+  remote_args=(--from flint-rebuild-bundle --from-another-mac)
   [[ -n $MODEL ]] && remote_args+=(--model "$MODEL")
   (( REPLACE )) && remote_args+=(--replace-existing)
   (( WITHOUT_DB )) && remote_args+=(--without-database)
@@ -404,6 +571,7 @@ if [[ $MODE == to ]]; then
   quoted_args=(${(q-)remote_args})
   ssh -t "${ssh_opts[@]}" -- "$target" "/bin/zsh flint/apps/studio/rebuild.sh ${(j: :)quoted_args}" \
     || refuse "The rebuild stopped before it finished. What it printed above says why. Running this command again starts it over."
+  finished=1
   exit 0
 fi
 
@@ -423,12 +591,14 @@ if (( REHEARSE )) && [[ -z ${FLINT_REHEARSAL_INNER:-} ]]; then
   [[ $SCRATCH != $real_home && $SCRATCH != / ]] || refuse "Choose a scratch folder for the rehearsal, not your home folder."
   empty_or_absent "$SCRATCH" || refuse "The rehearsal's folder is not empty. Choose a new one."
   [[ -d ${SCRATCH:h} ]] || refuse "The folder the rehearsal's folder would go in is not there."
-  (( ! REPLACE )) || refuse "A rehearsal always starts from an empty scratch folder, so --replace-existing does not apply to it."
+  # A rehearsal starts from an empty scratch folder, so there is nothing to rebuild over, unless it
+  # was told to pretend there is (FLINT_REHEARSAL_EXISTING, which only the tests set).
+  (( ! REPLACE )) || [[ -n ${FLINT_REHEARSAL_EXISTING:-} ]] || refuse "A rehearsal always starts from an empty scratch folder, so --replace-existing does not apply to it."
   for tool in node pnpm; do
     need_tool $tool "The program $tool is not installed, and the rehearsal needs it."
     typeset "TOOL_$tool=$REPLY"
   done
-  need_tool initdb "Postgres 17 is not installed, and the rehearsal needs it. Install it with: brew install postgresql@17"; pg_bin=${REPLY:h}
+  need_tool initdb "Postgres 17 is not installed, and the rehearsal needs it. Install it with this command:" "  brew install postgresql@17"; pg_bin=${REPLY:h}
   [[ -n $OFFSITE ]] && { abs "$OFFSITE"; OFFSITE=$REPLY; }
   [[ -n $KEY ]] && { abs "$KEY"; KEY=$REPLY; }
   [[ -n $GIVEN_BUNDLE ]] && { abs "$GIVEN_BUNDLE"; GIVEN_BUNDLE=$REPLY; }
@@ -436,7 +606,7 @@ if (( REHEARSE )) && [[ -z ${FLINT_REHEARSAL_INNER:-} ]]; then
   [[ -n $KEY || -n $GIVEN_BUNDLE ]] || { default_key; KEY=$REPLY; }
   mkdir -p -m 700 "$SCRATCH" "$SCRATCH/home" "$SCRATCH/state" "$SCRATCH/log" || refuse "Flint could not make the rehearsal's folder."
   chmod 700 "$SCRATCH" "$SCRATCH/home" "$SCRATCH/state" "$SCRATCH/log"
-  : > "$SCRATCH/.flint-rehearsal"
+  print -r -- "$SCRATCH" > "$SCRATCH/.flint-rehearsal"
   # pnpm here is Corepack's; a scratch home has no copy of it, so the rehearsal brings one and never downloads.
   corepack=()
   if [[ -d $real_home/.cache/node/corepack ]]; then
@@ -450,6 +620,7 @@ if (( REHEARSE )) && [[ -z ${FLINT_REHEARSAL_INNER:-} ]]; then
   [[ -n $MODEL ]] && inner+=(--model "$MODEL")
   (( WITHOUT_DB )) && inner+=(--without-database)
   (( KEEP_RUNNING )) && inner+=(--keep-running)
+  (( REPLACE )) && inner+=(--replace-existing)
   rehearsal_path=("$STANDINS" "$QUIET" "${TOOL_node:h}" "${TOOL_pnpm:h}" "$pg_bin" ${(s.:.)${FLINT_TOOL_PATHS-/opt/homebrew/bin}} /usr/bin /bin /usr/sbin /sbin)
   exec /usr/bin/env -i \
     HOME="$SCRATCH/home" USER="$(id -un)" LOGNAME="$(id -un)" TMPDIR="$TMP" LANG=en_US.UTF-8 \
@@ -512,12 +683,22 @@ DATA="$HOME/.flint"
 AGENTS="$HOME/Library/LaunchAgents"
 ME="$(id -un)"
 MARKER="$DATA/.rebuild-in-progress"
+# Read on the MacBook's screen when --to started this: "this Mac" there would be the wrong one.
+MAC="this Mac" MAC_CAP="This Mac"
+(( VIA_TO )) && MAC="the new Mac" MAC_CAP="The new Mac"
+# Working files of this run, removed however it ends. (The rehearsal has its own way out, above.)
+typeset -a WORK_FILES
+if (( ! REHEARSE )); then
+  trap '(( ${#WORK_FILES} )) && rm -f -- "${WORK_FILES[@]}"' EXIT
+  trap 'print -r -- "The rebuild was interrupted. Running the same command again starts it over."; exit 130' INT TERM HUP
+fi
 
 # ---- 1. before anything changes ----------------------------------------------------------
 if (( ! REHEARSE )); then
-  need_tool fdesetup "This Mac cannot say whether FileVault is on, so Flint stopped."
-  "$REPLY" status 2>/dev/null | grep -q 'FileVault is On' || refuse "FileVault is off on this Mac, and a rebuild puts your memory and history on its disk. Turn FileVault on in System Settings, then run this again."
+  need_tool fdesetup "$MAC_CAP cannot say whether FileVault is on, so Flint stopped."
+  "$REPLY" status 2>/dev/null | grep -q 'FileVault is On' || refuse "FileVault is off on $MAC, and a rebuild puts your memory and history on its disk. Turn FileVault on in System Settings, then run this again."
   [[ $REPO == ${${:-$HOME/flint}:A} ]] || refuse "On the new Mac, run the copy of this script that is in the flint folder of your home folder."
+  [[ $HOME != *[\<\>\&\"\'\\]* ]] || refuse "$MAC_CAP's home folder has a character in its name that a LaunchAgent file cannot hold. Nothing was changed."
   # Flint's services are LaunchAgents: they live in your login session, and there is none until you log in at the screen.
   launchctl print "gui/$UID" >/dev/null 2>&1 || refuse "Log in at the new Mac's own screen first, and leave it logged in. Flint runs in your login session. Nothing was changed."
 fi
@@ -529,9 +710,9 @@ if (( REHEARSE )); then
   # The rehearsal only needs to know where these would be: it never runs them.
   OLLAMA_BIN=/opt/homebrew/bin/ollama TAILSCALED_BIN=/opt/homebrew/opt/tailscale/bin/tailscaled
 else
-  need_tool ollama "Ollama is not installed. Install it with: brew install ollama"; OLLAMA_BIN=$REPLY
-  need_tool tailscaled "Tailscale is not installed. Install it with: brew install tailscale"; TAILSCALED_BIN=$REPLY
-  need_tool tailscale "Tailscale is not installed. Install it with: brew install tailscale"; TAILSCALE_BIN=$REPLY
+  need_tool ollama "Ollama is not installed. Install it with this command:" "  brew install ollama"; OLLAMA_BIN=$REPLY
+  need_tool tailscaled "Tailscale is not installed. Install it with this command:" "  brew install tailscale"; TAILSCALED_BIN=$REPLY
+  need_tool tailscale "Tailscale is not installed. Install it with this command:" "  brew install tailscale"; TAILSCALE_BIN=$REPLY
 fi
 manifest_load || exit 1
 
@@ -549,9 +730,10 @@ timed backups
 # Your settings, read out of the files backup before anything is unpacked, so that
 # whatever is missing is known while nothing has changed yet. Only the ones that are
 # not secrets are in there, and each is checked again here against settings.manifest.
-typeset -a SET_SECRETS SET_OVERRIDE SET_BACKUP SET_SERVER SET_OLLAMA NOT_RESTORED CONNECTORS PRESENT
+typeset -a SET_SECRETS SET_OVERRIDE SET_BACKUP SET_SERVER SET_OLLAMA NOT_RESTORED CONNECTORS PRESENT DEPLOYED
 RESTORED_PORT= RESTORED_MODEL= have_snapshot=0
 snapshot="$(mktemp "$TMP/flint-settings.XXXXXX")" || refuse "Flint could not make a working file."
+WORK_FILES+=("$snapshot")
 if /usr/bin/tar -xzOf "$BUNDLE/files.tar.gz" ./settings-snapshot.tsv > "$snapshot" 2>/dev/null && [[ -s $snapshot ]]; then
   have_snapshot=1
   while IFS=$'\t' read -r kind where name value extra; do
@@ -572,31 +754,40 @@ if /usr/bin/tar -xzOf "$BUNDLE/files.tar.gz" ./settings-snapshot.tsv > "$snapsho
           server.plist)
             if [[ $name == PORT ]]; then RESTORED_PORT=$value
             elif [[ $name == OLLAMA_MODEL ]]; then RESTORED_MODEL=$value
+            elif [[ $name == FLINT_RUNTIME_URL ]]; then :   # the rebuild writes its own
             else SET_SERVER+=("$name=$value"); fi ;;
           ollama.plist) SET_OLLAMA+=("$name=$value") ;;
           *) NOT_RESTORED+=("$name") ;;
         esac ;;
       skipped|unknown) [[ $where =~ '^[A-Za-z0-9._-]{1,60}$' && $name =~ '^[A-Za-z_][A-Za-z0-9_]{0,79}$' ]] && NOT_RESTORED+=("$name") ;;
       connector) [[ $where =~ '^[a-z0-9][a-z0-9_-]{0,39}$' ]] && CONNECTORS+=("$where") ;;
+      deployed) [[ $where == (server|runtime) && $name =~ '^[0-9a-f]{40}$' && -z $value ]] && DEPLOYED+=("$name") ;;
       present) [[ $where =~ '^[A-Za-z0-9._-]{1,60}$' && $name =~ '^[A-Za-z0-9._-]{1,80}$' ]] && manifest_lookup "$where" "$name" && [[ $REPLY == reenter ]] && PRESENT+=("$REPLY2") ;;
     esac
   done < "$snapshot"
 fi
 rm -f "$snapshot"
 (( ! REHEARSE )) && [[ -n $RESTORED_PORT ]] && SERVER_PORT=$RESTORED_PORT
-[[ -n $MODEL ]] || MODEL=$RESTORED_MODEL
+model_restored=0
+[[ -n $MODEL ]] || { MODEL=$RESTORED_MODEL; [[ -n $MODEL ]] && model_restored=1; }
 if [[ -z $MODEL ]]; then
-  (( REHEARSE )) || refuse "The backup does not say which local model Flint uses. Nothing was changed. Run this again and add --model with its name, for example: --model muse-glimmer:30b"
+  (( REHEARSE )) || refuse "The backup does not say which local model Flint uses. Nothing was changed. Run this again and add --model with its name, like this:" "  --model muse-glimmer:30b"
   MODEL=rehearsal-model
 fi
 SET_SERVER+=("OLLAMA_MODEL=$MODEL")
 
 # The Mac must be empty of Flint. Two things are allowed past that: a rebuild that stopped
 # part-way and is being run again (its own marker says so), and the owner's explicit word.
-# (The test of that refusal: a rehearsal can be told to pretend its scratch Mac already has Flint's files.)
-if (( REHEARSE )) && [[ ${FLINT_REHEARSAL_EXISTING:-} == files ]]; then mkdir -p -m 700 "$DATA" && : > "$DATA/already-here"; fi
-# (And of the way past it: a rehearsal can be told to pretend an earlier rebuild stopped part-way here.)
-if (( REHEARSE )) && [[ ${FLINT_REHEARSAL_EXISTING:-} == resume ]]; then mkdir -p -m 700 "$DATA" && : > "$MARKER" && : > "$DATA/left-by-the-first-try"; fi
+# (The tests of all this: a rehearsal can be told to pretend things about its scratch Mac, one or more of
+#   files            it already has Flint's files
+#   database         its database server already has a Flint database
+#   roles            its database server still has Flint's roles from an earlier install
+#   resume           an earlier rebuild stopped part-way here, before it reached the database
+#   resume-database  an earlier rebuild stopped after it had put a database in place.)
+PRETEND=(${(s:,:)${FLINT_REHEARSAL_EXISTING:-}})
+(( REHEARSE )) || PRETEND=()
+if (( ${PRETEND[(Ie)files]} )); then mkdir -p -m 700 "$DATA" && : > "$DATA/already-here"; fi
+if (( ${PRETEND[(Ie)resume]} + ${PRETEND[(Ie)resume-database]} )); then mkdir -p -m 700 "$DATA" && : > "$MARKER" && : > "$DATA/left-by-the-first-try"; fi
 RESUME=0
 [[ -f $MARKER ]] && RESUME=1
 if (( ! RESUME )); then
@@ -604,13 +795,17 @@ if (( ! RESUME )); then
   empty_or_absent "$DATA" || existing+=("its data folder")
   [[ -z "$(print -l "$AGENTS"/com.flint.*.plist(N))" ]] || existing+=("its LaunchAgents")
   if (( ${#existing} )); then
-    (( REPLACE )) || refuse "This Mac already has a Flint (${(j: and :)existing}). Nothing was changed. A rebuild is for a new Mac. To rebuild over what is here, add --replace-existing: the data folder is kept under another name."
+    (( REPLACE )) || refuse "$MAC_CAP already has a Flint (${(j: and :)existing}). Nothing was changed. A rebuild is for a new Mac. To rebuild over what is here, add --replace-existing: the data folder is kept under another name."
+  fi
+  # Nothing of Flint's may be running here: a rebuild is not for a Mac in use, whatever option was given.
+  if (( ! REHEARSE )) && launchctl list 2>/dev/null | grep -q 'com\.flint\.'; then
+    refuse "Flint is running on $MAC, so it is not a new Mac. Nothing was changed."
   fi
 fi
 mkdir -p -m 700 "$LOG" && chmod 700 "$LOG" || refuse "Flint could not make a folder for the rebuild's logs."
 
 # ---- the database server, and whether a Flint database is already in it --------------------
-pg_conf() { # this Mac's own login by socket, every other connection by password on ::1, nothing off this Mac
+pg_conf() { # $MAC's own login by socket, every other connection by password on ::1, nothing off $MAC
   emulate -L zsh
   [[ -f $PG_DATA/pg_hba.conf.before-flint ]] || cp -p "$PG_DATA/pg_hba.conf" "$PG_DATA/pg_hba.conf.before-flint" || return 1
   print -r -- "# Written by Flint (apps/studio/rebuild.sh). The copy from before is pg_hba.conf.before-flint.
@@ -649,7 +844,7 @@ if [[ ! -f $PG_DATA/PG_VERSION ]]; then
   LC_ALL=C "$TOOL_initdb" -D "$PG_DATA" --locale=C -E UTF-8 >"$LOG/initdb.log" 2>&1 || refuse "Flint could not make the database server's data folder. The details are in $LOG/initdb.log."
   fresh_cluster=1
 fi
-[[ "$(<"$PG_DATA/PG_VERSION")" == 17 ]] || refuse "The database server on this Mac is not Postgres 17, so Flint stopped. Nothing was changed."
+[[ "$(<"$PG_DATA/PG_VERSION")" == 17 ]] || refuse "The database server on $MAC is not Postgres 17, so Flint stopped. Nothing was changed."
 if (( fresh_cluster )); then
   pg_conf || refuse "Flint could not write the database server's settings."
   pg_start start || refuse "The database server did not start. The details are in $LOG."
@@ -658,20 +853,39 @@ elif [[ -f $PG_DATA/flint.conf ]]; then
   pg_ready 4 || pg_start start || refuse "The database server did not start. The details are in $LOG."
 else
   # A database server that was here first. Flint looks before it touches anything.
-  pg_ready 4 || pg_start start || refuse "The database server on this Mac did not start, so Flint stopped. Nothing was changed."
-  others="$(pg_admin -c "SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")" || refuse "Flint could not ask the database server on this Mac what it holds, so it stopped. Nothing was changed."
+  pg_ready 4 || pg_start start || refuse "The database server on $MAC did not start, so Flint stopped. Nothing was changed."
+  others="$(pg_admin -c "SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")" || refuse "Flint could not ask the database server on $MAC what it holds, so it stopped. Nothing was changed."
   if [[ $others == 0 ]]; then
     pg_conf || refuse "Flint could not write the database server's settings."
     pg_start restart || refuse "The database server did not start. The details are in $LOG."
   else
-    say "This Mac's database server already holds other databases, so Flint left its settings alone."
+    # Flint's rules about who may write what rest on each role having to give its password. A server that lets
+    # anyone in without one would make them words only, and its settings are not Flint's to change.
+    open_doors="$(pg_admin -c "SELECT count(*) FROM pg_hba_file_rules WHERE auth_method = 'trust'")" || refuse "Flint could not ask the database server on $MAC how it lets programs sign in, so it stopped. Nothing was changed."
+    [[ $open_doors == 0 ]] || refuse "The database server on $MAC holds other databases and lets programs sign in without a password, and Flint's safety rules depend on passwords. Flint left it alone and stopped. Nothing was changed."
+    say "The database server on $MAC already holds other databases, so Flint left its settings alone."
   fi
 fi
-# (The same for the refusal below: a rehearsal can be told to pretend its scratch Mac already has a Flint database.)
-if (( REHEARSE )) && [[ ${FLINT_REHEARSAL_EXISTING:-} == database ]]; then pg_admin -c 'CREATE DATABASE flint' >/dev/null; fi
+if (( ${PRETEND[(Ie)database]} )); then pg_admin -c 'CREATE DATABASE flint' >/dev/null; fi
+if (( ${PRETEND[(Ie)resume-database]} )); then
+  # What the first try did before it stopped: the roles and the databases, and then something in the database.
+  ( cd "$REPO" && PGHOST="$PG_SOCKET" PGPORT="$PG_PORT" PGUSER="$ME" PGDATABASE=postgres pnpm --silent --filter @flint/runtime bootstrap-db --port "$PG_PORT" ) >/dev/null 2>&1 \
+    && "$TOOL_psql" -X -q -At -v ON_ERROR_STOP=1 -h "$PG_SOCKET" -p "$PG_PORT" -U "$ME" -d flint -c 'CREATE TABLE left_by_the_first_try (id integer)' >/dev/null 2>&1 \
+    || refuse "The rehearsal could not set up what an earlier rebuild would have left."
+fi
+if (( ${PRETEND[(Ie)roles]} )); then pg_admin -c 'CREATE ROLE flint_owner LOGIN CREATEDB' -c 'CREATE ROLE flint_app LOGIN' >/dev/null; fi
+ROTATE=0
 if (( ! RESUME )); then
   held="$(pg_admin -c "SELECT count(*) FROM pg_database WHERE datname = 'flint'")" || refuse "Flint could not ask the database server what it holds, so it stopped. Nothing was changed."
-  [[ $held == 0 ]] || refuse "This Mac already has a Flint database. Nothing was changed. A rebuild never replaces a database: to put a backup back into it, see docs/RECOVERY.md."
+  [[ $held == 0 ]] || refuse "$MAC_CAP already has a Flint database. Nothing was changed. A rebuild never replaces a database: to put a backup back into it, see docs/RECOVERY.md."
+  # Flint's database roles left by an earlier install, with no database: found here, before anything changes.
+  roles="$(pg_admin -c "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'flint\_%'")" || refuse "Flint could not ask the database server what it holds, so it stopped. Nothing was changed."
+  if [[ $roles != 0 ]]; then
+    (( REPLACE )) || refuse "The database server on $MAC still has Flint's roles from an earlier install. Nothing was changed. To rebuild over what is here, add --replace-existing: each role gets a new password."
+    ROTATE=1
+  fi
+else
+  ROTATE=1
 fi
 timed database-server
 
@@ -679,43 +893,84 @@ timed database-server
 # From here the Mac changes. The marker lets this same command be run again if it stops part-way.
 stamp="$(date +%Y%m%d-%H%M%S)"
 if (( RESUME )); then
-  say "An earlier rebuild stopped part-way on this Mac. Flint is starting it over."
-  rm -rf "${DATA:?}"
+  say "An earlier rebuild stopped part-way on $MAC. Flint is starting it over."
+  if (( ! REHEARSE )); then
+    # Whatever the first try started is stopped first: nothing may hold the files or the database it left.
+    for plist in "$AGENTS"/com.flint.*.plist(N); do launchctl bootout "gui/$UID/${plist:t:r}" >/dev/null 2>&1; done
+  fi
+  # What the first try left is set aside, not deleted, and removed when this one finishes.
+  mv "$DATA" "$DATA.rebuild-stopped-$stamp" || refuse "Flint could not set aside what the earlier rebuild left, so it stopped."
 elif ! empty_or_absent "$DATA"; then
   mv "$DATA" "$DATA.before-rebuild-$stamp" || refuse "Flint could not set the existing data folder aside, so it stopped."
   say "The Flint data that was here is kept in ${DATA:t}.before-rebuild-$stamp."
 fi
 mkdir -p -m 700 "$DATA" && chmod 700 "$DATA" && : > "$MARKER" || refuse "Flint could not make its data folder."
-# The same list of secret-bearing names the backup leaves out: a file of that kind is never
-# unpacked, even from an archive that somehow carries one.
-secret_names=("${(@f)$(FLINT_BACKUP_DEFINE_ONLY=1 /bin/zsh -c 'source "$1" && print -rl -- "${SECRETS[@]}"' _ "$HERE/backup_flint.sh" 2>/dev/null)}")
-(( ${#secret_names} >= 20 )) || refuse "Flint could not read its own list of secret files, so it stopped before unpacking anything."
-( umask 077; /usr/bin/tar -xzf "$BUNDLE/files.tar.gz" -C "$DATA" "${secret_names[@]}" ) >/dev/null 2>"$LOG/unpack.err" \
-  || refuse "The files backup did not unpack. The details are in $LOG/unpack.err."
+
+# What is unpacked, by name: the folders and files that hold your data, and nothing else. An archive
+# is not trusted to hold only what a backup of Flint's holds (see the top of this file), so a
+# settings file, a connector list, a token or a program in it is simply never unpacked, whatever
+# case its name is written in. The names are matched exactly as written here.
+UNPACK=(memory training eval spend notifications.json settings-snapshot.tsv)   # and the adapters folders under brain
+typeset -a wanted_members left_out
+for name in $ARCHIVE_NAMES; do
+  top=${name%%/*}
+  if (( ${UNPACK[(Ie)$top]} )); then
+    wanted_members+=("./$top")
+  elif [[ $name == brain/adapters*/* ]]; then
+    wanted_members+=("./brain/${${name#brain/}%%/*}")
+  elif [[ $top != brain && $top =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$' ]]; then
+    left_out+=("$top")
+  fi
+done
+wanted_members=(${(u)wanted_members})
+left_out=(${(u)left_out})
+free_kb="$(/bin/df -k "$DATA" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+[[ $free_kb == <-> ]] && (( free_kb * 1024 > ARCHIVE_BYTES + 1024 * 1024 * 1024 )) || refuse "$MAC does not have room for what the backup holds. Free some space, then run this again."
+if (( ${#wanted_members} )); then
+  /usr/bin/tar -xzf "$BUNDLE/files.tar.gz" -C "$DATA" -- "${wanted_members[@]}" >/dev/null 2>"$LOG/unpack.err" \
+    || refuse "The files backup did not unpack. The details are in $LOG/unpack.err."
+fi
 # Nothing from a backup is run, and nothing in it points outside its folder.
-find "$DATA" -type l -delete 2>/dev/null
-find "$DATA" -type f -perm +111 -exec chmod a-x {} + 2>/dev/null
-chmod -R go-rwx "$DATA" 2>/dev/null
-# This Mac's own state, which the old Mac's copy would only confuse: what is deployed, what is
-# built, and the approval key that lived in the old Mac's hardware.
-for stale in runtime/current runtime/migrate-failed runtime-held deploy-retry deploy-hold deploy-events.jsonl \
-  app-installed-tree app-failed-tree app-notified-tree app-pid calendar-installed-tree calendar-failed-tree \
-  approval-key.se tailscale-url.txt tailscaled.sock server.mjs.prev console.html.prev; do
-  rm -rf "${DATA:?}/${stale:?}"
+find "$DATA" -type l -delete 2>"$LOG/unpack.err" || refuse "Flint could not remove the links the backup held, so it stopped."
+find "$DATA" -type f -perm +111 -exec chmod a-x {} + 2>"$LOG/unpack.err" || refuse "Flint could not make the backup's files plain files, so it stopped."
+chmod -R go-rwx "$DATA" 2>"$LOG/unpack.err" || refuse "Flint could not make its data folder private, so it stopped."
+# Checked again on the disk, which does not tell upper case from lower: nothing that came out of the
+# archive may sit where a settings file, a token or a sign-in lives, and no settings file anywhere.
+typeset -a forbidden
+for key in ${(k)MF_CLASS}; do [[ $key == file/* ]] && forbidden+=("${${key#file/}:l}"); done
+(( ${#forbidden} >= 10 )) || refuse "Flint could not read its own list of secret files, so it stopped."
+for f in "$DATA"/*(DN); do
+  [[ ${f:t} == .rebuild-in-progress ]] && continue
+  if (( ${forbidden[(Ie)${${f:t}:l}]} )); then
+    rm -rf "${DATA:?}"
+    refuse "The files backup put a file where one of Flint's secret files lives, which a backup of Flint's never does. Flint removed what it had unpacked and stopped."
+  fi
 done
-# Connectors are code. The restored bundles are removed; the ones this repo has source for are rebuilt below.
-restored_connectors=() dropped_connectors=()
-for f in "$DATA"/connectors/*(DN); do
-  name=${f:t}
-  if [[ $name =~ '^([a-z0-9-]+-server)\.mjs$' && -f $REPO/packages/mcp/connectors/$match[1].ts ]]; then restored_connectors+=("$match[1]")
-  elif [[ $name == *.mjs ]]; then dropped_connectors+=("${name%.mjs}"); fi
-  rm -rf "${f:?}"
+if [[ -n "$(find "$DATA" -iname '*.env' -o -iname '*.env.*' 2>/dev/null | head -1)" ]]; then
+  rm -rf "${DATA:?}"
+  refuse "The files backup holds a settings file, which a backup of Flint's never does. Flint removed what it had unpacked and stopped."
+fi
+# The key the nightly backups on this Mac are encrypted to: yours, as worked out from your key on the MacBook.
+print -r -- "$BUNDLE_RECIPIENT" > "$DATA/backup-age-recipient" && chmod 600 "$DATA/backup-age-recipient" || refuse "Flint could not save the key your backups are encrypted to."
+# Connectors are code, and are never unpacked. The ones the old Mac had that this repo has source for
+# are rebuilt below; the rest are named.
+restored_connectors=() dropped_connectors=() dropped_unnamed=0
+for name in $ARCHIVE_NAMES; do
+  [[ $name == connectors/*.mjs && $name != connectors/*/* ]] || continue
+  name=${${name#connectors/}%.mjs}
+  if [[ $name =~ '^[a-z0-9][a-z0-9-]{0,39}-server$' && -f $REPO/packages/mcp/connectors/$name.ts ]]; then restored_connectors+=("$name")
+  elif [[ $name =~ '^[a-z0-9][a-z0-9_-]{0,39}$' ]]; then dropped_connectors+=("$name")
+  else dropped_unnamed=$(( dropped_unnamed + 1 )); fi
 done
-rm -f "$DATA"/server.mjs "$DATA"/ask.mjs
 say "Your memory, history and Flint's own files are back from the backup."
-restored=$(( ${#SET_SECRETS} + ${#SET_OVERRIDE} + ${#SET_BACKUP} + ${#SET_SERVER} + ${#SET_OLLAMA} ))
+restored=$(( ${#SET_SECRETS} + ${#SET_OVERRIDE} + ${#SET_BACKUP} + ${#SET_SERVER} + ${#SET_OLLAMA} - 1 + model_restored ))
 if (( have_snapshot )); then
-  say "Flint put back $restored of your settings."
+  # Each one by name and value: they came from the backup, and none is a secret (settings.manifest says which may be saved).
+  if (( restored > 0 )); then say "Flint put back $restored of your settings:"; else say "Flint put back none of your settings."; fi
+  for kv in $SET_SECRETS $SET_OVERRIDE $SET_BACKUP $SET_SERVER $SET_OLLAMA; do
+    [[ $kv == OLLAMA_MODEL=* ]] && (( ! model_restored )) && continue
+    say "  ${kv%%=*} is ${kv#*=}."
+  done
 else
   say "This backup was made before Flint saved your settings, so they start at their defaults."
 fi
@@ -742,15 +997,29 @@ timed secrets
 
 # ---- 4. the database ---------------------------------------------------------------------------
 bootstrap_args=(--port "$PG_PORT")
-(( RESUME )) && bootstrap_args+=(--rotate)
-( cd "$REPO" && PGHOST="$PG_SOCKET" PGPORT="$PG_PORT" PGUSER="$ME" PGDATABASE=postgres pnpm --silent --filter @flint/runtime bootstrap-db "${bootstrap_args[@]}" ) 2>"$LOG/bootstrap-db.err" \
+# Roles that are already there (a rebuild started over, or one over an earlier install) get new passwords.
+(( ROTATE )) && bootstrap_args+=(--rotate)
+( cd "$REPO" && PGHOST="$PG_SOCKET" PGPORT="$PG_PORT" PGUSER="$ME" PGDATABASE=postgres pnpm --silent --filter @flint/runtime bootstrap-db --from-rebuild "${bootstrap_args[@]}" ) 2>"$LOG/bootstrap-db.err" \
   || refuse "Flint could not set up its database. The details are in $LOG/bootstrap-db.err."
 if (( ${#SET_BACKUP} )); then
-  ( umask 077; print -rl -- $SET_BACKUP >> "$DATA/backup.env" ) && chmod 600 "$DATA/backup.env" || refuse "Flint could not write your backup settings."
+  ( print -rl -- $SET_BACKUP >> "$DATA/backup.env" ) && chmod 600 "$DATA/backup.env" || refuse "Flint could not write your backup settings."
 fi
 if [[ -n $BUNDLE_DUMP ]]; then
-  ( cd "$REPO" && pnpm --silent --filter @flint/runtime restore-empty --dump "$BUNDLE_DUMP" ) 2>"$LOG/restore.err" \
-    || refuse "The database backup did not restore. The details are in $LOG/restore.err."
+  # The runtime's own restore, told that the rebuild is running it and what the dump's fingerprint was when
+  # the MacBook opened it. It restores beside the empty database, checks the copy against a database built
+  # from this repo, and only then puts it in place: a run that stops leaves the empty database as it was.
+  # Run directly, not through pnpm: how it ends (3 means the database is not empty) must reach this script as it is.
+  restore_db() { ( cd "$REPO/apps/runtime" && ./node_modules/.bin/tsx src/cli.ts restore-empty --from-rebuild --dump "$BUNDLE_DUMP" --sha256 "$BUNDLE_DUMP_SHA" ) 2>"$LOG/restore.err"; }
+  restore_db; st=$?
+  if (( st == 3 && RESUME )); then
+    # The earlier try got as far as putting a database in place and stopped before it was checked and
+    # recorded. The marker says this rebuild made that database, so it is made again, empty.
+    pg_admin -c 'DROP DATABASE IF EXISTS flint' && pg_admin -c 'CREATE DATABASE flint OWNER flint_owner' \
+      && "$TOOL_psql" -X -q -At -v ON_ERROR_STOP=1 -h "$PG_SOCKET" -p "$PG_PORT" -U "$ME" -d flint -c 'ALTER SCHEMA public OWNER TO flint_owner' >/dev/null 2>>"$LOG/psql.err" \
+      || refuse "Flint could not clear the database the earlier rebuild left. The details are in $LOG/psql.err."
+    restore_db; st=$?
+  fi
+  (( st == 0 )) || refuse "The database backup did not restore. What it printed above says why, and the details are in $LOG/restore.err."
 else
   say "No database backup was restored, so Flint starts with an empty database."
 fi
@@ -758,7 +1027,6 @@ timed database
 
 # ---- 5. the LaunchAgents the repo could not make before, from their templates ------------------
 mkdir -p "$AGENTS" || refuse "Flint could not make the LaunchAgents folder."
-[[ $HOME != *[\<\>\&\"\'\\]* ]] || refuse "This Mac's home folder has a character in its name that a LaunchAgent file cannot hold."
 render_template "$HERE/templates/com.flint.server.plist.tmpl" "$AGENTS/com.flint.server.plist" NODE="$TOOL_node" NODE_DIR="${TOOL_node:h}" HOME="$HOME" PORT="$SERVER_PORT" || exit 1
 render_template "$HERE/templates/com.flint.ollama.plist.tmpl" "$AGENTS/com.flint.ollama.plist" OLLAMA="$OLLAMA_BIN" HOME="$HOME" || exit 1
 render_template "$HERE/templates/com.flint.tailscaled.plist.tmpl" "$AGENTS/com.flint.tailscaled.plist" TAILSCALED="$TAILSCALED_BIN" HOME="$HOME" || exit 1
@@ -791,7 +1059,10 @@ say "Flint's LaunchAgents are written from the repo."
 timed agents
 
 load_agent() { # real mode only: load one LaunchAgent into this login session
+  local i
   launchctl bootout "gui/$UID/$1" >/dev/null 2>&1
+  # launchd lets go of a job a moment after it is told to; loading it again before then fails.
+  for i in {1..40}; do launchctl print "gui/$UID/$1" >/dev/null 2>&1 || break; sleep 0.25; done
   launchctl bootstrap "gui/$UID" "$AGENTS/$1.plist" >/dev/null 2>&1 || launchctl kickstart -k "gui/$UID/$1" >/dev/null 2>&1
 }
 
@@ -803,7 +1074,18 @@ if (( ! REHEARSE )); then
   for i in {1..20}; do [[ -S $DATA/tailscaled.sock ]] && break; sleep 0.5; done
   say "Open the link below on any device and sign in to Tailscale. Flint waits up to 10 minutes."
   if "$TAILSCALE_BIN" --socket "$DATA/tailscaled.sock" up --timeout=10m && /bin/zsh "$HERE/finish-tailscale.sh" >"$LOG/finish-tailscale.log" 2>&1; then
-    say "Your phone and MacBook can reach Flint on this Mac again."
+    say "Your phone and MacBook can reach Flint on $MAC again."
+    # Who may use Flint over the tailnet is the account that just signed in, as Tailscale itself names it:
+    # never a name read from a backup, which would hand the console to whoever wrote it there.
+    status="$("$TAILSCALE_BIN" --socket "$DATA/tailscaled.sock" status --json 2>/dev/null)"
+    uid="$(print -r -- "$status" | "$TOOL_plutil" -extract Self.UserID raw -o - - 2>/dev/null)"
+    login=
+    [[ $uid == <-> ]] && login="$(print -r -- "$status" | "$TOOL_plutil" -extract "User.$uid.LoginName" raw -o - - 2>/dev/null)"
+    if flint_value_ok email "$login"; then
+      print -r -- "FLINT_TAILNET_USER=${login:l}" >> "$DATA/secrets.env" && say "Only that Tailscale account may use Flint from another device."
+    else
+      say "Flint could not read which Tailscale account signed in, so other devices will ask for the access token."
+    fi
   else
     REMOTE_DONE=0
     say "Remote access is not set up yet. Flint goes on, and the last lines below say how to finish it."
@@ -819,9 +1101,17 @@ for name in $restored_connectors; do
     --outfile="$DATA/connectors/$name.mjs" --log-level=error >"$LOG/connector-$name.log" 2>&1 \
     || say "The connector $name could not be rebuilt from the repo, so it is left out."
 done
-# The code being installed is what was already live, so its gate (typecheck and tests) is not run
-# again here; the deploy job runs it on the next change, as always.
-install_env=(FLINT_SKIP_TESTS=1 "PORT=$SERVER_PORT" "RUNTIME_PORT=$RUNTIME_PORT")
+# When the code here is the commit the old Mac was running (the backup names it, and the MacBook
+# set this checkout to it), its gate (typecheck and tests) already passed there and is not run
+# again. When the backup names none, this is main's newest commit, which nothing has vouched for:
+# its gate runs before it is installed. (A rehearsal is itself run by the gate.)
+install_env=("PORT=$SERVER_PORT" "RUNTIME_PORT=$RUNTIME_PORT")
+head_commit="$("$TOOL_git" -C "$REPO" rev-parse HEAD 2>/dev/null)" || head_commit=
+if (( REHEARSE )) || { [[ -n $head_commit ]] && (( ${DEPLOYED[(Ie)$head_commit]} )); }; then
+  install_env+=(FLINT_SKIP_TESTS=1)
+else
+  say "Flint is testing its code before installing it, because the backup does not say which version the old Mac was running. This takes several minutes."
+fi
 ( cd "$REPO" && env "${install_env[@]}" ./apps/runtime/install-runtime.sh ) >"$LOG/install-runtime.log" 2>&1 \
   || refuse "The runtime did not come up. The details are in $LOG/install-runtime.log."
 say "Flint's runtime is built and answering."
@@ -837,9 +1127,9 @@ env_value "$DATA/secrets.env" FLINT_DB_OWNER_URL || refuse "The database's setti
 ( cd "$REPO/apps/runtime" && DATABASE_URL="$REPLY" PRISMA_HIDE_UPDATE_MESSAGE=1 ./node_modules/.bin/prisma migrate status ) >"$LOG/migrate-status.log" 2>&1 \
   || refuse "The database is not up to date after the install. The details are in $LOG/migrate-status.log."
 for f in "$DATA"/*.env(N) "$DATA"/tokens/*(N); do
-  private "$f" || refuse "A settings file in Flint's data folder can be read by others on this Mac: ${f:t}."
+  private "$f" || refuse "A settings file in Flint's data folder can be read by others on $MAC: ${f:t}."
 done
-say "Flint answers on this Mac, and its database is up to date."
+say "Flint answers on $MAC, and its database is up to date."
 timed checks
 
 # ---- 9. the approval key --------------------------------------------------------------------------
@@ -849,9 +1139,14 @@ if (( REHEARSE )); then
   ( cd "$REPO" && pnpm --silent --filter @flint/runtime enroll --replace ) >/dev/null 2>"$LOG/enroll.err" || refuse "The rehearsal could not make an enrolment code."
   [[ -f $DATA/enroll-code ]] && private "$DATA/enroll-code" || refuse "The enrolment code was not saved safely."
 else
-  say "Your approval key lived in the old Mac. Open Flint on this Mac, go to Settings and then Approval Key, and enter this code:"
-  ( cd "$REPO" && pnpm --silent --filter @flint/runtime enroll --replace ) 2>"$LOG/enroll.err" \
-    || { say "Flint could not make an enrolment code. Make one later with:"; say "  cd ~/flint && pnpm --filter @flint/runtime enroll --replace"; }
+  # The code is read from the file the command saves (0600), so that it is shown on a line of its own.
+  if ( cd "$REPO" && pnpm --silent --filter @flint/runtime enroll --replace ) >/dev/null 2>"$LOG/enroll.err" && [[ "$(<"$DATA/enroll-code")" =~ '^([0-9a-f-]{20,40}) replace$' ]]; then
+    say "Your approval key lived in the old Mac. Open Flint on $MAC, go to Settings and then Approval Key, and enter this code:"
+    say "  $match[1]"
+  else
+    say "Flint could not make an enrolment code. Make one later with this command:"
+    say "  cd ~/flint && pnpm --silent --filter @flint/runtime enroll --replace"
+  fi
 fi
 
 # ---- 10. the rest of the agents (the real rebuild only), and what is left for you ------------------
@@ -859,13 +1154,15 @@ if (( ! REHEARSE )); then
   /bin/zsh "$HERE/install_searxng.sh" >"$LOG/install-searxng.log" 2>&1 || say "Keyless web search did not install. Flint works without it."
   for label in $LOAD_NOW $LOAD_LAST; do load_agent "$label" || say "The agent $label did not load."; done
 fi
-# The rebuild is whole: the marker goes, and so do the opened copy of the backups and the rebuild's logs.
+# The rebuild is whole: the marker goes, and so do the opened copy of the backups, the rebuild's logs,
+# and what an earlier try that stopped part-way had left.
 rm -f "$MARKER"
+for old in "$DATA".rebuild-stopped-*(N/); do rm -rf "${old:?}"; done
 (( REHEARSE )) || rm -rf "${BUNDLE:?}" "${LOG:?}"
 
 embed=nomic-embed-text
 for kv in $SET_SECRETS; do [[ $kv == FLINT_EMBED_MODEL=* ]] && embed=${kv#*=}; done
-say "Flint does not download models. Run these on this Mac, one at a time:"
+say "Flint does not download models. Run these on $MAC, one at a time:"
 say "  ollama pull $MODEL"
 say "  ollama pull $embed"
 
@@ -876,23 +1173,31 @@ WHERE_TO=(
   Google-AI      "Google AI: revoke the old key at aistudio.google.com under API keys, and add a new one only if you still use it."
   Perplexity     "Perplexity: revoke the old key in Perplexity's settings under API, and add a new one only if you still use it."
   Tavily         "Tavily: revoke the old key at app.tavily.com under API Keys, and add a new one only if you still use it."
-  Nexus          "Nexus: revoke the old Mac's tokens in Nexus, and give this Mac new ones."
+  Nexus          "Nexus: revoke the old Mac's tokens in Nexus, and give $MAC new ones."
   Phone-Pings    "Phone pings: choose a new topic name in the phone's notification app, and set the same name in Flint."
   GitHub-App     "GitHub: remove the old private key of the flint-observer app under Developer settings, and make a new one."
   Google         "Google Calendar: remove the old Mac under Third-party access at myaccount.google.com, then sign in again from Flint."
   Tailscale      "Tailscale: remove the old Mac under Machines in the Tailscale admin page."
-  Approval-Key   "Approval key: the enrolment code registers this Mac's key and revokes the old one."
+  Approval-Key   "Approval key: the enrolment code registers the new Mac's key and revokes the old one."
   Connectors     "Connectors: the list of connectors holds keys, so it was never backed up. It needs writing again."
+  Safety-Switch  "Safety switches: one you had turned off on the old Mac is back on. Turn it off again only if you still mean to."
+  Allowed-Hosts  "Allowed hosts: the extra addresses Flint answered on were typed by hand. Set them again if you still use them."
+  Health-Endpoints "Health checks of other sites: their addresses were typed by hand. Set them again if you still want them."
+  Voice          "Voice: the speech program and its model are installed by hand. Install them again if you use voice."
+  Backup-Key     "Backup key: the rebuilt Mac encrypts its backups to the key you rebuilt it with."
 )
 outside=()
 if (( have_snapshot )); then outside=(${(u)PRESENT}); else outside=(Tailscale Approval-Key Connectors Google Nexus); fi
 (( ${#outside} )) && say "These were never in a backup, because Flint does not back up a key or a sign-in. Each needs you once:"
 for o in $outside; do [[ -n ${WHERE_TO[$o]:-} ]] && say "  ${WHERE_TO[$o]}"; done
 (( ${#CONNECTORS} )) && say "The connectors that were set up on the old Mac: ${(j:, :)CONNECTORS}."
-(( ${#dropped_connectors} )) && say "Flint left out ${#dropped_connectors} connector(s) it has no source for: ${(j:, :)dropped_connectors}."
+(( ${#dropped_connectors} + dropped_unnamed )) && say "Flint left out $(( ${#dropped_connectors} + dropped_unnamed )) connector(s) it has no source for${dropped_connectors:+: ${(j:, :)dropped_connectors}}."
 (( ${#NOT_RESTORED} )) && say "Flint did not put back ${#${(u)NOT_RESTORED}} setting(s) it does not know or could not check: ${(j:, :)${(u)NOT_RESTORED}}."
+# What else the backup held and a rebuild does not unpack (a rebuild takes your data, and nothing that is run or that holds a key).
+left_out=(${(o)left_out})
+(( ${#left_out} )) && say "The backup also held ${#left_out} other thing(s) that a rebuild does not put back: ${(j:, :)left_out[1,40]}${${left_out[41]:+, and more}:-}."
 if (( ! REHEARSE && ! REMOTE_DONE )); then
-  say "To finish remote access, run these three on this Mac, one at a time:"
+  say "To finish remote access, run these three on $MAC, one at a time:"
   say "  tailscale --socket ~/.flint/tailscaled.sock up"
   say "  ~/flint/apps/studio/finish-tailscale.sh"
   say "  ~/flint/apps/runtime/install-runtime.sh"
@@ -913,6 +1218,6 @@ if (( REHEARSE )); then
     say "  ${(q-)SELF} --stop ${(q-)SCRATCH}"
   fi
 else
-  say "Flint is rebuilt on this Mac."
+  say "Flint is rebuilt on $MAC."
 fi
 exit 0

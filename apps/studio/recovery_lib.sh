@@ -20,9 +20,10 @@ SETTINGS_MANIFEST="${FLINT_SETTINGS_MANIFEST:-$RECOVERY_DIR/settings.manifest}"
 AGENTS_MANIFEST="${FLINT_AGENTS_MANIFEST:-$RECOVERY_DIR/agents.manifest}"
 
 say() { print -r -- "$*"; }
-refuse() { print -r -- "$*" >&2; exit 1; }
+# refuse <sentence> [<more lines>...]: each argument is a line of its own (a command goes on its own line).
+refuse() { print -rl -- "$@" >&2; exit 1; }
 
-# need_tool <program> <sentence saying how to get it>: its full path in REPLY, or a refusal.
+# need_tool <program> <sentence saying how to get it> [<more lines>...]: its full path in REPLY, or a refusal.
 # Looked for on PATH, then where Homebrew puts things (launchd's PATH has no Homebrew).
 # FLINT_TOOL_PATHS, when set, replaces that second list (the tests use it to hide a tool).
 need_tool() {
@@ -34,7 +35,7 @@ need_tool() {
       [[ -x $dir/$1 && ! -d $dir/$1 ]] && { found=$dir/$1; break; }
     done
   fi
-  [[ -n $found && -x $found ]] || refuse "$2"
+  [[ -n $found && -x $found ]] || refuse "${@[2,-1]}"
   REPLY=$found
 }
 

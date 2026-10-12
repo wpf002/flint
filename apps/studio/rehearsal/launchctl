@@ -44,10 +44,10 @@ running_pid() { # <label>: the pid of the job this stand-in started, if it is st
 
 start_job() { # <label> <plist>: run it if launchd would at load (RunAtLoad or KeepAlive); a timed job is only recorded
   local label=$1 plist=$2 i=0 arg name out err wd jobpath=/usr/bin:/bin:/usr/sbin:/sbin line
-  local -a argv envs
+  local -a job_args envs
   [[ "$(raw "$plist" RunAtLoad)" == true || "$(raw "$plist" KeepAlive)" == true ]] || return 0
-  while arg="$(raw "$plist" "ProgramArguments.$i")"; do argv+=("$arg"); i=$(( i + 1 )); done
-  (( ${#argv} > 0 )) || return 1
+  while arg="$(raw "$plist" "ProgramArguments.$i")"; do job_args+=("$arg"); i=$(( i + 1 )); done
+  (( ${#job_args} > 0 )) || return 1
   envs=("HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${LOGNAME:-$(id -un)}" "TMPDIR=${TMPDIR:-/tmp}" "FLINT_REHEARSAL_STATE=$STATE")
   for name in ${(f)"$(plist_env_names "$plist")"}; do
     [[ -n $name ]] || continue
@@ -67,7 +67,7 @@ start_job() { # <label> <plist>: run it if launchd would at load (RunAtLoad or K
   err="$(raw "$plist" StandardErrorPath)" || err=/dev/null
   wd="$(raw "$plist" WorkingDirectory)" || wd=/
   [[ -d $wd ]] || wd=/
-  ( cd "$wd" && exec /usr/bin/env -i "${envs[@]}" "${argv[@]}" >>"$out" 2>>"$err" </dev/null ) &
+  ( cd "$wd" && exec /usr/bin/env -i "${envs[@]}" "${job_args[@]}" >>"$out" 2>>"$err" </dev/null ) &
   local pid=$!
   print -r -- "$pid" > "$STATE/pids/$label"
   ps -o lstart= -p "$pid" > "$STATE/pids/$label.started" 2>/dev/null
@@ -80,7 +80,8 @@ stop_job() { # <label>: stop the process this stand-in started for it, and only 
     pid=$REPLY
     kill -TERM "$pid" 2>/dev/null
     for i in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
-    kill -KILL "$pid" 2>/dev/null
+    # Still the same process (a process id is reused in time): only then is it killed outright.
+    running_pid "$label" && kill -KILL "$REPLY" 2>/dev/null
   fi
   rm -f "$STATE/pids/$label" "$STATE/pids/$label.started"
 }
@@ -127,8 +128,9 @@ case $cmd in
     [[ ${1:-} == -k ]] && shift
     target_label "${1:-}" || exit 113
     is_loaded "$REPLY" || exit 113
-    stop_job "$REPLY"
-    start_job "$REPLY" "$(<"$STATE/loaded/$REPLY")"; exit $? ;;
+    label=$REPLY   # kept: stopping the job reuses REPLY
+    stop_job "$label"
+    start_job "$label" "$(<"$STATE/loaded/$label")"; exit $? ;;
   list)
     for f in "$STATE"/loaded/*(N); do
       if running_pid "${f:t}"; then print -r -- "$REPLY"$'\t'"0"$'\t'"${f:t}"; else print -r -- "-"$'\t'"0"$'\t'"${f:t}"; fi

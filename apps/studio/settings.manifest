@@ -47,7 +47,8 @@ secrets.env  TAVILY_API_KEY                       reenter   Tavily
 secrets.env  NEXUS_MCP_TOKEN                      reenter   Nexus
 secrets.env  FLINT_NTFY_TOPIC                     reenter   Phone-Pings
 secrets.env  FLINT_RUNTIME_URL                    restore   loopback
-secrets.env  FLINT_TAILNET_USER                   restore   email
+# Who may use Flint over the tailnet is never taken from a backup: the rebuild reads it from the Tailscale sign-in.
+secrets.env  FLINT_TAILNET_USER                   derive    rebuild
 secrets.env  FLINT_TIERS                          restore   onoff
 secrets.env  FLINT_TIER_STANDARD                  restore   spec
 secrets.env  FLINT_TIER_ROUTINE                   restore   spec
@@ -73,10 +74,17 @@ secrets.env  FLINT_MEMORY_K                       restore   number
 secrets.env  FLINT_MEMORY_FLOOR                   restore   number
 secrets.env  FLINT_MEMORY_EMBED_TIMEOUT_MS        restore   number
 secrets.env  FLINT_EXTRACT_SKIP_CONVERSATIONS     restore   onoff
+secrets.env  FLINT_EXTRACT_INTERVAL_MS            restore   number
+secrets.env  FLINT_EXTRACT_BACKLOG_INTERVAL_MS    restore   number
+secrets.env  FLINT_EXTRACT_MAX_TURNS              restore   number
+secrets.env  FLINT_EXTRACT_MAX_CALLS_PER_DAY      restore   number
+secrets.env  FLINT_EXTRACT_BATCH_CHARS            restore   number
 secrets.env  FLINT_FRONTIER_PROVIDER              restore   word
 secrets.env  FLINT_FRONTIER_MODEL                 restore   model
 secrets.env  FLINT_FRONTIER_BASE_URL              restore   loopback
 secrets.env  FLINT_FRONTIER_NUM_CTX               restore   number
+secrets.env  FLINT_FRONTIER_MAX_RETRIES           restore   number
+secrets.env  FLINT_FRONTIER_TIMEOUT_MS            restore   number
 secrets.env  FLINT_EVAL_NUM_CTX                   restore   number
 secrets.env  FLINT_HISTORY_TURNS                  restore   number
 secrets.env  FLINT_HISTORY_MAX_AGE_HOURS          restore   number
@@ -86,6 +94,7 @@ secrets.env  FLINT_TOOL_APPEND                    restore   number
 secrets.env  FLINT_TOOL_FLOOR                     restore   number
 # A switch that turns a safety rule off is never put back from a backup: it starts safe again.
 secrets.env  FLINT_TAINT_FLOOR                    reenter   Safety-Switch
+secrets.env  FLINT_DEBUG_ERRORS                   reenter   Safety-Switch
 secrets.env  FLINT_PERPLEXITY_USD_PER_CALL        restore   number
 secrets.env  FLINT_TAVILY_USD_PER_CALL            restore   number
 secrets.env  OLLAMA_THINK                         restore   onoff
@@ -117,9 +126,23 @@ server.plist  FLINT_BUDGET_PERPLEXITY_DAILY_USD   restore   number
 server.plist  FLINT_BUDGET_PERPLEXITY_MONTHLY_USD restore   number
 server.plist  FLINT_BUDGET_TAVILY_DAILY_USD       restore   number
 server.plist  FLINT_BUDGET_TAVILY_MONTHLY_USD     restore   number
+# The background kinds (packages/policy SPEND_KINDS): a dollar cap a day and a month, and a number of calls a day.
+server.plist  FLINT_BUDGET_KIND_RUNTIME_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_RUNTIME_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_RUNTIME_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_REVIEW_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_DISPATCH_DAILY_CALLS restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_DAILY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_MONTHLY_USD restore   number
+server.plist  FLINT_BUDGET_KIND_SELFMOD_DAILY_CALLS restore   number
 
 # ---- the runtime: ~/.flint/runtime.override.env (yours) and runtime.env (rewritten on every install) ----
 runtime.override.env  FLINT_RUNTIME_TRIAGE          restore   onoff
+runtime.override.env  FLINT_PLANNER                 restore   onoff
 runtime.override.env  FLINT_SOURCE_GOOGLE_CALENDAR  restore   onoff
 runtime.override.env  FLINT_SOURCE_APPLE_CALENDAR   restore   onoff
 runtime.override.env  FLINT_TRIAGE_MODEL            restore   model
@@ -175,6 +198,7 @@ com.flint.runtime.plist         HOME              derive    install-runtime
 com.flint.runtime-backup.plist  HOME              derive    install-runtime
 com.flint.runtime-backup.plist  PATH              derive    install-runtime
 com.flint.runtime-backup.plist  FLINT_REPO        derive    install-runtime
+com.flint.rebuild-rehearsal.plist  PATH           derive    install-server
 com.flint.searxng.plist         SEARXNG_SETTINGS_PATH         derive  install_searxng
 com.flint.searxng.plist         GRANIAN_INTERFACE             derive  install_searxng
 com.flint.searxng.plist         GRANIAN_HOST                  derive  install_searxng
@@ -187,6 +211,8 @@ com.flint.evolve-measure.plist  PATH              derive    repo
 com.flint.evolve-measure.plist  EVOLVE_BUDGET_USD derive    repo
 com.flint.evolve-measure.plist  EVOLVE_PROMPTS    derive    repo
 com.flint.retrain.plist         PATH              derive    repo
+com.flint.retrain.plist         FLINT_TRAIN_PY    derive    repo
+com.flint.voice.plist           PATH              derive    repo
 com.flint.grow.plist            GROW_CONCURRENCY  retired   training
 com.flint.grow.plist            GROW_TARGET       retired   training
 
@@ -199,6 +225,8 @@ file  runtime.override.env        derive    rebuild
 file  token                       generate  rebuild
 file  tokens                      generate  install-runtime
 file  enroll-code                 generate  rebuild
+file  backup-fingerprint.key      generate  backup
+file  backup-age-recipient        derive    rebuild
 file  approval-key.se             reenter   Approval-Key
 file  tailscaled.state            reenter   Tailscale
 file  tailscale                   reenter   Tailscale
