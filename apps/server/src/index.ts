@@ -75,7 +75,7 @@ import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runti
 import { WorldNow, estimateTokens } from './world-now';
 import { inboxRoutes } from './inbox-routes';
 import { ChatLoad } from './chat-load';
-import { CompleteGate, localBackgroundBrain, localBackgroundModel } from './background-complete';
+import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
 import { FrontierBreaker, FrontierPaused, breakerNote, gateTurn, pausedCode } from './frontier-breaker';
 import { errorSummary, logError } from './error-log';
 import { createHash } from 'node:crypto';
@@ -810,7 +810,9 @@ async function main(): Promise<void> {
   // outside one, yielding to Will's chat like memory extraction. Every kind is off until Will raises its cap.
   const backgroundModel = localBackgroundModel(localEnv, model, (m) => console.error(m));
   const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
-  const completeGate = new CompleteGate({ guard: spend, kindCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
+  // The local model costs nothing, so a kind is bounded by its calls a day, not its dollars.
+  const callCaps = readKindCallCaps(process.env, (m) => console.error(`[spend] ${m}`));
+  const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
   startInternal({
     tokenSha256: internalSha,
     // The runtime's words stay in the console; the phone only ever gets the content-free ping.

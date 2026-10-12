@@ -20,7 +20,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Flint, costOf, makeAiError, type ProviderAdapter, type StreamEvent, type TokenUsage } from '@flint/core';
 import { AuditUnavailable, type AuditRecord } from '../src/audit-sink';
-import { ChatBusy, CompleteGate, localBackgroundBrain, localBackgroundModel, type BackgroundBrain, type CompleteGateDeps } from '../src/background-complete';
+import {
+  ChatBusy,
+  CompleteGate,
+  DEFAULT_DAILY_CALLS,
+  fitWindow,
+  localBackgroundBrain,
+  localBackgroundModel,
+  matchesSchema,
+  readKindCallCaps,
+  type BackgroundBrain,
+  type CompleteGateDeps,
+  type KindCallCaps,
+} from '../src/background-complete';
 import type { LocalMemoryModel } from '../src/memory-brain';
 import { SpendGuard, SpendLedger, readKindCaps, spendContext, spendObserver, type Caps, type KindCaps } from '../src/spend';
 
@@ -243,8 +255,8 @@ describe('/internal/complete with a raised cap', () => {
 // the brain main() wires: the local model
 
 /** Ollama's /api/chat reply for a non-streamed call. */
-function chatReply(content: string): Response {
-  return new Response(JSON.stringify({ message: { role: 'assistant', content }, done: true, done_reason: 'stop', prompt_eval_count: 40, eval_count: 9 }), {
+function chatReply(content: string, doneReason = 'stop'): Response {
+  return new Response(JSON.stringify({ message: { role: 'assistant', content }, done: true, done_reason: doneReason, prompt_eval_count: 40, eval_count: 9 }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
@@ -271,9 +283,9 @@ function fakeOllama(reply: (seen: Seen, n: number) => Response | Promise<Respons
 const LOCAL: LocalMemoryModel = { baseURL: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b', numCtx: 4096, unloadAfter: false };
 
 /** The gate as main() builds it, with no vendor caps and no unified view at all: a local call needs neither. */
-function localGate(brain: BackgroundBrain | undefined, kindCaps: KindCaps = raised()) {
+function localGate(brain: BackgroundBrain | undefined, kindCaps: KindCaps = raised(), opts: { callCaps?: KindCallCaps; now?: () => number } = {}) {
   const guard = new SpendGuard(ledger, { anthropic: {}, openai: {}, perplexity: {}, tavily: {} });
-  return new CompleteGate({ guard, kindCaps, audit: auditSink(), brain: () => brain, now: () => NOON });
+  return new CompleteGate({ guard, kindCaps, audit: auditSink(), brain: () => brain, now: opts.now ?? (() => NOON), ...(opts.callCaps ? { callCaps: opts.callCaps } : {}) });
 }
 
 describe('/internal/complete on the local model', () => {
@@ -319,12 +331,37 @@ describe('/internal/complete on the local model', () => {
     expect(requests).toHaveLength(0);
   });
 
-  it('does not start while Will is chatting', async () => {
+  // Will's chat comes first, and giving way to it is not a failure of anything.
+  it('does not start while Will is chatting: 503 busy, a refusal, with no intent and no failed call in the audit', async () => {
     const { f, requests } = fakeOllama(() => chatReply('x'));
     const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f, chatActive: () => true })).handle(REQ);
-    expect(r).toEqual({ status: 502, body: { error: 'the call failed (ChatBusy)', reason: 'provider_failed' } });
+    expect(r).toEqual({ status: 503, body: { error: 'Will is chatting; the local model is his', reason: 'busy' } });
     expect(requests).toHaveLength(0);
-    expect(audit.at(-1)).toMatchObject({ outcome: 'failed', inputs: { error: 'ChatBusy' } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ kind: 'decision', decision: 'deny', outcome: 'denied', inputs: { reason: 'busy' } });
+  });
+
+  it('a call cut off because Will started chatting is 503 busy too: its intent is closed as skipped, never as a failed spend, and it is not one of the day\'s calls', async () => {
+    let chatting = false;
+    const { f, requests } = fakeOllama(
+      (seen) =>
+        new Promise((_, reject) => {
+          seen.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+          chatting = true;
+        }),
+    );
+    const g = localGate(localBackgroundBrain(LOCAL, { fetch: f, chatActive: () => chatting, pollMs: 5 }), raised(), { callCaps: { ...readKindCallCaps({}), runtime: 1 } });
+    const r = await g.handle(REQ);
+    expect(r).toEqual({ status: 503, body: { error: 'Will is chatting; the local model is his', reason: 'busy' } });
+    expect(requests).toHaveLength(1);
+    expect(audit.map((a) => [a.kind, a.outcome])).toEqual([['intent', 'pending'], ['decision', 'skipped']]);
+    expect(audit[1]).toMatchObject({ correlationId: audit[0]!.correlationId, inputs: { reason: 'busy' } });
+    expect(audit.some((a) => a.kind === 'spend')).toBe(false);
+    // The one call a day this kind has is still there once Will is done.
+    chatting = false;
+    const again = fakeOllama(() => chatReply('ok'));
+    const g2 = localGate(localBackgroundBrain(LOCAL, { fetch: again.f }), raised(), { callCaps: { ...readKindCallCaps({}), runtime: 1 } });
+    expect((await g2.handle(REQ)).status).toBe(200);
   });
 
   it('is cut off the moment a chat turn starts', async () => {
@@ -390,5 +427,155 @@ describe('localBackgroundModel (which local model background calls ask)', () => 
   it('ignores every vendor key', () => {
     const env = { ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-x', FLINT_TIER_ROUTINE: 'anthropic:claude-sonnet-5-5' };
     expect(localBackgroundModel(env, 'muse-glimmer:30b', () => {})).toEqual(localBackgroundModel({}, 'muse-glimmer:30b', () => {}));
+  });
+});
+
+describe('/internal/complete on the local model: a reply that is no answer is a failure, not a 200', () => {
+  const failed = async (brain: BackgroundBrain, req: Record<string, unknown> = REQ) => {
+    const r = await localGate(brain).handle(req);
+    return [r.status, (r.body as { error?: string }).error, audit.at(-1)?.inputs.error];
+  };
+
+  it('an empty reply (after the provider\'s own retries)', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('   '));
+    expect(await failed(localBackgroundBrain(LOCAL, { fetch: f }))).toEqual([502, 'the call failed (EmptyReply)', 'EmptyReply']);
+    expect(requests).toHaveLength(3);
+    expect(audit.at(-1)).toMatchObject({ kind: 'spend', outcome: 'failed' });
+  });
+
+  it('a reply cut off at its token limit (done_reason length), plain or to a schema', async () => {
+    const plain = fakeOllama(() => chatReply('The api service is', 'length'));
+    expect(await failed(localBackgroundBrain(LOCAL, { fetch: plain.f }))).toEqual([502, 'the call failed (Truncated)', 'Truncated']);
+    const shaped = fakeOllama(() => chatReply('{"summary":"api is', 'length'));
+    expect(await failed(localBackgroundBrain(LOCAL, { fetch: shaped.f }), { ...REQ, schema: { type: 'object' } })).toEqual([502, 'the call failed (Truncated)', 'Truncated']);
+  });
+
+  it('JSON that is not the schema asked for', async () => {
+    const schema = { type: 'object', properties: { severity: { type: 'string', enum: ['low', 'high'] }, summary: { type: 'string' } }, required: ['severity', 'summary'], additionalProperties: false };
+    for (const reply of ['{"severity":"medium","summary":"x"}', '{"summary":"x"}', '{"severity":"low","summary":7}', '{"severity":"low","summary":"x","extra":1}', '[]', '"low"']) {
+      const { f } = fakeOllama(() => chatReply(reply));
+      expect(await failed(localBackgroundBrain(LOCAL, { fetch: f }), { ...REQ, schema }), reply).toEqual([502, 'the call failed (InvalidReply)', 'InvalidReply']);
+    }
+    const ok = fakeOllama(() => chatReply('{"severity":"high","summary":"api is down"}'));
+    expect((await localGate(localBackgroundBrain(LOCAL, { fetch: ok.f })).handle({ ...REQ, schema })).status).toBe(200);
+    // What the model wrote never reaches the audit trail, only the class of what went wrong.
+    expect(JSON.stringify(audit)).not.toContain('medium');
+  });
+});
+
+describe('matchesSchema (the part of JSON Schema a reply\'s shape is written in)', () => {
+  it('type, one or several, with integer a kind of number', () => {
+    expect(matchesSchema('x', { type: 'string' })).toBe(true);
+    expect(matchesSchema(3, { type: 'string' })).toBe(false);
+    expect(matchesSchema(3, { type: 'integer' })).toBe(true);
+    expect(matchesSchema(3.5, { type: 'integer' })).toBe(false);
+    expect(matchesSchema(3, { type: 'number' })).toBe(true);
+    expect(matchesSchema(null, { type: ['string', 'null'] })).toBe(true);
+    expect(matchesSchema([], { type: 'object' })).toBe(false);
+    expect(matchesSchema({}, { type: 'array' })).toBe(false);
+    expect(matchesSchema(true, { type: 'boolean' })).toBe(true);
+  });
+
+  it('enum and const', () => {
+    expect(matchesSchema('low', { enum: ['low', 'high'] })).toBe(true);
+    expect(matchesSchema('mid', { enum: ['low', 'high'] })).toBe(false);
+    expect(matchesSchema(1, { const: 1 })).toBe(true);
+    expect(matchesSchema(2, { const: 1 })).toBe(false);
+  });
+
+  it('objects: properties, required, additionalProperties: false; arrays: items; all nested', () => {
+    const schema = { type: 'object', required: ['items'], properties: { items: { type: 'array', items: { type: 'object', required: ['id'], properties: { id: { type: 'integer' } }, additionalProperties: false } } } };
+    expect(matchesSchema({ items: [{ id: 1 }, { id: 2 }] }, schema)).toBe(true);
+    expect(matchesSchema({ items: [{ id: 1 }, { id: 'two' }] }, schema)).toBe(false);
+    expect(matchesSchema({ items: [{ id: 1, more: true }] }, schema)).toBe(false);
+    expect(matchesSchema({}, schema)).toBe(false);
+    expect(matchesSchema({ items: [], other: 1 }, schema)).toBe(true); // additional properties are allowed unless the schema says not
+  });
+
+  it('a keyword it does not know is not checked, and a schema that is no object matches anything', () => {
+    expect(matchesSchema('abc', { type: 'string', minLength: 10 })).toBe(true);
+    expect(matchesSchema(1, true)).toBe(true);
+  });
+});
+
+describe('/internal/complete sizes the call to the model\'s window', () => {
+  it('fitWindow: the reply as asked, up to half the window; the prompt in the rest, or it does not fit', () => {
+    expect(fitWindow(4096, 1000, 200)).toEqual({ maxTokens: 200, promptRoom: Math.floor((4096 - 200) * 3.5) });
+    expect(fitWindow(4096, 1000, 4000)).toEqual({ maxTokens: 2048, promptRoom: 7168 });
+    expect(fitWindow(4096, 7168, 4000)).toBeDefined();
+    expect(fitWindow(4096, 7169, 4000)).toBeUndefined();
+    expect(fitWindow(16384, 40_000, 4000)).toEqual({ maxTokens: 4000, promptRoom: 43_344 });
+  });
+
+  it('a reply budget over half the window is cut to it before the model is asked', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('ok'));
+    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f })).handle({ ...REQ, maxTokens: 4000 });
+    expect(r.status).toBe(200);
+    expect(requests[0]!.body.options).toMatchObject({ num_ctx: 4096, num_predict: 2048 });
+    expect(audit[0]).toMatchObject({ kind: 'intent', inputs: { maxTokens: 2048 } });
+  });
+
+  // Ollama would silently drop the start of it (the instructions) and answer something else.
+  it('a prompt that does not fit is refused, 400 too_long, and the model is not asked', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('ok'));
+    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f })).handle({ ...REQ, prompt: 'x'.repeat(20_000) });
+    expect(r).toMatchObject({ status: 400, body: { reason: 'too_long' } });
+    expect(r.body).toHaveProperty('error', expect.stringContaining("does not fit the model's 4096-token window"));
+    expect(requests).toHaveLength(0);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ outcome: 'denied', inputs: { reason: 'too_long' } });
+    // The same prompt fits the window the chat brain really has.
+    const big = fakeOllama(() => chatReply('ok'));
+    expect((await localGate(localBackgroundBrain({ ...LOCAL, numCtx: 16384 }, { fetch: big.f })).handle({ ...REQ, prompt: 'x'.repeat(20_000) })).status).toBe(200);
+  });
+
+  it('with no num_ctx from the chat brain, it sizes to Ollama\'s own 4,096', () => {
+    expect(localBackgroundBrain({ ...LOCAL, numCtx: undefined }).numCtx).toBe(4096);
+    expect(localBackgroundBrain({ ...LOCAL, numCtx: 8192 }).numCtx).toBe(8192);
+  });
+});
+
+// Dollars bound a brain that bills. The local model is free, so calls a day are what bound a kind.
+describe('/internal/complete: each kind\'s calls a day', () => {
+  it('reads FLINT_BUDGET_KIND_<KIND>_DAILY_CALLS, 100 unless set, 0 a real cap', () => {
+    const warns: string[] = [];
+    const caps = readKindCallCaps({ FLINT_BUDGET_KIND_RUNTIME_DAILY_CALLS: '5', FLINT_BUDGET_KIND_REVIEW_DAILY_CALLS: '0', FLINT_BUDGET_KIND_DISPATCH_DAILY_CALLS: 'lots', FLINT_BUDGET_KIND_SELFMOD_DAILY_CALLS: '2.5' }, (m) => warns.push(m));
+    expect(caps).toEqual({ runtime: 5, review: 0, dispatch: DEFAULT_DAILY_CALLS, selfmod: DEFAULT_DAILY_CALLS });
+    expect(DEFAULT_DAILY_CALLS).toBe(100);
+    expect(warns).toHaveLength(2);
+    expect(readKindCallCaps({})).toEqual({ runtime: 100, review: 100, dispatch: 100, selfmod: 100 });
+  });
+
+  it('refuses once the kind has made its calls for the day (402 call_cap), per kind, and starts over the next day', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('ok'));
+    let now = NOON;
+    const all: KindCaps = { runtime: { dailyUsd: 1, monthlyUsd: 5 }, review: { dailyUsd: 1, monthlyUsd: 5 }, dispatch: { dailyUsd: 1, monthlyUsd: 5 }, selfmod: { dailyUsd: 1, monthlyUsd: 5 } };
+    const g = localGate(localBackgroundBrain(LOCAL, { fetch: f }), all, { callCaps: { ...readKindCallCaps({}), runtime: 2 }, now: () => now });
+    expect((await g.handle(REQ)).status).toBe(200);
+    expect((await g.handle(REQ)).status).toBe(200);
+    const third = await g.handle(REQ);
+    expect(third).toMatchObject({ status: 402, body: { reason: 'call_cap' } });
+    expect(third.body).toHaveProperty('error', expect.stringContaining('FLINT_BUDGET_KIND_RUNTIME_DAILY_CALLS'));
+    expect(requests).toHaveLength(2);
+    // Another kind has its own count.
+    expect((await g.handle({ ...REQ, kind: 'review' })).status).toBe(200);
+    // Tomorrow (the ledger's day, America/Chicago here) the count starts over.
+    now = NOON + 24 * 3600_000;
+    expect((await g.handle(REQ)).status).toBe(200);
+  });
+
+  it('a failed call is one of the day\'s calls: a model that keeps failing cannot be asked without end', async () => {
+    const { f, requests } = fakeOllama(() => chatReply(''));
+    const g = localGate(localBackgroundBrain(LOCAL, { fetch: f }), raised(), { callCaps: { ...readKindCallCaps({}), runtime: 1 } });
+    expect((await g.handle(REQ)).status).toBe(502);
+    expect(await g.handle(REQ)).toMatchObject({ status: 402, body: { reason: 'call_cap' } });
+    expect(requests).toHaveLength(3); // the one call's own three tries
+  });
+
+  it('a cap of 0 turns a kind off, whatever its dollars say', async () => {
+    const { f, requests } = fakeOllama(() => chatReply('ok'));
+    const g = localGate(localBackgroundBrain(LOCAL, { fetch: f }), raised(), { callCaps: { ...readKindCallCaps({}), runtime: 0 } });
+    expect(await g.handle(REQ)).toMatchObject({ status: 402, body: { reason: 'call_cap' } });
+    expect(requests).toHaveLength(0);
   });
 });

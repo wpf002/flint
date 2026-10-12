@@ -273,14 +273,25 @@ cap, **unset is $0**: a kind is off until both periods are raised (the boot log 
 `[spend] background kinds: ...`), and refused with 402 `kind_cap` until then.
 
 **The call is answered by the local model** (`src/background-complete.ts`): the chat brain's own
-Ollama model, at `OLLAMA_HOST` with the same `OLLAMA_NUM_CTX`, `think` off, no tools. A request
-may carry `schema` (a JSON schema), and the reply is then held to it. It used to go to the routine
-frontier tier (Sonnet) and answer 503 without one; nothing calls it yet, and every background call
-from here on stays on this machine. It yields to Will's chat like memory extraction: not started
-while he is chatting, and cut off the moment a turn starts (502, error class `ChatBusy`). It costs
-nothing, so nothing is added to the ledger and `costUsd` is 0; the kind's caps are simply its
-switch. With no local model to ask (the chat model is an Ollama cloud model, or `OLLAMA_HOST` is
-no URL) it answers 503 `no_local_model`.
+Ollama model, at `OLLAMA_HOST` with the same `OLLAMA_NUM_CTX`, `think` off, no tools. It used to
+go to the routine frontier tier (Sonnet) and answer 503 without one; nothing calls it yet, and
+every background call from here on stays on this machine. With no local model to ask (the chat
+model is an Ollama cloud model, or `OLLAMA_HOST` is no URL) it answers 503 `no_local_model`.
+
+- **Will's chat comes first.** A call is not started while he is chatting, and one already running
+  is cut off the moment a turn starts. Either way the answer is 503 `busy` (try later): nothing
+  failed, the audit closes the intent as skipped, and it is not one of the day's calls.
+- **Sized to the model's window.** The reply gets what was asked for, up to half the window; the
+  prompt must fit in the rest, or the call is refused with 400 `too_long` before the model is
+  asked. (Ollama would otherwise drop the start of the prompt, the instructions, without saying.)
+- **A reply that is no answer is a failure, not a 200**: nothing in it (`EmptyReply`), cut off at
+  its token limit (`Truncated`), or, when the request carried a `schema` (a JSON schema), not JSON
+  of that shape (`InvalidReply`). All three are 502 `provider_failed`; the audit records the class,
+  never the text.
+- **Calls a day.** The local model costs nothing, so nothing is added to the ledger, `costUsd` is
+  0, and the kind's dollar caps are simply its switch. What bounds a kind is
+  `FLINT_BUDGET_KIND_<KIND>_DAILY_CALLS` (default 100; `0` turns it off): past it, 402 `call_cap`.
+  The count is in memory, so a restart starts the day's over.
 
 A durable audit intent is written first (if it can't be, nothing runs) and the outcome is audited.
 One call at a time; every refusal is audited. The gate keeps its money guards for any brain that

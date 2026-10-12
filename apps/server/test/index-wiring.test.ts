@@ -189,6 +189,9 @@ describe('index.ts wiring', () => {
     expect(block).toContain('const backgroundModel = localBackgroundModel(localEnv, model,');
     expect(block).toContain('const backgroundBrain = backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
     expect(block).toContain('brain: () => backgroundBrain,');
+    // Free calls are bounded by a count a day, read from the env beside the dollar caps.
+    expect(block).toContain('const callCaps = readKindCallCaps(process.env,');
+    expect(block).toContain('new CompleteGate({ guard: spend, kindCaps, callCaps, audit,');
     expect(block).not.toMatch(/frontier|brains\b|spendContext/);
     expect(src).not.toContain('backgroundFrontier');
   });
