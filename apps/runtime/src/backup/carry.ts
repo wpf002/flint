@@ -461,7 +461,7 @@ export function carryLines(r: CarryReport, tz: string, mode: 'production' | 'reb
   if (r.deliveries + r.jobs) out.push('Notes and jobs that were waiting when the backup was made were closed, so nothing is sent twice.');
   if (r.liveKeys.length === 0) {
     out.push('No approval key is live after this restore. Enrol one with this command:');
-    out.push('  pnpm --silent --filter @flint/runtime enroll --replace');
+    out.push('  cd ~/flint && pnpm --silent --filter @flint/runtime enroll --replace');
   }
   for (const k of r.liveKeys) {
     out.push(`This key can approve: "${plain(k.label)}", ${kindOfKey(k.factor)}, enrolled ${day(k.enrolledAt, tz)}.${k.known === false ? ' It is not in the database in use now: revoke it if you do not know it.' : ''}`);

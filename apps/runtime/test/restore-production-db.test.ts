@@ -36,7 +36,7 @@ import {
   KEEP_DAYS, RestoreRefused, VOIDED_BY_RESTORE, checkDump, referenceBuilder, repairDatabase, restoreDatabase, roleProblems, verifyRestored, writeDumpHash,
   type RestoreOptions, type RestoreSummary,
 } from '../src/backup/restore';
-import { refusalLines, restoreEmptyCommand, restoreProductionCommand, runtimeAgent, summaryLines, terminal } from '../src/backup/restore-cli';
+import { NotRunHere, execFor, refusalLines, restoreEmptyCommand, restoreProductionCommand, runtimeAgent, summaryLines, terminal } from '../src/backup/restore-cli';
 import type { RestoreConfig } from '../src/config';
 import {
   GRANTS_FIXTURE, MIGRATIONS, NO_CLUSTER, RUNTIME, connect, enrollKey, id, migrate, onDb, pgConfig, readEnv, signedPolicy, signedRule, startScratchCluster,
@@ -169,7 +169,8 @@ describe('the command is Will’s alone', () => {
     // No key at all: the command that enrols one, on a line of its own.
     const bare = carryLines(emptyReport, 'UTC', 'production');
     expect(bare).toContain('No approval key is live after this restore. Enrol one with this command:');
-    expect(bare).toContain('  pnpm --silent --filter @flint/runtime enroll --replace');
+    // Runnable as it is printed, from wherever the Terminal window happens to be.
+    expect(bare).toContain('  cd ~/flint && pnpm --silent --filter @flint/runtime enroll --replace');
     expect(bare).toContain('Flint may do nothing on its own after this restore: every action asks you first.');
   });
 
@@ -236,6 +237,15 @@ describe('the command is Will’s alone', () => {
       await expect(flapping.agent.start()).rejects.toThrow(/did not stay running/);
       const dead = launchd('waiting', (args) => (args[0] === 'kickstart' ? '' : undefined));
       await expect(dead.agent.start()).rejects.toThrow(/did not stay running/);
+    });
+
+    it('whether it is down is launchd’s own answer: not loaded or not running is down, and where launchd may not be asked it is not known', async () => {
+      expect(await launchd('running').agent.down()).toBe(false);
+      expect(await launchd('waiting').agent.down()).toBe(true);
+      expect(await launchd('absent').agent.down()).toBe(true);
+      // Under a test runner, and anywhere else the config does not allow launchctl: no answer, never "down".
+      expect(await runtimeAgent(home, 501, execFor(false)).down()).toBeUndefined();
+      await expect(execFor(false)('/bin/launchctl', ['print', 'gui/501/com.flint.runtime'])).rejects.toBeInstanceOf(NotRunHere);
     });
 
     it('start says why when it cannot load it: no LaunchAgent file, or launchd keeps refusing', async () => {
@@ -1332,7 +1342,9 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       await admin((c) => c.query('REVOKE flint_restore FROM flint_owner'));
       try {
         const err = await refusal(restoreDatabase(options(p, { checkOnly: true })));
-        expect(err.message).toMatch(/That permission is missing\.$/);
+        expect(err.message).toBe('A restore needs one database permission that has not been granted on this Mac yet. Nothing was changed.');
+        expect(err.stage).toBe('setup');
+        // The command, exactly as it is run: this test then runs the same statement.
         expect(err.lines).toEqual(['Grant it once with this command, then run this again:', "  psql -d postgres -c 'GRANT flint_restore TO flint_owner'"]);
       } finally {
         await admin((c) => c.query('GRANT flint_restore TO flint_owner'));
@@ -1734,6 +1746,24 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(text).toContain('A copy of it is also in the pre-restore folder of your Flint backups.');
       for (const l of out) expect(l, l).toMatch(/^[A-Z].*\.$/);
       expect(await statusOf(p.owner, p.marker)).toBeUndefined();
+      // With the runtime running when it began, nothing is said about it.
+      expect(text).not.toMatch(/The runtime is not running/);
+
+      // A restore killed outright after it stopped the runtime could not start it again. The next run, a trial one
+      // included, says the runtime is down and what starts it, before anything else.
+      loaded = false;
+      const later: string[] = [];
+      await restoreProductionCommand(['--check', '--dump', basename(dump)], config(p), { say: (l) => later.push(l), uid: 501, exec });
+      expect(later.slice(0, 2)).toEqual([
+        'The runtime is not running. If an earlier restore was stopped part-way, this command starts it and puts right anything else that restore left:',
+        '  ~/flint/apps/studio/restore_database.sh --repair',
+      ]);
+      expect(later.at(-1)).toBe('This was a trial run. Nothing was changed.');
+      // And that command does start it.
+      const fixed: string[] = [];
+      await restoreProductionCommand(['--repair'], config(p), { say: (l) => fixed.push(l), ask: async () => 'REPAIR', uid: 501, exec });
+      expect(loaded).toBe(true);
+      expect(fixed.at(-1)).toBe('The runtime is running.');
 
       // Anything but the word leaves everything as it was.
       const q = await production();

@@ -215,6 +215,9 @@ materialize() {
   [[ -f $file ]] && return 0
   [[ -e ${file:h}/.${file:t}.icloud ]] || return 1
   command -v brctl >/dev/null 2>&1 && brctl download "$file" >/dev/null 2>&1
+  # Said before the wait, which can be long: nothing else is printed until the file is here or the wait is over.
+  local minutes=$(( (wait + 59) / 60 ))
+  say "A backup has not come down from iCloud yet. Flint asked for it and is waiting, for up to $minutes minute$( (( minutes == 1 )) || print -n s)."
   while (( i < wait )); do
     [[ -f $file ]] && return 0
     sleep 1; i=$(( i + 1 ))

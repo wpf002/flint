@@ -101,8 +101,8 @@ const HEX64 = /^[0-9a-f]{64}$/;
 export const KEEP_DAYS = 14;
 /** Two numbers no other program on this cluster takes an advisory lock on: "FLNT", and this job. */
 const LOCK = [0x464c4e54, 7] as const;
-/** What repairs a database an earlier run left closed or renamed. */
-const REPAIR = '  ~/flint/apps/studio/restore_database.sh --repair';
+/** What repairs a database an earlier run left closed or renamed, and starts a runtime it left stopped. */
+export const REPAIR = '  ~/flint/apps/studio/restore_database.sh --repair';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`;
@@ -965,9 +965,14 @@ export async function restoreDatabase(o: RestoreOptions): Promise<RestoreResult>
     if (setup.length) throw new RestoreRefused(`Flint's database is not set up for a restore: ${setup.join('; ')}.`, { stage: 'setup' });
     const member = (await m.query<{ ok: boolean }>(`SELECT pg_has_role($1, $2, 'MEMBER') AS ok`, [OWNER, restorer.user])).rows[0]!.ok;
     if (!member) {
-      throw new RestoreRefused('Flint restores a backup as a role that owns nothing else, and the migration owner must be able to take over what that role makes. That permission is missing.', {
+      // What it is for: a backup is restored by a role that owns nothing else, and the migration owner then takes over
+      // what that role made. The command is printed only when it can be run exactly as printed.
+      const plain = /^[a-z_][a-z0-9_]{0,62}$/.test(restorer.user);
+      throw new RestoreRefused('A restore needs one database permission that has not been granted on this Mac yet. Nothing was changed.', {
         stage: 'setup',
-        lines: ['Grant it once with this command, then run this again:', `  psql -d postgres -c 'GRANT ${restorer.user} TO ${OWNER}'`],
+        lines: plain
+          ? ['Grant it once with this command, then run this again:', `  psql -d postgres -c 'GRANT ${restorer.user} TO ${OWNER}'`]
+          : ['The role that restores backups has a name Flint cannot put in a command, so it printed none.'],
       });
     }
     for (const role of APP_ROLES) {

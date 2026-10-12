@@ -35,7 +35,7 @@ import { resolveTier, type PolicyRow } from '@flint/policy';
 import type { RestoreConfig } from '../config.js';
 import { client, targetOf } from './backup.js';
 import { carryLines, type CarryReport } from './carry.js';
-import { KEEP_DAYS, RestoreRefused, repairDatabase, restoreDatabase, type RestoreOptions, type RestoreSummary } from './restore.js';
+import { KEEP_DAYS, REPAIR, RestoreRefused, repairDatabase, restoreDatabase, type RestoreOptions, type RestoreSummary } from './restore.js';
 
 /** apps/runtime, whichever directory the command was started from. */
 const RUNTIME_DIR = fileURLToPath(new URL('../../', import.meta.url));
@@ -52,9 +52,11 @@ export type Exec = (bin: string, args: string[]) => Promise<string>;
  * and is never stopped by an update that happens to be installing on the Mac
  * the tests run on (the deploy gate runs them from inside one).
  */
+/** launchctl and pgrep are not run where the config says they may not be: the answer is "cannot tell", never "not there". */
+export class NotRunHere extends Error {}
 export const execFor = (machine: boolean): Exec => (bin, args) =>
   (bin === LAUNCHCTL || bin === PGREP) && !machine
-    ? Promise.reject(new Error(`${bin === LAUNCHCTL ? 'launchctl' : 'pgrep'} is not run here`))
+    ? Promise.reject(new NotRunHere(`${bin === LAUNCHCTL ? 'launchctl' : 'pgrep'} is not run here`))
     : new Promise((resolveP, reject) => execFile(bin, args, { timeout: 30_000 }, (err, stdout) => (err ? reject(err) : resolveP(String(stdout)))));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -78,6 +80,15 @@ export function runtimeAgent(home: string, uid: number, exec: Exec, wait: (ms: n
   return {
     /** The command that starts it by hand, for when this could not. */
     startCommand: `  launchctl bootstrap ${target} ~/Library/LaunchAgents/${LABEL}.plist`,
+    /** Is the runtime down? True: launchd says it is not loaded, or loaded and not running. Undefined: launchd could not be asked. */
+    async down(): Promise<boolean | undefined> {
+      try {
+        const out = await exec(LAUNCHCTL, ['print', `${target}/${LABEL}`]);
+        return !(/^\s*state = running\s*$/m.test(out) && /^\s*pid = \d+\s*$/m.test(out));
+      } catch (err) {
+        return err instanceof NotRunHere ? undefined : true;
+      }
+    },
     async stop(): Promise<void> {
       if (!(await state())) return;
       await exec(LAUNCHCTL, ['bootout', `${target}/${LABEL}`]).catch(() => undefined);
@@ -302,6 +313,13 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
     throw new RestoreRefused('A database update is waiting or did not finish, and restoring now could apply it. Nothing was changed.', {
       stage: 'deploy', lines: ['Let the update finish, or pause updates and put the earlier version back first (docs/RECOVERY.md says how).'],
     });
+  }
+
+  // A restore that was killed outright after it stopped the runtime could not start it again, and nothing else says
+  // so: the database is restored and in use, and Flint is simply not running. Said here, with what starts it.
+  if (await agent.down()) {
+    io.say('The runtime is not running. If an earlier restore was stopped part-way, this command starts it and puts right anything else that restore left:');
+    io.say(REPAIR);
   }
 
   // The chosen backup (always one in Flint's own backup folder), or the newest there.

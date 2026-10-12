@@ -34,11 +34,12 @@ gone.
    brew install age
    ```
 
-3. Put the backup key where the rebuild looks for it. Replace `KEYFILE` with
-   where your key file is now:
+3. Copy the backup key to where the rebuild looks for it. Replace `KEYFILE`
+   with where your key file is now. This copies it: the file you have stays
+   where it is.
 
    ```
-   mkdir -p ~/.flint-standby && mv KEYFILE ~/.flint-standby/backup-key.txt && chmod 600 ~/.flint-standby/backup-key.txt
+   mkdir -p ~/.flint-standby && cp KEYFILE ~/.flint-standby/backup-key.txt && chmod 600 ~/.flint-standby/backup-key.txt
    ```
 
 4. Prove that the key opens last night's backups:
@@ -48,7 +49,8 @@ gone.
    ```
 
    It says which backups it opened. That proves the key, the program, and that
-   Terminal can read iCloud Drive.
+   Terminal can read iCloud Drive. If a backup has not come down from iCloud
+   yet, it says it is waiting, for up to 10 minutes a file.
 5. Remove the opened copy. It is not encrypted:
 
    ```
@@ -147,6 +149,11 @@ Other things to know:
   ```
   ~/flint/apps/studio/restore_database.sh --repair
   ```
+
+- If it was killed outright (the Mac lost power, or the window was closed and
+  it would not stop), Flint's runtime can be left stopped with the database
+  already restored. Nothing shows that on its own. The same command starts it,
+  and the next restore or `--check` says so if it is still stopped.
 
 - To restore an older backup, list them and name the one you want:
 
@@ -288,7 +295,8 @@ not reach the database server.
    brew services restart postgresql@17
    ```
 
-2. Wait a minute, then check:
+2. Wait a minute, then check. This is a full trial restore, so it takes about
+   a minute, and it changes nothing in use:
 
    ```
    ~/flint/apps/studio/restore_database.sh --check
