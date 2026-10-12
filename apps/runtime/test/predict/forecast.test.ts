@@ -68,6 +68,8 @@ describe('the forecaster\'s parts, by hand', () => {
     expect(slope([4])).toBe(0);
     // 2, 4, 9: the average step is (9 - 2) / 2 = 3.5.
     expect(MODEL.drift([2, 4, 9], 1, 7)).toBe(12.5);
+    // The average step is over the whole history, however long: 0, then thirty-nine 100s, is 100 / 39 a step.
+    expect(MODEL.drift([0, ...range(39, () => 100)], 1, 7)).toBeCloseTo(100 + 100 / 39, 12);
     expect(MODEL.drift([2, 4, 9], 2, 7)).toBe(16);
     // 1, 3, 5, 7: alpha 0.9 ends at 6.778; half the slope of 2 is 1.
     expect(sesLevel([1, 3, 5, 7])).toBeCloseTo(6.778, 12);
@@ -210,6 +212,9 @@ describe('a forecast, end to end', () => {
     expect(f).toMatchObject({ pick: 'last', naive: 'last', model: 'drift', folds: 28, beatsNaive: null, naiveMase: 1, modelMase: 0 });
     // The last value (118), which has been 2 low every time: 118 to 120.
     expect(f.steps[0]).toEqual({ h: 1, mean: 118, lo: 118, hi: 120 });
+    // Each later step has its own errors, not the first step's: three steps on, the last value has been 6 low every time.
+    expect(f.steps[2]).toEqual({ h: 3, mean: 118, lo: 118, hi: 124 });
+    expect(f.steps[6]).toEqual({ h: 7, mean: 118, lo: 118, hi: 132 });
     // A weekly number needs 26 weeks.
     expect(forecast(range(25, (i) => 10 + 2 * i), { m: 1, unit: 'count' }).beatsNaive).toBeNull();
     expect(forecast(range(26, (i) => 10 + 2 * i), { m: 1, unit: 'count' })).toMatchObject({ beatsNaive: true, pick: 'drift' });
@@ -331,10 +336,10 @@ describe('a forecast, end to end', () => {
     }
     const dollars = forecast(range(40, (i) => 1.234 + 0.317 * (i % 5)), { m: 7, unit: 'usd' });
     for (const s of dollars.steps) for (const v of [s.mean, s.lo, s.hi]) expect(Math.abs(v * 100 - Math.round(v * 100))).toBeLessThan(1e-6);
-    // Outward: a range of 2.2 to 3.7 counts is 2 to 4, never 3 to 3.
-    const frac = forecast(range(20, (i) => 2.2 + 1.5 * (i % 2)), { m: 1, unit: 'count' });
-    expect(frac.steps[0]!.lo).toBeLessThanOrEqual(2);
-    expect(frac.steps[0]!.hi).toBeGreaterThanOrEqual(4);
+    // Outward: a range of about 2.6 to 3.4 counts is 2 to 4. Rounded to the nearest it would be 3 to 3, and hold nothing.
+    const frac = forecast(range(20, (i) => 2.6 + 0.8 * (i % 2)), { m: 1, unit: 'count' });
+    expect(frac.pick).toBe('mean28');
+    expect(frac.steps[0]).toEqual({ h: 1, mean: 3, lo: 2, hi: 4 });
   });
 
   it('the same input gives the same output, and the input is not changed', () => {

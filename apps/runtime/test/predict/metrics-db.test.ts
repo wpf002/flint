@@ -177,9 +177,12 @@ describe.skipIf(NO_DB)('the materialiser on flint_test', () => {
     await svc('com.nexus.worker', false, chi('2026-03-10', '10:20'));
     await svc('com.flint.server', true, chi('2026-03-10', '10:30'));
     await svc('com.nexus.worker', true, chi('2026-03-10', '11:00'));
-    // A service put away on purpose is not down, and neither is one of somebody else's.
+    // A service put away on purpose is not down, and neither is one of somebody else's: each is seen "down" for two
+    // hours of Monday the 9th (seen then, and seen again two hours on), and neither adds a minute to it.
     await svc('com.flint.voice', false, chi('2026-03-09', '09:00'), true);
+    await svc('com.flint.voice', true, chi('2026-03-09', '11:00'), true);
     await observe('service', 'service:launchd:homebrew.mxcl.postgresql', { managedBy: 'brew', running: false, disabled: false }, chi('2026-03-09', '09:00'));
+    await observe('service', 'service:launchd:homebrew.mxcl.postgresql', { managedBy: 'brew', running: true, disabled: false }, chi('2026-03-09', '11:00'));
     // An endpoint: down by its health check for a quarter of an hour on the 11th.
     await observe('service', 'service:endpoint:flint-server', { managedBy: 'other', health: 'ok' }, chi('2026-03-01', '08:00'), { source: 'health' });
     await observe('service', 'service:endpoint:flint-server', { managedBy: 'other', health: 'down' }, chi('2026-03-11', '14:00'), { source: 'health' });

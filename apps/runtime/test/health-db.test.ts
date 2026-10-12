@@ -709,6 +709,18 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
       expect(healthName('forecasts')).toBe('Forecasts');
       const details = (await db.healthCheck.findMany({ where: { component: 'forecasts' }, select: { detail: true } })).map((c) => c.detail).join(' ');
       expect(details).not.toMatch(/31337|4242|daily\.|pd[a-z0-9]{8}/);
+      // A rule Will signed that forbids forecasting (or recording a prediction, which a forecast's two are): said plainly.
+      const forbid = async (pattern: string) => {
+        const args = { rows: [{ pattern, tier: 'forbidden', expiresAt: new Date(Date.now() + 30 * DAY).toISOString() }] };
+        const p = await createProposal(db, { kind: 'policy', origin: 'console', action: 'policy.change', args, argsProvenance: { rows: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+        await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: digestOf(args) }), undefined, 'test');
+        await runInternal(db, p.id, undefined, 'UTC', 'test');
+      };
+      // (Keeping the numbers forbidden alone does not stop the forecasts: it is not said as that.)
+      await forbid('forecast.series.build');
+      expect(await forecasts(on)).toMatchObject({ status: 'ok', detail: 'Last night’s forecasts ran for 10 numbers.' });
+      await forbid('forecast.local');
+      expect(await forecasts(on)).toEqual({ component: 'forecasts', status: 'degraded', detail: 'A rule stops Flint from forecasting.' });
     } finally {
       await k.db.$disconnect();
     }
