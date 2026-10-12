@@ -693,7 +693,7 @@ describe('the console Approvals panel', () => {
     // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', sensitivity: 'ops' })})`)).toBe(true);
-    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), card({ id: 'src' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), plain({ id: 'src' })] } });
     await open();
     expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
     const open1 = ids.apprlist!.children[0]!.children[0]!;
@@ -720,10 +720,18 @@ describe('the console Approvals panel', () => {
     open1.button('Show Details').onclick!();
     expect(details.hidden).toBe(false);
     expect(open1.shown()).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|[{}[\]"]/);
-    // Every other card still shows its raw args there.
+    // Every card's details are words, the others' too: what each holds, under a label, and never its args as they are stored.
     const other = ids.apprlist!.children[0]!.children[1]!;
     other.onclick!();
-    expect(ids.apprlist!.children[0]!.children[1]!.all().filter((e) => e.tagName === 'pre').map((e) => e.textContent)).toEqual([JSON.stringify({ source: 'deploy' }, null, 1)]);
+    const otherDetails = ids.apprlist!.children[0]!.children[1]!.all().find((e) => e.className === 'details')!;
+    expect(otherDetails.all().filter((e) => e.tagName === 'pre')).toEqual([]);
+    expect(otherDetails.all().filter((e) => e.tagName === 'dt' || e.tagName === 'dd').map((e) => e.textContent)).toEqual(['Lane', 'Relevant']);
+    // A number this page cannot name is counted in the list and given exactly, as a reference, behind Show Details:
+    // Will signs it, so he can see it. A card whose numbers are all known has no such group.
+    const refs = (p: Record<string, unknown>) => JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(p)}).refs`))) as string[][];
+    expect(refs(odd)).toEqual([['Unknown Numbers', 'daily.spend.acme.usd, x.y'], ['Unknown Second Opinions', 'x.y']]);
+    expect(refs(predict())).toEqual([]);
+    expect(JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(predict())})`)))).toEqual({ says: [also], facts: [], refs: [], withheld: '' });
     ids.apprlist!.children[0]!.children[0]!.onclick!();
     run('approveAll()');
     await settle();

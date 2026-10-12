@@ -284,6 +284,11 @@ Object.assign(CARDS, {
     ] },
   }),
   'a suggestion whose quote does not fit a sentence': base({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', args: { title: 'Run a "Half" Marathon', quote: `I said: "I want to run"\n${'and then some more words '.repeat(20)}`, dueAt: '2027-05-15T18:30:00.000Z', conversationId: 'c1', turnId: 'turn_0123456789abcdef0123' } }),
+  // P4's card: its numbers are listed by their names; one this page cannot name is counted, and given exactly below.
+  'predictions to turn on': base({
+    fullName: 'forecast.series.enable', kind: 'forecast', origin: 'console', sensitivity: 'financial', consequential: true, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.',
+    args: { series: ['daily.spend.anthropic.usd', 'daily.deploys.count', 'daily.calendar.hours', 'daily.spend.acme.usd'], reason: ['daily.deploys.count', 'x.y'] },
+  }),
   'a source with a secret': base({ fullName: 'world.source.enable', kind: 'world', origin: 'cli', args: { source: 'github', repos: ['wpf002/flint'], token: 'ghp_SECRET0123456789abcdef' } }),
 });
 const KINDS = Object.keys(CARDS);
@@ -338,12 +343,16 @@ const at = (leaf: Leaf) => leaf.path.join('.');
 /** Under a key that holds a secret? */
 const secret = (leaf: Leaf) => leaf.path.some((k) => typeof k === 'string' && SECRET.test(k)) && typeof leaf.value === 'string';
 
+/** The numbers Flint can forecast, by their stored key: the names the predictions card lists them by. */
+const SERIES = new Map((JSON.parse(p.run('JSON.stringify(APPR_SERIES)') as string) as Array<[string, string, string]>).map(([key, name]) => [key, name] as [string, string]));
+
 /** Why a stored value is NOT whole in the card's text, or '' when it is. */
 function missing(text: string, leaf: Leaf): string {
   const v = leaf.value;
   if (secret(leaf)) return text.includes(v as string) ? 'a secret is shown' : text.includes(`Hidden, ${(v as string).length} characters`) ? '' : 'a secret is not said to be hidden';
   if (typeof v !== 'string' || v === '') return ''; // a number, yes or no, nothing: the next check changes each and looks for the change
   if (text.includes(v)) return '';
+  if (SERIES.has(v)) return text.includes(SERIES.get(v)!) ? '' : `no ${SERIES.get(v)!}`;
   if (isDay(v)) return text.includes(dayOf(v)) ? '' : `no ${dayOf(v)}`;
   if (isMoment(v)) return text.includes(momentOf(v)) || (/T00:00:00(\.0+)?Z$/.test(v) && text.includes(dayOf(v))) ? '' : `no ${momentOf(v)}`;
   if (CADENCE[v]) return text.toLowerCase().includes(CADENCE[v]!.toLowerCase()) ? '' : `no ${CADENCE[v]}`;

@@ -233,8 +233,9 @@ export async function signedCard(
   const argsDigest = digestOf(card.args);
   await connect(roles.app, (c) =>
     c.query(
-      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", "expiresAt") VALUES ($1, $2, 'cli', $3, $4::jsonb, $5, '{}', now() + interval '1 hour')`,
-      [proposalId, card.kind, card.action, JSON.stringify(card.args), argsDigest],
+      // A rule card always asks on its own: the database refuses one filed without that mark (Proposal_policy_floor).
+      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", "expiresAt", consequential) VALUES ($1, $2, 'cli', $3, $4::jsonb, $5, '{}', now() + interval '1 hour', $6)`,
+      [proposalId, card.kind, card.action, JSON.stringify(card.args), argsDigest, card.action === 'policy.change'],
     ),
   );
   const approvalId = await key.approve({ subjectId: proposalId, action: card.action, argsDigest }, roles.approver);

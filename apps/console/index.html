@@ -228,7 +228,7 @@
   .facts dd{margin:0;font-size:13px;line-height:18px;overflow-wrap:anywhere;}
   .details{margin:10px 0 0 26px;}
   .details p{color:var(--t2);font-size:12px;line-height:18px;margin-top:6px;}
-  .details ul{list-style:none;margin:6px 0 0;padding:0;color:var(--t2);font-size:12px;line-height:20px;}
+  .details ul,.pargs ul{list-style:none;margin:6px 0 0;padding:0;color:var(--t2);font-size:12px;line-height:20px;}
   .details .facts,.pargs .facts{margin:8px 0 0 0;} .details .facts dd,.pargs .facts dd{font-size:12px;color:var(--t2);white-space:pre-wrap;}
   .details .dh,.pargs .dh{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);margin:14px 0 0;}
   .facts.refs dt,.details .facts.refs dd,.pargs .facts.refs dd{color:var(--t3);}
@@ -1495,7 +1495,7 @@ var APPR_EXACT_RULE={pattern:1};
 var APPR_KEYS_PERSON={people:'Person'};
 /* What a card would do: `says` are sentences; `facts` (DETAILS) and `refs` (REFERENCES) are everything else it holds,
    in full; `withheld` is the sentence for a card that does not show all of itself (it then asks on its own). */
-function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.isArray(p.args)?p.args:{},f=p.fullName,says=[],said={},lead=[],names={},t;
+function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.isArray(p.args)?p.args:{},f=p.fullName,says=[],said={},lead=[],extra=[],names={},t;
   var took=function(){for(var i=0;i<arguments.length;i++)said[arguments[i]]=1;};
   /* Someone's text inside a sentence, when it can sit there whole (then the sentence has stated it). */
   var q=function(at,text,max){if(!apprInline(text,max))return '';took(at);return apprQ(text);};
@@ -1545,11 +1545,18 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
       else if(nm){took(at+'.name');says.push('Flint adds '+nm+'.');}
       else says.push('Flint adds a person, listed below.');});
     var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');if(cal){if(typeof a.source==='string')took('source');says.push('They come from '+cal+'.');}}
+  else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){says.push(APPR_PREDICT_ALSO);
+    /* Its numbers are listed by name under this sentence (apprPredictDetails), each with its second opinion. A number
+       this page cannot name is counted there, and given here exactly as the card holds it: nothing signed is unseen. */
+    var known={};APPR_SERIES.forEach(function(x){known[x[0]]=1;});
+    var strange=function(list){return list.filter(function(k){return typeof k!=='string'||apprGet(known,k)!==1;});};
+    ['series','reason'].forEach(function(k){var list=a[k];if(!Array.isArray(list))return;took(k);var odd=strange(list);
+      if(odd.length)extra.push([k==='series'?'Unknown Numbers':'Unknown Second Opinions',odd.map(apprExact).join(', ')]);});}
   var rest=apprFactsOf(a,said,names,f==='policy.change'?APPR_EXACT_RULE:null);
   var facts=lead.concat(rest.facts);
-  if(!says.length&&!facts.length&&!rest.refs.length&&!p.reason)says.push('This card holds nothing more.');
+  if(!says.length&&!facts.length&&!rest.refs.length&&!extra.length&&!p.reason)says.push('This card holds nothing more.');
   var withheld=rest.secret&&rest.more?'Some of this card is not shown here, so it asks on its own.':rest.secret?'A secret this card carries is hidden, so it asks on its own.':rest.more?'This card holds more than is shown here, so it asks on its own.':'';
-  return {says:says,facts:facts,refs:rest.refs,withheld:withheld};}
+  return {says:says,facts:facts,refs:extra.concat(rest.refs),withheld:withheld};}
 /* Does the card show less than all of itself (a secret's value, or more than it can list)? Then it asks on its own. */
 function apprWithheld(p){return !!apprDetails(p).withheld;}
 /* A value into its place, whole: it wraps, and nothing of it is cut. A long one starts folded, with ALL of its text
@@ -1565,6 +1572,7 @@ function apprValueInto(host,text){text=String(text);if(text.length<=APPR_LONG){h
 function apprGroupInto(host,title,list,cls){if(!list.length)return;host.appendChild(apprEl('h4','dh',title));var dl=apprEl('dl','facts'+(cls?' '+cls:''));
   list.forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));var dd=apprEl('dd');apprValueInto(dd,x[1]);dl.appendChild(dd);});host.appendChild(dl);}
 function apprDetailsInto(host,p){var d=apprDetails(p);d.says.forEach(function(t){host.appendChild(apprEl('p',null,t));});
+  if(typeof APPR_PREDICT==='string'&&p&&p.fullName===APPR_PREDICT)host.appendChild(apprPredictDetails(p));
   apprGroupInto(host,'DETAILS',d.facts,'');apprGroupInto(host,'REFERENCES',d.refs,'refs');
   if(d.withheld)host.appendChild(apprEl('p','held',d.withheld));}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
@@ -1737,10 +1745,9 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
   if(open){var dl=apprEl('dl','facts');apprFacts(p).forEach(function(x){dl.appendChild(apprEl('dt',null,x[0]));dl.appendChild(apprEl('dd',null,x[1]));});card.appendChild(dl);
     var det=apprEl('div','details');det.hidden=true;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
-    /* What the card would do, in sentences and labelled facts (apprDetails): never its args as they are stored.
-       The predictions card lists its numbers in words. */
-    if(p.fullName===APPR_PREDICT){det.appendChild(apprEl('p',null,APPR_PREDICT_ALSO));det.appendChild(apprPredictDetails(p));}
-    else apprDetailsInto(det,p);
+    /* What the card would do, in sentences and labelled values (apprDetails): never its args as they are stored, and
+       all of them. (The predictions card lists its numbers by name there.) */
+    apprDetailsInto(det,p);
     var show=apprEl('button','ghost','Show Details');show.onclick=function(){det.hidden=!det.hidden;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
     no.onclick=function(){rejectAction(p.id,card);setTimeout(loadApprovals,1200);};
