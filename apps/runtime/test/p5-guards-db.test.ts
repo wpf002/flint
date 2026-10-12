@@ -1293,7 +1293,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
 
   describe('every refusal', () => {
     it('the migration can raise names its SQLSTATE, and was refused above with that SQLSTATE and that message', () => {
-      const sql = readFileSync(join(MIGRATIONS, '20261014000000_p5_assets', 'migration.sql'), 'utf8');
+      const sql = readFileSync(join(MIGRATIONS, '20261014000100_p5_assets', 'migration.sql'), 'utf8');
       const p3 = readFileSync(join(MIGRATIONS, '20261009000000_p3_goals', 'migration.sql'), 'utf8');
       const raises = [...sql.matchAll(/RAISE EXCEPTION '((?:[^']|'')*)'([^;]*?);/g)];
       expect(raises.length).toBeGreaterThan(80);

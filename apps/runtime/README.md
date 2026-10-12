@@ -1530,7 +1530,7 @@ rules themselves are the same.
 
 ### Rolling P5 back
 
-The migration's `down.sql` (`20261014000000_p5_assets`) belongs to a rollback:
+The migration's `down.sql` (`20261014000100_p5_assets`) belongs to a rollback:
 
 1. First deploy a runtime from before P5. P5's job bus expects the four queues
    that `down.sql` drops.

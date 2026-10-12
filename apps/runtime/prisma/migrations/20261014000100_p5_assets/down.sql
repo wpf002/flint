@@ -139,7 +139,7 @@ $$;
 DO $$
 BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
-    DELETE FROM _prisma_migrations WHERE migration_name = '20261014000000_p5_assets';
+    DELETE FROM _prisma_migrations WHERE migration_name = '20261014000100_p5_assets';
   END IF;
 END;
 $$;

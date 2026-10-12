@@ -99,11 +99,11 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     // A card that only waits holds nothing back: nobody signed it, so nothing of it could be used twice.
     await k.card('task.cancel', { taskId: 'tanone1' }, { stage: 'pending' });
     const approved = await k.card('asset.enable', { assetId: 'asnone' }, { stage: 'approved' });
-    expect(await pgError(runDown('20261014000000_p5_assets'))).toMatchObject(refusedFor(1));
+    expect(await pgError(runDown('20261014000100_p5_assets'))).toMatchObject(refusedFor(1));
     // Running, and under any of the names a P5 guard acts on (a reviewer's or the Hive's dispatch among them).
     const running = await k.card('hive.dispatch_job', { taskId: 'tanone2' });
     const review = await k.card('review.local', { taskId: 'tanone3' }, { stage: 'approved' });
-    expect(await pgError(runDown('20261014000000_p5_assets'))).toMatchObject(refusedFor(3));
+    expect(await pgError(runDown('20261014000100_p5_assets'))).toMatchObject(refusedFor(3));
     expect(await there()).toBe(true);
     // Each ends: the first fails, the second finishes, the third fails too. A card of another kind that is approved was never P5's to hold.
     await k.app(`UPDATE "Proposal" SET status = 'failed', error = 'Synthetic end', "executedAt" = now() WHERE id = ANY ($1)`, [[approved.pid, review.pid]]);
@@ -122,7 +122,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
     const newest = migrationDirs().at(-1)!;
     // What the newest migration makes, to see it go and come back. A new migration names its own here.
-    const made: Record<string, string> = { '20261014000000_p5_assets': 'Asset' };
+    const made: Record<string, string> = { '20261014000100_p5_assets': 'Asset' };
     expect(made[newest], `name a table ${newest} makes`).toBeTruthy();
     const table = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass($1) AS t`, [`public."${made[newest]}"`])).rows[0].t);
     expect(await table()).not.toBeNull();
@@ -170,7 +170,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   // bodies back to the letter (as P3's migration wrote them), and takes away the trigger and the checks it added
   // to older tables. A deploy then re-applies them all, in order.
   it('after P5\'s down.sql, the policy floor\'s takes its rules away and P4\'s puts P3\'s helpers back to the letter; a deploy re-applies them all', async () => {
-    const [p4, floor, p5] = ['20261013000000_p4_forecasts', '20261013000100_p3_policy_floor', '20261014000000_p5_assets'];
+    const [p4, floor, p5] = ['20261013000000_p4_forecasts', '20261013000100_p3_policy_floor', '20261014000100_p5_assets'];
     const floorRules = async () => withClient(owner, async (c) => (await c.query(
       `SELECT string_agg(tgname, ',' ORDER BY tgname) AS t FROM pg_trigger WHERE tgname IN ('Proposal_policy_floor', 'Proposal_clock', 'HealthCheck_clock') AND NOT tgisinternal`)).rows[0].t as string | null);
     await runDown(p5);
@@ -210,7 +210,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
                       'prediction_forecast_check', 'prediction_question_guard', 'resolution_valid', 'resolution_will_check'))) AS functions`)).rows[0]);
     expect(leftovers).toEqual({ triggers: 0, checks: 0, functions: 0 });
     const status = await prisma(['migrate', 'status'], owner);
-    expect(status.stdout + status.stderr).toMatch(/not yet been applied:[\s\S]*20261013000000_p4_forecasts[\s\S]*20261013000100_p3_policy_floor[\s\S]*20261014000000_p5_assets/);
+    expect(status.stdout + status.stderr).toMatch(/not yet been applied:[\s\S]*20261013000000_p4_forecasts[\s\S]*20261013000100_p3_policy_floor[\s\S]*20261014000100_p5_assets/);
     await migrateUp(owner);
     await emptyDiff();
     expect(await floorRules()).toBe('HealthCheck_clock,Proposal_clock,Proposal_policy_floor');
