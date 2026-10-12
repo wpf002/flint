@@ -7,6 +7,22 @@ import { describe, it, expect } from 'vitest';
 import {
   CHECK_PATHS,
   GOAL_ARGS,
+  GOAL_CARD_BODIES,
+  GOAL_CARD_VERBS,
+  GOAL_CONDITIONS,
+  GOAL_SAYS,
+  GOAL_STATUSES,
+  GOAL_STATUS_SAYS,
+  GoalId,
+  GoalsPage,
+  Linkable,
+  LinkableBody,
+  MarkBody,
+  NewGoalBody,
+  StepBody,
+  goalCodeOf,
+  goalIdOf,
+  goalSayOf,
   GOAL_KIND,
   GOAL_REASONS,
   GOAL_SIGNED_ACTIONS,
@@ -110,10 +126,15 @@ describe('goal args', () => {
   });
 
   it('the other cards: exact fields, a title for display, and every args object under 64 KB', () => {
-    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')] }).success).toBe(false); // links are required
-    expect(GoalCriteriaChangeArgs.parse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [] })).toMatchObject({ description: '' });
-    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M' }).success).toBe(true);
-    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', reviewCadence: 'P1M' }).success).toBe(false);
+    // A change says what it changes from (its precondition, signed with it): what the goal was.
+    const was = { title: 'Was', description: '', successCriteria: [crit('c1')], links: [] };
+    const timingWas = { horizonAt: null, reviewCadence: 'P1W' };
+    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], from: was }).success).toBe(false); // links are required
+    expect(GoalCriteriaChangeArgs.parse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [], from: was })).toMatchObject({ description: '' });
+    expect(GoalCriteriaChangeArgs.safeParse({ goalId: 'gotest0001', title: 'T', successCriteria: [crit('c1')], links: [] }).success).toBe(false); // so is what it changes from
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M', from: timingWas }).success).toBe(true);
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P1M' }).success).toBe(false);
+    expect(GoalHorizonChangeArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', reviewCadence: 'P1M', from: timingWas }).success).toBe(false);
     expect(GoalDoneArgs.safeParse({ goalId: 'gotest0001', goalTitle: 'T', note: 'x' }).success).toBe(false);
     const big = activate({ description: 'x'.repeat(1000), successCriteria: Array.from({ length: 10 }, (_, i) => crit(`c${i + 1}`)) });
     expect(jsonbSize(big)).toBeLessThan(65536);
@@ -261,5 +282,70 @@ describe('the review calendar', () => {
     expect(nextReviewAt('P1M', tz, localWallTime(tz, '2026-02-28', 9, 0), localWallTime(tz, '2026-02-28', 9, 0)).toISOString().slice(0, 10)).toBe('2026-03-28');
     // A due time in the future: one step after it.
     expect(nextReviewAt('P3D', tz, localWallTime(tz, '2026-05-01', 9, 0), localWallTime(tz, '2026-04-01', 9, 0)).toISOString()).toBe(localWallTime(tz, '2026-05-04', 9, 0).toISOString());
+  });
+});
+
+describe('the goals panel’s wire (P3 part 2)', () => {
+  const dk = 'k7Hq2LmN9pQr3sTv';
+  const body = (over: Record<string, unknown> = {}) => ({ draftKey: dk, args: activate({ goalId: `go${dk}`, ...over }) });
+
+  it('a refusal is a fixed sentence with a code, and only a code in the closed set has one', () => {
+    for (const [code, say] of Object.entries(GOAL_SAYS)) {
+      expect(say, code).toMatch(/^[A-Z][^{}<>$]*\.$/);
+      expect(goalSayOf(code)).toBe(say);
+      expect(goalCodeOf(say)).toBe(code);
+    }
+    for (const s of GOAL_STATUSES) {
+      expect(goalCodeOf(GOAL_STATUS_SAYS[s])).toBe(`status.${s}`);
+      expect(goalSayOf(`status.${s}`)).toBe(GOAL_STATUS_SAYS[s]);
+    }
+    for (const bad of ['toString', '__proto__', 'status.toString', 'status.', 'forbidden: goal.done', 42, null]) expect(goalSayOf(bad), String(bad)).toBeUndefined();
+    expect(goalCodeOf('Some runtime words.')).toBeUndefined();
+  });
+
+  it('a new goal is Will’s own and its id is made from the form’s draft key', () => {
+    expect(NewGoalBody.safeParse(body()).success).toBe(true);
+    expect(goalIdOf(dk)).toBe(`go${dk}`);
+    expect(GoalId.safeParse(goalIdOf('a'.repeat(32))).success).toBe(true);
+    for (const over of [{ goalId: 'goSomethingElse1' }, { origin: 'flint' }, { owner: 'flint' }, { tainted: true }, { nexusProjectId: 'p1' }, { sensitivity: 'ops' }]) {
+      expect(NewGoalBody.safeParse(body(over)).success, JSON.stringify(over)).toBe(false);
+    }
+    expect(NewGoalBody.safeParse({ ...body(), extra: 1 }).success).toBe(false);
+    expect(NewGoalBody.safeParse({ draftKey: 'short', args: activate({ goalId: 'goshort' }) }).success).toBe(false);
+    expect(NewGoalBody.safeParse(body({ sensitivity: 'financial' })).success).toBe(true);
+  });
+
+  it('each card route takes that card’s args; resuming brings no plan; the plain writes are strict', () => {
+    expect(Object.values(GOAL_CARD_VERBS).sort()).toEqual([...GOAL_SIGNED_ACTIONS].sort());
+    expect(GOAL_CARD_BODIES.done.safeParse({ args: { goalId: 'gotest0001', goalTitle: 'T' } }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.done.safeParse({ args: { goalId: 'gotest0001', goalTitle: 'T' }, x: 1 }).success).toBe(false);
+    expect(GOAL_CARD_BODIES.resume.safeParse({ args: activate() }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.resume.safeParse({ args: activate({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [crit('c1', { kind: 'steps', keys: ['s1'] })] }) }).success).toBe(false);
+    // A change to what counts as done, or to the timing, says what it changes from (the card's precondition, signed with it).
+    const def = { title: 'T', description: '', successCriteria: [crit('c1')], links: [] };
+    const edit = { goalId: 'gotest0001', ...def, title: 'T2' };
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: edit }).success).toBe(false);
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: { ...edit, from: def } }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: { ...edit, from: { ...def, extra: 1 } } }).success).toBe(false);
+    const timing = { goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W' };
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: timing }).success).toBe(false);
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null, reviewCadence: 'P1W' } } }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null } } }).success).toBe(false);
+    // The contract itself requires it: a card filed by any other way (the CLI, straight at the runtime) is held to it too.
+    expect(GoalHorizonChangeArgs.safeParse(timing).success).toBe(false);
+    expect(GoalCriteriaChangeArgs.safeParse(edit).success).toBe(false);
+    expect(StepBody.safeParse({ status: 'skipped' }).success).toBe(false);
+    expect(MarkBody.safeParse({ met: true, at: 'x' }).success).toBe(false);
+    expect(LinkableBody.safeParse({ q: 'x'.repeat(81) }).success).toBe(false);
+  });
+
+  it('the conditions the panel offers fit CHECK_PATHS; answers are strict, and a row can never be late until reviews exist', () => {
+    expect(Object.keys(GOAL_CONDITIONS).sort()).toEqual(Object.keys(CHECK_PATHS).sort());
+    for (const [kind, cs] of Object.entries(GOAL_CONDITIONS)) for (const c of cs) expect(checkFits(kind, c.key, c.value)).toBe(true);
+    const row = { id: 'gotest0001', title: 'T', status: 'active', origin: 'will', checks: { met: 0, total: 1, unknown: 0 }, horizonAt: null, reviewCadence: 'P1W', endedAt: null, waiting: 0, late: false, tainted: false };
+    expect(GoalsPage.safeParse({ tab: 'active', goals: [row], waiting: [], reviews: 'off' }).success).toBe(true);
+    expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, extra: 1 }], waiting: [], reviews: 'off' }).success).toBe(false);
+    expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, title: 'x'.repeat(121) }], waiting: [], reviews: 'off' }).success).toBe(false);
+    expect(Linkable.safeParse({ items: [{ entityId: 'en1', kind: 'pull_request', label: 'wpf002/flint #57', status: 'active', title: null, conditions: [] }] }).success).toBe(true);
   });
 });

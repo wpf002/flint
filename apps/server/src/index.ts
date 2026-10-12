@@ -75,6 +75,7 @@ import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
 import { inboxRoutes } from './inbox-routes';
+import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, type BackgroundFrontier } from './background-complete';
 import { createHash } from 'node:crypto';
@@ -1544,6 +1545,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
 
   // The runtime's lanes, its health report, and Will's labels, acks and dismissals (./inbox-routes).
   if (await inboxRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
+
+  // Will's goals, for the console's Goals panel (./goals-routes): checked both ways, never spooled.
+  if (await goalsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {

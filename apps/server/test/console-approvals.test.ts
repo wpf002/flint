@@ -482,6 +482,107 @@ describe('the console Approvals panel', () => {
     expect(ids.apprnote!.textContent).toBe('You have 1 approval waiting.');
   });
 
+  it('P3’s cards in words: a title, a sentence and their facts for every goal and plan action; never the raw action name', async () => {
+    const h = '2026-12-01T23:59:00.000Z';
+    const crit = [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }, { id: 'c2', text: 'Synthetic other', check: { kind: 'manual' } }, { id: 'c3', text: 'x', check: { kind: 'manual' } }];
+    const say = (p: Record<string, unknown>) => {
+      const c = { origin: 'console', expiresAt: '2026-10-16T14:00:00.000Z', ...p };
+      return [run(`apprTitle(${JSON.stringify(c)})`), run(`apprSub(${JSON.stringify(c)})`), JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(c)})`))), run(`apprIcon(${JSON.stringify(c)})`)];
+    };
+    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit, horizonAt: h }, reason: 'Approving starts this goal.' }))
+      .toEqual(['Add a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks'], ['Finish By', run(`apprDate('${h}')`)]], 'target']);
+    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit.slice(0, 1), horizonAt: null, origin: 'flint' } }).slice(0, 3))
+      .toEqual(['Activate a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '1 Check'], ['Finish By', 'No Date']]]);
+    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit }, reason: 'Approving resumes this goal.' }).slice(0, 2)).toEqual(['Resume a Goal', 'It resumes as soon as you approve.']);
+    expect(say({ fullName: 'goal.criteria_change', args: { title: 'Synthetic goal', successCriteria: crit } }).slice(0, 3)).toEqual(['Change a Goal', 'This changes what counts as done.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks']]]);
+    expect(say({ fullName: 'goal.horizon_change', args: { goalTitle: 'Synthetic goal', horizonAt: null, reviewCadence: 'P2W' } }).slice(0, 3))
+      .toEqual(['Change a Goal’s Timing', 'This changes its date or how often it’s reviewed.', [['Goal', 'Synthetic goal'], ['Finish By', 'No Date'], ['Review Every', '2 Weeks']]]);
+    expect(say({ fullName: 'goal.done', args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
+    expect(say({ fullName: 'goal.abandon', args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
+    const ops = [{ op: 'add', key: 's4' }, { op: 'set', key: 's1', to: { dueAt: h } }, { op: 'set', key: 's2', to: { dueAt: h } }, { op: 'set', key: 's3', to: { status: 'blocked' } }];
+    expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
+      .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
+    expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
+    expect(say({ fullName: 'plan.change', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
+    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } }).slice(0, 3))
+      .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]]);
+    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { quote: 'I will send it by Friday', dueAt: h } }).slice(0, 3))
+      .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['You Said', 'I will send it by Friday'], ['Due', run(`apprDate('${h}')`)]]]);
+    // A card whose args were cleared says what it still knows, and no empty facts.
+    expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
+    expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
+    // The policy card names P3's rows in words.
+    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', dailyCap: 20 }, { pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }] } })[2])
+      .toContainEqual(['Limits', 'Review Your Goals 20 a Day · Suggest Goals from Chat 3 a Day · Add Commitments from Chat 10 a Day']);
+  });
+
+  it('every goal card, and every consequential card, asks on its own with a fresh touch and a plain prompt; minor plan and chat suggestions ride Approve All', async () => {
+    const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
+    const alone = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon'];
+    // Even without the server's mark, a goal card's name keeps it alone (an older server).
+    for (const a of alone) expect(run(`apprAlone(${JSON.stringify({ fullName: a })})`), a).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', consequential: true })})`)).toBe(true);
+    for (const p of [{ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false }, { fullName: 'goal.propose' }, { fullName: 'world.commitment.from_chat' }]) {
+      expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName).toBe(false);
+    }
+    answer = () => ({
+      status: 200,
+      body: {
+        signed: true,
+        proposals: [
+          ...alone.map((a, i) => goalCard(`g${i}`, a, { consequential: true })),
+          goalCard('pm', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [] } }),
+          goalCard('pw', 'plan.change', { consequential: true, args: { goalTitle: 'Synthetic goal', ops: [] } }),
+          goalCard('gp', 'goal.propose', { origin: 'chat:c1', args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
+          card({ id: 'src' }),
+        ],
+      },
+    });
+    await open();
+    expect(ids.apprnote!.textContent).toBe('You have 9 approvals waiting. Approve All skips 6.');
+    // Approve All signs only the cards that may share one prompt.
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['pm', 'gp', 'src']);
+    expect(decided.every((d) => !(d[2] as { fresh?: boolean }).fresh)).toBe(true);
+    // Each goal card is signed on its own, fresh, and the prompt says what it does in plain words.
+    decided = [];
+    const rows = () => ids.apprlist!.children[0]!.children;
+    const prompts: string[] = [];
+    for (let i = 0; i < alone.length; i++) {
+      rows()[i]!.onclick?.();
+      const r = rows()[i]!;
+      expect(r.shown()).toContain('Asks on Its Own');
+      r.button('Approve with Password').onclick!();
+      const o = decided.at(-1)![2] as { fresh: boolean; reason: string; args: unknown };
+      expect(o.fresh, alone[i]).toBe(true);
+      expect(o.args).toEqual({ goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' });
+      prompts.push(o.reason);
+    }
+    expect(prompts).toEqual(['add this goal', 'change what counts as done for this goal', 'change this goal’s timing', 'mark this goal done', 'abandon this goal']);
+    for (const p of prompts) expect(p).not.toMatch(/goal\.|approve/);
+    rows()[6]!.onclick?.();
+    rows()[6]!.button('Approve with Password').onclick!();
+    expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
+  });
+
+  it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
+    const told: string[] = [];
+    ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
+    await open();
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    await settle();
+    expect(told).toEqual(['g1']);
+    failApprove = 'g1';
+    await open();
+    ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+    await settle();
+    expect(told).toEqual(['g1']);
+  });
+
   it('the approvals panel never writes HTML', () => {
     expect(apprJs.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
