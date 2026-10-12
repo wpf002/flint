@@ -444,7 +444,7 @@ async function main(): Promise<void> {
   // answered yet: that is a stand-in for some seconds, and the log says so.)
   const noteLocalDefault = (b: LocalBrain): void => {
     if (b.from !== 'default' || !b.settled) return;
-    const note = localDefaultNote(b.model);
+    const note = localDefaultNote();
     notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });
   };
   noteLocalDefault(localBrain);

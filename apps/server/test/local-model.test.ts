@@ -494,11 +494,15 @@ describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
     expect(new OllamaProvider(b.options).name).toBe('ollama');
   });
 
-  it('localDefaultNote: one plain sentence for the console when the model is a guess', () => {
-    expect(localDefaultNote('qwen2.5:7b')).toEqual({
+  // Will's rules for a note (2026-10-12): plain sentences, and never an internal name. The
+  // model's id and the setting's name are both in the boot log, which the note points at.
+  it('localDefaultNote: plain sentences for the console when the model is a guess, with no id or setting name in them', () => {
+    const note = localDefaultNote();
+    expect(note).toEqual({
       title: 'Flint Is Guessing Its Local Model',
-      body: 'No local model is set, and Ollama listed none, so Flint is trying qwen2.5:7b. Set OLLAMA_MODEL to choose one, then restart Flint.',
+      body: 'No local model is set, and Ollama has none to offer, so Flint is trying a small default. The server log says how to choose one.',
     });
+    expect(`${note.title} ${note.body}`).not.toMatch(/OLLAMA|[A-Z]+_[A-Z]+|qwen|[a-z0-9]+:[a-z0-9]+|[()`]/);
   });
 });
 

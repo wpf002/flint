@@ -385,7 +385,7 @@ describe('the cool-down and the one check after it', () => {
     await settle();
     expect(t.breaker.state('anthropic').open).toMatchObject({ reason: 'credit', cooldownMs: HARD_COOLDOWN_MS });
     expect(t.opened.map((e) => e.reason)).toEqual(['transient', 'credit']);
-    expect(breakerNote(t.opened[1]! as Parameters<typeof breakerNote>[0])?.title).toBe('Claude Is Out of Credit');
+    expect(breakerNote(t.opened[1]! as Parameters<typeof breakerNote>[0])?.title).toBe('Claude Has No Credit Left');
     expect(t.logs.at(-1)).toBe('[breaker] anthropic paused (credit): the local model answers; next check in 15 min');
     // ...and the other way round: no credit, then the network goes. 5 minutes, and no note for an outage.
     t.checksFail(noConnection());
@@ -925,20 +925,44 @@ describe('gateChain / gateTurn / gated', () => {
 describe('breakerNote (what the console tells Will)', () => {
   it('says what happened and what Flint is doing, in plain words, for the things only Will can fix', () => {
     expect(breakerNote({ provider: 'anthropic', reason: 'credit' })).toEqual({
-      title: 'Claude Is Out of Credit',
+      title: 'Claude Has No Credit Left',
       body: 'Flint is answering with the local model, and checks again every 15 minutes.',
     });
     expect(breakerNote({ provider: 'openai', reason: 'auth' })).toEqual({
-      title: "OpenAI Rejected Flint's Key",
+      title: 'OpenAI Rejected Flint’s Key',
       body: 'Flint is answering with the local model, and checks again every 15 minutes.',
     });
   });
 
-  it('one model the key may not use: says which, and that the others still answer', () => {
+  // Will's rules for a note (2026-10-12) allow no internal name, and a model's id is one.
+  it('one model the key may not use: says so without the model\'s id, where to find it, and that the others still answer', () => {
     expect(breakerNote({ provider: 'anthropic', reason: 'auth', model: 'claude-opus-5-5' })).toEqual({
       title: 'Claude Refused One Model',
-      body: "Flint's key can't use claude-opus-5-5. Its other models still answer, and Flint checks again every 15 minutes.",
+      body: 'Flint’s key can’t use one of Claude’s models, and the server log names it. The others still answer, and Flint checks again every 15 minutes.',
     });
+  });
+
+  it('no note carries a model id or a provider\'s config name, whatever the provider is called', () => {
+    for (const provider of ['anthropic', 'openai', 'perplexity', 'ollama', 'openai-compat', 'my_proxy']) {
+      for (const e of [
+        { provider, reason: 'credit' as const },
+        { provider, reason: 'auth' as const },
+        { provider, reason: 'auth' as const, model: 'sonar-deep-research' },
+        { provider, reason: 'auth' as const, model: 'gpt-5.5' },
+      ]) {
+        const note = breakerNote(e)!;
+        const text = `${note.title} ${note.body}`;
+        expect(text, text).not.toMatch(/sonar|gpt|openai-compat|my_proxy|[a-z]+-[a-z0-9]+-|[()`_]/);
+        // Title Case, with no stop; whole sentences under it.
+        expect(note.title, note.title).toMatch(/^(?:[A-Z][A-Za-z’]*)(?: [A-Z][A-Za-z’]*)*$/);
+        expect(note.body, note.body).toMatch(/^[A-Z].*\.$/);
+      }
+    }
+    expect(breakerNote({ provider: 'ollama', reason: 'auth' })!.title).toBe('Ollama Rejected Flint’s Key');
+    expect(breakerNote({ provider: 'my_proxy', reason: 'credit' })!.title).toBe('An Outside AI Has No Credit Left');
+    expect(breakerNote({ provider: 'my_proxy', reason: 'auth', model: 'x-1' })!.body).toBe(
+      'Flint’s key can’t use one of its models, and the server log names it. The others still answer, and Flint checks again every 15 minutes.',
+    );
   });
 
   it('an outage that clears itself gets no note', () => {

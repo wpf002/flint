@@ -157,9 +157,10 @@ the same refusal from each, and only then asked the local model.
   on resume). Its research planner does respect the pause.
 - **Not counted:** a malformed request, an unknown model, a 429, a refusal, a closed tab.
 - **Will is told.** Out of credit, a rejected key, or a model the key may not use puts one note in
-  the console's notifications ("Claude Is Out of Credit"), once a day, with no banner and no phone
+  the console's notifications ("Claude Has No Credit Left"), once a day, with no banner and no phone
   ping; also when a check finds that an outage was one of those all along. A transient pause clears
-  itself and says nothing.
+  itself and says nothing. A note is plain words and carries no model id: the server log
+  (`[breaker] anthropic:<model> paused (auth)`) and `GET /health` name the model.
 - **`GET /health`** lists what is paused as `frontierPaused`:
   `[{ "scope": "anthropic", "reason": "credit", "nextCheckInSec": 840, "checking": false }]`
   (empty when nothing is). A model's own pause has the scope `openai:gpt-5`.

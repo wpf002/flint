@@ -423,20 +423,27 @@ export function gateTurn<P>(input: {
   };
 }
 
-/** What Will calls each outside provider. */
-const NAMES: Record<string, string> = { anthropic: 'Claude', openai: 'OpenAI', perplexity: 'Perplexity' };
+/** What Will calls each outside provider. One this does not know is "an outside AI": a name from config is never shown as it is. */
+const NAMES: Record<string, string> = { anthropic: 'Claude', openai: 'OpenAI', perplexity: 'Perplexity', ollama: 'Ollama' };
 
 /**
  * The note for Will when a provider is paused for something only he can fix.
  * A `transient` pause clears itself in minutes and gets no note.
+ *
+ * Written to his rules for a note (2026-10-12): a short Title Case title, whole
+ * sentences under it, and no internal name. A model's id is one, so the note
+ * says "one of Claude's models" and the server log names it (`[breaker]
+ * anthropic:<model> paused (auth)`), as GET /health does under frontierPaused.
  */
 export function breakerNote(e: Pick<BreakerEvent, 'provider' | 'reason' | 'model'>): { title: string; body: string } | undefined {
-  const name = NAMES[e.provider] ?? e.provider;
+  const name = NAMES[e.provider];
+  const who = name ?? 'An Outside AI';
   const body = 'Flint is answering with the local model, and checks again every 15 minutes.';
-  if (e.reason === 'credit') return { title: `${name} Is Out of Credit`, body };
+  if (e.reason === 'credit') return { title: `${who} Has No Credit Left`, body };
   if (e.reason !== 'auth') return undefined;
-  if (e.model === undefined) return { title: `${name} Rejected Flint's Key`, body };
-  // Only a model id's characters: it is read from config, and is shown as is.
-  const model = e.model.replace(/[^A-Za-z0-9._:/-]/g, '').slice(0, 80);
-  return { title: `${name} Refused One Model`, body: `Flint's key can't use ${model}. Its other models still answer, and Flint checks again every 15 minutes.` };
+  if (e.model === undefined) return { title: `${who} Rejected Flint’s Key`, body };
+  return {
+    title: `${who} Refused One Model`,
+    body: `Flint’s key can’t use one of ${name ? `${name}’s` : 'its'} models, and the server log names it. The others still answer, and Flint checks again every 15 minutes.`,
+  };
 }

@@ -225,11 +225,17 @@ export function keepPickingLocal(
   return { stop: () => void (stopped = true), done };
 }
 
-/** The console note when the local brain is the fallback default: nothing was set and Ollama had nothing to offer. */
-export function localDefaultNote(model: string): { title: string; body: string } {
+/**
+ * The console note when the local brain is the fallback default: nothing was
+ * set and Ollama had nothing to offer. Written to Will's rules for a note
+ * (2026-10-12): no internal name, so neither the model's id nor the setting's.
+ * The boot log has both, and says what to run (`[brain] OLLAMA_MODEL is unset
+ * and Ollama listed no chat model: ...`).
+ */
+export function localDefaultNote(): { title: string; body: string } {
   return {
     title: 'Flint Is Guessing Its Local Model',
-    body: `No local model is set, and Ollama listed none, so Flint is trying ${model}. Set OLLAMA_MODEL to choose one, then restart Flint.`,
+    body: 'No local model is set, and Ollama has none to offer, so Flint is trying a small default. The server log says how to choose one.',
   };
 }
 

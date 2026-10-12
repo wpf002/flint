@@ -223,7 +223,7 @@ describe('index.ts wiring', () => {
     const note = between('const noteLocalDefault = (b: LocalBrain): void => {', 'const runtimeUrl =');
     // Only a default that is settled: a stand-in while Ollama has not answered is no guess to report.
     expect(note).toContain("if (b.from !== 'default' || !b.settled) return;");
-    expect(note).toContain('const note = localDefaultNote(b.model);');
+    expect(note).toContain('const note = localDefaultNote();');
     expect(note).toContain('noteLocalDefault(localBrain);');
     expect(note).toContain("notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });");
   });
