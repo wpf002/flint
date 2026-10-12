@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { HEALTH_NAMES, SERVICE_WORDS, healthName, properWords, serviceWords } from '../src/health-names';
+import { HEALTH_GROUPS, HEALTH_GROUP_OTHER, HEALTH_NAMES, SERVICE_WORDS, healthGroup, healthName, properWords, serviceWords } from '../src/health-names';
 import { JOB_WORDS } from '../src/action-words';
 import { noteProblems } from '../src/notes';
 
@@ -41,6 +41,37 @@ describe('healthName', () => {
   it('the nightly forecasts (P4) are a component of their own: Forecasts', () => {
     expect(healthName('forecasts')).toBe('Forecasts');
     expect(HEALTH_NAMES.forecasts).toBe('Forecasts');
+  });
+});
+
+describe('the rest of the machine (P7)', () => {
+  it('each new component has its plain name', () => {
+    expect(healthName('disk')).toBe('Disk Space');
+    expect(healthName('remote_access')).toBe('Remote Access');
+    expect(healthName('files_backup')).toBe('Files Backup');
+    expect(healthName('offsite_drill')).toBe('Offsite Restore Test');
+    expect(healthName('backup_model')).toBe('Backup Model');
+  });
+
+  it('Health is shown in four groups, each header in capitals, and no component is in two', () => {
+    expect(HEALTH_GROUPS.map((g) => g.header)).toEqual(['MODELS', 'BACKUPS', 'THIS MAC', 'REMOTE ACCESS']);
+    for (const g of HEALTH_GROUPS) expect(g.header).toBe(g.header.toUpperCase());
+    const placed = HEALTH_GROUPS.flatMap((g) => g.components);
+    expect(new Set(placed).size).toBe(placed.length);
+    // Every component placed by name is one that has a name. (One with a name and no place is shown under THIS MAC,
+    // so a new component needs no line here to be shown.)
+    for (const c of placed) expect(Object.keys(HEALTH_NAMES), c).toContain(c);
+    expect(healthGroup('disk')).toBe('THIS MAC');
+    expect(healthGroup('offsite_backup')).toBe('BACKUPS');
+    expect(healthGroup('ollama')).toBe('MODELS');
+    expect(healthGroup('remote_access')).toBe('REMOTE ACCESS');
+  });
+
+  it('a source, and anything not placed yet, is shown under THIS MAC: it is something Flint runs here', () => {
+    expect(HEALTH_GROUP_OTHER).toBe('THIS MAC');
+    expect(healthGroup('source:github')).toBe('THIS MAC');
+    expect(healthGroup('something_new')).toBe('THIS MAC');
+    expect(HEALTH_GROUPS.some((g) => g.header === HEALTH_GROUP_OTHER)).toBe(true);
   });
 });
 

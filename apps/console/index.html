@@ -1143,7 +1143,7 @@ function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
    name ("backup.offsite"), a file path, a command, an id or an aside in parentheses, whatever an older Flint
    stored: those details are in the logs. The jobs' names are @flint/policy's JOB_WORDS (a test keeps the two in
    step). A calendar or market note carries someone else's words, which stay as they were written. */
-var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restore.drill':'Restore Test','maintenance.retention':'Cleanup'};
+var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restore.drill':'Restore Test','maintenance.retention':'Cleanup','backup.prune':'Backup Cleanup'};
 var NOTE_OUTSIDE={calendar:1,signal:1};
 /* An internal name (lowercase parts joined by dots or underscores), an entity's ref (issue#24ehza), a file path. */
 var NOTE_NAME=/(^|[^A-Za-z0-9])([a-z][a-z0-9]*(?:[._][a-z0-9]+)+)/g,NOTE_REF=/[a-z_]{2,20}#[A-Za-z0-9]{1,12}\b/g,NOTE_PATH=/(^|[\s"'“(])~?\/[\w.~\/-]+/g;
@@ -1312,7 +1312,7 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
   }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;laneMsg(e.message,true);});}
 
 /* ---------- Settings: Health ---------- */
-var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',runtime:'Runtime'};
+var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',runtime:'Runtime',backup_model:'Backup Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access'};
 var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};
 var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
 /* An issue with no note of its own says what its status means (its dot and its place in the list show how bad). */
