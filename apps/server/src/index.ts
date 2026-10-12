@@ -175,8 +175,9 @@ const ALLOWED_HOSTS = process.env.FLINT_ALLOWED_HOSTS?.trim()
  */
 let TAILNET_USER: string | undefined; // read in main(), after ~/.flint/secrets.env is loaded
 /**
- * Will's goals for chat turns (./goals-now), built in main() when FLINT_GOALS_NOW=1; undefined: off.
- * It hands the block out per ask, to a brain on this Mac only (unless Will set FLINT_GOALS_TO_FRONTIER=on).
+ * The gate for what stays on this Mac in chat (./goals-now), built in main() and again when the local
+ * brain is swapped: Will's goals (when FLINT_GOALS_NOW=1) and the recalled facts learned from goals
+ * turns. It hands them out per ask, to a brain on this Mac only (unless Will set FLINT_GOALS_TO_FRONTIER=on).
  */
 let GOALS: GoalsNow<Persona> | undefined;
 
