@@ -1249,29 +1249,33 @@ action so named.
 ### Rolling P4 back
 
 P4 has two database updates, and each has a `down.sql` that belongs to a
-rollback. They're run newest first:
+rollback. Updates are undone newest first, and one from goals sits between
+P4's two:
 
-- `20261014000000_p4_forecast_inputs` (this part): two columns, how many days
-  of each forecast were filled in and where each number was read to. Its
-  `down.sql` drops them and loses nothing else. Run alone, it needs a runtime
-  from before this part.
-- `20261013000000_p4_forecasts` (the store). Its `down.sql` is the real
-  rollback:
+1. `20261014000000_p4_forecast_inputs` (P4's third part): two columns, how
+   many days of each forecast were filled in and where each number was read
+   to. Its `down.sql` drops them and loses nothing else. Undone alone, it
+   needs a runtime from before that part.
+2. `20261013000100_p3_policy_floor` (goals, part 4). See "Rolling P3 back".
+3. `20261013000000_p4_forecasts` (the store). Undoing this one is the real
+   rollback of P4.
+
+To roll the store back:
 
 1. First deploy a runtime from before P4, with `FLINT_PREDICT` off. P4's job bus
-   expects the six prediction queues that `down.sql` drops.
-2. Then take a dump and run the two `down.sql` files by hand, the newer one
-   first. Forecast runs, which numbers
-   were on, and your questions and answers go with it. So do the scores only P4
-   keeps (range scores and the finer measures), which a later snapshot
-   recomputes. Every prediction and resolution stays, and so does each yes/no
-   score; a forecast's predictions lose their range and their link to the run.
-   The four safeguards on goal cards go back to how P3 had them.
+   expects the six prediction queues that the store's `down.sql` drops.
+2. Then take a dump and run the three `down.sql` files by hand, in the order
+   above. Forecast runs, which numbers were on, and your questions and
+   answers go with the store. So do the scores only P4 keeps (range scores
+   and the finer measures), which a later snapshot recomputes. Every
+   prediction and resolution stays, and so does each yes/no score; a
+   forecast's predictions lose their range and their link to the run. The
+   four safeguards on goal cards go back to how P3 had them.
 
 A Turn On Predictions card still waiting expires on its own. One you approve
 while P4 is rolled back isn't carried out ("not carried out by the runtime")
-and stays approved. Any later deploy of P4 code applies the migration again.
-Claude runs `down.sql` only with your OK, after the dump.
+and stays approved. Any later deploy of P4 code applies the updates again.
+Claude runs a `down.sql` only with your OK, after the dump.
 
 ## When a database update fails
 
