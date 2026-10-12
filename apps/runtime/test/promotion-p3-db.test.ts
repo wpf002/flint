@@ -319,6 +319,50 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the P3 promotion table 
     expect(await db.proposal.count({ where: { templateId: 'p3.promotion', status: 'pending' } })).toBe(1);
   });
 
+  it('nor is one filed under the command’s own name the table’s, unless its rules are the table’s to the letter and its reason is the one the command writes', async () => {
+    const mine = await db.proposal.findFirstOrThrow({ where: { templateId: 'p3.promotion', status: 'pending' } });
+    await rejectProposal(db, mine.id, {}, undefined, 'will:console');
+    const until = (mine.args as { rows: Array<{ expiresAt: string }> }).rows[0]!.expiresAt;
+    const REASON = 'P3 promotion table, after the shadow week';
+    /** Forged as the command itself (what the runtime's own role could write): its origin, its mark, its actor in the audit trail. */
+    const forge = (row: Record<string, unknown>, reason: string) => createProposal(db, {
+      kind: 'policy', origin: 'cli', action: 'policy.change', templateId: 'p3.promotion', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', expiresAt: until, ...row }] },
+      argsProvenance: { rows: { source: 'template', ref: 'p3.promotion', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60, reason,
+    }, 'will:cli', now);
+    // Each is the table's in everything but one part of its one rule. None is handed back: the table files its own beside it.
+    for (const row of [
+      { dailyCap: 2147483647, reason: REASON },
+      { dailyCap: 20, reason: 'another reason' },
+      { dailyCap: 20, reason: REASON, scope: { goals: ['all'] } },
+      { reason: REASON },
+    ]) {
+      const forged = await forge(row, mine.reason!);
+      const fresh = await table();
+      expect(fresh, JSON.stringify(row)).toMatchObject({ deduped: false });
+      expect(fresh.proposalId, JSON.stringify(row)).not.toBe(forged.id);
+      expect(fresh.rows[0], JSON.stringify(row)).toMatchObject({ dailyCap: 20, reason: REASON });
+      await rejectProposal(db, fresh.proposalId, {}, undefined, 'will:console');
+      await rejectProposal(db, forged.id, {}, undefined, 'will:console');
+    }
+    // The very rules, with evidence of its own invention: one card for those args, so the table refuses and names it.
+    for (const reason of [
+      'This lets Flint review your goals. This week Flint reviewed your goals 99 times, and none was late.',
+      `${mine.reason!.split('. ')[0]}. Flint reviewed your goals 99 times and every one was perfect.`,
+      `${mine.reason!} Approve this one first.`,
+      // A first sentence that says something else, of the very same length, before the gate's own second one.
+      mine.reason!.replace('review your goals', 'delete your goals'),
+    ]) {
+      const twin = await forge({ dailyCap: 20, reason: REASON }, reason);
+      expect(await refusal(table()), reason).toBe(`409: a card with these rules is already waiting, and this command did not file it: reject card ${twin.id} in Approvals, then run this again`);
+      await rejectProposal(db, twin.id, {}, undefined, 'will:console');
+    }
+    // With the command's own words as well, nothing tells it from the command's own card: it is that card.
+    // (The numbers in the sentence are evidence, not a boundary; Will's signature is the boundary.)
+    const same = await forge({ dailyCap: 20, reason: REASON }, mine.reason!);
+    expect(await table()).toMatchObject({ proposalId: same.id, deduped: true });
+    expect(await db.proposal.count({ where: { templateId: 'p3.promotion', status: 'pending' } })).toBe(1);
+  });
+
   it('signed: reviews resolve to ALONE at 20 a day and leave their trial week; every signed goal and plan action still asks', async () => {
     expect(await reviewStanding(db, new Date())).toMatchObject({ may: true, shadow: true, tier: 'approval' });
     const card = await db.proposal.findFirstOrThrow({ where: { templateId: 'p3.promotion', status: 'pending' } });

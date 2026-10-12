@@ -87,6 +87,8 @@ describe.skipIf(NO_DB)('P2.5 on flint_test', () => {
     key = await enrollTestKey(urls);
     const args = { source: 'google_calendar' };
     const p = await createProposal(db, { kind: 'tool_call', origin: 'console', action: 'world.source.enable', args, argsProvenance: { source: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60 }, 'test');
+    // Filed without the mark, stored with it: a card that turns a source on asks on its own.
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).consequential).toBe(true);
     expect(await sign(p.id, 'world.source.enable', args)).toEqual({ source: 'google_calendar', enabled: true });
   });
   afterAll(async () => db?.$disconnect());

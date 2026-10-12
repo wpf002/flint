@@ -158,6 +158,9 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // filer's to leave off (the database refuses a policy change without it: Proposal_policy_floor).
     input = { ...input, consequential: true };
   }
+  // A card that turns a source on changes what Flint reads, and a triage rule changes how it sorts what it
+  // reads: each asks on its own too, whoever files it.
+  if (input.action === 'world.source.enable' || input.action === 'triage.rule.create') input = { ...input, consequential: true };
   // So is a triage rule, against its source's allowlisted fields; and it is policy (kind `rule`).
   if (input.action === 'triage.rule.create') {
     const { refuseRule } = await import('./internal.js');

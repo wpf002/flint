@@ -158,6 +158,8 @@ interface PhaseOf {
    * it is asked nothing else.
    */
   weighed?: (db: Db, now: Date, tz: string) => Promise<{ gap: string } | { measured: string }>;
+  /** The shape of the sentence `weighed` writes on the card, after the card's fixed first one. */
+  says?: RegExp;
 }
 
 /** "Oct 5": the day a window starts, as the card says it. */
@@ -254,6 +256,7 @@ const PHASES: Record<Phase, PhaseOf> = {
     template: 'p3.promotion',
     label: 'P3',
     lets: 'Flint review your goals and send its plan suggestions as cards',
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint reviewed your goals \d+ times?, and (?:none was|1 was|\d+ were) late\. The local model answered \d+\. It (?:would have suggested|suggested) \d+ changes?\.$/,
     evidence: 'goal reviews',
     // Flint's first review of any goal: the trial week runs from there.
     first: (db) => firstReviewAt(db),
@@ -292,6 +295,7 @@ const PHASES: Record<Phase, PhaseOf> = {
     lets: 'Flint suggest goals from your chats',
     evidence: 'chat suggestions',
     shadowDays: P3C_SHADOW_DAYS,
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals? from chat: you approved \d+, rejected \d+, and \d+ expired\.$/,
     // The first goal chat suggested: Will has signed or rejected each one since.
     first: async (db) => (await db.proposal.findFirst({ where: { action: 'goal.propose' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
     // Two weeks of suggestions means there were some: the 14 whole local days before today, and today. The
@@ -361,9 +365,16 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   const args = PolicyArgs.parse({ rows });
   // This table's own card, still waiting: that one (Will signs one table, not several). Its own means this
   // command filed it (the audit trail's actor), as Will's card that asks on its own, with the very rules it
-  // would file now. A waiting card that only carries the table's name is not it, whatever it says.
-  const own = async (w: { id: string; origin: string; consequential: boolean; args: unknown }): Promise<boolean> =>
-    w.origin === 'cli' && w.consequential === true && sameRules(rulesOf(w.args), rows, now)
+  // would file now and the reason this command writes for them. A waiting card that only carries the table's
+  // name is not it, whatever it says.
+  const ownReason = (w: { reason: string | null; args: unknown }): boolean => {
+    // The fixed first sentence, for that card's own last day; then, for a table whose gate writes one, a
+    // sentence of the gate's shape. (Its numbers were true when it was filed; they are evidence, not checked here.)
+    const lead = `This lets ${phase.lets} without asking until ${untilDay(String(rulesOf(w.args)[0]?.expiresAt ?? ''))}. `;
+    return typeof w.reason === 'string' && w.reason.startsWith(lead) && (!phase.says || phase.says.test(w.reason.slice(lead.length)));
+  };
+  const own = async (w: { id: string; origin: string; consequential: boolean; args: unknown; reason: string | null }): Promise<boolean> =>
+    w.origin === 'cli' && w.consequential === true && sameRules(rulesOf(w.args), rows, now) && ownReason(w)
     && (await db.auditEntry.count({ where: { correlationId: w.id, kind: 'decision', action: 'policy.change', decision: 'queue', actor: PROMOTION_ACTOR } })) > 0;
   const waiting = await db.proposal.findMany({ where: { action: 'policy.change', templateId: phase.template, status: 'pending', expiresAt: { gt: now } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
   for (const w of waiting) {

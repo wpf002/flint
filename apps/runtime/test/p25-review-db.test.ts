@@ -107,6 +107,8 @@ describe.skipIf(NO_DB)('P2.5 review cases on flint_test', () => {
     await expect(proposeEnable(db, 'not_a_source')).rejects.toThrow();
     expect(await sign(p.id, 'world.source.enable', { source: 'google_calendar' })).toEqual({ source: 'google_calendar', enabled: true });
     expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).origin).toBe('cli');
+    // It changes what Flint reads, so its card asks on its own: the runtime marks it, whoever files it and whatever they ask for.
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).consequential).toBe(true);
   });
   afterAll(async () => db?.$disconnect());
 
