@@ -1447,7 +1447,13 @@ pollApprovals();setInterval(pollApprovals,60000);
  * label, and its title (outside text) appears only in the picker, marked. What the panel has to say
  * (an error, an outcome, "Flint is waiting for your approval.") is said in the footer, which never scrolls away.
  * A half-typed New Goal is kept until it is added or cleared. ES5, no confirm(), alert() or prompt():
- * the Mac app's web view has none. Reviews come in a later part: until then nothing is late. */
+ * the Mac app's web view has none.
+ * Reviews (part 3): while Flint reviews goals, a goal says when its review is late, and an open goal
+ * shows how likely it is to be done in time (from the ledger's own number), its latest review, and
+ * Review Now. A review's suggestions are said in sentences made here from a step's title and closed
+ * sets: the model writes none of these words. In the trial week Flint only shows what it would
+ * change. With reviews off (the planner is not on yet), nothing is ever late, and the list says that
+ * scheduled reviews start soon. */
 var GOALS={tab:'active',view:'list',page:null,suggested:0,goal:null,form:null,draft:null,busy:false,seq:0,nav:0,note:null,timer:null};
 var GOAL_METHODS=[['manual','You Mark It'],['steps','When Its Steps Are Done'],['item','When an Item Changes']];
 /* A condition's words by its field and value: the picker's, and the sentence's ("Flint checks this: wpf002/flint #57
@@ -1458,6 +1464,13 @@ var GOAL_KINDS={pull_request:'It’s a pull request.',issue:'It’s an issue.',c
 var GOAL_STATE={met:['Met','ok'],unmet:['Not Yet','off'],unknown:['Unknown','unknown']};
 var GOAL_DONE_SAY={done:'Your goal is done.',abandon:'You abandoned this goal.',resume:'Your goal is active again.',start:'Your goal is active.',timing:'Its timing changed.',edit:'What counts as done changed.',step:'The step is added.'};
 var GOAL_MAX=10;
+/* How likely, in the ledger's words (the runtime picks the word from the forecast's own number). */
+var GOAL_LIKELY={very_unlikely:'Very Unlikely',unlikely:'Unlikely',somewhat_unlikely:'Somewhat Unlikely',about_even:'About Even',somewhat_likely:'Somewhat Likely',likely:'Likely',very_likely:'Very Likely'};
+/* Why a review has no plan suggestions, each a sentence. */
+var GOAL_PLAN_SAY={pending:'Flint is still looking at the plan.',off:'The local model is off, so Flint suggested no plan changes.',capped:'Flint reached today’s limit of plan reviews, so it suggested no changes.',
+  unavailable:'The local model didn’t answer, so Flint suggested no plan changes.',invalid:'The local model’s answer didn’t fit, so Flint suggested no plan changes.',
+  deferred:'Chat stayed busy, so Flint suggested no plan changes.',skipped:'Flint didn’t look at the plan this time.'};
+var GOAL_STEP_WORDS={todo:'not started',in_progress:'in progress',blocked:'blocked'};
 
 function gEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function gBtn(cls,text,fn){var b=gEl('button',cls,text);b.onclick=function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();fn(b);};return b;}
@@ -1472,6 +1485,12 @@ function gCall(path,body){var o={headers:Object.assign({'content-type':'applicat
 /* Oct 14, and the year when it isn't this one: Dec 1, 2027. */
 function gDay(t){try{var d=new Date(t);return d.toLocaleDateString([],{month:'short',day:'numeric',year:d.getFullYear()===new Date().getFullYear()?undefined:'numeric'});}catch(e){return '';}}
 function gLocalDay(d){d=d||new Date();var p=function(n){return (n<10?'0':'')+n;};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());}
+function gClock(t){try{return new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}catch(e){return '';}}
+/* The day of a time, as Will says it: Today, Tomorrow or Yesterday, a weekday within the week ahead, else the date. */
+function gDayWord(t){var d=new Date(t),n=new Date();var days=Math.round((new Date(d.getFullYear(),d.getMonth(),d.getDate())-new Date(n.getFullYear(),n.getMonth(),n.getDate()))/86400000);
+  if(days===0)return 'Today';if(days===1)return 'Tomorrow';if(days===-1)return 'Yesterday';if(days>1&&days<7){try{return d.toLocaleDateString([],{weekday:'short'});}catch(e){return gDay(t);}}return gDay(t);}
+/* "Mon at 9:00 AM"; inside a sentence the day words are lowercase ("today at 9:00 AM"). */
+function gWhen(t,inSentence){var w=gDayWord(t);if(inSentence&&/^(Today|Tomorrow|Yesterday)$/.test(w))w=w.toLowerCase();return w+' at '+gClock(t);}
 /* A form's date as an instant: a finish date at the end of that day, a step due at 5 PM. */
 function gAt(day,h,m){var x=/^(\d{4})-(\d{2})-(\d{2})$/.exec(day||'');if(!x)return null;return new Date(+x[1],+x[2]-1,+x[3],h,m,0,0).toISOString();}
 /* The review cadences and the prompts' words are the Approvals panel's tables (approvals-js): one of each for both panels. */
@@ -1492,7 +1511,7 @@ function gGoalPath(g,rest){return '/goals/'+encodeURIComponent(g.id)+(rest||'');
 
 /* ---------- the panel ---------- */
 function goalsShown(on){var b=document.getElementById('goalsbtn');if(b)b.hidden=!on;}
-/* The header's gold dot: a goal card waits for Will (reviews, and so lateness, come later). */
+/* The header's gold dot is for what needs Will: a goal card waits for him. A late review never lights it (Flint runs that itself). */
 function goalsDot(proposals){(proposals||[]).forEach(function(p){if(p.status==='approved')goalsApproved(p);});
   var d=document.getElementById('goalsdot');if(!d)return;var n=(proposals||[]).filter(function(p){return p.status==='pending'&&/^(goal\.|plan\.change$)/.test(String(p.fullName||''));}).length;d.hidden=!(n>0);}
 /* A New Goal draft is spent once its goal exists: its card was approved (here or in Approvals), or the goal is in a list.
@@ -1546,7 +1565,8 @@ function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.
     return;}
   var g=gEl('div','group');
   waiting.forEach(function(w){g.appendChild(goalRow(w.title,'It starts once you approve it.',[gTag('Waiting for You',true)],function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));});
-  goals.forEach(function(x){g.appendChild(goalRow(x.title,goalLine(x),goalTags(x),function(){goalOpen(x.id);}));});
+  var on=d.reviews==='on';
+  goals.forEach(function(x){g.appendChild(goalRow(x.title,goalLine(x,on),goalTags(x,on),function(){goalOpen(x.id);}));});
   list.appendChild(g);
   if(GOALS.tab==='active'&&d.reviews==='off'&&goals.length)list.appendChild(gEl('p','gnote','Flint checks your goals when you open them. Scheduled reviews start soon.'));}
 function goalRow(title,line,tags,open){var row=gEl('div','row two click gwrap');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,title));l.appendChild(gEl('span',null,line));row.appendChild(l);
@@ -1556,12 +1576,13 @@ function goalRow(title,line,tags,open){var row=gEl('div','row two click gwrap');
 function goalChecksLine(c){c=c||{met:0,total:0};if(c.total&&c.met===c.total)return c.total===1?'Its check is met.':'All of its checks are met.';
   if(c.total===1)return 'Its check isn’t met yet.';
   return c.met+' of '+c.total+' checks '+(c.met===1?'is':'are')+' met.';}
-/* One sentence per goal: the first that applies. Lateness waits for reviews (a later part). */
-function goalLine(x){if(x.status==='done')return 'It was done on '+gDay(x.endedAt)+'.';if(x.status==='abandoned')return 'It was abandoned on '+gDay(x.endedAt)+'.';if(x.status==='rejected')return 'It was dismissed on '+gDay(x.endedAt)+'.';
+/* One sentence per goal: the first that applies. A review is late only while Flint reviews goals (`on`). */
+function goalLine(x,on){if(x.status==='done')return 'It was done on '+gDay(x.endedAt)+'.';if(x.status==='abandoned')return 'It was abandoned on '+gDay(x.endedAt)+'.';if(x.status==='rejected')return 'It was dismissed on '+gDay(x.endedAt)+'.';
   if(x.status==='proposed')return 'Flint suggested this from a chat.';
+  if(on&&x.late&&x.status==='active')return 'Its review is late, and Flint runs it as soon as it can.';
   if(x.status==='paused')return 'It’s paused, so Flint won’t review it until you resume it.';
   return goalChecksLine(x.checks);}
-function goalTags(x){var t=[];if(x.status==='paused')t.push(gTag('Paused'));if(x.origin==='flint')t.push(gTag('From Chat'));if(x.waiting>0)t.push(gTag('Waiting for You',true));return t;}
+function goalTags(x,on){var t=[];if(on&&x.late&&x.status==='active')t.push(gTag('Late',true));if(x.status==='paused')t.push(gTag('Paused'));if(x.origin==='flint')t.push(gTag('From Chat'));if(x.waiting>0)t.push(gTag('Waiting for You',true));return t;}
 
 /* ---------- one goal, open ---------- */
 /* `refresh`: the goal is on screen already (a mark, a tick, a change just landed). It is read again and redrawn in place,
@@ -1580,7 +1601,10 @@ function goalShow(g,note,keep){goalHead(g.title,true,false);var el=document.getE
   var c=g.checks||{met:0,total:0};
   var facts=gEl('div','group');facts.appendChild(goalFact('Checks',c.met+' of '+c.total+' Met'));
   facts.appendChild(goalFact('Finish By',g.horizonAt?gDay(g.horizonAt):'No Date'));
+  /* The third fact: how it ended; or, while Flint reviews it, how likely it is to be done in time (once a review has said) or when its first review is; else how often. */
   if(g.endedAt)facts.appendChild(goalFact(g.status==='done'?'Done':g.status==='abandoned'?'Abandoned':'Dismissed',gDay(g.endedAt)));
+  else if(goalReviewed(g)&&g.onTrack)facts.appendChild(goalFact('On Track',(GOAL_LIKELY[g.onTrack.likelihood]||'About Even')+' · '+g.onTrack.percent+'%'));
+  else if(goalReviewed(g)&&g.nextReviewAt)facts.appendChild(goalFact('Next Review',goalNext(g)));
   else facts.appendChild(goalFact('Review Every',gCadence(g.reviewCadence)));
   body.appendChild(facts);
   if(g.description){body.appendChild(gEl('div','gsh','Why It Matters'));var w=gEl('div','group');var wr=gEl('div','row');var wl=gEl('span','lbl gwhy');wl.appendChild(gEl('span',null,g.description));wr.appendChild(wl);w.appendChild(wr);body.appendChild(w);}
@@ -1590,11 +1614,44 @@ function goalShow(g,note,keep){goalHead(g.title,true,false);var el=document.getE
   if(!list.length){var e=gEl('div','row');var el=gEl('span','lbl');el.appendChild(gEl('span',null,'This goal has no steps yet.'));e.appendChild(el);steps.appendChild(e);}
   list.forEach(function(s){steps.appendChild(goalStepRow(g,s));});body.appendChild(steps);
   if(goalLive(g)){var add=gEl('div','gact');add.id='goaladdstep';add.appendChild(gBtn('ghost','Add Step',function(){goalAddStep(g,add);}));body.appendChild(add);}
+  /* The latest review, and Review Now under it (as Add Step sits under the steps). Before its first review an active goal says so here. */
+  if(g.review||goalReviewed(g)){body.appendChild(gEl('div','gsh','Latest Review'));body.appendChild(goalReview(g));
+    if(goalReviewed(g)){var ra=gEl('div','gact');ra.id='goalreviewnow';
+      /* Review Now asks for a review; it needs no signature (a review only records what it finds and suggests). */
+      ra.appendChild(gBtn('ghost','Review Now',function(b){goalPlain(gGoalPath(g,'/review'),{},b,function(){goalMsg('Flint is reviewing this goal. It takes a few minutes.','ok');});}));body.appendChild(ra);}}
   if((g.waiting||[]).length){var n=g.waiting.length;var wt=gEl('div','gwait');wt.appendChild(gEl('span',null,n+(n===1?' change waits':' changes wait')+' for you in Approvals.'));
     wt.appendChild(gBtn('ghost','Open Approvals',function(){closeGoals();if(typeof openApprovals==='function')openApprovals();}));body.appendChild(wt);}
   /* The header keeps two lines of a title. Only when that cuts it short is it here too, in full. */
   var h=document.getElementById('goalsttl');if(h&&h.scrollHeight>h.clientHeight+1)body.insertBefore(gEl('div','gfull',g.title),body.children[0]||null);
   el.scrollTop=top;goalActions(g);if(note)goalMsg(note,'ok');}
+/* Flint reviews this goal now: reviews are on and it is active. */
+function goalReviewed(g){return g.reviews==='on'&&g.status==='active';}
+/* "Mon at 9:00 AM": when it is next reviewed. A time already here means the review is about to run, or is late. */
+function goalNext(g){if(g.late)return 'Late';if(new Date(g.nextReviewAt).getTime()<=Date.now())return 'In a Few Minutes';return gWhen(g.nextReviewAt);}
+function goalNextLine(g){if(g.late)return 'The next review is late, and Flint runs it as soon as it can.';
+  if(new Date(g.nextReviewAt).getTime()<=Date.now())return 'The next review runs in a few minutes.';return 'The next review is '+gWhen(g.nextReviewAt,true)+'.';}
+/* One suggestion as a sentence, from the step's title and what would change. The words are the panel's; the titles Will's or a template's. */
+function goalChangeLine(c){var t='“'+c.title+'”';
+  if(c.kind==='add')return 'Add the step '+t+(c.dueAt?', due '+gDay(c.dueAt):'')+'.';
+  if(c.kind==='due')return c.dueAt?'Move '+t+' to '+gDay(c.dueAt)+'.':'Take the due date off '+t+'.';
+  if(c.kind==='status')return 'Mark '+t+' '+(GOAL_STEP_WORDS[c.status]||'not started')+'.';
+  if(c.kind==='move')return c.after?'Do '+t+' after “'+c.after+'”.':'Do '+t+' first.';
+  return 'Skip '+t+'.';}
+function goalReviewRow(text,dot){var row=gEl('div','row gwrap');if(dot){var d=gEl('span','st off');d.appendChild(gEl('i'));row.appendChild(d);}
+  var l=gEl('span','lbl');l.appendChild(gEl('span',null,text));row.appendChild(l);return row;}
+/* The latest review: when, what it found (sentences from counts), and what it suggests for the plan. In the trial week it only shows what it would change. */
+function goalReview(g){var r=g.review,grp=gEl('div','group');grp.id='goalreview';
+  if(!r){grp.appendChild(goalReviewRow('Flint hasn’t reviewed this goal yet.'));if(g.nextReviewAt)grp.appendChild(goalReviewRow(goalNextLine(g)));return grp;}
+  var head=gEl('div','row two gwrap');var hl=gEl('span','lbl');hl.appendChild(gEl('b',null,'Reviewed '+gWhen(r.at)));hl.appendChild(gEl('span',null,r.summary));head.appendChild(hl);
+  if(r.shadow)head.appendChild(gTag('Trial Week'));grp.appendChild(head);
+  var n=(r.changes||[]).length;
+  if(r.shadow)grp.appendChild(goalReviewRow('Flint is in its trial week, so it only shows what it would change.'));
+  if(r.planner!=='ok')grp.appendChild(goalReviewRow(GOAL_PLAN_SAY[r.planner]||GOAL_PLAN_SAY.skipped));
+  else if(!n)grp.appendChild(goalReviewRow(r.shadow?'It would change nothing in the plan.':'Flint suggested no changes to the plan.'));
+  else if(!r.shadow)grp.appendChild(goalReviewRow(n===1?'Flint suggested this change to the plan.':'Flint suggested these changes to the plan.'));
+  if(r.planner==='ok')(r.changes||[]).forEach(function(c){grp.appendChild(goalReviewRow(goalChangeLine(c),true));});
+  if(goalReviewed(g)&&g.nextReviewAt)grp.appendChild(goalReviewRow(goalNextLine(g)));
+  return grp;}
 function goalCheckRow(g,cr){var st=goalStateOf(g,cr.id),w=GOAL_STATE[st]||GOAL_STATE.unknown;var row=gEl('div','row two gwrap');
   var dot=gEl('span','st '+w[1]);dot.appendChild(gEl('i'));row.appendChild(dot);
   var l=gEl('span','lbl');l.appendChild(gEl('b',null,cr.text));l.appendChild(gEl('span',null,goalCheckLine(g,cr)));row.appendChild(l);
@@ -1841,7 +1898,8 @@ function goalSubmit(buttons){var f=GOALS.form;if(!f||GOALS.busy)return;goalMsg('
   var edit={goalId:g.id,title:next.title,description:next.description,successCriteria:next.successCriteria,links:next.links,from:from};
   goalSign({path:gGoalPath(g,'/edit'),body:{args:edit},args:edit,prompt:gPrompt('edit'),buttons:buttons,done:function(){goalOpen(g.id,GOAL_DONE_SAY.edit);}});}
 /* Added: say so; Done is the likelier next step, Add Another the other. */
-function goalFormDone(body){body.appendChild(goalEmpty('Goal Added','Your goal is active.'));var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
+function goalFormDone(body){var r=GOALS.page&&GOALS.page.reviews;
+  body.appendChild(goalEmpty('Goal Added',r==='on'?'Your goal is active. Flint’s first review runs in a few minutes.':r==='off'?'Your goal is active. Scheduled reviews start soon.':'Your goal is active.'));var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
   foot.appendChild(gBtn('btn','Add Another',function(){goalNew();}));foot.appendChild(gBtn('btn pri','Done',function(){goalList('active');}));}
 
 goalsProbe();
