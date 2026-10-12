@@ -6,9 +6,10 @@
 --    Will signed, in one transaction; turning it off needs nothing;
 --  - a card he signed earlier never undoes what he decided after it: an
 --    approval decides nothing once he has signed a later card about the same
---    asset, task or review requirement, whichever is carried out first, nor
---    does one signed before its asset was last turned off; when he signed is
---    stamped by the database, not by the role that records it;
+--    asset, task or review requirement, whichever is carried out first and
+--    whatever becomes of the later card, nor does one signed before its asset
+--    was last turned off; when he signed, and for what, is stamped by the
+--    database as the signature is recorded;
 --  - a task is handed over only as the exact task of an executing dispatch card
 --    he signed (its digest checked, its approval used once), with its forecast
 --    on record, naming it and the rule that settles it; a spending asset's task
@@ -31,9 +32,12 @@
 -- rules refuses. A forget clears all of it, a write in flight included, and
 -- no output, review or result is written back. Also the four task and review
 -- job queues (nothing sends to them yet). It replaces P3's plan_step_guard (one
--- rule added, near the end of this file), and stamps the time on each approval
--- (Approval_clock). The only P5 migration. Reversed by down.sql in this
--- directory.
+-- rule added, near the end of this file), and stamps each approval with its
+-- time and what it was signed for (Approval.signedFor, a new column). The only
+-- P5 migration. Reversed by down.sql in this directory.
+
+-- AlterTable
+ALTER TABLE "Approval" ADD COLUMN     "signedFor" TEXT;
 
 -- AlterTable
 ALTER TABLE "Proposal" ADD COLUMN     "reviewId" TEXT,
@@ -157,6 +161,9 @@ CREATE TABLE "TaskApprovalUse" (
 );
 
 -- CreateIndex
+CREATE INDEX "Approval_signedFor_createdAt_idx" ON "Approval"("signedFor", "createdAt");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Asset_kind_externalRef_key" ON "Asset"("kind", "externalRef");
 
 -- CreateIndex
@@ -259,7 +266,9 @@ CREATE UNIQUE INDEX "Task_one_live_per_step_key" ON "Task" ("goalId", "stepKey")
 -- or the CLI, with nothing untrusted in it, marked for Will's own fresh touch;
 -- a cancellation or an override is a task card from the console or the CLI,
 -- untainted; a dispatch or an acceptance is a task or spend card from the
--- console, the CLI or one of the runtime's own jobs (never from chat). It never
+-- console, the CLI or one of the runtime's own jobs (never from chat). The
+-- approval was recorded as signed for this subject (Approval.signedFor: the
+-- card was there, with these args, when he signed). It never
 -- consumes the approval (proposal_transition did that when the card was
 -- approved); p5_bind_approval, below, makes each one count in one transaction
 -- only. Raises otherwise. VOLATILE (the default): each call reads the wall clock
@@ -295,7 +304,7 @@ BEGIN
              ELSE p."kind" IN ('task', 'spend') AND (p."origin" IN ('console', 'cli') OR p."origin" LIKE 'runtime:%')
            END
        AND a."payload"->>'action' = p."action" AND a."payload"->>'argsDigest' = p."argsDigest"
-       AND jsonb_typeof(p."args") = 'object' AND p."args"->>p_key = p_subject, false) THEN
+       AND jsonb_typeof(p."args") = 'object' AND p."args"->>p_key = p_subject AND a."signedFor" = k || ':' || s, false) THEN
     RAISE EXCEPTION '% %: approval % is not for an executing % of it', k, s, ap, acts USING ERRCODE = 'insufficient_privilege';
   END IF;
   -- Only now (the args are an object): what is stored is what he signed.
@@ -318,11 +327,13 @@ $$;
 -- and it is the order Will signed in, not the order the runtime applies cards
 -- in: an approval decides nothing once he has signed a later card about the
 -- same asset, task or gate, whichever of the two is carried out first. So the
--- later signature wins, and a card kept back never undoes it. (When he signed
--- is the database's to say: Approval_clock, below. Two signed in the same
--- millisecond are ordered by id, so one of them still wins both ways.)
--- SECURITY DEFINER: flint_app has no grant on TaskApprovalUse, so it can only
--- use an approval, never free one.
+-- later signature wins, and a card kept back never undoes it. When he signed,
+-- and for what, is on the approval itself, written as the server records it
+-- (Approval_clock and Approval_signed_for, below): nothing the runtime does to
+-- the later card afterwards (ending it unused, clearing its args) brings the
+-- earlier one back. Two signed in the same millisecond are ordered by id, so
+-- one of them still wins both ways. SECURITY DEFINER: flint_app has no grant
+-- on TaskApprovalUse, so it can only use an approval, never free one.
 CREATE FUNCTION p5_bind_approval(p_approval text, p_key text, p_subject text, p_action text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -344,31 +355,59 @@ BEGIN
   IF NOT coalesce(u."xact" = me AND u."subject" = subj AND u."action" = p_action, false) THEN
     RAISE EXCEPTION '% %: approval % was already used', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
-  -- Will has since signed another card about the same asset, task or gate: the later signature stands, applied or not.
+  -- Will has since signed another card about the same asset, task or gate: the later signature stands, carried out or not.
   SELECT a."createdAt" INTO signed_at FROM "Approval" a WHERE a."id" = p_approval;
-  IF EXISTS (
-       SELECT 1 FROM "Approval" b JOIN "Proposal" c ON c."id" = b."subjectId"
-       WHERE b."subjectType" = 'proposal' AND b."decision" = 'approve' AND (b."createdAt", b."id") > (signed_at, p_approval)
-         AND b."payload"->>'action' = c."action" AND b."payload"->>'argsDigest' = c."argsDigest"
-         AND jsonb_typeof(c."args") = 'object' AND c."args"->>p_key = p_subject
-         AND CASE p_key WHEN 'assetId' THEN c."action" = 'asset.enable' WHEN 'gate' THEN c."action" = 'review.enforce'
-               ELSE c."action" LIKE 'task.%' OR c."action" IN ('review.local', 'review.trident_panel', 'hive.dispatch_job') END) THEN
+  IF EXISTS (SELECT 1 FROM "Approval" b WHERE b."signedFor" = subj AND b."decision" = 'approve' AND (b."createdAt", b."id") > (signed_at, p_approval)) THEN
     RAISE EXCEPTION '% %: approval % was signed before a later decision', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
 END;
 $$;
 
--- ---- When Will signed ---------------------------------------------------------------
--- The order rules above, and the rule that a review comes before the signature
+-- ---- When Will signed, and for what ---------------------------------------------------
+-- The order rule above, and the rule that a review comes before the signature
 -- that names it, compare when an approval was recorded. That time is stamped
--- here, by the wall clock, for every role but the owner (a restore, a test's
--- fixture): the server's role, which records approvals, cannot date one into the
--- past or the future. Named to fire before P1's Approval_insert_check.
+-- here, by the wall clock, for every role but the owner (a test's fixture): the
+-- server's role, which records approvals, cannot date one into the past or the
+-- future. Named to fire before P1's Approval_insert_check.
 CREATE FUNCTION approval_clock() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF current_user <> 'flint_owner' THEN
     NEW."createdAt" := clock_timestamp();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- What a signature is about is recorded with it, as it is recorded: the asset,
+-- task or gate its card names, read from the card as it was filed (a card's
+-- action and args never change). The order rule reads this and never a card's
+-- args, which retention or a forget clears, and which the runtime may clear
+-- once it has ended a card. NULL for a rejection, for a card of any other
+-- action, and for a card that is not there or has no such id (such a signature
+-- acts on nothing here). Whatever the writer sent is overwritten, the owner's
+-- too, and P1's approval_consume_once then holds it fixed. SECURITY DEFINER:
+-- the server's role cannot read cards; all it learns back is that id. It reads
+-- one row and raises nothing: recording a signature never fails here.
+CREATE FUNCTION approval_signed_for() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  c "Proposal"%ROWTYPE;
+  s text;
+BEGIN
+  NEW."signedFor" := NULL;
+  IF NEW."subjectType" = 'proposal' AND NEW."decision" = 'approve' THEN
+    SELECT * INTO c FROM "Proposal" WHERE "id" = NEW."subjectId";
+    IF FOUND AND jsonb_typeof(c."args") = 'object' THEN
+      s := CASE
+             WHEN c."action" = 'asset.enable' THEN 'assetId:' || (c."args"->>'assetId')
+             WHEN c."action" = 'review.enforce' THEN 'gate:' || (c."args"->>'gate')
+             WHEN c."action" LIKE 'task.%' OR c."action" IN ('review.local', 'review.trident_panel', 'hive.dispatch_job') THEN 'taskId:' || (c."args"->>'taskId')
+           END;
+      IF s ~ '^(taskId|assetId|gate):[A-Za-z0-9_-]{1,40}$' THEN
+        NEW."signedFor" := s;
+      END IF;
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -1505,9 +1544,11 @@ CREATE TRIGGER "Proposal_valid_p5" BEFORE INSERT OR UPDATE ON "Proposal"
 CREATE TRIGGER "Resolution_for_task" BEFORE INSERT ON "Resolution"
   FOR EACH ROW EXECUTE FUNCTION resolution_task_check();
 
--- Named to fire before P1's Approval_insert_check.
+-- Named to fire before P1's Approval_insert_check, and after it.
 CREATE TRIGGER "Approval_clock" BEFORE INSERT ON "Approval"
   FOR EACH ROW EXECUTE FUNCTION approval_clock();
+CREATE TRIGGER "Approval_signed_for" BEFORE INSERT ON "Approval"
+  FOR EACH ROW EXECUTE FUNCTION approval_signed_for();
 
 CREATE TRIGGER "Entity_forgotten_p5" AFTER UPDATE OF "status" ON "Entity"
   FOR EACH ROW WHEN (NEW."status" = 'forgotten' AND OLD."status" <> 'forgotten') EXECUTE FUNCTION entity_forgotten_p5();
@@ -1531,12 +1572,12 @@ SELECT pgboss.create_queue('reviews.run', '{"policy":"stately","retryLimit":3,"r
 -- what a review found. The two helpers run inside trigger bodies as flint_app, so
 -- it may execute them: one only reads, and p5_bind_approval writes only
 -- TaskApprovalUse, on which flint_app has no grant at all. flint_approver (the
--- server) gets nothing here: the time on an approval it records is stamped for
--- it (Approval_clock).
+-- server) gets nothing here: the time on an approval it records, and what it
+-- was signed for, are stamped for it (Approval_clock, Approval_signed_for).
 REVOKE ALL ON FUNCTION p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text), p5_digest_check(), p5_card_valid(),
   asset_insert_check(), asset_guard(), task_insert_check(), task_guard(), task_valid(), task_output_guard(), review_insert_check(),
   review_guard(), review_valid(), review_gate_guard(), proposal_review_floor(), proposal_review_guard(), entity_forgotten_p5(),
-  resolution_task_check(), task_step_undone(), approval_clock() FROM PUBLIC;
+  resolution_task_check(), task_step_undone(), approval_clock(), approval_signed_for() FROM PUBLIC;
 REVOKE ALL ON "Asset", "Task", "TaskOutput", "Review", "ReviewGate", "TaskApprovalUse", review_coverage, review_gate_violations FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text) TO flint_app;
 

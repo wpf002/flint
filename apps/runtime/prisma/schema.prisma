@@ -46,12 +46,14 @@ model Approval {
   clientDataJson    Bytes? // webauthn only
   signature         Bytes
   note              String? // <= 500
-  createdAt         DateTime           @default(now()) @db.Timestamptz(3)
+  createdAt         DateTime           @default(now()) @db.Timestamptz(3) // P5: stamped by the database for every role but the owner (Approval_clock)
   expiresAt         DateTime           @db.Timestamptz(3)
   consumedAt        DateTime?          @db.Timestamptz(3)
+  signedFor         String? // P5, set by trigger: the asset, task or gate the card named when it was signed (taskId:<id> | assetId:<id> | gate:proposal)
   policies          ActionPolicy[]
 
   @@index([subjectType, subjectId])
+  @@index([signedFor, createdAt])
 }
 
 /// Promotion rows. INSERT is checked against the approved policy proposal (action_policy_matches_approval).

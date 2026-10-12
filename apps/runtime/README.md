@@ -1300,8 +1300,9 @@ What the database now holds to, whatever the runtime's code does:
   needs no signature.
 - **The later signature stands.** When you've signed two cards about the same
   asset, task or review requirement, the later one counts, whichever one Flint
-  carries out first. A card you signed before you turned an asset off can't
-  turn it back on. The database records when you signed, so nothing can put
+  carries out first, and whatever happens to the later card afterwards. A card
+  you signed before you turned an asset off can't turn it back on. The database
+  records when you signed and what each signature was for, so nothing can put
   your signatures in another order.
 - **A task runs only as the task you signed.** Its card carries the whole task:
   the asset, the title, what to do, the bar, any goal and step, the due time
@@ -1375,8 +1376,11 @@ Nothing files such a card today, and a card already on record is not held to
 these rules, so it can still be approved, rejected or expire.
 
 The time on each approval is now stamped by the database as the server records
-it. The server sent none before, so nothing changes for it. A forget is now
-refused above READ COMMITTED, the default level. Nothing calls it yet.
+it. The server sent none before, so nothing changes for it. Each approval also
+records which asset, task or gate its card named (`Approval.signedFor`, a new
+column, empty for every approval so far and for every card that isn't one of
+these). A forget is now refused above READ COMMITTED, the default level.
+Nothing calls it yet.
 
 A card of any kind that breaks one of its own rules is now refused by name,
 with its id and the rule. Before, only goal, plan and task cards were. The
@@ -1400,9 +1404,11 @@ rules themselves are the same.
   signed about its asset, task or gate. If you've signed a later one, the
   earlier one is refused as "signed before a later decision", even when the
   later card failed or expired: ask for a new signature, don't retry. File and
-  sign each card when it's wanted, not ahead of time. Write an asset's row
-  before filing the card that turns it on: a card signed before the row was
-  written, or before the asset was last turned off, doesn't turn it on.
+  sign each card when it's wanted, not ahead of time. File a card before its
+  signature is recorded: a signature recorded for a card that isn't there yet
+  acts on nothing. Write an asset's row before filing the card that turns it
+  on: a card signed before the row was written, or before the asset was last
+  turned off, doesn't turn it on.
 - **Filing.** A spend card needs an estimate above zero. The route that files
   cards must answer 400 with a sentence for one that has none. The database
   refuses it, which would otherwise surface as a 500.
@@ -1508,10 +1514,11 @@ rules themselves are the same.
   "Never from chat" holds against a mistake in the runtime, not against a
   runtime that lies about where a card came from.
 - **When you signed.** The order rules compare when each approval was recorded.
-  The database stamps that time as the server records the approval, so neither
-  the server nor the runtime can date one. It's the time the server recorded
-  your signature, not the moment you touched the key. Two approvals recorded in
-  the same millisecond are ordered by their ids.
+  The database stamps that time, and what the card was about, as the server
+  records the approval, so neither the server nor the runtime can change either.
+  It's the time the server recorded your signature, not the moment you touched
+  the key. Two approvals recorded in the same millisecond are ordered by their
+  ids.
 - **A later card that didn't run.** If the later of two cards about the same
   thing fails or expires, the earlier one still doesn't act. You sign again.
 - **What a forget leaves.** A task's title and a review's finding codes are
@@ -1544,6 +1551,11 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
 
 ### Follow-ups
 
+- A restore from a backup brings assets and the review requirement back as the
+  backup had them. An asset you turned off since would be on again, and reviews
+  you required since would no longer be required. The restore carries forward
+  keys, promotions and triage rules you took away, and doesn't know these two
+  yet. Nothing is on today, so nothing is exposed until an asset exists.
 - A policy row that holds an action back can be switched off by the runtime
   (see Known limits). Closing that needs a rule on who may switch a row off.
 - The runtime can create a large object, and one it owns makes the backup's

@@ -147,12 +147,13 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(restored[0]!.prosrc).toBe(p3Body);
     const leftovers = await withClient(owner, async (c) => (await c.query(
       `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('Proposal_valid_p5', 'Proposal_review_guard', 'Proposal_review_floor',
-                 'Proposal_p5_digest_check', 'Entity_forgotten_p5', 'Resolution_for_task', 'Task_step_undone', 'Approval_clock')) AS triggers,
-              (SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Proposal' AND column_name IN ('reviewId', 'reviewRequired')) AS columns,
+                 'Proposal_p5_digest_check', 'Entity_forgotten_p5', 'Resolution_for_task', 'Task_step_undone', 'Approval_clock', 'Approval_signed_for')) AS triggers,
+              (SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'public'
+                 AND ((table_name = 'Proposal' AND column_name IN ('reviewId', 'reviewRequired')) OR (table_name = 'Approval' AND column_name = 'signedFor'))) AS columns,
               (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
-                 AND c.relname IN ('Asset', 'Task', 'TaskOutput', 'Review', 'ReviewGate', 'TaskApprovalUse', 'review_coverage', 'review_gate_violations', 'Proposal_reviewId_idx')) AS relations,
+                 AND c.relname IN ('Asset', 'Task', 'TaskOutput', 'Review', 'ReviewGate', 'TaskApprovalUse', 'review_coverage', 'review_gate_violations', 'Proposal_reviewId_idx', 'Approval_signedFor_createdAt_idx')) AS relations,
               (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
-                 AND (p.proname ~ '^(p5|asset|task|review)_' OR p.proname IN ('proposal_review_floor', 'proposal_review_guard', 'entity_forgotten_p5', 'resolution_task_check', 'approval_clock'))) AS functions,
+                 AND (p.proname ~ '^(p5|asset|task|review)_' OR p.proname IN ('proposal_review_floor', 'proposal_review_guard', 'entity_forgotten_p5', 'resolution_task_check', 'approval_clock', 'approval_signed_for'))) AS functions,
               (SELECT count(*)::int FROM pgboss.queue WHERE name IN ('tasks.tick', 'tasks.run', 'tasks.check', 'reviews.run')) AS queues`)).rows[0]);
     expect(leftovers).toEqual({ triggers: 0, columns: 0, relations: 0, functions: 0, queues: 0 });
     // What P4 gave P3's helpers is still there: P5's rollback touches nothing of P4's.

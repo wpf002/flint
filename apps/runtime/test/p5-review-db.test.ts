@@ -31,8 +31,9 @@
  *    deadlock with a dispatch.
  *  - An accept card counts only if it was signed after the result was handed
  *    in, and a task is checked only with its result on record.
- *  - The later signature stands, whichever card is carried out first.
- *  - When Will signed is stamped by the database.
+ *  - The later signature stands, whichever card is carried out first, and
+ *    whatever the runtime then does to the later card.
+ *  - When Will signed, and for what, is stamped by the database.
  *  - A reviewer is not turned off under a review being written; a score waits
  *    for an override and is then refused.
  *  - The ledger's own sweep leaves a task's forecast alone, however late.
@@ -762,6 +763,34 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
         }
       });
 
+      it('nothing the runtime does to the later card brings the earlier one back: carried out or turned down, and its args cleared', async () => {
+        const signedFor = async (aid: string) => (await app(`SELECT "signedFor" FROM "Approval" WHERE id = $1`, [aid])).rows[0].signedFor as string | null;
+        // The gate. "Stop requiring" signed and kept. "Require" signed after it and carried out; that card has ended, so its args may be cleared, and are.
+        const reviewer = await k.reviewer();
+        try {
+          const kept = await k.card('review.enforce', { gate: 'proposal', enforced: false, n: 'kept' }, { stage: 'approved' });
+          const on = await k.enforce(true);
+          await app(`UPDATE "Proposal" SET args = NULL, result = NULL, "argsPurgedAt" = now() WHERE id = $1`, [on.pid]);
+          await executing(kept.pid);
+          await refused(k.setGate(app, false, kept.aid), '42501', laterDecision('gate', 'proposal', kept.aid));
+          expect([(await k.gate()).enforced, await k.used(kept.aid), await signedFor(on.aid)]).toEqual([true, 0, 'gate:proposal']);
+        } finally {
+          if ((await k.gate()).enforced) await k.enforce(false);
+          await k.switchOff(app, reviewer.id);
+        }
+        // A task. An accept card signed and kept. "Reject anyway" signed after it and never carried out: the runtime turns that card down itself, and empties it.
+        const t = await k.taskAt('checked', w);
+        const accept = await k.card('task.check_bar', await k.acceptArgs(t.id), { origin: 'runtime:tasks' });
+        const over = await k.card('task.bar_override', { taskId: t.id, to: 'rejected' }, { stage: 'pending' });
+        await app(`UPDATE "Proposal" SET status = 'rejected', error = 'Synthetic: turned down' WHERE id = $1`, [over.pid]);
+        await app(`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = $1`, [over.pid]);
+        await refused(k.setStatus(app, t.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(t.id)]), '42501', `task ${t.id}: accepting it needs Will's signed card for this result until he lets Flint accept on its own`);
+        expect([await status(t.id), await k.used(accept.aid), await signedFor(over.aid)]).toEqual(['checking', 0, `taskId:${t.id}`]);
+        // He signs again: that card is his latest word, and it acts.
+        await k.accept(t.id);
+        expect(await status(t.id)).toBe('accepted');
+      });
+
       it('two cards to turn one asset on: the later one does, either way', async () => {
         for (const first of ['the earlier card', 'the later card'] as const) {
           const a = await k.asset();
@@ -784,7 +813,7 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
       const recent = async (aid: string) => Math.abs(Date.now() - new Date((await app(`SELECT "createdAt" FROM "Approval" WHERE id = $1`, [aid])).rows[0].createdAt).getTime());
       const c = await webCard('clock');
       for (const at of [`now() + interval '1 hour'`, `now() - interval '30 days'`, `'2020-01-01'`]) {
-        expect(await recent(await k.approval(c.pid, 'mcp:web.fetch_url', c.digest, { at })), at).toBeLessThan(60_000);
+        expect(await recent(await k.approval(c.pid, 'mcp:web.fetch_url', c.digest, { set: { createdAt: at } })), at).toBeLessThan(60_000);
       }
       // Nor afterwards (only whether it was used ever changes).
       const aid = await k.approval(c.pid, 'mcp:web.fetch_url', c.digest);
@@ -793,15 +822,48 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
       await required(async () => {
         const card = await webCard('clock-review');
         const rid = id('rv');
-        const signed = await k.approval(card.pid, 'mcp:web.fetch_url', card.digest, { fields: { reviewId: rid, verdict: 'proceed' }, at: `now() + interval '1 hour'` });
+        const signed = await k.approval(card.pid, 'mcp:web.fetch_url', card.digest, { fields: { reviewId: rid, verdict: 'proceed' }, set: { createdAt: `now() + interval '1 hour'` } });
         await sleep(50);
         await k.reviewed(card.pid, { id: rid, verdict: 'proceed' });
         await refused(k.approve(app, card.pid, signed), '42501', `proposal ${card.pid}: its review was written after Will signed`);
         expect(await violations()).toBe(0);
       });
-      // The owner still can (a restore, a test's fixture), as it can do anything.
-      const old = await k.approval(c.pid, 'mcp:web.fetch_url', c.digest, { at: `now() - interval '2 hours'`, as: owner });
+      // The owner still can (a test's fixture), as it can do anything.
+      const old = await k.approval(c.pid, 'mcp:web.fetch_url', c.digest, { set: { createdAt: `now() - interval '2 hours'` }, as: owner });
       expect(await recent(old)).toBeGreaterThan(3_600_000);
+    });
+
+    it('what a signature is for is read from its card as it is recorded, whatever the writer sends', async () => {
+      const signedFor = async (aid: string) => (await app(`SELECT "signedFor" FROM "Approval" WHERE id = $1`, [aid])).rows[0].signedFor as string | null;
+      const a = await k.asset();
+      const t = await k.task(w.id);
+      const cards: Array<[string, { pid: string; digest: string }, string | null]> = [
+        ['asset.enable', await k.file('asset.enable', k.enableArgs(a)), `assetId:${a.id}`],
+        ['review.enforce', await k.file('review.enforce', { gate: 'proposal', enforced: false, n: 'for' }), 'gate:proposal'],
+        [w.dispatchAction, await k.file(w.dispatchAction, k.dispatchArgs(t, w.kind)), `taskId:${t.id}`],
+        ['hive.dispatch_job', await k.file('hive.dispatch_job', { taskId: t.id, n: 'hive' }), `taskId:${t.id}`],
+        ['task.check_bar', await k.file('task.check_bar', { taskId: t.id, outputRef: 'out:000000000000', metBar: true }), `taskId:${t.id}`],
+        ['task.cancel', await k.file('task.cancel', { taskId: t.id }), `taskId:${t.id}`],
+        ['task.bar_override', await k.file('task.bar_override', { taskId: t.id, to: 'rejected' }), `taskId:${t.id}`],
+        // A card of any other action, and one whose id is not shaped like one: for nothing here.
+        ['mcp:web.fetch_url', await webCard('for'), null],
+        ['goal.done', await k.file('goal.done', { goalId: 'go1', taskId: t.id }, { kind: 'goal' }), null],
+        ['task.cancel', await k.file('task.cancel', { taskId: `${CANARY} not an id` }), null],
+      ];
+      for (const [action, c, expected] of cards) {
+        expect(await signedFor(await k.approval(c.pid, action, c.digest)), action).toBe(expected);
+        // Sent by the writer (the server's role, or the owner): overwritten.
+        for (const as of [k.approver, owner]) expect(await signedFor(await k.approval(c.pid, action, c.digest, { set: { signedFor: `'taskId:tanone'` }, as })), action).toBe(expected);
+        // A signed rejection is for nothing.
+        expect(await signedFor(await k.approval(c.pid, action, c.digest, { decision: 'reject' })), action).toBeNull();
+      }
+      // A signature for a card that is not there, or of something that is not a card.
+      expect(await signedFor(await k.approval('propnone', 'task.cancel', HEX('a')))).toBeNull();
+      expect(await signedFor(await forgetApproval(await k.entity()))).toBeNull();
+      // And it never changes afterwards.
+      const aid = await k.approval(cards[0]![1].pid, 'asset.enable', cards[0]![1].digest);
+      for (const q of [k.approver, app, owner]) expect(await k.outcome(q(`UPDATE "Approval" SET "signedFor" = 'gate:proposal' WHERE id = $1`, [aid]))).not.toBe('ok');
+      // (Those cards are left waiting, unused: each task and asset here is this test's own.)
     });
 
     it('the ledger\'s own sweep leaves a task\'s forecast alone, however late: it does not settle it, and does not let it run out', async () => {

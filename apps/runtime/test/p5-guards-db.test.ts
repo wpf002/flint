@@ -89,6 +89,13 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const brief = await k.card('asset.enable', { ...args, n: 'brief' }, { life: '1 second' });
       await sleep(1100);
       await refused(on(brief.aid), '42501', wrong);
+      // A signature recorded before its card was filed is for nothing: the card was not there to say what it was about.
+      const unfiled = { pid: id('prop'), args: { ...args, n: 'unfiled' } };
+      const ahead = await k.approval(unfiled.pid, 'asset.enable', digestOf(unfiled.args));
+      await k.file('asset.enable', unfiled.args, { id: unfiled.pid });
+      await k.approve(app, unfiled.pid, ahead);
+      await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = $1`, [unfiled.pid]);
+      await refused(on(ahead), '42501', wrong);
       expect((await app(`SELECT enabled FROM "Asset" WHERE id = $1`, [a.id])).rows[0].enabled).toBe(false);
 
       // What the card signed is what the asset is, field by field.

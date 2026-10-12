@@ -34,6 +34,8 @@ export interface CardOptions {
   fields?: Record<string, unknown>;
   /** A digest to file the card under instead of its args' own. */
   digest?: string;
+  /** The card's id (default: a new one). */
+  id?: string;
 }
 
 export interface AssetRow {
@@ -126,19 +128,20 @@ export async function p5Kit(urls: TestUrls) {
   const one = async (sql: string, params?: unknown[], q: Q = app) => (await q(sql, params)).rows[0];
 
   /**
-   * Will's signed approval of a card, as the server records it after verifying his signature. `at` is a time to
-   * send as when it was signed (SQL; the server never sends one), and `as` the role that writes the row.
+   * Will's signed approval of a card, as the server records it after verifying his signature. `set` sends more
+   * columns than the server ever does (column -> SQL), and `as` is the role that writes the row.
    */
-  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string; at?: string; as?: Q } = {}): Promise<string> {
+  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string; set?: Record<string, string>; as?: Q } = {}): Promise<string> {
     const aid = id('appr');
     const expires = (await owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
     const payload = {
       v: 1, subjectType: o.subjectType ?? 'proposal', subjectId: pid, decision: o.decision ?? 'approve', action, argsDigest: digest,
       ...(o.fields ? { fields: o.fields } : {}), expiresAt: expires, nonce: HEX('0').slice(0, 32),
     };
+    const more = Object.entries(o.set ?? {});
     await (o.as ?? approver)(
-      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt"${o.at ? ', "createdAt"' : ''})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, '\\x01', $8${o.at ? `, ${o.at}` : ''})`,
+      `INSERT INTO "Approval" (id, "subjectType", "subjectId", decision, payload, challenge, "credentialId", signature, "expiresAt"${more.map(([c]) => `, "${c}"`).join('')})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, '\\x01', $8${more.map(([, v]) => `, ${v}`).join('')})`,
       [aid, payload.subjectType, pid, payload.decision, JSON.stringify(payload), HEX('c'), o.credential ?? credentialId, expires],
     );
     return aid;
@@ -146,7 +149,7 @@ export async function p5Kit(urls: TestUrls) {
 
   /** File a card (pending). Its digest is its args' own, unless said otherwise. */
   async function file(action: string, args: Record<string, unknown>, o: CardOptions = {}, q: Q = app): Promise<{ pid: string; digest: string }> {
-    const pid = id('prop');
+    const pid = o.id ?? id('prop');
     const digest = o.digest ?? digestOf(args);
     const policy = action === 'asset.enable' || action === 'review.enforce';
     const origin = o.origin ?? 'console';
