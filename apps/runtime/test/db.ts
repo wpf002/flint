@@ -123,8 +123,27 @@ export async function prisma(args: string[], url: string): Promise<{ stdout: str
   }
 }
 
+/**
+ * P5's down.sql refuses to run while a task, asset or review card is approved
+ * or running: that card's one use is on record only in a table it drops. A test
+ * database is reset whatever a test left behind, so those cards are failed
+ * first, as they would end before a real rollback. A database without P5 has
+ * none.
+ */
+export async function settleCards(owner: string): Promise<void> {
+  await withClient(owner, async (c) => {
+    const { rows } = await c.query(`SELECT to_regclass('public."TaskApprovalUse"') IS NOT NULL AND to_regclass('public."Proposal"') IS NOT NULL AS p5`);
+    if (!rows[0].p5) return;
+    await c.query(
+      `UPDATE "Proposal" SET status = 'failed', error = 'ended by a test reset', "executedAt" = now()
+       WHERE status IN ('approved', 'executing') AND (kind IN ('task', 'spend') OR action ~ '^(task[.]|asset[.]enable$|review[.])' OR action = 'hive.dispatch_job')`,
+    );
+  });
+}
+
 /** Run every down.sql, newest first, and forget the migration history. */
 export async function migrateDown(owner: string): Promise<void> {
+  await settleCards(owner);
   await withClient(owner, async (c) => {
     for (const d of migrationDirs().reverse()) {
       await c.query(readFileSync(join(MIGRATIONS, d, 'down.sql'), 'utf8'));

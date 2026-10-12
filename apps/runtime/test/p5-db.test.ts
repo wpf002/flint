@@ -243,13 +243,20 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
   });
 
   describe('reviews', () => {
+    // A review is taken only while a reviewer is on.
+    beforeAll(async () => {
+      await k.reviewer();
+    });
+
     it('which cards need one is decided when a card is filed: the floor, the writer\'s own ask, and never the card that turns the requirement', async () => {
       const needs = async (action: string, o: Parameters<P5Kit['file']>[2], asked?: boolean) => {
         const pid = id('prop');
+        // (A spend card says its estimate: the card's own rules ask for one above nothing.)
         await app(
-          `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, "reviewRequired", "expiresAt")
-           VALUES ($1, $2, 'console', $3, '{"a":1}', $4, '{}', $5, $6, $7, $8, now() + interval '1 hour')`,
-          [pid, o?.kind ?? 'tool_call', action, digestOf({ a: 1 }), o?.tainted ?? false, o?.sensitivity ?? 'ops', o?.destructive ?? false, asked === undefined ? false : asked],
+          `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, "reviewRequired", "estCostUsd", "expiresAt")
+           VALUES ($1, $2, $9, $3, '{"a":1}', $4, '{}', $5, $6, $7, $8, $10, now() + interval '1 hour')`,
+          [pid, o?.kind ?? 'tool_call', action, digestOf({ a: 1 }), o?.tainted ?? false, o?.sensitivity ?? 'ops', o?.destructive ?? false, asked === undefined ? false : asked,
+            o?.origin ?? 'console', o?.kind === 'spend' ? 1 : null],
         );
         return (await row('Proposal', pid)).reviewRequired as boolean;
       };
@@ -264,6 +271,12 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
       expect(await needs('mcp:mail.send', {}, true)).toBe(true);
       // The card that turns the requirement on or off never needs one, though it is a policy card.
       expect(await needs('review.enforce', { kind: 'policy' }, true)).toBe(false);
+      expect(await needs('review.enforce', { kind: 'policy', origin: 'cli' }, true)).toBe(false);
+      // Only that card: anything else under its name (another kind, from chat or a job) is held to the floor like any card.
+      expect(await needs('review.enforce', { kind: 'policy', origin: 'chat:c1' })).toBe(true);
+      expect(await needs('review.enforce', { kind: 'tool_call', tainted: true })).toBe(true);
+      expect(await needs('review.enforce', { kind: 'tool_call' }, true)).toBe(true);
+      expect(await needs('review.enforce', { kind: 'spend' })).toBe(true);
       // A card filed without saying is not required (and is never left empty).
       const pid = id('prop');
       await app(`INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", "reviewRequired", "expiresAt") VALUES ($1, 'tool_call', 'console', 'x.y', '{"a":1}', $2, '{}', NULL, now() + interval '1 hour')`, [pid, digestOf({ a: 1 })]);
@@ -362,6 +375,7 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
   describe('forget', () => {
     it('clears the words of tasks about the item, their outputs, and the reviews that read them; outcomes stay', async () => {
       const a = await k.onAsset();
+      await k.reviewer();
       const [eid, other] = [await k.entity(), await k.entity()];
       const spec = (items: string[]) => ({ template: 'summarize_items', params: { items, note: `${CANARY} spec` } });
       // Named in its items list; named only inside its spec; and one about something else.

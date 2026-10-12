@@ -8,13 +8,33 @@
 -- though it loses its review and whether it needed one; every task forecast and
 -- its resolution, in the ledger; and the history in RowChange (the table is
 -- append-only: a task's rows hold lengths only, never text). The record of used
--- approvals goes with its table, so a task or asset card left executing could
--- act once more after a re-deploy, until it expires (a week at most after it was
--- signed). plan_step_guard goes back to P3's own body, to the letter (copied
--- from 20261009000000_p3_goals; the round-trip test compares them): a step that
--- is a Flint task is then held by nothing but the console, as before P5. It also
--- removes its own row from _prisma_migrations, so the next deploy re-applies it.
--- Every statement tolerates a half-applied state, and an empty database.
+-- approvals goes with its table, so a task, asset or review card that is
+-- approved or running could act once more after a re-deploy. So this refuses to
+-- run while one is: let each finish, fail or expire first (a week at most after
+-- it was signed), and then run it again. plan_step_guard goes back to P3's own
+-- body, to the letter (copied from 20261009000000_p3_goals; the round-trip test
+-- compares them): a step that is a Flint task is then held by nothing but the
+-- console, as before P5. It also removes its own row from _prisma_migrations, so
+-- the next deploy re-applies it. Every statement tolerates a half-applied state,
+-- and an empty database.
+
+-- Nothing is dropped while a card of this migration's could still act: its one use is on record only in a
+-- table this drops. (Looked at only where both tables are there: an empty or half-applied database has none.)
+DO $do$
+DECLARE
+  n integer;
+BEGIN
+  IF to_regclass('public."Proposal"') IS NOT NULL AND to_regclass('public."TaskApprovalUse"') IS NOT NULL THEN
+    SELECT count(*) INTO n FROM "Proposal"
+    WHERE "status" IN ('approved', 'executing')
+      AND ("kind" IN ('task', 'spend') OR "action" ~ '^(task[.]|asset[.]enable$|review[.])' OR "action" = 'hive.dispatch_job');
+    IF n > 0 THEN
+      RAISE EXCEPTION 'p5_assets is not rolled back while % task, asset or review card(s) are approved or running: let each finish, fail or expire first', n
+        USING ERRCODE = 'object_not_in_prerequisite_state';
+    END IF;
+  END IF;
+END;
+$do$;
 
 -- Only where P3 is there: on an empty database there is no plan_step_guard to put back.
 DO $do$
@@ -88,11 +108,13 @@ DROP TRIGGER IF EXISTS "Proposal_review_guard" ON "Proposal";
 DROP TRIGGER IF EXISTS "Proposal_review_floor" ON "Proposal";
 DROP TRIGGER IF EXISTS "Proposal_p5_digest_check" ON "Proposal";
 DROP TRIGGER IF EXISTS "Entity_forgotten_p5" ON "Entity";
+DROP TRIGGER IF EXISTS "Resolution_for_task" ON "Resolution";
 ALTER TABLE IF EXISTS "Proposal" DROP CONSTRAINT IF EXISTS "Proposal_reviewId_fkey", DROP COLUMN IF EXISTS "reviewId", DROP COLUMN IF EXISTS "reviewRequired";
 DROP TABLE IF EXISTS "TaskOutput", "Task", "Asset", "Review", "ReviewGate", "TaskApprovalUse" CASCADE;
 DROP FUNCTION IF EXISTS p5_signed_proposal(text, text, text, text[]), p5_bind_approval(text, text, text, text), p5_digest_check(), p5_card_valid(),
   asset_insert_check(), asset_guard(), task_insert_check(), task_guard(), task_valid(), task_output_guard(), review_insert_check(),
-  review_guard(), review_valid(), review_gate_guard(), proposal_review_floor(), proposal_review_guard(), entity_forgotten_p5() CASCADE;
+  review_guard(), review_valid(), review_gate_guard(), proposal_review_floor(), proposal_review_guard(), entity_forgotten_p5(),
+  resolution_task_check(), task_step_undone() CASCADE;
 DO $$
 DECLARE
   q text;

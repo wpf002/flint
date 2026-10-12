@@ -5,8 +5,9 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, prisma, withClient } from './db';
+import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
 import { grantLines } from '../src/backup/grants';
+import { p5Kit } from './p5';
 
 const GRANTS_FIXTURE = join(__dirname, 'fixtures', 'grants.json');
 const grants = (owner: string): Promise<string[]> => withClient(owner, (c) => grantLines(c));
@@ -88,6 +89,31 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   };
 
+  // P5's down.sql drops the record of which approvals its cards used. A card that is approved or running
+  // could then act once more after a re-deploy, so the rollback refuses to start while one is: nothing is
+  // dropped, and it runs once each such card has finished, failed or expired.
+  it('P5\'s down.sql refuses to run while a task, asset or review card is approved or running, and drops nothing', async () => {
+    const k = await p5Kit(URLS!);
+    const refusedFor = (n: number) => ({ code: '55000', message: `p5_assets is not rolled back while ${n} task, asset or review card(s) are approved or running: let each finish, fail or expire first` });
+    const there = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."TaskApprovalUse"') IS NOT NULL AND to_regprocedure('resolution_task_check()') IS NOT NULL AS ok`)).rows[0].ok);
+    // A card that only waits holds nothing back: nobody signed it, so nothing of it could be used twice.
+    await k.card('task.cancel', { taskId: 'tanone1' }, { stage: 'pending' });
+    const approved = await k.card('asset.enable', { assetId: 'asnone' }, { stage: 'approved' });
+    expect(await pgError(runDown('20261014000000_p5_assets'))).toMatchObject(refusedFor(1));
+    // Running, and under any of the names a P5 guard acts on (a reviewer's or the Hive's dispatch among them).
+    const running = await k.card('hive.dispatch_job', { taskId: 'tanone2' });
+    const review = await k.card('review.local', { taskId: 'tanone3' }, { stage: 'approved' });
+    expect(await pgError(runDown('20261014000000_p5_assets'))).toMatchObject(refusedFor(3));
+    expect(await there()).toBe(true);
+    // Each ends: the first fails, the second finishes, the third fails too. A card of another kind that is approved was never P5's to hold.
+    await k.app(`UPDATE "Proposal" SET status = 'failed', error = 'Synthetic end', "executedAt" = now() WHERE id = ANY ($1)`, [[approved.pid, review.pid]]);
+    await k.finish(running.pid);
+    await k.card('world.sync.git', { source: 'git' }, { kind: 'tool_call', stage: 'approved' });
+    // (The next test runs it, on this state.)
+    expect((await withClient(owner, async (c) => (await c.query(
+      `SELECT count(*)::int AS n FROM "Proposal" WHERE status IN ('approved', 'executing') AND (kind IN ('task', 'spend') OR action ~ '^(task[.]|asset[.]enable$|review[.])' OR action = 'hive.dispatch_job')`)).rows[0].n))).toBe(0);
+  });
+
   // The newest migration is the one a rollback undoes (P5: p5_assets). Its
   // down.sql alone, then a deploy, gives back exactly the schema: migrate status
   // lists it as not applied, what it made is gone, and the redeploy diffs empty.
@@ -121,12 +147,12 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(restored[0]!.prosrc).toBe(p3Body);
     const leftovers = await withClient(owner, async (c) => (await c.query(
       `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('Proposal_valid_p5', 'Proposal_review_guard', 'Proposal_review_floor',
-                 'Proposal_p5_digest_check', 'Entity_forgotten_p5')) AS triggers,
+                 'Proposal_p5_digest_check', 'Entity_forgotten_p5', 'Resolution_for_task', 'Task_step_undone')) AS triggers,
               (SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Proposal' AND column_name IN ('reviewId', 'reviewRequired')) AS columns,
               (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
                  AND c.relname IN ('Asset', 'Task', 'TaskOutput', 'Review', 'ReviewGate', 'TaskApprovalUse', 'review_coverage', 'review_gate_violations', 'Proposal_reviewId_idx')) AS relations,
               (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
-                 AND (p.proname ~ '^(p5|asset|task|review)_' OR p.proname IN ('proposal_review_floor', 'proposal_review_guard', 'entity_forgotten_p5'))) AS functions,
+                 AND (p.proname ~ '^(p5|asset|task|review)_' OR p.proname IN ('proposal_review_floor', 'proposal_review_guard', 'entity_forgotten_p5', 'resolution_task_check'))) AS functions,
               (SELECT count(*)::int FROM pgboss.queue WHERE name IN ('tasks.tick', 'tasks.run', 'tasks.check', 'reviews.run')) AS queues`)).rows[0]);
     expect(leftovers).toEqual({ triggers: 0, columns: 0, relations: 0, functions: 0, queues: 0 });
     // What P4 gave P3's helpers is still there: P5's rollback touches nothing of P4's.

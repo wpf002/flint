@@ -857,6 +857,7 @@ model Asset {
   entityId       String?
   approvalId     String? // the signed card that last turned it on; plain reference, checked by trigger
   createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  changedAt      DateTime @default(now()) @db.Timestamptz(3) // set by the trigger: when it was last turned on or off
   tasks          Task[]
 
   @@unique([kind, externalRef])
@@ -969,5 +970,7 @@ model TaskApprovalUse {
   subject    String // taskId:<id> | assetId:<id> | gate:proposal
   action     String
   xact       String // the transaction that used it (its id and when it began)
-  usedAt     DateTime @default(now()) @db.Timestamptz(3)
+  usedAt     DateTime @default(now()) @db.Timestamptz(3) // set by the binding: the wall clock
+
+  @@index([subject, usedAt])
 }

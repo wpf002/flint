@@ -44,6 +44,8 @@ export interface AssetRow {
   capabilities: string[];
   dispatchAction: string;
   spends: boolean;
+  /** The world item it stands for, if any (part of what its card signs). */
+  entityId?: string | null;
 }
 
 export interface TaskRow {
@@ -180,7 +182,8 @@ export async function p5Kit(urls: TestUrls) {
   }
   /** What an asset.enable card signs: exactly what the asset is. */
   const enableArgs = (a: AssetRow, over: Record<string, unknown> = {}) => ({
-    assetId: a.id, kind: a.kind, externalRef: a.externalRef, name: a.name, capabilities: a.capabilities, dispatchAction: a.dispatchAction, spends: a.spends, ...over,
+    assetId: a.id, kind: a.kind, externalRef: a.externalRef, name: a.name, capabilities: a.capabilities, dispatchAction: a.dispatchAction, spends: a.spends,
+    entityId: a.entityId ?? null, ...over,
   });
   const switchOn = (q: Q, assetId: string, aid: string | null) => q(`UPDATE "Asset" SET enabled = true, "approvalId" = $2 WHERE id = $1`, [assetId, aid]);
   const switchOff = (q: Q, assetId: string) => q(`UPDATE "Asset" SET enabled = false WHERE id = $1`, [assetId]);
@@ -197,6 +200,8 @@ export async function p5Kit(urls: TestUrls) {
     await turnOn(a);
     return a;
   }
+  /** A local reviewer that is on: a review is taken only while one is. */
+  const reviewer = () => onAsset({ kind: 'local_reviewer', capabilities: ['review'] });
 
   // ---- Tasks ----
   /** A task as the runtime would write it: proposed. Column by column, so a test can send what the runtime never would. */
@@ -276,9 +281,23 @@ export async function p5Kit(urls: TestUrls) {
       [t.id, bar.met ?? true, bar.by ?? 'flint:rule', JSON.stringify([{ id: 'a1', met: bar.met ?? true, by: 'rule', note: `${CANARY} evidence` }])]);
     return t;
   }
+  /** What an accept card signs: the task, the output it accepts, and that it met its bar. */
+  async function acceptArgs(taskId: string, over: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const t = await one(`SELECT "outputRef" FROM "Task" WHERE id = $1`, [taskId]);
+    return { taskId, outputRef: t?.outputRef ?? null, metBar: true, ...over };
+  }
+  /**
+   * Say a task ended that long ago. The database stamps a task's end itself and nobody may change it, so
+   * only its owner, with the guard set aside for the one statement, can: a test's stand-in for time passing.
+   */
+  const endedAgo = (taskId: string, interval = '25 hours') => owner(`DO $$ BEGIN
+    ALTER TABLE "Task" DISABLE TRIGGER "Task_guard";
+    UPDATE "Task" SET "completedAt" = now() - interval '${interval.replace(/[^a-z0-9 ]/gi, '')}' WHERE id = '${taskId.replace(/[^A-Za-z0-9_-]/g, '')}';
+    ALTER TABLE "Task" ENABLE TRIGGER "Task_guard";
+  END $$`);
   /** Accept a checked task on Will's signed accept card, with its proof. Returns the proof's id. */
   async function accept(taskId: string): Promise<string> {
-    const c = await card('task.check_bar', { taskId, metBar: true }, { origin: 'runtime:tasks' });
+    const c = await card('task.check_bar', await acceptArgs(taskId), { origin: 'runtime:tasks' });
     const au = await proof(taskId);
     await setStatus(app, taskId, 'accepted', `, "acceptedAuditId" = $3`, [au]);
     await finish(c.pid);
@@ -360,8 +379,8 @@ export async function p5Kit(urls: TestUrls) {
 
   return {
     urls, app, owner, approver, credentialId, client, on, inTx, code, outcome, one, approval, file, card, finish, used,
-    asset, enableArgs, switchOn, switchOff, turnOn, onAsset,
-    task, dispatchArgs, forecast, queue, dispatch, setStatus, outputDigest, putOutput, proof, taskAt, accept,
+    asset, enableArgs, switchOn, switchOff, turnOn, onAsset, reviewer,
+    task, dispatchArgs, forecast, queue, dispatch, setStatus, outputDigest, putOutput, proof, taskAt, acceptArgs, endedAgo, accept,
     reviewFields, review, reviewed, approve, setGate, gate, enforce, planStep, goalWithPlan, entity, forget,
   };
 }

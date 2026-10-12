@@ -15,7 +15,7 @@
  * was refused somewhere above, with the SQLSTATE it declares.
  * Synthetic text only.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { digestOf } from '@flint/policy';
@@ -60,7 +60,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       // No approval, one that does not exist, and words where an approval's id goes (never repeated).
       await refused(on(null), '42501', `asset ${a.id}: turning it on needs a new approval`);
       await refused(on('apprnone'), '42501', `assetId ${a.id}: approval apprnone is not a live signed approval of a card`);
-      await refused(on(`${CANARY} not an id`), '42501', `assetId ${a.id}: approval ? is not a live signed approval of a card`);
+      await refused(on(`${CANARY} not an id`), '42501', `assetId ${a.id}: approval ? is not shaped as a card's approval`);
       // A signed rejection; an approval of something that is not a card; one from a credential since revoked.
       const pending = await k.file('asset.enable', args);
       await refused(on(await k.approval(pending.pid, 'asset.enable', pending.digest, { decision: 'reject' })), '42501', notLive('assetId', a.id));
@@ -95,14 +95,17 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       for (const [label, over] of [
         ['kind', { kind: 'ci_runner' }], ['reference', { externalRef: 'test:other' }], ['name', { name: 'Another Name' }], ['capabilities', { capabilities: ['summarize_items'] }],
         ['capabilities, reordered', { capabilities: [...a.capabilities].reverse() }], ['action', { dispatchAction: 'task.dispatch.ci_runner' }], ['spends', { spends: true }],
+        ['the item it stands for', { entityId: 'en1' }],
       ] as const) {
         const c = await k.card('asset.enable', k.enableArgs(a, over));
         await refused(on(c.aid), '42501', `asset ${a.id}: what it is is not what approval ${c.aid} signed`, label);
         expect(await k.used(c.aid), label).toBe(0);
       }
-      const { spends: _drop, ...bare } = args;
-      const missing = await k.card('asset.enable', bare);
-      await refused(on(missing.aid), '42501', `asset ${a.id}: what it is is not what approval ${missing.aid} signed`);
+      for (const drop of ['spends', 'entityId'] as const) {
+        const { [drop]: _drop, ...bare } = args;
+        const missing = await k.card('asset.enable', bare);
+        await refused(on(missing.aid), '42501', `asset ${a.id}: what it is is not what approval ${missing.aid} signed`, drop);
+      }
 
       // The matching card: a week is the longest the runtime files one for, and that works.
       const c = await k.card('asset.enable', { ...args }, { life: '7 days', origin: 'cli' });
@@ -110,14 +113,20 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       expect((await app(`SELECT enabled, "approvalId" FROM "Asset" WHERE id = $1`, [a.id])).rows[0]).toEqual({ enabled: true, approvalId: c.aid });
     });
 
-    it('the stored args are the args he signed, under any action name: their digest is computed again when the card is used', async () => {
+    it('the stored args are the args he signed, under any action name: a task or spend card is checked when it is filed, and its digest computed again when it is used', async () => {
       const hive = await k.onAsset({ kind: 'hive_bot', capabilities: [] });
       const t = await k.task(hive.id);
       const args = k.dispatchArgs(t, 'hive_bot');
-      // Filed under a digest of other args (the filing check knows task, asset and gate cards by name; this card has another name).
-      const forged = await k.card('hive.dispatch_job', args, { digest: digestOf({ ...args, title: 'Synthetic other title' }) });
+      const other = digestOf({ ...args, title: 'Synthetic other title' });
+      // Filed under a digest of other args: refused, whatever the card is called (every task and spend card is checked).
+      await refused(k.file('hive.dispatch_job', args, { digest: other }), '42501', /^proposal \w+: its digest is not its args' digest$/);
+      await refused(k.file('review.local', args, { digest: other }), '42501', /^proposal \w+: its digest is not its args' digest$/);
+      await refused(k.file('pay.vendor', args, { kind: 'spend', estCostUsd: 1, digest: other }), '42501', /^proposal \w+: its digest is not its args' digest$/);
+      // Were that check ever missing (here the owner sets it aside for one card), the card still acts on nothing: the digest is computed again when it is used.
+      await owner(`ALTER TABLE "Proposal" DISABLE TRIGGER "Proposal_p5_digest_check"`);
+      const forged = await k.card('hive.dispatch_job', args, { digest: other }).finally(() => owner(`ALTER TABLE "Proposal" ENABLE TRIGGER "Proposal_p5_digest_check"`));
       const f = await k.forecast();
-      await refused(k.queue(app, t.id, forged.aid, f), '42501', notFor('taskId', t.id, 'hive.dispatch_job'));
+      await refused(k.queue(app, t.id, forged.aid, f), '42501', `taskId ${t.id}: the card approval ${forged.aid} signed does not hold the args he signed`);
       expect(await status(t.id)).toBe('proposed');
       const honest = await k.card('hive.dispatch_job', args);
       await k.queue(app, t.id, honest.aid, f);
@@ -144,6 +153,27 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await k.switchOff(app, a.id);
       await refused(k.switchOn(app, a.id, first.aid), '42501', `assetId ${a.id}: approval ${first.aid} was already used`);
       expect((await app(`SELECT enabled, "approvalId" FROM "Asset" WHERE id = $1`, [a.id])).rows[0]).toEqual({ enabled: false, approvalId: second.aid });
+      // Order counts as well as use. A spare card signed before the one that was used (never used itself) decides nothing afterwards...
+      const d = await k.asset();
+      const spare = await k.card('asset.enable', k.enableArgs(d), { stage: 'approved' });
+      const usedOne = await k.card('asset.enable', k.enableArgs(d));
+      await k.switchOn(app, d.id, usedOne.aid);
+      await k.finish(usedOne.pid);
+      await k.switchOff(app, d.id);
+      await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = $1`, [spare.pid]);
+      await refused(k.switchOn(app, d.id, spare.aid), '42501', `assetId ${d.id}: approval ${spare.aid} was signed before a later decision`);
+      // ...and nor does one signed while the asset was on, once Will has turned it off (that needs no card, so only the asset says when).
+      const whileOn = await k.card('asset.enable', k.enableArgs(d), { stage: 'approved' });
+      const again = await k.card('asset.enable', k.enableArgs(d));
+      await k.switchOn(app, d.id, again.aid);
+      await k.finish(again.pid);
+      const later = await k.card('asset.enable', k.enableArgs(d), { stage: 'approved' });
+      await k.switchOff(app, d.id);
+      await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = ANY ($1)`, [[whileOn.pid, later.pid]]);
+      await refused(k.switchOn(app, d.id, later.aid), '42501', `asset ${d.id}: approval ${later.aid} was signed before it last changed`);
+      expect([(await app(`SELECT enabled FROM "Asset" WHERE id = $1`, [d.id])).rows[0].enabled, await k.used(spare.aid), await k.used(later.aid)]).toEqual([false, 0, 0]);
+      // A card signed since then turns it on, as always.
+      await k.turnOn(d);
       // A use that is rolled back is no use: the approval is still Will's to use.
       const b = await k.asset();
       const c = await k.card('asset.enable', k.enableArgs(b));
@@ -163,6 +193,9 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         expect(await k.outcome(file(action, kind, digestOf(args))), action).toBe('ok');
       }
       expect(await k.outcome(file('world.sync.git', 'tool_call', HEX('a')))).toBe('ok');
+      // Every task and spend card is checked, whatever its action: a reviewer's or the Hive's dispatch card is one a guard acts on.
+      for (const action of ['review.local', 'review.trident_panel', 'hive.dispatch_job', 'x.y']) await refused(file(action, 'task', HEX('a')), '42501', /^proposal \w+: its digest is not its args' digest$/, action);
+      expect(await k.code(file('review.local', 'task', HEX('a'), { taskId: 'tatest0001', x: 0.5 }))).toBe('23514');
       // Money is whole micro-dollars: a fraction has no single canonical form, so such a card is never filed.
       expect(await k.code(file('task.dispatch.local_worker', 'task', HEX('a'), { estCostMicros: 0.5 }))).toBe('23514');
     });
@@ -182,9 +215,10 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         ['a required field', { origin: null }], ['a required field', { tainted: null }], ['a required field', { consequential: null }],
         ['kind', { kind: 'chore' }], ['sensitivity', { sensitivity: 'secret' }], ['args', { args: JSON.stringify(big), argsDigest: digestOf(big) }],
         ['reason', { reason: `${CANARY} `.repeat(60) }], ['provenance', { argsProvenance: '[]' }], ['template', { origin: 'runtime:tasks' }], ['expiry', { life: '-1 hour' }],
-        ['estimate', { kind: 'spend', estCostUsd: -1 }],
-        // A spend card under a name the digest check does not know still has its digest's shape checked here.
-        ['digest', { kind: 'spend', action: 'pay.vendor', argsDigest: 'not-a-digest' }],
+        // An estimate is never negative, and a spend card says one above nothing.
+        ['estimate', { kind: 'spend', estCostUsd: -1 }], ['estimate', { estCostUsd: -0.01 }], ['estimate', { kind: 'spend', estCostUsd: 0 }], ['estimate', { kind: 'spend' }],
+        // A card of a kind the digest check does not look at still has its digest's shape checked here.
+        ['digest', { kind: 'tool_call', action: 'pay.vendor', argsDigest: 'not-a-digest' }],
       ] as const) await refused(insert(cols), '23514', new RegExp(`^proposal \\w+: its ${rule} is not valid$`), rule);
       // On update too: an error or a result too long for the card.
       const c = await k.card('task.cancel', { taskId: 'tatest0001', title: `${CANARY} title` });
@@ -216,11 +250,13 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       expect(await constraint({ entityId: 'not an id' })).toBe('Asset_entityId_check');
     });
 
-    it('what one is never changes; it is never deleted; on and off are the only moves, and on is signed at READ COMMITTED', async () => {
+    it('what one is never changes; it is never deleted; on and off are the only moves, both at READ COMMITTED, and on is signed', async () => {
       const a = await k.asset();
       for (const [col, value] of [['kind', 'ci_runner'], ['externalRef', 'test:renamed'], ['name', 'Renamed'], ['capabilities', '{review}'], ['dispatchAction', 'review.local'], ['spends', true], ['entityId', 'en1'], ['createdAt', '2020-01-01'], ['id', id('as')]] as const) {
         await refused(owner(`UPDATE "Asset" SET "${col}" = $2 WHERE id = $1`, [a.id, value]), '42501', `asset ${a.id}: what it is never changes`, col);
       }
+      // When it last changed is the database's to say.
+      await refused(owner(`UPDATE "Asset" SET "changedAt" = '2020-01-01' WHERE id = $1`, [a.id]), '42501', `asset ${a.id}: when it last changed is stamped here`);
       await refused(owner(`DELETE FROM "Asset" WHERE id = $1`, [a.id]), '42501', 'assets are never deleted (an asset is turned off)');
       await refused(owner(`TRUNCATE "Asset" CASCADE`), '42501', 'assets are never deleted (an asset is turned off)');
       await refused(app(`UPDATE "Asset" SET enabled = NULL WHERE id = $1`, [a.id]), '23514', `asset ${a.id}: it is on or off`);
@@ -228,13 +264,21 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       // Its approval is set when it is turned on, and at no other time.
       await refused(app(`UPDATE "Asset" SET "approvalId" = $2 WHERE id = $1`, [a.id, c.aid]), '42501', `asset ${a.id}: its approval changes only when it is turned on`);
       for (const iso of ['REPEATABLE READ', 'SERIALIZABLE']) {
-        await refused(k.inTx((q) => k.switchOn(q, a.id, c.aid), { iso }), '40001', `asset ${a.id}: it is turned on at read committed only`, iso);
+        await refused(k.inTx((q) => k.switchOn(q, a.id, c.aid), { iso }), '40001', `asset ${a.id}: it is turned on or off at read committed only`, iso);
       }
+      const made = (await app(`SELECT "changedAt" FROM "Asset" WHERE id = $1`, [a.id])).rows[0].changedAt as Date;
       await k.switchOn(app, a.id, c.aid);
+      const turnedOn = (await app(`SELECT "changedAt" FROM "Asset" WHERE id = $1`, [a.id])).rows[0].changedAt as Date;
+      expect(turnedOn.getTime()).toBeGreaterThan(made.getTime());
       await refused(app(`UPDATE "Asset" SET "approvalId" = NULL WHERE id = $1`, [a.id]), '42501', `asset ${a.id}: its approval changes only when it is turned on`);
-      // Off needs nothing, at any isolation level.
-      await k.inTx((q) => k.switchOff(q, a.id), { iso: 'SERIALIZABLE' });
-      expect((await app(`SELECT enabled FROM "Asset" WHERE id = $1`, [a.id])).rows[0].enabled).toBe(false);
+      // Off needs no signature, but it reads what is committed now too (the last reviewer's rule depends on it).
+      for (const iso of ['REPEATABLE READ', 'SERIALIZABLE']) {
+        await refused(k.inTx((q) => k.switchOff(q, a.id), { iso }), '40001', `asset ${a.id}: it is turned on or off at read committed only`, iso);
+      }
+      await k.switchOff(app, a.id);
+      const off = (await app(`SELECT enabled, "changedAt" FROM "Asset" WHERE id = $1`, [a.id])).rows[0];
+      expect(off.enabled).toBe(false);
+      expect((off.changedAt as Date).getTime()).toBeGreaterThan(turnedOn.getTime());
     });
   });
 
@@ -345,14 +389,18 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const spendCard = `task ${t.id}: a spending asset is dispatched by a spend card with its estimate`;
       await refused(k.queue(app, t.id, (await k.card(paid.dispatchAction, args, { kind: 'task' })).aid, f), '42501', spendCard);
       await refused(k.queue(app, t.id, (await k.card(paid.dispatchAction, { ...args, n: 1 }, { kind: 'spend', estCostUsd: 0.2 })).aid, f), '42501', spendCard);
-      await refused(k.queue(app, t.id, (await k.card(paid.dispatchAction, { ...args, n: 2 }, { kind: 'spend' })).aid, f), '42501', spendCard);
+      // A spend card with no estimate, or one of nothing, is never filed at all.
+      for (const estCostUsd of [null, 0]) await refused(k.file(paid.dispatchAction, { ...args, n: 2 }, { kind: 'spend', estCostUsd }), '23514', /^proposal \w+: its estimate is not valid$/, String(estCostUsd));
+      // Nor does a spending asset take a task priced at nothing, under any card.
+      const zero = await k.task(paid.id, { estCostUsd: 0 });
+      await refused(k.queue(app, zero.id, (await k.card(paid.dispatchAction, k.dispatchArgs(zero, paid.kind), { kind: 'spend', estCostUsd: 0.01 })).aid, await k.forecast()), '42501', `task ${zero.id}: a spending asset is dispatched by a spend card with its estimate`);
       // A job cannot file a spending dispatch: only Will, from the console.
       await refused(k.queue(app, t.id, (await k.card(paid.dispatchAction, { ...args, n: 3 }, { kind: 'spend', estCostUsd: 0.25, origin: 'runtime:tasks' })).aid, f), '42501', spendCard);
       await k.queue(app, t.id, (await k.card(paid.dispatchAction, { ...args, n: 4 }, { kind: 'spend', estCostUsd: 0.25 })).aid, f);
 
       const free = `an asset that does not spend is dispatched by a task card, at no cost`;
       const local = await k.task(w.id);
-      await refused(k.queue(app, local.id, (await k.card(w.dispatchAction, k.dispatchArgs(local, w.kind), { kind: 'spend', estCostUsd: 0 })).aid, await k.forecast()), '42501', `task ${local.id}: ${free}`);
+      await refused(k.queue(app, local.id, (await k.card(w.dispatchAction, k.dispatchArgs(local, w.kind), { kind: 'spend', estCostUsd: 0.01 })).aid, await k.forecast()), '42501', `task ${local.id}: ${free}`);
       const priced = await k.task(w.id, { estCostUsd: 0.01 });
       await refused(k.queue(app, priced.id, (await k.card(w.dispatchAction, k.dispatchArgs(priced, w.kind))).aid, await k.forecast()), '42501', `task ${priced.id}: ${free}`);
 
@@ -418,7 +466,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const a = await k.onAsset();
       const t = await k.taskAt('queued', a);
       await k.switchOff(app, a.id);
-      await refused(k.setStatus(app, t.id, 'dispatched'), '42501', `task ${t.id}: asset ${a.id} is off`);
+      await refused(k.setStatus(app, t.id, 'dispatched'), '42501', `task ${t.id}: asset ${a.id} was turned off`);
       await k.turnOn(a);
       await k.setStatus(app, t.id, 'dispatched');
 
@@ -466,17 +514,23 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
     it('accepted needs what the check found, its own successful check on record, and Will\'s signed accept card for this task', async () => {
       const t = await k.taskAt('checked', w);
       const good = await k.proof(t.id);
-      const needsCard = `task ${t.id}: accepting it needs Will's signed card until he lets Flint accept on its own`;
+      const needsCard = `task ${t.id}: accepting it needs Will's signed card for this result until he lets Flint accept on its own`;
       const accept = (auditId: string | null, extra = '') => k.setStatus(app, t.id, 'accepted', `, "acceptedAuditId" = $3${extra}`, [auditId]);
       // On Flint's own word; under another task's accept card; under a cancel card for this task.
       await refused(accept(good), '42501', needsCard);
       const other = await k.taskAt('checked', w);
-      await k.card('task.check_bar', { taskId: other.id, metBar: true }, { origin: 'runtime:tasks' });
+      const signs = await k.acceptArgs(t.id);
+      await k.card('task.check_bar', await k.acceptArgs(other.id), { origin: 'runtime:tasks' });
       await k.card('task.cancel', { taskId: t.id });
-      await k.card('task.check_bar', { taskId: t.id, metBar: true, n: 1 }, { origin: 'chat:c1' });
+      await k.card('task.check_bar', { ...signs, n: 1 }, { origin: 'chat:c1' });
+      // A card for this task that does not say what it accepts: no output named, another output, or a bar that was not met.
+      await k.card('task.check_bar', { taskId: t.id, metBar: true }, { origin: 'runtime:tasks' });
+      await k.card('task.check_bar', { ...signs, outputRef: 'out:another' }, { origin: 'runtime:tasks' });
+      await k.card('task.check_bar', { ...signs, metBar: false }, { origin: 'runtime:tasks' });
+      await k.card('task.check_bar', { taskId: t.id, outputRef: signs.outputRef }, { origin: 'runtime:tasks' });
       await refused(accept(good), '42501', needsCard);
 
-      const c = await k.card('task.check_bar', { taskId: t.id, metBar: true }, { origin: 'runtime:tasks' });
+      const c = await k.card('task.check_bar', signs, { origin: 'runtime:tasks' });
       const onRecord = `task ${t.id}: it is accepted only with its own successful check on record`;
       // No proof, another task's, one that failed, one that is not an action, and an action of another name.
       await refused(accept(null), '42501', onRecord);
@@ -498,7 +552,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(set(app, t.id, `"acceptedAuditId" = $2`, [await k.proof(t.id)]), '42501', `task ${t.id}: acceptedAuditId is set once`);
       // The card that accepted it accepts nothing else: another task needs its own.
       const third = await k.taskAt('checked', w);
-      await refused(k.setStatus(app, third.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(third.id)]), '42501', `task ${third.id}: accepting it needs Will's signed card until he lets Flint accept on its own`);
+      await refused(k.setStatus(app, third.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(third.id)]), '42501', `task ${third.id}: accepting it needs Will's signed card for this result until he lets Flint accept on its own`);
     });
 
     it('against the check, either way, needs Will\'s signed override to that status, says it was his, and comes before the forecast is scored', async () => {
@@ -512,7 +566,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const other = await k.taskAt('checked', w);
       await k.card('task.bar_override', { taskId: other.id, to: 'rejected' });
       const accepting = await k.card('task.bar_override', { taskId: t.id, to: 'accepted' });
-      await k.card('task.check_bar', { taskId: t.id, metBar: true }, { origin: 'runtime:tasks' });
+      await k.card('task.check_bar', await k.acceptArgs(t.id), { origin: 'runtime:tasks' });
       await k.card('task.bar_override', { taskId: t.id, to: 'rejected', n: 1 }, { origin: 'runtime:tasks' });
       await refused(toRejected(), '42501', against);
       const c = await k.card('task.bar_override', { taskId: t.id, to: 'rejected' });
@@ -523,13 +577,56 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await toRejected();
       expect([await status(t.id), await k.used(c.aid), await k.used(accepting.aid)]).toEqual(['rejected', 1, 0]);
 
-      // Back to accepted on the other card: it needs a check or an override on record, as any acceptance does.
+      // The card to accept it that was signed before that decision decides nothing now: the later one stands.
+      await refused(k.setStatus(app, t.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(t.id, { action: 'task.bar_override' })]), '42501', against);
+      // Back to accepted on a card signed since: it needs a check or an override on record, as any acceptance does.
+      const back = await k.card('task.bar_override', { taskId: t.id, to: 'accepted', n: 2 });
       await refused(k.setStatus(app, t.id, 'accepted'), '42501', `task ${t.id}: it is accepted only with its own successful check on record`);
-      // Once its forecast is scored, the result is final.
+      // Once its forecast is scored (a day after it ended, as how it ended), the result is final.
       const f = (await app(`SELECT "predictionId" FROM "Task" WHERE id = $1`, [t.id])).rows[0].predictionId as string;
+      await k.endedAgo(t.id);
       await app(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, false, now(), 'auto_world')`, [id('rs'), f]);
       await refused(k.setStatus(app, t.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(t.id, { action: 'task.bar_override' })]), '42501', `task ${t.id}: its forecast is already scored`);
-      expect([await status(t.id), await k.used(accepting.aid)]).toEqual(['rejected', 0]);
+      expect([await status(t.id), await k.used(accepting.aid), await k.used(back.aid)]).toEqual(['rejected', 0, 0]);
+    });
+
+    it('its forecast is scored only a day after it ended, and as it ended: the runtime cannot score first, early, or otherwise', async () => {
+      const score = (taskId: string, outcome: boolean, by = 'auto_world') =>
+        app(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") SELECT $1, "predictionId", $3, now(), $4 FROM "Task" WHERE id = $2`, [id('rs'), taskId, outcome, by]);
+      const early = (taskId: string) => `task ${taskId}: its forecast is scored a day after it ended as accepted, rejected or failed`;
+      const asEnded = (taskId: string) => `task ${taskId}: its forecast's outcome is whether it was accepted`;
+      const scored = async (taskId: string) => (await app(`SELECT r.outcome FROM "Resolution" r JOIN "Task" t ON t."predictionId" = r."predictionId" WHERE t.id = $1`, [taskId])).rows[0]?.outcome;
+      // Still out, still being checked, and just accepted (the day Will has to overrule it has not passed): not yet.
+      const out = await k.taskAt('dispatched', w);
+      const checking = await k.taskAt('checked', w);
+      const fresh = await k.taskAt('checked', w);
+      await k.accept(fresh.id);
+      for (const t of [out, checking, fresh]) for (const outcome of [true, false]) await refused(score(t.id, outcome), '42501', early(t.id), `${t.id} ${outcome}`);
+      // So his override still lands on what Flint has just accepted.
+      await k.card('task.bar_override', { taskId: fresh.id, to: 'rejected' });
+      await k.setStatus(app, fresh.id, 'rejected', `, "barCheckedBy" = 'will'`);
+      // A day on: scored as it ended, and no other way.
+      const accepted = await k.taskAt('checked', w);
+      await k.accept(accepted.id);
+      const failed = await k.taskAt('dispatched', w);
+      await k.setStatus(app, failed.id, 'failed', `, failure = 'timeout'`);
+      for (const t of [accepted, fresh, failed]) await k.endedAgo(t.id);
+      await refused(score(accepted.id, false), '42501', asEnded(accepted.id));
+      await refused(score(fresh.id, true), '42501', asEnded(fresh.id));
+      await refused(score(failed.id, true), '42501', asEnded(failed.id));
+      await score(accepted.id, true);
+      await score(fresh.id, false);
+      await score(failed.id, false);
+      expect([await scored(accepted.id), await scored(fresh.id), await scored(failed.id)]).toEqual([true, false, false]);
+      // A cancelled task's forecast is left to expire, however long ago it was cancelled.
+      const cancelled = await k.taskAt('dispatched', w);
+      await k.card('task.cancel', { taskId: cancelled.id });
+      await k.setStatus(app, cancelled.id, 'cancelled');
+      await k.endedAgo(cancelled.id);
+      for (const outcome of [true, false]) await refused(score(cancelled.id, outcome), '42501', early(cancelled.id));
+      // A forecast that is no task's is the ledger's own business, as before.
+      const loose = await k.forecast();
+      await app(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, now(), 'auto_world')`, [id('rs'), loose]);
     });
 
     it('the times are the database\'s: nobody sets when it went out or when it ended', async () => {
@@ -571,12 +668,24 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(set(app, t.id, `spec = $2::jsonb`, [JSON.stringify({ template: 'sort_items', params: { note: `${CANARY} new spec` } })]), '42501', `task ${t.id}: its spec is written once`);
       await refused(set(app, t.id, `acceptance = $2::jsonb`, [JSON.stringify([{ id: 'a9', text: `${CANARY} easier bar` }])]), '42501', `task ${t.id}: its acceptance is written once`);
       await refused(set(app, t.id, `"outputSummary" = $2`, [`${CANARY} rewritten`]), '42501', `task ${t.id}: its outputSummary is written once`);
+      // The summary belongs to the result as it is handed in, the evidence to the check as it is made: neither is written at another step.
+      const out = await k.taskAt('dispatched', w);
+      await refused(set(app, out.id, `"outputSummary" = $2`, [`${CANARY} early summary`]), '42501', `task ${out.id}: its outputSummary is written at its own step`);
+      await refused(set(app, out.id, `"barEvidence" = '[]'`), '42501', `task ${out.id}: its barEvidence is written at its own step`);
+      const idle = await k.task(w.id);
+      await refused(set(app, idle.id, `"outputSummary" = $2`, [`${CANARY} early summary`]), '42501', `task ${idle.id}: its outputSummary is written at its own step`);
+      const handedIn = await k.taskAt('submitted', w);
+      await refused(set(app, handedIn.id, `"barEvidence" = '[]'`), '42501', `task ${handedIn.id}: its barEvidence is written at its own step`);
+      const late = await k.taskAt('checking', w, {});
+      await set(app, late.id, `"metBar" = false, "barCheckedBy" = 'flint:rule'`);
+      await k.setStatus(app, late.id, 'rejected');
+      await refused(set(app, late.id, `"barEvidence" = '[]'`), '42501', `task ${late.id}: its barEvidence is written at its own step`);
       // Cleared while it is still live: refused, with or without the purge mark.
       for (const col of ['spec', 'acceptance', 'outputSummary', 'barEvidence']) {
         await refused(set(app, t.id, `"${col}" = NULL`), '42501', `task ${t.id}: its ${col} is cleared only once it has ended`, col);
         await refused(set(app, t.id, `"${col}" = NULL, "textPurgedAt" = now()`), '42501', `task ${t.id}: its ${col} is cleared only once it has ended`, col);
       }
-      await refused(set(app, t.id, `"textPurgedAt" = now()`), '42501', `task ${t.id}: its text is cleared only once it has ended`);
+      await refused(set(app, t.id, `"textPurgedAt" = now()`), '42501', `task ${t.id}: it is marked as cleared only once it has ended`);
       // Ended: cleared with the purge mark, never without it, and the mark is set once.
       await k.accept(t.id);
       await refused(set(app, t.id, `spec = NULL`), '42501', `task ${t.id}: its spec is cleared only once it has ended`);
@@ -636,8 +745,8 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const put = (taskId: unknown, over: { body?: string | null; sha?: string | null; tainted?: boolean | null } = {}, q: Q = app) =>
         q(`INSERT INTO "TaskOutput" ("taskId", body, sha256, tainted) VALUES ($1, $2::jsonb, $3, $4)`,
           [taskId, over.body === undefined ? JSON.stringify(body) : over.body, over.sha === undefined ? digestOf(body) : over.sha, over.tainted === undefined ? true : over.tainted]);
-      await refused(put(null), '23514', `task output: its task's id is not valid`);
-      await refused(put(`${CANARY} task`), '23514', `task output: its task's id is not valid`);
+      await refused(put(null), '23514', `task output: the id of its task is not valid`);
+      await refused(put(`${CANARY} task`), '23514', `task output: the id of its task is not valid`);
       // Only while it is out: not before, not once handed in, and not for a task that is not there.
       const out = `output is taken only while it is out`;
       await refused(put('tanone'), '42501', `task tanone: ${out}`);
@@ -649,7 +758,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(put(idle.id), '42501', `task ${idle.id}: ${out}`);
 
       const t = await k.taskAt('dispatched', w);
-      const invalid = (rule: string) => `task ${t.id}: its output's ${rule} is not valid`;
+      const invalid = (rule: string) => `task ${t.id}: the ${rule} of its output is not valid`;
       await refused(put(t.id, { body: null }), '23514', invalid('body'));
       await refused(put(t.id, { body: JSON.stringify([body]) }), '23514', invalid('body'));
       await refused(put(t.id, { body: JSON.stringify(`${CANARY} just text`) }), '23514', invalid('body'));
@@ -672,13 +781,33 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(app(`DELETE FROM "TaskOutput" WHERE "taskId" = $1`, [t.id]), '42501', kept);
       await k.setStatus(app, t.id, 'failed', `, failure = 'invalid'`);
       await app(`DELETE FROM "TaskOutput" WHERE "taskId" = $1`, [t.id]);
+      // A task whose text a forget cleared takes no output afterwards: nothing is written back.
+      const item = await k.entity();
+      const about = await k.taskAt('dispatched', w, { entityIds: [item] });
+      await k.forget(item);
+      await refused(put(about.id), '42501', `task ${about.id}: its text was cleared, so no output is taken`);
     });
   });
 
   describe('reviews', () => {
+    let reviewer: AssetRow;
+    beforeAll(async () => {
+      reviewer = await k.reviewer();
+    });
+    afterAll(async () => {
+      await k.switchOff(app, reviewer.id);
+    });
+
     it('one is written only of a card still waiting, by its args\' digest, at least as tainted and exactly as sensitive; or of a task\'s output as it is checked', async () => {
       const { pid, digest } = await k.file('mcp:web.fetch_url', { url: 'https://example.com/', note: `${CANARY} args` }, { kind: 'tool_call', origin: 'chat:c1', tainted: true, sensitivity: 'personal' });
       const of = (over: Record<string, unknown> = {}) => k.review({ subjectId: pid, subjectDigest: digest, tainted: true, sensitivity: 'personal', ...over });
+      // A review needs its reviewer: with none on, none is taken (a worker is not one); and none from the paid panel at all.
+      await k.switchOff(app, reviewer.id);
+      const none = id('rv');
+      await refused(of({ id: none }), '42501', `review ${none}: no reviewer is on`);
+      reviewer = await k.reviewer();
+      await refused(of({ id: none, engine: 'trident_panel', costUsd: 0.4 }), '42501', `review ${none}: no paid review is taken yet`);
+      await refused(of({ id: none, engine: 'trident_panel' }), '42501', `review ${none}: no paid review is taken yet`);
       await refused(of({ id: `${CANARY} id` }), '23514', `review: its id or its subject's is not valid`);
       await refused(of({ subjectId: `${CANARY} subject` }), '23514', `review: its id or its subject's is not valid`);
       await refused(of({ subjectId: null }), '23514', `review: its id or its subject's is not valid`);
@@ -717,6 +846,13 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       // A card's digest is not a task's output: a task review needs the output's own.
       await refused(ofTask({ subjectId: pid }), '42501', `review ${rid}: it is not of task ${pid}'s output as it is checked`);
       expect(await k.outcome(ofTask({ id: id('rv') }))).toBe('ok');
+      // Nothing is left to review once a forget cleared it: not a waiting card's args, not a task's result.
+      const item = await k.entity();
+      const emptied = await k.file('mcp:notes.update', { entityId: item, text: `${CANARY} args` }, { kind: 'tool_call', origin: 'console' });
+      const about = await k.taskAt('checking', w, { entityIds: [item] });
+      await k.forget(item);
+      await refused(k.review({ id: rid, subjectId: emptied.pid, subjectDigest: emptied.digest }), '42501', `review ${rid}: card ${emptied.pid} has no args left to review`);
+      await refused(k.review({ id: rid, subjectType: 'task', subjectId: about.id, subjectDigest: k.outputDigest(), tainted: true }), '42501', `review ${rid}: it is not of task ${about.id}'s output as it is checked`);
     });
 
     it('its own rules name the rule, never what it holds', async () => {
@@ -731,11 +867,11 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         ['findings', { findings: { code: 'outside_text' } }], ['findings', { findings: [`${CANARY} `.repeat(300)] }],
         ['reason codes', { reasonCodes: [`${CANARY} reason`] }], ['reason codes', { reasonCodes: Array.from({ length: 9 }, (_, i) => `c${i}`) }], ['reason codes', { reasonCodes: null }],
         ['words', { attack: `${CANARY} `.repeat(120) }], ['words', { defense: `${CANARY} `.repeat(120) }], ['words', { verdictReason: `${CANARY} `.repeat(30) }],
-        // The local engine is free; only the paid panel carries a cost.
-        ['cost', { costUsd: 0.02 }], ['cost', { engine: 'trident_panel' }], ['cost', { engine: 'trident_panel', costUsd: -1 }],
+        // The local engine is free, and no paid review is taken yet: no review carries a cost.
+        ['cost', { costUsd: 0.02 }], ['cost', { costUsd: -1 }],
         ['time', { modelMs: -5 }],
       ] as const) await refused(of(over), '23514', `review ${rid}: its ${rule} is not valid`, `${rule} ${JSON.stringify(over).slice(0, 40)}`);
-      expect(await k.outcome(of({ engine: 'trident_panel', costUsd: 0.4 }))).toBe('ok');
+      expect(await k.outcome(of({ costUsd: 0 }))).toBe('ok');
       // (Its id, subject, digest and sensitivity are held first by the check on what it reviews, in the test above.)
     });
 
@@ -755,6 +891,18 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         // Cleared without the purge mark: refused.
         await refused(app(`UPDATE "Review" SET "${col}" = NULL WHERE id = $1`, [rid]), '42501', cleared, col);
       }
+      // While its card still waits for Will, its words stay, purge mark or not: a block's case is there when he decides.
+      const kept = `review ${rid}: its words are kept while what it reviews still waits`;
+      await refused(app(`UPDATE "Review" SET attack = NULL, defense = NULL, "verdictReason" = NULL, "textPurgedAt" = now() WHERE id = $1`, [rid]), '42501', kept);
+      await refused(app(`UPDATE "Review" SET "verdictReason" = NULL, "textPurgedAt" = now() WHERE id = $1`, [rid]), '42501', kept);
+      await refused(app(`UPDATE "Review" SET "textPurgedAt" = now() WHERE id = $1`, [rid]), '42501', kept);
+      // The same for a task's review while the task is being checked.
+      const checking = await k.taskAt('checking', w);
+      const ofTask = await k.review({ subjectType: 'task', subjectId: checking.id, subjectDigest: k.outputDigest(), tainted: true });
+      await refused(app(`UPDATE "Review" SET attack = NULL, "textPurgedAt" = now() WHERE id = $1`, [ofTask]), '42501', `review ${ofTask}: its words are kept while what it reviews still waits`);
+      await set(app, checking.id, `"metBar" = false, "barCheckedBy" = 'flint:rule'`);
+      await k.setStatus(app, checking.id, 'rejected');
+      await app(`UPDATE "Review" SET attack = NULL, "textPurgedAt" = now() WHERE id = $1`, [ofTask]);
 
       // The override's forecast: only once Will has approved the card, with this review on it.
       const attached = `review ${rid}: an override's forecast is attached once, to a block Will approved past`;
@@ -831,15 +979,19 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         await k.setGate(app, true, on.aid);
         await k.finish(on.pid);
         expect(await k.gate()).toEqual({ enforced: true, approvalId: on.aid });
-        // Used once: stopping and starting again each take their own card.
-        await k.setGate(app, false, off.aid);
+        // The card to stop that was signed before reviews were required decides nothing now: his later decision stands.
+        await refused(k.setGate(app, false, off.aid), '42501', `the review gate: approval ${off.aid} was signed before it last changed`);
+        expect([await k.gate(), await k.used(off.aid)]).toEqual([{ enforced: true, approvalId: on.aid }, 0]);
+        // Used once: stopping and starting again each take their own card, signed since.
+        const stop = await k.card('review.enforce', { gate: 'proposal', enforced: false, n: 5 });
+        await k.setGate(app, false, stop.aid);
         await refused(k.setGate(app, true, on.aid), '42501', notFor('gate', 'proposal', 'review.enforce'));
         const again = await k.card('review.enforce', { gate: 'proposal', enforced: true, n: 3 });
         await k.setGate(app, true, again.aid);
         // The approval that turned it on once does not turn it on again while its card is still executing.
         const offAgain = await k.card('review.enforce', { gate: 'proposal', enforced: false, n: 4 });
         await k.setGate(app, false, offAgain.aid);
-        await refused(k.setGate(app, true, again.aid), '42501', `gate proposal: approval ${again.aid} was already used`);
+        await refused(k.setGate(app, true, again.aid), '42501', `the review gate: approval ${again.aid} was signed before it last changed`);
         await k.enforce(true);
 
         // While reviews are required, one reviewer may go; the last one stays on.
@@ -869,6 +1021,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(app(`UPDATE "Proposal" SET "reviewRequired" = NULL WHERE id = $1`, [needs.pid]), '42501', `proposal ${needs.pid}: whether it needs a review never changes`);
       await refused(app(`UPDATE "Proposal" SET "reviewRequired" = true WHERE id = $1`, [plain.pid]), '42501', `proposal ${plain.pid}: whether it needs a review never changes`);
 
+      const reviewer = await k.reviewer();
       const mine = await k.reviewed(needs.pid, {}, false);
       const theirs = await k.reviewed(plain.pid, {}, false);
       const attach = (pid: string, rid: string | null) => app(`UPDATE "Proposal" SET "reviewId" = $2 WHERE id = $1`, [pid, rid]);
@@ -889,6 +1042,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(app(`UPDATE "Proposal" SET status = 'approved', "approvalId" = $2, "reviewId" = $3 WHERE id = $1`, [late.pid, aid, lateReview]), '42501', `proposal ${late.pid}: its review is attached once, while it waits`);
       await k.approve(app, late.pid, aid);
       await refused(attach(late.pid, lateReview), '42501', `proposal ${late.pid}: its review is attached once, while it waits`);
+      await k.switchOff(app, reviewer.id);
     });
 
     it('while reviews are required, a card that needs one is approved only with it attached, by a signature that names it and its verdict', async () => {
@@ -912,6 +1066,14 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         await refused(k.approve(app, blocked.pid, await sign({ reviewId: 'rvother', verdict: 'block' })), '42501', names);
         await refused(k.approve(app, blocked.pid, await sign({ reviewId: rid, verdict: 'proceed' })), '42501', names);
         expect((await app(`SELECT status FROM "Proposal" WHERE id = $1`, [blocked.pid])).rows[0].status).toBe('pending');
+        // A signature that names a review written afterwards (its id is the runtime's to choose) was not of something he was shown.
+        const unseen = await card(3);
+        const lateId = id('rv');
+        const tooEarly = await k.approval(unseen.pid, 'mcp:web.fetch_url', unseen.digest, { fields: { reviewId: lateId, verdict: 'proceed' } });
+        await sleep(20);
+        await k.reviewed(unseen.pid, { id: lateId, verdict: 'proceed' });
+        await refused(k.approve(app, unseen.pid, tooEarly), '42501', `proposal ${unseen.pid}: its review was written after Will signed`);
+        expect((await app(`SELECT status FROM "Proposal" WHERE id = $1`, [unseen.pid])).rows[0].status).toBe('pending');
         // Signed past the block he was shown.
         await k.approve(app, blocked.pid, await sign({ tainted: true, reviewId: rid, verdict: 'block' }));
         // Rejecting and expiring need no review; a card that needs none is approved as always; so is the card that stops requiring them.
@@ -991,12 +1153,26 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(nextVersion(c1.aid, (r) => (r.key === 's2' ? { ...r, ...done, taskId: mine.id } : r)), '42501', /^step \w+: its task is a task of this goal and step$/);
       await refused(nextVersion(c1.aid, (r) => (r.key === 's1' ? { ...r, taskId: null } : r)), '42501', /^step \w+: a Flint task is done only when its task was accepted$/);
       expect(await k.used(c1.aid)).toBe(0);
-      // Will later overrides the task to rejected: the step that was done stays done, here and in the next version.
+      // Will later overrides the task to rejected: the step it had done is no longer done, in the same transaction.
       const over = await k.card('task.bar_override', { taskId: mine.id, to: 'rejected' });
       await k.setStatus(app, mine.id, 'rejected', `, "barCheckedBy" = 'will'`);
       await k.finish(over.pid);
-      const v2 = await nextVersion(c1.aid);
-      expect((await app(`SELECT status, "taskId" FROM "PlanStep" WHERE "planId" = $1 AND key = 's1'`, [v2])).rows[0]).toEqual({ status: 'done', taskId: mine.id });
+      expect((await app(`SELECT status, "taskId", "doneAt" FROM "PlanStep" WHERE id = $1`, [s1])).rows[0]).toEqual({ status: 'blocked', taskId: mine.id, doneAt: null });
+      // The steps other tasks did, and Will's own, are as they were.
+      expect((await app(`SELECT status FROM "PlanStep" WHERE id = $1`, [s3])).rows[0].status).toBe('done');
+      // It is not ticked back by hand, and a copy that still says done is refused: no version that was active has it done now.
+      await refused(tick(s1), '42501', notDone(s1));
+      await refused(nextVersion(c1.aid), '42501', /^step \w+: a Flint task is done only when its task was accepted$/);
+      // The next version copies it as it stands.
+      const v2 = await nextVersion(c1.aid, (r) => (r.key === 's1' ? { ...r, status: 'blocked', doneAt: null } : r));
+      expect((await app(`SELECT status, "taskId" FROM "PlanStep" WHERE "planId" = $1 AND key = 's1'`, [v2])).rows[0]).toEqual({ status: 'blocked', taskId: mine.id });
+      // A task that is live for the step is the only way it is done again: one at a time (the rejected one is not live).
+      const retry = await k.taskAt('checked', w, { goalId: gid, stepKey: 's1', sensitivity: 'personal' });
+      expect(await k.code(k.task(w.id, { goalId: gid, stepKey: 's1', sensitivity: 'personal' }))).toBe('23505');
+      // ...and the rejected one is not brought back beside it, even on a signed override.
+      await k.card('task.bar_override', { taskId: mine.id, to: 'accepted', n: 2 });
+      expect(await k.code(k.setStatus(app, mine.id, 'accepted'))).toBe('23505');
+      expect(retry.id).toBeTruthy();
       // On the new version, the other Flint task still needs its own accepted task to be done.
       const s2v2 = (await app(`SELECT id FROM "PlanStep" WHERE "planId" = $1 AND key = 's2'`, [v2])).rows[0].id as string;
       await refused(tick(s2v2), '42501', notDone(s2v2));
@@ -1015,6 +1191,13 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       const declared = raises.map((m) => ({ format: m[1]!.replace(/''/g, "'"), state: /USING ERRCODE = '([a-z_]+)'/.exec(m[2]!)?.[1] }));
       // Every RAISE names its SQLSTATE.
       expect(declared.filter((d) => !d.state || !SQLSTATE[d.state]).map((d) => d.format)).toEqual([]);
+      // No message is raised at two sites: a refusal seen above is one site's, so each site has to be reached.
+      const formats = declared.map((d) => d.format);
+      expect(formats.filter((f, i) => formats.indexOf(f) !== i)).toEqual([]);
+      // Nor does one site's message fit another's shape (a `%` matching what another message spells out).
+      const shapeOf = (f: string) => new RegExp(`^${f.split('%').map(esc).join('.+')}$`);
+      const literal = (f: string) => f.replace(/%/g, 'x');
+      expect(formats.flatMap((f) => formats.filter((g) => g !== f && shapeOf(f).test(literal(g))).map((g) => `${f} | ${g}`))).toEqual([]);
       // P3's own refusals inside plan_step_guard (its body is P3's, to the letter) are P3's tests' to cover.
       const own = declared.filter((d) => !p3.includes(`RAISE EXCEPTION '${d.format.replace(/'/g, "''")}'`));
       const missing = own.filter((d) => {

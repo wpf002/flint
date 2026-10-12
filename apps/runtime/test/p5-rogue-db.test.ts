@@ -36,6 +36,15 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
   const status = async (taskId: string) => (await app(`SELECT status FROM "Task" WHERE id = $1`, [taskId])).rows[0].status as string;
   const uses = async () => (await owner(`SELECT count(*)::int AS n FROM "TaskApprovalUse"`)).rows[0].n as number;
   const webCard = (n: string, o: Parameters<P5Kit['file']>[2] = {}) => k.file('mcp:web.fetch_url', { url: `https://example.com/${n}` }, { kind: 'tool_call', origin: 'chat:c1', tainted: true, ...o });
+  /**
+   * A write that should wait on another session's lock: its outcome, and whether it has ended yet. A race
+   * test that only looked at the outcome would pass with the lock gone; `ended` must still be false while
+   * the other session holds its transaction open.
+   */
+  const waiting = (p: Promise<unknown>) => {
+    const w = { ended: false, outcome: k.outcome(p).finally(() => { w.ended = true; }) };
+    return w;
+  };
 
   beforeAll(async () => {
     k = await p5Kit(await freshDb());
@@ -269,10 +278,11 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       try {
         await d.query('BEGIN');
         await k.queue(k.on(d), t.id, c.aid, await k.forecast());
-        const off = k.outcome(k.switchOff(k.on(o), a.id));
+        const off = waiting(k.switchOff(k.on(o), a.id));
         await sleep(300);
+        expect(off.ended, 'the turn-off waits for the dispatch').toBe(false);
         await d.query('COMMIT');
-        expect(await off).toBe('ok');
+        expect(await off.outcome).toBe('ok');
       } finally {
         await d.end();
         await o.end();
@@ -289,10 +299,11 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       try {
         await o2.query('BEGIN');
         await k.switchOff(k.on(o2), b.id);
-        const queued = k.outcome(k.queue(k.on(d2), u.id, e.aid, f));
+        const queued = waiting(k.queue(k.on(d2), u.id, e.aid, f));
         await sleep(300);
+        expect(queued.ended, 'the dispatch waits for the turn-off').toBe(false);
         await o2.query('COMMIT');
-        expect(await queued).toBe('42501');
+        expect(await queued.outcome).toBe('42501');
       } finally {
         await o2.end();
         await d2.end();
@@ -357,14 +368,17 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       await k.accept(t.id);
       const forecastId = (await app(`SELECT "predictionId" FROM "Task" WHERE id = $1`, [t.id])).rows[0].predictionId as string;
       const over = await k.card('task.bar_override', { taskId: t.id, to: 'rejected' });
+      // (A forecast is scored only a day after its task ended: the test says a day has passed.)
+      await k.endedAgo(t.id);
       const [score, o] = [await k.client(), await k.client()];
       try {
         await score.query('BEGIN');
         await score.query(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, now(), 'auto_world')`, [id('rs'), forecastId]);
-        const overridden = k.outcome(k.setStatus(k.on(o), t.id, 'rejected', `, "barCheckedBy" = 'will'`));
+        const overridden = waiting(k.setStatus(k.on(o), t.id, 'rejected', `, "barCheckedBy" = 'will'`));
         await sleep(300);
+        expect(overridden.ended, 'the override waits for the score').toBe(false);
         await score.query('COMMIT');
-        expect(await overridden).toBe('42501');
+        expect(await overridden.outcome).toBe('42501');
       } finally {
         await score.end();
         await o.end();
@@ -399,6 +413,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
 
   describe('reviews and the gate', () => {
     it('it cannot attach a foreign review, write one after the fact, rewrite one, or change whether a card needs one', async () => {
+      const reviewer = await k.reviewer();
       const mine = await webCard('rogue-1');
       const theirs = await webCard('rogue-2');
       const theirReview = await k.reviewed(theirs.pid, { verdict: 'proceed' }, false);
@@ -412,10 +427,10 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       await app(`INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, "reviewRequired", "expiresAt") VALUES ($1, 'tool_call', 'chat:c1', 'x.y', '{}', $2, '{}', true, false, now() + interval '1 hour')`, [dodged, HEX('a')]);
       expect((await app(`SELECT "reviewRequired" FROM "Proposal" WHERE id = $1`, [dodged])).rows[0].reviewRequired).toBe(true);
       for (const set of [`"reviewRequired" = false`, `"reviewRequired" = NULL`, `tainted = false`, `kind = 'goal'`, `action = 'review.enforce'`]) expect(await k.outcome(app(`UPDATE "Proposal" SET ${set} WHERE id = $1`, [dodged])), set).not.toBe('ok');
-      // Calling a card `review.enforce` does spare it a review, and makes it a card that can only change the gate:
-      // which a card from chat, with outside text in it, never does.
+      // Calling a card `review.enforce` spares it nothing: only Will's own policy card of that name is spared a review,
+      // and a card from chat, with outside text in it, never changes the gate either.
       const named = await k.card('review.enforce', { gate: 'proposal', enforced: true, url: 'https://example.com/x' }, { kind: 'tool_call', origin: 'chat:c1', tainted: true });
-      expect((await app(`SELECT "reviewRequired" FROM "Proposal" WHERE id = $1`, [named.pid])).rows[0].reviewRequired).toBe(false);
+      expect((await app(`SELECT "reviewRequired" FROM "Proposal" WHERE id = $1`, [named.pid])).rows[0].reviewRequired).toBe(true);
       expect(await code(k.setGate(app, true, named.aid))).toBe('42501');
 
       // After the fact: once the card is approved, no review of it is written, and none is attached.
@@ -436,6 +451,7 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
       expect(await code(app(`UPDATE "Proposal" SET "reviewId" = $2 WHERE id = $1`, [theirs.pid, theirReview]))).toBe('42501');
       // A block it would rather not have scored: the override's forecast is the reviews writer's own, attached once.
       expect(await code(app(`UPDATE "Review" SET "overridePredictionId" = $2 WHERE id = $1`, [late, await k.forecast({ type: 'effect_given_accept', createdBy: 'runtime:reviews' })]))).toBe('42501');
+      await k.switchOff(app, reviewer.id);
     });
 
     it('it cannot turn the gate, in any statement shape; nor approve around it', async () => {
@@ -488,10 +504,11 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
         try {
           await g.query('BEGIN');
           await k.setGate(k.on(g), true, on.aid);
-          const approved = k.outcome(k.approve(k.on(a), card.pid, signed));
+          const approved = waiting(k.approve(k.on(a), card.pid, signed));
           await sleep(300);
+          expect(approved.ended, 'the approval waits for the gate').toBe(false);
           await g.query('COMMIT');
-          expect(await approved).toBe('42501');
+          expect(await approved.outcome).toBe('42501');
         } finally {
           await g.end();
           await a.end();
@@ -508,10 +525,11 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
         try {
           await a2.query('BEGIN');
           await k.approve(k.on(a2), early.pid, earlySigned);
-          const gated = k.outcome(k.setGate(k.on(g2), true, on2.aid));
+          const gated = waiting(k.setGate(k.on(g2), true, on2.aid));
           await sleep(300);
+          expect(gated.ended, 'requiring reviews waits for the approval').toBe(false);
           await a2.query('COMMIT');
-          expect(await gated).toBe('ok');
+          expect(await gated.outcome).toBe('ok');
         } finally {
           await a2.end();
           await g2.end();
@@ -526,26 +544,30 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
         try {
           await o.query('BEGIN');
           await k.switchOff(k.on(o), reviewer.id);
-          const gated = k.outcome(k.setGate(k.on(g3), true, on3.aid));
+          const gated = waiting(k.setGate(k.on(g3), true, on3.aid));
           await sleep(300);
+          expect(gated.ended, 'requiring reviews waits for the turn-off').toBe(false);
           await o.query('COMMIT');
-          expect(await gated).toBe('42501');
+          expect(await gated.outcome).toBe('42501');
         } finally {
           await o.end();
           await g3.end();
         }
         expect([(await k.gate()).enforced, await assetOn(reviewer.id)]).toEqual([false, false]);
 
-        // Requiring reviews first: the turn-off waits for it, then finds reviews required.
+        // Requiring reviews first: the turn-off waits for it, then finds reviews required. (Its card is signed
+        // after the reviewer came back on: every card is signed after the change before it.)
         await k.turnOn(reviewer);
+        const on4 = await k.card('review.enforce', { gate: 'proposal', enforced: true, n: 'race-4' });
         const [g4, o4] = [await k.client(), await k.client()];
         try {
           await g4.query('BEGIN');
-          await k.setGate(k.on(g4), true, on3.aid);
-          const off = k.outcome(k.switchOff(k.on(o4), reviewer.id));
+          await k.setGate(k.on(g4), true, on4.aid);
+          const off = waiting(k.switchOff(k.on(o4), reviewer.id));
           await sleep(300);
+          expect(off.ended, 'the turn-off waits for the requirement').toBe(false);
           await g4.query('COMMIT');
-          expect(await off).toBe('42501');
+          expect(await off.outcome).toBe('42501');
         } finally {
           await g4.end();
           await o4.end();
@@ -558,19 +580,26 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
     });
 
     it('a review cannot land on a card as it is approved', async () => {
+      const reviewer = await k.reviewer();
       const card = await webCard('race-4');
       const signed = await k.approval(card.pid, 'mcp:web.fetch_url', card.digest);
       const [a, r] = [await k.client(), await k.client()];
       try {
         await a.query('BEGIN');
         await k.approve(k.on(a), card.pid, signed);
-        const written = k.outcome(k.review({ subjectId: card.pid, subjectDigest: card.digest, tainted: true }, k.on(r)));
+        const rid = id('rv');
+        const written = refusal(k.review({ id: rid, subjectId: card.pid, subjectDigest: card.digest, tainted: true }, k.on(r)));
+        let ended = false;
+        void written.finally(() => { ended = true; });
         await sleep(300);
+        expect(ended, 'the review waits for the approval').toBe(false);
         await a.query('COMMIT');
-        expect(await written).toBe('42501');
+        // Refused because the card no longer waits (not for want of a reviewer: one is on).
+        expect(await written).toMatchObject({ code: '42501', message: `review ${rid}: it is not of card ${card.pid} as it waits` });
       } finally {
         await a.end();
         await r.end();
+        await k.switchOff(app, reviewer.id);
       }
       expect((await app(`SELECT count(*)::int AS n FROM "Review" WHERE "subjectId" = $1`, [card.pid])).rows[0].n).toBe(0);
     });
@@ -616,8 +645,10 @@ describe.skipIf(NO_DB)('P5 against a runtime that breaks the rules', () => {
     });
 
     it('that a review was honest: the gate proves a review of these args came first and that Will signed its verdict, not what the engine did', async () => {
+      const reviewer = await k.reviewer();
       const card = await webCard('trust-1');
       expect(await k.outcome(k.reviewed(card.pid, { verdict: 'proceed', attack: null, defense: null, verdictReason: null, modelMs: 0 }))).toBe('ok');
+      await k.switchOff(app, reviewer.id);
     });
 
     it('that a forecast or a cost is right: the forecast is any open one from the tasks writer, and a cost is what the runtime reports', async () => {
