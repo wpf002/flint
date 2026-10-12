@@ -402,13 +402,13 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
     expect(Math.abs(row.createdAt.getTime() - Date.now())).toBeLessThan(60_000);
     expect(await refusal(table())).toBe('409: the shadow weeks are not over: 8.0 of 14 days of chat suggestions');
     // Nor a health check: a week of "reviews were on" cannot be written in an afternoon.
-    await db.healthCheck.create({ data: { component: 'goals', status: 'ok', at: new Date(Date.now() - 8 * DAY) } });
-    await db.healthCheck.createMany({ data: [3, 4, 5].map((d) => ({ component: 'goals', status: 'ok', at: new Date(Date.now() - d * DAY) })) });
-    const written = await db.healthCheck.findMany({ where: { component: 'goals' }, select: { at: true } });
+    await db.healthCheck.create({ data: { component: 'goals', status: 'ok', detail: 'one', at: new Date(Date.now() - 8 * DAY) } });
+    await db.healthCheck.createMany({ data: [3, 4, 5].map((d) => ({ component: 'goals', status: 'ok', detail: 'many', at: new Date(Date.now() - d * DAY) })) });
+    const written = await db.healthCheck.findMany({ where: { component: 'goals' }, select: { at: true, detail: true } });
     expect(written).toHaveLength(4);
     for (const w of written) expect(Math.abs(w.at.getTime() - Date.now())).toBeLessThan(60_000);
     // The rows of one statement share their time, as one health run's checks always have.
-    expect(new Set(written.map((w) => w.at.getTime())).size).toBe(2);
+    expect(new Set(written.filter((w) => w.detail === 'many').map((w) => w.at.getTime())).size).toBe(1);
     await withClient(urls.owner, (c) => c.query(`DELETE FROM "HealthCheck" WHERE component = 'goals'`));
   });
 

@@ -445,9 +445,11 @@ describe('P3: goals and plans', () => {
     const small = /\n(function apprSmallOp\(o\)\{[\s\S]*?\nfunction apprSmallPlan\(p\)\{[^\n]*)\n/.exec(js)![1]!;
     const predict = /\nvar APPR_PREDICT='[^'\n]*';/.exec(js)![0];
     const alone = /\n(function apprAlone\(p\)\{[\s\S]*?)\nfunction /.exec(js)![1]!;
+    // (The panel reads each of its tables through one guarded lookup.)
+    const get = /\n(function apprGet\(table,key\)\{[^\n]*)\n/.exec(js)![1]!;
     const c: Record<string, unknown> = {};
     createContext(c);
-    runInContext(`${goals}\n${small}\n${predict}\n${alone}`, c);
+    runInContext(`${get}\n${goals}\n${small}\n${predict}\n${alone}`, c);
     const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
     for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a }), a).toBe(true);
     const status = { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'blocked' } };
