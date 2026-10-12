@@ -70,6 +70,20 @@ describe('flint contestant: the cost of every replay', () => {
     expect(costOfFailure(err)).toBe(0.03);
   });
 
+  // The server's breaker had the frontier paused (no credit, a rejected key, an outage), so its
+  // local model answered a replay meant for the frontier tiers.
+  it('an answer the local model gave because the frontier was paused is not judged, and carries its cost', async () => {
+    serverSays({ text: 'A local answer.', reason: 'complete', usage: USAGE, costUsd: 0.02, brain: 'local', model: 'muse-glimmer:30b', frontierPaused: 'anthropic:credit' });
+    const err = await failure(flint());
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(FatalError); // retried on resume, once the provider is back; not a reason to stop the run
+    expect(err!.message).toMatch(/frontier was paused \(frontierPaused=anthropic:credit, model=muse-glimmer:30b\).*not judged/);
+    expect(costOfFailure(err)).toBe(0.02);
+    // Without the mark, the same response is an answer, as before.
+    serverSays({ text: 'Paris.', reason: 'complete', usage: USAGE, costUsd: 0.07 });
+    expect((await flint().answer(prompt, new AbortController().signal)).text).toBe('Paris.');
+  });
+
   it('a server error carries the cost the server reports, or (an older server) the estimate', async () => {
     serverSays({ error: 'flint failed: boom', costUsd: 0.12 }, 500);
     expect(costOfFailure(await failure(flint()))).toBe(0.12);

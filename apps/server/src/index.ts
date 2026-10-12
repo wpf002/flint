@@ -64,7 +64,7 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { AuditSink, runtimeFromDisk, type Runtime } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
 import { RuntimePolicies, capClaimer } from './runtime-link';
-import { currentTurn, historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
+import { asLocalTurn, currentTurn, historyOrigin, isLocalTurn, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
@@ -76,7 +76,7 @@ import { WorldNow, estimateTokens } from './world-now';
 import { inboxRoutes } from './inbox-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
-import { FrontierBreaker, FrontierPaused, breakerNote, gateTurn, pausedCode } from './frontier-breaker';
+import { FrontierBreaker, FrontierPaused, breakerNote, gateChain, gateTurn, pausedCode } from './frontier-breaker';
 import { errorSummary, logError } from './error-log';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
@@ -652,17 +652,20 @@ async function main(): Promise<void> {
     deepResearchTool({
       tools: mcpTools,
       embedder,
-      // Planning is optional (heuristic queries are the fallback): it waits at 80% of the cap,
-      // and while the breaker has its provider paused.
+      // Planning is optional (heuristic queries are the fallback): it waits at 80% of the cap.
       complete: pausable(
         async (prompt) => {
           if (!frontierFlint) throw new Error('no frontier brain');
           return (await frontierFlint.generate({ prompt }, { context: spendContext('plan') })).text;
         },
+        () => (plannerVendor ? spend.backgroundBlocked(plannerVendor) : undefined),
+        // Whatever the turn, an eval replay included. The planner's prompt is the question itself:
+        // on a turn the local model is answering (Local-only, a private question, a fallback) it
+        // does not go to an outside AI, and a provider the breaker has paused is not asked.
         () => {
+          if (plannerVendor && isLocalTurn()) return 'the local model is answering this turn, so its question stays here';
           const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;
-          if (paused) return `the frontier is paused (${paused})`;
-          return plannerVendor ? spend.backgroundBlocked(plannerVendor) : undefined;
+          return paused ? `the frontier is paused (${paused})` : undefined;
         },
       ),
     }),
@@ -1222,7 +1225,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (plan) logPlan(plan);
     // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
     // out, and with none left the local model answers at once instead of after their failures.
-    const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: route.localFallback && !budget.localRefusal, breaker: ctx.breaker });
+    // An eval replay measures the tiers as configured, so it is not rerouted (as the caps do not
+    // apply to it): every brain it planned is asked. If they fail and the local model answers
+    // while a provider is paused, the answer is MARKED (evalPaused, `frontierPaused` in the
+    // response), so apps/parity does not file a local answer under a frontier contestant.
+    const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: route.localFallback && !budget.localRefusal && !evalMode, breaker: ctx.breaker });
+    const evalPaused = () => (evalMode && plan ? pausedCode(gateChain(plan.chain, ctx.breaker).paused) : undefined);
     let brain = gate.brain;
     let paused = gate.paused; // also set when a brain's provider is paused while the turn runs
     let answeredBy = local.model;
@@ -1302,13 +1310,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           }
           logToLocal('frontier failed', err);
           if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
+          paused ??= evalPaused(); // a replay the local model answers because the provider is paused
           brain = 'local';
           lastTried = local.model;
-          out = await answered.ask(local.persona);
+          out = await asLocalTurn(() => answered.ask(local.persona));
         }
       } else {
         lastTried = local.model;
-        out = await answered.ask(local.persona);
+        // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn).
+        out = await asLocalTurn(() => answered.ask(local.persona));
       }
     } catch (err) {
       if (abort.signal.aborted) {
@@ -1507,7 +1517,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
               brain = 'local';
               lastTried = ctx.model;
               res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
-              await pump(ctx.persona);
+              await asLocalTurn(() => pump(ctx.persona));
             } else if (answer.length === 0 && route.localFallback && budget.localRefusal && mayAskAnother(err, { acted, signal: ac.signal })) {
               stopWords = budget.localRefusal;
               throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
@@ -1518,7 +1528,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         } else {
           lastTried = ctx.model;
           res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
-          await pump(ctx.persona);
+          // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn).
+          await asLocalTurn(() => pump(ctx.persona));
         }
         if (answer.trim()) {
           recordConvo(ctx.convos, asText, answer);

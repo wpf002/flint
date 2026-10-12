@@ -84,6 +84,11 @@ the streaming, the badge — stays identical.
 - **Flint says what is actually answering.** Each brain's prompt names its own
   model after the style guide, so a local model asked what it runs on no longer
   answers "Claude" (packages/persona/README.md, "What powers this answer").
+- **A Local-only turn keeps its question on this machine.** deep_research used
+  to send the question to the frontier's routine tier to plan its searches,
+  whatever the turn. On a turn the local model is answering it now plans by its
+  heuristic, and no outside AI is asked. (Its web searches are still web
+  searches: see "Still on an outside AI".)
 - **Background calls** the runtime asks the server for (`/internal/complete`)
   are answered by the local model, never a frontier tier. Nothing uses them
   yet; whatever does will be local from its first call.
@@ -99,9 +104,11 @@ the streaming, the badge — stays identical.
 - **Hard and everyday questions**, while `ANTHROPIC_API_KEY` is set: `judgeBrain`
   (apps/server/src/policy.ts) sends them to the frontier tiers by default.
 - **`evolve measure`'s judge** (Claude), **voice output** (OpenAI TTS, with the
-  browser's voice as its fallback), and **paid search** (Perplexity, Tavily).
-- The `playground` demos still pick Anthropic when `OLLAMA_MODEL` is unset and a
-  key is present.
+  browser's voice as its fallback), and **paid search** (Perplexity, Tavily),
+  which a Local-only turn can still call: the search query leaves the machine
+  even when the question's answer is written here.
+- **deep_research's planner**, on a frontier turn: the routine tier writes the
+  search queries.
 
 ## The milestone
 

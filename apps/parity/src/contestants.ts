@@ -206,6 +206,11 @@ interface FlintGenerateResponse {
   costUsd?: number;
   /** Paid tools the server refused for budget during the replay (Flint's own cap for them is spent). */
   budgetBlocked?: string[];
+  /**
+   * Set (`anthropic:credit`) when the server's breaker had an outside provider
+   * paused and the local model answered a replay planned for the frontier.
+   */
+  frontierPaused?: string;
 }
 
 /** Attach what a failed call still cost, so the budget guard charges it (steps.ts answerOne). */
@@ -388,6 +393,17 @@ export function flintContestant(opts: {
         throw fail(
           new Error(
             `flint answered without ${body.budgetBlocked.join(', ')} (refused: Flint's own spend cap for it is spent), so the answer is not judged`,
+          ),
+        );
+      }
+      // The frontier was paused (no credit, a rejected key, an outage) and the local model
+      // answered in its place: not the configured Flint's answer, so filing it under this
+      // contestant would score the wrong system. A failure like `unanswered`: not judged,
+      // retried on resume (once the provider is back).
+      if (body.frontierPaused && !localOnly) {
+        throw fail(
+          new Error(
+            `flint answered on its local model because the frontier was paused (frontierPaused=${body.frontierPaused}, model=${body.model ?? '?'}), so the answer is not judged`,
           ),
         );
       }

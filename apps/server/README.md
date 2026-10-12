@@ -63,7 +63,16 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 ## The local brain is always Ollama
 
 The local brain (private questions, Local-only, the answer when the frontier can't) is an Ollama
-model, whatever keys are in the environment (`chooseLocalBrain` in `src/local-model.ts`):
+model, whatever keys are in the environment (`chooseLocalBrain` in `src/local-model.ts`).
+
+**A turn the local model answers keeps its question here.** deep_research plans its searches with
+the frontier's routine tier when there is one, and that prompt is the question itself. On a turn
+the local model is answering (Local-only, a question Will asked to keep private, a turn handed to
+it) the planner is not asked: deep_research plans by its heuristic (`asLocalTurn` in
+`src/turn-taint.ts`, `pausable` in `src/spend.ts`). The searches it then runs are the same web
+searches as on any turn.
+
+Which model it is:
 
 - `OLLAMA_MODEL` names it. An Ollama cloud model (`...-cloud`, `:cloud`) is refused: it runs on
   Ollama's servers, which is an outside AI by another door. The pick below is used in its place.
@@ -131,6 +140,11 @@ the same refusal from each, and only then asked the local model.
   outage; a check that breaks for a reason of its own leaves the pause as it was.
 - **A turn only the frontier can answer** (an image or a PDF) is not gated: it is asked as before,
   since there is no local answer to give instead.
+- **An eval replay** (`/generate` with `eval: true`) is not rerouted either: it measures the tiers
+  as configured, so every brain it planned is asked, as the caps do not apply to it. If they fail
+  and the local model answers while a provider is paused, the response carries `frontierPaused`,
+  and apps/parity does not judge that answer or file it under a frontier contestant (it is retried
+  on resume). Its research planner does respect the pause.
 - **Not counted:** a malformed request, an unknown model, a 429, a refusal, a closed tab.
 - **Will is told.** Out of credit, a rejected key, or a model the key may not use puts one note in
   the console's notifications ("Claude Is Out of Credit"), once a day, with no banner and no phone

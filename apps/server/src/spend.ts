@@ -969,12 +969,20 @@ export function spendObserver(ledger: SpendLedger): AiObserver {
  * Wrap an OPTIONAL frontier completion (the research planner) so it refuses
  * while `paused()` gives a reason. It throws rather than returning nothing, so
  * the caller's own fallback takes over (deep_research plans heuristically).
- * Inside an eval replay it never pauses: the replay is exempt from Flint's caps
- * like the rest of its turn, and its planner call is eval spend, not Will's.
+ * Inside an eval replay `paused` is not asked: the replay is exempt from Flint's
+ * caps like the rest of its turn, and its planner call is eval spend, not Will's.
+ *
+ * `never()` is asked for every turn, an eval replay included: the reasons that
+ * are no budget's. A turn the local model is answering does not send its
+ * question to an outside AI, and a provider the breaker has paused is not asked.
  */
-export function pausable(complete: (prompt: string) => Promise<string>, paused: () => string | undefined): (prompt: string) => Promise<string> {
+export function pausable(
+  complete: (prompt: string) => Promise<string>,
+  paused: () => string | undefined,
+  never: () => string | undefined = () => undefined,
+): (prompt: string) => Promise<string> {
   return async (prompt) => {
-    const why = currentTurnSpend()?.kind === 'eval' ? undefined : paused();
+    const why = never() ?? (currentTurnSpend()?.kind === 'eval' ? undefined : paused());
     if (why) throw new Error(why);
     return complete(prompt);
   };

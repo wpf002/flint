@@ -77,6 +77,24 @@ export function historyOrigin(): number | undefined {
   return scope.getStore()?.historyOrigin;
 }
 
+const localScope = new AsyncLocalStorage<true>();
+
+/**
+ * Run `fn` as (part of) a turn the LOCAL model is answering: Local-only, a
+ * question Will asked to keep private, or a frontier turn handed to the local
+ * model. Its own store, not the turn's, so it reaches a scope opened inside the
+ * turn too (deep_research runs in one): nothing the local model's turn sets off
+ * may quietly send the question to an outside AI (isLocalTurn).
+ */
+export function asLocalTurn<T>(fn: () => T): T {
+  return localScope.run(true, fn);
+}
+
+/** Is this the local model's turn (asLocalTurn)? */
+export function isLocalTurn(): boolean {
+  return localScope.getStore() === true;
+}
+
 /** This turn is an eval replay. */
 export function markEval(): void {
   const t = scope.getStore();

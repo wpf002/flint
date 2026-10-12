@@ -42,7 +42,8 @@ describe('index.ts wiring', () => {
     expect(chat).toContain("brain === 'frontier' && plan && ctx.worldNow ? ctx.worldNow.block()");
     // The frontier chain gets it; the local brain (first choice or fallback) does not.
     expect(chat).toMatch(/await pump\(b\.persona, [^;]*, frontierCtx\)/);
-    expect(chat.match(/await pump\(ctx\.persona\)/g)).toHaveLength(2);
+    expect(chat.match(/await asLocalTurn\(\(\) => pump\(ctx\.persona\)\)/g)).toHaveLength(2);
+    expect(chat.match(/pump\(ctx\.persona\)/g)).toHaveLength(2);
     expect(chat.match(/frontierCtx/g)).toHaveLength(2); // defined once, used once
   });
 
@@ -104,6 +105,7 @@ describe('index.ts wiring', () => {
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
       expect(route, name).toMatch(/const gate = gateTurn\(\{ brain: budget\.brain, chain: plan\?\.chain, canLocal: [^,]+, breaker: ctx\.breaker \}\);/);
       expect(route, name).toContain('let brain = gate.brain;');
+      expect(route, name).toContain('let paused = gate.paused;');
       expect(route.indexOf('gateTurn('), name).toBeGreaterThan(route.indexOf('budgetTurn('));
       expect(route, name).toContain('gate.attempt(');
       // The spend plan's chain is only ever tried through the gate.
@@ -117,7 +119,7 @@ describe('index.ts wiring', () => {
   });
 
   it('a turn the local model may not answer (an image or PDF, or a spent paid local brain) is not gated', () => {
-    expect(generate).toContain('canLocal: route.localFallback && !budget.localRefusal');
+    expect(generate).toContain('canLocal: route.localFallback && !budget.localRefusal && !evalMode');
     expect(chat).toContain('const toLocal = route.localFallback && !budget.localRefusal;');
     expect(chat).toContain('canLocal: toLocal');
   });
@@ -172,6 +174,23 @@ describe('index.ts wiring', () => {
     const block = between('complete: pausable(', 'calculateTool(),');
     expect(block).toContain('const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;');
     expect(src).toContain('plannerProvider = planner.provider.name;');
+  });
+
+  // test/local-turn.test.ts runs it; this checks index.ts marks every local answer and asks the planner's check.
+  it('the local model\'s turn is marked wherever it answers, and the research planner stays off an outside AI there', () => {
+    expect(generate.match(/await asLocalTurn\(\(\) => answered\.ask\(local\.persona\)\)/g)).toHaveLength(2);
+    expect(generate.match(/answered\.ask\(local\.persona\)/g)).toHaveLength(2);
+    const block = between('complete: pausable(', 'calculateTool(),');
+    // The budget check is the one an eval replay is exempt from; the local turn and the breaker are for every turn.
+    expect(block).toMatch(/\(\) => \(plannerVendor \? spend\.backgroundBlocked\(plannerVendor\) : undefined\),\s*\/\/ Whatever the turn, an eval replay included\./);
+    expect(block).toContain("if (plannerVendor && isLocalTurn()) return 'the local model is answering this turn, so its question stays here';");
+  });
+
+  it('an eval replay is not rerouted by the breaker; a local answer it gets during a pause is marked', () => {
+    expect(generate).toContain('canLocal: route.localFallback && !budget.localRefusal && !evalMode');
+    expect(generate).toContain('const evalPaused = () => (evalMode && plan ? pausedCode(gateChain(plan.chain, ctx.breaker).paused) : undefined);');
+    expect(generate).toContain('paused ??= evalPaused();');
+    expect(generate.indexOf('paused ??= evalPaused();')).toBeLessThan(generate.indexOf("brain = 'local';"));
   });
 
   it('every persona says which model answers: the local brain, an eval candidate, each frontier tier', () => {
