@@ -271,13 +271,19 @@ What comes back, what is new, and what needs you:
 
 - The new Mac is asked first whether it is fit: FileVault on, someone logged in,
   and no Flint on it. If it is not, nothing is sent and the command says why.
-- If the rebuild stops part-way, run the same command again. It starts over.
+- If the rebuild stops part-way, run the same command again straight away. It
+  starts over. If more than a day has passed, or Flint has been running on the
+  new Mac since, it asks you to type `START OVER` first, because starting over
+  replaces the files and the database that are there.
 - The MacBook stays awake while it runs. Leave it open and plugged in.
 - The backup key never leaves the MacBook. The new Mac gets the opened backups
   over SSH, and they are removed from it when the rebuild is done or has failed.
 - A rebuild takes only your data from a backup. It never unpacks a settings
   file, a connector list, a token or a program, and it says what it left out.
-- The rebuilt Flint is the version the old Mac was running, not a newer one.
+- The rebuilt Flint is the version the old Mac was running, not a newer one,
+  and the rebuild says which day that version is from. The one exception: if
+  the way Flint rebuilds has changed since then, it installs the newest version
+  instead, tests it first, and says so.
 - Anything you revoked, switched off or told Flint to forget after the backup is
   back. The rebuild says so, and says what Flint may do on its own.
 - A rebuild never replaces a Flint that is already there. On a Mac that has a

@@ -70,9 +70,16 @@ NODE_VERSION="v24.15.0"   # matches the PATH baked into the repo's LaunchAgent f
 # running: the later of the ones the backup names, when main holds any of them; otherwise main's
 # newest, which is then tested before it is installed. A checkout with changes of its own (files
 # changed, or commits main does not have) is left exactly as it is, and that is a refusal.
+#
+# The backup's word for which commit that was is only a line in an archive, and the commit it
+# names is the one whose rebuild then unpacks and restores that same archive. So a named commit is
+# used only when everything a rebuild is made of (RECOVERY_CODE) is the same in it as in main's
+# newest: otherwise a backup could ask for an old commit and with it undo every later fix to the
+# unpacking, the restore or the rules. Then main's newest is used instead, and tested first.
+RECOVERY_CODE=(apps/studio apps/runtime/src/backup apps/runtime/scripts apps/runtime/install-runtime.sh apps/server/install-server.sh packages/policy)
 checkout_deployed() {
   emulate -L zsh
-  local dir=$1 want= sha
+  local dir=$1 want= sha when
   git -C "$dir" fetch --quiet origin main || { print -r -- "Flint's code could not be brought up to date."; return 1; }
   if [[ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]] || ! git -C "$dir" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
     print -r -- "The flint folder on the new Mac has changes of its own, so Flint left it alone and stopped. Nothing was changed."
@@ -82,9 +89,14 @@ checkout_deployed() {
     [[ $sha =~ '^[0-9a-f]{40}$' ]] && git -C "$dir" merge-base --is-ancestor "$sha" origin/main 2>/dev/null || continue
     if [[ -z $want ]] || git -C "$dir" merge-base --is-ancestor "$want" "$sha" 2>/dev/null; then want=$sha; fi
   done
-  if [[ -n $want ]]; then
+  [[ -n $want ]] && when="$(git -C "$dir" show -s --format=%cd --date=format:%Y-%m-%d "$want" 2>/dev/null)"
+  [[ ${when:-} =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' ]] || when=
+  if [[ -n $want ]] && ! git -C "$dir" diff --quiet "$want" origin/main -- "${RECOVERY_CODE[@]}" 2>/dev/null; then
+    git -C "$dir" checkout --quiet -B main origin/main || { print -r -- "Flint's code could not be brought up to date."; return 1; }
+    print -r -- "The way Flint rebuilds has changed since the version the old Mac was running${when:+, which is from $when}, so Flint uses the newest and tests it before installing it."
+  elif [[ -n $want ]]; then
     git -C "$dir" checkout --quiet -B main "$want" || { print -r -- "Flint's code could not be set to the version the old Mac was running."; return 1; }
-    print -r -- "Flint's code is the version the old Mac was running."
+    print -r -- "Flint's code is the version the old Mac was running${when:+, from $when}."
   else
     git -C "$dir" checkout --quiet -B main origin/main || { print -r -- "Flint's code could not be brought up to date."; return 1; }
     print -r -- "The backup does not say which version the old Mac was running, so Flint uses the newest and tests it before installing it."
@@ -431,8 +443,12 @@ verify_bundle() {
   env_value "$bundle/bundle.info" version && [[ $REPLY == $BUNDLE_VERSION ]] || refuse "The opened backups were made by another version of this script. Open the backups again."
   env_value "$bundle/bundle.info" recipient && [[ $REPLY =~ '^age1[0-9a-z]{50,80}$' ]] || refuse "The opened backups are incomplete. Open the backups again."
   BUNDLE_RECIPIENT=$REPLY
+  # The two backups' own names, for the mark a rebuild leaves while it runs (which backups it was putting back).
+  BUNDLE_FILES_NAME=unknown BUNDLE_DB_NAME=none
+  env_value "$bundle/bundle.info" files && [[ $REPLY =~ $FILES_NAME ]] && BUNDLE_FILES_NAME=$REPLY
   env_value "$bundle/bundle.info" database || refuse "The opened backups are incomplete. Open the backups again."
   BUNDLE_DUMP= BUNDLE_DUMP_SHA=
+  [[ $REPLY =~ $DUMP_NAME ]] && BUNDLE_DB_NAME=$REPLY
   if [[ $REPLY != none ]]; then
     [[ $REPLY =~ $DUMP_NAME && -n ${listed[${REPLY%.age}]:-} ]] || refuse "The opened backups are incomplete. Open the backups again."
     BUNDLE_DUMP="$bundle/${REPLY%.age}"
@@ -789,13 +805,30 @@ SET_SERVER+=("OLLAMA_MODEL=$MODEL")
 #   database         its database server already has a Flint database
 #   roles            its database server still has Flint's roles from an earlier install
 #   resume           an earlier rebuild stopped part-way here, before it reached the database
-#   resume-database  an earlier rebuild stopped after it had put a database in place.)
+#   resume-database  an earlier rebuild stopped after it had put a database in place
+#   resume-old       the same as resume, two days ago
+#   resume-used      the same as resume-database, and Flint has been used on that database since.)
 PRETEND=(${(s:,:)${FLINT_REHEARSAL_EXISTING:-}})
 (( REHEARSE )) || PRETEND=()
 if (( ${PRETEND[(Ie)files]} )); then mkdir -p -m 700 "$DATA" && : > "$DATA/already-here"; fi
-if (( ${PRETEND[(Ie)resume]} + ${PRETEND[(Ie)resume-database]} )); then mkdir -p -m 700 "$DATA" && : > "$MARKER" && : > "$DATA/left-by-the-first-try"; fi
-RESUME=0
-[[ -f $MARKER ]] && RESUME=1
+if (( ${PRETEND[(Ie)resume]} + ${PRETEND[(Ie)resume-database]} + ${PRETEND[(Ie)resume-old]} + ${PRETEND[(Ie)resume-used]} )); then
+  marked_at=$(date +%s); (( ${PRETEND[(Ie)resume-old]} )) && marked_at=$(( marked_at - 2 * 86400 ))
+  mkdir -p -m 700 "$DATA" && print -r -- "$marked_at flint-20261011-0230.tar.gz.age none" > "$MARKER" && : > "$DATA/left-by-the-first-try"
+fi
+# The mark a rebuild leaves in the data folder while it runs: when it began, and which backups it was
+# putting back. With it there, this same command starts the rebuild over instead of refusing a Mac
+# that "already has a Flint". That is right straight after a rebuild stopped, and wrong once the
+# half-built Flint has been used: starting over sets its files aside and replaces its database. So
+# a mark over a day old, or one whose database has been written to since it was restored, is acted
+# on only when you say so at the keyboard (asked below, once the database can be read).
+RESUME=0 RESUME_AT= RESUME_FILES=
+if [[ -f $MARKER ]]; then
+  RESUME=1
+  resume_rest=
+  { read -r RESUME_AT RESUME_FILES resume_rest < "$MARKER"; } 2>/dev/null
+  [[ $RESUME_AT =~ '^[0-9]{9,11}$' ]] || RESUME_AT=
+  [[ $RESUME_FILES =~ $FILES_NAME ]] || RESUME_FILES=
+fi
 if (( ! RESUME )); then
   existing=()
   empty_or_absent "$DATA" || existing+=("its data folder")
@@ -873,10 +906,17 @@ else
   fi
 fi
 if (( ${PRETEND[(Ie)database]} )); then pg_admin -c 'CREATE DATABASE flint' >/dev/null; fi
-if (( ${PRETEND[(Ie)resume-database]} )); then
+if (( ${PRETEND[(Ie)resume-database]} + ${PRETEND[(Ie)resume-used]} )); then
   # What the first try did before it stopped: the roles and the databases, and then something in the database.
   ( cd "$REPO" && PGHOST="$PG_SOCKET" PGPORT="$PG_PORT" PGUSER="$ME" PGDATABASE=postgres pnpm --silent --filter @flint/runtime bootstrap-db --port "$PG_PORT" ) >/dev/null 2>&1 \
     && "$TOOL_psql" -X -q -At -v ON_ERROR_STOP=1 -h "$PG_SOCKET" -p "$PG_PORT" -U "$ME" -d flint -c 'CREATE TABLE left_by_the_first_try (id integer)' >/dev/null 2>&1 \
+    || refuse "The rehearsal could not set up what an earlier rebuild would have left."
+fi
+if (( ${PRETEND[(Ie)resume-used]} )); then
+  # And Flint was then used: its record holds the restore, and something written after it.
+  "$TOOL_psql" -X -q -At -v ON_ERROR_STOP=1 -h "$PG_SOCKET" -p "$PG_PORT" -U "$ME" -d flint \
+    -c 'CREATE TABLE "AuditEntry" (at timestamptz, action text, outcome text, inputs jsonb)' -c 'ALTER TABLE "AuditEntry" OWNER TO flint_owner' \
+    -c "INSERT INTO \"AuditEntry\" VALUES (now() - interval '2 hours', 'restore.production', 'ok', '{\"mode\":\"rebuild\"}'), (now() - interval '1 hour', 'health.check', 'ok', '{}')" >/dev/null 2>&1 \
     || refuse "The rehearsal could not set up what an earlier rebuild would have left."
 fi
 if (( ${PRETEND[(Ie)roles]} )); then pg_admin -c 'CREATE ROLE flint_owner LOGIN CREATEDB' -c 'CREATE ROLE flint_app LOGIN' >/dev/null; fi
@@ -895,6 +935,33 @@ else
 fi
 timed database-server
 
+# ---- starting a stopped rebuild over: only straight away, or when you say so -----------------------
+if (( RESUME )); then
+  doubts=()
+  [[ -n $RESUME_AT ]] && (( $(date +%s) - RESUME_AT <= 86400 )) || doubts+=("that was more than a day ago")
+  # Has Flint written to its database since the earlier rebuild restored it? Its own record says: anything
+  # newer than the restore's entry (or anything at all, when no restore was recorded) is Flint having run.
+  used=0
+  if [[ "$(pg_admin -c "SELECT count(*) FROM pg_database WHERE datname = 'flint'")" == 1 ]]; then
+    flint_sql() { "$TOOL_psql" -X -q -At -v ON_ERROR_STOP=1 -h "$PG_SOCKET" -p "$PG_PORT" -U "$ME" -d flint -c "$1" 2>>"$LOG/psql.err"; }
+    if [[ "$(flint_sql "SELECT to_regclass('public.\"AuditEntry\"') IS NOT NULL")" == t ]]; then
+      used="$(flint_sql "SELECT count(*) FROM public.\"AuditEntry\" a WHERE a.action <> 'restore.production' AND a.at > coalesce((SELECT max(r.at) FROM public.\"AuditEntry\" r WHERE r.action = 'restore.production' AND r.outcome = 'ok'), '-infinity')")" \
+        || refuse "Flint could not read the database the earlier rebuild left on $MAC, so it stopped. Nothing was changed."
+    fi
+  fi
+  [[ $used == 0 ]] || doubts+=("Flint has been running on $MAC since")
+  if (( ${#doubts} )); then
+    began="some time ago"; [[ -n $RESUME_AT ]] && began="on $(date -r "$RESUME_AT" '+%Y-%m-%d at %H:%M')"
+    using=; if [[ -n $RESUME_FILES ]]; then when_of "$RESUME_FILES"; using=" It was putting back the backup from $REPLY."; fi
+    say "An earlier rebuild stopped part-way on $MAC $began, and ${(j:, and :)doubts}.$using"
+    say "Starting it over sets aside the Flint files that are on $MAC now and puts the backup in their place, and replaces its database."
+    [[ -t 0 && -t 1 ]] || refuse "Flint will not start it over without being told to at the keyboard. Nothing was changed."
+    print -n -- "Type START OVER to go on, or press Return to stop: "
+    answer=; read -r answer || true
+    [[ $answer == 'START OVER' ]] || refuse "Nothing was changed."
+  fi
+fi
+
 # ---- 2. Flint's files --------------------------------------------------------------------
 # From here the Mac changes. The marker lets this same command be run again if it stops part-way.
 stamp="$(date +%Y%m%d-%H%M%S)"
@@ -910,7 +977,7 @@ elif ! empty_or_absent "$DATA"; then
   mv "$DATA" "$DATA.before-rebuild-$stamp" || refuse "Flint could not set the existing data folder aside, so it stopped."
   say "The Flint data that was here is kept in ${DATA:t}.before-rebuild-$stamp."
 fi
-mkdir -p -m 700 "$DATA" && chmod 700 "$DATA" && : > "$MARKER" || refuse "Flint could not make its data folder."
+mkdir -p -m 700 "$DATA" && chmod 700 "$DATA" && print -r -- "$(date +%s) $BUNDLE_FILES_NAME $BUNDLE_DB_NAME" > "$MARKER" || refuse "Flint could not make its data folder."
 
 # What is unpacked, by name: the folders and files that hold your data, and nothing else. An archive
 # is not trusted to hold only what a backup of Flint's holds (see the top of this file), so a
@@ -1125,7 +1192,7 @@ head_commit="$("$TOOL_git" -C "$REPO" rev-parse HEAD 2>/dev/null)" || head_commi
 if (( REHEARSE )) || { [[ -n $head_commit ]] && (( ${DEPLOYED[(Ie)$head_commit]} )); }; then
   install_env+=(FLINT_SKIP_TESTS=1)
 else
-  say "Flint is testing its code before installing it, because the backup does not say which version the old Mac was running. This takes several minutes."
+  say "Flint is testing its code before installing it, because it is not a version the old Mac was running. This takes several minutes."
 fi
 ( cd "$REPO" && env "${install_env[@]}" ./apps/runtime/install-runtime.sh ) >"$LOG/install-runtime.log" 2>&1 \
   || refuse "The runtime did not come up. The details are in $LOG/install-runtime.log."

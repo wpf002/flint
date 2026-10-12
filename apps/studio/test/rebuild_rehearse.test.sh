@@ -410,6 +410,42 @@ if [[ $st == 0 ]]; then
   /bin/zsh "$rebuild" --stop "$r0b" >/dev/null 2>&1
 fi
 check "nothing of that one is left either" '[ ! -e "$r0b" ] && ! pgrep -f "$r0b/" >/dev/null'
+
+# ==== 2d. a stopped rebuild is started over without a word only straight away ====
+# Starting over sets aside the files that are there and replaces the database. Days later, or once Flint
+# has been used on what the first try left, that would lose what was done since: it asks at the keyboard.
+old_out="$(FLINT_REHEARSAL_EXISTING=resume-old /bin/zsh "$rebuild" --rehearse "$fx/r0c" --bundle "$fx/nodb" 2>&1)"; old_st=$?
+check "a rebuild that stopped more than a day ago is not started over on its own" '[ "$old_st" = 1 ] && [[ "$old_out" == *"Flint will not start it over without being told to at the keyboard. Nothing was changed."* ]] && [ ! -e "$fx/r0c" ]'
+check "it says when the earlier one stopped, which backup it was putting back, and what starting over does" '[[ "$old_out" == *"An earlier rebuild stopped part-way on this Mac on 20"*", and that was more than a day ago. It was putting back the backup from 2026-10-11 at 02:30."* && "$old_out" == *"Starting it over sets aside the Flint files that are on this Mac now and puts the backup in their place, and replaces its database."* ]]'
+rm -rf "$fx"/r0c*(N)
+# At a terminal: anything but the words stops it with nothing changed; the words start it over, and it passes.
+if [[ -x /usr/bin/expect ]]; then
+  cat > "$fx/startover.exp" <<'EXPECT'
+set timeout 300
+spawn -noecho /usr/bin/env FLINT_REHEARSAL_EXISTING=$env(T_STATE) /bin/zsh $env(T_REBUILD) --rehearse $env(T_DIR) --bundle $env(T_BUNDLE)
+expect {
+  "Type START OVER to go on, or press Return to stop: " { send -- "$env(T_ANSWER)\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]
+EXPECT
+  typed() { # <state> <bundle> <answer>
+    so_out="$( { T_STATE="$1" T_REBUILD="$rebuild" T_DIR="$fx/r0e" T_BUNDLE="$2" T_ANSWER="$3" /usr/bin/expect "$fx/startover.exp"; print -r -- $? > "$fx/startover.status"; } 2>&1 | tr -d '\r')"
+    so_st="$(<"$fx/startover.status")"
+  }
+  typed resume-old "$fx/nodb" "start over"
+  check "anything but the words stops it, with nothing changed" '[ "$so_st" != 0 ] && [[ "$so_out" == *"Nothing was changed."* && "$so_out" != *"Flint is starting it over."* ]] && [ ! -e "$fx/r0e" ]'
+  rm -rf "$fx"/r0e*(N)
+  # A database the first try restored, and Flint has written to since.
+  typed resume-used "$fx/good" "START OVER"
+  check "it says Flint has been running since" '[[ "$so_out" == *"An earlier rebuild stopped part-way on this Mac on 20"*", and Flint has been running on this Mac since."* ]]'
+  check "the words start it over, the database the first try left is replaced, and the rehearsal passes" '[ "$so_st" = 0 ] && [[ "$so_out" == *"Flint is starting it over."* && "$so_out" == *"The rehearsal passed in "* ]]'
+  [[ $so_st == 0 ]] || { print -r -- "$so_out" | tail -n 20; for f in "$fx"/r0e.failed-log/*(N); do print -r -- "---- ${f:t}"; tail -n 12 "$f"; done; }
+  rm -rf "$fx"/r0e*(N)
+else
+  check "expect is here to type at a terminal" 'false'
+fi
 t_stop=$SECONDS
 
 # ==== 3. refusals: each one stops before anything is restored, and leaves nothing behind ====
@@ -565,8 +601,10 @@ gitq -C "$fx/seed" push --quiet "$fx/origin.git" main
 c1="$(gitq -C "$fx/seed" rev-parse HEAD~2)" c2="$(gitq -C "$fx/seed" rev-parse HEAD~1)" c3="$(gitq -C "$fx/seed" rev-parse HEAD)"
 co() { rm -rf "${fx:?}/checkout"; gitq clone --quiet "$fx/origin.git" "$fx/checkout"; }
 deployed() { c_out="$(HOME="$fx/githome" GIT_CONFIG_NOSYSTEM=1 /bin/zsh "$rebuild" --checkout-deployed "$fx/checkout" "$@" 2>&1)"; c_st=$?; c_head="$(gitq -C "$fx/checkout" rev-parse HEAD)"; }
+# The day a commit is from, as the commit itself has it (never today's date: a run across midnight must not fail).
+day_of() { gitq -C "$fx/seed" show -s --format=%cd --date=format:%Y-%m-%d "$1"; }
 co; deployed "$c1" "$c2"
-check "of two commits the backup names, the later one is installed" '[ "$c_st" = 0 ] && [ "$c_head" = "$c2" ] && [[ "$c_out" == "Flint'"'"'s code is the version the old Mac was running." ]]'
+check "of two commits the backup names, the later one is installed, and its date is said" '[ "$c_st" = 0 ] && [ "$c_head" = "$c2" ] && [[ "$(day_of "$c2")" =~ "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" ]] && [[ "$c_out" == "Flint'"'"'s code is the version the old Mac was running, from $(day_of "$c2")." ]]'
 co; deployed "$c2" "$c1"
 check "whichever order they are named in" '[ "$c_head" = "$c2" ]'
 co; deployed "$c1"
@@ -575,6 +613,25 @@ co; deployed
 check "none named: the newest, and it says the code is tested before it is installed" '[ "$c_st" = 0 ] && [ "$c_head" = "$c3" ] && [[ "$c_out" == "The backup does not say which version the old Mac was running, so Flint uses the newest and tests it before installing it." ]]'
 co; deployed "$(printf 'ab%.0s' {1..20})" 'not-a-commit; touch '"$fx"'/ran'
 check "a commit main does not hold, or a name that is not a commit, is never checked out or run" '[ "$c_st" = 0 ] && [ "$c_head" = "$c3" ] && [ ! -e "$fx/ran" ]'
+# The backup's word for the commit is a line in an archive anyone with the public key can write. A
+# commit is used only when everything a rebuild is made of is the same in it as in main's newest:
+# an older one would bring back the rebuild, the restore and the rules as they were before later fixes.
+mkdir -p "$fx/seed/apps/studio" "$fx/seed/packages/policy/src" "$fx/seed/apps/runtime/src/backup"
+print -r -- v1 > "$fx/seed/apps/studio/rebuild.sh"; gitq -C "$fx/seed" add -A; gitq -C "$fx/seed" commit --quiet -m four
+print -r -- other > "$fx/seed/file"; gitq -C "$fx/seed" commit --quiet -am five
+gitq -C "$fx/seed" push --quiet "$fx/origin.git" main
+c4="$(gitq -C "$fx/seed" rev-parse HEAD~1)" c5="$(gitq -C "$fx/seed" rev-parse HEAD)"
+co; deployed "$c4"
+check "a named commit whose rebuild code is main's own is used, though main has moved on" '[ "$c_st" = 0 ] && [ "$c_head" = "$c4" ] && [[ "$c_out" == "Flint'"'"'s code is the version the old Mac was running, from $(day_of "$c4")." ]]'
+co; deployed "$c2"
+check "a named commit from before the rebuild code changed is not used: the newest is, tested first, and it says why" '[ "$c_st" = 0 ] && [ "$c_head" = "$c5" ] && [[ "$c_out" == "The way Flint rebuilds has changed since the version the old Mac was running, which is from $(day_of "$c2"), so Flint uses the newest and tests it before installing it." ]]'
+for part in apps/runtime/src/backup/restore.ts packages/policy/src/tiers.ts apps/studio/recovery_lib.sh; do
+  print -r -- "$part" > "$fx/seed/$part"; gitq -C "$fx/seed" add -A; gitq -C "$fx/seed" commit --quiet -m "$part"; gitq -C "$fx/seed" push --quiet "$fx/origin.git" main
+  co; deployed "$c5"
+  check "a change to $part since the named commit is one to what a rebuild is made of" '[ "$c_head" = "$(gitq -C "$fx/seed" rev-parse HEAD)" ] && [[ "$c_out" == "The way Flint rebuilds has changed"* ]]'
+  c5="$(gitq -C "$fx/seed" rev-parse HEAD)"
+done
+c3=$c5   # main's newest, for the cases below
 co; print -r -- mine > "$fx/checkout/file"; deployed "$c1"
 check "a checkout with changed files is left exactly as it is, and that is a refusal" '[ "$c_st" = 1 ] && [ "$c_head" = "$c3" ] && [ "$(<"$fx/checkout/file")" = mine ] && [[ "$c_out" == *"has changes of its own, so Flint left it alone and stopped."* ]]'
 co; print -r -- local > "$fx/checkout/file"; gitq -C "$fx/checkout" commit --quiet -am local; local_head="$(gitq -C "$fx/checkout" rev-parse HEAD)"; deployed "$c1"
