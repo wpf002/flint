@@ -129,10 +129,10 @@ export async function p5Kit(urls: TestUrls) {
 
   /**
    * Will's signed approval of a card, as the server records it after verifying his signature. `set` sends more
-   * columns than the server ever does (column -> SQL), and `as` is the role that writes the row.
+   * columns than the server ever does (column -> SQL), `as` is the role that writes the row, and `id` its id.
    */
-  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string; set?: Record<string, string>; as?: Q } = {}): Promise<string> {
-    const aid = id('appr');
+  async function approval(pid: string, action: string, digest: string, o: { credential?: string; fields?: Record<string, unknown>; decision?: 'approve' | 'reject'; subjectType?: string; set?: Record<string, string>; as?: Q; id?: string } = {}): Promise<string> {
+    const aid = o.id ?? id('appr');
     const expires = (await owner(`SELECT to_char((now() + interval '10 minutes') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
     const payload = {
       v: 1, subjectType: o.subjectType ?? 'proposal', subjectId: pid, decision: o.decision ?? 'approve', action, argsDigest: digest,
@@ -274,9 +274,14 @@ export async function p5Kit(urls: TestUrls) {
   }
   const setStatus = (q: Q, taskId: string, status: string, extra = '', params: unknown[] = []) =>
     q(`UPDATE "Task" SET status = $2${extra} WHERE id = $1`, [taskId, status, ...params]);
-  const outputDigest = (body: unknown = OUTPUT) => digestOf(body);
-  const putOutput = (q: Q, taskId: string, body: unknown = OUTPUT, sha = outputDigest(body)) =>
-    q(`INSERT INTO "TaskOutput" ("taskId", body, sha256) VALUES ($1, $2::jsonb, $3)`, [taskId, JSON.stringify(body), sha]);
+  /** The digest the database takes for an output: its own sha256 over the body as it stores it. `json` is the body's JSON text. */
+  const digestIn = async (json: string | null) => (await owner(`SELECT encode(sha256(convert_to(($1::jsonb)::text, 'UTF8')), 'hex') AS d`, [json])).rows[0].d as string | null;
+  const outputSha = (await digestIn(JSON.stringify(OUTPUT)))!;
+  /** The digest of the kit's own OUTPUT (the body every taskAt hands in). */
+  const outputDigest = () => outputSha;
+  /** Write a task's output. Its digest is computed by the database in the same statement, as a writer's is, unless one is given. */
+  const putOutput = (q: Q, taskId: string, body: unknown = OUTPUT, sha: string | null = null) =>
+    q(`INSERT INTO "TaskOutput" ("taskId", body, sha256) VALUES ($1, $2::jsonb, coalesce($3, encode(sha256(convert_to(($2::jsonb)::text, 'UTF8')), 'hex')))`, [taskId, JSON.stringify(body), sha]);
   /** The successful check (or override) a task's acceptance names: an action entry, outcome ok, correlated with the task. */
   async function proof(taskId: string, over: { action?: string; outcome?: string; kind?: string; correlationId?: string } = {}): Promise<string> {
     const aid = id('au');
@@ -406,7 +411,7 @@ export async function p5Kit(urls: TestUrls) {
   return {
     urls, app, owner, approver, credentialId, client, on, inTx, code, outcome, one, approval, file, sign, card, without, finish, used,
     asset, enableArgs, switchOn, switchOff, turnOn, onAsset, reviewer,
-    task, dispatchArgs, forecast, queue, dispatch, setStatus, outputDigest, putOutput, proof, taskAt, acceptArgs, endedAgo, accept,
+    task, dispatchArgs, forecast, queue, dispatch, setStatus, digestIn, outputDigest, putOutput, proof, taskAt, acceptArgs, endedAgo, accept,
     reviewFields, review, reviewed, approve, setGate, gate, enforce, planStep, goalWithPlan, entity, forget,
   };
 }

@@ -113,7 +113,7 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
         await k.setStatus(q, t.id, 'submitted', `, "outputRef" = $3, "outputSummary" = $4`, [`out:${k.outputDigest().slice(0, 12)}`, `${CANARY} summary`]);
       });
       const out = await row('TaskOutput', t.id, 'taskId');
-      expect(out).toMatchObject({ body: OUTPUT, sha256: digestOf(OUTPUT), tainted: true });
+      expect(out).toMatchObject({ body: OUTPUT, sha256: k.outputDigest(), tainted: true });
       expect(recent(out.createdAt)).toBe(true);
 
       // The check: the bar, its evidence and who checked it, once.

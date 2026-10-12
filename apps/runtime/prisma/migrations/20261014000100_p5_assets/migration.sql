@@ -5,10 +5,12 @@
 --  - an asset is born off, and is turned on only as the exact asset of a card
 --    Will signed, in one transaction; turning it off needs nothing;
 --  - a card he signed earlier never undoes what he decided after it: an
---    approval decides nothing once he has signed a later card about the same
---    asset, task or review requirement, whichever is carried out first and
---    whatever becomes of the later card, nor does one signed before its asset
---    was last turned off; when he signed, and for what, is stamped by the
+--    approval decides nothing once he has signed for or against a later card
+--    about the same asset, task or review requirement (a card on record when
+--    he signed it), whichever is carried out first and whatever becomes of
+--    the later card; nor does a card to turn an asset on that he signed before
+--    it was last turned off (a dispatch card acts only while its asset is on,
+--    whenever it was signed); when he signed, and for what, is stamped by the
 --    database as the signature is recorded;
 --  - a task is handed over only as the exact task of an executing dispatch card
 --    he signed (its digest checked, its approval used once), with its forecast
@@ -325,15 +327,17 @@ $$;
 -- only for a row that is then written (or the statement fails, and the use goes
 -- with it): an approval is used only by a change that lands. Order counts too,
 -- and it is the order Will signed in, not the order the runtime applies cards
--- in: an approval decides nothing once he has signed a later card about the
--- same asset, task or gate, whichever of the two is carried out first. So the
--- later signature wins, and a card kept back never undoes it. When he signed,
--- and for what, is on the approval itself, written as the server records it
--- (Approval_clock and Approval_signed_for, below): nothing the runtime does to
--- the later card afterwards (ending it unused, clearing its args) brings the
--- earlier one back. Two signed in the same millisecond are ordered by id, so
--- one of them still wins both ways. SECURITY DEFINER: flint_app has no grant
--- on TaskApprovalUse, so it can only use an approval, never free one.
+-- in: an approval decides nothing once he has signed for or against a later
+-- card about the same asset, task or gate (a card on record when he signed
+-- it), whichever of the two is carried out first. So the later signature
+-- wins, a rejection included, and a card kept back never undoes it. When he
+-- signed, and for what, is on the approval itself, written as the server
+-- records it (Approval_clock and Approval_signed_for, below): nothing the
+-- runtime does to the later card afterwards (ending it unused, clearing its
+-- args) brings the earlier one back. Two signed in the same millisecond are
+-- ordered by id, so one of them still wins both ways. SECURITY DEFINER:
+-- flint_app has no grant on TaskApprovalUse, so it can only use an approval,
+-- never free one.
 CREATE FUNCTION p5_bind_approval(p_approval text, p_key text, p_subject text, p_action text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -355,9 +359,9 @@ BEGIN
   IF NOT coalesce(u."xact" = me AND u."subject" = subj AND u."action" = p_action, false) THEN
     RAISE EXCEPTION '% %: approval % was already used', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
-  -- Will has since signed another card about the same asset, task or gate: the later signature stands, carried out or not.
+  -- Will has since signed for or against another card about the same asset, task or gate: the later signature stands, carried out or not.
   SELECT a."createdAt" INTO signed_at FROM "Approval" a WHERE a."id" = p_approval;
-  IF EXISTS (SELECT 1 FROM "Approval" b WHERE b."signedFor" = subj AND b."decision" = 'approve' AND (b."createdAt", b."id") > (signed_at, p_approval)) THEN
+  IF EXISTS (SELECT 1 FROM "Approval" b WHERE b."signedFor" = subj AND (b."createdAt", b."id") > (signed_at, p_approval)) THEN
     RAISE EXCEPTION '% %: approval % was signed before a later decision', p_key, p_subject, p_approval USING ERRCODE = 'insufficient_privilege';
   END IF;
 END;
@@ -381,14 +385,17 @@ $$;
 
 -- What a signature is about is recorded with it, as it is recorded: the asset,
 -- task or gate its card names, read from the card as it was filed (a card's
--- action and args never change). The order rule reads this and never a card's
--- args, which retention or a forget clears, and which the runtime may clear
--- once it has ended a card. NULL for a rejection, for a card of any other
--- action, and for a card that is not there or has no such id (such a signature
--- acts on nothing here). Whatever the writer sent is overwritten, the owner's
--- too, and P1's approval_consume_once then holds it fixed. SECURITY DEFINER:
--- the server's role cannot read cards; all it learns back is that id. It reads
--- one row and raises nothing: recording a signature never fails here.
+-- action and args never change). His approval of a card and his signed
+-- rejection of one both say it: turning a card down is a decision about its
+-- subject too. The order rule reads this and never a card's args, which
+-- retention or a forget clears, and which the runtime may clear once it has
+-- ended a card. NULL for a card of any other action, and for a card that is
+-- not on record as the signature is (one the runtime has not committed yet
+-- among them) or has no such id: such a signature acts on nothing here, and
+-- stands in no other's way. Whatever the writer sent is overwritten, the
+-- owner's too, and P1's approval_consume_once then holds it fixed. SECURITY
+-- DEFINER: the server's role cannot read cards; all it learns back is that id.
+-- It reads one row and raises nothing: recording a signature never fails here.
 CREATE FUNCTION approval_signed_for() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -396,7 +403,7 @@ DECLARE
   s text;
 BEGIN
   NEW."signedFor" := NULL;
-  IF NEW."subjectType" = 'proposal' AND NEW."decision" = 'approve' THEN
+  IF NEW."subjectType" = 'proposal' THEN
     SELECT * INTO c FROM "Proposal" WHERE "id" = NEW."subjectId";
     IF FOUND AND jsonb_typeof(c."args") = 'object' THEN
       s := CASE
@@ -956,7 +963,10 @@ $$;
 
 -- A task's raw output: written once, now, while the task is out; always marked
 -- as outside text (a model wrote it); never updated; deleted only once the task
--- has ended (retention) or in a forget. None is taken once the task's text was
+-- has ended (retention) or in a forget. Its digest is its body's: this
+-- server's sha256 over the body as it is stored (its text, in UTF-8), in hex,
+-- so the reference a task is handed in under, and the digest a review names,
+-- are of what was really written. None is taken once the task's text was
 -- cleared (a forget of an item it is about): nothing is written back after
 -- that. Its own rules are checked here, by the task's id only: the body is a
 -- model's words.
@@ -979,6 +989,7 @@ BEGIN
       WHEN NEW."body" IS NULL OR jsonb_typeof(NEW."body") <> 'object' THEN 'body'
       WHEN octet_length(NEW."body"::text) > 32768 THEN 'size'
       WHEN NOT coalesce(NEW."sha256" ~ '^[0-9a-f]{64}$', false) THEN 'digest'
+      WHEN NEW."sha256" <> encode(sha256(convert_to(NEW."body"::text, 'UTF8')), 'hex') THEN 'digest'
       WHEN NEW."tainted" IS DISTINCT FROM true THEN 'taint'
     END;
     IF bad IS NOT NULL THEN

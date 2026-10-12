@@ -49,7 +49,7 @@ model Approval {
   createdAt         DateTime           @default(now()) @db.Timestamptz(3) // P5: stamped by the database for every role but the owner (Approval_clock)
   expiresAt         DateTime           @db.Timestamptz(3)
   consumedAt        DateTime?          @db.Timestamptz(3)
-  signedFor         String? // P5, set by trigger: the asset, task or gate the card named when it was signed (taskId:<id> | assetId:<id> | gate:proposal)
+  signedFor         String? // P5, set by trigger: the asset, task or gate the card named when it was signed, for or against (taskId:<id> | assetId:<id> | gate:proposal)
   policies          ActionPolicy[]
 
   @@index([subjectType, subjectId])
@@ -920,7 +920,7 @@ model TaskOutput {
   taskId    String   @id
   task      Task     @relation(fields: [taskId], references: [id], onDelete: Restrict)
   body      Json // the template's output shape, <= 32 KB
-  sha256    String
+  sha256    String // the database's own sha256 over the body's text, hex: checked on INSERT
   tainted   Boolean  @default(true) // always true: a model wrote it
   createdAt DateTime @default(now()) @db.Timestamptz(3)
 }

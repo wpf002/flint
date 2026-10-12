@@ -32,7 +32,8 @@
  *  - An accept card counts only if it was signed after the result was handed
  *    in, and a task is checked only with its result on record.
  *  - The later signature stands, whichever card is carried out first, and
- *    whatever the runtime then does to the later card.
+ *    whatever the runtime then does to the later card; a signed rejection
+ *    is a signature too.
  *  - When Will signed, and for what, is stamped by the database.
  *  - A reviewer is not turned off under a review being written; a score waits
  *    for an override and is then refused.
@@ -186,12 +187,13 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
       const body = { headline: `${CANARY} words about the forgotten item`, points: [] };
       await refused(k.putOutput(app, t.id, body), '42501', `task ${t.id}: its text was cleared, so no output is taken`);
       // It can still be handed in, with a reference and nothing behind it...
-      await k.setStatus(app, t.id, 'submitted', `, "outputRef" = $3`, [`out:${k.outputDigest(body).slice(0, 12)}`]);
+      const digest = (await k.digestIn(JSON.stringify(body)))!;
+      await k.setStatus(app, t.id, 'submitted', `, "outputRef" = $3`, [`out:${digest.slice(0, 12)}`]);
       await refused(app(`UPDATE "Task" SET "outputSummary" = $2 WHERE id = $1`, [t.id, `${CANARY} summary`]), '42501', `task ${t.id}: its outputSummary is written once`);
       // ...but it is not checked with no result on record, there is nothing of it to review, and its evidence is not written back.
       await refused(k.setStatus(app, t.id, 'checking'), '42501', `task ${t.id}: it is checked and accepted only with its result on record`);
       const rid = id('rv');
-      await refused(k.review({ id: rid, subjectType: 'task', subjectId: t.id, subjectDigest: k.outputDigest(body), tainted: true, attack: `${CANARY} attack` }), '42501', `review ${rid}: it is not of task ${t.id}'s output as it is checked`);
+      await refused(k.review({ id: rid, subjectType: 'task', subjectId: t.id, subjectDigest: digest, tainted: true, attack: `${CANARY} attack` }), '42501', `review ${rid}: it is not of task ${t.id}'s output as it is checked`);
       await refused(app(`UPDATE "Task" SET "metBar" = true, "barCheckedBy" = 'flint:rule', "barEvidence" = $2::jsonb WHERE id = $1`, [t.id, JSON.stringify([{ id: 'a1', met: true, note: `${CANARY} evidence` }])]), '42501', `task ${t.id}: its barEvidence is written once`);
       expect((await app(`SELECT (SELECT count(*)::int FROM "TaskOutput" WHERE "taskId" = $1) AS outputs, (SELECT count(*)::int FROM "Review" WHERE "subjectId" = $1) AS reviews`, [t.id])).rows[0]).toEqual({ outputs: 0, reviews: 0 });
       await k.switchOff(app, reviewer.id);
@@ -791,6 +793,57 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
         expect(await status(t.id)).toBe('accepted');
       });
 
+      it('a later signed rejection counts too: a kept accept card, or a kept dispatch card, decides nothing once he has turned down another for the same task', async () => {
+        const turnDown = async (c: { pid: string; digest: string }, action: string) => {
+          const no = await k.approval(c.pid, action, c.digest, { decision: 'reject' });
+          await app(`UPDATE "Proposal" SET status = 'rejected', "approvalId" = $2 WHERE id = $1`, [c.pid, no]);
+        };
+        // An accept card signed and kept; then a second accept card for the same result, which he signs against.
+        const t = await k.taskAt('checked', w);
+        const signs = await k.acceptArgs(t.id);
+        const kept = await k.card('task.check_bar', signs, { origin: 'runtime:tasks' });
+        await turnDown(await k.file('task.check_bar', { ...signs, n: 2 }, { origin: 'runtime:tasks' }), 'task.check_bar');
+        await refused(k.setStatus(app, t.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(t.id)]), '42501', `task ${t.id}: accepting it needs Will's signed card for this result until he lets Flint accept on its own`);
+        expect([await status(t.id), await k.used(kept.aid)]).toEqual(['checking', 0]);
+        // One he signs for after that is his latest word.
+        await k.accept(t.id);
+        expect(await status(t.id)).toBe('accepted');
+        // The same for a dispatch: the first card kept, a second one turned down.
+        const u = await k.task(w.id);
+        const d = await k.card(w.dispatchAction, k.dispatchArgs(u, w.kind));
+        await turnDown(await k.file(w.dispatchAction, { ...k.dispatchArgs(u, w.kind), n: 2 }), w.dispatchAction);
+        const f = await k.forecast({ taskId: u.id });
+        await refused(k.queue(app, u.id, d.aid, f), '42501', laterDecision('taskId', u.id, d.aid));
+        expect([await status(u.id), await k.used(d.aid)]).toEqual(['proposed', 0]);
+        await k.queue(app, u.id, (await k.card(w.dispatchAction, k.dispatchArgs(u, w.kind))).aid, f);
+        expect(await status(u.id)).toBe('queued');
+      });
+
+      it('two signatures in the same millisecond: the one with the higher id is the later, whichever is carried out first', async () => {
+        const a = await k.asset();
+        await sleep(5);
+        // Only the owner can date an approval: both are given the one millisecond, after the asset's row was written.
+        const at = (await owner(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)).rows[0].t as string;
+        const base = id('appr');
+        const signedThen = async (aid: string) => {
+          const c = await k.file('asset.enable', k.enableArgs(a));
+          await k.approval(c.pid, 'asset.enable', c.digest, { id: aid, set: { createdAt: `'${at}'` }, as: owner });
+          await k.approve(app, c.pid, aid);
+          await executing(c.pid);
+          return aid;
+        };
+        const lower = await signedThen(`${base}a`);
+        const higher = await signedThen(`${base}b`);
+        expect((await app(`SELECT count(DISTINCT "createdAt")::int AS n FROM "Approval" WHERE id = ANY ($1)`, [[lower, higher]])).rows[0].n).toBe(1);
+        await refused(k.switchOn(app, a.id, lower), '42501', laterDecision('assetId', a.id, lower));
+        await k.switchOn(app, a.id, higher);
+        expect((await app(`SELECT enabled, "approvalId" FROM "Asset" WHERE id = $1`, [a.id])).rows[0]).toEqual({ enabled: true, approvalId: higher });
+        // And after it, as before it.
+        await k.switchOff(app, a.id);
+        await refused(k.switchOn(app, a.id, lower), '42501', laterDecision('assetId', a.id, lower));
+        expect([await k.used(lower), await k.used(higher)]).toEqual([0, 1]);
+      });
+
       it('two cards to turn one asset on: the later one does, either way', async () => {
         for (const first of ['the earlier card', 'the later card'] as const) {
           const a = await k.asset();
@@ -854,8 +907,8 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
         expect(await signedFor(await k.approval(c.pid, action, c.digest)), action).toBe(expected);
         // Sent by the writer (the server's role, or the owner): overwritten.
         for (const as of [k.approver, owner]) expect(await signedFor(await k.approval(c.pid, action, c.digest, { set: { signedFor: `'taskId:tanone'` }, as })), action).toBe(expected);
-        // A signed rejection is for nothing.
-        expect(await signedFor(await k.approval(c.pid, action, c.digest, { decision: 'reject' })), action).toBeNull();
+        // His signed rejection of a card says what it was about too.
+        expect(await signedFor(await k.approval(c.pid, action, c.digest, { decision: 'reject' })), action).toBe(expected);
       }
       // A signature for a card that is not there, or of something that is not a card.
       expect(await signedFor(await k.approval('propnone', 'task.cancel', HEX('a')))).toBeNull();

@@ -848,9 +848,12 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
   describe('a task\'s output', () => {
     it('is written once, while the task is out, always as outside text, and kept until the task has ended; its rules name the task only', async () => {
       const body = { headline: `${CANARY} output` };
-      const put = (taskId: unknown, over: { body?: string | null; sha?: string | null; tainted?: boolean | null } = {}, q: Q = app) =>
-        q(`INSERT INTO "TaskOutput" ("taskId", body, sha256, tainted) VALUES ($1, $2::jsonb, $3, $4)`,
-          [taskId, over.body === undefined ? JSON.stringify(body) : over.body, over.sha === undefined ? digestOf(body) : over.sha, over.tainted === undefined ? true : over.tainted]);
+      /** An output, column by column. Unless one is given, its digest is the database's own for that body. */
+      const put = async (taskId: unknown, over: { body?: string | null; sha?: string | null; tainted?: boolean | null } = {}, q: Q = app) => {
+        const json = over.body === undefined ? JSON.stringify(body) : over.body;
+        return q(`INSERT INTO "TaskOutput" ("taskId", body, sha256, tainted) VALUES ($1, $2::jsonb, $3, $4)`,
+          [taskId, json, over.sha === undefined ? await k.digestIn(json) : over.sha, over.tainted === undefined ? true : over.tainted]);
+      };
       await refused(put(null), '23514', `task output: the id of its task is not valid`);
       await refused(put(`${CANARY} task`), '23514', `task output: the id of its task is not valid`);
       // Only while it is out: not before, not once handed in, and not for a task that is not there.
@@ -872,10 +875,18 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
       await refused(put(t.id, { body: JSON.stringify({ pad: `${CANARY} `.repeat(2400) }) }), '23514', invalid('size'));
       await refused(put(t.id, { sha: null }), '23514', invalid('digest'));
       await refused(put(t.id, { sha: `${CANARY} digest` }), '23514', invalid('digest'));
+      // Its digest is its body's, as the database computes it: a well-shaped digest of anything else is refused
+      // (another body's, the digest a card's args would have, a made-up one).
+      await refused(put(t.id, { sha: await k.digestIn(JSON.stringify({ headline: 'Synthetic other' })) }), '23514', invalid('digest'));
+      await refused(put(t.id, { sha: digestOf(body) }), '23514', invalid('digest'));
+      await refused(put(t.id, { sha: HEX('a') }), '23514', invalid('digest'));
       // A model wrote it: it is never marked as anything but outside text.
       await refused(put(t.id, { tainted: false }), '23514', invalid('taint'));
       await refused(put(t.id, { tainted: null }), '23514', invalid('taint'));
       await put(t.id);
+      // So what is on record is the digest of what was written, and a reference names that.
+      expect((await app(`SELECT sha256 = encode(sha256(convert_to(body::text, 'UTF8')), 'hex') AS own, sha256 FROM "TaskOutput" WHERE "taskId" = $1`, [t.id])).rows[0])
+        .toEqual({ own: true, sha256: await k.digestIn(JSON.stringify(body)) });
       // Once: no second one, no update (flint_app has no grant to try; the owner is refused by the guard), no truncate.
       expect(await k.code(put(t.id))).toBe('23505');
       await refused(owner(`UPDATE "TaskOutput" SET body = '{}' WHERE "taskId" = $1`, [t.id]), '42501', `a task's output is written once`);
