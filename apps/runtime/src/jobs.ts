@@ -309,7 +309,7 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
       handler: async () => {
         if (!(await predictionsStarted(ctx.db))) return;
         const c = await runForecasts({ db: ctx.db, tz: ctx.config.tz, log: ctx.log });
-        if (c.allowed) ctx.log(`forecast: ${c.ran} forecast(s) and ${c.steady} steady of ${c.on} on; ${c.waiting} waiting for history, ${c.same} already made, ${c.capped} capped, ${c.refused} refused, ${c.failed} failed`);
+        if (c.allowed) ctx.log(`forecast: ${c.ran} forecast(s) and ${c.steady} steady of ${c.on} on; ${c.waiting} waiting for history, ${c.late} waiting for the latest number, ${c.same} already made, ${c.capped} capped, ${c.refused} refused, ${c.failed} failed`);
       },
     },
     {

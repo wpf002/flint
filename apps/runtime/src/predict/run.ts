@@ -6,21 +6,33 @@
  * fetch.
  *
  * For each number that is on:
- *  1. Its history is read and made ready (forecast.ts: 14 days or 8 weeks,
- *     its latest number at most one step late, short gaps filled). Not ready:
- *     nothing is recorded, and it waits.
+ *  1. Its history is read and made ready (forecast.ts: 24 days or 19 weeks,
+ *     short gaps filled, never more than a fifth of it). The number for the
+ *     step just ended must be in: a forecast is never made from a made-up
+ *     latest value, so without it the number is late and waits a night. Not
+ *     ready: nothing is recorded.
  *  2. One run per input. The run's digest is its input (the series, the values
  *     used, the level, the method's version), and the database keeps one ok
  *     run per series and digest: a second pass over the same numbers, the same
- *     night or any night of the same week, records nothing.
- *  3. One claim of forecast.local's daily cap per run (the forecast's two
+ *     night or any night of the same week, records nothing. A new day's number
+ *     is a new input, so each night's forecast is a new run.
+ *  3. One scored forecast per number and step: when an open forecast of this
+ *     step is already there (a weekly number whose history changed mid-week),
+ *     no second one is made.
+ *  4. One claim of forecast.local's daily cap per run (the forecast's two
  *     predictions do not use the cap chat and triage record under).
- *  4. In one transaction: the run, and unless the number is steady, its range
- *     and its yes/no question, each carrying the rule the sweep settles it by.
- *     The method follows the run: `statistical` only when it beat a plain
- *     guess, `base_rate` otherwise (the database refuses any other pairing).
- *     A write the database refuses (the number was turned off meanwhile) is
- *     counted and not retried.
+ *  5. In one transaction: the run (with how many of its steps were filled in),
+ *     and unless the number is steady, its range and its yes/no question, each
+ *     carrying the rule the sweep settles it by. The method follows the run:
+ *     `statistical` only when it beat a plain guess, `base_rate` otherwise
+ *     (the database refuses any other pairing).
+ *
+ * What goes wrong is told apart. A write the database refuses (the number was
+ * turned off or forgotten meanwhile, or another run got there first) is
+ * `refused`: counted, not retried. Anything else (the arithmetic, a lost
+ * connection, a bug) is `failed`: a failed run is recorded where one can be,
+ * with a code and nothing else, and the same input is not tried or claimed for
+ * again. Health shows both.
  *
  * One audit entry per job run: counts and series keys, never a value. Log
  * lines the same.
@@ -29,7 +41,7 @@ import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { CODE_TABLE, addLocalDays, digestOf, localDay, localDayBounds, resolveTier, runsInShadow, type Cap, type PolicyRow } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
-import { failureOf } from '../dbcodes.js';
+import { failureOf, sqlState } from '../dbcodes.js';
 import { appendAudit } from '../governance/audit.js';
 import { claim } from '../governance/counters.js';
 import { activePolicies } from '../governance/proposals.js';
@@ -53,6 +65,15 @@ export const RUN_FAILED = 'forecast_failed';
 
 const RANGE_CRITERIA = 'The series’ own number for that step is inside the range, ends included, as Flint records it once the step is over.';
 const QUESTION_CRITERIA = 'The series’ own number for that step is above the threshold, as Flint records it once the step is over.';
+
+/**
+ * Did the database refuse the write: a guard or a constraint said no (the number was turned off or forgotten since it
+ * was read, the run is already there)? Those are its answers. Anything else it or the code threw is a failure.
+ */
+export function refusedByDb(err: unknown): boolean {
+  const state = sqlState(err);
+  return state !== undefined && (state.startsWith('23') || state === '42501' || state === 'P0001' || state === '40001');
+}
 
 interface Standing {
   may: boolean;
@@ -118,13 +139,15 @@ export interface RunCounts {
   steady: number;
   /** Numbers already forecast from the same input. */
   same: number;
-  /** Numbers without enough history yet, or whose latest number is too old. */
+  /** Numbers without enough history yet. */
   waiting: number;
+  /** Numbers whose value for the step just ended is not in: not forecast from a made-up one. They wait a night. */
+  late: number;
   /** Numbers left for tomorrow: the daily cap was reached. */
   capped: number;
   /** Writes the database refused (the number was turned off meanwhile): not retried. */
   refused: number;
-  /** Forecasts that could not be computed (a failed run is recorded). */
+  /** Forecasts that failed: the arithmetic, a lost connection, a bug (a failed run is recorded where one can be). */
   failed: number;
   /** Predictions recorded. */
   predictions: number;
@@ -148,7 +171,7 @@ async function history(db: Db, tz: string, def: ForecastSeriesDef, targetDay: st
 }
 
 /** The run's row and, unless the number is steady, its two predictions. One transaction. */
-async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: string; now: Date; targetDay: string; digest: string; latencyMs: number }): Promise<number> {
+async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: string; now: Date; targetDay: string; digest: string; latencyMs: number; filled: number }): Promise<number> {
   const at = localDayBounds(o.tz, o.targetDay).start;
   const stepDays = def.step === 'day' ? 1 : 7;
   const runId = newId('fr', o.now);
@@ -157,7 +180,7 @@ async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: stri
       id: runId, seriesKey: def.key, provider: 'local', endpoint: FORECAST_ENDPOINT, requestDigest: o.digest, horizon: f.steps.length, level: f.level,
       beatsNaive: f.beatsNaive, naiveMase: f.naiveMase, modelMase: f.modelMase, scale: f.scale,
       points: f.steps.map((s) => ({ at: localDayBounds(o.tz, addLocalDays(o.targetDay, (s.h - 1) * stepDays)).start.toISOString(), mean: s.mean, lo: s.lo, hi: s.hi })) as Prisma.InputJsonArray,
-      latencyMs: o.latencyMs, ok: true,
+      filled: o.filled, latencyMs: o.latencyMs, ok: true,
     },
   });
   if (f.steady || !f.question) return 0;
@@ -175,7 +198,7 @@ async function record(tx: Tx, def: ForecastSeriesDef, f: Forecast, o: { tz: stri
     resolutionCriteria: RANGE_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), end: end.toISOString(), op: 'range' },
   }, FORECAST_WRITER, o.now);
   await emitPrediction(tx, {
-    ...common, kind: 'binary', type: 'threshold_cross', probability: f.question.probability, template: { id: 'threshold', params: { series: def.key, op: 'above', value: f.question.threshold } },
+    ...common, kind: 'binary', type: 'threshold_cross', probability: f.question.probability, template: { id: 'series_above', params: { series: def.key, value: f.question.threshold, on: o.targetDay } },
     resolutionCriteria: QUESTION_CRITERIA, resolverSpec: { seriesKey: def.key, at: at.toISOString(), end: end.toISOString(), op: 'above', value: f.question.threshold },
   }, FORECAST_WRITER, o.now);
   return 2;
@@ -199,21 +222,40 @@ export async function runForecasts(d: RunDeps): Promise<RunCounts> {
   // A forecast's predictions are predictions: a rule that forbids recording one forbids these too (they do not use its cap).
   const recordMay = standing('ledger.prediction.record', policies, now);
   const defs = await seriesOn(d.db);
-  const c: RunCounts = { on: defs.length, ran: 0, steady: 0, same: 0, waiting: 0, capped: 0, refused: 0, failed: 0, predictions: 0, allowed: run.may && recordMay.may };
+  const c: RunCounts = { on: defs.length, ran: 0, steady: 0, same: 0, waiting: 0, late: 0, capped: 0, refused: 0, failed: 0, predictions: 0, allowed: run.may && recordMay.may };
   const failedKeys: string[] = [];
   if (c.allowed) {
     const today = localDay(d.tz, now);
     for (const [i, def] of defs.entries()) {
       const targetDay = def.step === 'day' ? today : weekOf(today);
+      const m = def.step === 'day' ? 7 : 1;
+      /** Once the input is known: its digest, so a failure can be recorded against it and not tried again. */
+      let digest: string | undefined;
+      const started = performance.now();
       try {
-        const ready = prepare(await history(d.db, d.tz, def, targetDay), stepIndex(def, targetDay), def.step === 'day' ? 7 : 1);
+        const ready = prepare(await history(d.db, d.tz, def, targetDay), stepIndex(def, targetDay), m);
         if (!ready.ok) {
-          c.waiting += 1;
+          if (ready.why === 'late') c.late += 1;
+          else c.waiting += 1;
           continue;
         }
         // The input, whole: what this forecast is of, from which numbers, by which method. Never logged, only digested.
-        const digest = digestOf({ v: FC_VERSION, series: def.key, step: def.step, unit: def.unit, first: stepDay(def, ready.first), values: ready.values, level: LEVEL, steps: STEPS });
-        if (await d.db.forecastRun.findFirst({ where: { seriesKey: def.key, requestDigest: digest, ok: true }, select: { id: true } })) {
+        digest = digestOf({ v: FC_VERSION, series: def.key, step: def.step, unit: def.unit, first: stepDay(def, ready.first), values: ready.values, level: LEVEL, steps: STEPS });
+        const before = await d.db.forecastRun.findFirst({ where: { seriesKey: def.key, requestDigest: digest }, orderBy: { ok: 'desc' }, select: { ok: true } });
+        if (before?.ok) {
+          c.same += 1;
+          continue;
+        }
+        // This input failed before, and it is the same input: said again as failed, with no second claim and no second row.
+        if (before) {
+          c.failed += 1;
+          failedKeys.push(def.key);
+          continue;
+        }
+        // One scored forecast per number and step: an open one of this step is already there (made from an earlier
+        // reading of the same history). A second would be scored beside it.
+        const at = localDayBounds(d.tz, targetDay).start.toISOString();
+        if (await d.db.prediction.findFirst({ where: { seriesKey: def.key, createdBy: FORECAST_WRITER, status: 'open', resolverSpec: { path: ['at'], equals: at } }, select: { id: true } })) {
           c.same += 1;
           continue;
         }
@@ -221,33 +263,41 @@ export async function runForecasts(d: RunDeps): Promise<RunCounts> {
           c.capped += defs.length - i;
           break;
         }
-        const started = performance.now();
-        let f: Forecast;
-        try {
-          f = forecast(ready.values, { m: def.step === 'day' ? 7 : 1, unit: def.unit });
-        } catch {
-          // The arithmetic failed (it should not): said as a failed run, with a code and nothing else.
-          await d.db.forecastRun.create({ data: { id: newId('fr', now), seriesKey: def.key, provider: 'local', endpoint: FORECAST_ENDPOINT, requestDigest: digest, horizon: STEPS, level: LEVEL, points: [], latencyMs: Math.round(performance.now() - started), ok: false, error: RUN_FAILED } });
-          c.failed += 1;
-          failedKeys.push(def.key);
+        const f = forecast(ready.values, { m, unit: def.unit });
+        // From the least history on, the first step has its range; without one there is nothing to say yet.
+        if (!f.steps.length) {
+          c.waiting += 1;
           continue;
         }
         const latencyMs = Math.max(0, Math.round(performance.now() - started));
         await d.hooks?.beforeRecord?.(def.key);
-        c.predictions += await d.db.$transaction((tx: Tx) => record(tx, def, f, { tz: d.tz, now, targetDay, digest, latencyMs }));
+        c.predictions += await d.db.$transaction((tx: Tx) => record(tx, def, f, { tz: d.tz, now, targetDay, digest: digest!, latencyMs, filled: ready.filled }));
         if (f.steady) c.steady += 1;
         else c.ran += 1;
       } catch (err) {
-        // The database refused it (the number was turned off or forgotten since it was read): its class and the key, never a value.
-        c.refused += 1;
-        log(`forecast: ${def.key} was not recorded: ${failureOf(err)}`);
+        if (refusedByDb(err)) {
+          // The database refused it (the number was turned off or forgotten since it was read): its class and the key, never a value.
+          c.refused += 1;
+          log(`forecast: ${def.key} was not recorded: ${failureOf(err)}`);
+          continue;
+        }
+        // Anything else is a failure, and is said as one: counted, logged by its class, and where the input is known,
+        // recorded as a failed run (a code and nothing else) so the same input is not tried again.
+        c.failed += 1;
+        failedKeys.push(def.key);
+        log(`forecast: ${def.key} failed: ${failureOf(err)}`);
+        if (digest) {
+          await d.db.forecastRun
+            .create({ data: { id: newId('fr', now), seriesKey: def.key, provider: 'local', endpoint: FORECAST_ENDPOINT, requestDigest: digest, horizon: STEPS, level: LEVEL, points: [], latencyMs: Math.max(0, Math.round(performance.now() - started)), ok: false, error: RUN_FAILED } })
+            .catch((again: unknown) => log(`forecast: ${def.key}'s failed run was not recorded: ${failureOf(again)}`));
+        }
       }
     }
   }
   await appendAudit(d.db, [{
     actor: FORECAST_ACTOR, context: 'autonomous', kind: 'action', action: RUN_ACTION, tier: run.tier, outcome: c.allowed ? 'ok' : 'skipped',
     inputs: {
-      on: c.on, ran: c.ran, steady: c.steady, same: c.same, waiting: c.waiting, capped: c.capped, refused: c.refused, failed: c.failed, predictions: c.predictions,
+      on: c.on, ran: c.ran, steady: c.steady, same: c.same, waiting: c.waiting, late: c.late, capped: c.capped, refused: c.refused, failed: c.failed, predictions: c.predictions,
       recordTier: recordMay.tier, ...(failedKeys.length ? { failedSeries: failedKeys.slice(0, 20) } : {}),
     },
   }]);

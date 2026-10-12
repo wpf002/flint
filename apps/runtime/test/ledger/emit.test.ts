@@ -89,11 +89,14 @@ describe('emit: P4\'s rules', () => {
     expect(renderClaim(p)).toBe('daily.deploys.count is between 2 and 6 on 2026-10-14');
     const bad = EmitPrediction.parse({ ...base(), ...onRun, ...range, claim: undefined, template: { id: 'series_range', params: { series: 'Deploys today', lo: 6, hi: 2, on: 'soon' } } });
     expect(validatePrediction(bad).join(' ')).toMatch(/^template series_range: /);
-    // Chat's four, and the runtime's own two (a goal review's forecast, the forecaster's range).
-    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'goal_on_track', 'series_range', 'service_healthy', 'threshold']);
-    expect([...INTERNAL_TEMPLATES].sort()).toEqual(['goal_on_track', 'series_range']);
-    // The wider shape P3's review holds to: neither of the runtime's templates, from any caller of the route.
-    for (const template of [{ id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } }, { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } }]) {
+    // Its yes/no question is about the same whole day (or week), so it says "on" that day, never "at the resolve time".
+    const q = EmitPrediction.parse({ ...base(), ...onRun, claim: undefined, template: { id: 'series_above', params: { series: 'daily.deploys.count', value: 4, on: '2026-10-14' } } });
+    expect(renderClaim(q)).toBe('daily.deploys.count is above 4 on 2026-10-14');
+    // Chat's four, and the runtime's own three (a goal review's forecast, the forecaster's range and its question).
+    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'goal_on_track', 'series_above', 'series_range', 'service_healthy', 'threshold']);
+    expect([...INTERNAL_TEMPLATES].sort()).toEqual(['goal_on_track', 'series_above', 'series_range']);
+    // The wider shape P3's review holds to: none of the runtime's templates, from any caller of the route.
+    for (const template of [{ id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } }, { id: 'series_above', params: { series: 'daily.deploys.count', value: 4, on: '2026-10-14' } }, { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } }]) {
       expect(EmitPredictionIn.safeParse({ ...base(), claim: undefined, template }).success, template.id).toBe(false);
     }
   });

@@ -42,6 +42,8 @@ export const CLAIM_TEMPLATES = {
   goal_on_track: { params: CLAIM_TEMPLATE_PARAMS.goal_on_track, render: (p: { goal: string; by: string }) => `${p.goal} meets its success criteria by ${p.by}` },
   // P4, the forecaster's own (never offered to chat): a registry key, two numbers and a local date.
   series_range: { params: CLAIM_TEMPLATE_PARAMS.series_range, render: (p: { series: string; lo: number; hi: number; on: string }) => `${p.series} is between ${p.lo} and ${p.hi} on ${p.on}` },
+  // ...and its yes/no question about the same step (a whole day or week, so never "at the resolve time").
+  series_above: { params: CLAIM_TEMPLATE_PARAMS.series_above, render: (p: { series: string; value: number; on: string }) => `${p.series} is above ${p.value} on ${p.on}` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
 /** Templates only the runtime's own writers fill (a goal review's, the forecaster's): never one a caller of the ledger's route may send. */
