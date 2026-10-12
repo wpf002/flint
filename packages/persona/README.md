@@ -105,6 +105,9 @@ half with this paragraph. Don't resume a parity run (`--run`) started before tha
 cached answers were given without it. The server gives each prompt a revision id for exactly this
 (a hash of the guide and the engine paragraph: `promptRevisions` in `/health`, `promptRev` on the
 `[route]` line and in an eval response), so answers from before and after can be told apart.
+apps/parity holds to it: a run records the revisions in its `run.json`, `--run` refuses to resume
+it on a server whose revisions differ, and the gate counts a change between its two sides as a
+changed server.
 
 ## Why it's a separate package
 

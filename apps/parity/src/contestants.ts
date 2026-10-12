@@ -607,6 +607,46 @@ export async function ollamaHasModel(model: string, host: string, fetchFn: typeo
 export class FatalError extends Error {}
 
 /**
+ * Which exact prompts the server's brains speak with, as a run records them:
+ * /health's `promptRevisions`, one short hash per live brain (`local`,
+ * `frontier`) of its style guide and engine paragraph. A style variant's name
+ * says which guide; this says which text. Undefined from a server that reports
+ * none (it predates them).
+ */
+export function promptRevisionsOf(health: Record<string, unknown> | undefined): Record<string, string> | undefined {
+  const raw = health?.promptRevisions;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [brain, rev] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof rev === 'string' && /^[0-9a-f]{4,64}$/.test(rev)) out[brain] = rev;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Why a contestant's cached answers in a run must not be added to on this
+ * server, or undefined when they may be. Answers are filed under the
+ * contestant's name, so a resume that mixes answers from two prompts under one
+ * name can't be told from one that doesn't; this is what tells.
+ *  - `recorded` (the revisions run.json holds for this contestant) differs from
+ *    what the server reports now, or the server reports none;
+ *  - nothing was recorded (the answers are from before servers reported
+ *    revisions) but the contestant `hasAnswers` in the run, and the server
+ *    reports some now.
+ * A contestant that has not answered in the run yet has nothing to mix with:
+ * `--flint-local` or `--local-model` added to an old run starts clean.
+ */
+export function promptChange(recorded: Record<string, string> | undefined, now: Record<string, string> | undefined, hasAnswers: boolean): string | undefined {
+  const show = (r: Record<string, string> | undefined) => (r ? Object.keys(r).sort().map((k) => `${k} ${r[k]}`).join(', ') : 'none reported');
+  if (recorded === undefined) {
+    return hasAnswers && now !== undefined
+      ? `its cached answers are from before the server reported its prompt revisions, and the server's prompts now are ${show(now)}: they may be from other prompts`
+      : undefined;
+  }
+  return show(recorded) === show(now) ? undefined : `its cached answers are from prompt revisions ${show(recorded)}, and the server's are now ${show(now)}`;
+}
+
+/**
  * What `run` checks on the Flint server before sending it a prompt: /health
  * answers, the server has eval mode (without it every replay is logged to the
  * training corpus) unless `allowTrainingLog`, and it supports every eval-only

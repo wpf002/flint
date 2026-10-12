@@ -25,6 +25,8 @@ import {
   openaiContestant,
   perplexityContestant,
   preflightFlint,
+  promptChange,
+  promptRevisionsOf,
   resolveFlintToken,
   type Contestant,
 } from './contestants.js';
@@ -447,6 +449,8 @@ interface TasksRunMeta {
   contextChars: number | null;
   /** Each competitor's and judge's model against its vendor's model list, from the latest invocation that checked. */
   modelChecks?: ModelCheck[];
+  /** The prompts each Flint contestant answered this run's tasks with (/health promptRevisions): a resume on other prompts is refused. */
+  promptRevisions?: Record<string, Record<string, string>>;
 }
 
 function runStamp(d = new Date()): string {
@@ -635,6 +639,16 @@ export async function runTasks(argv: string[]): Promise<void> {
     ...(withholdMemory ? { withholdMemory: (p) => noRecall.has(p.id) } : {}),
   });
   if (!withholdMemory) notes.push('The Flint server predates `recall: false`, so Flint read long-term memory on every task; tasks where it recalled something the competitors were not given are not compared.');
+  // Flint's cached answers in a resumed run must be from the prompts the server has now (promptChange).
+  let promptRevisions = resumed?.promptRevisions;
+  if (!judgeOnly) {
+    const now = promptRevisionsOf(health);
+    const cached = join(runDir, 'answers.jsonl');
+    const hasAnswers = existsSync(cached) && readJsonl<{ contestant?: string }>(cached).some((a) => a.contestant === flint.name);
+    const changed = promptChange(promptRevisions?.[flint.name], now, hasAnswers);
+    if (changed) throw new Error(`can't add ${flint.name} answers to ${basename(runDir)}: ${changed}. Start a new run (drop --run), or use --judge-only to judge what it already has.`);
+    if (now) promptRevisions = { ...(promptRevisions ?? {}), [flint.name]: now };
+  }
   const competitors: Contestant[] = [];
   const need = (name: string, key: string): string | undefined => {
     if (!wanted.has(name)) return undefined;
@@ -699,6 +713,7 @@ export async function runTasks(argv: string[]): Promise<void> {
     shareLocalWith: [...sharing.local],
     contextChars: contextChars ?? null,
     modelChecks,
+    ...(promptRevisions ? { promptRevisions } : {}),
   };
   writeFileSync(runMetaPath, JSON.stringify(meta, null, 2) + '\n');
   const answersPath = join(runDir, 'answers.jsonl');

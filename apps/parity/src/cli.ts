@@ -27,6 +27,8 @@ import {
   openaiContestant,
   perplexityContestant,
   preflightFlint,
+  promptChange,
+  promptRevisionsOf,
   resolveFlintToken,
   type Contestant,
 } from './contestants.js';
@@ -208,7 +210,11 @@ async function run(argv: string[]): Promise<void> {
       : join(EVAL_DIR, 'runs', values.run)
     : join(EVAL_DIR, 'runs', runStamp(now));
   const runMeta = join(runDir, 'run.json');
-  const resumed = existsSync(runMeta) ? (JSON.parse(readFileSync(runMeta, 'utf8')) as { judgeModel?: string; judgePanel?: string[] }) : undefined;
+  const resumed = existsSync(runMeta)
+    ? (JSON.parse(readFileSync(runMeta, 'utf8')) as { judgeModel?: string; judgePanel?: string[]; promptRevisions?: Record<string, Record<string, string>> })
+    : undefined;
+  // Which prompts the Flint server speaks with now (/health promptRevisions), once it has been asked.
+  let flintPrompts: Record<string, string> | undefined;
   // ---- judge (validated up front: a missing key should fail before any answer is bought)
   const judge = chooseGroundedJudge({
     judgeModel: values['judge-model'],
@@ -288,6 +294,16 @@ async function run(argv: string[]): Promise<void> {
       requireGrounding: grounded,
     });
     contestants.push(flint);
+    if (!judgeOnly) {
+      // This contestant's cached answers in the run must be from the prompts the server has now
+      // (promptChange): answers are filed under its name, whichever prompt gave them.
+      flintPrompts = promptRevisionsOf(health);
+      const name = flint.name;
+      const cached = join(runDir, 'answers.jsonl');
+      const hasAnswers = existsSync(cached) && readJsonl<{ contestant?: string }>(cached).some((a) => a.contestant === name);
+      const changed = promptChange(resumed?.promptRevisions?.[name], flintPrompts, hasAnswers);
+      if (changed) throw new Error(`can't add ${name} answers to ${basename(runDir)}: ${changed}. Start a new run (drop --run), or use --judge-only to judge what it already has.`);
+    }
     log(judgeOnly ? `${flint.name}: cached answers only (--judge-only)` : `${flint.name}: ${url} (local brain ${String(health.provider)}:${String(health.model)}, ${String(health.tools)} tools)`);
   }
   const need = (name: string, key: string): string | undefined => {
@@ -355,11 +371,17 @@ async function run(argv: string[]): Promise<void> {
           ...(panelSpecs ? { judgePanel: panelSpecs.map((p) => p.id) } : {}),
           seed,
           competitorSystem: system,
+          // The prompts each Flint contestant answered this run's questions with (promptChange refuses a resume on others).
+          ...(flintPrompts && flint ? { promptRevisions: { [flint.name]: flintPrompts } } : {}),
         },
         null,
         2,
       ) + '\n',
     );
+  } else if (flintPrompts && flint && resumed?.promptRevisions?.[flint.name] === undefined) {
+    // A contestant new to this run (--flint-local, --local-model on an existing one): from here its answers are from these prompts.
+    const meta = JSON.parse(readFileSync(runMeta, 'utf8')) as Record<string, unknown>;
+    writeFileAtomic(runMeta, JSON.stringify({ ...meta, promptRevisions: { ...(resumed?.promptRevisions ?? {}), [flint.name]: flintPrompts } }, null, 2) + '\n');
   }
   const run = basename(runDir);
   log(`run ${run}: ${prompts.length} prompts × ${contestants.length} contestants, budget $${budget.limitUsd.toFixed(2)} -> ${runDir}`);
