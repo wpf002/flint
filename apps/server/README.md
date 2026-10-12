@@ -133,6 +133,14 @@ answer.
 streamed, now goes to the local model (when it may answer the turn). It used to reach the console
 as a reply that stopped early; only earlier tiers' errors moved on.
 
+**A turn that has called a tool is never handed to another brain** (`mayAskAnother` in
+`src/brains.ts`), on either route, tier to tier or frontier to local. A fallback starts the turn
+over, so the next brain would call the tool again: an event created twice, a proposal filed twice.
+Once a tool call has gone out, a failure ends the turn as a failure (`/chat`: the reply stops
+early; `/generate`: 502), and a reply refused after its tools ran gets the honest message at once.
+A failure that is not the provider's (a tool that threw, a tool loop that ran out) never falls
+back either.
+
 ## Memory extraction
 
 Flint reads back over its own conversations and writes the durable facts about Will

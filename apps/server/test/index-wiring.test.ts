@@ -122,10 +122,22 @@ describe('index.ts wiring', () => {
   });
 
   it('/chat: an error from the last frontier tier goes to the local model when it may answer, as /generate\'s does', () => {
-    expect(chat).toContain("if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);");
-    expect(chat).toContain('if (answer.length === 0 && toLocal && !ac.signal.aborted) {');
+    expect(chat).toContain("if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !acted && providerFailure(ev.error) && !ac.signal.aborted) throw new FlintError(ev.error);");
+    expect(chat).toContain('if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal })) {');
     // The console is told the local model is answering before its text streams.
     expect(chat).toMatch(/brain = 'local';\s*lastTried = ctx\.model;\s*res\.write\(`data: \$\{JSON\.stringify\(\{ type: 'meta', brain,/);
+  });
+
+  // test/fallback-after-tools.test.ts runs the rule; this checks index.ts applies it at every hand-off.
+  it('a turn that has called a tool is never handed to another brain, on either route', () => {
+    // /chat: the pump notes the tool_call, stops throwing errors on from there, and both hand-offs ask.
+    expect(chat).toContain("if (ev.type === 'tool_call') acted = true;");
+    expect(chat).toContain('{ signal: ac.signal, acted: () => acted, onFallback: logFallback },');
+    expect(chat.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\)/g)).toHaveLength(2);
+    // /generate: the turn's own action-log entries (TurnLog), not a concurrent turn's.
+    expect(generate).toContain('{ signal: abort.signal, acted: () => turn.acted, onFallback: logFallback },');
+    expect(generate).toContain('if (!route.localFallback || !mayAskAnother(err, { acted: turn.acted })) {');
+    expect(generate.indexOf('!mayAskAnother(err, { acted: turn.acted })')).toBeLessThan(generate.indexOf("logToLocal('frontier failed', err);"));
   });
 
   it('the breaker\'s check is one token from the cheapest brain on that provider, tried once and metered', () => {

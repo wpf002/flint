@@ -227,7 +227,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
-import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, describeError, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
+import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, describeError, mayAskAnother, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -1251,7 +1251,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
               lastTried = b.label;
               return answered.ask(personas.frontier(b));
             }),
-            { signal: abort.signal, onFallback: logFallback },
+            // Once this turn has called a tool, no other brain is asked to do it again.
+            { signal: abort.signal, acted: () => turn.acted, onFallback: logFallback },
           );
           out = won.result;
           unanswered = won.unanswered;
@@ -1261,8 +1262,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
             logRoute('aborted');
             return; // the client is gone: nothing to answer
           }
-          // An image/PDF turn has no honest fallback — the local brain can't see it.
-          if (!route.localFallback) {
+          // An image/PDF turn has no honest fallback — the local brain can't see it. Nor does a
+          // turn that already called a tool (the local brain would call it again), or one whose
+          // failure is not the provider's (a tool's own error): ./brains mayAskAnother.
+          if (!route.localFallback || !mayAskAnother(err, { acted: turn.acted })) {
             logRoute('error');
             return json(res, 502, { error: 'frontier failed', ref: errorRef('generate', err), ...evalFields() });
           }
@@ -1426,6 +1429,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const ac = new AbortController();
       res.on('close', () => ac.abort());
       let answer = '';
+      // A tool_call went out: the turn has acted (the tool ran, or was filed for approval), so
+      // from here no other brain is asked. It would start the turn over and call it again.
+      let acted = false;
       const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
       // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
       const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
@@ -1437,10 +1443,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // The budget note rides just ahead of `done`: shown, but never stored as the answer.
           if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
           if (ev.type === 'text') answer += ev.delta;
+          if (ev.type === 'tool_call') acted = true;
           // A provider error arrives as an event, not a throw. With no text out yet it is
           // thrown instead: to the next tier, or, from the last frontier tier, to the local
           // model when it may answer this turn (it used to reach Will as a stopped reply).
-          if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !ac.signal.aborted) throw new FlintError(ev.error);
+          // Only the provider's own failure, and only while the turn has not called a tool.
+          if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !acted && providerFailure(ev.error) && !ac.signal.aborted) throw new FlintError(ev.error);
           if (ev.type === 'error') streamErrored = true; // passed on to the client, so the turn failed
           res.write(`data: ${JSON.stringify(ev)}\n\n`);
         }
@@ -1461,19 +1469,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
                   throw err;
                 }
               }),
-              { signal: ac.signal, onFallback: logFallback },
+              { signal: ac.signal, acted: () => acted, onFallback: logFallback },
             );
             answeredBy = won.brain.label;
           } catch (err) {
-            // Only safe to fall back if nothing was streamed yet, and (a paid local brain) its budget isn't spent.
-            if (answer.length === 0 && toLocal && !ac.signal.aborted) {
+            // Only safe to fall back if nothing was streamed yet and no tool was called, the failure is
+            // the provider's, and (a paid local brain) its budget isn't spent.
+            if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal })) {
               logToLocal('frontier failed pre-output', err);
               if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
               brain = 'local';
               lastTried = ctx.model;
               res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
               await pump(ctx.persona);
-            } else if (answer.length === 0 && route.localFallback && !ac.signal.aborted && budget.localRefusal) {
+            } else if (answer.length === 0 && route.localFallback && budget.localRefusal && mayAskAnother(err, { acted, signal: ac.signal })) {
               stopWords = budget.localRefusal;
               throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
             } else {

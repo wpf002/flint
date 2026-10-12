@@ -45,6 +45,7 @@ import {
   PerplexityProvider,
   TIERS,
   isFlintError,
+  type AiError,
   type ProviderAdapter,
   type Tier,
 } from '@flint/core';
@@ -376,17 +377,45 @@ function lastResortBrain<P>(
 // ---------------------------------------------------------------------------
 // fallback
 
+/** The tool loop's own failures, as @flint/core words them (core/tool-loop.ts): a tool handler that threw, a loop that ran out of iterations. */
+const TOOL_LOOP_FAILURE = /^Tool (?:'[^']*' failed|loop exceeded)/;
+
+/**
+ * Is this the PROVIDER failing to serve the request (an outage, a timeout, a
+ * rate limit, a rejected key, no credit, an unknown model, an over-long prompt,
+ * a broken stream), or the turn going wrong after the brain was reached: a tool
+ * that threw, a tool loop that ran out? Those two are `internal` errors core
+ * raises itself, and another brain would only do the same thing again.
+ */
+export function providerFailure(err: Pick<AiError, 'kind' | 'message'>): boolean {
+  return !(err.kind === 'internal' && TOOL_LOOP_FAILURE.test(err.message));
+}
+
 /**
  * Whether a failure should move on to the next brain. Everything a provider can
  * throw qualifies — rate limits and outages obviously, but also a rejected key
  * or unknown model (a misconfigured tier should degrade, not break Flint) and a
- * context overflow (the next brain may have a bigger window). The one exception
- * is the caller's own cancellation: a closed tab must not spend another model.
+ * context overflow (the next brain may have a bigger window). Two exceptions:
+ * the caller's own cancellation (a closed tab must not spend another model), and
+ * a failure that is not the provider's (providerFailure: a tool's own error).
  */
 export function shouldFallBack(err: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
   if (isFlintError(err) && err.kind === 'timeout' && !err.retryable && /abort/i.test(err.message)) return false;
+  if (isFlintError(err) && !providerFailure(err.error)) return false;
   return true;
+}
+
+/**
+ * May a failed attempt be asked again of ANOTHER brain: the next tier, or the
+ * local model? Never once the turn has acted (`acted`: a tool was called, so it
+ * ran, or was filed for approval). The second brain would start the turn over
+ * and call it again: on 2026-10-12 a review showed calendar.create_event run
+ * twice that way, once by the tier that then failed and once by the fallback.
+ * Otherwise as shouldFallBack says.
+ */
+export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortSignal | undefined }): boolean {
+  return !o.acted && shouldFallBack(err, o.signal);
 }
 
 /** A short description of an error for logs: its AiError kind when it has one. */
@@ -401,11 +430,14 @@ export function describeError(err: unknown): string {
  * it always has). `attempt` decides for itself whether a failure is still
  * recoverable — e.g. a stream that already sent text must rethrow a non-fallback
  * error by wrapping it with `NoFallback`.
+ *
+ * `acted` says whether the turn has called a tool yet: once it has, a failure
+ * is thrown as it is and no later brain is asked (mayAskAnother).
  */
 export async function runWithFallback<P, T>(
   chain: readonly BrainTier<P>[],
   attempt: (brain: BrainTier<P>) => Promise<T>,
-  opts: { signal?: AbortSignal; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
+  opts: { signal?: AbortSignal; acted?: () => boolean; onFallback?: (from: BrainTier<P>, to: BrainTier<P>, err: unknown) => void } = {},
 ): Promise<{ result: T; brain: BrainTier<P> }> {
   if (chain.length === 0) throw new Error('no frontier brain configured');
   let lastErr: unknown;
@@ -417,7 +449,7 @@ export async function runWithFallback<P, T>(
       if (err instanceof NoFallback) throw err.inner;
       lastErr = err;
       const next = chain[i + 1];
-      if (!next || !shouldFallBack(err, opts.signal)) throw err;
+      if (!next || !mayAskAnother(err, { acted: opts.acted?.() ?? false, signal: opts.signal })) throw err;
       opts.onFallback?.(brain, next, err);
     }
   }
