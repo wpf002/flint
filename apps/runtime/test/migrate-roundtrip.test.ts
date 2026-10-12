@@ -165,14 +165,31 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     await emptyDiff();
   });
 
-  // A rollback goes newest first. P4 hardened three of P3's functions: after P5's down.sql, P4's puts P3's own
+  // A rollback goes newest first: P5, then what lies between it and P4 (the policy floor: rules only, three
+  // triggers and their two functions), then P4. P4 hardened three of P3's functions: its down.sql puts P3's own
   // bodies back to the letter (as P3's migration wrote them), and takes away the trigger and the checks it added
-  // to older tables. A deploy then re-applies both.
-  it('P4\'s down.sql, after P5\'s, puts P3\'s helpers back to the letter; a deploy re-applies both', async () => {
-    await runDown('20261014000000_p5_assets');
-    await runDown('20261013000000_p4_forecasts');
+  // to older tables. A deploy then re-applies them all, in order.
+  it('after P5\'s down.sql, the policy floor\'s takes its rules away and P4\'s puts P3\'s helpers back to the letter; a deploy re-applies them all', async () => {
+    const [p4, floor, p5] = ['20261013000000_p4_forecasts', '20261013000100_p3_policy_floor', '20261014000000_p5_assets'];
+    const floorRules = async () => withClient(owner, async (c) => (await c.query(
+      `SELECT string_agg(tgname, ',' ORDER BY tgname) AS t FROM pg_trigger WHERE tgname IN ('Proposal_policy_floor', 'Proposal_clock', 'HealthCheck_clock') AND NOT tgisinternal`)).rows[0].t as string | null);
+    await runDown(p5);
+    // P5's rollback leaves the floor's rules standing.
+    expect(await floorRules()).toBe('HealthCheck_clock,Proposal_clock,Proposal_policy_floor');
+    // Every migration between P4 and P5, newest first.
+    const between = migrationDirs().filter((d) => d > p4 && d < p5).reverse();
+    expect(between).toContain(floor);
+    for (const dir of between) await runDown(dir);
+    // The floor's rules and their functions go, and nothing else of the schema does.
+    expect(await floorRules()).toBeNull();
+    expect((await objects(owner)).functions.filter((f) => /proposal_policy_floor|row_clock/.test(f))).toEqual([]);
+    expect((await objects(owner)).tables).toContain('public.Proposal');
+    expect((await objects(owner)).tables).toContain('public.ForecastRun');
+    // Run twice, it is still a no-op (every statement tolerates a half-applied state).
+    await runDown(floor);
+    await runDown(p4);
     expect(await withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."ForecastRun"') AS t`)).rows[0].t)).toBeNull();
-    await runDown('20261013000000_p4_forecasts');
+    await runDown(p4);
     const restored = await functionsNamed(['p3_signed_proposal', 'p3_bind_approval', 'goal_entity_guard', 'plan_step_guard']);
     expect(restored.map((r) => [r.proname, r.provolatile, r.prosecdef, r.config, r.public])).toEqual([
       ['goal_entity_guard', 'v', false, 'search_path=public, pg_temp', false],
@@ -193,9 +210,10 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
                       'prediction_forecast_check', 'prediction_question_guard', 'resolution_valid', 'resolution_will_check'))) AS functions`)).rows[0]);
     expect(leftovers).toEqual({ triggers: 0, checks: 0, functions: 0 });
     const status = await prisma(['migrate', 'status'], owner);
-    expect(status.stdout + status.stderr).toMatch(/not yet been applied:[\s\S]*20261013000000_p4_forecasts[\s\S]*20261014000000_p5_assets/);
+    expect(status.stdout + status.stderr).toMatch(/not yet been applied:[\s\S]*20261013000000_p4_forecasts[\s\S]*20261013000100_p3_policy_floor[\s\S]*20261014000000_p5_assets/);
     await migrateUp(owner);
     await emptyDiff();
+    expect(await floorRules()).toBe('HealthCheck_clock,Proposal_clock,Proposal_policy_floor');
     // Re-applied in order: P5's rule is back on top of P3's body.
     expect((await functionsNamed(['plan_step_guard']))[0]!.prosrc).toContain(`NEW."kind" = 'asset_task'`);
   });
