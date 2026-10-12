@@ -94,6 +94,10 @@ describe('the goal routes, before the database', () => {
       ['POST', `/v1/goals/${GOAL}/done`, { args: { goalId: GOAL } }],
       ['POST', `/v1/goals/${GOAL}/done`, { args: { goalId: GOAL, goalTitle: CANARY }, extra: 1 }],
       ['POST', `/v1/goals/${GOAL}/timing`, { args: { goalId: GOAL, goalTitle: CANARY, horizonAt: null, reviewCadence: 'P5Y' } }],
+      // A change to what counts as done, or to the timing, says what it changes from.
+      ['POST', `/v1/goals/${GOAL}/timing`, { args: { goalId: GOAL, goalTitle: CANARY, horizonAt: null, reviewCadence: 'P2W' } }],
+      ['POST', `/v1/goals/${GOAL}/timing`, { args: { goalId: GOAL, goalTitle: CANARY, horizonAt: null, reviewCadence: 'P2W', from: { horizonAt: null } } }],
+      ['POST', `/v1/goals/${GOAL}/edit`, { args: { goalId: GOAL, title: CANARY, description: '', successCriteria: [{ id: 'c1', text: CANARY, check: { kind: 'manual' } }], links: [] } }],
       ['POST', `/v1/goals/${GOAL}/resume`, { args: args({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 100, title: CANARY, kind: 'will_task' } }] } }) }],
       ['POST', `/v1/goals/${GOAL}/plan`, { args: { goalId: GOAL, goalTitle: CANARY, ops: [] } }],
       ['POST', `/v1/goals/${GOAL}/pause`, { why: CANARY }],

@@ -103,3 +103,13 @@ export async function itemFacts(db: Db | Tx, ids: Iterable<string>): Promise<Map
 export function checkedItems(criteria: readonly Criterion[]): string[] {
   return criteria.flatMap((c) => (c.check.kind === 'item' ? [c.check.entityId] : []));
 }
+
+/** A goal row's checks, as stored (an array, or none). */
+export function criteriaOf(g: { successCriteria: unknown }): Criterion[] {
+  return Array.isArray(g.successCriteria) ? (g.successCriteria as Criterion[]) : [];
+}
+
+/** A goal row's marks (Will's, by check id), as a copy that may be changed. */
+export function marksOf(g: { criteriaMet: unknown }): Record<string, unknown> {
+  return g.criteriaMet && typeof g.criteriaMet === 'object' && !Array.isArray(g.criteriaMet) ? { ...(g.criteriaMet as Record<string, unknown>) } : {};
+}

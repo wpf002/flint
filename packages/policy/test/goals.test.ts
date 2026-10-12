@@ -9,7 +9,6 @@ import {
   GOAL_ARGS,
   GOAL_CARD_BODIES,
   GOAL_CARD_VERBS,
-  GOAL_CODES,
   GOAL_CONDITIONS,
   GOAL_SAYS,
   GOAL_STATUSES,
@@ -291,8 +290,10 @@ describe('the goals panel’s wire (P3 part 2)', () => {
       expect(goalSayOf(code)).toBe(say);
       expect(goalCodeOf(say)).toBe(code);
     }
-    for (const s of GOAL_STATUSES) expect(goalCodeOf(GOAL_STATUS_SAYS[s])).toBe(`status.${s}`);
-    expect(GOAL_CODES).toContain('status.done');
+    for (const s of GOAL_STATUSES) {
+      expect(goalCodeOf(GOAL_STATUS_SAYS[s])).toBe(`status.${s}`);
+      expect(goalSayOf(`status.${s}`)).toBe(GOAL_STATUS_SAYS[s]);
+    }
     for (const bad of ['toString', '__proto__', 'status.toString', 'status.', 'forbidden: goal.done', 42, null]) expect(goalSayOf(bad), String(bad)).toBeUndefined();
     expect(goalCodeOf('Some runtime words.')).toBeUndefined();
   });
@@ -315,6 +316,19 @@ describe('the goals panel’s wire (P3 part 2)', () => {
     expect(GOAL_CARD_BODIES.done.safeParse({ args: { goalId: 'gotest0001', goalTitle: 'T' }, x: 1 }).success).toBe(false);
     expect(GOAL_CARD_BODIES.resume.safeParse({ args: activate() }).success).toBe(true);
     expect(GOAL_CARD_BODIES.resume.safeParse({ args: activate({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [crit('c1', { kind: 'steps', keys: ['s1'] })] }) }).success).toBe(false);
+    // A change to what counts as done, or to the timing, says what it changes from (the card's precondition, signed with it).
+    const def = { title: 'T', description: '', successCriteria: [crit('c1')], links: [] };
+    const edit = { goalId: 'gotest0001', ...def, title: 'T2' };
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: edit }).success).toBe(false);
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: { ...edit, from: def } }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.edit.safeParse({ args: { ...edit, from: { ...def, extra: 1 } } }).success).toBe(false);
+    const timing = { goalId: 'gotest0001', goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W' };
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: timing }).success).toBe(false);
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null, reviewCadence: 'P1W' } } }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.timing.safeParse({ args: { ...timing, from: { horizonAt: null } } }).success).toBe(false);
+    // The contract itself leaves `from` out for a card that has none (part 1's), and its digest is unchanged by that.
+    expect(GoalHorizonChangeArgs.parse(timing)).toEqual(timing);
+    expect(Object.keys(GoalCriteriaChangeArgs.parse(edit))).not.toContain('from');
     expect(StepBody.safeParse({ status: 'skipped' }).success).toBe(false);
     expect(MarkBody.safeParse({ met: true, at: 'x' }).success).toBe(false);
     expect(LinkableBody.safeParse({ q: 'x'.repeat(81) }).success).toBe(false);

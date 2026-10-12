@@ -14,11 +14,14 @@
  *   POST /goals/:id/steps/:key {status}         -> unsigned
  *
  * Every id and body is checked here with the shared contracts (@flint/policy,
- * bodies up to 16 KB) before the runtime sees it, and every answer against its
- * contract before the console does. A goal card is filed with the runtime
- * straight away: nothing is ever spooled to disk (RuntimeProposals.propose
- * would write its args there), so a runtime that is down is a 503 and nothing
- * changed. The runtime's own words never pass through: a refusal reaches the
+ * bodies up to 64 KB, the runtime's own limit and the contracts' largest card)
+ * before the runtime sees it, and every answer against its contract before the
+ * console does. A goal card is filed with the runtime straight away: nothing is
+ * ever spooled to disk (RuntimeProposals.propose would write its args there), so
+ * a runtime that is down is a 503 and nothing changed. A write the runtime did
+ * not answer in time is a 504 that says Flint isn't sure it went through (the
+ * runtime may still finish it): the same card filed again is the same card. The
+ * runtime's own words never pass through: a refusal reaches the
  * console only as one of GOAL_SAYS's codes and its fixed sentence. A runtime
  * 401 or 403 is a 502 (the console forgets its token on a 401); a 404 on the
  * list is a 501 (an older runtime: the console hides its Goals button). Logs
@@ -54,14 +57,22 @@ export interface GoalsDeps {
   /** The runtime link main() builds. */
   runtime: () => Runtime | undefined;
   fetchImpl?: typeof fetch;
-  /** Per call to the runtime (default 10 s: filing a card checks the goal as it stands). */
+  /** Per call to the runtime. Default: 10 s for a read; 30 s for a write, which may wait that long on a goal's lock before it lands. */
   timeoutMs?: number;
   /** Log an error with a short reference, and return the reference for the client. */
   errorRef: (tag: string, err: unknown) => string;
 }
 
-/** A goals request's largest body: a new goal with ten checks and ten steps is well under it. */
-export const GOALS_BODY_BYTES = 16 * 1024;
+/**
+ * A goals request's largest body: the runtime's own (64 KB), which holds the
+ * contracts' largest card (ten checks and ten steps at full length, in any script,
+ * with what it changes from).
+ */
+export const GOALS_BODY_BYTES = 64 * 1024;
+const READ_TIMEOUT_MS = 10_000;
+const WRITE_TIMEOUT_MS = 30_000;
+/** ask()'s status for a call the runtime did not answer in time (0: it could not be reached at all). */
+const TIMED_OUT = -2;
 /** The largest runtime answer the server reads. */
 const MAX_ANSWER = 2 * 1024 * 1024;
 
@@ -71,6 +82,7 @@ export const GOALS_SAY = {
   older: 'This needs a newer runtime.',
   down: 'The runtime isn’t answering, so goals can’t load.',
   downWrite: 'The runtime isn’t answering, so nothing changed.',
+  unsure: 'Flint isn’t sure it went through. Check the goal before trying again.',
   token: 'The runtime rejected Flint’s token. Reinstall the runtime to fix it.',
   refused: 'The runtime refused that change.',
   gone: 'That goal no longer exists.',
@@ -90,14 +102,14 @@ function reply(res: ServerResponse, status: number, body: unknown): true {
 
 type Answer = { ok: true; json: unknown } | { ok: false; status: number; code?: unknown };
 
-/** One call to the runtime: its JSON, or its status (0: no answer) and a refusal's code. The body is always read or cancelled. */
+/** One call to the runtime: its JSON, or its status (0: unreachable; TIMED_OUT: no answer in time) and a refusal's code. The body is always read or cancelled. */
 async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: string, body?: unknown): Promise<Answer> {
   try {
     const r = await (deps.fetchImpl ?? fetch)(`${rt.url}${path}`, {
       method,
       headers: { authorization: `Bearer ${rt.token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(deps.timeoutMs ?? 10_000),
+      signal: AbortSignal.timeout(deps.timeoutMs ?? (method === 'GET' ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS)),
     });
     const text = await r.text();
     if (text.length > MAX_ANSWER) return { ok: false, status: -1 };
@@ -111,8 +123,9 @@ async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: s
       return { ok: false, status: r.status, code };
     }
     return { ok: true, json: JSON.parse(text) as unknown };
-  } catch {
-    return { ok: false, status: 0 };
+  } catch (err) {
+    const name = (err as { name?: unknown } | null)?.name;
+    return { ok: false, status: name === 'TimeoutError' || name === 'AbortError' ? TIMED_OUT : 0 };
   }
 }
 
@@ -120,6 +133,8 @@ async function ask(deps: GoalsDeps, rt: Runtime, method: 'GET' | 'POST', path: s
 function failed(res: ServerResponse, deps: GoalsDeps, a: { status: number; code?: unknown }, what: string, read: boolean, list: boolean): true {
   const s = a.status;
   if (s === 0) return reply(res, 503, { error: read ? GOALS_SAY.down : GOALS_SAY.downWrite });
+  // No answer in time: a read just did not load; a write may still land, and saying "nothing changed" would be a guess.
+  if (s === TIMED_OUT) return read ? reply(res, 503, { error: GOALS_SAY.down }) : reply(res, 504, { error: GOALS_SAY.unsure });
   if (s === 401 || s === 403) return reply(res, 502, { error: GOALS_SAY.token });
   // A refusal the runtime named by a code in the closed set: its fixed sentence, and the code.
   const say = goalSayOf(a.code);
@@ -193,7 +208,7 @@ export async function goalsRoutes(req: IncomingMessage, res: ServerResponse, url
     return forward(res, deps, rt, 'GET', `/v1/goals/${id.data}`, undefined, GoalAnswer, 'goal');
   }
 
-  // The POSTs: the body is read (and drained) whatever happens, up to 16 KB.
+  // The POSTs: the body is read (and drained) whatever happens, up to 64 KB.
   const read = await readJsonLimited(req, GOALS_BODY_BYTES);
   if (read.tooLarge) return reply(res, 413, { error: GOALS_SAY.tooLarge });
   const body = read.body;

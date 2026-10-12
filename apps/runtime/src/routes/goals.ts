@@ -101,7 +101,7 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
 
   app.get('/v1/goals/:id', pre, guarded(async (req) => {
     const { id } = parse(Goal, req.params);
-    const goal = await goalView(db, id);
+    const goal = await goalView(db, id, tz);
     if (!goal) throw new Refused(404, SAY.noGoal);
     return out(GoalAnswer, { goal });
   }));
@@ -113,7 +113,7 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
 
   app.post('/v1/goals/linkable', pre, guarded(async (req) => {
     const { q } = parse(LinkableBody, req.body);
-    return out(Linkable, { items: await linkable(db, q) });
+    return out(Linkable, { items: await linkable(db, q, tz) });
   }));
 
   app.post('/v1/goals/:id/:verb', pre, guarded(async (req) => {

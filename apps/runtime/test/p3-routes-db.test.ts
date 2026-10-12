@@ -10,6 +10,12 @@
  *  - Pause, dismiss, manual marks and step ticks are unsigned, each audited as
  *    will:console with ids only; progress follows. Resume files goal.activate;
  *    Add Step files plan.change; edit, timing, done and abandon file theirs.
+ *  - A newer change to what counts as done, or to the timing, replaces an older
+ *    card still waiting; and a card filed before a later change does not apply
+ *    (each says what it changes from). An overdue goal's cadence can still change.
+ *  - The unsigned writes move progress only: never a Flint action's or an asset's
+ *    step, never a skipped one, never another goal's step or check, never an
+ *    active goal into dismissed, and never a paused goal back to active.
  *  - A linked pull request whose sync sets state merged and status archived
  *    makes "Is Merged" met (finished items count).
  *  - A step tick takes the goal's lock before it touches the plan.
@@ -76,7 +82,18 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
       links: [], plan: null, ...over,
     };
   }
-  const step = (k: string, n: number, title = `${CANARY} step ${k}`) => ({ op: 'add', key: k, step: { ordinal: 100 * n, title, kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } });
+  const step = (k: string, n: number, title = `${CANARY} step ${k}`, kind = 'will_task') => ({ op: 'add', key: k, step: { ordinal: 100 * n, title, kind, tier: 'approval', dueAt: null, dependsOn: [] } });
+  /** What a goal is now, as the console says it in a card's `from`. */
+  const definitionOf = (v: GoalView) => ({ title: v.title, description: v.description, successCriteria: v.successCriteria, links: v.links.map((l) => ({ entityId: l.entityId, role: l.role, watchPaths: l.watchPaths })) });
+  const timingOf = (v: GoalView) => ({ horizonAt: v.horizonAt, reviewCadence: v.reviewCadence });
+  /** A goal filed, signed and run through the routes; its id and the args it was shown with. */
+  async function started(over: Record<string, unknown> = {}) {
+    const dk = draftKey();
+    const args = shown(dk, over);
+    await signRun((await call('POST', '/v1/goals', { draftKey: dk, args })).body.id as string);
+    return { gid: args.goalId, args };
+  }
+  const statusOf = async (pid: string) => (await db.proposal.findUniqueOrThrow({ where: { id: pid } })).status;
 
   beforeAll(async () => {
     urls = await freshDb();
@@ -199,12 +216,14 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
     expect(await signRun(resumeCard.id)).toEqual({ goalId: gid, resumed: true });
 
     // What counts as done, and its timing.
-    const editArgs = { goalId: gid, title: `${CANARY} goal, sharper`, description: '', successCriteria: [args.successCriteria[0]], links: [] };
+    const editArgs = { goalId: gid, title: `${CANARY} goal, sharper`, description: '', successCriteria: [args.successCriteria[0]], links: [], from: definitionOf(await view(gid)) };
+    // A card that does not say what it changes from is not one the panel files.
+    expect((await call('POST', `/v1/goals/${gid}/edit`, { args: { ...editArgs, from: undefined } })).body).toMatchObject({ code: 'invalid' });
     const edit = await call('POST', `/v1/goals/${gid}/edit`, { args: editArgs });
     expect((await db.proposal.findUniqueOrThrow({ where: { id: edit.body.id as string } })).argsDigest).toBe(digestOf(editArgs));
     await signRun(edit.body.id as string);
     const horizonAt = new Date(Date.now() + 30 * DAY).toISOString();
-    const timing = await call('POST', `/v1/goals/${gid}/timing`, { args: { goalId: gid, goalTitle: editArgs.title, horizonAt, reviewCadence: 'P2W' } });
+    const timing = await call('POST', `/v1/goals/${gid}/timing`, { args: { goalId: gid, goalTitle: editArgs.title, horizonAt, reviewCadence: 'P2W', from: timingOf(await view(gid)) } });
     await signRun(timing.body.id as string);
     expect(await view(gid)).toMatchObject({ title: editArgs.title, horizonAt, reviewCadence: 'P2W', checks: { total: 1 } });
     // A card naming the goal as it no longer is, or another goal, is refused with a sentence and a code.
@@ -225,6 +244,132 @@ describe.skipIf(NO_DB)('the goals panel’s routes on flint_test', () => {
     expect(audits.every((a) => a.context === 'console' && a.kind === 'action')).toBe(true);
     const everything = JSON.stringify(await db.auditEntry.findMany({ where: { OR: [{ actor: 'will:console' }, { correlationId: { in: [planCard.id, resumeCard.id] } }] } }), (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
     expect(everything).not.toContain('CANARY');
+  });
+
+  it('a newer edit or timing card replaces the one still waiting; done, plan and other goals’ cards are left alone', async () => {
+    const { gid, args } = await started();
+    const other = await started();
+    const v = await view(gid);
+    const edit = (title: string) => call('POST', `/v1/goals/${gid}/edit`, { args: { goalId: gid, title, description: v.description, successCriteria: v.successCriteria, links: [], from: definitionOf(v) } });
+    const timing = (reviewCadence: string) => call('POST', `/v1/goals/${gid}/timing`, { args: { goalId: gid, goalTitle: v.title, horizonAt: v.horizonAt, reviewCadence, from: timingOf(v) } });
+    const editA = (await edit(`${CANARY} edit A`)).body.id as string;
+    const timingA = (await timing('P1D')).body.id as string;
+    const done = (await call('POST', `/v1/goals/${gid}/done`, { args: { goalId: gid, goalTitle: args.title } })).body.id as string;
+    const plan = (await call('POST', `/v1/goals/${gid}/plan`, { args: { goalId: gid, goalTitle: args.title, ops: [step('s1', 1)] } })).body.id as string;
+    const otherView = await view(other.gid);
+    const otherEdit = (await call('POST', `/v1/goals/${other.gid}/edit`, { args: { goalId: other.gid, title: `${CANARY} other edit`, description: '', successCriteria: otherView.successCriteria, links: [], from: definitionOf(otherView) } })).body.id as string;
+    // The same card again is that card, and replaces nothing.
+    expect((await edit(`${CANARY} edit A`)).body).toEqual({ id: editA, deduped: true });
+    expect(await statusOf(editA)).toBe('pending');
+    const editB = (await edit(`${CANARY} edit B`)).body.id as string;
+    const timingB = (await timing('P2W')).body.id as string;
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: editA } })).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: timingA } })).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
+    for (const pid of [editB, timingB, done, plan, otherEdit]) expect(await statusOf(pid), pid).toBe('pending');
+    expect((await view(gid)).waiting.map((w) => w.id).sort()).toEqual([editB, timingB, done, plan].sort());
+  });
+
+  it('a card filed before a later change does not undo it: it says what it changes from, and is refused when the goal has moved on', async () => {
+    const { gid, args } = await started();
+    const v = await view(gid);
+    const from = definitionOf(v);
+    const file = (action: string, a: Record<string, unknown>) => createProposal(db, {
+      kind: 'goal', origin: 'console', action, args: a, argsProvenance: { args: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: true, ttlMinutes: 60,
+    }, 'test');
+    // Two edits and two timing changes, each from the goal as it is now; filed past the routes so neither replaces the other.
+    const editA = await file('goal.criteria_change', { goalId: gid, title: `${CANARY} stale title`, description: v.description, successCriteria: v.successCriteria, links: [], from });
+    const editB = await file('goal.criteria_change', { goalId: gid, title: `${CANARY} newer title`, description: v.description, successCriteria: v.successCriteria, links: [], from });
+    const timingA = await file('goal.horizon_change', { goalId: gid, goalTitle: args.title, horizonAt: v.horizonAt, reviewCadence: 'P1D', from: timingOf(v) });
+    const timingB = await file('goal.horizon_change', { goalId: gid, goalTitle: args.title, horizonAt: v.horizonAt, reviewCadence: 'P1M', from: timingOf(v) });
+    await signRun(timingB.id);
+    await signRun(editB.id);
+    // The older ones, approved later (they sat in Approvals after a cancelled prompt): refused, and nothing reverts.
+    await sign(editA.id);
+    await expect(run(editA.id)).rejects.toMatchObject({ status: 409, message: 'The goal changed since this card was filed.' });
+    await sign(timingA.id);
+    await expect(run(timingA.id)).rejects.toMatchObject({ status: 409, message: 'The goal changed since this card was filed.' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: editA.id } })).toMatchObject({ status: 'failed', error: 'The goal changed since this card was filed.' });
+    expect(await view(gid)).toMatchObject({ title: `${CANARY} newer title`, reviewCadence: 'P1M' });
+    // And a card that says it changes from something the goal no longer is cannot even be filed.
+    expect(await call('POST', `/v1/goals/${gid}/edit`, { args: { goalId: gid, title: `${CANARY} third`, description: '', successCriteria: v.successCriteria, links: [], from } }))
+      .toMatchObject({ status: 409, body: { code: 'looked' } });
+    expect(await call('POST', `/v1/goals/${gid}/timing`, { args: { goalId: gid, goalTitle: `${CANARY} newer title`, horizonAt: null, reviewCadence: 'P1W', from: timingOf(v) } }))
+      .toMatchObject({ status: 409, body: { code: 'looked' } });
+  });
+
+  it('an overdue goal keeps its date while its cadence changes; only a new date has to be in the future', async () => {
+    const soon = new Date(Date.now() + 1500).toISOString();
+    const { gid, args } = await started({ horizonAt: soon });
+    await sleep(1700);
+    const v = await view(gid);
+    expect(Date.parse(v.horizonAt!)).toBeLessThan(Date.now());
+    const timing = (a: Record<string, unknown>) => call('POST', `/v1/goals/${gid}/timing`, { args: { goalId: gid, goalTitle: args.title, from: timingOf(v), ...a } });
+    const past = new Date(Date.now() - DAY).toISOString();
+    expect(await timing({ horizonAt: past, reviewCadence: 'P2W' })).toMatchObject({ status: 400, body: { code: 'future' } });
+    const kept = await timing({ horizonAt: soon, reviewCadence: 'P2W' });
+    expect(kept.status).toBe(200);
+    await signRun(kept.body.id as string);
+    expect(await view(gid)).toMatchObject({ horizonAt: soon, reviewCadence: 'P2W' });
+  });
+
+  it('the unsigned writes move progress only: no Flint or asset step, no skipped step, no other goal’s step or check, no dismissing a started goal, no resuming', async () => {
+    const a = await started({
+      successCriteria: [{ id: 'c1', text: `${CANARY} mine`, check: { kind: 'manual' } }, { id: 'c2', text: `${CANARY} second`, check: { kind: 'manual' } }],
+      plan: { ops: [step('s1', 1), step('s2', 2, `${CANARY} flint step`, 'flint_action'), step('s3', 3, `${CANARY} asset step`, 'asset_task'), step('s4', 4)] },
+    });
+    const b = await started({ plan: { ops: [step('s1', 1)] } });
+    const bare = await started();
+    const tick = (gid: string, key: string, status = 'done') => call('POST', `/v1/goals/${gid}/steps/${key}`, { status });
+    const stepOf = (gid: string, key: string) => db.planStep.findFirstOrThrow({ where: { key, plan: { goalId: gid, status: 'active' } } });
+    // A Flint action is done by doing it, an asset's task by its asset: neither is Will's to tick.
+    expect(await tick(a.gid, 's2')).toMatchObject({ status: 400, body: { code: 'notTickable', error: 'Flint carries out this step itself.' } });
+    expect(await tick(a.gid, 's3')).toMatchObject({ status: 400, body: { code: 'notTickable' } });
+    expect((await stepOf(a.gid, 's2')).status).toBe('todo');
+    expect((await stepOf(a.gid, 's3')).status).toBe('todo');
+    // A skipped step (a signed plan change) stays skipped.
+    const skip = await call('POST', `/v1/goals/${a.gid}/plan`, { args: { goalId: a.gid, goalTitle: a.args.title, ops: [{ op: 'set', key: 's4', from: { title: `${CANARY} step s4`, status: 'todo' }, to: { status: 'skipped' } }] } });
+    await signRun(skip.body.id as string);
+    for (const status of ['done', 'todo', 'in_progress', 'blocked']) expect(await tick(a.gid, 's4', status)).toMatchObject({ status: 409, body: { code: 'skipped' } });
+    expect((await stepOf(a.gid, 's4')).status).toBe('skipped');
+    // A goal with no plan has no step to tick.
+    expect(await tick(bare.gid, 's1')).toMatchObject({ status: 404, body: { code: 'noPlan', error: 'This goal has no steps yet.' } });
+    // Another goal's step or check is not reachable through this one: b has s1 and c1 only.
+    expect(await tick(b.gid, 's2')).toMatchObject({ status: 404, body: { code: 'noStep' } });
+    expect(await tick(b.gid, 's4')).toMatchObject({ status: 404, body: { code: 'noStep' } });
+    expect((await stepOf(a.gid, 's2')).status).toBe('todo');
+    expect(await call('POST', `/v1/goals/${b.gid}/criteria/c2`, { met: true })).toMatchObject({ status: 404, body: { code: 'noCheck' } });
+    expect((await db.goal.findUniqueOrThrow({ where: { id: a.gid } })).criteriaMet).toEqual({});
+    expect((await db.goal.findUniqueOrThrow({ where: { id: b.gid } })).criteriaMet).toEqual({});
+    expect(await tick('goNoSuchGoalAtAll01', 's1')).toMatchObject({ status: 404, body: { code: 'noGoal' } });
+    // Dismissing is for a goal Flint suggested, never one that has started.
+    expect(await call('POST', `/v1/goals/${a.gid}/dismiss`, {})).toMatchObject({ status: 409, body: { code: 'status.active', error: 'This goal is already active.' } });
+    // Pausing never resumes: a paused goal comes back only with Will's signature.
+    expect((await call('POST', `/v1/goals/${b.gid}/pause`, {})).status).toBe(200);
+    expect(await call('POST', `/v1/goals/${b.gid}/pause`, {})).toMatchObject({ status: 409, body: { code: 'status.paused' } });
+    expect(await call('POST', `/v1/goals/${b.gid}/dismiss`, {})).toMatchObject({ status: 409, body: { code: 'status.paused' } });
+    expect((await call('POST', `/v1/goals/${b.gid}/resume`, {})).status).toBe(400);
+    expect((await tick(b.gid, 's1')).status).toBe(200);
+    expect((await call('POST', `/v1/goals/${b.gid}/criteria/c1`, { met: true })).status).toBe(200);
+    const resume = await call('POST', `/v1/goals/${b.gid}/resume`, { args: { ...b.args, plan: null } });
+    expect(resume.status).toBe(200);
+    // Still paused through all of that, the resume card included: only its signature starts it again.
+    expect((await db.goal.findUniqueOrThrow({ where: { id: b.gid } })).status).toBe('paused');
+    await signRun(resume.body.id as string);
+    expect((await db.goal.findUniqueOrThrow({ where: { id: b.gid } })).status).toBe('active');
+  });
+
+  it('a goal with more than 50 cards waiting still opens: the view names the oldest 50', async () => {
+    const { gid, args } = await started();
+    for (let i = 0; i < 53; i++) {
+      await createProposal(db, {
+        kind: 'plan', origin: 'console', action: 'plan.change', args: { goalId: gid, goalTitle: args.title, ops: [step('s1', 1, `Synthetic waiting step ${i}`)] },
+        argsProvenance: { args: { source: 'will', tainted: false } }, tainted: false, sensitivity: 'personal', destructive: false, consequential: true, ttlMinutes: 60,
+      }, 'test');
+    }
+    const r = await call('GET', `/v1/goals/${gid}`);
+    expect(r.status).toBe(200);
+    expect((r.body.goal as GoalView).waiting).toHaveLength(50);
+    expect((await page('active')).goals.find((g) => g.id === gid)?.waiting).toBe(53);
   });
 
   it('dismissing a goal Flint suggested is unsigned and audited; it moves to Finished', async () => {

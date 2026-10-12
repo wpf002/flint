@@ -4,9 +4,11 @@
  * contracts before the runtime sees them; the runtime's answers are checked
  * before the console does (a malformed one is a 502, logged by field paths only);
  * a runtime 401/403 is a 502, a 404 on the list a 501, a runtime that is down a
- * 503 with a sentence; a refusal passes through only as a code from the closed
- * set, with its fixed sentence; nothing is ever spooled to disk; the search text
- * travels in a POST body, never a URL; and no goal text reaches a log line.
+ * 503 with a sentence, and a write it did not answer in time a 504 that does not
+ * claim nothing changed; a refusal passes through only as a code from the closed
+ * set, with its fixed sentence; nothing is ever spooled to disk; a goal at the
+ * contract's full size fits in any script; the search text travels in a POST
+ * body, never a URL; and no goal text reaches a log line.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -45,6 +47,8 @@ let base: string;
 let logged: string[];
 let deps: GoalsDeps;
 let up: boolean;
+/** How long the stand-in runtime waits before it answers. */
+let delayMs: number;
 
 beforeAll(async () => {
   runtime = createServer((req, res) => {
@@ -53,8 +57,10 @@ beforeAll(async () => {
     req.on('end', () => {
       asked.push({ method: req.method!, url: req.url!, auth: req.headers.authorization, body });
       const a = answer({ method: req.method!, url: req.url!, body });
-      res.writeHead(a.status, { 'content-type': 'application/json' });
-      res.end(typeof a.body === 'string' ? a.body : JSON.stringify(a.body));
+      setTimeout(() => {
+        res.writeHead(a.status, { 'content-type': 'application/json' });
+        res.end(typeof a.body === 'string' ? a.body : JSON.stringify(a.body));
+      }, delayMs);
     });
   });
   await new Promise<void>((r) => runtime.listen(0, '::1', r));
@@ -78,6 +84,7 @@ beforeEach(() => {
   asked = [];
   logged = [];
   up = true;
+  delayMs = 0;
   answer = () => ({ status: 200, body: { ok: true } });
   // The server's errorRef logs what it is given: here, a record of it.
   deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: 'http://[::1]:1', token: TOKEN }), errorRef: (_t, err) => (logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
@@ -167,14 +174,21 @@ describe('writes', () => {
   it('each card route takes only its card’s args, naming its own goal', async () => {
     answer = () => ({ status: 200, body: { id: 'pr2', deduped: true } });
     expect((await post(`/goals/${GID}/done`, { args: { goalId: GID, goalTitle: 'T' } })).body).toEqual({ id: 'pr2', deduped: true });
-    expect((await post(`/goals/${GID}/timing`, { args: { goalId: GID, goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W' } })).status).toBe(200);
+    expect((await post(`/goals/${GID}/timing`, { args: { goalId: GID, goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W', from: { horizonAt: null, reviewCadence: 'P1W' } } })).status).toBe(200);
+    const def = { title: 'T', description: '', successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'manual' } }], links: [] };
+    expect((await post(`/goals/${GID}/edit`, { args: { goalId: GID, ...def, title: 'T2', from: def } })).status).toBe(200);
     expect((await post(`/goals/${GID}/plan`, { args: { goalId: GID, goalTitle: 'T', ops: [{ op: 'add', key: 's3', step: { ordinal: 300, title: 'S', kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } })).status).toBe(200);
     expect((await post(`/goals/${GID}/resume`, { args: args() })).status).toBe(200);
-    expect(asked.map((a) => a.url)).toEqual([`/v1/goals/${GID}/done`, `/v1/goals/${GID}/timing`, `/v1/goals/${GID}/plan`, `/v1/goals/${GID}/resume`]);
+    expect(asked.map((a) => a.url)).toEqual([`/v1/goals/${GID}/done`, `/v1/goals/${GID}/timing`, `/v1/goals/${GID}/edit`, `/v1/goals/${GID}/plan`, `/v1/goals/${GID}/resume`]);
+    // What a change changes from goes to the runtime with it.
+    expect(JSON.parse(asked[1]!.body)).toEqual({ args: { goalId: GID, goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W', from: { horizonAt: null, reviewCadence: 'P1W' } } });
     asked = [];
     for (const [p, b] of [
       [`/goals/${GID}/done`, { args: { goalId: 'goSomeOtherGoal01', goalTitle: 'T' } }],
       [`/goals/${GID}/done`, { args: { goalId: GID } }],
+      // A change to what counts as done, or to the timing, says what it changes from.
+      [`/goals/${GID}/timing`, { args: { goalId: GID, goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W' } }],
+      [`/goals/${GID}/edit`, { args: { goalId: GID, title: 'T2', description: '', successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'manual' } }], links: [] } }],
       [`/goals/${GID}/abandon`, { args: { goalId: GID, goalTitle: 'T', more: 1 } }],
       [`/goals/${GID}/resume`, { args: args({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'steps', keys: ['s1'] } }] }) }],
       [`/goals/${GID}/pause`, { why: CANARY }],
@@ -217,9 +231,33 @@ describe('writes', () => {
     expect(asked).toHaveLength(1);
   });
 
-  it('a body over 16 KB is a 413 before anything else', async () => {
-    expect((await post('/goals', { draftKey: DK, args: args({ description: 'x'.repeat(17_000) }) })).status).toBe(413);
+  it('a goal at the contract’s full size fits, in any script; a body over 64 KB is a 413 before anything else', async () => {
+    // Every field at its longest, in three-byte characters: over 16 KB of JSON, well under 64 KB.
+    const w = (n: number) => '界'.repeat(n);
+    const full = args({
+      title: w(120), description: w(1000),
+      successCriteria: Array.from({ length: 10 }, (_, i) => ({ id: `c${i + 1}`, text: w(200), check: { kind: 'manual' } })),
+      plan: { ops: Array.from({ length: 10 }, (_, i) => ({ op: 'add', key: `s${i + 1}`, step: { ordinal: (i + 1) * 100, title: w(200), kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } })) },
+    });
+    expect(Buffer.byteLength(JSON.stringify({ draftKey: DK, args: full }))).toBeGreaterThan(16 * 1024);
+    answer = () => ({ status: 200, body: { id: 'pr1', deduped: false } });
+    expect((await post('/goals', { draftKey: DK, args: full })).status).toBe(200);
+    expect(asked).toHaveLength(1);
+    asked = [];
+    expect(await post('/goals', `{"draftKey":"${DK}","pad":"${'x'.repeat(70_000)}"}`)).toEqual({ status: 413, body: { error: GOALS_SAY.tooLarge } });
     expect(asked).toEqual([]);
+  });
+
+  it('a write the runtime does not answer in time is not called unchanged: Flint says it isn’t sure; a read just did not load', async () => {
+    deps = { ...deps, timeoutMs: 150 };
+    delayMs = 600;
+    answer = () => ({ status: 200, body: { ok: true } });
+    expect(await post(`/goals/${GID}/steps/s1`, { status: 'done' })).toEqual({ status: 504, body: { error: 'Flint isn’t sure it went through. Check the goal before trying again.' } });
+    expect(await post('/goals', { draftKey: DK, args: args() })).toEqual({ status: 504, body: { error: GOALS_SAY.unsure } });
+    expect(await get('/goals')).toEqual({ status: 503, body: { error: GOALS_SAY.down } });
+    // The runtime did get each one: it may well have landed.
+    expect(asked).toHaveLength(3);
+    await new Promise((r) => setTimeout(r, 700));
   });
 
   it('a goals route is never reported back to the runtime as a route.error', () => {

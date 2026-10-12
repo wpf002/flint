@@ -9,8 +9,7 @@
  */
 import {
   GOAL_SIGNED_ACTIONS,
-  GoalActivateArgs,
-  type Criterion,
+  GoalTitle,
   type GoalRow,
   type GoalSignedAction,
   type GoalTab,
@@ -19,14 +18,16 @@ import {
   type Link,
 } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
-import { checkedItems, evaluate, itemFacts, type ItemFacts, type StepFacts } from './criteria.js';
-import { labelOf } from './items.js';
+import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf, type ItemFacts, type StepFacts } from './criteria.js';
+import { conditionsOf, labelOf } from './items.js';
 import { stepState } from './ops.js';
 
 /** Reviews are part 3's: until then they are off, and so is lateness. */
 const REVIEWS = 'off' as const;
 /** The finished tab's length. */
 const FINISHED = 50;
+/** How many waiting cards a view names (GoalView.waiting and GoalsPage.waiting, @flint/policy). */
+const WAITING = 50;
 
 const iso = (d: Date | null) => d?.toISOString() ?? null;
 
@@ -48,21 +49,37 @@ interface GoalRecord {
   updatedAt: Date;
 }
 
-/** Cards waiting for Will, by the goal they are for (its id is in their args). */
-async function waitingCards(db: Db | Tx, now: Date): Promise<Map<string, Array<{ id: string; action: GoalSignedAction; args: unknown }>>> {
-  const rows = await db.proposal.findMany({
-    where: { status: 'pending', action: { in: [...GOAL_SIGNED_ACTIONS] }, expiresAt: { gt: now } },
-    orderBy: { createdAt: 'asc' },
-    take: 500,
-    select: { id: true, action: true, args: true },
-  });
-  const by = new Map<string, Array<{ id: string; action: GoalSignedAction; args: unknown }>>();
+interface WaitingCard {
+  id: string;
+  action: GoalSignedAction;
+}
+
+/**
+ * Cards waiting for Will, by the goal they are for (its id is in their args), oldest
+ * first. Only each card's id, action and goal id are read: never its whole args.
+ */
+async function waitingCards(db: Db | Tx, now: Date, goalId?: string): Promise<Map<string, WaitingCard[]>> {
+  const rows = await db.$queryRaw<Array<{ id: string; action: string; goalId: string | null }>>`
+    SELECT id, action, args->>'goalId' AS "goalId" FROM "Proposal"
+    WHERE status = 'pending' AND action = ANY (${[...GOAL_SIGNED_ACTIONS]}::text[]) AND "expiresAt" > ${now}
+      AND (${goalId ?? null}::text IS NULL OR args->>'goalId' = ${goalId ?? null}::text)
+    ORDER BY "createdAt" ASC, id ASC LIMIT 500`;
+  const by = new Map<string, WaitingCard[]>();
   for (const r of rows) {
-    const goalId = (r.args as { goalId?: unknown } | null)?.goalId;
-    if (typeof goalId !== 'string') continue;
-    by.set(goalId, [...(by.get(goalId) ?? []), { id: r.id, action: r.action as GoalSignedAction, args: r.args }]);
+    if (typeof r.goalId !== 'string') continue;
+    by.set(r.goalId, [...(by.get(r.goalId) ?? []), { id: r.id, action: r.action as GoalSignedAction }]);
   }
   return by;
+}
+
+/** New goals whose card waits: each card's title and how many checks it has, and nothing else of its args. */
+async function waitingGoals(db: Db | Tx, cardIds: readonly string[]): Promise<Array<{ proposalId: string; goalId: string; title: string; checks: number }>> {
+  if (!cardIds.length) return [];
+  const rows = await db.$queryRaw<Array<{ id: string; goalId: string; title: string | null; checks: number | null }>>`
+    SELECT id, args->>'goalId' AS "goalId", args->>'title' AS title,
+           CASE WHEN jsonb_typeof(args->'successCriteria') = 'array' THEN jsonb_array_length(args->'successCriteria') END AS checks
+    FROM "Proposal" WHERE id = ANY (${[...cardIds]}::text[]) ORDER BY "createdAt" ASC, id ASC`;
+  return rows.flatMap((r) => (GoalTitle.safeParse(r.title).success && typeof r.checks === 'number' ? [{ proposalId: r.id, goalId: r.goalId, title: r.title!, checks: r.checks }] : []));
 }
 
 /** The active plans' steps, by goal. */
@@ -72,8 +89,6 @@ async function activeSteps(db: Db | Tx, goalIds: readonly string[]): Promise<Map
   return new Map(plans.map((p) => [p.goalId, { version: p.version, steps: p.steps }]));
 }
 
-const criteriaOf = (g: GoalRecord) => (Array.isArray(g.successCriteria) ? (g.successCriteria as Criterion[]) : []);
-const marksOf = (g: GoalRecord) => (g.criteriaMet && typeof g.criteriaMet === 'object' && !Array.isArray(g.criteriaMet) ? (g.criteriaMet as Record<string, unknown>) : {});
 const FINAL = new Set(['done', 'abandoned', 'rejected']);
 
 function row(g: GoalRecord, steps: StepFacts[] | null, items: ReadonlyMap<string, ItemFacts>, waiting: number): GoalRow {
@@ -101,27 +116,24 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date()): Pr
     itemFacts(db, goals.flatMap((g) => checkedItems(criteriaOf(g)))),
   ]);
   const rows = goals.map((g) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0));
-  // A new goal Will filed and has not signed yet: its card's own words, as it will start.
-  const known = new Set((await db.goal.findMany({ where: { id: { in: [...cards.keys()] } }, select: { id: true } })).map((g) => g.id));
-  const waiting = tab !== 'active' ? [] : [...cards.entries()].flatMap(([goalId, list]) => {
-    if (known.has(goalId)) return [];
-    return list.flatMap((c) => {
-      if (c.action !== 'goal.activate') return [];
-      const a = GoalActivateArgs.safeParse(c.args);
-      return a.success ? [{ proposalId: c.id, goalId, title: a.data.title, checks: a.data.successCriteria.length }] : [];
-    });
-  }).slice(0, 50);
+  // A new goal Will filed and has not signed yet: its card's own title, as it will start.
+  let waiting: GoalsPage['waiting'] = [];
+  if (tab === 'active') {
+    const known = new Set((await db.goal.findMany({ where: { id: { in: [...cards.keys()] } }, select: { id: true } })).map((g) => g.id));
+    const fresh = [...cards.entries()].flatMap(([goalId, list]) => (known.has(goalId) ? [] : list.filter((c) => c.action === 'goal.activate').map((c) => c.id)));
+    waiting = await waitingGoals(db, fresh.slice(0, WAITING));
+  }
   return { tab, goals: rows, waiting, reviews: REVIEWS };
 }
 
 /** One goal, open; null when there is none. */
-export async function goalView(db: Db | Tx, id: string, now = new Date()): Promise<GoalView | null> {
+export async function goalView(db: Db | Tx, id: string, tz: string, now = new Date()): Promise<GoalView | null> {
   const g = await db.goal.findUnique({ where: { id } });
   if (!g) return null;
   const [linkRows, planRow, cards] = await Promise.all([
-    db.goalEntity.findMany({ where: { goalId: id }, orderBy: { entityId: 'asc' }, include: { entity: { select: { id: true, kind: true, key: true, name: true, status: true, taintedPaths: true } } } }),
+    db.goalEntity.findMany({ where: { goalId: id }, orderBy: { entityId: 'asc' }, include: { entity: { select: { id: true, kind: true, key: true, name: true, status: true, taintedPaths: true, firstSeenAt: true } } } }),
     db.plan.findFirst({ where: { goalId: id, status: 'active' }, select: { version: true, steps: { orderBy: [{ ordinal: 'asc' }, { key: 'asc' }] } } }),
-    waitingCards(db, now),
+    waitingCards(db, now, id),
   ]);
   const criteria = criteriaOf(g);
   const items = await itemFacts(db, checkedItems(criteria));
@@ -129,7 +141,8 @@ export async function goalView(db: Db | Tx, id: string, now = new Date()): Promi
   const e = evaluate(criteria, marksOf(g), steps, items);
   const links = linkRows.map((l) => ({
     entityId: l.entityId, role: l.role as Link['role'], watchPaths: [...l.watchPaths].sort(),
-    label: labelOf(l.entity), kind: l.entity.kind, status: l.entity.status as GoalView['links'][number]['status'],
+    label: labelOf(l.entity, tz, now), kind: l.entity.kind, status: l.entity.status as GoalView['links'][number]['status'],
+    conditions: conditionsOf(l.entity.kind),
   }));
   return {
     id: g.id, title: g.title, description: g.description, status: g.status as GoalView['status'],
@@ -142,7 +155,8 @@ export async function goalView(db: Db | Tx, id: string, now = new Date()): Promi
     plan: planRow && steps
       ? { version: planRow.version, steps: steps.map((s) => ({ key: s.key, ordinal: s.ordinal, title: s.title, kind: s.kind, tier: s.tier, status: s.status, dueAt: s.dueAt, dependsOn: s.dependsOn })) }
       : null,
-    waiting: (cards.get(id) ?? []).map((c) => ({ id: c.id, action: c.action })),
+    // The oldest of its waiting cards: a goal with more still opens.
+    waiting: (cards.get(id) ?? []).slice(0, WAITING),
     reviews: REVIEWS,
     late: false,
   };

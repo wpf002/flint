@@ -23,7 +23,7 @@ import type { Db, Tx } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { Refused, createProposal, rejectProposal } from '../governance/proposals.js';
 import { sqlState } from '../dbcodes.js';
-import { checkedItems, evaluate, itemFacts } from './criteria.js';
+import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
 import { SAY, goalStatusWords } from './errors.js';
 
 /** Who the panel's writes are by. */
@@ -42,29 +42,43 @@ async function file(db: Db, action: GoalSignedAction, args: Record<string, unkno
 }
 
 /**
+ * The newer card wins: Will's other cards of this action still waiting for this
+ * goal are rejected (unsigned, with a fixed sentence) once a new one is filed. A
+ * card left waiting after a cancelled prompt can then never be approved later
+ * over the change that replaced it.
+ */
+async function supersede(db: Db, action: GoalSignedAction, goalId: string, keep: string): Promise<void> {
+  const older = await db.proposal.findMany({
+    where: { status: 'pending', action, origin: 'console', id: { not: keep }, args: { path: ['goalId'], equals: goalId } },
+    select: { id: true },
+  });
+  for (const o of older) await rejectProposal(db, o.id, { error: SAY.replaced }, undefined, CONSOLE_ACTOR).catch(() => {});
+}
+
+/**
  * A new goal's card. Another card still waiting for the same new goal (the form
  * filed, then changed) is rejected once this one is filed: the newer form wins.
  */
 export async function fileNewGoal(db: Db, args: Record<string, unknown> & { goalId: string }, now = new Date()) {
   const filed = await file(db, 'goal.activate', args, now);
-  if (!filed.deduped) {
-    const older = await db.proposal.findMany({
-      where: { status: 'pending', action: 'goal.activate', origin: 'console', id: { not: filed.id }, args: { path: ['goalId'], equals: args.goalId } },
-      select: { id: true },
-    });
-    const goal = await db.goal.findUnique({ where: { id: args.goalId }, select: { id: true } });
-    if (!goal) {
-      for (const o of older) await rejectProposal(db, o.id, { error: SAY.replaced }, undefined, CONSOLE_ACTOR).catch(() => {});
-    }
-  }
+  if (!filed.deduped && !(await db.goal.findUnique({ where: { id: args.goalId }, select: { id: true } }))) await supersede(db, 'goal.activate', args.goalId, filed.id);
   return { id: filed.id, deduped: filed.deduped };
 }
 
-/** A card for an existing goal, from its route: its args name that goal. */
+/** The cards that say a goal's new values and nothing of the old ones' order: a newer one replaces an older one still waiting. */
+const SUPERSEDING: ReadonlySet<GoalCardVerb> = new Set<GoalCardVerb>(['edit', 'timing']);
+
+/**
+ * A card for an existing goal, from its route: its args name that goal. A change
+ * to what counts as done, or to the timing, replaces an older one still waiting
+ * (and each says what it changes from, so one filed before a later change does
+ * not apply: apply.ts).
+ */
 export async function fileGoalCard(db: Db, verb: GoalCardVerb, goalId: string, args: Record<string, unknown> & { goalId: string }, now = new Date()) {
   if (args.goalId !== goalId) throw new Refused(400, SAY.invalid, 'the args name another goal');
   if (!(await db.goal.findUnique({ where: { id: goalId }, select: { id: true } }))) throw new Refused(404, SAY.noGoal);
   const filed = await file(db, GOAL_CARD_VERBS[verb], args, now);
+  if (!filed.deduped && SUPERSEDING.has(verb)) await supersede(db, GOAL_CARD_VERBS[verb], goalId, filed.id);
   return { id: filed.id, deduped: filed.deduped };
 }
 
@@ -125,8 +139,6 @@ export async function dismissGoal(db: Db, id: string, now = new Date()): Promise
   });
 }
 
-const criteriaOf = (g: LockedGoal) => (Array.isArray(g.successCriteria) ? (g.successCriteria as Criterion[]) : []);
-const marksOf = (g: LockedGoal): Record<string, unknown> => (g.criteriaMet && typeof g.criteriaMet === 'object' && !Array.isArray(g.criteriaMet) ? { ...(g.criteriaMet as Record<string, unknown>) } : {});
 const live = (g: LockedGoal) => {
   if (g.status !== 'active' && g.status !== 'paused') throw new Refused(409, goalStatusWords(g.status));
 };

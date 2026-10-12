@@ -322,16 +322,29 @@ export const GoalActivateArgs = z
   })
   .refine(fits, OVER);
 
-/** goal.criteria_change: what counts as done (title, description, checks) and the whole new set of links. */
+/**
+ * What a goal was when a card to change it was filed: the card's precondition,
+ * signed with it, as a plan operation's `from` is. A card whose goal no longer
+ * matches does not apply (an older card approved after a newer change would
+ * otherwise undo it). The executor checks it; the database compares only the new
+ * values with the row (a check of `from` there would need a migration).
+ */
+export const DefinitionFrom = z.object({ title: GoalTitle, description: Description, successCriteria: SuccessCriteria, links: Links }).strict();
+export const TimingFrom = z.object({ horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES) }).strict();
+
+/**
+ * goal.criteria_change: what counts as done (title, description, checks) and the whole new set of links;
+ * `from`, what they were (every card the console files says so).
+ */
 export const GoalCriteriaChangeArgs = z
-  .object({ goalId: GoalId, title: GoalTitle, description: Description.default(''), successCriteria: SuccessCriteria, links: Links })
+  .object({ goalId: GoalId, title: GoalTitle, description: Description.default(''), successCriteria: SuccessCriteria, links: Links, from: DefinitionFrom.optional() })
   .strict()
   .superRefine(itemsLinked)
   .refine(fits, OVER);
 
-/** goal.horizon_change: when it should be done by, and how often it is reviewed. The title is for the card only. */
+/** goal.horizon_change: when it should be done by, and how often it is reviewed; `from`, what they were. The title is for the card only. */
 export const GoalHorizonChangeArgs = z
-  .object({ goalId: GoalId, goalTitle: GoalTitle, horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES) })
+  .object({ goalId: GoalId, goalTitle: GoalTitle, horizonAt: IsoMs.nullable(), reviewCadence: z.enum(REVIEW_CADENCES), from: TimingFrom.optional() })
   .strict();
 
 /** goal.done and goal.abandon: the goal, and its title for the card. */
@@ -436,10 +449,7 @@ export const GOAL_STATUS_SAYS: Readonly<Record<GoalStatus, string>> = {
   rejected: 'This goal was dismissed.',
 };
 
-/** Every code a goal refusal may carry: a GOAL_SAYS key, or `status.<status>`. */
-export const GOAL_CODES: readonly string[] = [...Object.keys(GOAL_SAYS), ...GOAL_STATUSES.map((s) => `status.${s}`)];
-
-/** The sentence a code stands for, or undefined for a code outside the closed set. */
+/** The sentence a code stands for (a GOAL_SAYS key, or `status.<status>`), or undefined for a code outside the closed set. */
 export function goalSayOf(code: unknown): string | undefined {
   if (typeof code !== 'string') return undefined;
   if (Object.prototype.hasOwnProperty.call(GOAL_SAYS, code)) return GOAL_SAYS[code as GoalSay];
@@ -514,10 +524,13 @@ export const NewGoalBody = z
     if (b.args.tainted) issue(['tainted'], 'a goal you add is your own words');
     if (b.args.nexusProjectId !== null) issue(['nexusProjectId'], 'the panel names no Nexus project');
   });
-/** POST /goals/:id/<verb>: that card's args, as the panel shows them. Resuming (or starting a suggested goal) brings no plan. */
+/**
+ * POST /goals/:id/<verb>: that card's args, as the panel shows them. Resuming (or starting a suggested goal)
+ * brings no plan; a change to what counts as done or to the timing says what it changes from.
+ */
 export const GOAL_CARD_BODIES = {
-  edit: z.object({ args: GoalCriteriaChangeArgs }).strict(),
-  timing: z.object({ args: GoalHorizonChangeArgs }).strict(),
+  edit: z.object({ args: GoalCriteriaChangeArgs }).strict().refine((b) => b.args.from !== undefined, { message: 'says what it changes from', path: ['args', 'from'] }),
+  timing: z.object({ args: GoalHorizonChangeArgs }).strict().refine((b) => b.args.from !== undefined, { message: 'says what it changes from', path: ['args', 'from'] }),
   done: z.object({ args: GoalDoneArgs }).strict(),
   abandon: z.object({ args: GoalAbandonArgs }).strict(),
   resume: z.object({ args: GoalActivateArgs }).strict().refine((b) => b.args.plan === null, { message: 'resuming brings no plan', path: ['args', 'plan'] }),
@@ -537,6 +550,8 @@ const Count = z.number().int().min(0).max(10_000);
 /** An item as the panel names it: by its key (a repo and number), never by a title. */
 const ItemLabel = z.string().min(1).max(120);
 const CheckCounts = z.object({ met: Count, total: Count, unknown: Count }).strict();
+/** The conditions an item offers a check (GOAL_CONDITIONS for its kind). */
+const ItemConditions = z.array(z.object({ key: z.string().max(40), value: z.string().max(40) }).strict()).max(10);
 
 /** One goal in a list. `late` stays false until reviews exist (part 3). */
 export const GoalRow = z
@@ -602,7 +617,7 @@ export const GoalView = z
     reviewCadence: z.enum(REVIEW_CADENCES),
     activatedAt: IsoMs.nullable(),
     endedAt: IsoMs.nullable(),
-    links: z.array(Link.extend({ label: ItemLabel, kind: z.string().max(40), status: z.enum(ENTITY_STATUSES) })).max(20),
+    links: z.array(Link.extend({ label: ItemLabel, kind: z.string().max(40), status: z.enum(ENTITY_STATUSES), conditions: ItemConditions })).max(20),
     plan: z.object({ version: z.number().int().min(1), steps: z.array(PlanStepView).max(1000) }).strict().nullable(),
     waiting: z.array(z.object({ id: ProposalRef, action: z.enum(GOAL_SIGNED_ACTIONS) }).strict()).max(50),
     reviews: z.enum(['off', 'on']),
@@ -622,7 +637,7 @@ export const LinkableItem = z
     label: ItemLabel,
     status: z.enum(['active', 'archived']),
     title: z.string().min(1).max(300).nullable(),
-    conditions: z.array(z.object({ key: z.string().max(40), value: z.string().max(40) }).strict()).max(10),
+    conditions: ItemConditions,
   })
   .strict();
 export const Linkable = z.object({ items: z.array(LinkableItem).max(25) }).strict();
