@@ -36,6 +36,10 @@ pnpm --filter @flint/parity build-prompts             # --seed 1 --max 300 by de
 
 Reads `~/.flint/training/corpus.jsonl` and:
 
+- **first, leaves out every row whose turn stayed on Will's Mac** (`staysHere`: he kept it
+  private, or Flint was in Local mode). The set's prompts are sent to outside competitors and
+  judges, so such a row is never one of them. A mark this code does not understand is left
+  out too. The build prints how many rows it left out;
 - drops greetings, acknowledgements, context-dependent follow-ups ("yes", "go ahead"),
   API probes ("say ok") and bare URLs;
 - drops exact and near duplicates (content-word Jaccard ≥ 0.8, or a short ask ≥ 80%

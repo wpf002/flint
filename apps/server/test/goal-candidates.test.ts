@@ -477,7 +477,9 @@ describe('no tool reaches it', () => {
     for (const n of names) for (const a of NAMES) expect(n).not.toBe(a);
     // Every built-in main() gives a model: none is added without being looked at here.
     const index = readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8');
-    const made = index.slice(index.indexOf('...gateBuiltins(['), index.indexOf('], tierOpts)'));
+    // (They are also held to the private rule, which wraps the list: ...heldOnPrivate(gateBuiltins([ ... ], tierOpts)).)
+    const made = index.slice(index.indexOf('gateBuiltins(['), index.indexOf('], tierOpts)'));
+    expect(index.indexOf('gateBuiltins([')).toBeGreaterThan(-1);
     expect([...made.matchAll(/^\s{4}(\w+Tool)\(/gm)].map((m) => m[1])).toEqual(['rememberTool', 'trainingStatusTool', 'deepResearchTool', 'calculateTool', 'spendStatusTool']);
     // The runtime connector (the MCP server a model's runtime tools live in): its tools, and every route it calls.
     const connector = readFileSync(join(__dirname, '..', '..', '..', 'packages', 'mcp', 'connectors', 'runtime-server.ts'), 'utf8');

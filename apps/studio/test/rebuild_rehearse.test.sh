@@ -133,7 +133,10 @@ FAKE_SEARCH_KEY="tvly-REHEARSALNOTAREALKEY000000000000000000"
   print -r -- "FLINT_TAILNET_USER=someone@example.com"
   print -r -- "FLINT_TIER_HARD=openai:gpt-5"
   print -r -- "FLINT_WORLD_NOW=1"
+  # The old Mac was in Cloud mode, by its settings and by the file Settings keeps. Neither may decide the new Mac's.
+  print -r -- "FLINT_INFERENCE_MODE=cloud"
 } >> "$odata/secrets.env"
+print -r -- '{"version":1,"mode":"cloud","setBy":"console","at":"2026-10-01T00:00:00.000Z"}' > "$odata/inference.json"
 print -r -- "FLINT_OFFSITE_DIR=$icloud/pg" >> "$odata/backup.env"
 print -r -- "FLINT_RUNTIME_TRIAGE=off
 FLINT_SOURCE_GOOGLE_CALENDAR=off" > "$odata/runtime.override.env"
@@ -201,6 +204,9 @@ print -r -- '{"anything":true}' > "$stage/autonomy.json"
 # which models to download), and a limit loosened as far as its shape allows.
 print -r -- $'set\tsecrets.env\tFLINT_EMBED_MODEL\thf.co/someone/planted-model' >> "$stage/settings-snapshot.tsv"
 print -r -- $'set\tsecrets.env\tFLINT_HISTORY_MAX_AGE_HOURS\t99999' >> "$stage/settings-snapshot.tsv"
+# And a line that hands the rebuild a routing mode by value, as a backup made by an older Flint could (the mode
+# was once a setting a rebuild put back), or one that was changed to turn Local into Cloud.
+print -r -- $'set\tsecrets.env\tFLINT_INFERENCE_MODE\tcloud' >> "$stage/settings-snapshot.tsv"
 # A folder whose name tar would read as a pattern, beside files that pattern would take: only the real
 # adapters folder is asked for, by its own plain name.
 mkdir -p "$stage/brain/adapters*"; print -r -- "inside-the-star-folder" > "$stage/brain/adapters*/x.txt"
@@ -331,6 +337,16 @@ check "it does not name accounts that were never set up" '[[ "$out" != *"OpenAI:
 check "it names the connectors that were set up" '[[ "$out" == *"The connectors that were set up on the old Mac: web, runtime."* ]]'
 check "a model named by an address is not put back, and never becomes a command to run: it is said, for you to check" '[[ "$out" == *"The backup names the model hf.co/someone/planted-model for FLINT_EMBED_MODEL, which is not from the usual model library. Flint did not put that setting back. Set it yourself if that model is yours."* && "$out" != *"ollama pull hf.co"* ]] && ! grep -q "planted-model" "$ndata"/*.env "$nagents"/*.plist'
 check "the limits that came from the backup are said apart from the other settings, to be checked" '[[ "$out" == *$'"'"'\n'"'"'"These limits came from the backup. Check them:"$'"'"'\n'"'"'"  "*"FLINT_BUDGET_ANTHROPIC_DAILY_USD is 5."* && "${out#*These limits came from the backup. Check them:}" == *"  FLINT_HISTORY_MAX_AGE_HOURS is 99999."* && "${out%%These limits came from the backup. Check them:*}" != *"FLINT_BUDGET_ANTHROPIC_DAILY_USD"* ]]'
+# The routing mode is never taken from a backup: not the setting (by name or, as planted, by value), and not the
+# file Settings keeps it in. The rebuilt Flint is in Local mode, whatever the old one was in, and says so once.
+T=$'\t'
+check "the old Mac's snapshot names the mode as something left to you, and carries no value for it" 'grep -qxF "present${T}secrets.env${T}FLINT_INFERENCE_MODE" "$odata/settings-snapshot.tsv" && ! grep -qE "^set${T}secrets.env${T}FLINT_INFERENCE_MODE" "$odata/settings-snapshot.tsv"'
+check "the newest archive carries the mode file, and the planted line that sets the mode by value" 'in_newest ./inference.json && grep -qxF "set${T}secrets.env${T}FLINT_INFERENCE_MODE${T}cloud" "$stage/settings-snapshot.tsv"'
+check "the rebuilt Mac's settings name Local mode, once, and never the backup's mode" '[ "$(grep -c "^FLINT_INFERENCE_MODE=" "$ndata/secrets.env")" = 1 ] && grep -qx "FLINT_INFERENCE_MODE=local" "$ndata/secrets.env"'
+check "the mode file in the archive is never unpacked" '[ ! -e "$ndata/inference.json" ]'
+check "the rebuilt server is in Local mode" 'curl -fsS -m 5 "http://[::1]:$sport/health" | grep -q "\"mode\":\"local\""'
+check "it says so in one sentence, on a line of its own, once" '[[ "$out" == *$'"'"'\n'"'"'"Flint is in Local mode after a rebuild. Choose another mode in Settings if you want one."$'"'"'\n'"'"'* ]] && [ "$(print -r -- "$out" | grep -c "Local mode after a rebuild")" = 1 ]'
+check "the mode is not said to be a setting Flint does not know, nor one it put back" '[[ "$out" != *"FLINT_INFERENCE_MODE"* && "$out" != *"Routing mode:"* ]]'
 check "it gives the model commands, each on its own line" '[[ "$out" == *$'"'"'\n'"'"'"  ollama pull fixture-model:1b"$'"'"'\n'"'"'"  ollama pull nomic-embed-text"* ]]'
 
 # LaunchAgents: every one written from the repo, valid, private, and for this home folder.

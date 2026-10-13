@@ -82,6 +82,7 @@ secrets.env  FLINT_EXTRACT_BACKLOG_INTERVAL_MS    restore   number
 secrets.env  FLINT_EXTRACT_MAX_TURNS              restore   number
 secrets.env  FLINT_EXTRACT_MAX_CALLS_PER_DAY      restore   number
 secrets.env  FLINT_EXTRACT_BATCH_CHARS            restore   number
+secrets.env  FLINT_EXTRACT_FIRST_PASS_MS          restore   number
 secrets.env  FLINT_EXTRACT_CANDIDATES             restore   onoff
 secrets.env  FLINT_EXTRACT_COMMITMENTS            restore   onoff
 secrets.env  FLINT_FRONTIER_PROVIDER              restore   word
@@ -94,6 +95,37 @@ secrets.env  FLINT_EVAL_NUM_CTX                   restore   number
 secrets.env  FLINT_HISTORY_TURNS                  restore   number
 secrets.env  FLINT_HISTORY_MAX_AGE_HOURS          restore   number
 secrets.env  FLINT_LOCAL_STYLE_VARIANT            restore   word
+# Local inference (apps/server/src/inference-config.ts): the routing mode, the local model and how it is asked.
+# The mode is never taken from a backup, here or from the file Settings keeps it in (inference.json, below): a
+# backup that was changed could turn Local into Cloud, and a mode decides where your words go. A rebuild writes
+# Local for the new Mac, whatever the old one was in, and says so.
+secrets.env  FLINT_INFERENCE_MODE                 reenter   Routing-Mode
+secrets.env  FLINT_HARDWARE_TIER                  restore   word
+# Which wire the local model is asked over, and what kind of server answers it. Both are words, and neither can
+# point Flint at another machine (the address is below, and is never restored). They can stay restorable because
+# neither decides whether a model is taken for one on this Mac: whatever these say, the model server itself is
+# asked what it is and where each model runs, and nothing is local until it has answered
+# (apps/server/src/policy.ts brainIsLocal). A backup that sets both to openai changes how the server is asked,
+# and nothing else.
+secrets.env  FLINT_LOCAL_PROVIDER                 restore   word
+secrets.env  FLINT_LOCAL_SERVER                   restore   word
+secrets.env  FLINT_LOCAL_MODEL                    restore   model
+secrets.env  FLINT_LOCAL_FALLBACK_MODEL           restore   model
+secrets.env  FLINT_LOCAL_FALLBACK_NUM_CTX         restore   number
+secrets.env  FLINT_LOCAL_TOOLS                    restore   word
+secrets.env  FLINT_LOCAL_CONNECT_TIMEOUT_MS       restore   number
+secrets.env  FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS  restore   number
+secrets.env  FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS     restore   number
+secrets.env  FLINT_LOCAL_REQUEST_TIMEOUT_MS       restore   number
+secrets.env  FLINT_LOCAL_IDLE_TIMEOUT_MS          restore   number
+secrets.env  FLINT_LOCAL_HEALTH_INTERVAL_MS       restore   number
+# Where the local model server is, and its key, are never taken from a backup: an address in one could send
+# what you keep private to another machine. A rebuild leaves both unset (Ollama on this Mac), and says so.
+secrets.env  FLINT_LOCAL_BASE_URL                 reenter   Local-Model-Server
+secrets.env  FLINT_LOCAL_API_KEY                  reenter   Local-Model-Server
+# The two switches that let "local" be a server on another machine start off again, like every safety switch.
+secrets.env  FLINT_LOCAL_ALLOW_REMOTE             reenter   Safety-Switch
+secrets.env  FLINT_LOCAL_ALLOW_INSECURE_REMOTE    reenter   Safety-Switch
 secrets.env  FLINT_RESEARCH_CHARS                 restore   number
 secrets.env  FLINT_TOOL_APPEND                    restore   number
 secrets.env  FLINT_TOOL_FLOOR                     restore   number
@@ -244,3 +276,8 @@ file  nexus-responder.env         reenter   Nexus
 file  nexus-responder.json        reenter   Nexus
 file  nexus-responder.sh          reenter   Nexus
 file  legion                      retired   legion
+# Not a secret, and listed so a rebuild says what it does with it: the routing mode chosen in Settings
+# (Local, Hybrid or Cloud). It is in the offsite copy, and a rebuild never unpacks it: a file from a backup
+# does not decide where your words go. The rebuilt Flint starts in Local mode (the rebuild writes that, and the
+# setting above is never restored either), and the rebuild says so in one sentence.
+file  inference.json              reenter   Routing-Mode

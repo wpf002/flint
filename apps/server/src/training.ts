@@ -19,6 +19,15 @@ export interface TrainingRecord {
   /** Tools used to derive the answer (how, not just what). */
   tools: Array<{ tool: string; outcome?: string; ms?: number }>;
   usage?: unknown;
+  /**
+   * The turn stayed on this Mac: Will kept it private, or Flint was in Local
+   * mode (./private-turns turnStaysHere). The row is kept, because it is what
+   * a model on this Mac learns from, and it carries this mark so that nothing
+   * which builds a set for an outside model or a judge takes it: apps/parity
+   * drops a marked row before it looks at anything else (src/prompts.ts).
+   * Absent on every other row.
+   */
+  staysHere?: true;
 }
 
 /**
@@ -27,7 +36,9 @@ export interface TrainingRecord {
  * distillation targets — the teacher; local answers are the current student.
  * Fine-tuning an owned open model on this corpus is how Flint's own model
  * absorbs capability over time and walks toward independence. The data is
- * yours, on your machine, never sent anywhere.
+ * yours, on your machine. The eval harness builds prompt sets from it for
+ * outside models and judges, so a turn that stayed on this Mac is written
+ * with a mark that keeps its row out of those (`staysHere`).
  */
 export class TrainingLogger {
   private seq = 0;

@@ -222,6 +222,11 @@ export function mediaNeeds(attachments: Attachment[]): MediaNeeds {
   };
 }
 
+/** How many characters of text files a turn carries: part of how long its prompt is (the hybrid rules' long-context test). */
+export function textChars(attachments: Attachment[]): number {
+  return attachments.reduce((n, a) => n + (a.kind === 'text' ? a.text?.length ?? 0 : 0), 0);
+}
+
 /**
  * A one-line, body-free summary for logs, the Action Log and the training
  * corpus — which must never carry a base64 blob or a pasted file.

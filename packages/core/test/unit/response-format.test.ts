@@ -101,6 +101,16 @@ describe('Ollama format', () => {
     expect(events).toMatchObject([{ type: 'error', error: { kind: 'validation', retryable: false } }]);
   });
 
+  it('a reply that had to be asked for again: usage is the sum of the tries, and lastInput is the last try\'s own prompt', async () => {
+    const once = make(['{"action":"log"}']);
+    expect((await once.p.generate({ model: 'm', messages: [user], responseFormat: rf('triage') })).usage).toEqual({ input: 5, output: 3 });
+    const thrice = make(['not json', 'still not', '{"action":"log"}']);
+    const r = await thrice.p.generate({ model: 'm', messages: [user], responseFormat: rf('triage') });
+    expect(thrice.bodies).toHaveLength(3);
+    // 15 tokens were processed; the model's window held 5 at a time.
+    expect(r.usage).toEqual({ input: 15, output: 9, lastInput: 5 });
+  });
+
   it('a reply cut off at num_predict is max_tokens with the partial text, and is not retried', async () => {
     const { p, bodies } = make([{ content: '{"action":"lo', done_reason: 'length' }]);
     const r = await p.generate({ model: 'm', messages: [user], maxTokens: 4, responseFormat: rf('triage') });

@@ -9,16 +9,23 @@ import type { ModelCapabilities } from '../../types/capabilities.js';
  *
  * Numbers are conservative defaults per model family; unknown models fall back
  * to a small, safe profile. A model's real context can be larger (Ollama lets
- * you raise `num_ctx`), but Flint budgets against the safe default unless the
- * app overrides it.
+ * you raise `num_ctx`): the provider reports the `num_ctx` it is configured to
+ * send in place of these numbers (OllamaProvider.getCapabilities).
+ *
+ * Tool calling is claimed only for the families listed here, which were run
+ * through Flint's tool loop. A model this table has never heard of is
+ * `unsupported` until someone who knows says otherwise (OllamaProviderOptions
+ * `capabilities`, fed from Ollama's own /api/show): claiming a tool API the
+ * model lacks sends a router the wrong way.
  */
 function caps(
   maxContextTokens: number,
   maxOutputTokens: number,
   structuredOutput: ModelCapabilities['structuredOutput'] = 'prompted',
+  toolCalling: ModelCapabilities['toolCalling'] = 'native',
 ): ModelCapabilities {
   return {
-    toolCalling: 'native',
+    toolCalling,
     structuredOutput,
     streaming: 'full',
     maxContextTokens,
@@ -39,6 +46,6 @@ export function ollamaCapabilities(model: string): ModelCapabilities {
   for (const entry of KNOWN) {
     if (entry.match.test(model)) return entry.caps;
   }
-  // Unknown local model: assume a small window and unreliable structure.
-  return caps(4_096, 2_048, 'unreliable');
+  // Unknown local model: a small window, unreliable structure, and no claim that it can call tools.
+  return caps(4_096, 2_048, 'unreliable', 'unsupported');
 }

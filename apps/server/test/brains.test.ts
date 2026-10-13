@@ -507,3 +507,33 @@ describe('BrainSet.cheapestOn (the brain the breaker\'s check asks)', () => {
     expect(set.cheapestOn('anthropic')?.label).toBe('anthropic:claude-sonnet-4-6');
   });
 });
+
+describe("envProviderFactory: 'local', an OpenAI-compatible local server as a tier", () => {
+  it('builds the local adapter at FLINT_LOCAL_BASE_URL, one instance for every tier on it', () => {
+    const factory = envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://127.0.0.1:8080/v1' });
+    const p = factory('local');
+    expect(p?.name).toBe('local');
+    expect(factory('local')).toBe(p);
+    // Not probed: no tools unless Will says the model can call them, and a modest window.
+    expect(p!.getCapabilities('any')).toMatchObject({ toolCalling: 'unsupported', maxContextTokens: 8192 });
+    const on = envProviderFactory({ FLINT_LOCAL_TOOLS: 'on', FLINT_FRONTIER_NUM_CTX: '32768' })('local');
+    expect(on!.getCapabilities('any')).toMatchObject({ toolCalling: 'native', maxContextTokens: 32768 });
+  });
+
+  // The final review's L6: this site read the number as it came ("1e9" was a billion-token window).
+  it('its window is a context size by the one rule: a value that is not one is the default, never a guess', () => {
+    for (const bad of ['1e9', '99999999999', '8192.5', '-1', '0', 'big', '100', '']) {
+      const p = envProviderFactory({ FLINT_FRONTIER_NUM_CTX: bad })('local');
+      expect(p!.getCapabilities('any').maxContextTokens, bad).toBe(8192);
+    }
+    expect(envProviderFactory({ FLINT_FRONTIER_NUM_CTX: '4096' })('local')!.getCapabilities('any').maxContextTokens).toBe(4096);
+  });
+
+  it('an address that is not this Mac builds nothing, so the tier resolves like one with no key', () => {
+    expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://10.0.0.9:8080/v1' })('local')).toBeUndefined();
+    // Another machine needs Will's say, and https (or his word that the network is private).
+    expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://10.0.0.9:8080/v1', FLINT_LOCAL_ALLOW_REMOTE: '1' })('local')).toBeUndefined();
+    expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'https://10.0.0.9:8443/v1', FLINT_LOCAL_ALLOW_REMOTE: '1' })('local')?.name).toBe('local');
+    expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://10.0.0.9:8080/v1', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' })('local')?.name).toBe('local');
+  });
+});

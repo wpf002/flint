@@ -1,4 +1,5 @@
 import { makeAiError, type AiError } from '../../types/error.js';
+import { DeadlineError, deadlineAiError, isRedirectRefusal, redirectAiError } from '../deadline.js';
 
 /**
  * Map Ollama HTTP/transport failures onto the canonical AiError taxonomy.
@@ -6,6 +7,10 @@ import { makeAiError, type AiError } from '../../types/error.js';
  * status code and the shape of the thrown value.
  */
 export function toAiError(err: unknown): AiError {
+  // The adapter's own deadline (OllamaProviderOptions.firstTokenTimeoutMs / requestTimeoutMs): the
+  // model stalled. Not retryable, so the caller moves to another model instead of waiting again.
+  if (err instanceof DeadlineError) return deadlineAiError(err, 'Ollama');
+
   // Abort surfaces as a non-retryable timeout-class signal.
   if (err instanceof DOMException && err.name === 'AbortError') {
     return makeAiError('timeout', 'Request aborted', { retryable: false, raw: err });
@@ -21,6 +26,9 @@ export function toAiError(err: unknown): AiError {
   if (err instanceof OllamaHttpError) {
     return fromStatus(err.status, err.message, err);
   }
+
+  // Ollama answered with a redirect, which the adapter never follows: the address is wrong.
+  if (isRedirectRefusal(err)) return redirectAiError('Ollama', err);
 
   // fetch() connection failures (server down, refused, DNS) are TypeErrors.
   if (err instanceof TypeError) {

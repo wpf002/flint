@@ -36,6 +36,13 @@ describe('flintEngineLine', () => {
     expect(LOCAL).not.toMatch(/comes from Claude|Anthropic/);
   });
 
+  it("a model on an OpenAI-compatible local server ('local') is Will's own too, and is not Claude", () => {
+    const line = flintEngineLine({ provider: 'local', model: 'muse-glimmer:30b' });
+    expect(line).toContain("This reply comes from an open model (muse-glimmer:30b) that Will runs himself, on his own model server. It is not Claude, and no AI company's service is answering.");
+    expect(line).not.toMatch(/comes from Claude|Anthropic|OpenAI/);
+    expect(line).toMatch(/You are still Flint\.$/);
+  });
+
   it('an Ollama cloud model is open weights on Ollama\'s servers, not Will\'s, and still not Claude', () => {
     const line = flintEngineLine({ provider: 'ollama', model: 'gpt-oss:120b-cloud', ollamaCloud: true });
     expect(line).toContain("an open model (gpt-oss:120b-cloud) that Ollama runs on its own servers, not on Will's hardware. It is not Claude.");

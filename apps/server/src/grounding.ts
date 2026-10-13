@@ -53,8 +53,10 @@ export function withMemory(base: string, facts: readonly string[]): string {
  *
  * `outside` is the same for a brain that is not on this Mac: without the facts
  * Flint learned from a turn answered with Will's goals (./knowledge
- * `fromGoals`). It is the very same block and list when no such fact was
- * recalled, and always when the store does not tell them apart.
+ * `fromGoals`) or from one he kept private (`fromPrivate`). It is the very same
+ * block and list when no such fact was recalled, and always when the store
+ * does not tell them apart. `lifted` leaves out only the private ones: what a
+ * brain off this Mac may have once Will set FLINT_GOALS_TO_FRONTIER=on.
  *
  * `skip` (an eval request's `recall: false`, ./eval-tools): don't read long-term
  * memory at all, so the turn has exactly the block it would have with nothing
@@ -65,27 +67,29 @@ export function withMemory(base: string, facts: readonly string[]): string {
 export async function recallContext(
   base: string,
   message: string,
-  knowledge: { recall(query: string): Promise<string[]>; recallWithMode?(query: string): Promise<{ facts: string[]; mode: string; outside?: string[] }> },
+  knowledge: { recall(query: string): Promise<string[]>; recallWithMode?(query: string): Promise<{ facts: string[]; mode: string; outside?: string[]; lifted?: string[] }> },
   opts: { skip?: boolean } = {},
-): Promise<{ block: string; facts: string[]; mode: string; outside: { block: string; facts: string[] } }> {
+): Promise<{ block: string; facts: string[]; mode: string; outside: { block: string; facts: string[] }; lifted: { block: string; facts: string[] } }> {
   let facts: string[] = [];
   let outside: string[] | undefined;
+  let lifted: string[] | undefined;
   let mode = opts.skip ? 'skipped' : 'none';
   if (!opts.skip) {
     try {
-      if (knowledge.recallWithMode) ({ facts, mode, outside } = await knowledge.recallWithMode(message));
+      if (knowledge.recallWithMode) ({ facts, mode, outside, lifted } = await knowledge.recallWithMode(message));
       else facts = await knowledge.recall(message);
     } catch {
       /* memory recall is best-effort */
       mode = 'error';
       facts = [];
       outside = undefined;
+      lifted = undefined;
     }
   }
   const block = withMemory(base, facts);
   // The same objects when nothing was held back, so a caller can tell by comparing the blocks.
-  const same = !outside || (outside.length === facts.length && outside.every((f, i) => f === facts[i]));
-  return { block, facts, mode, outside: same ? { block, facts } : { block: withMemory(base, outside!), facts: outside! } };
+  const view = (list: string[] | undefined) => (!list || (list.length === facts.length && list.every((f, i) => f === facts[i])) ? { block, facts } : { block: withMemory(base, list), facts: list });
+  return { block, facts, mode, outside: view(outside), lifted: view(lifted) };
 }
 
 /**

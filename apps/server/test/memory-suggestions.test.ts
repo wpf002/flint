@@ -528,6 +528,47 @@ describe('goals and commitments from chat, in the extractor', () => {
     expect(got).toEqual([expect.objectContaining({ staysHere: true, turnId: t.id })]);
   });
 
+  // Local inference (this branch) marks the turns Will kept private: Local Only, a message that asked to stay
+  // private, any turn of Local mode. A suggestion is his own sentence on its way to being a goal, and his goals can
+  // be sent to every brain (FLINT_GOALS_TO_FRONTIER). So a call about such turns asks for facts alone.
+  it('a turn Will kept private is mined for facts and never for suggestions: its call is the one a pass with the setting off makes', async () => {
+    const kept = turn('c-private', `${CANARY} I want to run a half marathon by spring and I keep a Mac Studio in the office.`);
+    const open = turn('c-open', SAID);
+    const fact = { turn: 1, quote: 'I keep a Mac Studio in the office', fact: 'Will keeps a Mac Studio in the office.', category: 'other', supersedes: [] };
+    const got: ChatSuggestion[] = [];
+    // A model that proposes a suggestion for every call, asked or not.
+    const { brain, calls } = local((prompt) => ({ facts: prompt.includes('Mac Studio') ? [fact] : [], suggestions: [good()] }));
+    const k = new KnowledgeStore(join(dir, 'k-private.json'), downEmbedder);
+    const ex = new MemoryExtractor(source({ 'c-private': [kept], 'c-open': [open] }), k, brain, join(dir, 's-private.json'), {
+      now: () => NOW, candidates: true, commitments: true, onCandidate: async (sug) => (got.push(sug), 'filed' as SuggestionOutcome),
+      keptPrivate: (cid) => cid === 'c-private',
+    });
+    await ex.run();
+    // Two calls: turns of different marks never share one.
+    expect(calls).toHaveLength(2);
+    const [priv, ordinary] = [calls.find((c) => c.prompt.includes('Mac Studio'))!, calls.find((c) => !c.prompt.includes('Mac Studio'))!];
+    // The private turn's call: not asked for suggestions (no lines in the prompt, no schema for them)...
+    expect(priv.suggestions).toBeUndefined();
+    expect(priv.prompt).not.toContain(SUGGEST_PROMPT);
+    expect(priv.prompt).not.toContain(SUGGEST_GOALS_PROMPT);
+    // ...and the one its reply carried anyway is not read. The ordinary turn's call is asked, and its suggestion is handed on.
+    expect(ordinary.suggestions).toBe('all');
+    expect(ordinary.prompt).toContain(SUGGEST_PROMPT);
+    expect(got.map((g) => g.conversationId)).toEqual(['c-open']);
+    // The fact from the private turn is learned and marked, as ever.
+    expect(k.all().map((f) => [f.text, f.fromPrivate])).toEqual([['Will keeps a Mac Studio in the office.', true]]);
+    // The log says how many turns were not asked, by a count.
+    expect(ex.lastStats.rejected['suggestion-private-turn']).toBe(1);
+    expect(ex.lastStats.suggestionsFiled).toBe(1);
+    // A turn that carries both marks (answered with his goals, and kept private) is held the same way.
+    const both = await pass({ c1: [turn('c1', SAID)] }, [good()], { carriedGoals: () => true, keptPrivate: () => true });
+    expect(both.calls.map((c) => c.suggestions)).toEqual([undefined]);
+    expect(both.got).toEqual([]);
+    // With the setting off there is nothing to count.
+    const off = await pass({ c1: [turn('c1', SAID)] }, [good()], { candidates: false, keptPrivate: () => true });
+    expect(off.stats.rejected['suggestion-private-turn']).toBeUndefined();
+  });
+
   it('the knowledge facts are stored exactly as with it off', async () => {
     const convs = { c1: [turn('c1', `${CANARY} I keep a Mac Studio in the office and I want to run a half marathon by spring`)] };
     const facts = [{ turn: 1, quote: 'I keep a Mac Studio in the office', fact: 'Will keeps a Mac Studio in the office.', category: 'hardware', supersedes: [] }];

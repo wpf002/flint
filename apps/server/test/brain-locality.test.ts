@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { AnthropicProvider, OllamaProvider, OpenAiProvider, PerplexityProvider } from '@flint/core';
-import { LOCAL_WIRES, brainIsLocal, brainOf, listedAt, onThisMachine } from '../src/policy';
+import { LOCAL_WIRES, brainIsLocal, brainOf, isLocalWire, listedAt, notLocalWhy, onThisMachine, placeUnknown, placedHere, setPlaceRules } from '../src/policy';
 import { liveOllamaOptions } from '../src/local-model';
 import { buildTiers, envProviderFactory } from '../src/brains';
 import { LOCALITY } from '../src/ollama-locality';
@@ -20,7 +20,10 @@ const PULLED = ['qwen2.5:14b', 'qwen2.5:72b', 'cloudy-7b:latest'];
 beforeEach(() => {
   for (const url of LOOPBACKS) listed(url, PULLED);
 });
-afterEach(() => LOCALITY.clear());
+afterEach(() => {
+  LOCALITY.clear();
+  setPlaceRules({});
+});
 
 describe('brainIsLocal', () => {
   it('an Ollama model on this Mac is local, at any loopback address', () => {
@@ -68,10 +71,11 @@ describe('brainIsLocal', () => {
   });
 
   it('no outside provider is local, whatever its model or address says', () => {
-    for (const provider of ['anthropic', 'openai', 'perplexity', 'tavily', 'Ollama', 'ollama ', 'local', '']) {
+    for (const provider of ['anthropic', 'openai', 'perplexity', 'tavily', 'Ollama', 'ollama ', 'Local', 'openai-compatible', '']) {
       expect(brainIsLocal({ provider, model: 'qwen2.5:14b', baseURL: here }), provider).toBe(false);
     }
-    expect([...LOCAL_WIRES]).toEqual(['ollama']);
+    // Two wires reach a model on this Mac: Ollama's own API, and the OpenAI-compatible local adapter (`local`).
+    expect([...LOCAL_WIRES]).toEqual(['ollama', 'local']);
   });
 
   it('an Ollama cloud model is not local: Ollama serves it from its own machines', () => {
@@ -105,6 +109,163 @@ describe('brainIsLocal', () => {
     expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'http://studio:11434' })).toBe(false);
     expect(brainIsLocal({ provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: 'http://studio:11434' }, { allowRemote: true })).toBe(false);
     expect(brainIsLocal({ provider: 'anthropic', model: 'claude-opus-5-5', baseURL: here }, { allowRemote: true })).toBe(false);
+  });
+});
+
+describe('what the server’s own settings say about an address (setPlaceRules, told by ./inference at boot)', () => {
+  const studio = 'https://studio.tailnet.ts.net:11434';
+
+  it('with none set, here is this Mac and nowhere else', () => {
+    expect(placedHere(here)).toBe(true);
+    expect(placedHere(studio)).toBe(false);
+    expect(placedHere(undefined)).toBe(false);
+    expect(placedHere('not a url')).toBe(false);
+  });
+
+  it('the model server Will said is his own is held as this Mac is, on its Ollama’s word, and no other server is', () => {
+    setPlaceRules({ own: (url) => new URL(url).origin === new URL(studio).origin });
+    expect(placedHere(studio)).toBe(true);
+    expect(placedHere('https://other.example.com:11434')).toBe(false);
+    // The address is his, and the model is still local only once that Ollama has said it runs there.
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: studio })).toBe(false);
+    listed(studio, ['qwen2.5:72b', { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: studio })).toBe(true);
+    expect(brainIsLocal({ provider: 'ollama', model: 'mine', baseURL: studio })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'gpt-oss:120b-cloud', baseURL: studio })).toBe(false);
+    expect(brainIsLocal({ provider: 'anthropic', model: 'claude-opus-5-5', baseURL: studio })).toBe(false);
+    listed('https://other.example.com:11434', ['qwen2.5:72b']);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'https://other.example.com:11434' })).toBe(false);
+    // It is asked like this Mac's own, so what is known of it stays current; no other server ever is.
+    expect(listedAt({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: studio })).toBe(studio);
+    expect(listedAt({ provider: 'ollama', model: 'qwen2.5:72b', baseURL: 'https://other.example.com:11434' })).toBeUndefined();
+  });
+
+  it('an address reached through a proxy is not here, loopback included, whoever vouches for it', () => {
+    setPlaceRules({ proxied: () => true, own: () => true });
+    expect(placedHere(here)).toBe(false);
+    expect(placedHere(studio)).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here }, { allowRemote: true })).toBe(false);
+    expect(brainIsLocal({ provider: 'local', model: 'any', baseURL: 'http://127.0.0.1:8080/v1' })).toBe(false);
+    setPlaceRules({ proxied: (url) => new URL(url).port === '8080' });
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: here })).toBe(true);
+    expect(brainIsLocal({ provider: 'local', model: 'any', baseURL: 'http://127.0.0.1:8080/v1' })).toBe(false);
+  });
+});
+
+describe('not local, or not known yet? (placeUnknown: whoever can wait for the answer should)', () => {
+  const ollama = (model: string, baseURL: string = here) => ({ provider: 'ollama', model, baseURL });
+
+  it('a model its Ollama has not been heard on is not known yet; one it lists is settled either way', () => {
+    listed(here, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    expect(placeUnknown(ollama('qwen2.5:14b'))).toBe(false); // here
+    expect(placeUnknown(ollama('mine'))).toBe(false); // elsewhere, for good
+    expect(placeUnknown(ollama('not-pulled:7b'))).toBe(true); // the listing does not hold it: it may be pulled yet
+    LOCALITY.clear();
+    expect(brainIsLocal(ollama('qwen2.5:14b'))).toBe(false);
+    expect(placeUnknown(ollama('qwen2.5:14b'))).toBe(true); // nothing heard: not a no for good
+  });
+
+  it('a brain that can never be local is not "unknown": another provider, a cloud name, a server elsewhere, no address', () => {
+    LOCALITY.clear();
+    expect(placeUnknown({ provider: 'anthropic', model: 'claude-opus-5-5' })).toBe(false);
+    expect(placeUnknown(ollama('gpt-oss:120b-cloud'))).toBe(false);
+    expect(placeUnknown(ollama('qwen2.5:14b', 'http://gpu-box.lan:11434'))).toBe(false);
+    expect(placeUnknown({ provider: 'ollama', model: 'qwen2.5:14b' })).toBe(false);
+    expect(placeUnknown(undefined)).toBe(false);
+    // The model server Will allowed is here, so its answer is worth waiting for too.
+    setPlaceRules({ own: (url) => url.startsWith('https://studio.example') });
+    expect(placeUnknown(ollama('qwen2.5:14b', 'https://studio.example:11434'))).toBe(true);
+  });
+});
+
+describe('notLocalWhy: a few words for a log line about a local wire that is not local', () => {
+  it('not downloaded is its Ollama’s own "I do not have it"; everything else is not on this Mac; a local brain and an outside one need no saying', () => {
+    listed(here, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    const ollama = (model: string, baseURL: string = here) => ({ provider: 'ollama', model, baseURL });
+    expect(notLocalWhy(ollama('qwen2.5:14b'))).toBeUndefined();
+    expect(notLocalWhy({ provider: 'anthropic', model: 'claude-opus-5-5' })).toBeUndefined();
+    expect(notLocalWhy(undefined)).toBeUndefined();
+    expect(notLocalWhy(ollama('never-pulled:3b'))).toBe('not downloaded');
+    expect(notLocalWhy({ provider: 'local', model: 'never-pulled:3b', baseURL: `${here}/v1` })).toBe('not downloaded');
+    expect(notLocalWhy(ollama('mine'))).toBe('not on this Mac');
+    expect(notLocalWhy(ollama('gpt-oss:120b-cloud'))).toBe('not on this Mac');
+    expect(notLocalWhy(ollama('qwen2.5:14b', 'http://gpu-box.lan:11434'))).toBe('not on this Mac');
+    // A server that has not said what runs on it: nothing is known, and "not downloaded" would be a guess.
+    LOCALITY.clear();
+    expect(notLocalWhy(ollama('qwen2.5:14b'))).toBe('not on this Mac');
+    expect(notLocalWhy({ provider: 'local', model: 'any', baseURL: 'http://127.0.0.1:1234/v1' })).toBe('not on this Mac');
+  });
+});
+
+describe('the OpenAI-compatible local wire', () => {
+  const lm = 'http://127.0.0.1:1234/v1';
+  const viaOllama = 'http://127.0.0.1:11434/v1';
+  const alias = { name: 'mine:latest', remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' };
+
+  it('is a local wire: on a server at this Mac’s address that has said it is no Ollama, a model is local; elsewhere it is not', () => {
+    expect(isLocalWire('local')).toBe(true);
+    expect(isLocalWire('ollama')).toBe(true);
+    expect(isLocalWire('openai')).toBe(false);
+    // llama.cpp, LM Studio: asked for the listing an Ollama gives, it answered that it has none. It runs only its own models.
+    LOCALITY.notOllama(lm);
+    expect(LOCALITY.said(lm)).toBe('other');
+    expect(brainIsLocal({ provider: 'local', model: 'qwen2.5-coder-14b', baseURL: lm })).toBe(true);
+    expect(placeUnknown({ provider: 'local', model: 'qwen2.5-coder-14b', baseURL: lm })).toBe(false);
+    expect(brainIsLocal({ provider: 'local', model: 'qwen2.5-coder-14b', baseURL: 'http://gpu.example.com:1234/v1' })).toBe(false);
+    expect(brainIsLocal({ provider: 'local', model: 'qwen2.5-coder-14b' })).toBe(false);
+    expect(brainIsLocal({ provider: 'local', model: 'gpt-oss:120b-cloud', baseURL: lm })).toBe(false);
+  });
+
+  // The privacy review's N1. This wire can be pointed at an Ollama (`…:11434/v1`), where a cloud model can carry a
+  // plain name, and only the server knows which it is. "Not known yet" was once taken as "so, yes".
+  it('it fails closed: until the server has said what it is, nothing on it is local, whatever its address', () => {
+    LOCALITY.clear();
+    for (const baseURL of [viaOllama, lm]) {
+      expect(LOCALITY.said(baseURL), baseURL).toBeUndefined();
+      expect(brainIsLocal({ provider: 'local', model: 'mine', baseURL }), baseURL).toBe(false);
+      // Not a no for good: whoever can wait for the server's answer should.
+      expect(placeUnknown({ provider: 'local', model: 'mine', baseURL }), baseURL).toBe(true);
+    }
+    // A caller's own listing does not stand in for the server's word on what it is.
+    expect(brainIsLocal({ provider: 'local', model: 'mine', baseURL: viaOllama }, { listed: () => true })).toBe(false);
+  });
+
+  it('pointed at an Ollama, it is held to that Ollama’s listing like the other wire: an alias of a cloud model is not local', () => {
+    LOCALITY.clear();
+    // A server is known by its origin: what the Ollama at …:11434 lists is what …:11434/v1 serves.
+    listed('http://127.0.0.1:11434', ['qwen2.5:14b', alias]);
+    expect(LOCALITY.said(viaOllama)).toBe('ollama');
+    expect(brainIsLocal({ provider: 'local', model: 'mine', baseURL: viaOllama })).toBe(false);
+    expect(placeUnknown({ provider: 'local', model: 'mine', baseURL: viaOllama })).toBe(false); // elsewhere, for good
+    expect(brainIsLocal({ provider: 'local', model: 'qwen2.5:14b', baseURL: viaOllama })).toBe(true);
+    // A model that Ollama does not list is not known to run on it.
+    expect(brainIsLocal({ provider: 'local', model: 'never-pulled', baseURL: viaOllama })).toBe(false);
+    expect(placeUnknown({ provider: 'local', model: 'never-pulled', baseURL: viaOllama })).toBe(true);
+    // The other way round too: learned over this wire's address, it holds for Ollama's own API.
+    LOCALITY.clear();
+    listed(viaOllama, ['qwen2.5:14b', alias]);
+    expect(brainIsLocal({ provider: 'ollama', model: 'mine', baseURL: 'http://127.0.0.1:11434' })).toBe(false);
+    expect(brainIsLocal({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://127.0.0.1:11434' })).toBe(true);
+    // A "no listing here" from another path on that origin does not unsay the listing it gave.
+    LOCALITY.notOllama(viaOllama);
+    expect(LOCALITY.said(viaOllama)).toBe('ollama');
+    expect(brainIsLocal({ provider: 'local', model: 'mine', baseURL: viaOllama })).toBe(false);
+    // Another server on the same wire is none of that Ollama's business.
+    LOCALITY.notOllama(lm);
+    expect(brainIsLocal({ provider: 'local', model: 'mine', baseURL: lm })).toBe(true);
+  });
+
+  it('its server is asked at its origin, so a brain on this wire is watched like an Ollama’s (a tier’s included)', () => {
+    expect(listedAt({ provider: 'local', model: 'mine', baseURL: viaOllama })).toBe('http://127.0.0.1:11434');
+    expect(listedAt({ provider: 'local', model: 'mine', baseURL: 'http://localhost:1234/v1/' })).toBe('http://localhost:1234');
+    expect(listedAt({ provider: 'local', model: 'mine', baseURL: 'http://gpu.example.com:1234/v1' })).toBeUndefined();
+    expect(listedAt({ provider: 'local', model: 'mine' })).toBeUndefined();
+    expect(listedAt({ provider: 'openai', model: 'gpt-5', baseURL: viaOllama })).toBeUndefined();
+    // The model server Will allowed is asked too; one reached through a proxy never is.
+    setPlaceRules({ own: (url) => url.startsWith('https://studio.example'), proxied: (url) => new URL(url).port === '8080' });
+    expect(listedAt({ provider: 'local', model: 'mine', baseURL: 'https://studio.example/v1' })).toBe('https://studio.example');
+    expect(listedAt({ provider: 'local', model: 'mine', baseURL: 'http://127.0.0.1:8080/v1' })).toBeUndefined();
   });
 });
 

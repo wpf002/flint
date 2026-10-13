@@ -101,4 +101,40 @@ describe('tool loop with a model that mangles tool names', () => {
     expect(fed).toContain("Unknown tool 'launch_rockets'");
     expect(fed).toContain('web.web_search');
   });
+
+  // An app that holds a tool back on purpose can say why (FlintConfig.unknownTool).
+  it('with unknownTool, the app says what the model is told about a tool that was not offered, and nothing runs', async () => {
+    const seen: string[] = [];
+    const asked: Array<{ name: string; offered: readonly string[] }> = [];
+    const { provider, bodies } = scripted([callTool('trident.gmail_search'), answer('I cannot look at mail for this one')]);
+    const flint = new Flint({
+      provider,
+      defaultModel: 'claude-sonnet-4-6',
+      unknownTool: (call, offered) => {
+        asked.push({ name: call.toolName, offered });
+        return { isError: true, content: 'This message is private, so nothing outside this Mac is asked.' };
+      },
+    });
+    const out = await flint.generate({ prompt: 'q', tools: [search(seen)] });
+    expect(seen).toEqual([]);
+    expect(out.text).toBe('I cannot look at mail for this one');
+    expect(asked).toEqual([{ name: 'trident.gmail_search', offered: ['web.web_search'] }]);
+    const fed = JSON.stringify(bodies[1]!.messages.at(-1));
+    expect(fed).toContain('This message is private, so nothing outside this Mac is asked.');
+    expect(fed).not.toContain('Unknown tool');
+  });
+
+  it('unknownTool that returns undefined, or throws, leaves the default; a tool that WAS offered is never asked about', async () => {
+    for (const unknownTool of [() => undefined, () => { throw new Error('the app has its own trouble'); }]) {
+      const { provider, bodies } = scripted([callTool('launch_rockets'), answer('sorry')]);
+      await new Flint({ provider, defaultModel: 'claude-sonnet-4-6', unknownTool }).generate({ prompt: 'q', tools: [search([])] });
+      expect(JSON.stringify(bodies[1]!.messages.at(-1))).toContain("Unknown tool 'launch_rockets'");
+    }
+    let asked = 0;
+    const seen: string[] = [];
+    const { provider } = scripted([callTool('web_search'), answer('done')]);
+    await new Flint({ provider, defaultModel: 'claude-sonnet-4-6', unknownTool: () => void asked++ }).generate({ prompt: 'q', tools: [search(seen)] });
+    expect(asked).toBe(0);
+    expect(seen).toHaveLength(1);
+  });
 });

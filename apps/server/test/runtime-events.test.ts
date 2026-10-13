@@ -8,7 +8,7 @@
  * is tested with the notifications feed it depends on: notifications.test.ts.)
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ServerEventBatch, type ServerEvent } from '@flint/policy';
@@ -84,6 +84,33 @@ describe('pushing', () => {
     expect(logs.some((l) => /spool is full; 1 event/.test(l))).toBe(true);
     expect(ev.push({ type: 'spend.threshold', vendor: 'anthropic', level: 'exhausted', period: 'day' })).toBe(true);
     expect(ev.push({ type: 'route.error', route: 'chat', status: 502 })).toBe(true);
+  });
+});
+
+// The breaker's last review, F4: these two lines handed the caught error's own message to the log, and a
+// file error's message is the spool's path. (test/error-log.test.ts's scan now sees a logOnce, too.)
+describe('a spool that cannot be written, or a flush that throws, is logged by its class, never its words', () => {
+  it('a write that fails: the system\'s code, and nothing of the path', () => {
+    const ev = make(stubRuntime().fetchImpl);
+    // The spool file's place is taken by a directory: appending to it fails with EISDIR, and the message names the path.
+    mkdirSync(join(dir, 'events.jsonl'));
+    expect(ev.push(turn())).toBe(false);
+    expect(logs).toEqual(['[events] could not write the spool (Error EISDIR)']);
+    expect(logs.join('\n')).not.toContain(dir);
+    // Once: the same failure a second time is not a second line.
+    ev.push(turn());
+    expect(logs).toHaveLength(1);
+  });
+
+  it('a flush that throws on the timer: its class only', async () => {
+    const ev = make(stubRuntime().fetchImpl);
+    const secret = `${dir}/some-secret-path`;
+    (ev as unknown as { flush: () => Promise<void> }).flush = async () => Promise.reject(Object.assign(new Error(`EACCES: permission denied, open '${secret}'`), { code: 'EACCES' }));
+    const stop = ev.start(5);
+    await new Promise((r) => setTimeout(r, 40));
+    stop();
+    expect(logs).toEqual(['[events] flush failed (Error EACCES)']);
+    expect(logs.join('\n')).not.toContain('secret');
   });
 });
 

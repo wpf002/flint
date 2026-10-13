@@ -85,6 +85,7 @@ export class ActionLogObserver implements AiObserver {
 /** Fan one observer interface out to several (e.g. metrics + audit log). */
 export function combineObservers(...observers: AiObserver[]): AiObserver {
   return {
+    onContext: (e) => observers.forEach((o) => o.onContext?.(e)),
     onRequest: (e) => observers.forEach((o) => o.onRequest?.(e)),
     onResponse: (e) => observers.forEach((o) => o.onResponse?.(e)),
     onError: (e) => observers.forEach((o) => o.onError?.(e)),

@@ -243,8 +243,12 @@ export function corpusView(c: CorpusStats) {
 export interface TrainingStatusDeps {
   brainDir: string;
   corpus: () => CorpusStats;
-  /** What is answering right now (the local provider + model, and frontier). */
-  serving: () => { local: string; frontier?: string | undefined };
+  /**
+   * What is answering right now: the local provider + model, the frontier, and
+   * (./inference) the routing mode and the local model's state, so "what are
+   * you running on?" has a true answer.
+   */
+  serving: () => { local: string; frontier?: string | undefined; mode?: string; localState?: string };
   /** Injectable for tests. */
   isRunning?: () => Promise<boolean>;
   /** Injectable for tests. A reader that returns undefined leaves `trainingJobs` out. */

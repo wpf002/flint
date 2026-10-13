@@ -1,4 +1,5 @@
 import { makeAiError, type AiError } from '../../types/error.js';
+import { DeadlineError, deadlineAiError, isRedirectRefusal, redirectAiError } from '../deadline.js';
 
 /** A non-2xx response from an OpenAI-compatible endpoint. */
 export class OpenAiHttpError extends Error {
@@ -19,6 +20,10 @@ export class OpenAiHttpError extends Error {
  * the only part of the body that is stable across OpenAI and its compatibles.
  */
 export function toAiError(err: unknown, providerLabel: string): AiError {
+  // The wire's own deadline (ChatWire.firstTokenTimeoutMs / requestTimeoutMs): the endpoint
+  // stalled. Not retryable, so the caller moves to another model instead of waiting again.
+  if (err instanceof DeadlineError) return deadlineAiError(err, providerLabel);
+
   /*
    * AbortSignal.timeout() raises TimeoutError, not AbortError, so a deadline that fired
    * was landing in the generic branch and reporting as a non-retryable internal fault.
@@ -34,6 +39,9 @@ export function toAiError(err: unknown, providerLabel: string): AiError {
   if (err instanceof OpenAiHttpError) {
     return fromStatus(err, providerLabel);
   }
+
+  // A wire that refuses redirects (ChatWire.refuseRedirects) was sent one: the address is wrong.
+  if (isRedirectRefusal(err)) return redirectAiError(providerLabel, err);
 
   // fetch() connection failures (DNS, refused, offline) surface as TypeError.
   if (err instanceof TypeError) {

@@ -100,6 +100,15 @@ legal advice.) Prompts a vendor model wrote (the retired `bulk_seed`/`auto_grow`
 are dropped too. Will's own prompts are his: when their answer is refused, the prompt
 goes to `prompts_for_sampling.jsonl` for a compliant teacher to answer.
 
+A prompt from a turn that stayed on this Mac (the server marks its corpus row
+`staysHere`: a message Will kept private, or any turn of Local mode) carries
+`"staysHere": true` into that file, and so does the kept copy of a prompt that was
+asked twice when either copy was marked. A teacher that runs on this Mac may answer
+it. Nothing that is not on this Mac is ever given a marked row: whatever reads the
+file for an outside teacher or judge reads it through
+`build_data.prompts_for_outside`, which leaves them out. The manifest counts them
+(`counts.samplingStaysHere`).
+
 **What that leaves today:** zero target rows. Of the corpus's 827 rows, 625 have
 Claude-written prompts, 101 overlap the parity set, 17 are in the eval pool, 42 are
 trivial, and the rest have Claude's answers. 40 eligible prompts remain for sampling.

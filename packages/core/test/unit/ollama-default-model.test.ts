@@ -74,6 +74,16 @@ describe('pickOllamaModel', () => {
     }
   });
 
+  it('skip: a model the caller names is never picked, loaded or pulled', async () => {
+    const skip = (name: string) => name === 'small-model:3b';
+    const both = ollama({ ps: [model('small-model:3b', 'llama'), model('muse-glimmer:30b', 'muse-glimmer')], tags: [] });
+    expect(await pickOllamaModel({ fetch: both.impl, skip })).toMatchObject({ model: 'muse-glimmer:30b', from: 'loaded' });
+    const onlyIt = ollama({ ps: [model('small-model:3b', 'llama')], tags: [model('small-model:3b', 'llama'), model('gemma4:26b', 'gemma4')] });
+    expect(await pickOllamaModel({ fetch: onlyIt.impl, skip })).toMatchObject({ model: 'gemma4:26b', from: 'pulled' });
+    const nothingElse = ollama({ ps: [model('small-model:3b', 'llama')], tags: [model('small-model:3b', 'llama')] });
+    expect(await pickOllamaModel({ fetch: nothingElse.impl, skip })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered: true });
+  });
+
   it('a reply that is not the expected shape is treated as an empty list', async () => {
     const impl = (async () => new Response('"nope"', { status: 200 })) as unknown as typeof fetch;
     expect(await pickOllamaModel({ fetch: impl })).toEqual({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered: true });

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyCandidate, hasParked, parkEnvLine, readEnvLine, readRollback, recoverIfNeeded, setEnvLine, settleCandidate, unparkEnvLine, writeSecrets, type TryIo } from '../src/run-try';
+import { SECRETS_TEMP_STALE_MS, applyCandidate, hasParked, isSecretsTemp, parkEnvLine, readEnvLine, readRollback, recoverIfNeeded, secretsTempName, setEnvLine, settleCandidate, unparkEnvLine, writeSecrets, type TryIo } from '../src/run-try';
 
 describe('setEnvLine', () => {
   const file = 'A=1\nFLINT_TIER_HARD=anthropic:claude-opus-5-5\nB=2\n';
@@ -309,6 +309,57 @@ describe('writeSecrets (the file is replaced whole, or not at all)', () => {
     expect(() => writeSecrets(path, 'A=1\n')).toThrow();
     expect(readFileSync(join(path, 'keep'), 'utf8')).toBe('still here');
     expect(readdirSync(dir)).toEqual(['secrets.env']);
+  });
+
+  // The breaker's last review, F5: the temp file holds every key, a hard kill between the write and the
+  // rename leaves it behind, and under its old name the offsite backup took it along.
+  it('the temp file has a name the offsite backup leaves out: it ends in .env', () => {
+    const name = secretsTempName('secrets.env');
+    expect(name).toMatch(/^\.secrets\.env\.\d+\.[0-9a-f]{8}\.tmp\.env$/);
+    // apps/studio/backup_flint.sh leaves `./*.env` out of the offsite archive, at any depth (bsdtar's * crosses '/').
+    const backup = readFileSync(join(__dirname, '..', '..', 'studio', 'backup_flint.sh'), 'utf8');
+    expect(backup).toMatch(/SECRETS=\([^)]*--exclude '\.\/\*\.env'/);
+    expect(name.endsWith('.env')).toBe(true);
+    // The name it had before did not: `.secrets.env.<pid>.<hex>.tmp`.
+    expect('.secrets.env.4242.0a1b2c3d.tmp'.endsWith('.env')).toBe(false);
+    expect(isSecretsTemp(name, 'secrets.env')).toBe(true);
+    expect(isSecretsTemp('.secrets.env.4242.0a1b2c3d.tmp', 'secrets.env')).toBe(true);
+    for (const other of ['secrets.env', '.secrets.env', 'secrets.env.bak', '.secrets.env.notes', '.other.env.1.0a1b2c3d.tmp.env', '.secrets.env.1.xyz.tmp.env']) {
+      expect(isSecretsTemp(other, 'secrets.env'), other).toBe(false);
+    }
+  });
+
+  it('a temp file an earlier, killed write left behind is swept by the next write, under either name; a fresh one is left alone', () => {
+    const path = join(dir, 'secrets.env');
+    writeFileSync(path, 'A=1\n', 'utf8');
+    const staleNew = join(dir, '.secrets.env.4242.0a1b2c3d.tmp.env');
+    const staleOld = join(dir, '.secrets.env.4242.deadbeef.tmp');
+    const fresh = join(dir, '.secrets.env.4243.0badf00d.tmp.env');
+    const notOurs = join(dir, '.secrets.env.notes');
+    for (const f of [staleNew, staleOld, fresh, notOurs]) writeFileSync(f, 'KEY=every-key-flint-has\n', 'utf8');
+    const old = new Date(Date.now() - SECRETS_TEMP_STALE_MS - 5_000);
+    utimesSync(staleNew, old, old);
+    utimesSync(staleOld, old, old);
+    writeSecrets(path, 'A=2\n');
+    expect(readFileSync(path, 'utf8')).toBe('A=2\n');
+    expect(readdirSync(dir).sort()).toEqual(['.secrets.env.4243.0badf00d.tmp.env', '.secrets.env.notes', 'secrets.env']);
+    // ...and once it is old too, the next write takes it.
+    writeSecrets(path, 'A=3\n', { now: () => Date.now() + SECRETS_TEMP_STALE_MS + 5_000 });
+    expect(readdirSync(dir).sort()).toEqual(['.secrets.env.notes', 'secrets.env']);
+  });
+
+  it('the new contents are on disk before they take the old file\'s place: fsync, then rename', () => {
+    const src = readFileSync(join(__dirname, '..', 'src', 'run-try.ts'), 'utf8');
+    const body = src.slice(src.indexOf('export function writeSecrets('), src.indexOf('export const SECRETS_TEMP_STALE_MS'));
+    const at = (needle: string) => {
+      const i = body.indexOf(needle);
+      expect(i, needle).toBeGreaterThan(-1);
+      return i;
+    };
+    expect(at("openSync(tmp, 'wx', 0o600)")).toBeLessThan(at('writeSync(fd, content'));
+    expect(at('writeSync(fd, content')).toBeLessThan(at('fsyncSync(fd)'));
+    expect(at('fsyncSync(fd)')).toBeLessThan(at('closeSync(fd)'));
+    expect(at('closeSync(fd)')).toBeLessThan(at('renameSync(tmp, target)'));
   });
 
   it('a symlinked secrets.env stays a symlink: the file it points at is the one replaced', () => {

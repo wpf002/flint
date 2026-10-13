@@ -263,6 +263,15 @@ describe('what the server writes when something breaks, line by line', () => {
  * tokens in it), a database error can quote a row. Every such line goes
  * through logError or errorSummary. This scans the source, so a new one fails
  * here; a line that really is safe is listed in AUDITED, with why.
+ *
+ * The scan reads each log call whole (console.*, an injected `log` or `warn`
+ * callback, a `logOnce`), sets its string literals aside, and flags the call
+ * when what is left NAMES a caught error anywhere outside errorSummary,
+ * errorClass or breakerReason: alone, first or last among the arguments, in an
+ * object, added to a string, through a method, a cast or an optional chain.
+ * A caught error is `err`, `error` or `cause`, and any name the file binds in
+ * a `catch (name)`, a `.catch((name) =>`, an `on('error', (name) =>` or a
+ * rejection handler.
  */
 describe('no log line carries a caught error or its message', () => {
   const dir = join(__dirname, '..', 'src');
@@ -277,36 +286,148 @@ describe('no log line carries a caught error or its message', () => {
     "safe-handler.ts: log(`[http] ${req.method ?? '?'} ${(req.url ?? '?').split('?')[0]} failed:`, err);": 'its `log` defaults to logError, which summarises',
     // A provider error is summarised; anything else here is a reason the server wrote (no frontier brain, a budget pause, the timeout).
     'deep-research.ts: deps.log?.(`[research] planner failed (${isFlintError(err) ? errorSummary(err) : errMsg(err)}); using heuristics`);': "a provider's error is summarised; the rest are the server's own reasons",
+    // logError's own line: the summary, and where the error was thrown (thrownAt: a stack frame, found only after the message, never the message).
+    'error-log.ts: else log(`${prefix} ${errorSummary(err)}${thrownAt(err)}`);': 'thrownAt is one stack frame (a function and a file), never the message',
+    // FrontierPaused carries the server's own brain and reason: a label from config and a reason code.
+    'index.ts: if (err instanceof FrontierPaused) console.error(`[brain] ${err.brain.label} is paused (${err.brain.reason}); the local model answers`);': "FrontierPaused.brain is the server's own: a configured label and a reason code",
+    // errorKind is memory extraction's own summariser (./memory-extract): a kind or name and a code, cut to word characters, never the message.
+    'memory-extract.ts: console.error(`[memory-extract] pass failed: ${errorKind(err)}`);': "errorKind keeps an error's kind or name and a code, never its message",
+    'memory-extract.ts: console.error(`[memory-extract] could not persist watermarks: ${errorKind(err)}`);': "errorKind keeps an error's kind or name and a code, never its message",
+    'memory-extract.ts: console.error(`[memory-extract] the suggestions step failed (${errorKind(err)}); the facts are kept and the pass goes on`);': "errorKind keeps an error's kind or name and a code, never its message",
   };
-  /** A call that writes a log line: console.*, or one of the injected `log` callbacks. */
-  const LOGS = /\bconsole\.(error|warn|log|info|debug)\(|(^|[^\w.])log\??\.?\(|\.log\??\.?\(/;
-  /** ...that is handed a caught error, or its words. */
-  const LEAK = /,\s*(err|e|error|cause)\s*\)|\b(err|e|error|cause)\.(message|stack)\b|String\((err|e|error|cause)\)|\$\{(err|e|error|cause)\}|errMsg\(/;
 
-  /** The whole call that starts on `from`, to its closing bracket: a call can run over several lines. */
-  const callText = (src: string[], from: number): string => {
+  /** A call that writes a log line: console.*, an injected `log` / `warn` callback, or a `logOnce`. */
+  const CALL = /(?:\bconsole\.(?:error|warn|log|info|debug)|(?<![\w.$])(?:log|warn|logOnce)|\.(?:log|warn|logOnce))(?:\?\.)?\(/g;
+  /** Wrappers that turn an error into code words: naming the error inside one is the point. */
+  const SAFE = ['errorSummary', 'errorClass', 'breakerReason'];
+  /** Names that are a caught error wherever they appear. */
+  const ALWAYS = ['err', 'error', 'cause'];
+
+  /** From an opening bracket at `open`, the index just past its closing one (strings and templates skipped). */
+  const closeOf = (src: string, open: number): number => {
     let depth = 0;
-    let text = '';
-    for (let i = from; i < Math.min(src.length, from + 12); i++) {
-      text += `${src[i]}\n`;
-      for (const ch of src[i]!) depth += ch === '(' ? 1 : ch === ')' ? -1 : 0;
-      if (depth <= 0) break;
+    let i = open;
+    const skipString = (q: string): void => {
+      i++;
+      while (i < src.length && src[i] !== q) {
+        if (src[i] === '\\') i++;
+        else if (q === '`' && src[i] === '$' && src[i + 1] === '{') {
+          let d = 1;
+          i += 2;
+          while (i < src.length && d > 0) {
+            if (src[i] === '`' || src[i] === "'" || src[i] === '"') skipString(src[i]!);
+            else if (src[i] === '{') d++;
+            else if (src[i] === '}') d--;
+            if (d > 0) i++;
+          }
+        }
+        i++;
+      }
+    };
+    for (; i < src.length; i++) {
+      const ch = src[i]!;
+      if (ch === "'" || ch === '"' || ch === '`') skipString(ch);
+      else if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) return i + 1;
     }
-    return text;
+    return src.length;
   };
 
-  const lines = (): string[] => {
-    const out: string[] = [];
-    for (const f of readdirSync(dir).filter((n) => n.endsWith('.ts'))) {
-      const src = readFileSync(join(dir, f), 'utf8').split('\n');
-      src.forEach((raw, i) => {
-        const line = raw.trim();
-        if (line.startsWith('//') || line.startsWith('*') || !LOGS.test(line)) return;
-        if (LEAK.test(callText(src, i))) out.push(`${f}: ${line}`);
-      });
+  /** Code with its string literals emptied: what a template interpolates is kept, as code. */
+  const codeOnly = (src: string): string => {
+    let out = '';
+    let i = 0;
+    const template = (): void => {
+      i++; // the opening backtick
+      while (i < src.length && src[i] !== '`') {
+        if (src[i] === '\\') i += 2;
+        else if (src[i] === '$' && src[i + 1] === '{') {
+          i += 2;
+          out += ' (';
+          let d = 1;
+          while (i < src.length && d > 0) {
+            const ch = src[i]!;
+            if (ch === '`') template();
+            else if (ch === "'" || ch === '"') quoted(ch);
+            else {
+              if (ch === '{') d++;
+              else if (ch === '}') d--;
+              if (d > 0) out += ch;
+              i++;
+            }
+          }
+          out += ') ';
+        } else i++;
+      }
+      i++;
+    };
+    const quoted = (q: string): void => {
+      i++;
+      while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1;
+      i++;
+      out += "''";
+    };
+    while (i < src.length) {
+      const ch = src[i]!;
+      if (ch === '`') template();
+      else if (ch === "'" || ch === '"') quoted(ch);
+      else {
+        out += ch;
+        i++;
+      }
     }
     return out;
   };
+
+  /** The names a file binds to a caught error or a rejection, beside the three that always are one. */
+  const errorNames = (src: string): string[] => {
+    const names = new Set(ALWAYS);
+    for (const re of [
+      /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g,
+      /\.catch\(\s*(?:async\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*(?::[^)=]*)?\)?\s*=>/g,
+      /\bon(?:ce)?\(\s*['"]error['"]\s*,\s*(?:async\s*)?\(?\s*([A-Za-z_$][\w$]*)/g,
+      /,\s*\(\s*([A-Za-z_$][\w$]*)\s*:\s*unknown\s*\)\s*=>/g, // a rejection handler: `.then(ok, (x: unknown) => ...)`
+    ]) {
+      for (const m of src.matchAll(re)) names.add(m[1]!);
+    }
+    return [...names];
+  };
+
+  /** Does this call's text name one of `names` outside a safe wrapper? `call` starts at the callee. */
+  const namesError = (call: string, names: readonly string[]): boolean => {
+    let code = codeOnly(call.slice(call.indexOf('(')));
+    for (const fn of SAFE) {
+      for (let at = code.search(new RegExp(`\\b${fn}\\(`)); at >= 0; at = code.search(new RegExp(`\\b${fn}\\(`))) {
+        code = `${code.slice(0, at)}0${code.slice(closeOf(code, at + fn.length))}`;
+      }
+    }
+    const word = new RegExp(`(?<![\\w$.])(?:${names.map((n) => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`, 'g');
+    for (const m of code.matchAll(word)) {
+      const before = code.slice(0, m.index).trimEnd();
+      const after = code.slice(m.index! + m[0].length).trimStart();
+      // An object's key (`{ error: 'x' }`), not the variable: but `{ err }` and `x ? err : y` are the variable.
+      if (after.startsWith(':') && !after.startsWith('::') && /[{,]$/.test(before)) continue;
+      return true;
+    }
+    return false;
+  };
+
+  /** Every flagged call in a file, as `file: the trimmed line it starts on`. */
+  const scan = (file: string, src: string): string[] => {
+    const names = errorNames(src);
+    const out: string[] = [];
+    for (const m of src.matchAll(CALL)) {
+      const lineStart = src.lastIndexOf('\n', m.index!) + 1;
+      const lineEnd = src.indexOf('\n', m.index!);
+      const line = src.slice(lineStart, lineEnd < 0 ? src.length : lineEnd).trim();
+      if (line.startsWith('//') || line.startsWith('*') || line.startsWith('/*')) continue;
+      const call = src.slice(m.index!, closeOf(src, m.index! + m[0].length - 1));
+      if (namesError(call, names)) out.push(`${file}: ${line}`);
+    }
+    return [...new Set(out)];
+  };
+
+  const lines = (): string[] => readdirSync(dir).filter((n) => n.endsWith('.ts')).flatMap((f) => scan(f, readFileSync(join(dir, f), 'utf8')));
 
   it('every such line is one that was looked at and listed', () => {
     expect(lines().filter((k) => !(k in AUDITED))).toEqual([]);
@@ -318,26 +439,54 @@ describe('no log line carries a caught error or its message', () => {
     for (const why of Object.values(AUDITED)) expect(why.length).toBeGreaterThan(10);
   });
 
-  it('the scan sees what it is meant to: a line that hands over an error, in each of the shapes found so far', () => {
+  it('the scan sees what it is meant to: a line that hands over an error, in every shape', () => {
+    const flagged = (code: string): boolean => scan('x.ts', code).length > 0;
     for (const bad of [
+      // The shapes found so far...
       "console.error('[x] failed:', err);",
       'console.warn(`[x] failed: ${err.message}`);',
       'console.log(`[x] ${String(err)}`);',
       'this.log(`[x] could not save: ${err instanceof Error ? err.message : String(err)}`);',
       'deps.log?.(`[x] failed (${errMsg(err)})`);',
-      "log('[x]', e);",
+      "try { f(); } catch (e) { log('[x]', e); }",
       'this.o.log?.(`[x] ${error}`);',
-      'console.error(`[x] ${e.stack}`);',
+      'try { f(); } catch (e) { console.error(`[x] ${e.stack}`); }',
+      // ...and the ones the breaker's last review found the old scan blind to (F4):
+      'console.error(err);', // the error alone
+      "console.error(err, '[x] failed');", // not the last argument
+      "console.error('[x] failed', { err });", // in an object
+      "console.error('[x] failed', { cause: err });",
+      "console.error('[x] failed: ' + err);", // added to a string
+      'console.error(`[x] ${err.toString()}`);', // through a method
+      'console.error(`[x] ${(err as Error).message}`);', // through a cast
+      'console.error(`[x] ${err?.message}`);', // through an optional chain
+      'console.error(`[x] ${JSON.stringify(err)}`);',
+      'console.error(`[x] ${String(\n  err,\n)}`);', // over several lines
+      'warn(`[x] failed: ${err.message}`);', // a `warn` callback
+      "opts.warn?.('[x]', err);",
+      'this.logOnce(\'write\', `[x] could not write: ${err instanceof Error ? err.message : String(err)}`);', // a logOnce
+      'void go().catch((problem) => this.logOnce(\'flush\', `[x] flush failed: ${problem}`));', // another name, from .catch
+      'try { f(); } catch (ex) { console.error(`[x] ${ex}`); }', // another name, from catch
+      "sock.on('error', (boom) => console.error('[x]', boom.message));", // another name, from an error event
+      'p.then(ok, (why: unknown) => console.error(`[x] ${String(why)}`));', // another name, from a rejection handler
+      'console.error(`[x] ${errorSummary(err)} ${err.message}`);', // summarised, and then handed over anyway
     ]) {
-      expect(LOGS.test(bad) && LEAK.test(bad), bad).toBe(true);
+      expect(flagged(bad), bad).toBe(true);
     }
     for (const fine of [
       'logError(`[x] failed:`, err);',
       'console.error(`[x] failed (${errorSummary(err)})`);',
       'this.log(`[x] could not save ${this.file} (${errorSummary(err)})`);',
+      'this.logOnce(\'write\', `[x] could not write the spool (${errorSummary(err)})`);',
+      'console.error(`[x] ${errorClass(err)} ${breakerReason(err.error) ?? \'\'}`);',
       "console.error('[x] started');",
+      "console.error('[x] an error, the cause of which is in err');", // the words, in a string
+      "console.error('[x]', { error: 'the address was refused', cause: reason });", // an object's keys
+      'console.error(`[x] ${r.error} ${res.err}`);', // another thing's property
+      'try { f(); } catch (e) { g(); }\nconsole.error(`[x] ${ev.type}`);', // `e` is bound, `ev` is not it
+      '// console.error(err)',
     ]) {
-      expect(LOGS.test(fine) && LEAK.test(fine), fine).toBe(false);
+      expect(flagged(fine), fine).toBe(false);
     }
   });
 });

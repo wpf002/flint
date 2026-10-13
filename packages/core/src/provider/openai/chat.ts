@@ -9,6 +9,7 @@ import { newId } from '../../core/util.js';
 import { OpenAiHttpError, toAiError } from './errors.js';
 import { fromOpenAiToolName, mapFinishReason, mapMessages, mapTools, parseArgs } from './mapping.js';
 import { responseFormatName } from '../response-format.js';
+import { raceAbort, readDeadline, startDeadline, type DeadlineMs } from '../deadline.js';
 
 /**
  * The chat-completions wire format, as spoken by OpenAI and by everyone who cloned
@@ -34,12 +35,49 @@ export interface ChatWire {
   /** Fields merged into every request body (e.g. a search filter). */
   extraBody?: Record<string, unknown>;
   headers?: Record<string, string>;
+  /*
+   * The fields below are for endpoints that can stall rather than fail (a local
+   * model server whose model is cold). All are off unless set, and a wire that
+   * sets none of them sends exactly the requests it always did.
+   */
+  /**
+   * ms from sending a streamed call that starts a turn to its first sign of
+   * output (text, a tool call, or reasoning). Past it the call ends with a
+   * `timeout` error whose providerCode is `first_token_timeout`, not retryable.
+   * Like the two below, a number or a function read on every call (DeadlineMs).
+   */
+  firstTokenTimeoutMs?: DeadlineMs;
+  /** The same for a call that follows a tool result (the last message is one). Unset: firstTokenTimeoutMs. */
+  toolPassTimeoutMs?: DeadlineMs;
+  /** ms for a non-streamed generate() to answer (providerCode `request_timeout`). */
+  requestTimeoutMs?: DeadlineMs;
+  /**
+   * ms a streamed reply may go quiet once it has begun, between one piece and
+   * the next (providerCode `idle_timeout`). A model that sends one delta and
+   * then nothing would otherwise hold the turn until the caller gave up.
+   */
+  idleTimeoutMs?: DeadlineMs;
+  /**
+   * How `toolChoice: 'none'` is sent: `send` (the default) keeps the tools
+   * defined and sends the API's own `tool_choice: "none"`; `drop_tools` leaves
+   * the tools out instead, for a server with no such knob (Ollama's /v1).
+   */
+  toolChoiceNone?: 'send' | 'drop_tools';
+  /** Never follow a redirect: a server at a fixed address has no reason to send one. */
+  refuseRedirects?: boolean;
 }
 
 interface ChatChoice {
   /** `refusal` is set (and `content` null) when the model declines to answer. */
   message?: { content?: string | null; refusal?: string | null; tool_calls?: RawToolCall[] };
-  delta?: { content?: string | null; refusal?: string | null; tool_calls?: RawDeltaToolCall[] };
+  delta?: {
+    content?: string | null;
+    refusal?: string | null;
+    tool_calls?: RawDeltaToolCall[];
+    /** A thinking model's reasoning (Ollama: `reasoning`; llama.cpp: `reasoning_content`). Never the answer. */
+    reasoning?: string | null;
+    reasoning_content?: string | null;
+  };
   finish_reason?: string | null;
 }
 
@@ -103,9 +141,11 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
   }
 
   async generate(args: GenerateArgs): Promise<GenerateResult> {
+    // A deadline of the wire's own on the whole reply (off unless the wire sets one).
+    const guard = startDeadline('request', readDeadline(this.wire.requestTimeoutMs), args.signal);
     try {
       const body = this.buildBody(args, false);
-      const raw = (await this.post(body, args.signal)) as ChatResponse;
+      const raw = (await (guard.active ? raceAbort(this.post(body, guard.signal), guard.signal) : this.post(body, args.signal))) as ChatResponse;
 
       const choice = raw.choices?.[0];
       const text = choice?.message?.content ?? '';
@@ -126,7 +166,9 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       const reason = choice?.message?.refusal ? 'refusal' : mapFinishReason(choice?.finish_reason);
       return this.decorate({ message, usage, reason }, raw, args);
     } catch (err) {
-      throw new FlintError(toAiError(err, this.wire.name));
+      throw new FlintError(toAiError(guard.fired() ?? err, this.wire.name));
+    } finally {
+      guard.dispose();
     }
   }
 
@@ -137,22 +179,46 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
     // the caller decides what to tell the user.
     let refused = false;
 
-    // Tool calls arrive as fragments keyed by index and must be reassembled.
-    const builders = new Map<number, { id: string; name: string; json: string }>();
+    // Tool calls arrive as fragments keyed by index and must be reassembled. A fragment
+    // with no index continues the call before it; and a NEW id where a call with another
+    // id already sits is another call (some local servers send every call at index 0, or
+    // with no index at all: keyed by index alone, the second overwrote the first).
+    interface CallBuilder {
+      index: number | undefined;
+      id: string;
+      name: string;
+      json: string;
+    }
+    const calls: CallBuilder[] = [];
+    const byIndex = new Map<number, CallBuilder>();
+    let lastCall: CallBuilder | undefined;
 
     // Endpoints that carry extra top-level fields (Perplexity's sources, say) put
     // them on the final chunk, so the last one seen is the one worth keeping.
     let lastChunk: unknown;
+    // The first sign of output has arrived: from here the idle clock runs between pieces.
+    let started = false;
+
+    // The wire's own deadlines: on the first sign of output, and then between one piece of the
+    // reply and the next (both off unless the wire sets them).
+    const idleMs = readDeadline(this.wire.idleTimeoutMs);
+    const guard = startDeadline('first_token', this.firstTokenMs(args), args.signal, { always: idleMs !== undefined });
 
     try {
       const body = this.buildBody(args, true);
-      const response = await this.send(body, args.signal);
+      const response = await (guard.active ? raceAbort(this.send(body, guard.signal), guard.signal) : this.send(body, args.signal));
       if (!response.body) throw new OpenAiHttpError(502, 'Response had no body');
 
-      for await (const chunk of readSse(response.body)) {
-        const parsed = safeJson(chunk) as ChatResponse | undefined;
+      for await (const chunk of readSse(response.body, guard.active ? guard.signal : undefined)) {
+        const parsed = safeJson(chunk) as (ChatResponse & { error?: unknown }) | undefined;
         if (!parsed) continue;
+        // An error sent inside the stream (llama.cpp and Ollama's /v1 do this once the 200 is
+        // out): the call failed. It used to be skipped as a chunk with no choices, and the
+        // turn ended `complete` with whatever text had arrived, or none.
+        if (parsed.error !== undefined && parsed.error !== null && !parsed.choices?.length) throw inStreamError(parsed.error);
         lastChunk = parsed;
+        // Anything at all from the server restarts the idle clock, once the reply has begun.
+        if (guard.active && started) guard.rearm('idle', idleMs);
 
         if (parsed.usage) usage = toUsage(parsed.usage, usage);
 
@@ -161,16 +227,27 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
         if (choice.finish_reason) finish = choice.finish_reason;
 
         const delta = choice.delta;
+        // Any sign the model is producing something ends the first-token deadline. Reasoning
+        // counts (the model is working) but is never emitted: only `content` is the answer.
+        if (!started && (delta?.content || delta?.refusal || delta?.reasoning || delta?.reasoning_content || (delta?.tool_calls?.length ?? 0) > 0 || choice.finish_reason)) {
+          started = true;
+          guard.rearm('idle', idleMs);
+        }
         if (delta?.refusal) refused = true;
         if (delta?.content) yield { type: 'text', delta: delta.content };
 
         for (const frag of delta?.tool_calls ?? []) {
-          const existing = builders.get(frag.index) ?? { id: '', name: '', json: '' };
-          builders.set(frag.index, {
-            id: frag.id ?? existing.id,
-            name: frag.function?.name ?? existing.name,
-            json: existing.json + (frag.function?.arguments ?? ''),
-          });
+          const index = typeof frag.index === 'number' ? frag.index : undefined;
+          let b = index !== undefined ? byIndex.get(index) : lastCall;
+          if (!b || (frag.id && b.id && frag.id !== b.id)) {
+            b = { index, id: '', name: '', json: '' };
+            calls.push(b);
+            if (index !== undefined) byIndex.set(index, b);
+          }
+          lastCall = b;
+          b.id = frag.id ?? b.id;
+          b.name = frag.function?.name ?? b.name;
+          b.json += frag.function?.arguments ?? '';
         }
       }
 
@@ -179,7 +256,9 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
        * wire has no per-call terminator — a call is only known to be complete once
        * the stream is.
        */
-      for (const [, b] of [...builders.entries()].sort((a, z) => a[0] - z[0])) {
+      // By index, as the API numbers them; calls that share an index (or have none) keep the order they arrived in.
+      const ordered = calls.map((b, seen) => ({ b, seen })).sort((x, y) => (x.b.index ?? x.seen) - (y.b.index ?? y.seen) || x.seen - y.seen);
+      for (const { b } of ordered) {
         if (!b.name) continue;
         yield {
           type: 'tool_call',
@@ -197,8 +276,17 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       yield { type: 'done', reason: refused ? 'refusal' : mapFinishReason(finish), usage };
     } catch (err) {
       // Always terminate with exactly one done or error, never just stop.
-      yield { type: 'error', error: toAiError(err, this.wire.name) };
+      yield { type: 'error', error: toAiError(guard.fired() ?? err, this.wire.name) };
+    } finally {
+      guard.dispose();
     }
+  }
+
+  /** The first-token deadline for this call: the tool-pass one after a tool result, when set. */
+  private firstTokenMs(args: GenerateArgs): number | undefined {
+    const afterTool = args.messages[args.messages.length - 1]?.role === 'tool_result';
+    const first = readDeadline(this.wire.firstTokenTimeoutMs);
+    return afterTool && this.wire.toolPassTimeoutMs !== undefined ? readDeadline(this.wire.toolPassTimeoutMs) : first;
   }
 
   /**
@@ -220,8 +308,13 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
   private buildBody(args: GenerateArgs, stream: boolean): Record<string, unknown> {
     // responseFormat replaces the caller's tools (see GenerateArgs.responseFormat):
     // offered both, the model may answer with a tool call and no JSON at all.
-    const tools = this.wire.supportsTools && !args.responseFormat ? mapTools(args.tools) : undefined;
     const caps = this.wire.capabilities(args.model);
+    // Tools go only to a model that can call them: the wire has function calling at
+    // all, and this model's capability is not `unsupported` (a local model may not be).
+    const offered = this.wire.supportsTools && caps.toolCalling !== 'unsupported' && !args.responseFormat;
+    // An endpoint with no `tool_choice` honours `none` by not being offered the tools.
+    const dropped = args.toolChoice === 'none' && this.wire.toolChoiceNone === 'drop_tools';
+    const tools = offered && !dropped ? mapTools(args.tools) : undefined;
     return {
       model: args.model,
       messages: mapMessages(args.messages, args.system, {
@@ -255,6 +348,7 @@ export class OpenAiCompatibleProvider implements ProviderAdapter {
       },
       body: JSON.stringify(body),
       ...(signal ? { signal } : {}),
+      ...(this.wire.refuseRedirects ? { redirect: 'error' as const } : {}),
     });
 
     if (!response.ok) throw await httpError(response);
@@ -303,14 +397,15 @@ function describeBody(text: string, status?: number): string | undefined {
  * Buffers across reads because a chunk boundary lands mid-event often enough that
  * parsing per-read would silently drop tokens.
  */
-async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* readSse(body: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
 
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      // With a deadline, a read gives up when it fires even if the transport ignores the signal.
+      const { done, value } = await (signal ? raceAbort(reader.read(), signal) : reader.read());
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
@@ -327,8 +422,23 @@ async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<string
       }
     }
   } finally {
+    // A stream abandoned at its deadline is closed, not left open behind the turn.
+    if (signal?.aborted) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+}
+
+/**
+ * An `error` object a server sent inside a 200 stream, as the failure it is.
+ * The status is the error's own when it is one (llama.cpp sends `code: 503`),
+ * else 502: the upstream answered, and what it answered was a failure.
+ */
+function inStreamError(error: unknown): OpenAiHttpError {
+  const e = (typeof error === 'object' && error !== null ? error : { message: String(error) }) as { message?: unknown; code?: unknown; type?: unknown };
+  const numeric = typeof e.code === 'number' ? e.code : typeof e.code === 'string' && /^\d{3}$/.test(e.code) ? Number(e.code) : undefined;
+  const status = numeric !== undefined && numeric >= 400 && numeric <= 599 ? numeric : 502;
+  const code = typeof e.code === 'string' && !/^\d{3}$/.test(e.code) ? e.code : typeof e.type === 'string' ? e.type : undefined;
+  return new OpenAiHttpError(status, typeof e.message === 'string' && e.message ? e.message : 'the server sent an error in the middle of its reply', code);
 }
 
 function safeJson(text: string): unknown {

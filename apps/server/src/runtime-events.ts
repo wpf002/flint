@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { ServerEvent } from '@flint/policy';
 import type { Runtime } from './audit-sink';
+import { errorSummary } from './error-log';
 import type { Outcome } from './route-log';
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -169,7 +170,8 @@ export class RuntimeEvents {
       appendFileSync(this.file, line, { mode: 0o600 });
       return true;
     } catch (err) {
-      this.logOnce('write', `[events] could not write the spool: ${err instanceof Error ? err.message : String(err)}`);
+      // Its class and the system's code, never its words: a file error's message is the spool's path.
+      this.logOnce('write', `[events] could not write the spool (${errorSummary(err)})`);
       return false;
     }
   }
@@ -272,7 +274,7 @@ export class RuntimeEvents {
 
   /** Ship every `ms` (default 15 s) until stopped. */
   start(ms = 15_000): () => void {
-    const t = setInterval(() => void this.flush().catch((err) => this.logOnce('flush', `[events] flush failed: ${err instanceof Error ? err.message : String(err)}`)), ms);
+    const t = setInterval(() => void this.flush().catch((err) => this.logOnce('flush', `[events] flush failed (${errorSummary(err)})`)), ms);
     t.unref();
     return () => clearInterval(t);
   }

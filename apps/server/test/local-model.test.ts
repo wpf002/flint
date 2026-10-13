@@ -23,6 +23,19 @@ import {
 describe('parseLocalModelRequest', () => {
   const evalLocal = { eval: true, localOnly: true };
 
+  // The routing review: an Ollama cloud tag passed as an eval's localModel, and "local" was then Ollama's servers.
+  it('refuses an Ollama cloud model: a bake-off candidate is a model on this Mac', () => {
+    for (const cloud of ['gpt-oss:120b-cloud', 'glm-4.6:cloud', 'big-model-cloud', 'ORG/Some-Model:20b-CLOUD']) {
+      expect(parseLocalModelRequest({ eval: true, localOnly: true, localModel: cloud }), cloud).toEqual({
+        ok: false,
+        status: 400,
+        error: "localModel must be a model on this Mac: an Ollama cloud model runs on Ollama's servers",
+      });
+    }
+    // A name that only has the word in it is a local model like any other.
+    expect(parseLocalModelRequest({ eval: true, localOnly: true, localModel: 'cloudy-model:7b' })).toMatchObject({ ok: true, model: 'cloudy-model:7b' });
+  });
+
   it('is a no-op when no override is asked for (normal traffic)', () => {
     expect(parseLocalModelRequest({ prompt: 'hi' })).toEqual({ ok: true, model: undefined });
     expect(parseLocalModelRequest({ prompt: 'hi', eval: true })).toEqual({ ok: true, model: undefined });
@@ -398,6 +411,24 @@ describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
     expect(o.asked).toEqual(['http://127.0.0.1:11434/api/ps']);
   });
 
+  // The final review's L3: the name the SERVER listed reached this line raw, before the caller checked it. A
+  // name with a line break in it wrote a second, forged log line; one with colour codes repainted the terminal.
+  it('a listed name that is not a model name is never printed: the log says so, and nothing of the name is in it', async () => {
+    for (const forged of ['evil\n[access] FLINT_TOKEN accepted from 203.0.113.9', 'x\u001b[31mRED\u001b[0m', 'a b', 'm'.repeat(101), 'model;rm -rf']) {
+      const o = ollama({ ps: [forged] });
+      const logs: string[] = [];
+      const b = await chooseLocalBrain({}, { fetch: o.impl, log: (m) => logs.push(m) });
+      expect(b.model, JSON.stringify(forged)).toBe(forged); // returned as it is: ./local-brains refuses it next
+      expect(logs).toEqual(['[brain] OLLAMA_MODEL is unset: Ollama has a model loaded whose name is not a model name, so it is not printed (set OLLAMA_MODEL to choose one)']);
+      for (const line of logs) {
+        expect(line).not.toMatch(/[\n\r\u001b]/);
+        expect(line).not.toContain('FLINT_TOKEN');
+        expect(line).not.toContain('RED');
+        expect(line.length).toBeLessThan(200);
+      }
+    }
+  });
+
   it('a loaded model keeps the context size it is loaded with, and the rest of the server is told', async () => {
     const o = ollama({ ps: [{ name: 'muse-glimmer:30b', context_length: 16384 }] });
     const b = await chooseLocalBrain({}, { fetch: o.impl });
@@ -436,7 +467,7 @@ describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
     expect(b).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, from: 'default', settled: false, env: { OLLAMA_MODEL: DEFAULT_OLLAMA_MODEL } });
     expect(b.model).not.toMatch(/claude|gpt|sonar/);
     expect(o.asked).toEqual(['http://127.0.0.1:11434/api/ps', 'http://127.0.0.1:11434/api/tags']); // one round, no second
-    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${DEFAULT_OLLAMA_MODEL} for now, and Ollama is asked again in the background`]);
+    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: no local model is chosen yet, so local turns wait, and Ollama is asked again in the background (${DEFAULT_OLLAMA_MODEL} is held as a stand-in, and is never asked)`]);
   });
 
   // Core cuts each list call off at 2 s, but only through the signal it hands fetch. The cap is the
@@ -449,7 +480,7 @@ describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
     const b = await chooseLocalBrain({}, { fetch: never, log: (m) => logs.push(m), capMs: 40 });
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(b).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, from: 'default', settled: false });
-    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${DEFAULT_OLLAMA_MODEL} for now, and Ollama is asked again in the background`]);
+    expect(logs).toEqual([`[brain] OLLAMA_MODEL is unset and Ollama is not answering: no local model is chosen yet, so local turns wait, and Ollama is asked again in the background (${DEFAULT_OLLAMA_MODEL} is held as a stand-in, and is never asked)`]);
     // The real cap covers both of core's 2 s list calls, and stays far inside the installer's wait.
     expect(LOCAL_PICK_CAP_MS).toBeGreaterThanOrEqual(4_000);
     expect(LOCAL_PICK_CAP_MS).toBeLessThanOrEqual(30_000);
@@ -503,6 +534,27 @@ describe('chooseLocalBrain (the local brain is always an Ollama model)', () => {
       body: 'No local model is set, and Ollama has none to offer, so Flint is trying a small default. The server log says how to choose one.',
     });
     expect(`${note.title} ${note.body}`).not.toMatch(/OLLAMA|[A-Z]+_[A-Z]+|qwen|[a-z0-9]+:[a-z0-9]+|[()`]/);
+  });
+});
+
+describe('chooseLocalBrain: what ./local-brains adds to the pick', () => {
+  const lists = (ps: Array<{ name: string }>, tags: string[]) =>
+    (async (url: string) => new Response(JSON.stringify({ models: url.endsWith('/api/ps') ? ps : tags.map((name) => ({ name })) }), { status: 200 })) as unknown as typeof fetch;
+
+  it('defaultModel: with nothing to pick, the guess is the caller\'s (this machine\'s tier\'s model), settled or not as before', async () => {
+    const none = await chooseLocalBrain({}, { fetch: lists([], []), defaultModel: 'tier-model:30b' });
+    expect(none).toMatchObject({ model: 'tier-model:30b', from: 'default', settled: true, env: { OLLAMA_MODEL: 'tier-model:30b' } });
+    const down = await chooseLocalBrain({}, { fetch: (async () => Promise.reject(new TypeError('fetch failed'))) as unknown as typeof fetch, defaultModel: 'tier-model:30b' });
+    expect(down).toMatchObject({ model: 'tier-model:30b', from: 'default', settled: false });
+    // Something to pick wins over it.
+    expect(await chooseLocalBrain({}, { fetch: lists([], ['pulled-model:7b']), defaultModel: 'tier-model:30b' })).toMatchObject({ model: 'pulled-model:7b', from: 'pulled' });
+  });
+
+  it('skip: a model the caller loads itself (the standby) is never taken for the one Will runs', async () => {
+    const skip = (name: string) => name === 'small-model:3b';
+    expect(await chooseLocalBrain({}, { fetch: lists([{ name: 'small-model:3b' }, { name: 'main-model:30b' }], []), skip })).toMatchObject({ model: 'main-model:30b', from: 'loaded' });
+    expect(await chooseLocalBrain({}, { fetch: lists([{ name: 'small-model:3b' }], ['small-model:3b', 'other-model:7b']), skip })).toMatchObject({ model: 'other-model:7b', from: 'pulled' });
+    expect(await chooseLocalBrain({}, { fetch: lists([{ name: 'small-model:3b' }], ['small-model:3b']), skip })).toMatchObject({ from: 'default', settled: true });
   });
 });
 
@@ -561,6 +613,53 @@ describe('keepPickingLocal (an Ollama that did not answer at boot is asked again
     await keepPickingLocal({}, (b) => adopted.push(`${b.model} ${b.from} ${b.settled}`), { fetch: ollama('down', { ps: [], tags: [] }), wait: async () => {}, log: (m) => logs.push(m) }).done;
     expect(adopted).toEqual([`${DEFAULT_OLLAMA_MODEL} default true`]);
     expect(logs[0]).toMatch(/lists no chat model: the local brain stays/);
+  });
+
+  it('choose: a caller may ask in its own way (./local-brains: its guarded fetch, the tier\'s model first), and what settles is handed over as it is', async () => {
+    type Mine = { model: string; from: string; settled: boolean; mine: true };
+    const answers: Mine[] = [
+      { model: 'stand-in', from: 'default', settled: false, mine: true },
+      { model: 'tier-model:30b', from: 'tier', settled: true, mine: true },
+    ];
+    const adopted: Mine[] = [];
+    let asked = 0;
+    const k = keepPickingLocal<Mine>({}, (b) => adopted.push(b), { choose: async () => answers[Math.min(asked++, answers.length - 1)]!, wait: async () => {} });
+    await k.done;
+    expect(asked).toBe(2);
+    expect(adopted).toEqual([{ model: 'tier-model:30b', from: 'tier', settled: true, mine: true }]);
+  });
+
+  // The breaker's last review, F7: adopt runs inside this loop's own promise, which nothing awaits. An adopt
+  // that threw was an unhandled rejection, and an unhandled rejection ends the server.
+  it('an adopt that throws is caught and logged by its class: `done` still resolves, and nothing is left unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    const logs: string[] = [];
+    const SECRET = 'the-words-of-the-error';
+    try {
+      const k = keepPickingLocal(
+        {},
+        () => {
+          throw new TypeError(`could not build the persona: ${SECRET}`);
+        },
+        { fetch: ollama({ ps: [{ name: 'muse-glimmer:30b' }] }), wait: async () => {}, log: (m) => logs.push(m) },
+      );
+      await expect(k.done).resolves.toBeUndefined();
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(logs.at(-1)).toBe('[brain] the model that was settled could not be adopted, so the one in use stays (TypeError)');
+    expect(logs.join('\n')).not.toContain(SECRET);
+  });
+
+  it('a choice that throws ends the asking, logged, never an unhandled rejection', async () => {
+    const logs: string[] = [];
+    const k = keepPickingLocal({}, () => {}, { choose: async () => Promise.reject(new RangeError('boom')), wait: async () => {}, log: (m) => logs.push(m) });
+    await expect(k.done).resolves.toBeUndefined();
+    expect(logs).toEqual(['[brain] asking the model server again stopped (RangeError)']);
   });
 
   it('its real timer does not hold the process open, and stop() ends it', async () => {

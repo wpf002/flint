@@ -31,7 +31,7 @@ import { KnowledgeStore, rememberTool } from '../src/knowledge';
 import { MemoryExtractor, type TurnSource } from '../src/memory-extract';
 import { paidToolSpecs } from '../src/spend';
 import { asLocalTurn } from '../src/turn-taint';
-import { HERE, answer, cleanup, miniServer as server, type MiniOptions, type Step } from './goals-mini';
+import { HERE, answer, cleanup, listed, miniServer as server, type MiniOptions, type Step } from './goals-mini';
 
 type Emb = ConstructorParameters<typeof KnowledgeStore>[1];
 const downEmbedder: Emb = {
@@ -330,6 +330,33 @@ describe('a fact that stays here and the embedder', () => {
     await k.add(SECRET, 'history', { fromGoals: true });
     expect(e.sent).toEqual([SECRET]);
     expect(vectors()).toEqual([[SECRET, true]]);
+  });
+
+  // The privacy review's N9 (and M29): the address is not the whole of it. The embedding MODEL is asked about too,
+  // of the Ollama it is on: a cloud model under a plain name embeds on Ollama's servers, whatever its address.
+  it('with the embedder on this Mac but its model one that runs on Ollama’s servers, a marked fact is stored without an embedding and never sent to it', async () => {
+    const HOST = 'http://127.0.0.1:11434';
+    const e = recordingEmbedder();
+    let model = 'embed-alias';
+    const k = new KnowledgeStore(kpath(), e.embedder, undefined, undefined, { embedderHere: () => embedderHere(HOST, model) });
+    // Nothing heard from that Ollama yet: not known to be here, so nothing that stays here is sent.
+    await k.add(SECRET, 'history', { fromPrivate: true });
+    expect(e.sent).toEqual([]);
+    listed(HOST, ['nomic-embed-text', { name: 'embed-alias', remote_host: 'https://ollama.com:443' }]);
+    expect(embedderHere(HOST, 'embed-alias')).toBe(false);
+    expect(embedderHere(HOST, 'never-pulled')).toBe(false);
+    expect(embedderHere(HOST, 'nomic-embed-text')).toBe(true);
+    expect(embedderHere(HOST, 'nomic-embed-text:latest')).toBe(true);
+    expect(embedderHere('http://rented-gpu.example.com:11434', 'nomic-embed-text')).toBe(false);
+    await k.add(`${SECRET} Again.`, 'history', { fromGoals: true });
+    expect(await k.reembedMissing()).toBe(0);
+    await k.add(OPEN, 'history');
+    expect(e.sent).toEqual([OPEN]); // an ordinary fact is embedded as before
+    expect(e.sent.join(' ')).not.toContain(FACT_CANARY);
+    // The embedding model is one of Ollama's own: the facts held back get their embeddings now.
+    model = 'nomic-embed-text';
+    expect(await k.reembedMissing()).toBe(2);
+    expect(vectors().every(([, embedded]) => embedded)).toBe(true);
   });
 
   it('an embedder nobody vouched for is not here: the default holds a marked fact back', async () => {

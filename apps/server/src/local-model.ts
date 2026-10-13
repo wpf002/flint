@@ -19,6 +19,7 @@
  * `localModel`. Leaving it out sends no `think` field, the model's own default.
  */
 import { DEFAULT_OLLAMA_MODEL, OllamaProvider, isOllamaCloudModel, pickOllamaModel, type OllamaProviderOptions, type PickedOllamaModel } from '@flint/core';
+import { errorSummary } from './error-log';
 import type { StyleVariant } from './style-variant';
 
 /** Ollama model names: `name`, `name:tag`, `namespace/name:tag`, `hf.co/org/repo:Q4_K_M`. */
@@ -46,6 +47,9 @@ export function parseLocalModelRequest(body: Record<string, unknown>): LocalMode
   if (!model || model.length > LOCAL_MODEL_MAX_LEN || !LOCAL_MODEL_RE.test(model)) {
     return { ok: false, status: 400, error: `localModel must match ${String(LOCAL_MODEL_RE)} and be at most ${LOCAL_MODEL_MAX_LEN} chars` };
   }
+  // A bake-off candidate is a model on this Mac. An Ollama cloud tag is a pointer to Ollama's servers: asked
+  // through "localModel" it would be an outside AI answering as the local brain, under localOnly.
+  if (isOllamaCloudModel(model)) return { ok: false, status: 400, error: "localModel must be a model on this Mac: an Ollama cloud model runs on Ollama's servers" };
   if (hasThink && typeof rawThink !== 'boolean') return { ok: false, status: 400, error: 'localThink must be a boolean' };
   if (body.eval !== true) return { ok: false, status: 400, error: 'localModel is only accepted with eval: true' };
   if (body.localOnly !== true) return { ok: false, status: 400, error: 'localModel requires localOnly: true' };
@@ -139,8 +143,11 @@ export const LOCAL_REPICK_FAST_TRIES = 12;
  * within seconds whatever Ollama is doing (the installer polls /health, and a
  * boot that waited for Ollama failed the deploy). When Ollama does not answer
  * (both start at login, and it may be a few seconds behind), the result is the
- * default model with `settled: false`: main() starts on it and
- * keepPickingLocal swaps in Ollama's own answer for the next turn.
+ * default model with `settled: false`: a stand-in. main() holds its name and
+ * never asks for it (asking would make Ollama load it, and the next pick would
+ * then take it for the model Will runs: local turns get a sentence instead, and
+ * the background gate has no local model); keepPickingLocal swaps in Ollama's
+ * own answer for the next turn.
  *
  * It used to become Anthropic's claude-sonnet-4-6 whenever OLLAMA_MODEL was
  * unset and a key was present: a missing setting quietly sent every "local"
@@ -149,7 +156,15 @@ export const LOCAL_REPICK_FAST_TRIES = 12;
  */
 export async function chooseLocalBrain(
   env: Record<string, string | undefined>,
-  deps: { fetch?: typeof fetch; log?: (msg: string) => void; capMs?: number } = {},
+  deps: {
+    fetch?: typeof fetch;
+    log?: (msg: string) => void;
+    capMs?: number;
+    /** What to settle for when Ollama offers nothing, in place of DEFAULT_OLLAMA_MODEL: this machine's hardware tier's model (./local-brains). */
+    defaultModel?: string;
+    /** Models never to pick (./local-brains: the standby is in Ollama's memory too, and is not the model Will runs). */
+    skip?: (name: string) => boolean;
+  } = {},
 ): Promise<LocalBrain> {
   const log = deps.log ?? (() => {});
   const options = liveOllamaOptions(env);
@@ -162,19 +177,25 @@ export async function chooseLocalBrain(
   if (named) return { options, model: named, from: 'env', env: { OLLAMA_MODEL: named }, settled: true };
 
   let cap: ReturnType<typeof setTimeout> | undefined;
-  const picked = await Promise.race([
-    pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+  let picked = await Promise.race([
+    pickOllamaModel({ ...(options.baseURL ? { baseURL: options.baseURL } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}), ...(deps.skip ? { skip: deps.skip } : {}) }),
     // Out of time is the same answer as no answer: the stand-in default, asked again in the background.
     new Promise<PickedOllamaModel>((resolve) => {
       cap = setTimeout(() => resolve({ model: DEFAULT_OLLAMA_MODEL, from: 'default', answered: false }), deps.capMs ?? LOCAL_PICK_CAP_MS);
     }),
   ]).finally(() => clearTimeout(cap));
+  if (picked.from === 'default' && deps.defaultModel) picked = { ...picked, model: deps.defaultModel };
+  // A name the SERVER supplied is printed only when it is a model's name. Anything else (a line break, colour
+  // codes, a forged log line) is described, never repeated: the caller refuses such a name next (./local-brains).
+  const plain = picked.model.length <= LOCAL_MODEL_MAX_LEN && LOCAL_MODEL_RE.test(picked.model);
   log(
     picked.from !== 'default'
-      ? `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`
+      ? plain
+        ? `[brain] OLLAMA_MODEL is unset: the local brain is ${picked.model}, which Ollama has ${picked.from} (set OLLAMA_MODEL to choose another)`
+        : `[brain] OLLAMA_MODEL is unset: Ollama has a model ${picked.from} whose name is not a model name, so it is not printed (set OLLAMA_MODEL to choose one)`
       : picked.answered
         ? `[brain] OLLAMA_MODEL is unset and Ollama listed no chat model: the local brain is ${picked.model} until the next restart (run "ollama pull ${picked.model}", or set OLLAMA_MODEL)`
-        : `[brain] OLLAMA_MODEL is unset and Ollama is not answering: the local brain is ${picked.model} for now, and Ollama is asked again in the background`,
+        : `[brain] OLLAMA_MODEL is unset and Ollama is not answering: no local model is chosen yet, so local turns wait, and Ollama is asked again in the background (${picked.model} is held as a stand-in, and is never asked)`,
   );
   // A loaded model is asked with the window it is loaded with, unless Will set one.
   const numCtx = env.OLLAMA_NUM_CTX?.trim() ? undefined : picked.numCtx;
@@ -194,10 +215,16 @@ export async function chooseLocalBrain(
  * the server is up and answering on the stand-in default meanwhile. The timer
  * does not keep the process alive, and `stop()` ends it.
  */
-export function keepPickingLocal(
+export function keepPickingLocal<B extends { settled: boolean; from: string; model: string } = LocalBrain>(
   env: Record<string, string | undefined>,
-  adopt: (brain: LocalBrain) => void,
-  deps: { fetch?: typeof fetch; log?: (msg: string) => void; wait?: (ms: number) => Promise<void> } = {},
+  adopt: (brain: B) => void,
+  deps: {
+    fetch?: typeof fetch;
+    log?: (msg: string) => void;
+    wait?: (ms: number) => Promise<void>;
+    /** How the model is chosen, in place of chooseLocalBrain: ./local-brains asks with its own guarded fetch and the tier's model first. */
+    choose?: () => Promise<B>;
+  } = {},
 ): { stop: () => void; done: Promise<void> } {
   let stopped = false;
   const wait =
@@ -211,17 +238,26 @@ export function keepPickingLocal(
       await wait(tries < LOCAL_REPICK_FAST_TRIES ? LOCAL_REPICK_FAST_MS : LOCAL_REPICK_SLOW_MS);
       if (stopped) return;
       // Quiet: one line when it settles, not one for every time Ollama still is not there.
-      const next = await chooseLocalBrain(env, deps.fetch ? { fetch: deps.fetch } : {});
+      const next = deps.choose ? await deps.choose() : ((await chooseLocalBrain(env, deps.fetch ? { fetch: deps.fetch } : {})) as unknown as B);
       if (!next.settled) continue;
       (deps.log ?? (() => {}))(
         next.from === 'default'
           ? `[brain] Ollama is answering now and lists no chat model: the local brain stays ${next.model} (run "ollama pull ${next.model}", or set OLLAMA_MODEL)`
           : `[brain] Ollama is answering now: the local brain is ${next.model}, which it has ${next.from}; the next turn uses it`,
       );
-      adopt(next);
+      // An adopt that throws must not become an unhandled rejection, which ends the process: the brain
+      // Flint had stays, and the log says so by the error's class only.
+      try {
+        adopt(next);
+      } catch (err) {
+        (deps.log ?? (() => {}))(`[brain] the model that was settled could not be adopted, so the one in use stays (${errorSummary(err)})`);
+      }
       return;
     }
-  })();
+  })().catch((err: unknown) => {
+    // Nothing in the loop is meant to throw (the pick never does); if something does, it ends here, not in the process.
+    (deps.log ?? (() => {}))(`[brain] asking the model server again stopped (${errorSummary(err)})`);
+  });
   return { stop: () => void (stopped = true), done };
 }
 

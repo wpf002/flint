@@ -18,6 +18,8 @@
  *                                            apps/runtime/test/notes-inventory.test.ts has their words
  *   index.ts (the frontier breaker)          an outside AI is paused for something only Will can fix
  *   index.ts (the local model)               no local model is set, and Ollama has none to offer
+ *   index.ts (the standby model)             the line under an answer the standby model gave: not a
+ *                                            note in the feed, held to the same rules
  *   index.ts (the deploy hold)               updates have been paused for a day (once per pause)
  *   apps/desktop-mac/update_app.sh           Flint.app was updated, or its update did not build
  *   apps/desktop-calendar/update_calendar.sh Flint Calendar's update did not build
@@ -33,6 +35,7 @@ import { actionDoneNote } from '../src/approval-routes';
 import { HOLD_NOTE_AFTER_MS, deployHoldNote, holdNoteDue, holdSince } from '../src/deploy-hold';
 import { breakerNote } from '../src/frontier-breaker';
 import { localDefaultNote } from '../src/local-model';
+import { standbyNote } from '../src/local-serve';
 import { Notifications, PHONE_PING, signalNote, upcomingNote } from '../src/notifications';
 import { effectOf, thresholdNote, type BudgetLevel } from '../src/spend';
 
@@ -143,6 +146,20 @@ describe('the server’s notes to Will', () => {
     const guess = localDefaultNote();
     plain('index.ts local default', guess.title, guess.body);
     expect(guess.title).toBe('Flint Is Guessing Its Local Model');
+  });
+
+  it('index.ts: the line under a standby model’s answer is one plain sentence, with no parentheses and no model’s id', () => {
+    const lines = (['loaded', 'cold', 'loading', 'unavailable'] as const).map((primaryState) => standbyNote({ primaryState }));
+    for (const line of lines) plain('index.ts standby', 'Standby Model', line);
+    expect([...new Set(lines)]).toEqual(['My standby model answered this while my main model loads.', 'My standby model answered this because my main model isn’t available.']);
+    // It is written in one place, and used for both routes.
+    const index = readFileSync(join(SRC, 'index.ts'), 'utf8');
+    expect(index.match(/standbyNote\(localPlan\)/g)).toHaveLength(2);
+    expect(index).not.toMatch(/standby model answered this|Answered by my standby/);
+    // /chat: the day's one line is used only where the standby's answer ends, never where its step starts.
+    expect(index).toContain("if (ev.type === 'done' && !note && standbyLine && answer.trim() && ctx.standbyNotes.take(conversationId)) note = standbyLine;");
+    expect(index.match(/standbyNotes\.take\(/g)).toHaveLength(1);
+    expect(index).toContain('if (byStandby) standbyLine = standbyNote(localPlan);');
   });
 
   it('index.ts: a pause on updates gets one note once it has lasted a day, in plain words, and one per pause', () => {

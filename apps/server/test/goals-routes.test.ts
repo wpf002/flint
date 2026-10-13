@@ -13,6 +13,7 @@
  * (an answer from a runtime without reviews still reads); Review Now is a POST
  * with an empty body, and its refusals are the fixed sentences.
  */
+import { logError } from '../src/error-log';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -58,6 +59,8 @@ let base: string;
 let logged: string[];
 /** What errorRef was handed, as it was handed. */
 let given: unknown[];
+/** ...and as the server's own errorRef would write it to the log (logError). */
+let written: string[];
 let deps: GoalsDeps;
 let up: boolean;
 /** How long the stand-in runtime waits before it answers. */
@@ -104,12 +107,23 @@ beforeEach(() => {
   asked = [];
   logged = [];
   given = [];
+  written = [];
   up = true;
   delayMs = 0;
   drop = false;
   answer = () => ({ status: 200, body: { ok: true } });
   // The server's errorRef logs what it is given: here, a record of it.
-  deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (given.push(err), logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
+  deps = {
+    runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }),
+    errorRef: (tag, err) => {
+      given.push(err);
+      logged.push(String(err));
+      // index.ts's errorRef: logError writes a string as it is, and an Error by its class only.
+      logError(`[${tag}] ref=ref123`, err, { log: (...a) => written.push(a.join(' ')), env: {} });
+      return 'ref123';
+    },
+    timeoutMs: 2000,
+  };
 });
 
 /** How many of the proxy's own answers these helpers have seen, and checked for `no-store`. */
@@ -223,6 +237,26 @@ describe('reads', () => {
     expect(logged.some((l) => /^malformed list answer/.test(l)) && logged.some((l) => /^the runtime answered 500 for a list request$/.test(l)) && logged.some((l) => /^refused a .* request/.test(l)), logged.join(' | ')).toBe(true);
     const src = readFileSync(join(__dirname, '..', 'src', 'goals-routes.ts'), 'utf8');
     expect(src).not.toMatch(/errorRef\([^)]*new Error/);
+    expect(src.match(/deps\.errorRef\('goals', `/g)).toHaveLength(3);
+  });
+
+  // The breaker's last review, F3: these were handed over as `new Error(sentence)`, and the server's log
+  // keeps only an error's class, so the line said "Error" and the status, the request and the field paths
+  // were lost. They are the server's own words: strings, as ./inbox-routes passes them.
+  it('what the log gets is the sentence the route wrote: the status and the request, or the field paths', async () => {
+    answer = () => ({ status: 200, body: { tab: 'active', goals: [row({ late: 'yes', title: CANARY })], waiting: [], reviews: 'off' } });
+    await get('/goals');
+    answer = () => ({ status: 500, body: { error: CANARY } });
+    await get('/goals');
+    await post('/goals', { draftKey: DK, args: args({ title: 'x'.repeat(121) }) });
+    expect(written).toHaveLength(3);
+    expect(written[0]).toMatch(/^\[goals\] ref=ref123 malformed .* answer \(.*goals\.0\.(late|title).*\)$/);
+    expect(written[1]).toMatch(/^\[goals\] ref=ref123 the runtime answered 500 for a .* request$/);
+    expect(written[2]).toMatch(/^\[goals\] ref=ref123 refused a .* request \(.*title.*\)$/);
+    expect(written.join('\n')).not.toContain(CANARY);
+    // Never an Error object: the log would keep its class and nothing else.
+    const src = readFileSync(join(__dirname, '..', 'src', 'goals-routes.ts'), 'utf8');
+    expect(src).not.toMatch(/errorRef\([^)]*new Error\(/);
     expect(src.match(/deps\.errorRef\('goals', `/g)).toHaveLength(3);
   });
 });

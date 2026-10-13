@@ -85,6 +85,7 @@ export { noopObserver } from './observability/observer.js';
 export type {
   AiObserver,
   ObserverEventBase,
+  ContextEvent,
   RequestEvent,
   ResponseEvent,
   ErrorEvent,
@@ -145,6 +146,34 @@ export { OpenAiProvider, OpenAiCompatibleProvider, openAiCapabilities } from './
 export type { OpenAiProviderOptions, ChatWire } from './provider/openai/index.js';
 export { PerplexityProvider, perplexityCapabilities } from './provider/perplexity/index.js';
 export type { PerplexityProviderOptions } from './provider/perplexity/index.js';
+// Any OpenAI-compatible local model server (Ollama's /v1, llama.cpp), this machine only by default.
+export { LocalOpenAiProvider, localCapabilities, isLoopbackHost } from './provider/local/index.js';
+export type { LocalOpenAiProviderOptions, LocalModelFacts } from './provider/local/index.js';
+// The deadlines a local server's adapter can be given, and the codes they end a call with.
+export { FIRST_TOKEN_TIMEOUT, IDLE_TIMEOUT, REQUEST_TIMEOUT } from './provider/deadline.js';
+export type { DeadlineMs } from './provider/deadline.js';
+
+// Hardware tiers: the one table that names a local model for each class of machine.
+export {
+  HARDWARE_TIERS,
+  HARDWARE_TIER_IDS,
+  HardwareTierSchema,
+  EMBEDDING_MODEL,
+  EmbeddingModelSchema,
+  APPLE_USABLE_FRACTION,
+  TIER_TOLERANCE,
+  hardwareTier,
+  hardwareTierFor,
+  hardwareTiersMarkdown,
+  tierFilesGb,
+  tierFloorGb,
+  usableMemoryGb,
+  isTopTier,
+  modelDisplayName,
+  derivedModelName,
+  modelDownloadGb,
+} from './hardware-tiers.js';
+export type { HardwareTier, HardwareTierId, Accelerator, EmbeddingModel, TierMachine } from './hardware-tiers.js';
 
 // Frontier tier classification (shared by the server's brain picker and evolve).
 export { classifyMessage, LONG_CONVERSATION, TIERS } from './tiers.js';

@@ -10,7 +10,7 @@ import { noopObserver } from '../observability/observer.js';
 import { InMemoryStore } from '../memory/in-memory.js';
 import { FlintError, makeAiError, isFlintError } from '../types/error.js';
 import { ConcurrencyLimiter } from './concurrency.js';
-import { assembleContext } from './context.js';
+import { FIT_MARGIN, assembleContext, fittedPromptTokens, fixedPromptTokens, messageBudget } from './context.js';
 import { resolveCall, type ResolvedCall } from './escape-hatch.js';
 import { runToolLoop, type LoopSink } from './tool-loop.js';
 import { decodeAssistantTurn } from './encoding.js';
@@ -20,6 +20,15 @@ import { newId, now } from './util.js';
 export interface Tool {
   definition: ToolDefinition;
   handler: ToolHandler;
+  /**
+   * This tool was chosen for the message being asked (a router matched it to
+   * the words), where the others are offered on every turn. It changes one
+   * thing: when a prompt has to be fitted to a small window
+   * (FlintConfig.fitToWindow) and tools must be left out, a tool marked `keep`
+   * is left out only after every tool that is not. The order the tools are
+   * sent in is never changed by it.
+   */
+  keep?: boolean;
 }
 
 /** Shared inputs for stateless calls. */
@@ -222,18 +231,69 @@ export class Flint {
     const provider = this.config.provider;
     const caps = provider.getCapabilities(resolved.model);
 
-    // Reserve output budget; assemble input to fit the remaining context.
+    const handlers = new Map<string, ToolHandler>();
+    const definitions: ToolDefinition[] = [];
+    /** The tools chosen for this very message (Tool.keep): the last to be left out of a fitted prompt. */
+    const kept = new Set<string>();
+    for (const t of work.tools) {
+      handlers.set(t.definition.name, t.handler);
+      definitions.push(t.definition);
+      if (t.keep === true) kept.add(t.definition.name);
+    }
+
+    // Reserve output budget, then the system prompt and tool schemas (they share the
+    // window with the messages); assemble the messages to fit what is left.
     const reserve = resolved.maxTokens ?? caps.maxOutputTokens;
-    const budget = Math.max(0, caps.maxContextTokens - reserve);
+    const estimate = (m: Message[]): number => provider.estimateTokens(m, resolved.model);
+    const fitted = this.config.fitToWindow === true;
+    const shed: string[] = [];
+    let budget: number;
+    let fixed: number;
+    if (fitted) {
+      // Nothing is sent that does not fit (FlintConfig.fitToWindow). Counted on the safe side (fittedPromptTokens,
+      // and a margin of the window left free), because the server's own count is the one that cuts. The messages
+      // are owed the newest one, and never less than a quarter of the input window: tools give way for that, the
+      // last listed first. A tool chosen for this message (Tool.keep) gives way only when no other is left: a
+      // router lists the ones it matched to the words LAST, and those are the ones the turn is most likely to need.
+      const input = Math.max(0, caps.maxContextTokens - reserve - Math.ceil(caps.maxContextTokens * FIT_MARGIN));
+      const newest = work.baseMessages.length > 0 ? estimate([work.baseMessages[work.baseMessages.length - 1]!]) : 0;
+      const owed = Math.min(input, Math.max(newest, Math.floor(input / 4)));
+      const listed = definitions.map((d) => d.name);
+      while (definitions.length > 0 && fittedPromptTokens(work.system, definitions) > input - owed) {
+        let at = definitions.length - 1;
+        while (at >= 0 && kept.has(definitions[at]!.name)) at--;
+        if (at < 0) at = definitions.length - 1;
+        shed.push(definitions.splice(at, 1)[0]!.name);
+      }
+      // Reported in the order they were listed.
+      shed.sort((a, b) => listed.indexOf(a) - listed.indexOf(b));
+      fixed = fittedPromptTokens(work.system, definitions);
+      budget = input - fixed;
+      if (budget < newest) {
+        // The system prompt alone leaves no room for the question: said, not sent and cut by the server.
+        sink.finalReason = 'error';
+        yield {
+          type: 'error',
+          error: makeAiError('context_overflow', `The prompt does not fit this model's window: ${caps.maxContextTokens} tokens, ${reserve} of them kept for the reply, and the system prompt takes about ${fittedPromptTokens(work.system, [])}.`, { retryable: false }),
+        };
+        return;
+      }
+    } else {
+      fixed = fixedPromptTokens(work.system, definitions);
+      budget = messageBudget(Math.max(0, caps.maxContextTokens - reserve), fixed);
+    }
 
     let assembled: Message[];
+    let dropped = 0;
     try {
-      assembled = assembleContext({
+      const fit = assembleContext({
         messages: work.baseMessages,
         budgetTokens: budget,
         strategy: resolved.contextStrategy,
-        estimate: (m) => provider.estimateTokens(m, resolved.model),
-      }).messages;
+        estimate,
+      });
+      assembled = fit.messages;
+      dropped = fit.dropped;
     } catch (err) {
       const flintErr = isFlintError(err)
         ? err
@@ -243,16 +303,25 @@ export class Flint {
       return;
     }
 
-    const handlers = new Map<string, ToolHandler>();
-    const definitions: ToolDefinition[] = [];
-    for (const t of work.tools) {
-      handlers.set(t.definition.name, t.handler);
-      definitions.push(t.definition);
-    }
-
     const observeContext =
       resolved.context !== undefined ? resolved.context : undefined;
     const requestId = newId('req');
+
+    // How the prompt was sized, before anything is sent: numbers and tool names, nothing of the prompt.
+    this.observer.onContext?.({
+      requestId,
+      provider: provider.name,
+      model: resolved.model,
+      timestamp: now(),
+      context: observeContext,
+      windowTokens: caps.maxContextTokens,
+      reserveTokens: reserve,
+      fixedTokens: fixed,
+      budgetTokens: budget,
+      messages: { kept: assembled.length, dropped },
+      tools: { offered: definitions.length, shed },
+      fitted,
+    });
 
     // Debug escape hatch (spec §7.9): when on, surface the unfiltered request
     // and response payloads through the observer. Off by default.
@@ -292,6 +361,7 @@ export class Flint {
           provider: provider.name,
           context: observeContext,
         },
+        unknownTool: this.config.unknownTool,
       },
       sink,
     );

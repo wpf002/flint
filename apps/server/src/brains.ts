@@ -29,8 +29,10 @@
  *   FLINT_TIERS=off      kill switch: ignore every FLINT_TIER_* (legacy only)
  * Providers: anthropic (ANTHROPIC_API_KEY), openai (OPENAI_API_KEY),
  * perplexity (PERPLEXITY_API_KEY; no tool calling), ollama (FLINT_TIER_OLLAMA_HOST
- * → FLINT_FRONTIER_BASE_URL → OLLAMA_HOST). A tier whose provider has no key is
- * skipped with a log line and resolves like an unset tier.
+ * → FLINT_FRONTIER_BASE_URL → OLLAMA_HOST), local (an OpenAI-compatible local
+ * server at FLINT_LOCAL_BASE_URL, see ./inference-config). A tier whose provider
+ * has no key (or whose address was refused) is skipped with a log line and
+ * resolves like an unset tier.
  *   FLINT_FRONTIER_MAX_RETRIES / FLINT_FRONTIER_TIMEOUT_MS  how the Anthropic
  *                        client fails (frontierClientOptions): 0 retries of its
  *                        own and 60 s for a response to start, unless set.
@@ -40,15 +42,19 @@
 import type { MediaFlags } from './policy';
 import {
   AnthropicProvider,
+  LocalOpenAiProvider,
   OllamaProvider,
   OpenAiProvider,
   PerplexityProvider,
   TIERS,
   isFlintError,
   type AiError,
+  localCapabilities,
   type ProviderAdapter,
   type Tier,
 } from '@flint/core';
+import { readContextSize, readInferenceConfig } from './inference-config';
+import { guardedFetch, openAiPaths } from './local-backend';
 
 
 /**
@@ -215,6 +221,26 @@ export function envProviderFactory(env: Env): ProviderFactory {
             'http://127.0.0.1:11434',
           defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
         });
+      case 'local': {
+        // An OpenAI-compatible local server (llama.cpp, Ollama's /v1) as a tier: FLINT_LOCAL_BASE_URL,
+        // held to this Mac unless FLINT_LOCAL_ALLOW_REMOTE=1 (./inference-config). A refused address
+        // builds nothing, so the tier resolves like one with no key. Tools only when Will says the
+        // model can call them (FLINT_LOCAL_TOOLS=on): a tier is not probed.
+        const cfg = readInferenceConfig(env).local;
+        const at = cfg.openai;
+        if (!at) return undefined;
+        // Held to the rule every context size is (./inference-config readContextSize): anything else is the default.
+        const context = readContextSize(env.FLINT_FRONTIER_NUM_CTX) ?? 8192;
+        return new LocalOpenAiProvider({
+          baseURL: at.baseURL,
+          allowRemote: cfg.allowRemote,
+          ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+          fetch: guardedFetch({ origin: at.origin, paths: openAiPaths(at.path), connectTimeoutMs: cfg.connectTimeoutMs }),
+          firstTokenTimeoutMs: cfg.firstTokenTimeoutMs,
+          toolPassTimeoutMs: cfg.toolPassTimeoutMs,
+          capabilities: () => localCapabilities({ contextTokens: context, tools: cfg.tools === 'on' }),
+        });
+      }
       default:
         return undefined;
     }
@@ -284,11 +310,17 @@ export class BrainSet<P> {
    * resort. With `model`, the brain on that model (the one being checked).
    * `usable` leaves brains out: a provider-wide check must not ask a model
    * that has a pause of its own (the key may not use it), or that model's 403
-   * would be read as the provider's answer, every time.
+   * would be read as the provider's answer, every time. When none is usable it
+   * asks one anyway.
    */
   cheapestOn(provider: string, model?: string, usable: (brain: BrainTier<P>) => boolean = () => true): BrainTier<P> | undefined {
     const all = [...this.chain('routine'), ...TIERS.map((t) => this.byTier[t]), ...(this.lastResort ? [this.lastResort] : [])];
-    return all.find((b) => b.provider.name === provider && (model === undefined ? usable(b) : b.model === model));
+    if (model !== undefined) return all.find((b) => b.provider.name === provider && b.model === model);
+    const on = all.filter((b) => b.provider.name === provider);
+    // With every model on the provider paused on its own there is none to prefer: any brain is asked,
+    // rather than none. A provider-wide check with nobody to ask could never pass, and the provider
+    // would stay paused for good.
+    return on.find(usable) ?? on[0];
   }
 
   /** One line per tier for the boot log. */

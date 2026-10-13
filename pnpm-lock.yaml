@@ -203,6 +203,9 @@ importers:
       pg:
         specifier: ^8.13.0
         version: 8.22.0
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
     devDependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.0
@@ -222,9 +225,6 @@ importers:
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@20.19.41)
-      zod:
-        specifier: ^3.23.0
-        version: 3.25.76
 
   apps/train:
     dependencies:

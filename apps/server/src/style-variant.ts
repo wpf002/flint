@@ -40,12 +40,40 @@ export type StyleVariant = FlintStyleVariant;
 /** Every known variant, v1 first. What /health reports as `styleVariants`. */
 export const STYLE_VARIANTS: readonly StyleVariant[] = FLINT_STYLE_VARIANT_NAMES;
 
+/**
+ * The guide the STANDBY local model is given, whatever the main local model's:
+ * the compact one, written for a small window. The standby answers while the
+ * main model loads (./local-serve), in a window of 4,096 to 8,192 tokens; the
+ * default guide alone is about 3,980.
+ */
+export const STANDBY_STYLE: StyleVariant = 'local-v1';
+
 /** What an unset (or unknown) FLINT_STYLE_VARIANT / FLINT_LOCAL_STYLE_VARIANT means: today's guide. */
 export const DEFAULT_STYLE_VARIANT: StyleVariant = 'v1';
 
 /** The style guide text for a variant. */
 export function styleGuideFor(variant: StyleVariant): string {
   return FLINT_STYLE_VARIANTS[variant];
+}
+
+/** The most of a local model's window its guide may take, so that the tools, the conversation and the reply have the rest. */
+export const GUIDE_MAX_SHARE = 0.5;
+
+/**
+ * The guide the MAIN local model speaks with, given its window: the one asked
+ * for (FLINT_LOCAL_STYLE_VARIANT, else the default) when it leaves the window
+ * room to work, else the compact one.
+ *
+ * The default guide is about 3,980 tokens. Four of the hardware tiers run their
+ * model at a 4,096-token context: there the default guide is the whole window,
+ * and a prompt that is sized to its window (FlintConfig.fitToWindow) would have
+ * no room for the question and fail before anything was sent. A guide is
+ * counted as a fitted prompt is, on the safe side (3 characters a token). At
+ * the 16,384 tokens Will's own model runs at, the guide asked for is used.
+ */
+export function localStyleFor(wanted: StyleVariant, windowTokens: number): StyleVariant {
+  if (!Number.isFinite(windowTokens) || windowTokens <= 0) return wanted;
+  return Math.ceil(styleGuideFor(wanted).length / 3) <= windowTokens * GUIDE_MAX_SHARE ? wanted : STANDBY_STYLE;
 }
 
 /**

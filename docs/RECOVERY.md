@@ -299,6 +299,10 @@ What comes back, what is new, and what needs you:
   instead, tests it first, and says so.
 - Anything you revoked, switched off or told Flint to forget after the backup is
   back. The rebuild says so, and says what Flint may do on its own.
+- The rebuilt Flint is in Local mode, whatever mode the old Mac was in: every
+  answer comes from the new Mac. The mode is never taken from a backup, and the
+  rebuild says so. To choose another, open Flint, open Settings (the gear,
+  bottom left), find Brain, and press Local, Hybrid or Cloud under Mode.
 - A rebuild never replaces a Flint that is already there. On a Mac that has a
   Flint database it stops and changes nothing. That is entry 2's job.
 - Nexus is a separate system and is not rebuilt by this command.

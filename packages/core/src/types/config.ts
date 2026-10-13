@@ -1,6 +1,7 @@
 import type { ProviderAdapter } from '../provider/adapter.js';
 import type { AiObserver } from '../observability/observer.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { ToolCall } from './tool.js';
 
 /**
  * Context-assembly strategy (context.ts). The default is ALWAYS explicit —
@@ -74,4 +75,35 @@ export interface FlintConfig {
   retryPolicy?: RetryPolicy;
   /** Default context strategy for the client; overridable per call. */
   contextStrategy?: ContextStrategy;
+  /**
+   * Size the WHOLE prompt to the model's window, for a model whose window is
+   * small enough to matter (a local one). Off by default: the client then
+   * behaves as it always has, and gives the messages at least half the input
+   * window whatever the system prompt and tools take, which on a small window
+   * can add up to more than the model holds (the server then cuts the START of
+   * the prompt: the persona and the tools).
+   *
+   * On, nothing is sent that does not fit:
+   *  - tools are left out, last first, until the system prompt and the tools
+   *    that remain leave the messages a quarter of the input window (or the
+   *    newest message, when that is more). List the tools that matter first,
+   *    and mark a tool chosen for the message being asked `keep` (Tool.keep):
+   *    it is left out only after every tool that is not;
+   *  - the messages get exactly what is left, oldest dropped first as the
+   *    context strategy says;
+   *  - when the system prompt alone leaves no room for the newest message, the
+   *    call fails with `context_overflow` before anything is sent.
+   * What was left out is reported through the observer (`onContext`).
+   */
+  fitToWindow?: boolean;
+  /**
+   * What to tell the model when it calls a tool this call did not offer, in
+   * place of the default ("Unknown tool 'x'. Available tools: ..."). An app
+   * that holds a tool back on purpose (a turn that must not reach outside
+   * services) can say why, so the model tells the user instead of guessing.
+   * Return undefined for the default. Whatever it returns is the call's
+   * result, marked as an error; Flint runs nothing for such a call, and a
+   * function that throws gets the default.
+   */
+  unknownTool?: (call: ToolCall, offered: readonly string[]) => unknown;
 }

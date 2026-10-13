@@ -769,7 +769,24 @@ describe('Settings: Health', () => {
     run('loadHealth()');
     await settle();
     expect(ids.sethealth!.shown()).toContain('Checks Stopped');
-    expect(ids.sethealth!.shown()).toContain('Last check');
+    expect(ids.sethealth!.shown()).toContain('Flint last checked on ');
+  });
+
+  it('the summary says when Flint checked as a sentence on its own line, so the row cannot run together at phone width', async () => {
+    routes['/runtime/health'] = report([{ component: 'postgres', status: 'ok', detail: null, at: AT }]);
+    run('loadHealth()');
+    await settle();
+    // The label, Refresh, then the sentence: a stacked row, not three things on one line.
+    expect(ids['sethealth-last']!.shown()).toContain('All Systems NormalRefreshFlint checked just now.');
+    expect(run(`healthChecked(new Date().toISOString(), false)`)).toBe('Flint checked just now.');
+    expect(run(`healthChecked(new Date(Date.now() - 5 * 60000).toISOString(), false)`)).toBe('Flint checked 5m ago.');
+    expect(run(`healthChecked('2026-10-01T00:00:00.000Z', true)`)).toMatch(/^Flint last checked on \w+ \d+\.$/);
+    expect(run(`healthChecked(null, true)`)).toBe('Flint has never checked.');
+    expect(html).toContain("var sum=laneEl('div','row stack dotin');");
+    expect(html).toContain("var when=laneEl('div','sub');when.appendChild(laneEl('span',null,healthChecked(h.lastHealthRun,stale)));sum.appendChild(when);");
+    // The old one-line form is gone: no "Checked 2m ago" value squeezed between the label and the button.
+    expect(html).not.toContain("'Never Checked'");
+    expect(html).toMatch(/\.row\.stack\.dotin \.sub\{padding-left:16px;\}/);
   });
 
   it('a failure is shown with a way to try again', async () => {

@@ -19,7 +19,11 @@ looked up). What this does instead, in order:
      "no model answered" messages, answers under 40 characters, tool-using
      answers without their tool trajectory, and answers that visibly correct
      themselves mid-answer. Eligible prompts left without a target are written
-     to prompts_for_sampling.jsonl for a compliant teacher to answer.
+     to prompts_for_sampling.jsonl for a compliant teacher to answer. A prompt
+     from a turn that stayed on this Mac (the server's `staysHere` mark: a
+     message Will kept private, or any turn of Local mode) carries that mark
+     into the file. A teacher on this Mac may answer it; nothing that is not
+     on this Mac is given it (`prompts_for_outside` is the one filter).
   4. Dedupe (exact + parity's near-duplicate rule) keeping human > self >
      open-weight, then a fixed, stratified valid split. Deduping first means no
      valid prompt has a near-duplicate in train.
@@ -84,6 +88,8 @@ class Row:
     tool_defs: Optional[List[Dict[str, Any]]] = None
     kind: str = ""
     pid: str = ""
+    # The server's mark on the row: the turn stayed on this Mac (Will kept it private, or Flint was in Local mode).
+    stays_here: bool = False
 
     def final_text(self) -> str:
         """The teacher's final answer: the last plain assistant turn after the last user turn."""
@@ -149,6 +155,7 @@ def load_corpus(path: str) -> List[Row]:
                 messages=r.get("messages") if isinstance(r.get("messages"), list) else None,
                 output=str(r.get("output") or ""),
                 tools_used=[str(t.get("tool")) for t in (r.get("tools") or []) if isinstance(t, dict) and t.get("tool")],
+                stays_here=bool(r.get("staysHere")),
             )
         )
     return rows
@@ -174,6 +181,8 @@ def load_samples(paths: Sequence[str]) -> List[Row]:
                     output=str(r.get("output") or "") if r.get("output") is not None else None,
                     reasoning=str(r.get("reasoning")) if r.get("reasoning") else None,
                     tool_defs=r.get("tools") if isinstance(r.get("tools"), list) else None,
+                    # (A sample batch made from a prompt that stays here says so on its row too.)
+                    stays_here=bool(r.get("staysHere")),
                 )
             )
     return rows
@@ -229,6 +238,18 @@ def _first_unique(ordered: List[Row]) -> List[Row]:
         seen.add(norm)
         kept.append((r, words))
     return [r for r, _ in kept]
+
+
+def prompts_for_outside(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The sampling prompts that may be given to a teacher, a judge or any service that is NOT on this Mac.
+
+    prompts_for_sampling.jsonl holds every eligible prompt, and a prompt from a
+    turn that stayed on this Mac carries `staysHere`. Whatever reads that file
+    for anything outside reads it through this: a marked row is never among
+    them. Anything said of the mark counts (true, 1, "yes"): only a row that
+    says nothing of it, or says false, may go out.
+    """
+    return [r for r in rows if not r.get("staysHere")]
 
 
 def _rank(seed: int, pid: str) -> str:
@@ -372,11 +393,17 @@ def build(
     kept = {id(t) for t in targets}
     target_words = [word_set(t.prompt) for t in targets]
     sampling: List[Dict[str, Any]] = []
+    # A prompt that stays on this Mac keeps its mark in the file. The same words can be in the corpus twice (asked
+    # again, or deduped against a copy): if ANY copy carried the mark, the one that is written carries it.
+    kept_here = {normalize(r.prompt) for r in [*corpus_rows, *sample_rows] if r.stays_here}
     for r in dedupe_prompts([r for r in eligible if id(r) not in kept]):
         w = word_set(r.prompt)
         if any(is_near_duplicate(w, tw) for tw in target_words):
             continue
-        sampling.append({"id": r.pid, "prompt": r.prompt, "conversationId": r.conversation_id, "source": r.source, "origin": source_of(r.conversation_id)})
+        row = {"id": r.pid, "prompt": r.prompt, "conversationId": r.conversation_id, "source": r.source, "origin": source_of(r.conversation_id)}
+        if r.stays_here or normalize(r.prompt) in kept_here:
+            row["staysHere"] = True
+        sampling.append(row)
 
     train_rows, valid_rows = split_valid(targets, int(tr["valid_n"]), seed)
     n_human = sum(1 for r in train_rows if r.kind == "human")
@@ -452,6 +479,7 @@ def build(
             "bySource": by_source,
             "humanRepeat": reps,
             "samplingPrompts": len(sampling),
+            "samplingStaysHere": sum(1 for x in sampling if x.get("staysHere")),
         },
         "reasoningShare": round(reasoning_share, 3),
         "drops": dict(sorted(drops.items())),

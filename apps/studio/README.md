@@ -71,6 +71,13 @@ in a backup to be what Flint wrote.
 - Settings are read as text; each value must match the shape its name is listed
   with and not look like a secret. Who may reach Flint over the tailnet is read
   from the Tailscale sign-in, never from the backup.
+- The routing mode is never taken from a backup: not the setting, and not the
+  file Settings keeps it in. A changed backup could turn Local into Cloud, and
+  the mode decides where your words go. The rebuild writes Local for the new
+  Mac, whatever the old one was in, and says so in one sentence ("Flint is in
+  Local mode after a rebuild. Choose another mode in Settings if you want
+  one."). Where the local model server is, its key and the two switches that
+  let it be another machine are left to you as well.
 - Nothing unpacked can run, links are dropped, and connectors are rebuilt from
   this repo.
 - The key future backups are encrypted to is worked out from your key on the

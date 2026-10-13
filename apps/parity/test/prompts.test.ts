@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPromptSet, dedupe, isTrivial, takeBalanced, type TrainingRecord } from '../src/prompts.js';
+import { buildPromptSet, dedupe, isTrivial, staysOnThisMac, takeBalanced, type TrainingRecord } from '../src/prompts.js';
 
 let nextId = 0;
 function rec(input: string, conversationId = 'console', tools: string[] = []): TrainingRecord {
@@ -113,6 +113,32 @@ describe('buildPromptSet', () => {
       picks.add(ids);
     }
     expect(picks.size).toBeGreaterThan(1);
+  });
+
+  // The final review's M4: a private turn was written to the corpus like any other, and this set is what goes to
+  // outside competitors and judges.
+  it('a row from a turn that stayed on this Mac is never a prompt, whatever else is true of it', () => {
+    const SECRET = 'What should I tell my doctor about the ZEBRA-7781 diagnosis I got last week?';
+    const marked: TrainingRecord = { ...rec(SECRET, 'c-private'), staysHere: true };
+    const open = rec('How do transformers compare with state space models for long documents?', 'c-open');
+    const { prompts, stats } = buildPromptSet([marked, open], { seed: 1, max: 300 });
+    expect(prompts.map((p) => p.prompt)).toEqual([open.input]);
+    expect(JSON.stringify(prompts)).not.toContain('ZEBRA-7781');
+    expect(stats).toMatchObject({ corpusRows: 2, keptHere: 1, candidates: 1 });
+    // A mark this code does not understand is kept here too (fail closed); absent, false and null are not marks.
+    for (const odd of ['yes', 1, {}, 'true']) expect(buildPromptSet([{ ...rec(SECRET), staysHere: odd }], { seed: 1, max: 300 }).prompts, String(odd)).toEqual([]);
+    for (const none of [undefined, false, null]) expect(buildPromptSet([{ ...rec(SECRET), staysHere: none }], { seed: 1, max: 300 }).prompts, String(none)).toHaveLength(1);
+    expect(staysOnThisMac(marked)).toBe(true);
+    expect(staysOnThisMac(open)).toBe(false);
+  });
+
+  it('a marked row is dropped before the dedupe: it never stands in for the same question asked openly', () => {
+    const q = 'Explain how a vector database decides which neighbours are closest to a query';
+    const first: TrainingRecord = { ...rec(q, 'c-private'), staysHere: true };
+    const again = rec(q, 'c-open');
+    const { prompts, stats } = buildPromptSet([first, again], { seed: 1, max: 300 });
+    expect(prompts.map((p) => p.conversationId)).toEqual(['c-open']);
+    expect(stats).toMatchObject({ keptHere: 1, duplicates: 0 });
   });
 
   it('drops trivial and duplicate rows and reports how many', () => {

@@ -540,6 +540,24 @@ describe('/internal/complete sizes the call to the model\'s window', () => {
     expect((await localGate(localBackgroundBrain(LOCAL, { fetch: room.f })).handle(REQ)).status).toBe(200);
   });
 
+  // The breaker's last review, F6: a constrained reply the adapter has to ask for again (the JSON did not
+  // parse) sums its tries in usage.input. Three tries of a 1,500-token prompt read as 4,500 in a 4,096
+  // window, and a reply that fit was refused as WindowFull.
+  it('a reply that needed a second try is judged by that try\'s own prompt count, never the sum of the tries', async () => {
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
+    const retried = fakeOllama((_seen, n) => (n < 3 ? chatReply('not json at all', 'stop', 1500) : chatReply('{"ok":true}', 'stop', 1500)));
+    const r = await localGate(localBackgroundBrain(LOCAL, { fetch: retried.f })).handle({ ...REQ, schema });
+    expect(retried.requests).toHaveLength(3);
+    // 3 x 1,500 = 4,500 was summed, and 4,500 + 200 is past the 4,096 window; the last try alone is 1,500.
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ text: '{"ok":true}' });
+    // The sum is still what the meter is told was processed.
+    expect((r.body as { usage: { input: number } }).usage.input).toBe(4500);
+    // And a last try that really did fill the window is still refused.
+    const full = fakeOllama((_seen, n) => (n < 2 ? chatReply('nope', 'stop', 100) : chatReply('{"ok":true}', 'stop', 3896)));
+    expect((await localGate(localBackgroundBrain(LOCAL, { fetch: full.f })).handle({ ...REQ, schema })).body).toMatchObject({ error: 'the call failed (WindowFull)' });
+  });
+
   it('a reply budget over half the window is cut to it before the model is asked', async () => {
     const { f, requests } = fakeOllama(() => chatReply('ok'));
     const r = await localGate(localBackgroundBrain(LOCAL, { fetch: f })).handle({ ...REQ, maxTokens: 4000 });
