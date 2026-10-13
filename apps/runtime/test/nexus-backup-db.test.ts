@@ -23,7 +23,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -119,6 +119,53 @@ describe('a backup set’s names', () => {
     expect(() => pruneOffsite(dir, manifest, 'flint-2026-10-03.dump.age', 2, { prefix: 'nexus' })).toThrow(/not an encrypted copy/);
     expect(() => pruneOffsite(dir, manifest, 'nexus-2026-10-03.dump.age', 2)).toThrow(/not an encrypted copy/);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('Nexus’s offsite copy only ever writes by path: into a folder it may not list, beside copies it may not read, each is recorded by what was written and the oldest is pruned by name', async () => {
+    // What a launchd job has of iCloud Drive: it may write a file by its path, and may neither list the folder nor
+    // read a file back. Here the folder cannot be listed, and every copy is made unreadable as soon as it is there.
+    const root = mkdtempSync(join(tmpdir(), 'flint-nexus-writeonly-'));
+    const dumps = join(root, 'nexus');
+    const offsite = join(root, 'icloud', 'FlintBackups', 'nexus');
+    mkdirSync(dumps, { recursive: true });
+    mkdirSync(offsite, { recursive: true });
+    const age = join(root, 'age');
+    writeFileSync(age, `#!/bin/zsh\nprint -n -- 'age-encryption.org/v1\\n-> stand-in\\n'\ncat -- "$3"\n`, { mode: 0o755 });
+    const sealed = (plain: string) => Buffer.from(`age-encryption.org/v1\n-> stand-in\n${plain}`);
+    const night = (n: number) => `nexus-2026-10-${String(n).padStart(2, '0')}T07-15-00-000Z.dump`;
+    const records: Array<{ path: string; bytes: bigint; sha256: string }> = [];
+    const db = {
+      backupRun: {
+        findFirst: async () => null,
+        findMany: async () => records.map((r) => ({ path: r.path })),
+        create: async (a: { data: { path: string; bytes: bigint; sha256: string } }) => records.push(a.data),
+        update: async () => undefined,
+      },
+    } as unknown as Parameters<typeof sendOffsite>[0];
+    const warned: string[] = [];
+    chmodSync(offsite, 0o300);
+    try {
+      for (let n = 1; n <= 9; n++) {
+        writeFileSync(join(dumps, night(n)), `rows of night ${n}`, { mode: 0o600 });
+        writeFileSync(join(dumps, `${night(n)}.counts.json`), `{"public.t":${n}}`, { mode: 0o600 });
+        const sent = await sendOffsite(
+          db, { ageRecipient: `age1${'q'.repeat(58)}`, offsiteDir: offsite, offsiteManifest: join(dumps, 'offsite-copies.txt'), dumpDir: dumps, tools: { pgDump: 'pg_dump', pgRestore: 'pg_restore', age } },
+          new Date(), (line) => warned.push(line), { set: NEXUS_SET, action: 'backup.nexus.offsite' },
+        );
+        // Its size and fingerprint are of what was written, taken as it went by: the copy is never opened again.
+        const copy = sealed(`rows of night ${n}`);
+        expect(sent, night(n)).toEqual({ bytes: copy.length, sha256: createHash('sha256').update(copy).digest('hex'), pruned: n > 7 ? 1 : 0 });
+        expect(records.at(-1), night(n)).toMatchObject({ path: join(offsite, `${night(n)}.age`), bytes: BigInt(copy.length), sha256: sent.sha256 });
+        for (const file of [`${night(n)}.age`, `${night(n)}.counts.json.age`]) chmodSync(join(offsite, file), 0o000);
+      }
+      expect(warned).toEqual([]);
+      expect(() => readdirSync(offsite)).toThrow(/EACCES/);
+    } finally {
+      chmodSync(offsite, 0o700);
+    }
+    // The newest seven, each with its row counts; the two oldest went, with theirs.
+    expect(readdirSync(offsite).sort()).toEqual([3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`${night(n)}.age`, `${night(n)}.counts.json.age`]).sort());
+    rmSync(root, { recursive: true, force: true });
   });
 
   it('the commands: three for Nexus, each under its own action, doing the same three steps', () => {
@@ -649,8 +696,15 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       const running = () => spawnSync('/usr/bin/pgrep', ['-f', `sleep ${nap}`], { encoding: 'utf8' }).stdout.trim().split('\n').filter(Boolean);
       writeFileSync(join(bin, 'tool'), `#!/bin/zsh\nsleep ${nap} &\nsleep ${nap}\n:\n`, { mode: 0o755 });
       // A command that runs the tool with a limit it will not reach, as the three Nexus commands run theirs.
+      // (Were it to go on after its tool was stopped, it would leave a mark.)
       const script = join(bin, 'command.mts');
-      writeFileSync(script, `import { run } from ${JSON.stringify(join(RUNTIME, 'src', 'backup', 'backup.ts'))};\nawait run(${JSON.stringify(join(bin, 'tool'))}, [], '', { timeoutMs: 600_000 });\n`);
+      const wentOn = join(bin, 'went-on');
+      writeFileSync(script, [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { run } from ${JSON.stringify(join(RUNTIME, 'src', 'backup', 'backup.ts'))};`,
+        `await run(${JSON.stringify(join(bin, 'tool'))}, [], '', { timeoutMs: 600_000 }).catch(() => undefined);`,
+        `writeFileSync(${JSON.stringify(wentOn)}, 'the command went on after it was told to end');`, '',
+      ].join('\n'));
       const command = spawn(join(RUNTIME, 'node_modules', '.bin', 'tsx'), [script], { cwd: RUNTIME, stdio: 'ignore', env: { PATH: process.env.PATH ?? '', HOME: dir } });
       const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => command.on('close', (code, signal) => resolve({ code, signal })));
       try {
@@ -663,6 +717,8 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         expect(how.signal === 'SIGTERM' || how.code === 143, JSON.stringify(how)).toBe(true);
         for (let i = 0; i < 40 && running().length; i++) await new Promise((r) => setTimeout(r, 50));
         expect(running()).toEqual([]);
+        // And the command itself ended there, as the signal meant: it did not carry on to its next step.
+        expect(existsSync(wentOn)).toBe(false);
       } finally {
         command.kill('SIGKILL');
         spawnSync('/usr/bin/pkill', ['-f', `sleep ${nap}`]);
