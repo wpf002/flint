@@ -337,7 +337,7 @@ describe('the cards', () => {
 });
 
 describe('what Will reads', () => {
-  const standing = (over: Partial<TaskStanding>): TaskStanding => ({ status: 'queued', assetKind: 'ci_runner', failure: null, checks: null, overridden: false, waitingForWill: false, declined: false, ...over });
+  const standing = (over: Partial<TaskStanding>): TaskStanding => ({ status: 'queued', assetKind: 'ci_runner', failure: null, checks: null, checksCleared: false, overridden: false, waitingForWill: false, declined: false, ...over });
 
   it('a task\'s line says where it stands, from counts and classes alone', () => {
     expect(taskLine(standing({ status: 'proposed' }))).toBe('It’s waiting for your approval.');
@@ -350,6 +350,14 @@ describe('what Will reads', () => {
     expect(taskLine(standing({ status: 'accepted', checks: { total: 1, met: 1 } }))).toBe('It passed 1 of 1 check.');
     expect(taskLine(standing({ status: 'rejected', checks: { total: 3, met: 2 } }))).toBe('It failed 1 of 3 checks.');
     expect(taskLine(standing({ status: 'accepted', checks: { total: 3, met: 2 }, overridden: true }))).toBe('You accepted it.');
+    // Once what its checks found is no longer kept, the line says so: never a count of nothing.
+    expect(taskLine(standing({ status: 'accepted', checksCleared: true }))).toBe('It was accepted, and its checks are no longer kept.');
+    expect(taskLine(standing({ status: 'rejected', checksCleared: true }))).toBe('It was rejected, and its checks are no longer kept.');
+    expect(taskLine(standing({ status: 'rejected', checksCleared: true, overridden: true }))).toBe('You rejected it.');
+    for (const status of ['accepted', 'rejected'] as const) for (const checksCleared of [true, false]) expect(taskLine(standing({ status, checksCleared }))).not.toMatch(/\d/);
+    // The two ways a task's time is up read differently: no movement for a day, and a due date passed.
+    expect(taskLine(standing({ status: 'failed', failure: 'timeout' }))).toBe('It ran out of time.');
+    expect(taskLine(standing({ status: 'failed', failure: 'expired' }))).toBe('It wasn’t finished by its due date.');
     expect(taskLine(standing({ status: 'rejected', checks: { total: 3, met: 3 }, overridden: true }))).toBe('You rejected it.');
     expect(taskLine(standing({ status: 'failed', failure: 'expired' }))).toBe('It wasn’t finished by its due date.');
     // It passed, and he turned its accept card down or let it lapse: said as that, not as a missed date.
@@ -361,7 +369,7 @@ describe('what Will reads', () => {
     const lines = [
       ...Object.values(TASK_SAYS), ...Object.values(TASK_STATUS_SAYS), ...Object.values(TASK_FAILURE_SAYS), ...Object.values(TASK_REASONS),
       ...TASK_STATUSES.flatMap((status) => ASSET_KINDS.flatMap((assetKind) => [null, ...TASK_FAILURES].flatMap((failure) => [null, { total: 3, met: 2 }].flatMap((checks) =>
-        [true, false].flatMap((overridden) => [true, false].flatMap((waitingForWill) => [true, false].map((declined) => taskLine({ status, assetKind, failure, checks, overridden, waitingForWill, declined })))))))),
+        [true, false].flatMap((overridden) => [true, false].flatMap((waitingForWill) => [true, false].flatMap((declined) => [true, false].map((checksCleared) => taskLine({ status, assetKind, failure, checks, checksCleared, overridden, waitingForWill, declined }))))))))),
     ];
     for (const line of new Set(lines)) expect(noteProblems('A Title', line), line).toEqual([]);
     for (const name of Object.values(CHECK_NAMES)) {

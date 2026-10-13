@@ -464,11 +464,14 @@ export const TASK_SAYS = {
   due: 'The due time has to be in the future, within 90 days.',
   noGoal: 'This goal no longer exists.',
   scored: 'Its result is already scored.',
+  outputGone: 'Its result is no longer kept, so it can’t be accepted.',
   notChecked: 'Flint hasn’t checked its result yet.',
   notOverride: 'That is already how it ended.',
   decided: 'You already decided this result.',
   superseded: 'You signed something newer about this, so this card didn’t run. Ask for it again if you still want it.',
   forgotten: 'You had Flint forget what this was about, so it didn’t run.',
+  setAside: 'You ended this task another way, so this card wasn’t needed.',
+  pool: 'A Hive job has to name its one pool.',
   reviewerFirst: 'Turn on Local Reviews first.',
   reviewerStays: 'Reviews are required, so this stays on.',
 } as const;
@@ -519,8 +522,10 @@ export interface TaskStanding {
   status: TaskStatus;
   assetKind: AssetKind;
   failure: TaskFailure | null;
-  /** Its checks, once they ran: how many there are and how many it met. */
+  /** Its checks, once they ran: how many there are and how many it met. Null before they ran, and once they are no longer kept. */
   checks: { total: number; met: number } | null;
+  /** Its checks ran, and what they found is no longer kept (a task's details are cleared some time after it ends). */
+  checksCleared: boolean;
   /** Will ended it himself, against its check. */
   overridden: boolean;
   /** Its accept card is waiting for him. */
@@ -538,9 +543,9 @@ export function taskLine(t: TaskStanding): string {
     case 'checking':
       return t.waitingForWill ? 'It passed its checks and is waiting for you.' : TASK_STATUS_SAYS.checking;
     case 'accepted':
-      return t.overridden ? 'You accepted it.' : t.checks ? `It passed ${n(t.checks.met)}.` : TASK_STATUS_SAYS.accepted;
+      return t.overridden ? 'You accepted it.' : t.checks ? `It passed ${n(t.checks.met)}.` : t.checksCleared ? 'It was accepted, and its checks are no longer kept.' : TASK_STATUS_SAYS.accepted;
     case 'rejected':
-      return t.overridden ? 'You rejected it.' : t.checks ? `It failed ${n(t.checks.total - t.checks.met)}.` : TASK_STATUS_SAYS.rejected;
+      return t.overridden ? 'You rejected it.' : t.checks ? `It failed ${n(t.checks.total - t.checks.met)}.` : t.checksCleared ? 'It was rejected, and its checks are no longer kept.' : TASK_STATUS_SAYS.rejected;
     case 'failed':
       return t.declined ? 'You didn’t accept its result.' : t.failure ? TASK_FAILURE_SAYS[t.failure] : TASK_STATUS_SAYS.failed;
     default:
