@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EMBEDDING_MODEL, hardwareTier, isFlintError, type Tool } from '@flint/core';
@@ -801,6 +801,41 @@ describe('which brain is on this Mac, as the facade answers it', () => {
     // A check that is handed in is the one that is asked.
     const told = await start({ WHISPER_MODEL: join(dir, 'ggml-small.en.bin') }, () => false);
     expect(told.inference.cfg.problems.map((p) => [p.key, p.kind])).toEqual([['WHISPER_MODEL', 'missing']]);
+  });
+
+  // The re-review: a WHISPER_BIN that was there but could not be run was taken at start, every recording was a
+  // 500, and the status said all was well.
+  it('a WHISPER_BIN that is there and cannot be run (chmod 644) is refused at start, on the real file system; made runnable, it is used', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    const bin = join(dir, 'whisper-cli');
+    const model = join(dir, 'ggml-small.en.bin');
+    writeFileSync(bin, '#!/bin/sh\necho heard\n');
+    writeFileSync(model, 'a stand-in for a model file');
+    const start = async () => {
+      const lines: string[] = [];
+      const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', WHISPER_BIN: bin, WHISPER_MODEL: model }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, log: (l) => lines.push(l) });
+      built.push(inference);
+      return { inference, lines };
+    };
+    chmodSync(bin, 0o644);
+    const refused = await start();
+    expect(refused.inference.cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a program that is not there, or that cannot be run', kind: 'missing' }]);
+    expect(refused.lines).toContain('[inference] WHISPER_BIN is the path of a program that is not there, or that cannot be run; using the usual transcription program');
+    expect(refused.lines.join('\n')).not.toContain(dir);
+    // The usual program is what the plan names; the model, which is a file and is there, is the one that was set.
+    expect(refused.inference.voicePlan.stt).toMatchObject({ bin: '/opt/homebrew/bin/whisper-cli', model });
+    expect((await refused.inference.status()).notices).toContain("The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one.");
+    chmodSync(bin, 0o755);
+    const kept = await start();
+    expect(kept.inference.cfg.problems).toEqual([]);
+    expect(kept.inference.voicePlan.stt).toMatchObject({ bin, model });
+    // ...and the status follows the program while Flint runs: taken away its permission, the row says so at the next look.
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe('Your voice is turned into text on this Mac.');
+    chmodSync(bin, 0o644);
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe("Flint can't turn speech into text until its transcription program is on this Mac.");
+    chmodSync(bin, 0o755);
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe('Your voice is turned into text on this Mac.');
   });
 
   // The Transcription row follows what is on this Mac when the status is built: the same look the provider takes

@@ -34,10 +34,10 @@
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SAY_VOICE_RE, type InferenceConfig, type LocalUrlOk, type SttProviderKind, type TtsProviderKind } from './inference-config';
+import { SAY_VOICE_RE, type FileCheck, type FileKind, type InferenceConfig, type LocalUrlOk, type SttProviderKind, type TtsProviderKind } from './inference-config';
 import { guardedFetch } from './local-backend';
 
 /** The kinds of audio a provider may hand back. `/speak` answers with the provider's own. */
@@ -119,7 +119,15 @@ export class SpeechBusy extends Error {
 
 /** How many `say` run at once, and how many more may wait behind them. */
 export const SAY_AT_ONCE = 2;
-export const SAY_WAITING = 8;
+/**
+ * Forty behind the two that run. The console asks for a reply one sentence at
+ * a time, as fast as the reply streams in, so a long reply is thirty requests
+ * in a few seconds: with a line of eight, the first ten sentences were spoken
+ * by this Mac's voice and the rest by the device's. Forty holds a whole long
+ * reply (and still bounds what one client can pile up: at most forty-two
+ * replies in hand, two programs running).
+ */
+export const SAY_WAITING = 40;
 
 const hungUp = (): Error => Object.assign(new Error('the caller hung up'), { name: 'AbortError' });
 
@@ -186,10 +194,16 @@ export function openAiSpeech(v: Pick<InferenceConfig['voice'], 'openaiModel' | '
 /** A file's name, for a log or a status: never the folder it is in. */
 export const fileNameOf = (path: string): string => path.replace(/^.*[\\/]/, '');
 
-/** Is there a file at this path (a link to one counts)? Never throws. */
-export function isFile(path: string): boolean {
+/**
+ * Is there a file at this path (a link to one counts)? As a `program`: one
+ * this user may run, too. A program that is there without execute permission
+ * cannot be started, so for what Flint can do it is not there. Never throws.
+ */
+export function isFile(path: string, kind: FileKind = 'file'): boolean {
   try {
-    return statSync(path).isFile();
+    if (!statSync(path).isFile()) return false;
+    if (kind === 'program') accessSync(path, constants.X_OK);
+    return true;
   } catch {
     return false;
   }
@@ -215,8 +229,9 @@ export class CannotTranscribe extends Error {
  * first, then its model. One question with one answer, for the recording that
  * is about to be transcribed and for the status that says whether one can be.
  */
-export function whisperMissing(at: { bin: string; model: string }, exists: (path: string) => boolean = isFile): 'program' | 'model' | undefined {
-  return !exists(at.bin) ? 'program' : !exists(at.model) ? 'model' : undefined;
+export function whisperMissing(at: { bin: string; model: string }, exists: FileCheck = isFile): 'program' | 'model' | undefined {
+  // The program has to be one that can be run; the model has to be a file.
+  return !exists(at.bin, 'program') ? 'program' : !exists(at.model, 'file') ? 'model' : undefined;
 }
 
 /**
@@ -229,7 +244,7 @@ export function whisperMissing(at: { bin: string; model: string }, exists: (path
  * error of a program that could not start. It is looked for each time, so a
  * model put there while Flint runs is used by the next recording.
  */
-export function whisperCppStt(opts: { bin: string; model: string; run?: Run; exists?: (path: string) => boolean }): SttProvider {
+export function whisperCppStt(opts: { bin: string; model: string; run?: Run; exists?: FileCheck }): SttProvider {
   const run = opts.run ?? runFile;
   const exists = opts.exists ?? isFile;
   return {
@@ -526,7 +541,7 @@ export function planVoice(cfg: Pick<InferenceConfig, 'voice' | 'problems'>, env:
  * status. A speech server lacks nothing here: whether it is up is its own
  * answer to give, when it is asked.
  */
-export function transcriptionMissing(stt: VoicePlan['stt'], exists: (path: string) => boolean = isFile): 'program' | 'model' | undefined {
+export function transcriptionMissing(stt: VoicePlan['stt'], exists: FileCheck = isFile): 'program' | 'model' | undefined {
   return stt.name === 'local' ? undefined : whisperMissing(stt, exists);
 }
 
@@ -542,8 +557,8 @@ export interface BuildVoiceDeps {
   connectTimeoutMs?: number;
   /** Injectable TCP connect check (tests: no real socket). */
   connect?: (host: string, port: number, ms: number) => Promise<void>;
-  /** Is there a file at this path? For whisper.cpp and its model, looked for before each recording. Default: the real file system. */
-  fileExists?: (path: string) => boolean;
+  /** Is there a file at this path (for the program: one that can be run)? For whisper.cpp and its model, looked for before each recording. Default: the real file system. */
+  fileExists?: FileCheck;
 }
 
 /** Build the providers a plan names. A local speech server is reached through the guarded fetch: its origin only, its two paths only, never a redirect. */

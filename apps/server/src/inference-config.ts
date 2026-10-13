@@ -135,6 +135,11 @@ const fileSetting = z
   .refine((v) => !UNPRINTABLE_RE.test(v), { message: 'unprintable' })
   .refine((v) => /[^\\/]$/.test(v) && v.replace(/^.*[\\/]/, '').length <= FILE_NAME_MAX_LEN, { message: 'file_name' });
 
+/** What is looked for at a path: a file, or a program (a file this user may run). */
+export type FileKind = 'file' | 'program';
+/** Is that there? Handed in by whoever touches the file system (./voice isFile); a stand-in may answer for the path alone. */
+export type FileCheck = (path: string, kind: FileKind) => boolean;
+
 export const DEFAULT_LOCAL_STT_MODEL = 'whisper-1';
 export const DEFAULT_LOCAL_TTS_MODEL = 'tts-1';
 export const DEFAULT_LOCAL_TTS_VOICE = 'alloy';
@@ -471,7 +476,7 @@ export function readInferenceConfig(
      * no file is looked for: this function reads the environment and nothing
      * else.
      */
-    fileExists?: (path: string) => boolean;
+    fileExists?: FileCheck;
   } = {},
 ): InferenceConfig {
   const problems: ConfigProblem[] = [];
@@ -572,7 +577,9 @@ export function readInferenceConfig(
    * A path to a program or a model file: a full path, with `~/` read as this home folder (neither the settings
    * file nor a LaunchAgent expands it, and a path whisper.cpp cannot open would fail every recording). Any other
    * path that is not a full one (`~someone/...`, a bare name) is refused, and the usual one is used. So is one
-   * that names a file that is not there (`opts.fileExists`): said by the setting's name, never by its path.
+   * that names a file that is not there (`opts.fileExists`), or a program that is there and may not be run (a
+   * file without execute permission fails every recording just as a missing one does): said by the setting's
+   * name, never by its path.
    */
   const home = opts.home ?? homedir();
   const filePath = (key: 'WHISPER_BIN' | 'WHISPER_MODEL', outcome: string): string | undefined => {
@@ -583,8 +590,8 @@ export function readInferenceConfig(
       refuse(key, 'not a full path (one that starts with / or with ~/)', outcome);
       return undefined;
     }
-    if (opts.fileExists && !opts.fileExists(full)) {
-      refuse(key, 'the path of a file that is not there', outcome, 'missing');
+    if (opts.fileExists && !opts.fileExists(full, key === 'WHISPER_BIN' ? 'program' : 'file')) {
+      refuse(key, key === 'WHISPER_BIN' ? 'the path of a program that is not there, or that cannot be run' : 'the path of a file that is not there', outcome, 'missing');
       return undefined;
     }
     return full;

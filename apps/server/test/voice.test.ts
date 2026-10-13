@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { readInferenceConfig } from '../src/inference-config';
-import { NO_PROXY_SPELLINGS, REVIEW_SIX } from './no-proxy-spellings';
+import { NO_PROXY_SPELLINGS, REVIEW_SPELLINGS } from './no-proxy-spellings';
 import {
   AUDIO_TYPES,
   CannotTranscribe,
@@ -220,8 +220,8 @@ describe('a WHISPER_BIN or WHISPER_MODEL that names a file that is not there is 
   it('the program likewise; and both at once are two refusals', () => {
     const one = read({ WHISPER_BIN: '/gone/bin/whisper-cli' }, [USUAL.bin, USUAL.model]);
     expect(one.plan.stt).toMatchObject(USUAL);
-    expect(one.cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a file that is not there', kind: 'missing' }]);
-    expect(one.warned).toEqual(['[inference] WHISPER_BIN is the path of a file that is not there; using the usual transcription program']);
+    expect(one.cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a program that is not there, or that cannot be run', kind: 'missing' }]);
+    expect(one.warned).toEqual(['[inference] WHISPER_BIN is the path of a program that is not there, or that cannot be run; using the usual transcription program']);
     const both = read({ WHISPER_BIN: '/gone/whisper-cli', WHISPER_MODEL: '/gone/ggml-small.en.bin' }, []);
     expect(both.cfg.problems.map((x) => [x.key, x.kind])).toEqual([['WHISPER_BIN', 'missing'], ['WHISPER_MODEL', 'missing']]);
     // The plan names the usual ones whether or not they are there: what is there is looked for again at each recording.
@@ -260,6 +260,65 @@ describe('a WHISPER_BIN or WHISPER_MODEL that names a file that is not there is 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The re-review: a WHISPER_BIN that was there but could not be run was taken, every recording was a 500, and
+  // the Transcription row said all was well. A program is one this user may run.
+  it('a program is a file that can be run: one without execute permission (chmod 644) is not there, at start and before each recording', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-isprogram-'));
+    try {
+      const bin = join(dir, 'whisper-cli');
+      const model = join(dir, 'ggml-small.en.bin');
+      writeFileSync(bin, '#!/bin/sh\necho heard\n');
+      writeFileSync(model, 'weights');
+      symlinkSync(bin, join(dir, 'link-to-it'));
+      chmodSync(bin, 0o644);
+      // As a file it is there; as a program it is not. A folder is neither (a folder has the execute bit: it is no program).
+      expect([isFile(bin), isFile(bin, 'file'), isFile(bin, 'program'), isFile(join(dir, 'link-to-it'), 'program'), isFile(dir, 'program'), isFile(join(dir, 'gone'), 'program')]).toEqual([true, true, false, false, false, false]);
+      // At start, on the real file system: refused by the name of the setting, and the usual program is used.
+      const env = { WHISPER_BIN: bin, WHISPER_MODEL: model };
+      const warned: string[] = [];
+      const cfg = readInferenceConfig(env, (m) => warned.push(m), { home: '/Users/will', fileExists: isFile });
+      expect(cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a program that is not there, or that cannot be run', kind: 'missing' }]);
+      expect(warned).toEqual(['[inference] WHISPER_BIN is the path of a program that is not there, or that cannot be run; using the usual transcription program']);
+      expect(warned.join('')).not.toContain(dir);
+      expect(planVoice(cfg, env, { platform: 'darwin', home: '/Users/will' }).stt).toMatchObject({ bin: '/opt/homebrew/bin/whisper-cli', model });
+      // The model is a file, and is never asked to be a program: a model without execute permission is a model.
+      chmodSync(model, 0o644);
+      expect(cfg.voice.whisperModel).toBe(model);
+      // Before each recording: the same sentence as a program that is missing, and nothing is run.
+      const { run, ran } = runner({ whisperSays: 'heard' });
+      const stt = whisperCppStt({ bin, model, run });
+      const err = (await stt.transcribe(Buffer.from('a')).catch((e: Error) => e)) as CannotTranscribe;
+      expect(err).toBeInstanceOf(CannotTranscribe);
+      expect([err.what, err.message]).toEqual(['program', 'Flint can’t turn speech into text: its transcription program isn’t on this Mac.']);
+      expect(ran).toEqual([]);
+      expect(whisperMissing({ bin, model })).toBe('program');
+      // Made runnable while Flint runs: the next recording is transcribed, and so is one through a link to it.
+      chmodSync(bin, 0o755);
+      expect([isFile(bin, 'program'), isFile(join(dir, 'link-to-it'), 'program'), whisperMissing({ bin, model })]).toEqual([true, true, undefined]);
+      expect(readInferenceConfig(env, undefined, { home: '/Users/will', fileExists: isFile }).problems).toEqual([]);
+      expect(await stt.transcribe(Buffer.from('a'))).toEqual({ text: 'heard' });
+      expect(ran.map((r) => r.file)).toEqual(['/usr/bin/afconvert', bin]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the program is asked for as a program and the model as a file: by config at start, and by the provider at each recording', async () => {
+    const asked: Array<[string, string]> = [];
+    const check = (p: string, kind: string): boolean => (asked.push([p, kind]), true);
+    readInferenceConfig({ WHISPER_BIN: '/x/whisper-cli', WHISPER_MODEL: '/x/ggml-small.en.bin' }, undefined, { home: '/h', fileExists: check });
+    expect(asked).toEqual([
+      ['/x/whisper-cli', 'program'],
+      ['/x/ggml-small.en.bin', 'file'],
+    ]);
+    asked.length = 0;
+    await whisperCppStt({ bin: '/x/whisper-cli', model: '/x/ggml-small.en.bin', run: runner({ whisperSays: 'x' }).run, exists: check }).transcribe(Buffer.from('a'));
+    expect(asked).toEqual([
+      ['/x/whisper-cli', 'program'],
+      ['/x/ggml-small.en.bin', 'file'],
+    ]);
   });
 });
 
@@ -667,31 +726,60 @@ describe("the Mac's own say is held to a line: two at a time, a few waiting, and
   }
   const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
 
-  it('twenty at once: two run, eight wait, ten are told it is busy at once, and no more than two ever run together', async () => {
-    expect([SAY_AT_ONCE, SAY_WAITING]).toEqual([2, 8]);
+  it('fifty at once: two run, forty wait, eight are told it is busy at once, and no more than two ever run together', async () => {
+    expect([SAY_AT_ONCE, SAY_WAITING]).toEqual([2, 40]);
     const h = held();
     const tts = macSayTts({ run: h.run });
-    const all = Array.from({ length: 20 }, (_, i) => tts.synthesize(`Sentence ${i}.`).then((s) => (s ? 'spoken' : 'null'), (e: Error) => e));
+    const all = Array.from({ length: 50 }, (_, i) => tts.synthesize(`Sentence ${i}.`).then((s) => (s ? 'spoken' : 'null'), (e: Error) => e));
     await tick();
     expect(h.seen()).toEqual({ running: 2, most: 2 });
-    // The ten past the line were refused already, each with the error /speak answers 429 for.
-    const early = await Promise.all(all.slice(10));
+    // The eight past the line were refused already, each with the error /speak answers 429 for.
+    const early = await Promise.all(all.slice(42));
+    expect(early).toHaveLength(8);
     expect(early.every((e) => e instanceof SpeechBusy)).toBe(true);
     // The rest are spoken as the two in front finish, in the order they came.
-    for (let done = 0; done < 10; done++) {
+    for (let done = 0; done < 42; done++) {
       while (h.waiting.length === 0) await tick();
       h.waiting.shift()!.go();
-      await tick();
+      await new Promise((r) => setImmediate(r));
       expect(h.seen().running).toBeLessThanOrEqual(2);
     }
-    expect(await Promise.all(all.slice(0, 10))).toEqual(Array.from({ length: 10 }, () => 'spoken'));
-    expect(h.started).toEqual(Array.from({ length: 10 }, (_, i) => `Sentence ${i}.`));
+    expect(await Promise.all(all.slice(0, 42))).toEqual(Array.from({ length: 42 }, () => 'spoken'));
+    expect(h.started).toEqual(Array.from({ length: 42 }, (_, i) => `Sentence ${i}.`));
     expect(h.seen()).toEqual({ running: 0, most: 2 });
     // The line is free again: the next one runs at once.
     const next = tts.synthesize('Again.');
     await tick();
     h.waiting.shift()!.go();
     expect(await next).toMatchObject({ contentType: 'audio/mp4' });
+  });
+
+  // The re-review: the console asks for a reply one sentence at a time, as fast as it streams in. With a line of
+  // eight, a reply of thirty sentences was spoken by this Mac's voice for its first ten and by the device's voice
+  // for the rest (and, at five sentences a second, back and forth between them). The line holds a whole long reply.
+  it('a long reply fits in the line: thirty sentences at once are all spoken by this Mac, two at a time, and so are thirty at five a second', async () => {
+    for (const everyMs of [0, 4]) {
+      let running = 0;
+      let most = 0;
+      // (A sentence takes this Mac about 0.7 s to speak and arrives every 0.2 s: the same ratio, a fiftieth of the time.)
+      const run: Run = async (_file, args) => {
+        running++;
+        most = Math.max(most, running);
+        await new Promise((r) => setTimeout(r, 14));
+        writeFileSync(args[args.indexOf('-o') + 1]!, 'aac');
+        running--;
+        return { stdout: '' };
+      };
+      const tts = macSayTts({ run });
+      const asked: Array<Promise<string>> = [];
+      for (let i = 0; i < 30; i++) {
+        asked.push(tts.synthesize(`Sentence ${i}.`).then(() => 'M', (e: Error) => (e instanceof SpeechBusy ? 'd' : `failed: ${e.message}`)));
+        if (everyMs > 0) await new Promise((r) => setTimeout(r, everyMs));
+      }
+      // Every sentence by this Mac's voice: not one was handed back to the device.
+      expect((await Promise.all(asked)).join(''), `one every ${everyMs} ms`).toBe('M'.repeat(30));
+      expect(most, `one every ${everyMs} ms`).toBe(2);
+    }
   });
 
   it('a say that fails gives up its place: the line does not jam', async () => {
@@ -1035,9 +1123,10 @@ describe('a refused voice setting never lands on a less private choice, and neve
     const ON = { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://proxy.example:3128' };
     const at = { v4: 'http://127.0.0.1:8880/v1', v6: 'http://[::1]:8880/v1' } as const;
 
-    it('there are six of them, and for each at least one of this Mac’s two addresses is one Node proxies', () => {
-      expect(REVIEW_SIX).toHaveLength(6);
-      for (const s of REVIEW_SIX) expect(s.direct.v4 && s.direct.v6, s.label).toBe(false);
+    it('the review’s spellings are all here, the reviewer’s own sixth among them, and for each at least one of this Mac’s two addresses is one Node proxies', () => {
+      expect(REVIEW_SPELLINGS).toHaveLength(7);
+      expect(REVIEW_SPELLINGS.map((s) => s.env)).toContainEqual({ NO_PROXY: '*', no_proxy: 'x' });
+      for (const s of REVIEW_SPELLINGS) expect(s.direct.v4 && s.direct.v6, s.label).toBe(false);
     });
 
     it.each(NO_PROXY_SPELLINGS.map((s) => [s.label, s] as const))('%s: a speech server is taken exactly when Node would reach it directly, for speaking and for hearing', (_label, s) => {

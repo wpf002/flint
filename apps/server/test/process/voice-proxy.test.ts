@@ -22,7 +22,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NO_PROXY_SPELLINGS, REVIEW_SIX } from '../no-proxy-spellings';
+import { NO_PROXY_SPELLINGS, REVIEW_SPELLINGS } from '../no-proxy-spellings';
 import { scratch } from './rig';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -223,9 +223,9 @@ describe.runIf(NODE_HAS_ENV_PROXY)('a local speech server under Node’s env pro
     expect(JSON.stringify([speechGot, proxyGot])).not.toContain('OPENAISECRET');
   });
 
-  it('the six the review found are all here, and for each of them Node proxied at least one of the two addresses', () => {
-    expect(REVIEW_SIX).toHaveLength(6);
-    for (const s of REVIEW_SIX) {
+  it('the spellings the review found are all here, and for each of them Node proxied at least one of the two addresses', () => {
+    expect(REVIEW_SPELLINGS).toHaveLength(7);
+    for (const s of REVIEW_SPELLINGS) {
       const got = seen.get(s.label)!;
       expect([got.v4.probe, got.v6.probe], s.label).toContain('from the proxy');
     }

@@ -987,7 +987,9 @@ function voiceMeta(vctx,ev){if(ev.staysHere===true||ev.staysHere===false){vctx.h
 // The server's audio for a sentence, or null for this device's own voice. A reply that stays on this Mac is sent
 // to the server to be spoken only when the server has said its speech is made on this Mac (speechHere): otherwise
 // the speech is an outside service's, the request is never made, and the browser speaks it.
-function _speechBlob(clean,vctx){return(clean&&(!vctx.here||vctx.speechHere===true))?_neuralFetch(clean,vctx).catch(function(){return null;}):Promise.resolve(null);}
+// One reply, one voice: once a sentence of a reply has been spoken by this device (vctx.own), the rest of that
+// reply is too, and no more of it is asked of the server. The next reply starts with the server's voice again.
+function _speechBlob(clean,vctx){return(clean&&!vctx.own&&(!vctx.here||vctx.speechHere===true))?_neuralFetch(clean,vctx).catch(function(){return null;}):Promise.resolve(null);}
 // Speak a sentence AND reveal its text in sync — the words appear on screen the
 // instant Flint starts saying them. Audio for the next sentence is prefetched
 // while the current one plays, so there are no gaps. Sentences play in order.
@@ -1013,12 +1015,15 @@ function speakSynced(sentence,body,vctx){
     return blobP.then(function(blob){
       return new Promise(function(res){
         if(vctx.gen!==_ttsGen){res();return;}
-        if(blob){
+        /* Sentences are spoken in order, so this is where a reply changes voice, at most once: the first sentence
+           with no audio from the server (it refused, was busy, or failed) is spoken by this device, and so is every
+           sentence after it, even one whose audio had already come back. Never back and forth. */
+        if(blob&&!vctx.own){
           var url=URL.createObjectURL(blob);var a=new Audio(url);_ttsAudio=a;
           a.onplay=reveal; // text shows up exactly as the voice begins it
           a.onended=a.onerror=function(){URL.revokeObjectURL(url);if(_ttsAudio===a)_ttsAudio=null;res();};
           a.play().catch(function(){reveal();res();});
-        }else{reveal();_localSpeak(clean,vctx.here===true).then(res);} // no neural voice → local, still synced
+        }else{if(clean)vctx.own=true;reveal();_localSpeak(clean,vctx.here===true).then(res);} // no neural voice → local, still synced
       });
     });
   }).then(spoken,spoken);

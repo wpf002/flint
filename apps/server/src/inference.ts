@@ -28,7 +28,7 @@
  */
 import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type HardwareTier, type Tier, type Tool } from '@flint/core';
 import { detectHardware, type Hardware } from './hardware';
-import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type InferenceConfig, type InferenceMode } from './inference-config';
+import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type FileCheck, type InferenceConfig, type InferenceMode } from './inference-config';
 import { ModeStore } from './inference-mode';
 import { inferenceStatus, localOnlySentence, modeSentence, type InferenceStatus } from './inference-status';
 import type { BrainTier } from './brains';
@@ -117,11 +117,11 @@ export class Inference {
   private readonly listing: (baseURL: string) => Promise<void>;
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
   /** Is there a file at this path? Asked when a status is built, of the transcription program and its model (./voice transcriptionMissing). */
-  private readonly fileExists: (path: string) => boolean;
+  private readonly fileExists: FileCheck;
 
   constructor(parts: {
     cfg: InferenceConfig; voice: VoicePlan; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
-    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: (path: string) => boolean;
+    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: FileCheck;
   }) {
     this.cfg = parts.cfg;
     this.voicePlan = parts.voice;
@@ -768,7 +768,7 @@ export interface BuildInferenceDeps {
    * refused, and the usual one is used. Default: the real file system. A test
    * hands one in.
    */
-  fileExists?: (path: string) => boolean;
+  fileExists?: FileCheck;
   /**
    * Have the server at an address asked what runs on it, when its word is more
    * than two seconds old. Default: the server's own record

@@ -218,20 +218,20 @@ describe("/speak when this Mac's own voice is busy, and when the client hangs up
     expect(SPEECH_BUSY).not.toContain('Dallas');
   });
 
-  it('twenty replies at once through the real line: two are spoken at a time, eight wait, ten get the 429, and every one gets an answer', async () => {
+  it('fifty replies at once through the real line: two are spoken at a time, forty wait, eight get the 429, and every one gets an answer', async () => {
     let running = 0;
     let most = 0;
     const run: Run = async (_file, args) => {
       running++;
       most = Math.max(most, running);
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 4));
       writeFileSync(args[args.indexOf('-o') + 1]!, 'aac');
       running--;
       return { stdout: '' };
     };
     const d = deps(macSayTts({ run })).d;
-    const all = await Promise.all(Array.from({ length: 20 }, (_, i) => speak({ text: `Sentence ${i}.` }, d)));
-    expect(all.map((r) => r.status)).toEqual([...Array.from({ length: 10 }, () => 200), ...Array.from({ length: 10 }, () => 429)]);
+    const all = await Promise.all(Array.from({ length: 50 }, (_, i) => speak({ text: `Sentence ${i}.` }, d)));
+    expect(all.map((r) => r.status)).toEqual([...Array.from({ length: 42 }, () => 200), ...Array.from({ length: 8 }, () => 429)]);
     expect(most).toBe(2);
     // The line empties: the next reply is spoken.
     expect((await speak({ text: 'Again.' }, d)).status).toBe(200);

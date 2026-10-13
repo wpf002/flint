@@ -40,7 +40,7 @@
  * whole run is unit-tested with stand-ins: the tests run no program.
  */
 import { ttsCostOf } from '@flint/core';
-import { readInferenceConfig, SAY_VOICE_RE, viaProxy } from './inference-config';
+import { readInferenceConfig, SAY_VOICE_RE, viaProxy, type FileKind } from './inference-config';
 import { buildVoice, fileNameOf, openAiSpeech, planVoice, whisperPaths, type Run, type SttProvider, type TtsProvider } from './voice';
 import { wordErrorRate, wordErrors, type WordErrors } from './wer';
 
@@ -442,7 +442,8 @@ export interface BenchDeps {
   readFile: (path: string) => Buffer;
   writeFile: (path: string, data: Buffer | string) => void;
   mkdir: (path: string) => void;
-  exists: (path: string) => boolean;
+  /** Is this there? Asked with `kind` for whisper.cpp's program (one that can be run) and its model (a file). */
+  exists: (path: string, kind?: FileKind) => boolean;
   /** Remove one file this run made. */
   remove: (path: string) => void;
   /** The names in a folder; [] when it cannot be read. */

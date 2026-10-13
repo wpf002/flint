@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readInferenceConfig } from '../src/inference-config';
 import { BENCH_SERVER_HOST, SENTENCES, USAGE, defaultOut, paidPlan, parseBenchArgs, renderBench, runBench, type BenchDeps, type BenchResult, type StartedServer } from '../src/voice-bench';
-import { openAiSpeech, runFile } from '../src/voice';
+import { isFile, openAiSpeech, runFile } from '../src/voice';
 
 type Env = Record<string, string | undefined>;
 
@@ -172,7 +172,8 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
     readFile: (p) => readFileSync(p),
     writeFile: (p, data) => writeFileSync(p, data, { mode: 0o600 }),
     mkdir: (p) => void mkdirSync(p, { recursive: true, mode: 0o700 }),
-    exists: (p) => existsSync(p),
+    // (whisper.cpp's program has to be one that can be run, and its model a file: the same look the server takes.)
+    exists: (p, kind) => (kind ? isFile(p, kind) : existsSync(p)),
     remove: (p) => rmSync(p, { force: true }),
     list: (dir) => {
       try {

@@ -150,6 +150,27 @@ v.speak("Yeah?")
     expect(r.ran).toEqual([['afplay', '.mp3'], ['afplay', '.mp3']]);
   });
 
+  // One reply, one voice. This client asks for a reply's speech in ONE request, whole (the console asks sentence
+  // by sentence), so a reply is spoken from its first word to its last by one voice: the server's, or this Mac's.
+  it('a long reply is one request, so it is one voice: the server’s for all of it, or this Mac’s own for all of it', () => {
+    const long = Array.from({ length: 30 }, (_, i) => `Sentence number ${i + 1} of a long reply.`).join(' ');
+    const spoken = run(`
+answer_with(200, b"m4a-bytes", "audio/mp4")
+v.speak(${JSON.stringify(long)}, False, "turn_long")
+`);
+    expect(spoken.sent).toEqual([{ url: 'http://flint.test/speak', body: { text: long, conversationId: 'voice', turnId: 'turn_long' } }]);
+    expect(spoken.ran).toEqual([['afplay', '.m4a']]);
+    for (const status of [429, 409, 503, 500]) {
+      const own = run(`
+answer_with(${status})
+v.speak(${JSON.stringify(long)}, False, "turn_long")
+`);
+      // Asked once, refused once, and then this Mac's own voice for the reply: nothing of it is played from the server.
+      expect(own.sent, String(status)).toHaveLength(1);
+      expect((own.ran as string[][]).map((x) => x[0]), String(status)).toEqual(['say']);
+    }
+  });
+
   it('when the server refuses (409: the reply stays here), is busy (429) or fails, this Mac’s own voice speaks it', () => {
     for (const status of [409, 429, 503, 500]) {
       const r = run(`

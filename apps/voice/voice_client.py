@@ -119,8 +119,10 @@ def speak(text, here=False, turn=None, speech_here=False):
     """Speak a reply. One that stays on this Mac (`here`) is sent to /speak
     only when the server said its speech is made on this Mac (`speech_here`);
     otherwise this Mac's own voice speaks it and nothing is sent. Any other is
-    sent, naming its conversation and turn; if the server refuses or fails,
-    this Mac's own voice speaks it."""
+    sent, naming its conversation and turn; if the server refuses, is busy or
+    fails, this Mac's own voice speaks it.
+    A reply is ONE request, whole, so it is spoken by one voice from its first
+    word to its last: the server's, or this Mac's own. Never part by each."""
     if here and speech_here is not True:
         say_here(text); return
     said = {"text":text, "conversationId":CONVERSATION}

@@ -3,7 +3,8 @@
  * this Mac when its env proxy is on (NODE_USE_ENV_PROXY=1 and a proxy named):
  * `direct.v4` for 127.0.0.1, `direct.v6` for [::1].
  *
- * The first six are the ones the voice review found: each used to be read as
+ * The first seven are the ones the voice review found (six by what goes wrong,
+ * and the reviewer's own sixth to the letter): each used to be read as
  * "this address is direct", so a local speech server at it was accepted, while
  * Node sent the request to the proxy: a reply that stays on this Mac, and the
  * speech server's key with it. The rule that reads them is @flint/policy's
@@ -29,6 +30,8 @@ export const NO_PROXY_SPELLINGS: readonly NoProxySpelling[] = [
   // With both spellings set Node reads the lower-case one, and only it: even when it is empty.
   { label: 'NO_PROXY=127.0.0.1,[::1] and no_proxy=x', env: { NO_PROXY: '127.0.0.1,[::1]', no_proxy: 'x' }, direct: { v4: false, v6: false } },
   { label: 'NO_PROXY=127.0.0.1,[::1] and no_proxy empty', env: { NO_PROXY: '127.0.0.1,[::1]', no_proxy: '' }, direct: { v4: false, v6: false } },
+  // The reviewer's sixth, to the letter: the upper-case list says every host, and the lower-case one, which is the one Node reads, does not.
+  { label: 'NO_PROXY=* and no_proxy=x', env: { NO_PROXY: '*', no_proxy: 'x' }, direct: { v4: false, v6: false } },
   // Spellings Node honours, so that "refused" above is not simply "always refused".
   { label: 'NO_PROXY=127.0.0.1', env: { NO_PROXY: '127.0.0.1' }, direct: { v4: true, v6: false } },
   { label: 'NO_PROXY=[::1]', env: { NO_PROXY: '[::1]' }, direct: { v4: false, v6: true } },
@@ -37,5 +40,5 @@ export const NO_PROXY_SPELLINGS: readonly NoProxySpelling[] = [
   { label: 'no list at all', env: {}, direct: { v4: false, v6: false } },
 ];
 
-/** The six the review found (the rest are controls). */
-export const REVIEW_SIX = NO_PROXY_SPELLINGS.slice(0, 6);
+/** The ones the review found (the rest are controls). */
+export const REVIEW_SPELLINGS = NO_PROXY_SPELLINGS.slice(0, 7);
