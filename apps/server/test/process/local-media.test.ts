@@ -13,7 +13,7 @@
  * Three servers, each on its own scratch HOME, against loopback stand-ins
  * (./stubs), fenced so that nothing else can be reached (./guard.mjs):
  *  - `plain`:  no setting. The model server says its model can see;
- *  - `vision`: FLINT_LOCAL_VISION=on, same model server;
+ *  - `vision`: FLINT_LOCAL_VISION=on, saved in ~/.flint/secrets.env as the README says to, same model server;
  *  - `pdf`:    FLINT_LOCAL_PDF=spotlight: NOT in the default run (see below).
  *
  * THE TESTS THAT READ A PDF FOR REAL ARE OPT-IN. The server runs the Mac's own
@@ -74,9 +74,10 @@ interface Booted {
   cloud: CloudStub;
   srv: Running;
 }
-async function boot(dir: string, env: Record<string, string>): Promise<Booted> {
+async function boot(dir: string, env: Record<string, string>, saved?: string): Promise<Booted> {
   const [ollama, cloud] = await Promise.all([startOllamaStub(models()), startCloudStub()]);
-  const srv = await startServer({ dir, env: { OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', ...cloudEnv(cloud), ...env } });
+  // `saved`: lines for the scratch HOME's ~/.flint/secrets.env, where Will keeps his settings.
+  const srv = await startServer({ dir, env: { OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', ...cloudEnv(cloud), ...env }, ...(saved ? { seed: [{ path: ['secrets.env'], text: saved }] } : {}) });
   return { ollama, cloud, srv };
 }
 
@@ -91,7 +92,8 @@ beforeAll(async () => {
   if (pdfTmp) temps.push(pdfTmp);
   const [a, b, c] = await Promise.all([
     boot(runs.plain.dir, {}),
-    boot(runs.vision.dir, { FLINT_LOCAL_VISION: 'on' }),
+    // (Set the way the README says to set it: a line in ~/.flint/secrets.env, and nothing in the environment.)
+    boot(runs.vision.dir, {}, '# pictures for the local model\nFLINT_LOCAL_VISION=on\n'),
     pdfTmp ? boot(runs.pdf.dir, { FLINT_LOCAL_PDF: 'spotlight', TMPDIR: pdfTmp }) : Promise.resolve(undefined),
   ]);
   plain = a;
