@@ -175,6 +175,50 @@ describe('a backup set’s names', () => {
   });
 });
 
+describe('the one-time setup, as the README gives it', () => {
+  const readme = readFileSync(join(RUNTIME, 'README.md'), 'utf8');
+  const section = readme.slice(readme.indexOf('## Nexus is backed up and tested (P7)'), readme.indexOf('## When a database update fails'));
+  const commands = [...section.matchAll(/^ {0,3}```\n([\s\S]*?)^ {0,3}```$/gm)].flatMap((m) => m[1]!.split('\n').map((l) => l.trim()).filter(Boolean));
+
+  it('is the commands Flint itself prints: the grant, the switch, and the first backup and test', () => {
+    expect(section.length).toBeGreaterThan(2000);
+    expect(commands).toEqual([
+      "psql -d postgres -c 'GRANT CONNECT ON DATABASE nexus TO flint_backup'",
+      'cd ~/flint && pnpm --filter @flint/runtime nexus-setup',
+      'cd ~/flint && pnpm --filter @flint/runtime nexus-backup',
+      'cd ~/flint && pnpm --filter @flint/runtime nexus-drill',
+      "sed -i '' '/^FLINT_NEXUS_BACKUP_URL=/d' ~/.flint/backup.env && chmod 600 ~/.flint/backup.env",
+    ]);
+    // The grants are the ones a refusal prints, to the letter; the other one it prints is named in the text.
+    const printed = nexusHelp(Object.assign(new Error('permission denied for database "nexus"'), { code: '42501' }), { backupUrl: 'postgresql://flint_backup:x@[::1]:5432/nexus' }).map((l) => l.trim());
+    expect(printed).toContain(commands[0]);
+    expect(section).toContain('`GRANT pg_read_all_data TO flint_backup`');
+    expect(printed).toContain("psql -d postgres -c 'GRANT pg_read_all_data TO flint_backup'");
+    expect([...NEXUS_OFF].map((l) => l.trim())).toContain(commands[1]);
+    // It says what it never does, and that restoring Nexus is not here yet.
+    for (const said of ['It ships off.', 'Flint cannot restore Nexus.', 'It never opens the Nexus database.', 'Nexus\'s own backup job is not touched.']) expect(section, said).toContain(said);
+    const runbook = readFileSync(join(RUNTIME, '..', '..', 'docs', 'RECOVERY.md'), 'utf8');
+    expect(runbook).toContain('it cannot\n  put Nexus back');
+    expect(runbook).toContain('Restoring Nexus from one is a later part.');
+  });
+
+  it('switching it off: the README’s own command takes the line out, keeps the others, and leaves the file its owner’s alone', () => {
+    const home = mkdtempSync(join(tmpdir(), 'flint-nexus-off-'));
+    mkdirSync(join(home, '.flint'), { mode: 0o700 });
+    const file = join(home, '.flint', 'backup.env');
+    writeFileSync(file, 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\nFLINT_BACKUP_CATCHUP=on\n', { mode: 0o600 });
+    expect(nexusBackupWanted(home, file)).toBe(true);
+    const off = commands.find((c) => c.startsWith('sed '))!;
+    const r = spawnSync('/bin/zsh', ['-c', off], { env: { PATH: '/usr/bin:/bin', HOME: home }, encoding: 'utf8' });
+    expect(`${r.stdout}${r.stderr}`).toBe('');
+    expect(r.status).toBe(0);
+    expect(readFileSync(file, 'utf8')).toBe('FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_BACKUP_CATCHUP=on\n');
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(nexusBackupWanted(home, file)).toBe(false);
+    rmSync(home, { recursive: true, force: true });
+  });
+});
+
 describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the real one)', () => {
   const tag = randomBytes(4).toString('hex');
   const fixture = `nexus_fixture_${tag}`;
@@ -302,10 +346,14 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
     it('the weekly test restores into its scratch database, compares, drops it, and never opens the database the dump came from', async () => {
       // Closed to every connection: a test that opened it would fail here.
       await withClient(URLS!.restore!, (c) => c.query(`ALTER DATABASE ${fixture} ALLOW_CONNECTIONS false`));
+      // A scratch database a run that was killed left behind, under this set's own name: it is the one replaced.
+      await withClient(URLS!.restore!, (c) => c.query(`CREATE DATABASE ${SET.scratch}`));
       try {
         const r = await restoreDrill(dump, URLS!.restore!, tools, SET);
         expect(r).toEqual({ ok: true, tables: 2, mismatches: [] });
         expect(await databases(`${SET.scratch}%`)).toEqual([]);
+        // The login that restores is never pointed at the scratch database itself (it could not then drop it).
+        await expect(restoreDrill(dump, onDatabase(URLS!.restore!, SET.scratch), tools, SET)).rejects.toThrow('the restore login’s own database is the scratch database');
       } finally {
         await withClient(URLS!.restore!, (c) => c.query(`ALTER DATABASE ${fixture} ALLOW_CONNECTIONS true`));
       }
@@ -513,6 +561,28 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(await databases('nexus_restore_test')).toEqual([]);
       // The fixture is as it was.
       expect(await count('"MemoryEntry"')).toBe(ROWS['"MemoryEntry"']);
+    });
+
+    it('it keeps the newest 14 dumps of its own, with what is beside them, and never touches a file that is not one', async () => {
+      // Thirteen older dumps (sixteen with the two above and tonight's), and one of Flint's own left in the folder by mistake.
+      for (let d = 1; d <= 13; d++) {
+        const name = `nexus-2026-09-${String(d).padStart(2, '0')}T07-15-00-000Z.dump`;
+        for (const tail of ['', '.counts.json', '.sha256']) writeFileSync(join(dumps(), `${name}${tail}`), 'old', { mode: 0o600 });
+      }
+      writeFileSync(join(dumps(), 'flint-2020-01-01T00-00-00-000Z.dump'), 'not Nexus’s');
+      writeFileSync(join(dumps(), 'notes.txt'), 'keep');
+      const r = cli(['nexus-backup']);
+      expect(r.status).toBe(0);
+      expect(r.out).toMatch(/"pruned":2\}\n$/);
+      const left = readdirSync(dumps());
+      expect(left.filter((f) => /^nexus-.*\.dump$/.test(f))).toHaveLength(14);
+      expect(left.filter((f) => f.startsWith('nexus-2026-09-01') || f.startsWith('nexus-2026-09-02'))).toEqual([]);
+      expect(left).toContain('nexus-2026-09-03T07-15-00-000Z.dump.counts.json');
+      expect(left).toContain('flint-2020-01-01T00-00-00-000Z.dump');
+      expect(left).toContain('notes.txt');
+      for (let d = 3; d <= 13; d++) for (const tail of ['', '.counts.json', '.sha256']) rmSync(join(dumps(), `nexus-2026-09-${String(d).padStart(2, '0')}T07-15-00-000Z.dump${tail}`));
+      rmSync(join(dumps(), 'flint-2020-01-01T00-00-00-000Z.dump'));
+      rmSync(join(dumps(), 'notes.txt'));
     });
 
     it('`nexus-offsite`: without Will’s key no copy is written at all; with it, only an encrypted one, with its row counts', async () => {

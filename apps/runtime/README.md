@@ -2246,6 +2246,152 @@ rollback:
 Any later deploy of P7 code applies the migration again. Claude runs `down.sql`
 only with your OK, after the dump.
 
+## Nexus is backed up and tested (P7)
+
+Nexus runs on this Mac and keeps its database on the same Postgres server as
+Flint. Flint can now back that database up the way it backs up its own: a
+dump every night, an encrypted copy offsite, and a weekly test that restores
+the dump and compares it.
+
+It ships off. Until you switch it on nothing of it runs, nothing of Nexus is
+read, and Settings > Health shows Nexus Backup as Off.
+
+What Flint does and does not do to Nexus:
+
+- It reads Nexus through a login that can change nothing there: Flint's own
+  backup login, which may read every table and write none. Before each dump
+  Flint checks that. A login that could write is refused, and nothing is
+  backed up.
+- It never stops, restarts or changes Nexus, its database or its logins.
+- The weekly test restores into a scratch database, `nexus_restore_test`, and
+  drops it. It never opens the Nexus database.
+- The dump is a file only you can read. It leaves this Mac only encrypted to
+  your backup key. No model ever reads it.
+- Nexus's own backup job is not touched. It still runs.
+- Flint cannot put a Nexus backup back yet. See Known limits.
+
+### Switching it on
+
+Run these once, in Terminal on the Studio.
+
+1. Let Flint's backup login into the Nexus database:
+
+   ```
+   psql -d postgres -c 'GRANT CONNECT ON DATABASE nexus TO flint_backup'
+   ```
+
+   This grants one thing: that login may connect to Nexus. It can already read
+   every table on this Mac's Postgres and write none, from Flint's own setup.
+   Today any login may connect to Nexus, so this changes nothing yet. It keeps
+   the backup working when Nexus closes its database to other logins.
+
+2. Switch the backup on:
+
+   ```
+   cd ~/flint && pnpm --filter @flint/runtime nexus-setup
+   ```
+
+   It works the address out from Flint's own backup address: the same login
+   and password, with the Nexus database's name. Before it saves anything it
+   opens Nexus once with that login, to see that the login is let in and can
+   change nothing. Then it writes one line, `FLINT_NEXUS_BACKUP_URL`, into
+   `~/.flint/backup.env`. It never shows the address. If the Nexus database
+   has another name, add `--database <name>`.
+
+3. Take a first backup and test it:
+
+   ```
+   cd ~/flint && pnpm --filter @flint/runtime nexus-backup
+   cd ~/flint && pnpm --filter @flint/runtime nexus-drill
+   ```
+
+   Run by hand they are you, so they need no card. With your backup key on
+   this Mac, `nexus-offsite` sends the encrypted copy the same way.
+
+If a command says Flint's backup login is not let in, it prints the two
+commands that fix it. The second, `GRANT pg_read_all_data TO flint_backup`,
+lets that login read every table, view and sequence and change none. Flint's
+own setup already gave it; the command is there in case it was taken away.
+
+Run `nexus-setup` again after Flint's database passwords are changed, and
+after a rebuild. The address holds a password, so no backup carries it.
+
+### What runs each night
+
+The 02:15 job runs Nexus's three steps after Flint's own, and only while the
+address is set:
+
+| Step | Action | Card | Cap |
+|---|---|---|---|
+| The dump, into `~/FlintBackups/nexus` (14 kept) | `backup.nexus` | Run Tonight's Nexus Backup | 1 a day |
+| The encrypted copy, into iCloud Drive's `FlintBackups/nexus` (7 kept), only with your backup key here | `backup.nexus.offsite` | Run Tonight's Nexus Offsite Copy | 1 a day |
+| The restore test, on Sundays | `restore.drill.nexus` | Run This Week's Nexus Restore Test | 1 a week |
+
+- Each ships at APPROVAL: it files a card and waits for you. To let one run on
+  its own, sign a rule that names it. A rule you signed for the backups as a
+  group does not cover these. Nothing said in chat can ask for them.
+- Each dump has its row counts and a fingerprint sealed with this Mac's key
+  beside it, taken in the same snapshot. Large objects are left out, as in
+  Flint's own dumps.
+- The offsite copy is never written in plaintext: with no key there is no
+  copy. Its row counts go with it, encrypted, and are removed with it.
+- Each file is recorded once, under the kind `nexus_dump`. A file written
+  again is the same record.
+- With `FLINT_OFFSITE_DIR` set, the copies go into a `nexus` folder inside it.
+
+Settings > Health has one row, Nexus Backup, under BACKUPS. It says the worst
+of three things: the dump (none yet, failed, or its age), its offsite copy
+(only with your key here), and its test (failed, or over eight days old).
+Restore Test and Backups stay Flint's own database's.
+
+You get a note when one of the three jobs fails (Nexus Backup Failed, Nexus
+Offsite Backup Failed, Nexus Restore Test Failed), and a critical one, Nexus
+Backups Have Stopped, when the last good dump is over 36 hours old.
+
+### Switching it off
+
+Take the line out, and keep the file yours alone:
+
+```
+sed -i '' '/^FLINT_NEXUS_BACKUP_URL=/d' ~/.flint/backup.env && chmod 600 ~/.flint/backup.env
+```
+
+The next night nothing of it runs and Health shows Off. The dumps already
+taken stay where they are.
+
+### What changed on deploy
+
+- No database update. The records use a kind the P7 update already allows.
+- Four commands: `nexus-setup`, `nexus-backup`, `nexus-offsite`,
+  `nexus-drill`. The last three do nothing until the address is set.
+- One setting, `FLINT_NEXUS_BACKUP_URL`, in `~/.flint/backup.env`. It is listed
+  in `apps/studio/settings.manifest` as one a rebuild leaves to you.
+- Settings > Health gains the row Nexus Backup. It reads Off.
+- Restore Test and the note The Last Restore Test Failed now read only the
+  tests of Flint's own database. They did before too, because there were no
+  others.
+
+### Known limits
+
+- Flint cannot restore Nexus. What exists is the dump, its encrypted copy and
+  the weekly test. Putting a dump back into Nexus is a later part.
+- The test compares the row count of every table in `public`, which is the
+  only schema Nexus's own updates make. A table in another schema is dumped
+  and restored but not counted.
+- The test proves a dump restores and holds as many rows as were dumped. It
+  does not compare what is in the rows.
+- The address is set once and kept. If Nexus moves its database, or Flint's
+  passwords change, the nightly job fails, says its setup needs fixing, and
+  prints what to run.
+- A failed Nexus restore test is a note from its own job and shows in Health.
+  It does not raise The Last Restore Test Failed, which is Flint's own.
+- While both run, Nexus's own backup job and this one each take a dump.
+
+### Rolling it back
+
+Switch it off (above), or deploy a runtime from before it. No database update
+needs undoing. The records of kind `nexus_dump` stay and are read by nothing.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A

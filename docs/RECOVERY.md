@@ -382,6 +382,7 @@ Disk Space as low. Backups and the database stop when the disk fills.
 |---|---|---|---|
 | Flint's files (memory, conversations, notes, training data) | Nightly, 02:30 | `~/FlintBackups` on the Studio, 14 kept. An encrypted copy in iCloud Drive, 7 kept. | The Studio's copy is plain. The iCloud copy needs the key on the MacBook. |
 | Flint's database | Nightly, 02:15 | `~/FlintBackups/pg` on the Studio, 14 kept. An encrypted copy in iCloud Drive, 7 kept. | The same. |
+| The Nexus database, once you switch its backup on | Nightly, 02:15 | `~/FlintBackups/nexus` on the Studio, 14 kept. An encrypted copy in iCloud Drive, 7 kept. | The same. |
 
 No key, token or password is ever in the iCloud copies.
 
@@ -400,6 +401,11 @@ No key, token or password is ever in the iCloud copies.
   that the database in use never held. Enrol it again if it was yours.
 - The first connection to a new Mac trusts the fingerprint you compare in entry
   4, step 2, and that Mac's password.
+- Flint backs up the Nexus database only once you switch that on, and it cannot
+  put Nexus back. What exists today is the nightly dump, its encrypted copy in
+  iCloud Drive, and a weekly test that restores the dump into a scratch
+  database and compares it. Restoring Nexus from one is a later part. No entry
+  on this page restores Nexus, and a rebuild does not bring it back.
 
 ## For whoever maintains this page
 
@@ -420,6 +426,8 @@ Each entry is proved by a test, so a change that breaks one fails the deploy.
   the Tailscale sign-in.
 - Entry 6: `apps/studio/test/free_space.test.sh`, on a stand-in home folder and
   a stand-in temp folder.
+- The Nexus backup: `apps/runtime/test/nexus-backup-db.test.ts`, on a second
+  database made for the test. It never opens Nexus.
 - This page itself: `apps/studio/test/runbook.test.sh`. Flint may not edit it
   (`packages/policy/src/selfmod-paths.ts`). What a rebuild restores, makes new
   and leaves to you is listed by name in `apps/studio/settings.manifest`.
