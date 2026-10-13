@@ -50,7 +50,7 @@ import { rememberTool, type KnowledgeStore } from './knowledge';
 import { LOCALITY, type OllamaLocality } from './ollama-locality';
 import type { PersistentStore } from './persistent-store';
 import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type AnsweringBrain } from './policy';
-import { PRIVATE_TURN, corpusMark, turnStaysHere, type StayRoute } from './private-turns';
+import { LOCAL_MODE_TURN, PRIVATE_TURN, corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
 import { isPartOf } from './spoken-text';
 import { asLocalTurn, isLocalTurn } from './turn-taint';
@@ -329,7 +329,11 @@ export class GoalsChat<P extends Speaker> {
     const goals = await this.#gate?.forTurn();
     // With the persona's own words, the rest of the prompt: what the block's room is measured against.
     const restChars = message.length + this.#o.memory.historyChars(conversationId);
-    return new ChatTurn<P>(this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools, (turnId, text) => this.#streamed(conversationId, turnId, text));
+    return new ChatTurn<P>(
+      this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools,
+      (turnId, text) => this.#streamed(conversationId, turnId, text),
+      route !== undefined && keptByModeAlone(route),
+    );
   }
 
   /** Keep what was just streamed as a turn's reply (`ChatAsk.said`). */
@@ -400,6 +404,7 @@ export class GoalsChat<P extends Speaker> {
     isTainted: (conversationId: string, turnId: string) => boolean;
     carriedGoals: (conversationId: string, turnId: string) => boolean;
     keptPrivate: (conversationId: string, turnId: string) => boolean;
+    privateByRequest: (conversationId: string, turnId: string) => boolean;
     holdOff: () => string | undefined;
   } {
     void this.#watch(o.brain);
@@ -410,6 +415,8 @@ export class GoalsChat<P extends Speaker> {
       isTainted: (cid, tid) => o.tainted(cid, tid) || (goals(cid, tid) && !staysHere(o.brain, this.#out)) || (kept(cid, tid) && !keepsPrivate(o.brain)),
       carriedGoals: goals,
       keptPrivate: kept,
+      // The narrower notion, as stored: a turn Will himself asked to keep private is never asked for a goal.
+      privateByRequest: (cid, tid) => this.#o.memory.matches(cid, tid, privateByRequest),
       holdOff: () => {
         if (!placeUnknown(o.brain)) return undefined;
         // (That Ollama is being asked: at once when it has never answered, and every minute after.)
@@ -451,6 +458,8 @@ export class ChatTurn<P extends Speaker> {
     private readonly keptTools?: KeptTools,
     /** Told what was streamed as a stored turn's reply (GoalsChat keeps it for `/speak`). */
     private readonly streamed?: (turnId: string, text: string) => void,
+    /** ...and it is the mode alone that keeps it here (Local mode, and Will did not ask for this turn to be private): its mark says so. */
+    private readonly byMode = false,
   ) {}
 
   /**
@@ -475,13 +484,14 @@ export class ChatTurn<P extends Speaker> {
           carried: this.memory.windowHas(this.conversationId, carriedGoals),
           carriedPrivate: this.memory.windowHas(this.conversationId, keptStrictly),
           kept: this.kept,
+          byMode: this.byMode,
           tools: a.tools,
           promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + this.restChars,
         })
       : // No brain has been named yet: nothing that stays here is handed out. A turn its route keeps here is still
         // marked, and saves nothing unmarked.
         this.kept
-        ? { context: open, tools: this.keptTools ? this.keptTools(a.tools, { private: true }) : a.tools.filter((t) => t.definition.name !== 'remember'), tokens: 0, mark: { context: PRIVATE_TURN } }
+        ? { context: open, tools: this.keptTools ? this.keptTools(a.tools, { private: true }) : a.tools.filter((t) => t.definition.name !== 'remember'), tokens: 0, mark: { context: this.byMode ? LOCAL_MODE_TURN : PRIVATE_TURN } }
         : { context: open, tools: a.tools, tokens: 0, mark: {} };
     const staysHere = asked.mark.context !== undefined;
     this.#stays = staysHere;

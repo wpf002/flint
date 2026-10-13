@@ -92,7 +92,7 @@ import type { Runtime } from './audit-sink';
 import { TIERS, type BrainSet } from './brains';
 import type { PersistentStore } from './persistent-store';
 import { brainIsLocal, brainOf, notLocalWhy, type AnsweringBrain } from './policy';
-import { PRIVATE_TURN, wasPrivate } from './private-turns';
+import { LOCAL_MODE_TURN, PRIVATE_TURN, wasPrivate } from './private-turns';
 import { carriesTaint } from './world-now';
 
 export const GOALS_NOW_MAX_TOKENS = GOALS_BLOCK_MAX_TOKENS;
@@ -175,16 +175,27 @@ export function carriedGoals(turn: { context?: unknown }): boolean {
  */
 export const STAY_MARKS: ReadonlyArray<(turn: { context?: unknown }) => boolean> = [carriedGoals, wasPrivate];
 
-/** What a stored turn that stays here carries in its call context: one mark, or both. */
-export type StayMark = Readonly<{ goals?: true; private?: true }>;
+/**
+ * What a stored turn that stays here carries in its call context: one mark, or
+ * both. `byMode` is not a mark: it is a note on the private one, that the turn
+ * is kept here by Local mode and not by Will's own word for it
+ * (./private-turns LOCAL_MODE_TURN).
+ */
+export type StayMark = Readonly<{ goals?: true; private?: true; byMode?: true }>;
 
 /** A turn that was answered with Will's goals AND is one he kept private: it keeps both marks. */
 const BOTH_MARKS: StayMark = Object.freeze({ goals: true, private: true });
+/** ...and the same for a turn of Local mode he did not ask to keep private. */
+const BOTH_MARKS_BY_MODE: StayMark = Object.freeze({ goals: true, private: true, byMode: true });
 
-/** The call context for a turn with these marks; undefined for a turn with none. */
-export function stayMark(marks: { goals: boolean; private: boolean }): StayMark | undefined {
-  if (marks.goals && marks.private) return BOTH_MARKS;
-  return marks.goals ? GOALS_TURN : marks.private ? PRIVATE_TURN : undefined;
+/**
+ * The call context for a turn with these marks; undefined for a turn with
+ * none. `byMode`: the private mark is the mode's (./private-turns
+ * keptByModeAlone); it says nothing when the turn carries no private mark.
+ */
+export function stayMark(marks: { goals: boolean; private: boolean; byMode?: boolean }): StayMark | undefined {
+  if (marks.goals && marks.private) return marks.byMode ? BOTH_MARKS_BY_MODE : BOTH_MARKS;
+  return marks.goals ? GOALS_TURN : marks.private ? (marks.byMode ? LOCAL_MODE_TURN : PRIVATE_TURN) : undefined;
 }
 
 /** Is this stored turn marked to stay on this Mac, by any mark? */
@@ -389,6 +400,12 @@ export interface Ask {
    * marked whichever brain is asked, and whatever that brain is given.
    */
   kept?: boolean;
+  /**
+   * ...and it is kept by the mode alone (./private-turns keptByModeAlone):
+   * Flint is in Local mode and Will did not ask for this turn to be private.
+   * Its mark carries the note.
+   */
+  byMode?: boolean;
   /** The tools the turn would offer. */
   tools?: readonly Tool[];
   /**
@@ -473,7 +490,7 @@ export class TurnGoals<P> {
     const goals = goalsOk && (!!text || lifted !== a.context || a.carried === true);
     // Neither a fact that stays here, nor the goals, nor a turn that stays here in its history, nor a route that
     // keeps it here: an ordinary ask, with every tool and no mark.
-    const context = stayMark({ goals, private: priv });
+    const context = stayMark({ goals, private: priv, byMode: a.kept === true && a.byMode === true });
     if (!context) return { context: a.context, tools: offered, tokens: 0, mark: {} };
     const tools = priv ? this.#rules.toolsPrivate(offered, goals) : sized;
     return { context: text ? (base ? `${base}\n\n${text}` : text) : base, tools, tokens: text ? estimateTokens(text) : 0, mark: { context } };

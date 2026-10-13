@@ -39,6 +39,30 @@ export function wasPrivate(turn: { context?: unknown }): boolean {
   return !!c && typeof c === 'object' && (c as { private?: unknown }).private === true;
 }
 
+/**
+ * What a turn of Local mode carries when Will did not himself ask for it to
+ * stay private: the same mark, and a note that it is the MODE that keeps it
+ * here. Everything the mark does, it does for this turn too. The note is read
+ * for one thing: such a turn may be asked for the goals he set in it
+ * (./memory-extract, FLINT_EXTRACT_CANDIDATES), and a turn he asked to keep
+ * private is not.
+ */
+export const LOCAL_MODE_TURN: Readonly<{ private: true; byMode: true }> = Object.freeze({ private: true, byMode: true });
+
+/**
+ * Is this stored turn kept here by Will's own word for it (the Local Only
+ * switch, or a message that asked to stay private), and not only because
+ * Flint was in Local mode? The narrower of the two notions, as stored.
+ *
+ * A private mark with no note is read as his own word: that is every turn
+ * marked before the note existed, and a turn outside Local mode that was
+ * marked because its model was handed one (a private turn in its history, or
+ * a fact from one). Only the note makes a turn the mode's.
+ */
+export function privateByRequest(turn: { context?: unknown }): boolean {
+  return wasPrivate(turn) && (turn.context as { byMode?: unknown }).byMode !== true;
+}
+
 /** What a route says about keeping a turn here: Will's own word for this turn, and the mode. */
 export interface StayRoute {
   private: boolean;
@@ -59,6 +83,15 @@ export interface StayRoute {
  */
 export function turnStaysHere(route: StayRoute): boolean {
   return route.private || route.mode === 'local';
+}
+
+/**
+ * Does this turn stay here by the MODE alone: Flint is in Local mode, and Will
+ * did not ask for this turn to be private? Its stored mark then carries the
+ * note (LOCAL_MODE_TURN).
+ */
+export function keptByModeAlone(route: StayRoute): boolean {
+  return !route.private && route.mode === 'local';
 }
 
 /**

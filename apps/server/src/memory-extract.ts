@@ -435,6 +435,13 @@ interface Item {
    * a call only with turns that carry the same marks.
    */
   private?: boolean;
+  /**
+   * ...and it (or the earlier one shown with it) is one he ASKED to keep
+   * private, not one that only Local mode kept (./private-turns
+   * privateByRequest). A call that holds such a turn is never asked for a
+   * goal; in a pass that asks, it never shares a call with a turn that may be.
+   */
+  byRequest?: boolean;
 }
 
 /** How closely what is learned from this turn is held, like a fact's own marks (./knowledge): 0, 1 for Will's goals, 2 for a private turn. */
@@ -537,11 +544,19 @@ export interface ExtractorOptions {
    */
   keptPrivate?: (conversationId: string, turnId: string) => boolean;
   /**
+   * Of the turns he kept private: is this one kept by his own word for it (the
+   * Local Only switch, or a message that asked to stay private), and not only
+   * because Flint was in Local mode (./private-turns privateByRequest)? Such a
+   * turn is never asked for a goal. Left out: every turn he kept private is
+   * read as one he asked to.
+   */
+  privateByRequest?: (conversationId: string, turnId: string) => boolean;
+  /**
    * Also ask for the goals Will set (FLINT_EXTRACT_CANDIDATES=1). Only with
    * the local brain (`kind` local) and somewhere to hand them (`onCandidate`):
    * otherwise it is off, and the prompt is what it always was. And never of a
-   * call about turns he kept private (`keptPrivate`): those are asked for
-   * facts alone. Given as a
+   * call about a turn he asked to keep private (`privateByRequest`): those are
+   * asked for facts alone. A turn taken in Local mode is asked like any other. Given as a
    * question, it is asked again at the start of every pass (does the model
    * run on this Mac right now?): a pass it says no to asks for facts alone.
    */
@@ -580,6 +595,7 @@ export class MemoryExtractor {
   private readonly isTainted: (conversationId: string, turnId: string) => boolean;
   private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
   private readonly keptPrivate: (conversationId: string, turnId: string) => boolean;
+  private readonly privateByRequest: (conversationId: string, turnId: string) => boolean;
   private readonly candidates: boolean;
   private readonly mayPropose: () => boolean;
   private readonly commitments: boolean;
@@ -625,6 +641,7 @@ export class MemoryExtractor {
     this.isTainted = opts.isTainted ?? (() => false);
     this.carriedGoals = opts.carriedGoals ?? (() => false);
     this.keptPrivate = opts.keptPrivate ?? (() => false);
+    this.privateByRequest = opts.privateByRequest ?? this.keptPrivate;
     // Goals and commitments are asked of the local model alone, and only with somewhere to hand them.
     const asked = opts.candidates;
     this.candidates = (asked === true || typeof asked === 'function') && local && opts.onCandidate !== undefined;
@@ -790,7 +807,9 @@ export class MemoryExtractor {
         // is learned from a marked turn stays on this Mac under its marks, and a call that mixed them could not
         // say which fact came from where.
         let marks: string | undefined;
-        const marksOf = (it: Item) => `${it.goals ? 'g' : ''}${it.private ? 'p' : ''}`;
+        // (A pass that asks for goals also keeps the turns he asked to keep private apart from the ones Local mode
+        // kept: the first are never asked, the second are. A pass that asks for facts alone batches as it always did.)
+        const marksOf = (it: Item) => `${it.goals ? 'g' : ''}${it.private ? 'p' : ''}${asking && it.byRequest ? 'r' : ''}`;
         // A batch that strikes have halved keeps that size until it goes through.
         const head = pending.slice(idx).find((it) => !it.skip);
         const struck = head && state.failures?.key === `${head.cid}@${head.at}` ? state.failures.cap : undefined;
@@ -824,11 +843,13 @@ export class MemoryExtractor {
           const key = `${toSend[0]!.cid}@${toSend[0]!.at}`;
           state.budget.calls++;
           stats.calls++;
-          // A call about turns Will kept private asks for facts alone, whatever the pass asks (a call is all turns
-          // of one kind of mark, so it is all of them or none). A suggestion is his own sentence on its way to
-          // being a goal, and his goals can be sent to every brain (FLINT_GOALS_TO_FRONTIER): what he asked to
-          // keep on this Mac is never put on that road. The facts are learned and marked as ever.
-          const asked = asking && !toSend.some((it) => it.private) ? asking : undefined;
+          // A call about turns Will ASKED to keep private (the Local Only switch, or the words) asks for facts
+          // alone, whatever the pass asks (a call is all turns of one kind, so it is all of them or none). A
+          // suggestion is his own sentence on its way to being a goal, and his goals can be sent to every brain
+          // (FLINT_GOALS_TO_FRONTIER): what he asked to keep on this Mac is never put on that road. The facts are
+          // learned and marked as ever. A turn taken in Local mode is asked: the mode keeps its answer here, and
+          // a goal he then approves is a goal like any he typed.
+          const asked = asking && !toSend.some((it) => it.byRequest) ? asking : undefined;
           const ask = this.prompt(toSend, room, asked);
           let reply: BrainReply | undefined;
           let why: BrainFailure | undefined;
@@ -1021,6 +1042,8 @@ export class MemoryExtractor {
               // and either one being a turn he kept private marks it private.
               ...(this.carriedGoals(cid, t.id) || (context && this.carriedGoals(cid, context.id)) ? { goals: true } : {}),
               ...(this.keptPrivate(cid, t.id) || (context && this.keptPrivate(cid, context.id)) ? { private: true } : {}),
+              // ...and either one being a turn he ASKED to keep private keeps the call from being asked for a goal.
+              ...(this.privateByRequest(cid, t.id) || (context && this.privateByRequest(cid, context.id)) ? { byRequest: true } : {}),
             });
           }
         }
@@ -1209,7 +1232,7 @@ export class MemoryExtractor {
       stats.suggestionsKept++;
       let outcome: SuggestionOutcome;
       try {
-        outcome = await this.onCandidate!({ kind: s.kind, text, quote, ...(dueOn ? { dueOn } : {}), conversationId: src.cid, turnId: src.turnId, sourceAt: src.at, staysHere: src.goals === true });
+        outcome = await this.onCandidate!({ kind: s.kind, text, quote, ...(dueOn ? { dueOn } : {}), conversationId: src.cid, turnId: src.turnId, sourceAt: src.at, staysHere: src.goals === true || src.private === true });
       } catch {
         outcome = 'unreachable';
       }
