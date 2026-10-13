@@ -123,6 +123,44 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
     expect(out.sent).toHaveLength(1);
   });
 
+  // Local voice: when the server's own speech is made on this Mac (`say`, a speech server on this Mac), the meta
+  // event says so (`speechHere`), and a reply that stays here may then be sent to it: nothing spoken there leaves.
+  // The page starts from "it is not", and only the server's own yes changes that, for the reply it was said about.
+  it('a reply that stays here is sent to /speak only when the server has said its speech is made on this Mac', async () => {
+    const p = page();
+    const vctx = { displayed: '', gen: 0, conv: 'c1', here: true, turn: null as string | null };
+    // Stays here, and nothing said about where the speech is made: not sent.
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: true, turn: 'turn_kept' } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A private sentence.', vctx })).toBeNull();
+    expect(p.sent).toEqual([]);
+    // The server says it speaks on this Mac: sent, naming the turn as any other reply's request does.
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: true, turn: 'turn_kept', speechHere: true } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A private sentence.', vctx })).toBe('mp3');
+    expect(p.sent).toEqual([{ url: 'http://flint.test/speak', body: { text: 'A private sentence.', conversationId: 'c1', turnId: 'turn_kept' } }]);
+    // Only a real yes counts, and it is said again by each event: one without it takes it back.
+    for (const said of ['true', 1, {}, null, false]) {
+      p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: true, turn: 'turn_kept', speechHere: said } });
+      expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'Another.', vctx }), String(said)).toBeNull();
+    }
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: true, turn: 'turn_kept', speechHere: true } });
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', staysHere: true, turn: 'turn_next' } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'Another.', vctx })).toBeNull();
+    expect(p.sent).toHaveLength(1);
+    // An event that says nothing of the reply (the brain's own) changes nothing, whatever else it carries.
+    p.call('voiceMeta(vctx,ev)', { vctx, ev: { type: 'meta', brain: 'local', speechHere: true } });
+    expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'Another.', vctx })).toBeNull();
+    expect(p.sent).toHaveLength(1);
+  });
+
+  it('...and when the server then refuses or fails, the device’s own voice speaks it, as for any reply', async () => {
+    for (const status of [409, 502, 503]) {
+      const p = page(status);
+      const vctx = { displayed: '', gen: 0, conv: 'c1', here: true, turn: 'turn_kept' as string | null, speechHere: true };
+      expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A private sentence.', vctx }), String(status)).toBeNull();
+      expect(p.sent, String(status)).toHaveLength(1);
+    }
+  });
+
   it('the page wires them in: each reply has its own voice state, the meta event feeds it, and speech goes through it', () => {
     expect(html).toContain("var vctx={displayed:'',gen:_ttsGen,conv:convId,here:true,turn:null};");
     // (The tag under the reply also says when the standby local model answered: `ev.standby`.)
@@ -131,6 +169,8 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
     // Nothing else in the page sets the voice state: not Local Only, not the route the brain's own event carries.
     expect(html).not.toContain('vctx.priv');
     expect(html.match(/vctx\.here=[^=]/g)).toHaveLength(1); // voiceMeta's own assignment
+    expect(html.match(/vctx\.speechHere=[^=]/g)).toHaveLength(1); // ...and the same for where the server speaks
+    expect(html.match(/speechHere/g)).toHaveLength(4); // voiceMeta reads and sets it; _speechBlob reads it, and its comment names it
     // The browser's own voice is told whether the reply stays here.
     expect(html).toContain('}else{reveal();_localSpeak(clean,vctx.here===true).then(res);}');
     // /speak is asked from one place.

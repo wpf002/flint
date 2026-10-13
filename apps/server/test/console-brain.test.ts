@@ -17,6 +17,7 @@ import { EMBEDDING_MODEL, HARDWARE_TIERS, hardwareTier, hardwareTierFor } from '
 import type { Hardware } from '../src/hardware';
 import { readInferenceConfig, type InferenceMode } from '../src/inference-config';
 import { inferenceStatus, type InferenceStatus } from '../src/inference-status';
+import { planVoice } from '../src/voice';
 import type { LocalBrains, NotConfined } from '../src/local-brains';
 import type { ModelHealth } from '../src/local-monitor';
 
@@ -87,7 +88,7 @@ class El {
   }
 }
 
-const IDS = ['modesub', 'lmval', 'lmsub', 'lmdot', 'lmcopy', 'brainmsg', 'modeseg', 'hwval', 'hwsub', 'sbrow', 'sbval', 'sbsub', 'sbdot', 'sbcopy', 'brainrows', 'brainerr', 'brainerrttl', 'brainerrsub', 'brainretry', 'brainnotes', 'settings', 'losub', 'lotoggle', 'lopill'];
+const IDS = ['modesub', 'lmval', 'lmsub', 'lmdot', 'lmcopy', 'brainmsg', 'modeseg', 'hwval', 'hwsub', 'sbrow', 'sbval', 'sbsub', 'sbdot', 'sbcopy', 'brainrows', 'brainerr', 'brainerrttl', 'brainerrsub', 'brainretry', 'brainnotes', 'settings', 'losub', 'lotoggle', 'lopill', 'sprow', 'spval', 'spsub', 'trrow', 'trval', 'trsub'];
 
 /** What a real request to the server came to, for a test that runs the page's own `laneCall`: a status and a body, or a network that failed. */
 type Wire = { status: number; body?: unknown; text?: string } | { fail: string };
@@ -113,6 +114,8 @@ function page(answers: { get?: () => unknown; post?: (body: unknown) => unknown;
   ids.brainnotes!.hidden = true;
   ids.lmcopy!.hidden = true;
   ids.sbcopy!.hidden = true;
+  ids.sprow!.hidden = true;
+  ids.trrow!.hidden = true;
   const calls: Array<{ path: string; body?: unknown }> = [];
   const copied: string[] = [];
   const timers: Array<() => void> = [];
@@ -179,7 +182,8 @@ function page(answers: { get?: () => unknown; post?: (body: unknown) => unknown;
     run('renderBrain(__d)');
   };
   /** Every word the section has on screen. */
-  const screen = () => [ids.brainrows!.hidden ? '' : ['modesub', 'lmval', 'lmsub', 'sbval', 'sbsub', 'hwval', 'hwsub'].map((id) => (id.startsWith('sb') && ids.sbrow!.hidden ? '' : ids[id]!.shown())).join(' '), ids.brainerr!.hidden ? '' : `${ids.brainerrttl!.shown()} ${ids.brainerrsub!.shown()}`, ids.brainnotes!.shown(), ids.brainmsg!.shown()].join(' ');
+  const rowOf = (id: string): string | undefined => (id.startsWith('sb') ? 'sbrow' : id.startsWith('sp') ? 'sprow' : id.startsWith('tr') ? 'trrow' : undefined);
+  const screen = () => [ids.brainrows!.hidden ? '' : ['modesub', 'lmval', 'lmsub', 'sbval', 'sbsub', 'hwval', 'hwsub', 'spval', 'spsub', 'trval', 'trsub'].map((id) => (rowOf(id) && ids[rowOf(id)!]!.hidden ? '' : ids[id]!.shown())).join(' '), ids.brainerr!.hidden ? '' : `${ids.brainerrttl!.shown()} ${ids.brainerrsub!.shown()}`, ids.brainnotes!.shown(), ids.brainmsg!.shown()].join(' ');
   /** Settings is open or closed, as the page's own panel code marks it. */
   const open = (on: boolean) => ids.settings!.classList.toggle('open', on);
   /** Let the timers the page has set and not cancelled run, as if their time had passed. */
@@ -234,6 +238,7 @@ function status(o: Shape = {}): InferenceStatus {
     local,
     snapshot: { server: 'ollama', reachable: true, primary: health(model, o.primary), ...(o.standby ? { fallback: health(SMALL, o.standby) } : {}) },
     embedding: { model: EMBEDDING_MODEL.model, installed: true },
+    voice: planVoice(readInferenceConfig(o.env ?? {}), { OPENAI_API_KEY: 'sk-test', ...(o.env ?? {}) }, { platform: 'darwin', home: '/home/will' }),
   });
 }
 
@@ -247,7 +252,7 @@ describe('the Brain section', () => {
 
   it('labels and buttons are Title Case', () => {
     const labels = [...section.matchAll(/<b[^>]*>([^<]+)<\/b>|<button[^>]*>([^<]+)<\/button>/g)].map((m) => m[1] ?? m[2]);
-    expect(labels).toEqual(['Mode', 'Local', 'Hybrid', 'Cloud', 'Local Model', 'Copy Command', 'Standby Model', 'Copy Command', 'Hardware', 'Couldn’t Load Brain', 'Try Again']);
+    expect(labels).toEqual(['Mode', 'Local', 'Hybrid', 'Cloud', 'Local Model', 'Copy Command', 'Standby Model', 'Copy Command', 'Hardware', 'Speech', 'Transcription', 'Couldn’t Load Brain', 'Try Again']);
     const titles = [...labels, ...[...script.matchAll(/brainFail\('([^']+)'/g)].map((m) => m[1]!), 'Copied'];
     expect(titles).toContain('Not Signed In');
     for (const l of titles) for (const w of l!.split(' ')) expect(w[0], l!).toBe(w[0]!.toUpperCase());
@@ -524,6 +529,63 @@ describe('what it shows', () => {
     p.render(status({ hardware: null }));
     expect(p.ids.hwval!.textContent).toBe('');
     expect(p.ids.hwsub!.textContent).toBe('Flint is checking.');
+  });
+
+  it('what speaks and what hears: a name and a sentence each, from the server, true for the mode', () => {
+    const p = page();
+    p.render(status({ mode: 'hybrid' }));
+    expect([p.ids.sprow!.hidden, p.ids.trrow!.hidden]).toEqual([false, false]);
+    expect(p.ids.spval!.textContent).toBe('OpenAI');
+    expect(p.ids.spsub!.textContent).toBe('It speaks replies. A reply that stays on this Mac is spoken by the device instead.');
+    expect(p.ids.trval!.textContent).toBe('Whisper Base English');
+    expect(p.ids.trsub!.textContent).toBe('Your voice is turned into text on this Mac.');
+    // In Local mode the outside service is not used, and the row says that instead.
+    p.render(status({ mode: 'local' }));
+    expect(p.ids.spsub!.textContent).toBe('Local mode doesn’t use it, so each device speaks with its own voice.');
+    // The Mac's own voice, a local speech server, and off.
+    p.render(status({ env: { FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: 'Samantha' } }));
+    expect([p.ids.spval!.textContent, p.ids.spsub!.textContent]).toEqual(['Samantha', 'Replies are spoken on this Mac, and nothing is sent out.']);
+    p.render(status({ env: { FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8081/v1' } }));
+    expect([p.ids.spval!.textContent, p.ids.spsub!.textContent]).toEqual(['Local Speech Server', 'Replies are spoken by the speech server on this Mac, and nothing is sent out.']);
+    expect([p.ids.trval!.textContent, p.ids.trsub!.textContent]).toEqual(['Local Speech Server', 'Your voice is turned into text by the speech server on this Mac.']);
+    p.render(status({ env: { FLINT_TTS_PROVIDER: 'off' } }));
+    expect([p.ids.spval!.textContent, p.ids.spsub!.textContent]).toEqual(['Off', 'Each device speaks with its own voice.']);
+  });
+
+  it('nothing in the voice rows is a tag, a key, a path, an address or a bracket, whatever the settings', () => {
+    const p = page();
+    const envs: Array<Record<string, string>> = [
+      {},
+      { FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: 'Eddy (English (US))' },
+      { FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1', FLINT_LOCAL_TTS_MODEL: 'kokoro-v1.0:q8', FLINT_LOCAL_TTS_VOICE: 'af_heart' },
+      { FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8081/v1', FLINT_LOCAL_STT_MODEL: 'Systran/faster-whisper-small.en' },
+      { WHISPER_MODEL: '/Users/someone/models/ggml-large-v3-turbo-q5_0.bin', FLINT_TTS_MODEL: 'tts-1-hd', FLINT_TTS_VOICE: 'nova' },
+      { FLINT_TTS_PROVIDER: 'nonsense', FLINT_STT_PROVIDER: 'cloud' },
+      { FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'https://speech.example/v1' },
+    ];
+    for (const env of envs) {
+      for (const mode of ['local', 'hybrid', 'cloud'] as const) {
+        p.render(status({ env, mode }));
+        const shown = [p.ids.spval!.textContent, p.ids.spsub!.textContent, p.ids.trval!.textContent, p.ids.trsub!.textContent];
+        for (const text of shown) {
+          expect(text, JSON.stringify(env)).not.toMatch(/[/\\~()_:{}\[\]]|https?|FLINT_|127\.0\.0\.1|speech\.example|\.bin|tts-1|whisper-1|kokoro|ggml/);
+        }
+        for (const line of [p.ids.spsub!.textContent, p.ids.trsub!.textContent]) expect(line, JSON.stringify(env)).toMatch(/^[A-Z][^\n]*\.$/);
+        for (const name of [p.ids.spval!.textContent, p.ids.trval!.textContent]) for (const w of name.split(' ')) expect(w[0], name).toBe(w[0]!.toUpperCase());
+      }
+    }
+  });
+
+  it('a status with no voice in it shows no voice rows, and a failed load clears them', async () => {
+    const p = page();
+    p.render({ ...status(), voice: undefined });
+    expect([p.ids.sprow!.hidden, p.ids.trrow!.hidden]).toEqual([true, true]);
+    p.render({ ...status(), voice: { speech: { name: 7, sentence: null }, transcription: { name: 'Whisper', sentence: '' } } });
+    expect([p.ids.sprow!.hidden, p.ids.trrow!.hidden]).toEqual([true, true]);
+    p.render(status());
+    expect(p.ids.sprow!.hidden).toBe(false);
+    p.run("brainFail('Couldn’t Load Brain','Flint isn’t answering.',true)");
+    expect([p.ids.sprow!.hidden, p.ids.trrow!.hidden, p.ids.spval!.textContent, p.ids.trsub!.textContent]).toEqual([true, true, '', '']);
   });
 
   it('refused settings, a mode that could not be read and warnings appear under the group, each a plain sentence with a dot', () => {
