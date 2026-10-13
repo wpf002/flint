@@ -124,6 +124,15 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
     return t.id;
   }
   const task = (taskId: string) => db.task.findUniqueOrThrow({ where: { id: taskId } });
+  /**
+   * Say a task ended that many hours ago. The database stamps a task's end itself and nobody may change it, so
+   * only its owner, with the guard set aside in the same statement, can: a test's stand-in for time passing.
+   */
+  const endedAgo = (taskId: string, hours: number) => owner(`DO $$ BEGIN
+    ALTER TABLE "Task" DISABLE TRIGGER "Task_guard";
+    UPDATE "Task" SET "completedAt" = now() - interval '${Math.round(hours)} hours' WHERE id = '${taskId.replace(/[^A-Za-z0-9]/g, '')}';
+    ALTER TABLE "Task" ENABLE TRIGGER "Task_guard";
+  END $$`);
   /** The card of an action for a task, newest first. */
   const cardFor = (action: string, taskId: string) => db.proposal.findFirst({ where: { action, args: { path: ['taskId'], equals: taskId } }, orderBy: { createdAt: 'desc' } });
   /** A rule Will signed: promote an action, or forbid it. */
@@ -141,6 +150,6 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
     const resolutions = await db.resolution.findMany({ select: { evidence: true } });
     return JSON.stringify([bus.sent.map((j) => j.data), audits, cards, health, predictions, resolutions], (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
   }
-  return { key, bus, owner, sign, approve, signRun, signRunCard, file, sourceOn, ciRun, entity, person, forget, watcherOn, newTask, dispatched, checked, task, cardFor, policy, everythingButTasks };
+  return { key, bus, owner, sign, approve, signRun, signRunCard, file, sourceOn, ciRun, entity, person, forget, watcherOn, newTask, dispatched, checked, task, endedAgo, cardFor, policy, everythingButTasks };
 }
 export type TaskFixture = Awaited<ReturnType<typeof taskFixture>>;

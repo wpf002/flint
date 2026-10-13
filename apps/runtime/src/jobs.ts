@@ -390,7 +390,7 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
       cron: TASK_TICK_CRON,
       handler: async () => {
         const r = await taskTick({ db: ctx.db, bus: ctx.bus, log });
-        if (r.failed || r.cancelled || r.scored) ctx.log(`tasks: ${r.failed} ended as failed, ${r.cancelled} cancelled, ${r.scored} forecast(s) scored`);
+        if (r.failed || r.cancelled || r.scored || r.ranOut) ctx.log(`tasks: ${r.failed} ended as failed, ${r.cancelled} cancelled, ${r.scored} forecast(s) scored, ${r.ranOut} run out`);
       },
     },
     {

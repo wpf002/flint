@@ -8,19 +8,22 @@
  *     names (their refs, kinds and clean state fields only) and gives back a
  *     result, a wait, or a failure's class. Any call it makes sits outside
  *     every transaction.
- *  3. A result is checked against its template's shape and the database's
- *     size, stored once (always marked as outside text), and the task moves to
- *     submitted with its bar check sent, all in one transaction.
+ *  3. A result is cleaned of what the database cannot store (a NUL, half a
+ *     surrogate pair), checked against its template's shape and the database's
+ *     size, stored once (always marked as outside text) under the digest the
+ *     database computes for it, and the task moves to submitted under the
+ *     reference that digest gives, with its bar check sent: one transaction.
  *
  * A wait changes nothing: the tick sends the run again until the task's time
  * is up. Job data is a task's id; a log line is `task <id>: <status> (<class>)`.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { TASK_OUTPUTS, TaskId, TaskSpec, digestOf, entityRef, redact, specItems, type TaskFailure } from '@flint/policy';
+import { TASK_OUTPUTS, TaskId, TaskSpec, entityRef, outputRefOf, redact, specItems, type TaskFailure } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { inTx, type Bus } from '../bus.js';
 import { jsonbBytes } from '../jsonsize.js';
+import { clip, wellFormedDeep } from '../sources/text.js';
 import { failureClass, sqlState } from '../dbcodes.js';
 import { ciWatch } from './adapters/ci-watch.js';
 import type { AdapterSet, ItemFact } from './adapters/types.js';
@@ -117,20 +120,27 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
   }
   if ('wait' in result) return 'waiting';
   if ('failure' in result) return fail(result.failure);
-  const shaped = TASK_OUTPUTS[spec.data.template].safeParse(result.output);
+  // An asset's words are outside text: what the database cannot store is taken out before anything reads them.
+  const shaped = TASK_OUTPUTS[spec.data.template].safeParse(wellFormedDeep(result.output));
   if (!shaped.success || jsonbBytes(shaped.data) > OUTPUT_MAX_BYTES) return fail('invalid');
-  const body = shaped.data as Prisma.InputJsonObject;
-  const sha256 = digestOf(body);
+  const body = JSON.stringify(shaped.data);
+  const summary = clip(redact(result.summary), 1000);
   // A spending asset says what the run cost, and whether that is an estimate, before the task can end.
   const cost = task.asset.spends ? await adapter.meter?.(input) : undefined;
   const submitted = await db.$transaction(async (tx) => {
     const [row] = await tx.$queryRaw<Array<{ status: string }>>`SELECT status FROM "Task" WHERE id = ${task.id} FOR UPDATE`;
     if (!row || (row.status !== 'dispatched' && row.status !== 'running')) return false;
-    await tx.taskOutput.create({ data: { taskId: task.id, body, sha256, tainted: true } });
+    // Its digest is the database's own, over the body as it stores it: computed in the write and read back. (The
+    // database refuses any other, so a task's reference names what was really written.)
+    const [stored] = await tx.$queryRaw<Array<{ sha256: string }>>`
+      WITH o AS (SELECT ${body}::jsonb AS body)
+      INSERT INTO "TaskOutput" ("taskId", body, sha256, tainted)
+      SELECT ${task.id}, o.body, encode(sha256(convert_to(o.body::text, 'UTF8')), 'hex'), true FROM o
+      RETURNING sha256`;
     await tx.task.update({
       where: { id: task.id },
       data: {
-        status: 'submitted', outputRef: `out:${sha256.slice(0, 16)}`, outputSummary: redact(result.summary).slice(0, 1000), attempts: { increment: 1 },
+        status: 'submitted', outputRef: outputRefOf(stored!.sha256), outputSummary: summary, attempts: { increment: 1 },
         ...(cost ? { costUsd: new Prisma.Decimal(cost.micros).div(1_000_000), costIsEstimate: cost.estimate } : {}),
       },
     });

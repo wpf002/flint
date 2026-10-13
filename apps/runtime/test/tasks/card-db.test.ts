@@ -22,7 +22,7 @@ import { createDb, type Db } from '../../src/db';
 import { Refused, claimProposal, createProposal } from '../../src/governance/proposals';
 import { INTERNAL_ACTIONS, runInternal } from '../../src/governance/internal';
 import { NEVER_PROMOTED } from '../../src/governance/promotion';
-import { ASSETS, CI_WATCHER, assetOf, type AssetDef } from '../../src/assets/registry';
+import { ASSETS, CI_WATCHER, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
 import { fileEnable, syncAssets, turnOff } from '../../src/assets/service';
 import { checkTaskCard, runTask, runTaskCard } from '../../src/tasks/card';
 import { checkTaskJob } from '../../src/tasks/check';
@@ -72,7 +72,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const filed = await fileEnable(db, CI_WATCHER.id);
     const card = await db.proposal.findUniqueOrThrow({ where: { id: filed.proposalId } });
     expect(card).toMatchObject({ kind: 'policy', origin: 'console', action: 'asset.enable', tainted: false, consequential: true, sensitivity: 'ops', reason: TASK_REASONS.enable, reviewRequired: true });
-    expect(card.args).toEqual({ assetId: CI_WATCHER.id, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false });
+    expect(card.args).toEqual({ assetId: CI_WATCHER.id, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null });
     expect(card.expiresAt.getTime() - card.createdAt.getTime()).toBeLessThanOrEqual(7 * 86_400_000 + 1000);
     // The same card while it waits; nothing is on yet.
     expect(await fileEnable(db, CI_WATCHER.id)).toEqual({ proposalId: filed.proposalId, deduped: true });
@@ -133,13 +133,17 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(await fx.task(t.id)).toMatchObject({ status: 'checking', metBar: true, barCheckedBy: 'flint:rule', barEvidence: [{ id: 'a1', op: 'ci', met: true }], acceptedAuditId: null });
     const accept = (await fx.cardFor('task.check_bar', t.id))!;
     expect(accept).toMatchObject({ kind: 'task', origin: TASKS_ORIGIN, templateId: ACCEPT_TEMPLATE, status: 'pending', tainted: false, sensitivity: 'ops', reason: TASK_REASONS.accept, reviewRequired: false });
-    expect(accept.args).toEqual({ taskId: t.id, checks: 1, met: 1, by: 'flint:rule' });
+    // It names the result it accepts (the start of the digest the database gave its output) and that it met its bar.
+    const handedIn = await fx.task(t.id);
+    expect(handedIn.outputRef).toMatch(/^out:[0-9a-f]{16}$/);
+    expect(accept.args).toEqual({ taskId: t.id, outputRef: handedIn.outputRef, metBar: true, checks: 1, met: 1, by: 'flint:rule' });
+    expect(accept.createdAt.getTime()).toBeGreaterThanOrEqual(handedIn.submittedAt!.getTime());
     // Checked again (a job run twice): the same card, the bar as it was.
     expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('waiting');
     expect(await db.proposal.count({ where: { action: 'task.check_bar', args: { path: ['taskId'], equals: t.id } } })).toBe(1);
 
     // Will signs it: the proof, then accepted, in the card's transaction.
-    expect(await fx.signRun(accept.id)).toEqual({ taskId: t.id, accepted: true, scored: false });
+    expect(await fx.signRun(accept.id)).toEqual({ taskId: t.id, accepted: true });
     const accepted = await fx.task(t.id);
     expect(accepted).toMatchObject({ status: 'accepted', metBar: true, barCheckedBy: 'flint:rule' });
     expect(accepted.completedAt).toBeInstanceOf(Date);
@@ -218,7 +222,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(await refusal(fx.file('task.bar_override', { taskId: failed, to: 'rejected' }))).toMatchObject({ status: 400, message: TASK_SAYS.notOverride });
     const over = await fx.file('task.bar_override', { taskId: failed, to: 'accepted' });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: over.id } })).toMatchObject({ kind: 'task', reason: TASK_REASONS.overrideAccept, consequential: true });
-    expect(await fx.signRun(over.id)).toEqual({ taskId: failed, to: 'accepted', scored: false });
+    expect(await fx.signRun(over.id)).toEqual({ taskId: failed, to: 'accepted' });
     const overruled = await fx.task(failed);
     expect(overruled).toMatchObject({ status: 'accepted', metBar: false, barCheckedBy: 'will' });
     expect(await db.auditEntry.findFirstOrThrow({ where: { id: overruled.acceptedAuditId! } })).toMatchObject({ action: 'task.bar_override', outcome: 'ok', correlationId: `task:${failed}` });
@@ -228,7 +232,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     // A result that passed and waits for him: he may reject it anyway. One he accepted on his own card stays accepted.
     const passed = await fx.checked('wpf002/passed');
     const reject = await fx.file('task.bar_override', { taskId: passed, to: 'rejected' });
-    expect(await fx.signRun(reject.id)).toEqual({ taskId: passed, to: 'rejected', scored: false });
+    expect(await fx.signRun(reject.id)).toEqual({ taskId: passed, to: 'rejected' });
     expect(await fx.task(passed)).toMatchObject({ status: 'rejected', metBar: true, barCheckedBy: 'will', acceptedAuditId: null });
     const his = await fx.checked('wpf002/his');
     await fx.signRun((await fx.cardFor('task.check_bar', his))!.id);
@@ -268,7 +272,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(await refusal(fx.file('review.enforce', { gate: 'proposal', enforced: false }, { kind: 'policy', consequential: true }))).toMatchObject({ status: 400, message: TASK_SAYS.nothing });
     // The reviewer joins the registry in a later part: here it is a test's, turned on by its own real signed card.
     await syncAssets(db, registry);
-    const enableArgs = { assetId: reviewer.id, kind: reviewer.kind, externalRef: reviewer.externalRef, name: reviewer.name, capabilities: [...reviewer.capabilities], dispatchAction: reviewer.dispatchAction, spends: false };
+    const enableArgs = enableArgsOf(reviewer);
     const input = await checkTaskCard(db, { kind: 'policy', origin: 'console', action: 'asset.enable', args: enableArgs, argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 60 }, registry);
     expect(input).toMatchObject({ reason: TASK_REASONS.enable, consequential: true });
     // Outside the code registry it is not an asset: the card is never filed through the front door.
@@ -298,7 +302,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const dispatchArgs = (await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).args as Record<string, unknown>;
     const checkedId = await fx.checked('wpf002/chat-checked');
     const argsOf: Record<string, Record<string, unknown>> = {
-      'asset.enable': { assetId: CI_WATCHER.id, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false },
+      'asset.enable': enableArgsOf(CI_WATCHER),
       'review.enforce': { gate: 'proposal', enforced: true },
       'task.dispatch.local_worker': dispatchArgs,
       'task.dispatch.ci_runner': dispatchArgs,
@@ -387,7 +391,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     // A stand-in for the local model: it writes what it was asked to, with a canary in every field.
     const fake: TaskAdapter = { kind: 'local_worker', estimate: () => 0, run: async () => ({ output: { title: `${CANARY} title`, body: `${CANARY} body` }, summary: `${CANARY} summary` }) };
     await syncAssets(db, registry);
-    const args = { assetId: worker.id, kind: worker.kind, externalRef: worker.externalRef, name: worker.name, capabilities: [...worker.capabilities], dispatchAction: worker.dispatchAction, spends: false };
+    const args = enableArgsOf(worker);
     const enable = await planted('asset.enable', args, { kind: 'policy', origin: 'console', consequential: true });
     await fx.approve(enable);
     await runTaskCard(db, enable, undefined, 'UTC', 'test', { registry });

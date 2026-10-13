@@ -11,15 +11,21 @@
  * It is counted under its own counter and never claims the 50 a day chat's and
  * triage's predictions share.
  *
+ * Whose it is. The forecast carries the rule that names its task
+ * (TaskForecastSpec): the database takes a dispatch only with it, and the
+ * ledger's own sweep leaves a prediction alone when it carries a rule it does
+ * not know. So tasks.tick is the only thing that settles one or lets it run
+ * out, and this file is the only writer of a task forecast's resolution.
+ *
  * Scoring. tasks.tick scores a forecast 24 hours after its task ended (the
- * time Will has to overrule a check), as `auto_world`, and only once Will has
- * promoted ledger.resolve.auto for the assets domain: until then forecasts
- * wait. An accepted task is true; a rejected or failed one is false; a
- * cancelled one is left to expire. scoreTaskForecast is the only writer of a
- * task forecast's resolution: the ledger's own sweep leaves `assets` /
- * `task_meets_bar` predictions (TASK_FORECAST) to it.
+ * time Will has to overrule a check; the database refuses a score before
+ * then), as `auto_world`: true when the task ended accepted, false when it
+ * ended rejected or failed. It runs as the ledger's own checks do, in shadow
+ * at APPROVAL, and a rule that forbids ledger.resolve.auto stops it. A
+ * cancelled task's forecast is never scored: it runs out once its date has
+ * passed (ledger.expire, the same way).
  */
-import { MEETS_BAR_COUNTER, TASKS_WRITER, entityRef, localDay, periodKey, resolveTier, type TaskTemplateId } from '@flint/policy';
+import { MEETS_BAR_COUNTER, TASKS_WRITER, TASK_FORECAST_RULE, entityRef, localDay, periodKey, resolveTier, runsInShadow, type TaskTemplateId } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { activePolicies } from '../governance/proposals.js';
 import { emitPrediction } from '../ledger/emit.js';
@@ -71,8 +77,8 @@ export async function recordForecast(
       template: { id: 'task_meets_bar', params: { task: ref, by: localDay(tz, resolveBy) } },
       kind: 'binary', probability, method: 'base_rate', domain: TASK_FORECAST.domain, type: TASK_FORECAST.type,
       evidence: [{ kind: 'base_rate', ref: MEETS_BAR_RULE, note: `${accepted} of ${n} like it were accepted in the last 90 days` }],
-      resolutionCriteria: `True if ${ref} is accepted at or before the resolve time. False if it is rejected or fails, or is not accepted by then.`,
-      resolver: 'auto_world', resolverSpec: { taskId: task.id, rule: 'task_accepted_by' },
+      resolutionCriteria: `True if ${ref} ends accepted. False if it ends rejected or failed.`,
+      resolver: 'auto_world', resolverSpec: { taskId: task.id, rule: TASK_FORECAST_RULE },
       resolveBy: resolveBy.toISOString(), tainted: false,
     },
     TASKS_WRITER,
@@ -82,17 +88,28 @@ export async function recordForecast(
   return { id: p.id, probability };
 }
 
-/** May Flint score task forecasts on its own: only once Will promoted ledger.resolve.auto, for everything or for the assets domain. */
-export async function mayScore(db: Db | Tx, now: Date): Promise<boolean> {
+/**
+ * May a ledger action run for task forecasts now: promoted, or in shadow at
+ * APPROVAL, as the ledger's own sweep reads it. A rule of Will's scoped to the
+ * assets domain counts here; one that forbids the action stops it.
+ */
+async function ledgerMay(db: Db | Tx, action: 'ledger.resolve.auto' | 'ledger.expire', now: Date): Promise<boolean> {
   const inAssets = (scope: unknown): boolean => scope !== null && typeof scope === 'object' && (scope as { domain?: unknown }).domain === TASK_FORECAST.domain;
-  return resolveTier('ledger.resolve.auto', { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), scopeAllows: inAssets, now }).tier === 'alone';
+  const t = resolveTier(action, { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), scopeAllows: inAssets, now });
+  return t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action));
 }
+/** May Flint score task forecasts now? */
+export const mayScore = (db: Db | Tx, now: Date): Promise<boolean> => ledgerMay(db, 'ledger.resolve.auto', now);
+/** May Flint let a task forecast that can never be scored run out now? */
+export const mayExpire = (db: Db | Tx, now: Date): Promise<boolean> => ledgerMay(db, 'ledger.expire', now);
 
 /**
  * Score one ended task's forecast, inside the caller's READ COMMITTED
- * transaction. The task's row is locked first and its status read after, so an
- * override and a score never cross (the database refuses an override once the
- * forecast is scored, and waits on a score in flight).
+ * transaction (the database refuses a score above it). The task's row is
+ * locked first and its status read after, in the order an override takes them
+ * (the task, then its forecast), so the two never cross: the database refuses
+ * an override once the forecast is scored, and a score whose outcome is not
+ * how the task ended.
  */
 export async function scoreTaskForecast(tx: Tx, taskId: string, now: Date): Promise<'scored' | 'not_yet' | 'left'> {
   const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Task" WHERE id = ${taskId} FOR UPDATE`;
@@ -100,14 +117,14 @@ export async function scoreTaskForecast(tx: Tx, taskId: string, now: Date): Prom
   const t = await tx.task.findUniqueOrThrow({ where: { id: taskId }, select: { status: true, completedAt: true, predictionId: true } });
   if (!t.predictionId || t.status === 'cancelled') return 'left';
   if (!t.completedAt || !['accepted', 'rejected', 'failed'].includes(t.status) || t.completedAt.getTime() > now.getTime() - OVERRIDE_WINDOW_MS) return 'not_yet';
-  const p = await tx.prediction.findUnique({ where: { id: t.predictionId }, select: { status: true, resolveBy: true, resolution: { select: { id: true } } } });
+  const p = await tx.prediction.findUnique({ where: { id: t.predictionId }, select: { status: true, resolution: { select: { id: true } } } });
   // Already scored, or no longer open (it ran past its date and expired): there is nothing to record.
   if (!p || p.resolution || p.status !== 'open') return 'left';
   await tx.resolution.create({
     data: {
       id: `rs${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`,
       predictionId: t.predictionId,
-      outcome: t.status === 'accepted' && t.completedAt.getTime() <= p.resolveBy.getTime(),
+      outcome: t.status === 'accepted',
       eventAt: t.completedAt,
       resolvedBy: 'auto_world',
       evidence: { taskId, status: t.status, via: 'tasks.tick' },
@@ -117,14 +134,13 @@ export async function scoreTaskForecast(tx: Tx, taskId: string, now: Date): Prom
 }
 
 /**
- * Will's own signed act on a task (his accept card, his override) is his answer
- * to whether it met its bar. Whether that answer scores the forecast there and
- * then is the ledger's rule to make: the database takes a result recorded as
- * his only with his answer on record, and a task card is not yet one. So
- * nothing is recorded here, and the forecast is scored with the rest
- * (scoreTaskForecast). The executors of both cards call this, in the card's
- * transaction: it is the one place that changes if the rule does.
+ * Let a cancelled task's forecast run out, inside the caller's transaction:
+ * nothing will ever settle it. Only once its date has passed (the database
+ * holds every expiry to that), and only while it is still open and unscored.
  */
-export async function scoreOnWillsCard(_tx: Tx, _taskId: string, _outcome: boolean, _approvalId: string): Promise<boolean> {
-  return false;
+export async function expireCancelledForecast(tx: Tx, taskId: string, now: Date): Promise<boolean> {
+  const t = await tx.task.findUnique({ where: { id: taskId }, select: { status: true, predictionId: true } });
+  if (!t?.predictionId || t.status !== 'cancelled') return false;
+  const r = await tx.prediction.updateMany({ where: { id: t.predictionId, status: 'open', resolveBy: { lt: now }, resolution: null }, data: { status: 'expired' } });
+  return r.count > 0;
 }

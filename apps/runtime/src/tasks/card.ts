@@ -14,8 +14,13 @@
  * The database checks every write against the executing card it names
  * (migration p5_assets): an asset turns on only as the card signed what it is,
  * a task goes out only as the task the card signed, with its forecast on
- * record, and is accepted only with its own successful check on record. The
- * checks here come first so that Will reads a sentence, not a refusal.
+ * record, and is accepted only with its result and its own successful check on
+ * record, on a card that names that result. Of two cards Will signed about the
+ * same asset, task or gate, only the later one acts. The checks here come
+ * first so that Will reads a sentence, not a refusal.
+ *
+ * A card whose subject he had Flint forget (its args are gone) does not run:
+ * it fails with a sentence and no result.
  *
  * Results, audit entries, log lines and errors carry ids, classes and counts,
  * never a task's title, spec or result.
@@ -52,7 +57,7 @@ import { failApproved } from '../goals/apply.js';
 import { ASSETS, assetDef, sameAsset, type AssetDef } from '../assets/registry.js';
 import { enableProblem } from '../assets/service.js';
 import { SAY, taskStatusWords } from './errors.js';
-import { recordForecast, scoreOnWillsCard } from './forecast.js';
+import { recordForecast } from './forecast.js';
 
 /** The queue a dispatched task's run is sent to. */
 export const RUN_QUEUE = 'tasks.run';
@@ -207,7 +212,8 @@ export async function checkTaskCard(db: Db, input: CreateProposal, registry: rea
     const t = await task(args.taskId);
     if (t.status !== 'checking') throw new Refused(409, taskStatusWords(t.status));
     const counts = countsOf(t.barEvidence);
-    if (t.metBar !== true || t.barCheckedBy !== args.by || counts.total !== args.checks || counts.met !== args.met) throw new Refused(409, SAY.changed);
+    // It names the result it accepts: the one the task was handed in under, having met its bar.
+    if (t.metBar !== true || t.outputRef !== args.outputRef || t.barCheckedBy !== args.by || counts.total !== args.checks || counts.met !== args.met) throw new Refused(409, SAY.changed);
     return {
       ...input, ...fixed, args, argsProvenance: { args: { source: 'template', ref: ACCEPT_TEMPLATE, tainted: false } },
       reason: TASK_REASONS.accept, sensitivity: t.sensitivity as CreateProposal['sensitivity'], consequential: false,
@@ -249,6 +255,20 @@ type Applied = { result: Result } | { refusal: string };
 function signed<T extends z.ZodTypeAny>(schema: T, raw: unknown, ctx: ApplyContext): z.output<T> | undefined {
   const r = schema.safeParse(raw);
   return r.success && digestOf(r.data) === ctx.argsDigest ? r.data : undefined;
+}
+
+/**
+ * Has Will signed for or against another card about the same asset, task or
+ * gate since he signed this one? The database lets only his latest signature
+ * act (it records what each one was for as it is recorded); said here first, as
+ * a sentence.
+ */
+async function superseded(tx: Tx, approvalId: string, subject: string): Promise<boolean> {
+  const [row] = await tx.$queryRaw<Array<{ later: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1 FROM "Approval" mine JOIN "Approval" other ON other."signedFor" = ${subject} AND (other."createdAt", other.id) > (mine."createdAt", mine.id)
+      WHERE mine.id = ${approvalId}) AS later`;
+  return row?.later === true;
 }
 
 /** The task, locked for this transaction before anything of it is read or written. */
@@ -293,6 +313,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     if (row.enabled) return { refusal: SAY.nothing };
     const why = await enableProblem(tx, def);
     if (why) return { refusal: why };
+    if (await superseded(tx, approvalId, `assetId:${row.id}`)) return { refusal: SAY.superseded };
     await tx.asset.update({ where: { id: row.id }, data: { enabled: true, approvalId } });
     return { result: { assetId: row.id, enabled: true } };
   }
@@ -303,6 +324,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const [gate] = await tx.$queryRaw<Array<{ enforced: boolean }>>`SELECT enforced FROM "ReviewGate" WHERE id = ${args.gate} FOR UPDATE`;
     if (!gate || gate.enforced === args.enforced) return { refusal: SAY.nothing };
     if (args.enforced && !(await tx.asset.findFirst({ where: { kind: 'local_reviewer', enabled: true }, select: { id: true } }))) return { refusal: SAY.reviewerFirst };
+    if (await superseded(tx, approvalId, `gate:${args.gate}`)) return { refusal: SAY.superseded };
     await tx.reviewGate.update({ where: { id: args.gate }, data: { enforced: args.enforced, approvalId } });
     return { result: { gate: args.gate, enforced: args.enforced } };
   }
@@ -316,6 +338,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const asset = await tx.asset.findUnique({ where: { id: t.assetId } });
     if (!asset || asset.kind !== args.assetKind || asset.dispatchAction !== action || !sameTask(t, args)) return { refusal: SAY.changed };
     if (!asset.enabled) return { refusal: SAY.assetOff };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
     // Money first: a spending asset's task goes out only once its amount is set aside.
     if (asset.spends && !(await ctx.deps.reserve?.(args.estCostMicros))) return { refusal: SAY.paidOff };
     const forecast = await recordForecast(tx, { id: t.id, assetKind: asset.kind, template: args.spec.template, dueAt: t.dueAt }, ctx.tz, now);
@@ -332,12 +355,13 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     if (!t) return { refusal: SAY.noTask };
     if (t.status !== 'checking') return { refusal: taskStatusWords(t.status) };
     const counts = countsOf(t.barEvidence);
-    if (t.metBar !== true || t.barCheckedBy !== args.by || counts.total !== args.checks || counts.met !== args.met) return { refusal: SAY.changed };
+    if (t.metBar !== true || t.outputRef !== args.outputRef || t.barCheckedBy !== args.by || counts.total !== args.checks || counts.met !== args.met) return { refusal: SAY.changed };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
     const proof = await writeProof(tx, { taskId: t.id, action: 'task.check_bar', actor: ctx.actor, context: 'console', tier: 'approval', inputs: { proposalId: ctx.proposalId, approvalId, checks: counts.total, met: counts.met, by: args.by } }, now);
     await tx.task.update({ where: { id: t.id }, data: { status: 'accepted', acceptedAuditId: proof, ...endingCost(t, asset.spends) } });
-    const scored = await scoreOnWillsCard(tx, t.id, true, approvalId);
-    return { result: { taskId: t.id, accepted: true, scored } };
+    // (Its forecast is scored by the task tick, a day after it ended: Will can still overrule the check until then.)
+    return { result: { taskId: t.id, accepted: true } };
   }
 
   if (action === 'task.cancel') {
@@ -346,6 +370,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const t = await lockTask(tx, args.taskId);
     if (!t) return { refusal: SAY.noTask };
     if (!STILL_OUT.includes(t.status)) return { refusal: taskStatusWords(t.status) };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
     await tx.task.update({ where: { id: t.id }, data: { status: 'cancelled', ...endingCost(t, asset.spends) } });
     return { result: { taskId: t.id, cancelled: true } };
@@ -358,14 +383,14 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
   if (!t) return { refusal: SAY.noTask };
   const why = await overrideProblem(tx, t, args.to);
   if (why) return { refusal: why.say };
+  if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
   const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
   // Accepted by his word: the proof is his override, on record. (A proof a task already has is kept: it is set once.)
   const proof = args.to === 'accepted' && t.acceptedAuditId === null
     ? await writeProof(tx, { taskId: t.id, action: 'task.bar_override', actor: ctx.actor, context: 'console', tier: 'approval', inputs: { proposalId: ctx.proposalId, approvalId, to: args.to } }, now)
     : undefined;
   await tx.task.update({ where: { id: t.id }, data: { status: args.to, barCheckedBy: 'will', ...(proof ? { acceptedAuditId: proof } : {}), ...endingCost(t, asset.spends) } });
-  const scored = await scoreOnWillsCard(tx, t.id, args.to === 'accepted', approvalId);
-  return { result: { taskId: t.id, to: args.to, scored } };
+  return { result: { taskId: t.id, to: args.to } };
 }
 
 /** Why a card is not one this executor runs as it stands, or undefined: who filed it, as what kind, under which template. */
@@ -379,6 +404,16 @@ function cardProblem(action: string, p: { origin: string; templateId: string | n
   if (!isTaskSignedAction(action)) return SAY.invalid;
   if (p.kind !== TASK_CARD_KIND[action]) return SAY.kind;
   return TASK_WILL_ONLY.has(action) && p.tainted ? SAY.invalid : undefined;
+}
+
+/** End an approved card whose args a forget cleared: failed, with a sentence, no result, and its denial on record by ids only. */
+async function completeForgotten(tx: Tx, id: string, actor: string, now: Date): Promise<void> {
+  const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { action: true, origin: true, argsDigest: true, tainted: true } });
+  await tx.proposal.update({ where: { id }, data: { status: 'failed', error: SAY.forgotten, executedAt: now } });
+  await appendAudit(tx, [{
+    actor, context: contextOf(p.origin), kind: 'action', action: p.action, decision: 'deny', outcome: 'denied',
+    inputs: { proposalId: id, argsDigest: p.argsDigest, why: 'forgotten' }, correlationId: id, tainted: p.tainted,
+  }], now);
 }
 
 /** Test seams: a fault injected after the writes, before the card completes. */
@@ -399,6 +434,13 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
   try {
     out = await db.$transaction(
       async (tx) => {
+        // A card whose subject Will had Flint forget since he approved it: its args are gone (only a forget clears
+        // them before a card has ended). It does not run, and ends with a sentence and no result.
+        const [gone] = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} AND status = 'approved' AND "argsPurgedAt" IS NOT NULL FOR UPDATE`;
+        if (gone) {
+          await completeForgotten(tx, id, actor, now);
+          return { refused: new Refused(409, SAY.forgotten) };
+        }
         const c = await claimIn(tx, id, rp, tz, actor, now);
         if ('refused' in c) return c;
         const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true, origin: true, templateId: true, kind: true, tainted: true } });

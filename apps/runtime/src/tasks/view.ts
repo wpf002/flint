@@ -49,6 +49,8 @@ async function rowOf(db: Db, t: Loaded, waiting: Map<string, string>, tz: string
     line: taskLine({
       status: t.status as TaskStatus, assetKind: t.asset.kind as AssetKind, failure: t.failure as TaskFailure | null, checks,
       overridden: t.barCheckedBy === 'will', waitingForWill: waiting.has(t.id),
+      // It passed its checks and still ended: only its accept card, turned down or left to lapse, ends a task that way.
+      declined: t.status === 'failed' && t.failure === 'expired' && t.metBar === true,
     }),
     runsOn: t.asset.name,
     // Its spec showed the model outside text, or it has a result (a result is always outside text).

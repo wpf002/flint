@@ -12,11 +12,17 @@
  *  3. A task handed in (submitted, checking): its check is sent again, until
  *     it has a result. One that passed waits for Will's accept card as long as
  *     the card does, and fails as `expired` once he turned it down or let it
- *     lapse; one without a card is sent to its check, which files it.
- *  4. Scoring: an ended task's forecast, 24 hours after it ended, once Will
- *     has promoted ledger.resolve.auto for the assets domain. This is the only
- *     place a task's forecast is scored (forecast.ts): the ledger's own sweep
- *     leaves these predictions alone.
+ *     lapse; one without a card is sent to its check, which files it (again,
+ *     when the last one did not run because he signed something newer about
+ *     the task).
+ *  4. Scoring: an ended task's forecast, 24 hours after it ended, as the
+ *     ledger's own checks run (in shadow; a rule that forbids
+ *     ledger.resolve.auto stops it). This is the only place a task's forecast
+ *     is scored (forecast.ts): the ledger's own sweep leaves these predictions
+ *     alone, because they carry a rule it does not know.
+ *  5. Running out: a cancelled task's forecast is never scored, so it is
+ *     marked as run out once its date has passed (ledger.expire, the same
+ *     way). The sweep would never do it.
  */
 import { Prisma } from '@prisma/client';
 import type { Db } from '../db.js';
@@ -24,10 +30,11 @@ import type { Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
 import { TASKS_ORIGIN } from '@flint/policy';
 import { RUN_QUEUE } from './card.js';
-import { liveAcceptCard } from './check.js';
-import { OVERRIDE_WINDOW_MS, TASK_FORECAST, mayScore, scoreTaskForecast } from './forecast.js';
+import { acceptDeclined, liveAcceptCard } from './check.js';
+import { OVERRIDE_WINDOW_MS, TASK_FORECAST, expireCancelledForecast, mayExpire, mayScore, scoreTaskForecast } from './forecast.js';
 import { CHECK_QUEUE, failTask } from './run.js';
 import { taskLog } from './errors.js';
+import { failureClass } from '../dbcodes.js';
 
 /** The tick's cron: every 2 minutes. */
 export const TASK_TICK_CRON = '*/2 * * * *';
@@ -54,6 +61,8 @@ export interface TaskTickCounts {
   cancelled: number;
   /** Forecasts scored. */
   scored: number;
+  /** Forecasts of cancelled tasks marked as run out. */
+  ranOut: number;
 }
 
 const RC = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted } as const;
@@ -61,7 +70,7 @@ const RC = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.Transactio
 export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
   const { db } = d;
   const now = d.now?.() ?? new Date();
-  const counts: TaskTickCounts = { sent: 0, failed: 0, cancelled: 0, scored: 0 };
+  const counts: TaskTickCounts = { sent: 0, failed: 0, cancelled: 0, scored: 0, ranOut: 0 };
   const stale = new Date(now.getTime() - STALE_MS);
   const send = async (queue: string, taskId: string) => {
     if (await d.bus.boss.send(queue, { taskId }, { singletonKey: taskId })) counts.sent += 1;
@@ -99,8 +108,7 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
     } else if (t.status === 'checking' && t.metBar === true) {
       // Passed: it waits for Will as long as his card does. A card he turned down, or let lapse, ends the wait.
       if (await liveAcceptCard(db, t.id)) continue;
-      const dead = await db.proposal.findFirst({ where: { action: 'task.check_bar', status: { in: ['rejected', 'expired', 'failed'] }, args: { path: ['taskId'], equals: t.id } }, select: { id: true } });
-      if (dead) await fail('expired');
+      if (await acceptDeclined(db, t.id)) await fail('expired');
       else await send(CHECK_QUEUE, t.id);
     } else if (t.updatedAt <= stale) await fail('expired');
     else await send(CHECK_QUEUE, t.id);
@@ -115,9 +123,35 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
         AND NOT EXISTS (SELECT 1 FROM "Resolution" r WHERE r."predictionId" = p.id)
       ORDER BY t."completedAt" ASC LIMIT ${SCORES_PER_TICK}`;
     for (const t of due) {
-      if ((await db.$transaction((tx) => scoreTaskForecast(tx, t.id, now), RC)) === 'scored') {
-        counts.scored += 1;
-        d.log?.(taskLog(t.id, 'scored'));
+      // One forecast the database will not take (its day is not up by the database's own clock, an override
+      // landed first) is left for the next tick, said by its class: the others are still scored.
+      try {
+        if ((await db.$transaction((tx) => scoreTaskForecast(tx, t.id, now), RC)) === 'scored') {
+          counts.scored += 1;
+          d.log?.(taskLog(t.id, 'scored'));
+        }
+      } catch (err) {
+        d.log?.(taskLog(t.id, 'not scored', failureClass(err)));
+      }
+    }
+  }
+
+  // 5. Forecasts of cancelled tasks, past their date: nothing will ever settle them.
+  if (await mayExpire(db, now)) {
+    const lapsed = await db.$queryRaw<Array<{ id: string }>>`
+      SELECT t.id FROM "Task" t JOIN "Prediction" p ON p.id = t."predictionId"
+      WHERE t.status = 'cancelled' AND p.status = 'open' AND p."resolveBy" < ${now}
+        AND p.domain = ${TASK_FORECAST.domain} AND p.type = ${TASK_FORECAST.type} AND p."createdBy" = ${TASK_FORECAST.createdBy}
+        AND NOT EXISTS (SELECT 1 FROM "Resolution" r WHERE r."predictionId" = p.id)
+      ORDER BY p."resolveBy" ASC LIMIT ${SCORES_PER_TICK}`;
+    for (const t of lapsed) {
+      try {
+        if (await db.$transaction((tx) => expireCancelledForecast(tx, t.id, now), RC)) {
+          counts.ranOut += 1;
+          d.log?.(taskLog(t.id, 'forecast ran out'));
+        }
+      } catch (err) {
+        d.log?.(taskLog(t.id, 'forecast not run out', failureClass(err)));
       }
     }
   }

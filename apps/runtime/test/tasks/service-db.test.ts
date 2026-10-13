@@ -13,11 +13,11 @@
  *    the forecast from its prediction, and what Will can do next.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { AssetsPage, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TasksPage, noteProblems, titleCase } from '@flint/policy';
+import { AssetEnableArgs, AssetsPage, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TasksPage, noteProblems, titleCase } from '@flint/policy';
 import { NO_DB, freshDb, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Refused } from '../../src/governance/proposals';
-import { ASSETS, CI_WATCHER, assetDef, assetFor, sameAsset } from '../../src/assets/registry';
+import { ASSETS, CI_WATCHER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
 import { fileEnable, known, syncAssets, turnOff } from '../../src/assets/service';
 import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
@@ -52,9 +52,12 @@ describe('the asset registry, before the database', () => {
     // No asset runs the local model's templates yet.
     for (const t of ['summarize_items', 'sort_items', 'draft_note'] as const) expect(assetFor(t)).toBeUndefined();
     // An asset is exactly its definition: a changed list of what it can do, or its order, is another asset.
-    const facts = { kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false };
+    const facts = { kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null as string | null };
     expect(sameAsset(CI_WATCHER, facts)).toBe(true);
-    for (const over of [{ capabilities: ['watch_ci', 'more'] }, { capabilities: [] }, { name: 'CI' }, { spends: true }, { externalRef: 'github:ci:v2' }, { kind: 'local_worker' }, { dispatchAction: 'review.local' }]) {
+    // What Will signs for it is exactly that, the item it stands for included (none).
+    expect(enableArgsOf(CI_WATCHER)).toEqual({ assetId: CI_WATCHER.id, ...facts });
+    expect(AssetEnableArgs.safeParse(enableArgsOf(CI_WATCHER)).success).toBe(true);
+    for (const over of [{ capabilities: ['watch_ci', 'more'] }, { capabilities: [] }, { name: 'CI' }, { spends: true }, { externalRef: 'github:ci:v2' }, { kind: 'local_worker' }, { dispatchAction: 'review.local' }, { entityId: 'en1' }]) {
       expect(sameAsset(CI_WATCHER, { ...facts, ...over }), JSON.stringify(over)).toBe(false);
     }
     expect(known({ id: CI_WATCHER.id, ...facts })).toBe(CI_WATCHER);

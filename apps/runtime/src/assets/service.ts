@@ -16,17 +16,21 @@ import { appendAudit } from '../governance/audit.js';
 import { Refused, createProposal } from '../governance/proposals.js';
 import { sqlState } from '../dbcodes.js';
 import { SAY } from '../tasks/errors.js';
-import { ASSETS, assetDef, sameAsset, type AssetDef } from './registry.js';
+import { ASSETS, assetDef, enableArgsOf, sameAsset, type AssetDef } from './registry.js';
 
 /** Who the console's writes are by. */
 export const CONSOLE_ACTOR = 'will:console';
 /** How long an asset card waits for Will. */
 const CARD_TTL_MINUTES = 7 * 24 * 60;
 
-/** Add the registry's assets that have no row yet, off. A row that is there is never written. */
+/**
+ * Add the registry's assets that have no row yet, off. A row that is there is
+ * never written. The row comes before its card: the database takes a card to
+ * turn an asset on only if Will signed it after the row was written.
+ */
 export async function syncAssets(db: Db | Tx, registry: readonly AssetDef[] = ASSETS): Promise<void> {
   await db.asset.createMany({
-    data: registry.map((d) => ({ id: d.id, kind: d.kind, externalRef: d.externalRef, name: d.name, capabilities: [...d.capabilities], dispatchAction: d.dispatchAction, spends: d.spends })),
+    data: registry.map((d) => ({ id: d.id, kind: d.kind, externalRef: d.externalRef, name: d.name, capabilities: [...d.capabilities], dispatchAction: d.dispatchAction, spends: d.spends, entityId: d.entityId })),
     skipDuplicates: true,
   });
 }
@@ -47,7 +51,7 @@ export async function fileEnable(db: Db, assetId: string, now = new Date()): Pro
   if (!def) throw new Refused(404, SAY.noAsset);
   const filed = await createProposal(db, {
     kind: 'policy', origin: 'console', action: 'asset.enable',
-    args: { assetId: def.id, kind: def.kind, externalRef: def.externalRef, name: def.name, capabilities: [...def.capabilities], dispatchAction: def.dispatchAction, spends: def.spends },
+    args: enableArgsOf(def),
     // checkTaskCard sets where the args came from (the registry), the fixed reason and the fresh-touch mark.
     argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: CARD_TTL_MINUTES,
   }, CONSOLE_ACTOR, now);

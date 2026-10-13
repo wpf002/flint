@@ -11,15 +11,16 @@
  *  - A result that passed waits for Will as long as his card does, and the
  *    task ends once he turned the card down.
  *  - A forecast is a base rate over tasks like it, counted under its own
- *    counter. It is scored only once Will promoted that for the assets
- *    domain, 24 hours after the task ended, by the tick alone: accepted is
- *    true, rejected or failed is false, cancelled is left. Once it is scored,
- *    an override is refused.
+ *    counter, and names its task under the tasks rule. It is scored 24 hours
+ *    after the task ended, by the tick alone, unless a rule of Will's forbids
+ *    that: accepted is true, rejected or failed is false. Once it is scored,
+ *    an override is refused. A cancelled task's forecast is never scored: it
+ *    runs out once its date has passed.
  *  - Retention clears a task's words and deletes its output only once it has
  *    ended; Health says when tasks are off, idle, stuck or stopped.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { MEETS_BAR_COUNTER, TASK_SAYS, TASKS_WRITER } from '@flint/policy';
+import { MEETS_BAR_COUNTER, TASK_FORECAST_RULE, TASK_SAYS, TASKS_WRITER } from '@flint/policy';
 import { NO_DB, freshDb, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Refused, rejectProposal } from '../../src/governance/proposals';
@@ -29,8 +30,10 @@ import { TASK_HEALTH, checkComponents } from '../../src/health/checks';
 import { turnOff } from '../../src/assets/service';
 import { CI_WATCHER } from '../../src/assets/registry';
 import { checkTaskJob } from '../../src/tasks/check';
-import { OVERRIDE_WINDOW_MS, TASK_FORECAST, forecastResolveBy, mayScore, meetsBarProbability, scoreOnWillsCard, scoreTaskForecast } from '../../src/tasks/forecast';
-import { runTaskJob } from '../../src/tasks/run';
+import { OVERRIDE_WINDOW_MS, TASK_FORECAST, expireCancelledForecast, forecastResolveBy, mayExpire, mayScore, meetsBarProbability, scoreTaskForecast } from '../../src/tasks/forecast';
+import { failTask, runTaskJob } from '../../src/tasks/run';
+import { ruleOwner } from '../../src/predict/resolvers';
+import { backdatePrediction } from '../ledger/kit';
 import { FILING_GRACE_MS, STALE_MS, taskTick } from '../../src/tasks/tick';
 import { DAY, FakeBus, taskFixture, type TaskFixture } from './fixture';
 
@@ -54,16 +57,16 @@ describe('a task’s forecast, before the database', () => {
   });
   it('the task template is the tasks writer’s alone, and that writer records nothing else', async () => {
     const noDb = {} as Db;
-    const p = { kind: 'binary' as const, probability: 0.5, method: 'base_rate' as const, domain: 'assets' as const, type: 'task_meets_bar' as const, evidence: [], resolutionCriteria: 'x', resolver: 'auto_world' as const, resolveBy: later(DAY).toISOString(), tainted: false };
+    const p = { kind: 'binary' as const, probability: 0.5, method: 'base_rate' as const, domain: 'assets' as const, type: 'task_meets_bar' as const, evidence: [], resolutionCriteria: 'x', resolver: 'auto_world' as const, resolverSpec: { taskId: 'tkabcdefghij123456', rule: 'task_meets_bar' } as Record<string, unknown> | undefined, resolveBy: later(DAY).toISOString(), tainted: false };
     const template = { id: 'task_meets_bar' as const, params: { task: 'task#abc123', by: '2026-12-01' } };
     for (const [body, by] of [
       [{ ...p, template }, 'runtime:goals'], [{ ...p, template }, 'client:server'],
       [{ ...p, claim: 'a task passes' }, TASKS_WRITER], [{ ...p, template, domain: 'goals' as const }, TASKS_WRITER], [{ ...p, template, method: 'rule' as const }, TASKS_WRITER],
       [{ ...p, template, tainted: true }, TASKS_WRITER], [{ ...p, template, resolver: 'will' as const }, TASKS_WRITER],
       [{ ...p, template: { id: 'task_meets_bar' as const, params: { task: 'A task’s own title', by: '2026-12-01' } } }, TASKS_WRITER],
+      // Without the rule that names its task, or under another rule: not a task's forecast.
+      [{ ...p, template, resolverSpec: undefined }, TASKS_WRITER], [{ ...p, template, resolverSpec: { taskId: 'tkabcdefghij123456', rule: 'goal_done_by' } }, TASKS_WRITER],
     ] as const) await expect(emitPrediction(noDb, body, by), `${JSON.stringify(body)} by ${by}`).rejects.toBeInstanceOf(Invalid);
-    expect(scoreOnWillsCard.length).toBe(4);
-    expect(await scoreOnWillsCard(noDb as never, 'tk1', true, 'ap1')).toBe(false);
   });
 });
 
@@ -74,6 +77,11 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
   const bus = new FakeBus();
   const tick = (now = new Date(), logs?: string[]) => taskTick({ db, bus, now: () => now, ...(logs ? { log: (m: string) => logs.push(m) } : {}) });
   const sentTo = (queue: string, taskId: string) => bus.of(queue).filter((j) => j.data.taskId === taskId).length;
+  /** A task that ended 25 hours ago, its forecast made two days ago and due in a week: a test's stand-in for a day passing. */
+  const dayOn = async (taskId: string) => {
+    await fx.endedAgo(taskId, 25);
+    await backdatePrediction(urls, (await fx.task(taskId)).predictionId!, { madeAgo: 2 * DAY, dueAgo: -7 * DAY });
+  };
   /** End every task still open, so each test starts from none. */
   const settle = async () => {
     for (const t of await db.task.findMany({ where: { status: { in: ['proposed'] } }, select: { id: true } })) await db.task.updateMany({ where: { id: t.id, status: 'proposed' }, data: { status: 'cancelled' } });
@@ -114,7 +122,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
   it('a task still out is sent to its run again, one handed in to its check; a job that is already waiting is the same job', async () => {
     const out = await fx.dispatched(await fx.ciRun('wpf002/out'));
     bus.clear();
-    expect(await tick()).toEqual({ sent: 1, failed: 0, cancelled: 0, scored: 0 });
+    expect(await tick()).toEqual({ sent: 1, failed: 0, cancelled: 0, scored: 0, ranOut: 0 });
     expect(bus.of('tasks.run')).toEqual([expect.objectContaining({ data: { taskId: out.id }, options: { singletonKey: out.id } })]);
     // Still waiting on the bus: not sent twice.
     expect(await tick()).toMatchObject({ sent: 0 });
@@ -131,7 +139,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     // Checked, and its accept card waits for Will: nothing is sent, and it is not given up on, however long he takes within the card's week.
     await checkTaskJob({ db }, { taskId: out.id });
     bus.clear();
-    expect(await tick(later(3 * DAY))).toEqual({ sent: 0, failed: 0, cancelled: 0, scored: 0 });
+    expect(await tick(later(3 * DAY))).toEqual({ sent: 0, failed: 0, cancelled: 0, scored: 0, ranOut: 0 });
     expect(await fx.task(out.id)).toMatchObject({ status: 'checking', metBar: true });
     // He turns the card down: the wait is over, and the task ends.
     const card = (await fx.cardFor('task.check_bar', out.id))!;
@@ -155,7 +163,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     expect(await tick()).toMatchObject({ sent: 1, failed: 0 });
     expect(sentTo('tasks.check', t.id)).toBe(1);
     expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('filed');
-    expect((await fx.cardFor('task.check_bar', t.id))!.args).toEqual({ taskId: t.id, checks: 1, met: 1, by: 'flint:rule' });
+    expect((await fx.cardFor('task.check_bar', t.id))!.args).toEqual({ outputRef: (await fx.task(t.id)).outputRef, metBar: true, taskId: t.id, checks: 1, met: 1, by: 'flint:rule' });
   });
 
   it('its asset turned off, its due time passed, or a day without moving ends a task, as a class', async () => {
@@ -166,7 +174,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     await runTaskJob({ db, bus }, { taskId: handedIn.id });
     bus.clear();
     // An hour on: all three are still in time.
-    expect(await tick(later(HOUR))).toEqual({ sent: 3, failed: 0, cancelled: 0, scored: 0 });
+    expect(await tick(later(HOUR))).toEqual({ sent: 3, failed: 0, cancelled: 0, scored: 0, ranOut: 0 });
     // Three hours on: the one with a due time is past it.
     expect(await tick(later(3 * HOUR))).toMatchObject({ failed: 1 });
     expect(await fx.task(due.id)).toMatchObject({ status: 'failed', failure: 'expired' });
@@ -189,7 +197,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     const turnedDown = await fx.newTask(await fx.ciRun('wpf002/turned-down'));
     await rejectProposal(db, turnedDown.proposalId, { approvalId: await fx.sign(turnedDown.proposalId, 'reject') }, undefined, 'test');
     // Inside the grace a new task has (its card is filed a moment after its row): nothing.
-    expect(await tick()).toEqual({ sent: 0, failed: 0, cancelled: 0, scored: 0 });
+    expect(await tick()).toEqual({ sent: 0, failed: 0, cancelled: 0, scored: 0, ranOut: 0 });
     expect(await tick(later(FILING_GRACE_MS + 60_000))).toMatchObject({ cancelled: 1 });
     expect(await fx.task(turnedDown.id)).toMatchObject({ status: 'cancelled', dispatchApprovalId: null });
     expect(await fx.task(waiting.id)).toMatchObject({ status: 'proposed' });
@@ -198,7 +206,7 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     expect(entry.inputs).toEqual({ taskId: turnedDown.id, why: 'card_gone' });
   });
 
-  it('the base rate follows tasks like it, the forecast is counted under its own counter, and it is scored only once Will promoted that, a day after the task ended', async () => {
+  it('the base rate follows tasks like it, the forecast names its task under the tasks rule and is counted under its own counter, and it is scored a day after the task ended, as it ended', async () => {
     const before = await db.task.count({ where: { status: { in: ['accepted', 'rejected', 'failed'] }, asset: { kind: 'ci_runner' }, completedAt: { not: null } } });
     const acceptedBefore = await db.task.count({ where: { status: 'accepted', asset: { kind: 'ci_runner' } } });
     const accepted = await fx.checked('wpf002/score-yes');
@@ -208,51 +216,87 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     const forecast = await db.prediction.findUniqueOrThrow({ where: { id: (await fx.task(next.id)).predictionId! } });
     expect(forecast.probability).toBe(meetsBarProbability(acceptedBefore + 1, before + 2));
     expect(forecast.evidence).toEqual([{ kind: 'base_rate', ref: 'tasks.meets_bar.base_rate.v1', note: `${acceptedBefore + 1} of ${before + 2} like it were accepted in the last 90 days` }]);
-    expect(forecast.resolverSpec).toEqual({ taskId: next.id, rule: 'task_accepted_by' });
+    // It names its task under the tasks rule, which the ledger's own sweep does not know: only this tick settles it.
+    expect(forecast).toMatchObject({ resolver: 'auto_world', resolverSpec: { taskId: next.id, rule: TASK_FORECAST_RULE }, createdBy: TASKS_WRITER, domain: 'assets', type: 'task_meets_bar' });
+    expect(ruleOwner({ resolver: forecast.resolver, resolverSpec: forecast.resolverSpec, recType: null })).toBe('other');
     const counted = await db.$queryRaw<Array<{ count: number }>>`SELECT count FROM "ActionCounter" WHERE action = ${MEETS_BAR_COUNTER}`;
     expect(counted[0]!.count).toBe(await db.prediction.count({ where: { domain: 'assets' } }));
     expect(await db.$queryRaw<unknown[]>`SELECT 1 FROM "ActionCounter" WHERE action = 'ledger.prediction.record'`).toEqual([]);
-    const cancelled = await fx.dispatched(await fx.ciRun('wpf002/score-cancelled'));
-    await fx.signRun((await fx.file('task.cancel', { taskId: cancelled.id })).id);
+    // A task that failed: its run gave up.
+    expect(await failTask(db, next.id, ['queued'], 'timeout')).toBe(true);
 
-    // Not promoted: nothing is scored, however long ago the tasks ended.
-    const day = later(OVERRIDE_WINDOW_MS + HOUR);
-    expect(await mayScore(db, new Date())).toBe(false);
-    expect((await tick(day)).scored).toBe(0);
-    // A promotion for another domain does not reach these.
-    await fx.policy('ledger.resolve.auto', 'alone', { domain: 'goals' });
-    expect(await mayScore(db, new Date())).toBe(false);
-    await fx.policy('ledger.resolve.auto', 'alone', { domain: TASK_FORECAST.domain });
-    expect(await mayScore(db, new Date())).toBe(true);
     // Inside the day Will has to overrule a check: not yet. Nor a task that is still out.
-    expect((await tick(later(HOUR))).scored).toBe(0);
+    expect(await mayScore(db, new Date())).toBe(true);
+    expect((await tick()).scored).toBe(0);
     expect(await db.$transaction((tx) => scoreTaskForecast(tx, accepted, new Date()))).toBe('not_yet');
     const stillOut = await fx.dispatched(await fx.ciRun('wpf002/score-out'));
-    expect(await db.$transaction((tx) => scoreTaskForecast(tx, stillOut.id, day))).toBe('not_yet');
+    expect(await db.$transaction((tx) => scoreTaskForecast(tx, stillOut.id, later(2 * DAY)))).toBe('not_yet');
+    // A clock that runs ahead of the database's does not score one early: the database holds the day itself, the
+    // forecast is left for the next tick, and the tick goes on.
+    const early: string[] = [];
+    expect((await tick(later(OVERRIDE_WINDOW_MS + HOUR), early)).scored).toBe(0);
+    expect(early).toEqual(expect.arrayContaining([expect.stringMatching(new RegExp(`^task ${accepted}: not scored \\(`))]));
+    expect(await db.resolution.count({ where: { predictionId: (await fx.task(accepted)).predictionId! } })).toBe(0);
+
+    // A day on (said by the database's owner: nobody else can move a task's end, or when its forecast was made).
+    for (const id of [accepted, rejected, next.id]) await dayOn(id);
+    // A rule of Will's that forbids settling predictions stops it, whatever it is scoped to (a rule tightens outside its scope too).
+    await fx.policy('ledger.resolve.auto', 'forbidden', { domain: 'goals' });
+    expect(await mayScore(db, new Date())).toBe(false);
+    expect((await tick()).scored).toBe(0);
+    await fx.owner(`UPDATE "ActionPolicy" SET active = false WHERE pattern = 'ledger.resolve.auto'`);
+    expect(await mayScore(db, new Date())).toBe(true);
+
     const logs: string[] = [];
-    const scored = await tick(day, logs);
-    expect(scored.scored).toBeGreaterThanOrEqual(2);
-    expect(logs).toEqual(expect.arrayContaining([`task ${accepted}: scored`, `task ${rejected}: scored`]));
+    const scored = await tick(new Date(), logs);
+    expect(scored.scored).toBe(3);
+    expect(logs).toEqual(expect.arrayContaining([`task ${accepted}: scored`, `task ${rejected}: scored`, `task ${next.id}: scored`]));
     const resolutionOf = async (taskId: string) => db.resolution.findUnique({ where: { predictionId: (await fx.task(taskId)).predictionId! } });
     const yes = (await resolutionOf(accepted))!;
     expect(yes).toMatchObject({ outcome: true, resolvedBy: 'auto_world', evidence: { taskId: accepted, status: 'accepted', via: 'tasks.tick' } });
     expect(yes.eventAt).toEqual((await fx.task(accepted)).completedAt);
     expect(await resolutionOf(rejected)).toMatchObject({ outcome: false, resolvedBy: 'auto_world' });
-    expect((await db.prediction.findUniqueOrThrow({ where: { id: yes.predictionId } })).status).toBe('resolved');
-    // A cancelled task's forecast is left to expire. The one that was still out ran out of time on this clock, and a failed task is false.
-    expect(await resolutionOf(cancelled.id)).toBeNull();
-    expect(await fx.task(next.id)).toMatchObject({ status: 'failed', failure: 'expired' });
     expect(await resolutionOf(next.id)).toMatchObject({ outcome: false, evidence: { taskId: next.id, status: 'failed', via: 'tasks.tick' } });
+    expect((await db.prediction.findUniqueOrThrow({ where: { id: yes.predictionId } })).status).toBe('resolved');
     // Scored once: a second tick finds nothing, and the scorer leaves a scored one alone.
-    expect((await tick(day)).scored).toBe(0);
-    expect(await db.$transaction((tx) => scoreTaskForecast(tx, accepted, day))).toBe('left');
-    expect(await db.$transaction((tx) => scoreTaskForecast(tx, cancelled.id, day))).toBe('left');
-    expect(await db.$transaction((tx) => scoreTaskForecast(tx, 'tk0000000000000000', day))).toBe('left');
+    expect((await tick()).scored).toBe(0);
+    expect(await db.$transaction((tx) => scoreTaskForecast(tx, accepted, new Date()))).toBe('left');
+    expect(await db.$transaction((tx) => scoreTaskForecast(tx, 'tk0000000000000000', new Date()))).toBe('left');
     // Once it is scored, the result is final: an override is refused when it is filed.
     const e = await fx.file('task.bar_override', { taskId: rejected, to: 'accepted' }).then(() => undefined, (err: unknown) => err);
     expect(e).toBeInstanceOf(Refused);
     expect(e).toMatchObject({ status: 409, message: TASK_SAYS.scored });
-    await fx.owner(`UPDATE "ActionPolicy" SET active = false WHERE pattern = 'ledger.resolve.auto'`);
+  });
+
+  it('a cancelled task’s forecast is never scored: it runs out once its date has passed, and not before', async () => {
+    const cancelled = await fx.dispatched(await fx.ciRun('wpf002/score-cancelled'));
+    await fx.signRun((await fx.file('task.cancel', { taskId: cancelled.id })).id);
+    const pid = (await fx.task(cancelled.id)).predictionId!;
+    const status = async () => (await db.prediction.findUniqueOrThrow({ where: { id: pid } })).status;
+    await dayOn(cancelled.id);
+    // Never scored, however long ago it was cancelled; and its date has not passed, so it stays open.
+    expect(await db.$transaction((tx) => scoreTaskForecast(tx, cancelled.id, new Date()))).toBe('left');
+    expect(await tick()).toMatchObject({ scored: 0, ranOut: 0 });
+    expect(await db.$transaction((tx) => expireCancelledForecast(tx, cancelled.id, new Date()))).toBe(false);
+    expect(await status()).toBe('open');
+    // Its date passes (a test's stand-in: the forecast as it was made, moved into the past).
+    await backdatePrediction(urls, pid, { madeAgo: 12 * DAY, dueAgo: HOUR });
+    // A rule of Will's that forbids running predictions out stops it.
+    await fx.policy('ledger.expire', 'forbidden');
+    expect(await mayExpire(db, new Date())).toBe(false);
+    expect((await tick()).ranOut).toBe(0);
+    await fx.owner(`UPDATE "ActionPolicy" SET active = false WHERE pattern = 'ledger.expire'`);
+    const logs: string[] = [];
+    expect(await tick(new Date(), logs)).toMatchObject({ scored: 0, ranOut: 1 });
+    expect(logs).toContain(`task ${cancelled.id}: forecast ran out`);
+    expect(await status()).toBe('expired');
+    expect(await db.resolution.count({ where: { predictionId: pid } })).toBe(0);
+    // Once: a second tick finds nothing. And a task that is not cancelled is not run out here, whatever its date.
+    expect((await tick()).ranOut).toBe(0);
+    const out = await fx.dispatched(await fx.ciRun('wpf002/score-not-cancelled'));
+    await backdatePrediction(urls, (await fx.task(out.id)).predictionId!, { madeAgo: 12 * DAY, dueAgo: HOUR });
+    expect(await db.$transaction((tx) => expireCancelledForecast(tx, out.id, new Date()))).toBe(false);
+    expect((await tick()).ranOut).toBe(0);
   });
 
   it('retention clears a task’s words and deletes its output only once it has ended: 30 days after for ops, 7 for a personal one; the title stays', async () => {
@@ -263,12 +307,8 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
     await runTaskJob({ db, bus }, { taskId: own.id });
     await checkTaskJob({ db }, { taskId: own.id });
     expect(await fx.task(own.id)).toMatchObject({ status: 'rejected', sensitivity: 'personal' });
-    /** Ended that many days ago: the database stamps a task's end itself, so only its owner, with the guard set aside, can say otherwise. */
-    const endedAgo = (id: string, days: number) => fx.owner(`DO $$ BEGIN
-      ALTER TABLE "Task" DISABLE TRIGGER "Task_guard";
-      UPDATE "Task" SET "completedAt" = now() - interval '${days} days' WHERE id = '${id}';
-      ALTER TABLE "Task" ENABLE TRIGGER "Task_guard";
-    END $$`);
+    /** Ended that many days ago (the fixture's stand-in for time passing). */
+    const endedAgo = (id: string, days: number) => fx.endedAgo(id, days * 24);
     const row = async (id: string) => ({ ...(await fx.task(id)), output: await db.taskOutput.count({ where: { taskId: id } }) });
     // Ended six days ago: nothing yet.
     await endedAgo(ended, 6);

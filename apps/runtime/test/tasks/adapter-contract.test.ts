@@ -20,7 +20,7 @@ import { createDb, type Db } from '../../src/db';
 import { Refused } from '../../src/governance/proposals';
 import { runInternal } from '../../src/governance/internal';
 import { jsonbBytes } from '../../src/jsonsize';
-import { ASSETS, assetOf, type AssetDef } from '../../src/assets/registry';
+import { ASSETS, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
 import { syncAssets } from '../../src/assets/service';
 import { ciWatch } from '../../src/tasks/adapters/ci-watch';
 import type { AdapterInput, ItemFact, TaskAdapter } from '../../src/tasks/adapters/types';
@@ -128,7 +128,7 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
     fx = await taskFixture(urls, db, bus);
     // The stand-in asset, turned on by its own signed card. It is not in the code registry: no such asset is built.
     await syncAssets(db, registry);
-    const args = { assetId: asset.id, kind: asset.kind, externalRef: asset.externalRef, name: asset.name, capabilities: [...asset.capabilities], dispatchAction: asset.dispatchAction, spends: true };
+    const args = enableArgsOf(asset);
     const pid = id('pr');
     await withClient(urls.app, (c) => c.query(
       `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, "expiresAt")

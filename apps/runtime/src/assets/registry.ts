@@ -20,12 +20,14 @@ export interface AssetDef {
   capabilities: readonly string[];
   dispatchAction: string;
   spends: boolean;
+  /** The tracked item it stands for, or null: part of what Will signs. */
+  entityId: string | null;
   /** The sentence under its row in Settings. */
   line: string;
 }
 
-/** An asset's definition; the action it is handed work under follows from its kind. */
-export const assetOf = (d: Omit<AssetDef, 'dispatchAction'>): AssetDef => ({ ...d, dispatchAction: dispatchActionOf(d.kind) });
+/** An asset's definition; the action it is handed work under follows from its kind, and it stands for no item unless it says one. */
+export const assetOf = (d: Omit<AssetDef, 'dispatchAction' | 'entityId'> & { entityId?: string | null }): AssetDef => ({ ...d, dispatchAction: dispatchActionOf(d.kind), entityId: d.entityId ?? null });
 
 export const CI_WATCHER: AssetDef = assetOf({
   id: 'as-ci-watcher-v1', kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], spends: false,
@@ -39,7 +41,7 @@ export const assetDef = (id: string, registry: readonly AssetDef[] = ASSETS): As
 /** The asset that runs a template, if one is defined. */
 export const assetFor = (template: TaskTemplateId, registry: readonly AssetDef[] = ASSETS): AssetDef | undefined => registry.find((a) => a.capabilities.includes(template));
 
-/** What a row or a card says an asset is: the six fields Will signs. */
+/** What a row or a card says an asset is: the seven fields Will signs. */
 export interface AssetFacts {
   kind: string;
   externalRef: string;
@@ -47,9 +49,14 @@ export interface AssetFacts {
   capabilities: readonly string[];
   dispatchAction: string;
   spends: boolean;
+  entityId: string | null;
 }
-/** Is this exactly the definition (its list of what it can do in the same order)? */
+/** Is this exactly the definition (its list of what it can do in the same order, and the item it stands for)? */
 export function sameAsset(d: AssetDef, x: AssetFacts): boolean {
   return d.kind === x.kind && d.externalRef === x.externalRef && d.name === x.name && d.dispatchAction === x.dispatchAction && d.spends === x.spends
-    && d.capabilities.length === x.capabilities.length && d.capabilities.every((c, i) => c === x.capabilities[i]);
+    && d.entityId === x.entityId && d.capabilities.length === x.capabilities.length && d.capabilities.every((c, i) => c === x.capabilities[i]);
 }
+/** What an asset.enable card signs for this definition: exactly what the asset is. */
+export const enableArgsOf = (d: AssetDef) => ({
+  assetId: d.id, kind: d.kind, externalRef: d.externalRef, name: d.name, capabilities: [...d.capabilities], dispatchAction: d.dispatchAction, spends: d.spends, entityId: d.entityId,
+});
