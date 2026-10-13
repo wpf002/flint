@@ -29,7 +29,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { GOAL_SAYS, GOAL_STATUS_SAYS, HEALTH_NAMES, JOB_WORDS, jobFailedNote, noteProblems, shownProblems, type NightlyJob } from '@flint/policy';
 import { ACTION, nextAfterFailure } from '../src/backup/nightly';
-import { digestBody, digestTitle, goalsSentence } from '../src/digest';
+import { digestBody, digestTitle, goalsSentence, questionsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
 import { FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH } from '../src/health/checks';
@@ -110,6 +110,11 @@ describe('the runtime’s notes to Will', () => {
       for (const [goalsReviewed, goalsLate] of [[1, 0], [1, 1], [3, 0], [3, 1], [3, 3], [40, 12]] as const) {
         for (const c of counts) for (const d of [[], ['goals'], ['backup', 'goals', 'source:github']]) plain('digest.ts', digestTitle(day), digestBody({ ...c, goalsReviewed, goalsLate }, d));
         expect(digestBody({ ...zero, goalsReviewed, goalsLate }, [])).toContain(goalsSentence(goalsReviewed, goalsLate));
+      }
+      // Once Will lets Flint ask on its own, the digest ends with how many questions wait in Predictions (P4 part 4).
+      for (const questions of [1, 2, 5, 37]) {
+        for (const c of counts) for (const d of [[], ['forecasts', 'ledger']]) plain('digest.ts', digestTitle(day), digestBody({ ...c, questions }, d));
+        expect(digestBody({ ...zero, questions }, []).split('\n').at(-1)).toBe(questionsSentence(questions));
       }
     }
     expect(digestTitle('2026-10-11')).toBe('Daily Summary for Sun Oct 11');

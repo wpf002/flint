@@ -23,6 +23,8 @@ import { appendAudit } from './governance/audit.js';
 import { activePolicies } from './governance/proposals.js';
 import { claim } from './governance/counters.js';
 import { notifyServer, type NotifyOutcome } from './notify.js';
+import { questionsWaiting } from './predict/questions.js';
+import { questionsAnnounced } from './predict/view.js';
 
 export interface Digest {
   day: string;
@@ -51,7 +53,7 @@ async function didOnItsOwn(db: Db, start: Date, end: Date): Promise<number> {
   return row?.n ?? 0;
 }
 
-export async function buildDigest(db: Db, tz: string, now = new Date()): Promise<Digest> {
+export async function buildDigest(db: Db, tz: string, now = new Date(), o: { predict?: boolean } = {}): Promise<Digest> {
   const day = previousDay(localDay(tz, now));
   const { start, end } = localDayBounds(tz, day);
   const today = localDayBounds(tz, localDay(tz, now));
@@ -75,8 +77,12 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
                SELECT 1 FROM "AuditEntry" a WHERE a."correlationId" = gr.id AND a.action = 'goal.review.local' AND a.inputs->>'late' = 'true'))::int AS late
       FROM "GoalReview" gr WHERE gr."createdAt" >= ${start} AND gr."createdAt" < ${end}`,
   ]);
+  // Will's questions in Predictions, counted only once he has let Flint ask on its own: until then they wait in the
+  // panel and nothing announces them.
+  // And never while predictions are switched off on this Mac: nothing can be answered then.
+  const questions = o.predict !== false && (await questionsAnnounced(db, now)) ? await questionsWaiting(db, now) : 0;
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
-  const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0 };
+  const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0, questions };
   return { day, title: digestTitle(day), body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
 }
 
@@ -85,6 +91,11 @@ export function goalsSentence(reviewed: number, late: number): string {
   if (!reviewed) return '';
   if (reviewed === 1) return `Flint reviewed 1 goal yesterday, ${late ? 'and it was late' : 'on time'}.`;
   return `Flint reviewed ${reviewed} goals yesterday, and ${late ? `${late} ${late === 1 ? 'was' : 'were'} late` : 'none was late'}.`;
+}
+
+/** "Flint has 2 questions for you in Predictions.": a count only. '' when none wait. */
+export function questionsSentence(n: number): string {
+  return n ? `Flint has ${plural(n, 'question')} for you in Predictions.` : '';
 }
 
 /**
@@ -98,12 +109,13 @@ export function digestTitle(day: string): string {
 }
 
 /**
- * The digest's lines, each a sentence: four, and a fifth on a day Flint reviewed
- * goals. The title carries the day; the console's tabs are Important and Other, it
+ * The digest's lines, each a sentence: four, a fifth on a day Flint reviewed
+ * goals, and a last one when questions wait for Will in Predictions (only once
+ * he has let Flint ask on its own). The title carries the day; the console's tabs are Important and Other, it
  * calls a proposal an approval, and Health's names stand for the components.
  */
 export function digestBody(
-  c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number; goalsReviewed?: number; goalsLate?: number },
+  c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number; goalsReviewed?: number; goalsLate?: number; questions?: number },
   degraded: string[],
 ): string {
   const waiting = [c.queued ? plural(c.queued, 'approval') : '', c.open ? plural(c.open, 'open escalation') : ''].filter(Boolean);
@@ -114,6 +126,7 @@ export function digestBody(
     ...(c.goalsReviewed ? [goalsSentence(c.goalsReviewed, c.goalsLate ?? 0)] : []),
     degraded.length ? `${degraded.length === 1 ? 'This needs' : 'These need'} a look: ${listOf(names)}.` : 'Everything checked is healthy.',
     c.due ? `Today, ${plural(c.due, 'prediction')} ${c.due === 1 ? 'resolves' : 'resolve'}.` : 'No predictions resolve today.',
+    ...(c.questions ? [questionsSentence(c.questions)] : []),
   ].join('\n');
 }
 
@@ -138,7 +151,7 @@ async function closeStaleDigests(db: Db, today: string, now: Date): Promise<void
 
 export async function runDigest(
   db: Db,
-  config: Pick<Config, 'tz' | 'server'>,
+  config: Pick<Config, 'tz' | 'server'> & Partial<Pick<Config, 'predict'>>,
   now = new Date(),
   post: (req: Parameters<typeof notifyServer>[1]) => Promise<NotifyOutcome> = (req) => notifyServer(config, req),
 ): Promise<DigestOutcome> {
@@ -147,7 +160,7 @@ export async function runDigest(
   const digestTier = tier('digest.daily');
   if (digestTier === 'forbidden' || (digestTier === 'approval' && !runsInShadow('digest.daily'))) return 'skipped';
   const deliver = digestTier === 'alone' && tier('notify.inapp') === 'alone';
-  const d = await buildDigest(db, config.tz, now);
+  const d = await buildDigest(db, config.tz, now, { ...(config.predict === undefined ? {} : { predict: config.predict }) });
   const ref = `digest:${d.day}`;
   await closeStaleDigests(db, ref, now);
   // The day's claim and the intent, together: a second run that day finds the claim taken.

@@ -31,6 +31,10 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/goals/:id/edit\|timing\|done\|abandon\|resume\|plan` | yes | `{ args }` | `{ id, deduped }`: that change's card |
 | POST | `/goals/:id/pause\|dismiss\|review`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime (`review` is Review Now) |
 | POST | `/goals/linkable` | yes | `{ q }` | `{ items }`: items a check may watch |
+| GET | `/predictions/waiting` | yes | — | `{ questions, announce }`: what the console asks when it loads, and every few minutes. Two facts, and no number of any series |
+| GET | `/predictions`, `/predictions/series/:key`, `/predictions/questions`, `/predictions/accuracy` | yes | — | Flint's forecasts, one number open, Will's questions, and how Flint has done (`PredictionsPage`, `{ series: SeriesView }`, `QuestionsPage`, `AccuracyView` in @flint/policy). See "Predictions" |
+| POST | `/predictions/turn-on` | yes | `{ series }` | `{ id, deduped }`: the Turn On Predictions card, to sign in the console |
+| POST | `/predictions/series/:key/turn-off`, `/predictions/questions/:id/answer` | yes | `{}`, `{ answer: "yes" \| "no" \| "skip" }` | `{ ok: true }`: unsigned, audited by the runtime |
 | GET | `/inference` | yes (full token) | — | The routing mode, this machine and the local models: `{ mode, modeSource, modeSentence, hardware: { accelerator, chip, memoryGb, usableGb, tier, tierLabel, recommended, name, sentence, notes }, local: { wire, server, host, model, contextLength, tools, primary, standby, embedding, confined, pull, warnings }, cloud, problems, notices, lines }`. `primary` and `standby` are `{ model, name, state, why?, pull?, downloadGb?, sentence }`. `lines` is the same as sentences for the command line (tags, keys); `name`, `sentence` and `notices` are for the console (display names, no key or tag). `hardware` is absent until the machine has been looked at. It takes one fresh look at the model server, and never starts a model load. See "Local inference", Status. |
 | POST | `/inference/mode` | yes (full token) | `{ mode: "local" \| "hybrid" \| "cloud" }` or `{ reset: true }` | `{ ok, mode, previous, source }`. Switches the mode and saves it; `reset` goes back to `FLINT_INFERENCE_MODE`. Anything else: 400. Audited. |
 
@@ -1633,6 +1637,26 @@ model (not the size the block was meant to have); the runtime rolls it up daily
 
 Chat has no goal tools: nothing in a chat turn can read a goal by asking the runtime, and a
 goal or plan card filed from a chat is refused by the runtime.
+
+## Predictions
+
+The console's Predictions panel (the chart icon) reaches the runtime's prediction routes
+through src/predictions-routes.ts, with the console's full token only (a voice or eval token
+reaches none of them). It is the goals proxy's twin: every key, id and body (up to 16 KB) is
+checked with @flint/policy's contracts before the runtime sees it, and every answer before
+the console does; the card is filed with the runtime at once and never spooled; a runtime
+that is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that
+says Flint isn't sure it went through; a refusal reaches the console only as one of the
+fixed sentences, by its code; and a runtime without the routes is a 501, so the console
+hides its Predictions button. No read takes a query, and every answer (this proxy's and the
+goals proxy's) says `Cache-Control: no-store`, so nothing is left in a browser's disk cache.
+
+A forecast's numbers include what Flint spends and the hours on the calendar, and a
+question holds a prediction's words. They pass through this proxy from the runtime to the
+console and go nowhere else in the server: it keeps nothing, pushes no note, puts nothing
+in chat context, and logs statuses, field paths and references only. The runtime writes
+every sentence the panel shows about a number, and the contract refuses a raw value beside
+the words. `/predictions` is never reported back to the runtime as a `route.error`.
 
 ## Tools / integrations
 

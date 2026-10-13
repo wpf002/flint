@@ -2,14 +2,35 @@ import { describe, it, expect } from 'vitest';
 import { CHAT_CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_PARAMS, ClaimTemplate, RUNTIME_CLAIM_TEMPLATE_IDS } from '../src/claims';
 import { digestOf } from '../src/canonical';
 import {
+  ACCURACY_MIN,
+  AccuracyView,
+  AnswerBody,
   FORECAST_REASONS,
   FORECAST_SIGNED_ACTIONS,
+  FORECAST_STATES,
   ForecastEnableArgs,
+  ForecastRow,
   P4_ACTIONS,
+  PREDICT_SAYS,
+  PanelSentence,
+  PanelWords,
+  PredictDone,
+  PredictEmptyBody,
+  PredictFiled,
+  PredictionsPage,
+  PredictionsWaiting,
+  QUESTIONS_PER_DAY,
+  QuestionsPage,
+  SeriesAnswer,
   SeriesKey,
+  TurnOnBody,
   isForecastSignedAction,
   mostSensitive,
+  predictCodeOf,
+  predictSayOf,
 } from '../src/predict';
+import { noteProblems } from '../src/notes';
+import { CODE_TABLE } from '../src/tiers';
 
 describe('P4: the forecast cards\' contracts', () => {
   it('a series key is the database\'s own shape: lowercase segments, at most 80 characters', () => {
@@ -90,5 +111,100 @@ describe('P4: the forecaster\'s claim template', () => {
     expect(ClaimTemplate.safeParse({ id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } }).success).toBe(false);
     for (const id of CHAT_CLAIM_TEMPLATE_IDS) expect(ClaimTemplate.options.map((o) => o.shape.id.value)).toContain(id);
     expect(ClaimTemplate.options).toHaveLength(CHAT_CLAIM_TEMPLATE_IDS.length);
+  });
+});
+
+describe('P4 part 4: the Predictions panel\'s wire', () => {
+  const row = { key: 'daily.deploys.count', name: 'Deploys', about: 'This is how many times Flint is deployed each day.', step: 'day', on: true, state: 'range', value: 'About 4', says: 'Flint expects about 4, with an 80% range of 2 to 6.' };
+
+  it('every refusal is one fixed sentence with a code, in both directions, and held to the notes\' rules', () => {
+    for (const [code, say] of Object.entries(PREDICT_SAYS)) {
+      expect(predictSayOf(code)).toBe(say);
+      expect(predictCodeOf(say)).toBe(code);
+      expect(say, code).toMatch(/^[A-Z].*\.$/);
+      expect(noteProblems('Predictions', say), code).toEqual([]);
+    }
+    expect(new Set(Object.values(PREDICT_SAYS)).size).toBe(Object.keys(PREDICT_SAYS).length);
+    for (const bad of ['toString', '__proto__', 'constructor', '', 'forbidden: forecast.local', 42, null, undefined]) expect(predictSayOf(bad), String(bad)).toBeUndefined();
+    expect(predictCodeOf('Some runtime words.')).toBeUndefined();
+  });
+
+  it('a sentence on the wire ends as one and carries no JSON, no backtick and no aside in parentheses; a label is a few words', () => {
+    for (const ok of ['Flint expects about $1.20, with an 80% range of $0.80 to $1.75.', 'It’s likely, around 70%, that today runs above 3.', 'Flint has 12 of the 30 range results it needs.']) {
+      expect(PanelSentence.safeParse(ok).success, ok).toBe(true);
+      expect(noteProblems('Predictions', ok), ok).toEqual([]);
+    }
+    for (const bad of ['', 'No stop', '{"mean":4}.', 'About 4 (2 to 6).', 'Run `flint`.', '[1,2].', `${'a'.repeat(400)}.`]) expect(PanelSentence.safeParse(bad).success, bad).toBe(false);
+    for (const ok of ['About 4', 'About $1.20', 'Likely · 70%', 'Not Enough History', '41 Scored']) expect(PanelWords.safeParse(ok).success, ok).toBe(true);
+    for (const bad of ['', '{"a":1}', 'About 4 (2 to 6)', 'a'.repeat(81)]) expect(PanelWords.safeParse(bad).success, bad).toBe(false);
+  });
+
+  it('a row says one of the closed states, and nothing but what the contract names', () => {
+    expect(FORECAST_STATES).toEqual(['range', 'no_trend', 'early', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off']);
+    expect(ForecastRow.parse(row)).toEqual(row);
+    for (const state of FORECAST_STATES) expect(ForecastRow.safeParse({ ...row, state }).success, state).toBe(true);
+    expect(ForecastRow.safeParse({ ...row, state: 'sure' }).success).toBe(false);
+    // No raw number travels beside the words: a field the contract does not name is refused, not ignored.
+    for (const extra of [{ mean: 4 }, { lo: 2, hi: 6 }, { points: [] }, { values: [1, 2, 3] }]) expect(ForecastRow.safeParse({ ...row, ...extra }).success, JSON.stringify(extra)).toBe(false);
+    expect(ForecastRow.safeParse({ ...row, key: 'Daily Deploys' }).success).toBe(false);
+  });
+
+  it('the page, one number, the questions and the scores are strict, and bounded', () => {
+    const page = { state: 'on', numbers: [row], waiting: [{ id: 'prabc123', numbers: 12 }], questions: 2, announce: false };
+    expect(PredictionsPage.parse(page)).toEqual(page);
+    expect(PredictionsPage.safeParse({ ...page, state: 'maybe' }).success).toBe(false);
+    expect(PredictionsPage.safeParse({ ...page, extra: 1 }).success).toBe(false);
+    expect(PredictionsPage.safeParse({ ...page, numbers: Array.from({ length: 61 }, () => row) }).success).toBe(false);
+    // What the console asks on load holds two facts and nothing else: no number of any series rides along.
+    expect(PredictionsWaiting.parse({ questions: 2, announce: true })).toEqual({ questions: 2, announce: true });
+    for (const bad of [{ questions: 2 }, { questions: -1, announce: false }, { questions: 2, announce: 'yes' }, { questions: 2, announce: false, numbers: [row] }, { questions: 2, announce: false, state: 'on' }]) {
+      expect(PredictionsWaiting.safeParse(bad).success, JSON.stringify(bad).slice(0, 60)).toBe(false);
+    }
+    const fact = { label: 'Today', value: 'About 4', says: 'The 80% range is 2 to 6.' };
+    const series = { number: row, forecast: [fact], chance: { label: 'Above 3', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above 3.' }, record: 'Flint has no results for this number yet.', waiting: false, offHere: false };
+    expect(SeriesAnswer.parse({ series })).toEqual({ series });
+    expect(SeriesAnswer.safeParse({ series: { ...series, chance: null } }).success).toBe(true);
+    expect(SeriesAnswer.safeParse({ series: { ...series, forecast: Array.from({ length: 9 }, () => fact) } }).success).toBe(false);
+    expect(SeriesAnswer.safeParse({ series: { ...series, points: [{ mean: 4 }] } }).success).toBe(false);
+    const q = { id: 'pdabc123', title: 'The deploy lands by Friday', says: 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.', answer: null, answerable: true };
+    const qs = { waiting: [q], answered: [{ ...q, answer: 'yes' }], offHere: false };
+    expect(QuestionsPage.parse(qs)).toEqual(qs);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, answer: 'maybe' }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, probability: 0.7 }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, id: 'pd abc' }] }).success).toBe(false);
+    // Whether a question can be answered Yes or No is always said, and so is whether anything can be answered here at all.
+    const { answerable: _a, ...unsaid } = q;
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [unsaid] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, answerable: 'yes' }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ waiting: [q], answered: [] }).success).toBe(false);
+    // A title is at most 300 characters: one over is refused, never cut.
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, title: 'x'.repeat(301) }] }).success).toBe(false);
+    const acc = { scored: true, scoring: 'on', areas: [{ name: 'Deploys', value: '12 Scored', lines: ['Flint has 12 of the 30 range results it needs.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
+    expect(AccuracyView.parse(acc)).toEqual(acc);
+    for (const scoring of ['off_here', 'not_started', 'on']) expect(AccuracyView.safeParse({ ...acc, scoring }).success, scoring).toBe(true);
+    for (const bad of [{ ...acc, scoring: 'maybe' }, { scored: true, areas: acc.areas, unsettled: acc.unsettled }]) expect(AccuracyView.safeParse(bad).success).toBe(false);
+    expect(AccuracyView.safeParse({ ...acc, areas: [{ ...acc.areas[0], lines: [] }] }).success).toBe(false);
+    expect(AccuracyView.safeParse({ ...acc, areas: [{ ...acc.areas[0], brier: 0.2 }] }).success).toBe(false);
+  });
+
+  it('the requests: an answer is yes, no or skip; turning on names numbers by key; turning off sends nothing', () => {
+    for (const a of ['yes', 'no', 'skip']) expect(AnswerBody.parse({ answer: a })).toEqual({ answer: a });
+    for (const bad of [{}, { answer: 'maybe' }, { answer: true }, { answer: 'yes', outcome: true }, { answer: 'yes', resolvedBy: 'will' }]) expect(AnswerBody.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    expect(TurnOnBody.parse({ series: ['daily.deploys.count'] })).toEqual({ series: ['daily.deploys.count'] });
+    for (const bad of [{}, { series: [] }, { series: ['Deploys'] }, { series: ['daily.deploys.count'], reason: ['daily.deploys.count'] }, { series: Array.from({ length: 41 }, (_, i) => `daily.x${i}.count`) }]) {
+      expect(TurnOnBody.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
+    }
+    expect(PredictEmptyBody.safeParse({}).success).toBe(true);
+    expect(PredictEmptyBody.safeParse({ on: false }).success).toBe(false);
+    expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false }).success).toBe(true);
+    expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false, args: {} }).success).toBe(false);
+    expect(PredictDone.safeParse({ ok: true }).success).toBe(true);
+    expect(PredictDone.safeParse({ ok: false }).success).toBe(false);
+  });
+
+  it('the day\'s questions are the action\'s own cap, and an area needs thirty results before Flint says how it did', () => {
+    expect(CODE_TABLE['ledger.resolve.ask_will']!.cap).toEqual({ limit: QUESTIONS_PER_DAY, period: 'day' });
+    expect(CODE_TABLE['ledger.resolve.ask_will']!.shadow).toBe(true);
+    expect(ACCURACY_MIN).toBe(30);
   });
 });

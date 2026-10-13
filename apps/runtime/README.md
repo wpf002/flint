@@ -832,10 +832,11 @@ approved. Any later deploy of P3 code applies the migration again. Claude runs
 Predictions arrive in parts. The first part was the store and what the
 database guarantees about it. The second is Flint checking its own predictions
 (see "Checking predictions" below). The third is the numbers themselves and
-their forecasts (see "Daily numbers and forecasts"). All of it is off until you
-turn it on, and nothing here changes what you see yet. Flint forecasts its own
-numbers on this Mac: no series is sent anywhere, and no part of this calls an
-outside service.
+their forecasts (see "Daily numbers and forecasts"). The fourth is where you
+see it all: the console's Predictions panel (see "The Predictions panel"). All
+of it is off until you turn it on. Flint forecasts its own numbers on this
+Mac: no series is sent anywhere, and no part of this calls an outside
+service.
 
 What the database now holds to, whatever the runtime's code does:
 
@@ -870,13 +871,10 @@ Both must be on before anything runs:
    and any other value is off. Off, the prediction jobs aren't scheduled at
    all. On, they're scheduled and still do nothing until the card is signed.
 2. The signed Turn On Predictions card. This is the real gate, and the database
-   enforces it. The console's own panel for it comes in a later part. Until
-   then Claude files the card with one command, with your OK (see "Turning
-   predictions on" below), and you approve it in Approvals. Approvals already
-   knows the card. It shows as Turn On
-   Predictions and names each number it covers. It says when spending or
-   calendar numbers are among them, and when the local model's second opinion
-   is included. It always asks on its own, with a fresh touch.
+   enforces it. You file it from the console's Predictions panel and approve
+   it there (see "Turning predictions on" below). The card names each number
+   it covers, and says when spending or calendar numbers are among them. It
+   always asks on its own, with a fresh touch, and never rides Approve All.
 
 ### Daily numbers and forecasts
 
@@ -999,28 +997,141 @@ for yesterday's number, is said, and isn't a fault.
 
 Two steps. Claude does the first with your OK; only you can do the second.
 
-1. Claude sets `FLINT_PREDICT=on` in `~/.flint/runtime.override.env`,
-   restarts the runtime, and files the card:
+1. Claude sets `FLINT_PREDICT=on` in `~/.flint/runtime.override.env` and
+   restarts the runtime. Until then the Predictions panel says "Predictions are
+   switched off on this Mac." and offers nothing to turn on.
+2. You open Flint and click **Predictions** in the top bar (the chart icon,
+   beside Goals). Click **Turn On Predictions**. Every number is switched on to
+   begin with; switch off any you don't want, then click **Continue**. Flint
+   shows the card: the numbers by name, which of them are spending or calendar
+   numbers, and that turning this on also checks the predictions Flint has
+   already made. Click **Approve with Touch ID**. Nothing is forecast until you
+   do. **Not Now** leaves the card waiting in Approvals for 7 days.
 
-   ```
-   cd ~/flint && pnpm --filter @flint/runtime predictions-on
-   ```
-
-   That files one Turn On Predictions card for all twelve numbers (or name the
-   ones you want after the command). It prints what it filed. Run again, it
-   returns the same card. If `FLINT_PREDICT` isn't on, it files nothing, says
-   so, and fails, because a card signed then would start nothing. It also
-   fails, with Flint's own sentence, if a number it was given can't be
-   forecast.
-2. You open Flint, click **Approvals** in the top bar, open **Turn On
-   Predictions**, check the numbers it names, and approve it with Touch ID. It
-   asks on its own, never in Approve All, and expires in 7 days.
+Asking again with other numbers replaces a card that is still waiting, so a
+card you left behind can't be approved later by mistake.
 
 The first forecasts appear the night after a number has 24 days of history
 (19 weeks for commits). Spend, deploys, downtime, commits and calendar hours
-are filled in from what Flint already has, so most start that night. To turn a
-number off again there's no button yet; ask Claude, and no signature is
-needed.
+are filled in from what Flint already has, so most start that night.
+
+To turn one number off: open it in Predictions and click **Turn Off**. No
+signature is needed, because it only narrows what Flint does. Turning it on
+again takes the card.
+
+Claude can still file the same card from the command line, with your OK:
+
+```
+cd ~/flint && pnpm --filter @flint/runtime predictions-on
+```
+
+That files one Turn On Predictions card for all twelve numbers (or name the
+ones you want after the command). Run again, it returns the same card. If
+`FLINT_PREDICT` isn't on, it files nothing, says so, and fails.
+
+### The Predictions panel
+
+The **Predictions** button is in the console's top bar once the runtime is
+new enough. The panel has three tabs.
+
+**Forecasts** lists the numbers that are on, under TODAY and THIS WEEK. Each
+row says one of these, and never a number Flint doesn't have:
+
+| It says | When |
+| --- | --- |
+| "Flint expects about 4, with an 80% range of 2 to 6." | The forecast beat a plain guess on this number's own past. |
+| "There's no reliable trend, and a plain guess gives an 80% range of 0 to 3." | With enough history to judge (56 days, or 26 weeks), it didn't. Only the range is given, never a middle. |
+| "It's too early to tell a trend, and a plain guess gives an 80% range of 0 to 3." | There's less history than that, so nothing has been judged yet. |
+| "This number hasn't changed in 24 days." | There's nothing to forecast. The count is of the days it really has, up to 28. |
+| "Yesterday's number isn't in yet, so there's no forecast for today." | Flint never forecasts from a made-up latest value. It waits a night. |
+| "Flint needs 24 days of history. It has 9." | Not enough history yet (19 weeks for a weekly number). |
+| "This number has no data yet." | Nothing has been kept for it. |
+| "Flint makes its next forecast tonight." | It's ready, and tonight's run makes its forecast. |
+| "Flint couldn't forecast this number last night." | The forecast failed. Settings > Health says more. |
+| "Forecasts for this number are off." | You turned it off, or never turned it on. |
+
+Click a number to open it: each day (or week) of its forecast with its range,
+the chance that today runs above its usual level, how many of its last 30
+ranges held, and **Turn Off**.
+
+**Questions** is where Flint asks you about the predictions only you can
+settle: the ones it made in a chat. Each morning at 07:20 it picks up to five
+that have come due, oldest first. Each row is the prediction in plain words
+and one line under it: "Flint said likely, around 70%, on Oct 3. It was due
+Oct 5 at 3:00 PM." Your answer is recorded as of that due time, so the row
+says it. Then three buttons:
+
+- **Yes** or **No** records the result as yours, as of the prediction's due
+  time. It's scored like any other.
+- **Skip** records that you skipped it and no result. The prediction runs out
+  14 days after it was asked, unscored.
+
+Nothing is recorded on one tap. The first tap arms the row: the other choices
+go away, and the row shows **Cancel** and one button that says what it will
+record (**Record Yes**, **Record No** or **Skip for Good**). The second tap
+records it. A double tap doesn't count as the second.
+
+An answer needs no signature: it's what you saw, not something Flint does. It
+is recorded once and can't be changed yet (see Known limits), which is why it
+takes two taps. Each answer is in the audit trail (who, when, which
+prediction, which answer), so a wrong one can be found.
+
+**What Flint can't put in plain words, you can only skip.** That's a
+prediction about an item that's gone or about a person, about a number that
+isn't one of Flint's own, or one whose words came from outside text. Its row
+says "Flint made this prediction in a chat." and "Flint can't show what this
+one was about, so it can only be skipped.", and offers only **Skip**. The
+runtime refuses Yes or No for it whoever asks. One odd prediction never takes
+the tab down: a row that wouldn't fit is shown that same way.
+
+**The 14 days start when you're told.** Until you let Flint ask on its own
+(the action is `ledger.resolve.ask_will`, five a day), questions are asked
+quietly: they wait in the panel and nothing announces them. A question nobody
+announced never runs out. It stays in the list, and stays answerable, for as
+long as it takes. Once you let Flint ask on its own, the Predictions button
+shows a dot while any wait, the morning summary adds one line ("Flint has 2
+questions for you in Predictions."), and the 14 days begin: from then for the
+questions already waiting, and from when each is asked for new ones. A
+question you skipped you have seen, so that one runs out 14 days after it was
+asked either way.
+
+**With predictions switched off on this Mac** (`FLINT_PREDICT` not on),
+nothing is forecast, asked or scored. The panel still opens and says so on
+each tab. Two things are refused with "Predictions are switched off on this
+Mac.": turning predictions on, and answering a question. One thing still
+works: turning a number off, which only narrows what Flint does. Reading is
+unaffected.
+
+**Accuracy** says how Flint has done, by area, from the night's scores:
+
+- "When Flint said about 70%, it happened 64% of the time, over 41
+  predictions." This is the chance it stated most often, and how often that
+  came true.
+- "Its 80% ranges held 79% of the time, over 120 forecasts."
+- "Flint did better than always guessing the usual rate.", or that it didn't.
+- Below 30 results of a kind it says how many it has: "Flint has 12 of the 30
+  results it needs for its ranges."
+- From 100 results: its error score (lower is better) and how far its stated
+  chances sat from what happened.
+
+Under LEFT UNSETTLED it counts what was never scored: predictions that ran
+out, ones revised close to their date, ones that depended on advice you
+declined, and ones set aside with your approval.
+
+**What stays private.** A forecast's numbers include what Flint spends and
+how many hours are on your calendar. They go from the runtime to the console
+when you open the panel, and nowhere else: not into chat, a note, a log or
+the audit trail, and never to an outside service. Until you open it the
+console asks only whether questions are waiting, which holds no number. When
+you close it, the console drops what it was showing, and the server tells the
+browser not to keep any of it. The chat connector's token can't read these
+routes or answer a question for you. The audit trail records that you turned
+a number off or answered a question, by id, and never a number's value or a
+prediction's words.
+
+Chat has its own, older view of Flint's track record (see "The scores can
+reach chat, when chat asks" below). For the spend and calendar areas it no
+longer includes the range loss.
 
 ### Checking predictions
 
@@ -1064,9 +1175,11 @@ Details. Nothing is voided, and nothing is recorded as yours.
      "condition unmet". If you took the advice, it's checked like the others.
 3. What can't be settled runs out. A prediction Flint can check itself runs
    out 72 hours after its time. One only you can answer runs out 14 days
-   after Flint asked you about it, and never before it asked. Nothing asks
-   yet (the questions come with the console's panel), so until then yours
-   stay open.
+   after you were told its question waits, and never before. Flint asks in
+   the Predictions panel's Questions tab, up to five new ones a morning. A
+   question asked quietly, before you've let Flint ask on its own, hasn't
+   been announced to anyone, so its 14 days haven't started (see "The
+   Predictions panel").
 
 It never answers for you. A prediction only you resolve is never given to a
 resolver, and the database refuses any attempt. It never voids a prediction,
@@ -1138,6 +1251,8 @@ prediction's words, and never a number a prediction was about. Those totals
 go wherever the chat model runs, so with an outside model they leave this
 Mac. A group with nothing scored yet is given with no score at all, since a
 stored 0 would read as a perfect Brier score, or as a range that never held.
+For the spend and calendar areas chat is not given the range loss either: it
+is worked out from those numbers' own values, and chat has no use for it.
 
 **Settings > Health** has a row, **Prediction Checks**. It's Off until both
 switches are on. It needs a look when no check has run in 3 hours, when the
@@ -1148,7 +1263,7 @@ check ran in 26 hours. A restart buys 70 minutes and no more: a runtime that
 restarts every few hours and never checks still reads late, then Down. What
 ran out is said beside what was checked, never as checked.
 
-**Rolling it back:** turn `FLINT_PREDICT` off. All four jobs are unscheduled
+**Rolling it back:** turn `FLINT_PREDICT` off. All five jobs are unscheduled
 at the next start. Resolutions, daily numbers and forecasts already written
 stay (none is ever deleted), and each resolution says in its evidence that the
 sweep wrote it. Parts 2 and 3 have no database update of their own.
@@ -1206,10 +1321,11 @@ action so named.
 
 ### What the next parts must do
 
-- **The console's panel** must file the Turn On Predictions card from the
-  console. The database acts on that card only if it carries `consequential`
-  and is at least as sensitive as each number it lists, which the runtime sets
-  when it files one.
+- **The console's panel** files the Turn On Predictions card through the
+  runtime (`proposeForecasts`, the same call the command makes). Anything else
+  that files one must go the same way: the database acts on that card only if
+  it carries `consequential` and is at least as sensitive as each number it
+  lists, which the runtime sets when it files one.
 - **A template only the runtime fills** goes in `RUNTIME_CLAIM_TEMPLATE_IDS`
   in `packages/policy/src/claims.ts`, which keeps it out of chat's. A goal
   review's `goal_on_track` and the forecaster's `series_range` and
@@ -1228,14 +1344,21 @@ action so named.
   is still settled against the day it was about. A rule without `end` is
   still read, with the end worked out in the zone of the day; the runner
   never writes one.
-- **The Predictions panel** must show a forecast's range only through the
-  phrase table (`predict/phrasing.ts`): "about 4, with an 80% range of 2 to 6"
-  when the run beat a plain guess, and "no reliable trend, and a plain guess
-  gives an 80% range of 0 to 3" when it didn't. It also needs a Turn Off
-  button (turning a number off needs no signature), and words for the two
-  ways a number waits: for more history (24 days, 19 weeks), and for
-  yesterday's number. A run may hold fewer than seven days ahead: only the
-  days it has ten past errors for.
+- **The Predictions panel** shows a forecast's range only through the phrase
+  table (`predict/phrasing.ts`): "about 4, with an 80% range of 2 to 6" when
+  the run beat a plain guess, and "no reliable trend, and a plain guess gives
+  an 80% range of 0 to 3" when it didn't. Every sentence about a number, a
+  question or a score is made there, by the runtime, and sent as words; the
+  console writes none of them and formats no number, so it can't show one the
+  runtime didn't send. A new state needs its sentence there first. A run may
+  hold fewer than seven days ahead (only the days it has ten past errors
+  for), and the panel lists what the run holds.
+- **A forecast's numbers go to the console and nowhere else.** The panel's
+  routes need the `proposals` scope, the server's proxy
+  (`apps/server/src/predictions-routes.ts`) keeps nothing and logs only
+  statuses and field paths, and nothing in `predict/view.ts` or
+  `predict/questions.ts` writes a log line. Anything that would put a number
+  from these views into chat context, a note or a log needs its own decision.
 - **The next database update** should take two things this part holds in code
   only:
   - A recorded day can still be changed or deleted by the runtime's own
@@ -1302,7 +1425,10 @@ action so named.
   correction (`ledger.resolution.correct`) and a signed void (`ledger.void`),
   and the database has a place for each. Nothing carries either out yet, and
   the scores don't read corrections. Until a later part does both, a result
-  stays as it was recorded.
+  stays as it was recorded. That includes your own answer to a question: a
+  wrong one can't be undone yet. It takes two taps to record one, and the
+  audit trail says which answer was given to which prediction, so a wrong
+  one can be found and put right once corrections are carried out.
 - **What an automatic check records.** The outcome of an automatic check is
   the runtime's own reading of its rows. The database holds it to the rest:
   who may resolve what, that the event isn't before the prediction or after
@@ -1396,6 +1522,11 @@ To roll the store back:
    prediction and resolution stays, and so does each yes/no score; a
    forecast's predictions lose their range and their link to the run. The
    four safeguards on goal cards go back to how P3 had them.
+
+The Predictions panel (P4's fourth part) added no database update. Rolling
+it back is deploying the code from before it: the Predictions button goes
+away, the morning's questions stop being picked, and every question already
+asked and every answer stays in the database.
 
 A Turn On Predictions card still waiting expires on its own. One you approve
 while P4 is rolled back isn't carried out ("not carried out by the runtime")

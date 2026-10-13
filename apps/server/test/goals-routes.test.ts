@@ -126,13 +126,25 @@ beforeEach(() => {
   };
 });
 
+/** How many of the proxy's own answers these helpers have seen, and checked for `no-store`. */
+let answersSeen = 0;
+/** Every answer the proxy gives, whatever its status, says it is not to be kept (the harness's own 404 is not the proxy's). */
+const unkept = (r: Response, body: Record<string, unknown>) => {
+  if (r.status === 404 && body.error === 'not found') return;
+  expect(r.headers.get('cache-control'), `${r.status} ${r.url}`).toBe('no-store');
+  answersSeen += 1;
+};
 const get = async (p: string) => {
   const r = await fetch(`${base}${p}`);
-  return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  const body = (await r.json()) as Record<string, unknown>;
+  unkept(r, body);
+  return { status: r.status, body };
 };
 const post = async (p: string, body?: unknown) => {
   const r = await fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body ?? {}) });
-  return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  const answer = (await r.json()) as Record<string, unknown>;
+  unkept(r, answer);
+  return { status: r.status, body: answer };
 };
 
 describe('reads', () => {
@@ -404,6 +416,31 @@ describe('writes', () => {
     // Nothing listening at all: the request never left, so nothing changed.
     up = false;
     expect(await post(`/goals/${GID}/criteria/c1`, { met: true })).toEqual({ status: 503, body: { error: GOALS_SAY.downWrite } });
+  });
+
+  it('every answer of the proxy, whatever its status, says no-store: a goal\'s words never land in a disk cache', async () => {
+    const before = answersSeen;
+    answer = () => ({ status: 200, body: { tab: 'active', goals: [row()], waiting: [], reviews: 'off' } });
+    const seen: number[] = [(await get('/goals')).status];
+    answer = () => ({ status: 200, body: { goal: view() } });
+    seen.push((await get(`/goals/${GID}`)).status);
+    seen.push((await get('/goals?tab=all')).status);
+    answer = () => ({ status: 200, body: { nonsense: true } });
+    seen.push((await get('/goals')).status);
+    answer = () => ({ status: 409, body: { error: 'x', code: 'looked' } });
+    seen.push((await post(`/goals/${GID}/pause`)).status);
+    seen.push((await post('/goals', `{"draftKey":"${DK}","pad":"${'x'.repeat(70_000)}"}`)).status);
+    up = false;
+    seen.push((await get('/goals')).status);
+    seen.push((await post(`/goals/${GID}/pause`)).status);
+    deps = { ...deps, runtime: () => undefined };
+    seen.push((await get('/goals')).status);
+    expect(seen).toEqual([200, 200, 400, 502, 409, 413, 503, 503, 501]);
+    expect(answersSeen - before).toBe(9);
+    const src = readFileSync(join(__dirname, '..', 'src', 'goals-routes.ts'), 'utf8');
+    expect(src).toContain("res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });");
+    expect(src.match(/res\.writeHead\(/g)).toHaveLength(1);
+    expect(src.match(/res\.end\(/g)).toHaveLength(1);
   });
 
   it('a goals route is never reported back to the runtime as a route.error', () => {

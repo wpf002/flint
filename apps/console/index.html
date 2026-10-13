@@ -383,6 +383,25 @@
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+
+  /* predictions: the panel's rows, in the same components; every number in tabular figures */
+  #predictions .mh{height:auto;min-height:56px;padding-top:6px;padding-bottom:6px;}
+  #predbody{font-variant-numeric:tabular-nums;}
+  #predfoot{flex-wrap:wrap;}
+  #predfoot #predmsg{flex-basis:100%;margin:0;}
+  #predlist>.gsh:first-child{margin-top:8px;}
+  .plead{color:var(--t2);margin:4px 4px 0;} .plead+.plead{margin-top:8px;}
+  .pacts{display:flex;align-items:center;gap:8px;flex:none;}
+  /* A title or a sentence with no place to break (a long unbroken word) wraps anywhere rather than run off the row. */
+  #predbody .lbl b,#predbody .lbl span,#predbody .plead,#predbody .empty span{overflow-wrap:anywhere;}
+  .pmany .lbl span+span{margin-top:4px;}
+  .ppick{cursor:pointer;}
+  @media (max-width:600px){
+    .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .btn,.pacts .ghost{min-width:72px;justify-content:center;}
+    #predfoot .btn{flex:1;justify-content:center;} #predfoot .note:not(:empty){flex-basis:100%;}
+    /* Every target in the panel is at least 44 points tall on a phone: its tabs too. */
+    #predseg button{height:44px;padding:0 14px;}
+  }
 </style>
 </head>
 <body>
@@ -405,6 +424,7 @@
   <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
   <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
   <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
 </defs></svg>
 
@@ -425,6 +445,7 @@
       <span class="ctitle" id="ctitle"></span>
       <div class="trail">
         <button class="ib" id="goalsbtn" onclick="openGoals()" aria-label="Goals" data-tip="Goals" hidden><svg class="i"><use href="#i-target"/></svg><span class="udot" id="goalsdot" hidden></span></button>
+        <button class="ib" id="predbtn" onclick="openPredictions()" aria-label="Predictions" data-tip="Predictions" hidden><svg class="i"><use href="#i-chart"/></svg><span class="udot" id="preddot" hidden></span></button>
         <button class="ib" id="apprbtn" onclick="openApprovals()" aria-label="Approvals" data-tip="Approvals"><svg class="i"><use href="#i-shield"/></svg><span class="badge" id="apprbadge" hidden></span></button>
         <button class="ib" id="bellbtn" onclick="openNotifs()" aria-label="Activity" data-tip="Activity"><svg class="i"><use href="#i-bell"/></svg><span class="udot" id="nbadge" hidden></span></button>
       </div>
@@ -526,6 +547,12 @@
   <div class="mh"><button class="xb" id="goalback" onclick="goalBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="goalsttl">Goals</h2><button class="ghost" id="goaladd" onclick="goalNew()"><svg class="i"><use href="#i-plus"/></svg>Add Goal</button><button class="ghost" id="goalclear" onclick="goalClearAsk()" hidden>Clear</button><button class="xb" onclick="closeGoals()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
   <div class="mb" id="goalbody"></div>
   <div class="mf" id="goalfoot" hidden></div>
+</div></div>
+
+<div class="overlay" id="predictions" onclick="if(event.target===this)closePredictions()"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="predttl">
+  <div class="mh"><button class="xb" id="predback" onclick="predBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="predttl">Predictions</h2><button class="xb" onclick="closePredictions()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mb" id="predbody"></div>
+  <div class="mf" id="predfoot" hidden></div>
 </div></div>
 
 <script>
@@ -2581,6 +2608,252 @@ function goalFormDone(body){var r=GOALS.page&&GOALS.page.reviews;
 
 goalsProbe();
 </script>
+<script id="predictions-js">
+/* ---------- Predictions: what Flint forecasts, what it asks Will, and how it has done (P4) ----------
+ * The panel has three tabs. Forecasts lists the numbers Flint forecasts each night on this Mac and opens one;
+ * Questions puts to Will the predictions only he can settle (Yes, No or Skip, one tap each); Accuracy says how
+ * Flint's predictions have done. Every sentence and value about a number, a question or a score is written by
+ * the runtime from its own rows (apps/runtime/src/predict/phrasing.ts) and shown here as text, never HTML: the
+ * panel writes none of them, so it cannot show a number the runtime did not send. A state with no number
+ * (waiting, not enough history, no data) arrives as a sentence. The panel's own words are its titles, tabs,
+ * buttons, headers, and what it says when something fails.
+ * Turning predictions on is a card Will signs: the sheet files it through the server (/predictions/turn-on), the
+ * panel shows it in the card's own words (the Approvals panel's: apprSub, apprPredictList, APPR_PREDICT_ALSO), and
+ * he approves it here with a fresh touch, signing exactly the args shown (approveAction checks their digest). It
+ * never rides Approve All. Turning a number off, and answering a question, need no signature.
+ * A forecast's numbers (spend and calendar hours among them) and a question's words are read over the console's
+ * own token and kept in this page's memory only: nothing here stores them, logs them or puts them in a URL.
+ * The helpers are the Goals panel's (goals-js): one of each for both panels. ES5, no confirm(), alert() or
+ * prompt(): the Mac app's web view has none. */
+var PRED={tab:'forecasts',view:'list',page:null,series:null,picked:null,busy:false,seq:0,nav:0,questions:0,announce:false};
+/* An answer is never recorded on one tap, and it cannot be changed afterwards. The first tap arms the row: the other
+   choices go, and the row offers Cancel and the one thing the second tap will record. A second tap that lands within
+   this long of the first (a double tap) is not taken for the second. */
+var PRED_ARM_MS=400;
+var PRED_RECORD={yes:'Record Yes',no:'Record No',skip:'Skip for Good'};
+function predNow(){return Date.now();}
+var PRED_TABS=[['forecasts','Forecasts'],['questions','Questions'],['accuracy','Accuracy']];
+var PRED_PATHS={forecasts:'/predictions',questions:'/predictions/questions',accuracy:'/predictions/accuracy'};
+/* What the page asks on load, and every few minutes: is the panel there, and do questions wait. Two facts and no
+   number of any series: a forecast's numbers are read only when Will opens the panel. */
+var PRED_WAITING='/predictions/waiting';
+/* What the panel says of a tap: an answer's word as a value, and each outcome as a sentence. */
+var PRED_ANSWERS={yes:'Yes',no:'No',skip:'Skipped'};
+var PRED_SAY={recorded:'Flint recorded your answer.',on:'Approved. Flint starts keeping these numbers tonight.',off:'Flint stopped forecasting this number.',
+  waiting:'Flint is waiting for your approval.',cancelled:'Cancelled. It’s waiting in Approvals.',approved:'Approved. It hasn’t run yet.',none:'Choose at least one number.',
+  key:'This device needs an approval key.',offHere:'Predictions are switched off on this Mac.',starts:'It starts once you approve it.',
+  answers:'Yes means it happened. Skip leaves it unscored. An answer can’t be changed.',notStarted:'Flint scores its predictions once you turn them on.',
+  nightly:'Flint scores its predictions each night, once they come due.'};
+
+/* ---------- the panel ---------- */
+function predShown(on){var b=document.getElementById('predbtn');if(b)b.hidden=!on;}
+/* The header's gold dot is for what needs Will: questions wait for him. Only once he has let Flint ask on its own
+   (the runtime says so): until then they wait here, and nothing announces them. */
+function predDot(d){var x=document.getElementById('preddot');PRED.announce=!!(d&&d.announce===true);if(x)x.hidden=!(PRED.announce&&d.questions>0);}
+/* An older runtime (or none) answers 501: no Predictions button at all. */
+function predProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall(PRED_WAITING).then(function(d){predShown(true);predDot(d);},function(e){predShown(e.status!==501&&e.status!==401);});}
+function predIsOpen(){var p=document.getElementById('predictions');return !!(p&&p.classList&&p.classList.contains('open'));}
+/* Each view Will goes to takes a new number. An answer that comes back after he has gone elsewhere finds the number
+   changed (or the panel closed), and neither pulls him back nor writes into a view that is gone. */
+function predNav(view){PRED.view=view;return ++PRED.nav;}
+function predHere(){var n=PRED.nav;return function(){return PRED.nav===n&&predIsOpen();};}
+function openPredictions(){if(typeof TOKEN!=='undefined'&&!TOKEN){if(typeof openSettings==='function')openSettings();return;}
+  if(typeof showPanel==='function')showPanel('predictions',true);if(typeof loadCreds==='function')loadCreds();predTab(PRED.tab);}
+/* Closing drops what the panel holds: a read still on its way is no longer wanted (the sequence moves on, so its
+   answer is not drawn), and the numbers and questions already drawn leave the page and its memory. */
+function closePredictions(){if(typeof showPanel==='function')showPanel('predictions',false);predNav('list');++PRED.seq;
+  PRED.page=null;PRED.series=null;PRED.picked=null;PRED.busy=false;
+  var b=document.getElementById('predbody');if(b)b.textContent='';if(document.getElementById('predfoot'))predFoot();
+  if(typeof pollApprovals==='function')pollApprovals();predProbe();}
+/* The keyboard's place follows what was drawn: a view that replaces the one the cursor was in takes the cursor with it. */
+function predFocus(el){try{if(el&&typeof el.focus==='function'&&predIsOpen())el.focus();}catch(e){}}
+function predHead(title,back){document.getElementById('predttl').textContent=title;document.getElementById('predback').hidden=!back;}
+/* The footer: what the panel has to say, on a line of its own that never scrolls away, then the view's buttons. */
+function predFoot(){var f=document.getElementById('predfoot');f.textContent='';f.hidden=true;var m=gEl('div','res');m.id='predmsg';m.hidden=true;m.setAttribute('role','status');f.appendChild(m);return f;}
+/* kind: bad (an error, the default), ok (an outcome) or wait (in progress). An empty message leaves a footer with nothing else hidden. */
+function predMsg(t,kind){var f=document.getElementById('predfoot'),m=document.getElementById('predmsg');if(!f||!m)return;
+  m.textContent=t||'';m.hidden=!t;m.className='res '+(kind||'bad');if(t)f.hidden=false;else if(f.children.length<2)f.hidden=true;}
+function predBody(){var b=document.getElementById('predbody');b.textContent='';return b;}
+function predBack(){predTab(PRED.tab);}
+function predToApprovals(){closePredictions();if(typeof openApprovals==='function')openApprovals();}
+function predToSettings(){closePredictions();if(typeof openSettings==='function')openSettings();}
+/* What a failed read says, by what failed. A token the server no longer takes is its own state: signed out. */
+function predFailed(e,again){
+  if(e&&e.status===401)return goalEmpty('You’re Signed Out','Enter your access token in Settings to see predictions.',gBtn('btn pri','Open Settings',predToSettings));
+  var line=e&&e.status===503?'The runtime isn’t answering, so predictions can’t load.':e&&e.status===501?'This needs a newer runtime.':gSay(e);
+  return goalEmpty('Couldn’t Load Predictions',line,gBtn('ghost','Try Again',again));}
+function predNeedsKey(){var f=predFoot();f.hidden=false;f.appendChild(gEl('span','note',PRED_SAY.key));f.appendChild(gBtn('btn pri','Open Settings',predToSettings));}
+/* A row: a label over its sentences, a value on the right; with `open`, it is a button to the keyboard too. */
+function predRow(label,lines,value,open,tags){var row=gEl('div','row two gwrap'+(open?' click':'')+(lines.length>1?' pmany':''));var l=gEl('span','lbl');
+  if(label)l.appendChild(gEl('b',null,label));lines.forEach(function(t){l.appendChild(gEl('span',null,t));});row.appendChild(l);
+  (tags||[]).forEach(function(t){row.appendChild(t);});
+  if(value)row.appendChild(gEl('span','val',value));
+  if(open){row.tabIndex=0;row.setAttribute('role','button');row.appendChild(gIcon('chev'));row.onclick=open;
+    row.onkeydown=function(e){if(!e||(e.key!=='Enter'&&e.key!==' '))return;if(e.preventDefault)e.preventDefault();open();};}
+  return row;}
+/* A sentence on a row of its own. */
+function predLine(t){var row=gEl('div','row');var l=gEl('span','lbl gwhy');l.appendChild(gEl('span',null,t));row.appendChild(l);return row;}
+/* How many questions wait, beside the Questions tab. */
+function predCount(n){PRED.questions=n>0?n:0;var e=document.getElementById('predqn');if(!e)return;e.textContent=PRED.questions?String(PRED.questions):'';e.hidden=!PRED.questions;}
+
+/* ---------- the tabs ---------- */
+/* `say`: something to tell Will once the tab has been drawn (an outcome, or why a tap did nothing). */
+function predTab(tab,say,kind){predNav('list');PRED.tab=PRED_PATHS[tab]?tab:'forecasts';PRED.series=null;PRED.picked=null;var seq=++PRED.seq;
+  predHead('Predictions',false);predFoot();var body=predBody();
+  var seg=gEl('div','seg');seg.id='predseg';seg.setAttribute('role','tablist');
+  PRED_TABS.forEach(function(t){var b=gBtn(t[0]===PRED.tab?'on':'',t[1],function(){predTab(t[0]);});b.id='predtab-'+t[0];b.setAttribute('role','tab');b.setAttribute('aria-selected',t[0]===PRED.tab?'true':'false');
+    if(t[0]==='questions'){var n=gEl('em',null,PRED.questions?String(PRED.questions):'');n.id='predqn';n.hidden=!PRED.questions;b.appendChild(n);}
+    seg.appendChild(b);});
+  body.appendChild(seg);var list=gEl('div');list.id='predlist';list.appendChild(gEl('div','empty','Loading…'));body.appendChild(list);
+  predFocus(document.getElementById('predtab-'+PRED.tab));
+  if(say)predMsg(say,kind||'ok');
+  gCall(PRED_PATHS[PRED.tab]).then(function(d){if(seq!==PRED.seq)return;predShown(true);list.textContent='';
+    if(PRED.tab==='questions')predQuestions(list,d);else if(PRED.tab==='accuracy')predAccuracy(list,d);else predForecasts(list,d);
+  },function(e){if(seq!==PRED.seq)return;if(e.status===501)predShown(false);if(e.status===401)predCount(0);list.textContent='';list.appendChild(predFailed(e,function(){predTab(PRED.tab);}));});}
+
+/* ---------- Forecasts ---------- */
+function predWaitingRow(w){var n=w&&w.numbers>0?w.numbers:0;
+  return predRow('Turn On Predictions',[n?(n===1?'It turns on 1 number once you approve it.':'It turns on '+n+' numbers once you approve it.'):PRED_SAY.starts],'',predToApprovals,[gTag('Waiting for You',true)]);}
+function predForecasts(list,d){PRED.page=d;predDot(d);predCount(d.questions);var waiting=d.waiting||[],numbers=d.numbers||[];
+  if(d.state==='off_here'){list.appendChild(goalEmpty('Predictions Are Off',PRED_SAY.offHere));return;}
+  if(waiting.length){var wg=gEl('div','group');waiting.forEach(function(w){wg.appendChild(predWaitingRow(w));});list.appendChild(wg);}
+  if(d.state!=='on'){
+    if(!waiting.length)list.appendChild(goalEmpty('Predictions Are Off','Flint can forecast its own numbers each night, on this Mac.',gBtn('btn pri','Turn On Predictions',function(){predSheet();})));
+    else list.appendChild(gEl('p','gnote','Nothing is forecast until you approve it.'));
+    return;}
+  [['day','Today'],['week','This Week']].forEach(function(g){var rows=numbers.filter(function(n){return n.step===g[0];});if(!rows.length)return;
+    list.appendChild(gEl('div','gsh',g[1]));var box=gEl('div','group');
+    rows.forEach(function(n){box.appendChild(predRow(n.name,[n.says],n.value,function(){predSeries(n.key);}));});list.appendChild(box);});}
+
+/* ---------- one number, open ---------- */
+function predSeries(key,say){predNav('series');PRED.picked=null;var seq=++PRED.seq;
+  predHead('Predictions',true);predFoot();predBody().appendChild(gEl('div','empty','Loading…'));
+  gCall('/predictions/series/'+encodeURIComponent(key)).then(function(d){if(seq!==PRED.seq)return;PRED.series=d.series;predSeriesShow(d.series,say);},
+    function(e){if(seq!==PRED.seq)return;predHead('Predictions',true);predFoot();var b=predBody();b.appendChild(predFailed(e,function(){predSeries(key);}));});}
+function predSeriesShow(s,say){var n=s.number;predHead(n.name,true);var body=predBody();
+  body.appendChild(gEl('p','plead',n.about));
+  /* Each step of its forecast; or, with no forecast, where it stands and why, in the runtime's sentence. */
+  body.appendChild(gEl('div','gsh','Forecast'));var f=gEl('div','group');
+  var steps=s.forecast||[];if(!steps.length)f.appendChild(predRow(n.step==='week'?'This Week':'Today',[n.says],n.value));
+  steps.forEach(function(x){f.appendChild(predRow(x.label,[x.says],x.value));});body.appendChild(f);
+  if(s.chance){body.appendChild(gEl('div','gsh','Chance'));var c=gEl('div','group');c.appendChild(predRow(s.chance.label,[s.chance.says],s.chance.value));body.appendChild(c);}
+  body.appendChild(gEl('div','gsh','Record'));var r=gEl('div','group');r.appendChild(predLine(s.record));body.appendChild(r);
+  var foot=predFoot();foot.hidden=false;
+  if(n.on){foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn','Turn Off',function(b){predTurnOff(n,b);}));}
+  else if(s.offHere)foot.appendChild(gEl('span','note',PRED_SAY.offHere));
+  else if(s.waiting){foot.appendChild(gEl('span','note',PRED_SAY.waiting));foot.appendChild(gBtn('btn','Open Approvals',predToApprovals));}
+  else{foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn pri','Turn On',function(){predSheet([n.key]);}));}
+  predFocus(document.getElementById('predback'));
+  if(say)predMsg(say,'ok');}
+/* Unsigned: it only narrows what Flint does. Turning it on again takes the card. */
+function predTurnOff(n,b){if(PRED.busy)return;PRED.busy=true;if(b)b.disabled=true;var here=predHere();
+  gCall('/predictions/series/'+encodeURIComponent(n.key)+'/turn-off',{}).then(function(){PRED.busy=false;if(here())predSeries(n.key,PRED_SAY.off);},
+    function(e){PRED.busy=false;if(b)b.disabled=false;if(here())predMsg(gSay(e));});}
+
+/* ---------- turning predictions on: the sheet, then the card, signed here ---------- */
+/* The numbers that are off, each with what it is and a switch. `only`: the ones switched on to begin with (all, unless told). */
+function predSheet(only){var numbers=((PRED.page&&PRED.page.numbers)||[]).filter(function(n){return !n.on;});
+  if(!PRED.page){predTab('forecasts');return;}
+  predNav('sheet');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();PRED.picked={};
+  body.appendChild(gEl('div','gsh','Numbers to Forecast'));var g=gEl('div','group');
+  numbers.forEach(function(n){var on=!only||only.indexOf(n.key)>=0;PRED.picked[n.key]=on;
+    var row=gEl('div','row two gwrap ppick');var l=gEl('span','lbl');l.appendChild(gEl('b',null,n.name));l.appendChild(gEl('span',null,n.about));row.appendChild(l);
+    var t=gEl('button','toggle');t.setAttribute('role','switch');t.setAttribute('aria-label',n.name);t.setAttribute('aria-checked',on?'true':'false');
+    var flip=function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(PRED.busy)return;var now=!PRED.picked[n.key];PRED.picked[n.key]=now;t.setAttribute('aria-checked',now?'true':'false');predMsg('');};
+    t.onclick=flip;row.onclick=flip;row.appendChild(t);g.appendChild(row);});
+  body.appendChild(g);
+  foot.hidden=false;foot.appendChild(gEl('span','note'));
+  var cancel=gBtn('btn','Cancel',function(){predBack();});var go=gBtn('btn pri','Continue',function(){predFile([cancel,go]);});
+  foot.appendChild(cancel);foot.appendChild(go);predFocus(document.getElementById('predback'));}
+/* What the card will hold, as the runtime files it: the numbers sorted, no repeats, and no second opinion. */
+function predArgs(){var keys=[];for(var k in (PRED.picked||{}))if(Object.prototype.hasOwnProperty.call(PRED.picked,k)&&PRED.picked[k])keys.push(k);return {series:gSorted(keys),reason:[]};}
+function predFile(buttons){var args=predArgs();if(!args.series.length){predMsg(PRED_SAY.none);return;}
+  if(!gKeyed()){predNeedsKey();return;}
+  if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();
+  gCall('/predictions/turn-on',{series:args.series}).then(function(d){PRED.busy=false;if(here())predCard(d.id,args);},
+    function(e){PRED.busy=false;buttons.forEach(function(b){b.disabled=false;});if(here())predMsg(gSay(e));});}
+/* "Approve it with Touch ID to start.": the method this device will ask for, as Approve buttons name it. */
+function predStartSays(){var l=typeof approveLabel==='function'?approveLabel():'Approve';var i=l.indexOf(' with ');return 'Approve it'+(i>0?l.slice(i):'')+' to start.';}
+/* The card, in the Approvals panel's own words for it: what it does, what turning predictions on also does (said
+   before the list, so it is never below the fold), and each number by name, spending and calendar numbers marked.
+   Nothing is turned on until Will approves it. */
+function predCard(id,args){predNav('card');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();
+  var p={id:id,fullName:typeof APPR_PREDICT==='string'?APPR_PREDICT:'forecast.series.enable',args:args,origin:'console',consequential:true};
+  var list=typeof apprPredictList==='function'?apprPredictList(p):{named:[],unknown:0,total:args.series.length};
+  body.appendChild(gEl('p','plead',typeof apprSub==='function'?apprSub(p):''));
+  if(typeof APPR_PREDICT_ALSO==='string')body.appendChild(gEl('p','plead',APPR_PREDICT_ALSO));
+  body.appendChild(gEl('div','gsh','Numbers'));var g=gEl('div','group');
+  list.named.forEach(function(x){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.name));row.appendChild(l);
+    if(x.kind==='money'||x.kind==='calendar')row.appendChild(gEl('span','val',x.kind==='money'?'Spending':'Calendar'));g.appendChild(row);});
+  if(list.unknown&&typeof apprUnknownNumbers==='function')g.appendChild(predLine(apprUnknownNumbers(list.unknown)));
+  body.appendChild(g);
+  foot.hidden=false;foot.appendChild(gEl('span','note',predStartSays()));
+  var later=gBtn('btn','Not Now',function(){predTab('forecasts',PRED_SAY.cancelled);});
+  var ok=gBtn('btn pri',typeof approveLabel==='function'?approveLabel():'Approve',function(){predApprove(p,[later,ok]);});
+  foot.appendChild(later);foot.appendChild(ok);predFocus(document.getElementById('predback'));}
+/* Sign exactly the args the card showed, with a fresh touch. While the prompt is up the buttons are off and the
+   footer says it is waiting. A cancelled prompt leaves the card waiting in Approvals. */
+function predApprove(p,buttons){if(PRED.busy)return;if(typeof approveAction!=='function'||!gKeyed()){predNeedsKey();return;}
+  PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();predMsg(PRED_SAY.waiting,'wait');
+  var end=function(){PRED.busy=false;buttons.forEach(function(b){b.disabled=false;});};
+  approveAction(p.id,goalHost(),{fresh:true,reason:typeof apprReason==='function'?apprReason(p):'turn on predictions',args:p.args}).then(function(r){end();var a=(r&&r.action)||{},ok=a.status==='done';
+    if(!here()){if(ok&&predIsOpen()&&PRED.view==='list'&&PRED.tab==='forecasts')predTab('forecasts');return;}
+    if(ok)predTab('forecasts',PRED_SAY.on);else predMsg(a.status==='approved'?PRED_SAY.approved:gSay(a.error||'It failed.'));
+  },function(e){end();if(here())predMsg(goalCancelled(e)?PRED_SAY.cancelled:gSay(e));});}
+
+/* ---------- Questions ---------- */
+function predQuestions(list,d){var waiting=d.waiting||[],answered=d.answered||[],off=d.offHere===true;predCount(off?0:waiting.length);
+  if(!waiting.length&&!answered.length){list.appendChild(goalEmpty('No Questions','No questions are waiting.'));return;}
+  list.appendChild(gEl('div','gsh','For You'));var g=gEl('div','group');
+  if(!waiting.length)g.appendChild(predLine('No questions are waiting.'));
+  waiting.forEach(function(q){g.appendChild(predQuestion(q,off));});list.appendChild(g);
+  /* Switched off on this Mac, nothing here can be answered: the rows say what waits, and offer nothing. */
+  if(waiting.length)list.appendChild(gEl('p','gnote',off?PRED_SAY.offHere:PRED_SAY.answers));
+  if(answered.length){list.appendChild(gEl('div','gsh','Answered'));var a=gEl('div','group');
+    answered.forEach(function(q){a.appendChild(predRow(q.title,[q.says],PRED_ANSWERS[q.answer]||''));});list.appendChild(a);}}
+/* One question: the prediction (text only), what Flint said, when, and when it was due, and one clear choice. */
+function predQuestion(q,off){var row=predRow(q.title,[q.says],'');if(off)return row;var acts=gEl('span','pacts');row.appendChild(acts);predChoices(q,row,acts);return row;}
+/* Yes, No and Skip; or Skip alone, for a prediction Flint cannot say plainly (the runtime says which, and refuses the
+   rest itself). Yes and No are apart from each other and from Skip. A tap records nothing: it arms the row. */
+function predChoices(q,row,acts){acts.textContent='';
+  var list=q.answerable===true?[['yes','Yes','btn'],['no','No','btn'],['skip','Skip','ghost']]:[['skip','Skip','ghost']];
+  list.forEach(function(a){acts.appendChild(gBtn(a[2],a[1],function(){predArm(q,a[0],row,acts);}));});}
+/* Armed: the other choices are gone. Cancel puts them back; the one button left says what it records, and records it. */
+function predArm(q,answer,row,acts){if(PRED.busy)return;acts.textContent='';var at=predNow();
+  var cancel=gBtn('ghost','Cancel',function(){if(PRED.busy)return;predChoices(q,row,acts);predMsg('');predFocus(acts.children&&acts.children[0]);});
+  var go=gBtn('btn pri',PRED_RECORD[answer],function(){if(predNow()-at<PRED_ARM_MS)return;predAnswer(q,answer,row,[cancel,go]);});
+  acts.appendChild(cancel);acts.appendChild(go);predFocus(cancel);}
+/* His answer, recorded once. The row then says so, with what he answered; nothing else on the tab moves. */
+function predAnswer(q,answer,row,buttons){if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();
+  gCall('/predictions/questions/'+encodeURIComponent(q.id)+'/answer',{answer:answer}).then(function(){PRED.busy=false;if(!here())return;
+    row.textContent='';var l=gEl('span','lbl');l.appendChild(gEl('b',null,q.title));l.appendChild(gEl('span',null,PRED_SAY.recorded));row.appendChild(l);row.appendChild(gEl('span','val',PRED_ANSWERS[answer]));
+    predCount(PRED.questions-1);predDot({announce:PRED.announce,questions:PRED.questions});predMsg('');
+  },function(e){PRED.busy=false;if(!here())return;
+    /* Already answered, no longer open, or not one that can be answered that way: the list is stale. It is read again, and the footer says why. */
+    if(e.code==='answered'||e.code==='noQuestion'||e.code==='unanswerable'||e.code==='offHere'){predTab('questions',gSay(e),'bad');return;}
+    buttons.forEach(function(b){b.disabled=false;});predMsg(gSay(e));});}
+
+/* ---------- Accuracy ---------- */
+function predAccuracy(list,d){var areas=d.areas||[],left=d.unsettled||[];
+  /* Nothing scored yet: said as what it is. "Each night" only when something scores them each night. */
+  if(!d.scored||!areas.length){
+    if(d.scoring==='off_here')list.appendChild(goalEmpty('Predictions Are Off',PRED_SAY.offHere));
+    else if(d.scoring==='not_started')list.appendChild(goalEmpty('Predictions Are Off',PRED_SAY.notStarted));
+    else list.appendChild(goalEmpty('No Results Yet',PRED_SAY.nightly));
+    return;}
+  if(d.scoring==='off_here')list.appendChild(gEl('p','gnote',PRED_SAY.offHere));
+  list.appendChild(gEl('div','gsh','How Flint Has Done'));var g=gEl('div','group');
+  areas.forEach(function(a){g.appendChild(predRow(a.name,a.lines||[],a.value));});list.appendChild(g);
+  list.appendChild(gEl('div','gsh','Left Unsettled'));var u=gEl('div','group');
+  if(!left.length)u.appendChild(predLine('Nothing was left unsettled.'));
+  left.forEach(function(t){u.appendChild(predLine(t));});list.appendChild(u);}
+
+/* The panel is one of the page's panels (opening another closes it), and Escape closes it. */
+if(typeof PANELS!=='undefined'&&PANELS.indexOf('predictions')<0)PANELS.push('predictions');
+if(typeof document.addEventListener==='function')document.addEventListener('keydown',function(e){if(e&&e.key==='Escape'&&predIsOpen())closePredictions();});
+predProbe();
+if(typeof setInterval==='function')setInterval(predProbe,300000);
+</script>
 <script id="update-js">
 /* Flint updates itself. A deploy replaces this page (and the Mac app's build). The
    server stamps the page's version into it (__FLINT_UI__) and answers GET /ui-version
@@ -2607,7 +2880,7 @@ function flintBusy(){
   /* An approval being signed: its card's buttons dim until the outcome. */
   var t=document.getElementById('transcript'),rows=t&&t.querySelectorAll?t.querySelectorAll('.propose .prow'):[];
   for(var i=0;i<rows.length;i++){if(rows[i].style.display!=='none'&&String(rows[i].style.opacity)==='0.5')return true;}
-  return ['settings','activity','approvals','goals'].some(function(id){var e=document.getElementById(id);return !!(e&&e.classList&&e.classList.contains('open'));});
+  return ['settings','activity','approvals','goals','predictions'].some(function(id){var e=document.getElementById(id);return !!(e&&e.classList&&e.classList.contains('open'));});
 }
 function flintIdle(quietMs){return !flintBusy()&&(document.hidden||Date.now()-LAST_INPUT>=(quietMs==null?60000:quietMs));}
 /* Keep the open conversation for the next page; false when it cannot be kept. */

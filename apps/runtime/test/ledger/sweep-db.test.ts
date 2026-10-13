@@ -40,10 +40,13 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
   let stale: string;
   const waiting = (dueAgo: number, over: Record<string, unknown> = {}) =>
     k.prediction({ resolverSpec: { entityId: stale, check: 'healthy', at: 'resolveBy' }, ...over }, { madeAgo: dueAgo + DAY, dueAgo });
-  /** One only Will resolves, due `dueAgo` ago; with `askedAgo`, Flint put its question to him that long ago. */
-  const wills = async (dueAgo: number, askedAgo?: number) => {
+  /**
+   * One only Will resolves, due `dueAgo` ago; with `askedAgo`, Flint put its question to him that long ago. `shadow`:
+   * the question was asked quietly (no dot, no line in the morning summary), so nobody was told it waits.
+   */
+  const wills = async (dueAgo: number, askedAgo?: number, shadow = false) => {
     const p = await k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server' }, { madeAgo: dueAgo + DAY, dueAgo });
-    if (askedAgo !== undefined) await k.asked(p, askedAgo);
+    if (askedAgo !== undefined) await k.asked(p, askedAgo, { shadow });
     return p;
   };
   /** A service that is running, seen six hours ago and five minutes ago: a prediction about it an hour ago can be settled. */
@@ -87,12 +90,15 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
       asked13: await wills(20 * DAY, 13 * DAY + 23 * HOUR), asked14: await wills(20 * DAY, 14 * DAY + HOUR),
       // Asked a moment ago about one that was due long since: his two weeks start at the question.
       justAsked: await wills(60 * DAY, MIN),
+      // Asked in shadow, a month ago: nothing announced it, so its two weeks have not begun. It stays open.
+      quiet: await wills(60 * DAY, 30 * DAY, true),
     };
     const ahead = await waiting(-HOUR);
     const c = await all();
     expect(c).toMatchObject({ resolved: 0, expired: 4, conditionUnmet: 0, refused: 0, capped: false });
     expect([await k.status(auto.fresh), await k.status(auto.day3), await k.status(auto.over), await k.status(auto.old), await k.status(metric)]).toEqual(['open', 'open', 'expired', 'expired', 'expired']);
     expect([await k.status(will.never), await k.status(will.fresh), await k.status(will.asked13), await k.status(will.asked14), await k.status(will.justAsked)]).toEqual(['open', 'open', 'open', 'expired', 'open']);
+    expect(await k.status(will.quiet)).toBe('open');
     expect(await k.status(ahead)).toBe('open');
     // Run out is not resolved: no resolution is written for any of them, and none is void.
     for (const p of [auto.over, auto.old, metric, will.asked14]) expect(await k.resolution(p), p).toBeUndefined();
@@ -372,12 +378,14 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
       const specs = predictJobs(ctx());
       expect(specs.map((s) => [s.queue, s.cron, s.missed])).toEqual([
         ['forecast.series', '30 3 * * *', 'once'], ['forecast.run', '50 3 * * *', 'once'], ['ledger.sweep', '40 * * * *', undefined], ['ledger.snapshot', '45 3 * * *', 'once'],
+        // Part 4: the day's questions for Will, picked in the morning, ahead of the 07:30 digest.
+        ['ledger.ask', '20 7 * * *', 'once'],
       ]);
       expect([SERIES_CRON, SWEEP_CRON, SNAPSHOT_CRON, FORECAST_CRON]).toEqual(['30 3 * * *', '40 * * * *', '45 3 * * *', '50 3 * * *']);
       for (const s of specs) expect(ALL_QUEUES, s.queue).toContain(s.queue);
       // They are part of the runtime's job set only when on.
       const queues = (c: JobContext) => jobSpecs(c).map((s) => s.queue);
-      const four = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot'];
+      const four = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask'];
       expect(queues(ctx())).toEqual(expect.arrayContaining(four));
       for (const q of four) expect(queues(ctx({ predict: false })), q).not.toContain(q);
       // Yesterday's numbers, then the sweep that settles what they decide, then the scores, then today's forecasts.

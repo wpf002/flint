@@ -38,6 +38,7 @@ import { runPlan } from './goals/batch.js';
 import { predictionsStarted, sweep } from './ledger/sweep.js';
 import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
 import { runForecasts, runSeries } from './predict/run.js';
+import { askQuestions } from './predict/questions.js';
 import { makeRun } from './sources/exec.js';
 import { clones } from './sources/registry.js';
 
@@ -275,6 +276,8 @@ export const SWEEP_CRON = '40 * * * *';
 /** When the snapshot runs: 03:45 local, after the sweep. */
 export const SNAPSHOT_CRON = '45 3 * * *';
 export const FORECAST_CRON = '50 3 * * *';
+/** When Flint picks the day's questions for Will: 07:20 local, ahead of the 07:30 digest that may count them. */
+export const ASK_CRON = '20 7 * * *';
 
 /**
  * Predictions (P4), only while FLINT_PREDICT is on. Off, this is empty:
@@ -287,7 +290,8 @@ export const FORECAST_CRON = '50 3 * * *';
  *  - ledger.sweep: Flint checks its own predictions (ledger/sweep.ts).
  *  - ledger.snapshot: the night's scores (ledger/calibration.ts).
  *  - forecast.run: today's forecast of each number that is on (predict/run.ts).
- * None has job data. Log lines carry counts, ids and series keys, never a value.
+ *  - ledger.ask: the day's questions for Will, about predictions only he can settle (predict/questions.ts).
+ * None has job data. Log lines carry counts, ids and series keys, never a value or a prediction's words.
  */
 export function predictJobs(ctx: JobContext): JobSpec[] {
   if (!ctx.config.predict) return [];
@@ -338,6 +342,17 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
         if (!s.may) return;
         const c = await runSnapshot(ctx.db, { tz: ctx.config.tz, tier: s.tier });
         ctx.log(`ledger: scored ${c.scored} yes/no prediction(s) and ${c.ranges} range(s) in ${c.groups} group(s)`);
+      },
+    },
+    {
+      // At most five new questions a day, oldest first. In shadow they wait in the panel, and nothing announces them.
+      queue: 'ledger.ask',
+      cron: ASK_CRON,
+      missed: 'once',
+      handler: async () => {
+        if (!(await predictionsStarted(ctx.db))) return;
+        const c = await askQuestions(ctx.db, { tz: ctx.config.tz });
+        if (c.allowed && (c.asked || c.capped || c.refused)) ctx.log(`ledger: asked ${c.asked} question(s)${c.shadow ? ' in shadow' : ''}; ${c.capped} left for another day, ${c.refused} refused`);
       },
     },
   ];
