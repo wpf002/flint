@@ -24,10 +24,11 @@
  * never a series' values.
  */
 import { Prisma } from '@prisma/client';
-import { FORECAST_REASONS, ForecastEnableArgs, digestOf, isForecastSignedAction, mostSensitive, type WebAuthnRelyingParty } from '@flint/policy';
+import { FORECAST_REASONS, ForecastEnableArgs, PREDICT_SAYS, digestOf, isForecastSignedAction, mostSensitive, type WebAuthnRelyingParty } from '@flint/policy';
 import type { z } from 'zod';
 import type { Db, Tx } from '../db.js';
-import { Refused, claimIn, completeIn, contextOf, createProposal, type CreateProposal } from '../governance/proposals.js';
+import { appendAudit } from '../governance/audit.js';
+import { Refused, claimIn, completeIn, contextOf, createProposal, rejectPendingIn, type CreateProposal } from '../governance/proposals.js';
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, sanitize } from '../goals/errors.js';
 import { failApproved } from '../goals/apply.js';
@@ -35,16 +36,18 @@ import { FORECAST_SERIES_KEYS, forecastSeries, freqOf, type ForecastSeriesDef } 
 
 /** What Will reads under a forecast card: fixed sentences, never a number. */
 export const SAY = {
-  invalid: 'This card isn’t valid.',
+  // The ones the console's panel can be told are the shared ones (@flint/policy PREDICT_SAYS): one source of each.
+  invalid: PREDICT_SAYS.invalid,
   kind: 'A predictions card is filed as kind tool_call.',
   fromConsole: 'Predictions are turned on from the console.',
   template: 'A predictions card carries no template.',
   provenance: 'The numbers on a predictions card are yours to choose.',
-  unknown: 'That number can’t be forecast.',
-  forgotten: 'One of these numbers was forgotten, so it can’t be forecast.',
-  mislabeled: 'One of these numbers isn’t stored the way Flint expects, so nothing was turned on.',
-  nothing: 'It changes nothing.',
+  unknown: PREDICT_SAYS.unknown,
+  forgotten: PREDICT_SAYS.forgotten,
+  mislabeled: PREDICT_SAYS.mislabeled,
+  nothing: PREDICT_SAYS.nothing,
   reshaped: 'Flint reads this card differently since you approved it. File it again.',
+  replaced: 'A newer version of this card replaced it.',
 } as const;
 
 /** A provenance ref on a card is an id: a proposal's provenance is kept for good. */
@@ -164,19 +167,64 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
 }
 
 /**
- * File the Turn On Predictions card from the command line, for Will to sign in
- * the console (until the console's own panel can file it). Every registered
- * number unless some are named. The same checks as any filing: a key outside
- * the registry is refused, and a card that would change nothing is never filed.
- * A card already waiting with the same numbers is the one returned.
+ * File the Turn On Predictions card, for Will to sign in the console: from the
+ * console's Predictions panel (the numbers he ticked), or from the command
+ * line. Every registered number unless some are named. The same card and the
+ * same checks either way: a key outside the registry is refused, and a card
+ * that would change nothing is never filed. A card already waiting with the
+ * same numbers is the one returned.
+ *
+ * From the console the newer card wins: his other Turn On cards still waiting
+ * (from the console or the command line) are rejected, unsigned, with a fixed
+ * sentence. A card left waiting after a cancelled prompt can then never be
+ * approved later in place of the one that replaced it. Only cards filed
+ * before this one are rejected, and in the transaction that files it: Turn On
+ * filings run one at a time (createProposal's `serial`), so each sees every
+ * card filed before it and none filed after, and filings made at the same
+ * moment can never reject each other. The last one filed is the one left.
  */
-export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date()) {
+export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date(), from: 'cli' | 'console' = 'cli') {
   const series = [...new Set(keys)].sort();
+  const actor = `will:${from}`;
+  const action = 'forecast.series.enable';
   return createProposal(db, {
-    kind: 'tool_call', origin: 'cli', action: 'forecast.series.enable', args: { series, reason: [] },
+    kind: 'tool_call', origin: from, action, args: { series, reason: [] },
     argsProvenance: { series: { source: 'will', tainted: false }, reason: { source: 'will', tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
-  }, 'will:cli', now);
+  }, actor, now, undefined, undefined, {
+    serial: action,
+    ...(from === 'console' ? {
+      filed: async (tx: Tx, id: string) => {
+        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { id: true, action: true, argsDigest: true, tainted: true, origin: true } });
+        for (const o of older) await rejectPendingIn(tx, o, SAY.replaced, actor);
+      },
+    } : {}),
+  });
+}
+
+/** Who the panel's writes are by. */
+export const CONSOLE_ACTOR = 'will:console';
+/** What turning a number off is recorded under in the audit trail. */
+export const TURN_OFF_ACTION = 'forecast.series.disable';
+
+/**
+ * Turn one number's forecasts off, from the console. Unsigned: it only narrows
+ * what Flint does (the database asks for a signed card to turn a number on,
+ * and for nothing to turn one off), and it is audited, by the number's key.
+ * The local model's estimate of it goes off with it. What Flint already
+ * predicted about it keeps being checked. Turning it on again takes the card.
+ */
+export async function turnOffSeries(db: Db, key: string, now = new Date()): Promise<void> {
+  if (!forecastSeries(key)) throw new Refused(404, SAY.unknown);
+  await db.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT set_config('flint.actor', ${CONSOLE_ACTOR}, true)`;
+      const n = await tx.$executeRaw`UPDATE "ForecastSeries" SET "on" = false, "reason" = false WHERE "seriesKey" = ${key} AND "on"`;
+      if (!n) throw new Refused(409, PREDICT_SAYS.alreadyOff);
+      await appendAudit(tx, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: TURN_OFF_ACTION, outcome: 'ok', correlationId: `${key}.off`, tainted: false, inputs: { series: key } }], now);
+    },
+    { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+  );
 }
 
 /**

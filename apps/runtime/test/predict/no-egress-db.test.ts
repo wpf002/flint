@@ -2,7 +2,7 @@
  * The night's prediction jobs with the network taken away (P4 part 3; review
  * finding 10). The static test (no-egress.test.ts) reads the files as text,
  * which cannot see a fetch built from pieces, an import decided at run time, or
- * a call inside a helper those files use. This one runs the four jobs as the
+ * a call inside a helper those files use. This one runs the prediction jobs as the
  * runtime runs them, in the night's order, on flint_test, with:
  *
  *  - Node's net, tls, http, https and dns made to throw (and fetch with them),
@@ -129,13 +129,15 @@ describe.skipIf(NO_DB)('the prediction jobs with the network taken away', () => 
       source: 'apple_calendar', allDay: false, response: 'accepted', eventStatus: 'confirmed', confirmation: 'confirmed',
       startsAt: new Date(dayStart(2).getTime() + 9 * 3_600_000).toISOString(), endsAt: new Date(dayStart(2).getTime() + 10 * 3_600_000).toISOString(),
     }, new Date(dayStart(3).getTime() + 3_600_000), 'apple_calendar');
+    // Something for the morning's questions to ask about: a prediction only Will can settle, already due.
+    const wills = await k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', domain: 'projects' }, { madeAgo: 3 * 86_400_000, dueAgo: 3_600_000 });
     // Something for the sweep to settle and the scores to score.
     const due = await k.prediction({ resolverSpec: { entityId: eid, check: 'healthy', at: 'resolveBy' } }, { madeAgo: 3 * 3_600_000, dueAgo: 3_600_000 });
 
     const said: string[] = [];
     const ctx: JobContext = { db: k.db, bus: {} as Bus, sources: [], log: (m) => void said.push(m), config: { predict: true, triage: false, planner: false, tz: TZ, home } as Config };
     const jobs = predictJobs(ctx);
-    expect(jobs.map((j) => j.queue).sort()).toEqual(['forecast.run', 'forecast.series', 'ledger.snapshot', 'ledger.sweep']);
+    expect(jobs.map((j) => j.queue).sort()).toEqual(['forecast.run', 'forecast.series', 'ledger.ask', 'ledger.snapshot', 'ledger.sweep']);
     takeAway();
     let failure: unknown;
     try {
@@ -146,8 +148,8 @@ describe.skipIf(NO_DB)('the prediction jobs with the network taken away', () => 
       expect(() => (globalThis.fetch as Fn)('https://example.invalid/')).toThrow('the network is taken away');
       expect(reached).toHaveLength(4);
       reached.length = 0;
-      // The night, in order: yesterday's numbers, the sweep, the scores, today's forecasts.
-      for (const queue of ['forecast.series', 'ledger.sweep', 'ledger.snapshot', 'forecast.run']) await jobs.find((j) => j.queue === queue)!.handler([]);
+      // The night, in order: yesterday's numbers, the sweep, the scores, today's forecasts; then the morning's questions.
+      for (const queue of ['forecast.series', 'ledger.sweep', 'ledger.snapshot', 'forecast.run', 'ledger.ask']) await jobs.find((j) => j.queue === queue)!.handler([]);
     } catch (err) {
       failure = err;
     } finally {
@@ -155,6 +157,9 @@ describe.skipIf(NO_DB)('the prediction jobs with the network taken away', () => 
     }
     expect(failure).toBeUndefined();
     expect(reached).toEqual([]);
+    // The question was asked (so the questions job did its work too), in shadow, and it is still Will's to answer.
+    expect((await k.owner(`SELECT shadow, answer FROM "PredictionQuestion" WHERE "predictionId" = $1`, [wills])).rows).toEqual([{ shadow: true, answer: null }]);
+    expect((await k.owner(`SELECT outcome, inputs FROM "AuditEntry" WHERE action = 'ledger.resolve.ask_will'`)).rows).toEqual([{ outcome: 'ok', inputs: { due: 1, asked: 1, capped: 0, refused: 0, shadow: true, predictionIds: [wills] } }]);
 
     // The jobs did their work (so the empty list above is not the emptiness of jobs that did nothing).
     const audits = (await k.owner(`SELECT action, outcome, inputs FROM "AuditEntry" WHERE action IN ('forecast.series.build', 'forecast.local', 'ledger.sweep', 'ledger.calibration.snapshot') ORDER BY seq`)).rows;

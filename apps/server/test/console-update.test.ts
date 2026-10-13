@@ -302,6 +302,7 @@ describe('the Goals panel (P3) in the main script', () => {
     expect(html).toContain("var PANELS=['approvals','settings','activity','goals'];");
     expect(html).toContain("else if($('goals').classList.contains('open')&&typeof closeGoals==='function')closeGoals();");
     expect(html).toContain("else if(name==='openGoals'&&typeof openGoals==='function')openGoals();");
-    expect(updateJs).toContain("return ['settings','activity','approvals','goals'].some(");
+    // (The Predictions panel, P4, joined the list: an update never reloads the page under it either.)
+    expect(updateJs).toContain("return ['settings','activity','approvals','goals','predictions'].some(");
   });
 });

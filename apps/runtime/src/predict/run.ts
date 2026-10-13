@@ -157,8 +157,8 @@ export interface RunCounts {
 
 const newId = (prefix: string, now: Date) => `${prefix}${now.getTime().toString(36)}${randomBytes(6).toString('hex')}`;
 
-/** A number's history as the forecaster reads it: values by step index, up to the step before the target. */
-async function history(db: Db, tz: string, def: ForecastSeriesDef, targetDay: string): Promise<Map<number, number>> {
+/** A number's history as the forecaster reads it: values by step index, up to the step before the target. (The panel's view reads it the same way.) */
+export async function history(db: Db, tz: string, def: ForecastSeriesDef, targetDay: string): Promise<Map<number, number>> {
   const target = stepIndex(def, targetDay);
   const from = localDayBounds(tz, addLocalDays(targetDay, -(def.step === 'day' ? 1 : 7) * 420)).start;
   const rows = await db.metricPoint.findMany({ where: { seriesKey: def.key, at: { gte: from, lt: localDayBounds(tz, targetDay).start } }, select: { at: true, value: true } });
