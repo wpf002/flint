@@ -53,9 +53,14 @@ export const CHECK_PATHS: Readonly<Record<string, Readonly<Record<string, readon
   thread: { status: ['open', 'archived'] },
   project: { status: ['active', 'archived'] },
 };
-/** Can an item of this kind be checked for key = value? */
+/**
+ * Can an item of this kind be checked for key = value? Only the table's own
+ * entries count: a kind or a key every object has (`constructor`, `toString`)
+ * is no entry, so it is refused like any other unknown name, never read.
+ */
 export function checkFits(kind: string, key: string, value: string): boolean {
-  return Object.prototype.hasOwnProperty.call(CHECK_PATHS, kind) && (CHECK_PATHS[kind]![key]?.includes(value) ?? false);
+  const own = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+  return own(CHECK_PATHS, kind) && own(CHECK_PATHS[kind]!, key) && CHECK_PATHS[kind]![key]!.includes(value);
 }
 
 /**
