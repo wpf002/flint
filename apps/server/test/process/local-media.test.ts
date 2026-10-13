@@ -464,6 +464,30 @@ describe('at the door, with nothing set', () => {
     expect(body).not.toContain('"messages":[]');
   });
 
+  // Main's own hole, closed for everyone: a text file the local model was sent, echoed back in its server's error.
+  it('a model server that echoes the request in its error: the text file’s words are not stored and not returned, with nothing set', async () => {
+    const { srv, ollama } = plain;
+    expect((await srv.post('/inference/mode', { mode: 'local' })).status).toBe(200);
+    ollama.errorFor = (body) => ({ status: 500, message: `could not parse ${JSON.stringify(body.messages).slice(-1500)}` });
+    try {
+      const file = { name: 'ECHONAME7.txt', type: 'text/plain', data: Buffer.from('my bank PIN note ECHOFILE7').toString('base64') };
+      const r = await srv.post('/chat', { conversationId: 'echo-plain', message: 'ECHOMSG7 what do my notes say?', attachments: [file] });
+      expect(ollama.saw('ECHOFILE7')).toBe(true);
+      const got = JSON.stringify(r.events ?? r.json);
+      expect(got).not.toMatch(/ECHOFILE7|could not parse/);
+      expect(got).toContain('The local model server could not answer.');
+      const g = await srv.post('/generate', { prompt: 'ECHOMSG7 what do my notes say?', attachments: [file] });
+      expect(g).toMatchObject({ status: 500, json: { error: 'The local model server could not answer.' } });
+      await sleep(900); // the store writes a moment after a turn ends
+      const stored = srv.read('memory', 'conversations.json');
+      expect(stored).toContain('echo-plain');
+      expect(stored).not.toMatch(/ECHOFILE7|could not parse/);
+    } finally {
+      ollama.errorFor = undefined;
+      expect((await srv.post('/inference/mode', { mode: 'cloud' })).status).toBe(200);
+    }
+  });
+
   it('a text file that mentions a PDF’s header is read as the text file it is, in Local mode too', async () => {
     const { srv, ollama } = plain;
     expect((await srv.post('/inference/mode', { mode: 'local' })).status).toBe(200);

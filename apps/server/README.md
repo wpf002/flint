@@ -940,8 +940,9 @@ local model's state.
 Two settings, **both off unless set**. Off, every request, route, refusal and status line is what
 it was before they existed: a turn with a picture or a PDF goes to a cloud model that can read
 it, and one that has to stay on this Mac (Local mode, Local Only, a message that asks) is
-refused with a sentence. (Two things at the door changed for every turn, whatever is set: see
-"What a file says is outside text" and "At the door" below.)
+refused with a sentence. (Three things changed for every turn, whatever is set: see "What a
+file says is outside text" and "At the door" below, and the wording of a failed local model's
+error.)
 
 **`FLINT_LOCAL_VISION=on`: pictures.** On Ollama's own API, a local model its server says can
 see (`vision` in `/api/show`) is sent a turn's pictures in the request's `images`, as Ollama
@@ -1048,12 +1049,13 @@ with a file waits for that, three seconds at most, and is answered. One boot log
 which of the two are on: `[local] on for the local model: pictures (FLINT_LOCAL_VISION), PDF
 text by spotlight (FLINT_LOCAL_PDF)`.
 
-**What the local model server says when it fails is not repeated,** with either setting on. An
-error keeps its class (a timeout, a server that could not answer) and says a fixed sentence
-("The local model server could not answer."): a model server's error is its own words, and a
-review's stand-in put the request, picture and all, inside one, from where it was stored with
-the failed turn and sent back to the client. With neither setting on an error is what it
-always was.
+**What the local model server says when it fails is not repeated,** whatever is set. An error
+keeps its class (a timeout, a server that could not answer) and says a fixed sentence ("The
+local model server could not answer."): a model server's error is its own words, and a review's
+stand-in put the request, picture and all, inside one, from where it was stored with the failed
+turn and sent back to the client. The same hole was there before pictures were, for a private
+message or a text file, so this holds with both settings off too. The adapter's own deadlines
+("did not start answering in time") and a call the caller called off pass as they are.
 
 #### What a file says is outside text
 

@@ -16,9 +16,9 @@
  * wrote them itself and callers read them: its own deadlines (the first-token,
  * idle and whole-reply timeouts), and a call the caller called off.
  *
- * It is put around a local adapter when pictures or PDFs for the local model
- * are turned on (./local-brains): with neither set, an error is what it
- * always was.
+ * It is put around EVERY local adapter, whatever is set (./local-brains): an
+ * error's wording is not a default worth keeping, and the hole was there for a
+ * text file and a private message before pictures and PDFs were.
  */
 import { FIRST_TOKEN_TIMEOUT, IDLE_TIMEOUT, REQUEST_TIMEOUT, FlintError, isFlintError, type AiError, type ProviderAdapter } from '@flint/core';
 

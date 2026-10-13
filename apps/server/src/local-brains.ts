@@ -423,16 +423,17 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   // reply is in); the OpenAI-compatible wire streams every pass, so its first event is the first token.
   const watching = (which: Which, timedBy: 'events' | 'callback') => watcher(which, () => monitor, deps.now, timedBy);
   // Pictures or PDFs for the local model are turned on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF): a request to it can
-  // then carry a file, so two things hold for every local adapter that do not when both are off.
+  // then carry a file, and a file's content goes only to a server that is this Mac (`filesStayHere`).
   const filesOn = cfg.local.vision || cfg.local.pdf !== undefined;
   /** May a file's content go to the local model server right now (BuildLocalDeps.filesStayHere)? */
   const filesStayHere = (): boolean => deps.filesStayHere?.() !== false;
-  // ...with FLINT_LOCAL_PDF set, each is handed a PDF as its text (./local-media). Around the watched adapter:
-  // reading a PDF is not the model's time to first token. And with either set, what the model server says when it
-  // fails is not repeated (./local-errors): its error could carry the file back. With both off, an adapter is
-  // exactly the watched one it always was.
+  // What a local model server says when it fails is never repeated, whatever is set (./local-errors): an error
+  // keeps its class and says a fixed sentence. Its own words could carry the request back (a private message, a
+  // text file, a picture), into the stored turn and to the client. And with FLINT_LOCAL_PDF set, each adapter is
+  // handed a PDF as its text (./local-media), around the watched adapter: reading a PDF is not the model's time
+  // to first token.
   const pdfs = (inner: ProviderAdapter): ProviderAdapter => {
-    const quiet = filesOn ? plainErrors(inner) : inner;
+    const quiet = plainErrors(inner);
     return deps.readsPdfs ? deps.readsPdfs(quiet) : quiet;
   };
 

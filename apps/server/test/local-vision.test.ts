@@ -653,18 +653,24 @@ describe('what a local model server says when it fails', () => {
     return isFlintError(e) ? e.error.message : String(e);
   };
 
-  it('with pictures or PDFs turned on it is not repeated: a class and a fixed sentence', async () => {
-    for (const env of [{ FLINT_LOCAL_VISION: 'on' }, { FLINT_LOCAL_PDF: 'spotlight' }] as Array<Record<string, string>>) {
+  it('is not repeated, whatever is set, on either wire: a class and a fixed sentence', async () => {
+    for (const env of [{}, { FLINT_LOCAL_VISION: 'on' }, { FLINT_LOCAL_PDF: 'spotlight' }, { FLINT_LOCAL_PROVIDER: 'openai' }] as Array<Record<string, string>>) {
       const { inference } = await boot(failing(), env, { reader: standInReader(READS) });
-      expect(await failure(inference)).toBe('The local model server could not answer.');
+      const said = await failure(inference);
+      expect(said, JSON.stringify(env)).toBe('The local model server could not answer.');
+      expect(said).not.toContain('ECHO');
       built.splice(0).forEach((i) => i.stop());
       await server?.close();
     }
   });
 
-  it('with nothing turned on an error is what it always was', async () => {
-    const { inference } = await boot(failing(), {});
-    expect(await failure(inference)).toContain(ECHO);
+  it('the standby’s errors are plain too', async () => {
+    const { inference } = await boot({ ...failing(), [SMALL]: { loaded: true, contextLength: 4096, capabilities: BLIND, replies: [{ status: 500, message: ECHO }] } }, { FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
+    const e = await inference.standby!.provider.generate({ model: SMALL, messages: [user('hi', [])] }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect(isFlintError(e) && e.error.message).toBe('The local model server could not answer.');
   });
 });
 
