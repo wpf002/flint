@@ -63,7 +63,7 @@ import { recordForecast } from './forecast.js';
 export const RUN_QUEUE = 'tasks.run';
 
 export interface TaskCardDeps {
-  /** False while tasks and assets are switched off (FLINT_ASSETS=off): no card runs. */
+  /** True only while tasks and assets are switched on (FLINT_ASSETS=on); otherwise no card runs. */
   assets?: boolean;
   /** The assets there are (the code registry). */
   registry?: readonly AssetDef[];
@@ -428,7 +428,7 @@ export interface TaskHooks {
  * SQLSTATE. While tasks are switched off no card runs, and it stays approved.
  */
 export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, deps: TaskCardDeps = {}, hooks: TaskHooks = {}): Promise<Result> {
-  if (deps.assets === false) throw new Refused(409, SAY.off);
+  if (deps.assets !== true) throw new Refused(409, SAY.off);
   const now = new Date();
   let out: { refused: Refused } | { done: Result };
   try {

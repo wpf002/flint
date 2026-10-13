@@ -1608,10 +1608,11 @@ Claude runs a `down.sql` only with your OK, after the dump.
 
 This arrives in parts. The first part is the store and what the database
 guarantees about it. The second adds the runtime's side for work that needs no
-model: one asset (the CI Watcher), tasks, and the cards that run them. The
-one thing you'll see is a Tasks row in Settings > Health, shown as off. Nothing
-else changes until you turn an asset on, and the Tasks panel that lets you do
-that comes in a later part.
+model: one asset (the CI Watcher), tasks, and the cards that run them. It
+ships switched off. The one thing you'll see is a Tasks row in Settings >
+Health, shown as off. Nothing else changes until tasks are switched on and you
+turn an asset on, and the Tasks panel that lets you do that comes in a later
+part.
 
 Three things live here:
 
@@ -1691,7 +1692,8 @@ What the database now holds to, whatever the runtime's code does:
 
 ### Tasks without a model (part 2)
 
-What the runtime now does, once an asset is on:
+Part 2 ships switched off (see "Switching tasks on" below). What the runtime
+does once tasks are switched on and an asset is on:
 
 - **The CI Watcher** is the one asset so far. It watches a CI run that the
   GitHub source already tracks and reports how it ended. It calls nothing and
@@ -1722,9 +1724,9 @@ What the runtime now does, once an asset is on:
 - **Cleanup.** A task's spec, bar, summary and evidence are cleared 30 days
   after it ended, or 7 days for one that is personal, financial or read outside
   text. Its raw output is deleted 7 days after it ended. Its title stays.
-- **Health** has a Tasks row. It's shown as off while no asset that runs tasks
-  is on. Once one is, it says when a task is stuck or a rule stops Flint from
-  checking results.
+- **Health** has a Tasks row. It's shown as off while tasks are switched off
+  or no asset that runs tasks is on. Otherwise it says when a task is stuck or
+  a rule stops Flint from checking results.
 
 There is no panel yet. The routes the panel will use exist, behind the same
 token scope as approvals, so no model can read a task or start one:
@@ -1740,28 +1742,38 @@ token scope as approvals, so no model can read a task or start one:
 | `POST /v1/tasks/:id/cancel` | Cancels it, or files the card to cancel one that has gone out |
 | `POST /v1/tasks/:id/accept` and `/reject` | Files the card that overrules its check |
 
+While tasks are switched off, every one of these answers "Tasks are turned off
+on this Mac." and reads nothing.
+
 Two things filed over `POST /v1/proposals` now get a sentence back instead of
 an error: a spend card that says no cost, and a task or spend card whose
 details hold a number that isn't whole.
 
-**Switching it off.** Tasks and assets work unless you switch them off: what is
-on is the assets you turned on, not a setting. The switch is for rolling part 2
-back. Claude sets it once you say OK, with the lines below, which keep the
-override file `0600`, add the setting only once and start it on a line of its
-own:
+**Switching tasks on.** Part 2 ships off. No task job is scheduled, nothing
+reads a task or an asset, the routes above say tasks are turned off, and Health
+shows Tasks as off. To switch tasks on, set `FLINT_ASSETS=on`. Claude does that
+once you say OK, with the lines below, which keep the override file `0600`, add
+the setting only once and start it on a line of its own:
 
 ```bash
 touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env
-grep -q '^FLINT_ASSETS=' ~/.flint/runtime.override.env || printf '\nFLINT_ASSETS=off\n' >> ~/.flint/runtime.override.env
+grep -q '^FLINT_ASSETS=' ~/.flint/runtime.override.env || printf '\nFLINT_ASSETS=on\n' >> ~/.flint/runtime.override.env
 launchctl kickstart -k gui/$(id -u)/com.flint.runtime
 ```
 
-Only `off` switches them off (any case, spaces around it ignored). The task
-jobs are then not scheduled, no task or asset card is filed or run, and a card
-you already approved stays approved until they are back. The lists still
-answer, and an asset can still be turned off. To switch them back on, remove
-the `FLINT_ASSETS` line and run the `launchctl` line again. Part 2 has no
-database update of its own.
+Only `on` switches them on (any case, spaces around it ignored); anything else
+is off. On is not enough for anything to run: each asset stays off until you
+sign the card that turns it on.
+
+**Switching tasks off** is the rollback. Remove the `FLINT_ASSETS` line from
+`~/.flint/runtime.override.env` and run the `launchctl` line again. The task
+jobs are no longer scheduled, no task or asset card is filed or run, and the
+routes and Health say tasks are off. Nothing else is changed. An asset you
+turned on is still on when tasks come back. A card you already approved stays
+approved until then, or until it expires. A task that was out waits where it
+was: the first tick after tasks are back on sends it again, or ends it if a day
+has passed. The nightly cleanup above still runs, so what has ended is still
+cleared on time. Part 2 has no database update of its own.
 
 ### What changed on deploy
 

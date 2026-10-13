@@ -41,12 +41,12 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
   /** Will signs a card that is filed. */
   const approve = async (pid: string) => approveProposal(db, pid, await sign(pid), undefined, 'test');
   /** Will signs it and the runtime carries it out, as the console's Approve does. */
-  async function signRun(pid: string, deps: TaskCardDeps = { bus }) {
+  async function signRun(pid: string, deps: TaskCardDeps = { assets: true, bus }) {
     await approve(pid);
     return runInternal(db, pid, undefined, 'UTC', 'test', undefined, deps);
   }
   /** The same for a card runInternal does not take (a paid dispatch): straight to the task executor. */
-  async function signRunCard(pid: string, deps: TaskCardDeps = { bus }) {
+  async function signRunCard(pid: string, deps: TaskCardDeps = { assets: true, bus }) {
     await approve(pid);
     return runTaskCard(db, pid, undefined, 'UTC', 'test', deps);
   }

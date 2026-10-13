@@ -48,9 +48,9 @@ describe('runtime config', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_SOURCE_APPLE_CALENDAR: ' On ' }).appleCalendar).toBe(true);
   });
 
-  it('tasks and assets (P5) stay as Will set them unless FLINT_ASSETS is exactly `off`, trimmed and in any case', () => {
-    for (const v of [undefined, '', '  ', 'on', '0', 'no', 'false', 'disabled', 'off!']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_ASSETS: v }).assets, String(v)).toBe(true);
-    for (const v of ['off', ' off ', 'OFF', ' Off\t']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_ASSETS: v }).assets, v).toBe(false);
+  it('tasks and assets (P5) are off unless FLINT_ASSETS is exactly `on`, trimmed and in any case', () => {
+    for (const v of [undefined, '', '  ', 'off', '1', 'yes', 'true', 'enabled', 'on!']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_ASSETS: v }).assets, String(v)).toBe(false);
+    for (const v of ['on', ' on ', 'ON', ' On\t']) expect(loadConfig({ DATABASE_URL: DB, HOME, FLINT_ASSETS: v }).assets, v).toBe(true);
   });
 
   it('goal reviews (P3) are off unless FLINT_PLANNER is exactly `on`, trimmed and in any case', () => {

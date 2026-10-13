@@ -6,8 +6,9 @@
  * token; 403 for the runtime connector's token (world:read|ledger) on every
  * route, reads included, so a model can never read a task or start one; 400 on
  * the strict contracts, with a code and field paths only; and, switched off
- * (FLINT_ASSETS=off), every route that would start or change work refused in a
- * sentence. Over the wire no task or asset card is filed as a job's.
+ * (as it ships: FLINT_ASSETS is not `on`), every route answered with the same
+ * one sentence, whatever it was sent. Over the wire no task or asset card is
+ * filed as a job's.
  *
  * On flint_test: Settings and the whole of a task's life over HTTP, every
  * refusal as a sentence with its code, and the seven cards never filed, claimed
@@ -38,9 +39,11 @@ const tokens = [
   { name: 'runtime-mcp', sha256: sha(MCP), scopes: new Set<RuntimeScope>(['world:read', 'ledger']) },
 ];
 
-function harness(db: Db, over: { assets?: boolean; status?: RuntimeStatus } = {}) {
+/** The app with tasks switched on, unless `assets` says otherwise: `false`, or `undefined` for a config that does not name them. */
+function harness(db: Db, over: { assets?: boolean | undefined; status?: RuntimeStatus } = {}) {
   const lines: string[] = [];
-  const app = buildApp({ db, config: { tokens, tz: 'UTC', ...(over.assets === undefined ? {} : { assets: over.assets }) }, logger: true, logStream: { write: (l: string) => void lines.push(l) }, ...(over.status ? { status: over.status } : {}) });
+  const assets = 'assets' in over ? over.assets : true;
+  const app = buildApp({ db, config: { tokens, tz: 'UTC', ...(assets === undefined ? {} : { assets }) }, logger: true, logStream: { write: (l: string) => void lines.push(l) }, ...(over.status ? { status: over.status } : {}) });
   const call = (method: 'GET' | 'POST', url: string, body?: unknown, token: string | null = SERVER) =>
     app.inject({
       method, url,
@@ -110,20 +113,37 @@ describe('the task routes, before the database', () => {
     await h.app.close();
   });
 
-  it('switched off for a rollback: everything that would start or change work is refused in a sentence, a task card is not filed over the wire, and nothing touches the database', async () => {
-    const h = harness(untouchable, { assets: false });
-    for (const [method, url, body] of ROUTES.filter(([m, u]) => m === 'POST' && !u.endsWith('/off'))) {
-      const r = await h.call(method, url, body);
-      expect(r.statusCode, url).toBe(409);
-      expect(r.json()).toEqual({ error: TASK_SAYS.off, code: 'off' });
-    }
-    for (const action of [...TASK_SIGNED_ACTIONS, PAID_DISPATCH]) {
-      const r = await h.call('POST', '/v1/proposals', { kind: 'task', origin: 'console', action, args: { taskId: TASK }, argsProvenance: {} });
-      expect(r.statusCode, action).toBe(409);
-      expect(r.json()).toEqual({ error: TASK_SAYS.off });
+  it('switched off, which is how it ships: every route answers with the one sentence whatever it is sent, a task card is not filed over the wire, and nothing touches the database or the log', async () => {
+    expect(TASK_SAYS.off).toBe('Tasks are turned off on this Mac.');
+    // A config that does not name them, and one that says off.
+    for (const over of [{ assets: undefined }, { assets: false }]) {
+      const h = harness(untouchable, over);
+      const sent: typeof ROUTES = [
+        ...ROUTES,
+        // What would be a 400 with tasks on: its input is not read.
+        ['GET', '/v1/tasks?tab=everything'],
+        ['GET', '/v1/tasks/not-a-task-id'],
+        ['POST', '/v1/tasks', { [CANARY]: true }],
+        ['POST', `/v1/tasks/${TASK}/cancel`, { why: CANARY }],
+        ['POST', `/v1/assets/${CI_WATCHER.id}/on`, { force: CANARY }],
+      ];
+      for (const [method, url, body] of sent) {
+        const r = await h.call(method, url, body);
+        expect([r.statusCode, r.json()], `${method} ${url}`).toEqual([409, { error: TASK_SAYS.off, code: 'off' }]);
+        // Whether tasks are on is not told to a caller who may not ask.
+        expect((await h.call(method, url, body, null)).statusCode, `${method} ${url}`).toBe(401);
+        expect((await h.call(method, url, body, MCP)).statusCode, `${method} ${url}`).toBe(403);
+      }
+      for (const action of [...TASK_SIGNED_ACTIONS, PAID_DISPATCH]) {
+        const r = await h.call('POST', '/v1/proposals', { kind: 'task', origin: 'console', action, args: { taskId: TASK }, argsProvenance: {} });
+        expect(r.statusCode, action).toBe(409);
+        expect(r.json()).toEqual({ error: TASK_SAYS.off });
+      }
+      expect(h.lines.join('\n')).not.toContain(CANARY);
+      expect(h.lines.some((l) => l.includes('task route refused'))).toBe(false);
+      await h.app.close();
     }
     expect(touched).toBe(0);
-    await h.app.close();
   });
 
   it('over the wire no card is a job’s: a task card under a runtime origin is refused before anything reads it', async () => {
@@ -241,16 +261,21 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     await ok('POST', `/v1/proposals/${t.proposalId}/approve`, { approvalId: await fx.sign(t.proposalId) });
     const claim = await h.call('POST', `/v1/proposals/${t.proposalId}/claim`, {});
     expect([claim.statusCode, claim.json()]).toEqual([409, { error: 'task.dispatch.ci_runner is carried out by the runtime: use /run' }]);
-    // Switched off: it does not run, and stays approved; the lists still answer, and an asset can still be turned off.
+    // Switched off after it was on: the card does not run and stays approved, and every task route
+    // says so. Nothing is changed: the asset is as Will left it, and so is the task.
     const off = harness(db, { assets: false });
     const run = await off.call('POST', `/v1/proposals/${t.proposalId}/run`, {});
     expect([run.statusCode, run.json()]).toEqual([409, { error: TASK_SAYS.off }]);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved' });
-    expect((await off.call('GET', '/v1/tasks')).statusCode).toBe(200);
-    expect(AssetsPage.parse((await off.call('GET', '/v1/assets')).json()).assets[0]).toMatchObject({ on: true, line: TASK_SAYS.off, canTurnOn: false });
-    expect((await off.call('POST', `/v1/assets/${CI_WATCHER.id}/off`, {})).json()).toEqual({ ok: true });
+    for (const [method, url, body] of [['GET', '/v1/tasks'], ['GET', '/v1/assets'], ['GET', `/v1/tasks/${t.id}`], ['POST', `/v1/tasks/${t.id}/cancel`, {}], ['POST', `/v1/assets/${CI_WATCHER.id}/off`, {}]] as typeof ROUTES) {
+      const r = await off.call(method, url, body);
+      expect([r.statusCode, r.json()], `${method} ${url}`).toEqual([409, { error: TASK_SAYS.off, code: 'off' }]);
+    }
+    expect(await db.asset.findUniqueOrThrow({ where: { id: CI_WATCHER.id } })).toMatchObject({ enabled: true });
+    expect(await fx.task(t.id)).toMatchObject({ status: 'proposed' });
     await off.app.close();
-    // Back on: its asset is off now, so the card fails with that sentence.
+    // Back on, and Will turns the asset off: the card fails with that sentence.
+    expect(await ok('POST', `/v1/assets/${CI_WATCHER.id}/off`, {})).toEqual({ ok: true });
     const late = await h.call('POST', `/v1/proposals/${t.proposalId}/run`, {});
     expect([late.statusCode, late.json()]).toEqual([409, { error: TASK_SAYS.assetOff }]);
   });

@@ -81,22 +81,21 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
   });
   afterAll(async () => db?.$disconnect());
 
-  it('Settings: the CI watcher is off, waits for the GitHub source, then for Will’s card, then is on; switched off, nothing can be turned on', async () => {
-    const page = async (on = true) => AssetsPage.parse(await assetsPage(db, { on }));
+  it('Settings: the CI watcher is off, waits for the GitHub source, then for Will’s card, then is on', async () => {
+    const page = async () => AssetsPage.parse(await assetsPage(db));
     const row = { id: CI_WATCHER.id, name: 'CI Watcher', kind: 'ci_runner', costs: false };
     // The row is made by the first read, off. Until the GitHub source is on it says what it needs.
     expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }], reviewsRequired: false });
     expect(await refusal(fileEnable(db, CI_WATCHER.id))).toMatchObject({ status: 409, message: TASK_SAYS.needsGithub });
     await fx.sourceOn();
     expect((await page()).assets).toEqual([{ ...row, on: false, waiting: false, canTurnOn: true, line: CI_WATCHER.line }]);
-    expect((await page(false)).assets).toEqual([{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.off }]);
     const filed = await fileEnable(db, CI_WATCHER.id);
     expect((await page()).assets).toEqual([{ ...row, on: false, waiting: true, canTurnOn: false, line: WAITING }]);
     await fx.signRun(filed.proposalId);
     expect((await page()).assets).toEqual([{ ...row, on: true, waiting: false, canTurnOn: false, line: CI_WATCHER.line }]);
-    // Turning it off needs no signature, is on record by id, and can be done while tasks are switched off.
+    // Turning it off needs no signature and is on record by id.
     await turnOff(db, CI_WATCHER.id);
-    expect((await page(false)).assets[0]).toMatchObject({ on: false, line: TASK_SAYS.off });
+    expect((await page()).assets[0]).toMatchObject({ on: false, canTurnOn: true, line: CI_WATCHER.line });
     const off = await db.auditEntry.findFirstOrThrow({ where: { action: 'asset.disable' } });
     expect(off).toMatchObject({ actor: 'will:console', kind: 'action', outcome: 'ok', correlationId: `asset:${CI_WATCHER.id}` });
     expect(off.inputs).toEqual({ assetId: CI_WATCHER.id });

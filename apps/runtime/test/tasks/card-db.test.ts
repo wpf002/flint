@@ -172,7 +172,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     await fx.approve(t.proposalId);
     const before = await db.prediction.count({ where: { domain: 'assets' } });
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const err = await refusal(runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { bus: undefined }, { afterWrites: async () => { throw new Error(`${CANARY} boom`); } }));
+    const err = await refusal(runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { assets: true }, { afterWrites: async () => { throw new Error(`${CANARY} boom`); } }));
     expect(err).toMatchObject({ status: 409, message: 'Flint couldn’t carry it out.' });
     expect(errors.mock.calls.flat().join(' ')).not.toContain(CANARY);
     errors.mockRestore();
@@ -180,9 +180,9 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(await db.prediction.count({ where: { domain: 'assets' } })).toBe(before);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved', error: null });
     // The same card runs once the fault is gone, and only once: its approval is used.
-    expect(await runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { bus })).toMatchObject({ taskId: t.id });
+    expect(await runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: true, bus })).toMatchObject({ taskId: t.id });
     expect(await fx.task(t.id)).toMatchObject({ status: 'queued' });
-    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test'))).toMatchObject({ status: 409, message: 'It already ran.' });
+    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: true }))).toMatchObject({ status: 409, message: 'It already ran.' });
   });
 
   it('a dispatch card is the task as it stands: one for a task that changed, moved on or lost its asset is never filed, and never runs', async () => {
@@ -204,7 +204,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     // Approved, then its asset is turned off (that needs no signature): the card fails with a sentence, and nothing goes out.
     await fx.approve(t.proposalId);
     await turnOff(db, CI_WATCHER.id);
-    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test'))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
+    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: true }))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'failed', error: TASK_SAYS.assetOff });
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', predictionId: null });
     expect(await refusal(fx.newTask(item))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
@@ -291,7 +291,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const enable = await planted('asset.enable', enableArgs, { kind: 'policy', origin: 'console', consequential: true });
     // ...and the executor holds to the registry it is given too.
     await fx.approve(enable);
-    expect(await runTaskCard(db, enable, undefined, 'UTC', 'test', { registry })).toEqual({ assetId: reviewer.id, enabled: true });
+    expect(await runTaskCard(db, enable, undefined, 'UTC', 'test', { assets: true, registry })).toEqual({ assetId: reviewer.id, enabled: true });
 
     const require = await fx.file('review.enforce', { gate: 'proposal', enforced: true }, { kind: 'policy', consequential: true });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: require.id } })).toMatchObject({ kind: 'policy', reason: TASK_REASONS.require, consequential: true, reviewRequired: false });
@@ -343,7 +343,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     for (const action of TASK_SIGNED_ACTIONS) {
       const pid = await planted(action, argsOf[action]!, { kind: action === 'asset.enable' || action === 'review.enforce' ? 'policy' : 'task' });
       await fx.approve(pid);
-      expect(await refusal(runInternal(db, pid, undefined, 'UTC', 'test')), action).toMatchObject({ status: 409, message: TASK_SAYS.fromConsole });
+      expect(await refusal(runInternal(db, pid, undefined, 'UTC', 'test', undefined, { assets: true })), action).toMatchObject({ status: 409, message: TASK_SAYS.fromConsole });
       expect(await db.proposal.findUniqueOrThrow({ where: { id: pid } })).toMatchObject({ status: 'failed', error: TASK_SAYS.fromConsole });
     }
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed' });
@@ -353,7 +353,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     for (const over of [{ origin: 'console' }, { origin: TASKS_ORIGIN, templateId: 'task.other.v1' }]) {
       const pid = await planted('task.check_bar', argsOf['task.check_bar']!, over);
       await fx.approve(pid);
-      expect(await refusal(runInternal(db, pid, undefined, 'UTC', 'test'))).toMatchObject({ status: 409, message: TASK_SAYS.flintFiles });
+      expect(await refusal(runInternal(db, pid, undefined, 'UTC', 'test', undefined, { assets: true }))).toMatchObject({ status: 409, message: TASK_SAYS.flintFiles });
     }
     expect(await fx.task(checkedId)).toMatchObject({ status: 'checking', acceptedAuditId: null });
     // The seven are the runtime's own to carry out (never claimed by the server), and a dispatch that spends is nobody's.
@@ -395,7 +395,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     await fx.approve(kept.proposalId);
     const again = await planted('task.dispatch.ci_runner', (await card(kept.proposalId)).args as Record<string, unknown>, { origin: 'console' });
     await rejectProposal(db, again, { approvalId: await fx.sign(again, 'reject') }, undefined, 'test');
-    expect(await refusal(runInternal(db, kept.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
+    expect(await refusal(runInternal(db, kept.proposalId, undefined, 'UTC', 'test', undefined, { assets: true, bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
     expect(await card(kept.proposalId)).toMatchObject({ status: 'failed', error: TASK_SAYS.superseded, result: null });
     expect(await fx.task(kept.id)).toMatchObject({ status: 'proposed', dispatchApprovalId: null, predictionId: null });
     expect(bus.of('tasks.run').some((j) => j.data.taskId === kept.id)).toBe(false);
@@ -406,7 +406,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     await fx.approve(accept.id);
     const stop = await fx.file('task.cancel', { taskId });
     await rejectProposal(db, stop.id, { approvalId: await fx.sign(stop.id, 'reject') }, undefined, 'test');
-    expect(await refusal(runInternal(db, accept.id, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
+    expect(await refusal(runInternal(db, accept.id, undefined, 'UTC', 'test', undefined, { assets: true, bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
     expect(await card(accept.id)).toMatchObject({ status: 'failed', error: TASK_SAYS.superseded, result: null });
     expect(await fx.task(taskId)).toMatchObject({ status: 'checking', acceptedAuditId: null });
     // ...and that is no answer about the result: the tick sends its check, which asks him again, and his new signature accepts it.
@@ -440,14 +440,14 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     // The forget cleared the task's words and its card's args; the card is still approved.
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved', args: null });
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', spec: null });
-    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.forgotten });
+    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: true, bus }))).toMatchObject({ status: 409, message: TASK_SAYS.forgotten });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'failed', error: TASK_SAYS.forgotten, result: null, args: null });
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', dispatchApprovalId: null, predictionId: null });
     const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: t.proposalId, outcome: 'denied' }, orderBy: { seq: 'desc' } });
     expect(entry).toMatchObject({ kind: 'action', action: 'task.dispatch.ci_runner', decision: 'deny' });
     expect(entry.inputs).toMatchObject({ proposalId: t.proposalId, why: 'forgotten' });
     // Run again (a retry): it has ended, and says so.
-    expect((await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).status).toBe(409);
+    expect((await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: true, bus }))).status).toBe(409);
   });
 
   it('a spend card says what it will cost, and a task or spend card holds whole numbers only: each is a sentence when the card is filed, not the database’s refusal', async () => {
@@ -465,12 +465,23 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(await db.proposal.count({ where: { action: 'pay.vendor' } })).toBe(0);
   });
 
-  it('switched off for a rollback, no card runs: it stays approved, and runs once tasks are back', async () => {
+  it('switched off, which is how it ships, no card runs: it stays approved, nothing is read, and it runs once tasks are on', async () => {
     const t = await fx.newTask(await fx.ciRun('wpf002/off'));
     await fx.approve(t.proposalId);
-    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { assets: false }))).toMatchObject({ status: 409, message: TASK_SAYS.off });
+    // Not said to be on is off: a caller that forgets the switch runs nothing.
+    for (const deps of [undefined, {}, { assets: false }, { bus }]) {
+      expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, deps)), JSON.stringify(deps)).toMatchObject({ status: 409, message: TASK_SAYS.off });
+    }
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved', error: null });
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed' });
+    // The executor itself refuses before it reads anything: any use of this client fails the test.
+    let touched = 0;
+    const untouchable = new Proxy({}, { get: () => { touched++; throw new Error('the database was touched'); } }) as unknown as Db;
+    for (const deps of [undefined, {}, { assets: false }]) {
+      expect(await refusal(runTask(untouchable, t.proposalId, undefined, 'UTC', 'test', deps))).toMatchObject({ status: 409, message: TASK_SAYS.off });
+      expect(await refusal(runTaskCard(untouchable, t.proposalId, undefined, 'UTC', 'test', deps))).toMatchObject({ status: 409, message: TASK_SAYS.off });
+    }
+    expect(touched).toBe(0);
     expect(await runTask(db, t.proposalId, undefined, 'UTC', 'test', { assets: true, bus })).toMatchObject({ taskId: t.id });
   });
 
@@ -484,7 +495,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const args = enableArgsOf(worker);
     const enable = await planted('asset.enable', args, { kind: 'policy', origin: 'console', consequential: true });
     await fx.approve(enable);
-    await runTaskCard(db, enable, undefined, 'UTC', 'test', { registry });
+    await runTaskCard(db, enable, undefined, 'UTC', 'test', { assets: true, registry });
 
     const t = await createTask(db, { draftKey: draft(), template: 'draft_note', params: { about: `${CANARY} what to write` }, goalId: null, dueAt: null, ownCheck: null }, { registry, adapters: { local_worker: fake } });
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
@@ -515,7 +526,7 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     await db.$queryRaw`SELECT claim_action('task.dispatch.local_worker', ${today}, 20) FROM generate_series(1, 19)`;
     const next = await createTask(db, { draftKey: draft(), template: 'draft_note', params: { about: 'Another note' }, goalId: null, dueAt: null, ownCheck: null }, { registry, adapters: { local_worker: fake } });
     await fx.approve(next.proposalId);
-    expect(await refusal(runInternal(db, next.proposalId, undefined, 'UTC', 'test'))).toMatchObject({ status: 429, message: 'Today’s limit of 20 is reached.' });
+    expect(await refusal(runInternal(db, next.proposalId, undefined, 'UTC', 'test', undefined, { assets: true }))).toMatchObject({ status: 429, message: 'Today’s limit of 20 is reached.' });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: next.proposalId } })).toMatchObject({ status: 'approved' });
     expect(await fx.task(next.id)).toMatchObject({ status: 'proposed' });
   });

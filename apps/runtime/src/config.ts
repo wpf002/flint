@@ -112,10 +112,12 @@ const Env = z.object({
    */
   FLINT_PREDICT: z.string().optional(),
   /**
-   * Assets and tasks (P5): a kill switch, for rolling back. `off` stops them:
-   * the task jobs are not scheduled and every task or asset card is refused with
-   * a sentence. Anything else, blank included, leaves them as Will set them in
-   * the console: an asset does nothing until he signs the card that turns it on.
+   * Assets and tasks (P5): `on` to run them; anything else, blank included, is
+   * off, and then the task jobs are not scheduled, no task or asset is read,
+   * and every task or asset route and card is refused with a sentence. Off by
+   * default: it is turned on, in runtime.override.env, with Will's OK. Turning
+   * it off is its rollback. On is not enough: an asset does nothing until Will
+   * signs the card that turns it on.
    */
   FLINT_ASSETS: z.string().optional(),
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
@@ -169,7 +171,7 @@ export interface Config {
   planner: boolean;
   /** P4's prediction jobs may run (FLINT_PREDICT=on). The signed card is still what turns a number on. */
   predict: boolean;
-  /** P5's tasks and assets are not switched off (FLINT_ASSETS=off is the rollback). What is on is still Will's signed cards. */
+  /** P5's tasks and assets may run (FLINT_ASSETS=on). The signed card is still what turns an asset on. */
   assets: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
@@ -252,7 +254,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
     planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
     predict: e.FLINT_PREDICT?.trim().toLowerCase() === 'on',
-    assets: e.FLINT_ASSETS?.trim().toLowerCase() !== 'off',
+    assets: e.FLINT_ASSETS?.trim().toLowerCase() === 'on',
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),

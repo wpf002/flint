@@ -485,16 +485,17 @@ const TASK_STUCK_SLACK_MS = 3_600_000;
 
 /**
  * Tasks (P5): are they moving? Counts only: a detail never names a task.
- * Nothing can run while they are switched off or no asset that runs tasks is
- * on, so the row is shown and left out. The tick ends a task that has not moved
- * for a day; one still out an hour past that means the tick is not running. (A
- * result waiting for Will's accept card is not stuck: it waits as long as its
- * card does.)
+ * Nothing can run while they are switched off (the default: then nothing is
+ * read either) or no asset that runs tasks is on, so the row is shown and left
+ * out. The tick ends a task that has not moved for a day; one still out an hour
+ * past that means the tick is not running. (A result waiting for Will's accept
+ * card is not stuck: it waits as long as its card does.)
  */
 async function tasks(d: CheckDeps): Promise<ComponentCheck> {
   const { db, now } = d;
   const component = 'tasks';
-  if (d.config.assets === false || !(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
+  if (!d.config.assets) return { component, status: 'disabled' };
+  if (!(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
   const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
   if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
   if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };

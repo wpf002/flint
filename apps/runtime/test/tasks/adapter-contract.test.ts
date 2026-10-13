@@ -155,7 +155,7 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
       [pid, JSON.stringify(args), digestOf(args)],
     ));
     await fx.approve(pid);
-    await runTaskCard(db, pid, undefined, 'UTC', 'test', { registry });
+    await runTaskCard(db, pid, undefined, 'UTC', 'test', { assets: true, registry });
   });
   afterAll(async () => db?.$disconnect());
 
@@ -179,14 +179,14 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
     expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test'))).toMatchObject({ status: 409, message: `${PAID_DISPATCH} is not carried out by the runtime` });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved' });
     // Handed straight to the task executor, with no way to reserve: refused, in a sentence.
-    expect(await refusal(runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { registry, bus }))).toMatchObject({ status: 409, message: TASK_SAYS.paidOff });
+    expect(await refusal(runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { assets: true, registry, bus }))).toMatchObject({ status: 409, message: TASK_SAYS.paidOff });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'failed', error: TASK_SAYS.paidOff });
     expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', predictionId: null, costUsd: null });
     // The same when the answer to the reservation is no.
     const u = await newTask();
     const asked: number[] = [];
     await fx.approve(u.proposalId);
-    expect(await refusal(runTaskCard(db, u.proposalId, undefined, 'UTC', 'test', { registry, bus, reserve: async (micros) => { asked.push(micros); return false; } }))).toMatchObject({ status: 409, message: TASK_SAYS.paidOff });
+    expect(await refusal(runTaskCard(db, u.proposalId, undefined, 'UTC', 'test', { assets: true, registry, bus, reserve: async (micros) => { asked.push(micros); return false; } }))).toMatchObject({ status: 409, message: TASK_SAYS.paidOff });
     expect(asked).toEqual([250_000]);
     expect(await fx.task(u.id)).toMatchObject({ status: 'proposed' });
     expect(bus.of('tasks.run')).toEqual([]);
@@ -196,7 +196,7 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
     const reserve = async () => true;
     const t = await newTask();
     await fx.approve(t.proposalId);
-    expect(await runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { registry, bus, reserve })).toMatchObject({ taskId: t.id });
+    expect(await runTaskCard(db, t.proposalId, undefined, 'UTC', 'test', { assets: true, registry, bus, reserve })).toMatchObject({ taskId: t.id });
     expect(await fx.task(t.id)).toMatchObject({ status: 'queued', costUsd: null, costIsEstimate: true });
     expect(await runTaskJob({ db, bus, adapters }, { taskId: t.id })).toBe('submitted');
     const submitted = await fx.task(t.id);
@@ -210,7 +210,7 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
     // Cancelled after it went out, before the asset said anything: it ends with its estimate, marked as one.
     const u = await newTask();
     await fx.approve(u.proposalId);
-    await runTaskCard(db, u.proposalId, undefined, 'UTC', 'test', { registry, bus, reserve });
+    await runTaskCard(db, u.proposalId, undefined, 'UTC', 'test', { assets: true, registry, bus, reserve });
     await runTaskJob({ db, bus, adapters: { nexus_participant: { ...paid, run: async () => ({ wait: true }) } } }, { taskId: u.id });
     expect(await fx.task(u.id)).toMatchObject({ status: 'dispatched', costUsd: null });
     await fx.signRun((await fx.file('task.cancel', { taskId: u.id })).id);
@@ -220,7 +220,7 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
     // One the asset failed: the same.
     const v = await newTask();
     await fx.approve(v.proposalId);
-    await runTaskCard(db, v.proposalId, undefined, 'UTC', 'test', { registry, bus, reserve });
+    await runTaskCard(db, v.proposalId, undefined, 'UTC', 'test', { assets: true, registry, bus, reserve });
     expect(await runTaskJob({ db, bus, adapters: { nexus_participant: { ...paid, run: async () => ({ failure: 'timeout' }) } } }, { taskId: v.id })).toBe('failed');
     const failed = await fx.task(v.id);
     expect(failed).toMatchObject({ status: 'failed', failure: 'timeout', costIsEstimate: true });

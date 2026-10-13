@@ -16,9 +16,9 @@
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
  * of TASK_SAYS's sentences with its code, and a zod failure is logged by field
  * paths and codes only. Answers are checked against their contracts on the way
- * out. Nothing here logs a task's words. While tasks are switched off
- * (FLINT_ASSETS=off) the lists still answer, an asset can still be turned off,
- * and everything else is refused with a sentence.
+ * out. Nothing here logs a task's words. While tasks are switched off (the
+ * default; FLINT_ASSETS=on turns them on) every route here answers with one
+ * sentence saying so, before it reads its input or the database.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -36,7 +36,7 @@ export interface TaskRouteDeps {
   db: Db;
   need: (scope: RuntimeScope) => (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
   tz: string;
-  /** False while tasks and assets are switched off (FLINT_ASSETS=off). */
+  /** True only while tasks and assets are switched on (FLINT_ASSETS=on). */
   on: boolean;
 }
 
@@ -64,14 +64,13 @@ const AssetVerb = z.object({ id: AssetId, verb: z.enum(['on', 'off']) }).strict(
 export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void {
   const { db, need, tz } = d;
   const pre = { preHandler: need('proposals') };
-  /** Anything that would start or change work, while tasks are switched off. */
-  const live = () => {
-    if (!d.on) throw new Refused(409, SAY.off);
-  };
-
-  /** A refusal as Will reads it, with its code; anything else to the app's handler. */
+  /**
+   * A refusal as Will reads it, with its code; anything else to the app's
+   * handler. Switched off, the refusal is the whole answer: no route's own code runs.
+   */
   const guarded = <T>(fn: (req: FastifyRequest) => Promise<T>) => async (req: FastifyRequest, reply: FastifyReply) => {
     try {
+      if (!d.on) throw new Refused(409, SAY.off);
       return await fn(req);
     } catch (err) {
       if (!(err instanceof Refused)) throw err;
@@ -85,7 +84,7 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
     }
   };
 
-  app.get('/v1/assets', pre, guarded(async () => out(AssetsPage, await assetsPage(db, { on: d.on }))));
+  app.get('/v1/assets', pre, guarded(async () => out(AssetsPage, await assetsPage(db))));
 
   app.post('/v1/assets/:id/:verb', pre, guarded(async (req) => {
     const { id, verb } = parse(AssetVerb, req.params);
@@ -94,7 +93,6 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
       await turnOff(db, id);
       return out(TaskDone, { ok: true });
     }
-    live();
     return out(TaskCardFiled, await fileEnable(db, id));
   }));
 
@@ -110,15 +108,11 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
     return out(TaskAnswer, { task });
   }));
 
-  app.post('/v1/tasks', pre, guarded(async (req) => {
-    live();
-    return out(TaskFiled, await createTask(db, parse(NewTaskBody, req.body)));
-  }));
+  app.post('/v1/tasks', pre, guarded(async (req) => out(TaskFiled, await createTask(db, parse(NewTaskBody, req.body)))));
 
   app.post('/v1/tasks/:id/:verb', pre, guarded(async (req) => {
     const { id, verb } = parse(TaskVerb, req.params);
     parse(EmptyBody, req.body ?? {});
-    live();
     if (verb === 'cancel') {
       const r = await cancelTask(db, id);
       return 'ok' in r ? out(TaskDone, r) : out(TaskCardFiled, r);

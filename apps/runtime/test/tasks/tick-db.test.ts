@@ -100,16 +100,28 @@ describe.skipIf(NO_DB)('the task tick on flint_test', () => {
   });
   afterAll(async () => db?.$disconnect());
 
-  it('Health: off while no asset that runs tasks is on or tasks are switched off; idle, moving, stuck, or stopped by a rule', async () => {
-    const tasks = async (config: Record<string, unknown> = {}, now = new Date()) =>
-      (await checkComponents({ db, config: { home: '/tmp/none', triage: false, tz: 'UTC', ...config }, now, sources: [] })).find((c) => c.component === 'tasks');
-    expect(await tasks({ assets: false })).toEqual({ component: 'tasks', status: 'disabled' });
+  it('Health: off, and nothing of a task or an asset read, unless tasks are switched on; on, off while no asset that runs tasks is on; idle, moving, stuck, or stopped by a rule', async () => {
+    // Every read of the task and asset tables through this client is counted.
+    const read: string[] = [];
+    const watched = new Proxy(db, {
+      get: (target, key) => {
+        if (key === 'task' || key === 'asset' || key === 'taskOutput') read.push(key);
+        const v = Reflect.get(target, key) as unknown;
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const tasks = async (config: Record<string, unknown> = { assets: true }, now = new Date()) =>
+      (await checkComponents({ db: watched, config: { home: '/tmp/none', triage: false, tz: 'UTC', ...config }, now, sources: [] })).find((c) => c.component === 'tasks');
+    // As it ships (unset) and switched off: the row is Off although the watcher is on, and nothing was read.
+    for (const config of [{}, { assets: false }]) expect(await tasks(config)).toEqual({ component: 'tasks', status: 'disabled' });
+    expect(read).toEqual([]);
     expect(await tasks()).toEqual({ component: 'tasks', status: 'ok', detail: TASK_HEALTH.none });
+    expect(read).toContain('asset');
     const t = await fx.dispatched(await fx.ciRun('wpf002/health'));
     await runTaskJob({ db, bus }, { taskId: t.id });
     // Still out an hour past the day the tick gives it: the tick is not running.
-    expect(await tasks({}, later(STALE_MS + 30 * 60_000))).toEqual({ component: 'tasks', status: 'ok' });
-    expect(await tasks({}, later(STALE_MS + 2 * HOUR))).toEqual({ component: 'tasks', status: 'degraded', detail: TASK_HEALTH.stuck(1) });
+    expect(await tasks({ assets: true }, later(STALE_MS + 30 * 60_000))).toEqual({ component: 'tasks', status: 'ok' });
+    expect(await tasks({ assets: true }, later(STALE_MS + 2 * HOUR))).toEqual({ component: 'tasks', status: 'degraded', detail: TASK_HEALTH.stuck(1) });
     expect(TASK_HEALTH.stuck(3)).toBe('3 tasks are past their time and haven’t been ended.');
     await fx.policy('task.check_bar', 'forbidden');
     expect(await tasks()).toEqual({ component: 'tasks', status: 'degraded', detail: TASK_HEALTH.stopped });

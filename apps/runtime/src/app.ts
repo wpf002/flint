@@ -92,8 +92,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   const { db, config } = deps;
   const rp: WebAuthnRelyingParty | undefined = config.rp;
-  // P5: tasks and assets work unless they are switched off for a rollback (FLINT_ASSETS=off).
-  const assetsOn = config.assets ?? true;
+  // P5: tasks and assets work only while they are switched on (FLINT_ASSETS=on).
+  const assetsOn = config.assets ?? false;
   // BigInt columns (AuditEntry.seq, BackupRun.bytes) have no JSON form of their own.
   app.setReplySerializer((payload) => JSON.stringify(payload, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)));
 
@@ -208,7 +208,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // A job's cards are filed by the job, in this process. Over the wire an origin is only a claim, and a
     // `runtime:` one would file under a job's templates and its standing: refused, whoever holds the token.
     if (body.origin.startsWith('runtime:')) throw new Refused(400, GOAL_SAYS.runtimeOrigin);
-    // Switched off for a rollback: no task or asset card is filed.
+    // Switched off: no task or asset card is filed.
     if (!assetsOn && isTaskCard(body.action)) throw new Refused(409, TASK_SAYS.off);
     const created = await createProposal(db, body, actor(req));
     return reply.code(201).send(created);

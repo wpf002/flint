@@ -374,11 +374,11 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
 }
 
 /**
- * Tasks (P5). Always scheduled, unless they are switched off for a rollback
- * (FLINT_ASSETS=off: then this is empty, startJobs unschedules the tick and
- * nothing is worked). With no asset on there is no task, and the jobs idle:
- * what is on is Will's signed cards, not a setting. Job data is a task's id,
- * checked strictly; log lines carry ids, classes and counts.
+ * Tasks (P5). Scheduled only while they are switched on (FLINT_ASSETS=on);
+ * otherwise this is empty, startJobs unschedules the tick and nothing is
+ * worked or read. On, with no asset on, there is no task and the jobs idle:
+ * what runs is still Will's signed cards. Job data is a task's id, checked
+ * strictly; log lines carry ids, classes and counts.
  */
 export function taskJobs(ctx: JobContext): JobSpec[] {
   if (!ctx.config.assets) return [];
