@@ -10,6 +10,8 @@
  * nothing claimed and no model request sent.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { PLACE_ASK_EVERY_MS, PLACE_MAX_AGE_MS } from '@flint/policy';
 import { LocalModels } from '../../src/model/here';
 import { judge } from '../../src/triage/judge';
@@ -196,6 +198,86 @@ describe('what the runtime knows of the models on this Mac', () => {
     expect(seen[0]!.body).toBeUndefined();
   });
 });
+
+describe('the one reader of Ollama’s lists', () => {
+  const both = (installed: unknown[], loaded: unknown[]) => listening(() => tags(installed), (async () => tags(loaded)) as unknown as typeof fetch);
+
+  it('gives each list as Ollama gave it, and what the listing said is what the next local call goes by', async () => {
+    const models = new LocalModels();
+    const o = both([ALIAS, ...HERE], [{ name: MODEL }]);
+    expect(await models.list({ url: URL_ }, '/api/tags', o.fetch)).toEqual([ALIAS, ...HERE]);
+    expect(await models.list({ url: URL_ }, '/api/ps', o.fetch)).toEqual([{ name: MODEL }]);
+    expect(o.seen).toEqual([{ method: 'GET', url: `${URL_}/api/tags` }, { method: 'GET', url: `${URL_}/api/ps` }]);
+    // A local call right after asks nothing more: the listing a health run heard is believed.
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    expect(await models.runsHere({ url: URL_, model: 'mine' }, o.fetch)).toBe(false);
+    expect(o.seen).toHaveLength(2);
+    // Asked for again, it is asked now, whatever was heard before.
+    await models.list({ url: URL_ }, '/api/tags', o.fetch);
+    expect(o.seen).toHaveLength(3);
+  });
+
+  it('what is loaded says nothing of where a model runs: only the listing is taken into the record', async () => {
+    const models = new LocalModels();
+    const o = both([], [{ name: MODEL }]);
+    expect(await models.list({ url: URL_ }, '/api/ps', o.fetch)).toEqual([{ name: MODEL }]);
+    const sent = o.seen.length;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
+    // It had to ask for the listing itself.
+    expect(o.seen.slice(sent)).toEqual([{ method: 'GET', url: `${URL_}/api/tags` }]);
+  });
+
+  it('an address that is not this machine, or one a proxy would carry, is asked nothing', async () => {
+    const models = new LocalModels();
+    const o = both(HERE, HERE);
+    for (const url of ['http://10.0.0.5:11434', 'https://ollama.com', 'http://127.0.0.1.example.com:11434', 'not a url']) {
+      expect(await models.list({ url }, '/api/tags', o.fetch), url).toBeUndefined();
+      expect(await models.list({ url }, '/api/ps', o.fetch), url).toBeUndefined();
+    }
+    expect(await models.list({ url: URL_, proxied: true }, '/api/tags', o.fetch)).toBeUndefined();
+    expect(await models.list({ url: URL_, proxied: true }, '/api/ps', o.fetch)).toBeUndefined();
+    expect(o.seen).toEqual([]);
+  });
+
+  it('an answer that is no list, a failure and a hang are all no list', async () => {
+    for (const bad of [() => new Response('', { status: 503 }), () => new Response('<html>'), () => new Response('{"models":"many"}'), () => new Response('', { status: 404 }), () => { throw new Error('ECONNREFUSED'); }, hangs]) {
+      const models = new LocalModels({ timeoutMs: 30 });
+      expect(await models.list({ url: URL_ }, '/api/tags', listening(bad).fetch)).toBeUndefined();
+      expect(await models.list({ url: URL_ }, '/api/ps', listening(() => tags(HERE), (async () => bad()) as unknown as typeof fetch).fetch)).toBeUndefined();
+    }
+    expect(await new LocalModels().list({ url: URL_ }, '/api/tags', listening(() => new Response('{"models":null}')).fetch)).toEqual([]);
+  });
+
+  it('nothing else in the runtime reads Ollama’s lists, and every file that asks a model asks here first', () => {
+    const src = join(__dirname, '..', '..', 'src');
+    const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []));
+    // Code only: a comment may name what the code must never do.
+    const code = (f: string) => readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const all = files(src);
+    expect(all.length).toBeGreaterThan(100);
+    const here = join(src, 'model', 'here.ts');
+    const askers: string[] = [];
+    for (const f of all) {
+      const c = code(f);
+      // The lists are fetched in one file. Health names the two paths when it asks the reader for them, and nothing more.
+      if (/\/api\/(tags|ps)\b/.test(c)) expect([here, join(src, 'health', 'machine.ts')], f).toContain(f);
+      if (f !== here) expect(c, f).not.toMatch(/pathPrefix: [^,]*\/api\/(tags|ps)/);
+      // Whoever builds a provider for a local model, or names the chat endpoint, asks first.
+      if (/new OllamaProvider\(|\/api\/chat/.test(c)) {
+        askers.push(f.slice(src.length + 1));
+        expect(c, f).toMatch(/\.runsHere\(d\.ollama, d\.fetch \?\? fetch\)/);
+        // And asks before it builds anything to send with.
+        expect(c.indexOf('.runsHere('), f).toBeLessThan(c.indexOf('new OllamaProvider('));
+        expect(c.indexOf('.runsHere('), f).toBeLessThan(c.indexOf('scopedFetch('));
+      }
+    }
+    expect(askers.sort()).toEqual(LOCAL_CALLERS);
+    expect(code(here)).toContain("scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }]");
+  });
+});
+
+/** Every file in the runtime that asks a local model. A new one is added here, and to the callers below. */
+const LOCAL_CALLERS = ['goals/planner.ts', 'triage/judge.ts'];
 
 // ── every caller ────────────────────────────────────────────────────────────
 

@@ -184,7 +184,9 @@ describe('planDiff (stub Ollama)', () => {
     }
     const planner = readFileSync(join(dirs[0]!, 'planner.ts'), 'utf8');
     expect(planner).toContain("scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }]");
-    expect(readFileSync(join(dirs[1]!, 'here.ts'), 'utf8')).toContain("scopedFetch([{ origin, pathPrefix: '/api/tags', methods: ['GET'] }]");
+    const here = readFileSync(join(dirs[1]!, 'here.ts'), 'utf8');
+    expect(here).toContain("scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }]");
+    expect(here).toContain("export type ListPath = '/api/tags' | '/api/ps';");
   });
 
   it('non-template output is refused: extra keys, free text, an unknown template, ids the goal does not have, done', async () => {

@@ -25,6 +25,7 @@ import {
   standbyModelCheck, daysUntil, diskCheck, freeBytes, gigabytes, localModelCheck, localModels, modelName, readMachine, remoteAccess, remoteAccessCheck, runFixed,
   type RemoteAccess, type Run,
 } from '../src/health/machine';
+import { LocalModels as ModelReader } from '../src/model/here';
 
 const NOW = new Date('2026-10-12T18:00:00Z');
 const DAY = 86_400_000;
@@ -253,6 +254,26 @@ describe('the local models', () => {
       expect(none, url).toEqual([]);
     }
     for (const url of ['http://localhost:11434', 'http://[::1]:11434']) expect(await localModels(url, lists(['x'], [])), url).toBeDefined();
+  });
+
+  it('Health reads through the runtime’s one reader, so what it saw is what the next local call goes by', async () => {
+    const reader = new ModelReader();
+    const calls: Array<{ url: string; method: string; redirect: unknown }> = [];
+    const f = lists(['qwen2.5:14b'], [], calls);
+    expect((await localModels('http://127.0.0.1:11434', f, reader))!.installed.has('qwen2.5:14b')).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(await reader.runsHere({ url: 'http://127.0.0.1:11434', model: 'qwen2.5:14b' }, f)).toBe(true);
+    expect(await reader.runsHere({ url: 'http://127.0.0.1:11434', model: 'gemma3:4b' }, f)).toBe(false);
+    expect(calls).toHaveLength(2);
+    // And an address Node's env proxy would carry is asked nothing: the lists are unread, never guessed.
+    const none: Array<{ url: string; method: string; redirect: unknown }> = [];
+    expect(await localModels({ url: 'http://127.0.0.1:11434', proxied: true }, lists(['x'], ['x'], none), reader)).toBeUndefined();
+    expect(none).toEqual([]);
+    // A name is one model however it is written, as every local call reads it.
+    const m = await localModels('http://127.0.0.1:11434', lists(['Qwen2.5:14B', 'LLaMA3.2'], ['qwen2.5:14b']), reader);
+    const up = { component: 'ollama', status: 'ok' } as const;
+    expect(localModelCheck(up, 'qwen2.5:14b', m)).toMatchObject({ status: 'ok', detail: 'The local model is loaded.' });
+    expect(standbyModelCheck('llama3.2', m)).toMatchObject({ status: 'ok' });
   });
 
   it('a list that cannot be read is no list at all: never half of one', async () => {

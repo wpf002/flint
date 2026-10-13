@@ -13,8 +13,9 @@
  *    only a state, a reason from a fixed list, and the date the sign-in runs
  *    out. It is asked over its socket on this Mac, and no network call is made.
  *  - Models: Ollama's own two lists (what is installed, what is loaded), on
- *    this Mac's own address only, through the same scoped fetch the sources
- *    use, with those two paths allowed and nothing else. Asking costs nothing
+ *    this Mac's own address only, through the runtime's one reader of them
+ *    (model/here.ts: the scoped fetch, those two paths and nothing else), so
+ *    what Health sees is what every local call goes by. Asking costs nothing
  *    and loads no model.
  *
  * Each check is a sentence built here from numbers and fixed words: never a
@@ -25,7 +26,8 @@ import { existsSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { scopedFetch } from '../policy/egress.js';
+import { canonicalModel, listedModels } from '@flint/policy';
+import { LOCAL_MODELS, type ListPath, type LocalModels as ModelReader } from '../model/here.js';
 import type { ComponentCheck } from './checks.js';
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -195,7 +197,8 @@ export function remoteAccessCheck(r: RemoteAccess, now: Date): ComponentCheck {
 // ---------------------------------------------------------------------------
 // Local models
 
-const ModelList = z.object({ models: z.array(z.object({ name: z.string().min(1).max(200) }).passthrough()).max(5000) }).passthrough();
+/** A list Health takes: every row names its model. One that does not is no list at all, never half of one. */
+const ModelRows = z.array(z.object({ name: z.string().min(1).max(200) }).passthrough()).max(5000);
 
 export interface LocalModels {
   installed: ReadonlySet<string>;
@@ -208,39 +211,28 @@ export interface LocalModels {
   elsewhere: ReadonlySet<string>;
 }
 
-/** A model's name as Ollama lists it: one with no tag is its `latest`. */
-export const modelName = (name: string): string => (/:[^/]*$/.test(name) ? name : `${name}:latest`);
+/** A model's name as Ollama lists it: lower case, and one with no tag is its `latest` (@flint/policy's rule, the one every local call goes by). */
+export const modelName = canonicalModel;
 
 /**
  * What Ollama has installed and what it has loaded right now. Undefined when
  * it cannot be asked or its answer is not a list. Only an address on this Mac
  * is ever asked, and only for these two lists.
  */
-export async function localModels(url: string, base: typeof fetch = fetch): Promise<LocalModels | undefined> {
-  let origin: string;
+export async function localModels(at: string | { url: string; proxied?: boolean }, base: typeof fetch = fetch, reader: ModelReader = LOCAL_MODELS): Promise<LocalModels | undefined> {
+  const ollama = typeof at === 'string' ? { url: at } : at;
   try {
-    const u = new URL(url);
-    if (u.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) return undefined;
-    origin = u.origin;
+    // The runtime's Ollama is plain http on this Mac (config.ts): anything else is not asked.
+    if (new URL(ollama.url).protocol !== 'http:') return undefined;
   } catch {
     return undefined;
   }
-  const get = scopedFetch([{ origin, pathPrefix: '/api/tags', methods: ['GET'] }, { origin, pathPrefix: '/api/ps', methods: ['GET'] }], base, 3_000);
-  const rows = async (path: '/api/tags' | '/api/ps'): Promise<Array<{ name: string; remote: boolean }> | undefined> => {
-    let res: Response | undefined;
-    try {
-      res = await get(`${origin}${path}`);
-      if (!res.ok) return undefined;
-      const said = ModelList.safeParse(await res.json());
-      if (!said.success) return undefined;
-      // Anything at all under either key is Ollama saying the model is not run here.
-      const names = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
-      return said.data.models.map((m) => ({ name: modelName(m.name), remote: names(m.remote_host) || names(m.remote_model) }));
-    } catch {
-      return undefined;
-    } finally {
-      await res?.body?.cancel().catch(() => {});
-    }
+  const rows = async (path: ListPath): Promise<Array<{ name: string; remote: boolean }> | undefined> => {
+    const said = ModelRows.safeParse(await reader.list(ollama, path, base));
+    if (!said.success) return undefined;
+    // Anything at all said of a remote host or a remote model is Ollama saying the model is not run here, and a
+    // model listed twice, once as run elsewhere, is run elsewhere (listedModels: the rule every local call goes by).
+    return listedModels(said.data).map((m) => ({ name: modelName(m.name), remote: !m.here }));
   };
   const installed = await rows('/api/tags');
   const loaded = await rows('/api/ps');
@@ -248,7 +240,6 @@ export async function localModels(url: string, base: typeof fetch = fetch): Prom
   return {
     installed: new Set(installed.map((m) => m.name)),
     loaded: new Set(loaded.map((m) => m.name)),
-    // Listed twice, once as run elsewhere: it is run elsewhere.
     elsewhere: new Set(installed.filter((m) => m.remote).map((m) => m.name)),
   };
 }
@@ -320,11 +311,11 @@ export interface MachineDeps {
 }
 
 /** Everything above, read once. Each part fails on its own: one that cannot be read leaves the others as they are. */
-export async function readMachine(config: { home: string; ollama?: { url: string } }, now: Date, deps: MachineDeps = {}): Promise<MachineReading> {
+export async function readMachine(config: { home: string; ollama?: { url: string; proxied?: boolean } }, now: Date, deps: MachineDeps = {}): Promise<MachineReading> {
   const [free, remote, models] = await Promise.all([
     freeBytes(config.home, deps.stat),
     remoteAccess(config.home, now, { ...(deps.run ? { run: deps.run } : {}), ...(deps.exists ? { exists: deps.exists } : {}) }).catch((): RemoteAccess => ({ state: 'unknown' })),
-    config.ollama ? localModels(config.ollama.url, deps.fetch).catch(() => undefined) : Promise.resolve(undefined),
+    config.ollama ? localModels(config.ollama, deps.fetch).catch(() => undefined) : Promise.resolve(undefined),
   ]);
   return { ...(free !== undefined ? { freeBytes: free } : {}), remote, ...(models ? { models } : {}) };
 }

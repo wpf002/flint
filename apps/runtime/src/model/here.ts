@@ -26,16 +26,24 @@
  * heard, not listed, listed with a remote host, or an answer that is no
  * listing: not here.
  *
- * The request can reach only `/api/tags` on that loopback address
+ * This is also the runtime's ONE reader of Ollama's lists (`list`): Settings >
+ * Health reads what is installed and what is loaded through it
+ * (health/machine.ts), and what a health run hears of the listing is what the
+ * next local call believes.
+ *
+ * A request can reach only `/api/tags` or `/api/ps` on that loopback address
  * (scopedFetch, no redirect followed), has two seconds, and is given up after
  * them even when the transport would wait longer. Listing models loads nothing
  * and costs nothing, so it needs no slot and no cap.
  */
-import { ModelPlaces, PLACE_ASK_EVERY_MS, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid } from '@flint/policy';
+import { ModelPlaces, PLACE_ASK_EVERY_MS, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type PlaceSaid } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 
-/** A listing longer than this is not read. */
+/** A list longer than this is not read. */
 export const LISTING_MAX_CHARS = 4_000_000;
+
+/** Ollama's two lists: what is installed, and what is loaded now. */
+export type ListPath = '/api/tags' | '/api/ps';
 
 /** The Ollama a local call is about to ask, as config.ts read it. */
 export interface AskedOllama {
@@ -57,7 +65,7 @@ export interface LocalModelsOptions {
 
 export class LocalModels {
   readonly #places: ModelPlaces;
-  readonly #asking = new Map<string, Promise<void>>();
+  readonly #asking = new Map<string, Promise<PlaceSaid | undefined>>();
 
   constructor(private readonly opts: LocalModelsOptions = {}) {
     this.#places = new ModelPlaces({ ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : {}), ...(opts.now ? { now: opts.now } : {}) });
@@ -80,45 +88,65 @@ export class LocalModels {
     return this.#places.runsHere(origin, ollama.model);
   }
 
-  /** One request at a time per Ollama: callers that ask together share the answer. */
-  #listen(origin: string, base: typeof fetch): Promise<void> {
+  /**
+   * One of Ollama's two lists, as it gave it: the rows of `models` from `/api/tags` (what is installed) or
+   * `/api/ps` (what is loaded now). Undefined when the address is not this machine (nothing is asked), or it
+   * did not answer with a list. Asked now, whatever was heard before; the listing is remembered as `runsHere`
+   * remembers it. Never throws.
+   */
+  async list(ollama: Pick<AskedOllama, 'url' | 'proxied'>, path: ListPath, base: typeof fetch = fetch): Promise<readonly unknown[] | undefined> {
+    if (ollama.proxied === true || !onThisMachine(ollama.url)) return undefined;
+    const origin = new URL(ollama.url).origin;
+    const said = path === '/api/tags' ? await this.#listen(origin, base) : await this.#ask(origin, path, base);
+    return said && said !== 'other' ? said.ollama : undefined;
+  }
+
+  /** One request for the listing at a time per Ollama: callers that ask together share the answer. */
+  #listen(origin: string, base: typeof fetch): Promise<PlaceSaid | undefined> {
     const running = this.#asking.get(origin);
     if (running) return running;
-    const asked = this.#ask(origin, base).finally(() => this.#asking.delete(origin));
+    const asked = this.#ask(origin, '/api/tags', base).finally(() => this.#asking.delete(origin));
     this.#asking.set(origin, asked);
     return asked;
   }
 
-  /** Ask that Ollama for its models. Never throws; an answer that says nothing either way leaves what is known to age out. */
-  async #ask(origin: string, base: typeof fetch): Promise<void> {
+  /**
+   * Ask that Ollama for one of its lists. Never throws. What the listing (`/api/tags`) says is taken into the
+   * record; an answer that says nothing either way leaves what is known to age out.
+   */
+  async #ask(origin: string, path: ListPath, base: typeof fetch): Promise<PlaceSaid | undefined> {
     const at = this.#now();
     const timeoutMs = this.opts.timeoutMs ?? PLACE_TIMEOUT_MS;
-    const get = scopedFetch([{ origin, pathPrefix: '/api/tags', methods: ['GET'] }], base, timeoutMs);
+    const get = scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }], base, timeoutMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let gaveUp = false;
     // The transport is told to stop after the timeout; this stops waiting for it even if it does not.
-    const deadline = new Promise<void>((resolve) => {
+    const deadline = new Promise<undefined>((resolve) => {
       timer = setTimeout(() => {
         gaveUp = true;
-        resolve();
+        resolve(undefined);
       }, timeoutMs + 250);
       timer.unref?.();
     });
-    const answer = (async (): Promise<void> => {
+    const answer = (async (): Promise<PlaceSaid | undefined> => {
       try {
-        const r = await get(`${origin}/api/tags`, { method: 'GET' });
+        const r = await get(`${origin}${path}`, { method: 'GET' });
         let text = '';
         if (r.ok) text = await r.text();
         else await r.body?.cancel().catch(() => {});
-        // Too late, or too long to be a listing: nothing is learned.
-        if (gaveUp || text.length > LISTING_MAX_CHARS) return;
-        this.#places.take(origin, await placeSaid(r.status, async () => JSON.parse(text) as unknown), at);
+        // Too late, or too long to be a list: nothing is learned.
+        if (gaveUp || text.length > LISTING_MAX_CHARS) return undefined;
+        const said = await placeSaid(r.status, async () => JSON.parse(text) as unknown);
+        if (path === '/api/tags') this.#places.take(origin, said, at);
+        return said;
       } catch {
         // Down, slow or refused: nothing is learned, and what was known ages out.
+        return undefined;
       }
     })();
-    await Promise.race([answer, deadline]);
+    const said = await Promise.race([answer, deadline]);
     if (timer) clearTimeout(timer);
+    return said;
   }
 
   /** Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`: what `runsHere` then believes (tests). */
