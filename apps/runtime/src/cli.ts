@@ -29,6 +29,10 @@
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
+ *   pnpm --filter @flint/runtime rules                list Will's rules that are switched on, each under its id
+ *   pnpm --filter @flint/runtime rules --off <id>...  file the card that switches those rules off, for Will to
+ *                                                    sign in the console (the only way a rule that holds an
+ *                                                    action back goes off)
  *   pnpm --filter @flint/runtime predictions-on [key]...
  *                                                    file the Turn On Predictions card (P4), for Will to
  *                                                    sign in the console: every number Flint can
@@ -72,6 +76,7 @@ import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
+import { RULES_SAY, proposeRulesOff, rulesLines, rulesOffFiledSays, rulesOn } from './governance/rules.js';
 import { PREDICTIONS_OFF_SAYS, cardFiledSays, proposeForecasts } from './predict/enable.js';
 import { FORECAST_SERIES_KEYS } from './predict/series.js';
 import { Refused } from './governance/proposals.js';
@@ -171,6 +176,29 @@ async function main(): Promise<void> {
     try {
       const p = await proposeEnable(db, source);
       console.log(`${p.deduped ? 'already filed' : 'filed'}: proposal ${p.id}, to turn on ${source}. Sign it in the console (Approvals) with your key; it runs once signed.`);
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
+  if (process.argv[2] === 'rules') {
+    const rest = process.argv.slice(3);
+    // `rules` lists; `rules --off <id>...` files the card. Anything else is said, and nothing is filed.
+    if (rest.length && rest[0] !== '--off') throw new Error('rules: run it alone to list your rules, or with --off <id>... to file the card that switches some off');
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      if (!rest.length) {
+        for (const line of rulesLines(await rulesOn(db), config.tz)) console.log(line);
+        return;
+      }
+      if (rest.length === 1) throw new Refused(400, RULES_SAY.none);
+      console.log(rulesOffFiledSays(await proposeRulesOff(db, rest.slice(1))));
+    } catch (err) {
+      // A refusal is Flint's own sentence: said as it is, with nothing filed, and the command fails.
+      if (!(err instanceof Refused)) throw err;
+      console.log(`Not filed: ${err.message}`);
+      process.exitCode = 1;
     } finally {
       await db.$disconnect();
     }
@@ -295,7 +323,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | rules [--off <id>...] | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const action = ACTION[cmd];

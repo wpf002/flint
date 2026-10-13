@@ -39,6 +39,8 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/goals/candidates.ts': { minutes: [WEEK, WEEK], files: 'goal.propose and world.commitment.from_chat' },
   'apps/runtime/src/governance/internal.ts': { minutes: [WEEK], files: 'world.source.enable' },
   'apps/runtime/src/governance/promotion.ts': { minutes: [WEEK], files: 'policy.change' },
+  // A switch-off's card is held to the same bound by its own guard (action_policy_off_guard), though policy.change is not one of the seven.
+  'apps/runtime/src/governance/rules.ts': { minutes: [WEEK], files: 'policy.change that switches rules off (the rules command)' },
   'apps/runtime/src/surface/act.ts': { minutes: [WEEK], files: 'a recommendation\'s action' },
   'apps/runtime/src/world/person-create.ts': { minutes: [24 * 60], files: 'world.person.create' },
   'apps/runtime/src/predict/enable.ts': { minutes: [WEEK], files: 'forecast.series.enable, from the command line (predictions-on)' },

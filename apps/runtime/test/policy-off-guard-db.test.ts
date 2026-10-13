@@ -21,18 +21,25 @@
  *     acceptance) now stand; rows from before the migration behave the same.
  *  4. The runtime's own path: the card is filed, signed and carried out, and a
  *     refusal by the database is a sentence and an audit entry, never a retry.
+ *  5. The `rules` command: Will's rules in sentences, and the card it files.
  * Synthetic text only.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import pg from 'pg';
 import { actionKey, digestOf, patternMatches, resolveTier, suggestionGoalId, type McpFacts, type PolicyRow, type Tier, type TierContext, type TierDecision } from '@flint/policy';
-import { NO_DB, freshDb, withClient, withoutPolicyOffGuard, pgConfig, pgError, id, HEX, type TestUrls } from './db';
+import { NO_DB, RUNTIME, freshDb, withClient, withoutPolicyOffGuard, pgConfig, pgError, id, HEX, type TestUrls } from './db';
 import { p5Kit, sleep, type CardOptions, type P5Kit, type Q } from './p5';
 import { enrollTestKey } from './sign';
 import { createDb } from '../src/db';
 import { approveProposal, createProposal } from '../src/governance/proposals';
 import { POLICY_OFF_REFUSED, POLICY_OFF_SAYS, runInternal } from '../src/governance/internal';
+import { RULES_SAY, proposeRulesOff, ruleSays, rulesLines, rulesOffFiledSays, rulesOn } from '../src/governance/rules';
 
 // ---- The rule, and what "looser" means -------------------------------------------------------------------------
 
@@ -1085,5 +1092,99 @@ describe.skipIf(NO_DB)('a signed switch-off, as the runtime files and carries it
     // Asked again, it has failed: nothing is retried.
     await expect(runInternal(db, pid, undefined, 'UTC', 'will:console')).rejects.toMatchObject({ status: 409, message: 'It already failed.' });
     expect((await entries(pid)).length).toBe(3);
+  });
+
+  describe('the rules command', () => {
+    const TZ = 'America/Chicago';
+    const at = (iso: string) => new Date(iso);
+
+    it('says each rule as a sentence, by the action’s plain name: what it does, its limit and its last day', () => {
+      const now = at('2026-10-13T12:00:00Z');
+      const row = (pattern: string, tier: string, more: Record<string, unknown> = {}) => ({ id: 'ap1', pattern, tier, dailyCap: null, scoped: false, expiresAt: at('2027-04-05T05:00:00Z'), ...more });
+      expect(ruleSays(row('backup.local', 'alone'), TZ, now)).toBe('Flint may run Backup on its own, until April 5, 2027.');
+      expect(ruleSays(row('goal.propose', 'alone', { dailyCap: 3 }), TZ, now)).toBe('Flint may run Suggest a Goal from Chat on its own, up to 3 a day, until April 5, 2027.');
+      expect(ruleSays(row('world.sync.github', 'alone', { scoped: true, dailyCap: 0 }), TZ, now)).toBe('Flint may run World Sync Github on its own, within the limits you signed, up to 0 a day, until April 5, 2027.');
+      expect(ruleSays(row('goal.propose', 'approval', { dailyCap: 9, scoped: true }), TZ, now)).toBe('Flint asks you each time before it runs Suggest a Goal from Chat, until April 5, 2027.');
+      expect(ruleSays(row('restore.*', 'forbidden'), TZ, now)).toBe('Flint may not run Everything Under Restore, until April 5, 2027.');
+      // One that has ended and is still switched on says so: it holds nothing today, and is listed until it is switched off.
+      expect(ruleSays(row('goal.propose', 'approval', { expiresAt: at('2026-10-01T05:00:00Z') }), TZ, now)).toBe('Flint asks you each time before it runs Suggest a Goal from Chat, and ended on October 1, 2026.');
+      // The day is Will's day, wherever the Mac's clock is.
+      expect(ruleSays(row('backup.local', 'alone', { expiresAt: at('2027-04-05T03:00:00Z') }), TZ, now)).toBe('Flint may run Backup on its own, until April 4, 2027.');
+      expect(rulesLines([], TZ, now)).toEqual(['You have no rules switched on.']);
+      expect(rulesLines([row('backup.local', 'alone')], TZ, now)).toEqual([
+        'You have 1 rule switched on.',
+        '  ap1  Flint may run Backup on its own, until April 5, 2027.',
+        'To switch one off, run this with its id, then sign the card in the console (Approvals):',
+        '  cd ~/flint && pnpm --silent --filter @flint/runtime rules --off <id>',
+      ]);
+      expect(rulesLines([row('backup.local', 'alone'), row('restore.*', 'forbidden', { id: 'ap2' })], TZ, now)[0]).toBe('You have 2 rules switched on.');
+      expect(rulesOffFiledSays({ id: 'pr1', deduped: false, rules: 1 })).toBe('filed: proposal pr1, to switch off 1 rule. Sign it in the console (Approvals) with your key; it goes off once signed.');
+      expect(rulesOffFiledSays({ id: 'pr1', deduped: true, rules: 3 })).toBe('already filed: proposal pr1, to switch off 3 rules. Sign it in the console (Approvals) with your key; they go off once signed.');
+    });
+
+    it('lists what is on, files one card for the rules named (the same card when filed again), and files nothing it cannot', async () => {
+      await k.owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
+      const f = fam();
+      const [wide, brake, gone] = await rules([{ pattern: `${f}.*`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.gone`, tier: 'alone' }]);
+      await k.app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [gone!.id]);
+      expect((await rulesOn(db)).map((r) => [r.id, r.pattern, r.tier, r.dailyCap, r.scoped])).toEqual([[wide!.id, `${f}.*`, 'alone', 3, false], [brake!.id, `${f}.propose`, 'approval', null, false]]);
+      const filed = await proposeRulesOff(db, [brake!.id, wide!.id, brake!.id]);
+      expect([filed.deduped, filed.rules, filed.tier]).toEqual([false, 2, 'approval']);
+      const card = await db.proposal.findUniqueOrThrow({ where: { id: filed.id } });
+      expect(card).toMatchObject({
+        kind: 'policy', origin: 'cli', action: 'policy.change', status: 'pending', tainted: false, consequential: true, reason: 'Approving switches these rules off.',
+        args: { off: [{ id: wide!.id, pattern: `${f}.*`, tier: 'alone' }, { id: brake!.id, pattern: `${f}.propose`, tier: 'approval' }] },
+      });
+      expect(card.expiresAt.getTime() - card.createdAt.getTime()).toBeLessThanOrEqual(7 * 86_400_000 + 1_000);
+      // Again, in any order: the card that waits.
+      expect(await proposeRulesOff(db, [wide!.id, brake!.id])).toMatchObject({ id: filed.id, deduped: true, rules: 2 });
+      // Nothing is switched off by filing.
+      expect((await rulesOn(db)).length).toBe(2);
+      await expect(proposeRulesOff(db, [])).rejects.toMatchObject({ status: 400, message: RULES_SAY.none });
+      await expect(proposeRulesOff(db, ['no-such-rule'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
+      await expect(proposeRulesOff(db, [brake!.id, 'no-such-rule'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
+      await expect(proposeRulesOff(db, ['not an id; DROP'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
+      await expect(proposeRulesOff(db, [gone!.id])).rejects.toMatchObject({ status: 409, message: POLICY_OFF_SAYS.alreadyOff });
+      expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(1);
+      // Signed and run, both go off, and the list is empty.
+      await approveProposal(db, filed.id, await key.approve({ subjectId: filed.id, action: 'policy.change', argsDigest: filed.argsDigest }), undefined, 'will:console');
+      expect(await runInternal(db, filed.id, undefined, 'UTC', 'will:console')).toEqual({ off: 2 });
+      expect(await rulesOn(db)).toEqual([]);
+    });
+
+    it('run for real: it lists the rules under their ids, files the card, and says one sentence when it cannot', async () => {
+      await k.owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
+      const f = fam();
+      const [brake] = await rules([{ pattern: `${f}.propose`, tier: 'approval' }]);
+      // A home of its own, so the command reads no settings but the ones given here.
+      const home = mkdtempSync(join(tmpdir(), 'flint-rules-'));
+      try {
+        const env = { PATH: process.env.PATH ?? '', HOME: home, RUNTIME_ENV_FILE: join(home, 'none.env'), DATABASE_URL: urls.app, FLINT_TZ: TZ };
+        const cli = (...args: string[]) => promisify(execFile)(join(RUNTIME, 'node_modules', '.bin', 'tsx'), [join(RUNTIME, 'src', 'cli.ts'), 'rules', ...args], { cwd: RUNTIME, env })
+          .then((r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }), (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }));
+        const listed = await cli();
+        expect(listed.code, listed.stderr).toBe(0);
+        expect(listed.stdout.trim().split('\n')).toEqual(rulesLines(await rulesOn(db), TZ));
+        expect(listed.stdout).toContain(`  ${brake!.id}  Flint asks you each time before it runs `);
+        const none = await cli('--off');
+        expect([none.code, none.stdout.trim()]).toEqual([1, `Not filed: ${RULES_SAY.none}`]);
+        const unknown = await cli('--off', 'no-such-rule');
+        expect([unknown.code, unknown.stdout.trim()]).toEqual([1, `Not filed: ${RULES_SAY.unknown}`]);
+        const wrong = await cli('--all');
+        expect(wrong.code).toBe(1);
+        expect(wrong.stderr).toContain('rules: run it alone to list your rules, or with --off <id>... to file the card that switches some off');
+        expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
+        const filed = await cli('--off', brake!.id);
+        expect(filed.code, filed.stderr).toBe(0);
+        const card = await db.proposal.findFirstOrThrow({ where: { action: 'policy.change', status: 'pending' } });
+        expect(filed.stdout.trim()).toBe(rulesOffFiledSays({ id: card.id, deduped: false, rules: 1 }));
+        expect(card.args).toEqual({ off: [{ id: brake!.id, pattern: `${f}.propose`, tier: 'approval' }] });
+        expect((await cli('--off', brake!.id)).stdout.trim()).toBe(rulesOffFiledSays({ id: card.id, deduped: true, rules: 1 }));
+        // Still on: the command files a card and switches nothing off.
+        expect((await db.actionPolicy.findUniqueOrThrow({ where: { id: brake!.id } })).active).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
   });
 });
