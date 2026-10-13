@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -391,6 +391,47 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     expect(t.ran).toEqual(['server', 'runtime']);
     expect(git(deployDir, 'rev-parse', 'HEAD')).toBe(sha);
     expect(t.out).toContain(`deployed ${sha}`);
+  });
+
+  it('every look for an update leaves its time, and only a look does: not a pause, not a fetch that failed (Settings > Health reads it)', () => {
+    const mark = join(state, 'deploy-tick');
+    const at = () => (existsSync(mark) ? statSync(mark).mtimeMs : null);
+    expect(at()).toBeNull();
+    // A look that finds nothing new is still a look.
+    expect(tick().ran).toEqual([]);
+    const first = at();
+    expect(first).not.toBeNull();
+    expect(Date.now() - first!).toBeLessThan(60_000);
+    expect(readFileSync(mark, 'utf8')).toBe('');
+    // Made old by hand, the next look brings it back to now, deploy or no deploy.
+    const old = Date.now() / 1000 - 5 * 3600;
+    utimesSync(mark, old, old);
+    push('v1');
+    expect(tick().ran).toEqual(['server', 'runtime']);
+    expect(Date.now() - at()!).toBeLessThan(60_000);
+    // Paused: nothing is looked for, so the time stands still (Health says paused, with the pause's own age).
+    utimesSync(mark, old, old);
+    writeFileSync(join(state, 'deploy-hold'), '');
+    tick();
+    expect(Math.round(at()! / 1000)).toBe(Math.round(old));
+    rmSync(join(state, 'deploy-hold'));
+    // GitHub cannot be reached: not a look either.
+    const origin = join(tmp, 'origin.git');
+    renameSync(origin, `${origin}.away`);
+    expect(tick().out).toContain('fetch failed');
+    expect(Math.round(at()! / 1000)).toBe(Math.round(old));
+    renameSync(`${origin}.away`, origin);
+    tick();
+    expect(Date.now() - at()!).toBeLessThan(60_000);
+    // A state folder it cannot write to never stops a deploy.
+    rmSync(mark);
+    mkdirSync(mark);
+    chmodSync(mark, 0o500);
+    push('v2');
+    const t = tick();
+    expect(t.status).toBe(0);
+    expect(t.ran).toEqual(['server']);
+    chmodSync(mark, 0o700);
   });
 
   it('a pause a database restore left when it was killed is lifted; one whose restore is still running holds', () => {

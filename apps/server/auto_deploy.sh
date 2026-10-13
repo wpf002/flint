@@ -71,6 +71,11 @@ before=$(git rev-parse HEAD 2>/dev/null || echo none)
 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --quiet origin main || { echo "$(ts) fetch failed"; exit 0; }
 git reset --hard --quiet origin/main   # match GitHub exactly (Studio is deploy-only, never edited directly)
 after=$(git rev-parse HEAD)
+# This look happened. Settings > Health says when Flint last checked for updates from this file's time, and
+# that it has stopped checking once that is over an hour old (the runtime reads the time, and nothing else, of
+# ~/.flint/deploy-tick). Not written while updates are paused or when the fetch failed: neither is a look.
+# It can never stop a deploy.
+{ mkdir -p "$STATE" && touch "$STATE/deploy-tick"; } 2>/dev/null || true
 # Fetched, so this tick is the one that checks: a fetch that failed leaves the mark for the next.
 [ "$resumed" = 1 ] && rm -f "$HOLD_SEEN"
 
