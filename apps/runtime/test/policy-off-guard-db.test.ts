@@ -113,8 +113,10 @@ const CALLS: Array<{ action: string; mcp?: McpFacts }> = [
   { action: 'ledger.void' }, // never promoted
   { action: 'policy.change' },
   { action: 'restore.production' }, // the console's alone
-  { action: 'task.check_bar' }, // not in the code table
-  { action: 'unknown.thing' },
+  { action: 'task.check_bar' }, // promoted by name only, and then under a cap of its own (ALONE_CAPS); never from chat
+  { action: 'task.dispatch.local_worker' }, // promotable, 20 a day in code; never from chat
+  { action: 'review.local' },
+  { action: 'unknown.thing' }, // not in the code table
   { action: 'mcp:hive.do_thing', mcp: { server: 'hive', tool: 'do_thing' } },
   { action: 'mcp:hive.do_thing', mcp: { server: 'hive', tool: 'do_thing', destructiveHint: true } },
   { action: 'mcp:hive.open_position', mcp: { server: 'hive', tool: 'open_position' } },
@@ -126,7 +128,8 @@ const keyOf = (c: { action: string; mcp?: McpFacts }): string => (c.mcp?.server 
 
 const PATTERNS = [
   'goal.propose', 'goal.review.local', 'goal.*', 'goal.review.*', 'backup.prune', 'backup.local', 'backup.*', 'notify.push', 'notify.*', 'world.sync.git', 'world.sync.*', 'world.*',
-  'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'policy.change', 'restore.production', 'restore.*', 'task.check_bar', 'task.*', 'unknown.thing', 'unknown.*',
+  'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'policy.change', 'restore.production', 'restore.*', 'task.check_bar', 'task.dispatch.local_worker', 'task.dispatch.*', 'task.*',
+  'review.local', 'review.*', 'unknown.thing', 'unknown.*',
   'mcp:hive.do_thing', 'mcp:hive.open_position', 'mcp:hive.*', 'mcp:nexus.recall', 'mcp:nexus.*',
 ];
 
@@ -145,7 +148,7 @@ const pick = <T>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs
 
 /** A rule table: a few rows, mostly about one family of actions so that they meet. */
 function randomTable(r: () => number, n: number): Row[] {
-  const family = pick(r, ['goal.', 'backup.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'unknown.', '']);
+  const family = pick(r, ['goal.', 'backup.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'review.', 'unknown.', '']);
   const pool = PATTERNS.filter((p) => p.startsWith(family));
   const rows: Row[] = [];
   const size = 1 + Math.floor(r() * 6);
@@ -213,8 +216,9 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     let allowed = 0;
     let refused = 0;
     const bad: Found[] = [];
-    // Goals from chat (promotable, no cap in code) and the rule that covers the family; then an action promoted by name only.
-    for (const universe of [universeOf(['goal.propose', 'goal.*'], [null, SCOPE_A]), universeOf(['backup.prune', 'backup.*'], [null])]) {
+    // Goals from chat (promotable, no cap in code) and the rule that covers the family; an action promoted by name only;
+    // and one promoted by name only that then runs under a cap of its own (P5's acceptance, ALONE_CAPS).
+    for (const universe of [universeOf(['goal.propose', 'goal.*'], [null, SCOPE_A]), universeOf(['backup.prune', 'backup.*'], [null]), universeOf(['task.check_bar', 'task.*'], [null])]) {
       for (const table of smallTables(universe)) {
         for (const r of table) {
           if (!mayGoOff(r, table)) {
