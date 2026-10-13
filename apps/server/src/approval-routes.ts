@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { ACTION_DONE, digestOf } from '@flint/policy';
+import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, policyChangeKind } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -198,6 +198,10 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         // (Rejecting it is always allowed: that carries nothing out.) The console also sends the digest of the args
         // its card showed: the one signed must be that one too.
         if (decision === 'approve' && (!argsMatch(p) || !shownMatches(body, p.argsDigest))) return reply(res, 409, { error: DOES_NOT_MATCH });
+        // A rule card says one thing: it adds rules, or it switches rules off. One that carries both (or neither) could
+        // read as a switch-off and add a rule, so no signature is ever started for it, however it came to be filed.
+        // (The runtime files no such card and the database refuses one; this is the server's own half.)
+        if (decision === 'approve' && p.action === 'policy.change' && !policyChangeKind(p.args)) return reply(res, 409, { error: POLICY_CHANGE_SHAPE });
         return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted } }));
       }
       if (url === '/approvals/finish' && ctx.proposals) {

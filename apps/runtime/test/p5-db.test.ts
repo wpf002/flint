@@ -219,23 +219,31 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
 
       // The promotion table: a policy row Will signed.
       const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
-      const rows = [{ pattern: 'task.check_bar', tier: 'alone', expiresAt }, { pattern: 'task.*', tier: 'approval', expiresAt }];
-      const pc = await k.card('policy.change', { rows }, { kind: 'policy' });
+      // (Each on a card of its own: a card's rows are made together or not at all.)
+      const pc = await k.card('policy.change', { rows: [{ pattern: 'task.check_bar', tier: 'alone', expiresAt }] }, { kind: 'policy' });
       const alone = id('pol');
       await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.check_bar', 'alone', 'Synthetic promotion', $2, $3)`, [alone, pc.aid, expiresAt]);
+      await k.finish(pc.pid);
       await k.setStatus(app, before.id, 'accepted', `, "acceptedAuditId" = $3`, [proofBefore]);
       expect((await row('Task', before.id)).status).toBe('accepted');
 
       // A wider row at APPROVAL holds it back: the card is needed again.
+      const hold = await k.card('policy.change', { rows: [{ pattern: 'task.*', tier: 'approval', expiresAt }] }, { kind: 'policy' });
       const held = id('pol');
-      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.*', 'approval', 'Synthetic hold', $2, $3)`, [held, pc.aid, expiresAt]);
-      await k.finish(pc.pid);
+      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.*', 'approval', 'Synthetic hold', $2, $3)`, [held, hold.aid, expiresAt]);
+      await k.finish(hold.pid);
       const after = await k.taskAt('checked', a);
       const proofAfter = await k.proof(after.id);
       expect(await k.code(k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]))).toBe('42501');
+      // The row that holds it back is a brake Will set: the runtime's role cannot switch it off (policy_off_guard), so
+      // the card stays needed. His own signed card switches it off, and the promotion then stands again.
+      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [held]))).toBe('42501');
+      expect(await k.code(k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]))).toBe('42501');
+      const off = await k.card('policy.change', { off: [{ id: held, pattern: 'task.*', tier: 'approval' }] }, { kind: 'policy', origin: 'cli' });
       await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [held]);
+      await k.finish(off.pid);
       await k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]);
-      // Switched off again (as Will can at any time), it is back to his card.
+      // The promotion itself the runtime may take back at any time: switched off, it is back to his card.
       await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [alone]);
       const later = await k.taskAt('checked', a);
       expect(await k.code(k.setStatus(app, later.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(later.id)]))).toBe('42501');

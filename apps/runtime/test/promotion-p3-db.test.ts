@@ -88,6 +88,19 @@ function tonight(tz: string): Date {
   // (Run in the last ten minutes of the day, it is ten to midnight tomorrow.)
   return at.getTime() > Date.now() + 5 * 60_000 ? at : new Date(at.getTime() + DAY);
 }
+/**
+ * A card filed at these tests' own "now" (ten to midnight tonight) expires a week after THAT: up to a day later than
+ * one filed by the wall clock, as every real one is. The database carries out a rule card only if it expires within 7
+ * days of the approval that signed it (policy_off_guard), so before it is signed here the card's end is set to what a
+ * real filing has: 7 days from now. As the owner, with the card table's own rules set aside for the one statement.
+ */
+const asFiledNow = (owner: string, pid: string) => withClient(owner, async (c) => {
+  await c.query('BEGIN');
+  await c.query('ALTER TABLE "Proposal" DISABLE TRIGGER USER');
+  await c.query(`UPDATE "Proposal" SET "expiresAt" = now() + interval '7 days' WHERE id = $1`, [pid]);
+  await c.query('ALTER TABLE "Proposal" ENABLE TRIGGER USER');
+  await c.query('COMMIT');
+});
 const refusal = async (p: Promise<unknown>) => {
   const err = await p.then(() => undefined, (e: unknown) => e);
   if (!(err instanceof Refused)) throw new Error(`not refused: ${String(err)}`);
@@ -374,6 +387,7 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the P3 promotion table 
   it('signed: reviews resolve to ALONE at 20 a day and leave their trial week; every signed goal and plan action still asks', async () => {
     expect(await reviewStanding(db, new Date())).toMatchObject({ may: true, shadow: true, tier: 'approval' });
     const card = await db.proposal.findFirstOrThrow({ where: { templateId: 'p3.promotion', status: 'pending' } });
+    await asFiledNow(urls.owner, card.id);
     await approveProposal(db, card.id, await fx.key.approve({ subjectId: card.id, action: 'policy.change', argsDigest: card.argsDigest }), undefined, 'test');
     expect(await runInternal(db, card.id, undefined, TZ, 'test')).toEqual({ rows: 1 });
     const policies = await activePolicies(db);
@@ -589,6 +603,7 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
 
   it('signed: a goal suggested from chat lands without asking, 3 a day, and the database lets it in; a commitment is still a card; starting a goal is still Will’s signature, and reviews stay in their trial week', async () => {
     const card = await db.proposal.findFirstOrThrow({ where: { templateId: 'p3c.promotion', status: 'pending' } });
+    await asFiledNow(urls.owner, card.id);
     await approveProposal(db, card.id, await fx.key.approve({ subjectId: card.id, action: 'policy.change', argsDigest: card.argsDigest }), undefined, 'test');
     expect(await runInternal(db, card.id, undefined, 'UTC', 'test')).toEqual({ rows: 1 });
     const policies = await activePolicies(db);

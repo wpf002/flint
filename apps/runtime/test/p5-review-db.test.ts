@@ -488,7 +488,10 @@ describe.skipIf(NO_DB)('P5: what an independent review found', () => {
       ['a forget', 'world.forget', { kind: 'forget', destructive: true }],
       ['a void', 'ledger.void', { kind: 'void' }],
     ];
-    const argsOf = (what: string, n: string) => ({ note: `${CANARY} ${what}`, n });
+    // (A policy change's args say one thing, rules to add: the database files no other shape. Its words ride in a rule's reason.)
+    const argsOf = (what: string, n: string) => (what === 'a policy change'
+      ? { rows: [{ pattern: 'synthetic.rule', tier: 'approval', reason: `${CANARY} ${what} ${n}`, expiresAt: '2027-04-05T00:00:00.000Z' }] }
+      : { note: `${CANARY} ${what}`, n });
 
     it('a rule of Proposal\'s own that refuses a card names the card and the rule, whatever its kind', async () => {
       for (const [what, action, o] of KINDS) {

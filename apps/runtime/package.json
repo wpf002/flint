@@ -15,6 +15,7 @@
     "google-login": "tsx src/cli.ts google-login",
     "apple-calendar": "tsx src/cli.ts apple-calendar",
     "enable-source": "tsx src/cli.ts enable-source",
+    "rules": "tsx src/cli.ts rules",
     "offsite": "tsx src/cli.ts offsite",
     "prune-backups": "tsx src/cli.ts prune",
     "nexus-setup": "tsx src/cli.ts nexus-setup",

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
+import { digestOf } from '@flint/policy';
 import { NO_DB, URLS, freshDb, withClient, pgConfig, pgError, id, HEX } from './db';
 import { enrollTestKey } from './sign';
 import { createDb } from '../src/db';
@@ -199,8 +200,10 @@ describe.skipIf(NO_DB)('governance in the database', () => {
   describe('action policies', () => {
     /** A signed policy.change proposal listing rows, approved and being executed. */
     async function policyProposal(rows: unknown[]): Promise<{ proposalId: string; approvalId: string }> {
-      const p = await proposal({ kind: 'policy', action: 'policy.change', args: { rows } });
-      const a = await approval('proposal', p, { action: 'policy.change' });
+      // Under its args' own digest: the database computes it again before it makes a row (policy_off_guard).
+      const digest = digestOf({ rows });
+      const p = await proposal({ kind: 'policy', action: 'policy.change', args: { rows }, digest });
+      const a = await approval('proposal', p, { action: 'policy.change', digest });
       await app(`UPDATE "Proposal" SET status = 'approved', "approvalId" = $2 WHERE id = $1`, [p, a]);
       await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = $1`, [p]);
       return { proposalId: p, approvalId: a };
@@ -236,8 +239,10 @@ describe.skipIf(NO_DB)('governance in the database', () => {
         await c.query('COMMIT');
       });
       expect((await pgError(app(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [rid]))).message).toMatch(/switched off/);
+      // Who switched it off is the database's to say (the policy off guard): with no signed card behind the change, the
+      // role that wrote it, whatever the writer called itself. A card's approval is named in policy-off-guard-db.test.ts.
       const h = await app(`SELECT actor, changed FROM "RowChange" WHERE "rowId" = $1`, [rid]);
-      expect(h.rows).toEqual([{ actor: 'will:console', changed: { active: [true, false] } }]);
+      expect(h.rows).toEqual([{ actor: 'flint_app', changed: { active: [true, false] } }]);
       expect((await pgError(app(`INSERT INTO "RowChange" (id, "tableName", "rowId", actor, changed) VALUES ('x', 'ActionPolicy', $1, 'me', '{}')`, [rid]))).message).toMatch(/permission denied/);
       expect((await pgError(owner(`UPDATE "RowChange" SET actor = 'someone' WHERE "rowId" = $1`, [rid]))).message).toMatch(/append-only/);
     });
