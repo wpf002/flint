@@ -11,6 +11,7 @@ and each command says where.
 | Flint's memory, history or notes file is damaged or emptied | [3](#3-a-memory-history-or-notes-file-is-damaged-or-emptied) |
 | The Mac Studio is lost, stolen or dead | [4](#4-the-mac-studio-is-lost-stolen-or-dead) |
 | The database server will not start | [5](#5-the-database-server-will-not-start) |
+| The Mac Studio is running out of space | [6](#6-the-mac-studio-is-running-out-of-space) |
 
 Flint never edits this page.
 
@@ -331,13 +332,46 @@ not reach the database server.
    tail -n 20 /opt/homebrew/var/log/postgresql@17.log
    ```
 
-- "No space left on device" means the disk is full. Free some space, then do
-  step 1 again.
+- "No space left on device" means the disk is full. Free some space (entry 6),
+  then do step 1 again.
 - If it says its own files are damaged, no command here repairs that, and none
   should be guessed at. Your backups are safe: every night's is in
   `~/FlintBackups/pg` on the Studio and in iCloud. Do not delete the folder
   `/opt/homebrew/var/postgresql@17`. The way back is entry 4, onto this Mac once
   it is erased.
+
+## 6. The Mac Studio is running out of space
+
+Signs: a note that says "This Mac Is Nearly Full", or Settings › Health shows
+Disk Space as low. Backups and the database stop when the disk fills.
+
+1. See what takes the room. This lists Flint's own folders by size, and what
+   it could remove. It removes nothing:
+
+   ```
+   ~/flint/apps/studio/free_space.sh
+   ```
+
+2. Remove what nothing needs any more: old logs, and old versions of the
+   runtime beyond the ones Flint keeps to go back to.
+
+   ```
+   ~/flint/apps/studio/free_space.sh --remove
+   ```
+
+3. If step 1 listed temp folders that Flint's own tests left, remove those:
+
+   ```
+   ~/flint/apps/studio/free_space.sh --remove-test-leftovers
+   ```
+
+- Neither command removes a backup, your memory, the database or a model.
+- The copies of the database taken before each update pile up in
+  `~/FlintBackups/pre-migrate`. Flint asks to remove the old ones with a card
+  called Remove Old Backups. Approving it keeps the newest 10 and the last 30
+  days, and the one taken before the version that is running.
+- The local models are usually the largest thing on the disk. Step 1 says how
+  much room they take. Flint never removes one.
 
 ## What each backup is
 
@@ -381,6 +415,8 @@ Each entry is proved by a test, so a change that breaks one fails the deploy.
   `~/flint/apps/studio/run_rehearsal.sh`. What it cannot reach needs a real new
   Mac: the SSH connection, installing Homebrew, loading the LaunchAgents, and
   the Tailscale sign-in.
+- Entry 6: `apps/studio/test/free_space.test.sh`, on a stand-in home folder and
+  a stand-in temp folder.
 - This page itself: `apps/studio/test/runbook.test.sh`. Flint may not edit it
   (`packages/policy/src/selfmod-paths.ts`). What a rebuild restores, makes new
   and leaves to you is listed by name in `apps/studio/settings.manifest`.

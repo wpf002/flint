@@ -121,10 +121,15 @@ describe('what the two say is fit for Settings > Health and the morning digest',
   it('every health run checks both, from the home folder the runtime was given: none of their sentences is put together where it is returned', () => {
     const checks = readFileSync(join(__dirname, '..', 'src', 'health', 'checks.ts'), 'utf8');
     const run = checks.slice(checks.indexOf('export async function checkComponents('), checks.indexOf('/** How many of the latest plan stages Health looks at. */'));
-    expect(run).toContain('out.push(deployHold(d.config.home, now));');
+    // Automatic Updates is the pause first (deployHold), then when the deploy job last looked (health-machine-db.test.ts).
+    expect(run).toContain('out.push(await updates(d));');
     expect(run).toContain('out.push(rebuildRehearsal(d.config.home, d.config.tz, now));');
-    const own = checks.slice(checks.indexOf('export function deployHold('), checks.indexOf('export async function checkComponents('));
+    const own = checks.slice(checks.indexOf('export function deployHold('), checks.indexOf('/** How bad a status is, to say the worse of two. */'));
     expect(own.match(/\bdetail: /g)).toHaveLength(4);
     expect(own.match(/detail: UPKEEP_HEALTH\.(paused|passed|failed|never)\b/g)).toHaveLength(4);
+    const updates = checks.slice(checks.indexOf('async function updates('), checks.indexOf('export async function checkComponents('));
+    expect(updates).toContain('const hold = deployHold(d.config.home, d.now);\n  if (hold.status !== \'ok\') return hold;');
+    expect(updates.match(/\bdetail: /g)).toHaveLength(3);
+    expect(updates.match(/detail: UPKEEP_HEALTH\.(neverChecked|notChecked\(age\)|checked\(age\))/g)).toHaveLength(3);
   });
 });
