@@ -80,14 +80,24 @@ function names(text: string): string | undefined {
  */
 const ALLOWED: ReadonlyArray<{ file: string; text: string; reason: string }> = [
   {
-    file: 'apps/server/src/index.ts',
+    file: 'apps/server/src/voice.ts',
     text: '/opt/homebrew/bin/whisper-cli',
     reason: 'the speech-to-text program (whisper.cpp), a path and not a model; WHISPER_BIN names another',
   },
   {
-    file: 'apps/server/src/index.ts',
+    file: 'apps/server/src/voice.ts',
     text: 'ggml-base.en.bin',
     reason: "the speech-to-text model's file under ~/.flint/models: not a chat model, never served by the local model server, and WHISPER_MODEL names another",
+  },
+  {
+    file: 'apps/server/src/inference-status.ts',
+    text: '/^ggml-/i',
+    reason: "the prefix whisper.cpp's model FILES carry (a file format's name), taken off to make the name a screen shows: a pattern over a file name Will chose, not a model",
+  },
+  {
+    file: 'apps/server/src/inference-config.ts',
+    text: 'whisper-1',
+    reason: 'the model id an OpenAI-compatible speech server answers to by convention: a field of the request, not a model Flint picks, loads or downloads; FLINT_LOCAL_STT_MODEL names another',
   },
   ...['apps/server/src/inference-config.ts', 'apps/server/src/local-backend.ts', 'apps/server/src/local-brains.ts'].map((file) => ({
     file,
@@ -99,6 +109,24 @@ const ALLOWED: ReadonlyArray<{ file: string; text: string; reason: string }> = [
     text,
     reason: 'what a FAMILY of models can do when Ollama cannot say: a pattern over names a model already has, never a model to run',
   })),
+];
+
+/**
+ * A NAME that holds a family's word and is not a model: where it may be said.
+ * A literal in one of these files is allowed when, with the name taken out, it
+ * names nothing.
+ */
+const ALLOWED_NAMES: ReadonlyArray<{ name: string; files: readonly string[]; reason: string }> = [
+  {
+    name: 'whisper-cpp',
+    files: ['apps/server/src/inference-config.ts', 'apps/server/src/voice.ts', 'apps/server/src/inference-status.ts'],
+    reason: 'the name of a speech-to-text ENGINE (whisper.cpp, a program on this Mac): what FLINT_STT_PROVIDER is set to, and what a log or a status calls it. A program, not a model',
+  },
+  {
+    name: 'Whisper',
+    files: ['apps/server/src/inference-status.ts'],
+    reason: "the same engine's name as the console shows it, in front of words made from the model FILE's name (\"Whisper Base English\"): the file is Will's to choose (WHISPER_MODEL), and no model is named here",
+  },
 ];
 
 const sources = ROOTS.flatMap((r) => files(join(REPO, r))).map((p) => ({ rel: relative(REPO, p), text: readFileSync(p, 'utf8') }));
@@ -144,7 +172,8 @@ describe('a local model is named only in the hardware tier table', () => {
   const hits = sources
     .filter((s) => s.rel !== TABLE)
     .flatMap((s) => literals(s.text, s.rel).flatMap((l) => (names(l.text) ? [{ file: s.rel, line: l.line, text: l.text, why: names(l.text)! }] : [])));
-  const allowed = (h: { file: string; text: string }): boolean => ALLOWED.some((a) => a.file === h.file && a.text === h.text);
+  const byName = (h: { file: string; text: string }) => ALLOWED_NAMES.find((n) => n.files.includes(h.file) && h.text.includes(n.name) && names(h.text.split(n.name).join('')) === undefined);
+  const allowed = (h: { file: string; text: string }): boolean => ALLOWED.some((a) => a.file === h.file && a.text === h.text) || byName(h) !== undefined;
 
   it('no literal outside the table names a model, a tag or a family, except the ones allowed with a reason', () => {
     expect(hits.filter((h) => !allowed(h)).map((h) => `${h.file}:${h.line}: ${JSON.stringify(h.text.slice(0, 80))} ${h.why}`)).toEqual([]);
@@ -159,6 +188,21 @@ describe('a local model is named only in the hardware tier table', () => {
       expect(a.reason.length, a.text).toBeGreaterThan(30);
       expect(hits.some((h) => h.file === a.file && h.text === a.text), `${a.file}: ${a.text}`).toBe(true);
     }
+    for (const n of ALLOWED_NAMES) {
+      expect(n.reason.length, n.name).toBeGreaterThan(30);
+      for (const file of n.files) expect(hits.some((h) => h.file === file && byName(h) === n), `${file}: ${n.name}`).toBe(true);
+    }
+  });
+
+  it('an allowed name does not carry a model in with it', () => {
+    const file = ALLOWED_NAMES[0]!.files[0]!;
+    expect(byName({ file, text: 'whisper-cpp' })).toBeDefined();
+    expect(byName({ file, text: 'transcription stays on whisper-cpp, on this Mac' })).toBeDefined();
+    // The engine's name next to a model is still a model named.
+    expect(byName({ file, text: 'whisper-cpp with qwen2.5:7b' })).toBeUndefined();
+    expect(byName({ file, text: 'whisper-cpp and whisper-large-v3' })).toBeUndefined();
+    // ...and the name is allowed only in the files listed for it.
+    expect(byName({ file: 'apps/server/src/index.ts', text: 'whisper-cpp' })).toBeUndefined();
   });
 
   it('the checks do catch a model: every row of the table is found in the table file', () => {

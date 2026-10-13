@@ -3,7 +3,8 @@ import { EMBEDDING_MODEL, HARDWARE_TIERS, hardwareTier, hardwareTierFor, type Ha
 import type { Hardware } from '../src/hardware';
 import { MODES, readInferenceConfig, type ConfigKey, type ConfigProblem, type InferenceMode, type UrlProblem } from '../src/inference-config';
 import type { ModeSource } from '../src/inference-mode';
-import { INVALID_SAVED_SENTENCE, MODE_SENTENCES, RELOADS_SENTENCE, addressSentence, hardwareLine, hardwareName, hardwareSentence, inferenceStatus, localOnlySentence, modeSentence, noCloudSentence, problemSentence, staysOn, type StatusInput } from '../src/inference-status';
+import { INVALID_SAVED_SENTENCE, MODE_SENTENCES, RELOADS_SENTENCE, addressSentence, hardwareLine, hardwareName, hardwareSentence, inferenceStatus, localOnlySentence, modeSentence, noCloudSentence, problemSentence, speechRow, staysOn, transcriptionRow, voiceLines, whisperName, type StatusInput } from '../src/inference-status';
+import { planVoice } from '../src/voice';
 import type { LocalBrains, NotConfined } from '../src/local-brains';
 import type { ModelHealth, LocalSnapshot } from '../src/local-monitor';
 
@@ -68,6 +69,8 @@ function input(o: Shape = {}): StatusInput {
     local,
     snapshot,
     ...(o.embedding === null ? {} : { embedding: o.embedding ?? { model: EMBEDDING_MODEL.model, installed: true } }),
+    // What hears and what speaks, decided from the same environment (./voice). No program runs and no file is read.
+    voice: planVoice(cfg, o.env ?? {}, { platform: 'darwin', home: '/home/will' }),
   };
 }
 
@@ -88,6 +91,10 @@ const onScreen = (st: ReturnType<typeof status>): string[] =>
     st.local.standby?.sentence,
     st.local.embedding?.name,
     st.local.embedding?.sentence,
+    st.voice?.speech.name,
+    st.voice?.speech.sentence,
+    st.voice?.transcription.name,
+    st.voice?.transcription.sentence,
     ...st.notices,
   ].filter((x): x is string => typeof x === 'string');
 
@@ -124,7 +131,19 @@ describe('the console is given names and sentences: no tag, no key, no path, no 
       { state: 'unavailable', why: 'error' },
       { state: 'unavailable', why: 'config' },
     ];
-    const env = { FLINT_LOCAL_TOOLS: 'nonsense', FLINT_LOCAL_MODEL: 'glm-5:cloud', FLINT_LOCAL_REQUEST_TIMEOUT_MS: 'soon', OLLAMA_HOST: 'ftp://x', FLINT_INFERENCE_MODE: 'turbo' };
+    const env = {
+      FLINT_LOCAL_TOOLS: 'nonsense',
+      FLINT_LOCAL_MODEL: 'glm-5:cloud',
+      FLINT_LOCAL_REQUEST_TIMEOUT_MS: 'soon',
+      OLLAMA_HOST: 'ftp://x',
+      FLINT_INFERENCE_MODE: 'turbo',
+      // Voice, refused every way: a provider Flint does not know, a server on another machine, a voice that is not one.
+      FLINT_TTS_PROVIDER: 'local',
+      FLINT_LOCAL_TTS_BASE_URL: 'http://speech.example:8880/v1',
+      FLINT_STT_PROVIDER: 'cloud',
+      FLINT_SAY_VOICE: '-o /tmp/x',
+      WHISPER_MODEL: '/Users/someone/models/ggml-large-v3-turbo-q5_0.bin',
+    };
     let seen = 0;
     for (const mode of MODES) {
       for (const primary of states) {
@@ -137,7 +156,7 @@ describe('the console is given names and sentences: no tag, no key, no path, no 
               expect(text, text).not.toMatch(TAG_SHAPED);
               expect(text, text).not.toMatch(/[/\\~]|https?:|\d+\.\d+\.\d+\.\d+|\(|\)|\{|\}|_/);
             }
-            for (const text of [st.modeSentence, st.hardware!.sentence, st.local.primary.sentence, st.local.standby?.sentence, st.local.embedding!.sentence, ...st.notices]) {
+            for (const text of [st.modeSentence, st.hardware!.sentence, st.local.primary.sentence, st.local.standby?.sentence, st.local.embedding!.sentence, st.voice!.speech.sentence, st.voice!.transcription.sentence, ...st.notices]) {
               if (text !== undefined) expect(text, text).toMatch(/^[A-Z][^\n]*\.$/);
             }
           }
@@ -351,6 +370,15 @@ describe('refused settings and an unreadable mode are notices, each a plain sent
       FLINT_EMBED_MODEL: 1,
       FLINT_LOCAL_BASE_URL: 1,
       OLLAMA_HOST: 1,
+      FLINT_STT_PROVIDER: 1,
+      FLINT_TTS_PROVIDER: 1,
+      FLINT_LOCAL_STT_BASE_URL: 1,
+      FLINT_LOCAL_TTS_BASE_URL: 1,
+      FLINT_LOCAL_STT_MODEL: 1,
+      FLINT_LOCAL_TTS_MODEL: 1,
+      FLINT_LOCAL_TTS_VOICE: 1,
+      FLINT_LOCAL_VOICE_API_KEY: 1,
+      FLINT_SAY_VOICE: 1,
     } satisfies Record<ConfigKey, 1>) as ConfigKey[];
     const generic = "A setting in Flint's setup isn't valid, so Flint ignored it.";
     for (const key of keys) {
@@ -360,7 +388,7 @@ describe('refused settings and an unreadable mode are notices, each a plain sent
       expect(s, key).not.toBe(generic);
     }
     // One sentence per class, not one per key: the six timing keys share theirs.
-    expect(new Set(keys.map((k) => say(k))).size).toBe(14);
+    expect(new Set(keys.map((k) => say(k))).size).toBe(21);
     expect(say('FLINT_LOCAL_TOOLS')).toBe("The tools setting in Flint's setup isn't valid, so the local model is offered no tools.");
     expect(say('FLINT_HARDWARE_TIER')).toBe("The model size named in Flint's setup isn't one it knows, so Flint checks this machine instead.");
   });
@@ -555,5 +583,103 @@ describe('the embedding model', () => {
     const st = status({ server: 'llamacpp', embedding: { model: EMBEDDING_MODEL.model, installed: false }, primary: { state: 'unavailable', why: 'not_installed' } });
     expect(st.local.pull).toEqual([]);
     expect(JSON.stringify(st)).not.toContain('ollama pull');
+  });
+});
+
+describe('voice: what speaks and what hears, for the console and for the command line', () => {
+  const plan = (env: Record<string, string> = {}, platform: NodeJS.Platform = 'darwin') => planVoice(readInferenceConfig(env), env, { platform, home: '/home/will' });
+  const KEY = { OPENAI_API_KEY: 'sk-test' };
+
+  it('the defaults: OpenAI speaks, and whisper.cpp hears on this Mac', () => {
+    const st = status({ mode: 'hybrid', env: KEY });
+    expect(st.voice).toEqual({
+      speech: { provider: 'openai', name: 'OpenAI', here: false, sentence: 'It speaks replies. A reply that stays on this Mac is spoken by the device instead.' },
+      transcription: { provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: 'Your voice is turned into text on this Mac.' },
+    });
+    expect(st.lines).toContain('Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.');
+    expect(st.lines).toContain('Speech uses OpenAI (tts-1, onyx). A reply that stays on this Mac is spoken by the device instead.');
+    expect(st.notices).toEqual([]);
+  });
+
+  it('the speech sentence is true for the mode: Local mode does not use an outside service', () => {
+    const openai = plan(KEY).tts;
+    expect(speechRow(openai, 'cloud').sentence).toBe('It speaks replies. A reply that stays on this Mac is spoken by the device instead.');
+    expect(speechRow(openai, 'hybrid').sentence).toBe('It speaks replies. A reply that stays on this Mac is spoken by the device instead.');
+    expect(speechRow(openai, 'local').sentence).toBe("Local mode doesn't use it, so each device speaks with its own voice.");
+    expect(voiceLines(plan(KEY), 'local')[1]).toBe('Speech is set to OpenAI (tts-1, onyx), which Local mode does not use: each device speaks with its own voice.');
+    // With no key it cannot speak in any mode, and says so.
+    for (const mode of MODES) expect(speechRow(plan({}).tts, mode).sentence).toBe('It has no key, so each device speaks with its own voice.');
+  });
+
+  it("the Mac's own voice: its name when one is set, and nothing is sent out in any mode", () => {
+    const named = plan({ FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: 'Eddy (English (US))' });
+    for (const mode of MODES) expect(speechRow(named.tts, mode)).toEqual({ provider: 'say', name: 'Eddy English US', here: true, sentence: 'Replies are spoken on this Mac, and nothing is sent out.' });
+    expect(speechRow(plan({ FLINT_TTS_PROVIDER: 'say' }).tts, 'cloud').name).toBe('This Mac');
+    expect(voiceLines(named, 'cloud')[1]).toBe("Speech uses this Mac's own voice (Eddy (English (US))). Nothing is sent out.");
+    expect(voiceLines(plan({ FLINT_TTS_PROVIDER: 'say' }), 'local')[1]).toBe("Speech uses this Mac's own voice. Nothing is sent out.");
+  });
+
+  it('a local speech server, on this Mac or at the model server Will allowed: no address is on screen', () => {
+    const here = plan({ FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1', FLINT_LOCAL_TTS_MODEL: 'kokoro', FLINT_LOCAL_TTS_VOICE: 'af_heart', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8081/v1' });
+    for (const mode of MODES) expect(speechRow(here.tts, mode)).toEqual({ provider: 'local', name: 'Local Speech Server', here: true, sentence: 'Replies are spoken by the speech server on this Mac, and nothing is sent out.' });
+    expect(transcriptionRow(here.stt)).toEqual({ provider: 'local', name: 'Local Speech Server', here: true, sentence: 'Your voice is turned into text by the speech server on this Mac.' });
+    expect(voiceLines(here, 'cloud')).toEqual(['Transcription uses the local speech server at 127.0.0.1:8081 (whisper-1).', 'Speech uses the local speech server at 127.0.0.1:8880 (kokoro, af_heart).']);
+    // The one address that is not this Mac: the local model server's own, when Will said that server is his.
+    const remote = plan({ FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://gpu-box.example/v1', FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'https://gpu-box.example/v1', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'https://gpu-box.example/v1' });
+    expect(speechRow(remote.tts, 'cloud')).toMatchObject({ here: true, sentence: 'Replies are spoken by the speech server on the model server you allowed.' });
+    expect(transcriptionRow(remote.stt)).toMatchObject({ here: true, sentence: 'Your voice is turned into text by the speech server on the model server you allowed.' });
+    for (const row of [speechRow(remote.tts, 'cloud'), transcriptionRow(remote.stt), speechRow(here.tts, 'cloud'), transcriptionRow(here.stt)]) expect(`${row.name} ${row.sentence}`).not.toMatch(/gpu-box|example|https?:|127\.0\.0\.1/);
+  });
+
+  it('off, and why when the reason is the machine', () => {
+    expect(speechRow(plan({ FLINT_TTS_PROVIDER: 'off' }).tts, 'cloud')).toEqual({ provider: 'off', name: 'Off', here: true, sentence: 'Each device speaks with its own voice.' });
+    expect(speechRow(plan({ FLINT_TTS_PROVIDER: 'say' }, 'linux').tts, 'cloud').sentence).toBe("This machine isn't a Mac, so each device speaks with its own voice.");
+    expect(voiceLines(plan({ FLINT_TTS_PROVIDER: 'off' }), 'hybrid')[1]).toBe('Speech is off: each device speaks with its own voice.');
+  });
+
+  it('a whisper model is named for a screen from its file, never by its path', () => {
+    expect(whisperName('/Users/will/.flint/models/ggml-base.en.bin')).toBe('Whisper Base English');
+    expect(whisperName('ggml-small.bin')).toBe('Whisper Small');
+    expect(whisperName('/m/ggml-large-v3-turbo-q5_0.bin')).toBe('Whisper Large V3 Turbo Q5 0');
+    expect(whisperName('C:\\models\\ggml-medium.en.bin')).toBe('Whisper Medium English');
+    expect(whisperName('')).toBe('Whisper');
+    for (const odd of ['../../etc/passwd', '<script>alert(1)</script>.bin', 'ggml-$(reboot).bin', 'x'.repeat(300)]) {
+      expect(whisperName(odd), odd).toMatch(/^Whisper[A-Za-z0-9 ]{0,33}$/);
+    }
+    const st = status({ env: { WHISPER_MODEL: '/Users/someone/secret-folder/ggml-small.en.bin' } });
+    expect(st.voice!.transcription.name).toBe('Whisper Small English');
+    expect(JSON.stringify(st.voice)).not.toContain('secret-folder');
+    // The command line names the file, and still not the folder.
+    expect(st.lines).toContain('Transcription uses whisper-cpp (ggml-small.en.bin), on this Mac.');
+    expect(st.lines.join('\n')).not.toContain('secret-folder');
+  });
+
+  it('a refused voice setting is a notice in plain words, and the row says what Flint did instead', () => {
+    const typo = status({ env: { ...KEY, FLINT_TTS_PROVIDER: 'sya' } });
+    expect(typo.voice!.speech).toEqual({ provider: 'off', name: 'Off', here: true, sentence: 'Each device speaks with its own voice.' });
+    expect(typo.notices).toEqual(["The speech setting in Flint's setup isn't one it knows, so each device speaks with its own voice."]);
+    expect(typo.lines).toContain('A setting was refused: FLINT_TTS_PROVIDER is not one of openai, local, say, off.');
+    const noAddress = status({ env: { ...KEY, FLINT_TTS_PROVIDER: 'local', FLINT_STT_PROVIDER: 'local' } });
+    expect(noAddress.notices).toEqual(["The transcription server's address isn't set, so your voice is turned into text on this Mac.", "The speech server's address isn't set, so each device speaks with its own voice."]);
+    expect(noAddress.voice!.speech.name).toBe('Off');
+    expect(noAddress.voice!.transcription.name).toBe('Whisper Base English');
+    const elsewhere = status({ env: { ...KEY, FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://speech.example:8880/v1' } });
+    expect(elsewhere.notices).toEqual(["The speech server's address is on another machine, which Flint doesn't allow unless it is told to, so each device speaks with its own voice."]);
+    expect(elsewhere.voice!.speech.name).toBe('Off');
+    // Told to, for the model server: that vouches for the model server, and a speech server elsewhere is still refused.
+    const other = status({ env: { ...KEY, FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'https://speech.example/v1', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'https://speech.example/v1' } });
+    expect(other.notices).toEqual([
+      "The transcription server's address is on another machine, and a speech server has to run on this Mac, so your voice is turned into text on this Mac.",
+      "The speech server's address is on another machine, and a speech server has to run on this Mac, so each device speaks with its own voice.",
+    ]);
+    expect(other.voice).toMatchObject({ speech: { name: 'Off', here: true }, transcription: { name: 'Whisper Base English', here: true } });
+    const proxied = status({ env: { ...KEY, NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: 'http://proxy.example:3128', FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1' } });
+    expect(proxied.notices).toContain("The speech server's address is reached through a proxy, so each device speaks with its own voice.");
+    expect(JSON.stringify([other.notices, proxied.notices])).not.toMatch(/speech\.example|proxy\.example/);
+    const voice = status({ env: { ...KEY, FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: '--help', FLINT_LOCAL_TTS_VOICE: 'a b' } });
+    expect(voice.notices).toEqual(["A speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.", "The voice named in Flint's setup isn't a voice name, so this Mac's usual voice is used."]);
+    const key = status({ env: { FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1', FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'http://gpu-box.example:8880/v1', FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://gpu-box.example:8880/v1', FLINT_LOCAL_VOICE_API_KEY: 'voice-SECRET' } });
+    expect(key.notices).toContain("The speech server's key isn't sent, because the server's address isn't encrypted.");
+    expect(JSON.stringify(key)).not.toContain('SECRET');
   });
 });

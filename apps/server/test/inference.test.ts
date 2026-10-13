@@ -1396,8 +1396,15 @@ describe('status', () => {
       `The recommended model for this tier is ${hardwareTier('48gb').model} with a 16,384-token context.`,
       'No standby model is set.',
       `The embedding model is ${EMBED}. It is downloaded.`,
+      // Voice: the defaults, by provider. (No OpenAI key in this test's environment, and the line says so.)
+      'Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.',
+      'Speech is set to OpenAI (tts-1, onyx), which has no key: each device speaks with its own voice.',
       'A cloud model is configured.',
     ]);
+    expect(st.voice).toEqual({
+      speech: { provider: 'openai', name: 'OpenAI', here: false, sentence: 'It has no key, so each device speaks with its own voice.' },
+      transcription: { provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: 'Your voice is turned into text on this Mac.' },
+    });
     // What the console shows: a name made for a screen, a sentence for the mode, and nothing to report.
     expect(st.modeSentence).toBe('Flint picks this Mac or the cloud for each message.');
     expect(st.local.primary).toMatchObject({ name: 'Main Model 30B', sentence: 'It is ready.' });

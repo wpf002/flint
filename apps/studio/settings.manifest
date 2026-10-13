@@ -137,6 +137,21 @@ secrets.env  FLINT_TAVILY_USD_PER_CALL            restore   number
 secrets.env  OLLAMA_THINK                         restore   onoff
 secrets.env  WHISPER_MODEL                        reenter   Voice
 secrets.env  WHISPER_BIN                          reenter   Voice
+# Voice (apps/server/src/voice.ts): what turns your voice into text, and what speaks a reply. Which provider does
+# each is a word, and may be put back: unset, speech goes to OpenAI as it always has, so a rebuild that dropped a
+# more private choice (this Mac's own voice, a speech server on this Mac, off) would send replies out again. A word
+# can only choose among Flint's own providers, and one that names a local speech server without its address means
+# no speech is made here at all (never OpenAI in its place) and transcription stays on this Mac.
+secrets.env  FLINT_STT_PROVIDER                   restore   word
+secrets.env  FLINT_TTS_PROVIDER                   restore   word
+secrets.env  FLINT_LOCAL_STT_MODEL                restore   model
+secrets.env  FLINT_LOCAL_TTS_MODEL                restore   model
+secrets.env  FLINT_LOCAL_TTS_VOICE                restore   word
+secrets.env  FLINT_SAY_VOICE                      restore   word
+# Where a local speech server is, and its key, are never taken from a backup, like the local model server's.
+secrets.env  FLINT_LOCAL_STT_BASE_URL             reenter   Local-Speech-Server
+secrets.env  FLINT_LOCAL_TTS_BASE_URL             reenter   Local-Speech-Server
+secrets.env  FLINT_LOCAL_VOICE_API_KEY            reenter   Local-Speech-Server
 secrets.env  PARITY_DAILY_BUDGET_USD              restore   number
 secrets.env  PARITY_GOOGLE_MODEL                  restore   model
 secrets.env  FLINT_ALLOWED_HOSTS                  reenter   Allowed-Hosts

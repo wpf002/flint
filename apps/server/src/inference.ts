@@ -42,6 +42,7 @@ import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy'
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
 import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
+import { planVoice, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -96,6 +97,8 @@ export interface Machine {
 
 export class Inference {
   readonly cfg: InferenceConfig;
+  /** What hears and what speaks, as config decided it (./voice): the providers are built from it, and the status says it. */
+  readonly voicePlan: VoicePlan;
   readonly mode: ModeStore;
   /**
    * Over when the first pass behind the boot is: the machine looked at, its tier
@@ -115,10 +118,11 @@ export class Inference {
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
 
   constructor(parts: {
-    cfg: InferenceConfig; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
+    cfg: InferenceConfig; voice: VoicePlan; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
     log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>;
   }) {
     this.cfg = parts.cfg;
+    this.voicePlan = parts.voice;
     this.handle = parts.handle;
     this.mode = parts.mode;
     this.machine = parts.machine;
@@ -700,6 +704,7 @@ export class Inference {
       local: this.localNow,
       ...(this.standbyElsewhere() ? { standbyElsewhere: true } : {}),
       snapshot,
+      voice: this.voicePlan,
       ...(cloud ? { cloud } : {}),
     });
   }
@@ -856,5 +861,5 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}) });
+  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}) });
 }
