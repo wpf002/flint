@@ -89,7 +89,9 @@ describe('one error, made plain', () => {
   });
 
   it('what the monitor learns from a failure is the same before and after', () => {
-    for (const e of [upstream(), upstream({ providerCode: undefined }), upstream({ kind: 'internal', retryable: false })]) expect(observationOf(plainError(e))).toBe(observationOf(e));
+    const unreachable: AiError = { kind: 'provider_unavailable', message: `connect ECONNREFUSED ${ECHO}`, retryable: true };
+    for (const e of [upstream(), unreachable, upstream({ kind: 'internal', retryable: false })]) expect(observationOf(plainError(e))).toBe(observationOf(e));
+    expect(observationOf(plainError(unreachable))).toBe('unreachable');
   });
 });
 
