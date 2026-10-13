@@ -1204,8 +1204,46 @@ describe('C2: in Local mode the Local Only switch is on, and not Will\'s to chan
     expect(p.ids.lotoggle!.attrs['aria-disabled']).toBe('true');
     // Where the page reads /health, and what it tells Will when a file cannot be read in that mode.
     expect(mainScript).toContain("if(h&&typeof setLocalMode==='function')setLocalMode(h.mode);");
-    expect(mainScript).toContain("(LOCAL_ONLY||LOCAL_MODE))attNote(LOCAL_MODE?'Flint is in Local mode, so it can’t read images or PDFs.':'Local Only is on, so Flint can’t read images or PDFs.');");
+    expect(mainScript).toContain("if(blind)attNote(LOCAL_MODE?'Flint is in Local mode, so it can’t read '+blind+'.':'Local Only is on, so Flint can’t read '+blind+'.');");
     expect(mainScript).toContain('function toggleLO(){if(LOCAL_MODE)return;');
+  });
+
+  // Pictures and PDFs for the local model (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF; both off unless set). The note under
+  // an attached file says what a turn kept on this Mac cannot read. /health says what the local model reads, and
+  // only when one of the two is on: with neither, the note is the sentence it always was.
+  it('the note under an attached file: both kinds as ever with nothing turned on, and only what the local model cannot read when the server says it reads some', () => {
+    const js = mainScript.slice(mainScript.indexOf('var LOCAL_READS={images:false,pdfs:false};'), mainScript.indexOf('function chipHtml('));
+    expect(js).toContain('function attBlind(){');
+    const blind = (o: { localOnly?: boolean; localMode?: boolean; files: string[]; reads?: { images?: boolean; pdfs?: boolean } }): string => {
+      const c: Record<string, unknown> = { LOCAL_ONLY: o.localOnly === true, LOCAL_MODE: o.localMode === true, PENDING: o.files.map((kind) => ({ kind })) };
+      createContext(c);
+      runInContext(js, c);
+      if (o.reads) runInContext(`LOCAL_READS=${JSON.stringify({ images: o.reads.images === true, pdfs: o.reads.pdfs === true })};`, c);
+      return runInContext('attBlind()', c) as string;
+    };
+    // A turn that is not kept here, or one with only text files: no note.
+    expect(blind({ files: ['image', 'document'] })).toBe('');
+    expect(blind({ localOnly: true, files: ['text'] })).toBe('');
+    expect(blind({ localMode: true, files: [] })).toBe('');
+    // Nothing turned on: the words name both kinds, whichever was attached, in Local mode and with Local Only.
+    for (const files of [['image'], ['document'], ['image', 'document', 'text']]) {
+      expect(blind({ localOnly: true, files })).toBe('images or PDFs');
+      expect(blind({ localMode: true, files })).toBe('images or PDFs');
+      expect(blind({ localOnly: true, files, reads: {} })).toBe('images or PDFs');
+    }
+    // Pictures on: a picture needs no note, a PDF still does, and the note names the PDF alone.
+    expect(blind({ localOnly: true, files: ['image'], reads: { images: true } })).toBe('');
+    expect(blind({ localOnly: true, files: ['document'], reads: { images: true } })).toBe('PDFs');
+    expect(blind({ localMode: true, files: ['image', 'document'], reads: { images: true } })).toBe('PDFs');
+    // PDFs on: the other way round.
+    expect(blind({ localOnly: true, files: ['document'], reads: { pdfs: true } })).toBe('');
+    expect(blind({ localOnly: true, files: ['image', 'document'], reads: { pdfs: true } })).toBe('images');
+    // Both on: nothing to say.
+    expect(blind({ localMode: true, files: ['image', 'document'], reads: { images: true, pdfs: true } })).toBe('');
+    // What /health says is read strictly: only `true` counts, and an older server's /health turns nothing on.
+    expect(mainScript).toContain('LOCAL_READS={images:!!(h&&h.localReads&&h.localReads.images===true),pdfs:!!(h&&h.localReads&&h.localReads.pdfs===true)};');
+    // (The console's script is ES5: no arrow function crept in with it.)
+    expect(js).not.toMatch(/=>/);
   });
 
   // The privacy review's N4. The page learned the mode at load, on a token save and when Settings was opened, and

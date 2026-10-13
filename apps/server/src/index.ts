@@ -1261,6 +1261,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       localModelSettled: ctx.inference.primary.settled,
       // The routing mode: local, cloud or hybrid (./inference-mode).
       mode: ctx.inference.mode.current(),
+      // What the local model reads of a turn's files, when pictures or PDFs for it are turned on (FLINT_LOCAL_VISION,
+      // FLINT_LOCAL_PDF): the console's line under an attached file. Left out with both off, as before.
+      ...(ctx.inference.readsForConsole() ? { localReads: ctx.inference.readsForConsole() } : {}),
       tools: ctx.tools.length,
       servers: ctx.servers,
       // Lets apps/eval check, BEFORE sending anything, that /generate honours

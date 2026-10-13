@@ -420,6 +420,30 @@ describe('routing a turn with a picture or a PDF', () => {
   });
 });
 
+describe('what the console is told the local model reads (GET /health `localReads`)', () => {
+  const sees: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} };
+
+  it('nothing at all with both settings off, whatever the model can do: the console says what it always said', async () => {
+    expect((await boot(sees, {})).inference.readsForConsole()).toBeUndefined();
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    expect((await boot(sees, { FLINT_LOCAL_PROVIDER: 'openai' })).inference.readsForConsole()).toBeUndefined();
+  });
+
+  it('with one on: each kind, as the local model reads it now', async () => {
+    expect((await boot(sees, { FLINT_LOCAL_VISION: 'on' })).inference.readsForConsole()).toEqual({ images: true, pdfs: false });
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    expect((await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_VISION: 'on' })).inference.readsForConsole()).toEqual({ images: false, pdfs: false });
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    expect((await boot(sees, { FLINT_LOCAL_PDF: 'spotlight' }, { reader: standInReader(READS) })).inference.readsForConsole()).toEqual({ images: false, pdfs: true });
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    expect((await boot(sees, { FLINT_LOCAL_VISION: 'on', FLINT_LOCAL_PDF: 'spotlight' }, { reader: standInReader(READS) })).inference.readsForConsole()).toEqual({ images: true, pdfs: true });
+  });
+});
+
 describe('the status', () => {
   const sees: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} };
   const ABOUT = /picture|PDF/i;

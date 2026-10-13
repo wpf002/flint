@@ -1018,8 +1018,11 @@ Known limits:
 - *An eval replay that names its own local model* (`localModel`, apps/parity) is asked through
   a client of its own, which sends no picture and reads no PDF. Such a replay with a file is
   refused as before; a replay on the main local model is answered with what it can read.
-- *The console is unchanged.* It already attaches pictures and PDFs, and shows the refusal
-  sentence when a turn is refused.
+- *The console changes in one line.* It already attaches pictures and PDFs. Its note under an
+  attached file ("Local Only is on, so Flint can't read images or PDFs.") now follows what the
+  server says the local model reads (`localReads` in `GET /health`, given only when one of the
+  two settings is on): no note for a file it reads, and only the other kind named for one it
+  does not. With nothing set the note is the sentence it always was.
 
 #### The vision benchmark
 

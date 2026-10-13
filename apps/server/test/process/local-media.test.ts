@@ -152,6 +152,8 @@ describe('nothing set: a turn with a picture or a PDF is what it always was', ()
     expect('pdfReader' in st.local!).toBe(false);
     expect((st.lines ?? []).length).toBeGreaterThan(3);
     expect((st.lines ?? []).filter((l) => /picture|PDF/i.test(l))).toEqual([]);
+    // ...and /health tells the console nothing about what the local model reads: its note is the one it always showed.
+    expect('localReads' in (await srv.get('/health', null)).json!).toBe(false);
     expect(blocked(srv)).toEqual([]);
   });
 });
@@ -240,6 +242,8 @@ describe('FLINT_LOCAL_VISION=on', () => {
     const st = (await srv.get('/inference')).json as { local: Record<string, unknown>; lines: string[] };
     expect(st.local.pictures).toBe(true);
     expect(st.lines).toContain('Pictures are sent to the local model, which its server says can see.');
+    // The console is told, so its note under an attached picture no longer says Flint cannot read it.
+    expect((await srv.get('/health', null)).json).toMatchObject({ localReads: { images: true, pdfs: false } });
     expect(blocked(srv)).toEqual([]);
   });
 });
@@ -302,6 +306,7 @@ describe.runIf(REAL_PDF)('FLINT_LOCAL_PDF=spotlight, with the Mac’s own import
     const st = (await srv.get('/inference')).json as { local: Record<string, unknown>; lines: string[] };
     expect(st.local.pdfReader).toBe('spotlight');
     expect(st.lines).toContain("A PDF's text is read on this Mac for the local model, by the Mac's own PDF importer.");
+    expect((await srv.get('/health', null)).json).toMatchObject({ localReads: { images: false, pdfs: true } });
     expect(blocked(srv)).toEqual([]);
   });
 });

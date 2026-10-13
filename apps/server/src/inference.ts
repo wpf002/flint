@@ -379,6 +379,17 @@ export class Inference {
   }
 
   /**
+   * What the local model reads, for the console's line under an attached file ("Local Only is on, so Flint
+   * can't read ..."): given only when Will has turned pictures or PDFs for it on. Undefined with both off, and
+   * the console then says what it always said.
+   */
+  readsForConsole(): { images: boolean; pdfs: boolean } | undefined {
+    if (!this.cfg.local.vision && !this.media) return undefined;
+    const can = this.localCan();
+    return { images: can.image === true, pdfs: can.pdf === true };
+  }
+
+  /**
    * How many characters of a turn's PDFs the local model would be handed as text (./local-media): part of how
    * long its prompt is, for the hybrid rules' long-context test. Nothing when no PDF is read here, and nothing
    * for one that was not read for this turn (a turn a cloud model answers anyway).
