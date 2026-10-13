@@ -26,7 +26,7 @@
  */
 import { z } from 'zod';
 import { chanceParts, chancePhrase } from '../predict/phrasing.js';
-import { REASON_CODES, healthName, noteProblems, plainName, properWords, safeName, serviceWords, shownProblems, titleCase } from '@flint/policy';
+import { LOOSE_ODDS, REASON_CODES, healthName, noteProblems, plainName, properWords, safeName, serviceWords, shownProblems, titleCase } from '@flint/policy';
 
 const Ref = z.string().regex(/^[a-z_]{2,20}#[A-Za-z0-9]{1,12}$/);
 const Sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -51,8 +51,8 @@ export function phraseBefore(p: number, by: Date | undefined, tz: string): strin
   return `${x.word} (~${x.pct}%)${x.when}`;
 }
 
-/** Probability words a note may not carry unless they came from phrase(). */
-export const PROBABILITY_WORDS = /\b(likely|unlikely|probabl[ey]|almost certain|certain(ly)?|chances?|odds|confident|even)\b|\d+ ?%/i;
+/** Probability words a note may not carry unless they came from phrase() (@flint/policy's pattern: a task's result is held to the same). */
+export const PROBABILITY_WORDS = LOOSE_ODDS;
 
 /** True when `text` makes a probability claim that did not come from the ledger. */
 export function hasLoosePrediction(text: string, fromLedger: readonly string[] = []): boolean {

@@ -92,13 +92,40 @@ describe('emit: P4\'s rules', () => {
     // Its yes/no question is about the same whole day (or week), so it says "on" that day, never "at the resolve time".
     const q = EmitPrediction.parse({ ...base(), ...onRun, claim: undefined, template: { id: 'series_above', params: { series: 'daily.deploys.count', value: 4, on: '2026-10-14' } } });
     expect(renderClaim(q)).toBe('daily.deploys.count is above 4 on 2026-10-14');
-    // Chat's four, and the runtime's own three (a goal review's forecast, the forecaster's range and its question).
-    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'goal_on_track', 'series_above', 'series_range', 'service_healthy', 'threshold']);
-    expect([...INTERNAL_TEMPLATES].sort()).toEqual(['goal_on_track', 'series_above', 'series_range']);
+    // Chat's four, and the runtime's own four (a goal review's forecast, the forecaster's range and its question, a task's forecast).
+    expect(Object.keys(CLAIM_TEMPLATES).sort()).toEqual(['closed_by', 'deploy_succeeds', 'goal_on_track', 'series_above', 'series_range', 'service_healthy', 'task_meets_bar', 'threshold']);
+    expect([...INTERNAL_TEMPLATES].sort()).toEqual(['goal_on_track', 'series_above', 'series_range', 'task_meets_bar']);
     // The wider shape P3's review holds to: none of the runtime's templates, from any caller of the route.
     for (const template of [{ id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-14' } }, { id: 'series_above', params: { series: 'daily.deploys.count', value: 4, on: '2026-10-14' } }, { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } }]) {
       expect(EmitPredictionIn.safeParse({ ...base(), claim: undefined, template }).success, template.id).toBe(false);
     }
+  });
+});
+
+describe('emit: a task\'s forecast (P5)', () => {
+  const TASK = 'tkabcdefghij123456';
+  const task = (over: Record<string, unknown> = {}) => ({
+    claim: undefined, template: { id: 'task_meets_bar', params: { task: 'task#123456', by: '2026-12-01' } }, kind: 'binary', probability: 0.6, method: 'base_rate', domain: 'assets', type: 'task_meets_bar',
+    resolver: 'auto_world', resolverSpec: { taskId: TASK, rule: 'task_meets_bar' }, ...over,
+  });
+  const WRITER = 'runtime:tasks';
+  const SAYS = ['a task’s forecast is the tasks writer’s, under the task template with its task’s rule, and only it is'];
+
+  it('is the tasks writer\'s, under the task template, by base rate, settled from the world under the rule that names its task', () => {
+    expect(why(task(), WRITER)).toEqual([]);
+    expect(renderClaim(EmitPrediction.parse({ ...base(), ...task() }))).toBe('task#123456 meets its bar by 2026-12-01');
+    // That writer records nothing else: another template or a claim of its own, another domain, type, method or resolver, a tainted one, or one without its task's rule.
+    for (const over of [
+      { template: undefined, claim: 'the task goes well' }, { template: { id: 'goal_on_track', params: { goal: 'goal#abc123', by: '2026-12-01' } } },
+      { domain: 'services' }, { type: 'event_occurs' }, { method: 'rule' }, { resolver: 'will' }, { tainted: true },
+      { resolverSpec: undefined }, { resolverSpec: { taskId: TASK } }, { resolverSpec: { taskId: TASK, rule: 'goal_done_by' } }, { resolverSpec: { taskId: 'task1', rule: 'task_meets_bar' } },
+      { resolverSpec: { taskId: TASK, rule: 'task_meets_bar', owner: 'someone' } },
+    ]) expect(why(task(over), WRITER), JSON.stringify(over)).toEqual(expect.arrayContaining(SAYS));
+    // And no other writer uses the template: the goals writer, the forecaster, chat's connector, or a caller that names none.
+    for (const writer of ['runtime:goals', FORECAST_WRITER, REASON_WRITER, 'runtime-mcp', undefined]) expect(why(task(), writer), String(writer)).toEqual(expect.arrayContaining(SAYS));
+    expect(why(task(), 'runtime:goals')).toEqual(SAYS);
+    // Any other writer's ordinary prediction is as it was.
+    expect(why({}, 'runtime:triage')).toEqual([]);
   });
 });
 
