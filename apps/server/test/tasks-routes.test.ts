@@ -18,7 +18,7 @@ import type { AddressInfo } from 'node:net';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TASK_SAYS, TASK_STATUS_SAYS } from '@flint/policy';
-import { tasksRoutes, TASKS_BODY_BYTES, TASKS_SAY, type TasksDeps } from '../src/tasks-routes';
+import { MAX_ANSWER, tasksRoutes, TASKS_BODY_BYTES, TASKS_SAY, type TasksDeps } from '../src/tasks-routes';
 import { routeOf } from '../src/runtime-events';
 import { scopeAllows } from '../src/access';
 
@@ -189,6 +189,9 @@ describe('reads', () => {
       [`/tasks/${TID}`, { task: view({ can: { cancel: true, accept: false, reject: true, again: 'yes' } }) }],
       [`/tasks/${TID}`, { task: view({ can: { cancel: true, accept: false, reject: true, run: true } }) }],
       [`/tasks/${TID}`, { task: view({ checks: [{ id: 'a1', name: 'CI Run Passed', state: 'maybe' }] }) }],
+      // A cost no task's row could hold, and a kind of task offered twice.
+      [`/tasks/${TID}`, { task: view({ cost: { micros: 999_999_999_901, estimate: false } }) }],
+      ['/tasks/form', form({ templates: [form().templates[0], form().templates[0]] })],
       [`/tasks/${TID}`, view()],
     ];
     for (const [p, body] of bad) {
@@ -223,6 +226,53 @@ describe('reads', () => {
       answer = () => ({ status, body: { error: CANARY, code } });
       expect(await post(`/tasks/${TID}/again`, { draftKey: DRAFT })).toEqual({ status, body: { error: say, code } });
     }
+  });
+
+  it('an answer is one task’s and no other’s: a task answered under another id, and a filing that names another task, never reach the console', async () => {
+    const OTHER = 'tkZZZZZZZZZZZZZZZZ';
+    answer = () => ({ status: 200, body: { task: view({ id: OTHER, title: `Summarize ${CANARY}` }) } });
+    expect(await get(`/tasks/${TID}`)).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    // A new task's id is the one its form's key makes, and so is Run Again's.
+    answer = () => ({ status: 200, body: { id: OTHER, proposalId: 'pr1', deduped: false } });
+    expect(await post('/tasks', fresh())).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    expect(await post(`/tasks/${TID}/again`, { draftKey: 'n8Jr3MnP0qRs4tUw' })).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    answer = () => ({ status: 200, body: { id: TID, proposalId: 'pr1', deduped: false } });
+    // (The key that made the task asked about is not Run Again's own key: its answer must name the NEW task.)
+    expect((await post(`/tasks/${TID}/again`, { draftKey: 'n8Jr3MnP0qRs4tUw' })).status).toBe(502);
+    expect((await post(`/tasks/${TID}/again`, { draftKey: DRAFT })).status).toBe(200);
+    expect(logged).toEqual(['a task answer about another task', 'a new task answer about another task', 'a run again answer about another task', 'a run again answer about another task']);
+    expect(logged.join('\n')).not.toContain(CANARY);
+  });
+
+  it('at most 1 MB of an answer is read, and a 2xx that is not JSON is unreadable: neither is "not answering", and neither is parsed', async () => {
+    expect(MAX_ANSWER).toBe(1024 * 1024);
+    // Well-formed JSON, over the limit: refused by its size, before anything reads what it holds.
+    const big = JSON.stringify({ task: view(), pad: 'x'.repeat(2 * MAX_ANSWER) });
+    answer = () => ({ status: 200, body: big });
+    expect(await get(`/tasks/${TID}`)).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
+    expect(await post(`/tasks/${TID}/cancel`)).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    // A refusal over the limit is no refusal Flint can read either.
+    answer = () => ({ status: 409, body: JSON.stringify({ error: 'x', code: 'off', pad: 'x'.repeat(2 * MAX_ANSWER) }) });
+    expect(await get('/tasks')).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    expect(logged).toEqual(['an answer over 1 MB for a task request', 'an answer over 1 MB for a cancel request', 'an answer over 1 MB for a tab request']);
+    // Right at the limit an answer is read (and then held to its contract like any other).
+    logged = [];
+    const most = { tasks: [row()], more: false };
+    const room = MAX_ANSWER - Buffer.byteLength(JSON.stringify(most));
+    answer = () => ({ status: 200, body: `${' '.repeat(room)}${JSON.stringify(most)}` });
+    expect((await get('/tasks')).status).toBe(200);
+    answer = () => ({ status: 200, body: `${' '.repeat(room + 1)}${JSON.stringify(most)}` });
+    expect((await get('/tasks')).status).toBe(502);
+    expect(logged).toEqual(['an answer over 1 MB for a tab request']);
+    // Not JSON at all, or nothing: the runtime did answer.
+    logged = [];
+    for (const body of ['<html>502 Bad Gateway</html>', '', 'undefined', `{"task":${CANARY}`]) {
+      answer = () => ({ status: 200, body });
+      expect(await get(`/tasks/${TID}`), body).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+      expect(await post('/tasks', fresh()), body).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    }
+    expect([...new Set(logged)]).toEqual(['an answer that is not JSON for a task request', 'an answer that is not JSON for a new task request']);
+    expect(logged.join('\n')).not.toContain(CANARY);
   });
 
   it('switched off on this Mac: every route answers with the runtime’s code and the one fixed sentence, never its words', async () => {
@@ -261,10 +311,12 @@ describe('reads', () => {
     await post('/tasks', fresh({ template: CANARY }));
     expect(given.length).toBe(3);
     for (const e of given) expect(typeof e, String(e)).toBe('string');
-    expect(logged).toEqual(['malformed tab answer (tasks.0.line)', 'the runtime answered 500 for a assets request', 'refused a new task request (template)']);
+    expect(logged).toEqual(['malformed tab answer (tasks.0.line)', 'the runtime answered 500 for an assets request', 'refused a new task request (template)']);
     const src = readFileSync(join(__dirname, '..', 'src', 'tasks-routes.ts'), 'utf8');
     expect(src).not.toMatch(/errorRef\([^)]*new Error/);
-    expect(src.match(/deps\.errorRef\('tasks', `/g)).toHaveLength(3);
+    // Six places log, each a sentence made here: too long, not JSON, an error status, a broken contract, a refused request, another task's answer.
+    expect(src.match(/deps\.errorRef\('tasks', `/g)).toHaveLength(6);
+    expect(src.match(/errorRef\(/g)).toHaveLength(6);
     // The proxy keeps nothing and tells no one: no spool, no file, no note, no log line of its own.
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '');
     expect(code).not.toMatch(/RuntimeProposals|\.propose\(|runtime-proposals|appendFile|writeFile|node:fs|console\.(log|warn|error|info)|notes\.push|notifier|actionLog/);
@@ -275,18 +327,33 @@ describe('writes', () => {
   it('a new task is checked here, then filed with the runtime straight away, as the contract reads it', async () => {
     answer = () => ({ status: 200, body: { id: TID, proposalId: 'pr1', deduped: false } });
     expect(await post('/tasks', fresh())).toEqual({ status: 200, body: { id: TID, proposalId: 'pr1', deduped: false } });
-    expect(asked).toEqual([{ method: 'POST', url: '/v1/tasks', auth: `Bearer ${TOKEN}`, body: JSON.stringify({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'en1' }, goalId: null, dueAt: null, ownCheck: null }) }]);
+    // Its params go on as its own kind of task's contract reads them: every field said, nothing else.
+    expect(asked).toEqual([{ method: 'POST', url: '/v1/tasks', auth: `Bearer ${TOKEN}`, body: JSON.stringify({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'en1', sha: null }, goalId: null, dueAt: null, ownCheck: null }) }]);
     const due = '2026-11-01T22:00:00.000Z';
-    expect((await post('/tasks', fresh({ goalId: 'goabc12345', dueAt: due }))).status).toBe(200);
-    expect(JSON.parse(asked.at(-1)!.body)).toEqual({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'en1' }, goalId: 'goabc12345', dueAt: due, ownCheck: null });
+    expect((await post('/tasks', fresh({ goalId: 'goabc12345', dueAt: due, params: { item: 'en1', sha: 'abc1234' } }))).status).toBe(200);
+    expect(JSON.parse(asked.at(-1)!.body)).toEqual({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'en1', sha: 'abc1234' }, goalId: 'goabc12345', dueAt: due, ownCheck: null });
     asked = [];
     for (const bad of [
       {}, fresh({ draftKey: 'short' }), fresh({ template: 'run_shell' }), fresh({ params: 'en1' }), fresh({ taskId: TID }), fresh({ assetId: AID }), fresh({ tainted: false }),
       fresh({ dueAt: 'tomorrow' }), fresh({ dueAt: '2026-11-01' }), fresh({ goalId: 'not-a-goal' }), fresh({ ownCheck: 'x'.repeat(301) }), fresh({ note: CANARY }), [fresh()], 'watch_ci',
+      // Its params are its own kind of task's, and nothing more: no stray key, no field of another kind, no item that is no id.
+      fresh({ params: {} }), fresh({ params: { item: 'en1', command: 'ls' } }), fresh({ params: { item: 'en1', [CANARY]: 1 } }), fresh({ params: { item: { deep: [CANARY] } } }), fresh({ params: { item: 'en1', sha: 'main' } }),
+      fresh({ params: { items: ['en1'] } }), fresh({ template: 'draft_note', params: { item: 'en1' } }), fresh({ template: 'sort_items', params: { items: ['en1'], labels: ['Only One'] } }),
+      fresh({ params: { item: 'en1', constructor: { prototype: { x: 1 } } } }),
     ]) {
       expect(await post('/tasks', bad), JSON.stringify(bad).slice(0, 70)).toEqual({ status: 400, body: { error: TASKS_SAY.invalid } });
     }
     expect((await post('/tasks?force=1', fresh())).status).toBe(400);
+    // Too many items is said as that, here as in the runtime.
+    expect(await post('/tasks', fresh({ template: 'summarize_items', params: { items: Array.from({ length: 13 }, (_, i) => `en${i}`) } }))).toEqual({ status: 400, body: { error: 'A task takes up to 12 items.', code: 'tooMany' } });
+    expect(asked).toEqual([]);
+    // A field path in the log is the contracts' own words: a key a caller made up is never written there, however it is spelled.
+    logged = [];
+    await post('/tasks', fresh({ params: { item: 'en1', [`${CANARY}-key`]: 1 } }));
+    await post('/tasks', fresh({ params: { [`${CANARY}${'k'.repeat(40)}`]: 1 } }));
+    await post('/tasks', fresh({ [`${CANARY}-top`]: 1 }));
+    await post('/tasks', fresh({ params: { item: 'en1', sha: 'main' } }));
+    expect(logged).toEqual(['refused a new task request (params)', 'refused a new task request (params.?)', 'refused a new task request ((root))', 'refused a new task request (params.sha)']);
     expect(asked).toEqual([]);
     // An answer that is not the contract's never reaches the console.
     for (const body of [{ id: TID, proposalId: 'pr1', deduped: false, args: { title: CANARY } }, { proposalId: 'pr1', deduped: false }, { id: 'tk1', proposalId: 'pr1', deduped: false }, { ok: true }]) {
@@ -394,11 +461,15 @@ describe('writes', () => {
 
   it('a body over 32 KB is a 413 before anything else; the largest real form fits', async () => {
     expect(TASKS_BODY_BYTES).toBe(32 * 1024);
-    // A task's spec is at most 16 KB (the dispatch card's own limit).
-    const most = fresh({ template: 'draft_note', params: { about: 'x'.repeat(300), items: Array.from({ length: 12 }, (_, i) => `en${'a'.repeat(36)}${i}`), pad: 'y'.repeat(15_000) } });
-    expect(Buffer.byteLength(JSON.stringify(most))).toBeLessThan(TASKS_BODY_BYTES);
+    // The largest form there is (a note in 300 characters about 12 items) is a fraction of it.
+    const most = fresh({ template: 'draft_note', params: { about: 'x'.repeat(300), items: Array.from({ length: 12 }, (_, i) => `en${'a'.repeat(36)}${String(i).padStart(2, '0')}`), titles: true }, goalId: `go${'a'.repeat(38)}`, dueAt: '2026-11-01T22:00:00.000Z' });
+    expect(Buffer.byteLength(JSON.stringify(most))).toBeLessThan(TASKS_BODY_BYTES / 16);
     answer = () => ({ status: 200, body: { id: TID, proposalId: 'pr1', deduped: false } });
     expect((await post('/tasks', most)).status).toBe(200);
+    // Right up to the limit a body is read (the padding is the JSON's own white space), and one byte past it is not.
+    const padded = (bytes: number) => `${' '.repeat(bytes - Buffer.byteLength(JSON.stringify(fresh())))}${JSON.stringify(fresh())}`;
+    expect((await post('/tasks', padded(TASKS_BODY_BYTES))).status).toBe(200);
+    expect((await post('/tasks', padded(TASKS_BODY_BYTES + 1))).status).toBe(413);
     asked = [];
     for (const p of ['/tasks', `/assets/${AID}/on`, `/tasks/${TID}/cancel`, `/tasks/${TID}/again`]) {
       expect(await post(p, `{"draftKey":"${DRAFT}","pad":"${'x'.repeat(33_000)}"}`), p).toEqual({ status: 413, body: { error: TASKS_SAY.tooLarge } });
@@ -488,8 +559,21 @@ describe('where the routes sit', () => {
     expect(src).not.toMatch(/@flint\/core|Tool\b|tools\b|convos|memory|knowledge/);
   });
 
-  it('every sentence the server says here is one sentence in plain words', () => {
-    for (const s of Object.values(TASKS_SAY)) expect(s, s).toMatch(/^[A-Z][^()`{}]*\.$/);
+  it('every line the server says here is one plain sentence, or the two it is listed as: a second sentence slipped into any other fails here', () => {
+    /** The lines that say what happened and then what to do: two sentences each. Every other line is one. */
+    const TWO = new Set(['unsure', 'token', 'busy', 'failed']);
+    const sentences = (s: string) => s.split(/(?<=[.!?])\s+/);
+    for (const [key, s] of Object.entries(TASKS_SAY)) {
+      expect(sentences(s).length, `${key}: ${s}`).toBe(TWO.has(key) ? 2 : 1);
+      // Each sentence starts with a capital, ends with its one stop, and holds no aside, code or brace.
+      for (const one of sentences(s)) expect(one, one).toMatch(/^[A-Z][^.!?()`{}]*\.$/);
+    }
+    // The check itself tells one sentence from two.
+    expect(sentences('Tasks need the runtime.')).toHaveLength(1);
+    expect(sentences('Tasks need the runtime. Install it.')).toHaveLength(2);
+    expect('Tasks need the runtime. Install it.').not.toMatch(/^[A-Z][^.!?()`{}]*\.$/);
+    // What the runtime may say through here is held the same way (each of its lines is one or two sentences, none with an aside).
+    for (const s of Object.values(TASK_SAYS)) for (const one of sentences(s)) expect(one, one).toMatch(/^[A-Z][^.!?()`{}]*\.$/);
     expect(TASKS_SAY.noRuntime).toBe('Tasks need the runtime.');
     expect(TASKS_SAY.downWrite).toBe('The runtime isn’t answering, so nothing changed.');
     expect([TASK_SAYS.off, TASK_SAYS.noTask, TASK_SAYS.assetOff]).toEqual(['Tasks are turned off on this Mac.', 'This task no longer exists.', 'Its asset is off. Turn it on in Settings.']);

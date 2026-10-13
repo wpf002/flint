@@ -17,8 +17,11 @@
  *   POST /tasks/:id/again {draftKey}             -> Run Again: a new task like an ended one, and its card
  *
  * Every id and body is checked here with the shared contracts (@flint/policy,
- * bodies up to 32 KB) before the runtime sees it, and every answer against its
- * contract before the console does. A card is filed with the runtime straight
+ * bodies up to 32 KB; a new task's params against its own kind of task's
+ * contract, so nothing that kind does not take is ever sent on) before the
+ * runtime sees it, and every answer against its contract before the console
+ * does: at most 1 MB is read of one, an answer that is not JSON is refused as
+ * unreadable, and one task's answer is that task's and no other's. A card is filed with the runtime straight
  * away: nothing is ever spooled to disk, so a runtime that is down is a 503 and
  * nothing changed. A write the runtime did not answer (in time, or because the
  * connection dropped on the way) is a 504 that says Flint isn't sure it went
@@ -33,11 +36,14 @@
  * A task's title and its result are Will's words, or a watched system's. They
  * pass through here from the runtime to the console and go nowhere else: this
  * file keeps nothing, pushes no note, and logs statuses, field paths and
- * references only.
+ * references only. A field path in a log line is made of the contracts' own
+ * field names: a key a client made up is never written there.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TasksPage, taskSayOf } from '@flint/policy';
+import {
+  AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_ITEMS_MAX, TASK_SAYS, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TaskSpec, TasksPage, taskIdOf, taskSayOf,
+} from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import type { Runtime } from './audit-sink';
 
@@ -60,10 +66,13 @@ const WRITE_TIMEOUT_MS = 30_000;
  * connection dropped on the way. (0: the runtime could not be reached at all, so it got nothing.)
  */
 const NO_ANSWER = -2;
+/** ask()'s status for an answer over the size this proxy reads, and for a 2xx whose body is not JSON. */
+const TOO_LONG = -1;
+const NOT_JSON = -3;
 /** A connection that was never made: the request did not leave. */
 const UNREACHED: ReadonlySet<string> = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'EAI_AGAIN']);
-/** The largest runtime answer the server reads (a tab holds up to 200 rows). */
-const MAX_ANSWER = 1024 * 1024;
+/** The most of a runtime answer the server reads, in bytes (a tab of 200 rows is a fraction of it). */
+export const MAX_ANSWER = 1024 * 1024;
 
 /** What Will reads when the runtime can't be asked. */
 export const TASKS_SAY = {
@@ -95,6 +104,25 @@ function reply(res: ServerResponse, status: number, body: unknown): true {
 
 type Answer = { ok: true; json: unknown } | { ok: false; status: number; code?: unknown };
 
+/** An answer's body as text, read a piece at a time and given up once it is past the limit (undefined): the rest is never read. */
+async function readCapped(r: Response): Promise<string | undefined> {
+  if (!r.body) return '';
+  const reader = r.body.getReader();
+  const pieces: Uint8Array[] = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > MAX_ANSWER) {
+      await reader.cancel().catch(() => {});
+      return undefined;
+    }
+    pieces.push(value);
+  }
+  return Buffer.concat(pieces).toString('utf8');
+}
+
 /** One call to the runtime: its JSON, or its status (0: unreachable; NO_ANSWER: sent, or maybe sent, and not answered) and a refusal's code. The body is always read or cancelled. */
 async function ask(deps: TasksDeps, rt: Runtime, method: 'GET' | 'POST', path: string, body?: unknown): Promise<Answer> {
   try {
@@ -104,8 +132,8 @@ async function ask(deps: TasksDeps, rt: Runtime, method: 'GET' | 'POST', path: s
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(deps.timeoutMs ?? (method === 'GET' ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS)),
     });
-    const text = await r.text();
-    if (text.length > MAX_ANSWER) return { ok: false, status: -1 };
+    const text = await readCapped(r);
+    if (text === undefined) return { ok: false, status: TOO_LONG };
     if (!r.ok) {
       let code: unknown;
       try {
@@ -115,7 +143,12 @@ async function ask(deps: TasksDeps, rt: Runtime, method: 'GET' | 'POST', path: s
       }
       return { ok: false, status: r.status, code };
     }
-    return { ok: true, json: JSON.parse(text) as unknown };
+    // The runtime answered, and what it sent is no JSON: unreadable, never "not answering" (a write did land).
+    try {
+      return { ok: true, json: JSON.parse(text) as unknown };
+    } catch {
+      return { ok: false, status: NOT_JSON };
+    }
   } catch (err) {
     // Only a connection that was never made is "the runtime got nothing". A timeout, a reset, a socket closed
     // mid-answer: the runtime may have the request, and a write may still land.
@@ -134,9 +167,14 @@ interface How {
   newer?: boolean;
 }
 
+/** "a tab request", "an assets request". */
+const a = (what: string) => `${/^[aeiou]/.test(what) ? 'an' : 'a'} ${what}`;
+
 /** The console's answer when the runtime did not give a usable one. */
-function failed(res: ServerResponse, deps: TasksDeps, a: { status: number; code?: unknown }, how: How): true {
-  const s = a.status;
+function failed(res: ServerResponse, deps: TasksDeps, ans: { status: number; code?: unknown }, how: How): true {
+  const s = ans.status;
+  if (s === TOO_LONG) return reply(res, 502, { error: TASKS_SAY.unreadable, ref: deps.errorRef('tasks', `an answer over 1 MB for ${a(how.what)} request`) });
+  if (s === NOT_JSON) return reply(res, 502, { error: TASKS_SAY.unreadable, ref: deps.errorRef('tasks', `an answer that is not JSON for ${a(how.what)} request`) });
   if (s === 0) return reply(res, 503, { error: how.read ? TASKS_SAY.down : TASKS_SAY.downWrite });
   // No answer (in time, or the connection dropped): a read just did not load; a write may still land, and saying
   // "nothing changed" would be a guess.
@@ -144,19 +182,32 @@ function failed(res: ServerResponse, deps: TasksDeps, a: { status: number; code?
   if (s === 401 || s === 403) return reply(res, 502, { error: TASKS_SAY.token });
   // What this proxy sent was checked with the contract first. A runtime that calls it invalid is one from before
   // the route: said as that, never as a mistake of Will's.
-  if (how.newer && s === 400 && a.code === 'invalid') return reply(res, 501, { error: TASKS_SAY.older });
+  if (how.newer && s === 400 && ans.code === 'invalid') return reply(res, 501, { error: TASKS_SAY.older });
   // A refusal the runtime named by a code in the closed set: its fixed sentence, and the code.
-  const say = taskSayOf(a.code);
-  if (say && typeof a.code === 'string' && (s === 400 || s === 404 || s === 409 || s === 429)) return reply(res, s, { error: say, code: a.code });
+  const say = taskSayOf(ans.code);
+  if (say && typeof ans.code === 'string' && (s === 400 || s === 404 || s === 409 || s === 429)) return reply(res, s, { error: say, code: ans.code });
   if (s === 404) return how.page || !how.read ? reply(res, 501, { error: TASKS_SAY.older }) : reply(res, 404, { error: TASKS_SAY.gone });
   if (s === 400 || s === 422) return reply(res, 400, { error: TASKS_SAY.refused });
   if (s === 409) return reply(res, 409, { error: TASKS_SAY.stuck });
   if (s === 413) return reply(res, 413, { error: TASKS_SAY.tooLarge });
   if (s === 429) return reply(res, 429, { error: TASKS_SAY.busy });
-  return reply(res, 502, { error: TASKS_SAY.failed, ref: deps.errorRef('tasks', `the runtime answered ${s} for a ${how.what} request`) });
+  return reply(res, 502, { error: TASKS_SAY.failed, ref: deps.errorRef('tasks', `the runtime answered ${s} for ${a(how.what)} request`) });
 }
 
-const paths = (e: z.ZodError) => [...new Set(e.issues.map((i) => i.path.join('.') || '(root)'))].join(', ').slice(0, 300);
+/**
+ * The field names of this proxy's contracts: the only words of a field path
+ * that reach a log line. Anything else in a path (a key a client made up under
+ * `params`) is written as `?`: a log never echoes what a caller chose to send.
+ */
+const FIELDS: ReadonlySet<string> = new Set([
+  'draftKey', 'template', 'params', 'goalId', 'dueAt', 'ownCheck', 'item', 'items', 'sha', 'titles', 'labels', 'about',
+  'tasks', 'more', 'task', 'id', 'title', 'status', 'line', 'runsOn', 'outside', 'costs', 'createdAt', 'result', 'checks', 'name', 'state', 'checkedBy', 'askedBy',
+  'chance', 'likelihood', 'percent', 'cost', 'micros', 'estimate', 'card', 'can', 'cancel', 'accept', 'reject', 'again',
+  'assets', 'reviewsRequired', 'kind', 'on', 'waiting', 'canTurnOn', 'templates', 'goals', 'entityId', 'label', 'proposalId', 'deduped', 'ok',
+]);
+/** Where a request or an answer broke its contract: up to 8 places, each at most 6 deep, in the contracts' own words. */
+const paths = (e: z.ZodError) =>
+  [...new Set(e.issues.map((i) => i.path.slice(0, 6).map((k) => (typeof k === 'number' ? String(k) : FIELDS.has(k) ? k : '?')).join('.') || '(root)'))].slice(0, 8).join(', ').slice(0, 200);
 
 /** The runtime answered 2xx with something that is not the contract: logged by field paths, never values. */
 function malformed(res: ServerResponse, deps: TasksDeps, what: string, e: z.ZodError): true {
@@ -165,16 +216,24 @@ function malformed(res: ServerResponse, deps: TasksDeps, what: string, e: z.ZodE
 
 /** The console sent something no tasks route takes: refused here, before the runtime sees it, by field paths only. */
 function invalid(res: ServerResponse, deps: TasksDeps, what: string, e?: z.ZodError): true {
-  if (e) deps.errorRef('tasks', `refused a ${what} request (${paths(e)})`);
+  if (e) deps.errorRef('tasks', `refused ${a(what)} request (${paths(e)})`);
   return reply(res, 400, { error: TASKS_SAY.invalid });
 }
 
-/** Ask, check the answer against its contract, and pass it on. */
-async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: TasksDeps, rt: Runtime, method: 'GET' | 'POST', path: string, body: unknown, schema: T, how: Omit<How, 'read'>): Promise<true> {
-  const a = await ask(deps, rt, method, path, body);
-  if (!a.ok) return failed(res, deps, a, { ...how, read: method === 'GET' });
-  const answer = schema.safeParse(a.json);
+/**
+ * Ask, check the answer against its contract, and pass it on. `taskId`: the task the answer must be about (the one
+ * asked for, or the one a form's key makes). An answer about any other is refused: nothing the console keeps under
+ * one task's id is ever another task's.
+ */
+async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: TasksDeps, rt: Runtime, method: 'GET' | 'POST', path: string, body: unknown, schema: T, how: Omit<How, 'read'>, taskId?: string): Promise<true> {
+  const got = await ask(deps, rt, method, path, body);
+  if (!got.ok) return failed(res, deps, got, { ...how, read: method === 'GET' });
+  const answer = schema.safeParse(got.json);
   if (!answer.success) return malformed(res, deps, how.what, answer.error);
+  if (taskId !== undefined) {
+    const data = answer.data as { id?: unknown; task?: { id?: unknown } };
+    if ((data.task ? data.task.id : data.id) !== taskId) return reply(res, 502, { error: TASKS_SAY.unreadable, ref: deps.errorRef('tasks', `${a(how.what)} answer about another task`) });
+  }
   return reply(res, 200, answer.data);
 }
 
@@ -221,7 +280,7 @@ export async function tasksRoutes(req: IncomingMessage, res: ServerResponse, url
   if (one) {
     const id = TaskId.safeParse(one[1]);
     if (!id.success || u.search) return invalid(res, deps, 'task');
-    return forward(res, deps, rt, 'GET', `/v1/tasks/${id.data}`, undefined, TaskAnswer, { what: 'task' });
+    return forward(res, deps, rt, 'GET', `/v1/tasks/${id.data}`, undefined, TaskAnswer, { what: 'task' }, id.data);
   }
 
   // The POSTs: the body is read (and drained) whatever happens, up to 32 KB.
@@ -233,7 +292,15 @@ export async function tasksRoutes(req: IncomingMessage, res: ServerResponse, url
   if (create) {
     const b = NewTaskBody.safeParse(body);
     if (!b.success) return invalid(res, deps, 'new task', b.error);
-    return forward(res, deps, rt, 'POST', '/v1/tasks', b.data, TaskFiled, { what: 'new task' });
+    // Its params against its own kind of task's contract: what that kind does not take is not sent on, and what it
+    // takes is sent as the contract reads it. (Too many items has a sentence of its own.)
+    const spec = TaskSpec.safeParse({ template: b.data.template, params: b.data.params });
+    if (!spec.success) {
+      const items = (b.data.params as { items?: unknown }).items;
+      if (Array.isArray(items) && items.length > TASK_ITEMS_MAX) return reply(res, 400, { error: TASK_SAYS.tooMany, code: 'tooMany' });
+      return invalid(res, deps, 'new task', spec.error);
+    }
+    return forward(res, deps, rt, 'POST', '/v1/tasks', { ...b.data, params: spec.data.params }, TaskFiled, { what: 'new task' }, taskIdOf(b.data.draftKey));
   }
   if (asset) {
     const id = AssetId.safeParse(asset[1]);
@@ -246,7 +313,7 @@ export async function tasksRoutes(req: IncomingMessage, res: ServerResponse, url
   if (verb![2] === 'again') {
     const b = TaskAgainBody.safeParse(body);
     if (!id.success || !b.success) return invalid(res, deps, 'run again', b.success ? undefined : b.error);
-    return forward(res, deps, rt, 'POST', `/v1/tasks/${id.data}/again`, b.data, TaskFiled, { what: 'run again', newer: true });
+    return forward(res, deps, rt, 'POST', `/v1/tasks/${id.data}/again`, b.data, TaskFiled, { what: 'run again', newer: true }, taskIdOf(b.data.draftKey));
   }
   const [what, schema] = VERBS[verb![2] as keyof typeof VERBS];
   const b = EmptyBody.safeParse(body ?? {});
