@@ -27,6 +27,7 @@ import { currentTurn, historyOrigin, isPrivateTurn, markEval, noteFit, noteFitIn
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
+import { ownNameNotes } from './own-names';
 import { pgApproverStore } from './approver-store';
 import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
@@ -744,6 +745,8 @@ async function main(): Promise<void> {
   ];
   wiredNames.push(...tools.map((t) => t.definition.name));
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
+  // A connected tool that carries the name of one of Flint's own actions is said here, by its server's name only.
+  for (const line of ownNameNotes(wiredMcp.map((t) => t.definition.name))) console.error(`[mcp] ${line}`);
 
   // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
   const router = await ToolRouter.build(tools, embedder, CORE_TOOL_NAMES);

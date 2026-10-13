@@ -2007,6 +2007,16 @@ Each entry either starts a server on this machine or reaches a remote one:
 `${NAME}` in a header is read from the server's environment, so a token can stay out of
 the file. A remote server whose variable isn't set is skipped and logged by name.
 
+A connected server's tools are named `server.tool`, and whoever runs the server chooses
+both names. One may match an action of Flint's own: a server called `backup` with a tool
+called `local` is `backup.local`, the nightly backup's action. That tool works like any
+other, as `mcp:backup.local`, and is never run in the action's place: when you approve a
+card of Flint's own, the server does not look for a wired tool, and the runtime hands that
+card to no caller. At startup the log names such a server (`[mcp] the connected server
+"backup" names a tool like one of Flint's own actions…`), by the server's name only.
+Nothing is blocked. Rename the server in `mcp.json` if you want the two told apart at a
+glance.
+
 ## Deploy to Railway
 
 ```bash

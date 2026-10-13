@@ -320,14 +320,18 @@ export async function runRamApproval(
   return { action: result };
 }
 
+/** A built-in tool's stored action: its bare name (`remember`, `deep_research`). No dot, so never a connected server's `server.tool`, and never an action of Flint's own. */
+const BARE_NAME = /^[A-Za-z0-9_-]+$/;
+
 export type Executed = { id: string; fullName: string; status: 'done' | 'error' | 'approved'; result?: unknown; error?: string; note?: string };
 
 /**
  * Carry out a proposal Will has approved in the runtime:
- *  - a tool call this server has wired (an MCP tool or a built-in): claimed
- *    (the runtime re-verifies the signature, takes the cap and writes the
- *    intent), run here on a one-time allowance for exactly those args, in a
- *    scope as tainted as the proposal, and how it ended reported (spooled if the
+ *  - a tool call this server has wired (a connected server's tool, filed as
+ *    `mcp:server.tool`, or a built-in under its bare name): claimed (the
+ *    runtime re-verifies the signature, takes the cap and writes the intent),
+ *    run here on a one-time allowance for exactly those args, in a scope as
+ *    tainted as the proposal, and how it ended reported (spooled if the
  *    runtime cannot take it);
  *  - an action the runtime carries out itself (turning a source on, a signed
  *    policy change): run there;
@@ -342,7 +346,11 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   const server = m ? m[1]! : 'flint';
   const toolName = m ? m[2]! : proposal.action;
   const fullName = m ? `${server}.${toolName}` : proposal.action;
-  const tool = ctx.tools.find((t) => t.definition.name === fullName);
+  // A wired tool is looked up for a tool's own card and for no other: a connected server's (its action was filed
+  // with `mcp:` in front), or a built-in's (a bare name, which no connected tool has: theirs are `server.tool`).
+  // An action of Flint's own (`backup.local`, `goal.activate`) never resolves to a tool, whatever a connected server
+  // calls one of its tools: its card is carried out by the runtime or by its own job, and is handed to nothing else.
+  const tool = m || BARE_NAME.test(proposal.action) ? ctx.tools.find((t) => t.definition.name === fullName) : undefined;
   if (!tool) {
     try {
       return { id, fullName, status: 'done', result: await p.run(id) };

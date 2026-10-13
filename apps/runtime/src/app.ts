@@ -8,7 +8,7 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
-import { GOAL_SAYS, TASKS_WRITER, TASK_SAYS, safeName, taskNamed, type WebAuthnRelyingParty } from '@flint/policy';
+import { AUTONOMOUS_ACTIONS, GOAL_SAYS, TASKS_WRITER, TASK_SAYS, safeName, taskNamed, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Config, RuntimeScope } from './config.js';
 import type { Db } from './db.js';
 import { callerFor, type Caller } from './auth.js';
@@ -82,6 +82,20 @@ export interface AppDeps {
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 /** What a caller reads when it asks to carry out, or report done, a task card that nothing carries out. */
 const NOT_CARRIED_OUT = 'Flint can’t carry this out yet.';
+/**
+ * Why an approved card is not a caller's to claim, or undefined when it is. A card whose action Flint's own code
+ * carries out is claimed by that code and by nothing else: the runtime's own actions go through /run; a job's (a
+ * nightly backup, the restore test, the cleanup: every action on the closed list of what runs on its own) are
+ * claimed by the job, in its own process; and nothing carries out the rest of what is named as a task, an asset or
+ * a review. What a caller may claim is a tool's call: a connected server's (`mcp:server.tool`) or a built-in's.
+ * So a connected server that names a tool like one of these actions is never handed Flint's own card.
+ */
+export function notForCallers(action: string): string | undefined {
+  if (INTERNAL_ACTIONS.has(action)) return `${action} is carried out by the runtime: use /run`;
+  if (taskNamed(action)) return NOT_CARRIED_OUT;
+  if (AUTONOMOUS_ACTIONS.has(action)) return `${action} is carried out by Flint’s own job`;
+  return undefined;
+}
 /** The ledger's areas whose series are financial or personal (predict/series.ts: spend, calendar): chat is given no value scaled by one of them. */
 export const SENSITIVE_AREAS: ReadonlySet<string> = new Set(['spend', 'calendar']);
 
@@ -247,11 +261,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.post('/v1/proposals/:id/claim', { preHandler: need('proposals') }, async (req) => {
     const { id } = Id.parse(req.params);
     const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
-    if (p && INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is carried out by the runtime: use /run`);
-    // No card about a task, an asset or a review is a caller's to claim, whatever its name (P5): the seven are the
-    // runtime's own (above), and nothing carries the others out (a paid dispatch, a review, the Hive's dispatch).
-    // Claimed here, one could be reported done with any result while its task never moved.
-    if (p && taskNamed(p.action)) throw new Refused(409, NOT_CARRIED_OUT);
+    // No card that Flint's own code carries out is a caller's to claim, whoever asks (notForCallers). Nor is one about
+    // a task, an asset or a review, whatever its name (P5): the seven are the runtime's own, and nothing carries the
+    // others out (a paid dispatch, a review, the Hive's dispatch). Claimed here, one could be reported done with any
+    // result while its task never moved, or its backup never ran.
+    const why = p ? notForCallers(p.action) : undefined;
+    if (why) throw new Refused(409, why);
     return claimProposal(db, id, rp, config.tz, actor(req));
   });
   // Approved actions the runtime carries out itself (turning a source on, a signed policy change).
@@ -262,9 +277,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // A tool's result can be large (a fetched page): this route takes up to 1 MB and truncates what it stores.
   app.post('/v1/proposals/:id/complete', { preHandler: need('proposals'), bodyLimit: 1024 * 1024 }, async (req) => {
     const { id } = Id.parse(req.params);
-    // Nor is one a caller's to report done (the runtime completes its own in the transaction that carries them out).
+    // Nor is one a caller's to report done (the runtime completes its own in the transaction that carries them out,
+    // and a job reports its own card).
     const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
-    if (p && taskNamed(p.action)) throw new Refused(409, INTERNAL_ACTIONS.has(p.action) ? `${p.action} is carried out by the runtime: use /run` : NOT_CARRIED_OUT);
+    if (p && (taskNamed(p.action) || (AUTONOMOUS_ACTIONS.has(p.action) && !INTERNAL_ACTIONS.has(p.action)))) throw new Refused(409, notForCallers(p.action)!);
     await completeProposal(db, id, CompleteProposal.parse(req.body), actor(req));
     return { ok: true };
   });
