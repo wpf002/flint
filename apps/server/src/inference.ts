@@ -28,7 +28,7 @@
  */
 import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type HardwareTier, type Tier, type Tool } from '@flint/core';
 import { detectHardware, type Hardware } from './hardware';
-import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type InferenceConfig, type InferenceMode } from './inference-config';
+import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type FileCheck, type InferenceConfig, type InferenceMode } from './inference-config';
 import { ModeStore } from './inference-mode';
 import { inferenceStatus, localOnlySentence, modeSentence, type InferenceStatus } from './inference-status';
 import type { BrainTier } from './brains';
@@ -42,6 +42,7 @@ import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy'
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
 import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
+import { isFile, planVoice, transcriptionMissing, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -96,6 +97,8 @@ export interface Machine {
 
 export class Inference {
   readonly cfg: InferenceConfig;
+  /** What hears and what speaks, as config decided it (./voice): the providers are built from it, and the status says it. */
+  readonly voicePlan: VoicePlan;
   readonly mode: ModeStore;
   /**
    * Over when the first pass behind the boot is: the machine looked at, its tier
@@ -113,12 +116,16 @@ export class Inference {
   /** Have the server at this address asked what runs on it, when its word is more than two seconds old (./ollama-locality fresh). */
   private readonly listing: (baseURL: string) => Promise<void>;
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
+  /** Is there a file at this path? Asked when a status is built, of the transcription program and its model (./voice transcriptionMissing). */
+  private readonly fileExists: FileCheck;
 
   constructor(parts: {
-    cfg: InferenceConfig; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
-    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>;
+    cfg: InferenceConfig; voice: VoicePlan; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
+    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: FileCheck;
   }) {
     this.cfg = parts.cfg;
+    this.voicePlan = parts.voice;
+    this.fileExists = parts.fileExists ?? isFile;
     this.handle = parts.handle;
     this.mode = parts.mode;
     this.machine = parts.machine;
@@ -691,6 +698,8 @@ export class Inference {
     const snapshot = await this.local.monitor.check();
     const machine = this.machine();
     const embedModel = this.embedModel;
+    // Whether a recording could be transcribed right now: the same look the provider takes before each one.
+    const lacks = transcriptionMissing(this.voicePlan.stt, this.fileExists);
     return inferenceStatus({
       embedding: { model: embedModel, installed: await this.embedInstalled(embedModel, snapshot.reachable) },
       mode: this.mode.current(),
@@ -700,6 +709,8 @@ export class Inference {
       local: this.localNow,
       ...(this.standbyElsewhere() ? { standbyElsewhere: true } : {}),
       snapshot,
+      voice: this.voicePlan,
+      ...(lacks ? { transcriptionMissing: lacks } : {}),
       ...(cloud ? { cloud } : {}),
     });
   }
@@ -752,6 +763,13 @@ export interface BuildInferenceDeps {
    */
   observeOnly?: boolean;
   /**
+   * Is there a file at this path? For the program and the model a setting
+   * names (./inference-config): one that is not there when Flint starts is
+   * refused, and the usual one is used. Default: the real file system. A test
+   * hands one in.
+   */
+  fileExists?: FileCheck;
+  /**
    * Have the server at an address asked what runs on it, when its word is more
    * than two seconds old. Default: the server's own record
    * (./ollama-locality fresh). A test hands one in.
@@ -777,7 +795,7 @@ export interface BuildInferenceDeps {
  */
 export async function buildInference(deps: BuildInferenceDeps): Promise<Inference> {
   const log = deps.log ?? (() => {});
-  const cfg = readInferenceConfig(deps.env, log);
+  const cfg = readInferenceConfig(deps.env, log, { fileExists: deps.fileExists ?? isFile });
   const mode = new ModeStore({ file: deps.modeFile, envMode: cfg.mode, envSource: cfg.modeSource, log });
   // The machine, once, behind the boot: which tier it is in, and so which model to prefer when none is named.
   // Detection cannot throw and is cut off by the clock (./hardware); a failure of an injected one is "no accelerator".
@@ -856,5 +874,5 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}) });
+  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}) });
 }

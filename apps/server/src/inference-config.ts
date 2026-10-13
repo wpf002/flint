@@ -30,6 +30,38 @@
  *   OLLAMA_MODEL                         (see ./local-brains)         ignored: the server is asked what it has
  *   OLLAMA_NUM_CTX                       (see ./local-brains)         ignored: the model's own, or the tier's
  *   FLINT_EMBED_MODEL                    the tier table's             ignored: the tier table's
+ *   FLINT_STT_PROVIDER                   whisper-cpp (this Mac)       whisper-cpp: the engine on this Mac, the most private there is
+ *   FLINT_TTS_PROVIDER                   openai (as before)           off: no speech is made here, each device uses its own voice
+ *   FLINT_LOCAL_STT_BASE_URL             none                         transcription stays on whisper-cpp, never another address
+ *   FLINT_LOCAL_STT_MODEL                whisper-1                    whisper-1
+ *   FLINT_LOCAL_TTS_BASE_URL             none                         speech is off, never OpenAI in its place
+ *   FLINT_LOCAL_TTS_MODEL                tts-1                        tts-1
+ *   FLINT_LOCAL_TTS_VOICE                alloy                        alloy
+ *   FLINT_LOCAL_VOICE_API_KEY            none                         none
+ *   FLINT_SAY_VOICE                      the Mac's own default        the Mac's own default
+ *   FLINT_TTS_MODEL / FLINT_TTS_VOICE    tts-1 / onyx (OpenAI's)      tts-1 / onyx
+ *   WHISPER_BIN / WHISPER_MODEL          Homebrew's, ~/.flint/models  the same: the usual program, the usual model
+ *
+ * The last four are older than this module. The server used to read them
+ * before it read ~/.flint/secrets.env, so a line for one of them in that file
+ * was silently ignored; they are read here, after it, so such a line now
+ * applies. A path may start with `~/` (neither that file nor a LaunchAgent
+ * expands it): it is this home folder. Any other path that is not a full one
+ * is refused, and so is one that names a file that is not there when Flint
+ * starts (a line saved long ago, which nothing read until now): the usual
+ * program or model is used, wherever the value came from. A recording is
+ * never failed for a setting.
+ *
+ * A voice setting that is refused never lands on a less private choice than
+ * the one that was meant: a speech provider Flint does not know is no speech
+ * at all (the default would be an outside service), and a local speech server
+ * whose address is refused is never replaced by OpenAI.
+ *
+ * A local speech server is on THIS MAC. The one exception is the same one
+ * OLLAMA_HOST has (`ollamaIsLocal`): the address of the local model server
+ * itself, when Will said that server is his. FLINT_LOCAL_ALLOW_REMOTE vouches
+ * for that server and for no other machine, so a speech server anywhere else
+ * is refused, and so is one that Node's env proxy would carry the request to.
  *
  * Secure by default: a local endpoint is this Mac (127.0.0.1, localhost or
  * [::1]) unless FLINT_LOCAL_ALLOW_REMOTE=1 says a server elsewhere is meant.
@@ -38,6 +70,8 @@
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
 import { HARDWARE_TIER_IDS, isLoopbackHost, isOllamaCloudModel, type HardwareTierId } from '@flint/core';
 import { readEnvProxy as policyEnvProxy, viaProxy, type EnvProxy } from '@flint/policy';
@@ -53,6 +87,62 @@ export type LocalProviderKind = (typeof LOCAL_PROVIDERS)[number];
 /** What kind of server answers at the local address; `auto` asks it. */
 export const LOCAL_SERVERS = ['auto', 'ollama', 'llamacpp', 'openai'] as const;
 export type LocalServerSetting = (typeof LOCAL_SERVERS)[number];
+
+/** What turns Will's voice into text: whisper.cpp on this Mac (today's), or an OpenAI-compatible local speech server. */
+export const STT_PROVIDERS = ['whisper-cpp', 'local'] as const;
+export type SttProviderKind = (typeof STT_PROVIDERS)[number];
+
+/** What speaks a reply: OpenAI (today's), an OpenAI-compatible local speech server, the Mac's own `say`, or nothing here. */
+export const TTS_PROVIDERS = ['openai', 'local', 'say', 'off'] as const;
+export type TtsProviderKind = (typeof TTS_PROVIDERS)[number];
+
+/**
+ * A voice for the Mac's `say`: letters, spaces, brackets and hyphens, as its
+ * own list names them ("Samantha", "Eddy (English (US))"). It starts with a
+ * letter, so it can never be read as an option.
+ */
+export const SAY_VOICE_RE = /^[A-Za-z][A-Za-z ()-]{0,39}$/;
+
+/** The longest name `say` gives a voice that is taken here. */
+export const SAY_VOICE_MAX_LEN = 40;
+
+/**
+ * A model or a voice on a speech server, and OpenAI's speech model: a plain
+ * name, never a path or an option. The same shape a rebuild puts back
+ * (apps/studio/recovery_lib.sh `model`, `speechname`), so a name that is taken
+ * here is one a rebuild keeps.
+ */
+const SPEECH_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/;
+const speechName = z.string().trim().min(1).max(80).regex(SPEECH_NAME_RE);
+/** OpenAI's voice: one word (recovery_lib.sh `word`). */
+const SPEECH_WORD_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+/** The longest path to a program or a model file that is looked at, and the longest file name a log or a status shows. */
+const FILE_PATH_MAX_LEN = 1024;
+const FILE_NAME_MAX_LEN = 100;
+/** Nothing a terminal or a log acts on: a control character, a format character (a direction override), a line or paragraph separator. */
+const UNPRINTABLE_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+/**
+ * A path to a program or to a model's file, as it is written in a setting:
+ * printable, bounded, and with a file name short enough to show. Whether it
+ * is a full path is decided where the home folder is known (`filePath`).
+ */
+const fileSetting = z
+  .string()
+  .trim()
+  .min(1)
+  .max(FILE_PATH_MAX_LEN)
+  .refine((v) => !UNPRINTABLE_RE.test(v), { message: 'unprintable' })
+  .refine((v) => /[^\\/]$/.test(v) && v.replace(/^.*[\\/]/, '').length <= FILE_NAME_MAX_LEN, { message: 'file_name' });
+
+/** What is looked for at a path: a file, or a program (a file this user may run). */
+export type FileKind = 'file' | 'program';
+/** Is that there? Handed in by whoever touches the file system (./voice isFile); a stand-in may answer for the path alone. */
+export type FileCheck = (path: string, kind: FileKind) => boolean;
+
+export const DEFAULT_LOCAL_STT_MODEL = 'whisper-1';
+export const DEFAULT_LOCAL_TTS_MODEL = 'tts-1';
+export const DEFAULT_LOCAL_TTS_VOICE = 'alloy';
 
 export const DEFAULT_LOCAL_BASE_URL = 'http://127.0.0.1:11434/v1';
 export const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
@@ -99,6 +189,9 @@ export type LocalUrl =
       secure: boolean;
     }
   | { ok: false; reason: UrlProblem };
+
+/** An address that passed: what `parseLocalUrl` says of it. */
+export type LocalUrlOk = Extract<LocalUrl, { ok: true }>;
 
 /**
  * A local model server's address, or why it is refused. http or https; no
@@ -204,6 +297,20 @@ export const SCHEMAS = {
   // A model tag like any other here: never one of Ollama's cloud models, which would send every fact and every
   // question it embeds to Ollama's servers.
   FLINT_EMBED_MODEL: modelTag,
+  // Voice (./voice). The defaults are today's: whisper.cpp hears, OpenAI speaks.
+  FLINT_STT_PROVIDER: z.string().trim().toLowerCase().pipe(z.enum(STT_PROVIDERS)),
+  FLINT_TTS_PROVIDER: z.string().trim().toLowerCase().pipe(z.enum(TTS_PROVIDERS)),
+  FLINT_LOCAL_STT_MODEL: speechName,
+  FLINT_LOCAL_TTS_MODEL: speechName,
+  FLINT_LOCAL_TTS_VOICE: speechName,
+  FLINT_LOCAL_VOICE_API_KEY: z.string().trim().min(1).max(512).regex(/^[\x21-\x7e]+$/),
+  FLINT_SAY_VOICE: z.string().trim().min(1).max(SAY_VOICE_MAX_LEN).regex(SAY_VOICE_RE),
+  // Older than this module (the server read them as they were). A name that goes to OpenAI, into a log and into a
+  // status is a plain name; a path is printable and bounded, so no newline or escape of it reaches a line of either.
+  FLINT_TTS_MODEL: speechName,
+  FLINT_TTS_VOICE: z.string().trim().min(1).max(40).regex(SPEECH_WORD_RE),
+  WHISPER_BIN: fileSetting,
+  WHISPER_MODEL: fileSetting,
 } as const;
 
 /**
@@ -217,7 +324,7 @@ export function readContextSize(raw: string | undefined): number | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-export type ConfigKey = keyof typeof SCHEMAS | 'FLINT_LOCAL_BASE_URL' | 'OLLAMA_HOST';
+export type ConfigKey = keyof typeof SCHEMAS | 'FLINT_LOCAL_BASE_URL' | 'OLLAMA_HOST' | 'FLINT_LOCAL_STT_BASE_URL' | 'FLINT_LOCAL_TTS_BASE_URL';
 
 /**
  * The class of a refusal, for a face that says it in its own words (the
@@ -225,7 +332,7 @@ export type ConfigKey = keyof typeof SCHEMAS | 'FLINT_LOCAL_BASE_URL' | 'OLLAMA_
  * that runs on Ollama's servers, a key that would have travelled in the clear,
  * or simply a value the key does not take.
  */
-export type ProblemKind = UrlProblem | 'invalid' | 'cloud_model' | 'in_the_clear';
+export type ProblemKind = UrlProblem | 'invalid' | 'cloud_model' | 'in_the_clear' | 'unset' | 'other_machine' | 'proxied' | 'missing';
 
 /** A value that was set and refused: the key, why in words, and the class of the refusal. Never the value. */
 export interface ConfigProblem {
@@ -279,6 +386,30 @@ export interface InferenceConfig {
   };
   /** FLINT_HARDWARE_TIER: `auto` detects the machine (./hardware); a tier id overrides the detection. */
   hardwareTier: 'auto' | HardwareTierId;
+  /** Voice (./voice): what hears and what speaks. What is here is what was SET and passed; ./voice decides what it comes to. */
+  voice: {
+    /** FLINT_STT_PROVIDER. Unset or refused: `whisper-cpp`. */
+    stt: SttProviderKind;
+    /** FLINT_TTS_PROVIDER. Unset: `openai`, as before. Refused: `off`, never the outside service a typo did not ask for. */
+    tts: TtsProviderKind;
+    /** FLINT_LOCAL_STT_BASE_URL. Undefined when unset or refused: there is no local transcription server. */
+    sttServer: LocalUrlOk | undefined;
+    sttModel: string;
+    /** FLINT_LOCAL_TTS_BASE_URL. Undefined when unset or refused: there is no local speech server. */
+    ttsServer: LocalUrlOk | undefined;
+    ttsModel: string;
+    ttsVoice: string;
+    /** FLINT_LOCAL_VOICE_API_KEY, for a speech server started with a key. Never logged, never in a status. */
+    apiKey: string | undefined;
+    /** FLINT_SAY_VOICE. Undefined: the Mac's own default voice. */
+    sayVoice: string | undefined;
+    /** FLINT_TTS_MODEL and FLINT_TTS_VOICE, OpenAI's. Undefined when unset or refused: the usual ones (./voice). */
+    openaiModel: string | undefined;
+    openaiVoice: string | undefined;
+    /** WHISPER_BIN and WHISPER_MODEL, as full paths (`~/` is this home folder). Undefined when unset or refused: the usual ones (./voice). */
+    whisperBin: string | undefined;
+    whisperModel: string | undefined;
+  };
   problems: ConfigProblem[];
 }
 
@@ -287,6 +418,8 @@ function reasonOf(error: z.ZodError): string {
   const issue = error.issues[0];
   if (!issue) return 'invalid';
   if (issue.message === 'cloud_model') return 'an Ollama cloud model does not run on this Mac';
+  if (issue.message === 'unprintable') return 'written with characters that cannot be shown';
+  if (issue.message === 'file_name') return 'not the path of a file with a name of at most 100 characters';
   switch (issue.code) {
     case 'invalid_enum_value':
       return `not one of ${issue.options.join(', ')}`;
@@ -298,7 +431,7 @@ function reasonOf(error: z.ZodError): string {
     case 'too_big':
       return issue.type === 'number' ? `above ${String(issue.maximum)}` : 'too long';
     case 'invalid_string':
-      return 'has characters that are not allowed';
+      return 'written with characters that are not allowed';
     default:
       return 'invalid';
   }
@@ -316,10 +449,36 @@ const URL_REASONS: Record<UrlProblem, string> = {
 };
 
 /**
+ * The same for a speech server's address, where two of them would mislead: its
+ * key has a setting of its own, and no switch lets a speech server be on
+ * another machine (FLINT_LOCAL_ALLOW_REMOTE vouches for the model server).
+ */
+const SPEECH_URL_REASONS: Record<UrlProblem, string> = {
+  ...URL_REASONS,
+  has_credentials: 'a URL that carries credentials (use FLINT_LOCAL_VOICE_API_KEY)',
+  not_loopback: 'on another machine (a speech server runs on this Mac)',
+};
+
+/**
  * Read every key. `warn` gets one line per refused value; the same facts are
  * in `problems` for the status command. Nothing here throws.
  */
-export function readInferenceConfig(env: Env, warn: (msg: string) => void = () => {}, opts: { execArgv?: readonly string[] } = {}): InferenceConfig {
+export function readInferenceConfig(
+  env: Env,
+  warn: (msg: string) => void = () => {},
+  opts: {
+    execArgv?: readonly string[];
+    home?: string;
+    /**
+     * Is there a file at this path? Handed in by whoever starts the server
+     * (./inference buildInference: the real file system), so that a program or
+     * a model that is named and not there is refused here, at start. Left out,
+     * no file is looked for: this function reads the environment and nothing
+     * else.
+     */
+    fileExists?: FileCheck;
+  } = {},
+): InferenceConfig {
   const problems: ConfigProblem[] = [];
   const refuse = (key: ConfigKey, reason: string, outcome: string, kind: ProblemKind = 'invalid'): void => {
     problems.push({ key, reason, kind });
@@ -363,9 +522,99 @@ export function readInferenceConfig(env: Env, warn: (msg: string) => void = () =
   const ollamaUrl = parseLocalUrl(rawOllama || DEFAULT_OLLAMA_HOST, true);
   if (!ollamaUrl.ok) refuse('OLLAMA_HOST', URL_REASONS[ollamaUrl.reason], "Ollama's own API is off", ollamaUrl.reason);
 
+  // Voice. A provider Flint does not know is whisper-cpp for hearing (this Mac, the most private there is) and
+  // OFF for speaking: the default there is an outside service, and a typo must not choose it.
+  const stt = or<SttProviderKind>(read('FLINT_STT_PROVIDER', 'transcription stays on whisper-cpp, on this Mac'), 'whisper-cpp');
+  const tts = or<TtsProviderKind>(read('FLINT_TTS_PROVIDER', 'no speech is made here, so each device uses its own voice'), 'openai', 'off');
+  /**
+   * A local speech server's address: this Mac. Or the local model server's own address on another machine, when
+   * Will said that server is his (the switch vouches for that server and no other), and then under its rule: https,
+   * unless he also called its network private. Never an address Node's env proxy would carry the request to.
+   */
+  // Where the model server's own setting points, read as an address and nothing more: whether a machine other than
+  // this one may be used at all, and over what, is decided below, by the same two switches the model server has.
+  const baseAsWritten = parseLocalUrl(rawBase || DEFAULT_LOCAL_BASE_URL, true, { defaultPath: '/v1' });
+  const modelOrigin = provider === 'openai' ? (baseAsWritten.ok ? baseAsWritten.origin : undefined) : ollamaUrl.ok ? ollamaUrl.origin : undefined;
+  const speechServer = (key: 'FLINT_LOCAL_STT_BASE_URL' | 'FLINT_LOCAL_TTS_BASE_URL', wanted: boolean, outcome: string): LocalUrlOk | undefined => {
+    const raw = env[key]?.trim();
+    if (!raw) {
+      if (wanted) refuse(key, 'not set', outcome, 'unset');
+      return undefined;
+    }
+    // Read as an address first, whatever machine it names: what is said of another machine is this rule's own.
+    const at = parseLocalUrl(raw, true, { defaultPath: '/v1' });
+    if (!at.ok) {
+      refuse(key, SPEECH_URL_REASONS[at.reason], outcome, at.reason);
+      return undefined;
+    }
+    if (!at.loopback) {
+      if (!allowRemote || modelOrigin !== at.origin) {
+        refuse(key, SPEECH_URL_REASONS.not_loopback, outcome, 'other_machine');
+        return undefined;
+      }
+      // The model server's own address: under the model server's rule, https unless its network was called private.
+      if (!at.secure && !allowInsecureRemote) {
+        refuse(key, URL_REASONS.insecure_remote, outcome, 'insecure_remote');
+        return undefined;
+      }
+    }
+    if (viaProxy(at.host, proxy)) {
+      refuse(key, 'reached through a proxy (NODE_USE_ENV_PROXY), so it is not this Mac', outcome, 'proxied');
+      return undefined;
+    }
+    return at;
+  };
+  const sttServer = speechServer('FLINT_LOCAL_STT_BASE_URL', stt === 'local', 'transcription stays on whisper-cpp, on this Mac');
+  const ttsServer = speechServer('FLINT_LOCAL_TTS_BASE_URL', tts === 'local', 'no speech is made here, so each device uses its own voice');
+  // The same rule as the model server's key: never in the clear to another machine.
+  let voiceKey = or<string | undefined>(read('FLINT_LOCAL_VOICE_API_KEY', 'no key is sent'), undefined);
+  if (voiceKey && [sttServer, ttsServer].some((at) => at && !at.secure)) {
+    refuse('FLINT_LOCAL_VOICE_API_KEY', 'not sent over plain http to another machine', 'no key is sent (use https)', 'in_the_clear');
+    voiceKey = undefined;
+  }
+
+  /**
+   * A path to a program or a model file: a full path, with `~/` read as this home folder (neither the settings
+   * file nor a LaunchAgent expands it, and a path whisper.cpp cannot open would fail every recording). Any other
+   * path that is not a full one (`~someone/...`, a bare name) is refused, and the usual one is used. So is one
+   * that names a file that is not there (`opts.fileExists`), or a program that is there and may not be run (a
+   * file without execute permission fails every recording just as a missing one does): said by the setting's
+   * name, never by its path.
+   */
+  const home = opts.home ?? homedir();
+  const filePath = (key: 'WHISPER_BIN' | 'WHISPER_MODEL', outcome: string): string | undefined => {
+    const r = read(key, outcome);
+    if (r.state !== 'ok') return undefined;
+    const full = r.value.startsWith('~/') ? join(home, r.value.slice(2)) : r.value;
+    if (!isAbsolute(full)) {
+      refuse(key, 'not a full path (one that starts with / or with ~/)', outcome);
+      return undefined;
+    }
+    if (opts.fileExists && !opts.fileExists(full, key === 'WHISPER_BIN' ? 'program' : 'file')) {
+      refuse(key, key === 'WHISPER_BIN' ? 'the path of a program that is not there, or that cannot be run' : 'the path of a file that is not there', outcome, 'missing');
+      return undefined;
+    }
+    return full;
+  };
+
   return {
     mode,
     modeSource,
+    voice: {
+      stt,
+      tts,
+      sttServer,
+      sttModel: or(read('FLINT_LOCAL_STT_MODEL', `using ${DEFAULT_LOCAL_STT_MODEL}`), DEFAULT_LOCAL_STT_MODEL),
+      ttsServer,
+      ttsModel: or(read('FLINT_LOCAL_TTS_MODEL', `using ${DEFAULT_LOCAL_TTS_MODEL}`), DEFAULT_LOCAL_TTS_MODEL),
+      ttsVoice: or(read('FLINT_LOCAL_TTS_VOICE', `using ${DEFAULT_LOCAL_TTS_VOICE}`), DEFAULT_LOCAL_TTS_VOICE),
+      apiKey: voiceKey,
+      sayVoice: or<string | undefined>(read('FLINT_SAY_VOICE', "using the Mac's own default voice"), undefined),
+      openaiModel: or<string | undefined>(read('FLINT_TTS_MODEL', "using OpenAI's usual speech model"), undefined),
+      openaiVoice: or<string | undefined>(read('FLINT_TTS_VOICE', "using OpenAI's usual voice"), undefined),
+      whisperBin: filePath('WHISPER_BIN', 'using the usual transcription program'),
+      whisperModel: filePath('WHISPER_MODEL', 'using the usual transcription model'),
+    },
     local: {
       provider,
       openai: base.ok ? base : undefined,

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EMBEDDING_MODEL, hardwareTier, isFlintError, type Tool } from '@flint/core';
@@ -777,6 +777,89 @@ describe('which brain is on this Mac, as the facade answers it', () => {
     expect(inference.brainIsLocal(fake('ollama'), 'no-address')).toBe(false);
   });
 
+  // A program or a model a voice setting names is looked for when Flint starts (./voice isFile, the real file
+  // system, unless a test hands a check in): one that is not there is refused, and the usual one is used.
+  it('a WHISPER_MODEL that names a file that is not there is refused at start, on the real file system; one that is there is used', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'ggml-small.en.bin'), 'a stand-in for a model file');
+    const start = async (env: Record<string, string>, fileExists?: (p: string) => boolean) => {
+      const lines: string[] = [];
+      const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', ...env }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, log: (l) => lines.push(l), ...(fileExists ? { fileExists } : {}) });
+      built.push(inference);
+      return { inference, lines };
+    };
+    const stale = await start({ WHISPER_MODEL: join(dir, 'ggml-gone.bin') });
+    expect(stale.inference.cfg.problems).toEqual([{ key: 'WHISPER_MODEL', reason: 'the path of a file that is not there', kind: 'missing' }]);
+    expect(stale.lines).toContain('[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model');
+    expect(stale.lines.join('\n')).not.toContain('ggml-gone');
+    expect(stale.inference.voicePlan.stt).toMatchObject({ name: 'whisper-cpp' });
+    expect((stale.inference.voicePlan.stt as { model: string }).model).toMatch(/\/\.flint\/models\/ggml-base\.en\.bin$/);
+    const kept = await start({ WHISPER_MODEL: join(dir, 'ggml-small.en.bin') });
+    expect(kept.inference.cfg.problems).toEqual([]);
+    expect(kept.inference.voicePlan.stt).toMatchObject({ model: join(dir, 'ggml-small.en.bin') });
+    // A check that is handed in is the one that is asked.
+    const told = await start({ WHISPER_MODEL: join(dir, 'ggml-small.en.bin') }, () => false);
+    expect(told.inference.cfg.problems.map((p) => [p.key, p.kind])).toEqual([['WHISPER_MODEL', 'missing']]);
+  });
+
+  // The re-review: a WHISPER_BIN that was there but could not be run was taken at start, every recording was a
+  // 500, and the status said all was well.
+  it('a WHISPER_BIN that is there and cannot be run (chmod 644) is refused at start, on the real file system; made runnable, it is used', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    const bin = join(dir, 'whisper-cli');
+    const model = join(dir, 'ggml-small.en.bin');
+    writeFileSync(bin, '#!/bin/sh\necho heard\n');
+    writeFileSync(model, 'a stand-in for a model file');
+    const start = async () => {
+      const lines: string[] = [];
+      const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', WHISPER_BIN: bin, WHISPER_MODEL: model }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, log: (l) => lines.push(l) });
+      built.push(inference);
+      return { inference, lines };
+    };
+    chmodSync(bin, 0o644);
+    const refused = await start();
+    expect(refused.inference.cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a program that is not there, or that cannot be run', kind: 'missing' }]);
+    expect(refused.lines).toContain('[inference] WHISPER_BIN is the path of a program that is not there, or that cannot be run; using the usual transcription program');
+    expect(refused.lines.join('\n')).not.toContain(dir);
+    // The usual program is what the plan names; the model, which is a file and is there, is the one that was set.
+    expect(refused.inference.voicePlan.stt).toMatchObject({ bin: '/opt/homebrew/bin/whisper-cli', model });
+    expect((await refused.inference.status()).notices).toContain("The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one.");
+    chmodSync(bin, 0o755);
+    const kept = await start();
+    expect(kept.inference.cfg.problems).toEqual([]);
+    expect(kept.inference.voicePlan.stt).toMatchObject({ bin, model });
+    // ...and the status follows the program while Flint runs: taken away its permission, the row says so at the next look.
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe('Your voice is turned into text on this Mac.');
+    chmodSync(bin, 0o644);
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe("Flint can't turn speech into text until its transcription program is on this Mac.");
+    chmodSync(bin, 0o755);
+    expect((await kept.inference.status()).voice!.transcription.sentence).toBe('Your voice is turned into text on this Mac.');
+  });
+
+  // The Transcription row follows what is on this Mac when the status is built: the same look the provider takes
+  // before each recording (./voice whisperMissing), so the row and /transcribe never say different things.
+  it('the status says when whisper.cpp or its model is not on this Mac, and stops saying it the moment it is', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    const there = new Set<string>();
+    const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', WHISPER_BIN: '/x/whisper-cli', WHISPER_MODEL: '/x/ggml-small.en.bin' }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, fileExists: (p) => p.startsWith('/x/') && (there.size === 0 || there.has(p)) });
+    built.push(inference);
+    // Both were there at start, so both settings were taken.
+    expect(inference.cfg.problems).toEqual([]);
+    const row = async () => (await inference.status()).voice!.transcription;
+    expect((await row()).sentence).toBe('Your voice is turned into text on this Mac.');
+    there.add('/x/whisper-cli'); // from here on, only what is in the set is there: the model is gone
+    expect(await row()).toEqual({ provider: 'whisper-cpp', name: 'Whisper Small English', here: true, sentence: "Flint can't turn speech into text until its transcription model is on this Mac." });
+    expect((await inference.status()).lines).toContain("Transcription is set to whisper-cpp (ggml-small.en.bin). Flint can't turn speech into text until its transcription model is on this Mac.");
+    there.delete('/x/whisper-cli');
+    there.add('/x/ggml-small.en.bin'); // the model is back, and the program is gone
+    expect((await row()).sentence).toBe("Flint can't turn speech into text until its transcription program is on this Mac.");
+    there.add('/x/whisper-cli');
+    expect((await row()).sentence).toBe('Your voice is turned into text on this Mac.');
+  });
+
   it('a stand-in brain (nothing settled) is not local: it has no server it may be asked on', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
     dirs.push(dir);
@@ -1396,8 +1479,15 @@ describe('status', () => {
       `The recommended model for this tier is ${hardwareTier('48gb').model} with a 16,384-token context.`,
       'No standby model is set.',
       `The embedding model is ${EMBED}. It is downloaded.`,
+      // Voice: the defaults, by provider. (No OpenAI key in this test's environment, and the line says so.)
+      'Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.',
+      'Speech is set to OpenAI (tts-1, onyx), which has no key: each device speaks with its own voice.',
       'A cloud model is configured.',
     ]);
+    expect(st.voice).toEqual({
+      speech: { provider: 'openai', name: 'OpenAI', here: false, sentence: 'It has no key, so each device speaks with its own voice.' },
+      transcription: { provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: 'Your voice is turned into text on this Mac.' },
+    });
     // What the console shows: a name made for a screen, a sentence for the mode, and nothing to report.
     expect(st.modeSentence).toBe('Flint picks this Mac or the cloud for each message.');
     expect(st.local.primary).toMatchObject({ name: 'Main Model 30B', sentence: 'It is ready.' });

@@ -9,11 +9,15 @@ captures your command → whisper-cli transcribes it → sends to Flint's `/chat
 plays the reply through `/speak` (onyx). No cloud wake-word service; reuses the
 STT/TTS Flint already has.
 
-`/speak` is an outside speech service (OpenAI). A reply Flint marks as staying on this Mac
-(a turn answered with Will's goals, or one that read such a turn: the chat stream's `meta`
-event says so) is never sent there. The client speaks it with the Mac's own `say` voice. Every
-other reply's request names its conversation and turn, so the server can refuse on its side
-too, and a refusal falls back to `say`.
+`/speak` is an outside speech service (OpenAI) unless Flint is set to speak on this Mac
+(`FLINT_TTS_PROVIDER`, see "Voice" in `apps/server/README.md`). A reply Flint marks as staying
+on this Mac (a private turn, a turn taken in Local mode, a turn answered with Will's goals, or
+one that read such a turn: the chat stream's `meta` event says so) is never sent to an outside
+service. The client speaks it with the Mac's own `say` voice. It is sent to `/speak` only when
+that same event says the server's speech is made on this Mac (`speechHere`). Every other
+reply's request names its conversation and turn, so the server can refuse on its side too, and
+a refusal falls back to `say`. The audio is played as the kind the server says it is (mp3 from
+OpenAI, m4a from the Mac's own voice, whatever a local speech server sends).
 
 ## Install on the Mac Studio
 ```

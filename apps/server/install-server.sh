@@ -171,6 +171,11 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   else
     SWIFT_CHECKS=0; echo "gate: Flint Calendar unchanged since the last deploy, so its Swift checks are skipped"
   fi
+  # The server's tests that start the Mac's own `say` for real are opt-in, by this name
+  # (apps/server/test/process/voice.test.ts). The gate never runs them: a busy moment on
+  # the live Mac must not fail a deploy. Cleared here, so no shell that starts a deploy
+  # can opt the gate in.
+  unset FLINT_TEST_REAL_SAY
   FLINT_REQUIRE_SWIFT=$SWIFT_CHECKS pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
   echo "gate: policy typecheck + tests (isSafeTool, the tier engine, approval signatures)..."
   pnpm --filter @flint/policy typecheck || { echo "✗ policy typecheck failed — NOT deploying"; exit 1; }

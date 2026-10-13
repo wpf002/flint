@@ -93,11 +93,13 @@ describe('index.ts wiring', () => {
     expect(src).toContain("goalsChat.hears({ provider: 'ollama', model: inference.embedModel, baseURL: embedHost });");
     // What a turn streams is kept as its own words, for the one question /speak asks of a text (the reply and its note).
     expect(chat.match(/asked\.said\(/g)).toHaveLength(2);
-    // /speak asks it before the outside speech service is called.
+    // /speak hands that question to the rule that decides which replies an outside speech service may be given
+    // (../src/speech-route asks it, with the conversation, the turn and the text, before any such service is called:
+    // test/speech-route.test.ts. A turn that may be spoken vouches only for its own words, test/goals-chat.test.ts.)
     const speak = between("url === '/speak'", "url === '/generate'");
-    // (The text goes with the names: a turn that may be spoken vouches only for its own words, test/goals-chat.test.ts.)
-    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
-    expect(speak.indexOf('ctx.goals.speechStaysHere(')).toBeLessThan(speak.indexOf('speakWithinBudget('));
+    expect(speak).toContain('mustStay: (said) => ctx.goals.speechStaysHere(said),');
+    expect(speak).toContain('mustStaySentence: SPEECH_STAYS_HERE,');
+    expect(src.match(/speechStaysHere\(/g)).toHaveLength(1);
     // /generate has no gate: recall as any brain may have it, and a tier on this Mac asked as a local model's turn.
     expect(generate).toContain('const recalled = recallForAnyBrain(await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall }));');
     expect(generate.match(/recallContext\(/g)).toHaveLength(1);
@@ -127,7 +129,8 @@ describe('index.ts wiring', () => {
     expect(chat.match(/\boutsideCtx\b/g)).toHaveLength(2);
     expect(chat.match(/\bliftedCtx\b/g)).toHaveLength(2);
     // The client is told, ahead of the reply, whether it stays here; and a tier on this Mac is asked as a local model's turn.
-    expect(chat).toMatch(/const here = asked\.meta\(\);\s*if \(here\) res\.write\(`data: \$\{JSON\.stringify\(here\)\}\\n\\n`\);/);
+    // (When the server's own speech is made on this Mac the event says that too: the case below.)
+    expect(chat).toMatch(/const here = asked\.meta\(\);\s*if \(here\) res\.write\(`data: \$\{JSON\.stringify\(speechMadeHere\(ctx\.voice\.tts\) \? \{ \.\.\.here, speechHere: true \} : here\)\}\\n\\n`\);/);
     expect(chat).toMatch(/await ctx\.goals\.run\(b, async \(\) => \{\s*await pump\(b\.persona, [^;]*, frontierCtx\);[^\n]*\n\s*\}\);/);
     // What the [route] line and the chat.turn event report is the module's measure for the brain asked last.
     expect(chat.match(/goalsTokens = /g)).toEqual(['goalsTokens = ', 'goalsTokens = ']);
@@ -561,15 +564,72 @@ describe('index.ts wiring', () => {
 
   // The final review's H2. The server decides which reply stays here, from the turn it stored (./goals-chat
   // speechStaysHere: a private turn's, any turn's from Local mode, a goals turn's): never from the client's own word.
-  it('/speak refuses a reply that stays here: Local mode\'s 503 first, then 409 for the stored turn, both before any speech is made', () => {
+  // What the rule DOES is tested by running it (test/speech-route.test.ts drives ../src/speech-route with every
+  // provider; test/goals-chat.test.ts drives speechStaysHere): what is checked here is that /speak hands it the
+  // server's own answers and decides nothing itself.
+  it('/speak hands the rule the provider, the mode and the stored turn, and decides nothing itself: no speech is made around it', () => {
     const speak = between("url === '/speak'", "url === '/generate'");
-    expect(speak).toMatch(/const noCloud = ctx\.inference\.cloudRefused\('tts'\);\s*if \(noCloud\) return json\(res, 503, \{ error: noCloud, fallback: 'browser' \}\);/);
-    // (The text goes with the names: a turn that may be spoken vouches only for its own words, test/goals-chat.test.ts.)
-    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
-    expect(speak.indexOf("ctx.inference.cloudRefused('tts')")).toBeLessThan(speak.indexOf('ctx.goals.speechStaysHere('));
-    expect(speak.indexOf('ctx.goals.speechStaysHere(')).toBeLessThan(speak.indexOf('speakWithinBudget('));
-    // The client is not asked whether its reply is private: a flag it could leave out decides nothing.
+    expect(speak).toMatch(
+      /const spoken = await speak\(read\.body, \{\s*tts: ctx\.voice\.tts,\s*localMode: \(\) => ctx\.inference\.cloudRefused\('tts'\),\s*mustStay: \(said\) => ctx\.goals\.speechStaysHere\(said\),\s*mustStaySentence: SPEECH_STAYS_HERE,\s*guard: ctx\.spend,\s*signal: gone\.signal,\s*\}\);/,
+    );
+    // A client that hangs up before its answer: the rule is handed a signal that fires then, and only then (a
+    // response that ended is not a hang-up). What a provider does with it is the seam's (test/voice.test.ts).
+    expect(speak).toContain('const gone = new AbortController();');
+    expect(speak).toMatch(/const hungUp = \(\): void => \{\s*if \(!res\.writableEnded\) gone\.abort\(\);\s*\};\s*res\.once\('close', hungUp\);/);
+    expect(speak).toContain("res.off('close', hungUp);");
+    // Speech on this Mac that was stopped that way is not a failure, and nobody is there to be told. An outside
+    // provider's failure is answered and logged as it always was, whoever is still listening.
+    expect(speak).toContain('if (gone.signal.aborted && speechMadeHere(ctx.voice.tts)) return;');
+    expect(speak).toContain('if (spoken.status !== 200) return json(res, spoken.status, spoken.body);');
+    // The audio goes out as the kind the provider made (mp3 from OpenAI, as before; m4a from this Mac's own voice).
+    expect(speak).toContain("res.writeHead(200, { 'Content-Type': spoken.contentType, 'Content-Length': spoken.audio.length });");
+    // One call: nothing else in the route makes speech, reads the mode, or asks the client whether its reply is private.
+    expect(speak.match(/await speak\(/g)).toHaveLength(1);
+    expect(speak).not.toMatch(/synthesize\(|speakWithinBudget\(|ctx\.voice\.tts\.[a-z]/);
+    expect(speak.match(/cloudRefused\(/g)).toHaveLength(1);
     expect(speak).not.toContain('body.private');
+    // ...and nowhere in index.ts is a speech or transcription engine named or run: the seam is the only way to one.
+    expect(src).not.toMatch(/api\.openai\.com\/v1\/audio|afconvert|whisper-cli|WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_|execFile/);
+    expect(src.match(/ctx\.voice\.(stt|tts)\b/g)).toEqual(['ctx.voice.stt', 'ctx.voice.tts', 'ctx.voice.tts', 'ctx.voice.tts']);
+    expect(between("url === '/transcribe'", "url === '/speak'")).toContain('return json(res, 200, { text: (await ctx.voice.stt.transcribe(buf)).text });');
+    // Nothing on this Mac can transcribe (no program, or no model): the provider's own sentence, as a 503, and no
+    // reference to a failure, because nothing was run. Anything else is the failure it always was.
+    expect(between("url === '/transcribe'", "url === '/speak'")).toMatch(
+      /\} catch \(e\) \{\s*(\/\/[^\n]*\s*)*if \(e instanceof CannotTranscribe\) return json\(res, 503, \{ error: e\.message \}\);\s*return json\(res, 500, \{ error: 'transcription failed', ref: errorRef\('transcribe', e\) \}\);/,
+    );
+    // The providers are built once, at boot, from what config decided, and the boot line names them.
+    expect(src).toContain('const voice = buildVoice(inference.voicePlan, { env: process.env, connectTimeoutMs: inference.cfg.local.connectTimeoutMs });');
+    expect(src).toContain('console.error(voiceLine(inference.voicePlan));');
+    expect(src.match(/buildVoice\(/g)).toHaveLength(1);
+  });
+
+  // The review's H1. main read WHISPER_BIN, WHISPER_MODEL, FLINT_TTS_MODEL and FLINT_TTS_VOICE into constants when
+  // the file loaded, which is BEFORE main() reads ~/.flint/secrets.env: a line for one of them in that file was
+  // silently ignored. They are read by config now, from the environment as it is after the settings file was read
+  // into it, so such a line applies. (What they come to is tested where it is decided: test/voice.test.ts; and
+  // on a real server with the four in its settings file: test/process.)
+  it('the four older voice settings are read after the saved settings are: nothing reads them when the file loads', () => {
+    const main = src.slice(src.indexOf('async function main()'));
+    const saved = main.indexOf('loadSecrets();');
+    const planned = main.indexOf('const inference = await buildInference({ env: process.env,');
+    const built = main.indexOf('const voice = buildVoice(inference.voicePlan,');
+    expect(saved).toBeGreaterThan(-1);
+    expect(planned).toBeGreaterThan(saved);
+    expect(built).toBeGreaterThan(planned);
+    // No constant of the file's own holds one of them: every one of the four is a name index.ts never writes.
+    expect(src).not.toMatch(/WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_MODEL|FLINT_TTS_VOICE/);
+    // ...and the plan is made from what config read: ./inference hands config, and the same environment, to ./voice.
+    expect(readFileSync(join(__dirname, '..', 'src', 'inference.ts'), 'utf8')).toContain('voice: planVoice(cfg, deps.env)');
+    const voice = readFileSync(join(__dirname, '..', 'src', 'voice.ts'), 'utf8');
+    expect(voice).not.toMatch(/env\.(WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_MODEL|FLINT_TTS_VOICE)/);
+    expect(voice.match(/env\.[A-Z_]+/g)).toEqual(['env.OPENAI_API_KEY', 'env.OPENAI_API_KEY']);
+  });
+
+  // A reply that stays here may be sent to /speak only when the speech is made on this Mac, and the server says
+  // which is the case: the client starts from "it is not" (test/console-speech.test.ts).
+  it('the meta event says when the server speaks on this Mac, and is what it always was when it does not', () => {
+    expect(chat).toContain('if (here) res.write(`data: ${JSON.stringify(speechMadeHere(ctx.voice.tts) ? { ...here, speechHere: true } : here)}\\n\\n`);');
+    expect(src.match(/speechHere/g)).toHaveLength(1);
   });
 
   it('every cloud call that is not a chat turn reads the mode where it is made: research planning, frontier memory extraction, speech', () => {
@@ -577,9 +637,8 @@ describe('index.ts wiring', () => {
     expect(planner).toMatch(/const localMode = inference\.cloudRefused\('plan'\);[^\n]*\n\s*if \(localMode\) return localMode;/);
     expect(planner.indexOf("inference.cloudRefused('plan')")).toBeLessThan(planner.indexOf('breaker.paused(plannerProvider)'));
     expect(src).toContain("frontier: extractWith && frontierExtractBrain(inference.cloudOnly('extract', (input: { system: string; prompt: string }) => extractWith.generate(input, { context: spendContext('extract') }))),");
-    const speak = between("url === '/speak'", "url === '/generate'");
-    expect(speak).toMatch(/const noCloud = ctx\.inference\.cloudRefused\('tts'\);\s*if \(noCloud\) return json\(res, 503, \{ error: noCloud, fallback: 'browser' \}\);/);
-    expect(speak.indexOf("ctx.inference.cloudRefused('tts')")).toBeLessThan(speak.indexOf('speakWithinBudget('));
+    // Speech: the mode is read inside the rule, for a provider that is an outside service (test/speech-route.test.ts).
+    expect(between("url === '/speak'", "url === '/generate'")).toContain("localMode: () => ctx.inference.cloudRefused('tts'),");
   });
 
   it('the [route] line says which mode, which rule and which provider, on both routes; responses carry the mode and rule', () => {

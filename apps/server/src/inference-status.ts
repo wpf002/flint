@@ -29,6 +29,7 @@ import type { ModeSource } from './inference-mode';
 import type { LocalBrains, ModelSource, NotConfined, Wire } from './local-brains';
 import type { ServerKind } from './local-backend';
 import { pullCommand, type LocalSnapshot, type LocalState, type ModelHealth, type UnavailableWhy } from './local-monitor';
+import { fileNameOf, whereOf, type VoicePlan } from './voice';
 
 /** One local model, as a status shows it. */
 export interface ModelStatus {
@@ -64,6 +65,18 @@ export interface EmbeddingStatus {
   state: 'installed' | 'not_installed' | 'unknown';
   pull?: string;
   downloadGb?: number;
+  sentence: string;
+}
+
+/** What speaks a reply, or what turns Will's voice into text. */
+export interface VoiceRow {
+  /** The provider's name in config (`openai`, `say`, `local`, `off`; `whisper-cpp`, `local`). For the command line. */
+  provider: string;
+  /** What the console calls it: words, never a tag, a path or an address. */
+  name: string;
+  /** The words (or the audio) stay on this Mac, or on a machine Will said is his. */
+  here: boolean;
+  /** What the console says of it, true for the mode Flint is in. */
   sentence: string;
 }
 
@@ -133,6 +146,8 @@ export interface InferenceStatus {
     /** Things Will should know, each a sentence. */
     warnings: string[];
   };
+  /** Voice (./voice): what speaks, and what hears. Absent when the status was built without it. */
+  voice?: { speech: VoiceRow; transcription: VoiceRow };
   /** The cloud side. Absent when the status was read without the running server, which is what knows it. */
   cloud?: {
     configured: boolean;
@@ -162,6 +177,10 @@ export interface StatusInput {
   snapshot: LocalSnapshot;
   /** The embedding model in use, and whether the model server has it (`undefined`: it did not say). */
   embedding?: { model: string; installed: boolean | undefined };
+  /** What hears and what speaks, as config decided it (./voice planVoice). */
+  voice?: VoicePlan;
+  /** What whisper.cpp lacks on this Mac right now, when it is what hears (./voice transcriptionMissing). Absent: nothing, or it was not looked at. */
+  transcriptionMissing?: 'program' | 'model';
   cloud?: InferenceStatus['cloud'];
   /**
    * The standby model is known to run on Ollama's servers, whatever it is
@@ -432,6 +451,110 @@ function embeddingStatus(e: NonNullable<StatusInput['embedding']>, canPull: bool
 const pullLine = (pull: string, gb: number | undefined): string => `To download it${gb !== undefined ? ` (about ${gb.toFixed(1)} GB)` : ''}, run:  ${pull}`;
 
 // ---------------------------------------------------------------------------
+// voice
+
+/** Words only: what a screen may show of a name that came from a setting or a file. */
+const plainWords = (raw: string): string =>
+  raw
+    .replace(/[^A-Za-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40)
+    .trim();
+
+/** A whisper.cpp model as a screen names it, from its file's name: "ggml-base.en.bin" is "Whisper Base English". */
+export function whisperName(file: string): string {
+  const stem = file
+    .replace(/^.*[\\/]/, '')
+    .replace(/\.bin$/i, '')
+    .replace(/^ggml-/i, '');
+  const words = stem
+    .split(/[._-]+/)
+    .map((w) => w.replace(/[^A-Za-z0-9]/g, ''))
+    .filter((w) => w.length > 0)
+    .map((w) => (w.toLowerCase() === 'en' ? 'English' : /\d/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()));
+  return plainWords(`Whisper ${words.join(' ')}`) || 'Whisper';
+}
+
+const OWN_VOICE = 'each device speaks with its own voice';
+
+/** What speaks a reply: its name, and a sentence that is true for the mode. */
+export function speechRow(t: VoicePlan['tts'], mode: InferenceMode): VoiceRow {
+  switch (t.name) {
+    case 'openai':
+      return {
+        provider: t.name,
+        name: 'OpenAI',
+        here: false,
+        sentence: !t.hasKey
+          ? `It has no key, so ${OWN_VOICE}.`
+          : mode === 'local'
+            ? `Local mode doesn't use it, so ${OWN_VOICE}.`
+            : 'It speaks replies. A reply that stays on this Mac is spoken by the device instead.',
+      };
+    case 'say':
+      // A voice by the name the Mac itself gives it ("Eddy (English (US))"): config took it only as letters, spaces, brackets and hyphens.
+      return { provider: t.name, name: t.voice || 'This Mac', here: true, sentence: 'Replies are spoken on this Mac, and nothing is sent out.' };
+    case 'local':
+      return {
+        provider: t.name,
+        name: 'Local Speech Server',
+        here: true,
+        // (Config lets a speech server be at one address that is not this Mac: the model server Will said is his.)
+        sentence: t.server.loopback ? 'Replies are spoken by the speech server on this Mac, and nothing is sent out.' : 'Replies are spoken by the speech server on the model server you allowed.',
+      };
+    case 'off':
+      return { provider: t.name, name: 'Off', here: true, sentence: t.why === 'not_a_mac' ? `This machine isn't a Mac, so ${OWN_VOICE}.` : `${OWN_VOICE.charAt(0).toUpperCase()}${OWN_VOICE.slice(1)}.` };
+  }
+}
+
+/** What a row and a line say when whisper.cpp or its model is not on this Mac: nothing can be transcribed until it is. */
+const CANNOT_TRANSCRIBE: Record<'program' | 'model', string> = {
+  program: "Flint can't turn speech into text until its transcription program is on this Mac.",
+  model: "Flint can't turn speech into text until its transcription model is on this Mac.",
+};
+
+/** What turns Will's voice into text. `missing`: what whisper.cpp lacks on this Mac right now, when it is what hears. */
+export function transcriptionRow(s: VoicePlan['stt'], missing?: 'program' | 'model'): VoiceRow {
+  if (s.name === 'local') {
+    return {
+      provider: s.name,
+      name: 'Local Speech Server',
+      here: true,
+      sentence: s.server.loopback ? 'Your voice is turned into text by the speech server on this Mac.' : 'Your voice is turned into text by the speech server on the model server you allowed.',
+    };
+  }
+  return { provider: s.name, name: whisperName(s.model), here: true, sentence: missing ? CANNOT_TRANSCRIBE[missing] : 'Your voice is turned into text on this Mac.' };
+}
+
+/** The same two facts for the command line: providers by name, models and voices as they are set. Never a path, an address or a key. */
+export function voiceLines(v: VoicePlan, mode: InferenceMode, missing?: 'program' | 'model'): string[] {
+  const s = v.stt;
+  const t = v.tts;
+  const hears =
+    s.name === 'local'
+      ? `Transcription uses the local speech server ${whereOf(s.server)} (${s.model}).`
+      : missing
+        ? `Transcription is set to whisper-cpp (${fileNameOf(s.model)}). ${CANNOT_TRANSCRIBE[missing]}`
+        : `Transcription uses whisper-cpp (${fileNameOf(s.model)}), on this Mac.`;
+  let speaks: string;
+  if (t.name === 'openai') {
+    speaks = !t.hasKey
+      ? `Speech is set to OpenAI (${t.model}, ${t.voice}), which has no key: ${OWN_VOICE}.`
+      : mode === 'local'
+        ? `Speech is set to OpenAI (${t.model}, ${t.voice}), which Local mode does not use: ${OWN_VOICE}.`
+        : `Speech uses OpenAI (${t.model}, ${t.voice}). A reply that stays on this Mac is spoken by the device instead.`;
+  } else if (t.name === 'say') {
+    speaks = `Speech uses this Mac's own voice${t.voice ? ` (${t.voice})` : ''}. Nothing is sent out.`;
+  } else if (t.name === 'local') {
+    speaks = `Speech uses the local speech server ${whereOf(t.server)} (${t.model}, ${t.voice}).`;
+  } else {
+    speaks = `Speech is off: ${OWN_VOICE}.`;
+  }
+  return [hears, speaks];
+}
+
+// ---------------------------------------------------------------------------
 // refused settings, for the console
 
 const TIMING_KEYS: ReadonlySet<ConfigKey> = new Set<ConfigKey>([
@@ -453,6 +576,15 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
     const kind = isUrlProblem(p.kind) ? p.kind : undefined;
     if (o.inUse) return addressSentence(kind);
     return `The address of a second local server ${kind ? ADDRESS_CLAUSES[kind] : 'was refused'}. Flint isn't using that server.`;
+  }
+  if (p.key === 'FLINT_LOCAL_TTS_BASE_URL' || p.key === 'FLINT_LOCAL_STT_BASE_URL') {
+    const speech = p.key === 'FLINT_LOCAL_TTS_BASE_URL';
+    const so = speech ? `so ${OWN_VOICE}.` : 'so your voice is turned into text on this Mac.';
+    const what = speech ? "The speech server's address" : "The transcription server's address";
+    if (p.kind === 'unset') return `${what} isn't set, ${so}`;
+    if (p.kind === 'other_machine') return `${what} is on another machine, and a speech server has to run on this Mac, ${so}`;
+    if (p.kind === 'proxied') return `${what} is reached through a proxy, ${so}`;
+    return `${what} ${isUrlProblem(p.kind) ? ADDRESS_CLAUSES[p.kind] : 'was refused'}, ${so}`;
   }
   if (TIMING_KEYS.has(p.key)) return "A timing setting in Flint's setup isn't valid, so Flint uses its usual value.";
   switch (p.key) {
@@ -490,6 +622,29 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
     case 'OLLAMA_NUM_CTX':
     case 'FLINT_LOCAL_FALLBACK_NUM_CTX':
       return "A context size in Flint's setup isn't valid, so Flint ignored it.";
+    case 'FLINT_TTS_PROVIDER':
+      return `The speech setting in Flint's setup isn't one it knows, so ${OWN_VOICE}.`;
+    case 'FLINT_STT_PROVIDER':
+      return "The transcription setting in Flint's setup isn't one it knows, so your voice is turned into text on this Mac.";
+    case 'FLINT_LOCAL_STT_MODEL':
+    case 'FLINT_LOCAL_TTS_MODEL':
+    case 'FLINT_LOCAL_TTS_VOICE':
+      return "A speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.";
+    case 'FLINT_SAY_VOICE':
+      return "The voice named in Flint's setup isn't a voice name, so this Mac's usual voice is used.";
+    case 'FLINT_TTS_MODEL':
+    case 'FLINT_TTS_VOICE':
+      return "The OpenAI speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.";
+    case 'WHISPER_BIN':
+      return p.kind === 'missing'
+        ? "The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one."
+        : "The transcription program named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
+    case 'WHISPER_MODEL':
+      return p.kind === 'missing'
+        ? "The transcription model named in Flint's setup isn't on this Mac, so Flint uses the usual one."
+        : "The transcription model named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
+    case 'FLINT_LOCAL_VOICE_API_KEY':
+      return p.kind === 'in_the_clear' ? "The speech server's key isn't sent, because the server's address isn't encrypted." : "The speech server's key isn't valid, so no key is sent.";
     default:
       return "A setting in Flint's setup isn't valid, so Flint ignored it.";
   }
@@ -602,6 +757,7 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
     lines.push(`The embedding model is ${embedding.model}.${embedding.state === 'installed' ? ' It is downloaded.' : embedding.state === 'not_installed' ? ' It is not downloaded yet.' : ''}`);
     if (embedding.pull) lines.push(pullLine(embedding.pull, embedding.downloadGb));
   }
+  if (i.voice) lines.push(...voiceLines(i.voice, i.mode, i.transcriptionMissing));
   if (i.cloud) lines.push(i.cloud.configured ? (i.cloud.paused ? 'A cloud model is configured, and it is paused right now.' : 'A cloud model is configured.') : 'No cloud model is configured.');
   lines.push(...warnings);
   for (const p of local.cfg.problems) lines.push(`A setting was refused: ${p.key} is ${p.reason}.`);
@@ -650,6 +806,7 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
       pull,
       warnings,
     },
+    ...(i.voice ? { voice: { speech: speechRow(i.voice.tts, i.mode), transcription: transcriptionRow(i.voice.stt, i.transcriptionMissing) } } : {}),
     ...(i.cloud ? { cloud: i.cloud } : {}),
     problems: local.cfg.problems,
     notices: shown,

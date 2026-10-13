@@ -518,6 +518,10 @@
           <div class="sub"><span id="sbsub"></span><button class="ghost" id="sbcopy" aria-label="Copy Standby Model Command" onclick="copyPull('standby')" hidden>Copy Command</button></div></div>
         <div class="row stack"><span class="lbl"><b>Hardware</b></span><span class="val" id="hwval"></span>
           <div class="sub"><span id="hwsub">Flint is checking.</span></div></div>
+        <div class="row stack" id="sprow" hidden><span class="lbl"><b>Speech</b></span><span class="val" id="spval"></span>
+          <div class="sub"><span id="spsub"></span></div></div>
+        <div class="row stack" id="trrow" hidden><span class="lbl"><b>Transcription</b></span><span class="val" id="trval"></span>
+          <div class="sub"><span id="trsub"></span></div></div>
       </div>
       <div class="row stack" id="brainerr" hidden><span class="lbl"><b id="brainerrttl">Couldn’t Load Brain</b></span><button class="ghost" id="brainretry" onclick="loadBrain()">Try Again</button>
         <div class="sub"><span id="brainerrsub">Flint isn’t answering.</span></div></div>
@@ -979,10 +983,13 @@ var _ttsSkipUntil=0;
 function _neuralFetch(clean,vctx){if(Date.now()<_ttsSkipUntil)return Promise.reject(new Error('no-tts'));return fetch(BASE+'/speak',{method:'POST',headers:Object.assign({'content-type':'application/json'},auth()),body:JSON.stringify({text:clean,conversationId:(vctx&&vctx.conv)||undefined,turnId:(vctx&&vctx.turn)||undefined})}).then(function(r){if(r.status===503)_ttsSkipUntil=Date.now()+600000;if(!r.ok)throw new Error('no-tts');return r.blob();});}
 // The server's `meta` event says whether the reply being streamed stays on this Mac, and which stored turn it is.
 // A reply starts as one that stays here (vctx.here): only the server saying it may go out clears that.
-function voiceMeta(vctx,ev){if(ev.staysHere===true||ev.staysHere===false){vctx.here=ev.staysHere;vctx.turn=typeof ev.turn==='string'?ev.turn:null;}}
-// The neural voice's audio for a sentence, or null for this device's own voice. A reply that stays on this Mac
-// is never sent to the speech service: the browser speaks it.
-function _speechBlob(clean,vctx){return(clean&&!vctx.here)?_neuralFetch(clean,vctx).catch(function(){return null;}):Promise.resolve(null);}
+function voiceMeta(vctx,ev){if(ev.staysHere===true||ev.staysHere===false){vctx.here=ev.staysHere;vctx.turn=typeof ev.turn==='string'?ev.turn:null;vctx.speechHere=ev.speechHere===true;}}
+// The server's audio for a sentence, or null for this device's own voice. A reply that stays on this Mac is sent
+// to the server to be spoken only when the server has said its speech is made on this Mac (speechHere): otherwise
+// the speech is an outside service's, the request is never made, and the browser speaks it.
+// One reply, one voice: once a sentence of a reply has been spoken by this device (vctx.own), the rest of that
+// reply is too, and no more of it is asked of the server. The next reply starts with the server's voice again.
+function _speechBlob(clean,vctx){return(clean&&!vctx.own&&(!vctx.here||vctx.speechHere===true))?_neuralFetch(clean,vctx).catch(function(){return null;}):Promise.resolve(null);}
 // Speak a sentence AND reveal its text in sync — the words appear on screen the
 // instant Flint starts saying them. Audio for the next sentence is prefetched
 // while the current one plays, so there are no gaps. Sentences play in order.
@@ -1008,12 +1015,15 @@ function speakSynced(sentence,body,vctx){
     return blobP.then(function(blob){
       return new Promise(function(res){
         if(vctx.gen!==_ttsGen){res();return;}
-        if(blob){
+        /* Sentences are spoken in order, so this is where a reply changes voice, at most once: the first sentence
+           with no audio from the server (it refused, was busy, or failed) is spoken by this device, and so is every
+           sentence after it, even one whose audio had already come back. Never back and forth. */
+        if(blob&&!vctx.own){
           var url=URL.createObjectURL(blob);var a=new Audio(url);_ttsAudio=a;
           a.onplay=reveal; // text shows up exactly as the voice begins it
           a.onended=a.onerror=function(){URL.revokeObjectURL(url);if(_ttsAudio===a)_ttsAudio=null;res();};
           a.play().catch(function(){reveal();res();});
-        }else{reveal();_localSpeak(clean,vctx.here===true).then(res);} // no neural voice → local, still synced
+        }else{if(clean)vctx.own=true;reveal();_localSpeak(clean,vctx.here===true).then(res);} // no neural voice → local, still synced
       });
     });
   }).then(spoken,spoken);
@@ -1411,7 +1421,9 @@ function brainClear(line){BRAIN_PULL.main='';BRAIN_PULL.standby='';
   brainEl('modesub').textContent=line;brainEl('lmsub').textContent=line;brainEl('hwsub').textContent=line;
   brainEl('lmval').textContent='';brainEl('hwval').textContent='';brainEl('sbval').textContent='';brainEl('sbsub').textContent='';
   brainEl('lmdot').className='st unknown';brainEl('sbdot').className='st unknown';
-  brainEl('lmcopy').hidden=true;brainEl('sbcopy').hidden=true;brainEl('sbrow').hidden=true;brainNotes([]);}
+  brainEl('lmcopy').hidden=true;brainEl('sbcopy').hidden=true;brainEl('sbrow').hidden=true;brainVoice('sp',null);brainVoice('tr',null);brainNotes([]);}
+/* A voice row (what speaks, what hears): the name and the sentence the server wrote. Nothing to say, no row. */
+function brainVoice(id,v){var name=v?brainText(v.name):'',line=v?brainText(v.sentence):'';brainEl(id+'row').hidden=!(name&&line);brainEl(id+'val').textContent=name;brainEl(id+'sub').textContent=line;}
 /* The section could not be shown: one row that says why, with Try Again when trying again can help. */
 function brainFail(title,line,retry){brainClear('');var bs=modeButtons();for(var i=0;i<bs.length;i++)bs[i].disabled=false;
   brainEl('brainerrttl').textContent=title;brainEl('brainerrsub').textContent=line;brainEl('brainretry').hidden=!retry;brainShow('err');BRAIN_SHOWN=false;
@@ -1450,6 +1462,7 @@ function renderBrain(d){d=d||{};var l=d.local||{},p=l.primary||{},h=d.hardware,s
   BRAIN_PULL.standby=sb?pullOf(sb):'';var sc=brainEl('sbcopy');sc.hidden=!BRAIN_PULL.standby;sc.textContent='Copy Command';
   /* The machine is looked at behind Flint's start: until then, the row says Flint is checking. */
   brainEl('hwval').textContent=h?brainText(h.name):'';brainEl('hwsub').textContent=(h&&brainText(h.sentence))||BRAIN_CHECKING;
+  var vo=d.voice||{};brainVoice('sp',vo.speech);brainVoice('tr',vo.transcription);
   brainNotes(d.notices);BRAIN_SHOWN=true;
   /* While Settings stays open and something is still on its way, the section looks again by itself. */
   if(BRAIN_TIMER){clearTimeout(BRAIN_TIMER);BRAIN_TIMER=0;}

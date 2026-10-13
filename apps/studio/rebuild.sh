@@ -1337,6 +1337,7 @@ WHERE_TO=(
   Backup-Key     "Backup key: the rebuilt Mac encrypts its backups to the key you rebuilt it with."
   Nexus-Backup   "Nexus backup: Flint backed up the Nexus database on the old Mac, and that is off here until you set it up again."
   Local-Model-Server "Local model server: its address and its key were typed by hand and are not put back, so Flint asks Ollama on this Mac. Set them again only if you still use another model server, and change the key if it was a real one."
+  Local-Speech-Server "Local speech server: its address and its key were typed by hand and are not put back. Until you set them again, what that server did is done without it: transcription runs on this Mac, and replies it spoke are spoken by each device's own voice."
   Routing-Mode   "Flint is in Local mode after a rebuild. Choose another mode in Settings if you want one."
 )
 # The mode, always, and on a line of its own: it was not left out of a backup, it is simply never taken from

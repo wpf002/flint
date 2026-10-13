@@ -5,11 +5,14 @@ Runs on the Mac Studio next to Flint. Flow: listen -> hear the wake word
 in his onyx voice. Reuses whisper-cli (STT) + Flint's /speak (TTS); no cloud
 wake-word service.
 
-/speak is an outside speech service (OpenAI). A reply Flint marks as staying on
-this Mac (its chat stream's `meta` event says so: a turn answered with Will's
-goals, or one that read such a turn) is never sent there: it is spoken with
-this Mac's own `say` voice instead. Every other reply's request names its
-conversation and turn, so the server can refuse on its side too.
+/speak is an outside speech service (OpenAI) unless Flint is set to speak on
+this Mac. A reply Flint marks as staying on this Mac (its chat stream's `meta`
+event says so: a private turn, a turn taken in Local mode, one answered with
+Will's goals) is never sent to an outside service: it is spoken with this
+Mac's own `say` voice instead. It is sent to /speak only when that same event
+says the server's speech is made on this Mac (`speechHere`). Every other
+reply's request names its conversation and turn, so the server can refuse on
+its side too. The audio is played as the kind the server says it is.
 
 Deps:  pip install sounddevice numpy   (whisper-cli + afplay already on macOS)
 Run:   python3 voice_client.py          (tune WAKE_RMS on real hardware)
@@ -72,13 +75,23 @@ def transcribe(audio):
 
 CONVERSATION = "voice"
 
+# What /speak may answer with (the server's speech provider decides), and the file suffix afplay reads it by.
+AUDIO_SUFFIX = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/wav": ".wav",
+                "audio/x-wav": ".wav", "audio/aac": ".aac", "audio/ogg": ".ogg", "audio/flac": ".flac"}
+
+def audio_suffix(content_type):
+    """The suffix for a kind of audio. Anything else (an older server names none) is mp3, as it always was."""
+    return AUDIO_SUFFIX.get((content_type or "").split(";")[0].strip().lower(), ".mp3")
+
 def read_reply(lines):
-    """One /chat reply from its event stream: (text, stays_here, turn_id).
+    """One /chat reply from its event stream: (text, stays_here, turn_id, speech_here).
     `stays_here` and `turn_id` are what the last `meta` event that spoke of them
     said: each brain asked in a turn says it for itself, and the last one asked
     is the one whose text this is. A reply stays here until the server says it
-    may go out: with no such event (an older server) it is spoken on this Mac."""
-    text, here, turn = "", True, None
+    may go out: with no such event (an older server) it is spoken on this Mac.
+    The same event may say the server speaks on this Mac (`speechHere`): only a
+    real yes counts, and an event that does not say it takes it back."""
+    text, here, turn, speech_here = "", True, None, False
     for raw in lines:
         l = (raw.decode() if isinstance(raw, bytes) else raw).strip()
         if not l.startswith("data:"): continue
@@ -89,7 +102,8 @@ def read_reply(lines):
         elif e.get("type") == "meta" and isinstance(e.get("staysHere"), bool):
             here = e["staysHere"]
             turn = e.get("turn") if isinstance(e.get("turn"), str) else None
-    return text.strip(), here, turn
+            speech_here = e.get("speechHere") is True
+    return text.strip(), here, turn, speech_here
 
 def ask_flint(msg):
     body = json.dumps({"conversationId":CONVERSATION,"message":msg}).encode()
@@ -101,22 +115,31 @@ def say_here(text):
     """This Mac's own voice: nothing leaves the machine."""
     subprocess.run(["say","-v","Daniel", text[:400]])
 
-def speak(text, here=False, turn=None):
-    """Speak a reply. One that stays on this Mac (`here`) is never sent to
-    /speak. Any other is, naming its conversation and turn; if the server
-    refuses or fails, this Mac's own voice speaks it."""
-    if here:
+def speak(text, here=False, turn=None, speech_here=False):
+    """Speak a reply. One that stays on this Mac (`here`) is sent to /speak
+    only when the server said its speech is made on this Mac (`speech_here`);
+    otherwise this Mac's own voice speaks it and nothing is sent. Any other is
+    sent, naming its conversation and turn; if the server refuses, is busy or
+    fails, this Mac's own voice speaks it.
+    A reply is ONE request, whole, so it is spoken by one voice from its first
+    word to its last: the server's, or this Mac's own. Never part by each."""
+    if here and speech_here is not True:
         say_here(text); return
     said = {"text":text, "conversationId":CONVERSATION}
     if turn: said["turnId"] = turn
     req = urllib.request.Request(FLINT_URL+"/speak", data=json.dumps(said).encode(),
         headers={"authorization":"Bearer "+FLINT_TOKEN,"content-type":"application/json"})
     try:
-        data = urllib.request.urlopen(req, timeout=60).read()
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            f.write(data); mp3=f.name
-        subprocess.run(["afplay", mp3]); os.remove(mp3)
-    except Exception:
+        with urllib.request.urlopen(req, timeout=60) as res:
+            data, kind = res.read(), res.headers.get("content-type")
+        with tempfile.NamedTemporaryFile(suffix=audio_suffix(kind), delete=False) as f:
+            f.write(data); clip=f.name
+        try: subprocess.run(["afplay", clip])
+        finally: os.remove(clip)
+    except Exception as e:
+        if callable(getattr(e, "close", None)):   # a refusal carries an open answer: let it go
+            try: e.close()
+            except Exception: pass
         say_here(text)   # fallback voice
 
 def strip_wake(text):
@@ -142,11 +165,11 @@ def main():
         if not cmd: continue
         print("you:", cmd, flush=True)
         try:
-            reply, here, turn = ask_flint(cmd)
+            reply, here, turn, speech_here = ask_flint(cmd)
         except Exception as e:
-            reply, here, turn = "I couldn't reach my server.", False, None
+            reply, here, turn, speech_here = "I couldn't reach my server.", False, None, False
         print("flint:", reply[:120], flush=True)
-        if reply: speak(reply, here, turn)
+        if reply: speak(reply, here, turn, speech_here)
 
 if __name__ == "__main__":
     main()

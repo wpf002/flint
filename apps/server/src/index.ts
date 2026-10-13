@@ -1,49 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { tmpdir, homedir } from 'node:os';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileP = promisify(execFile);
-/** Speech-to-text via whisper.cpp (the same pipeline the CLI voice mode uses). */
-const WHISPER_BIN = process.env.WHISPER_BIN?.trim() || '/opt/homebrew/bin/whisper-cli';
-const WHISPER_MODEL =
-  process.env.WHISPER_MODEL?.trim() || join(homedir(), '.flint', 'models', 'ggml-base.en.bin');
-async function transcribeAudio(buf: Buffer): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
-  try {
-    const inFile = join(dir, 'in');
-    const wav = join(dir, 'out.wav');
-    writeFileSync(inFile, buf);
-    // MediaRecorder gives mp4/m4a in WebKit; afconvert → 16 kHz mono WAV for whisper.
-    await execFileP('/usr/bin/afconvert', [inFile, wav, '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1']);
-    const { stdout } = await execFileP(WHISPER_BIN, ['-m', WHISPER_MODEL, '-f', wav, '-nt', '-np'], {
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    return stdout.replace(/\s+/g, ' ').trim();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-/** Neural text-to-speech for a human voice (OpenAI). Falls back to the browser's
- *  local voice client-side when no key is set. */
-const TTS_MODEL = process.env.FLINT_TTS_MODEL?.trim() || 'tts-1';
-const TTS_VOICE = process.env.FLINT_TTS_VOICE?.trim() || 'onyx';
-const TTS_MAX_CHARS = 4000;
-async function synthesizeSpeech(text: string): Promise<Buffer | null> {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (!key) return null;
-  const r = await fetch('https://api.openai.com/v1/audio/speech', {
-    method: 'POST',
-    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: TTS_MODEL, voice: TTS_VOICE, input: text.slice(0, TTS_MAX_CHARS), response_format: 'mp3' }),
-  });
-  if (!r.ok) throw new Error(`tts HTTP ${r.status}`);
-  return Buffer.from(await r.arrayBuffer());
-}
+import { homedir } from 'node:os';
 import {
   Flint,
   InMemoryStore,
@@ -74,6 +33,8 @@ import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
 import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, keptText, recallForAnyBrain, toolsKeptHere } from './goals-chat';
+import { speak, speechMadeHere } from './speech-route';
+import { CannotTranscribe, buildVoice, voiceLine, type Voice } from './voice';
 import { readContextBlocks } from './context-blocks';
 import { brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
@@ -129,7 +90,6 @@ import {
   budgetTurn,
   TurnSpend,
   describePlan,
-  speakWithinBudget,
   spendStatusTool,
   pausable,
   type FrontierPlan,
@@ -433,6 +393,9 @@ async function main(): Promise<void> {
   // machine's tier's model, or the model server's own answer when it was silent) is swapped in by adoptLocal
   // below, for the next turn. `localSeen` is the brain these variables were built from.
   const inference = await buildInference({ env: process.env, modeFile: join(homedir(), '.flint', 'inference.json'), log: (m) => console.error(m) });
+  // What hears and what speaks (./voice), as config decided it: whisper.cpp and OpenAI unless Will chose otherwise.
+  const voice = buildVoice(inference.voicePlan, { env: process.env, connectTimeoutMs: inference.cfg.local.connectTimeoutMs });
+  console.error(voiceLine(inference.voicePlan));
   let localSeen = inference.local;
   let { provider, model } = inference.primary;
   let localBrain = inference.primary;
@@ -993,7 +956,7 @@ async function main(): Promise<void> {
     res.once('finish', () => {
       if (res.statusCode >= 500 && res.statusCode <= 599 && route && !turn?.eval) events.push({ type: 'route.error', route, status: res.statusCode });
     });
-    return handle(req, res, { inference, standby, standbyNotes, persona, localModels, styled, provider, model, localFrom: localBrain.from, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, goals: goalsChat, chatLoad, runtime: runtimeLink });
+    return handle(req, res, { inference, standby, standbyNotes, persona, localModels, styled, provider, model, localFrom: localBrain.from, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, goals: goalsChat, chatLoad, runtime: runtimeLink, voice });
   })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
@@ -1064,6 +1027,8 @@ interface Convo {
 interface Ctx {
   /** The routing mode, the local brain's health, and every decision the handlers take from them (./inference). */
   inference: Inference;
+  /** What hears and what speaks (./voice): /transcribe and /speak call these. */
+  voice: Voice;
   /** The standby local model's persona (./local-serve): it answers while the main one loads. Undefined: none is configured. */
   standby: { persona: Persona; model: string } | undefined;
   /** The "answered by my standby model" line, once per conversation per day. */
@@ -1353,46 +1318,56 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, thread.status, thread.body);
   }
 
-  // Voice input: the app records mic audio and posts it here; we transcribe with
-  // whisper.cpp and hand back the text (the client then sends it as a chat).
+  // Voice input: the app records mic audio and posts it here; whatever hears (./voice: whisper.cpp on this Mac
+  // unless Will chose a local speech server) hands back the text, and the client then sends it as a chat.
   if (req.method === 'POST' && url === '/transcribe') {
     const raw = await readRawLimited(req, MAX_AUDIO_BYTES);
     if (raw.tooLarge) return json(res, 413, { error: 'audio too large' });
     const buf = raw.body;
     if (!buf.length) return json(res, 400, { error: 'no audio' });
     try {
-      return json(res, 200, { text: await transcribeAudio(buf) });
+      return json(res, 200, { text: (await ctx.voice.stt.transcribe(buf)).text });
     } catch (e) {
+      // Nothing on this Mac can transcribe (no program, or no model): a sentence saying so. Nothing was run and
+      // nothing failed, so there is no reference to look up.
+      if (e instanceof CannotTranscribe) return json(res, 503, { error: e.message });
       return json(res, 500, { error: 'transcription failed', ref: errorRef('transcribe', e) });
     }
   }
 
-  // Voice output: neural TTS → mp3. 503 (no key, or OpenAI's spend cap reached)
-  // tells the client to use its local browser voice instead.
+  // Voice output: the reply as audio from whatever speaks (./voice), in that provider's own format. A 503 (no key,
+  // OpenAI's spend cap reached, Local mode, speech off) or a 409 (this reply stays on this Mac) tells the client to
+  // use its own voice. Which replies an outside service may be given is decided here, on the server
+  // (./speech-route): never one that stays on this Mac (./goals-chat speechStaysHere: a private turn's, any
+  // turn's from Local mode, one answered with Will's goals; the client names the conversation and the turn, and
+  // the words must be that turn's own reply). A provider on this Mac speaks every reply: the words go nowhere.
   if (req.method === 'POST' && url === '/speak') {
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
-    const body = read.body;
-    const text = String(body.text ?? '').trim();
-    if (!text) return json(res, 400, { error: 'text required' });
-    // Speech is an outside service: in Local mode the client speaks with its own voice instead.
-    const noCloud = ctx.inference.cloudRefused('tts');
-    if (noCloud) return json(res, 503, { error: noCloud, fallback: 'browser' });
-    // ...and a reply that stays on this Mac is never sent to it, in any mode (./goals-chat speechStaysHere): a
-    // private turn's, any turn's from Local mode, one answered with Will's goals. The client names the
-    // conversation and the turn, and speaks with its own voice instead. The words must be that turn's own reply:
-    // a request that names an ordinary turn and carries another reply's words is refused too.
-    // 409, not 503: a 503 tells the client the neural voice is out for the next ten minutes.
-    if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });
+    // A client that hangs up before its answer takes its reply with it: speech being made on this Mac is stopped.
+    const gone = new AbortController();
+    const hungUp = (): void => {
+      if (!res.writableEnded) gone.abort();
+    };
+    res.once('close', hungUp);
     try {
-      const spoken = await speakWithinBudget(text, { guard: ctx.spend, model: TTS_MODEL, maxChars: TTS_MAX_CHARS, synth: synthesizeSpeech });
-      if (spoken.status === 'no-key') return json(res, 503, { error: 'no tts key' });
-      if (spoken.status === 'budget') return json(res, 503, { error: spoken.message, budget: true, fallback: 'browser' });
-      const audio = spoken.audio;
-      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': audio.length });
-      res.end(audio);
+      const spoken = await speak(read.body, {
+        tts: ctx.voice.tts,
+        localMode: () => ctx.inference.cloudRefused('tts'),
+        mustStay: (said) => ctx.goals.speechStaysHere(said),
+        mustStaySentence: SPEECH_STAYS_HERE,
+        guard: ctx.spend,
+        signal: gone.signal,
+      });
+      if (spoken.status !== 200) return json(res, spoken.status, spoken.body);
+      res.writeHead(200, { 'Content-Type': spoken.contentType, 'Content-Length': spoken.audio.length });
+      res.end(spoken.audio);
     } catch (e) {
+      // Speech on this Mac that was stopped because its client left: nobody is there to be told, and nothing failed.
+      if (gone.signal.aborted && speechMadeHere(ctx.voice.tts)) return;
       return json(res, 502, { error: 'tts failed', ref: errorRef('speak', e) });
+    } finally {
+      res.off('close', hungUp);
     }
     return;
   }
@@ -1819,8 +1794,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         );
         for await (const ev of tried === undefined ? events : guardAnswer(events, { recoverable, tried, noAnswers, onUnanswered: () => (gaveUp = true) })) {
           // Ahead of the reply: whether it stays on this Mac, and which stored turn it is, for the client's voice.
+          // When the server's own speech is made on this Mac, the event says that too: such a reply may then be
+          // sent to /speak, because nothing spoken there leaves. (With today's defaults the event is as it was.)
           const here = asked.meta();
-          if (here) res.write(`data: ${JSON.stringify(here)}\n\n`);
+          if (here) res.write(`data: ${JSON.stringify(speechMadeHere(ctx.voice.tts) ? { ...here, speechHere: true } : here)}\n\n`);
           // The standby's line is said only once it has actually answered, and once per conversation per day:
           // a standby that failed, or gave way to the next step, uses up nothing.
           if (ev.type === 'done' && !note && standbyLine && answer.trim() && ctx.standbyNotes.take(conversationId)) note = standbyLine;

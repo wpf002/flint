@@ -74,6 +74,11 @@ FLINT_PATTERNS=(
   zone      '^[A-Za-z_]{1,20}(/[A-Za-z_+-]{1,30}){0,2}$'
   place     '^[A-Za-z][A-Za-z ,.-]{0,59}$'
   homepath  '^~(/[A-Za-z0-9 ._~+-]{1,80}){1,12}$'
+  # Voice (apps/server/src/inference-config.ts). Each is the shape the server itself takes for that setting, so a
+  # value the server uses is one a rebuild puts back: a voice of the Mac's own as the Mac names it, brackets and
+  # all ("Eddy (English (US))"), and a voice on a local speech server, which may hold ':' and '/'.
+  sayvoice  '^[A-Za-z][A-Za-z ()-]{0,39}$'
+  speechname '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$'
 )
 
 # flint_value_ok <pattern name> <value>: the value has that shape and is not secret-shaped.

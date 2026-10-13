@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:process": "vitest run -c vitest.process.config.ts",
     "route-baseline": "tsx scripts/route-baseline.ts",
-    "inference-status": "tsx scripts/inference-status.ts"
+    "inference-status": "tsx scripts/inference-status.ts",
+    "voice-bench": "tsx scripts/voice-bench.ts"
   },
   "dependencies": {
     "@flint/core": "workspace:*",
