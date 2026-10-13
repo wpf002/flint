@@ -22,11 +22,12 @@
  * changes no setting. Exit codes: 0 done; 1 nothing could be measured; 2 the
  * arguments were not understood.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { cpus, homedir, release, totalmem } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { USAGE, defaultOut, parseVisionArgs, realReader, renderVision, runVisionBench, type VisionDeps, type VisionResult } from '../src/vision-bench';
+import { OUT_UNDER_FLINT, USAGE, defaultOut, parseVisionArgs, realReader, renderVision, runVisionBench, underFlint, type VisionDeps, type VisionResult } from '../src/vision-bench';
+import { endReadsNow } from '../src/pdf-text';
 import { isFile, runFile } from '../src/voice';
 
 type Env = Record<string, string | undefined>;
@@ -64,6 +65,18 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
   }
   const when = new Date().toISOString();
   const out = args.out ?? defaultOut(d.home, when, join);
+  // Never under ~/.flint: the nightly and the offsite backups carry that folder, and would carry every run's files.
+  const real = (path: string): string | undefined => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return undefined;
+    }
+  };
+  if (underFlint(out, d.home, { resolve, sep, real })) {
+    d.err(OUT_UNDER_FLINT);
+    return 2;
+  }
   let folder = false;
   try {
     mkdirSync(out, { recursive: true, mode: 0o700 });
@@ -103,6 +116,13 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   // Everything this run leaves behind is this user's alone: folders 0700, files 0600.
   process.umask(0o077);
+  // Stopped in the middle of a read: the reader's program is ended and its folder removed on the way out.
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, () => {
+      endReadsNow();
+      process.exit(1);
+    });
+  }
   main(process.argv.slice(2), { env: process.env, home: homedir(), out: (l) => console.log(l), err: (l) => console.error(l) }).then(
     (code) => process.exit(code),
     () => {

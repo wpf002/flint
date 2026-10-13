@@ -8,6 +8,7 @@
  */
 
 import { onThisMachine } from '@flint/policy';
+import { MAX_PDF_BYTES, MAX_PDF_PAGES } from './pdf-limits';
 import { isCloudModel } from './memory-brain';
 import { LOCALITY } from './ollama-locality';
 
@@ -46,14 +47,47 @@ export interface MediaFlags {
 /**
  * Why a PDF on this turn could not be read on this Mac, when something here
  * reads PDFs (FLINT_LOCAL_PDF, ./local-media) and this one did not come out as
- * text: `no_text`, it carries none (a scan); `failed`, the read did not work
- * this time.
+ * text:
+ *   no_text    it carries none (a scan);
+ *   too_big    it is larger than is read here (./pdf-limits);
+ *   too_long   it has more pages than are read here;
+ *   busy       the reader is busy: too many reads at once, or the Mac is still
+ *              working on a PDF that Flint stopped waiting for;
+ *   failed     the read did not work this time.
+ * The first three are about the PDF, and will be the same next time. The last
+ * two are about the moment.
  */
-export type PdfUnread = 'no_text' | 'failed';
+export type PdfUnread = 'no_text' | 'too_big' | 'too_long' | 'busy' | 'failed';
 
 /** That, as the clause a refusal is built on. */
 export function pdfUnreadClause(why: PdfUnread): string {
-  return why === 'no_text' ? 'this PDF has no text in it that Flint can read on this Mac' : "Flint couldn't read this PDF on this Mac just now";
+  switch (why) {
+    case 'no_text':
+      return 'this PDF has no text in it that Flint can read on this Mac';
+    case 'too_big':
+      return `this PDF is larger than the ${Math.round(MAX_PDF_BYTES / (1024 * 1024))} MB Flint reads on this Mac`;
+    case 'too_long':
+      return `this PDF has more than the ${MAX_PDF_PAGES.toLocaleString('en-US')} pages Flint reads on this Mac`;
+    case 'busy':
+      return "Flint's PDF reader on this Mac is busy right now";
+    case 'failed':
+      return "Flint couldn't read this PDF on this Mac just now";
+  }
+}
+
+/**
+ * What Will can do about it, as the sentence a refusal ends with. Never "send
+ * it as text" for a reader that is only busy: the PDF is fine, and a moment is
+ * all it needs.
+ */
+export function pdfUnreadAdvice(why: PdfUnread): string {
+  return why === 'no_text' ? 'Send it as text instead.' : why === 'busy' || why === 'failed' ? 'Try again in a moment.' : 'Send a smaller part of it, or its text.';
+}
+
+/** A refusal that begins with the clause: the clause, why nothing else may answer, and what to do. */
+export function pdfUnreadSentence(why: PdfUnread, because: string): string {
+  const clause = pdfUnreadClause(why);
+  return `${clause[0]!.toUpperCase()}${clause.slice(1)}, ${because} ${pdfUnreadAdvice(why)}`;
 }
 
 /** The kinds of file among `needs` that `can` cannot read, in words; undefined when it can read them all. */
@@ -112,9 +146,11 @@ export function routeTurn(opts: {
     if (!what) return { brain: 'local', localFallback: true };
     const unread = what === 'PDFs' && opts.pdfUnread ? pdfUnreadClause(opts.pdfUnread) : undefined;
     if (!opts.hasFrontier) {
-      if (unread) return { error: `${unread[0]!.toUpperCase()}${unread.slice(1)}, and no frontier brain is configured. Send it as text instead.` };
+      if (unread) return { error: pdfUnreadSentence(opts.pdfUnread!, 'and no frontier brain is configured.') };
       return { error: `The local brain can't read ${what}, and no frontier brain is configured. Send it as text instead.` };
     }
+    // (A scan may still go to a frontier brain that reads pages as pictures. Anything else has its own advice.)
+    if (unread && opts.pdfUnread !== 'no_text') return { error: `Local-only is on, and ${unread}. ${pdfUnreadAdvice(opts.pdfUnread!)}` };
     if (unread) return { error: `Local-only is on, and ${unread}. Turn Local-only off to send the file to the frontier brain, or remove the attachment.` };
     return {
       error: `Local-only is on, and the on-device brain can't read ${what}. Turn Local-only off to send the file to the frontier brain, or remove the attachment.`,

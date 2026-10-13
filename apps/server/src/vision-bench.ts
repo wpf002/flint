@@ -36,6 +36,7 @@
  * program.
  */
 import { OllamaProvider, type Attachment, type Message, type ProviderAdapter } from '@flint/core';
+import { listedModels } from '@flint/policy';
 import { PDF_READER_PROGRAMS, readInferenceConfig, viaProxy, type FileCheck, type PdfReaderKind } from './inference-config';
 import { localMedia, pdfChars } from './local-media';
 import { makePdfReader, plainText, type PdfReader, type PdfText } from './pdf-text';
@@ -231,6 +232,34 @@ export function parseVisionArgs(argv: readonly string[]): VisionArgs | { error: 
   return args;
 }
 
+/**
+ * Is this output folder Flint's own folder, or inside it? `~/.flint` is what
+ * the nightly and the offsite backups carry: a run's pictures and PDFs do not
+ * belong in it, so the command refuses such a folder. By the path as written
+ * and, when `real` is given, by where the nearest folder that exists really is
+ * (a link into ~/.flint is ~/.flint).
+ */
+export function underFlint(out: string, home: string, o: { resolve: (...parts: string[]) => string; sep: string; real?: (path: string) => string | undefined }): boolean {
+  const inside = (path: string, root: string): boolean => path === root || path.startsWith(root.endsWith(o.sep) ? root : `${root}${o.sep}`);
+  const flint = o.resolve(home, '.flint');
+  const target = o.resolve(out);
+  if (inside(target, flint)) return true;
+  if (!o.real) return false;
+  const realFlint = o.real(flint) ?? flint;
+  // The nearest ancestor that exists, as the file system has it.
+  let at = target;
+  for (;;) {
+    const real = o.real(at);
+    if (real !== undefined) return inside(real, realFlint) || inside(real, flint);
+    const up = o.resolve(at, '..');
+    if (up === at) return false;
+    at = up;
+  }
+}
+
+/** What the command says when it refuses such a folder. */
+export const OUT_UNDER_FLINT = "vision-bench: the output folder may not be Flint's own folder or inside it: the backups carry that folder. Name another with --out, or leave --out off.";
+
 /** Where a run's files go when no folder is named: under this user's caches, never under ~/.flint (a backup would carry them). */
 export function defaultOut(home: string, when: string, join: (...parts: string[]) => string): string {
   return join(home, 'Library', 'Caches', 'Flint', 'vision-bench', when.replace(/[:.]/g, '-'));
@@ -280,15 +309,20 @@ export async function lookAtServer(f: typeof fetch, origin: string): Promise<Ser
   const version = (await ask(f, `${origin}/api/version`)) as { version?: unknown } | undefined;
   if (!version) return { reachable: false, loaded: [], installed: [], sees: [] };
   const ps = (await ask(f, `${origin}/api/ps`)) as { models?: Array<{ name?: unknown; context_length?: unknown }> } | undefined;
-  const tags = (await ask(f, `${origin}/api/tags`)) as { models?: Array<{ name?: unknown; remote_host?: unknown }> } | undefined;
+  const tags = (await ask(f, `${origin}/api/tags`)) as { models?: unknown } | undefined;
+  // Which of its models run ON it, by the one rule the server itself uses (@flint/policy listedModels): a row that
+  // says anything of a remote host or a remote model runs elsewhere. Such a model is not listed here, and is never
+  // asked, in memory or not.
+  const installed = listedModels(Array.isArray(tags?.models) ? tags.models : [])
+    .filter((m) => m.here)
+    .map((m) => safeName(m.name))
+    .filter((n): n is string => n !== undefined);
   const loaded: LoadedModel[] = [];
   for (const m of Array.isArray(ps?.models) ? ps.models : []) {
     const name = safeName(m.name);
     const context = typeof m.context_length === 'number' && Number.isInteger(m.context_length) && m.context_length > 0 ? m.context_length : undefined;
-    if (name && context) loaded.push({ name, context });
+    if (name && context && installed.includes(name)) loaded.push({ name, context });
   }
-  // (A model the server says runs somewhere else is not a model on this Mac: it is not listed, and never asked.)
-  const installed = (Array.isArray(tags?.models) ? tags.models : []).filter((m) => m.remote_host === undefined || m.remote_host === '').map((m) => safeName(m.name)).filter((n): n is string => n !== undefined);
   const sees: string[] = [];
   for (const name of installed) {
     const shown = (await ask(f, `${origin}/api/show`, { model: name })) as { capabilities?: unknown } | undefined;
@@ -340,8 +374,8 @@ export interface PdfRead {
   /** Characters of text the PDF holds. */
   chars: number;
   ms: number;
-  /** `text`: it came back; `no_text`, `failed`, `busy`: it did not, and why. */
-  outcome: 'text' | 'no_text' | 'failed' | 'busy';
+  /** `text`: it came back; anything else: it did not, and why (./pdf-text PdfText). */
+  outcome: 'text' | Extract<PdfText, { ok: false }>['why'];
   /** The text that came back is exactly the text that was put in. */
   exact: boolean;
   /** Of the lines put in, how many are in what came back, word for word. */

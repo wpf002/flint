@@ -10,6 +10,7 @@ import {
   type CommitTurnInput,
   type FailTurnInput,
   type Message,
+  type Attachment,
   hasPayload,
   shedPayload,
 } from '@flint/core';
@@ -246,6 +247,19 @@ export class PersistentStore implements MemoryStore {
     const complete = this.completeTurns(conversationId);
     const sent = this.windowed(complete).length;
     return { sent, leftOut: complete.length - sent, window: this.history ? { ...this.history } : null };
+  }
+
+  /**
+   * The files the conversation's next message carries as history that still
+   * hold their bytes (the window's complete turns: a file's body is kept for
+   * the last few turns, in RAM only). For reading a PDF ahead of the request
+   * that will carry it (./inference routeFirst). It reads nothing out and
+   * triggers no history check.
+   */
+  windowAttachments(conversationId: string): Attachment[] {
+    const out: Attachment[] = [];
+    for (const t of this.windowed(this.completeTurns(conversationId))) for (const m of t.messages) for (const a of m.attachments ?? []) if (hasPayload(a)) out.push(a);
+    return out;
   }
 
   /** The ids of the turns the next message carries (the window), oldest first. */

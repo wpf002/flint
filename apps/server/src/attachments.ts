@@ -116,7 +116,12 @@ export function parseAttachments(raw: unknown): ParseResult {
 type Classified = { ok: true; attachment: Attachment } | { ok: false; status: 400 | 413 | 415; error: string };
 
 function classify(name: string, declared: string, bytes: Buffer, b64: string): Classified {
-  const sniffed = sniff(bytes);
+  let sniffed = sniff(bytes);
+  // A text file can hold the characters `%PDF-` near its start (notes about PDFs, a script that writes one) without
+  // being one. A PDF's header is at the very start of the file; readers also take one within the first kilobyte,
+  // and so does `sniff`. So when the header is NOT at the start, and the file was sent as text and reads as text,
+  // it is the text file it says it is. (It used to be taken for a PDF, and was then told it had no text in it.)
+  if (sniffed === 'application/pdf' && !startsAsPdf(bytes) && textMediaType(name, declared) !== undefined && decodeUtf8(bytes) !== undefined) sniffed = undefined;
 
   if (sniffed === 'application/pdf') {
     if (bytes.length > LIMITS.pdfBytes) return tooBig(name, LIMITS.pdfBytes);
@@ -164,6 +169,13 @@ export function sniff(b: Buffer): (typeof IMAGE_TYPES)[number] | 'application/pd
   return undefined;
 }
 
+/** Is the PDF header at the very start of the file (after, at most, a byte-order mark and blank space)? */
+export function startsAsPdf(b: Buffer): boolean {
+  let at = b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
+  while (at < b.length && at < 64 && (b[at] === 0x20 || b[at] === 0x09 || b[at] === 0x0a || b[at] === 0x0d)) at++;
+  return b.subarray(at, at + 5).toString('latin1') === '%PDF-';
+}
+
 function textMediaType(name: string, declared: string): string | undefined {
   if (declared.startsWith('text/')) return declared;
   if (TEXT_MIME.has(declared)) return declared;
@@ -202,7 +214,37 @@ function cleanName(raw: unknown): string {
 }
 
 function tooBig(name: string, limit: number): Classified {
-  return { ok: false, status: 413, error: `${name}: larger than the ${mb(limit)} limit` };
+  return { ok: false, status: 413, error: sizeSentence(name, limit) };
+}
+
+/** The sentence for a file that is too large: its name, and the limit. */
+export function sizeSentence(name: string, limit: number): string {
+  return `${name}: larger than the ${mb(limit)} limit`;
+}
+
+/**
+ * The largest PDF, in bytes, that a model with this window can be handed, by
+ * the count every prompt is sized with (@flint/core estimateAttachmentTokens:
+ * 2,000 tokens for each 50 KB). The window less the room kept for the reply;
+ * the system prompt and the tools are not taken off, so this errs on the side
+ * of letting a PDF through.
+ */
+export function pdfBytesThatFit(caps: { maxContextTokens: number; maxOutputTokens: number }): number {
+  return Math.max(0, Math.floor((caps.maxContextTokens - caps.maxOutputTokens) / 2000)) * 50_000;
+}
+
+/**
+ * The first PDF among a turn's files that is too large for EVERY one of the
+ * models that would be asked, with the most any of them takes; undefined when
+ * each PDF fits at least one. Such a PDF used to be sent on anyway: the message
+ * that carried it was dropped to make the prompt fit, and the model was sent
+ * `"messages": []`. It is refused at the door instead, with the size sentence.
+ */
+export function pdfTooBigFor(attachments: readonly Attachment[], models: ReadonlyArray<{ maxContextTokens: number; maxOutputTokens: number }>): { name: string; limit: number } | undefined {
+  if (models.length === 0) return undefined;
+  const limit = Math.max(...models.map(pdfBytesThatFit));
+  const big = attachments.find((a) => a.kind === 'document' && typeof a.data === 'string' && Math.floor((a.data.length * 3) / 4) > limit);
+  return big ? { name: big.name ?? 'attachment', limit } : undefined;
 }
 
 function mb(n: number): string {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { OllamaProvider, type Attachment, type GenerateArgs, type Message, type ModelCapabilities, type ProviderAdapter, type StreamEvent } from '@flint/core';
-import { KEPT_READS, MAX_PDF_CHARS, MIN_PDF_CHARS, PDF_SHARE, asTextFile, isPdf, localMedia, pdfChars, pdfHeading, withPdfText } from '../src/local-media';
+import { FlintError, OllamaProvider, makeAiError, type Attachment, type GenerateArgs, type Message, type ModelCapabilities, type ProviderAdapter, type StreamEvent } from '@flint/core';
+import { KEPT_READS, MAX_PDF_CHARS, MIN_PDF_CHARS, NOT_SENT, PDF_SHARE, asTextFile, isPdf, localMedia, pdfChars, pdfHeading, withPdfText } from '../src/local-media';
+import { FRESH_MS } from '../src/ollama-locality';
 import type { PdfReader, PdfText } from '../src/pdf-text';
 import { textPdf } from '../src/synthetic-files';
 
@@ -186,6 +187,23 @@ describe('reads are kept', () => {
     expect(r.reads).toEqual(['scan', 'flaky', 'flaky', 'busy', 'busy']);
   });
 
+  it('what a PDF IS is kept (too big, too many pages); what the moment was (busy, failed) is asked again', async () => {
+    let busy = true;
+    const r = reader({ big: { ok: false, why: 'too_big' }, long: { ok: false, why: 'too_long' }, later: async () => (busy ? { ok: false, why: 'busy' } : ok('Read at last.')) });
+    const media = localMedia(r);
+    for (const word of ['big', 'long']) {
+      const a = pdf(`${word}.pdf`, [word]);
+      const first = await media.text(a);
+      expect(first.ok).toBe(false);
+      expect(await media.text(a)).toEqual(first);
+    }
+    const later = pdf('later.pdf', ['later']);
+    expect(await media.text(later)).toEqual({ ok: false, why: 'busy' });
+    busy = false;
+    expect(await media.text(later)).toEqual(ok('Read at last.'));
+    expect(r.reads).toEqual(['big', 'long', 'later', 'later']);
+  });
+
   it('a reader that throws is a failed read, never a rejection', async () => {
     const media = localMedia({ kind: 'spotlight', read: async () => Promise.reject(new Error('boom')) });
     expect(await media.text(pdf('a.pdf'))).toEqual({ ok: false, why: 'failed' });
@@ -357,6 +375,103 @@ describe('the local adapter, wrapped', () => {
     expect(mixed).toBe(estimateMessageTokens([withPdfText(user('q', [small]), () => ok('y'.repeat(4000)), cap / 2)]) + Math.ceil(cap / 2 / 4));
     // No PDF: the adapter's own number.
     expect(p.estimateTokens([user('hello', [PNG])], 'm')).toBe(estimateMessageTokens([user('hello', [PNG])]));
+  });
+
+  // Nothing of a file goes to a model server that is not this Mac: the wrapper asks, for every request.
+  it('a server that is not this Mac is handed no PDF text, on any turn: the PDF stays a PDF, nothing is read, and the adapter does not say it reads PDFs', async () => {
+    const base = inner();
+    const r = reader({ alpha: ok('Alpha.') });
+    let here = false;
+    const p = localMedia(r).provider(base, { filesStayHere: () => here });
+    expect(p.getCapabilities('m').pdfInput).toBeUndefined();
+    const args: GenerateArgs = { model: 'm', messages: [user('q', [pdf('a.pdf', ['alpha'])])] };
+    await p.generate(args);
+    for await (const _ of p.stream(args)) void _;
+    expect(base.asked[0]).toBe(args);
+    expect(base.asked[1]).toBe(args);
+    expect(r.reads).toEqual([]);
+    // ...and the moment it is this Mac again, the same adapter reads.
+    here = true;
+    expect(p.getCapabilities('m').pdfInput).toBe(true);
+    await p.generate(args);
+    expect(base.asked[2]!.messages[0]!.attachments![0]!.kind).toBe('text');
+  });
+
+  // The look at the model server is the last thing before the request. A read that makes the request wait longer
+  // than that look is good for has the server asked again, and the request is not made if the answer changed.
+  describe('a read that makes the request wait', () => {
+    /** A reader whose read takes `takes` ms of a clock the test moves. */
+    const timed = (takes: number) => {
+      const clock = { t: 1_000_000 };
+      const r: PdfReader = {
+        kind: 'spotlight',
+        async read() {
+          clock.t += takes;
+          return ok('Alpha.');
+        },
+      };
+      return { clock, r };
+    };
+    const args = (): GenerateArgs => ({ model: 'm', messages: [user('q', [pdf('a.pdf', ['alpha'])])] });
+
+    it('a short one asks nothing more; a long one asks the model server again before anything is sent', async () => {
+      for (const [takes, asks] of [[FRESH_MS - 1, 0], [FRESH_MS, 0], [FRESH_MS + 1, 1], [11_700, 1]] as const) {
+        const { clock, r } = timed(takes);
+        const base = inner();
+        const looks: Array<{ model: string; sentYet: number }> = [];
+        const p = localMedia(r).provider(base, { now: () => clock.t, lookAgain: async (_inner, model) => void looks.push({ model, sentYet: base.asked.length }) });
+        await p.generate(args());
+        expect(looks.length, `${takes} ms`).toBe(asks);
+        if (asks) expect(looks[0]).toEqual({ model: 'm', sentYet: 0 });
+        expect(base.asked).toHaveLength(1);
+      }
+      expect(FRESH_MS).toBe(2000);
+    });
+
+    it('a read that was kept makes nothing wait, and nothing is asked', async () => {
+      const { clock, r } = timed(11_700);
+      const base = inner();
+      const media = localMedia(r);
+      const a = args();
+      await media.text(a.messages[0]!.attachments![0]!); // the route read it, before its own look
+      const before = clock.t;
+      let looks = 0;
+      await media.provider(base, { now: () => clock.t, lookAgain: async () => void looks++ }).generate(a);
+      expect(clock.t).toBe(before);
+      expect(looks).toBe(0);
+      expect(base.asked[0]!.messages[0]!.attachments![0]!.kind).toBe('text');
+    });
+
+    it('when the second look says no, the request is NOT made: generate throws, and a stream ends with an error event', async () => {
+      const { clock, r } = timed(11_700);
+      const base = inner();
+      const no = new FlintError(makeAiError('provider_unavailable', 'Flint cannot confirm right now that its local model runs on this Mac, so nothing was sent to it.', { retryable: false }));
+      const p = localMedia(r).provider(base, {
+        now: () => clock.t,
+        lookAgain: async () => {
+          throw no;
+        },
+      });
+      await expect(p.generate(args())).rejects.toBe(no);
+      const events: StreamEvent[] = [];
+      for await (const e of localMedia(timed(11_700).r).provider(base, { now: (() => { let t = 0; return () => (t += 6000); })(), lookAgain: async () => { throw no; } }).stream(args())) events.push(e);
+      expect(events).toEqual([{ type: 'error', error: no.error }]);
+      // A look that fails some other way is an error event too, in Flint's own words, never a stream that just stops.
+      const odd: StreamEvent[] = [];
+      for await (const e of localMedia(timed(11_700).r).provider(base, { now: (() => { let t = 0; return () => (t += 6000); })(), lookAgain: async () => { throw new Error('boom'); } }).stream(args())) odd.push(e);
+      expect(odd).toEqual([{ type: 'error', error: { kind: 'provider_unavailable', message: NOT_SENT, retryable: false } }]);
+      expect(base.asked).toEqual([]);
+    });
+
+    it('when the second look finds the server is no longer this Mac, an ordinary turn goes on without the PDF’s text', async () => {
+      const { clock, r } = timed(11_700);
+      const base = inner();
+      let here = true;
+      const p = localMedia(r).provider(base, { now: () => clock.t, filesStayHere: () => here, lookAgain: async () => void (here = false) });
+      const a = args();
+      await p.generate(a);
+      expect(base.asked[0]).toBe(a);
+    });
   });
 
   it('through the real Ollama adapter: the request carries the PDF’s text, and neither the PDF nor a picture field', async () => {

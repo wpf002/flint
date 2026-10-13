@@ -22,7 +22,21 @@
  *    attached, as it always did. The route does not let it get that far for a
  *    new turn (`reads`: such a turn is refused with a sentence, or goes to a
  *    cloud model that reads PDFs when it may); it is what an earlier turn's
- *    PDF in the history comes to.
+ *    PDF in the history comes to;
+ *  - NOTHING OF A FILE GOES TO A SERVER THAT IS NOT THIS MAC. The wrapper asks
+ *    (`filesStayHere`) each time: when the local model server is on another
+ *    machine that Will has not vouched for, reached through a proxy, or its
+ *    model is one that runs on Ollama's servers, no PDF becomes text, on an
+ *    ordinary turn as much as a private one, and the wrapper does not say it
+ *    reads PDFs;
+ *  - THE LOOK AT THE MODEL SERVER IS THE LAST THING BEFORE THE REQUEST. A turn
+ *    that stays here is decided on what the model server said a moment ago
+ *    (./inference routeFirst). A PDF is read before that look (the route reads
+ *    this turn's, and the history's), so the request finds every read kept
+ *    and waits for nothing. If it does have to wait (a read that was not
+ *    kept), and the wait is longer than the server's word is good for, the
+ *    server is asked again before anything is sent (`lookAgain`), and the
+ *    request is not made if the answer has changed.
  *
  * A read is kept for a while, by the PDF's contents (a SHA-256 of its bytes,
  * in memory only): the route reads a turn's PDFs once, before it decides who
@@ -31,7 +45,8 @@
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { createHash } from 'node:crypto';
-import type { Attachment, GenerateArgs, Message, ProviderAdapter } from '@flint/core';
+import { isFlintError, makeAiError, type Attachment, type GenerateArgs, type Message, type ProviderAdapter } from '@flint/core';
+import { FRESH_MS } from './ollama-locality';
 import type { PdfReader, PdfText } from './pdf-text';
 
 /** The share of a model's window one message's PDFs may take, as text. The rest is the reply, the system prompt, the tools and the history. */
@@ -109,6 +124,9 @@ export function withPdfText(m: Message, known: (a: Attachment) => PdfText | unde
   return { ...m, attachments };
 }
 
+/** What a request that was not made says, when nothing more particular is known. */
+export const NOT_SENT = 'Flint could not confirm that its local model runs on this Mac, so nothing was sent to it.';
+
 export interface LocalMedia {
   /** Which program reads a PDF here. */
   readonly reader: PdfReader['kind'];
@@ -122,7 +140,26 @@ export interface LocalMedia {
    */
   chars(attachments: readonly Attachment[], windowTokens: number): number;
   /** A local model's adapter that is handed a PDF as its text. */
-  provider(inner: ProviderAdapter): ProviderAdapter;
+  provider(inner: ProviderAdapter, o?: WrapOptions): ProviderAdapter;
+}
+
+/** What the wrapper asks of whoever knows where the adapter's server is (./inference). */
+export interface WrapOptions {
+  /**
+   * May a file's content be handed to this adapter's server right now: is it
+   * this Mac, or the one server Will vouched for? Asked for every request.
+   * Left out: yes (a test, a caller with one server it knows is here).
+   */
+  filesStayHere?: () => boolean;
+  /**
+   * The request had to wait for a read for longer than the model server's
+   * word is good for: ask the server again, and THROW if this turn may no
+   * longer be sent to this model. Left out: nothing is asked.
+   */
+  lookAgain?: (inner: ProviderAdapter, model: string) => Promise<void>;
+  /** How long a wait may be before the server is asked again. Default: as long as its word is good for (./ollama-locality FRESH_MS). */
+  freshMs?: number;
+  now?: () => number;
 }
 
 /** The PDF reading for the local model, around one reader. */
@@ -172,18 +209,29 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
       .catch((): PdfText => ({ ok: false, why: 'failed' }))
       .then((r) => {
         under.delete(d);
-        // What a PDF says does not change: its text, or that it has none, is kept. A read that did not work is tried again.
-        if (r.ok || r.why === 'no_text') keep(d, r);
+        // What a PDF is does not change: its text, that it has none, that it is too big or too long, is kept. A
+        // read that did not work, or was told the reader is busy, is tried again.
+        if (r.ok || r.why === 'no_text' || r.why === 'too_big' || r.why === 'too_long') keep(d, r);
         return r;
       });
     under.set(d, p);
     return p;
   };
 
-  const swapped = async (args: GenerateArgs, inner: ProviderAdapter): Promise<GenerateArgs> => {
+  const swapped = async (args: GenerateArgs, inner: ProviderAdapter, o: WrapOptions): Promise<GenerateArgs> => {
     const pdfs = args.messages.flatMap((m) => (m.attachments ?? []).filter(isPdf));
     if (pdfs.length === 0) return args;
+    // A server that is not this Mac is handed no file's text: the PDFs stay PDFs, which its adapter cannot send.
+    if (o.filesStayHere && !o.filesStayHere()) return args;
+    const now = o.now ?? Date.now;
+    const began = now();
     await Promise.all(pdfs.map((a) => text(a, args.signal)));
+    if (now() - began > (o.freshMs ?? FRESH_MS)) {
+      // The wait outlasted what the model server last said of where its models run: it is asked again, now, and
+      // this throws if the turn may no longer go to this model. Nothing has been sent yet.
+      await o.lookAgain?.(inner, args.model);
+      if (o.filesStayHere && !o.filesStayHere()) return args;
+    }
     const budget = pdfChars(inner.getCapabilities(args.model).maxContextTokens);
     return { ...args, messages: args.messages.map((m) => withPdfText(m, known, budget)) };
   };
@@ -201,7 +249,7 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
       const as = withPdfText({ id: 'size', role: 'user', content: '', timestamp: 0, attachments: [...attachments] }, known, pdfChars(windowTokens));
       return (as.attachments ?? []).reduce((n, a, i) => n + (a !== attachments[i] && a.kind === 'text' ? (a.text?.length ?? 0) : 0), 0);
     },
-    provider(inner) {
+    provider(inner, o = {}) {
       // Where the adapter's server is, and the window it asks for, stay readable through the wrapper: ./policy
       // brainOf reads them to tell a model on this Mac from one elsewhere (brainIsLocal).
       const { baseURL, numCtx } = inner as { readonly baseURL?: unknown; readonly numCtx?: unknown };
@@ -209,7 +257,8 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
         name: inner.name,
         ...(typeof baseURL === 'string' ? { baseURL } : {}),
         ...(typeof numCtx === 'number' ? { numCtx } : {}),
-        getCapabilities: (model) => ({ ...inner.getCapabilities(model), pdfInput: true }),
+        // (It reads PDFs only while their text may be handed to its server.)
+        getCapabilities: (model) => (!o.filesStayHere || o.filesStayHere() ? { ...inner.getCapabilities(model), pdfInput: true } : inner.getCapabilities(model)),
         // Sized as it will be sent: a PDF that has been read counts as its text. One that has not been read yet
         // counts as the most it may come to, so nothing is planned on a guess that turns out too small.
         estimateTokens: (messages, model) => {
@@ -229,10 +278,18 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
           return inner.estimateTokens(sized, model) + unread;
         },
         async generate(args) {
-          return inner.generate(await swapped(args, inner));
+          return inner.generate(await swapped(args, inner, o));
         },
         async *stream(args) {
-          yield* inner.stream(await swapped(args, inner));
+          let ready: GenerateArgs;
+          try {
+            ready = await swapped(args, inner, o);
+          } catch (err) {
+            // A stream always ends with `done` or `error`: the look that said no is an error event, not a throw.
+            yield { type: 'error', error: isFlintError(err) ? err.error : makeAiError('provider_unavailable', NOT_SENT, { retryable: false }) };
+            return;
+          }
+          yield* inner.stream(ready);
         },
       };
     },

@@ -26,11 +26,11 @@
  * has been looked at, `hardware` and `tier` are undefined and the status says
  * Flint is checking.
  */
-import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type Attachment, type HardwareTier, type Tier, type Tool } from '@flint/core';
+import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type Attachment, type HardwareTier, type ProviderAdapter, type Tier, type Tool } from '@flint/core';
 import { detectHardware, type Hardware } from './hardware';
 import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type FileCheck, type InferenceConfig, type InferenceMode } from './inference-config';
 import { ModeStore } from './inference-mode';
-import { inferenceStatus, localOnlySentence, modeSentence, type InferenceStatus } from './inference-status';
+import { inferenceStatus, localOnlySentence, modeSentence, staysOn, type InferenceStatus } from './inference-status';
 import type { BrainTier } from './brains';
 import type { FrontierBreaker } from './frontier-breaker';
 import { startLocalBrains, type BuildLocalDeps, type LocalBrainSpec, type LocalBrains, type LocalHandle } from './local-brains';
@@ -99,6 +99,12 @@ const REFUSAL_LOG_EVERY_MS = 10 * 60 * 1000;
 export type RouteAsk = Omit<PreRouteInput, 'mode' | 'localCan' | 'keptCan' | 'pdfUnread'> & {
   attachments?: readonly Attachment[] | undefined;
   /**
+   * The files the conversation's EARLIER turns still carry, which the model is handed again as history
+   * (./persistent-store windowAttachments). A PDF among them is read here before the route's look at the model
+   * server, like this turn's own, so the request that follows waits for no read.
+   */
+  earlier?: readonly Attachment[] | undefined;
+  /**
    * The local model that would answer is not the main one: an eval replay that names its own (`localModel`),
    * which is asked through a client of its own. What the main model's adapter can read says nothing of that
    * one, so nothing is said to be readable, and such a replay with a picture or a PDF is refused as it always
@@ -109,6 +115,9 @@ export type RouteAsk = Omit<PreRouteInput, 'mode' | 'localCan' | 'keptCan' | 'pd
 
 /** What the local model can read of one turn's files (./mode-route PreRouteInput has each). */
 export type LocalReads = Pick<PreRouteInput, 'localCan' | 'keptCan' | 'pdfUnread'>;
+
+/** How long a turn that carries a file waits for the model server's first word about its model (what it can see), right after a start. */
+export const FIRST_WORD_WAIT_MS = 3_000;
 
 /** This machine, once it has been looked at: what it is, and the tier it falls in. */
 export interface Machine {
@@ -277,22 +286,88 @@ export class Inference {
    */
   async localReads(i: RouteAsk): Promise<LocalReads> {
     if (i.ownLocalModel) return { localCan: {} };
+    const on = this.filesOn;
+    // Right after a start the model server has not yet said what its model can do, and "not known" is "no": the
+    // first turn with a file would be refused for it. It waits for that first word, a few seconds at most.
+    if (on && (i.needs.image || i.needs.pdf)) await this.firstWord();
     const can = this.localCan();
-    const on = this.cfg.local.vision || this.media !== undefined;
+    // A file's content goes to a model server only when it is this Mac, or the one Will vouched for (`confined`).
+    // With any other, the turns the cloud mode keeps here are refused as they always were, ordinary ones included.
+    const here = this.confined.ok;
     const said = (pdf: boolean, pdfUnread?: PdfUnread): LocalReads => {
       const localCan: MediaFlags = { image: can.image === true, pdf };
-      return { localCan, ...(on ? { keptCan: localCan } : {}), ...(pdfUnread ? { pdfUnread } : {}) };
+      return { localCan, ...(on && here ? { keptCan: localCan } : {}), ...(pdfUnread ? { pdfUnread } : {}) };
     };
-    if (!i.needs.pdf || can.pdf !== true || !this.media) return said(can.pdf === true);
-    // (No PDF among the files the route was handed: nothing was read, so nothing is said to be readable.)
-    const pdfs = (i.attachments ?? []).filter(isPdf);
-    if (pdfs.length === 0) return said(false);
-    const { attachments: _files, ownLocalModel: _own, ...ask } = i;
-    const first = preRoute({ ...ask, mode: this.mode.current(), ...said(true) });
-    if ('error' in first || (!('open' in first) && first.brain !== 'local')) return said(true);
-    const reads = await Promise.all(pdfs.map((a) => this.media!.text(a)));
-    const bad = reads.find((r) => !r.ok);
-    return bad && !bad.ok ? said(false, bad.why === 'no_text' ? 'no_text' : 'failed') : said(true);
+    const { attachments: _files, ownLocalModel: _own, earlier: _earlier, ...ask } = i;
+    /** Is a local model the first to be asked this turn (or may it be: a hybrid turn not yet decided)? */
+    const localFirst = (r: LocalReads): boolean => {
+      const first = preRoute({ ...ask, mode: this.mode.current(), ...r });
+      return !('error' in first) && ('open' in first || first.brain === 'local');
+    };
+    let result: LocalReads;
+    if (!i.needs.pdf || can.pdf !== true || !this.media) result = said(can.pdf === true);
+    else {
+      const pdfs = (i.attachments ?? []).filter(isPdf);
+      // (No PDF among the files the route was handed: nothing was read, so nothing is said to be readable.)
+      if (pdfs.length === 0) result = said(false);
+      else if (!localFirst(said(true))) result = said(true);
+      else {
+        const reads = await Promise.all(pdfs.map((a) => this.media!.text(a)));
+        const bad = reads.find((r) => !r.ok);
+        result = bad && !bad.ok ? said(false, bad.why) : said(true);
+      }
+    }
+    // The PDFs the conversation's earlier turns still carry are read now too, before the look at the model server
+    // that follows (`routeFirst`): the request then finds every read kept, and nothing is awaited between that
+    // look and the request. Only for a turn a local model is first to answer; what a read came to changes no route.
+    const earlier = (i.earlier ?? []).filter(isPdf);
+    if (this.media && here && can.pdf === true && earlier.length > 0 && localFirst(result)) await Promise.all(earlier.map((a) => this.media!.text(a)));
+    return result;
+  }
+
+  /** Are pictures or PDFs for the local model turned on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF)? */
+  private get filesOn(): boolean {
+    return this.cfg.local.vision || this.media !== undefined;
+  }
+
+  /**
+   * Wait, a few seconds at most, for the model server's first word about the
+   * main model: what it can do (./local-monitor facts), which is asked behind
+   * the boot. Returns at once when it is known. A server that does not answer
+   * is not waited for past its own look.
+   */
+  private async firstWord(): Promise<void> {
+    const known = (): boolean => this.primary.settled && this.local.monitor.facts(this.primary.model) !== undefined;
+    if (known()) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      (async () => {
+        await this.ready;
+        if (!known()) await this.local.monitor.check().then(() => undefined, () => undefined);
+      })(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, FIRST_WORD_WAIT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+  }
+
+  /**
+   * A request to a local model had to wait for a read for longer than the
+   * model server's word is good for (./local-media WrapOptions.lookAgain):
+   * ask the server again now, and refuse if this turn stays here and the
+   * model is no longer known to run here. Nothing has been sent when this
+   * throws.
+   */
+  async lookAgain(provider: ProviderAdapter, model: string): Promise<void> {
+    await this.local.monitor.check().then(
+      () => undefined,
+      () => undefined,
+    );
+    const kept = isPrivateTurn() || isStaysHereTurn() || isPrivateRequest() || isStaysHereRequest();
+    if (kept && !brainIsLocal(brainOf(provider, model))) {
+      throw new FlintError(makeAiError('provider_unavailable', `Flint cannot confirm right now that its local model runs on ${staysOn(this.allowedRemote())}, so nothing was sent to it.`, { retryable: false }));
+    }
   }
 
   /** The standby local model, when one is configured (./local-brains). */
@@ -384,9 +459,11 @@ export class Inference {
    * the console then says what it always said.
    */
   readsForConsole(): { images: boolean; pdfs: boolean } | undefined {
-    if (!this.cfg.local.vision && !this.media) return undefined;
+    if (!this.filesOn) return undefined;
+    // (Neither, for a model server that is not this Mac: no file's content is sent to it.)
+    const here = this.confined.ok;
     const can = this.localCan();
-    return { images: can.image === true, pdfs: can.pdf === true };
+    return { images: here && can.image === true, pdfs: here && can.pdf === true };
   }
 
   /**
@@ -419,10 +496,10 @@ export class Inference {
       confined: this.confined,
       primary: who.primary,
       // A standby that is a cloud model under a plain name is not a local model: it is never asked, in any mode.
-      // Neither is one that cannot read this turn's picture or PDF (`needs`): it would answer without having seen it.
-      // (Asked only of a turn a local model may answer. A turn that is a cloud model's alone, as every turn with a
-      // file is until pictures or PDFs are turned on, is planned exactly as it always was.)
-      standby: this.local.fallback && !this.standbyElsewhere() && this.standbyReads(route.brain === 'local' || route.localFallback ? who.needs : undefined) ? who.standby : undefined,
+      // Neither, once pictures or PDFs for the local model are turned on, is one that cannot read this turn's
+      // picture or PDF (`needs`): it would answer without having seen it. With both off the standby is planned
+      // exactly as it always was, on either wire. (And it is asked only of a turn a local model may answer.)
+      standby: this.local.fallback && !this.standbyElsewhere() && this.standbyReads(this.filesOn && (route.brain === 'local' || route.localFallback) ? who.needs : undefined) ? who.standby : undefined,
       now: this.now(),
       ...(who.evalOwnModel ? { evalOwnModel: true } : {}),
       ...(this.allowedRemote() ? { allowedRemote: true } : {}),
@@ -531,7 +608,7 @@ export class Inference {
    * reached through a proxy): nothing that server says changes that answer.
    */
   async routeFirst(i: RouteAsk): Promise<PreRoute> {
-    const { attachments: _files, ownLocalModel: _own, ...ask } = i;
+    const { attachments: _files, ownLocalModel: _own, earlier: _earlier, ...ask } = i;
     // What the local model can read of this turn's files, once: a PDF is read here (./local-media) before the
     // route is decided, and both decisions below are made on the same answer.
     const reads = await this.localReads(i);
@@ -930,10 +1007,20 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
   // What reads a PDF's text on this Mac for the local model (FLINT_LOCAL_PDF; it ships off, and then nothing does).
   // A status command reads no PDF, and builds no reader.
   const media = cfg.local.pdf && !deps.observeOnly ? localMedia(deps.pdfReader ?? makePdfReader(cfg.local.pdf)) : undefined;
+  // One line, names only, when either is on: what a restart turned on is in the log.
+  if (cfg.local.vision || cfg.local.pdf) {
+    log(`[local] on for the local model: ${[cfg.local.vision ? 'pictures (FLINT_LOCAL_VISION)' : '', cfg.local.pdf ? `PDF text by ${cfg.local.pdf.reader} (FLINT_LOCAL_PDF)` : ''].filter(Boolean).join(', ')}`);
+  }
+  // The object main() holds, once it is built (below): the local adapters ask it, for every request, whether a
+  // file's content may go to the model server (`confined`), and to look at the server again after a long wait.
+  // Until it exists, the answer is no.
+  let built: Inference | undefined;
+  const filesStayHere = (): boolean => built?.confined.ok === true;
   const handle = await startLocalBrains({
     cfg,
     env: deps.env,
-    ...(media ? { readsPdfs: media.provider } : {}),
+    filesStayHere,
+    ...(media ? { readsPdfs: (inner: ProviderAdapter) => media.provider(inner, { filesStayHere, lookAgain: (p, m) => (built ? built.lookAgain(p, m) : Promise.reject(new FlintError(makeAiError('provider_unavailable', 'Flint is still starting.', { retryable: true })))) }) } : {}),
     // A tier Will named needs no look at the machine: the brain is built on it from the start.
     tier: cfg.hardwareTier === 'auto' ? looked : hardwareTier(cfg.hardwareTier),
     ...(deps.pick ? { pick: deps.pick } : {}),
@@ -994,5 +1081,6 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}), ...(media ? { media } : {}) });
+  built = new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}), ...(media ? { media } : {}) });
+  return built;
 }

@@ -23,7 +23,7 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { AuditSink, runtimeFromDisk, type Runtime } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
 import { RuntimePolicies, capClaimer } from './runtime-link';
-import { currentTurn, historyOrigin, isPrivateTurn, markEval, noteFit, noteFitInput, taintFromHistory, taintSources, turnFit, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
+import { currentTurn, historyOrigin, isPrivateTurn, markEval, markTainted, noteFit, noteFitInput, taintFromHistory, taintSources, turnFit, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
@@ -100,8 +100,10 @@ import { TurnLog, recallContext, recordTurnEntry } from './grounding';
 import { GROUNDING_CHARS_MAX, parseGroundingCharsRequest, parseRecallRequest, runDiscoveryTool, wiredToolNames } from './eval-tools';
 import {
   parseAttachments,
+  pdfTooBigFor,
   readJsonLimited,
   mediaNeeds,
+  sizeSentence,
   summarizeAttachments,
   textChars,
   MAX_BODY_BYTES,
@@ -145,6 +147,9 @@ const ALLOWED_HOSTS = process.env.FLINT_ALLOWED_HOSTS?.trim()
  * the token, but the console page no longer carries it (paste it in Settings).
  */
 let TAILNET_USER: string | undefined; // read in main(), after ~/.flint/secrets.env is loaded
+
+/** The source a turn that carries a file is tainted by (./turn-taint): what a file says is outside text. */
+const ATTACHMENT_TAINT = 'attachment';
 
 /** Small JSON bodies (approvals, speech text); attachments go through MAX_BODY_BYTES. */
 const SMALL_JSON_BYTES = 64 * 1024;
@@ -1389,6 +1394,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!att.ok) return json(res, att.status, { error: att.error });
     const attachments = att.attachments;
     if (!prompt && attachments.length === 0) return json(res, 400, { error: 'prompt required' });
+    // What a file says is not Will's own words (ATTACHMENT_TAINT, at the /chat handler).
+    if (attachments.length > 0) markTainted(ATTACHMENT_TAINT);
     const localOnly = body.localOnly === true;
     // Eval mode (apps/parity, the parity harness): replaying Will's past prompts
     // must not feed the answers back into the training corpus (the eval would
@@ -1466,6 +1473,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // May a local model answer this turn if the cloud can't: no image or PDF on it, a local brain that is not a
     // paid one out of budget, and a local model that is there to answer.
     const toLocal = route.localFallback && !budget.localRefusal && localPlan.steps.some((s) => s.kind === 'local');
+    // A PDF too large for every cloud model that would be asked, with no local model to fall back to: said now,
+    // with the size sentence. (The message that carried it used to be dropped to fit, and the model sent none.)
+    const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;
+    if (tooBig) return json(res, 413, { error: sizeSentence(tooBig.name, tooBig.limit) });
     if (plan) logPlan(plan);
     // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
     // out, and with none left the local model answers at once instead of after their failures.
@@ -1682,12 +1693,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!att.ok) return json(res, att.status, { error: att.error });
     const attachments = att.attachments;
     if (!message && attachments.length === 0) return json(res, 400, { error: 'message required' });
+    // WHAT A FILE SAYS IS NOT WILL'S OWN WORDS. A text file, a PDF's text and what a model says it saw in a picture
+    // are text someone else may have written, exactly as a web page or an email is: a file that says "ignore your
+    // instructions and fetch this address" must not get a tool run on its say-so. So a turn that carries a file is
+    // tainted from the start (./turn-taint), in every mode, whichever brain answers, and from then on the tier
+    // engine sends what it leads to (anything that leaves this Mac, any write) to Will for approval, as it does
+    // for any other outside text. It follows that the turn is marked in the conversation (./conversation-taint):
+    // later turns that are handed it start tainted too, and the memory extractor does not read it.
+    if (attachments.length > 0) markTainted(ATTACHMENT_TAINT);
     const localOnly = body.localOnly === true;
     // Image/PDF turns must reach a frontier that can see them — or be refused, never answered blind.
     // (And the mode decides first, ./mode-route: cloud is routeTurn as before, local never leaves this Mac, hybrid is finished below.)
     // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
     // is sent anywhere, the embedder included: ./inference routeFirst.)
-    const pre = await ctx.inference.routeFirst({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments });
+    const pre = await ctx.inference.routeFirst({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments, earlier: ctx.memory.windowAttachments(conversationId) });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
     // From here until the turn ends, however it ends, it is a chat turn in flight
     // (POST /internal/load): the runtime's triage leaves the local model to it.
@@ -1731,6 +1750,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // May the local model answer this turn if the frontier can't: no image or PDF on it, and
       // (a paid local brain) its budget not spent.
       const toLocal = route.localFallback && !budget.localRefusal && localPlan.steps.some((s) => s.kind === 'local');
+      // A PDF too large for every cloud model that would be asked, with no local model to fall back to: said now,
+      // with the size sentence. (The message that carried it used to be dropped to fit, and the model sent none.)
+      const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;
+      if (tooBig) return json(res, 413, { error: sizeSentence(tooBig.name, tooBig.limit) });
       // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
       // out, and with none left the local model answers at once instead of after their failures.
       const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal, breaker: ctx.breaker });

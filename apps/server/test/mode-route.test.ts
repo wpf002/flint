@@ -142,7 +142,11 @@ describe('local mode never leaves this Mac', () => {
     expect(preRoute(input('local', { needs: { pdf: true }, localCan: { pdf: true } }))).toMatchObject({ brain: 'local', reason: 'mode_local' });
     expect(preRoute(input('local', { needs: { image: true, pdf: true }, localCan: { image: true, pdf: true } }))).toMatchObject({ brain: 'local' });
     expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'no_text' }))).toEqual({ error: 'This PDF has no text in it that Flint can read on this Mac, and Local mode never uses the cloud. Send it as text instead.', status: 422 });
-    expect(preRoute(input('local', { needs: { pdf: true }, localCan: { image: true }, pdfUnread: 'failed' }))).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: { image: true }, pdfUnread: 'failed' }))).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
+    // A reader that is busy says so, and never "send it as text": the PDF is fine.
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'busy' }))).toEqual({ error: "Flint's PDF reader on this Mac is busy right now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'too_big' }))).toEqual({ error: 'This PDF is larger than the 10 MB Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'too_long' }))).toEqual({ error: 'This PDF has more than the 1,000 pages Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
     // With a picture it cannot see as well, the plain words name both.
     expect(preRoute(input('local', { needs: { image: true, pdf: true }, localCan: {}, pdfUnread: 'no_text' }))).toEqual({ error: "The local model can't read images or PDFs, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
     // And the words about a PDF are never said of a turn that carries none.

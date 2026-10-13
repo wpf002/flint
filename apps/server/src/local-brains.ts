@@ -98,6 +98,7 @@ import {
 import type { ListedModel, PlaceSaid } from './ollama-locality';
 import { LocalMonitor, type Which } from './local-monitor';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, chooseLocalBrain, keepPickingLocal, liveOllamaOptions } from './local-model';
+import { plainErrors } from './local-errors';
 import { watcher } from './local-serve';
 import { sameModel } from './memory-brain';
 
@@ -231,6 +232,15 @@ export interface BuildLocalDeps {
    * standby's too, and around nothing else. Left out: no PDF is read here.
    */
   readsPdfs?: (inner: ProviderAdapter) => ProviderAdapter;
+  /**
+   * May a file's content (a picture, a PDF's text) be handed to the local
+   * model server right now: is it this Mac, or the one server Will vouched
+   * for, with a model that runs on it (./inference `confined`)? Asked for
+   * every request. A server that is anything else is sent no picture, on an
+   * ordinary turn as much as a private one. Left out: yes (tests, one-off
+   * callers that build a brain on a server they know).
+   */
+  filesStayHere?: () => boolean;
 }
 
 /** The local brain while the server runs: what the next turn uses, and when that changes. */
@@ -412,9 +422,19 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   // token. Ollama's own API says when a reply's first line arrives (its whole passes yield nothing until the
   // reply is in); the OpenAI-compatible wire streams every pass, so its first event is the first token.
   const watching = (which: Which, timedBy: 'events' | 'callback') => watcher(which, () => monitor, deps.now, timedBy);
-  // ...and, with FLINT_LOCAL_PDF set, each is handed a PDF as its text (./local-media). Around the watched adapter:
-  // reading a PDF is not the model's time to first token.
-  const pdfs = (inner: ProviderAdapter): ProviderAdapter => (deps.readsPdfs ? deps.readsPdfs(inner) : inner);
+  // Pictures or PDFs for the local model are turned on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF): a request to it can
+  // then carry a file, so two things hold for every local adapter that do not when both are off.
+  const filesOn = cfg.local.vision || cfg.local.pdf !== undefined;
+  /** May a file's content go to the local model server right now (BuildLocalDeps.filesStayHere)? */
+  const filesStayHere = (): boolean => deps.filesStayHere?.() !== false;
+  // ...with FLINT_LOCAL_PDF set, each is handed a PDF as its text (./local-media). Around the watched adapter:
+  // reading a PDF is not the model's time to first token. And with either set, what the model server says when it
+  // fails is not repeated (./local-errors): its error could carry the file back. With both off, an adapter is
+  // exactly the watched one it always was.
+  const pdfs = (inner: ProviderAdapter): ProviderAdapter => {
+    const quiet = filesOn ? plainErrors(inner) : inner;
+    return deps.readsPdfs ? deps.readsPdfs(quiet) : quiet;
+  };
 
   let tier: HardwareTier | undefined = deps.tier && !(deps.tier instanceof Promise) ? deps.tier : undefined;
   /** What an OpenAI-compatible address turned out to be; the config's own word until it is asked. */
@@ -533,9 +553,10 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
                   const tools = toolsAllowed(cfg.local.tools, facts);
                   // The model's own maximum context bounds the window (Ollama gives no more, whatever num_ctx asks).
                   const most = facts?.contextLength;
-                  // FLINT_LOCAL_VISION=on, and the model server says THIS model sees: the adapter sends it a turn's
-                  // pictures (@flint/core). Off, or a model it has not said that of: no picture is sent, as before.
-                  const sees = cfg.local.vision && facts?.vision === true;
+                  // FLINT_LOCAL_VISION=on, the model server says THIS model sees, and the server is this Mac (or
+                  // the one Will vouched for): the adapter sends it a turn's pictures (@flint/core). Off, a model
+                  // it has not said that of, or a server anywhere else: no picture is sent, as before.
+                  const sees = cfg.local.vision && facts?.vision === true && filesStayHere();
                   if (tools === undefined && most === undefined && !sees) return undefined;
                   return {
                     ...(tools === undefined ? {} : { toolCalling: tools ? ('native' as const) : ('unsupported' as const) }),
@@ -586,7 +607,9 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
                   // The context the server has the model loaded with, when it says; llama.cpp's own setting; else what
                   // the env says for the main model, and a small window for any other (the standby).
                   const context = monitor.contextLength(m) ?? (kind === 'llamacpp' ? facts?.contextLength : undefined) ?? (sameModel(m, choice.model) ? envCtx : undefined) ?? UNKNOWN_CONTEXT;
-                  return localCapabilities({ contextTokens: context, tools: toolsAllowed(cfg.local.tools, facts) === true, ...(facts?.vision ? { vision: true } : {}) });
+                  // (A model that sees was always sent pictures on this wire. With pictures or PDFs for the local
+                  // model turned on, not when the server is anywhere but this Mac: BuildLocalDeps.filesStayHere.)
+                  return localCapabilities({ contextTokens: context, tools: toolsAllowed(cfg.local.tools, facts) === true, ...(facts?.vision && (!filesOn || filesStayHere()) ? { vision: true } : {}) });
                 },
               }),
             ),

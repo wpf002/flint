@@ -31,7 +31,7 @@
 import type { Tier } from '@flint/core';
 import { asksDeep, decideHybrid, type HybridRule, type RouteReason, type TurnFacts } from './hybrid-rules';
 import type { InferenceMode } from './inference-config';
-import { FORCE_LOCAL_RE, pdfUnreadClause, routeTurn, unreadable, type Brain, type MediaFlags, type PdfUnread } from './policy';
+import { FORCE_LOCAL_RE, pdfUnreadSentence, routeTurn, unreadable, type Brain, type MediaFlags, type PdfUnread } from './policy';
 
 /**
  * Is the turn that is running right now being answered by a LOCAL model?
@@ -135,10 +135,7 @@ export function preRoute(i: PreRouteInput): PreRoute {
   }
   const cannot = unreadable(i.needs, i.localCan);
   if (i.mode === 'local') {
-    if (cannot === 'PDFs' && i.pdfUnread) {
-      const why = pdfUnreadClause(i.pdfUnread);
-      return { error: `${why[0]!.toUpperCase()}${why.slice(1)}, and Local mode never uses the cloud. Send it as text instead.`, status: 422 };
-    }
+    if (cannot === 'PDFs' && i.pdfUnread) return { error: pdfUnreadSentence(i.pdfUnread, 'and Local mode never uses the cloud.'), status: 422 };
     if (cannot) return { error: `The local model can't read ${cannot}, and Local mode never uses the cloud. Send it as text instead.`, status: 422 };
     return { brain: 'local', localFallback: true, cloudFallback: false, reason: 'mode_local', mode: 'local', private: priv };
   }

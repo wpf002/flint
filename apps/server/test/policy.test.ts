@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { judgeBrain, isSafeTool, pdfUnreadClause, routeTurn, unreadable } from '../src/policy';
+import { judgeBrain, isSafeTool, pdfUnreadAdvice, pdfUnreadClause, pdfUnreadSentence, routeTurn, unreadable, type PdfUnread } from '../src/policy';
 import { ActionQueue } from '../src/actions';
 
 describe('judgeBrain', () => {
@@ -116,16 +116,43 @@ describe('routeTurn: a turn the local brain keeps, with a file it can read', () 
       error: 'Local-only is on, and this PDF has no text in it that Flint can read on this Mac. Turn Local-only off to send the file to the frontier brain, or remove the attachment.',
     });
     expect(routeTurn({ ...base, localOnly: true, needs: { pdf: true }, localCan: {}, pdfUnread: 'failed' })).toEqual({
-      error: "Local-only is on, and Flint couldn't read this PDF on this Mac just now. Turn Local-only off to send the file to the frontier brain, or remove the attachment.",
+      error: "Local-only is on, and Flint couldn't read this PDF on this Mac just now. Try again in a moment.",
     });
     expect(routeTurn({ ...base, hasFrontier: false, needs: { pdf: true }, localCan: {}, pdfUnread: 'no_text' })).toEqual({ error: 'This PDF has no text in it that Flint can read on this Mac, and no frontier brain is configured. Send it as text instead.' });
-    expect(routeTurn({ ...base, hasFrontier: false, needs: { pdf: true }, localCan: {}, pdfUnread: 'failed' })).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and no frontier brain is configured. Send it as text instead." });
+    expect(routeTurn({ ...base, hasFrontier: false, needs: { pdf: true }, localCan: {}, pdfUnread: 'failed' })).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and no frontier brain is configured. Try again in a moment." });
     // With a picture it cannot see on the same turn, the words are the plain ones: both kinds are the trouble.
     expect(routeTurn({ ...base, localOnly: true, needs: { image: true, pdf: true }, localCan: {}, pdfUnread: 'no_text' })).toEqual({
       error: "Local-only is on, and the on-device brain can't read images or PDFs. Turn Local-only off to send the file to the frontier brain, or remove the attachment.",
     });
     // And a turn a frontier brain answers is not refused for it: that brain reads the PDF itself.
     expect(routeTurn({ ...base, needs: { pdf: true }, localCan: {}, pdfUnread: 'no_text' })).toEqual({ brain: 'frontier', localFallback: false });
+  });
+
+  // Each reason a PDF was not read has its own words, and its own advice. A reader that is only busy never tells
+  // Will to send the PDF as text: the PDF is fine, and a moment is all it needs.
+  it('each reason has its own sentence: too big, too long and busy as much as a scan', () => {
+    const kept = (why: PdfUnread) => (routeTurn({ ...base, localOnly: true, needs: { pdf: true }, localCan: {}, pdfUnread: why }) as { error: string }).error;
+    const alone = (why: PdfUnread) => (routeTurn({ ...base, hasFrontier: false, needs: { pdf: true }, localCan: {}, pdfUnread: why }) as { error: string }).error;
+    expect(kept('busy')).toBe("Local-only is on, and Flint's PDF reader on this Mac is busy right now. Try again in a moment.");
+    expect(alone('busy')).toBe("Flint's PDF reader on this Mac is busy right now, and no frontier brain is configured. Try again in a moment.");
+    expect(kept('too_big')).toBe('Local-only is on, and this PDF is larger than the 10 MB Flint reads on this Mac. Send a smaller part of it, or its text.');
+    expect(alone('too_big')).toBe('This PDF is larger than the 10 MB Flint reads on this Mac, and no frontier brain is configured. Send a smaller part of it, or its text.');
+    expect(kept('too_long')).toBe('Local-only is on, and this PDF has more than the 1,000 pages Flint reads on this Mac. Send a smaller part of it, or its text.');
+    expect(alone('too_long')).toBe('This PDF has more than the 1,000 pages Flint reads on this Mac, and no frontier brain is configured. Send a smaller part of it, or its text.');
+    for (const why of ['busy', 'failed'] as const) {
+      expect(kept(why)).not.toMatch(/as text|its text/);
+      expect(alone(why)).not.toMatch(/as text|its text/);
+      expect(pdfUnreadAdvice(why)).toBe('Try again in a moment.');
+    }
+    expect(pdfUnreadAdvice('no_text')).toBe('Send it as text instead.');
+    expect(pdfUnreadSentence('busy', 'and Local mode never uses the cloud.')).toBe("Flint's PDF reader on this Mac is busy right now, and Local mode never uses the cloud. Try again in a moment.");
+    // Every one is a sentence that starts with a capital and ends with a full stop, with no parentheses.
+    for (const why of ['no_text', 'too_big', 'too_long', 'busy', 'failed'] as const) {
+      for (const said of [kept(why), alone(why)]) {
+        expect(said).toMatch(/^[A-Z].*\.$/);
+        expect(said).not.toMatch(/[()]/);
+      }
+    }
   });
 
   it('the helpers: what cannot be read, in words, and the clause for a PDF that was tried', () => {

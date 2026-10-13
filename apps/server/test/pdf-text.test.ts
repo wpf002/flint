@@ -1,20 +1,33 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  COUNT_BUDGET_BYTES,
   FOLDER_PREFIX,
   LEFTOVER_AFTER_MS,
+  MAX_OUTPUT_BYTES,
   MAX_TEXT_CHARS,
+  PROBE_AFTER_MS,
+  PROBE_EVERY_MS,
+  PROBE_TIMEOUT_MS,
   READER_ARGS,
+  READ_TIMEOUT_MS,
+  ReadTimedOut,
+  countPdfPages,
+  endReadsNow,
+  folderPrefix,
   makePdfReader,
   parseSpotlight,
   plainText,
   plistValue,
   runProgram,
   sweepLeftovers,
+  sweepLeftoversNow,
   type RunProgram,
 } from '../src/pdf-text';
+import { MAX_PDF_BYTES, MAX_PDF_PAGES } from '../src/pdf-limits';
 import { PDF_READER_PROGRAMS } from '../src/inference-config';
 import { textPdf } from '../src/synthetic-files';
 
@@ -198,7 +211,18 @@ describe('the reader', () => {
     expect(r.program).toBe('/usr/bin/mdimport');
     expect(r.args).toEqual(['-t', '-d3', join(r.cwd, 'doc.pdf')]);
     expect(r.bytes.equals(PDF)).toBe(true);
-    expect(r.timeoutMs).toBe(20_000);
+    // The wait, and the most the program may print: the two bounds every read is run with.
+    expect(r.timeoutMs).toBe(READ_TIMEOUT_MS);
+    expect(READ_TIMEOUT_MS).toBe(20_000);
+    expect(r.maxBytes).toBe(MAX_OUTPUT_BYTES);
+    expect(MAX_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
+  });
+
+  it('a reader given other bounds runs its program with those', async () => {
+    const tmp = scratch();
+    const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+    await makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, timeoutMs: 1234, maxBytes: 4096 }).read(PDF);
+    expect(runs[0]).toMatchObject({ timeoutMs: 1234, maxBytes: 4096 });
   });
 
   it('pdftotext: quiet, UTF-8, to standard output, and what it printed is the text', async () => {
@@ -222,6 +246,9 @@ describe('the reader', () => {
     await makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp }).read(PDF);
     const r = runs[0]!;
     expect(r.cwd.startsWith(join(tmp, FOLDER_PREFIX))).toBe(true);
+    // Its name says which process made it: what is left by one that was killed can be told from a read under way.
+    expect(r.cwd.startsWith(join(tmp, `${FOLDER_PREFIX}${process.pid}-`))).toBe(true);
+    expect(folderPrefix()).toBe(`flint-pdf-${process.pid}-`);
     expect(r.cwd.endsWith('.noindex')).toBe(true);
     expect(r.folderMode).toBe(0o700);
     expect(r.innerMode).toBe(0o700);
@@ -273,6 +300,21 @@ describe('the reader', () => {
     expect(await makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run: none.run, tmp }).read(PDF)).toEqual({ ok: false, why: 'failed' });
     const cutText = standIn(() => ({ stdout: 'half a page', truncated: true }));
     expect(await makePdfReader({ reader: 'pdftotext', program: '/opt/homebrew/bin/pdftotext' }, { run: cutText.run, tmp }).read(PDF)).toEqual({ ok: true, text: 'half a page', cut: true });
+  });
+
+  it('an EMPTY text is "no text" only when the read was whole: cut off before a word of it came, it is a failed read', async () => {
+    const tmp = scratch();
+    const spot = (stdout: string, truncated: boolean) => makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run: standIn(() => ({ stdout, truncated })).run, tmp }).read(PDF);
+    const plain = (stdout: string, truncated: boolean) => makePdfReader({ reader: 'pdftotext', program: '/opt/homebrew/bin/pdftotext' }, { run: standIn(() => ({ stdout, truncated })).run, tmp }).read(PDF);
+    // The importer got as far as the text's opening quote, and no further.
+    const opened = RECORDED.slice(0, RECORDED.indexOf('kMDItemTextContent = "') + 'kMDItemTextContent = "'.length);
+    expect(await spot(opened, true)).toEqual({ ok: false, why: 'failed' });
+    expect(await spot(opened, false)).toEqual({ ok: false, why: 'failed' }); // (the value itself was not whole)
+    expect(await spot(recordedWith('""'), true)).toEqual({ ok: false, why: 'failed' });
+    expect(await spot(recordedWith('""'), false)).toEqual({ ok: false, why: 'no_text' });
+    expect(await plain('', true)).toEqual({ ok: false, why: 'failed' });
+    expect(await plain('\n\f\n', true)).toEqual({ ok: false, why: 'failed' });
+    expect(await plain('', false)).toEqual({ ok: false, why: 'no_text' });
   });
 
   it('more text than is kept: the first of it, marked as cut', async () => {
@@ -337,6 +379,220 @@ describe('the reader', () => {
   });
 });
 
+describe('what is refused before it is handed to a reader', () => {
+  /** A PDF whose page objects are in a compressed object stream, as most modern PDFs keep them. */
+  const objectStreamPdf = (pages: number): Buffer => {
+    const inner = Buffer.from(Array.from({ length: pages }, () => '<< /Type /Page /Parent 2 0 R >>').join('\n'), 'latin1');
+    const packed = deflateSync(inner);
+    return Buffer.concat([Buffer.from(`%PDF-1.5\n9 0 obj\n<< /Type /ObjStm /N ${pages} /First 0 /Length ${packed.length} /Filter /FlateDecode >>\nstream\n`, 'latin1'), packed, Buffer.from('\nendstream\nendobj\n%%EOF\n', 'latin1')]);
+  };
+  const manyPages = (n: number): Buffer => textPdf(Array.from({ length: n }, () => ['x']));
+  const PDF = textPdf([['hello']]);
+  /** A stand-in for the program that answers with the recording, and counts how often it was run. */
+  const standIn = (answer: () => { stdout: string }) => {
+    const runs: string[] = [];
+    const run: RunProgram = async (program) => {
+      runs.push(program);
+      return { stdout: answer().stdout, truncated: false };
+    };
+    return { run, runs };
+  };
+
+  it('the pages are counted from the bytes: page objects, the page tree’s own count, and what is inside compressed object streams', () => {
+    expect(countPdfPages(textPdf([['one'], ['two'], ['three']]))).toBe(3);
+    expect(countPdfPages(textPdf([[]]))).toBe(1);
+    expect(countPdfPages(manyPages(250))).toBe(250);
+    // The page TREE is not a page, and a page count it gives is believed even when the pages are not there to count.
+    expect(countPdfPages(Buffer.from('%PDF-1.4\n1 0 obj << /Type /Pages /Count 5 /Kids [] >> endobj', 'latin1'))).toBe(5);
+    expect(countPdfPages(Buffer.from('%PDF-1.4\n2 0 obj << /Type /Pages /Count 1000000 /Kids [2 0 R 2 0 R] >> endobj', 'latin1'))).toBe(1_000_000);
+    expect(countPdfPages(Buffer.from('%PDF-1.4 /Type/Page /Type /PageLabels /Type /Pages', 'latin1'))).toBe(1);
+    expect(countPdfPages(objectStreamPdf(40))).toBe(40);
+    expect(countPdfPages(objectStreamPdf(2500))).toBe(2500);
+    expect(countPdfPages(Buffer.from('not a PDF at all'))).toBe(0);
+    expect(countPdfPages(new Uint8Array(0))).toBe(0);
+  });
+
+  it('object streams that unpack to more than the budget are too much to count, and so too much to read', () => {
+    const big = objectStreamPdf(3000);
+    expect(countPdfPages(big, 1024)).toBe(Infinity);
+    expect(countPdfPages(big)).toBe(3000);
+    expect(COUNT_BUDGET_BYTES).toBe(32 * 1024 * 1024);
+    // A stream that is not one this can unpack is passed over: the PDF is counted by what else it holds.
+    expect(countPdfPages(Buffer.from('%PDF-1.5\n<< /Type /ObjStm >>\nstream\nthis is not deflate\nendstream\n<< /Type /Page >>', 'latin1'))).toBe(1);
+  });
+
+  it('a PDF with more pages than are read here is refused, and no program is run for it', async () => {
+    const tmp = scratch();
+    const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp });
+    expect(MAX_PDF_PAGES).toBe(1000);
+    expect(await reader.read(manyPages(MAX_PDF_PAGES + 1))).toEqual({ ok: false, why: 'too_long' });
+    expect(await reader.read(objectStreamPdf(MAX_PDF_PAGES + 1))).toEqual({ ok: false, why: 'too_long' });
+    expect(runs).toHaveLength(0);
+    expect(readdirSync(tmp)).toEqual([]);
+    // At the bound it is read.
+    expect((await reader.read(manyPages(MAX_PDF_PAGES))).ok).toBe(true);
+    expect(runs).toHaveLength(1);
+  });
+
+  it('a PDF larger than is read here is refused, and no program is run for it', async () => {
+    const tmp = scratch();
+    const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+    const reader = makePdfReader({ reader: 'pdftotext', program: '/opt/homebrew/bin/pdftotext' }, { run, tmp });
+    expect(MAX_PDF_BYTES).toBe(10 * 1024 * 1024);
+    const padded = (size: number): Buffer => Buffer.concat([PDF, Buffer.from('%'), Buffer.alloc(size - PDF.length - 1, 0x41)]);
+    expect(await reader.read(padded(MAX_PDF_BYTES + 1))).toEqual({ ok: false, why: 'too_big' });
+    expect(runs).toHaveLength(0);
+    expect((await reader.read(padded(MAX_PDF_BYTES))).ok).toBe(true);
+    expect(runs).toHaveLength(1);
+  });
+});
+
+// The wait bounds how long FLINT waits. The Mac's importer does its work in a system service, which goes on after
+// Flint has stopped waiting (a review: a 50,000-page PDF kept it busy three and a half minutes, and every read
+// behind it timed out too). So after one read runs out of time, nothing more is handed over until a small PDF of
+// Flint's own comes back.
+describe('after a read runs out of time the reader is busy, and nothing is queued behind a stuck service', () => {
+  /** A reader whose program times out while `slow` is true, and whose "later" is run by the test. */
+  const stuckable = () => {
+    const tmp = scratch();
+    const state = { slow: true, runs: [] as Array<{ timeoutMs: number; bytes: number }> };
+    const waits: Array<{ fn: () => void; ms: number }> = [];
+    const run: RunProgram = async (_p, args, opts) => {
+      state.runs.push({ timeoutMs: opts.timeoutMs, bytes: readFileSync(args.find((a) => a.endsWith('doc.pdf'))!).length });
+      if (state.slow) throw new ReadTimedOut();
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, later: (fn, ms) => void waits.push({ fn, ms }) });
+    return { reader, state, waits, tmp };
+  };
+  const PDF = textPdf([['hello']]);
+
+  it('the read that timed out says it failed; every read after it is told "busy" at once, and no program is run for any of them', async () => {
+    const { reader, state, waits, tmp } = stuckable();
+    expect(reader.stuck!()).toBe(false);
+    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'failed' });
+    expect(reader.stuck!()).toBe(true);
+    expect(state.runs).toHaveLength(1);
+    for (let i = 0; i < 12; i++) expect(await reader.read(PDF)).toEqual({ ok: false, why: 'busy' });
+    expect(state.runs).toHaveLength(1);
+    // One try of Flint's own small PDF is waiting, and only one.
+    expect(waits.map((w) => w.ms)).toEqual([PROBE_AFTER_MS]);
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it('a small PDF of Flint’s own is tried, with a short wait of its own; while it does not come back the reader stays busy and tries again later', async () => {
+    const { reader, state, waits } = stuckable();
+    await reader.read(PDF);
+    waits.shift()!.fn();
+    await expect.poll(() => waits.length, WAIT).toBe(1);
+    expect(state.runs).toHaveLength(2);
+    expect(state.runs[1]!.timeoutMs).toBe(PROBE_TIMEOUT_MS);
+    expect(state.runs[1]!.bytes).toBeLessThan(2000); // Flint's own page, not anything of Will's
+    expect(waits[0]!.ms).toBe(PROBE_EVERY_MS);
+    expect(reader.stuck!()).toBe(true);
+    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'busy' });
+  });
+
+  it('when the small PDF comes back the reader reads again, and nothing more is tried', async () => {
+    const { reader, state, waits } = stuckable();
+    await reader.read(PDF);
+    state.slow = false;
+    waits.shift()!.fn();
+    await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
+    expect(waits).toEqual([]);
+    expect((await reader.read(PDF)).ok).toBe(true);
+    expect(state.runs).toHaveLength(3);
+  });
+
+  it('reads that were waiting their turn when it happened are told "busy" too: none of them is run', async () => {
+    const tmp = scratch();
+    const gates: Array<(v: 'timeout' | 'ok') => void> = [];
+    let runs = 0;
+    const run: RunProgram = async () => {
+      runs++;
+      const how = await new Promise<'timeout' | 'ok'>((r) => gates.push(r));
+      if (how === 'timeout') throw new ReadTimedOut();
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 1, waiting: 4, later: () => {} });
+    const reads = [0, 1, 2].map(() => reader.read(PDF));
+    await expect.poll(() => gates.length, WAIT).toBe(1);
+    gates[0]!('timeout');
+    expect(await Promise.all(reads)).toEqual([
+      { ok: false, why: 'failed' },
+      { ok: false, why: 'busy' },
+      { ok: false, why: 'busy' },
+    ]);
+    expect(runs).toBe(1);
+  });
+
+  it('a read that fails any other way does not make the reader busy', async () => {
+    const tmp = scratch();
+    let n = 0;
+    const run: RunProgram = async () => {
+      if (n++ === 0) throw new Error('the reader failed');
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, later: () => {} });
+    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'failed' });
+    expect(reader.stuck!()).toBe(false);
+    expect((await reader.read(PDF)).ok).toBe(true);
+  });
+
+  it('a reader that is closed tries nothing more', async () => {
+    const { reader, waits } = stuckable();
+    reader.close!();
+    await reader.read(PDF);
+    expect(waits).toEqual([]);
+  });
+});
+
+describe('a read under way when the process is stopped', () => {
+  it('its folder is removed, and its program ended, as the process exits: what `finally` cannot do then', async () => {
+    const tmp = scratch();
+    let folder = '';
+    let release: () => void = () => {};
+    const run: RunProgram = async (_p, _a, opts) => {
+      folder = join(opts.cwd, '..');
+      await new Promise<void>((r) => (release = r));
+      return { stdout: RECORDED, truncated: false };
+    };
+    const pending = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp }).read(textPdf([['kept on this Mac']]));
+    await expect.poll(() => folder !== '' && existsSync(join(folder, 'read.noindex', 'doc.pdf')), WAIT).toBe(true);
+    // What the process's exit hook runs (index.ts turns SIGTERM and SIGINT into an exit).
+    endReadsNow();
+    expect(existsSync(folder)).toBe(false);
+    expect(readdirSync(tmp)).toEqual([]);
+    release();
+    await pending;
+    expect(readdirSync(tmp)).toEqual([]);
+    // The hook is one listener for the process, however many readers were made.
+    expect(process.listeners('exit').filter((l) => l === endReadsNow)).toHaveLength(1);
+  });
+
+  it('the real program is ended with it: nothing Flint started outlives Flint', async () => {
+    const tmp = scratch();
+    const pidFile = join(tmp, 'program.pid');
+    const running = runProgram('/bin/sh', ['-c', `echo $$ > ${JSON.stringify(pidFile)}; exec /bin/sleep 60`], { timeoutMs: 60_000, maxBytes: 4096, cwd: tmp });
+    running.catch(() => {});
+    await expect.poll(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim().length > 0, WAIT).toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(alive()).toBe(true);
+    endReadsNow();
+    await expect.poll(alive, WAIT).toBe(false);
+    await expect(running).rejects.toThrow();
+  });
+});
+
 describe('a folder a crash left behind', () => {
   it('is removed once it is older than any read, by its name, and nothing else in the temp folder is touched', async () => {
     const tmp = scratch();
@@ -358,6 +614,77 @@ describe('a folder a crash left behind', () => {
 
   it('a temp folder that is not there is nothing to sweep', async () => {
     expect(await sweepLeftovers(join(scratch(), 'gone'))).toBe(0);
+    expect(sweepLeftoversNow(join(scratch(), 'gone'))).toBe(0);
+  });
+
+  // A server stopped in the middle of a read left the PDF on disk, and the next start left it there too: it was
+  // younger than ten minutes. A folder's name now says who made it.
+  it('one made by a process that is gone is removed at once, whatever its age; one made by a process still running is left until it is old', async () => {
+    for (const sweep of [(tmp: string, now: number, running: (pid: number) => boolean) => sweepLeftovers(tmp, now, running), async (tmp: string, now: number, running: (pid: number) => boolean) => sweepLeftoversNow(tmp, now, running)]) {
+      const tmp = scratch();
+      const GONE = 4_000_001;
+      const ALIVE = 4_000_002;
+      const gone = join(tmp, `${FOLDER_PREFIX}${GONE}-AbCdEf`);
+      const alive = join(tmp, `${FOLDER_PREFIX}${ALIVE}-AbCdEf`);
+      const aliveOld = join(tmp, `${FOLDER_PREFIX}${ALIVE}-GhIjKl`);
+      const mine = join(tmp, `${FOLDER_PREFIX}${process.pid}-MnOpQr`);
+      for (const d of [gone, alive, aliveOld, mine]) {
+        mkdirSync(join(d, 'read.noindex'), { recursive: true });
+        writeFileSync(join(d, 'read.noindex', 'doc.pdf'), 'a PDF left behind');
+      }
+      const now = Date.now();
+      const before = new Date(now - LEFTOVER_AFTER_MS - 1000);
+      utimesSync(aliveOld, before, before);
+      // (`mine`: this process's own, and not a read under way: a leftover of a failed removal.)
+      expect(await sweep(tmp, now, (pid) => pid === ALIVE)).toBe(3);
+      expect(readdirSync(tmp)).toEqual([`${FOLDER_PREFIX}${ALIVE}-AbCdEf`]);
+    }
+  });
+
+  it('a link by that name is not a folder this made: it is left, and so is what it points at', async () => {
+    const tmp = scratch();
+    const target = join(tmp, 'precious');
+    mkdirSync(target);
+    writeFileSync(join(target, 'keep.txt'), 'keep');
+    const link = join(tmp, `${FOLDER_PREFIX}4000001-AbCdEf`);
+    symlinkSync(target, link);
+    const before = new Date(Date.now() - LEFTOVER_AFTER_MS - 1000);
+    utimesSync(target, before, before);
+    expect(await sweepLeftovers(tmp, Date.now(), () => false)).toBe(0);
+    expect(sweepLeftoversNow(tmp, Date.now(), () => false)).toBe(0);
+    expect(existsSync(join(target, 'keep.txt'))).toBe(true);
+    expect(readdirSync(tmp).sort()).toEqual([`${FOLDER_PREFIX}4000001-AbCdEf`, 'precious']);
+  });
+
+  it('every read sweeps first: what a killed process left is gone by the time the next PDF is read, with no restart', async () => {
+    const tmp = scratch();
+    const run: RunProgram = async () => ({ stdout: RECORDED, truncated: false });
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, running: () => false });
+    const left = join(tmp, `${FOLDER_PREFIX}4000001-AbCdEf`);
+    mkdirSync(join(left, 'read.noindex'), { recursive: true });
+    writeFileSync(join(left, 'read.noindex', 'doc.pdf'), 'a PDF left behind');
+    expect((await reader.read(textPdf([['hello']]))).ok).toBe(true);
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it('a read under way in this process is never swept, by this reader or another', async () => {
+    const tmp = scratch();
+    let release: () => void = () => {};
+    let inFlight = '';
+    const slow: RunProgram = async (_p, _a, opts) => {
+      inFlight = opts.cwd;
+      await new Promise<void>((r) => (release = r));
+      return { stdout: RECORDED, truncated: false };
+    };
+    const first = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run: slow, tmp }).read(textPdf([['one']]));
+    await expect.poll(() => inFlight !== '', WAIT).toBe(true);
+    // Another reader is made (it sweeps at once) and reads (it sweeps again): the first read's file is still there.
+    const other = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run: async () => ({ stdout: RECORDED, truncated: false }), tmp });
+    expect((await other.read(textPdf([['two']]))).ok).toBe(true);
+    expect(existsSync(join(inFlight, 'doc.pdf'))).toBe(true);
+    release();
+    expect((await first).ok).toBe(true);
+    expect(readdirSync(tmp)).toEqual([]);
   });
 
   it('making a reader sweeps', async () => {
@@ -390,9 +717,66 @@ describe('running a program', () => {
     expect(out.stdout.startsWith('line\nline\n')).toBe(true);
   });
 
-  it('a program that is not there, one that fails, and one that runs out of time all reject', async () => {
-    await expect(runProgram('/no/such/program', [], { timeoutMs: 10_000, maxBytes: 4096, cwd: tmpdir() })).rejects.toThrow();
-    await expect(runProgram('/usr/bin/false', [], { timeoutMs: 10_000, maxBytes: 4096, cwd: tmpdir() })).rejects.toThrow();
-    await expect(runProgram('/bin/sleep', ['30'], { timeoutMs: 50, maxBytes: 4096, cwd: tmpdir() })).rejects.toThrow();
+  it('a program that is not there, one that fails, and one that runs out of time all reject; only the last is "out of time"', async () => {
+    await expect(runProgram('/no/such/program', [], { timeoutMs: 10_000, maxBytes: 4096, cwd: tmpdir() })).rejects.not.toBeInstanceOf(ReadTimedOut);
+    await expect(runProgram('/usr/bin/false', [], { timeoutMs: 10_000, maxBytes: 4096, cwd: tmpdir() })).rejects.not.toBeInstanceOf(ReadTimedOut);
+    await expect(runProgram('/bin/sleep', ['30'], { timeoutMs: 50, maxBytes: 4096, cwd: tmpdir() })).rejects.toBeInstanceOf(ReadTimedOut);
+  });
+
+  it('what a failing program printed, on either stream, is in no error', async () => {
+    const dir = scratch();
+    const failing = runProgram('/bin/sh', ['-c', 'echo STDOUTCANARY; echo STDERRCANARY >&2; exit 3'], { timeoutMs: 10_000, maxBytes: 4096, cwd: dir });
+    await expect(failing).rejects.toThrow('the reader failed');
+    await failing.catch((e: Error) => expect(`${e.message} ${e.stack}`).not.toMatch(/CANARY/));
+  });
+
+  it('a read that was called off ends the program', async () => {
+    const off = new AbortController();
+    const running = runProgram('/bin/sleep', ['30'], { timeoutMs: 60_000, maxBytes: 4096, cwd: tmpdir(), signal: off.signal });
+    off.abort();
+    await expect(running).rejects.toThrow('called off');
+    const already = new AbortController();
+    already.abort();
+    await expect(runProgram('/bin/sleep', ['30'], { timeoutMs: 60_000, maxBytes: 4096, cwd: tmpdir(), signal: already.signal })).rejects.toThrow('called off');
+  });
+
+  // The program is the head of a process group of its own: when it runs out of time, whatever it started goes too.
+  it('out of time: the program AND what it started are killed together', async () => {
+    const dir = scratch();
+    const pidFile = join(dir, 'started.pid');
+    await expect(runProgram('/bin/sh', ['-c', `/bin/sleep 60 & echo $! > ${JSON.stringify(pidFile)}; wait`], { timeoutMs: 400, maxBytes: 4096, cwd: dir })).rejects.toBeInstanceOf(ReadTimedOut);
+    const started = Number(readFileSync(pidFile, 'utf8'));
+    expect(started).toBeGreaterThan(1);
+    const alive = (): boolean => {
+      try {
+        process.kill(started, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await expect.poll(alive, WAIT).toBe(false);
+  });
+
+  it('a program that has exited is never signalled, whatever it left behind: its number may be someone else’s by then', async () => {
+    const dir = scratch();
+    const pidFile = join(dir, 'left.pid');
+    // The program prints, leaves something running that holds its output open, and exits at once.
+    const out = await runProgram('/bin/sh', ['-c', `/bin/sleep 60 & echo $! > ${JSON.stringify(pidFile)}; echo printed`], { timeoutMs: 30_000, maxBytes: 4096, cwd: dir });
+    expect(out).toEqual({ stdout: 'printed\n', truncated: false });
+    const left = Number(readFileSync(pidFile, 'utf8'));
+    let alive = true;
+    try {
+      process.kill(left, 0);
+    } catch {
+      alive = false;
+    }
+    // (Ended here, by its own number, so the test leaves nothing running.)
+    try {
+      process.kill(left, 'SIGKILL');
+    } catch {
+      /* gone already */
+    }
+    expect(alive).toBe(true);
   });
 });

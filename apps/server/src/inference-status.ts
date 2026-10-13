@@ -775,16 +775,25 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
   }
   if (i.voice) lines.push(...voiceLines(i.voice, i.mode, i.transcriptionMissing));
   // Pictures and PDFs for the local model: said only when Will has turned one on. Off, nothing about them changed.
+  // (A model server that is not this Mac is sent no file's content, whatever is turned on: the line says so.)
   if (local.cfg.local.vision) {
     lines.push(
-      !settled
-        ? 'Pictures for the local model are turned on. No local model is chosen yet.'
-        : caps.vision === true
-          ? 'Pictures are sent to the local model, which its server says can see.'
-          : 'Pictures for the local model are turned on, and its server does not say this model can see, so none is sent to it.',
+      !local.confined.ok
+        ? 'Pictures for the local model are turned on, and the local model is not on this Mac, so none is sent to it.'
+        : !settled
+          ? 'Pictures for the local model are turned on. No local model is chosen yet.'
+          : caps.vision === true
+            ? 'Pictures are sent to the local model, which its server says can see.'
+            : 'Pictures for the local model are turned on, and its server does not say this model can see, so none is sent to it.',
     );
   }
-  if (local.cfg.local.pdf) lines.push(`A PDF's text is read on this Mac for the local model, by ${PDF_READER_NAMES[local.cfg.local.pdf.reader]}.`);
+  if (local.cfg.local.pdf) {
+    lines.push(
+      local.confined.ok
+        ? `A PDF's text is read on this Mac for the local model, by ${PDF_READER_NAMES[local.cfg.local.pdf.reader]}.`
+        : "PDF reading for the local model is turned on, and the local model is not on this Mac, so no PDF's text is sent to it.",
+    );
+  }
   if (i.cloud) lines.push(i.cloud.configured ? (i.cloud.paused ? 'A cloud model is configured, and it is paused right now.' : 'A cloud model is configured.') : 'No cloud model is configured.');
   lines.push(...warnings);
   for (const p of local.cfg.problems) lines.push(`A setting was refused: ${p.key} is ${p.reason}.`);
@@ -825,7 +834,7 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
       modelSource: local.primary.from,
       contextLength: caps.maxContextTokens,
       tools: caps.toolCalling !== 'unsupported',
-      ...(local.cfg.local.vision ? { pictures: settled && caps.vision === true } : {}),
+      ...(local.cfg.local.vision ? { pictures: local.confined.ok && settled && caps.vision === true } : {}),
       ...(local.cfg.local.pdf ? { pdfReader: local.cfg.local.pdf.reader } : {}),
       primary,
       ...(standby ? { standby } : {}),
