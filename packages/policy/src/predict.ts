@@ -74,3 +74,165 @@ export const FORECAST_REASONS = {
 export function mostSensitive(levels: ReadonlyArray<'ops' | 'personal' | 'financial'>): 'ops' | 'personal' | 'financial' {
   return levels.includes('financial') ? 'financial' : levels.includes('personal') ? 'personal' : 'ops';
 }
+
+// ---- The Predictions panel's wire (P4 part 4) ---------------------------------------------------------
+// The console reaches the runtime's prediction routes through the server, which
+// checks every request and every answer against these. A forecast's numbers
+// (spend and calendar hours among them) travel only between the runtime and
+// Will's console, behind the runtime's `proposals` scope: never to a model, a
+// note, a log or an audit entry.
+//
+// The runtime writes every sentence the panel shows (apps/runtime/src/predict/
+// phrasing.ts, the one source of these words), from the row's own numbers: a
+// number the runtime does not have is never on the wire, so the panel cannot
+// say one. The console holds only its own fixed words.
+
+const Ref = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+const Count = z.number().int().min(0).max(100_000);
+/** A sentence, shown as it is: it ends as one, and carries no JSON, no backtick and no aside in parentheses. */
+export const PanelSentence = z.string().min(2).max(400).regex(/^[^{}[\]`()]+[.!?]$/);
+/** A label or a value: a few words. */
+export const PanelWords = z.string().min(1).max(80).regex(/^[^{}[\]`()]+$/);
+
+/**
+ * Where one number stands today (or this week):
+ *  - `range`: a forecast that beat a plain guess, with its range;
+ *  - `no_trend`: no reliable trend, so only a plain guess's range;
+ *  - `steady`: the number has not changed, so there is nothing to forecast;
+ *  - `waiting`: the number for the step just ended is not in, and Flint never forecasts from a made-up one;
+ *  - `short`: not enough history yet;
+ *  - `no_data`: nothing kept for it yet;
+ *  - `tonight`: ready, and forecast on the next nightly run;
+ *  - `failed`: last night's forecast failed;
+ *  - `off`: its forecasts are off.
+ */
+export const FORECAST_STATES = ['range', 'no_trend', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off'] as const;
+export type ForecastState = (typeof FORECAST_STATES)[number];
+
+/** One number in the list. `about`: what it is, for the Turn On sheet. */
+export const ForecastRow = z
+  .object({
+    key: SeriesKey,
+    name: PanelWords,
+    about: PanelSentence,
+    step: z.enum(['day', 'week']),
+    on: z.boolean(),
+    state: z.enum(FORECAST_STATES),
+    value: PanelWords,
+    says: PanelSentence,
+  })
+  .strict();
+export type ForecastRow = z.infer<typeof ForecastRow>;
+
+/**
+ * The Forecasts tab. `state`: `off_here` when predictions are switched off on
+ * this Mac (nothing can be turned on from the console), `off` when no number
+ * is on, `on` otherwise. `waiting`: Turn On Predictions cards that wait for
+ * Will's signature, each with how many numbers it names. `questions`: how many
+ * wait for him; `announce`: whether the header may show a dot for them (only
+ * once he has let Flint ask on its own).
+ */
+export const PredictionsPage = z
+  .object({
+    state: z.enum(['off_here', 'off', 'on']),
+    numbers: z.array(ForecastRow).max(60),
+    waiting: z.array(z.object({ id: Ref, numbers: Count }).strict()).max(20),
+    questions: Count,
+    announce: z.boolean(),
+  })
+  .strict();
+export type PredictionsPage = z.infer<typeof PredictionsPage>;
+
+/** A labelled row with its sentence. */
+export const PanelFact = z.object({ label: PanelWords, value: PanelWords, says: PanelSentence }).strict();
+export type PanelFact = z.infer<typeof PanelFact>;
+
+/** One number, open: where it stands, each step of its forecast, its yes/no chance, and how its ranges have held. */
+export const SeriesView = z
+  .object({
+    number: ForecastRow,
+    forecast: z.array(PanelFact).max(8),
+    chance: PanelFact.nullable(),
+    record: PanelSentence,
+    /** A Turn On card that names it waits for Will. */
+    waiting: z.boolean(),
+    /** Predictions are switched off on this Mac: nothing here can be turned on. */
+    offHere: z.boolean(),
+  })
+  .strict();
+export type SeriesView = z.infer<typeof SeriesView>;
+export const SeriesAnswer = z.object({ series: SeriesView }).strict();
+
+export const QUESTION_ANSWERS = ['yes', 'no', 'skip'] as const;
+export type QuestionAnswer = (typeof QUESTION_ANSWERS)[number];
+/** A prediction's id, as the ledger makes them. */
+export const PredictionRef = Ref;
+/**
+ * One question for Will. `title` is the prediction, as Flint made it in a chat:
+ * its own words, or (for one made from outside text) fixed words around the
+ * item's own label. Shown as text only.
+ */
+export const QuestionView = z
+  .object({
+    id: PredictionRef,
+    title: z.string().min(1).max(300),
+    says: PanelSentence,
+    answer: z.enum(QUESTION_ANSWERS).nullable(),
+  })
+  .strict();
+export type QuestionView = z.infer<typeof QuestionView>;
+export const QuestionsPage = z.object({ waiting: z.array(QuestionView).max(50), answered: z.array(QuestionView).max(20) }).strict();
+export type QuestionsPage = z.infer<typeof QuestionsPage>;
+export const AnswerBody = z.object({ answer: z.enum(QUESTION_ANSWERS) }).strict();
+
+/** One area's record: how many results it has, and what they say, a sentence each. */
+export const AccuracyArea = z.object({ name: PanelWords, value: PanelWords, lines: z.array(PanelSentence).min(1).max(8) }).strict();
+export type AccuracyArea = z.infer<typeof AccuracyArea>;
+/** The Accuracy tab: each area Flint has predicted in, and what was left unsettled. `scored`: false until a night's scores exist. */
+export const AccuracyView = z.object({ scored: z.boolean(), areas: z.array(AccuracyArea).max(20), unsettled: z.array(PanelSentence).max(8) }).strict();
+export type AccuracyView = z.infer<typeof AccuracyView>;
+
+/** Turn On Predictions from the console: the numbers Will ticked. The card is `{series, reason: []}`, sorted, as he signs it. */
+export const TurnOnBody = z.object({ series: z.array(SeriesKey).min(1).max(40) }).strict();
+/** A card filed: its id, and whether it was one already waiting. */
+export const PredictFiled = z.object({ id: Ref, deduped: z.boolean() }).strict();
+export const PredictDone = z.object({ ok: z.literal(true) }).strict();
+/** A body with nothing in it (Turn Off). */
+export const PredictEmptyBody = z.object({}).strict();
+
+/** How many scored results of one kind an area needs before Flint says how it did. */
+export const ACCURACY_MIN = 30;
+/** Questions asked of Will in a day, at most (the action's cap in the code table). */
+export const QUESTIONS_PER_DAY = 5;
+
+/**
+ * What Will reads when a predictions route is refused: fixed sentences, never a
+ * number's value, a prediction's words or a database's. The runtime refuses
+ * with one of these and names it by its key (`code`); the server passes a
+ * refusal through to the console only as one of these codes.
+ */
+export const PREDICT_SAYS = {
+  invalid: 'This card isn’t valid.',
+  request: 'That request isn’t valid.',
+  unknown: 'That number can’t be forecast.',
+  forgotten: 'One of these numbers was forgotten, so it can’t be forecast.',
+  mislabeled: 'One of these numbers isn’t stored the way Flint expects, so nothing was turned on.',
+  nothing: 'It changes nothing.',
+  offHere: 'Predictions are switched off on this Mac.',
+  alreadyOff: 'Forecasts for this number are already off.',
+  answered: 'That question was already answered.',
+  noQuestion: 'That question no longer exists.',
+  busy: 'Flint is busy with this. Try again shortly.',
+} as const;
+export type PredictSay = keyof typeof PREDICT_SAYS;
+
+/** The sentence a code stands for, or undefined for a code outside the closed set. */
+export function predictSayOf(code: unknown): string | undefined {
+  return typeof code === 'string' && Object.prototype.hasOwnProperty.call(PREDICT_SAYS, code) ? PREDICT_SAYS[code as PredictSay] : undefined;
+}
+
+/** The code of one of these sentences, or undefined. */
+export function predictCodeOf(sentence: string): string | undefined {
+  for (const [k, v] of Object.entries(PREDICT_SAYS)) if (v === sentence) return k;
+  return undefined;
+}
