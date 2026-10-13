@@ -8,10 +8,12 @@
  * approved action; a goal card, the predictions card and a task card do all
  * three in one transaction (goals/apply.ts, predict/enable.ts, tasks/card.ts).
  * The database checks the effect too: a cursor turns on only under an executing
- * enable proposal, a policy row must appear in the signed proposal, a goal moves
- * only as its executing card says, a number is forecast only as the executing
- * card's signed list says, and an asset turns on, and a task goes out or is
- * accepted, only as its executing card says.
+ * enable proposal, a policy row must appear in the signed proposal, a row that
+ * holds an action back goes off only when the executing card names it
+ * (action_policy_off_guard), a goal moves only as its executing card says, a
+ * number is forecast only as the executing card's signed list says, and an
+ * asset turns on, and a task goes out or is accepted, only as its executing
+ * card says.
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
@@ -19,7 +21,7 @@ import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, SOURCES, TASK_SIGNED_ACTI
 import { runForecastCard } from '../predict/enable.js';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
-import { dbRefused, failureReport } from '../dbcodes.js';
+import { dbRefused, failureReport, sqlState } from '../dbcodes.js';
 import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
@@ -72,13 +74,16 @@ export async function proposeEnable(db: Db, source: string, now = new Date()) {
  * 180-day expiry, millisecond times, int4 caps) so a bad row is refused when the
  * proposal is made, not half-applied when it runs.
  */
+/** A policy row's pattern, as the database's own CHECK reads it. */
+const POLICY_PATTERN = z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*(\.\*)?$/);
+
 export const PolicyArgs = z
   .object({
     rows: z
       .array(
         z
           .object({
-            pattern: z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*(\.\*)?$/),
+            pattern: POLICY_PATTERN,
             tier: z.enum(['alone', 'approval', 'forbidden']),
             dailyCap: z.number().int().min(0).max(2_147_483_647).optional(),
             scope: z.record(z.string(), z.unknown()).optional(),
@@ -95,6 +100,54 @@ export const PolicyArgs = z
       .max(200),
   })
   .strict();
+
+/**
+ * A signed switch-off: the rows a policy change takes out of force. Each is
+ * named by its id and by what it says (its pattern and its tier), so the card
+ * shows Will what stops applying and the database lets exactly those rows go
+ * (action_policy_off_guard checks all three against the row). A card either
+ * adds rows (PolicyArgs) or switches rows off, never both. This is the only
+ * way a row that holds an action back goes off: the runtime's role cannot
+ * switch one off on its own.
+ */
+export const PolicyOffArgs = z
+  .object({
+    off: z
+      .array(z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), pattern: POLICY_PATTERN, tier: z.enum(['alone', 'approval', 'forbidden']) }).strict())
+      .min(1)
+      .max(200)
+      .refine((rows) => new Set(rows.map((r) => r.id)).size === rows.length, 'a rule is named once'),
+  })
+  .strict();
+
+/** Is this policy change a switch-off (it carries `off`)? Anything else is read as rows to add. */
+export const isPolicyOff = (args: unknown): boolean => typeof args === 'object' && args !== null && !Array.isArray(args) && 'off' in args;
+
+/** What Will reads when the database would not let a signed switch-off through (its guard found no card of his that still stands). */
+export const POLICY_OFF_REFUSED = 'The database refused to switch it off, so it’s still on. File it again and sign it.';
+/** What the rules command and a filing say about a rule that cannot be named on a card. */
+export const POLICY_OFF_SAYS = {
+  card: 'A card that switches rules off is your own: a policy card from the console or the CLI, with nothing untrusted in it.',
+  unknown: 'One of the rules named isn’t on record as written.',
+  alreadyOff: 'One of the rules named is already switched off.',
+} as const;
+
+/**
+ * Why a switch-off card may not be filed, checked before Will is asked to sign it: the card is one the
+ * database will take (action_policy_off_guard takes only his own untainted policy card), and each row it
+ * names is there, still on, and says what the card says. One that could not apply is never filed.
+ */
+export async function checkPolicyOff(db: Db, input: { kind: string; origin: string; tainted: boolean; args: unknown }): Promise<void> {
+  if (input.kind !== 'policy' || (input.origin !== 'console' && input.origin !== 'cli') || input.tainted) throw new Refused(400, POLICY_OFF_SAYS.card);
+  const { off } = PolicyOffArgs.parse(input.args);
+  const rows = await db.actionPolicy.findMany({ where: { id: { in: off.map((r) => r.id) } }, select: { id: true, pattern: true, tier: true, active: true } });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const r of off) {
+    const there = byId.get(r.id);
+    if (!there || there.pattern !== r.pattern || there.tier !== r.tier) throw new Refused(400, POLICY_OFF_SAYS.unknown);
+    if (!there.active) throw new Refused(409, POLICY_OFF_SAYS.alreadyOff);
+  }
+}
 
 /**
  * Carry out an approved action the runtime runs itself. `internal` is the set it
@@ -167,6 +220,21 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await completeProposal(db, id, { ok: true, result: { rule: rule.name } }, actor);
       return { rule: rule.name };
     }
+    if (claimed.action === 'policy.change' && isPolicyOff(claimed.args)) {
+      const { off } = PolicyOffArgs.parse(claimed.args);
+      const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
+      // All rows or none: a signed switch-off is applied whole. Each row only as the card names it (the database
+      // checks the same three); one that went off since the card was filed is left as it is. The row's history
+      // says which approval switched it off.
+      const switched = await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${approvalId}`}, true)`;
+        let n = 0;
+        for (const r of off) n += (await tx.actionPolicy.updateMany({ where: { id: r.id, pattern: r.pattern, tier: r.tier, active: true }, data: { active: false } })).count;
+        return n;
+      });
+      await completeProposal(db, id, { ok: true, result: { off: switched } }, actor);
+      return { off: switched };
+    }
     if (claimed.action === 'policy.change') {
       const { rows } = PolicyArgs.parse(claimed.args);
       const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
@@ -201,6 +269,9 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     const refusedInput = dbRefused(err) || (claimed.action === 'triage.rule.create' && (codes.includes('23505') || codes.includes('P2002') || /Code: `23505`/.test(String(e.message ?? ''))));
     // The ref is in the log above; Will reads a sentence under the card.
     if (refusedInput) throw new Refused(400, 'The database refused this change.');
+    // The database's guard on a switch-off (42501): the card has failed and is on record as failed (above), the
+    // rows are as they were, and nothing here tries again. Will reads what to do.
+    if (claimed.action === 'policy.change' && isPolicyOff(claimed.args) && sqlState(err) === '42501') throw new Refused(409, POLICY_OFF_REFUSED);
     throw new Refused(409, 'Flint couldn’t carry it out.');
   }
 }
