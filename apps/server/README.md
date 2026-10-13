@@ -1003,6 +1003,22 @@ model with the usual sentence, or in Hybrid goes to the cloud when it may.
 `pnpm --filter server inference-status` says each setting when it is on ("Pictures are sent to
 the local model, which its server says can see."), and nothing about either when it is off.
 
+**Turning them on.** Neither is on unless Will sets it. The server reads its settings at start:
+
+```bash
+grep -q '^FLINT_LOCAL_VISION=' ~/.flint/secrets.env || printf '\nFLINT_LOCAL_VISION=on\n' >> ~/.flint/secrets.env
+grep -q '^FLINT_LOCAL_PDF=' ~/.flint/secrets.env || printf '\nFLINT_LOCAL_PDF=spotlight\n' >> ~/.flint/secrets.env
+launchctl kickstart -k gui/$(id -u)/com.flint.server
+pnpm --filter server inference-status
+```
+
+The last command asks the running server, and prints one line for each: "Pictures are sent to
+the local model, which its server says can see." and "A PDF's text is read on this Mac for the
+local model, by the Mac's own PDF importer." Then, in the console, turn Local Only on and attach
+a picture: the line "Local Only is on, so Flint can't read images or PDFs." no longer appears,
+and the answer comes from this Mac. To turn either off, remove its line from
+`~/.flint/secrets.env` and kickstart again.
+
 Known limits:
 
 - *A PDF is read as text.* Its pictures, its charts and its layout are not handed over, and a
