@@ -1440,12 +1440,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const local = personas.local;
     // The mode decides first (./mode-route): cloud is routeTurn as before, local never leaves this Mac,
     // and a hybrid turn is finished below, once its tier and tools are known.
-    const pre = ctx.inference.preRoute({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
+    // is sent anywhere, the embedder included: ./inference routeFirst.)
+    const pre = await ctx.inference.routeFirst({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
-    // A turn that stays here: the model server is asked what runs on it NOW, before a word of the prompt is sent
-    // anywhere, the embedder included (./inference lookFirst).
-    const elsewhere = await ctx.inference.lookFirst(pre);
-    if (elsewhere) return json(res, elsewhere.status, { error: elsewhere.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const scored = await ctx.router.selectScored(asText);
     // A private turn: only the tools that run on this Mac; Local mode: none that is an outside AI or a paid service.
@@ -1705,12 +1703,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const localOnly = body.localOnly === true;
     // Image/PDF turns must reach a frontier that can see them — or be refused, never answered blind.
     // (And the mode decides first, ./mode-route: cloud is routeTurn as before, local never leaves this Mac, hybrid is finished below.)
-    const pre = ctx.inference.preRoute({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
+    // is sent anywhere, the embedder included: ./inference routeFirst.)
+    const pre = await ctx.inference.routeFirst({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
-    // A turn that stays here: the model server is asked what runs on it NOW, before a word of the message is sent
-    // anywhere, the embedder included (./inference lookFirst).
-    const elsewhere = await ctx.inference.lookFirst(pre);
-    if (elsewhere) return json(res, elsewhere.status, { error: elsewhere.error });
     // From here until the turn ends, however it ends, it is a chat turn in flight
     // (POST /internal/load): the runtime's triage leaves the local model to it.
     return ctx.chatLoad.run(async () => {

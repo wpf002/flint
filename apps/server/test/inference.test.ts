@@ -255,6 +255,8 @@ describe('a cloud model under a plain name: the model server says where it runs,
   const main = { primary: { persona: 'main', model: ALIAS }, standby: { persona: 'small', model: SMALL } };
   const names = (plan: { steps: Array<{ kind: string; persona?: unknown }> }) => plan.steps.map((s) => (s.kind === 'local' ? s.persona : s.kind));
   const ask = (i: Inference, localOnly = true) => i.preRoute({ message: 'what was my diagnosis', localOnly, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} });
+  /** As the handlers route: the model server is asked first when the turn stays here (routeFirst). */
+  const askFirst = (i: Inference, localOnly = true) => i.routeFirst({ message: 'what was my diagnosis', localOnly, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} });
 
   it('the settings alone see nothing wrong; what is known now says it is a cloud model', async () => {
     const { inference } = await boot(aliased, { OLLAMA_MODEL: ALIAS, FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
@@ -363,11 +365,11 @@ describe('a cloud model under a plain name: the model server says where it runs,
     // Not known yet is not "so, yes": the model is not local, and a turn that stays here is not planned for it.
     expect(inference.brainIsLocal(inference.primary.provider, ALIAS)).toBe(false);
     expect(inference.planLocal(route({ mode: 'cloud', reason: 'private', private: true }), main).steps).toEqual([]);
+    // On what is known alone the turn is routed: nothing has said the model is elsewhere.
+    expect(ask(inference)).toMatchObject({ brain: 'local', private: true });
     // The server comes up. The private turn's own look is where it says what it is, before a word is sent.
     up = true;
-    const pre = ask(inference);
-    expect(pre).toMatchObject({ brain: 'local', private: true }); // routed on what was known: nothing said it was elsewhere
-    expect(await inference.lookFirst(pre as { mode: 'cloud'; private: boolean })).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
+    expect(await askFirst(inference)).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
     expect(LOCALITY.said(server.baseURL)).toBe('ollama');
     expect(inference.confined).toEqual({ ok: false, why: 'cloud_model' });
     expect(server.chats()).toEqual([]);
@@ -383,7 +385,7 @@ describe('a cloud model under a plain name: the model server says where it runs,
     // Its word forgotten (as after five minutes of silence): not local until the next look hears it again.
     LOCALITY.clear();
     expect(inference.brainIsLocal(inference.primary.provider, 'model.gguf')).toBe(false);
-    expect(await inference.lookFirst({ mode: 'local', private: false })).toBeUndefined();
+    expect(await askFirst(inference, false)).toMatchObject({ brain: 'local', mode: 'local' });
     expect(inference.brainIsLocal(inference.primary.provider, 'model.gguf')).toBe(true);
   });
 
@@ -392,42 +394,60 @@ describe('a cloud model under a plain name: the model server says where it runs,
   it('N5: a turn that stays here asks the server first, in every mode: a name re-pointed while Flint runs is caught by the very next one', async () => {
     const { inference, s } = await boot(loaded, { FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
     const looks = () => s.requests.filter((q) => q.path === '/api/tags').length;
-    const privately = { mode: 'cloud', private: true } as const;
+    const REFUSED = { error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 };
     expect(inference.local.monitor.running).toBe(false); // Cloud mode: no timer
-    expect(ask(inference)).toMatchObject({ brain: 'local', private: true });
     // Every such turn looks, however fresh the last look is.
     const before = looks();
-    expect(await inference.lookFirst(privately)).toBeUndefined();
-    expect(await inference.lookFirst(privately)).toBeUndefined();
+    expect(await askFirst(inference)).toMatchObject({ brain: 'local', private: true });
+    expect(await askFirst(inference)).toMatchObject({ brain: 'local', private: true });
     expect(looks()).toBe(before + 2);
     // A turn that does not stay here is not held up, and asks nothing.
-    expect(await inference.lookFirst({ mode: 'cloud', private: false })).toBeUndefined();
-    expect(await inference.lookFirst({ mode: 'hybrid', private: false })).toBeUndefined();
+    expect(await askFirst(inference, false)).toMatchObject({ brain: 'frontier', private: false });
     expect(looks()).toBe(before + 2);
     // `ollama cp gpt-oss:120b-cloud main-model:30b`, while Flint runs.
     s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // what was known, a moment old
-    expect(await inference.lookFirst(privately)).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
+    expect(ask(inference)).toMatchObject({ brain: 'local', private: true }); // ...and routing on that alone would send it there
+    expect(await askFirst(inference)).toEqual(REFUSED);
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(false);
-    expect(ask(inference)).toMatchObject({ status: 503 });
-    // Local mode: an ordinary turn stays here too, so it looks; its refusal is the plan's.
-    inference.mode.set('local', 'console');
-    const inLocal = looks();
-    expect(await inference.lookFirst({ mode: 'local', private: false })).toBeUndefined();
-    expect(looks()).toBe(inLocal + 1);
-    expect(inference.planLocal(route({}), { primary: { persona: 'main', model: MAIN } }).steps).toEqual([]);
-    // Pointed back at a model of its own, the next look takes that too.
+    // Pointed back at a model of its own: the next private turn hears that too, and is not refused on old news.
     delete s.models.get(MAIN)!.remoteHost;
-    expect(await inference.lookFirst({ mode: 'local', private: true })).toBeUndefined();
+    expect(ask(inference)).toEqual(REFUSED); // what was known
+    expect(await askFirst(inference)).toMatchObject({ brain: 'local', private: true });
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true);
+    // Local mode: an ordinary turn stays here too, so it looks; its refusal is the plan's.
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    inference.mode.set('local', 'console');
+    await inference.local.monitor.check();
+    delete s.models.get(MAIN)!.remoteHost;
+    expect(inference.planLocal(route({}), { primary: { persona: 'main', model: MAIN } }).steps).toEqual([]); // what was known
+    const inLocal = looks();
+    expect(await askFirst(inference, false)).toMatchObject({ brain: 'local', mode: 'local', private: false });
+    expect(looks()).toBe(inLocal + 1);
+    expect(inference.planLocal(route({}), { primary: { persona: 'main', model: MAIN } }).steps).toHaveLength(1);
   });
 
-  it('N5: a model server that does not answer the look holds a turn for the look and no longer; it then goes on with what was known', async () => {
+  it('N5: the look is not taken for a turn the settings alone refuse, and a server that does not answer it holds the turn no longer than the look', async () => {
+    // A model server on another machine that is not Will's: nothing it says changes the answer, so it is not asked.
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    let asked = 0;
+    const counting = (async () => {
+      asked += 1;
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    const away = await buildInference({ env: { OLLAMA_HOST: 'http://gpu-box.invalid:11434', OLLAMA_MODEL: MAIN }, modeFile: join(dir, 'm.json'), fetch: counting, detect, observeOnly: true });
+    built.push(away);
+    await away.ready;
+    const before = asked;
+    expect(await askFirst(away)).toEqual({ error: 'The local model server is on another machine, and a private message never leaves this Mac.', status: 503 });
+    expect(asked).toBe(before);
+    // A look that fails: the turn goes on with what was known (believed for a few minutes, as ever).
     const { inference } = await boot(loaded, { FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
     const monitor = inference.local.monitor as unknown as { check: () => Promise<unknown> };
     monitor.check = () => Promise.reject(new Error('the look failed'));
-    expect(await inference.lookFirst({ mode: 'cloud', private: true })).toBeUndefined();
-    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // believed for a few minutes, as ever
+    expect(await askFirst(inference)).toMatchObject({ brain: 'local', private: true });
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true);
   });
 
   // The privacy review's N10: a standby that is a cloud model under a plain name was still loaded ahead of a turn.

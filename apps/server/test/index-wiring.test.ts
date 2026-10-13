@@ -471,10 +471,10 @@ describe('index.ts wiring', () => {
 
   // ---- The routing modes: local, cloud, hybrid (./mode-route, ./inference) ----
 
-  it('both routes are routed by the mode: preRoute before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
+  it('both routes are routed by the mode: routeFirst before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
     expect(src).not.toMatch(/\brouteTurn\(/);
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const pre = ctx\.inference\.preRoute\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\} \}\);/);
+      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\} \}\);/);
       expect(route, name).toContain("if ('error' in pre) return json(res, pre.status, { error: pre.error });");
       expect(route.indexOf('const tier = classifyMessage('), name).toBeLessThan(route.indexOf('const route = ctx.inference.finishRoute(pre, { tier, toolsLikely,'));
       // The spend plan and the breaker are handed the finished route, as before.
@@ -616,14 +616,16 @@ describe('index.ts wiring', () => {
     }
     // /chat: before anything streams.
     expect(chat.indexOf('await ctx.inference.freshen(route);')).toBeLessThan(chat.indexOf("res.writeHead(200, {"));
-    // A turn that stays here takes its own look as soon as it is routed, on both routes: before the router or recall
-    // embeds a word of it, and before the plan (test/inference.test.ts N5 runs it; the process test re-points a name).
+    // A turn that stays here takes its own look WHERE it is routed, on both routes: before it is refused, before the
+    // router or recall embeds a word of it, and before the plan (test/inference.test.ts N5 runs it; the process
+    // test re-points a name while the server runs). Nothing routes a turn any other way.
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/if \('error' in pre\) return json\(res, pre\.status, \{ error: pre\.error \}\);\s*(\/\/[^\n]*\s*)*const elsewhere = await ctx\.inference\.lookFirst\(pre\);\s*if \(elsewhere\) return json\(res, elsewhere\.status, \{ error: elsewhere\.error \}\);/);
-      expect(route.indexOf('ctx.inference.lookFirst(pre)'), name).toBeLessThan(route.indexOf('ctx.router.selectScored('));
+      expect(route.match(/ctx\.inference\.routeFirst\(/g), name).toHaveLength(1);
+      expect(route.indexOf('await ctx.inference.routeFirst('), name).toBeLessThan(route.indexOf('ctx.router.selectScored('));
     }
-    expect(generate.indexOf('ctx.inference.lookFirst(pre)')).toBeLessThan(generate.indexOf('recallContext('));
-    expect(chat.indexOf('ctx.inference.lookFirst(pre)')).toBeLessThan(chat.indexOf('ctx.chatLoad.run('));
+    expect(src).not.toMatch(/ctx\.inference\.preRoute\(/);
+    expect(generate.indexOf('ctx.inference.routeFirst(')).toBeLessThan(generate.indexOf('recallContext('));
+    expect(chat.indexOf('ctx.inference.routeFirst(')).toBeLessThan(chat.indexOf('ctx.chatLoad.run('));
   });
 
   it('a local model\'s prompt is sized to its real window, and what was left out is on the [route] line; a cloud brain\'s is as it was', () => {

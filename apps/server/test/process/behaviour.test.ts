@@ -25,7 +25,8 @@
  *    wire, with the server called a plain OpenAI-compatible one, and with the
  *    server not up when Flint booted (the privacy review's N1);
  *  - `tier`: a tier that is that cloud model on the same wire, beside one that
- *    is a real local model, and a name re-pointed while Flint runs (N1, N5);
+ *    is a real local model, on an Ollama that is not the main model's; and the
+ *    main model's name re-pointed while Flint runs (N1, N5, N9);
  *  - `helper`: the local model on this Mac and OLLAMA_HOST on another machine
  *    that FLINT_LOCAL_ALLOW_REMOTE does not vouch for (N2).
  */
@@ -105,7 +106,7 @@ let remote: { cloud: CloudStub; there: OllamaStub; srv: Running };
 let alias: { ollama: OllamaStub; cloud: CloudStub; srv: Running };
 let wire: { mock: MockLocalServer; cloud: CloudStub; srv: Running };
 let late: { mock: MockLocalServer; cloud: CloudStub; srv: Running; port: number; closers: Array<() => Promise<void>> };
-let tier: { mock: MockLocalServer; srv: Running };
+let tier: { ollama: OllamaStub; mock: MockLocalServer; srv: Running };
 let helper: { lm: MockLocalServer; other: OllamaStub; srv: Running };
 
 /** A complete stored turn, as the conversation store writes one. */
@@ -186,9 +187,12 @@ beforeAll(async () => {
     const srv = await startServer({ dir: runs.late.dir, env: { FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: `http://127.0.0.1:${port}/v1`, FLINT_LOCAL_MODEL: ALIAS, OLLAMA_HOST: `http://127.0.0.1:${port}`, ...cloudEnv(cloud) } });
     return { mock, cloud, srv, port, closers: [] };
   };
-  // N1 (d): the main model is real, on Ollama's own API. The tiers are named on the OpenAI-compatible wire at the same
-  // Ollama: the cloud model under a plain name for every tier but one, and a real local model for that one.
+  // N1 (d): the main model is real, on Ollama's own API. The tiers are named on the OpenAI-compatible wire, at
+  // ANOTHER Ollama on this Mac (so nothing but the server's own watch of a tier's server ever hears what it lists):
+  // the cloud model under a plain name for every tier but one, and a real local model for that one.
+  // (The main model's Ollama has an embedding model that is a cloud model under a plain name too: N9.)
   const startTier = async () => {
+    const ollama = await startOllamaStub({ [MAIN]: { loaded: true, contextLength: 16384 }, 'nomic-embed-text': { family: 'nomic-bert', remoteHost: 'https://ollama.com:443' } });
     const mock = await startMockLocalServer({
       kind: 'ollama',
       models: { [REAL]: { loaded: true, contextLength: 16384, replies: [{ text: 'REAL-LOCAL reply.' }] }, [ALIAS]: { loaded: true, remoteHost: 'https://ollama.com:443', replies: [{ text: 'ALIAS-ANSWERED-ON-OLLAMA-SERVERS.' }] } },
@@ -196,7 +200,7 @@ beforeAll(async () => {
     const tiers = { FLINT_TIER_STANDARD: `local:${ALIAS}`, FLINT_TIER_ROUTINE: `local:${ALIAS}`, FLINT_TIER_CODE: `local:${ALIAS}`, FLINT_TIER_HARD: `local:${REAL}` };
     const srv = await startServer({
       dir: runs.tier.dir,
-      env: { OLLAMA_HOST: mock.origin, OLLAMA_MODEL: REAL, OLLAMA_NUM_CTX: '16384', FLINT_LOCAL_BASE_URL: mock.baseURL, ...tiers },
+      env: { OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', FLINT_LOCAL_BASE_URL: mock.baseURL, ...tiers },
       seed: [
         {
           path: ['memory', 'knowledge.json'],
@@ -214,7 +218,7 @@ beforeAll(async () => {
         { path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { mix: [storedTurn('mix', 't_priv', 'Keep this private: the gate code is PRIVWORDT for the yard.', { private: true }), storedTurn('mix', 't_goals', 'How is the GOALWORDT regatta goal going?', { goals: true })] } }) },
       ],
     });
-    return { mock, srv };
+    return { ollama, mock, srv };
   };
   // N2: the local model is on THIS Mac (llama.cpp, the OpenAI-compatible wire) and OLLAMA_HOST is another machine,
   // with FLINT_LOCAL_ALLOW_REMOTE on. That switch vouches for the model server, which is here: not for that machine.
@@ -253,7 +257,7 @@ afterAll(async () => {
   await Promise.all([modes, remote, alias, wire, late, tier, helper].map((s) => s?.srv.stop()));
   await Promise.all([
     modes?.ollama.close(), modes?.cloud.close(), remote?.cloud.close(), remote?.there.close(), alias?.ollama.close(), alias?.cloud.close(),
-    wire?.mock.close(), wire?.cloud.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
+    wire?.mock.close(), wire?.cloud.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.ollama.close(), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
   ]);
   for (const r of Object.values(runs)) r.cleanup();
 });
@@ -827,15 +831,19 @@ describe('the real server, as a process: a cloud model under a plain name, asked
 // an ordinary Cloud-mode turn the cloud model under a plain name was handed the stored private turn as history and
 // the private fact, and by the same rule it would have been handed Will's goals. No private message was needed.
 describe('the real server, as a process: a tier on the OpenAI-compatible wire, a cloud model under a plain name beside a real local model', () => {
+  let ollama: OllamaStub;
   let mock: MockLocalServer;
   let srv: Running;
   const tierChats = (model: string) => mock.chats().filter((q) => q.path === '/v1/chat/completions' && q.model === model);
   const KEPT_WORDS = ['PRIVWORDT', 'GARNETFINCH'];
   const GOALS_WORDS = ['GOALWORDT', 'MARLINGOAL'];
+  const embedded = (stub: OllamaStub, word: string, from = 0) => stub.requests.slice(from).some((q) => q.path.startsWith('/api/embed') && JSON.stringify(q.body ?? '').includes(word));
 
   beforeAll(async () => {
-    ({ mock, srv } = tier);
+    ({ ollama, mock, srv } = tier);
     await waitFor(() => srv.log().includes('[local] provider=ollama'));
+    // The tiers' Ollama is not the main model's: the server asks it what it lists because a tier is named on it.
+    await waitFor(() => mock.requests.some((q) => q.method === 'GET' && q.path === '/api/tags'));
   });
 
   it('the cloud model as a tier is asked as an outside brain: not the private turn, not the private fact, not the goals turn, not the goals fact', async () => {
@@ -870,29 +878,49 @@ describe('the real server, as a process: a tier on the OpenAI-compatible wire, a
     expect(tierChats(ALIAS)).toHaveLength(1);
   });
 
-  // N5. In Cloud mode nothing watches the model server. `ollama cp gpt-oss:120b-cloud real:7b` while Flint runs:
-  // the name kept answering private turns until the next look, up to a minute later.
-  it('N5: a name pointed at a cloud model while Flint runs is caught by the very next private turn, before a word of it is sent', async () => {
+  // N9. The embedding model here is a cloud model under a plain name: it embeds on Ollama's servers. An ordinary
+  // message in Cloud mode is sent to it as it always was; a private message's words are not.
+  it('N9: a private message is never sent to an embedding model that runs on Ollama’s servers, whatever its name and address say', async () => {
+    const before = ollama.requests.length;
+    await srv.post('/chat', { conversationId: 'n9', message: 'An ordinary synthetic question about EMBEDOPEN.' });
+    expect(embedded(ollama, 'EMBEDOPEN', before)).toBe(true); // the embedder is there, and is used
+    const r = await srv.post('/chat', { conversationId: 'n9', message: 'A private synthetic question about EMBEDKEPT.', localOnly: true });
+    expect(r.status).toBe(200);
+    expect(r.text).toBe(`LOCAL(${MAIN}) reply.`); // the chat model is a real one, and answered
+    await srv.post('/generate', { prompt: 'A private synthetic prompt about EMBEDKEPT.', localOnly: true });
+    expect(embedded(ollama, 'EMBEDKEPT')).toBe(false);
+    expect(ollama.requests.filter((q) => q.path !== '/api/chat').some((q) => JSON.stringify(q.body ?? '').includes('EMBEDKEPT'))).toBe(false);
+  });
+
+  // N5. In Cloud mode nothing watches the model server. `ollama cp gpt-oss:120b-cloud main-model:30b` while Flint
+  // runs: the name kept answering private turns until the next look, up to a minute later.
+  it('N5: a name pointed at a cloud model while Flint runs is caught by the very next private turn, on either route, before a word of it is sent', async () => {
     expect((await srv.get('/health', null)).json).toMatchObject({ mode: 'cloud' });
+    const chats = () => ollama.chats().length;
     const ok = await srv.post('/chat', { conversationId: 'n5', message: 'A private synthetic question REPOINTBEFORE.', localOnly: true });
     expect(ok.status).toBe(200);
-    expect(ok.text).toBe('REAL-LOCAL reply.');
-    mock.models.get(REAL)!.remoteHost = 'https://ollama.com:443';
-    const before = { chats: mock.chats().length, all: mock.requests.length };
-    expect(await srv.post('/chat', { conversationId: 'n5', message: 'A private synthetic question REPOINTAFTER.', localOnly: true })).toMatchObject({ status: 503, json: { error: CLOUD_MODEL_PRIVATE } });
-    expect(await srv.post('/generate', { prompt: 'A private synthetic prompt REPOINTAFTER.', localOnly: true })).toMatchObject({ status: 503, json: { error: CLOUD_MODEL_PRIVATE } });
-    expect(mock.chats()).toHaveLength(before.chats);
+    expect(ok.text).toBe(`LOCAL(${MAIN}) reply.`);
+    // The one-shot route, from a state where the model was last seen to run here.
+    ollama.models[MAIN]!.remoteHost = 'https://ollama.com:443';
+    let before = { chats: chats(), all: ollama.requests.length };
+    expect(await srv.post('/generate', { prompt: 'A private synthetic prompt REPOINTONE.', localOnly: true })).toMatchObject({ status: 503, json: { error: CLOUD_MODEL_PRIVATE } });
+    expect(chats()).toBe(before.chats);
+    expect(ollama.requests.slice(before.all).some((q) => q.path === '/api/tags')).toBe(true);
+    // Pointed back at a model of its own: the next private turn hears that too, and is answered.
+    delete ollama.models[MAIN]!.remoteHost;
+    expect((await srv.post('/chat', { conversationId: 'n5', message: 'A private synthetic question REPOINTBACK.', localOnly: true })).status).toBe(200);
+    // /chat, from that state.
+    ollama.models[MAIN]!.remoteHost = 'https://ollama.com:443';
+    before = { chats: chats(), all: ollama.requests.length };
+    expect(await srv.post('/chat', { conversationId: 'n5', message: 'A private synthetic question REPOINTTWO.', localOnly: true })).toMatchObject({ status: 503, json: { error: CLOUD_MODEL_PRIVATE } });
+    expect(chats()).toBe(before.chats);
     // Its server was asked what runs on it, and sent nothing else: not the words, to be answered or to be embedded.
-    const during = mock.requests.slice(before.all);
+    const during = ollama.requests.slice(before.all);
     expect(during.some((q) => q.path === '/api/tags')).toBe(true);
-    expect(during.some((q) => JSON.stringify(q.body ?? '').includes('REPOINTAFTER'))).toBe(false);
-    // And the tier that was a real local model a moment ago is now an outside brain too: it reads nothing that stays here.
-    const r = await srv.post('/chat', { conversationId: 'mix', message: 'Think it through step by step: where is the spare key kept?' });
-    expect(r.events?.[0]).toMatchObject({ model: `local:${REAL}` });
-    const sent = JSON.stringify(tierChats(REAL).at(-1)!.body);
-    for (const word of [...KEPT_WORDS, ...GOALS_WORDS, 'REPOINTBEFORE']) expect(sent, word).not.toContain(word);
+    expect(ollama.saw('REPOINTONE')).toBe(false);
+    expect(ollama.saw('REPOINTTWO')).toBe(false);
     expect(blocked(srv)).toEqual([]);
-    expect(srv.log()).not.toMatch(/PRIVWORDT|GARNETFINCH|GOALWORDT|MARLINGOAL|REPOINT/);
+    expect(srv.log()).not.toMatch(/PRIVWORDT|GARNETFINCH|GOALWORDT|MARLINGOAL|REPOINT|EMBEDKEPT/);
   });
 });
 
@@ -946,6 +974,18 @@ describe('the real server, as a process: the local model on this Mac, and OLLAMA
     expect(JSON.stringify(st)).not.toContain(OTHER_MACHINE);
   });
 
+  it('in Local mode that machine is sent nothing at all: an ordinary turn is answered on this Mac and none of its words leave it', async () => {
+    expect((await srv.post('/inference/mode', { mode: 'local' })).json).toMatchObject({ mode: 'local', modeSentence: 'Every answer comes from this Mac. Flint may still search the web.', localOnlySentence: 'Local mode keeps every answer on this Mac.' });
+    const before = other.requests.length;
+    const r = await srv.post('/chat', { conversationId: 'lm-local', message: 'An ordinary synthetic question about LOCALWORDH.' });
+    expect(r.status).toBe(200);
+    expect(r.text).toBe('LMLOCAL reply.');
+    await sleep(150);
+    expect(other.requests.slice(before).filter((q) => q.method !== 'GET')).toEqual([]);
+    expect(other.saw('LOCALWORDH')).toBe(false);
+    expect((await srv.post('/inference/mode', { mode: 'cloud' })).json).toMatchObject({ mode: 'cloud' });
+  });
+
   // M29. An ORDINARY turn that carries a private one is not a private request: the helpers are not switched off for
   // it in Cloud mode. What keeps the fact it saves off that machine is the embedder's own rule, and nothing else.
   it('a fact saved on a turn that carries a private one is marked and never sent to that machine to be embedded; an ordinary fact is embedded there as before', async () => {
@@ -968,7 +1008,7 @@ describe('the real server, as a process: the local model on this Mac, and OLLAMA
     expect(ordinary.vector!.length).toBeGreaterThan(0);
     expect(embeds(before).some((q) => JSON.stringify(q.body).includes('HAZELWREN'))).toBe(true);
     expect(other.saw('SILVERTERN')).toBe(false);
-    expect(srv.log()).not.toMatch(/SILVERTERN|HAZELWREN|PRIVLIVEH|PRIVWORDH|GARNETFINCH|JASPERLARK/);
+    expect(srv.log()).not.toMatch(/SILVERTERN|HAZELWREN|PRIVLIVEH|PRIVWORDH|LOCALWORDH|GARNETFINCH|JASPERLARK/);
     // Nothing but this machine and that stand-in was ever reached.
     expect(blocked(srv)).toEqual([]);
   });

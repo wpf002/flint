@@ -351,33 +351,36 @@ export class Inference {
   }
 
   /**
-   * Ask the model server what runs on it NOW, before anything of a turn that
-   * STAYS HERE is sent anywhere: a message Will kept private, in any mode, and
-   * every turn of Local mode. Called as soon as the turn is routed, ahead of
-   * the router's and recall's embeddings and of the plan.
+   * Route a turn, asking the model server what runs on it NOW when the turn
+   * STAYS HERE (a message Will kept private, in any mode, and every turn of
+   * Local mode). This is how the handlers route: before anything of the turn
+   * is sent anywhere (the router's and recall's embeddings included), and
+   * before the turn is refused or planned.
    *
    * The look is where the server says where each of its models really runs
    * (./ollama-locality), and what was known can be a minute old in the cloud
    * mode, where no timer watches the server. A name pointed at a cloud model
    * while Flint was running (`ollama cp gpt-oss:120b-cloud mine`) would
    * otherwise keep answering private turns until the next look (the privacy
-   * review's N5). So a look taken a moment ago does not stand in for this one
-   * (only one already under way does), and the turn waits for it: as long as
-   * a look may take, two seconds, and then goes on with what is known, which
-   * ages into "not known to run here".
+   * review's N5); and one pointed back at a model of its own would keep being
+   * refused. So a look taken a moment ago does not stand in for this one (only
+   * one already under way does), and the turn waits for it: as long as a look
+   * may take, two seconds, and then goes on with what is known, which ages
+   * into "not known to run here".
    *
-   * Returns the refusal for a private turn whose model the server has just
-   * said runs somewhere else (the same sentence `preRoute` gives), or
-   * undefined. A turn that does not stay here is not held up at all.
+   * A turn that does not stay here is not held up at all. Neither is one the
+   * settings alone already refuse (a model server on another machine, or
+   * reached through a proxy): nothing that server says changes that answer.
    */
-  async lookFirst(pre: { mode: InferenceMode; private: boolean }): Promise<{ error: string; status: number } | undefined> {
-    if (!turnStaysHere(pre)) return undefined;
-    await this.local.monitor.check().then(
-      () => undefined,
-      () => undefined,
-    );
-    const refusal = pre.private ? privateRefusal(pre, this.confined) : undefined;
-    return refusal ? { error: refusal, status: 503 } : undefined;
+  async routeFirst(i: Omit<PreRouteInput, 'mode' | 'localCan'>): Promise<PreRoute> {
+    const asked = preRoute({ ...i, mode: this.mode.current(), localCan: this.localCan() });
+    if (!('error' in asked) && turnStaysHere(asked) && this.local.confined.ok) {
+      await this.local.monitor.check().then(
+        () => undefined,
+        () => undefined,
+      );
+    }
+    return this.preRoute(i);
   }
 
   /**
@@ -397,7 +400,7 @@ export class Inference {
    * current in this mode, for a server on another machine that Will allowed or
    * an Ollama asked over the OpenAI-compatible wire). A private turn there is
    * then decided on the server's own word, not refused for want of it. (A
-   * turn that stays here has already had its own look, `lookFirst`.)
+   * turn that stays here has already had its own look, `routeFirst`.)
    */
   async freshen(route?: { brain: 'local' | 'frontier' }): Promise<void> {
     const monitor = this.local.monitor;
