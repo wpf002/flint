@@ -339,7 +339,7 @@ describe('the small pieces', () => {
 describe('what is not on this Mac: a command for each, and none of them run', () => {
   it('a model that is here is not offered; one that is not gets the exact line to fetch it, and where it goes', () => {
     const h = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: ['ggml-base.en.bin', 'ggml-small.en.bin'], localTtsSet: false });
-    expect(h.map((x) => x.what)).toEqual(['the whisper model ggml-large-v3-turbo-q5_0.bin', 'the whisper model ggml-large-v3-turbo.bin', 'a neural voice on this Mac']);
+    expect(h.map((x) => x.what)).toEqual(['the speech model ggml-large-v3-turbo-q5_0.bin', 'the speech model ggml-large-v3-turbo.bin', 'a neural voice on this Mac']);
     expect(h[0]).toMatchObject({
       command: 'curl -L --fail --create-dirs -o ~/.flint/models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
       disk: 'about 574 MB',
@@ -354,7 +354,7 @@ describe('what is not on this Mac: a command for each, and none of them run', ()
     const none = hintsFor({ whisperCli: false, whisperServer: false, say: true, models: [], localTtsSet: true });
     expect(none[0]).toMatchObject({ what: 'whisper.cpp', command: 'brew install whisper-cpp' });
     expect(none.map((x) => x.what)).not.toContain('a neural voice on this Mac');
-    expect(none.filter((x) => x.what.startsWith('the whisper model'))).toHaveLength(WHISPER_MODELS.length);
+    expect(none.filter((x) => x.what.startsWith('the speech model'))).toHaveLength(WHISPER_MODELS.length);
     // The speech server it suggests is published on this Mac alone.
     const voice = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: [], localTtsSet: false }).at(-1)!;
     expect(voice.command).toContain('-p 127.0.0.1:8880:8880');
@@ -410,7 +410,7 @@ describe('a whole run, on stand-ins', () => {
 
     expect(result.paid).toEqual({ asked: false });
     expect(result.notes).toEqual([]);
-    expect(result.notInstalled.map((h) => h.what)).toEqual(['the whisper model ggml-large-v3-turbo-q5_0.bin', 'the whisper model ggml-large-v3-turbo.bin', 'a neural voice on this Mac']);
+    expect(result.notInstalled.map((h) => h.what)).toEqual(['the speech model ggml-large-v3-turbo-q5_0.bin', 'the speech model ggml-large-v3-turbo.bin', 'a neural voice on this Mac']);
   });
 
   it('nothing is played, nothing is installed, and nothing but the three programs is run: say always with a file to write to', async () => {
@@ -505,8 +505,8 @@ describe('a whole run, on stand-ins', () => {
     const noModels = rig({ models: [] });
     const b = await runBench(args({ out: noModels.out, voices: ['Samantha'], rates: [175] }), noModels.deps);
     expect(b.stt).toEqual([]);
-    expect(b.notes).toContain('No whisper model was found, so transcription was not measured.');
-    expect(b.notInstalled.filter((h) => h.what.startsWith('the whisper model'))).toHaveLength(WHISPER_MODELS.length);
+    expect(b.notes).toContain('No whisper.cpp model was found, so transcription was not measured.');
+    expect(b.notInstalled.filter((h) => h.what.startsWith('the speech model'))).toHaveLength(WHISPER_MODELS.length);
 
     const noServer = rig({ missing: [WHISPER_SERVER] });
     const c = await runBench(args({ out: noServer.out, voices: ['Samantha'], rates: [175] }), noServer.deps);

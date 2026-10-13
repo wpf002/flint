@@ -99,6 +99,19 @@ const ALLOWED: ReadonlyArray<{ file: string; text: string; reason: string }> = [
     text: 'whisper-1',
     reason: 'the model id an OpenAI-compatible speech server answers to by convention: a field of the request, not a model Flint picks, loads or downloads; FLINT_LOCAL_STT_MODEL names another',
   },
+  // The voice benchmark (src/voice-bench.ts) keeps one small table of its own: whisper.cpp's published model FILES,
+  // for the one thing it does with them, which is print the line that would fetch one that is not on this Mac. It
+  // never fetches, loads or picks one: it measures the files that are already in the folder WHISPER_MODEL points into.
+  ...['ggml-base.en.bin', 'ggml-small.en.bin', 'ggml-large-v3-turbo-q5_0.bin', 'ggml-large-v3-turbo.bin'].map((text) => ({
+    file: 'apps/server/src/voice-bench.ts',
+    text,
+    reason: "a speech-to-text model's file as whisper.cpp publishes it, in the benchmark's table of download lines it PRINTS for Will: not a chat model, never served by the local model server, never downloaded by Flint",
+  })),
+  {
+    file: 'apps/server/src/voice-bench.ts',
+    text: '/^ggml-[A-Za-z0-9._-]{1,60}\\.bin$/',
+    reason: "the shape of a whisper.cpp model FILE's name (the prefix they all carry): how the benchmark tells model files from anything else in the models folder. A pattern over files already there, not a model",
+  },
   ...['apps/server/src/inference-config.ts', 'apps/server/src/local-backend.ts', 'apps/server/src/local-brains.ts'].map((file) => ({
     file,
     text: 'llamacpp',
@@ -119,8 +132,23 @@ const ALLOWED: ReadonlyArray<{ file: string; text: string; reason: string }> = [
 const ALLOWED_NAMES: ReadonlyArray<{ name: string; files: readonly string[]; reason: string }> = [
   {
     name: 'whisper-cpp',
-    files: ['apps/server/src/inference-config.ts', 'apps/server/src/voice.ts', 'apps/server/src/inference-status.ts'],
+    files: ['apps/server/src/inference-config.ts', 'apps/server/src/voice.ts', 'apps/server/src/inference-status.ts', 'apps/server/src/voice-bench.ts'],
     reason: 'the name of a speech-to-text ENGINE (whisper.cpp, a program on this Mac): what FLINT_STT_PROVIDER is set to, and what a log or a status calls it. A program, not a model',
+  },
+  {
+    name: 'whisper.cpp',
+    files: ['apps/server/src/voice-bench.ts'],
+    reason: "the same program by its own name, as the benchmark's sentences and its results call it: a program, not a model",
+  },
+  {
+    name: 'whisper-server',
+    files: ['apps/server/src/voice-bench.ts'],
+    reason: "that program's own server, by the name of its binary: what the benchmark starts on 127.0.0.1 to measure the local provider. A program, not a model",
+  },
+  {
+    name: 'WHISPER_MODEL',
+    files: ['apps/server/src/voice-bench.ts'],
+    reason: 'the name of the SETTING that says which model file transcription uses, as a sentence names it for Will: a setting, not a model',
   },
   {
     name: 'Whisper',

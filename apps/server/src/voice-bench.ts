@@ -63,7 +63,18 @@ export const CLIP_RATES: readonly number[] = [175, 220];
 const MAX_VOICES = 6;
 const MAX_RATES = 4;
 
-export const STT_ENGINES = ['whisper-cpp', 'local'] as const;
+/**
+ * The speech-to-text engine on this Mac, by each name it goes by: the program
+ * (what a sentence calls it), the provider it is in Flint's settings (which is
+ * also its Homebrew formula), its own server, and the setting that names its
+ * model. Each is said here once, and nowhere else in this file.
+ */
+const ENGINE = 'whisper.cpp';
+const PROVIDER = 'whisper-cpp';
+const SERVER_BIN = 'whisper-server';
+const MODEL_SETTING = 'WHISPER_MODEL';
+
+export const STT_ENGINES = [PROVIDER, 'local'] as const;
 export type SttEngine = (typeof STT_ENGINES)[number];
 /** `openai` is the one that costs money: never run unless named and capped. */
 export const TTS_ENGINES = ['say', 'local', 'openai'] as const;
@@ -94,7 +105,7 @@ export const USAGE = [
   'pnpm --filter server voice-bench -- [options]',
   '  --out <folder>         where the clips, the speech and results go (default: a dated folder under ~/.flint/eval/voice-bench)',
   '  --clips <folder>       hear your own clips in place of the synthetic ones: name.wav (or m4a, mp3) beside name.txt, the words said',
-  '  --models-dir <folder>  where whisper.cpp models are (default: the folder of WHISPER_MODEL, or ~/.flint/models)',
+  `  --models-dir <folder>  where ${ENGINE} models are (default: the folder of ${MODEL_SETTING}, or ~/.flint/models)`,
   `  --voices A,B           the say voices the clips are spoken in (default: the first three this Mac has of ${CLIP_VOICES.join(', ')})`,
   `  --rates 175,220        words a minute (default: ${CLIP_RATES.join(', ')})`,
   `  --stt a,b              what hears: ${STT_ENGINES.join(', ')} (default: both)`,
@@ -313,27 +324,30 @@ export interface BenchResult {
 // ---------------------------------------------------------------------------
 // what is not here, and how to get it
 
+/** What one of the engine's model files is called: the prefix they all carry, a name, `.bin`. (Its voice-detection models carry it too, and are no transcriber.) */
+const MODEL_FILE = /^ggml-[A-Za-z0-9._-]{1,60}\.bin$/;
+
 /** whisper.cpp's own models, by the name of the file, with what each takes on disk. (Sizes: the files as published.) */
 export const WHISPER_MODELS: ReadonlyArray<{ file: string; disk: string; note: string }> = [
-  { file: 'ggml-base.en.bin', disk: '148 MB', note: "the model Flint's transcription uses unless WHISPER_MODEL names another" },
+  { file: 'ggml-base.en.bin', disk: '148 MB', note: `the model Flint's transcription uses unless ${MODEL_SETTING} names another` },
   { file: 'ggml-small.en.bin', disk: '488 MB', note: 'more accurate than base, slower' },
   { file: 'ggml-large-v3-turbo-q5_0.bin', disk: 'about 574 MB', note: 'the large model, made smaller: the most accurate of these for its size' },
   { file: 'ggml-large-v3-turbo.bin', disk: 'about 1.6 GB', note: 'the large model, as published' },
 ];
 
-const modelCommand = (file: string): string => `curl -L --fail --create-dirs -o ~/.flint/models/${file} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${file}`;
+const modelCommand = (file: string): string => `curl -L --fail --create-dirs -o ~/.flint/models/${file} https://huggingface.co/ggerganov/${ENGINE}/resolve/main/${file}`;
 
 /** The commands for what this Mac does not have. None of them was run here: this file installs nothing. */
 export function hintsFor(found: { whisperCli: boolean; whisperServer: boolean; say: boolean; models: readonly string[]; localTtsSet: boolean }): Hint[] {
   const hints: Hint[] = [];
   if (!found.whisperCli) {
-    hints.push({ what: 'whisper.cpp', why: 'Transcription on this Mac needs it, and it is not installed.', command: 'brew install whisper-cpp', disk: 'about 30 MB, plus a model', tried: false });
+    hints.push({ what: ENGINE, why: 'Transcription on this Mac needs it, and it is not installed.', command: `brew install ${PROVIDER}`, disk: 'about 30 MB, plus a model', tried: false });
   } else if (!found.whisperServer) {
-    hints.push({ what: 'whisper.cpp’s server', why: 'The local transcription server could not be measured: this copy of whisper.cpp has no whisper-server.', command: 'brew upgrade whisper-cpp', disk: 'about 30 MB', tried: false });
+    hints.push({ what: `${ENGINE}’s server`, why: `The local transcription server could not be measured: this copy of ${ENGINE} has no ${SERVER_BIN}.`, command: `brew upgrade ${PROVIDER}`, disk: 'about 30 MB', tried: false });
   }
   for (const m of WHISPER_MODELS) {
     if (found.models.includes(m.file)) continue;
-    hints.push({ what: `the whisper model ${m.file}`, why: `It is not on this Mac, so it was not measured (${m.note}).`, command: modelCommand(m.file), disk: m.disk, then: `To use it: set WHISPER_MODEL=~/.flint/models/${m.file} and restart Flint.`, tried: false });
+    hints.push({ what: `the speech model ${m.file}`, why: `It is not on this Mac, so it was not measured (${m.note}).`, command: modelCommand(m.file), disk: m.disk, then: `To use it: set ${MODEL_SETTING}=~/.flint/models/${m.file} and restart Flint.`, tried: false });
   }
   if (!found.localTtsSet) {
     hints.push({
@@ -446,7 +460,7 @@ const MAX_TRANSCRIPT_CHARS = 4000;
  * where they are. To learn how long one is it is made into a WAV in the output
  * folder, measured, and that WAV is removed at once: his voice is not copied.
  */
-async function ownClips(deps: BenchDeps, dir: string, scratch: string, notes: string[]): Promise<Clip[]> {
+async function ownClips(deps: BenchDeps, dir: string, scratch: string, remarks: string[]): Promise<Clip[]> {
   const clips: Clip[] = [];
   const audio = deps
     .list(dir)
@@ -481,8 +495,8 @@ async function ownClips(deps: BenchDeps, dir: string, scratch: string, notes: st
       }
     }
   }
-  if (untitled > 0) notes.push(`${untitled} clips had no text file beside them saying what was said, so they were left out.`);
-  if (unread > 0) notes.push(`${unread} clips could not be read and were left out.`);
+  if (untitled > 0) remarks.push(`${untitled} clips had no text file beside them saying what was said, so they were left out.`);
+  if (unread > 0) remarks.push(`${unread} clips could not be read and were left out.`);
   return clips;
 }
 
@@ -623,13 +637,14 @@ async function speakAll(
  */
 export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchResult> {
   const env = deps.env;
-  const notes: string[] = [];
+  /** What this run has to say about itself, for the results: what was left out, and why. */
+  const remarks: string[] = [];
   const cfg = readInferenceConfig(env);
   const plan = planVoice(cfg, env, { platform: deps.platform, home: deps.home });
   // whisper.cpp and its model, where the server itself reads them (WHISPER_BIN, WHISPER_MODEL).
   const { bin, model: usualModel } = whisperPaths(env, deps.home);
   const folderOf = (path: string): string => path.replace(/[\\/][^\\/]*$/, '');
-  const serverBin = deps.join(folderOf(bin), 'whisper-server');
+  const serverBin = deps.join(folderOf(bin), SERVER_BIN);
   const modelsDir = args.modelsDir ?? folderOf(usualModel);
   const haveCli = deps.exists(bin);
   const haveServer = deps.exists(serverBin);
@@ -637,7 +652,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   // Only whisper.cpp's own model files are looked at in that folder: nothing else in it is read, or named.
   const models = deps
     .list(modelsDir)
-    .filter((n) => /^ggml-[A-Za-z0-9._-]{1,60}\.bin$/.test(n) && !n.startsWith('ggml-silero'))
+    .filter((n) => MODEL_FILE.test(n) && !/silero/i.test(n))
     .sort();
   const usual = fileName(usualModel);
   // The usual model first, so the numbers for what Flint runs today lead.
@@ -657,11 +672,11 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   const own = args.clips !== undefined;
   const rates = own ? [] : (args.rates ?? [...CLIP_RATES]);
   if (!haveSay) {
-    notes.push("This machine has no `say`, so no clips were made and nothing could be measured. The benchmark runs on a Mac.");
+    remarks.push("This machine has no `say`, so no clips were made and nothing could be measured. The benchmark runs on a Mac.");
   } else if (own) {
     deps.log('Reading your clips where they are (nothing is played, and none is copied).');
-    clips = await ownClips(deps, args.clips!, deps.join(out, 'clips'), notes);
-    if (clips.length === 0) notes.push('No clip with a text file beside it was found in that folder, so nothing was heard.');
+    clips = await ownClips(deps, args.clips!, deps.join(out, 'clips'), remarks);
+    if (clips.length === 0) remarks.push('No clip with a text file beside it was found in that folder, so nothing was heard.');
   } else {
     let installed: string[] = [];
     try {
@@ -673,10 +688,10 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     const has = (v: string): boolean => installed.length === 0 || installed.some((n) => n === v || n.startsWith(`${v} (`));
     const wanted = args.voices ?? CLIP_VOICES.filter(has).slice(0, 3);
     voices = wanted.filter(has);
-    for (const v of wanted) if (!voices.includes(v)) notes.push(`The voice ${v} is not on this Mac, so no clip was spoken in it.`);
+    for (const v of wanted) if (!voices.includes(v)) remarks.push(`The voice ${v} is not on this Mac, so no clip was spoken in it.`);
     deps.log(`Speaking ${voices.length * rates.length * SENTENCES.length} clips into files (nothing is played).`);
     clips = await makeClips(deps, deps.join(out, 'clips'), voices, rates);
-    if (clips.length < voices.length * rates.length * SENTENCES.length) notes.push(`${voices.length * rates.length * SENTENCES.length - clips.length} clips could not be made and were left out.`);
+    if (clips.length < voices.length * rates.length * SENTENCES.length) remarks.push(`${voices.length * rates.length * SENTENCES.length - clips.length} clips could not be made and were left out.`);
   }
 
   // ---- hearing
@@ -685,25 +700,26 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   if (clips.length > 0 && haveCli) {
     for (const file of models) {
       const model = deps.join(modelsDir, file);
-      if (args.stt.includes('whisper-cpp')) {
-        deps.log(`Transcribing with whisper.cpp, ${file}.`);
-        const provider = buildVoice({ stt: { name: 'whisper-cpp', local: true, bin, model }, tts: { name: 'off', local: true, why: 'set' } }, { env, run: deps.run }).stt;
-        stt.push(await hear(deps, provider, 'whisper-cpp', file, clips));
-        hearBack ??= { stt: provider, label: `whisper.cpp ${file}` };
+      if (args.stt.includes(PROVIDER)) {
+        deps.log(`Transcribing with ${ENGINE}, ${file}.`);
+        const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model }, tts: { name: 'off', local: true, why: 'set' } }, { env, run: deps.run }).stt;
+        stt.push(await hear(deps, provider, PROVIDER, file, clips));
+        hearBack ??= { stt: provider, label: `${ENGINE} ${file}` };
       }
       if (args.stt.includes('local') && haveServer && deps.startServer) {
         deps.log(`Starting a transcription server on this Mac with ${file}.`);
         const server = await deps.startServer(serverBin, model);
         if (!server) {
-          notes.push(`The local transcription server did not start with ${file}, so it was not measured.`);
+          remarks.push(`The local transcription server did not start with ${file}, so it was not measured.`);
           continue;
         }
         try {
           // Through config and the guarded fetch, as Flint would reach it: FLINT_STT_PROVIDER=local at that address.
-          const serverEnv = { ...env, FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: server.baseURL, FLINT_LOCAL_STT_MODEL: 'whisper-1' };
+          // (The usual model name is sent: the server answers with the one model it was started with, whatever it is asked for.)
+          const serverEnv = { ...env, FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: server.baseURL, FLINT_LOCAL_STT_MODEL: undefined };
           const local = planVoice(readInferenceConfig(serverEnv), serverEnv, { platform: deps.platform, home: deps.home });
           if (local.stt.name !== 'local') {
-            notes.push('The local transcription server could not be reached through Flint’s own settings, so it was not measured.');
+            remarks.push('The local transcription server could not be reached through Flint’s own settings, so it was not measured.');
             continue;
           }
           const provider = buildVoice(local, { env: serverEnv, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).stt;
@@ -714,8 +730,8 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
       }
     }
   }
-  if (clips.length > 0 && !haveCli) notes.push('whisper.cpp is not installed, so transcription was not measured.');
-  if (clips.length > 0 && haveCli && models.length === 0) notes.push('No whisper model was found, so transcription was not measured.');
+  if (clips.length > 0 && !haveCli) remarks.push(`${ENGINE} is not installed, so transcription was not measured.`);
+  if (clips.length > 0 && haveCli && models.length === 0) remarks.push(`No ${ENGINE} model was found, so transcription was not measured.`);
   // A local transcription server Will already runs, when one is set: measured as it is.
   if (clips.length > 0 && args.stt.includes('local') && plan.stt.name === 'local') {
     deps.log('Transcribing with the local speech server that is set up.');
@@ -729,7 +745,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     // The Mac's usual voice, and each voice the clips were spoken in (or the ones named, with clips of his own).
     for (const voice of [undefined, ...(own ? (args.voices ?? []) : voices)]) {
       deps.log(`Speaking with this Mac's own voice${voice ? `, ${voice}` : ''}, into files.`);
-      const provider = buildVoice({ stt: { name: 'whisper-cpp', local: true, bin, model: usualModel }, tts: { name: 'say', local: true, ...(voice ? { voice } : {}) } }, { env, run: deps.run }).tts;
+      const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'say', local: true, ...(voice ? { voice } : {}) } }, { env, run: deps.run }).tts;
       tts.push(await speakAll(deps, provider, 'say', speech, hearBack ? { hearBack } : {}));
     }
   }
@@ -738,7 +754,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     tts.push(await speakAll(deps, buildVoice(plan, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts, 'local', speech, hearBack ? { hearBack } : {}));
   }
   if (paid.asked && paid.run) {
-    const provider = buildVoice({ stt: { name: 'whisper-cpp', local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, model: openaiModel, voice: env.FLINT_TTS_VOICE?.trim() || 'onyx', hasKey: true } }, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
+    const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, model: openaiModel, voice: env.FLINT_TTS_VOICE?.trim() || 'onyx', hasKey: true } }, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
     tts.push(await speakAll(deps, provider, 'openai', speech, { ...(hearBack ? { hearBack } : {}), capUsd: paid.budgetUsd, estimateUsd: paid.estimateUsd }));
   }
 
@@ -750,7 +766,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     tts,
     paid,
     notInstalled: hintsFor({ whisperCli: haveCli, whisperServer: haveServer, say: haveSay, models, localTtsSet: plan.tts.name === 'local' }),
-    notes,
+    notes: remarks,
   };
 }
 
@@ -766,7 +782,7 @@ function table(head: string[], rows: string[][]): string[] {
   return [line(head), `| ${width.map((w) => '-'.repeat(w)).join(' | ')} |`, ...rows.map(line)];
 }
 
-const STT_NAMES: Record<SttEngine, string> = { 'whisper-cpp': 'whisper.cpp, one run per clip (what Flint does today)', local: 'whisper.cpp as a server on this Mac (the local provider)' };
+const STT_NAMES: Record<SttEngine, string> = { [PROVIDER]: `${ENGINE}, one run per clip (what Flint does today)`, local: `${ENGINE} as a server on this Mac (the local provider)` };
 const TTS_NAMES: Record<TtsEngine, string> = { say: "this Mac's own voice (say)", local: 'local speech server', openai: 'OpenAI (paid)' };
 
 /** The results as a page of Markdown: two tables, what they mean, and what was not measured. */
