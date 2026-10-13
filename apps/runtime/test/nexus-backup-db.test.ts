@@ -705,7 +705,9 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         `await run(${JSON.stringify(join(bin, 'tool'))}, [], '', { timeoutMs: 600_000 }).catch(() => undefined);`,
         `writeFileSync(${JSON.stringify(wentOn)}, 'the command went on after it was told to end');`, '',
       ].join('\n'));
-      const command = spawn(join(RUNTIME, 'node_modules', '.bin', 'tsx'), [script], { cwd: RUNTIME, stdio: 'ignore', env: { PATH: process.env.PATH ?? '', HOME: dir } });
+      // (Run by node itself, with nothing between it and the signal: the `tsx` command would end a command that had
+      // stopped listening by itself, and hide whether this one ends.)
+      const command = spawn(process.execPath, ['--import', 'tsx', script], { cwd: RUNTIME, stdio: 'ignore', env: { PATH: process.env.PATH ?? '', HOME: dir } });
       const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => command.on('close', (code, signal) => resolve({ code, signal })));
       try {
         // The tool and its helper are both running (a group of their own, apart from the command's).
@@ -713,8 +715,8 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         expect(running()).toHaveLength(2);
         // Terminal closed, Ctrl-C, or the job stopped: the command is told to end.
         command.kill('SIGTERM');
-        const how = await ended;
-        expect(how.signal === 'SIGTERM' || how.code === 143, JSON.stringify(how)).toBe(true);
+        // It ends by that signal, as it would have with no tool running.
+        expect(await ended).toEqual({ code: null, signal: 'SIGTERM' });
         for (let i = 0; i < 40 && running().length; i++) await new Promise((r) => setTimeout(r, 50));
         expect(running()).toEqual([]);
         // And the command itself ended there, as the signal meant: it did not carry on to its next step.
