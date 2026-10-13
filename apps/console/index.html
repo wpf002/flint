@@ -1509,6 +1509,8 @@ var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 A
   /* Nexus's own backup (P7): the same three steps of the 02:15 job for the Nexus database, each with a card of its own. */
   'backup.nexus':["Run Tonight's Nexus Backup",'db','tonight at 2:15 AM'],'backup.nexus.offsite':["Run Tonight's Nexus Offsite Copy",'db','tonight at 2:15 AM'],
   'restore.drill.nexus':["Run This Week's Nexus Restore Test",'db','Sunday at 2:15 AM']};
+/* The nightly cards whose job runs on Sundays only (@flint/policy WEEKLY_JOBS; a test keeps the two the same). */
+var APPR_WEEKLY={'restore.drill':1,'restore.drill.nexus':1};
 /* What each of Nexus's cards does, as a sentence for its details: it is a database that is not Flint's, so the card says what is read and what is never changed. */
 var APPR_NEXUS={'backup.nexus':'Flint copies the Nexus database to this Mac. It reads Nexus and changes nothing there.',
   'backup.nexus.offsite':'The newest Nexus backup is encrypted to your key before it leaves this Mac.',
@@ -1903,7 +1905,7 @@ function apprReason(p){if(p.fullName==='goal.activate')return APPR_PROMPTS[p.rea
   if(p.fullName===APPR_PREDICT)return 'turn on predictions';
   var gw=apprGet(APPR_GOAL_WORDS,p.fullName);return gw?APPR_PROMPTS[gw[2]]:'approve: '+apprTitle(p);}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
-function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(apprGet(NOTE_WEEKLY,name)!==1)return n[2];var d=apprNow();
+function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(apprGet(APPR_WEEKLY,name)!==1)return n[2];var d=apprNow();
   if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
 /* Each calendar by its name, for the person card's subtitle: the calendar its people came from, which Will signs
    (a card that names none is Google's, as every P2.5 card was). */

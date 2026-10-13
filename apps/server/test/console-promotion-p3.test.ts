@@ -411,6 +411,9 @@ describe('every rule the panel has words for', () => {
     'backup.offsite': 'The offsite copy may be sent on its own, once a day',
     'restore.drill': 'The restore test may run on its own, once a week',
     'backup.prune': 'The backup cleanup may run on its own, once a day',
+    'backup.nexus': 'The Nexus backup may run on its own, once a day',
+    'backup.nexus.offsite': 'The Nexus offsite copy may be sent on its own, once a day',
+    'restore.drill.nexus': 'The Nexus restore test may run on its own, once a week',
   };
 
   it('has its sentence, word for word: all of them, not only the ones a promotion table holds', () => {
