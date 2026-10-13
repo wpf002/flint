@@ -28,6 +28,7 @@ import {
   TASK_FAILURE_SAYS,
   TASK_FAILURES,
   TASK_FORECAST_RULE,
+  TASK_FORM_ITEMS_MAX,
   TASK_OUTPUTS,
   TASK_REASONS,
   TASK_SAYS,
@@ -38,11 +39,13 @@ import {
   TASK_WILL_ONLY,
   PAID_DISPATCH,
   TaskAcceptArgs,
+  TaskAgainBody,
   TaskAnswer,
   TaskCancelArgs,
   taskCodeOf,
   TaskDispatchArgs,
   TaskForecastSpec,
+  TaskForm,
   taskIdOf,
   taskLine,
   TaskOverrideArgs,
@@ -336,6 +339,30 @@ describe('the cards', () => {
     const asset = { id: 'as-ci-watcher-v1', name: 'CI Watcher', kind: 'ci_runner', on: false, waiting: false, line: 'Flint reports how your CI runs end.', canTurnOn: true, costs: false };
     expect(AssetsPage.safeParse({ assets: [asset], reviewsRequired: false }).success).toBe(true);
     expect(AssetsPage.safeParse({ assets: [{ ...asset, approvalId: 'ap1' }], reviewsRequired: false }).success).toBe(false);
+  });
+
+  it('Run Again is a key a runtime may leave out, and its body is the new task\'s draft key alone', () => {
+    const row = { id: TASK, title: 'Watch a CI Run', about: 'wpf002/flint CI', status: 'failed', line: 'It ran out of time.', runsOn: 'CI Watcher', outside: false, costs: false, createdAt: '2026-10-12T10:00:00.000Z' };
+    const open = { ...row, result: null, checks: [], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: null, cost: null, card: null };
+    // A runtime from before the button says nothing of it; a newer one says yes or no; neither may say anything else.
+    expect(TaskAnswer.parse({ task: { ...open, can: { cancel: false, accept: false, reject: false } } }).task.can.again).toBeUndefined();
+    expect(TaskAnswer.parse({ task: { ...open, can: { cancel: false, accept: false, reject: false, again: true } } }).task.can.again).toBe(true);
+    expect(TaskAnswer.safeParse({ task: { ...open, can: { cancel: false, accept: false, reject: false, again: 'yes' } } }).success).toBe(false);
+    expect(TaskAnswer.safeParse({ task: { ...open, can: { cancel: false, accept: false, reject: false, rerun: true } } }).success).toBe(false);
+    expect(TaskAgainBody.parse({ draftKey: DRAFT })).toEqual({ draftKey: DRAFT });
+    for (const bad of [{}, { draftKey: 'short' }, { draftKey: DRAFT, params: { item: 'e1' } }, { draftKey: DRAFT, taskId: TASK }]) expect(TaskAgainBody.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+  });
+
+  it('the New Task form\'s answer names templates, items by label and goals by title, and nothing else', () => {
+    const one = { template: 'watch_ci', title: 'Watch a CI Run', runsOn: 'CI Watcher', items: [{ entityId: 'e1', label: 'wpf002/flint CI' }], more: false };
+    expect(TaskForm.safeParse({ templates: [], goals: [] }).success).toBe(true);
+    expect(TaskForm.safeParse({ templates: [one], goals: [{ id: 'goabc12345', title: 'Finish Building Flint' }] }).success).toBe(true);
+    expect(TaskForm.safeParse({ templates: [{ ...one, template: 'run_shell' }], goals: [] }).success).toBe(false);
+    // An item is named by its label alone: a title is outside text, and the form is sent none.
+    expect(TaskForm.safeParse({ templates: [{ ...one, items: [{ entityId: 'e1', label: 'wpf002/flint CI', title: 'ci: fix the build' }] }], goals: [] }).success).toBe(false);
+    expect(TaskForm.safeParse({ templates: [{ ...one, items: Array.from({ length: TASK_FORM_ITEMS_MAX + 1 }, (_, i) => ({ entityId: `e${i}`, label: 'A CI' })) }], goals: [] }).success).toBe(false);
+    expect(TaskForm.safeParse({ templates: [one], goals: [{ id: 'goabc12345', title: 'Finish Building Flint', description: 'why' }] }).success).toBe(false);
+    expect(TaskForm.safeParse({ templates: [one] }).success).toBe(false);
   });
 });
 

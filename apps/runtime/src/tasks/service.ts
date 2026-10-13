@@ -17,6 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import {
+  TASK_ENDED,
   TASK_ITEMS_MAX,
   TaskDispatchArgs,
   TaskSpec,
@@ -138,6 +139,23 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
     if (!existing) await cancelProposed(db, id, 'card_refused', now).catch(() => {});
     throw err;
   }
+}
+
+/**
+ * Run Again: a new task from one that has ended, with the same template, the
+ * same items and the same goal, and no due time (the old one's has passed, or
+ * soon will). It is made the way New Task makes one: the same checks of its
+ * items and its asset as they are now, a task of Will's, and its own card for
+ * him to sign. `draftKey` is the button's: pressed twice, it is one task.
+ */
+export async function runAgain(db: Db, id: string, draftKey: string, deps: TaskServiceDeps = {}, now = new Date()): Promise<{ id: string; proposalId: string; deduped: boolean }> {
+  const t = await db.task.findUnique({ where: { id }, select: { status: true, spec: true, goalId: true } });
+  if (!t) throw new Refused(404, SAY.noTask);
+  if (!(TASK_ENDED as readonly string[]).includes(t.status)) throw new Refused(409, taskStatusWords(t.status));
+  // A task's details are cleared some time after it ends: there is then nothing to run again.
+  const spec = TaskSpec.safeParse(t.spec);
+  if (!spec.success) throw new Refused(409, SAY.detailsGone);
+  return createTask(db, { draftKey, template: spec.data.template, params: spec.data.params, goalId: t.goalId, dueAt: null, ownCheck: null }, deps, now);
 }
 
 /**

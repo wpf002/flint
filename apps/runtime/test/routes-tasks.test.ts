@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TasksPage, digestOf } from '@flint/policy';
+import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TaskForm, TasksPage, digestOf } from '@flint/policy';
 import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
@@ -63,6 +63,8 @@ const ROUTES: Array<['GET' | 'POST', string, unknown?]> = [
   ['POST', `/v1/tasks/${TASK}/cancel`, {}],
   ['POST', `/v1/tasks/${TASK}/accept`, {}],
   ['POST', `/v1/tasks/${TASK}/reject`, {}],
+  ['POST', `/v1/tasks/${TASK}/again`, { draftKey: 'n8Jr3MnP0qRs4tUw' }],
+  ['GET', '/v1/task-form'],
 ];
 
 describe('the task routes, before the database', () => {
@@ -96,6 +98,13 @@ describe('the task routes, before the database', () => {
       ['POST', '/v1/tasks', { [CANARY]: true }],
       ['POST', `/v1/tasks/${TASK}/cancel`, { why: CANARY }],
       ['POST', `/v1/tasks/${TASK}/destroy`, {}],
+      // Run Again takes the new task's key and nothing else: no template, no item, no id of its own choosing.
+      ['POST', `/v1/tasks/${TASK}/again`, {}],
+      ['POST', `/v1/tasks/${TASK}/again`, { draftKey: 'short' }],
+      ['POST', `/v1/tasks/${TASK}/again`, { draftKey: DRAFT, params: { item: CANARY } }],
+      ['POST', `/v1/tasks/${TASK}/again`, { draftKey: DRAFT, taskId: TASK }],
+      ['POST', '/v1/tasks/nope/again', { draftKey: DRAFT }],
+      ['GET', '/v1/task-form?kind=person'],
       ['POST', '/v1/tasks/nope/cancel', {}],
       ['POST', `/v1/assets/${CI_WATCHER.id}/on`, { force: true }],
       ['POST', `/v1/assets/${CI_WATCHER.id}/toggle`, {}],
@@ -126,6 +135,8 @@ describe('the task routes, before the database', () => {
         ['POST', '/v1/tasks', { [CANARY]: true }],
         ['POST', `/v1/tasks/${TASK}/cancel`, { why: CANARY }],
         ['POST', `/v1/assets/${CI_WATCHER.id}/on`, { force: CANARY }],
+        ['POST', `/v1/tasks/${TASK}/again`, { draftKey: CANARY }],
+        ['GET', '/v1/task-form?kind=person'],
       ];
       for (const [method, url, body] of sent) {
         const r = await h.call(method, url, body);
@@ -208,6 +219,21 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     expect(await signRun(open.card!)).toMatchObject({ taskId: TASK, accepted: true });
     expect(TasksPage.parse(await ok('GET', '/v1/tasks?tab=finished')).tasks.map((t) => [t.id, t.status])).toEqual([[TASK, 'accepted']]);
     expect(TasksPage.parse(await ok('GET', '/v1/tasks')).tasks).toEqual([]);
+
+    // The New Task form is told what the watcher can watch, by label; and an ended task can be run again from its
+    // own row: a new task of the same kind, with its own card for Will, and the first one as it ended.
+    const offered = TaskForm.parse(await ok('GET', '/v1/task-form'));
+    expect(offered.templates).toEqual([{ template: 'watch_ci', title: 'Watch a CI Run', runsOn: 'CI Watcher', items: [{ entityId: item, label: 'wpf002/http CI' }], more: false }]);
+    expect(TaskAnswer.parse(await ok('GET', `/v1/tasks/${TASK}`)).task.can).toEqual({ cancel: false, accept: false, reject: false, again: true });
+    const KEY = 'n8Jr3MnP0qRs4tUw';
+    const again = TaskFiled.parse(await ok('POST', `/v1/tasks/${TASK}/again`, { draftKey: KEY }));
+    expect(again).toMatchObject({ id: `tk${KEY}`, deduped: false });
+    expect(TaskFiled.parse(await ok('POST', `/v1/tasks/${TASK}/again`, { draftKey: KEY }))).toEqual({ ...again, deduped: true });
+    expect(TaskAnswer.parse(await ok('GET', `/v1/tasks/${again.id}`)).task).toMatchObject({ status: 'proposed', about: 'wpf002/http CI', card: again.proposalId, can: { cancel: true, again: false } });
+    expect(TasksPage.parse(await ok('GET', '/v1/tasks?tab=finished')).tasks.map((t) => [t.id, t.status])).toEqual([[TASK, 'accepted']]);
+    const going = await h.call('POST', `/v1/tasks/${again.id}/again`, { draftKey: draft() });
+    expect([going.statusCode, going.json()]).toEqual([409, { error: TASK_STATUS_SAYS.proposed, code: 'status.proposed' }]);
+    expect(await ok('POST', `/v1/tasks/${again.id}/cancel`, {})).toEqual({ ok: true });
   });
 
   it('every refusal is a sentence with its code; cancelling and overruling go through their routes', async () => {

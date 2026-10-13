@@ -11,10 +11,13 @@
  *  - The panel's rows and the open task: a title of fixed words, what it is
  *    about by an item's label, a line made from counts, the checks by name,
  *    the forecast from its prediction, and what Will can do next.
+ *  - Run Again makes a new task like one that has ended, through the same
+ *    checks a new task goes through, with its own card; the New Task form is
+ *    offered only what an asset that is on can run, items by label alone.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { AssetEnableArgs, AssetsPage, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TasksPage, noteProblems, titleCase } from '@flint/policy';
-import { NO_DB, freshDb, type TestUrls } from '../db';
+import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TaskForm, TasksPage, noteProblems, titleCase } from '@flint/policy';
+import { HEX, NO_DB, freshDb, id, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Refused } from '../../src/governance/proposals';
 import { ASSETS, CI_WATCHER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
@@ -22,8 +25,8 @@ import { fileEnable, known, syncAssets, turnOff } from '../../src/assets/service
 import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
 import { runTaskJob } from '../../src/tasks/run';
-import { DUE_MAX_MS, TASK_TITLES, cancelTask, createTask, overrideTask } from '../../src/tasks/service';
-import { taskView, tasksPage } from '../../src/tasks/view';
+import { DUE_MAX_MS, TASK_TITLES, cancelTask, createTask, overrideTask, runAgain } from '../../src/tasks/service';
+import { taskForm, taskView, tasksPage } from '../../src/tasks/view';
 import { DAY, FakeBus, SHA, draft, taskFixture, type TaskFixture } from './fixture';
 
 const refusal = async (p: Promise<unknown>): Promise<Refused> => {
@@ -223,5 +226,110 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     const active = TasksPage.parse(await tasksPage(db, 'active', 'UTC'));
     expect(active.more).toBe(false);
     expect(active.tasks.map((r) => r.createdAt)).toEqual([...active.tasks.map((r) => r.createdAt)].sort().reverse());
+  });
+
+  it('Run Again: a new task like one that ended, with its own card; never for one still going, one that is gone, or one whose details are cleared', async () => {
+    const goal = `go${draft()}`;
+    const g = await fx.file('goal.activate', {
+      goalId: goal, title: 'Synthetic goal for a task', description: '', horizonAt: new Date(Date.now() + 30 * DAY).toISOString(), reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }], links: [], plan: null,
+    }, { kind: 'goal', argsProvenance: { args: { source: 'will', tainted: false } }, sensitivity: 'personal' });
+    await fx.signRun(g.id);
+    const item = await fx.ciRun('wpf002/again', { status: 'in_progress' });
+    const first = await fx.newTask(item, { goalId: goal, dueAt: new Date(Date.now() + 2 * DAY).toISOString(), params: { item, sha: SHA.slice(0, 8) } });
+    const can = async (taskId: string) => TaskAnswer.parse({ task: await taskView(db, taskId, 'UTC') }).task.can.again;
+    const before = await counts();
+    // While it is going there is nothing to run again: said as where it stands, and nothing is written.
+    expect(await can(first.id)).toBe(false);
+    expect(await refusal(runAgain(db, first.id, draft()))).toMatchObject({ status: 409, message: TASK_STATUS_SAYS.proposed });
+    await fx.signRun(first.proposalId);
+    expect(await refusal(runAgain(db, first.id, draft()))).toMatchObject({ status: 409, message: TASK_STATUS_SAYS.queued });
+    expect(await refusal(runAgain(db, 'tk0000000000000000', draft()))).toMatchObject({ status: 404, message: TASK_SAYS.noTask });
+    expect(await counts()).toEqual({ tasks: before.tasks, cards: before.cards });
+    await fx.signRun(((await cancelTask(db, first.id)) as { proposalId: string }).proposalId);
+    expect(await fx.task(first.id)).toMatchObject({ status: 'cancelled' });
+    expect(await can(first.id)).toBe(true);
+
+    // Ended: the same template, items and goal, no due time, a task of Will's, and its own card that waits for him.
+    const key = draft();
+    const again = await runAgain(db, first.id, key);
+    expect(again).toMatchObject({ id: `tk${key}`, deduped: false });
+    expect(again.id).not.toBe(first.id);
+    const [was, now] = [await fx.task(first.id), await fx.task(again.id)];
+    expect(now).toMatchObject({ status: 'proposed', origin: 'will', goalId: goal, stepKey: null, dueAt: null, title: was.title, assetId: was.assetId, entityIds: was.entityIds });
+    expect(now.spec).toEqual(was.spec);
+    expect(now.acceptance).toEqual(was.acceptance);
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: again.proposalId } });
+    expect(card).toMatchObject({ action: 'task.dispatch.ci_runner', origin: 'console', status: 'pending', approvalId: null });
+    expect(card.args).toMatchObject({ taskId: again.id, goalId: goal, dueAt: null, spec: was.spec });
+    // The button pressed twice is one task and one card; the first task is as it ended.
+    expect(await runAgain(db, first.id, key)).toEqual({ ...again, deduped: true });
+    expect(await counts()).toEqual({ tasks: before.tasks + 1, cards: before.cards + 2 });
+    expect(await fx.task(first.id)).toMatchObject({ status: 'cancelled' });
+    // The key of a task that already went another way is not a new task.
+    expect(await refusal(runAgain(db, first.id, first.id.slice(2)))).toMatchObject({ status: 409, message: TASK_STATUS_SAYS.cancelled });
+
+    // It goes through what a new task goes through, as things are now: an asset that was turned off is said so.
+    await turnOff(db, CI_WATCHER.id);
+    expect(await refusal(runAgain(db, first.id, draft()))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
+    await fx.watcherOn();
+    // Details that are cleared (here: its item was forgotten) cannot run again, and the view does not offer it.
+    const own = await fx.entity('ci_run', { workflow: 'ci', status: 'queued' });
+    const gone = await fx.newTask(own);
+    await cancelTask(db, gone.id);
+    expect(await can(gone.id)).toBe(true);
+    await fx.forget(own);
+    expect((await fx.task(gone.id)).spec).toBeNull();
+    expect(await can(gone.id)).toBe(false);
+    const tasks = await db.task.count();
+    expect(await refusal(runAgain(db, gone.id, draft()))).toMatchObject({ status: 409, message: TASK_SAYS.detailsGone });
+    expect(await db.task.count()).toBe(tasks);
+  });
+
+  it('the New Task form: only what an asset that is on can run, its items by label alone (never a title, a person or a forgotten one), and active goals', async () => {
+    const form = async (deps?: Parameters<typeof taskForm>[2]) => TaskForm.parse(await taskForm(db, 'UTC', deps));
+    const run = await fx.ciRun('wpf002/form');
+    const archived = await fx.entity('ci_run', { workflow: 'ci', status: 'completed' }, { name: 'Synthetic archived run' });
+    await db.entity.update({ where: { id: archived }, data: { status: 'archived' } });
+    const pr = await fx.entity('pull_request', { number: 9, state: 'open' });
+    const person = await fx.person();
+    // A run whose name is a stranger's words is named by what it is, never by them.
+    const named = await fx.entity('ci_run', { workflow: 'ci', status: 'queued' }, { name: 'Synthetic CANARY-p5tasks title', taintedPaths: ['name'] });
+    const f = await form();
+    expect(f.templates.map((t) => [t.template, t.title, t.runsOn, t.more])).toEqual([['watch_ci', 'Watch a CI Run', 'CI Watcher', false]]);
+    const items = f.templates[0]!.items;
+    expect(items.find((i) => i.entityId === run)).toEqual({ entityId: run, label: 'wpf002/form CI' });
+    for (const hidden of [archived, pr, person]) expect(items.some((i) => i.entityId === hidden), hidden).toBe(false);
+    expect(items.find((i) => i.entityId === named)!.label).toMatch(/^CI Run( \d+)? from [A-Z][a-z]{2} \d{1,2}$/);
+    expect(JSON.stringify(f)).not.toContain('CANARY');
+    // Every item offered is one a new task takes.
+    for (const i of items) expect((await db.entity.findUniqueOrThrow({ where: { id: i.entityId } })).kind).toBe('ci_run');
+    // Goals: the active ones, by id and title.
+    const goals = await db.goal.findMany({ where: { status: 'active' }, select: { id: true, title: true } });
+    expect(goals.length).toBeGreaterThan(0);
+    expect([...f.goals].sort((a, b) => a.id.localeCompare(b.id))).toEqual([...goals].sort((a, b) => a.id.localeCompare(b.id)));
+    await db.goal.updateMany({ where: { id: goals[0]!.id }, data: { status: 'paused' } });
+    expect((await form()).goals.some((x) => x.id === goals[0]!.id)).toBe(false);
+
+    // The list is bounded, the latest seen first, and says when there is more.
+    const many = Array.from({ length: TASK_FORM_ITEMS_MAX }, (_, i) => {
+      const eid = id('en');
+      return { id: eid, kind: 'ci_run', key: `ci_run:test:${eid}`, name: `Synthetic run ${i}`, state: {}, stateHash: HEX('d'), sensitivity: 'ops', lastObservedAt: new Date(Date.now() + 60_000 + i) };
+    });
+    await db.entity.createMany({ data: many });
+    const full = await form();
+    expect(full.templates[0]).toMatchObject({ more: true });
+    expect(full.templates[0]!.items).toHaveLength(TASK_FORM_ITEMS_MAX);
+    expect(full.templates[0]!.items[0]!.entityId).toBe(many[many.length - 1]!.id);
+    expect(full.templates[0]!.items.some((i) => i.entityId === run)).toBe(false);
+
+    // No template without its asset on, as the registry says it is, with something behind it to run it.
+    expect((await form({ adapters: {} })).templates).toEqual([]);
+    expect((await form({ registry: [{ ...CI_WATCHER, name: 'Another Name' }] })).templates).toEqual([]);
+    expect((await form({ registry: [] })).templates).toEqual([]);
+    await turnOff(db, CI_WATCHER.id);
+    expect(await form()).toMatchObject({ templates: [] });
+    await fx.watcherOn();
+    expect((await form()).templates).toHaveLength(1);
   });
 });
