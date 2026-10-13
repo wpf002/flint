@@ -37,6 +37,7 @@ import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
 import { chatSuggestions, daysNotRunning, firstReviewAt, overdueNow, reviewCounts, reviewsNow, windowStart } from '../goals/measures.js';
+import { CHAT_FLOOR_IN_DATABASE, CHAT_FLOOR_SAYS } from '../goals/candidates.js';
 
 /**
  * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
@@ -144,10 +145,16 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
 
 interface PhaseOf {
   rows: ReadonlyArray<{ pattern: string; dailyCap?: number }>;
+  /**
+   * Of `rows`, the ones this table offers now, when that depends on what the
+   * weeks hold (P3's later table offers commitments only when Flint suggested
+   * some: with their switch off there is nothing to promote). Unset: all rows.
+   */
+  offered?: (db: Db, now: Date, tz: string) => Promise<ReadonlySet<string>>;
   template: string;
   label: string;
-  /** What signing it lets happen without asking, for the card's first sentence. */
-  lets: string;
+  /** What signing it lets happen without asking, for the card's first sentence: said for the rows it holds. */
+  lets: string | ((patterns: readonly string[]) => string);
   evidence: string;
   /** Days of evidence it needs (SHADOW_DAYS unless said). */
   shadowDays?: number;
@@ -295,10 +302,16 @@ const PHASES: Record<Phase, PhaseOf> = {
     rows: P3C_PROMOTIONS,
     template: 'p3c.promotion',
     label: 'P3 chat',
-    lets: 'Flint take goals and commitments from your chats',
+    lets: (patterns) => (patterns.includes('world.commitment.from_chat') ? 'Flint take goals and commitments from your chats' : 'Flint suggest goals from your chats'),
+    // Commitments have their own switch on the server (off by default). The table offers their row only when
+    // Flint suggested one in the weeks it counts: with nothing suggested there is nothing to promote.
+    offered: async (db, now, tz) => {
+      const c = await chatSuggestions(db, { since: windowStart(tz, now, P3C_SHADOW_DAYS), actions: ['world.commitment.from_chat'] });
+      return new Set(c.filed ? ['goal.propose', 'world.commitment.from_chat'] : ['goal.propose']);
+    },
     evidence: 'chat suggestions',
     shadowDays: P3C_SHADOW_DAYS,
-    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals? and \d+ commitments? from chat: you approved \d+, rejected \d+, and \d+ expired\.$/,
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals?(?: and \d+ commitments?)? from chat: you approved \d+, made \d+ into goals yourself, rejected \d+, and \d+ expired\.$/,
     // The first thing chat suggested: Will has signed or rejected each one since.
     first: async (db) => (await db.proposal.findFirst({ where: { action: { in: [...CHAT_SUGGESTION_ACTIONS] } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
     // Two weeks of suggestions means there were some: the 14 whole local days before today, and today. The
@@ -311,9 +324,10 @@ const PHASES: Record<Phase, PhaseOf> = {
       const g = await chatSuggestions(db, { since, actions: ['goal.propose'] });
       const c = await chatSuggestions(db, { since, actions: ['world.commitment.from_chat'] });
       if (!g.filed && !c.filed) return { gap: `Flint suggested nothing from chat in the last ${P3C_SHADOW_DAYS} days` };
+      // Making a suggestion a goal himself is a yes, counted as one (it sets the suggestion's own card aside).
       return {
-        measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')} and ${count(c.filed, 'commitment')} from chat: `
-          + `you approved ${g.executed + c.executed}, rejected ${g.rejected + c.rejected}, and ${g.expired + c.expired} expired.`,
+        measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')}${c.filed ? ` and ${count(c.filed, 'commitment')}` : ''} from chat: `
+          + `you approved ${g.executed + c.executed}, made ${g.made} into goals yourself, rejected ${g.rejected + c.rejected}, and ${g.expired + c.expired} expired.`,
       };
     },
   },
@@ -349,9 +363,12 @@ function sameRules(theirs: Array<Record<string, unknown>>, mine: readonly Promot
   });
 }
 
-export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz: string }) {
+export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz: string; /** Test seam: the database's floor under goals from chat is in place. Never set outside a test. */ chatFloor?: boolean }) {
   const now = opts.now ?? new Date();
   const phase = PHASES[opts.phase ?? 'p2'];
+  // Nothing from chat runs without a card until the database holds what it adds to one (goals/candidates.ts
+  // CHAT_FLOOR_IN_DATABASE): until then this table is not filed at all, however many weeks have been lived.
+  if (opts.phase === 'p3c' && !(opts.chatFloor ?? CHAT_FLOOR_IN_DATABASE)) throw new Refused(409, CHAT_FLOOR_SAYS);
   const first = await phase.first(db);
   const need = phase.shadowDays ?? SHADOW_DAYS;
   if (!first || now.getTime() - first.getTime() < need * DAY) {
@@ -363,7 +380,9 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   const gap = weighed ? ('gap' in weighed ? weighed.gap : undefined) : await phase.covered?.(db, now, opts.tz);
   if (gap) throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week does' : 'weeks do'} not count yet: ${gap}`);
   const drop = new Set(opts.drop ?? []);
-  const patterns = phase.rows.filter((r) => !drop.has(r.pattern) && !NEVER_PROMOTED.has(r.pattern) && CODE_TABLE[r.pattern]?.tier !== 'forbidden' && CODE_TABLE[r.pattern]?.promotable !== false);
+  const offered = await phase.offered?.(db, now, opts.tz);
+  const patterns = phase.rows.filter((r) => (!offered || offered.has(r.pattern)) && !drop.has(r.pattern) && !NEVER_PROMOTED.has(r.pattern) && CODE_TABLE[r.pattern]?.tier !== 'forbidden' && CODE_TABLE[r.pattern]?.promotable !== false);
+  const lets = typeof phase.lets === 'function' ? phase.lets(patterns.map((r) => r.pattern)) : phase.lets;
   if (!patterns.length) throw new Refused(400, 'nothing left to promote');
   // The rows are stable for a day (the expiry from the day's start, a fixed reason), so a refiling is the same card.
   const dayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -377,7 +396,7 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   const ownReason = (w: { reason: string | null; args: unknown }): boolean => {
     // The fixed first sentence, for that card's own last day; then, for a table whose gate writes one, a
     // sentence of the gate's shape. (Its numbers were true when it was filed; they are evidence, not checked here.)
-    const lead = `This lets ${phase.lets} without asking until ${untilDay(String(rulesOf(w.args)[0]?.expiresAt ?? ''))}. `;
+    const lead = `This lets ${lets} without asking until ${untilDay(String(rulesOf(w.args)[0]?.expiresAt ?? ''))}. `;
     return typeof w.reason === 'string' && w.reason.startsWith(lead) && (!phase.says || phase.says.test(w.reason.slice(lead.length)));
   };
   const own = async (w: { id: string; origin: string; consequential: boolean; args: unknown; reason: string | null }): Promise<boolean> =>
@@ -393,7 +412,7 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
     kind: 'policy', origin: 'cli', action: 'policy.change', templateId: phase.template, args,
     argsProvenance: { rows: { source: 'template', ref: phase.template, tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
-    reason: `This lets ${phase.lets} without asking until ${untilDay(expiresAt)}. ${measured}`.slice(0, 1000),
+    reason: `This lets ${lets} without asking until ${untilDay(expiresAt)}. ${measured}`.slice(0, 1000),
   }, PROMOTION_ACTOR, now);
   // The same rules, already waiting on a card this command did not file (a proposal is one card for its
   // args): never handed back as the table's own. It is named by its id alone, for Will to reject.

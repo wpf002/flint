@@ -11,16 +11,27 @@
  *
  *  - the request, against the shared contract (@flint/policy ChatCandidate):
  *    ids of the shape the server names turns by, a quote of 12 to 300
- *    characters in the form the check leaves it, a real day that has not
- *    passed, a turn that ended in the last 30 days and not in the future;
+ *    characters in the form the check leaves it, a short text that could be a
+ *    goal's title (its length, no control or format character), a real day
+ *    that has not passed and is not over ten years out, a turn that ended in
+ *    the last 30 days and not in the future;
  *  - the same conversation, turn and quote is one suggestion, for good: its
  *    source (`chat:<sha256>`) is kept in the audit trail, and a replay files
- *    nothing;
- *  - the day's limit (3 goals, 10 commitments), claimed before anything is
- *    filed;
- *  - the tier, in chat context: FORBIDDEN is refused; at APPROVAL (how it
- *    ships) a card is filed for Will to sign; ALONE (only once he has signed
- *    the later promotion table) adds it directly, under that rule's own cap.
+ *    nothing. And once Will has turned a suggestion down, nothing more of that
+ *    kind is taken from that turn, however it is quoted;
+ *  - the day's limit (3 goals, 10 commitments);
+ *  - the tier, in chat context: FORBIDDEN is refused; otherwise a card is
+ *    filed for Will to sign, one that asks on its own (never in Approve All).
+ * All of it under one lock on the source, in one transaction with the day's
+ * claim: identical or racing posts make one card and use one slot, and a card
+ * that could not be filed uses none.
+ *
+ * NOTHING FROM CHAT RUNS WITHOUT A CARD YET (CHAT_FLOOR_IN_DATABASE). The
+ * code that adds a suggestion directly under a rule Will signed (ALONE) is
+ * here and tested, but it is switched off: the database does not yet hold a
+ * goal Flint adds from chat to a card, so until a migration adds that floor
+ * the intake files a card whatever a rule says, and the later promotion table
+ * is refused (governance/promotion.ts).
  *
  * Nothing but this intake files these two actions (createProposal refuses any
  * other caller), and no model can reach it: the route takes the server's own
@@ -50,6 +61,7 @@ import {
   SUGGESTION_ARGS,
   SUGGESTION_CARD_KIND,
   SUGGESTION_MAX_AGE_DAYS,
+  SUGGESTION_MAX_DAYS_AHEAD,
   SUGGESTION_TEMPLATE,
   GOAL_REASONS,
   digestOf,
@@ -60,6 +72,7 @@ import {
   sharedWords,
   suggestionGoalId,
   suggestionSourceRef,
+  suggestionTurnRef,
   type CandidateAnswer,
   type ChatCommitmentArgs,
   type ChatSuggestionAction,
@@ -84,8 +97,17 @@ export const CANDIDATES_ACTOR = 'runtime:goals.candidates';
 const CARD_TTL_MINUTES = 7 * 24 * 60;
 /** A turn's time may be this far ahead of the runtime's clock (the two share a Mac). */
 const CLOCK_SKEW_MS = 5 * 60_000;
-/** A day this far ahead is not a date Will gave. */
-const MAX_DAYS_AHEAD = 3660;
+/**
+ * Does the database hold a goal Flint adds from chat to the card behind it? Not
+ * yet: a proposed goal's row is checked for its shape, not for a card (that
+ * floor is a migration of its own). While this is false nothing from chat runs
+ * without a card: the intake files a card even under a rule that says ALONE,
+ * and `promotion-table --phase p3c` is refused. The migration that adds the
+ * floor flips it.
+ */
+export const CHAT_FLOOR_IN_DATABASE = false;
+/** What the later promotion table says while it is. */
+export const CHAT_FLOOR_SAYS = 'Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.';
 /** The counter the day's filings are claimed under, per action. */
 export const filedCounter = (action: ChatSuggestionAction): string => `${action}:filed`;
 /** A triggered review waits this long, as the review tick's do. */
@@ -146,7 +168,9 @@ export function checkSuggestionCard(input: CreateProposal): CreateProposal {
   return {
     ...input,
     reason: action === 'goal.propose' ? GOAL_REASONS.propose : GOAL_REASONS.commitment,
-    sensitivity: 'personal', destructive: false, ttlMinutes: CARD_TTL_MINUTES,
+    // It asks on its own, with a fresh touch, never in Approve All: what Will does with each one is the evidence
+    // the later table rests on, and that must be one decision a card.
+    sensitivity: 'personal', destructive: false, consequential: true, ttlMinutes: CARD_TTL_MINUTES,
   };
 }
 
@@ -206,26 +230,46 @@ export interface IntakeDeps {
   /** The bus, once it has started. */
   bus?: () => Pick<Bus, 'boss'> | undefined;
   now?: () => Date;
+  /** Test seam: the database's floor under goals from chat is in place (CHAT_FLOOR_IN_DATABASE). Never set outside a test. */
+  floor?: boolean;
 }
 
 /** Field paths and codes of a refused request: never a value. */
 const issuesOf = (issues: ReadonlyArray<{ path: Array<string | number>; code: string }>): string =>
   issues.map((i) => `${i.path.join('.') || '<body>'}: ${i.code}`).join('; ').slice(0, 300);
 
-/** Has this source been taken before: an intake entry in the audit trail, a goal, a commitment, or a card that still holds its args? */
-async function known(db: Db, action: ChatSuggestionAction, sourceRef: string): Promise<boolean> {
+/** A card that was turned down (rejected by Will, or dismissed), not one set aside because it was made a goal. */
+const turnedDown = (card: { status: string; error: string | null } | null): boolean => card?.status === 'rejected' && card.error !== SAY.replaced;
+
+/**
+ * Has this suggestion been taken before? By its source: an intake entry in the
+ * audit trail, a goal, a commitment, or a card that still holds its args. Or by
+ * its turn: once Will turned down a suggestion of this kind from this turn
+ * (dismissed it, or rejected its card), nothing more of that kind is taken
+ * from that turn, however it is quoted.
+ */
+async function known(db: Db | Tx, action: ChatSuggestionAction, sourceRef: string, turnRef: string): Promise<boolean> {
   if (await db.auditEntry.findFirst({ where: { correlationId: sourceRef, actor: CANDIDATES_ACTOR }, select: { id: true } })) return true;
   if (await db.goal.findUnique({ where: { sourceRef }, select: { id: true } })) return true;
   if (await db.entity.findUnique({ where: { kind_key: { kind: 'commitment', key: sourceRef } }, select: { id: true } })) return true;
   const [card] = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE action = ${action} AND args->>'sourceRef' = ${sourceRef} LIMIT 1`;
-  return !!card;
+  if (card) return true;
+  const earlier = await db.auditEntry.findMany({ where: { action, actor: CANDIDATES_ACTOR, inputs: { path: ['turnRef'], equals: turnRef } }, select: { correlationId: true, inputs: true }, take: 50 });
+  for (const e of earlier) {
+    const pid = (e.inputs as { proposalId?: unknown } | null)?.proposalId;
+    if (typeof pid === 'string' && turnedDown(await db.proposal.findUnique({ where: { id: pid }, select: { status: true, error: true } }))) return true;
+    if (e.correlationId && (await db.goal.findFirst({ where: { sourceRef: e.correlationId, status: 'rejected' }, select: { id: true } }))) return true;
+  }
+  return false;
 }
 
+/** Thrown inside the intake's transaction to undo its claim: the suggestion turned out to be one it has. */
+const KNOWN = Symbol('known');
+
 /**
- * Take one candidate from the server: check it, and file its card or (once Will
- * has signed the promotion) add it. A refusal is a sentence with its reason
- * logged by field and code; nothing of the candidate's words is kept anywhere
- * but the card or the row it becomes.
+ * Take one candidate from the server: check it, and file its card. A refusal is
+ * a sentence with its reason logged by field and code; nothing of the
+ * candidate's words is kept anywhere but the card or the row it becomes.
  */
 export async function takeCandidate(d: IntakeDeps, raw: unknown): Promise<CandidateAnswer> {
   const { db, tz } = d;
@@ -239,62 +283,69 @@ export async function takeCandidate(d: IntakeDeps, raw: unknown): Promise<Candid
   if (c.dueOn) {
     const today = localDay(tz, now);
     if (c.dueOn < today) throw new Refused(400, SAY.suggestionInvalid, 'dueOn: past');
-    if (Date.parse(`${c.dueOn}T00:00:00.000Z`) > now.getTime() + MAX_DAYS_AHEAD * DAY_MS) throw new Refused(400, SAY.suggestionInvalid, 'dueOn: too far ahead');
+    if (Date.parse(`${c.dueOn}T00:00:00.000Z`) > now.getTime() + SUGGESTION_MAX_DAYS_AHEAD * DAY_MS) throw new Refused(400, SAY.suggestionInvalid, 'dueOn: too far ahead');
   }
   const action = SUGGESTION_ACTION[c.kind];
   const sourceRef = suggestionSourceRef(c.conversationId, c.turnId, c.quote);
-  if (await known(db, action, sourceRef)) return { outcome: 'known' };
+  const turnRef = suggestionTurnRef(c.conversationId, c.turnId, c.kind);
 
   const decision = resolveTier(action, { context: 'chat', tainted: false, sensitivity: 'personal', policies: await activePolicies(db, now), now });
   const origin = `chat:${c.conversationId}`;
   const { args, provenance } = cardOf(c, sourceRef);
   const subject = 'goalId' in args ? { goalId: args.goalId } : {};
   if (decision.tier === 'forbidden') {
+    // Written outside the transaction below: a refusal is recorded whatever else happens. (One already known is not recorded twice.)
+    if (await known(db, action, sourceRef, turnRef)) return { outcome: 'known' };
     await appendAudit(db, [{
       actor: CANDIDATES_ACTOR, context: 'chat', kind: 'decision', action, tier: 'forbidden', decision: 'deny', outcome: 'denied',
-      inputs: { sourceRef, rule: decision.rule }, reasoning: decision.reason, correlationId: sourceRef, tainted: false,
+      inputs: { sourceRef, turnRef, rule: decision.rule }, reasoning: decision.reason, correlationId: sourceRef, tainted: false,
     }], now);
     throw new Refused(409, `forbidden: ${decision.reason}`);
   }
-  // The day's limit, in either tier: at most this many cards wait on Will, and no more are added without him.
-  if ((await claim(db, filedCounter(action), { limit: SUGGESTIONS_PER_DAY[action], period: 'day' }, tz, now)) === null) throw new Refused(429, SAY.suggestionCap);
+  // ALONE only once the database holds what it adds to a card (CHAT_FLOOR_IN_DATABASE): until then a card, whatever a rule says.
+  const alone = decision.tier === 'alone' && (d.floor ?? CHAT_FLOOR_IN_DATABASE);
 
   let outcome: CandidateAnswer['outcome'];
-  if (decision.tier === 'approval') {
-    const filed = await createProposal(db, {
-      kind: SUGGESTION_CARD_KIND[action], origin, action, templateId: SUGGESTION_TEMPLATE[action], args: args as Record<string, unknown>, argsProvenance: provenance,
-      tainted: false, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: CARD_TTL_MINUTES,
-    }, CANDIDATES_ACTOR, now, CANDIDATES_INTAKE);
-    if (filed.deduped) return { outcome: 'known' };
-    await appendAudit(db, [{
-      actor: CANDIDATES_ACTOR, context: 'chat', kind: 'decision', action, tier: 'approval', decision: 'log', outcome: 'ok',
-      inputs: { sourceRef, proposalId: filed.id, saidAt: c.sourceAt, ...subject }, correlationId: sourceRef, tainted: false,
-    }], now);
-    outcome = 'filed';
-  } else {
-    // ALONE: only under a rule Will signed. Its cap is claimed with the write, in one transaction.
-    try {
-      const done = await db.$transaction(async (tx) => {
-        if (decision.cap && (await claim(tx, decision.key, decision.cap, tz, now)) === null) return null;
-        const r = await applySuggestion(tx, action, args, { now, tz, actor: CANDIDATES_ACTOR });
+  try {
+    outcome = await db.$transaction(async (tx) => {
+      // One at a time for a source: a second identical post waits here, then finds the first one's card.
+      await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`suggestion:${sourceRef}`}))) AS l`;
+      if (await known(tx, action, sourceRef, turnRef)) return 'known' as const;
+      // The day's limit, in either tier: at most this many cards wait on Will, and no more are added without him.
+      // Claimed in this transaction: another post of the same kind waits on the counter's row, and a card that
+      // cannot be filed gives its slot back.
+      if ((await claim(tx, filedCounter(action), { limit: SUGGESTIONS_PER_DAY[action], period: 'day' }, tz, now)) === null) throw new Refused(429, SAY.suggestionCap);
+      if (!alone) {
+        const filed = await createProposal(db, {
+          kind: SUGGESTION_CARD_KIND[action], origin, action, templateId: SUGGESTION_TEMPLATE[action], args: args as Record<string, unknown>, argsProvenance: provenance,
+          tainted: false, sensitivity: 'personal', destructive: false, consequential: true, ttlMinutes: CARD_TTL_MINUTES,
+        }, CANDIDATES_ACTOR, now, CANDIDATES_INTAKE, tx);
+        if (filed.deduped) throw KNOWN;
         await appendAudit(tx, [{
-          actor: CANDIDATES_ACTOR, context: 'chat', kind: 'action', action, tier: 'alone', decision: 'act', outcome: 'ok',
-          inputs: { sourceRef, saidAt: c.sourceAt, argsDigest: digestOf(args), rule: decision.rule, ...(decision.policyPattern ? { policy: decision.policyPattern } : {}), ...r.result },
-          correlationId: sourceRef, tainted: false,
+          actor: CANDIDATES_ACTOR, context: 'chat', kind: 'decision', action, tier: 'approval', decision: 'log', outcome: 'ok',
+          inputs: { sourceRef, turnRef, proposalId: filed.id, saidAt: c.sourceAt, ...subject }, correlationId: sourceRef, tainted: false,
         }], now);
-        return r.result;
-      }, { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-      if (done === null) throw new Refused(429, SAY.suggestionCap);
-      if (done.existed === true) return { outcome: 'known' };
-    } catch (err) {
-      if (err instanceof Refused) throw err;
-      // Two of the same at once: the other one made it (a unique key refused this one).
-      if (sqlState(err) === '23505' || (err as { code?: unknown }).code === 'P2002') return { outcome: 'known' };
-      throw sanitize(err);
-    }
-    outcome = 'added';
+        return 'filed' as const;
+      }
+      // ALONE: only under a rule Will signed. Its cap is claimed with the write.
+      if (decision.cap && (await claim(tx, decision.key, decision.cap, tz, now)) === null) throw new Refused(429, SAY.suggestionCap);
+      const r = await applySuggestion(tx, action, args, { now, tz, actor: CANDIDATES_ACTOR });
+      if (r.result.existed === true) throw KNOWN;
+      await appendAudit(tx, [{
+        actor: CANDIDATES_ACTOR, context: 'chat', kind: 'action', action, tier: 'alone', decision: 'act', outcome: 'ok',
+        inputs: { sourceRef, turnRef, saidAt: c.sourceAt, argsDigest: digestOf(args), rule: decision.rule, ...(decision.policyPattern ? { policy: decision.policyPattern } : {}), ...r.result },
+        correlationId: sourceRef, tainted: false,
+      }], now);
+      return 'added' as const;
+    }, { maxWait: 10_000, timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  } catch (err) {
+    if (err === KNOWN) return { outcome: 'known' };
+    if (err instanceof Refused) throw err;
+    // Two of the same at once past the lock (a unique key refused this one): the other one made it.
+    if (sqlState(err) === '23505' || (err as { code?: unknown }).code === 'P2002') return { outcome: 'known' };
+    throw sanitize(err);
   }
-  await askReviews(d, c, sourceRef, now).catch(() => {});
+  if (outcome !== 'known') await askReviews(d, c, sourceRef, now).catch(() => {});
   return { outcome };
 }
 
@@ -380,6 +431,7 @@ export async function runSuggestionCard(db: Db, id: string, rp: WebAuthnRelyingP
  * and an approval of the card itself then run one after the other).
  */
 export async function waitingSuggestion(db: Db | Tx, goalId: string, now: Date, lock = false): Promise<{ id: string; sourceRef: string } | null> {
+  // (Under the intake's lock a source has one card; were there ever more, each call names the oldest still waiting.)
   const rows = lock
     ? await db.$queryRaw<Array<{ id: string; sourceRef: string | null }>>`
         SELECT id, args->>'sourceRef' AS "sourceRef" FROM "Proposal"

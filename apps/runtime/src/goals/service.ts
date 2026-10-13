@@ -149,11 +149,25 @@ export async function pauseGoal(db: Db, id: string, now = new Date()): Promise<v
  * a fixed sentence), and the same words are never suggested again.
  */
 export async function dismissGoal(db: Db, id: string, now = new Date()): Promise<void> {
-  if (!(await db.goal.findUnique({ where: { id }, select: { id: true } }))) {
-    const card = await waitingSuggestion(db, id, now);
-    if (!card) throw new Refused(404, SAY.noGoal);
-    await rejectProposal(db, card.id, { error: SAY.dismissed }, undefined, CONSOLE_ACTOR);
-    await appendAudit(db, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: 'goal.dismiss', outcome: 'ok', correlationId: `${id}.dismiss`, tainted: false, inputs: { goalId: id, proposalId: card.id } }], now);
+  /** Set aside every card of this suggestion that still waits (one, under the intake's lock). True when there was one. */
+  const setAside = async (): Promise<boolean> => {
+    let any = false;
+    for (let card = await waitingSuggestion(db, id, now); card; card = await waitingSuggestion(db, id, now)) {
+      await rejectProposal(db, card.id, { error: SAY.dismissed }, undefined, CONSOLE_ACTOR);
+      await appendAudit(db, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: 'goal.dismiss', outcome: 'ok', correlationId: `${id}.dismiss`, tainted: false, inputs: { goalId: id, proposalId: card.id } }], now);
+      any = true;
+    }
+    return any;
+  };
+  const goal = await db.goal.findUnique({ where: { id }, select: { status: true } });
+  if (!goal) {
+    if (!(await setAside())) throw new Refused(404, SAY.noGoal);
+    return;
+  }
+  // The goal exists already and is past being a suggestion (it was started, or dismissed, another way), yet a card
+  // of the same suggestion still waits: Dismiss sets that card aside. With no such card, it says where the goal stands.
+  if (goal.status !== 'proposed') {
+    if (!(await setAside())) throw new Refused(409, goalStatusWords(goal.status));
     return;
   }
   await plain(db, async (tx) => {
@@ -162,6 +176,7 @@ export async function dismissGoal(db: Db, id: string, now = new Date()): Promise
     await tx.goal.update({ where: { id }, data: { status: 'rejected' } });
     await audit(tx, 'goal.dismiss', `${id}.dismiss`, { goalId: id }, now);
   });
+  await setAside();
 }
 
 const live = (g: LockedGoal) => {

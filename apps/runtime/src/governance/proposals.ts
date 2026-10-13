@@ -139,8 +139,11 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 });
 
 /** Record a proposal. A FORBIDDEN action is refused (409) and the refusal audited. */
-export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date(), via?: typeof CANDIDATES_INTAKE) {
+export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date(), via?: typeof CANDIDATES_INTAKE, inside?: Tx) {
   let input = given;
+  // `inside`: the candidates intake files its card in its own transaction (with its lock and the day's claim), on
+  // its own connection. Everything below then reads and writes through it, and commits or rolls back with it.
+  const q: Db | Tx = inside ?? db;
   // A suggestion from chat is filed by the candidates intake alone (P3 part 5): never by a tool call, a
   // console button or another job, however the card is made up. The refusal is audited, by ids only.
   if (isChatSuggestion(input.action) && via !== CANDIDATES_INTAKE) {
@@ -187,7 +190,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     if (await db.triageRule.findUnique({ where: { name }, select: { id: true } })) throw new Refused(400, `a triage rule named ${name} exists (switched-off rules keep their names): choose another name`);
   }
   const argsDigest = digestOf(input.args);
-  const decision = await tierOf(db, { ...input }, now, input.readOnlyHint);
+  const decision = await tierOf(q, { ...input }, now, input.readOnlyHint);
   const id = `pr${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
   const context = contextOf(input.origin);
   if (decision.tier === 'forbidden') {
@@ -198,7 +201,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     throw new Refused(409, `forbidden: ${decision.reason}`);
   }
   const expiresAt = new Date(now.getTime() + input.ttlMinutes * 60_000);
-  return db.$transaction(async (tx) => {
+  const file = async (tx: Tx) => {
     // The same call proposed again while the first is still pending (a retried
     // turn, a replayed spool, a timeout after the first one landed, Will asking
     // twice) is the same proposal: one card, one approval, one run. The lock
@@ -231,7 +234,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
       inputs: auditInputs(row, { rule: decision.rule }), correlationId: row.id, tainted: input.tainted,
     }]);
     return { id: row.id, argsDigest, expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: false };
-  });
+  };
+  return inside ? file(inside) : db.$transaction(file);
 }
 
 /**

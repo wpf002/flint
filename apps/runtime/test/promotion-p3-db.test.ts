@@ -37,6 +37,7 @@ import { createDb, type Db } from '../src/db';
 import { activePolicies, approveProposal, createProposal, expireProposals, Refused, rejectProposal } from '../src/governance/proposals';
 import { PolicyArgs, runInternal } from '../src/governance/internal';
 import { NEVER_PROMOTED, P1_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS, P2_PROMOTIONS, P3C_PROMOTIONS, P3C_SHADOW_DAYS, P3_PROMOTIONS, PHASES_LIST, SHADOW_DAYS, promotionTable } from '../src/governance/promotion';
+import { CHAT_FLOOR_IN_DATABASE, CHAT_FLOOR_SAYS } from '../src/goals/candidates';
 import { runPlan } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
 import { reviewStanding, runReview } from '../src/goals/review';
@@ -407,7 +408,11 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
   let db: Db;
   let fx: GoalFixture;
   let now: Date;
-  const table = (over: Partial<Parameters<typeof promotionTable>[1]> = {}) => promotionTable(db, { phase: 'p3c', tz: TZ, now, ...over });
+  /**
+   * The later table as it will be once the database holds a goal from chat to its card (chatFloor: the seam the
+   * migration's constant will replace). As it ships the command refuses outright: the first test below.
+   */
+  const table = (over: Partial<Parameters<typeof promotionTable>[1]> = {}) => promotionTable(db, { phase: 'p3c', tz: TZ, now, chatFloor: true, ...over });
   let n = 0;
   /** A goal chat suggested, as chat files it (Will's own quoted words), dated in the past by the owner: the database dates the runtime's own cards itself. */
   const suggested = (ago: number, ttlDays = 7, action: 'goal.propose' | 'world.commitment.from_chat' = 'goal.propose') => {
@@ -428,6 +433,26 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
     now = tonight(TZ);
   });
   afterAll(async () => db?.$disconnect());
+
+  it('as it ships it is refused, in one plain sentence, whatever the weeks hold: nothing from chat runs without a card yet', async () => {
+    expect(CHAT_FLOOR_IN_DATABASE).toBe(false);
+    const refused = '409: Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.';
+    expect(await refusal(promotionTable(db, { phase: 'p3c', tz: TZ, now }))).toBe(refused);
+    expect(`409: ${CHAT_FLOOR_SAYS}`).toBe(refused);
+    expect(noteProblems('Promotion Table', CHAT_FLOOR_SAYS)).toEqual([]);
+    // Nor with two weeks of cards behind it (the weeks below are lived with the seam on; here it is off again).
+    const old = await suggested(15 * DAY, 1);
+    const fresh = await suggested(1 * DAY, 1);
+    expect(await refusal(promotionTable(db, { phase: 'p3c', tz: TZ, now }))).toBe(refused);
+    expect(await db.proposal.count({ where: { templateId: 'p3c.promotion' } })).toBe(0);
+    // The other tables are not touched by it.
+    expect(await refusal(promotionTable(db, { phase: 'p3', tz: TZ, now }))).toBe('409: the shadow week is not over: 0 of 7 days of goal reviews');
+    await withClient(urls.owner, async (c) => {
+      await c.query('ALTER TABLE "Proposal" DISABLE TRIGGER USER');
+      await c.query('DELETE FROM "Proposal" WHERE id = ANY ($1::text[])', [[old, fresh]]);
+      await c.query('ALTER TABLE "Proposal" ENABLE TRIGGER USER');
+    });
+  });
 
   it('needs 14 days of chat’s suggestion cards, not 7', async () => {
     expect(await refusal(table())).toBe('409: the shadow weeks are not over: 0 of 14 days of chat suggestions');
@@ -472,16 +497,29 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
     expect(await refusal(table())).toBe('409: the shadow weeks do not count yet: Flint suggested nothing from chat in the last 14 days');
   });
 
-  it('after two weeks: two rows, goal.propose ALONE at 3 a day and world.commitment.from_chat at 10; the card counts what Will did with the suggestions, the one that opened the gate among them', async () => {
+  it('after two weeks: goal.propose ALONE at 3 a day, and world.commitment.from_chat at 10 only when Flint suggested one; the card counts what Will did with the suggestions, the one that opened the gate among them', async () => {
     // Fourteen days and an hour ago: old enough to open the gate, and inside the 14 days the gate and the card count.
     const opener = await suggested(14 * DAY + HOUR, 1);
     const waiting = await suggested(1 * DAY);
     const turnedDown = await suggested(2 * DAY);
     await rejectProposal(db, turnedDown, {}, undefined, 'will:console');
-    // And a commitment he said he would keep, three days ago, also turned down.
-    await rejectProposal(db, await suggested(3 * DAY, 7, 'world.commitment.from_chat'), {}, undefined, 'will:console');
+    // One he made a goal himself (Make It a Goal sets the suggestion's own card aside): a yes, counted as one.
+    const madeGoal = await suggested(4 * DAY);
+    await db.proposal.update({ where: { id: madeGoal }, data: { status: 'rejected', error: 'A newer version of this card replaced it.' } });
     expect(await expireProposals(db)).toBeGreaterThanOrEqual(1);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: opener } })).toMatchObject({ status: 'expired' });
+    const day = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    // No commitment was suggested in these weeks (their switch is off by default): the table offers goals alone.
+    const goalsOnly = await table();
+    expect(goalsOnly.rows.map((r) => [r.pattern, r.tier, r.dailyCap])).toEqual([['goal.propose', 'alone', 3]]);
+    const goalsCard = await db.proposal.findUniqueOrThrow({ where: { id: goalsOnly.proposalId } });
+    expect(goalsCard.reason).toBe(`This lets Flint suggest goals from your chats without asking until ${day(goalsOnly.rows[0]!.expiresAt)}. `
+      + `Since ${dayWords(TZ, windowStart(TZ, now, 14))}, Flint suggested 4 goals from chat: you approved 0, made 1 into goals yourself, rejected 1, and 1 expired.`);
+    expect(noteProblems('Let Flint Suggest Goals from Chat', goalsCard.reason!)).toEqual([]);
+    expect(await table({ now: new Date(now.getTime() + 30_000) })).toMatchObject({ proposalId: goalsOnly.proposalId, deduped: true });
+    await rejectProposal(db, goalsOnly.proposalId, {}, undefined, 'will:console');
+    // And a commitment he said he would keep, three days ago, also turned down: now there is one to count, and its row is offered.
+    await rejectProposal(db, await suggested(3 * DAY, 7, 'world.commitment.from_chat'), {}, undefined, 'will:console');
     const t = await table();
     expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
     expect(t.rows).toEqual([
@@ -493,7 +531,7 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
     // In the 14 days: the opener (expired), the one rejected, the one still waiting. The older ones are before them.
     const since = windowStart(TZ, now, 14);
     expect(card.reason).toBe(`This lets Flint take goals and commitments from your chats without asking until ${new Date(t.rows[0]!.expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}. `
-      + `Since ${dayWords(TZ, since)}, Flint suggested 3 goals and 1 commitment from chat: you approved 0, rejected 2, and 1 expired.`);
+      + `Since ${dayWords(TZ, since)}, Flint suggested 4 goals and 1 commitment from chat: you approved 0, made 1 into goals yourself, rejected 2, and 1 expired.`);
     expect(noteProblems('Let Flint Take Goals and Commitments from Chat', card.reason!)).toEqual([]);
     expect(card.reason).not.toContain(CANARY);
     expect(await db.proposal.findUniqueOrThrow({ where: { id: waiting } })).toMatchObject({ status: 'pending' });

@@ -13,13 +13,21 @@
  *    route and a direct createProposal are refused, however the card is made.
  *  - At APPROVAL (how it ships): a goal.propose card (kind goal) or a
  *    world.commitment.from_chat card (kind tool_call), from a chat origin,
- *    personal, Will's quote as its provenance. The same conversation, turn and
- *    quote is never filed twice, even once the card is dismissed and cleared.
+ *    personal, Will's quote as its provenance, asking on its own. The same
+ *    conversation, turn and quote is never filed twice, even once the card is
+ *    dismissed and cleared; once one is turned down, nothing more of that kind
+ *    is taken from that turn. Identical or racing posts make one card and use
+ *    one of the day's slots.
+ *  - Nothing from chat runs without a card yet: even under a signed rule the
+ *    intake files a card, until the database holds what it adds to one.
  *  - An approved goal.propose adds only a proposed goal; an approved
  *    from_chat adds an unconfirmed commitment with no source row, Will's quote
  *    in EntityText, and nothing a world:read route serves or PersonGuard reads.
- *  - 3 goals and 10 commitments a day, while cards wait and after a test
- *    promotion (ALONE), whatever cap the promotion's row carries.
+ *  - 3 goals and 10 commitments a day, while cards wait and (with the floor
+ *    switched on for the test) after a promotion, whatever cap its row carries.
+ *  - A row the panel's contract does not take is left out of the tab and
+ *    counted: the Suggested and Finished tabs never answer 500 for one.
+ *  - The report counts a suggestion Will made a goal himself as a yes.
  *  - Make It a Goal takes one signature through the real signed path and sets
  *    the waiting card aside; a card that already ran is started as the goal it
  *    made, never as a second goal with the same source. Dismiss sets it aside.
@@ -28,9 +36,9 @@
  *    card's reason, error or result.
  * Synthetic text only.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { digestOf, suggestionGoalId, suggestionSourceRef, type GoalsPage } from '@flint/policy';
+import { GoalTitle, digestOf, suggestionGoalId, suggestionSourceRef, suggestionTurnRef, type GoalsPage } from '@flint/policy';
 import { NO_DB, freshDb, withClient, id, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { buildApp } from '../src/app';
@@ -38,7 +46,8 @@ import { createDb, type Db } from '../src/db';
 import type { RuntimeScope } from '../src/config';
 import { approveProposal, createProposal, rejectProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
-import { CANDIDATES_ACTOR, RELATED_WORDS, askReviews, filedCounter, takeCandidate } from '../src/goals/candidates';
+import { CANDIDATES_ACTOR, CHAT_FLOOR_IN_DATABASE, RELATED_WORDS, askReviews, filedCounter, suggestionCardProblem, takeCandidate } from '../src/goals/candidates';
+import { chatSuggestions } from '../src/goals/measures';
 import { REVIEW_QUEUE, runReview } from '../src/goals/review';
 import { personAllowed } from '../src/world/person-create';
 import { CHAT_COMMITMENT } from '../src/world/kinds';
@@ -137,8 +146,12 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
       ['a quote of 11 characters', { quote: 'I will do x' }],
       ['a quote of 301 characters', { quote: `${'I will finish it '.repeat(18)}`.slice(0, 301).trim().padEnd(301, 'x') }],
       ['a quote with no words in it', { quote: '1234 5678 9012 3456' }],
-      ['curly quotes the check would have straightened', { quote: 'I’ll finish the synthetic report' }],
       ['two spaces the check would have made one', { quote: 'I will finish  the synthetic report' }],
+      ['a control character in the quote', { quote: 'I will finish the synthetic\u0007 report' }],
+      // The short text could be a goal's title: its length as a title's is counted, and nothing hidden in it.
+      ['a text of 84 characters that is 154 units long', { text: `half marathon ${'\u{1F3C3}'.repeat(70)}` }],
+      ['a direction override in the text', { text: 'run a half marathon \u202Egnirps yb\u202C' }],
+      ['zero-width marks in the text', { text: 'run a half\u200B\u2060 marathon\u200D' }],
       ['a line break', { quote: 'I will finish\nthe synthetic report' }],
       ['a leading space', { quote: ' I will finish the synthetic report' }],
       ['text that is not NFC', { quote: 'I will finish the café report' }],
@@ -168,8 +181,8 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
     }
     expect(await db.proposal.count()).toBe(0);
     expect(await db.goal.count()).toBe(0);
-    // A good one, with a day ahead, is taken.
-    expect(await post(candidate({ dueOn: future }))).toMatchObject({ status: 201, body: { outcome: 'filed' } });
+    // A good one, with a day ahead, is taken: his own characters (a curly apostrophe is his) and all.
+    expect(await post(candidate({ dueOn: future, quote: `${CANARY} I’ll run a half marathon by spring ${n + 1}` }))).toMatchObject({ status: 201, body: { outcome: 'filed' } });
   });
 
   it('the database refuses a raw insert with a short or missing quote, as flint_app, under the intake’s own origin and template', async () => {
@@ -223,7 +236,8 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
     const goalCard = (await cardOf(g))!;
     const sourceRef = refOf(g);
     expect(goalCard).toMatchObject({
-      kind: 'goal', origin: 'chat:console-1', action: 'goal.propose', templateId: 'chat.goal', status: 'pending', tainted: false, sensitivity: 'personal', destructive: false, consequential: false,
+      // It asks on its own: never in Approve All, a fresh touch each.
+      kind: 'goal', origin: 'chat:console-1', action: 'goal.propose', templateId: 'chat.goal', status: 'pending', tainted: false, sensitivity: 'personal', destructive: false, consequential: true,
       reason: 'Approving adds it to your suggested goals.',
       args: { goalId: suggestionGoalId(sourceRef), title: g.text, quote: g.quote, dueOn: '2030-03-01', saidAt: g.sourceAt, sourceRef },
       argsProvenance: { quote: { source: 'will', ref: `turn:${g.turnId}`, tainted: false }, title: { source: 'model', tainted: false }, dueOn: { source: 'model', tainted: false }, saidAt: { source: 'event', tainted: false } },
@@ -231,14 +245,14 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
     expect(Math.round((goalCard.expiresAt.getTime() - when.getTime()) / DAY)).toBe(7);
     const commitCard = (await cardOf(c))!;
     expect(commitCard).toMatchObject({
-      kind: 'tool_call', origin: 'chat:console-1', action: 'world.commitment.from_chat', templateId: 'chat.commitment', status: 'pending', sensitivity: 'personal',
+      kind: 'tool_call', origin: 'chat:console-1', action: 'world.commitment.from_chat', templateId: 'chat.commitment', status: 'pending', sensitivity: 'personal', consequential: true,
       reason: 'Approving adds it to the things Flint knows you said you’d do.',
       args: { text: c.text, quote: c.quote, saidAt: c.sourceAt, sourceRef: refOf(c) },
     });
     expect(commitCard.args).not.toHaveProperty('dueOn');
     // The intake's own entry: the source and the day, never a word.
     const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: sourceRef, actor: CANDIDATES_ACTOR } });
-    expect(entry).toMatchObject({ kind: 'decision', decision: 'log', outcome: 'ok', context: 'chat', action: 'goal.propose', inputs: { sourceRef, proposalId: goalCard.id, saidAt: g.sourceAt, goalId: suggestionGoalId(sourceRef) } });
+    expect(entry).toMatchObject({ kind: 'decision', decision: 'log', outcome: 'ok', context: 'chat', action: 'goal.propose', inputs: { sourceRef, turnRef: suggestionTurnRef('console-1', String(g.turnId), 'goal'), proposalId: goalCard.id, saidAt: g.sourceAt, goalId: suggestionGoalId(sourceRef) } });
     // Neither has done anything yet.
     expect(await db.goal.count({ where: { sourceRef } })).toBe(0);
     expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(0);
@@ -557,24 +571,220 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
     expect(bus.sent).toEqual([]);
   });
 
+  it('identical or racing posts make one card and use one of the day’s slots', async () => {
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const day = new Date().toISOString().slice(0, 10);
+    const slots = async () => (await db.actionCounter.findUnique({ where: { action_day: { action: filedCounter('goal.propose'), day } } }))?.count ?? 0;
+    // Eight of the same at once (the reviewer's case: it used to leave one card, three slots gone and five 429s).
+    const c = candidate();
+    const eight = await Promise.all(Array.from({ length: 8 }, () => post(c)));
+    expect(eight.map((r) => r.status).sort()).toEqual([200, 200, 200, 200, 200, 200, 200, 201]);
+    expect(eight.filter((r) => r.status === 200).every((r) => r.body.outcome === 'known')).toBe(true);
+    expect(await db.proposal.count({ where: { action: 'goal.propose', args: { path: ['sourceRef'], equals: refOf(c) } } })).toBe(1);
+    expect(await slots()).toBe(1);
+    // The same source under three different short texts at once: one card, one goal id, one more slot.
+    const d = candidate();
+    const three = await Promise.all(['one', 'two', 'three'].map((t) => post({ ...d, text: `${CANARY} title ${t}` })));
+    expect(three.map((r) => r.status).sort()).toEqual([200, 200, 201]);
+    expect(await db.proposal.count({ where: { action: 'goal.propose', args: { path: ['sourceRef'], equals: refOf(d) } } })).toBe(1);
+    expect(await slots()).toBe(2);
+    // So the day's third distinct goal is still taken, and its fourth is not.
+    expect((await post(candidate())).status).toBe(201);
+    expect((await post(candidate())).status).toBe(429);
+    expect(await slots()).toBe(3);
+    // A card that could not be filed gives its slot back: the database refuses this one (its floor), inside the same transaction.
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    await owner(`ALTER TABLE "Proposal" ADD CONSTRAINT "zz_test_refuse" CHECK (args->>'title' IS DISTINCT FROM 'Synthetic refused title') NOT VALID`);
+    try {
+      const refused = await post(candidate({ text: 'Synthetic refused title' }));
+      expect(refused.status).toBe(400);
+      expect(await slots()).toBe(0);
+    } finally {
+      await owner(`ALTER TABLE "Proposal" DROP CONSTRAINT "zz_test_refuse"`);
+    }
+  });
+
+  it('once a suggestion is turned down, nothing more of that kind is taken from that turn, however it is quoted; the same words in a later turn are a new suggestion', async () => {
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const c = candidate({ quote: `${CANARY} I want to run a half marathon by spring and train every single week` });
+    expect((await post(c)).status).toBe(201);
+    const gid = suggestionGoalId(refOf(c));
+    expect((await call('POST', `/v1/goals/${gid}/dismiss`, {})).status).toBe(200);
+    // The reviewer's rows: the same turn quoted two words shorter, or trimmed by one, used to be filed again.
+    for (const quote of [`${CANARY} I want to run a half marathon by spring and train every`, `${CANARY} I want to run a half marathon by spring`, `I want to run a half marathon`]) {
+      expect(await post({ ...c, quote }), quote).toMatchObject({ status: 200, body: { outcome: 'known' } });
+    }
+    expect(await post({ ...c, text: `${CANARY} another title`, quote: `${CANARY} I want to run a half marathon by spring` })).toMatchObject({ status: 200, body: { outcome: 'known' } });
+    expect((await page()).suggestions.filter((x) => x.title.includes('half marathon') && x.quote.includes('every single week'))).toEqual([]);
+    // Another kind from that turn is not what he turned down; nor are the same words in a later turn.
+    expect((await post({ ...c, kind: 'commitment', quote: `${CANARY} I want to run a half marathon by spring` })).status).toBe(201);
+    expect((await post({ ...c, turnId: 'turn_later' })).status).toBe(201);
+    // A card rejected in Approvals, with his signature, is turned down the same way.
+    const d = candidate({ quote: `${CANARY} I want to learn to sail before the summer comes round` });
+    await post(d);
+    const card = (await cardOf(d))!;
+    await rejectProposal(db, card.id, { approvalId: await key.approve({ subjectId: card.id, action: card.action, argsDigest: card.argsDigest, decision: 'reject' }) }, undefined, 'test');
+    expect(await post({ ...d, quote: `${CANARY} I want to learn to sail` })).toMatchObject({ status: 200, body: { outcome: 'known' } });
+    // And a suggestion that became a proposed goal and was dismissed there.
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const e = candidate({ quote: `${CANARY} I want to restore the old boat in the yard this year` });
+    await post(e);
+    const ran = (await cardOf(e))!;
+    await sign(ran.id);
+    await run(ran.id);
+    expect((await call('POST', `/v1/goals/${suggestionGoalId(refOf(e))}/dismiss`, {})).status).toBe(200);
+    expect(await post({ ...e, quote: `${CANARY} I want to restore the old boat` })).toMatchObject({ status: 200, body: { outcome: 'known' } });
+    // One he made a goal was not turned down: other words of that turn may still be suggested.
+    const f = candidate({ quote: `${CANARY} I want to paint the fence and I want to fix the gate too` });
+    await post(f);
+    const fid = suggestionGoalId(refOf(f));
+    const started = (await call('POST', `/v1/goals/${fid}/start`, { args: {
+      goalId: fid, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: f.text, description: f.quote, horizonAt: null, reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: `${CANARY} done`, check: { kind: 'manual' } }], links: [], plan: null,
+    } })).body.id as string;
+    await sign(started);
+    await run(started);
+    expect((await post({ ...f, quote: `${CANARY} I want to fix the gate too` })).status).toBe(201);
+  });
+
+  it('a waiting card whose goal already exists is not shown as waiting, and Dismiss sets it aside', async () => {
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const c = candidate();
+    await post(c);
+    const sourceRef = refOf(c);
+    const gid = suggestionGoalId(sourceRef);
+    const args = {
+      goalId: gid, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: c.text, description: c.quote, horizonAt: null, reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: `${CANARY} done`, check: { kind: 'manual' } }], links: [], plan: null,
+    };
+    const start = (await call('POST', `/v1/goals/${gid}/start`, { args })).body.id as string;
+    await sign(start);
+    await run(start);
+    // A second card of the same suggestion still waiting (what racing posts could leave before the intake locked its source).
+    const left = { goalId: gid, title: `${CANARY} the same goal, worded again`, quote: c.quote, saidAt: c.sourceAt, sourceRef };
+    await owner(
+      `INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, reason, "expiresAt")
+       VALUES ('prleftwaiting1', 'goal', 'chat:console-1', 'goal.propose', 'chat.goal', $1::jsonb, $2, $3::jsonb, false, 'personal', true, 'x', now() + interval '1 day')`,
+      [JSON.stringify(left), digestOf(left), JSON.stringify({ quote: { source: 'will', ref: `turn:${c.turnId}`, tainted: false } })],
+    );
+    // The goal is active: the tab does not show the card as a suggestion waiting, and it cannot be started twice.
+    expect((await page()).suggestions.find((x) => x.goalId === gid)).toBeUndefined();
+    expect(await call('POST', `/v1/goals/${gid}/start`, { args })).toMatchObject({ status: 409, body: { code: 'status.active' } });
+    // Dismiss sets the leftover card aside (it used to answer "This goal is already active." and leave it waiting).
+    expect(await call('POST', `/v1/goals/${gid}/dismiss`, {})).toMatchObject({ status: 200, body: { ok: true } });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: 'prleftwaiting1' } })).toMatchObject({ status: 'rejected', error: 'You dismissed it.' });
+    expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
+    // With nothing left waiting, Dismiss says where the goal stands.
+    expect(await call('POST', `/v1/goals/${gid}/dismiss`, {})).toMatchObject({ status: 409, body: { code: 'status.active' } });
+  });
+
+  it('a row the panel’s contract does not take is left out and counted: the Suggested and Finished tabs still answer', async () => {
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => void errors.push(a.map(String).join(' ')));
+    try {
+      // The reviewer's title: 84 characters as the database counts them, 154 as a goal's title is counted.
+      const title = `half marathon ${'\u{1F3C3}'.repeat(70)}`;
+      expect([[...title].length, title.length, GoalTitle.safeParse(title).success]).toEqual([84, 154, false]);
+      // The intake no longer takes it...
+      expect((await post(candidate({ text: title }))).status).toBe(400);
+      // ...but a row stored in that state (by an intake from before the fix) must not take a tab down: a proposed goal,
+      const stored = `go${'ab12'.repeat(8)}`;
+      await owner(`INSERT INTO "Goal" (id, title, description, owner, origin, "sourceRef", "updatedAt") VALUES ($1, $2, $3, 'will', 'flint', $4, now())`, [stored, title, `${CANARY} words he said then`, `chat:${'ab12'.repeat(16)}`]);
+      // and a waiting card.
+      const cardSource = `chat:${'cd34'.repeat(16)}`;
+      const waiting = { goalId: suggestionGoalId(cardSource), title, quote: `${CANARY} I want to run a half marathon`, saidAt: new Date().toISOString(), sourceRef: cardSource };
+      await owner(
+        `INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, reason, "expiresAt")
+         VALUES ('prastralcard01', 'goal', 'chat:console-1', 'goal.propose', 'chat.goal', $1::jsonb, $2, $3::jsonb, false, 'personal', true, 'x', now() + interval '1 day')`,
+        [JSON.stringify(waiting), digestOf(waiting), JSON.stringify({ quote: { source: 'will', ref: 'turn:turn_astral', tainted: false } })],
+      );
+      const good = candidate();
+      expect((await post(good)).status).toBe(201);
+      const r = await call('GET', '/v1/goals?tab=suggested');
+      expect(r.status).toBe(200);
+      const tab = r.body as unknown as GoalsPage;
+      const ids = tab.suggestions.map((x) => x.goalId);
+      expect(ids).toContain(suggestionGoalId(refOf(good)));
+      expect(ids).not.toContain(stored);
+      expect(ids).not.toContain(waiting.goalId);
+      expect(tab.goals.map((g) => g.id)).not.toContain(stored);
+      // Counted, by number alone.
+      expect(errors.filter((l) => /^\[goals\] left 1 row\(s\) out of the (suggested|Suggested) tab: not what the panel's contract takes$/.test(l)).length).toBeGreaterThanOrEqual(2);
+      expect(errors).toContain("[goals] left 1 waiting card(s) out of the Suggested tab: not a suggestion's args");
+      // Dismissed by its id (the tab cannot show it), it does not take the Finished tab down either.
+      expect((await call('POST', `/v1/goals/${stored}/dismiss`, {})).status).toBe(200);
+      const f = await call('GET', '/v1/goals?tab=finished');
+      expect(f.status).toBe(200);
+      expect((f.body as unknown as GoalsPage).goals.map((g) => g.id)).not.toContain(stored);
+      expect(errors.some((l) => /left 1 row\(s\) out of the finished tab/.test(l))).toBe(true);
+      expect((await call('GET', '/v1/goals?tab=active')).status).toBe(200);
+      expect(errors.join('\n')).not.toContain('CANARY');
+      expect(errors.join('\n')).not.toContain('marathon');
+      await rejectProposal(db, 'prastralcard01', {}, undefined, 'will:console');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a card’s quote must be Will’s by its provenance, checked in code as well as by the database', () => {
+    const sourceRef = suggestionSourceRef('console-1', 'turn_1', `${CANARY} I want to run a half marathon`);
+    const card = (quote: unknown) => ({
+      kind: 'goal', origin: 'chat:console-1', templateId: 'chat.goal', tainted: false,
+      args: { goalId: suggestionGoalId(sourceRef), title: 'Run a half marathon', quote: `${CANARY} I want to run a half marathon`, saidAt: '2026-10-08T15:00:00.000Z', sourceRef },
+      argsProvenance: quote === undefined ? {} : { quote },
+    });
+    expect(suggestionCardProblem('goal.propose', card({ source: 'will', ref: 'turn:turn_1', tainted: false }))).toBeUndefined();
+    for (const quote of [{ source: 'model', ref: 'turn:turn_1', tainted: false }, { source: 'will', ref: 'turn:turn_1', tainted: true }, { source: 'will', tainted: false }, { source: 'will', ref: 'turn_1', tainted: false }, undefined]) {
+      expect(suggestionCardProblem('goal.propose', card(quote)), JSON.stringify(quote)).toBe('the quote is not Will’s, by a turn');
+    }
+    // And by the turn its provenance names: another turn's is another source.
+    expect(suggestionCardProblem('goal.propose', card({ source: 'will', ref: 'turn:turn_2', tainted: false }))).toBe('the source is not this conversation, turn and quote');
+  });
+
+  it('what Will did with each suggestion is counted once: approving its card, making it a goal himself (a yes, not a no), or turning it down', async () => {
+    await owner(`DELETE FROM "ActionCounter" WHERE action LIKE '%:filed'`);
+    const before = await chatSuggestions(db, { actions: ['goal.propose'] });
+    // The reviewer's three: one made a goal, one dismissed, one approved in Approvals.
+    const [made, dismissed, approved] = [candidate(), candidate(), candidate()];
+    for (const c of [made, dismissed, approved]) expect((await post(c)).status).toBe(201);
+    const mid = suggestionGoalId(refOf(made));
+    const start = (await call('POST', `/v1/goals/${mid}/start`, { args: {
+      goalId: mid, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: made.text, description: made.quote, horizonAt: null, reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: `${CANARY} done`, check: { kind: 'manual' } }], links: [], plan: null,
+    } })).body.id as string;
+    await sign(start);
+    await run(start);
+    await call('POST', `/v1/goals/${suggestionGoalId(refOf(dismissed))}/dismiss`, {});
+    const card = (await cardOf(approved))!;
+    await sign(card.id);
+    await run(card.id);
+    const after = await chatSuggestions(db, { actions: ['goal.propose'] });
+    const delta = Object.fromEntries((Object.keys(after) as Array<keyof typeof after>).map((k) => [k, after[k] - before[k]]));
+    expect(delta).toEqual({ filed: 3, withoutQuote: 0, cleared: 0, executed: 1, made: 1, rejected: 1, expired: 0 });
+  });
+
   it('the P3 report counts them: suggestions filed, each resting on Will’s quote, and what he did with them', async () => {
     const report = await p3Report(db, { tz: 'UTC', planner: true });
     const seven = report.criteria.find((x) => x.n === 7)!;
-    const cards = await db.proposal.findMany({ where: { action: { in: ['goal.propose', 'world.commitment.from_chat'] } }, select: { status: true } });
+    const cards = await db.proposal.findMany({ where: { action: { in: ['goal.propose', 'world.commitment.from_chat'] } }, select: { status: true, error: true, action: true } });
     const of = (s: string) => cards.filter((c) => c.status === s).length;
+    // Set aside by Make It a Goal: his yes, counted as that and not as a rejection.
+    const made = cards.filter((c) => c.status === 'rejected' && c.action === 'goal.propose' && c.error === 'A newer version of this card replaced it.').length;
+    expect(made).toBeGreaterThanOrEqual(3);
     // Six were planted with words Will never said in that turn, or another turn's: the database let them in (a quote, his, untainted),
     // and the runtime refused each when it ran. The criterion reads the quote floor, which every one of them meets.
     expect(seven).toMatchObject({
       n: 7, pass: true,
-      values: { suggestions: cards.length, withoutQuote: 0, approved: of('executed'), rejected: of('rejected'), expired: of('expired'), addedAlone: 0 },
+      values: { suggestions: cards.length, withoutQuote: 0, approved: of('executed'), madeGoals: made, rejected: of('rejected') - made, expired: of('expired'), addedAlone: 0 },
     });
     expect(seven.values.suggestions).toBeGreaterThan(20);
-    expect(seven.detail).toMatch(/^\d+ suggestions from chat; 0 without your own quoted words; \d+ too old to read; you approved \d+ and rejected \d+, and \d+ expired$/);
+    expect(seven.detail).toMatch(/^\d+ suggestions from chat; 0 without your own quoted words; \d+ too old to read; you approved \d+, made \d+ into goals yourself and rejected \d+, and \d+ expired$/);
     expect(JSON.stringify(report)).not.toContain('CANARY');
   });
 });
 
-describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE)', () => {
+describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, with the database floor switched on for the test)', () => {
   let urls: TestUrls;
   let db: Db;
   let key: Awaited<ReturnType<typeof enrollTestKey>>;
@@ -586,7 +796,8 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE)', (
       conversationId: 'console-2', turnId: `turn_${n}`, sourceAt: new Date(now.getTime() - 60_000).toISOString(), ...over,
     };
   };
-  const take = (c: Record<string, unknown>, now: Date) => takeCandidate({ db, tz: 'UTC', now: () => now }, c);
+  /** The intake as it will be once the database's floor is in: the ALONE path is on. (Today it is off: see the test below.) */
+  const take = (c: Record<string, unknown>, now: Date) => takeCandidate({ db, tz: 'UTC', now: () => now, floor: true }, c);
   const refOf = (c: { conversationId?: unknown; turnId?: unknown; quote?: unknown }) => suggestionSourceRef(String(c.conversationId), String(c.turnId), String(c.quote));
   /** A policy change Will signs and the runtime applies: the promotion's rows, with the caps given. */
   async function promote(rows: Array<{ pattern: string; dailyCap: number }>) {
@@ -648,6 +859,23 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE)', (
     // The next day starts again.
     const next = new Date(now.getTime() + DAY);
     expect(await take(candidate(next), next)).toEqual({ outcome: 'added' });
+  });
+
+  it('as it ships, nothing from chat runs without a card: under the very same signed rule the intake files a card and adds nothing', async () => {
+    expect(CHAT_FLOOR_IN_DATABASE).toBe(false);
+    const now = new Date(Date.now() - 2 * DAY);
+    const goals = await db.goal.count();
+    const commitments = await db.entity.count({ where: { kind: 'commitment' } });
+    const g = candidate(now);
+    const c = candidate(now, { kind: 'commitment' });
+    // No seam: the intake as the route calls it.
+    expect(await takeCandidate({ db, tz: 'UTC', now: () => now }, g)).toEqual({ outcome: 'filed' });
+    expect(await takeCandidate({ db, tz: 'UTC', now: () => now }, c)).toEqual({ outcome: 'filed' });
+    expect(await db.goal.count()).toBe(goals);
+    expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(commitments);
+    const [card] = await db.$queryRaw<Array<{ status: string; consequential: boolean }>>`SELECT status, consequential FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(g)}`;
+    expect(card).toEqual({ status: 'pending', consequential: true });
+    expect(await db.auditEntry.count({ where: { correlationId: refOf(g), kind: 'action' } })).toBe(0);
   });
 
   it('a signed rule with a smaller cap stops sooner; one with an invented cap still stops at 3 and 10', async () => {

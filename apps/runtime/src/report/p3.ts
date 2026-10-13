@@ -106,8 +106,8 @@ export async function p3Report(db: Db, config: Pick<Config, 'tz'> & { planner?: 
     detail: q.filed === 0 && alone === 0
       ? 'no suggestion from chat yet (the server files them once it is told to; the database refuses one without a quote)'
       : `${plural(q.filed, 'suggestion')} from chat; ${q.withoutQuote} without your own quoted words; ${q.cleared} too old to read; `
-        + `you approved ${q.executed} and rejected ${q.rejected}, and ${q.expired} expired${alone ? `; ${alone} more added under a rule you signed` : ''}`,
-    values: { suggestions: q.filed, withoutQuote: q.withoutQuote, cleared: q.cleared, approved: q.executed, rejected: q.rejected, expired: q.expired, addedAlone: alone },
+        + `you approved ${q.executed}, made ${q.made} into goals yourself and rejected ${q.rejected}, and ${q.expired} expired${alone ? `; ${alone} more added under a rule you signed` : ''}`,
+    values: { suggestions: q.filed, withoutQuote: q.withoutQuote, cleared: q.cleared, approved: q.executed, madeGoals: q.made, rejected: q.rejected, expired: q.expired, addedAlone: alone },
   });
 
   // 8. The goals block in chat stays within 300 tokens, and its size is measured turn by turn.
