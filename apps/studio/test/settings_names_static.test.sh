@@ -39,6 +39,7 @@ check() { if eval "$2"; then :; else print -r -- "FAIL $1"; fail=1; fi }
 not_settings=(
   # Set for one command by a test or by the deploy gate, never kept anywhere.
   FLINT_REQUIRE_DB          # install-runtime.sh, for its own test run: the database tests must not be skipped
+  FLINT_DEPLOY_GATE         # install-runtime.sh, for its own test run: only the gate's tests may read this Mac's database settings
   FLINT_REQUIRE_SWIFT       # install-server.sh, for its own test run: whether the Swift checks must run
   FLINT_REQUIRE_REHEARSAL   # install-server.sh and run_rehearsal.sh, for one run: the rehearsal must run, never be skipped
   FLINT_REHEARSE            # typed by hand before install-server.sh: run the rebuild rehearsal in this deploy's gate
