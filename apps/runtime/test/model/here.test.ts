@@ -16,6 +16,8 @@ import { PLACE_ASK_EVERY_MS, PLACE_MAX_AGE_MS } from '@flint/policy';
 import { LocalModels } from '../../src/model/here';
 import { judge } from '../../src/triage/judge';
 import { planDiff, type PlanFacts } from '../../src/goals/planner';
+import { estimate } from '../../src/predict/reason';
+import { SYNTHETIC_FACTS } from '../predict/reason-facts';
 import { facts as eventFacts } from '../triage/helpers';
 import { hangs, listening, tags, type Listened } from '../ollama-kit';
 
@@ -277,7 +279,7 @@ describe('the one reader of Ollama’s lists', () => {
 });
 
 /** Every file in the runtime that asks a local model. A new one is added here, and to the callers below. */
-const LOCAL_CALLERS = ['goals/planner.ts', 'triage/judge.ts'];
+const LOCAL_CALLERS = ['goals/planner.ts', 'predict/reason.ts', 'triage/judge.ts'];
 
 // ── every caller ────────────────────────────────────────────────────────────
 
@@ -312,6 +314,11 @@ const CALLERS: Array<[string, Caller, unknown]> = [
     'a goal review’s plan stage',
     (ollama, o, models, n) => planDiff(PLAN, { ollama, ...gates(n), resolve: () => [], fetch: o.fetch, models }),
     { reasonCode: 'on_track', ops: [] },
+  ],
+  [
+    'a prediction’s second opinion',
+    (ollama, o, models, n) => estimate(SYNTHETIC_FACTS, { ollama, ...gates(n), fetch: o.fetch, models }),
+    { probability: 0.6, reasonCode: 'weekday_pattern' },
   ],
 ];
 
