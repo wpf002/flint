@@ -239,8 +239,10 @@ describe.skipIf(NO_DB)('governance in the database', () => {
         await c.query('COMMIT');
       });
       expect((await pgError(app(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [rid]))).message).toMatch(/switched off/);
+      // Who switched it off is the database's to say (the policy off guard): with no signed card behind the change, the
+      // role that wrote it, whatever the writer called itself. A card's approval is named in policy-off-guard-db.test.ts.
       const h = await app(`SELECT actor, changed FROM "RowChange" WHERE "rowId" = $1`, [rid]);
-      expect(h.rows).toEqual([{ actor: 'will:console', changed: { active: [true, false] } }]);
+      expect(h.rows).toEqual([{ actor: 'flint_app', changed: { active: [true, false] } }]);
       expect((await pgError(app(`INSERT INTO "RowChange" (id, "tableName", "rowId", actor, changed) VALUES ('x', 'ActionPolicy', $1, 'me', '{}')`, [rid]))).message).toMatch(/permission denied/);
       expect((await pgError(owner(`UPDATE "RowChange" SET actor = 'someone' WHERE "rowId" = $1`, [rid]))).message).toMatch(/append-only/);
     });
