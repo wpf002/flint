@@ -235,6 +235,12 @@ describe('goals and commitments from chat, in the extractor', () => {
     ]);
     expect(got).toEqual([]);
     expect(stats.rejected['suggestion-quote']).toBe(5);
+    // The length alone: eleven characters of his own whole words are too few to be a quote; twelve are enough.
+    const short = turn('c2', `${CANARY} New goals for the year: learn Swift, and learn Kotlin properly this time`);
+    const edge = await pass({ c2: [short] }, [good({ quote: 'learn Swift', text: 'learn Swift' }), good({ quote: 'learn Kotlin', text: 'learn Kotlin' })]);
+    expect('learn Swift'.length).toBe(11);
+    expect(edge.got.map((g) => g.quote)).toEqual(['learn Kotlin']);
+    expect(edge.stats.rejected['suggestion-quote']).toBe(1);
   });
 
   it('dropped: no turn, a turn the batch does not have, and an entry that is not the shape; the facts beside it are kept', async () => {
