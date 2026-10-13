@@ -36,8 +36,10 @@ import { join } from 'node:path';
 import { ROUTE_FIELDS } from '../../src/route-log';
 import { HISTORY_GAP } from '../../src/goals-now';
 import { PRIVATE_TOOL_REFUSED, PRIVATE_TURN_NOTE } from '../../src/outside-ai';
+import { SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT } from '../../src/memory-extract';
+import { WAITING } from '../../src/goal-candidates';
 import { startMockLocalServer, type MockLocalServer } from '../mock-local-server';
-import { chatFacts, forward, reservePort, startCloudStub, startOllamaStub, type CloudStub, type OllamaStub } from './stubs';
+import { chatFacts, forward, reservePort, startCloudStub, startOllamaStub, startRuntimeStub, type CloudStub, type OllamaStub, type RuntimeStub } from './stubs';
 import { routeLines, scratch, sleep, startServer, writeMcpConfig, type Running } from './rig';
 
 const MAIN = 'main-model:30b';
@@ -98,13 +100,17 @@ const ALIAS = 'mine:latest';
 const MEMORY_MODEL = 'memory-model:7b';
 const EXTRACT_PRIVATE = 'Keep this private: I keep the passport in the JASPERLARK cabinet, keep that in mind.';
 const EXTRACT_OPEN = 'I keep the ladder in the CORALSWIFT garage, keep that in mind.';
+/** The server's token for its runtime, as install-runtime.sh would have left it under the scratch HOME (a made-up one). */
+const RUNTIME_TOKEN = { path: ['tokens', 'runtime.token'], text: 'ab'.repeat(32) };
+/** A message that sets a goal, for a server whose extractor is asked to suggest goals from chat (FLINT_EXTRACT_CANDIDATES). */
+const GOAL_SAID = 'I want to finish the PEARLFINCH boat deck by spring, keep that in mind.';
 const PRIVATE_LEARNED = 'Will keeps the passport in the JASPERLARK cabinet.';
 const OPEN_LEARNED = 'Will keeps the ladder in the CORALSWIFT garage.';
 
 let modes: { ollama: OllamaStub; cloud: CloudStub; mcp: ReturnType<typeof writeMcpConfig>; srv: Running };
 let remote: { cloud: CloudStub; there: OllamaStub; srv: Running };
-let alias: { ollama: OllamaStub; cloud: CloudStub; srv: Running };
-let wire: { mock: MockLocalServer; cloud: CloudStub; srv: Running };
+let alias: { ollama: OllamaStub; cloud: CloudStub; runtime: RuntimeStub; srv: Running };
+let wire: { mock: MockLocalServer; cloud: CloudStub; runtime: RuntimeStub; srv: Running };
 let late: { mock: MockLocalServer; cloud: CloudStub; srv: Running; port: number; closers: Array<() => Promise<void>> };
 let tier: { ollama: OllamaStub; mock: MockLocalServer; srv: Running };
 let helper: { lm: MockLocalServer; other: OllamaStub; srv: Running };
@@ -148,7 +154,9 @@ beforeAll(async () => {
   const startAlias = async () => {
     const ollama = await startOllamaStub({ [ALIAS]: { loaded: true, contextLength: 16384, remoteHost: 'https://ollama.com:443' }, [MEMORY_MODEL]: { loaded: false }, 'nomic-embed-text': { family: 'nomic-bert' } });
     const cloud = await startCloudStub();
-    // The memory curator's reply: the fact each turn it is shown holds, with Will's own words for it.
+    const runtime = await startRuntimeStub();
+    // The memory curator's reply: the fact each turn it is shown holds, with Will's own words for it. And, asked or
+    // not, a goal it makes of each turn (P3 part 5): a model that would suggest one from a private turn too.
     ollama.replyFor = (body, last) => {
       if (body.format === undefined || !last.includes('TURNS:')) return undefined;
       const turns = last.split('TURNS:')[1] ?? '';
@@ -156,7 +164,11 @@ beforeAll(async () => {
         ...(turns.includes('JASPERLARK') ? [{ turn: 1, quote: 'I keep the passport in the JASPERLARK cabinet', fact: PRIVATE_LEARNED, category: 'other', supersedes: [] }] : []),
         ...(turns.includes('CORALSWIFT') ? [{ turn: 1, quote: 'I keep the ladder in the CORALSWIFT garage', fact: OPEN_LEARNED, category: 'other', supersedes: [] }] : []),
       ];
-      return JSON.stringify({ facts });
+      const suggestions = [
+        ...(turns.includes('JASPERLARK') ? [{ turn: 1, kind: 'goal', quote: 'I keep the passport in the JASPERLARK cabinet', text: 'keep the passport in the JASPERLARK cabinet', dueOn: '' }] : []),
+        ...(turns.includes('CORALSWIFT') ? [{ turn: 1, kind: 'goal', quote: 'I keep the ladder in the CORALSWIFT garage', text: 'keep the ladder in the CORALSWIFT garage', dueOn: '' }] : []),
+      ];
+      return JSON.stringify({ facts, suggestions });
     };
     const srv = await startServer({
       dir: runs.alias.dir,
@@ -164,20 +176,38 @@ beforeAll(async () => {
         OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: 'mine', OLLAMA_NUM_CTX: '16384', ...cloudEnv(cloud), OPENAI_API_KEY: 'sk-process-test-not-a-key',
         // Memory extraction on a local model, and its first pass a moment after boot instead of a minute and a half.
         FLINT_MEMORY_BRAIN: 'local', FLINT_MEMORY_MODEL: MEMORY_MODEL, FLINT_EXTRACT_FIRST_PASS_MS: '300',
+        // ...which is also asked for the goals Will set in chat, and has a runtime on this Mac to hand them to.
+        FLINT_EXTRACT_CANDIDATES: '1', FLINT_RUNTIME_URL: runtime.origin,
       },
       // A conversation store from before: a turn Will kept private, and an ordinary one.
-      seed: [{ path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { 'kept-1': [storedTurn('kept-1', 'turn_kept', EXTRACT_PRIVATE, { private: true })], 'open-1': [storedTurn('open-1', 'turn_open', EXTRACT_OPEN)] } }) }],
+      seed: [RUNTIME_TOKEN, { path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { 'kept-1': [storedTurn('kept-1', 'turn_kept', EXTRACT_PRIVATE, { private: true })], 'open-1': [storedTurn('open-1', 'turn_open', EXTRACT_OPEN)] } }) }],
     });
-    return { ollama, cloud, srv };
+    return { ollama, cloud, runtime, srv };
   };
   /** An Ollama whose one chat model is a cloud model under a plain name, speaking both of Ollama's wires. */
   const aliasServer = () => startMockLocalServer({ kind: 'ollama', models: { [ALIAS]: { loaded: true, remoteHost: 'https://ollama.com:443', replies: [{ text: 'ALIAS-ANSWERED-ON-OLLAMA-SERVERS.' }] } } });
   // N1 (a): the settings call that Ollama a plain OpenAI-compatible server, so nothing about its KIND says to ask its listing.
+  // (Its memory extraction runs on that same cloud model under a plain name, with goals from chat switched on and a
+  // runtime to file them with: P3 part 5 asks the one locality rule whether the extractor's model is on this Mac.)
   const startWire = async () => {
     const mock = await aliasServer();
     const cloud = await startCloudStub();
-    const srv = await startServer({ dir: runs.wire.dir, env: { FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_SERVER: 'openai', FLINT_LOCAL_BASE_URL: mock.baseURL, FLINT_LOCAL_MODEL: ALIAS, OLLAMA_HOST: mock.origin, ...cloudEnv(cloud) } });
-    return { mock, cloud, srv };
+    const runtime = await startRuntimeStub();
+    // Asked for facts or for anything else, this "model" answers with a goal it made of Will's words.
+    mock.replyFor = (q) =>
+      q.path === '/api/chat' && q.body?.format !== undefined
+        ? { text: JSON.stringify({ facts: [], suggestions: [{ turn: 1, kind: 'goal', quote: 'I want to finish the PEARLFINCH boat deck by spring', text: 'finish the PEARLFINCH boat deck', dueOn: '' }] }) }
+        : undefined;
+    const srv = await startServer({
+      dir: runs.wire.dir,
+      env: {
+        FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_SERVER: 'openai', FLINT_LOCAL_BASE_URL: mock.baseURL, FLINT_LOCAL_MODEL: ALIAS, OLLAMA_HOST: mock.origin, ...cloudEnv(cloud),
+        FLINT_MEMORY_BRAIN: 'local', FLINT_MEMORY_MODEL: ALIAS, FLINT_EXTRACT_FIRST_PASS_MS: '300',
+        FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1', FLINT_RUNTIME_URL: runtime.origin,
+      },
+      seed: [RUNTIME_TOKEN, { path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { 'goal-1': [storedTurn('goal-1', 'turn_goal', GOAL_SAID)] } }) }],
+    });
+    return { mock, cloud, runtime, srv };
   };
   // N1 (b): nothing is listening at the model server's address when Flint boots (a login race). It comes up later (./stubs forward).
   const startLate = async () => {
@@ -256,8 +286,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await Promise.all([modes, remote, alias, wire, late, tier, helper].map((s) => s?.srv.stop()));
   await Promise.all([
-    modes?.ollama.close(), modes?.cloud.close(), remote?.cloud.close(), remote?.there.close(), alias?.ollama.close(), alias?.cloud.close(),
-    wire?.mock.close(), wire?.cloud.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.ollama.close(), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
+    modes?.ollama.close(), modes?.cloud.close(), remote?.cloud.close(), remote?.there.close(), alias?.ollama.close(), alias?.cloud.close(), alias?.runtime.close(),
+    wire?.mock.close(), wire?.cloud.close(), wire?.runtime.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.ollama.close(), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
   ]);
   for (const r of Object.values(runs)) r.cleanup();
 });
@@ -685,6 +715,27 @@ describe('the real server, as a process: a cloud model under a plain name, and w
     expect(cloud.saw('CORALSWIFT')).toBe(false);
   });
 
+  // P3 part 5 (goals from chat, FLINT_EXTRACT_CANDIDATES=1), on an extractor whose model IS on this Mac: the ordinary
+  // turn is asked for a goal too, and the one whose quote is Will's own is handed to the runtime. The turn he kept
+  // private is asked for facts alone: a suggestion is his own sentence on its way to being a goal.
+  it('goals from chat: an ordinary turn’s suggestion is filed with the runtime on this Mac; a private turn is never asked for one', async () => {
+    const { runtime } = alias;
+    await waitFor(() => runtime.candidates().length > 0);
+    expect(runtime.candidates()).toEqual([
+      { kind: 'goal', text: 'Keep the ladder in the CORALSWIFT garage', quote: EXTRACT_OPEN, conversationId: 'open-1', turnId: 'turn_open', sourceAt: expect.stringMatching(/^20\d\d-\d\d-\d\dT/) },
+    ]);
+    const asked = (word: string) => extractions().find((c) => chatFacts(c.body).last.includes(word))!;
+    // The ordinary turn's call asked for goals (the lines in the prompt, and the reply held to a schema with them).
+    expect(chatFacts(asked('CORALSWIFT').body).last).toContain(SUGGEST_GOALS_PROMPT);
+    expect(JSON.stringify(asked('CORALSWIFT').body?.format)).toContain('suggestions');
+    // The private turn's call did not, and the goal its reply carried anyway was not read.
+    expect(chatFacts(asked('JASPERLARK').body).last).not.toContain(SUGGEST_GOALS_PROMPT);
+    expect(JSON.stringify(asked('JASPERLARK').body?.format)).not.toContain('suggestions');
+    expect(runtime.saw('JASPERLARK')).toBe(false);
+    // One suggestion was read (the ordinary turn's), and one turn was not asked: counts, and none of his words.
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: [^\n]*rejected suggestion-private-turn=1; 1 suggestion\(s\) → kept 1, filed 1; /);
+  });
+
   it('what it learned from the private turn is marked, and what it learned from the ordinary one is not', () => {
     const facts = (JSON.parse(srv.read('memory', 'knowledge.json')) as { facts: Array<{ text: string; fromPrivate?: boolean; conversationId?: string }> }).facts;
     expect(facts.find((f) => f.text === PRIVATE_LEARNED)).toMatchObject({ fromPrivate: true, conversationId: 'kept-1' });
@@ -806,6 +857,33 @@ describe('the real server, as a process: a cloud model under a plain name, asked
     const r = await srv.post('/chat', { conversationId: 'wire-3', message: 'An ordinary synthetic question.' });
     expect(r.events?.[0]).toMatchObject({ type: 'meta', brain: 'frontier' });
     expect(blocked(srv)).toEqual([]);
+  });
+
+  // P3 part 5 meets N1. Goals from chat are asked only of an extractor whose model is on this Mac, by the one rule
+  // (brainIsLocal). Here the setting is on, a runtime is there to file with, and the extractor's model is the cloud
+  // model under a plain name, on a server the settings call a plain OpenAI-compatible one.
+  it('goals from chat, with the local model a cloud model under a plain name: no suggestion is asked for, and nothing is filed', async () => {
+    const { mock, runtime, srv } = wire;
+    expect(await waitFor(() => /\[memory-extract\] v2 local pass: sent 1 turn/.test(srv.log()))).toBe(true);
+    // The pass ran, on that model, as an ordinary turn's always could in Cloud mode: it was asked for facts...
+    const mined = mock.requests.filter((q) => q.path === '/api/chat' && q.body?.format !== undefined);
+    expect(mined.length).toBeGreaterThan(0);
+    expect(mined.some((q) => chatFacts(q.body).last.includes('PEARLFINCH'))).toBe(true);
+    // ...and for nothing else: no call's prompt asks for goals or commitments, and no reply is held to a schema with them.
+    for (const q of mined) {
+      const prompt = chatFacts(q.body).last;
+      expect(prompt).not.toContain(SUGGEST_PROMPT);
+      expect(prompt).not.toContain(SUGGEST_GOALS_PROMPT);
+      expect(JSON.stringify(q.body?.format)).not.toContain('suggestions');
+    }
+    // The goal its reply carried anyway was not read: the runtime was handed nothing.
+    await sleep(150);
+    expect(runtime.candidates()).toEqual([]);
+    expect(runtime.saw('PEARLFINCH')).toBe(false);
+    // The log says the setting is waiting for a model on this Mac, and carries none of his words.
+    expect(srv.log()).toContain(WAITING);
+    expect(srv.log()).not.toMatch(/suggestion\(s\) → kept/);
+    expect(srv.log()).not.toContain('PEARLFINCH');
   });
 
   it('N1 (b): the model server was not up when Flint booted: nothing is asked of it until it has said what it is, and then it is a cloud model', async () => {

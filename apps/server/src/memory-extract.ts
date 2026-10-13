@@ -539,7 +539,9 @@ export interface ExtractorOptions {
   /**
    * Also ask for the goals Will set (FLINT_EXTRACT_CANDIDATES=1). Only with
    * the local brain (`kind` local) and somewhere to hand them (`onCandidate`):
-   * otherwise it is off, and the prompt is what it always was. Given as a
+   * otherwise it is off, and the prompt is what it always was. And never of a
+   * call about turns he kept private (`keptPrivate`): those are asked for
+   * facts alone. Given as a
    * question, it is asked again at the start of every pass (does the model
    * run on this Mac right now?): a pass it says no to asks for facts alone.
    */
@@ -822,12 +824,17 @@ export class MemoryExtractor {
           const key = `${toSend[0]!.cid}@${toSend[0]!.at}`;
           state.budget.calls++;
           stats.calls++;
-          const ask = this.prompt(toSend, room, asking);
+          // A call about turns Will kept private asks for facts alone, whatever the pass asks (a call is all turns
+          // of one kind of mark, so it is all of them or none). A suggestion is his own sentence on its way to
+          // being a goal, and his goals can be sent to every brain (FLINT_GOALS_TO_FRONTIER): what he asked to
+          // keep on this Mac is never put on that road. The facts are learned and marked as ever.
+          const asked = asking && !toSend.some((it) => it.private) ? asking : undefined;
+          const ask = this.prompt(toSend, room, asked);
           let reply: BrainReply | undefined;
           let why: BrainFailure | undefined;
           let detail: string | undefined;
           try {
-            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asking ? { suggestions: asking } : {}) });
+            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);
@@ -893,15 +900,17 @@ export class MemoryExtractor {
             // Suggestions: only when this pass asked, and only from the local brain's own reply (a text reply is the
             // frontier's, and is never read for them). The facts above are stored; whatever happens in this step
             // (a bad zone, a hook that throws) is counted, and the watermark below still moves.
-            if (asking && reply && 'facts' in reply) {
+            if (asked && reply && 'facts' in reply) {
               try {
-                await this.suggest(reply.suggestions ?? [], toSend, stats, asking);
+                await this.suggest(reply.suggestions ?? [], toSend, stats, asked);
               } catch (err) {
                 stats.rejected['suggestion-failed'] = (stats.rejected['suggestion-failed'] ?? 0) + 1;
                 console.error(`[memory-extract] the suggestions step failed (${errorKind(err)}); the facts are kept and the pass goes on`);
               }
             }
           }
+          // Counted, so the log says why a pass that asks made no suggestion of them (no word of any turn is in it).
+          if (asking && !asked) stats.rejected['suggestion-private-turn'] = (stats.rejected['suggestion-private-turn'] ?? 0) + toSend.length;
           sent += toSend.length;
           stats.turnsSent += toSend.length;
         }

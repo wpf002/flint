@@ -1009,6 +1009,15 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
   reply is never read. With the setting off, the prompt and the request to Ollama are byte for
   byte what they were (a test pins both by their sha256), and turning it on does not re-read
   old chats.
+- **Never from a turn Will kept private.** A call about such turns (Local Only, a message that
+  asked to stay private, any turn of Local mode: `src/private-turns.ts`) asks for facts alone,
+  whatever the pass asks, and a suggestion in its reply is not read. A suggestion is his own
+  sentence on its way to being a goal, and his goals can be sent to every brain
+  (`FLINT_GOALS_TO_FRONTIER=on`); what he asked to keep on this Mac is not put on that road.
+  The facts from it are learned and marked as ever, and the pass line counts the turns that were
+  not asked (`suggestion-private-turn`). So nothing is suggested from chat taken in Local mode.
+  A turn answered with his goals is asked, as before, and its suggestion goes only to a runtime
+  on this Mac.
 - **The quote check comes first, and no model takes part in it.** A suggestion is kept only
   if its quote, 12 characters or more, is in Will's own message of the turn it names, as whole
   words. Curly quotes and runs of whitespace are made alike on both sides; nothing else is.

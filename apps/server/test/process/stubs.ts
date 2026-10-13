@@ -240,3 +240,37 @@ export async function forward(port: number, toPort: number): Promise<{ close(): 
       }),
   };
 }
+
+export interface RuntimeStub {
+  origin: string;
+  requests: Array<StubRequest & { auth: string }>;
+  /** The suggestions it was handed (POST /v1/goals/candidates), in order. */
+  candidates(): Array<Record<string, unknown>>;
+  saw(needle: string): boolean;
+  close(): Promise<void>;
+}
+
+/**
+ * The runtime, as far as a suggestion from chat goes: it files what it is
+ * handed on POST /v1/goals/candidates and answers 404 to everything else (the
+ * server lives with a runtime that has nothing for it). Every request is kept.
+ */
+export async function startRuntimeStub(): Promise<RuntimeStub> {
+  const requests: RuntimeStub['requests'] = [];
+  const server = createServer(async (req, res) => {
+    const path = (req.url ?? '/').split('?')[0]!;
+    const body = parse(await readBody(req));
+    requests.push({ method: req.method ?? 'GET', path, body, auth: String(req.headers.authorization ?? '') });
+    const filed = req.method === 'POST' && path === '/v1/goals/candidates';
+    res.writeHead(filed ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(filed ? { outcome: 'filed' } : { error: 'not found' }));
+  });
+  const origin = `http://127.0.0.1:${await listen(server)}`;
+  return {
+    origin,
+    requests,
+    candidates: () => requests.filter((r) => r.method === 'POST' && r.path === '/v1/goals/candidates').map((r) => r.body ?? {}),
+    saw: (needle) => requests.some((r) => JSON.stringify(r.body ?? '').includes(needle)),
+    close: () => close(server),
+  };
+}
