@@ -5,9 +5,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, prisma, withClient } from './db';
+import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
 import { grantLines } from '../src/backup/grants';
 import { buildReference, catalogLines, checkoutMigrations } from '../src/backup/catalog';
+import { p5Kit } from './p5';
 
 const GRANTS_FIXTURE = join(__dirname, 'fixtures', 'grants.json');
 const grants = (owner: string): Promise<string[]> => withClient(owner, (c) => grantLines(c, { everyone: true }));
@@ -72,6 +73,40 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
   });
 
+  const P5 = '20261014000100_p5_assets';
+  const runDown = (dir: string) => withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, dir, 'down.sql'), 'utf8')));
+  /** A function as the catalog has it: its body, and the settings and grants a down.sql must put back with it. */
+  const functionsNamed = (names: string[]) => withClient(owner, async (c) => (await c.query(
+    `SELECT p.proname, p.prosrc, p.provolatile, p.prosecdef, array_to_string(p.proconfig, ';') AS config,
+            EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) AS public
+     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public' AND p.proname = ANY ($1) ORDER BY 1`, [names])).rows);
+
+  // P5's down.sql drops the record of which approvals its cards used. A card that is approved or running
+  // could then act once more after a re-deploy, so the rollback refuses to start while one is: nothing is
+  // dropped, and it runs once each such card has finished, failed or expired.
+  it('P5\'s down.sql refuses to run while a task, asset or review card is approved or running, and drops nothing', async () => {
+    const k = await p5Kit(URLS!);
+    const refusedFor = (n: number) => ({ code: '55000', message: `p5_assets is not rolled back while ${n} task, asset or review card(s) are approved or running: let each finish, fail or expire first` });
+    const there = async () => withClient(owner, async (c) => (await c.query(`SELECT to_regclass('public."TaskApprovalUse"') IS NOT NULL AND to_regprocedure('resolution_task_check()') IS NOT NULL AS ok`)).rows[0].ok);
+    // A card that only waits holds nothing back: nobody signed it, so nothing of it could be used twice.
+    await k.card('task.cancel', { taskId: 'tanone1' }, { stage: 'pending' });
+    const approved = await k.card('asset.enable', { assetId: 'asnone' }, { stage: 'approved' });
+    expect(await pgError(runDown(P5))).toMatchObject(refusedFor(1));
+    // Running, and under any of the names a P5 guard acts on (a reviewer's or the Hive's dispatch among them).
+    const running = await k.card('hive.dispatch_job', { taskId: 'tanone2' });
+    const review = await k.card('review.local', { taskId: 'tanone3' }, { stage: 'approved' });
+    expect(await pgError(runDown(P5))).toMatchObject(refusedFor(3));
+    expect(await there()).toBe(true);
+    // Each ends: the first fails, the second finishes, the third fails too. A card of another kind that is approved was never P5's to hold.
+    await k.app(`UPDATE "Proposal" SET status = 'failed', error = 'Synthetic end', "executedAt" = now() WHERE id = ANY ($1)`, [[approved.pid, review.pid]]);
+    await k.finish(running.pid);
+    await k.card('world.sync.git', { source: 'git' }, { kind: 'tool_call', stage: 'approved' });
+    // (The next test runs it, on this state.)
+    expect((await withClient(owner, async (c) => (await c.query(
+      `SELECT count(*)::int AS n FROM "Proposal" WHERE status IN ('approved', 'executing') AND (kind IN ('task', 'spend') OR action ~ '^(task[.]|asset[.]enable$|review[.])' OR action = 'hive.dispatch_job')`)).rows[0].n))).toBe(0);
+  });
+
   // The newest migration is the one a rollback undoes. Its down.sql alone, then a
   // deploy, gives back exactly the schema: migrate status lists it as not applied,
   // what it did is undone, and the redeploy diffs empty. (An older migration's
@@ -80,14 +115,27 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
     const newest = migrationDirs().at(-1)!;
     // Something true only while the newest migration is applied, to see it go and come back. A new migration names its own here.
-    // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to.)
+    // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first table.)
     const applied: Record<string, string> = {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
         AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
+      [P5]: `(SELECT to_regclass('public."Asset"') IS NOT NULL)`,
     };
     expect(applied[newest], `say what ${newest} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[newest]} AS t`)).rows[0]!.t);
     expect(await there()).toBe(true);
+    // P5 replaced one of P3's functions. While it is applied, plan_step_guard is P3's body with P5's one rule added before its last line.
+    const p3 = readFileSync(join(MIGRATIONS, '20261009000000_p3_goals', 'migration.sql'), 'utf8');
+    const p3From = p3.indexOf('AS $$', p3.indexOf('CREATE FUNCTION plan_step_guard()')) + 'AS $$'.length;
+    const p3Body = p3.slice(p3From, p3.indexOf('\n$$;', p3From) + 1);
+    if (newest === P5) {
+      const during = (await functionsNamed(['plan_step_guard']))[0]!.prosrc as string;
+      const lastLine = '  RETURN NEW;\nEND;\n';
+      expect(p3Body.endsWith(lastLine)).toBe(true);
+      expect(during.startsWith(p3Body.slice(0, -lastLine.length))).toBe(true);
+      expect(during.endsWith(lastLine)).toBe(true);
+      expect(during).toContain(`NEW."kind" = 'asset_task'`);
+    }
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
     expect(await there()).toBe(false);
     // Nothing else of the schema went with it.
@@ -97,12 +145,38 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     }
     // Run again on what it left (the state a rollback half done would be in): it tolerates that, as its header says.
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    if (newest === P5) {
+      // Its down.sql puts P3's own body back to the letter (as P3's migration wrote it), with the settings and
+      // grants it had, and takes away everything it added to older tables.
+      const restored = await functionsNamed(['plan_step_guard']);
+      expect(restored.map((r) => [r.proname, r.provolatile, r.prosecdef, r.config, r.public])).toEqual([
+        ['plan_step_guard', 'v', false, 'search_path=public, pg_temp', false],
+      ]);
+      expect(restored[0]!.prosrc).toBe(p3Body);
+      const leftovers = await withClient(owner, async (c) => (await c.query(
+        `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('Proposal_valid_p5', 'Proposal_review_guard', 'Proposal_review_floor',
+                   'Proposal_p5_digest_check', 'Entity_forgotten_p5', 'Resolution_for_task', 'Task_step_undone', 'Approval_clock', 'Approval_signed_for')) AS triggers,
+                (SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'public'
+                   AND ((table_name = 'Proposal' AND column_name IN ('reviewId', 'reviewRequired')) OR (table_name = 'Approval' AND column_name = 'signedFor'))) AS columns,
+                (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
+                   AND c.relname IN ('Asset', 'Task', 'TaskOutput', 'Review', 'ReviewGate', 'TaskApprovalUse', 'review_coverage', 'review_gate_violations', 'Proposal_reviewId_idx', 'Approval_signedFor_createdAt_idx')) AS relations,
+                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
+                   AND (p.proname ~ '^(p5|asset|task|review)_' OR p.proname IN ('proposal_review_floor', 'proposal_review_guard', 'entity_forgotten_p5', 'resolution_task_check', 'approval_clock', 'approval_signed_for'))) AS functions,
+                (SELECT count(*)::int FROM pgboss.queue WHERE name IN ('tasks.tick', 'tasks.run', 'tasks.check', 'reviews.run')) AS queues`)).rows[0]);
+      expect(leftovers).toEqual({ triggers: 0, columns: 0, relations: 0, functions: 0, queues: 0 });
+      // Nothing of the migrations before it went: P4's two columns, the policy floor's rules, and what P4 gave P3's helpers.
+      expect(await withClient(owner, async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public' AND column_name IN ('filled', 'readTo')`)).rows[0]!.n)).toBe(2);
+      expect(await withClient(owner, async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('Proposal_policy_floor', 'Proposal_clock', 'HealthCheck_clock') AND NOT tgisinternal`)).rows[0]!.n)).toBe(3);
+      expect((await functionsNamed(['p3_bind_approval']))[0]!.prosrc).toContain('pg_trigger_depth()');
+    }
     const status = await prisma(['migrate', 'status'], owner);
     expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${newest}`));
     await migrateUp(owner);
     expect(await there()).toBe(true);
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
+    // Re-applied on top of P3's body: P5's rule is back.
+    if (newest === P5) expect((await functionsNamed(['plan_step_guard']))[0]!.prosrc).toContain(`NEW."kind" = 'asset_task'`);
   });
 
   // The floor: nobody reaches a Flint database, or its public schema, by default. The Mac Flint runs on had this

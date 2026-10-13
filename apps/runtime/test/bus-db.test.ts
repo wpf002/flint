@@ -69,8 +69,26 @@ describe.skipIf(NO_DB)('the job bus on pg-boss', () => {
     expect(QUEUES.scheduled).toEqual(expect.arrayContaining(p4.slice(0, 5)));
     const dead = Object.fromEntries((await b.boss.getQueues()).map((q) => [q.name, q.deadLetter]));
     for (const q of p4) expect(dead[q], q).toBe('dead');
+    // P5's four, made by its migration (nothing sends to them yet): one on a schedule, three per task or per review.
+    const p5 = ['tasks.tick', 'tasks.run', 'tasks.check', 'reviews.run'];
+    expect(ALL_QUEUES).toEqual(expect.arrayContaining(p5));
+    expect(p5.map((q) => policy[q])).toEqual(['singleton', 'stately', 'stately', 'stately']);
+    expect(QUEUES.assets).toEqual(p5.slice(1));
+    expect(QUEUES.scheduled).toContain('tasks.tick');
+    for (const q of p5) expect(dead[q], q).toBe('dead');
     // Nothing is scheduled on them, and nothing waits in them.
-    expect((await b.boss.getSchedules()).filter((s) => p4.includes(s.name))).toEqual([]);
+    expect((await b.boss.getSchedules()).filter((s) => [...p4, ...p5].includes(s.name))).toEqual([]);
+    expect((await owner(`SELECT count(*)::int AS n FROM pgboss.job WHERE name = ANY ($1)`, [[...p4, ...p5]])).rows[0].n).toBe(0);
+  });
+
+  it('a task or review queue dedupes on its key: one waiting job per task, and per review', async () => {
+    const b = await start();
+    for (const q of QUEUES.assets) {
+      expect(await b.boss.send(q, { id: 'ta1' }, { singletonKey: 'ta1' }), q).toBeTruthy();
+      expect(await b.boss.send(q, { id: 'ta1' }, { singletonKey: 'ta1' }), q).toBeNull();
+      expect(await b.boss.send(q, { id: 'ta2' }, { singletonKey: 'ta2' }), q).toBeTruthy();
+      expect((await jobs(q)).length, q).toBe(2);
+    }
   });
 
   it('missing queue → degraded start: it refuses to start and names the queue', async () => {
