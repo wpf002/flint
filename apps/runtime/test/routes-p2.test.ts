@@ -21,6 +21,10 @@ import { runInternal } from '../src/governance/internal';
 import { processEvent, type WorkerDeps } from '../src/triage/worker';
 import { raise } from '../src/health/watchdog';
 import type { Source, SourceObservation, SourceRun } from '../src/sources/types';
+import { modelsHere } from './ollama-kit';
+
+// Ollama has listed the model as its own (every local call asks first): what makes a model "not here" is model/here.test.ts's.
+modelsHere(['muse-glimmer:30b']);
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SERVER = 'server-token-0123456789abcdef';

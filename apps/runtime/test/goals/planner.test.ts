@@ -34,8 +34,11 @@ import { labelCouldBe, labelOf } from '../../src/goals/items';
 import { modelSlot } from '../../src/model/slot';
 import { judge } from '../../src/triage/judge';
 import { facts as eventFacts } from '../triage/helpers';
+import { modelsHere } from '../ollama-kit';
 
 const OLLAMA = { url: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b' };
+// Ollama has listed these models as its own: what makes a model "not here" is model-here.test.ts's.
+modelsHere([OLLAMA.model, 'm']);
 const NOW = new Date('2026-10-12T15:00:00Z');
 const TZ = 'America/Chicago';
 const reply = (content: string, done_reason = 'stop') => new Response(JSON.stringify({ model: 'm', message: { role: 'assistant', content }, done: true, done_reason, prompt_eval_count: 10, eval_count: 5 }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -174,12 +177,14 @@ describe('planDiff (stub Ollama)', () => {
       // Code only: a comment may name what the code must never do.
       const code = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
       expect(code, f).not.toMatch(/internal\/complete|anthropic|openai|perplexity|tavily|frontier|notifyServer|https?:\/\//i);
-      // The only fetch is the plan stage's, through the scoped fetch; the only provider is Ollama's.
-      if (/\bfetch\b/.test(code)) expect(f.endsWith('planner.ts') || f.endsWith('batch.ts'), f).toBe(true);
+      // The only fetches are the plan stage's and the question every local call asks first (is the model on this Mac?),
+      // each through the scoped fetch; the only provider is Ollama's.
+      if (/\bfetch\b/.test(code)) expect(f.endsWith('planner.ts') || f.endsWith('batch.ts') || f.endsWith(join('model', 'here.ts')), f).toBe(true);
       if (/Provider\b/.test(code)) expect(code, f).toMatch(/import \{ OllamaProvider \} from '@flint\/core\/ollama'/);
     }
     const planner = readFileSync(join(dirs[0]!, 'planner.ts'), 'utf8');
     expect(planner).toContain("scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }]");
+    expect(readFileSync(join(dirs[1]!, 'here.ts'), 'utf8')).toContain("scopedFetch([{ origin, pathPrefix: '/api/tags', methods: ['GET'] }]");
   });
 
   it('non-template output is refused: extra keys, free text, an unknown template, ids the goal does not have, done', async () => {

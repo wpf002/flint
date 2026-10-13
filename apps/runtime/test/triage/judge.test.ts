@@ -10,8 +10,11 @@ import { judge, judgePrompt, needsJudgement, MODEL_REQUESTS } from '../../src/tr
 import { chatLoad } from '../../src/triage/load';
 import { decide } from '../../src/triage/triage';
 import { facts, noCode } from './helpers';
+import { modelsHere } from '../ollama-kit';
 
 const OLLAMA = { url: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b' };
+// Ollama has listed the model as its own: what makes a model "not here" is model-here.test.ts's.
+modelsHere([OLLAMA.model]);
 const issue = () => facts({ created: true }, { name: 'Build is broken on main', state: { number: 7, state: 'open', labels: ['bug'] }, taintedPaths: ['name', 'state.title'] });
 const reply = (content: string, done_reason = 'stop') => new Response(JSON.stringify({ model: 'm', message: { role: 'assistant', content }, done: true, done_reason, prompt_eval_count: 10, eval_count: 5 }), { status: 200, headers: { 'content-type': 'application/json' } });
 

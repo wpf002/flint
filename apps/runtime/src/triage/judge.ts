@@ -11,7 +11,11 @@
  *    first checks that no chat turn is running and claims a slot of the
  *    120-an-hour cap (triage.local_model), and so is counted even when it fails.
  *  - One request at a time: each takes the process's model slot first
- *    (model/slot.ts), which a goal review's plan stage shares.
+ *    (model/slot.ts), which a goal review's plan stage and a prediction's
+ *    second opinion share.
+ *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
+ *    that is not this machine, or a model Ollama's own listing does not say
+ *    runs here is "unavailable" before anything is asked, claimed or sent.
  *  - Text someone else wrote goes only inside a <data> block, clipped.
  *  - Failing, it says why: invalid (replies, none usable), unavailable (no
  *    reply at all), capped, or deferred (chat is busy: try again later).
@@ -21,6 +25,7 @@ import { OllamaProvider } from '@flint/core/ollama';
 import { dataBlock, entityRef, REASON_CODES } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 import { modelSlot } from '../model/slot.js';
+import { LOCAL_MODELS, type LocalModels } from '../model/here.js';
 import type { Load } from './load.js';
 import type { EventFacts } from './verdict.js';
 
@@ -83,6 +88,8 @@ export interface JudgeDeps {
   claim: () => Promise<boolean>;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** What is known of the models on this Mac (tests): the process's own record when not given. */
+  models?: LocalModels;
 }
 
 export type Judged =
@@ -93,6 +100,8 @@ class Stop extends Error {}
 
 export async function judge(f: EventFacts, d: JudgeDeps): Promise<Judged> {
   const started = Date.now();
+  // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
+  if (!(await (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch))) return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: 0 };
   const origin = new URL(d.ollama.url).origin;
   const post = scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }], d.fetch ?? fetch, d.timeoutMs ?? 90_000);
   let requests = 0;

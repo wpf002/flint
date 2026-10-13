@@ -13,6 +13,10 @@
  *  - Checked three times: the reply ended on its own (not cut off); zod, strict,
  *    with a rule per operation; then resolve(), which holds every id against
  *    the plan, the goal's links and its checks. Any failure uses up an attempt.
+ *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
+ *    that is not this machine, or a model Ollama's own listing does not say
+ *    runs here is "unavailable" before anything is asked, claimed or sent. A
+ *    goal's words never reach a model that runs somewhere else.
  *  - Before EVERY request, in order: the process's model slot (one local
  *    request at a time, shared with triage); at most 2 requests a review,
  *    counted across the runs of a review that yielded to chat; chat's load
@@ -31,6 +35,7 @@ import { OllamaProvider } from '@flint/core/ollama';
 import { GOAL_BUDGETS, dataBlock, estimateTokens, type CheckState } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 import { modelSlot } from '../model/slot.js';
+import { LOCAL_MODELS, type LocalModels } from '../model/here.js';
 import type { Load } from '../triage/load.js';
 import { STEP_TEMPLATES, STEP_TEMPLATE_IDS, SUGGESTED_STATUSES, type ReplyOp } from './steps.js';
 
@@ -209,6 +214,8 @@ export interface PlanDeps<T> {
   resolve: (ops: readonly ReplyOp[]) => T | null;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** What is known of the models on this Mac (tests): the process's own record when not given. */
+  models?: LocalModels;
 }
 
 export type Planned<T> =
@@ -219,6 +226,10 @@ class Stop extends Error {}
 
 export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned<T>> {
   const started = Date.now();
+  // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
+  if (!(await (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch))) {
+    return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: Math.max(0, d.used ?? 0), claimed: d.claimed ?? false };
+  }
   const origin = new URL(d.ollama.url).origin;
   const post = scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }], d.fetch ?? fetch, d.timeoutMs ?? 90_000);
   let requests = Math.max(0, d.used ?? 0);
