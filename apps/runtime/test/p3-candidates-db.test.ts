@@ -38,7 +38,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { GoalTitle, digestOf, suggestionGoalId, suggestionSourceRef, suggestionTurnRef, type GoalsPage } from '@flint/policy';
+import { GoalTitle, digestOf, localWallTime, suggestionGoalId, suggestionSourceRef, suggestionTurnRef, type GoalsPage } from '@flint/policy';
 import { NO_DB, freshDb, withClient, withoutChatGoalFloor, id, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { buildApp } from '../src/app';
@@ -980,6 +980,33 @@ describe.skipIf(NO_DB)('suggestions from chat after a promotion Will signed (ALO
     const later = new Date(Date.now() - 6 * DAY);
     for (let i = 0; i < 3; i++) expect(await take(candidate(later), later)).toEqual({ outcome: 'added' });
     await expect(take(candidate(later), later)).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('the day he named is the end of that day wherever Will is, and the database takes it from the real intake: Chicago, Kiritimati (UTC+14) and Pago Pago (UTC-11), under the rule and by card', async () => {
+    await retire();
+    await promote([{ pattern: 'goal.propose', dailyCap: 3 }]);
+    const now = new Date();
+    const zones = ['America/Chicago', 'Pacific/Kiritimati', 'Pacific/Pago_Pago'];
+    const day = '2030-06-01';
+    const horizonOf = async (c: Record<string, unknown>) => (await db.goal.findUniqueOrThrow({ where: { id: suggestionGoalId(refOf(c)) } })).horizonAt?.toISOString();
+    // Under the rule: the intake's own arithmetic, the entry's day, and the database's reading of both.
+    for (const zone of zones) {
+      const c = candidate(now, { dueOn: day });
+      expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'added' });
+      expect(await horizonOf(c), zone).toBe(localWallTime(zone, day, 23, 59).toISOString());
+    }
+    // By card: filed with no rule in force, signed, and carried out in that zone.
+    await retire();
+    for (const zone of zones) {
+      const c = candidate(now, { dueOn: day });
+      expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'filed' });
+      const [card] = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(c)}`;
+      const waiting = await db.proposal.findUniqueOrThrow({ where: { id: card!.id } });
+      await approveProposal(db, waiting.id, await key.approve({ subjectId: waiting.id, action: waiting.action, argsDigest: waiting.argsDigest }), undefined, 'test');
+      expect(await runInternal(db, waiting.id, undefined, zone, 'test'), zone).toMatchObject({ goalId: suggestionGoalId(refOf(c)) });
+      expect(await horizonOf(c), zone).toBe(localWallTime(zone, day, 23, 59).toISOString());
+    }
+    expect([localWallTime('Pacific/Kiritimati', day, 23, 59).toISOString(), localWallTime('Pacific/Pago_Pago', day, 23, 59).toISOString()]).toEqual(['2030-06-01T09:59:00.000Z', '2030-06-02T10:59:00.000Z']);
   });
 
   it('the database counts too: with the runtime’s own counters gone, the seventh goal in 24 hours is not added, and is filed as a card', async () => {

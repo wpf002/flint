@@ -11,6 +11,9 @@
  *  - Under a rule Will signed: only with the intake's audit entry on record,
  *    only the words that entry's digest covers, and never more than twice the
  *    day's limit in any 24 hours.
+ *  - Only at READ COMMITTED: above it a transaction would read an old picture
+ *    (the count, a rule since switched off, a card since ended), so it is
+ *    refused on every path.
  *  - Goals proposed before the floor are read, started and dismissed as before.
  *  - The runtime's role cannot switch the guard off, and an error names ids only.
  * Synthetic text only.
@@ -18,7 +21,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
-import { SUGGESTIONS_PER_DAY, digestOf, suggestionGoalId } from '@flint/policy';
+import { SUGGESTIONS_PER_DAY, digestOf, localWallTime, suggestionGoalId } from '@flint/policy';
 import { NO_DB, freshDb, withClient, withoutChatGoalFloor, pgConfig, pgError, id, HEX, type TestUrls } from './db';
 
 type Q = (sql: string, params?: unknown[]) => Promise<pg.QueryResult>;
@@ -30,6 +33,7 @@ const SAID = '2026-10-08T15:00:00.000Z';
 const INTAKE = 'runtime:goals.candidates';
 const REFUSED = (gid: string) => `goal ${gid}: a goal from chat is added only by its own signed card, or under a rule Will signed`;
 const SHAPE = (gid: string) => `goal ${gid}: a goal from chat is Will's own, personal and untainted, and named by its source`;
+const LEVEL = (gid: string) => `goal ${gid}: a goal from chat is added at READ COMMITTED`;
 const DEF = { successCriteria: [{ id: 'c1', text: 'Synthetic check text', check: { kind: 'manual' } }], horizonAt: null, reviewCadence: 'P1W' };
 
 describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Will signed', () => {
@@ -89,11 +93,11 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
   const finish = (pid: string) => app(`UPDATE "Proposal" SET status = 'executed', result = '{}'::jsonb, "executedAt" = now() WHERE id = $1`, [pid]);
   /** A goal from chat as the runtime writes one (its own card's title and quote), or as told. */
   const flintGoal = (q: Q, src: string, over: Record<string, unknown> = {}, extra = '') => {
-    const v: Record<string, unknown> = { id: gidOf(src), title: TITLE, description: QUOTE, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, sourceRef: src, horizonAt: null, successCriteria: [], nexusProjectId: null, ...over };
+    const v: Record<string, unknown> = { id: gidOf(src), title: TITLE, description: QUOTE, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, sourceRef: src, horizonAt: null, successCriteria: [], nexusProjectId: null, reviewCadence: 'P1W', ...over };
     return q(
-      `INSERT INTO "Goal" (id, title, description, owner, origin, sensitivity, tainted, "sourceRef", "horizonAt", "successCriteria", "nexusProjectId", "updatedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, now()) ${extra}`,
-      [v.id, v.title, v.description, v.owner, v.origin, v.sensitivity, v.tainted, v.sourceRef, v.horizonAt, JSON.stringify(v.successCriteria), v.nexusProjectId],
+      `INSERT INTO "Goal" (id, title, description, owner, origin, sensitivity, tainted, "sourceRef", "horizonAt", "successCriteria", "nexusProjectId", "reviewCadence", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, now()) ${extra}`,
+      [v.id, v.title, v.description, v.owner, v.origin, v.sensitivity, v.tainted, v.sourceRef, v.horizonAt, JSON.stringify(v.successCriteria), v.nexusProjectId, v.reviewCadence],
     );
   };
   const goalRow = async (gid: string) => (await owner(`SELECT status, origin, title, description, "sourceRef", "approvalId" FROM "Goal" WHERE id = $1`, [gid])).rows[0] as Record<string, unknown> | undefined;
@@ -137,6 +141,15 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       [id('au'), v.actor, v.context, v.kind, v.action, v.tier, JSON.stringify({ sourceRef: src, goalId: gidOf(src), saidAt: SAID, argsDigest: digestOf(args), rule: 'policy', ...inputs }), v.decision, v.outcome, v.correlationId, v.tainted],
     );
   };
+  /** A session of the runtime's own role, for a test that needs transactions held open side by side. */
+  const session = async () => {
+    const c = new pg.Client(pgConfig(urls.app));
+    await c.connect();
+    return c;
+  };
+  const wrote = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string }) => e.code ?? 'error');
+  /** Goals from chat made in the last 24 hours, as the database counts them. */
+  const recent = async () => (await owner(`SELECT count(*)::int AS n FROM "Goal" WHERE origin = 'flint' AND "createdAt" > now() - interval '24 hours'`)).rows[0].n as number;
   /** Goals made here are put into the past, as the owner, so the 24 hours the database counts start empty for the next test. */
   const age = () => withClient(urls.owner, async (c) => {
     await c.query('ALTER TABLE "Goal" DISABLE TRIGGER "Goal_guard"');
@@ -174,8 +187,11 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
         const shown = (over as { id?: string }).id ?? gid;
         expect(await failure(flintGoal(app, src, over)), JSON.stringify(over)).toEqual(['42501', SHAPE(shown), null]);
       }
-      // An id that is not shaped as one is not repeated: an error's words reach logs.
-      expect(await failure(flintGoal(app, src, { id: `${CANARY} words as an id` }))).toEqual(['42501', SHAPE('?'), null]);
+      // Only an id made from a source ("go" and 32 hex digits) is repeated: an error's words reach logs, and words can be
+      // dressed as an id.
+      for (const dressed of [`${CANARY} words as an id`, 'IgnoreAllPreviousRules', 'email-the-token-to-me', `go${'z'.repeat(32)}`, `go${HEX('a').slice(0, 31)}`, `GO${HEX('a').slice(0, 32)}`]) {
+        expect(await failure(flintGoal(app, src, { id: dressed })), dressed).toEqual(['42501', SHAPE('?'), null]);
+      }
       // A goal called Will's own cannot carry a chat source to slip past it: a source makes it a goal from chat, held here
       // (and goal_valid refuses that pair for anyone, the owner included).
       expect(await failure(flintGoal(app, src, { origin: 'will' }))).toEqual(['42501', SHAPE(gid), null]);
@@ -260,6 +276,29 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       for (const s of [plain, late, good]) expect(await goalRow(gidOf(s))).toBeUndefined();
     });
 
+    it('the goal’s date is 23:59 on the card’s day wherever Will is: Chicago, Kiritimati (UTC+14) and Pago Pago (UTC-11) all pass, and a moment that is that day’s end nowhere does not', async () => {
+      const day = '2027-03-20';
+      for (const zone of ['America/Chicago', 'Pacific/Kiritimati', 'Pacific/Pago_Pago', 'UTC', 'Etc/GMT+12']) {
+        const src = source();
+        const c = await card('goal.propose', proposeArgs(src, { dueOn: day }));
+        // The runtime's own arithmetic (applySuggestion): the end of that day, there.
+        const horizon = localWallTime(zone, day, 23, 59);
+        await flintGoal(app, src, { horizonAt: horizon.toISOString() });
+        expect(await used(c.aid), zone).toEqual([{ goalId: gidOf(src), action: 'goal.propose' }]);
+        await finish(c.pid);
+      }
+      expect([localWallTime('Pacific/Kiritimati', day, 23, 59).toISOString(), localWallTime('Pacific/Pago_Pago', day, 23, 59).toISOString()]).toEqual(['2027-03-20T09:59:00.000Z', '2027-03-21T10:59:00.000Z']);
+      // Not the end of that day anywhere: the day before at noon UTC (the 20th has begun only east of UTC+12, and is
+      // nowhere near over), an hour too early for the farthest east, an hour too late for the farthest west, days off.
+      const src = source();
+      const c = await card('goal.propose', proposeArgs(src, { dueOn: day }));
+      for (const horizonAt of ['2027-03-19T12:00:00.000Z', '2027-03-19T23:59:00.000Z', '2027-03-21T12:00:00.000Z', '2027-03-22T09:59:00.000Z', '2027-03-18T10:59:00.000Z']) {
+        expect(await failure(flintGoal(app, src, { horizonAt })), horizonAt).toEqual(['42501', REFUSED(gidOf(src)), null]);
+      }
+      expect(await used(c.aid)).toEqual([]);
+      await age();
+    });
+
     it('a card for another goal does not cover it, nor does this goal’s card cover another source', async () => {
       const [mine, other] = [source(), source()];
       const c = await card('goal.propose', proposeArgs(other));
@@ -311,6 +350,42 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       expect(await goalRow(gid)).toEqual({ status: 'active', origin: 'flint', title: TITLE, description: QUOTE, sourceRef: src, approvalId: go.aid });
       // One approval, one goal, one transaction: the insert and the start are the same use.
       expect(await used(go.aid)).toEqual([{ goalId: gid, action: 'goal.activate' }]);
+      await finish(go.pid);
+      await age();
+    });
+
+    it('the row is what he signed to start, all of it: other words, checks, cadence or date than the start card’s are refused, and nothing is spent', async () => {
+      const src = source();
+      const gid = gidOf(src);
+      await card('goal.propose', proposeArgs(src), { stage: 'pending' });
+      const signed = { successCriteria: DEF.successCriteria, reviewCadence: 'P2W', horizonAt: '2027-03-01T23:59:00.000Z' };
+      const go = await card('goal.activate', activateArgs(src, signed));
+      const unsigned = [{ id: 'zz', text: `${CANARY} a check Will never saw`, check: { kind: 'manual' } }];
+      for (const over of [
+        { description: `${CANARY} words he did not sign` }, { description: '' }, { title: `${CANARY} another title` },
+        { successCriteria: unsigned }, { successCriteria: [] }, { successCriteria: [...DEF.successCriteria, ...unsigned] },
+        { reviewCadence: 'P1W' }, { reviewCadence: 'P1D' },
+        { horizonAt: null }, { horizonAt: '2031-01-01T00:00:00.000Z' }, { horizonAt: '2027-03-01T23:58:00.000Z' },
+      ]) {
+        expect(await failure(flintGoal(app, src, { ...signed, ...over })), JSON.stringify(over)).toEqual(['42501', REFUSED(gid), null]);
+      }
+      expect(await used(go.aid)).toEqual([]);
+      expect(await goalRow(gid)).toBeUndefined();
+      // A start signed with no date covers no dated row, and one whose date is not a time covers nothing (and nothing of it is cast).
+      const [undated, odd] = [source(), source()];
+      for (const [s, horizon] of [[undated, null], [odd, 'tomorrow, or 2027-03-01']] as const) {
+        await card('goal.propose', proposeArgs(s), { stage: 'pending' });
+        await card('goal.activate', activateArgs(s, { ...signed, horizonAt: horizon }));
+        expect(await failure(flintGoal(app, s, signed)), String(horizon)).toEqual(['42501', REFUSED(gidOf(s)), null]);
+      }
+      expect(await code(flintGoal(app, odd, { ...signed, horizonAt: null }))).toBe('42501');
+      // Exactly what he signed lands, and starts in the same transaction.
+      await inTx(async (q) => {
+        await flintGoal(q, src, signed);
+        await q(`UPDATE "Goal" SET status = 'active', "approvalId" = $2, "nextReviewAt" = now() WHERE id = $1`, [gid, go.aid]);
+      });
+      expect(await goalRow(gid)).toMatchObject({ status: 'active', approvalId: go.aid });
+      await inTx((q) => flintGoal(q, undated, { ...signed, horizonAt: null }), false);
       await finish(go.pid);
       await age();
     });
@@ -433,11 +508,104 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
         if (ok) await flintGoal(app, s, { description: words });
         else expect(await code(flintGoal(app, s, { description: words }))).toBe('42501');
       }
-      // With a day: the entry carries it, its digest covers it, and the goal's date falls on it.
+      // With a day: the entry carries it, its digest covers it, and the goal's date is the end of that day wherever Will is
+      // (the farthest east and the farthest west both pass), and no other moment.
       const dated = source();
       await entry(app, dated, {}, { dueOn: '2027-03-20', argsDigest: digestOf(proposeArgs(dated, { dueOn: '2027-03-20' })) });
-      expect(await code(flintGoal(app, dated, { horizonAt: '2027-04-20T23:59:00.000Z' }))).toBe('42501');
-      await flintGoal(app, dated, { horizonAt: '2027-03-20T23:59:00.000Z' });
+      for (const horizonAt of ['2027-04-20T23:59:00.000Z', '2027-03-19T12:00:00.000Z', '2027-03-21T12:00:00.000Z']) expect(await code(flintGoal(app, dated, { horizonAt })), horizonAt).toBe('42501');
+      await inTx((q) => flintGoal(q, dated, { horizonAt: localWallTime('Pacific/Kiritimati', '2027-03-20', 23, 59).toISOString() }), false);
+      await inTx((q) => flintGoal(q, dated, { horizonAt: localWallTime('Pacific/Pago_Pago', '2027-03-20', 23, 59).toISOString() }), false);
+      await flintGoal(app, dated, { horizonAt: localWallTime('America/Chicago', '2027-03-20', 23, 59).toISOString() });
+      await retire();
+      await age();
+    });
+
+    it('a rule he signed with no scope counts however its empty scope is stored: SQL NULL or a JSON null', async () => {
+      await retire();
+      await age();
+      const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
+      const pc = await card('policy.change', { rows: [{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3, expiresAt }] });
+      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, "dailyCap", scope, reason, "approvalId", "expiresAt") VALUES ($1, 'goal.propose', 'alone', 3, 'null'::jsonb, 'Synthetic rule', $2, $3)`, [id('pol'), pc.aid, expiresAt]);
+      await finish(pc.pid);
+      expect((await owner(`SELECT jsonb_typeof(scope) AS t, scope IS NULL AS missing FROM "ActionPolicy" WHERE active`)).rows).toEqual([{ t: 'null', missing: false }]);
+      const src = source();
+      await entry(app, src);
+      await flintGoal(app, src);
+      expect(await goalRow(gidOf(src))).toMatchObject({ status: 'proposed' });
+      await retire();
+      await age();
+    });
+
+    it('the count is of goals from chat only: six goals of Will’s own, made today, do not hold one back', async () => {
+      await retire();
+      await age();
+      await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+      for (let i = 0; i < 6; i++) await app(`INSERT INTO "Goal" (id, title, description, owner, origin, "updatedAt") VALUES ($1, 'Synthetic own goal', '', 'will', 'will', now())`, [id('gw')]);
+      expect(await recent()).toBe(0);
+      const src = source();
+      await entry(app, src);
+      await flintGoal(app, src);
+      expect(await recent()).toBe(1);
+      await retire();
+      await age();
+    });
+
+    it('one at a time: with one place left, the second of two open transactions waits on the guard’s lock, and is refused when the first lands; it lands when the first does not', async () => {
+      await retire();
+      await age();
+      await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+      for (let i = 0; i < 5; i++) {
+        const s = source();
+        await entry(app, s);
+        await flintGoal(app, s);
+      }
+      /** Is this session waiting on an advisory lock (the guard's), with its insert not yet answered? */
+      const waiting = async (pid: number) => {
+        for (let i = 0; i < 100; i++) {
+          const { rows } = await owner(`SELECT count(*)::int AS n FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted`, [pid]);
+          if (rows[0].n === 1) return true;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return false;
+      };
+      for (const firstLands of [false, true]) {
+        const [a, b] = [source(), source()];
+        await entry(app, a);
+        await entry(app, b);
+        const [one, two] = [await session(), await session()];
+        try {
+          await one.query('BEGIN');
+          await two.query('BEGIN');
+          // The first takes the last place and holds its transaction open: not committed, so not yet counted by anyone else.
+          await flintGoal(on(one), a);
+          const pid = (await two.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+          let answered = false;
+          const second = wrote(flintGoal(on(two), b)).then((r) => {
+            answered = true;
+            return r;
+          });
+          // The second does not read a count that is about to be wrong: it waits.
+          expect(await waiting(pid)).toBe(true);
+          expect(answered).toBe(false);
+          await one.query(firstLands ? 'COMMIT' : 'ROLLBACK');
+          // And is answered by what then stands: refused at the bound, or let in when the place was given back.
+          expect(await second, firstLands ? 'the first landed' : 'the first did not').toBe(firstLands ? '42501' : 'ok');
+          await two.query(firstLands ? 'ROLLBACK' : 'COMMIT');
+        } finally {
+          await one.end();
+          await two.end();
+        }
+        expect(await recent()).toBe(6);
+        expect([await goalRow(gidOf(a)), await goalRow(gidOf(b))].map((g) => g?.status ?? null)).toEqual(firstLands ? ['proposed', null] : [null, 'proposed']);
+        // The place that was taken is given back for the second round (the newest goal is put a few days into the past).
+        if (!firstLands) {
+          await withClient(urls.owner, async (c) => {
+            await c.query('ALTER TABLE "Goal" DISABLE TRIGGER "Goal_guard"');
+            await c.query(`UPDATE "Goal" SET "createdAt" = "createdAt" - interval '3 days' WHERE id = $1`, [gidOf(b)]);
+            await c.query('ALTER TABLE "Goal" ENABLE TRIGGER "Goal_guard"');
+          });
+        }
+      }
       await retire();
       await age();
     });
@@ -482,6 +650,169 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       const c = await card('goal.propose', proposeArgs(carded));
       await flintGoal(app, carded);
       await finish(c.pid);
+      await retire();
+      await age();
+    });
+  });
+
+  describe('only at READ COMMITTED', () => {
+    const LEVELS = ['REPEATABLE READ', 'SERIALIZABLE'] as const;
+    /** One insert in a transaction opened at this level, rolled back whatever it answers. */
+    const at = (level: string, write: (q: Q) => Promise<unknown>) => withClient(urls.app, async (c) => {
+      await c.query(`BEGIN ISOLATION LEVEL ${level}`);
+      try {
+        return await failure(write(on(c)));
+      } finally {
+        await c.query('ROLLBACK');
+      }
+    });
+
+    it('each of the three ways in is refused above it, with its real card or rule in place, and lands at it', async () => {
+      await retire();
+      await age();
+      // 1. Its own executing card.
+      const own = source();
+      const c1 = await card('goal.propose', proposeArgs(own));
+      // 2. Will's signed start of a waiting suggestion.
+      const started = source();
+      await card('goal.propose', proposeArgs(started), { stage: 'pending' });
+      const c2 = await card('goal.activate', activateArgs(started));
+      // 3. A rule he signed, and the intake's entry.
+      await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+      const ruled = source();
+      await entry(app, ruled);
+      const ways: Array<[string, (q: Q) => Promise<unknown>]> = [
+        [own, (q) => flintGoal(q, own)], [started, (q) => flintGoal(q, started, { successCriteria: DEF.successCriteria })], [ruled, (q) => flintGoal(q, ruled)],
+      ];
+      for (const level of LEVELS) {
+        for (const [src, write] of ways) expect(await at(level, write), `${level} ${src}`).toEqual(['42501', LEVEL(gidOf(src)), null]);
+      }
+      // Set for the whole session, or as the session's default, it is the same refusal.
+      for (const set of [`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`, `SET default_transaction_isolation = 'repeatable read'`]) {
+        expect(await withClient(urls.app, async (c) => {
+          await c.query(set);
+          return failure(flintGoal(on(c), own));
+        }), set).toEqual(['42501', LEVEL(gidOf(own)), null]);
+      }
+      expect([await used(c1.aid), await used(c2.aid), await recent()]).toEqual([[], [], 0]);
+      // At READ COMMITTED (said outright, and as the default) each lands.
+      await withClient(urls.app, async (c) => {
+        await c.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+        await flintGoal(on(c), own);
+        await c.query('COMMIT');
+      });
+      await flintGoal(app, started, { successCriteria: DEF.successCriteria });
+      await flintGoal(app, ruled);
+      expect(await recent()).toBe(3);
+      // The migration owner is still not held to it, at any level (a fixture, a repair by hand).
+      const fixture = source();
+      await withClient(urls.owner, async (c) => {
+        await c.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+        await flintGoal(on(c), fixture);
+        await c.query('ROLLBACK');
+      });
+      await finish(c1.pid);
+      await retire();
+      await age();
+    });
+
+    it('an old picture lets nothing in: a session opened before the rule was switched off, before a row held it back, or before its card ended, adds nothing after', async () => {
+      await retire();
+      await age();
+      for (const level of LEVELS) {
+        // The rule, switched off after the session took its picture of the database.
+        const [rid] = await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+        const off = await session();
+        const held = await session();
+        const ended = await session();
+        try {
+          for (const c of [off, held, ended]) {
+            await c.query(`BEGIN ISOLATION LEVEL ${level}`);
+            await c.query('SELECT count(*) FROM "ActionPolicy"');
+          }
+          const [a, b, own] = [source(), source(), source()];
+          const mine = await card('goal.propose', proposeArgs(own));
+          await ended.query('SELECT count(*) FROM "Proposal"');
+          // Elsewhere, since: the card fails, and the rule is switched off.
+          await app(`UPDATE "Proposal" SET status = 'failed', error = 'Synthetic end', "executedAt" = now() WHERE id = $1`, [mine.pid]);
+          await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [rid]);
+          await entry(on(off), a);
+          expect(await failure(flintGoal(on(off), a)), `${level}: rule switched off`).toEqual(['42501', LEVEL(gidOf(a)), null]);
+          expect(await failure(flintGoal(on(ended), own)), `${level}: card ended`).toEqual(['42501', LEVEL(gidOf(own)), null]);
+          // The rule again, and then a wider row that holds it back, signed after the third session's picture.
+          await held.query('ROLLBACK');
+          await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+          await held.query(`BEGIN ISOLATION LEVEL ${level}`);
+          await held.query('SELECT count(*) FROM "ActionPolicy"');
+          await rule([{ pattern: 'goal.*', tier: 'approval' }]);
+          await entry(on(held), b);
+          expect(await failure(flintGoal(on(held), b)), `${level}: held back`).toEqual(['42501', LEVEL(gidOf(b)), null]);
+          for (const c of [off, held, ended]) await c.query('ROLLBACK');
+          for (const s of [a, b, own]) expect(await goalRow(gidOf(s)), level).toBeUndefined();
+        } finally {
+          for (const c of [off, held, ended]) await c.end();
+        }
+        await retire();
+      }
+      expect(await recent()).toBe(0);
+    });
+
+    it('a burst lands the floor and no more: five sessions above READ COMMITTED land none, and twelve at READ COMMITTED racing for six places land six', async () => {
+      await retire();
+      await age();
+      await rule([{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }]);
+      // The reviewer's burst: each session opens above READ COMMITTED and takes its picture while the 24 hours are empty,
+      // then tries seven. Reading that picture, each would count none and add six (thirty landed before this rule).
+      for (const level of LEVELS) {
+        const sessions = await Promise.all(Array.from({ length: 5 }, () => session()));
+        try {
+          for (const c of sessions) {
+            await c.query(`BEGIN ISOLATION LEVEL ${level}`);
+            await c.query('SELECT count(*) FROM "Goal"');
+          }
+          const answers: string[] = [];
+          for (const c of sessions) {
+            for (let i = 0; i < 7; i++) {
+              const s = source();
+              await c.query('SAVEPOINT one');
+              const r = await wrote((async () => {
+                await entry(on(c), s);
+                await flintGoal(on(c), s);
+              })());
+              answers.push(r);
+              if (r !== 'ok') await c.query('ROLLBACK TO SAVEPOINT one').catch(() => {});
+            }
+            await c.query('COMMIT').catch(() => {});
+          }
+          expect(answers.filter((r) => r === 'ok'), level).toEqual([]);
+          // (At SERIALIZABLE the audit trail itself may refuse an entry first, with a serialization failure: either way, none lands.)
+          expect(new Set(answers).size === 1 && answers[0] === '42501' || level === 'SERIALIZABLE', `${level}: ${[...new Set(answers)].join(',')}`).toBe(true);
+          expect(await recent(), level).toBe(0);
+        } finally {
+          for (const c of sessions) await c.end();
+        }
+      }
+      // At READ COMMITTED, twelve sessions at one starting line, each holding its transaction a moment before it commits.
+      const sessions = await Promise.all(Array.from({ length: 12 }, () => session()));
+      try {
+        for (let round = 0; round < 3; round++) {
+          await age();
+          const sources = sessions.map(() => source());
+          for (const s of sources) await entry(app, s);
+          await Promise.all(sessions.map((c) => c.query('BEGIN')));
+          const answers = await Promise.all(sessions.map(async (c, i) => {
+            const r = await wrote(flintGoal(on(c), sources[i]!));
+            await new Promise((d) => setTimeout(d, 30));
+            await c.query(r === 'ok' ? 'COMMIT' : 'ROLLBACK');
+            return r;
+          }));
+          expect(answers.filter((r) => r === 'ok'), `round ${round}`).toHaveLength(6);
+          expect(answers.filter((r) => r !== 'ok').every((r) => r === '42501'), `round ${round}`).toBe(true);
+          expect(await recent(), `round ${round}`).toBe(6);
+        }
+      } finally {
+        for (const c of sessions) await c.end();
+      }
       await retire();
       await age();
     });

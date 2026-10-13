@@ -202,7 +202,10 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       await migrateUp(owner);
       for (const d of [...newer].reverse()) await runDown(d);
       await runDown(target);
-      if (!newer.length) expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+      // Compared whatever came after it: anything newer was rolled back first (above), so what is left is exactly the
+      // migrations before this one, and the reference is built from the same ones.
+      expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+      expect(without.length).toBeGreaterThan(100);
     }
     const status = await prisma(['migrate', 'status'], owner);
     expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${target}`));
@@ -222,17 +225,20 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     await rollsBack(P5);
   });
 
-  // P7's, with the newer one's first: its own rows are in the test after these.
-  it('P7\'s down.sql, after the newer one\'s, then deploy, re-applies it', async () => {
-    const P7 = '20261015000000_p7_resilience';
-    expect(migrationDirs().filter((d) => d > P7)).toEqual([CHAT_GOAL_FLOOR]);
-    await rollsBack(P7);
+  // P7's, with the newer ones' first: its own rows are in the test after these.
+  it('P7\'s down.sql, after the newer ones\', then deploy, re-applies it', async () => {
+    await rollsBack('20261015000000_p7_resilience');
   });
 
-  // The guard under goals from chat (P3 part 5's floor) is the newest: rules only, so its down.sql takes two
-  // triggers and their function away and leaves the goal store to the letter what it was.
+  // The guard under goals from chat (P3 part 5's floor): rules only, so its down.sql takes two triggers and their
+  // function away, leaves the goal store to the letter what it was, and gives back the catalog of a database built
+  // without it, line for line. Named here, not left to "the newest" below: whatever lands after it is rolled back
+  // first (newest first), so these checks keep running when it is no longer the newest.
+  it('the chat goal floor\'s down.sql, after any newer one\'s, leaves the goal store as it was and the catalog of a database built without it; a deploy re-applies it', async () => {
+    await rollsBack(CHAT_GOAL_FLOOR);
+  });
+
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
-    expect(migrationDirs().at(-1)).toBe(CHAT_GOAL_FLOOR);
     await rollsBack(migrationDirs().at(-1)!);
   });
 

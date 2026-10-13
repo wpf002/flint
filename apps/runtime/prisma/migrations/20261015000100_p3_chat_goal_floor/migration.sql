@@ -12,10 +12,11 @@
 --      goal and this source, from a chat, untainted. The goal's title is the
 --      card's title and its description the card's quote.
 --   2. Make It a Goal: an executing goal.activate that Will approved for this
---      goal, signed as one Flint suggested, with the row's title and
---      description, while the suggestion's own card still waits and names this
---      goal and this source. That approval is used here, so the goal is made
---      and started in one transaction or the card starts nothing.
+--      goal, signed as one Flint suggested, with the row's title, description,
+--      checks, review cadence and date (all he signed there), while the
+--      suggestion's own card still waits and names this goal and this source.
+--      That approval is used here, so the goal is made and started in one
+--      transaction or the card starts nothing.
 --   3. a rule he signed: a live, unscoped ActionPolicy row that lets
 --      goal.propose run alone (it exists only on a policy card he signed), no
 --      live row holding it back, and the intake's own audit entry for this
@@ -25,8 +26,19 @@
 --      is the rule's own cap, or 3 if that is less; every goal from chat made
 --      in those hours counts, a card's too). The runtime counts by Will's day,
 --      so twice the limit is the most an honest one adds across a midnight;
---      past that the database lets none in, however the runtime counts, and a
---      rule signed for 3 a day can never fill Suggested.
+--      past that the database lets none in, however the runtime counts.
+--
+-- What that third way is worth: with a rule Will signed, a runtime can add at
+-- most that many goals from chat in 24 hours, and their words are the runtime's
+-- own record (it writes the audit entry and the row), not proof that he said
+-- them. His signature on each goal is what the two card paths carry.
+--
+-- Only at READ COMMITTED. Above it a transaction keeps reading the database as
+-- it was when it began: it would not see the goals others added since (the
+-- count), a rule switched off or held back since, or a card that has ended
+-- since. So an insert at any other level is refused outright, as the goal
+-- store's other guards refuse theirs. Every writer in the runtime runs at READ
+-- COMMITTED.
 --
 -- A card's approval is used once, in one transaction, for this goal
 -- (p3_bind_approval, after the row is written: an insert that meets a goal
@@ -45,11 +57,13 @@
 
 -- Named to fire first of Goal's BEFORE INSERT triggers (name order), and once
 -- more AFTER the row is written, to use the card's approval. Errors name the
--- goal's id only (and only one shaped as an id): never a title or a quote.
+-- goal's id only, and only one shaped exactly as an id made from a source ("go"
+-- and 32 hex digits: no word dressed as an id is repeated): never a title or a
+-- quote.
 CREATE FUNCTION goal_chat_floor() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
-  gid text := CASE WHEN NEW."id" ~ '^[A-Za-z0-9_-]{1,40}$' THEN NEW."id" ELSE '?' END;
+  gid text := CASE WHEN NEW."id" ~ '^go[0-9a-f]{32}$' THEN NEW."id" ELSE '?' END;
   cand text;
   p "Proposal"%ROWTYPE;
   e record;
@@ -63,6 +77,11 @@ BEGIN
   IF current_user = 'flint_owner' THEN
     RETURN NEW;
   END IF;
+  -- Everything below reads what is committed now: the cards, the rule, the count. Above READ COMMITTED it would
+  -- read an old picture instead (a rule since switched off, goals others have added, a card since ended).
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'goal %: a goal from chat is added at READ COMMITTED', gid USING ERRCODE = 'insufficient_privilege';
+  END IF;
   -- What every goal from chat is, whoever adds it: Will's, personal, untainted, and named by its source (so a card
   -- or an entry for one goal is never one for another).
   IF NOT coalesce(
@@ -70,10 +89,12 @@ BEGIN
        AND NEW."sourceRef" ~ '^chat:[0-9a-f]{64}$' AND NEW."id" = 'go' || substr(NEW."sourceRef", 6, 32), false) THEN
     RAISE EXCEPTION 'goal %: a goal from chat is Will''s own, personal and untainted, and named by its source', gid USING ERRCODE = 'insufficient_privilege';
   END IF;
-  -- The day a horizon falls on, anywhere on Earth: the card's day must be one of them (no text of the card is cast).
+  -- The runtime dates a suggested goal to 23:59 on the card's day, where Will is. Wherever that is (UTC-12 to
+  -- UTC+14), that moment's UTC date is the card's day or the day after, and twelve hours before it is still the
+  -- card's day or the day before: so the card's day lies between those two dates. (No text of the card is cast.)
   IF NEW."horizonAt" IS NOT NULL THEN
     day_from := to_char((NEW."horizonAt" - interval '12 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD');
-    day_to := to_char((NEW."horizonAt" + interval '14 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD');
+    day_to := to_char(NEW."horizonAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD');
   END IF;
 
   -- 1. The suggestion's own card.
@@ -106,7 +127,13 @@ BEGIN
   LOOP
     BEGIN
       p := p3_signed_proposal(cand, NEW."id", ARRAY['goal.activate']);
-      IF coalesce(p."args"->>'origin' = 'flint' AND p."args"->>'title' = NEW."title" AND p."args"->>'description' = NEW."description", false)
+      -- The row is what he signed to start: its words, its checks, its cadence and its date (read as goal_guard
+      -- reads it: only a time is cast, so its shape is checked first).
+      IF coalesce(p."args"->>'origin' = 'flint' AND p."args"->>'title' = NEW."title" AND p."args"->>'description' = NEW."description"
+                  AND p."args"->'successCriteria' = NEW."successCriteria" AND p."args"->>'reviewCadence' = NEW."reviewCadence"
+                  AND (CASE WHEN jsonb_typeof(p."args"->'horizonAt') = 'null' THEN NEW."horizonAt" IS NULL
+                            WHEN (p."args"->>'horizonAt') ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' THEN (p."args"->>'horizonAt')::timestamptz = NEW."horizonAt"
+                            ELSE false END), false)
          AND EXISTS (
            SELECT 1 FROM "Proposal" s
            WHERE s."action" = 'goal.propose' AND s."kind" = 'goal' AND s."status" = 'pending' AND s."expiresAt" > clock_timestamp()
