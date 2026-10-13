@@ -35,7 +35,7 @@
  *    request at a time, shared with triage and goal reviews); at most 2
  *    requests; chat's load (a chat turn running means wait); the estimate's
  *    one claim of ledger.reason.local's daily cap; one of the night's two
- *    requests for this run; the listing again; then the request, 90 s, which
+ *    requests for this number; the listing again; then the request, 90 s, which
  *    can reach only Ollama's /api/chat (scopedFetch).
  *  - The prompt holds numbers and fixed words only: the number's Title Case
  *    name from the registry, its unit, its last 28 values with their days, the
@@ -55,11 +55,12 @@
  *  - `deferred` (chat is busy): it sends itself again in 15 seconds, up to 40
  *    times, then gives up for the night and leaves a mark for Settings >
  *    Health. `capped`, `unavailable`, `invalid`: nothing is recorded.
- *  - At most 2 requests and 1 claim of the cap for a run in a night, WHATEVER
- *    runs the job again: a job that failed after the model answered, a second
- *    job for the same run, a restart. Both are counted in the database, by the
- *    run, before the request goes (a missed second opinion is fine; a number
- *    asked about six times is not). The job itself is never retried.
+ *  - At most 2 requests and 1 claim of the cap for a number in a night,
+ *    WHATEVER runs the job again: a job that failed after the model answered,
+ *    a second job for the same number, a restart. Both are counted in the
+ *    database, by the number's key, before the request goes (a missed second
+ *    opinion is fine; a number asked about six times is not). The job itself
+ *    is never retried.
  *  - The estimate is written with the time of writing, and only while its
  *    step is still under way AT THAT TIME: the model can take minutes, and an
  *    answer that lands after the step is over is no forecast, so it is not
@@ -185,7 +186,7 @@ export interface EstimateDeps {
   /** One slot of ledger.reason.local's daily cap, or false when it is used up. Asked once per call (the job makes it once per run and night). */
   claim: () => Promise<boolean>;
   /**
-   * One of this estimate's requests for the night, counted where a later job for the same run finds it: false
+   * One of this estimate's requests for the night, counted where a later job for the same number finds it: false
    * when they are used up. Asked before every request. Not given: only this call's own two count.
    */
   attempt?: () => Promise<boolean>;
@@ -307,10 +308,10 @@ export type ReasonJob = z.infer<typeof ReasonJob>;
  * missed, which is fine. What it already asked and claimed is counted in the database either way (below).
  */
 export const REASON_SEND = { retryLimit: 0 } as const;
-/** The night's requests for one run's estimate, counted in the database by the run: 2, whatever runs the job again. */
-export const requestsCounter = (runId: string): string => `ledger.reason.requests:${runId}`;
-/** That a run's estimate has taken its one slot of the day's cap tonight. */
-export const claimedCounter = (runId: string): string => `ledger.reason.claimed:${runId}`;
+/** The night's requests for one number's estimate, counted in the database by the number's key: 2, whatever runs the job again. */
+export const requestsCounter = (seriesKey: string): string => `ledger.reason.requests:${seriesKey}`;
+/** That a number's estimate has taken its one slot of the day's cap tonight. */
+export const claimedCounter = (seriesKey: string): string => `ledger.reason.claimed:${seriesKey}`;
 
 export type ReasonOutcome =
   /** The estimate is on the ledger. */
@@ -324,7 +325,7 @@ export type ReasonOutcome =
   /** No local model is set. */
   | 'no_model'
   | 'unavailable' | 'invalid' | 'capped'
-  /** The night's requests for this run were already made by an earlier job: nothing is asked again. */
+  /** The night's requests for this number were already made by an earlier job: nothing is asked again. */
   | 'spent'
   /** Chat is busy: sent again. */
   | 'deferred'
@@ -352,14 +353,14 @@ const READ_COMMITTED = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prism
 class CapReached extends Error {}
 
 /**
- * This run's one slot of the day's cap: taken now, or already taken tonight by an earlier job for the same run
- * (true either way), or not to be had (false). The run's own mark and the cap's slot are one transaction: a run that
- * got no slot holds no mark, and a second job for the run takes no second slot.
+ * This number's one slot of the day's cap: taken now, or already taken tonight by an earlier job for the same
+ * number (true either way), or not to be had (false). The number's own mark and the cap's slot are one transaction:
+ * a number that got no slot holds no mark, and a second job for it takes no second slot.
  */
-async function claimOnce(db: Db, runId: string, cap: Cap, tz: string, now: Date): Promise<boolean> {
+async function claimOnce(db: Db, seriesKey: string, cap: Cap, tz: string, now: Date): Promise<boolean> {
   try {
     return await db.$transaction(async (tx: Tx) => {
-      if ((await claim(tx, claimedCounter(runId), { limit: 1, period: 'day' }, tz, now)) === null) return true;
+      if ((await claim(tx, claimedCounter(seriesKey), { limit: 1, period: 'day' }, tz, now)) === null) return true;
       if ((await claim(tx, REASON_ACTION, cap, tz, now)) === null) throw new CapReached();
       return true;
     }, READ_COMMITTED);
@@ -473,10 +474,10 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
   const asked = await estimate(facts, {
     ollama,
     load: d.load ?? chatLoad(d.config.server),
-    // One slot of the day's cap for this run tonight, however many jobs ask for it.
-    claim: () => claimOnce(db, job.runId, s.cap, tz, now),
-    // Each request is counted before it goes, where a later job for this run finds it: two tonight, and no more.
-    attempt: async () => (await claim(db, requestsCounter(job.runId), { limit: MODEL_REQUESTS, period: 'day' }, tz, now)) !== null,
+    // One slot of the day's cap for this number tonight, however many jobs ask for it.
+    claim: () => claimOnce(db, key, s.cap, tz, now),
+    // Each request is counted before it goes, where a later job for this number finds it: two tonight, and no more.
+    attempt: async () => (await claim(db, requestsCounter(key), { limit: MODEL_REQUESTS, period: 'day' }, tz, now)) !== null,
     ...(d.fetch ? { fetch: d.fetch } : {}),
     ...(d.timeoutMs ? { timeoutMs: d.timeoutMs } : {}),
     ...(d.models ? { models: d.models } : {}),

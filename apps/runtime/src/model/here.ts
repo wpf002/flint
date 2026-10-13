@@ -152,27 +152,27 @@ export class LocalModels {
   async #get(origin: string, path: ListPath, base: typeof fetch, signal: AbortSignal): Promise<PlaceSaid | undefined> {
     const timeoutMs = this.#timeout();
     const get = scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }], base, timeoutMs);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let gaveUp = false;
-    // The transport is told to stop when the ask's time is up; this stops waiting for it even if it does not.
+    let late: ReturnType<typeof setTimeout> | undefined;
+    // The transport is told to stop when the ask's time is up (`signal`). This stops waiting for it a moment after
+    // that even if it does not stop. An answer that lands later is never looked at: the wait has ended with no word.
     const deadline = new Promise<undefined>((resolve) => {
-      const end = (): void => {
-        gaveUp = true;
-        resolve(undefined);
+      const end = (): void => resolve(undefined);
+      const soon = (): void => {
+        late = setTimeout(end, 250);
+        late.unref?.();
       };
-      timer = setTimeout(end, timeoutMs + 250);
-      timer.unref?.();
       if (signal.aborted) end();
-      else signal.addEventListener('abort', () => setTimeout(end, 250).unref?.(), { once: true });
+      else signal.addEventListener('abort', soon, { once: true });
     });
     const answer = (async (): Promise<PlaceSaid | undefined> => {
       try {
         const r = await get(`${origin}${path}`, { method: 'GET', signal });
         let text = '';
+        // Only a listing's body is read. What an error, a redirect or another server's page carries is let go unread.
         if (r.ok) text = await r.text();
         else await r.body?.cancel().catch(() => {});
-        // Too late, or too long to be a list: no word.
-        if (gaveUp || text.length > LISTING_MAX_CHARS) return undefined;
+        // Too long to be a list: no word.
+        if (text.length > LISTING_MAX_CHARS) return undefined;
         return await placeSaid(r.status, async () => JSON.parse(text) as unknown);
       } catch {
         // Down, slow or refused: no word.
@@ -180,7 +180,7 @@ export class LocalModels {
       }
     })();
     const said = await Promise.race([answer, deadline]);
-    if (timer) clearTimeout(timer);
+    if (late) clearTimeout(late);
     return said;
   }
 

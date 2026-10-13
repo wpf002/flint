@@ -16,7 +16,8 @@
  *    then gives up and Settings > Health says so.
  *  - A number's estimate costs at most two requests and one slot of the day's
  *    cap a night, however many jobs run for it: the queue never runs a failed
- *    one again, and what it asked and claimed is counted in the database.
+ *    one again, and what it asked and claimed is counted in the database, by
+ *    the number's key.
  *  - The second look, before the write, is at the time of writing: a step that
  *    ended, a switch turned off, a question settled or an estimate written
  *    while the model answered, and nothing is written.
@@ -115,8 +116,8 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
   const latestRun = async (key: string) => (await k.owner(`SELECT id FROM "ForecastRun" WHERE "seriesKey" = $1 AND ok ORDER BY "createdAt" DESC, id DESC LIMIT 1`, [key])).rows[0]?.id as string | undefined;
   const question = async (runId: string) => (await k.owner(`SELECT * FROM "Prediction" WHERE "forecastRunId" = $1 AND kind = 'binary' AND "createdBy" = 'runtime:forecast'`, [runId])).rows[0];
   const estimates = async (runId: string) => (await k.owner(`SELECT * FROM "Prediction" WHERE "forecastRunId" = $1 AND "createdBy" = 'runtime:reason' ORDER BY "createdAt"`, [runId])).rows;
-  /** A new night for a run: what it asked and claimed is counted by the night. */
-  const newNight = (runId: string) => k.owner(`DELETE FROM "ActionCounter" WHERE action = ANY($1)`, [[requestsCounter(runId), claimedCounter(runId)]]);
+  /** A new night for a number: what was asked and claimed for it is counted by the night. */
+  const newNight = (key: string) => k.owner(`DELETE FROM "ActionCounter" WHERE action = ANY($1)`, [[requestsCounter(key), claimedCounter(key)]]);
   const counter = async (action: string) => (await k.owner(`SELECT coalesce(sum(count), 0)::int AS n FROM "ActionCounter" WHERE action = $1`, [action])).rows[0].n as number;
   const audits = async () => (await k.owner(`SELECT actor, context, kind, action, tier, outcome, inputs, reasoning, "outcomeDetail" FROM "AuditEntry" WHERE action = $1 ORDER BY seq DESC`, [REASON_ACTION])).rows;
   /** Everything that must never hold a value, a probability or a prompt: job data, audit entries, health details, log lines. */
@@ -286,11 +287,11 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
     expect(await counter(REASON_ACTION)).toBe(claims + 1);
     expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: key, run: runId, result: 'spent', requests: 0 } });
     // An extra key or a word of the model's own is the same: nothing recorded.
-    await newNight(runId);
+    await newNight(key);
     expect(await reason(runId, { fetch: model([{ probability: 0.6, reasonCode: 'trend', reasoning: 'because' }]) })).toEqual({ outcome: 'invalid' });
     expect(await estimates(runId)).toEqual([]);
     // A later, usable answer is recorded as it is.
-    await newNight(runId);
+    await newNight(key);
     expect(await reason(runId, { fetch: model(['not json', { probability: 0.95, reasonCode: 'recent_level' }]) })).toEqual({ outcome: 'recorded' });
     expect((await estimates(runId))[0]).toMatchObject({ probability: 0.95 });
   });
@@ -328,7 +329,7 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
     });
     // Each test is a night of its own.
     beforeEach(async () => {
-      await newNight(runId);
+      await newNight(KEY);
     });
     const nothingRecorded = async () => {
       expect(await estimates(runId)).toEqual([]);
@@ -472,11 +473,16 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
       expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
       expect([sent.length, await counter(REASON_ACTION)]).toEqual([2, claims + 1]);
-      expect([await counter(requestsCounter(runId)), await counter(claimedCounter(runId))]).toEqual([2, 1]);
+      expect([await counter(requestsCounter(KEY)), await counter(claimedCounter(KEY))]).toEqual([2, 1]);
       expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: KEY, run: runId, result: 'spent', requests: 0 } });
-      // The counts are names and numbers: the run's id, nothing of the number's.
-      expect(requestsCounter(runId)).toBe(`ledger.reason.requests:${runId}`);
-      expect(claimedCounter(runId)).toBe(`ledger.reason.claimed:${runId}`);
+      // The counts are kept by the number's key: a name and a count, nothing of its values.
+      expect(requestsCounter(KEY)).toBe(`ledger.reason.requests:${KEY}`);
+      expect(claimedCounter(KEY)).toBe(`ledger.reason.claimed:${KEY}`);
+      expect((await k.owner(`SELECT action, count FROM "ActionCounter" WHERE action LIKE 'ledger.reason.%:%' AND action LIKE $1 ORDER BY action`, [`%:${KEY}`])).rows).toEqual([
+        { action: `ledger.reason.claimed:${KEY}`, count: 1 }, { action: `ledger.reason.requests:${KEY}`, count: 2 },
+      ]);
+      // Another number's night is its own: Deploys' estimate that night is not held back by this one's.
+      expect(await counter(requestsCounter(DEPLOYS))).toBe(1);
       await nothingRecorded();
     });
 
@@ -524,7 +530,7 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       // model is asked or after it answered.
       const q = await question(runId);
       const status = (to: string) => k.past('Prediction', ['Prediction_guard', 'Prediction_valid_update'], (run) => run(`UPDATE "Prediction" SET status = $2 WHERE id = $1`, [q.id, to]));
-      await newNight(runId);
+      await newNight(KEY);
       sent = [];
       for (const closed of ['void', 'expired', 'resolved']) {
         await status(closed);
@@ -559,7 +565,7 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       expect(sent).toEqual([]);
       expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { result: 'capped', requests: 0 } });
       // A run that got no slot holds no mark of having one, and has asked nothing.
-      expect([await counter(claimedCounter(runId)), await counter(requestsCounter(runId))]).toEqual([0, 0]);
+      expect([await counter(claimedCounter(KEY)), await counter(requestsCounter(KEY))]).toEqual([0, 0]);
       await nothingRecorded();
       await g.policy(REASON_ACTION, 'forbidden');
       // (The rule is in force from now: the estimate is asked for a moment later.)

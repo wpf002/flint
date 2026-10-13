@@ -290,6 +290,38 @@ describe('what the runtime knows of the models on this Mac', () => {
     expect(LISTING_MAX_CHARS).toBe(4_000_000);
   });
 
+  it('only a listing’s body is read: what a failure, a redirect or a page that is no Ollama’s carries is let go unread', async () => {
+    /** A reply whose body says when it is read, and when it is let go. */
+    const reply = (status: number) => {
+      const seen = { read: 0, cancelled: 0 };
+      const body = new ReadableStream<Uint8Array>({
+        pull(c) {
+          seen.read += 1;
+          c.enqueue(new TextEncoder().encode(JSON.stringify({ models: HERE })));
+          c.close();
+        },
+        cancel() {
+          seen.cancelled += 1;
+        },
+      }, { highWaterMark: 0 });
+      return { seen, response: new Response(status === 204 ? null : body, { status }) };
+    };
+    for (const status of [500, 503, 401, 404, 302]) {
+      const r = reply(status);
+      const models = new LocalModels({ now: () => 0 });
+      expect(await models.runsHere({ url: URL_, model: MODEL }, (async () => r.response) as unknown as typeof fetch), String(status)).toBe(false);
+      expect(r.seen, String(status)).toEqual({ read: 0, cancelled: 1 });
+    }
+    // Health's reader is the same reader.
+    const failed = reply(500);
+    expect(await new LocalModels().list({ url: URL_ }, '/api/ps', (async () => failed.response) as unknown as typeof fetch)).toBeUndefined();
+    expect(failed.seen).toEqual({ read: 0, cancelled: 1 });
+    // A listing's own body is read, once.
+    const ok = reply(200);
+    expect(await new LocalModels().runsHere({ url: URL_, model: MODEL }, (async () => ok.response) as unknown as typeof fetch)).toBe(true);
+    expect(ok.seen).toEqual({ read: 1, cancelled: 0 });
+  });
+
   it('requests that ask together share one request', async () => {
     const models = new LocalModels();
     let release!: () => void;
