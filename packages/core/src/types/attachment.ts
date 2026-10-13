@@ -61,9 +61,32 @@ export function attachmentNote(a: Attachment, reason: 'shed' | 'unsupported'): s
     : `[attached: ${describeAttachment(a)} — this model cannot read ${a.kind === 'image' ? 'images' : 'this file type'}]`;
 }
 
-/** Render a text attachment inline, fenced so it can't be confused with the user's own words. */
+/**
+ * An opening angle bracket, or a character that looks like one, that begins
+ * something a reader could take for the fence's own tag: `</attached_file`,
+ * `<attached_file`, in any case, with spaces, a look-alike slash, or a space
+ * or hyphen in the name. Only the bracket is matched: the rest is left as it
+ * was written.
+ */
+const FENCE_TAG = /[<\uFF1C\uFE64\u2039\u3008\u27E8\u276E\u02C2](?=[\s\u200B-\u200D\uFEFF]*[/\u2215\u2044\uFF0F\\]?[\s\u200B-\u200D\uFEFF]*attached[\s_\u2010-\u2015-]*file)/gi;
+
+/**
+ * Text that goes INSIDE the fence, made unable to close it: a file's own text
+ * is whatever its author wrote, and one that holds `</attached_file>` would
+ * end the fence early, so what follows it would read as the user's words or
+ * the system's. The bracket of anything that looks like the fence's tag
+ * becomes `&lt;`. Nothing else is changed, and text with no such tag is
+ * returned as it is.
+ */
+export function insideFence(text: string): string {
+  return text.replace(FENCE_TAG, '&lt;');
+}
+
+/** Render a text attachment inline, fenced so it can't be confused with the user's own words, and so its own text cannot close the fence. */
 export function renderTextAttachment(a: Attachment): string {
-  return `<attached_file name="${(a.name ?? 'unnamed').replace(/"/g, "'")}" type="${a.mediaType}">\n${a.text ?? ''}\n</attached_file>`;
+  const name = insideFence((a.name ?? 'unnamed').replace(/"/g, "'")).replace(/[<>\r\n]/g, ' ');
+  const type = a.mediaType.replace(/[<>"\r\n]/g, ' ');
+  return `<attached_file name="${name}" type="${type}">\n${insideFence(a.text ?? '')}\n</attached_file>`;
 }
 
 /** Drop the body from an attachment, keeping what it was. */
