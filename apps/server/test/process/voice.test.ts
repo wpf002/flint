@@ -154,6 +154,18 @@ let none: Booted & { whisperRan: string };
 let noexec: Booted & { whisperRan: string };
 /** The `say` server, on a Mac: `tmp` is its TMPDIR, the one folder its `say` writes in. (A short path: the server's own start listens on a socket under it.) */
 let say: (Booted & { tmp: string }) | undefined;
+/**
+ * The `say` processes that are writing in a folder, by their command lines (`<pid> /usr/bin/say -o <folder>/...`).
+ * Any other `say` on the machine is not this test's, and is neither counted nor touched.
+ */
+function sayingIn(folder: string): string[] {
+  try {
+    return execFileSync('/usr/bin/pgrep', ['-fl', `/usr/bin/say -o ${folder}/`], { encoding: 'utf8' }).split('\n').filter((l) => l.includes(`/usr/bin/say -o ${folder}/`));
+  } catch {
+    return []; // pgrep exits 1 when there is none
+  }
+}
+
 /** A path that names nothing: a model that was there once. */
 const GONE = '/nonexistent/old/ggml-gone.bin';
 
@@ -242,7 +254,17 @@ afterAll(async () => {
     await b.cloud.close();
   }
   await local?.speech.close();
-  if (say) rmSync(say.tmp, { recursive: true, force: true });
+  if (say) {
+    // Whatever a failing test left behind: a `say` still writing in this test's own folder is stopped, by its own pid.
+    for (const line of sayingIn(say.tmp)) {
+      try {
+        process.kill(Number(line.trim().split(' ')[0]), 'SIGKILL');
+      } catch {
+        /* it finished by itself */
+      }
+    }
+    rmSync(say.tmp, { recursive: true, force: true });
+  }
   for (const r of Object.values(runs)) r.cleanup();
 });
 
@@ -529,14 +551,8 @@ describe('the real server, as a process: the same stale name in the environment,
 // alone. Here the real server speaks with the Mac's own voice (into files, in this test's own folder: nothing is
 // played), and a client really hangs up.
 describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, a client that hangs up, and the line', () => {
-  /** The `say` processes that are writing in this test's own folder, by their command lines. Any other `say` on the machine is not this test's. */
-  const saying = (): string[] => {
-    try {
-      return execFileSync('/usr/bin/pgrep', ['-fl', `/usr/bin/say -o ${say!.tmp}/`], { encoding: 'utf8' }).split('\n').filter((l) => l.includes('/usr/bin/say -o '));
-    } catch {
-      return []; // pgrep exits 1 when there is none
-    }
-  };
+  /** The `say` processes that are writing in this test's own folder. */
+  const saying = (): string[] => sayingIn(say!.tmp);
   const folders = (): string[] => readdirSync(say!.tmp).filter((n) => n.startsWith('flint-say-'));
   const until = async (ok: () => boolean, ms = 5_000): Promise<boolean> => {
     for (const end = Date.now() + ms; Date.now() < end; ) {
@@ -556,15 +572,23 @@ describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, 
 
   it('a client that hangs up while its reply is being spoken leaves no say process and no folder, and the server speaks the next reply', async () => {
     const before = say!.srv.log().length;
+    // First, how long this reply takes when nobody hangs up: the longest one a provider is handed, spoken to its end.
+    const text = 'word '.repeat(800);
+    const t0 = Date.now();
+    expect((await ask(text)).status).toBe(200);
+    const whole = Date.now() - t0;
+    expect(whole).toBeGreaterThan(1_000);
     const gone = new AbortController();
-    // A reply long enough to be still in the making when the client leaves.
-    const asked = ask('word '.repeat(700), gone.signal).then((r) => `answered ${r.status}`, (e: Error) => `client: ${e.name}`);
+    const asked = ask(text, gone.signal).then((r) => `answered ${r.status}`, (e: Error) => `client: ${e.name}`);
     expect(await until(() => saying().length === 1 && folders().length === 1), 'its say was started, in a folder of its own').toBe(true);
     // Its file is one in this test's own folder, written with -o: nothing is played.
     expect(saying()[0]).toMatch(new RegExp(`/usr/bin/say -o ${say!.tmp}/flint-say-[^/ ]+/speech\\.m4a --file-format=m4af --data-format=aac -f ${say!.tmp}/flint-say-[^/ ]+/text\\.txt$`));
     gone.abort();
+    const left = Date.now();
     expect(await asked).toBe('client: AbortError');
     expect(await until(() => saying().length === 0 && folders().length === 0), 'the say was stopped and its folder removed').toBe(true);
+    // STOPPED, not left to finish: it was gone in a fraction of the time the reply takes to speak.
+    expect(Date.now() - left, `gone ${Date.now() - left} ms after the hang-up; the whole reply takes ${whole} ms`).toBeLessThan(Math.min(700, whole / 2));
     // Nothing failed, and nothing is said of it: the reply was dropped because its client left.
     expect(say!.srv.log().slice(before)).not.toMatch(/\[speak\]|tts failed|    at /);
     const next = await ask('Hello there.');
@@ -601,14 +625,21 @@ describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, 
   it('past the line a reply is handed back at once (429), and replies that hang up while they wait leave it: no say is started for them', async () => {
     const gone = new AbortController();
     // Sixty long replies at once: two are being spoken, forty wait, and the other eighteen are refused at once.
-    const asked = Array.from({ length: 60 }, () => ask('word '.repeat(400), gone.signal).then((r) => r.status, (e: Error) => e.name));
-    const quick = await Promise.race([Promise.all(asked.slice(42)), sleep(4_000).then(() => 'slow' as const)]);
-    expect(quick).toEqual(Array.from({ length: 18 }, () => 429));
-    expect(saying().length).toBeLessThanOrEqual(2);
-    // Every one of the forty-two hangs up.
-    gone.abort();
+    const asked = Array.from({ length: 60 }, () => ask('word '.repeat(800), gone.signal).then((r) => r.status, (e: Error) => e.name));
+    try {
+      const quick = await Promise.race([Promise.all(asked.slice(42)), sleep(4_000).then(() => 'slow' as const)]);
+      expect(quick).toEqual(Array.from({ length: 18 }, () => 429));
+      expect(saying().length).toBeLessThanOrEqual(2);
+    } finally {
+      // Every one of the forty-two hangs up (whatever was seen above: none is left asking).
+      gone.abort();
+    }
+    const left = Date.now();
     expect(await Promise.all(asked.slice(0, 42))).toEqual(Array.from({ length: 42 }, () => 'AbortError'));
     expect(await until(() => saying().length === 0 && folders().length === 0)).toBe(true);
+    // The two that were being spoken were stopped, and the forty that waited were never started: had each been
+    // left to its end, the line would have taken a minute to empty.
+    expect(Date.now() - left).toBeLessThan(1_500);
     // The line is free again: the next reply is spoken, and nothing was looked up or sent anywhere in any of it.
     expect((await ask('Hello again.')).status).toBe(200);
     expect(blocked(say!.srv)).toEqual([]);
