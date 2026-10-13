@@ -458,6 +458,28 @@ describe('OllamaLocality', () => {
     l.clear();
   });
 
+  it('fresh: a "no, not an Ollama" that did not replace a listing still believed is no word about that listing: it does not stand in for one', async () => {
+    // Two addresses on one origin: an Ollama behind a path, and the origin itself, which answers the question with a 404.
+    let now = 1_000_000;
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (async (url: string) => (String(url).startsWith(`${HERE}/ollama/`) ? tags([{ name: 'qwen2.5:14b' }]) : new Response('{"error":"not found"}', { status: 404 }))) as unknown as typeof fetch,
+    });
+    await l.fresh(`${HERE}/ollama`);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    // A caller that asks first through the origin, once that listing is too old to use: the answer is not a listing,
+    // and it left the old one as old as it was. That caller has no word, so the listing is not believed for it.
+    now += 2_001;
+    await l.fresh(HERE);
+    expect(l.said(HERE)).toBeUndefined();
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    // Asked where its listing is, it is believed again.
+    now += 2_001;
+    await l.fresh(`${HERE}/ollama`);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    l.clear();
+  });
+
   it('silent: what a server has said SINCE the ask that failed stands (another look heard it meanwhile); what it said before does not', async () => {
     let now = 1_000_000;
     let fail: (e: Error) => void = () => {};
