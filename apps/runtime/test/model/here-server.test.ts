@@ -18,8 +18,17 @@
  * In each, for each caller, no chat request is made at all: nothing personal
  * is sent, and the caller ends on its no-model path. And once, with the model
  * listed as here, the same call does send it: the stand-in would have had it.
+ *
+ * And the listing is asked again immediately before EVERY request, so the
+ * bound holds when the text is sent, not only when the call began:
+ *  - the model slot was another request's while the name was pointed at a
+ *    cloud model: the waiting call sends nothing when its turn comes;
+ *  - a first reply the caller cannot use, and the name repointed while it was
+ *    written: the second attempt is not sent.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { modelSlot } from '../../src/model/slot';
+import type { LocalModels } from '../../src/model/here';
 import { planDiff, type PlanFacts } from '../../src/goals/planner';
 import { judge } from '../../src/triage/judge';
 import { decide } from '../../src/triage/triage';
@@ -52,23 +61,29 @@ interface Called {
 }
 const gates = (n: { claims: number; loads: number }) => ({ load: async () => (n.loads++, 'proceed' as const), claim: async () => (n.claims++, true) });
 
-/** Each local call the runtime makes: what it would send, a reply it would take, and the call itself (the real fetch, no stub). */
-const CALLERS: Array<{ name: string; holds: string[]; reply: unknown; call: (s: StandIn, n: { claims: number; loads: number }) => Promise<Called> }> = [
+/**
+ * Each local call the runtime makes: what it would send, a reply it would take, one it would not (so it asks a
+ * second time), and the call itself (the real fetch, no stub).
+ */
+const CALLERS: Array<{ name: string; holds: string[]; reply: unknown; bad: unknown; call: (s: StandIn, n: { claims: number; loads: number }, models?: LocalModels) => Promise<Called> }> = [
   {
-    name: 'a goal review’s plan stage', holds: [TITLE, WHY, 'CANARY-check', 'CANARY-step'], reply: { reasonCode: 'on_track', ops: [] },
-    call: (s, n) => planDiff(GOAL, { ollama: { url: s.url, model: MODEL }, ...gates(n), resolve: () => [], models: fresh() }),
+    name: 'a goal review’s plan stage', holds: [TITLE, WHY, 'CANARY-check', 'CANARY-step'], reply: { reasonCode: 'on_track', ops: [] }, bad: { nope: 1 },
+    call: (s, n, models = fresh()) => planDiff(GOAL, { ollama: { url: s.url, model: MODEL }, ...gates(n), resolve: () => [], models }),
   },
   {
-    name: 'triage’s judge', holds: [ISSUE], reply: { relevance: 0.9, reasonCode: 'failure', reasoning: 'main is broken' },
-    call: (s, n) => judge(EVENT, { ollama: { url: s.url, model: MODEL }, ...gates(n), models: fresh() }),
+    name: 'triage’s judge', holds: [ISSUE], reply: { relevance: 0.9, reasonCode: 'failure', reasoning: 'main is broken' }, bad: { nope: 1 },
+    call: (s, n, models = fresh()) => judge(EVENT, { ollama: { url: s.url, model: MODEL }, ...gates(n), models }),
   },
   {
-    name: 'a prediction’s second opinion', holds: [String(DOLLARS), 'Anthropic Spend'], reply: { probability: 0.6, reasonCode: 'recent_level' },
-    call: (s, n) => estimate(SPEND, { ollama: { url: s.url, model: MODEL }, ...gates(n), models: fresh() }),
+    name: 'a prediction’s second opinion', holds: [String(DOLLARS), 'Anthropic Spend'], reply: { probability: 0.6, reasonCode: 'recent_level' }, bad: { probability: 0.99, reasonCode: 'trend' },
+    call: (s, n, models = fresh()) => estimate(SPEND, { ollama: { url: s.url, model: MODEL }, ...gates(n), models }),
   },
 ];
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** A word Ollama gave is good for this long in the tests below (two seconds in the runtime): short, so nothing waits long. */
+const WORD = 150;
 
-describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, call }) => {
+describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, bad, call }) => {
   let s: StandIn;
   beforeAll(async () => {
     s = await standIn(MODEL, reply);
@@ -79,6 +94,9 @@ describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, call 
   beforeEach(() => {
     s.seen.length = 0;
     s.chats.length = 0;
+    s.reply = reply;
+    delete s.replies;
+    delete s.chatDelayMs;
   });
 
   it('listed as run here: the model is asked, and is sent the text (the stand-in would have had it)', async () => {
@@ -94,7 +112,7 @@ describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, call 
   const cases: Array<[string, ListingMode]> = [
     ['its listing marks the model as run elsewhere', 'remote'],
     ['its listing hangs', 'hang'],
-    ['its listing fails with a 500 while chat would have answered', 'error500'],
+    ['its listing fails with a 500, twice, while chat would have answered', 'error500'],
     ['its listing does not hold the model', 'gone'],
   ];
   it.each(cases)('%s: nothing is sent to the model, nothing is claimed, and the call ends unavailable', async (_what, mode) => {
@@ -103,8 +121,9 @@ describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, call 
     const started = Date.now();
     const r = await call(s, n);
     expect(r).toMatchObject({ ok: false, why: 'unavailable', requests: 0 });
-    // The listing was asked, once, and that is the whole conversation: no chat request, so no text of his.
-    expect(s.seen).toEqual([{ method: 'GET', path: '/api/tags' }]);
+    // The listing was asked (a second time when it failed at once), and that is the whole conversation: no chat
+    // request, so no text of his.
+    expect(s.seen).toEqual(Array(mode === 'error500' ? 2 : 1).fill({ method: 'GET', path: '/api/tags' }));
     expect(s.chats).toEqual([]);
     expect(n).toEqual({ claims: 0, loads: 0 });
     // Soon: a listing that hangs costs its short limit, never the model's 90 seconds.
@@ -121,6 +140,46 @@ describe.each(CALLERS)('$name against a stand-in Ollama', ({ holds, reply, call 
     expect(await call(s, n)).toMatchObject({ ok: false, why: 'unavailable' });
     expect(s.chats).toHaveLength(1);
     expect(n).toEqual({ claims: 1, loads: 1 });
+  });
+
+  it('the slot was another request’s while the name was pointed at a cloud model: when its turn comes it asks again, and sends nothing', async () => {
+    s.listing = 'here';
+    // Another local request holds the model slot for longer than a word is good for.
+    const held = modelSlot(() => sleep(WORD * 3));
+    const n = { claims: 0, loads: 0 };
+    const waiting = call(s, n, fresh(300, WORD));
+    // It looks before it queues, and the listing says here. Then the name is repointed.
+    await sleep(40);
+    expect(s.seen).toEqual([{ method: 'GET', path: '/api/tags' }]);
+    s.listing = 'remote';
+    await held;
+    expect(await waiting).toMatchObject({ ok: false, why: 'unavailable', requests: 0 });
+    // The listing again at the last moment, and no chat request: the text went nowhere.
+    expect(s.seen).toEqual([{ method: 'GET', path: '/api/tags' }, { method: 'GET', path: '/api/tags' }]);
+    expect(s.chats).toEqual([]);
+  });
+
+  it('a first reply it cannot use, and the name repointed while it was written: the second attempt is not sent', async () => {
+    s.listing = 'here';
+    s.replies = [bad, reply];
+    // The first reply takes longer to come than a word is good for.
+    s.chatDelayMs = (k) => (k === 1 ? WORD * 3 : 0);
+    const n = { claims: 0, loads: 0 };
+    const asking = call(s, n, fresh(300, WORD));
+    await sleep(60);
+    expect(s.chats).toHaveLength(1);
+    s.listing = 'remote';
+    expect(await asking).toMatchObject({ ok: false, why: 'unavailable', requests: 1 });
+    // One request went (while the model was here); the second was asked about first, and never sent.
+    expect(s.chats).toHaveLength(1);
+    expect(s.seen.map((x) => x.path)).toEqual(['/api/tags', '/api/chat', '/api/tags']);
+    // With the model still here, the second attempt goes, after its own look at the listing.
+    s.seen.length = 0;
+    s.chats.length = 0;
+    s.listing = 'here';
+    expect(await call(s, { claims: 0, loads: 0 }, fresh(300, WORD))).toMatchObject({ ok: true, requests: 2 });
+    expect(s.seen.map((x) => x.path)).toEqual(['/api/tags', '/api/chat', '/api/tags', '/api/chat']);
+    for (const text of holds) for (const body of s.chats) expect(body, text).toContain(text);
   });
 });
 

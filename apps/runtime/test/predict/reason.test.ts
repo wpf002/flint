@@ -40,7 +40,7 @@ describe('estimate (stub Ollama)', () => {
   it('a valid reply is taken, through /api/chat with the format, no thinking and a 200-token limit', async () => {
     const s = stub([() => reply(answer(0.62))]);
     const r = await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: s.fetch });
-    expect(r).toMatchObject({ ok: true, estimate: { probability: 0.62, reasonCode: 'weekday_pattern' }, requests: 1, claimed: true });
+    expect(r).toMatchObject({ ok: true, estimate: { probability: 0.62, reasonCode: 'weekday_pattern' }, requests: 1 });
     expect(s.calls).toHaveLength(1);
     expect(s.calls[0]!.url).toBe('http://127.0.0.1:11434/api/chat');
     const body = s.calls[0]!.body as { think: boolean; stream: boolean; model: string; format: typeof ESTIMATE_SCHEMA; options: Record<string, unknown>; messages: Array<{ role: string; content: string }> };
@@ -105,11 +105,19 @@ describe('estimate (stub Ollama)', () => {
     const s = stub([() => reply('{"probability": 0.', 'length')]);
     expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: s.fetch })).toMatchObject({ ok: false, why: 'invalid', requests: 2 });
     expect(s.calls).toHaveLength(2);
+    // A whole answer that Ollama marks as cut off is whole (a model held to a format can pad its JSON with spaces up to
+    // the limit): the provider takes it, and it passes the same strict check as any other. One request.
+    const whole = stub([() => reply(`${answer(0.6)}   `, 'length')]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: whole.fetch })).toMatchObject({ ok: true, estimate: { probability: 0.6 }, requests: 1 });
+    expect(whole.calls).toHaveLength(1);
+    // Padded or not, an answer the check refuses is refused.
+    const off = stub([() => reply(`${JSON.stringify({ probability: 0.99, reasonCode: 'trend' })}  `, 'length')]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: off.fetch })).toMatchObject({ ok: false, why: 'invalid', requests: 2 });
   });
 
   it('a transport error twice is unavailable; a model that never worked ends the run', async () => {
     const s = stub([() => { throw new TypeError('fetch failed'); }]);
-    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: s.fetch })).toMatchObject({ ok: false, why: 'unavailable', requests: 2, claimed: true });
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: s.fetch })).toMatchObject({ ok: false, why: 'unavailable', requests: 2 });
     const down = stub([() => new Response('model not found', { status: 404 })]);
     expect(await estimate(FACTS, { ollama: OLLAMA, ...always, fetch: down.fetch })).toMatchObject({ ok: false, why: 'unavailable' });
     expect(down.calls.length).toBeLessThanOrEqual(2);
@@ -118,35 +126,58 @@ describe('estimate (stub Ollama)', () => {
   it('one claim of the cap per estimate, and none when it is used up', async () => {
     let claims = 0;
     const s = stub([() => reply('not json'), () => reply(answer(0.4))]);
-    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => (claims++, true), fetch: s.fetch })).toMatchObject({ ok: true, requests: 2, claimed: true });
+    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => (claims++, true), fetch: s.fetch })).toMatchObject({ ok: true, requests: 2 });
     expect(claims).toBe(1);
     const capped = stub([() => reply(answer(0.4))]);
-    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => false, fetch: capped.fetch })).toMatchObject({ ok: false, why: 'capped', requests: 0, claimed: false });
+    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => false, fetch: capped.fetch })).toMatchObject({ ok: false, why: 'capped', requests: 0 });
     expect(capped.calls).toHaveLength(0);
   });
 
-  it('a chat turn running: no request and no claim; one that comes back keeps its claim and its request count', async () => {
+  it('a chat turn running: no request and no claim; one that starts after the first request ends the call there', async () => {
     let claims = 0;
     const s = stub([() => reply(answer(0.4))]);
-    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'defer', claim: async () => (claims++, true), fetch: s.fetch })).toMatchObject({ ok: false, why: 'deferred', requests: 0, claimed: false });
+    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'defer', claim: async () => (claims++, true), fetch: s.fetch })).toMatchObject({ ok: false, why: 'deferred', requests: 0 });
     expect(s.calls).toHaveLength(0);
     expect(claims).toBe(0);
-    // Chat starts after the first request: the estimate yields holding its claim and its one request.
+    // Chat starts after the first request: the estimate yields, having asked once and claimed once.
     let n = 0;
     const t = stub([() => reply('not json')]);
     const yielded = await estimate(FACTS, { ollama: OLLAMA, load: async () => (n++ ? 'defer' : 'proceed'), claim: async () => (claims++, true), fetch: t.fetch });
-    expect(yielded).toMatchObject({ ok: false, why: 'deferred', requests: 1, claimed: true });
+    expect(yielded).toMatchObject({ ok: false, why: 'deferred', requests: 1 });
     expect(claims).toBe(1);
-    // The run that comes back: no second claim, and one request left of its two.
-    const u = stub([() => reply('still not json')]);
-    const back = await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => (claims++, true), claimed: true, used: 1, fetch: u.fetch });
-    expect(back).toMatchObject({ ok: false, why: 'invalid', requests: 2, claimed: true });
-    expect(u.calls).toHaveLength(1);
-    expect(claims).toBe(1);
-    // One that already used both asks nothing.
-    const v = stub([() => reply(answer(0.4))]);
-    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, claimed: true, used: 2, fetch: v.fetch })).toMatchObject({ ok: false, requests: 2 });
-    expect(v.calls).toHaveLength(0);
+  });
+
+  it('the night’s requests are counted where a later job finds them: each is asked for before it goes, and none goes without one', async () => {
+    // (The job counts them in the database, by the run: here, a counter that allows `left` more.)
+    const night = (left: number) => {
+      const c = { asked: 0, left };
+      return { c, attempt: async () => (c.asked++, c.left-- > 0) };
+    };
+    // Two left: both of this call's requests go, each after asking for one.
+    let n = night(2);
+    let s = stub([() => reply('not json'), () => reply(answer(0.4))]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ ok: true, requests: 2 });
+    expect([s.calls.length, n.c.asked]).toEqual([2, 2]);
+    // One left (an earlier job for this run used the other): one request goes, and the call ends as that one did.
+    n = night(1);
+    s = stub([() => reply('not json'), () => reply(answer(0.4))]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ ok: false, why: 'invalid', requests: 1 });
+    expect(s.calls).toHaveLength(1);
+    // None left: nothing is sent at all, and the call says so.
+    n = night(0);
+    s = stub([() => reply(answer(0.4))]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ ok: false, why: 'spent', requests: 0 });
+    expect(s.calls).toHaveLength(0);
+    // It is asked for after the load check and the claim, and never while chat is busy or the cap is used up.
+    n = night(2);
+    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'defer', claim: async () => true, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ why: 'deferred' });
+    expect(await estimate(FACTS, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => false, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ why: 'capped' });
+    expect(n.c.asked).toBe(0);
+    // A transport that fails still used the request it asked for: two, and no third.
+    n = night(5);
+    s = stub([() => { throw new TypeError('fetch failed'); }]);
+    expect(await estimate(FACTS, { ollama: OLLAMA, ...always, attempt: n.attempt, fetch: s.fetch })).toMatchObject({ ok: false, why: 'unavailable', requests: 2 });
+    expect(n.c.asked).toBe(2);
   });
 
   it('it can reach Ollama’s /api/chat only', async () => {

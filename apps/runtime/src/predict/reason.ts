@@ -18,7 +18,10 @@
  * The seam (`estimate`):
  *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
  *    that is not this machine, or a model Ollama's own listing does not say
- *    runs here is "unavailable" before anything is asked, claimed or sent.
+ *    runs here is "unavailable" before anything is asked, claimed or sent. The
+ *    listing is asked first, and again immediately before EVERY request (after
+ *    the wait for the slot, the load check and the claim; and before a second
+ *    attempt), so a series' values go only on a word at most two seconds old.
  *  - The reply is constrained (a JSON schema) to a probability and a reason
  *    code. There is NO free-text field: the model never writes a word that is
  *    stored or shown. It must end on its own, parse, and pass the strict zod
@@ -26,10 +29,10 @@
  *    never clamped into range.
  *  - Before EVERY request, in order: the process's model slot (one local
  *    request at a time, shared with triage and goal reviews); at most 2
- *    requests an estimate, counted across the runs of one that yielded to
- *    chat; chat's load (a chat turn running means wait); one claim of
- *    ledger.reason.local's daily cap for the estimate; then the request, 90 s,
- *    which can reach only Ollama's /api/chat (scopedFetch).
+ *    requests; chat's load (a chat turn running means wait); the estimate's
+ *    one claim of ledger.reason.local's daily cap; one of the night's two
+ *    requests for this run; the listing again; then the request, 90 s, which
+ *    can reach only Ollama's /api/chat (scopedFetch).
  *  - The prompt holds numbers and fixed words only: the number's Title Case
  *    name from the registry, its unit, its last 28 values with their days, the
  *    threshold, the forecaster's own middle and range, and how the question
@@ -48,9 +51,18 @@
  *  - `deferred` (chat is busy): it sends itself again in 15 seconds, up to 40
  *    times, then gives up for the night and leaves a mark for Settings >
  *    Health. `capped`, `unavailable`, `invalid`: nothing is recorded.
+ *  - At most 2 requests and 1 claim of the cap for a run in a night, WHATEVER
+ *    runs the job again: a job that failed after the model answered, a second
+ *    job for the same run, a restart. Both are counted in the database, by the
+ *    run, before the request goes (a missed second opinion is fine; a number
+ *    asked about six times is not). The job itself is never retried.
+ *  - The estimate is written with the time of writing, and only while its
+ *    step is still under way AT THAT TIME: the model can take minutes, and an
+ *    answer that lands after the step is over is no forecast, so it is not
+ *    written.
  *  - One audit entry per estimate that ends: the series' key, the run's id and
  *    counts. Never a value, a probability or a prompt. Job data is the run's id
- *    (and what a run that yielded carries): nothing else.
+ *    (and how many times it has yielded to chat): nothing else.
  */
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -165,38 +177,43 @@ export interface EstimateDeps {
   ollama: AskedOllama & { numCtx?: number };
   /** Before each request: is a chat turn running? */
   load: () => Promise<Load>;
-  /** One slot of ledger.reason.local's daily cap, or false when it is used up. Asked once per estimate. */
+  /** One slot of ledger.reason.local's daily cap, or false when it is used up. Asked once per call (the job makes it once per run and night). */
   claim: () => Promise<boolean>;
-  /** The estimate already holds its slot (a run that yielded to chat after claiming it). */
-  claimed?: boolean;
-  /** Requests the estimate already made in a run that yielded to chat: they count against its 2. */
-  used?: number;
+  /**
+   * One of this estimate's requests for the night, counted where a later job for the same run finds it: false
+   * when they are used up. Asked before every request. Not given: only this call's own two count.
+   */
+  attempt?: () => Promise<boolean>;
   fetch?: typeof fetch;
   timeoutMs?: number;
   /** What is known of the models on this Mac (tests): the process's own record when not given. */
   models?: LocalModels;
 }
 
+/**
+ * `requests`: how many were sent in this call. `spent`: the night's requests for this estimate were already made
+ * (by an earlier job), so this call sent none.
+ */
 export type Estimated =
-  | { ok: true; estimate: Estimate; modelMs: number; requests: number; claimed: boolean }
-  | { ok: false; why: 'invalid' | 'unavailable' | 'capped' | 'deferred'; modelMs: number; requests: number; claimed: boolean };
+  | { ok: true; estimate: Estimate; modelMs: number; requests: number }
+  | { ok: false; why: 'invalid' | 'unavailable' | 'capped' | 'deferred' | 'spent'; modelMs: number; requests: number };
 
 class Stop extends Error {}
 
 export async function estimate(f: EstimateFacts, d: EstimateDeps): Promise<Estimated> {
   const started = Date.now();
+  /** Is the model on this Mac, on Ollama's own word from the last two seconds (model/here.ts)? */
+  const here = (): Promise<boolean> => (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch);
   // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
-  if (!(await (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch))) {
-    return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: Math.max(0, d.used ?? 0), claimed: d.claimed ?? false };
-  }
+  if (!(await here())) return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: 0 };
   const origin = new URL(d.ollama.url).origin;
   const post = scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }], d.fetch ?? fetch, d.timeoutMs ?? 90_000);
-  let requests = Math.max(0, d.used ?? 0);
-  /** Requests made in THIS run: a transport that never worked ends the run, whatever an earlier run asked. */
-  let made = 0;
+  let requests = 0;
   let replied = false;
-  let claimed = d.claimed ?? false;
-  let stopped: 'capped' | 'deferred' | undefined;
+  let claimed = false;
+  let stopped: 'capped' | 'deferred' | 'unavailable' | 'spent' | undefined;
+  /** The night's requests for this estimate are used up (an earlier job made them): nothing more is sent. */
+  let exhausted = false;
   // Every request the provider makes, its own retries included, comes through here.
   const gated = ((url: string | URL | Request, init?: RequestInit) =>
     modelSlot(async () => {
@@ -212,15 +229,26 @@ export async function estimate(f: EstimateFacts, d: EstimateDeps): Promise<Estim
         }
         claimed = true;
       }
+      if (d.attempt && !(await d.attempt())) {
+        // Said as "spent" only when this call sent none itself: after one of its own, it ends as that one did.
+        exhausted = true;
+        if (requests === 0) stopped = 'spent';
+        throw new Stop('no more requests tonight');
+      }
+      // Ollama is asked again at the last moment, before EVERY request: the slot may have been another caller's for
+      // seconds, and a second attempt comes after the first's whole reply. On a no, or no word, nothing is sent.
+      if (!(await here())) {
+        stopped = 'unavailable';
+        throw new Stop('the model is not on this Mac');
+      }
       requests += 1;
-      made += 1;
       const res = await post(String(url), init);
       if (res.ok) replied = true;
       return res;
     })) as typeof fetch;
   const provider = new OllamaProvider({ baseURL: origin, fetch: gated, think: false, defaultOptions: { temperature: 0, ...(d.ollama.numCtx ? { num_ctx: d.ollama.numCtx } : {}) } });
   const { system, user } = estimatePrompt(f);
-  while (requests < MODEL_REQUESTS && !stopped) {
+  while (requests < MODEL_REQUESTS && !stopped && !exhausted) {
     try {
       const r = await provider.generate({
         model: d.ollama.model,
@@ -229,7 +257,8 @@ export async function estimate(f: EstimateFacts, d: EstimateDeps): Promise<Estim
         responseFormat: { type: 'json_schema', name: SCHEMA_NAME, schema: ESTIMATE_SCHEMA as unknown as Record<string, unknown> },
         maxTokens: REPLY_TOKENS,
       });
-      // A reply cut off at its token limit is not a reply.
+      // A reply cut off before its JSON was whole is not a reply. (One that is whole and only padded up to the limit
+      // is, by the provider's rule; it passes the same strict check below as any other.)
       if (r.reason !== 'complete' || r.message.role !== 'assistant') continue;
       let value: unknown;
       try {
@@ -239,13 +268,13 @@ export async function estimate(f: EstimateFacts, d: EstimateDeps): Promise<Estim
       }
       // Out of band, an extra key, a word of its own: a failed attempt. Nothing is clamped or trimmed into shape.
       const reply = Estimate.safeParse(value);
-      if (reply.success) return { ok: true, estimate: reply.data, modelMs: Date.now() - started, requests, claimed };
+      if (reply.success) return { ok: true, estimate: reply.data, modelMs: Date.now() - started, requests };
     } catch {
       // A transport error, a timeout, unparsable replies, or the gate: the loop decides.
-      if (made === 0 && !stopped) break;
+      if (requests === 0 && !stopped) break;
     }
   }
-  return { ok: false, why: stopped ?? (replied ? 'invalid' : 'unavailable'), modelMs: Date.now() - started, requests, claimed };
+  return { ok: false, why: stopped ?? (replied ? 'invalid' : 'unavailable'), modelMs: Date.now() - started, requests };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,11 +292,20 @@ export const DEFERRAL_MARK = 'forecasts.deferral';
 export const DEFERRAL_SAYS = `Chat was busy for ${(MAX_DEFERRALS * DEFER_SECONDS) / 60} minutes, so a forecast went without the local model’s second opinion.`;
 
 const Id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
-/** One run's estimate: its run, and what a run of the job that yielded to chat carries over. Ids and counts only. */
-export const ReasonJob = z
-  .object({ runId: Id, deferrals: z.number().int().min(1).max(1000).optional(), claimed: z.literal(true).optional(), requests: z.number().int().min(1).max(10).optional() })
-  .strict();
+/** One run's estimate: its run, and how many times it has yielded to chat. An id and a count only. */
+export const ReasonJob = z.object({ runId: Id, deferrals: z.number().int().min(1).max(1000).optional() }).strict();
 export type ReasonJob = z.infer<typeof ReasonJob>;
+
+/**
+ * How a job for an estimate is sent: stately on its series, and never retried. A job that fails (the write threw
+ * after the model answered, the runtime was killed) is not run again by the queue: the night's second opinion is
+ * missed, which is fine. What it already asked and claimed is counted in the database either way (below).
+ */
+export const REASON_SEND = { retryLimit: 0 } as const;
+/** The night's requests for one run's estimate, counted in the database by the run: 2, whatever runs the job again. */
+export const requestsCounter = (runId: string): string => `ledger.reason.requests:${runId}`;
+/** That a run's estimate has taken its one slot of the day's cap tonight. */
+export const claimedCounter = (runId: string): string => `ledger.reason.claimed:${runId}`;
 
 export type ReasonOutcome =
   /** The estimate is on the ledger. */
@@ -281,6 +319,8 @@ export type ReasonOutcome =
   /** No local model is set. */
   | 'no_model'
   | 'unavailable' | 'invalid' | 'capped'
+  /** The night's requests for this run were already made by an earlier job: nothing is asked again. */
+  | 'spent'
   /** Chat is busy: sent again. */
   | 'deferred'
   /** Chat stayed busy: given up for the night. */
@@ -298,11 +338,31 @@ export interface ReasonDeps {
   timeoutMs?: number;
   models?: LocalModels;
   now?: () => Date;
-  /** Test seam: called after the second look, just before the estimate is written. */
-  hooks?: { beforeRecord?: () => Promise<void> };
+  /** Test seams: called after the second look, just before the estimate is written; and once the model has answered, before the write begins. */
+  hooks?: { beforeRecord?: () => Promise<void>; answered?: () => Promise<void> };
 }
 
 const READ_COMMITTED = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted } as const;
+
+class CapReached extends Error {}
+
+/**
+ * This run's one slot of the day's cap: taken now, or already taken tonight by an earlier job for the same run
+ * (true either way), or not to be had (false). The run's own mark and the cap's slot are one transaction: a run that
+ * got no slot holds no mark, and a second job for the run takes no second slot.
+ */
+async function claimOnce(db: Db, runId: string, cap: Cap, tz: string, now: Date): Promise<boolean> {
+  try {
+    return await db.$transaction(async (tx: Tx) => {
+      if ((await claim(tx, claimedCounter(runId), { limit: 1, period: 'day' }, tz, now)) === null) return true;
+      if ((await claim(tx, REASON_ACTION, cap, tz, now)) === null) throw new CapReached();
+      return true;
+    }, READ_COMMITTED);
+  } catch (err) {
+    if (err instanceof CapReached) return false;
+    throw err;
+  }
+}
 const Point = z.object({ mean: z.number().finite(), lo: z.number().finite(), hi: z.number().finite() }).passthrough();
 
 interface Standing {
@@ -381,7 +441,8 @@ async function factsOf(db: Db, tz: string, ride: Ride): Promise<EstimateFacts | 
 /** One run's second opinion. */
 export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcome: ReasonOutcome }> {
   const { db } = d;
-  const now = d.now?.() ?? new Date();
+  const clock = (): Date => d.now?.() ?? new Date();
+  const now = clock();
   const tz = d.config.tz;
   const s = await standing(db, now);
   const ride = await rideOf(db, job.runId, now);
@@ -393,7 +454,7 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
     await appendAudit(db, [{
       actor: REASON_ACTOR, context: 'autonomous', kind: 'action', action: REASON_ACTION, tier: s.tier,
       outcome: outcome === 'recorded' ? 'ok' : outcome === 'refused' || outcome === 'invalid' || outcome === 'unavailable' ? 'failed' : 'skipped',
-      inputs: { series: key, run: job.runId, result: outcome, requests: m.requests ?? job.requests ?? 0, deferrals: job.deferrals ?? 0, ...(m.modelMs !== undefined ? { modelMs: m.modelMs } : {}) },
+      inputs: { series: key, run: job.runId, result: outcome, requests: m.requests ?? 0, deferrals: job.deferrals ?? 0, ...(m.modelMs !== undefined ? { modelMs: m.modelMs } : {}) },
     }], now);
     return { outcome };
   };
@@ -407,9 +468,10 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
   const asked = await estimate(facts, {
     ollama,
     load: d.load ?? chatLoad(d.config.server),
-    claim: async () => (await claim(db, REASON_ACTION, s.cap, tz, now)) !== null,
-    ...(job.claimed ? { claimed: true } : {}),
-    ...(job.requests ? { used: job.requests } : {}),
+    // One slot of the day's cap for this run tonight, however many jobs ask for it.
+    claim: () => claimOnce(db, job.runId, s.cap, tz, now),
+    // Each request is counted before it goes, where a later job for this run finds it: two tonight, and no more.
+    attempt: async () => (await claim(db, requestsCounter(job.runId), { limit: MODEL_REQUESTS, period: 'day' }, tz, now)) !== null,
     ...(d.fetch ? { fetch: d.fetch } : {}),
     ...(d.timeoutMs ? { timeoutMs: d.timeoutMs } : {}),
     ...(d.models ? { models: d.models } : {}),
@@ -418,8 +480,8 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
   if (!asked.ok && asked.why === 'deferred') {
     const n = (job.deferrals ?? 0) + 1;
     if (n <= MAX_DEFERRALS) {
-      // Stately on the series: this job is running, so one more may wait.
-      await d.bus.boss.send(REASON_QUEUE, { runId: job.runId, deferrals: n, ...(asked.claimed ? { claimed: true as const } : {}), ...(asked.requests ? { requests: asked.requests } : {}) } satisfies ReasonJob, { singletonKey: key, startAfter: DEFER_SECONDS });
+      // Stately on the series: this job is running, so one more may wait. What it asked and claimed is in the database.
+      await d.bus.boss.send(REASON_QUEUE, { runId: job.runId, deferrals: n } satisfies ReasonJob, { singletonKey: key, startAfter: DEFER_SECONDS, ...REASON_SEND });
       return { outcome: 'deferred' };
     }
     // Chat has been busy for ten minutes: no second opinion tonight, and Health says so.
@@ -427,13 +489,17 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
     return ended('gave_up', counts);
   }
   if (!asked.ok) return ended(asked.why, counts);
+  await d.hooks?.answered?.();
 
   // The estimate, beside the forecaster's answer: the same claim, the same rule, the same resolve time.
   try {
     const wrote = await db.$transaction(async (tx: Tx) => {
       // One estimate per run, whoever else is writing: the lock, then a second look.
       await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`estimate:${job.runId}`}))) AS l`;
-      const again = await rideOf(tx, job.runId, now);
+      // The second look is at the time of WRITING, not of asking: the model may have taken minutes. A step that
+      // ended meanwhile, a question settled meanwhile, a switch turned off meanwhile: nothing is written.
+      const writing = clock();
+      const again = await rideOf(tx, job.runId, writing);
       if (again === 'exists') return 'exists' as const;
       if (!again) return 'nothing' as const;
       await d.hooks?.beforeRecord?.();
@@ -446,11 +512,12 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
         evidence: [{ kind: 'model', ref: `ollama:${ollama.model}`, note: asked.estimate.reasonCode }, { kind: 'forecast_run', ref: job.runId }],
         resolutionCriteria: again.question.resolutionCriteria, resolver: 'auto_metric', resolverSpec: again.question.spec,
         resolveBy: again.question.resolveBy.toISOString(), tainted: false, unit: again.def.unit, seriesKey: again.def.key, forecastRunId: job.runId,
-      }, REASON_WRITER, now);
+        // (The row's own time is the database's clock at the insert: the time it is written.)
+      }, REASON_WRITER, writing);
       return 'recorded' as const;
     }, READ_COMMITTED);
-    if (wrote === 'recorded') return ended('recorded', counts);
-    return { outcome: wrote };
+    // The model was asked: however it ends, there is an entry that says so.
+    return ended(wrote, counts);
   } catch (err) {
     if (!refusedByDb(err)) throw err;
     // The database refused it (the switch was turned off, or the number forgotten, while the model answered): its class and the key.
@@ -478,7 +545,7 @@ export async function sendReasons(d: { db: Db; bus: Pick<Bus, 'boss'>; now?: Dat
   for (const p of open) {
     if (!p.forecastRunId || !p.seriesKey || p.forecastRun?.predictions.length) continue;
     if ((await rideOf(d.db, p.forecastRunId, now)) === undefined) continue;
-    await d.bus.boss.send(REASON_QUEUE, { runId: p.forecastRunId } satisfies ReasonJob, { singletonKey: p.seriesKey });
+    await d.bus.boss.send(REASON_QUEUE, { runId: p.forecastRunId } satisfies ReasonJob, { singletonKey: p.seriesKey, ...REASON_SEND });
     sent += 1;
   }
   return sent;

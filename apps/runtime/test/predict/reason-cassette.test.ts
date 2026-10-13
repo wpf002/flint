@@ -27,7 +27,7 @@ describe('estimate against the recorded Ollama reply', () => {
     }) as unknown as typeof fetch;
     const r = await estimate(SYNTHETIC_FACTS, { ollama: { url: 'http://127.0.0.1:11434', model: cassette.model, numCtx: cassette.numCtx }, load: async () => 'proceed', claim: async () => true, fetch: replay });
     expect(sent).toEqual(cassette.exchanges.map((e) => e.request));
-    expect(r).toMatchObject({ ...cassette.result, requests: cassette.exchanges.length, claimed: true });
+    expect(r).toMatchObject({ ...cassette.result, requests: cassette.exchanges.length });
     expect(cassette.result.ok).toBe(true);
     // What the model said, end-of-turn token and all, is the strict shape: a number in band and a code, and nothing else.
     const raw = cassette.exchanges.at(-1)!.response.message!.content;

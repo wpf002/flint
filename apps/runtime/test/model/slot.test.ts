@@ -75,7 +75,7 @@ describe('the shared model slot', () => {
       judge(EVENT, { ollama: OLLAMA, load: async () => 'proceed', claim: async () => true, fetch: first }),
       estimate(SYNTHETIC_FACTS, { ollama: OLLAMA, load: async () => (busy ? 'defer' : 'proceed'), claim: async () => true, fetch: second }),
     ]);
-    expect(waited).toMatchObject({ ok: false, why: 'deferred', requests: 0, claimed: false });
+    expect(waited).toMatchObject({ ok: false, why: 'deferred', requests: 0 });
     expect(asked).toBe(0);
   });
 

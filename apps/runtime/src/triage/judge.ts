@@ -15,7 +15,10 @@
  *    second opinion share.
  *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
  *    that is not this machine, or a model Ollama's own listing does not say
- *    runs here is "unavailable" before anything is asked, claimed or sent.
+ *    runs here is "unavailable" before anything is asked, claimed or sent. The
+ *    listing is asked first, and again immediately before EVERY request (after
+ *    the wait for the slot, the load check and the claim; and before a second
+ *    attempt), so an item's title goes only on a word at most two seconds old.
  *  - Text someone else wrote goes only inside a <data> block, clipped.
  *  - Failing, it says why: invalid (replies, none usable), unavailable (no
  *    reply at all), capped, or deferred (chat is busy: try again later).
@@ -100,13 +103,15 @@ class Stop extends Error {}
 
 export async function judge(f: EventFacts, d: JudgeDeps): Promise<Judged> {
   const started = Date.now();
+  /** Is the model on this Mac, on Ollama's own word from the last two seconds (model/here.ts)? */
+  const here = (): Promise<boolean> => (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch);
   // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
-  if (!(await (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch))) return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: 0 };
+  if (!(await here())) return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: 0 };
   const origin = new URL(d.ollama.url).origin;
   const post = scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }], d.fetch ?? fetch, d.timeoutMs ?? 90_000);
   let requests = 0;
   let replied = false;
-  let stopped: 'capped' | 'deferred' | undefined;
+  let stopped: 'capped' | 'deferred' | 'unavailable' | undefined;
   // Every request the provider makes, its own retries included, comes through here: one local-model
   // request at a time in this process (a goal review's plan stage shares the slot), then the checks.
   const gated = ((url: string | URL | Request, init?: RequestInit) =>
@@ -119,6 +124,12 @@ export async function judge(f: EventFacts, d: JudgeDeps): Promise<Judged> {
       if (!(await d.claim())) {
         stopped = 'capped';
         throw new Stop('the hour cap is used up');
+      }
+      // Ollama is asked again at the last moment, before EVERY request: the slot may have been another caller's for
+      // seconds, and a second attempt comes after the first's whole reply. On a no, or no word, nothing is sent.
+      if (!(await here())) {
+        stopped = 'unavailable';
+        throw new Stop('the model is not on this Mac');
       }
       requests += 1;
       const res = await post(String(url), init);

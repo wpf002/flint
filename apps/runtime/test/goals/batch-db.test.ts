@@ -175,13 +175,14 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     expect(g.title).toContain(CANARY);
     await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
     const claims = async () => (await db.actionCounter.findUnique({ where: { action_day: { action: 'goal.review.local', day: day() } } }))?.count ?? 0;
-    const cases: Array<[string, () => Response | Promise<Response>]> = [
-      ['its listing marks the model as run elsewhere', () => tags([{ name: OLLAMA.model, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }])],
-      ['its listing hangs', hangs],
-      ['its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 })],
-      ['its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }])],
+    // (The last number: how many times the listing is asked in one look. One that fails at once is asked once more.)
+    const cases: Array<[string, () => Response | Promise<Response>, number]> = [
+      ['its listing marks the model as run elsewhere', () => tags([{ name: OLLAMA.model, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }]), 1],
+      ['its listing hangs', hangs, 1],
+      ['its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 }), 2],
+      ['its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }]), 1],
     ];
-    for (const [what, listing] of cases) {
+    for (const [what, listing, asks] of cases) {
       const id = await reviewed(g.id);
       prompts = [];
       bus.clear();
@@ -196,7 +197,7 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
       // The listing was asked each time, and that was the whole conversation: no prompt, so none of his words.
       expect(prompts, what).toEqual([]);
       expect(o.sent(), what).toBe(0);
-      expect(o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(['GET /api/tags', 'GET /api/tags']);
+      expect(o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(Array(2 * asks).fill('GET /api/tags'));
       expect((await cards(g.id)).length, what).toBe(0);
     }
     // Nothing was claimed of the day's cap for any of them.

@@ -78,15 +78,24 @@ export interface LocalModelsOptions {
 
 export class LocalModels {
   readonly #places: ModelPlaces;
+  /** The latest time the clock has shown. */
+  #latest = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly opts: LocalModelsOptions = {}) {
     // The shared record. A word is believed here only as long as a request may go on it: two seconds.
     this.#places = new ModelPlaces({ maxAgeMs: this.#word(), timeoutMs: this.#timeout(), now: () => this.#now() });
   }
 
-  /** Monotonic: the Mac's clock being set back does not make an old word young. */
+  /**
+   * The clock a word's age is counted on: one that does not follow the Mac's wall clock, so setting that back
+   * cannot make an old word young. And should the clock it is given ever show an earlier time than it has shown,
+   * everything heard is forgotten: an age that cannot be told is too old.
+   */
   #now(): number {
-    return this.opts.now?.() ?? performance.now();
+    const t = this.opts.now?.() ?? performance.now();
+    if (t < this.#latest) this.#places.clear();
+    this.#latest = t;
+    return t;
   }
 
   #word(): number {

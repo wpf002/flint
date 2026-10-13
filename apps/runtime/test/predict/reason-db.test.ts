@@ -14,7 +14,14 @@
  *    record nothing, and none of them touches the forecast already written.
  *  - While chat is busy it sends itself again, 15 seconds out, up to 40 times,
  *    then gives up and Settings > Health says so.
- *  - The sweep settles it and the night's scores score it like any other.
+ *  - A number's estimate costs at most two requests and one slot of the day's
+ *    cap a night, however many jobs run for it: the queue never runs a failed
+ *    one again, and what it asked and claimed is counted in the database.
+ *  - The second look, before the write, is at the time of writing: a step that
+ *    ended, a switch turned off, a question settled or an estimate written
+ *    while the model answered, and nothing is written.
+ *  - The sweep settles it like any other. The night's scores for an area do
+ *    not count it: it is scored only beside the forecaster's answer.
  *  - Job data, audit entries and log lines hold ids, keys and counts: never a
  *    series' value, a probability or a prompt.
  * Synthetic numbers; Flint's zone is UTC here. The clock is read once (NOW).
@@ -27,6 +34,7 @@ import { localDay } from '@flint/policy';
 import { NO_DB, freshDb, type TestUrls } from '../db';
 import { CANARY, DAY, HOUR, TZ, dayStart as kitDayStart, ledgerKit, type LedgerKit } from '../ledger/kit';
 import { FakeBus, goalFixture, type GoalFixture } from '../goals/fixture';
+import { startBus } from '../../src/bus';
 import { claim } from '../../src/governance/counters';
 import { checkComponents } from '../../src/health/checks';
 import { snapshotCalibration } from '../../src/ledger/calibration';
@@ -36,7 +44,8 @@ import { weekOf } from '../../src/predict/metrics';
 import { forecastSeries, freqOf } from '../../src/predict/series';
 import { runForecasts } from '../../src/predict/run';
 import {
-  DEFERRAL_MARK, DEFERRAL_SAYS, DEFER_SECONDS, MAX_DEFERRALS, PROMPT_VERSION, REASON_ACTION, REASON_QUEUE, ReasonJob, estimatePrompt, runReason, sendReasons, type ReasonDeps,
+  DEFERRAL_MARK, DEFERRAL_SAYS, DEFER_SECONDS, MAX_DEFERRALS, PROMPT_VERSION, REASON_ACTION, REASON_QUEUE, REASON_SEND, ReasonJob, claimedCounter, requestsCounter, runReason, sendReasons,
+  type ReasonDeps,
 } from '../../src/predict/reason';
 import { listening, modelsHere, tags } from '../ollama-kit';
 
@@ -106,6 +115,8 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
   const latestRun = async (key: string) => (await k.owner(`SELECT id FROM "ForecastRun" WHERE "seriesKey" = $1 AND ok ORDER BY "createdAt" DESC, id DESC LIMIT 1`, [key])).rows[0]?.id as string | undefined;
   const question = async (runId: string) => (await k.owner(`SELECT * FROM "Prediction" WHERE "forecastRunId" = $1 AND kind = 'binary' AND "createdBy" = 'runtime:forecast'`, [runId])).rows[0];
   const estimates = async (runId: string) => (await k.owner(`SELECT * FROM "Prediction" WHERE "forecastRunId" = $1 AND "createdBy" = 'runtime:reason' ORDER BY "createdAt"`, [runId])).rows;
+  /** A new night for a run: what it asked and claimed is counted by the night. */
+  const newNight = (runId: string) => k.owner(`DELETE FROM "ActionCounter" WHERE action = ANY($1)`, [[requestsCounter(runId), claimedCounter(runId)]]);
   const counter = async (action: string) => (await k.owner(`SELECT coalesce(sum(count), 0)::int AS n FROM "ActionCounter" WHERE action = $1`, [action])).rows[0].n as number;
   const audits = async () => (await k.owner(`SELECT actor, context, kind, action, tier, outcome, inputs, reasoning, "outcomeDetail" FROM "AuditEntry" WHERE action = $1 ORDER BY seq DESC`, [REASON_ACTION])).rows;
   /** Everything that must never hold a value, a probability or a prompt: job data, audit entries, health details, log lines. */
@@ -156,7 +167,10 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
     for (const j of jobs) {
       expect(Object.keys(j.data)).toEqual(['runId']);
       expect(ReasonJob.safeParse(j.data).success).toBe(true);
+      // Sent to run once: the queue does not run a failed one again.
+      expect(j.options).toEqual({ singletonKey: expect.any(String), retryLimit: 0 });
     }
+    expect(REASON_SEND).toEqual({ retryLimit: 0 });
     expect(jobs.find((j) => j.options.singletonKey === DEPLOYS)!.data.runId).toBe(await latestRun(DEPLOYS));
     // Asked again while those wait: the same jobs, not more (stately on the series).
     expect(await sendReasons({ db: k.db, bus, now: NOW })).toBe(2);
@@ -242,12 +256,12 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
     expect(prompts).toContain('It has too little history to test.');
     // ...and nothing else holds them, the prompt's words, or what the model said.
     const all = await everywhere();
-    expect(all).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b|31337|0\.62|0\.41/);
+    expect(all).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b|\b0\.62\b|\b0\.41\b/);
     expect(all).not.toMatch(/Series:|oldest first|Question:|too_noisy|"trend"/);
     // The estimate's own record names the model and its reason code, and holds no value of the series.
-    expect(JSON.stringify([e.evidence, e.modelConfig])).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b|31337/);
+    expect(JSON.stringify([e.evidence, e.modelConfig])).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b/);
     // The cards Will signed name the numbers by key: no value there either.
-    expect(JSON.stringify((await k.owner(`SELECT args, reason, error FROM "Proposal"`)).rows)).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b|31337/);
+    expect(JSON.stringify((await k.owner(`SELECT args, reason, error FROM "Proposal"`)).rows)).not.toMatch(/\b(3[1-9]|4[0-2])\.\d{2}\b/);
   });
 
   it('a probability outside 0.05 to 0.95 records nothing, and is not asked a third time', async () => {
@@ -264,10 +278,19 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
     expect((await audits())[0]).toMatchObject({ outcome: 'failed', inputs: { series: key, run: runId, result: 'invalid', requests: 2 } });
     // The forecast it would have ridden on is as it was.
     expect(await question(runId)).toMatchObject({ status: 'open', createdBy: 'runtime:forecast' });
+    // Those were the night's two requests. A job for the same run that night asks nothing, whatever the model would say.
+    sent = [];
+    expect(await reason(runId, { fetch: model([{ probability: 0.6, reasonCode: 'trend' }]) })).toEqual({ outcome: 'spent' });
+    expect(sent).toEqual([]);
+    expect(await estimates(runId)).toEqual([]);
+    expect(await counter(REASON_ACTION)).toBe(claims + 1);
+    expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: key, run: runId, result: 'spent', requests: 0 } });
     // An extra key or a word of the model's own is the same: nothing recorded.
+    await newNight(runId);
     expect(await reason(runId, { fetch: model([{ probability: 0.6, reasonCode: 'trend', reasoning: 'because' }]) })).toEqual({ outcome: 'invalid' });
     expect(await estimates(runId)).toEqual([]);
     // A later, usable answer is recorded as it is.
+    await newNight(runId);
     expect(await reason(runId, { fetch: model(['not json', { probability: 0.95, reasonCode: 'recent_level' }]) })).toEqual({ outcome: 'recorded' });
     expect((await estimates(runId))[0]).toMatchObject({ probability: 0.95 });
   });
@@ -303,10 +326,15 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       await runForecasts({ db: k.db, tz: TZ, now: NOW });
       runId = (await latestRun(KEY))!;
     });
+    // Each test is a night of its own.
+    beforeEach(async () => {
+      await newNight(runId);
+    });
     const nothingRecorded = async () => {
       expect(await estimates(runId)).toEqual([]);
       expect(await question(runId)).toMatchObject({ status: 'open' });
     };
+    const answers = () => model([{ probability: 0.6, reasonCode: 'trend' }]);
 
     it('a step that is over gets no estimate: one made then would be no forecast', async () => {
       expect(await reason(runId, { now: () => new Date(dayStart(0).getTime() + DAY + 1), fetch: model([{ probability: 0.6, reasonCode: 'trend' }]) })).toEqual({ outcome: 'nothing' });
@@ -327,7 +355,8 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       const cases: Array<[{ url: string; model: string; proxied?: true }, () => Response | Promise<Response>, number]> = [
         [{ ...OLLAMA, model: 'gpt-oss:120b-cloud' }, () => tags([{ name: 'gpt-oss:120b-cloud' }]), 0],
         [{ ...OLLAMA, model: 'mine' }, () => tags([{ name: 'mine:latest', remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }]), 1],
-        [OLLAMA, () => new Response('', { status: 500 }), 1],
+        // (A listing that fails at once is asked once more; one that hangs is not.)
+        [OLLAMA, () => new Response('', { status: 500 }), 2],
         [OLLAMA, () => new Promise<Response>(() => {}), 1],
         [OLLAMA, () => tags([{ name: 'llama3.1:latest' }]), 1],
         [{ ...OLLAMA, url: 'http://10.0.0.5:11434' }, () => tags([{ name: OLLAMA.model }]), 0],
@@ -358,20 +387,30 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       const claims = await counter(REASON_ACTION);
       const busy = (job: Partial<ReasonJob> = {}) => runReason(deps({ bus: waiting, load: async () => 'defer', fetch: model([{ probability: 0.6, reasonCode: 'trend' }]) }), { runId, ...job });
       expect(await busy()).toEqual({ outcome: 'deferred' });
-      expect(waiting.of(REASON_QUEUE)).toEqual([{ queue: REASON_QUEUE, data: { runId, deferrals: 1 }, options: { singletonKey: KEY, startAfter: DEFER_SECONDS } }]);
+      expect(waiting.of(REASON_QUEUE)).toEqual([{ queue: REASON_QUEUE, data: { runId, deferrals: 1 }, options: { singletonKey: KEY, startAfter: DEFER_SECONDS, retryLimit: 0 } }]);
       expect([DEFER_SECONDS, MAX_DEFERRALS]).toEqual([15, 40]);
       // Nothing was asked, nothing claimed, and a deferral is not an ending: no audit entry.
       expect(sent).toEqual([]);
       expect(await counter(REASON_ACTION)).toBe(claims);
       expect((await audits())[0]?.inputs.result).not.toBe('deferred');
-      // One that yields after its first request carries its claim and its count.
+      // One that yields after its first request sends its run and its count of waits, and nothing else: what it
+      // asked and claimed is in the database, where the job it sent finds it.
       waiting.clear();
       let n = 0;
       const half = await runReason(deps({ bus: waiting, load: async () => (n++ ? 'defer' : 'proceed'), fetch: model(['not json']) }), { runId, deferrals: 3 });
       expect(half).toEqual({ outcome: 'deferred' });
-      expect(waiting.of(REASON_QUEUE)[0]!.data).toEqual({ runId, deferrals: 4, claimed: true, requests: 1 });
+      expect(sent).toHaveLength(1);
+      expect(waiting.of(REASON_QUEUE)[0]!.data).toEqual({ runId, deferrals: 4 });
       expect(ReasonJob.safeParse(waiting.of(REASON_QUEUE)[0]!.data).success).toBe(true);
+      expect(ReasonJob.safeParse({ runId, deferrals: 4, claimed: true, requests: 0 }).success).toBe(false);
       expect(await counter(REASON_ACTION)).toBe(claims + 1);
+      // That job makes the night's second request and no third, and takes no second slot of the cap.
+      const next = await runReason(deps({ bus: waiting, fetch: model(['not json']) }), ReasonJob.parse(waiting.of(REASON_QUEUE)[0]!.data));
+      expect(next).toEqual({ outcome: 'invalid' });
+      expect(sent).toHaveLength(2);
+      expect(await counter(REASON_ACTION)).toBe(claims + 1);
+      expect((await audits())[0]).toMatchObject({ outcome: 'failed', inputs: { series: KEY, run: runId, result: 'invalid', requests: 1, deferrals: 4 } });
+      sent = [];
       // The fortieth wait is the last: it is sent once more, and then given up.
       waiting.clear();
       expect(await busy({ deferrals: MAX_DEFERRALS - 1 })).toEqual({ outcome: 'deferred' });
@@ -420,12 +459,107 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       expect(user).toMatch(/Week of \d{4}-\d{2}-\d{2}: \d+\nQuestion: is the value for the week of \d{4}-\d{2}-\d{2} above /);
     });
 
+    it('a job that fails after the model answered, run again and again: two requests and one slot of the cap that night, then nothing is asked', async () => {
+      const claims = await counter(REASON_ACTION);
+      const broke = async () => { throw new Error('the write failed'); };
+      // The write throws once the model has answered: the job fails. Run again (a deploy that sends it again, a
+      // queue that would retry), it asks once more, with the slot it already has.
+      await expect(reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).rejects.toThrow('the write failed');
+      expect([sent.length, await counter(REASON_ACTION)]).toEqual([1, claims + 1]);
+      await expect(reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).rejects.toThrow('the write failed');
+      expect([sent.length, await counter(REASON_ACTION)]).toEqual([2, claims + 1]);
+      // A third and a fourth, with a write that would work: nothing is asked and nothing is claimed.
+      expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
+      expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
+      expect([sent.length, await counter(REASON_ACTION)]).toEqual([2, claims + 1]);
+      expect([await counter(requestsCounter(runId)), await counter(claimedCounter(runId))]).toEqual([2, 1]);
+      expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: KEY, run: runId, result: 'spent', requests: 0 } });
+      // The counts are names and numbers: the run's id, nothing of the number's.
+      expect(requestsCounter(runId)).toBe(`ledger.reason.requests:${runId}`);
+      expect(claimedCounter(runId)).toBe(`ledger.reason.claimed:${runId}`);
+      await nothingRecorded();
+    });
+
+    it('the queue itself never runs a failed estimate again: a real job is sent with no retries', async () => {
+      const real = await startBus(urls.app, () => {});
+      try {
+        await k.owner(`DELETE FROM pgboss.job WHERE name = $1`, [REASON_QUEUE]);
+        expect(await sendReasons({ db: k.db, bus: real, now: NOW })).toBeGreaterThan(0);
+        // One that waits for chat is sent the same way.
+        await runReason(deps({ bus: real, load: async () => 'defer', fetch: answers() }), { runId });
+        const rows = (await k.owner(`SELECT retry_limit, data::text AS data FROM pgboss.job WHERE name = $1`, [REASON_QUEUE])).rows as Array<{ retry_limit: number; data: string }>;
+        expect(rows.length).toBeGreaterThan(0);
+        for (const r of rows) expect(r.retry_limit, r.data).toBe(0);
+        // (And what a job holds is its run and a count.)
+        for (const r of rows) expect(Object.keys(JSON.parse(r.data)).sort().join()).toMatch(/^(deferrals,)?runId$/);
+      } finally {
+        await k.owner(`DELETE FROM pgboss.job WHERE name = $1`, [REASON_QUEUE]);
+        await real.stop();
+      }
+    });
+
+    it('a step that ends while the model answers: the second look is at the time of writing, and nothing is written', async () => {
+      const over = new Date(dayStart(0).getTime() + DAY + 1);
+      let t = NOW;
+      const r = await reason(runId, { now: () => t, fetch: answers(), hooks: { answered: async () => void (t = over) } });
+      expect(r).toEqual({ outcome: 'nothing' });
+      // The model was asked (the step was open then), and what it said went nowhere.
+      expect(sent).toHaveLength(1);
+      expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: KEY, run: runId, result: 'nothing', requests: 1 } });
+      await nothingRecorded();
+    });
+
+    it('the second look comes before the write: a switch turned off, a question settled or an estimate written while the model answered', async () => {
+      // The Second Opinion turned off (the number stays on) once the model has answered: the second look finds
+      // nothing to ride on. The write is not tried, so there is no refusal to log.
+      said.length = 0;
+      const off = async () => void (await k.inTx((q) => q(`UPDATE "ForecastSeries" SET reason = false WHERE "seriesKey" = $1`, [KEY]), { actor: 'will:console' }));
+      expect(await reason(runId, { fetch: answers(), hooks: { answered: off } })).toEqual({ outcome: 'nothing' });
+      expect(sent).toHaveLength(1);
+      expect(said).toEqual([]);
+      await nothingRecorded();
+      await signOn([KEY], [KEY]);
+
+      // The forecaster's question is no longer open (settled, expired, void): nothing rides on it, before the
+      // model is asked or after it answered.
+      const q = await question(runId);
+      const status = (to: string) => k.past('Prediction', ['Prediction_guard', 'Prediction_valid_update'], (run) => run(`UPDATE "Prediction" SET status = $2 WHERE id = $1`, [q.id, to]));
+      await newNight(runId);
+      sent = [];
+      for (const closed of ['void', 'expired', 'resolved']) {
+        await status(closed);
+        expect(await reason(runId, { fetch: answers() }), closed).toEqual({ outcome: 'nothing' });
+        expect(sent, closed).toEqual([]);
+        await status('open');
+      }
+      expect(await reason(runId, { fetch: answers(), hooks: { answered: async () => void (await status('void')) } })).toEqual({ outcome: 'nothing' });
+      expect(sent).toHaveLength(1);
+      await status('open');
+      expect(await sendReasons({ db: k.db, bus: new FakeBus(), now: NOW })).toBeGreaterThan(0);
+      await nothingRecorded();
+
+      // Another job wrote this run's estimate while this one's model answered: one estimate, the first.
+      const NEXUS = 'weekly.commits.nexus.count';
+      await number(NEXUS);
+      await weeks(NEXUS, Array.from({ length: 22 }, (_, i) => 4 + (i % 3) * 3));
+      expect(await runForecasts({ db: k.db, tz: TZ, now: NOW })).toMatchObject({ ran: 1 });
+      const twin = (await latestRun(NEXUS))!;
+      sent = [];
+      const other = async () => void expect(await reason(twin, { fetch: model([{ probability: 0.3, reasonCode: 'burst' }]) })).toEqual({ outcome: 'recorded' });
+      expect(await reason(twin, { fetch: model([{ probability: 0.8, reasonCode: 'trend' }]), hooks: { answered: other } })).toEqual({ outcome: 'exists' });
+      expect(sent).toHaveLength(2);
+      expect((await estimates(twin)).map((e) => e.probability)).toEqual([0.3]);
+      expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { series: NEXUS, run: twin, result: 'exists', requests: 1 } });
+    });
+
     it('a used-up daily cap, and a rule that forbids it: nothing is asked', async () => {
       const cap = { limit: 30, period: 'day' as const };
       while ((await claim(k.db, REASON_ACTION, cap, TZ, NOW)) !== null);
       expect(await reason(runId, { fetch: model([{ probability: 0.6, reasonCode: 'trend' }]) })).toEqual({ outcome: 'capped' });
       expect(sent).toEqual([]);
       expect((await audits())[0]).toMatchObject({ outcome: 'skipped', inputs: { result: 'capped', requests: 0 } });
+      // A run that got no slot holds no mark of having one, and has asked nothing.
+      expect([await counter(claimedCounter(runId)), await counter(requestsCounter(runId))]).toEqual([0, 0]);
       await nothingRecorded();
       await g.policy(REASON_ACTION, 'forbidden');
       // (The rule is in force from now: the estimate is asked for a moment later.)
@@ -438,7 +572,7 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
   });
 });
 
-describe.skipIf(NO_DB)('the second opinion is settled and scored like any other prediction', () => {
+describe.skipIf(NO_DB)('the second opinion is settled like any other prediction, and kept out of an area’s own scores', () => {
   let urls: TestUrls;
   let k: LedgerKit;
   const NOW = new Date();
@@ -452,7 +586,7 @@ describe.skipIf(NO_DB)('the second opinion is settled and scored like any other 
     await k?.db.$disconnect();
   });
 
-  it('the sweep settles it by the same rule as the forecaster’s answer, and the night’s scores give it a row of its own', async () => {
+  it('the sweep settles it by the same rule as the forecaster’s answer, and the night’s scores for the area do not count it', async () => {
     const d = forecastSeries(DEPLOYS)!;
     await k.series({ key: d.key, unit: d.unit, freq: freqOf(d), sensitivity: d.sensitivity, description: d.description });
     await k.turnOn([DEPLOYS], [DEPLOYS]);
@@ -471,14 +605,16 @@ describe.skipIf(NO_DB)('the second opinion is settled and scored like any other 
       expect(await k.status(pid), pid).toBe('resolved');
       expect(await k.resolution(pid), pid).toMatchObject({ outcome: true, resolvedBy: 'auto_metric' });
     }
-    // The night's scores: the local model's answer is a row of its own beside the forecaster's, scored the same way.
+    // Each has its own score, by the same sum.
+    expect((await k.resolution(mine))!.brier).toBeCloseTo((0.55 - 1) ** 2, 10);
+    expect((await k.resolution(models))!.brier).toBeCloseTo((0.7 - 1) ** 2, 10);
+    // The night's scores for the area count the forecaster's answer and not the model's second answer to the same
+    // question: one question, one row. (The two are compared question by question in the panel: p4-opinion-db.)
     const end = new Date(Date.now() + 60_000);
     await snapshotCalibration(k.db, new Date(end.getTime() - 90 * DAY), end, TZ);
     const scores = (await k.owner(`SELECT method, kind, n, brier FROM "CalibrationSnapshot" WHERE domain = 'deploys' AND type = 'threshold_cross' ORDER BY method`)).rows;
-    expect(scores).toEqual([
-      { method: 'model_reasoning', kind: 'binary', n: 1, brier: expect.closeTo((0.7 - 1) ** 2, 10) },
-      { method: 'statistical', kind: 'binary', n: 1, brier: expect.closeTo((0.55 - 1) ** 2, 10) },
-    ]);
+    expect(scores).toEqual([{ method: 'statistical', kind: 'binary', n: 1, brier: expect.closeTo((0.55 - 1) ** 2, 10) }]);
+    expect((await k.owner(`SELECT count(*)::int AS n FROM "CalibrationSnapshot" WHERE method = 'model_reasoning'`)).rows[0].n).toBe(0);
     // Where the Second Opinion is not signed, the database takes no such row, whoever writes it.
     const plain = forecastSeries(OPENAI)!;
     await k.series({ key: plain.key, unit: plain.unit, freq: freqOf(plain), sensitivity: plain.sensitivity, description: plain.description });

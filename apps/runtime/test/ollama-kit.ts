@@ -51,8 +51,12 @@ export function listingForReal(): void {
   LOCAL_MODELS.forget();
 }
 
-/** A record of its own for one test: nothing heard yet, and a listing given up after `timeoutMs` (a hang then costs a third of a second, not two). */
-export const fresh = (timeoutMs = 300): LocalModels => new LocalModels({ timeoutMs });
+/**
+ * A record of its own for one test: nothing heard yet, and a listing given up after `timeoutMs` (a hang then costs
+ * a third of a second, not two). `wordMs`: how old Ollama's word may be when a request goes (two seconds, unless a
+ * test over real sockets shortens it so it need not wait that long).
+ */
+export const fresh = (timeoutMs = 300, wordMs?: number): LocalModels => new LocalModels({ timeoutMs, ...(wordMs !== undefined ? { wordMs } : {}) });
 
 /** Ollama's `/api/tags` reply for these rows. */
 export const tags = (rows: readonly unknown[]): Response => new Response(JSON.stringify({ models: rows }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -94,6 +98,10 @@ export interface StandIn {
   listing: ListingMode;
   /** The chat reply's content (an object is sent as JSON). Chat ALWAYS answers: only the listing says where the model runs. */
   reply: unknown;
+  /** When set: the reply to each chat request in turn (the last repeats), instead of `reply`. */
+  replies?: unknown[];
+  /** How long each chat request takes to answer, by its number from 1 (default: at once). */
+  chatDelayMs?: (n: number) => number;
   /** Every request it received, in order. */
   seen: Array<{ method: string; path: string }>;
   /** The body of every chat request it received: what would have reached the model. */
@@ -126,7 +134,11 @@ export async function standIn(model: string, reply: unknown = {}): Promise<Stand
       if (path === '/api/ps') return void res.end(JSON.stringify({ models: [] }));
       if (path === '/api/chat') {
         s.chats.push(body);
-        return void res.end(JSON.stringify({ model, message: { role: 'assistant', content: typeof s.reply === 'string' ? s.reply : JSON.stringify(s.reply) }, done: true, done_reason: 'stop', prompt_eval_count: 10, eval_count: 5 }));
+        const n = s.chats.length;
+        const said = s.replies ? s.replies[Math.min(n - 1, s.replies.length - 1)] : s.reply;
+        const answer = (): void => void res.end(JSON.stringify({ model, message: { role: 'assistant', content: typeof said === 'string' ? said : JSON.stringify(said) }, done: true, done_reason: 'stop', prompt_eval_count: 10, eval_count: 5 }));
+        const wait = s.chatDelayMs?.(n) ?? 0;
+        return void (wait > 0 ? setTimeout(answer, wait) : answer());
       }
       res.writeHead(404).end('{}');
     });

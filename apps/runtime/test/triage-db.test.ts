@@ -151,18 +151,19 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
       return { o, asked, decision: await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev.id } }) };
     };
     const MODEL = 'muse-glimmer:30b';
-    const cases: Array<[number, string, () => Response | Promise<Response>]> = [
-      [21, 'its listing marks the model as run elsewhere', () => tags([{ name: MODEL, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }])],
-      [22, 'its listing hangs', hangs],
-      [23, 'its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 })],
-      [24, 'its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }])],
+    // (The last number: how many times the listing is asked. One that fails at once is asked once more.)
+    const cases: Array<[number, string, () => Response | Promise<Response>, number]> = [
+      [21, 'its listing marks the model as run elsewhere', () => tags([{ name: MODEL, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }]), 1],
+      [22, 'its listing hangs', hangs, 1],
+      [23, 'its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 }), 2],
+      [24, 'its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }]), 1],
     ];
-    for (const [n, what, listing] of cases) {
+    for (const [n, what, listing, asks] of cases) {
       const r = await triaged(n, listing);
       // Decided without the model, quietly: never escalated on a guess. The model was not asked, so the title went nowhere.
       expect(r.decision, what).toMatchObject({ action: 'log', lane: 'quiet', decidedBy: 'fallback:unavailable' });
       expect(r.asked, what).toBe(0);
-      expect(r.o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(['GET /api/tags']);
+      expect(r.o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(Array(asks).fill('GET /api/tags'));
     }
     // No slot of the hour's cap was taken for any of them.
     expect(await claims()).toBe(before);

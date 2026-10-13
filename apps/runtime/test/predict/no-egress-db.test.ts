@@ -275,14 +275,17 @@ describe.skipIf(NO_DB)('the prediction jobs with the network taken away', () => 
     }
     expect(failure).toBeUndefined();
     expect(reached).toEqual([]);
-    expect(requests.map((r) => [r.method, r.url, r.redirect])).toEqual([
-      ['GET', 'http://127.0.0.1:11434/api/tags', 'manual'],
-      ['POST', 'http://127.0.0.1:11434/api/chat', 'manual'],
-    ]);
-    expect(requests[0]!.body).toBe('');
+    // The listing first, then the one chat request, last. (The listing is asked again just before the request goes
+    // when its word is by then more than two seconds old: one more GET of the same address, and nothing else.)
+    const shape = requests.map((r) => [r.method, r.url, r.redirect]);
+    expect(shape[0]).toEqual(['GET', 'http://127.0.0.1:11434/api/tags', 'manual']);
+    expect(shape.at(-1)).toEqual(['POST', 'http://127.0.0.1:11434/api/chat', 'manual']);
+    expect(shape.length).toBeLessThanOrEqual(3);
+    for (const r of shape.slice(0, -1)) expect(r).toEqual(['GET', 'http://127.0.0.1:11434/api/tags', 'manual']);
+    for (const r of requests.slice(0, -1)) expect(r.body).toBe('');
     // What was posted: the model, the format and the prompt. The prompt holds the dollars (the model is on this Mac),
     // the number's name, and never its key.
-    const posted = JSON.parse(requests[1]!.body) as { model: string; stream: boolean; think: boolean; format: { required: string[] }; messages: Array<{ role: string; content: string }> };
+    const posted = JSON.parse(requests.at(-1)!.body) as { model: string; stream: boolean; think: boolean; format: { required: string[] }; messages: Array<{ role: string; content: string }> };
     expect(posted).toMatchObject({ model: OLLAMA.model, stream: false, think: false, format: { required: ['probability', 'reasonCode'], additionalProperties: false } });
     const prompt = posted.messages.map((m) => m.content).join('\n');
     expect(prompt).toContain('Series: OpenAI Spend. Unit: US dollars. One value per day.');
@@ -292,7 +295,10 @@ describe.skipIf(NO_DB)('the prediction jobs with the network taken away', () => 
     expect(await estimates()).toEqual([{ probability: 0.6, method: 'model_reasoning', model: 'ollama:muse-glimmer:30b' }]);
     const audits = (await k.owner(`SELECT outcome, inputs FROM "AuditEntry" WHERE action = 'ledger.reason.local' ORDER BY seq`)).rows;
     expect(audits.map((a) => [a.outcome, a.inputs.result])).toEqual([['skipped', 'no_model'], ['failed', 'unavailable'], ['failed', 'unavailable'], ['failed', 'unavailable'], ['failed', 'unavailable'], ['ok', 'recorded']]);
-    expect(JSON.stringify([audits, bus.sent, said])).not.toContain(String(Math.trunc(CANARY_DOLLARS)));
+    // (The dollars as they are written, with their cents: a run's id is letters and digits, and could hold "7341".)
+    const DOLLARS = /734[1-6]\.5/;
+    expect(prompt).toMatch(DOLLARS);
+    expect(JSON.stringify([audits, bus.sent, said])).not.toMatch(DOLLARS);
     expect(said.join('\n')).toContain('forecast: 1 second opinion(s) asked for');
   }, 120_000);
 });

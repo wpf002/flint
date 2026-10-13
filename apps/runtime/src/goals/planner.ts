@@ -16,7 +16,10 @@
  *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
  *    that is not this machine, or a model Ollama's own listing does not say
  *    runs here is "unavailable" before anything is asked, claimed or sent. A
- *    goal's words never reach a model that runs somewhere else.
+ *    goal's words never reach a model that runs somewhere else. The listing is
+ *    asked first, and again immediately before EVERY request (after the wait
+ *    for the slot, the load check and the claim; and before a second attempt),
+ *    so his words go only on a word of Ollama's at most two seconds old.
  *  - Before EVERY request, in order: the process's model slot (one local
  *    request at a time, shared with triage); at most 2 requests a review,
  *    counted across the runs of a review that yielded to chat; chat's load
@@ -226,8 +229,10 @@ class Stop extends Error {}
 
 export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned<T>> {
   const started = Date.now();
+  /** Is the model on this Mac, on Ollama's own word from the last two seconds (model/here.ts)? */
+  const here = (): Promise<boolean> => (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch);
   // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
-  if (!(await (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch))) {
+  if (!(await here())) {
     return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: Math.max(0, d.used ?? 0), claimed: d.claimed ?? false };
   }
   const origin = new URL(d.ollama.url).origin;
@@ -237,7 +242,7 @@ export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned
   let made = 0;
   let replied = false;
   let claimed = d.claimed ?? false;
-  let stopped: 'capped' | 'deferred' | undefined;
+  let stopped: 'capped' | 'deferred' | 'unavailable' | undefined;
   // Every request the provider makes, its own retries included, comes through here.
   const gated = ((url: string | URL | Request, init?: RequestInit) =>
     modelSlot(async () => {
@@ -252,6 +257,12 @@ export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned
           throw new Stop('the day’s cap is used up');
         }
         claimed = true;
+      }
+      // Ollama is asked again at the last moment, before EVERY request: the slot may have been another caller's for
+      // seconds, and a second attempt comes after the first's whole reply. On a no, or no word, nothing is sent.
+      if (!(await here())) {
+        stopped = 'unavailable';
+        throw new Stop('the model is not on this Mac');
       }
       requests += 1;
       made += 1;
