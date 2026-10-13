@@ -71,6 +71,11 @@ describe.skipIf(NO_DB)('runtime API', () => {
   const proposal = (action = 'world.sync.github', args: Record<string, unknown> = { source: 'github' }) => ({
     kind: 'tool_call', origin: 'console', action, args, argsProvenance: { source: { source: 'will', tainted: false } },
   });
+  /**
+   * A connected server's tool call: the kind of card a caller claims and reports. (A card whose action Flint's own
+   * code carries out, a sync or a nightly job among them, is claimed by that code alone: claim-own-db.test.ts.)
+   */
+  const TOOL = 'mcp:notes.save';
 
   describe('the door', () => {
     it('/health needs no token and says the database is up', async () => {
@@ -128,9 +133,9 @@ describe.skipIf(NO_DB)('runtime API', () => {
     });
 
     it('approve with a real signature, claim, complete: every step audited, no open intent', async () => {
-      const created = (await call('POST', '/v1/proposals', proposal())).json();
+      const created = (await call('POST', '/v1/proposals', proposal(TOOL))).json();
       expect(created).toMatchObject({ tier: 'approval', argsDigest: digestOf({ source: 'github' }) });
-      const approvalId = await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest });
+      const approvalId = await signApproval({ subjectId: created.id, action: TOOL, argsDigest: created.argsDigest });
       expect((await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId })).statusCode).toBe(200);
       const claimed = await call('POST', `/v1/proposals/${created.id}/claim`, {});
       expect(claimed.json()).toMatchObject({ id: created.id, args: { source: 'github' } });
@@ -190,8 +195,8 @@ describe.skipIf(NO_DB)('runtime API', () => {
       const key2 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
       const cred2 = `cred2${Date.now().toString(36)}`;
       await approver(`INSERT INTO "ApprovalCredential" (id, "credentialId", factor, "publicKey", label, "enrolledVia") VALUES ($1, $2, 'secure_enclave', $3, 'second', 'enroll_code')`, [`c${cred2}`, cred2, key2.publicKey.export({ format: 'der', type: 'spki' })]);
-      const created = (await call('POST', '/v1/proposals', proposal())).json();
-      const approvalId = await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest, signer: key2.privateKey, credential: cred2 });
+      const created = (await call('POST', '/v1/proposals', proposal(TOOL))).json();
+      const approvalId = await signApproval({ subjectId: created.id, action: TOOL, argsDigest: created.argsDigest, signer: key2.privateKey, credential: cred2 });
       expect((await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId })).statusCode).toBe(200);
       await approver(`UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1`, [cred2]);
       const r = await call('POST', `/v1/proposals/${created.id}/claim`, {});
@@ -440,8 +445,8 @@ describe.skipIf(NO_DB)('runtime API', () => {
     it('an execution that never reports back is failed as outcome unknown after an hour, and audited so', async () => {
       const { sweepExecuting } = await import('../src/governance/proposals');
       const args = { source: 'launchd', k: Math.random() };
-      const created = (await call('POST', '/v1/proposals', proposal('world.sync.launchd', args))).json();
-      await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: 'world.sync.launchd', argsDigest: created.argsDigest }) });
+      const created = (await call('POST', '/v1/proposals', proposal(TOOL, args))).json();
+      await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: TOOL, argsDigest: created.argsDigest }) });
       const claimed = await call('POST', `/v1/proposals/${created.id}/claim`, {});
       expect(claimed.statusCode, claimed.body).toBe(200);
       expect(await sweepExecuting(db, new Date())).toBe(0); // not yet
@@ -496,8 +501,8 @@ describe.skipIf(NO_DB)('runtime API', () => {
   });
 
   it('proposals stay consistent under concurrent claims', async () => {
-    const created = (await call('POST', '/v1/proposals', proposal())).json();
-    await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: 'world.sync.github', argsDigest: created.argsDigest }) });
+    const created = (await call('POST', '/v1/proposals', proposal(TOOL))).json();
+    await call('POST', `/v1/proposals/${created.id}/approve`, { approvalId: await signApproval({ subjectId: created.id, action: TOOL, argsDigest: created.argsDigest }) });
     const results = await Promise.all(Array.from({ length: 8 }, () => call('POST', `/v1/proposals/${created.id}/claim`, {})));
     expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
     void pg;

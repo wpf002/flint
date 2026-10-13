@@ -430,6 +430,16 @@ a claim, and nothing outside the runtime files under a job's name. It refuses
 `goal.propose` and `world.commitment.from_chat` too, whatever the card says:
 only the candidates intake files those (below).
 
+`POST /v1/proposals/:id/claim` hands a caller a tool's card and no other. A card
+whose action Flint's own code carries out is claimed by that code alone: the
+runtime's own actions through `/run`, and a job's (a nightly backup, the restore
+test, the cleanup: every action on the list of what runs on its own) by the job,
+inside the runtime. The route refuses those whoever asks, and nobody but the job
+reports a job's card done. What is left for a caller is a tool's call: a
+connected server's, filed as `mcp:server.tool`, or a built-in's. So a connected
+server that names a tool like one of Flint's own actions is never handed that
+action's card.
+
 ### Suggestions from chat
 
 Off until the server is told to send them (`FLINT_EXTRACT_CANDIDATES=1` there
