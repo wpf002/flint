@@ -69,6 +69,19 @@ check "no age: recorded as failed, for want of the tool" '[ "$(field "$(last)" r
 run FLINT_BACKUP_TS=20261001-0004 FLINT_BACKUP_OFFSITE="$fx/not-here/FlintBackups"
 check "no offsite folder: recorded as failed, for want of the folder" '[ "$(field "$(last)" reason)" = no_folder ] && [ "$(field "$(last)" location)" = icloud ]'
 check "and the folder was not made" '[ ! -e "$fx/not-here" ]'
+# Its parent is there and the folder cannot be made in it (read-only, or not yet synced): the same, and the run says it failed.
+mkdir "$fx/locked"; chmod 500 "$fx/locked"; before="$(lines)"
+run FLINT_BACKUP_TS=20261001-0014 FLINT_BACKUP_OFFSITE="$fx/locked/FlintBackups"; st=$?
+chmod 700 "$fx/locked"
+check "an offsite folder that cannot be made: the run fails, and says so in its log" '[ "$st" = 1 ] && grep -q "offsite FAILED: the offsite folder could not be made" "$fx/err.log"'
+check "it is recorded as a copy that was not made, after the archive here" \
+  '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = no_folder ] && [ "$(field "$(last)" name)" = flint-20261001-0014.tar.gz.age ] && [ "$(field "$(last 2 | head -1)" outcome)" = ok ]'
+check "the archive here was still made, and the lock is gone" '[ -f "$fx/local/flint-20261001-0014.tar.gz" ] && [ ! -e "$data/backup.lock" ] && [ ! -e "$fx/locked/FlintBackups" ]'
+# With no key no offsite copy is expected, so none is recorded as missing.
+mv "$data/backup-age-recipient" "$fx/recipient.keep"; chmod 500 "$fx/locked"; before="$(lines)"
+run FLINT_BACKUP_TS=20261001-0015 FLINT_BACKUP_OFFSITE="$fx/locked/FlintBackups"
+chmod 700 "$fx/locked"; mv "$fx/recipient.keep" "$data/backup-age-recipient"
+check "with no key, a folder that cannot be made adds no offsite line" '[ "$(lines)" = $(( before + 1 )) ] && [ "$(field "$(last)" location)" = local ]'
 
 # ---- 5. not enough room: no archive is written, and the record says why ------------------------------
 before="$(lines)"
@@ -156,6 +169,24 @@ run FLINT_BACKUP_TS=20261002-0906 FLINT_BACKUP_CATCHUP=off -- --catch-up
 check "the environment, when it says, wins over the file" '[ ! -e "$fx/local/flint-20261002-0906.tar.gz" ]'
 run FLINT_BACKUP_TS=20261002-0907 -- --everything
 check "a word it does not know is refused, and nothing runs" '[ $? = 2 ] && [ ! -e "$fx/local/flint-20261002-0907.tar.gz" ]'
+# The switch takes the words the settings manifest takes for one (on, 1, true, yes; off, 0, false, no), with or
+# without quotes; a word nobody knows is off.
+n=10
+for word in 1 true yes ON '"on"' "'yes'" 'True'; do
+  for f in "$fx"/local/flint-*.tar.gz; do touch -t "$(date -v-30H +%Y%m%d%H%M)" "$f"; done
+  n=$(( n + 1 )); print -r -- "FLINT_BACKUP_CATCHUP=$word" > "$data/backup.env"
+  run FLINT_BACKUP_TS=20261002-09$n -- --catch-up
+  check "the switch set to $word in the backup settings is on" '[ -f "$fx/local/flint-20261002-09$n.tar.gz" ]'
+done
+for word in 0 false no off '"off"' maybe 'on please' '' 'yes"' on1; do
+  for f in "$fx"/local/flint-*.tar.gz; do touch -t "$(date -v-30H +%Y%m%d%H%M)" "$f"; done
+  n=$(( n + 1 )); print -r -- "FLINT_BACKUP_CATCHUP=$word" > "$data/backup.env"
+  run FLINT_BACKUP_TS=20261002-09$n -- --catch-up
+  check "the switch set to [$word] in the backup settings is off" '[ ! -e "$fx/local/flint-20261002-09$n.tar.gz" ]'
+done
+shape="onoff     '^(on|off|1|0|true|false|yes|no)\$'"
+check "the words tried above are every word the manifest takes for a switch" 'grep -qF -- "$shape" "$here/../recovery_lib.sh"'
+print -r -- 'FLINT_BACKUP_CATCHUP=on' > "$data/backup.env"
 # The night's own run is not the catch-up: it runs whatever the switch says.
 run FLINT_BACKUP_TS=20261002-0908 FLINT_BACKUP_CATCHUP=off
 check "the night's own run does not ask the switch" '[ -f "$fx/local/flint-20261002-0908.tar.gz" ]'

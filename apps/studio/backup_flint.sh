@@ -166,11 +166,16 @@ need_kb() { # folder
   print -r -- "$need"
 }
 
-# The catch-up is off unless FLINT_BACKUP_CATCHUP=on is in ~/.flint/backup.env (the environment, when it says, wins).
+# The catch-up is off unless FLINT_BACKUP_CATCHUP says on in ~/.flint/backup.env (the environment, when it says,
+# wins). "On" is any of the words the settings manifest takes for a switch (apps/studio/recovery_lib.sh, onoff):
+# on, 1, true, yes. Quotes around the word are taken off, as the other readers of that file do. Anything else,
+# a word nobody knows included, is off.
 catchup_on() {
   local v="${FLINT_BACKUP_CATCHUP:-}"
   [ -z "$v" ] && [ -r "$SRC/backup.env" ] && v="$(sed -n 's/^FLINT_BACKUP_CATCHUP=//p' "$SRC/backup.env" | tail -1)"
-  [[ ${v:l} == on ]]
+  v="${v%$'\r'}"
+  if [[ $v == \"*\" || $v == \'*\' ]]; then v="${v[2,-2]}"; fi
+  [[ ${v:l} == (on|1|true|yes) ]]
 }
 # How old the newest good archive here is, in seconds (nothing printed when there is none).
 newest_age() { # folder
@@ -260,7 +265,13 @@ prune "$LOCAL" "$KEEP_LOCAL"
 echo "$(date '+%F %T') local  $(du -h "$LOCAL/flint-$TS.tar.gz" | cut -f1)  $LOCAL/flint-$TS.tar.gz"
 
 if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
-  mkdir -p "$OFFSITE"
+  # A folder that cannot be made is a copy that was not made: said in the record when a key says one is
+  # expected, as a folder that is not there is (below). It used to end the run here with nothing written down.
+  if ! mkdir -p "$OFFSITE" 2>/dev/null; then
+    echo "$(date '+%F %T') offsite FAILED: the offsite folder could not be made; no copy written" >&2
+    [ -n "$AGE_RECIPIENT" ] && backup_event icloud failed "flint-$TS.tar.gz.age" no_folder
+    exit 1
+  fi
   # First run with a manifest: seed it from the local snapshot names. Offsite
   # copies are written in the same run as local ones, under the same name, and
   # rm -f on a name that was never written offsite is harmless.
