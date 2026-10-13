@@ -536,11 +536,11 @@ describe('the console Approvals panel', () => {
     for (const r of rows) expect(r.shown()).not.toMatch(/backup\.nexus|restore\.drill|nexus_dump|flint_backup|Can’t Be Undone/);
     // They ride Approve All like Flint's own nightly cards: nothing here deletes, and nothing of Nexus is changed.
     for (const p of three()) expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName as string).toBe(false);
-    // Show Details: what it does, in a sentence, and when it runs.
+    // Show Details: what it does, in a sentence. (When it runs is the line under its title, said once.)
     const details = (fullName: string) => (run(`apprDetails(${JSON.stringify(nexus('x', fullName))})`) as { says: string[]; facts: string[][]; refs: string[][] });
-    expect(details('backup.nexus').says).toEqual(['Flint copies the Nexus database to this Mac. It reads Nexus and changes nothing there.', 'It runs tonight at 2:15 AM if you approve it.']);
-    expect(details('backup.nexus.offsite').says).toEqual(['The newest Nexus backup is encrypted to your key before it leaves this Mac.', 'It runs tonight at 2:15 AM if you approve it.']);
-    expect(details('restore.drill.nexus').says).toEqual(['Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.', 'It runs Sunday at 2:15 AM if you approve it.']);
+    expect(details('backup.nexus').says).toEqual(['Flint copies the Nexus database to this Mac. It reads Nexus and changes nothing there.']);
+    expect(details('backup.nexus.offsite').says).toEqual(['The newest Nexus backup is encrypted to your key before it leaves this Mac.']);
+    expect(details('restore.drill.nexus').says).toEqual(['Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.']);
     for (const f of ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']) {
       for (const line of details(f).says) expect(noteProblems('Nexus Backup', line), line).toEqual([]);
       // What it signs is its day, shown as a date; nothing else is on the card.

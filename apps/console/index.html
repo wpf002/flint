@@ -1826,7 +1826,8 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
     says.push('An update backup is the copy of the database Flint takes before an update changes it.');
     says.push('The one taken before the version that is running is always kept.');
     says.push('It runs '+apprWhen(f)+' if you approve it.');}
-  else if(apprGet(APPR_NEXUS,f)!==undefined){says.push(apprGet(APPR_NEXUS,f));says.push('It runs '+apprWhen(f)+' if you approve it.');}
+  /* (When it runs is the line under the card's title already.) */
+  else if(apprGet(APPR_NEXUS,f)!==undefined)says.push(apprGet(APPR_NEXUS,f));
   else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){says.push(APPR_PREDICT_ALSO);
     /* Its numbers are listed by name under this sentence (apprPredictDetails), each with its second opinion. A number
        this page cannot name is counted there, and given here exactly as the card holds it: nothing signed is unseen. */
