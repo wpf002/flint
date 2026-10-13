@@ -31,6 +31,9 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/goals/:id/edit\|timing\|done\|abandon\|resume\|plan` | yes | `{ args }` | `{ id, deduped }`: that change's card |
 | POST | `/goals/:id/pause\|dismiss\|review`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime (`review` is Review Now) |
 | POST | `/goals/linkable` | yes | `{ q }` | `{ items }`: items a check may watch |
+| GET | `/predictions`, `/predictions/series/:key`, `/predictions/questions`, `/predictions/accuracy` | yes | — | Flint's forecasts, one number open, Will's questions, and how Flint has done (`PredictionsPage`, `{ series: SeriesView }`, `QuestionsPage`, `AccuracyView` in @flint/policy). See "Predictions" |
+| POST | `/predictions/turn-on` | yes | `{ series }` | `{ id, deduped }`: the Turn On Predictions card, to sign in the console |
+| POST | `/predictions/series/:key/turn-off`, `/predictions/questions/:id/answer` | yes | `{}`, `{ answer: "yes" \| "no" \| "skip" }` | `{ ok: true }`: unsigned, audited by the runtime |
 
 Auth: send `Authorization: Bearer $FLINT_TOKEN` on everything but `/health`.
 
@@ -619,6 +622,25 @@ in a sentence and asks on its own, and so does a card too large to list whole (p
 values, or 8 levels deep). A test walks every kind of card's stored args and finds each value
 on the opened card, and changes each one in turn to see the card change
 (test/console-card-details.test.ts).
+
+## Predictions
+
+The console's Predictions panel (the chart icon) reaches the runtime's prediction routes
+through src/predictions-routes.ts, with the console's full token only (a voice or eval token
+reaches none of them). It is the goals proxy's twin: every key, id and body (up to 16 KB) is
+checked with @flint/policy's contracts before the runtime sees it, and every answer before
+the console does; the card is filed with the runtime at once and never spooled; a runtime
+that is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that
+says Flint isn't sure it went through; a refusal reaches the console only as one of the
+fixed sentences, by its code; and a runtime without the routes is a 501, so the console
+hides its Predictions button. No read takes a query.
+
+A forecast's numbers include what Flint spends and the hours on the calendar, and a
+question holds a prediction's words. They pass through this proxy from the runtime to the
+console and go nowhere else in the server: it keeps nothing, pushes no note, puts nothing
+in chat context, and logs statuses, field paths and references only. The runtime writes
+every sentence the panel shows about a number, and the contract refuses a raw value beside
+the words. `/predictions` is never reported back to the runtime as a `route.error`.
 
 ### Goals in chat
 
