@@ -119,7 +119,7 @@ describe('the record of what model servers have said', () => {
     expect(p.runsHere(HERE, 'm:1')).toBe(false);
     expect(p.runsElsewhere(HERE, 'm:1')).toBe(false);
     expect(p.said(HERE)).toBeUndefined();
-    expect(p.heardAt(HERE)).toBeUndefined();
+    expect(p.heard(HERE)).toBe(false);
     expect(p.runsHere(undefined, 'm:1')).toBe(false);
     expect(p.runsHere(HERE, '')).toBe(false);
   });
@@ -156,8 +156,8 @@ describe('the record of what model servers have said', () => {
     expect(p.runsHere(HERE, 'm:1')).toBe(false);
     expect(p.runsElsewhere(HERE, 'r:1')).toBe(false);
     expect(p.said(HERE)).toBeUndefined();
-    // It was heard, once: when is still known, so whoever asks knows to ask again.
-    expect(p.heardAt(HERE)).toBe(1_000);
+    // It was heard, once: that much is still known.
+    expect(p.heard(HERE)).toBe(true);
     expect(new ModelPlaces({ maxAgeMs: 10, now: () => now }).runsHere(HERE, 'm:1')).toBe(false);
   });
 
@@ -174,19 +174,6 @@ describe('the record of what model servers have said', () => {
     // Once the listing is too old to believe, the no is taken.
     now += PLACE_MAX_AGE_MS + 1;
     p.notOllama(HERE);
-    expect(p.said(HERE)).toBe('other');
-  });
-
-  it('take: a listing is learned, a no is noted, and nothing said is nothing learned', () => {
-    const p = new ModelPlaces();
-    p.take(HERE, undefined);
-    expect(p.heardAt(HERE)).toBeUndefined();
-    p.take(HERE, { ollama: [{ name: 'm:1' }] });
-    expect(p.runsHere(HERE, 'm:1')).toBe(true);
-    p.take(HERE, undefined);
-    expect(p.runsHere(HERE, 'm:1')).toBe(true);
-    p.clear();
-    p.take(HERE, 'other');
     expect(p.said(HERE)).toBe('other');
   });
 });

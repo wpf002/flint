@@ -18,33 +18,41 @@
  *    remote model. A name proves nothing: `ollama cp` gives a cloud model a
  *    plain one, and only the listing tells them apart.
  *
- * It fails closed, and it asks every time. Before each local call Ollama is
- * asked for its listing again, unless it answered within the last two
- * seconds (calls that come together share one answer). What it said is
- * believed for those two seconds and no longer: a model repointed at Ollama's
- * servers stops being asked at the next call, and a listing that does not
- * come (Ollama down, slow, not an Ollama, an answer that is no listing) is not
- * a yes, whatever it said a moment ago. Never heard, not listed, listed with a
- * remote host: not here. The server keeps a watch and believes a listing for
- * minutes, because it reads it on every chat turn; the runtime's calls are
- * few, carry Will's own words (a goal's title and why it matters), and can
- * afford the question each time.
+ * It fails closed, and it asks every time. Before each local request Ollama is
+ * asked for its listing again, unless its last word is from an ask that began
+ * within the last two seconds (requests that come together share one answer).
+ * The rule is the shared one (@flint/policy `ModelPlaces.fresh`), the same the
+ * server asks with before a private turn:
+ *  - a word is as old as when its ask BEGAN, never as young as when it landed;
+ *  - an ask that yields no word (Ollama down, slow, an error, a redirect)
+ *    drops what was believed to run here: a silent listing is not a yes,
+ *    whatever it said a moment ago. What it said runs elsewhere is kept;
+ *  - a listing that fails at once is asked once more inside the same ask (one
+ *    bad answer does not cost the work its model); one that hangs is not;
+ *  - a silent Ollama is not asked again for two seconds.
+ * A model repointed at Ollama's servers stops being asked at the next request.
+ * The word's age is counted on a clock that never goes backwards, so setting
+ * the Mac's clock back cannot make an old word young. The server keeps a watch
+ * and believes a listing for minutes, because it reads it on every chat turn;
+ * the runtime's requests are few, carry Will's own words (a goal's title and
+ * why it matters), and can afford the question each time.
  *
  * This is also the runtime's ONE reader of Ollama's lists (`list`): Settings >
  * Health reads what is installed and what is loaded through it
- * (health/machine.ts), and what a health run hears of the listing is what the
- * next local call believes.
+ * (health/machine.ts), and what a health run hears of the listing is what a
+ * local request that comes with it goes by.
  *
  * A request can reach only `/api/tags` or `/api/ps` on that loopback address
  * (scopedFetch, no redirect followed), has two seconds, and is given up after
- * them even when the transport would wait longer. Listing models loads nothing
- * and costs nothing, so it needs no slot and no cap.
+ * them even when the transport would wait longer. A listing longer than 4 MB
+ * is not read. Listing models loads nothing and costs nothing, so it needs no
+ * slot and no cap.
  */
-import { ModelPlaces, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type PlaceSaid } from '@flint/policy';
+import { ModelPlaces, PLACE_FRESH_MS, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type AskPlace, type PlaceSaid } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 
-/** What Ollama said of its models is believed for this long, then asked for again: long enough for calls that come together to share one answer. */
-export const LISTING_WORD_MS = 2_000;
+/** How old Ollama's word may be when a local request goes: counted from when its ask began. */
+export const LISTING_WORD_MS = PLACE_FRESH_MS;
 /** A list longer than this is not read. */
 export const LISTING_MAX_CHARS = 4_000_000;
 
@@ -60,94 +68,105 @@ export interface AskedOllama {
 }
 
 export interface LocalModelsOptions {
-  /** What Ollama said is believed for this long, and then asked for again (default: two seconds). */
+  /** How old Ollama's word may be when a request goes (default: two seconds, from when its ask began). */
   wordMs?: number;
   /** How long Ollama has to list its models (default: two seconds). */
   timeoutMs?: number;
+  /** The clock a word's age is counted on (default: one that never goes backwards). */
   now?: () => number;
 }
 
 export class LocalModels {
   readonly #places: ModelPlaces;
-  readonly #asking = new Map<string, Promise<PlaceSaid | undefined>>();
 
   constructor(private readonly opts: LocalModelsOptions = {}) {
-    // The shared record reads the answer; here it is believed only for the word's two seconds.
-    this.#places = new ModelPlaces({ maxAgeMs: opts.wordMs ?? LISTING_WORD_MS, ...(opts.now ? { now: opts.now } : {}) });
+    // The shared record. A word is believed here only as long as a request may go on it: two seconds.
+    this.#places = new ModelPlaces({ maxAgeMs: this.#word(), timeoutMs: this.#timeout(), now: () => this.#now() });
   }
 
+  /** Monotonic: the Mac's clock being set back does not make an old word young. */
   #now(): number {
-    return this.opts.now?.() ?? Date.now();
+    return this.opts.now?.() ?? performance.now();
+  }
+
+  #word(): number {
+    return this.opts.wordMs ?? LISTING_WORD_MS;
+  }
+
+  #timeout(): number {
+    return this.opts.timeoutMs ?? PLACE_TIMEOUT_MS;
   }
 
   /**
-   * True only when the name, the address and that Ollama's own word, recent
-   * enough to believe, all say the model runs on this Mac. Never throws.
+   * True only when the name, the address and that Ollama's own word, from an
+   * ask begun within the last two seconds, all say the model runs on this Mac.
+   * Asked before every request to the model. Never throws.
    */
   async runsHere(ollama: AskedOllama, base: typeof fetch = fetch): Promise<boolean> {
     if (!ollama.model.trim() || isCloudModel(ollama.model)) return false;
     if (ollama.proxied === true || !onThisMachine(ollama.url)) return false;
     const origin = new URL(ollama.url).origin;
-    // Asked again unless it answered within the word's two seconds. An answer that does not come leaves nothing
-    // to believe: what was heard before is too old by then, so the model is not here.
-    const at = this.#places.heardAt(origin);
-    if (at === undefined || this.#now() - at > (this.opts.wordMs ?? LISTING_WORD_MS)) await this.#listen(origin, base);
+    // Asked again unless its word is young enough. An ask that yields no word leaves nothing believed to run here.
+    await this.#places.fresh(origin, this.#word(), this.#asker(base));
     return this.#places.runsHere(origin, ollama.model);
   }
 
   /**
    * One of Ollama's two lists, as it gave it: the rows of `models` from `/api/tags` (what is installed) or
    * `/api/ps` (what is loaded now). Undefined when the address is not this machine (nothing is asked), or it
-   * did not answer with a list. Asked now, whatever was heard before; the listing is remembered as `runsHere`
-   * remembers it. Never throws.
+   * did not answer with a list. Asked now, whatever was heard before; what the listing says (or its silence) is
+   * taken into the record as `runsHere` takes it. Never throws.
    */
   async list(ollama: Pick<AskedOllama, 'url' | 'proxied'>, path: ListPath, base: typeof fetch = fetch): Promise<readonly unknown[] | undefined> {
     if (ollama.proxied === true || !onThisMachine(ollama.url)) return undefined;
     const origin = new URL(ollama.url).origin;
-    const said = path === '/api/tags' ? await this.#listen(origin, base) : await this.#ask(origin, path, base);
+    const from = this.#now();
+    const said = await this.#get(origin, path, base, AbortSignal.timeout(this.#timeout()));
+    if (path === '/api/tags') {
+      // The look began at `from`: its word is that old, and its silence drops what was believed before it.
+      if (said === 'other') this.#places.notOllama(origin, from);
+      else if (said) this.#places.learn(origin, said.ollama, from);
+      else this.#places.silent(origin, from);
+    }
     return said && said !== 'other' ? said.ollama : undefined;
   }
 
-  /** One request for the listing at a time per Ollama: callers that ask together share the answer. */
-  #listen(origin: string, base: typeof fetch): Promise<PlaceSaid | undefined> {
-    const running = this.#asking.get(origin);
-    if (running) return running;
-    const asked = this.#ask(origin, '/api/tags', base).finally(() => this.#asking.delete(origin));
-    this.#asking.set(origin, asked);
-    return asked;
+  /** How the shared record asks this Ollama for its listing: through `base`, scoped to that one path. */
+  #asker(base: typeof fetch): AskPlace {
+    return (at, signal) => this.#get(at, '/api/tags', base, signal);
   }
 
   /**
-   * Ask that Ollama for one of its lists. Never throws. What the listing (`/api/tags`) says is taken into the
-   * record; an answer that says nothing either way leaves nothing new to believe.
+   * One request for one of Ollama's lists, read as the shared rule reads it (`placeSaid`). Never throws: no answer,
+   * an answer too long to be a list, or one that comes after it was given up is no word.
    */
-  async #ask(origin: string, path: ListPath, base: typeof fetch): Promise<PlaceSaid | undefined> {
-    const timeoutMs = this.opts.timeoutMs ?? PLACE_TIMEOUT_MS;
+  async #get(origin: string, path: ListPath, base: typeof fetch, signal: AbortSignal): Promise<PlaceSaid | undefined> {
+    const timeoutMs = this.#timeout();
     const get = scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }], base, timeoutMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let gaveUp = false;
-    // The transport is told to stop after the timeout; this stops waiting for it even if it does not.
+    // The transport is told to stop when the ask's time is up; this stops waiting for it even if it does not.
     const deadline = new Promise<undefined>((resolve) => {
-      timer = setTimeout(() => {
+      const end = (): void => {
         gaveUp = true;
         resolve(undefined);
-      }, timeoutMs + 250);
+      };
+      timer = setTimeout(end, timeoutMs + 250);
       timer.unref?.();
+      if (signal.aborted) end();
+      else signal.addEventListener('abort', () => setTimeout(end, 250).unref?.(), { once: true });
     });
     const answer = (async (): Promise<PlaceSaid | undefined> => {
       try {
-        const r = await get(`${origin}${path}`, { method: 'GET' });
+        const r = await get(`${origin}${path}`, { method: 'GET', signal });
         let text = '';
         if (r.ok) text = await r.text();
         else await r.body?.cancel().catch(() => {});
-        // Too late, or too long to be a list: nothing is learned.
+        // Too late, or too long to be a list: no word.
         if (gaveUp || text.length > LISTING_MAX_CHARS) return undefined;
-        const said = await placeSaid(r.status, async () => JSON.parse(text) as unknown);
-        // Its word is as old as its arrival: believed from now, for the word's two seconds.
-        if (path === '/api/tags') this.#places.take(origin, said, this.#now());
-        return said;
+        return await placeSaid(r.status, async () => JSON.parse(text) as unknown);
       } catch {
-        // Down, slow or refused: nothing is learned.
+        // Down, slow or refused: no word.
         return undefined;
       }
     })();
@@ -156,7 +175,7 @@ export class LocalModels {
     return said;
   }
 
-  /** Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`: what `runsHere` then believes for the word's two seconds (tests). */
+  /** Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`: what `runsHere` then goes by for the word's two seconds (tests). */
   learn(url: string, rows: readonly unknown[], at: number = this.#now()): void {
     this.#places.learn(url, rows, at);
   }
@@ -164,7 +183,6 @@ export class LocalModels {
   /** Forget everything heard (tests). */
   forget(): void {
     this.#places.clear();
-    this.#asking.clear();
   }
 }
 
