@@ -887,6 +887,9 @@ describe('the script itself', () => {
   it('its numbers are in tabular figures, and on a phone a row\'s choices take a full-height line of their own', () => {
     expect(html).toContain('#predbody{font-variant-numeric:tabular-nums;}');
     expect(html).toMatch(/@media \(max-width:600px\)\{\s*\.row\.gwrap>\.pacts\{flex:1 1 100%;justify-content:flex-end;\} \.pacts \.btn,\.pacts \.ghost\{min-width:72px;justify-content:center;\}/);
+    // Its tabs are 44 points tall on a phone, as every other target in it is.
+    expect(html).toContain('#predseg button{height:44px;padding:0 14px;}');
+    expect(html).toContain('.xb{width:44px;height:44px;}');
     // The phone's buttons are 44 points tall, and a row at least 48 (the page's own rules, which the panel's rows use).
     expect(html).toContain('.row{min-height:48px;font-size:17px;} .btn,.ghost{height:44px;}');
     expect(html).toMatch(/:focus-visible\{outline:none;box-shadow:0 0 0 2px var\(--bg\),0 0 0 4px var\(--gold-hi\)/);
