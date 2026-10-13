@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Turn } from '@flint/core';
+import { DayOnly, SUGGESTION_MAX_AGE_DAYS, SUGGESTION_QUOTE_MAX, SUGGESTION_QUOTE_MIN, SuggestionText, localDay, normalizeSaid, saidHolds } from '@flint/policy';
 import { contentTokens, type KnowledgeStore } from './knowledge';
 
 /**
@@ -60,13 +61,31 @@ import { contentTokens, type KnowledgeStore } from './knowledge';
  *    batch costs at most a turn at a time. A reply cut off at its token limit
  *    is asked again with half the turns.
  * Logs carry ids and counts only: never a fact, a quote or transcript text.
+ *
+ * GOALS AND COMMITMENTS FROM CHAT (P3 part 5; FLINT_EXTRACT_CANDIDATES=1, off
+ * by default). With it on, the LOCAL model is also asked for any goal Will set
+ * and anything he said he would do, each with his own words quoted. Only the
+ * local brain is ever asked: the frontier's prompt never changes, and a
+ * suggestion in a frontier reply is never read. With it off the prompt is
+ * byte for byte what it was, and nothing is filed.
+ *  - The quote check comes first and is deterministic: a suggestion is kept
+ *    only if its quote, 12 to 300 characters, is in Will's OWN message of the
+ *    turn it names (@flint/policy saidHolds: curly quotes and runs of
+ *    whitespace made alike on both sides, every word kept). Never the
+ *    assistant's words, never the earlier turn shown for context, never
+ *    another turn of the batch. A tainted turn is never sent at all.
+ *  - Its short text must be his too: most of its words, and every number in
+ *    it, are in that same message.
+ *  - What is kept is handed to `onCandidate` (./goal-candidates: the runtime on
+ *    this Mac, which checks it again and files the card). Nothing is kept here.
+ *  - What is dropped is counted by reason (`rejected`), never logged as text.
  */
 
 /**
  * A brain's reply: `facts`, already checked against FACTS_SCHEMA (the local
  * model's), or `text` for the extractor to parse (the frontier's).
  */
-export type BrainReply = { facts: FactEntry[] } | { text: string };
+export type BrainReply = { facts: FactEntry[]; suggestions?: unknown[] } | { text: string };
 
 /**
  * The model a pass asks: the local Ollama model by default, the frontier only
@@ -74,7 +93,8 @@ export type BrainReply = { facts: FactEntry[] } | { text: string };
  * it has no usable reply; anything else it throws counts as `unavailable`.
  */
 export interface ExtractBrain {
-  generate(input: { system: string; prompt: string }): Promise<BrainReply>;
+  /** `suggestions`: the prompt also asks for goals and commitments, so the reply is held to SUGGESTIONS_SCHEMA (the local brain only). */
+  generate(input: { system: string; prompt: string; suggestions?: boolean }): Promise<BrainReply>;
   /**
    * Characters of system prompt + prompt one call can hold: a local model's
    * context window less its reply. Unset, a call is sized by batchChars alone.
@@ -160,6 +180,10 @@ export interface PassStats {
   superseded: number;
   /** Supersedes refused: an id the model wasn't shown, or a fact about something else. */
   supersedeRefused: number;
+  /** Goals and commitments the local model proposed (FLINT_EXTRACT_CANDIDATES), those whose quote was Will's own, and those the runtime filed. */
+  suggested: number;
+  suggestionsKept: number;
+  suggestionsFiled: number;
   rejected: Record<string, number>;
 }
 
@@ -180,6 +204,9 @@ function emptyStats(): PassStats {
     stored: 0,
     superseded: 0,
     supersedeRefused: 0,
+    suggested: 0,
+    suggestionsKept: 0,
+    suggestionsFiled: 0,
     rejected: {},
   };
 }
@@ -210,6 +237,22 @@ Rules:
 
 Output ONLY a JSON object, no prose, no code fence:
 {"facts": [{"turn": <number of the turn it came from>, "quote": "<Will's exact words>", "fact": "...", "category": "${FACT_CATEGORIES.join('|')}", "supersedes": []}]}`;
+
+/**
+ * Added to EXTRACT_PROMPT only when goals and commitments are asked for
+ * (FLINT_EXTRACT_CANDIDATES, the local model). With it off, the prompt is
+ * EXTRACT_PROMPT alone, byte for byte.
+ */
+export const SUGGEST_PROMPT = `
+
+ALSO list under "suggestions" any GOAL Will set for himself, and anything he said HE WILL DO, in these turns. Most batches have none: then "suggestions" is [].
+- "kind": "goal" for something he is working toward; "commitment" for something he said he will do.
+- "quote": his exact words, copied from the WILL line of that turn (up to one sentence). Never ASSISTANT text, and never the "(earlier in this conversation …)" line.
+- "text": the goal or the promise in a few of his own words (3 to 120 characters), with no date in it.
+- "dueOn": the day he named, as YYYY-MM-DD, or "" when he named none. Never guess one.
+- Not a suggestion: a question, an idea he is only weighing, something the assistant proposed, something another person will do, something already done.
+With them the JSON object is:
+{"facts": [...], "suggestions": [{"turn": <number of the turn>, "kind": "goal|commitment", "quote": "<Will's exact words>", "text": "...", "dueOn": ""}]}`;
 
 /**
  * The reply EXTRACT_PROMPT asks for, as a JSON schema: Ollama's `format` holds
@@ -247,6 +290,65 @@ export interface FactEntry {
   supersedes: string[];
 }
 
+/** FACTS_SCHEMA and the suggestions SUGGEST_PROMPT asks for: `quote` before `text`, as a fact's is. */
+export const SUGGESTIONS_SCHEMA = {
+  type: 'object',
+  properties: {
+    facts: FACTS_SCHEMA.properties.facts,
+    suggestions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          turn: { type: 'integer', minimum: 1 },
+          kind: { type: 'string', enum: ['goal', 'commitment'] },
+          quote: { type: 'string', maxLength: 300 },
+          text: { type: 'string', maxLength: 120 },
+          dueOn: { type: 'string', maxLength: 10 },
+        },
+        required: ['turn', 'kind', 'quote', 'text', 'dueOn'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['facts', 'suggestions'],
+  additionalProperties: false,
+} as const;
+
+/** A reply's suggestions, as they came: an array, or none. Each entry is checked on its own (suggestionOf). */
+export function suggestionsReply(v: unknown): unknown[] {
+  return isRecord(v) && Array.isArray(v.suggestions) ? v.suggestions : [];
+}
+
+/** One proposed suggestion, read tolerantly: undefined when it is not the shape (it is dropped; the facts beside it are kept). */
+export function suggestionOf(e: unknown): { turn: number; kind: 'goal' | 'commitment'; quote: string; text: string; dueOn: string } | undefined {
+  if (!isRecord(e)) return undefined;
+  const { turn, kind, quote, text, dueOn } = e;
+  if (typeof turn !== 'number' || !Number.isInteger(turn) || turn < 1) return undefined;
+  if (kind !== 'goal' && kind !== 'commitment') return undefined;
+  if (typeof quote !== 'string' || typeof text !== 'string') return undefined;
+  if (dueOn !== undefined && dueOn !== null && typeof dueOn !== 'string') return undefined;
+  return { turn, kind, quote, text, dueOn: typeof dueOn === 'string' ? dueOn.trim() : '' };
+}
+
+/** A goal or commitment whose quote is Will's own, as it is handed on (./goal-candidates). */
+export interface ChatSuggestion {
+  kind: 'goal' | 'commitment';
+  /** The goal or the promise in a few words (the local model's). */
+  text: string;
+  /** Will's own words, as the check compared them (normalizeSaid). */
+  quote: string;
+  dueOn?: string;
+  conversationId: string;
+  turnId: string;
+  /** When the turn ended. */
+  sourceAt: number;
+  /** The turn stays on this Mac (it carried Will's goals): so does everything about this suggestion. */
+  staysHere: boolean;
+}
+/** What became of one: `filed` (a card, or added under a signed rule), or why not. A reason is a word, never text. */
+export type SuggestionOutcome = 'filed' | 'known' | 'refused' | 'capped' | 'unreachable' | 'held';
+
 /**
  * A reply checked against FACTS_SCHEMA's types and required fields, or null
  * when it doesn't match (a schema mismatch: the reply is unusable, not empty).
@@ -276,6 +378,9 @@ interface Item {
   at: number;
   /** Non-empty when this turn is sent to the model. */
   chunk: string;
+  /** This turn's id, and Will's own message in it, whole (SAID_CHARS at most): what a suggestion's quote must be in. Never the turn before, never the answer. */
+  turnId?: string;
+  said?: string;
   skip?: 'synthetic' | 'trivial' | 'duplicate' | 'tainted';
   /** Will's words as the model is shown them (this turn's, then the previous turn's): what a quote must come from. */
   will?: string[];
@@ -294,6 +399,10 @@ interface Item {
 const WILL_CHARS = 1500;
 const ASSISTANT_CHARS = 600;
 const CONTEXT_CHARS = 300;
+/** Will's own message, as a suggestion's quote is looked for in it: all of it, up to this (the model is shown WILL_CHARS). */
+const SAID_CHARS = 8000;
+/** Suggestions read from one reply, at most: a reply that lists more is a model gone wrong. */
+const SUGGESTIONS_PER_CALL = 5;
 /** Known facts shown per call, at most. */
 const KNOWN_CAP = 150;
 /** "### Turn N (YYYY-MM-DD)" and the blank lines around it, per turn. */
@@ -364,6 +473,17 @@ export interface ExtractorOptions {
    * carry the mark: a call about any other turn holds nothing that stays here.
    */
   carriedGoals?: (conversationId: string, turnId: string) => boolean;
+  /**
+   * Also ask for the goals Will set and the things he said he would do
+   * (FLINT_EXTRACT_CANDIDATES=1). Only with the local brain (`kind` local) and
+   * somewhere to hand them (`onCandidate`): otherwise it is off, and the prompt
+   * is what it always was.
+   */
+  candidates?: boolean;
+  /** One suggestion whose quote is Will's own: hand it on, and say what became of it. Its words are never logged. */
+  onCandidate?: (s: ChatSuggestion) => Promise<SuggestionOutcome>;
+  /** Will's zone, for "has the day he named passed". */
+  tz?: string;
   now?: () => number;
 }
 
@@ -383,6 +503,9 @@ export class MemoryExtractor {
   private readonly chatActive: (() => boolean) | undefined;
   private readonly isTainted: (conversationId: string, turnId: string) => boolean;
   private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
+  private readonly candidates: boolean;
+  private readonly onCandidate: ((s: ChatSuggestion) => Promise<SuggestionOutcome>) | undefined;
+  private readonly tz: string;
   private readonly now: () => number;
   /** Whether the last pass left work queued (drives the faster backlog cadence). */
   private backlog = false;
@@ -419,7 +542,16 @@ export class MemoryExtractor {
     this.chatActive = opts.chatActive;
     this.isTainted = opts.isTainted ?? (() => false);
     this.carriedGoals = opts.carriedGoals ?? (() => false);
+    // Goals and commitments are asked of the local model alone, and only with somewhere to hand them.
+    this.candidates = opts.candidates === true && local && opts.onCandidate !== undefined;
+    this.onCandidate = this.candidates ? opts.onCandidate : undefined;
+    this.tz = opts.tz ?? 'UTC';
     this.now = opts.now ?? Date.now;
+  }
+
+  /** Is the local model also asked for goals and commitments? */
+  get suggests(): boolean {
+    return this.candidates;
   }
 
   start(): void {
@@ -578,7 +710,7 @@ export class MemoryExtractor {
           let why: BrainFailure | undefined;
           let detail: string | undefined;
           try {
-            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text });
+            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(this.candidates ? { suggestions: true } : {}) });
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);
@@ -641,6 +773,8 @@ export class MemoryExtractor {
           } else {
             delete state.failures;
             await this.store(cands, toSend, ask.shown, stats);
+            // Goals and commitments: only from the local brain's own reply (a text reply is the frontier's, and is never read for them).
+            if (this.candidates && reply && 'facts' in reply) await this.suggest(reply.suggestions ?? [], toSend, stats);
           }
           sent += toSend.length;
           stats.turnsSent += toSend.length;
@@ -670,7 +804,8 @@ export class MemoryExtractor {
         `(skipped synthetic=${stats.skippedSynthetic} trivial=${stats.skippedTrivial} duplicate=${stats.skippedDuplicate} tainted=${stats.skippedTainted}); ` +
         `${stats.candidates} candidate(s) → stored ${stats.stored}, superseded ${stats.superseded}, rejected ${rej}` +
         `${stats.supersedeRefused ? `, supersede refused ${stats.supersedeRefused}` : ''}` +
-        `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}${stats.truncated ? `, cut off ${stats.truncated}` : ''}; ` +
+        `${stats.unparseable ? `, unparseable ${stats.unparseable}` : ''}${stats.truncated ? `, cut off ${stats.truncated}` : ''}` +
+        `${this.candidates ? `; ${stats.suggested} suggestion(s) → kept ${stats.suggestionsKept}, filed ${stats.suggestionsFiled}` : ''}; ` +
         `${pending.length - idx} turn(s) still queued; ` +
         `budget ${state.budget.calls}/${this.maxCallsPerDay} today${gated ? `; paused (${gated})` : ''}${ended}`,
     );
@@ -695,7 +830,7 @@ export class MemoryExtractor {
   private room(): Room {
     const limit = this.brain.promptChars;
     if (limit === undefined || !Number.isFinite(limit)) return { batchChars: this.batchChars, knownChars: Infinity, turnChars: Infinity };
-    const free = Math.max(0, limit - EXTRACT_SYSTEM.length - EXTRACT_PROMPT.length - PROMPT_FRAME);
+    const free = Math.max(0, limit - EXTRACT_SYSTEM.length - EXTRACT_PROMPT.length - (this.candidates ? SUGGEST_PROMPT.length : 0) - PROMPT_FRAME);
     const knownChars = Math.floor(free * KNOWN_SHARE);
     const turnChars = Math.max(MIN_BATCH_CHARS, free - knownChars);
     return { batchChars: Math.min(this.batchChars, turnChars), knownChars, turnChars };
@@ -742,6 +877,8 @@ export class MemoryExtractor {
             items.push({
               cid,
               at: t.updatedAt,
+              turnId: t.id,
+              said: head(user, SAID_CHARS),
               chunk: `${before}WILL: ${clip(user, WILL_CHARS)}\nASSISTANT: ${clip(asst, ASSISTANT_CHARS)}`,
               will: [head(user, WILL_CHARS), ...(context ? [head(userText(context), CONTEXT_CHARS)] : [])],
               assistant: [head(asst, ASSISTANT_CHARS), ...(context ? [head(assistantText(context), CONTEXT_CHARS)] : [])],
@@ -775,7 +912,7 @@ export class MemoryExtractor {
       .map((it, i) => `### Turn ${i + 1} (${new Date(it.at).toISOString().slice(0, 10)})\n${clip(it.chunk, fit)}`)
       .join('\n\n');
     return {
-      text: `${EXTRACT_PROMPT}\n\nKNOWN FACTS (id: text):\n${knownBlock}\n\nTURNS:\n\n${turns}`,
+      text: `${EXTRACT_PROMPT}${this.candidates ? SUGGEST_PROMPT : ''}\n\nKNOWN FACTS (id: text):\n${knownBlock}\n\nTURNS:\n\n${turns}`,
       shown: new Set(known.map((f) => f.id)),
     };
   }
@@ -848,6 +985,77 @@ export class MemoryExtractor {
         }
       }
     }
+  }
+
+  /**
+   * The goals and commitments one reply proposed. Each is held to Will's own
+   * message of the turn it names before anything else is looked at, then handed
+   * on; what fails is counted by reason and never logged.
+   */
+  private async suggest(raw: readonly unknown[], sent: Item[], stats: PassStats): Promise<void> {
+    const drop = (why: string): void => {
+      stats.rejected[`suggestion-${why}`] = (stats.rejected[`suggestion-${why}`] ?? 0) + 1;
+    };
+    const today = localDay(this.tz, new Date(this.now()));
+    const seen = new Set<string>();
+    stats.suggested += raw.length;
+    for (const e of raw.slice(0, SUGGESTIONS_PER_CALL)) {
+      const s = suggestionOf(e);
+      if (!s) {
+        drop('shape');
+        continue;
+      }
+      // The turn it names, and no other: a suggestion without one of this batch's turns rests on nothing.
+      const src = sent[s.turn - 1];
+      if (!src || src.skip || !src.turnId || !src.said) {
+        drop('turn');
+        continue;
+      }
+      // THE QUOTE CHECK. The quote as it is compared: normalised, without the quote marks and end punctuation a
+      // model wraps it in (taking them off only makes it shorter, so what is left must still be his words).
+      const quote = normalizeSaid(s.quote).replace(/^[\s"'.,;:!?\u2026-]+|[\s"'.,;:!?\u2026-]+$/gu, '');
+      const length = [...quote].length;
+      if (length < SUGGESTION_QUOTE_MIN || length > SUGGESTION_QUOTE_MAX || !saidHolds(src.said, quote)) {
+        drop('quote');
+        continue;
+      }
+      // What it says is his too: a short text, most of whose words, and every number, are in that same message.
+      const text = normalizeSaid(s.text);
+      if (!SuggestionText.safeParse(text).success || factCoverage([src.said], text) < FACT_COVERAGE || !numbersGrounded([src.said], text, src.at)) {
+        drop('text');
+        continue;
+      }
+      // A day, if he named one: a real one, not before the turn itself. One that has passed since is left off.
+      let dueOn: string | undefined;
+      if (s.dueOn) {
+        if (!DayOnly.safeParse(s.dueOn).success || s.dueOn < localDay(this.tz, new Date(src.at))) {
+          drop('date');
+          continue;
+        }
+        if (s.dueOn >= today) dueOn = s.dueOn;
+      }
+      if (this.now() - src.at > SUGGESTION_MAX_AGE_DAYS * 86_400_000) {
+        drop('old');
+        continue;
+      }
+      if (!/^[A-Za-z0-9_-]{1,80}$/.test(src.cid) || !/^[A-Za-z0-9_-]{1,80}$/.test(src.turnId)) {
+        drop('id');
+        continue;
+      }
+      const key = `${src.cid}\u0000${src.turnId}\u0000${quote}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      stats.suggestionsKept++;
+      let outcome: SuggestionOutcome;
+      try {
+        outcome = await this.onCandidate!({ kind: s.kind, text, quote, ...(dueOn ? { dueOn } : {}), conversationId: src.cid, turnId: src.turnId, sourceAt: src.at, staysHere: src.goals === true });
+      } catch {
+        outcome = 'unreachable';
+      }
+      if (outcome === 'filed') stats.suggestionsFiled++;
+      else drop(outcome);
+    }
+    if (raw.length > SUGGESTIONS_PER_CALL) stats.rejected['suggestion-extra'] = (stats.rejected['suggestion-extra'] ?? 0) + raw.length - SUGGESTIONS_PER_CALL;
   }
 
   private loadState(): ExtractState {

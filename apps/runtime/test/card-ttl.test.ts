@@ -33,6 +33,8 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/governance/proposals.ts': { minutes: [WEEK, 24 * 60], files: 'the most and the default for a card filed over HTTP (the console files forecast.series.enable here)' },
   'apps/runtime/src/goals/service.ts': { minutes: [WEEK], files: 'every goal card and a plan change Will asks for' },
   'apps/runtime/src/goals/batch.ts': { minutes: [WEEK], files: 'a review\'s plan.change' },
+  // P3 part 5: a suggestion from chat, set by the candidates intake and again where its card is checked (neither is one of the seven).
+  'apps/runtime/src/goals/candidates.ts': { minutes: [WEEK, WEEK], files: 'goal.propose and world.commitment.from_chat' },
   'apps/runtime/src/governance/internal.ts': { minutes: [WEEK], files: 'world.source.enable' },
   'apps/runtime/src/governance/promotion.ts': { minutes: [WEEK], files: 'policy.change' },
   'apps/runtime/src/surface/act.ts': { minutes: [WEEK], files: 'a recommendation\'s action' },
