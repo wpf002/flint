@@ -1112,7 +1112,8 @@ describe('the console Approvals panel', () => {
       for (const taskId of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'tk0000000000000000']) expect(run(`apprTaskKnown(${JSON.stringify({ args: { taskId } })})`), taskId).toBeNull();
       expect(run(`apprTaskKnown(${JSON.stringify(P5.cancel)}).about`)).toBe('wpf002/flint CI');
       // A due time that is no moment is not dressed as a date on the card's face; behind Show Details it is given as it is written.
-      expect(facts({ ...P5.dispatch, args: watch({ dueAt: 'whenever' }) }).map((x) => x[0])).toEqual(['CI Run', 'Cost']);
+      // (Words, a date written some other way, and a moment that never was: none of them is the card's kind of time.)
+      for (const dueAt of ['whenever', 'October 20, 2026', '2026-13-45T25:61:00.000Z', 20261020, true]) expect(facts({ ...P5.dispatch, args: watch({ dueAt }) }).map((x) => x[0]), String(dueAt)).toEqual(['CI Run', 'Cost']);
       expect(run(`JSON.stringify(apprDetails(${JSON.stringify({ ...P5.dispatch, args: watch({ dueAt: 'whenever' }) })}).says)`)).toContain('It’s due whenever.');
     });
 

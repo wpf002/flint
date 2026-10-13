@@ -3293,7 +3293,7 @@ function taskRender(list,d){list.textContent='';var tasks=d.tasks||[],can=taskCa
   if(!can&&TASKS.tab==='active')list.appendChild(gEl('p','gnote','Turn on '+taskNeeds()+' in Settings to run a new task.'));}
 
 /* ---------- one task, open ---------- */
-function taskOpen(id,say,kind){taskNav('task');TASKS.form=null;TASKS.back=null;var seq=++TASKS.seq;
+function taskOpen(id,say,kind){taskNav('task');TASKS.back=null;var seq=++TASKS.seq;
   taskHead('Tasks',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/tasks/'+encodeURIComponent(id)).then(function(d){if(seq!==TASKS.seq)return;var t=d.task;TASKS.task=t;
     /* Run Again's key is made once for the task on screen: the button pressed twice is one new task. */
@@ -3409,8 +3409,8 @@ function taskApprove(p,buttons,o){if(TASKS.busy)return;TASKS.busy=true;taskOnOff
 /* ---------- New Task ---------- */
 /* The form is told what it can offer by the runtime: the kinds of task an asset that is on can run, the items each
    can be about (by label), and his active goals. What Will picks lives in TASKS.form, with the key that makes a form
-   sent twice one task, until its task is made. Leaving the form for the list or a task (taskTab, taskOpen), or closing
-   the panel, drops it too: the next New Task starts empty, with a key of its own. */
+   sent twice one task, until its task is made. Leaving the form for the list, or closing the panel, drops it too: the
+   next New Task starts empty, with a key of its own. */
 function taskNew(){taskNav('form');TASKS.back=null;var seq=++TASKS.seq;taskHead('New Task',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/tasks/form').then(function(d){if(seq!==TASKS.seq)return;taskForm(d||{});},
     function(e){if(seq!==TASKS.seq)return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskFailedView(e,taskNew);taskHead('New Task',true,false);});}

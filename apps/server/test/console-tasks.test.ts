@@ -1380,7 +1380,10 @@ describe('what the panel holds', () => {
     await settle();
     body().field('CI Run').value = ITEM;
     body().field('CI Run').onchange!();
+    expect(run('TASKS.form.item')).toBe(ITEM);
     run('closeTasks()');
+    // Gone with the panel, not only once it is opened again.
+    expect(run('TASKS.form')).toBeNull();
     await open();
     run('taskNew()');
     await settle();
