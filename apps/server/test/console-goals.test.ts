@@ -357,6 +357,19 @@ describe('the Goals panel', () => {
     expect(panels.approvals).toBe(true);
   });
 
+  it('a step Flint carries out as a task is marked Flint Task, and is not Will’s to tick; no other kind of step is marked', async () => {
+    const steps = view().plan.steps;
+    const task = { key: 's4', ordinal: 400, title: 'Synthetic task step', kind: 'asset_task', tier: 'approval', status: 'todo', dueAt: null, dependsOn: [] };
+    await openGoal(view({ plan: { version: 2, steps: [...steps, task, { ...task, key: 's5', title: 'Synthetic wait step', kind: 'wait' }, { ...task, key: 's6', title: 'Synthetic decision step', kind: 'decision' }] } }), () => ({ status: 200, body: { ok: true } }));
+    const rowOf = (title: string) => body().visible().find((r) => r.className.split(' ').includes('row') && r.children.some((c) => c.children[0]?.textContent === title))!;
+    const tagsOf = (title: string) => rowOf(title).children.filter((c) => c.className.split(' ').includes('tag')).map((c) => c.textContent);
+    expect(tagsOf('Synthetic task step')).toEqual(['Flint Task']);
+    expect(rowOf('Synthetic task step').buttons()).toEqual([]);
+    for (const title of ['Synthetic step one', 'Synthetic step two', 'Synthetic Flint step', 'Synthetic wait step', 'Synthetic decision step']) expect(tagsOf(title), title).toEqual([]);
+    expect(rowOf('Synthetic wait step').buttons()).toEqual(['Mark Done']);
+    expect(titleCase('Flint Task')).toBe(true);
+  });
+
   it('an open goal: facts, DONE WHEN and STEPS in words; Mark Met, step ticks and Pause are unsigned', async () => {
     await openGoal(view(), () => ({ status: 200, body: { ok: true } }));
     expect(ids.goalsttl!.textContent).toBe('Synthetic goal one');
