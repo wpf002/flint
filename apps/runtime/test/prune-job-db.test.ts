@@ -360,6 +360,14 @@ describe.skipIf(NO_DB)('removing old backups, as it is run (flint_test)', () => 
     const row = await db.proposal.findUniqueOrThrow({ where: { id: real.id } });
     await approveProposal(db, real.id, await key.approve({ subjectId: real.id, action: 'restore.drill', argsDigest: row.argsDigest }), undefined, 'test');
     expect(await gate(db, 'drill', 'UTC', undefined, now)).toMatchObject({ go: true, proposalId: real.id });
+    // The other way round: only the job's card is waiting, and chat asks for the same thing. It gets a card of its
+    // own, never the job's card handed back as if chat had filed it.
+    expect((await gate(db, 'drill', 'UTC', undefined, now)).go).toBe(false);
+    const waiting = await db.proposal.findMany({ where: { action: 'restore.drill', status: 'pending' }, select: { id: true, origin: true } });
+    expect(waiting.map((p) => p.origin)).toEqual(['runtime:drill']);
+    const asked = await lookalike('chat:ghi', 'restore.drill', { day });
+    expect(asked).toMatchObject({ deduped: false });
+    expect(asked.id).not.toBe(waiting[0]!.id);
   });
 
   it('when the running release cannot be told, it removes nothing and files no card', async () => {

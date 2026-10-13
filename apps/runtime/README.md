@@ -1978,7 +1978,9 @@ versions, see entry 6 of [docs/RECOVERY.md](../../docs/RECOVERY.md).
   does not load it (the steps are above). Loaded, it does nothing unless the
   catch-up is on.
 - The nightly job gains its last step, `prune-backups --auto`. It files no card on a
-  night there is nothing to remove.
+  night there is nothing to remove. The list of copies a card signs is kept in
+  `~/.flint/prune-plans`, a folder it makes for you alone, and is removed once
+  no card that could still run names it.
 
 ### Known limits
 
