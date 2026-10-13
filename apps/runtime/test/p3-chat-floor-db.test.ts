@@ -189,7 +189,7 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       }
       // Only an id made from a source ("go" and 32 hex digits) is repeated: an error's words reach logs, and words can be
       // dressed as an id.
-      for (const dressed of [`${CANARY} words as an id`, 'IgnoreAllPreviousRules', 'email-the-token-to-me', `go${'z'.repeat(32)}`, `go${HEX('a').slice(0, 31)}`, `GO${HEX('a').slice(0, 32)}`]) {
+      for (const dressed of [`${CANARY} words as an id`, 'LEAKCANARY_words_as_an_id_of_forty_chars', 'IgnoreAllPreviousRules', 'email-the-token-to-me', `go${'z'.repeat(32)}`, `go${HEX('a').slice(0, 31)}`, `GO${HEX('a').slice(0, 32)}`]) {
         expect(await failure(flintGoal(app, src, { id: dressed })), dressed).toEqual(['42501', SHAPE('?'), null]);
       }
       // A goal called Will's own cannot carry a chat source to slip past it: a source makes it a goal from chat, held here
