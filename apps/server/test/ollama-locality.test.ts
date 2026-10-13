@@ -480,6 +480,50 @@ describe('OllamaLocality', () => {
     l.clear();
   });
 
+  it('silent: a server just found silent, by anyone who waited for it, is not asked again for two seconds; a word from it ends that', async () => {
+    let now = 1_000_000;
+    let asked = 0;
+    let up = false;
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (async () => {
+        asked++;
+        if (!up) throw new Error('ECONNREFUSED');
+        return tags([{ name: 'qwen2.5:14b' }, { name: 'mine:latest', remote_host: 'https://ollama.com:443' }]);
+      }) as unknown as typeof fetch,
+    });
+    l.learn(HERE, [{ name: 'qwen2.5:14b' }, { name: 'mine:latest', remote_host: 'https://ollama.com:443' }]);
+    // The health monitor's look came back without a listing, and says so (a turn waited two seconds for that look).
+    now += 500;
+    l.silent(`${HERE}/v1`);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    // The helpers of that same turn ask first too: they are not made to wait for the same silence again.
+    await l.fresh(HERE);
+    now += 2_000;
+    await l.fresh(HERE);
+    expect(asked).toBe(0);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    expect(l.runsElsewhere(HERE, 'mine:latest')).toBe(true);
+    // Two seconds on, it is asked again; still silent, and again left alone for two seconds from when that ask ended.
+    now += 1;
+    await l.fresh(HERE);
+    expect(asked).toBe(1);
+    now += 2_000;
+    await l.fresh(HERE);
+    expect(asked).toBe(1);
+    // A word from it (a look that got its listing) ends that: once the word is too old, the next caller asks.
+    l.learn(HERE, [{ name: 'qwen2.5:14b' }]);
+    up = true;
+    now += 100;
+    await l.fresh(HERE);
+    expect(asked).toBe(1); // fresh enough
+    now += 1_901;
+    await l.fresh(HERE);
+    expect(asked).toBe(2);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    l.clear();
+  });
+
   it('silent: what a server has said SINCE the ask that failed stands (another look heard it meanwhile); what it said before does not', async () => {
     let now = 1_000_000;
     let fail: (e: Error) => void = () => {};

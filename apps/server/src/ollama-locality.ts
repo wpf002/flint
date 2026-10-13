@@ -212,7 +212,8 @@ export class OllamaLocality {
     const at = trimmed(baseURL);
     const now = this.#now();
     const heard = this.#heard.get(serverOf(at));
-    if (heard && !heard.quiet && now - heard.at <= maxAgeMs) return Promise.resolve();
+    // (What is left of a server found silent is no older than the silence, so it is covered by the line after this one.)
+    if (heard && now - heard.at <= maxAgeMs) return Promise.resolve();
     // Found silent a moment ago by someone who waited for it, and not a word since: it is already not believed, and
     // it is not asked again yet.
     const hushed = this.#silentAt.get(serverOf(at));
