@@ -9,6 +9,7 @@
 #  - a value that could break out of the XML, or a placeholder with no value, is refused;
 #  - no template carries a secret, and each keeps its service on this Mac only;
 #  - every agent in agents.manifest names a source that exists in the repo.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 repo=${here:h:h:h}

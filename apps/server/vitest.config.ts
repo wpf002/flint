@@ -5,5 +5,7 @@ export default defineConfig({
     environment: 'node',
     // Tests never reach the screen (no notifications, dialogs or apps).
     setupFiles: ['../../test-support/quiet.ts'],
+    // One temp folder for the whole run, removed when it ends.
+    globalSetup: ['../../test-support/temp-root.ts'],
   },
 });

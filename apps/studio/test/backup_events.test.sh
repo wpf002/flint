@@ -4,6 +4,7 @@
 # does about a full disk, a run stopped part way, two runs at once, and the
 # catch-up at login (off unless it is switched on). All on a stand-in home folder.
 # Run: zsh apps/studio/test/backup_events.test.sh
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 script="$here/../backup_flint.sh"

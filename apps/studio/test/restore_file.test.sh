@@ -15,6 +15,7 @@
 #  - the server's process is gone before the file is swapped, so it cannot save
 #    over the copy on its way out, and the server is started again however the
 #    run ends: a refusal, a failure after the stop, Control-C.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 script="$here/../restore_file.sh"

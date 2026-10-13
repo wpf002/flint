@@ -28,6 +28,7 @@
 # the command line) is named in `not_settings` below, one by one, with why.
 # There are no patterns: a new name is a line in settings.manifest or a line
 # here, and a line here that the code no longer reads fails the test too.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 repo=${here:h:h:h}

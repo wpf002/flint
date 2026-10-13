@@ -22,6 +22,8 @@ studio=${here:h}
 repo=${studio:h:h}
 source "$studio/recovery_lib.sh"
 rebuild="$studio/rebuild.sh"
+# (This test keeps its own folders, not a run folder from temp_root.zsh: it sweeps what an earlier run that was
+# killed left in the temp folder, databases still running included, and could not find them inside another's.)
 TMP="${${TMPDIR:-/tmp}%/}"
 
 skip() {
