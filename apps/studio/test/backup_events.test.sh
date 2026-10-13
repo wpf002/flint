@@ -89,6 +89,35 @@ check "no fingerprint: the run still succeeds" '[ $? = 0 ]'
 check "the copy is recorded as unreadable" '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = unreadable ] && [ "$(field "$(last)" name)" = flint-20261001-0021.tar.gz.age ]'
 check "and the log says so" 'grep -q "offsite written, but its size or fingerprint could not be taken" "$fx/err.log"'
 rm -f "$fx/bin/shasum"
+# No size (the copy cannot be sized): said the same way, and the run goes on to its end.
+print -r -- '#!/bin/sh
+for a in "$@"; do case "$a" in *.tar.gz.age) exit 1;; esac; done
+exec /usr/bin/stat "$@"' > "$fx/bin/stat"; chmod +x "$fx/bin/stat"
+before=$(lines)
+run FLINT_BACKUP_TS=20261001-0022
+check "no size: the run still succeeds" '[ $? = 0 ]'
+check "the copy is recorded as unreadable" '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = unreadable ]'
+rm -f "$fx/bin/stat"
+check "the fingerprint's own file is never left beside the archives" '[ ! -e "$fx/local/.offsite-sha256" ]'
+
+# ---- 3c. Ctrl-C while the copy offsite is being written: the whole group is signalled, as a terminal does ----
+# The cleanup must still finish: the part-written copy goes, the record says interrupted, and the lock is
+# given back (left behind, it made every run for six hours stop at once, the night's included).
+print -r -- '#!/bin/sh
+{ echo "age-encryption.org/v1 (stand-in)"; head -c 5000; : > "$STARTED"; sleep 1; cat; }' > "$fx/tools/age-slow"; chmod +x "$fx/tools/age-slow"
+head -c 300000 /dev/urandom > "$data/memory/blob.bin"
+before=$(lines); rm -f "$fx/started-offsite"
+/usr/bin/perl -e 'setpgrp(0,0); $SIG{$_}="DEFAULT" for qw(INT HUP TERM PIPE); exec @ARGV' /usr/bin/env -i HOME="$home" PATH="$fx/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP_OFFSITE="$fx/icloud/FlintBackups" FLINT_BACKUP_MANIFEST="$fx/manifest.txt" FLINT_AGE_BIN="$fx/tools/age-slow" \
+  FLINT_BACKUP_TS=20261001-0023 STARTED="$fx/started-offsite" /bin/zsh "$script" >/dev/null 2>&1 </dev/null &
+pid=$!
+for i in {1..100}; do [[ -e $fx/started-offsite ]] && break; sleep 0.05; done; sleep 0.2
+kill -INT -- -$pid 2>/dev/null; wait $pid 2>/dev/null; st=$?; sleep 1.3
+check "Ctrl-C during the copy offsite: the run ends as stopped" '[ $st = 130 ]'
+check "the copy is recorded as interrupted, after the archive here" '[ "$(lines)" = $(( before + 2 )) ] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = interrupted ] && [ "$(field "$(last)" name)" = flint-20261001-0023.tar.gz.age ]'
+check "nothing part written is left offsite or beside the archives" '[ ! -e "$fx/icloud/FlintBackups/flint-20261001-0023.tar.gz.age" ] && [ ! -e "$fx/local/.offsite-sha256" ]'
+check "and the lock is given back" '[ ! -e "$data/backup.lock" ]'
+rm -f "$data/memory/blob.bin"
 
 # ---- 4. a key but no age, and a key but no offsite folder: each a copy that was not made ------------
 run FLINT_BACKUP_TS=20261001-0003 FLINT_AGE_BIN=/nonexistent/age

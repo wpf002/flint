@@ -229,6 +229,7 @@ finish() { # exit status
     fi
     if [ "$STAGE" = offsite ] && [ "$OFFSITE_DONE" = 0 ] && offsite_name "$NAME_OFFSITE"; then
       drop_own "$OFFSITE" "$NAME_OFFSITE"
+      rm -f "$LOCAL/.offsite-sha256" 2>/dev/null
       backup_event icloud failed "$NAME_OFFSITE" "$why"
     fi
   fi
@@ -285,11 +286,14 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
       # and age would happily encrypt a truncated tar stream.
       # The fingerprint is taken from the bytes as they are written, never read back: launchd's zsh may
       # write into iCloud Drive by path, but macOS refuses it the file's contents afterwards (Operation
-      # not permitted). Read back, the fingerprint came out empty and the copy was never recorded.
-      sum=""
+      # not permitted). Read back, the fingerprint came out empty and the copy was never recorded. It goes
+      # through a file beside the local archives (0700, never offsite) so that every part of the pipe is a
+      # program of its own: with the shell as the last part, Ctrl-C cut the cleanup short and left the lock.
+      sum=""; sumfile="$LOCAL/.offsite-sha256"
       set +e
-      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | "$AGE_BIN" -r "$AGE_RECIPIENT" | tee "$OFFSITE/$name" | shasum -a 256 | read -r sum _
+      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | "$AGE_BIN" -r "$AGE_RECIPIENT" | tee "$OFFSITE/$name" | shasum -a 256 > "$sumfile"
       st=("${pipestatus[@]}")
+      read -r sum _ < "$sumfile" 2>/dev/null; rm -f "$sumfile"
       set -e
       if [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ] || [ "${st[3]}" != 0 ] || [ "${st[4]}" != 0 ]; then
         rm -f "$OFFSITE/$name"
@@ -309,7 +313,7 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   fi
   if [ -n "$name" ]; then
     echo "$name" >> "$MANIFEST"
-    bytes="$(size_of "$OFFSITE/$name")"
+    bytes="$(size_of "$OFFSITE/$name")" || bytes=""
     if [[ $bytes =~ '^(0|[1-9][0-9]{0,14})$' && $sum =~ '^[0-9a-f]{64}$' ]]; then
       backup_event icloud ok "$name" "$bytes" "$sum"
     else
