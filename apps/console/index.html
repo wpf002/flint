@@ -2073,7 +2073,7 @@ function apprTaskFacts(p){var a=p.args||{},f=p.fullName,out,exp=['Expires',p.exp
   else if(f==='task.check_bar')out=[['Task',apprTaskName(p)],['Checked By',a.by==='flint:rule'?'Rules':/^ollama:/.test(String(a.by||''))?'Local Model':''],exp];
   else if(f==='task.cancel'||f==='task.bar_override')out=[['Task',apprTaskName(p)],['Filed By',apprFrom(p.origin)],exp];
   else{var t=apprTaskKnown(p),c=apprCost(p),ci=f===APPR_TASK_DISPATCH+'ci_runner';
-    out=[ci?['CI Run',t&&typeof t.about==='string'?t.about:'']:['Task',apprTaskName(p)],['Due',typeof a.dueAt==='string'&&a.dueAt?apprDate(a.dueAt):a.dueAt===null?'No Due Date':''],['Cost',c>=0?apprCostValue(c):'']];}
+    out=[ci?['CI Run',t&&typeof t.about==='string'?t.about:'']:['Task',apprTaskName(p)],['Due',typeof a.dueAt==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(a.dueAt)&&!isNaN(new Date(a.dueAt).getTime())?apprDate(a.dueAt):a.dueAt===null?'No Due Date':''],['Cost',c>=0?apprCostValue(c):'']];}
   /* A card whose args were cleared, or a task this page has not looked up, keeps only what it still knows. */
   return out.filter(function(x){return typeof x[1]==='string'&&x[1];}).slice(0,3);}
 function apprTaskReason(p){var a=p.args||{},f=p.fullName;
@@ -3298,7 +3298,7 @@ function taskOpen(id,say,kind){taskNav('task');TASKS.form=null;TASKS.back=null;v
   gCall('/tasks/'+encodeURIComponent(id)).then(function(d){if(seq!==TASKS.seq)return;var t=d.task;TASKS.task=t;
     /* Run Again's key is made once for the task on screen: the button pressed twice is one new task. */
     if(!TASKS.again||TASKS.again.id!==t.id)TASKS.again={id:t.id,key:gDraftKey()};
-    if(typeof APPR_TASKS!=='undefined')APPR_TASKS[t.id]={title:t.title,about:t.about};
+    if(typeof APPR_TASKS!=='undefined'&&typeof apprTaskId==='function'&&apprTaskId({args:{taskId:t.id}}))APPR_TASKS[t.id]={title:t.title,about:t.about};
     taskShow(t,say,kind);},
   function(e){if(seq!==TASKS.seq)return;if(e.code==='noTask'||taskOff(e)){taskTab(TASKS.tab,taskOff(e)?'':gSay(e),'bad');return;}taskFailedView(e,function(){taskOpen(id);});});}
 function taskFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,label));row.appendChild(l);var v=gEl('span','val',value);row.appendChild(v);row.val=v;return row;}
@@ -3375,7 +3375,7 @@ function taskNames(ps,done){var ids=[];done=done||function(){};
     gCall('/tasks/'+encodeURIComponent(id)).then(function(d){if(d&&d.task&&d.task.id===id&&typeof d.task.title==='string'){APPR_TASKS[id]={title:d.task.title,about:d.task.about};got++;}end();},end);});}
 /* The card the runtime filed, read back from the Approvals list: what Will signs is what that list holds, never
    something this panel made up. `o.back(say, kind)` is where Back and Not Now go; `o.done(say)` where an approved card goes. */
-function taskCard(id,o){taskNav('card');var seq=++TASKS.seq;TASKS.form=null;TASKS.back=function(){o.back();};
+function taskCard(id,o){taskNav('card');var seq=++TASKS.seq;TASKS.back=function(){o.back();};
   taskHead('Tasks',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/proposals').then(function(d){if(seq!==TASKS.seq)return;var p=null;((d&&d.proposals)||[]).forEach(function(x){if(x&&x.id===id&&x.status==='pending')p=x;});
     if(d&&d.runtime==='down'){taskBody().appendChild(goalEmpty('Couldn’t Load the Card',TASK_SAY.down,gBtn('ghost','Try Again',function(){taskCard(id,o);})));return;}
@@ -3409,7 +3409,8 @@ function taskApprove(p,buttons,o){if(TASKS.busy)return;TASKS.busy=true;taskOnOff
 /* ---------- New Task ---------- */
 /* The form is told what it can offer by the runtime: the kinds of task an asset that is on can run, the items each
    can be about (by label), and his active goals. What Will picks lives in TASKS.form, with the key that makes a form
-   sent twice one task. */
+   sent twice one task, until its task is made. Leaving the form for the list or a task (taskTab, taskOpen), or closing
+   the panel, drops it too: the next New Task starts empty, with a key of its own. */
 function taskNew(){taskNav('form');TASKS.back=null;var seq=++TASKS.seq;taskHead('New Task',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/tasks/form').then(function(d){if(seq!==TASKS.seq)return;taskForm(d||{});},
     function(e){if(seq!==TASKS.seq)return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskFailedView(e,taskNew);taskHead('New Task',true,false);});}

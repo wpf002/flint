@@ -2023,6 +2023,30 @@ nothing, pushes no note, puts nothing in chat context, and logs statuses, field 
 references only. `/tasks` and `/assets` are never reported back to the runtime as a
 `route.error`.
 
+In the console, the Tasks panel (the checklist icon) lists tasks under Active and Finished:
+each by its title, the runtime's sentence for where it stands, and what it is about. An open
+task shows its result (marked Outside Text), each check by name with Passed, Failed or
+Waiting, and its details (Runs On, Asked By, Goal, Due, Chance It Passes, Cost). A button is
+there only when the runtime's view of the task says it can be done now: **Cancel Task** (asked
+in place first; unsigned while the task has not gone out, else its card), **Accept Anyway**
+and **Reject Anyway** (their cards), **Run Again** (a new task like it, and its card), and
+**Review Card** while a card of its own waits. **New Task** offers what the runtime's form
+says can run now: today that is Watch a CI Run, with the runs Flint tracks by label, an
+optional goal and an optional due date. The form's key makes a form sent twice one task.
+
+A card filed from the panel is read back from the Approvals list and shown there and then
+in the Approvals panel's own words, with everything it holds behind Show Details; Approve
+signs exactly those args, with a fresh touch. Only a waiting card about a task or an asset
+is ever shown to sign in the panel. Settings > Assets lists each asset with its sentence,
+On, Off or Waiting, and the one thing that can be done with it now: **Turn On** (files the
+card and shows it in the Tasks panel), **Turn Off** (asked in place first; unsigned, as the
+runtime allows), or **Open Approvals** while its card waits.
+
+In the approvals list (`GET /proposals`), a task's dispatch card carries `cost: { micros }`:
+the estimate in the args Will signs, in millionths of a dollar, zero included. The card
+shows it as "No Cost" or "About $0.25". No other card has one, and a number the card could
+not hold is not shown as an estimate.
+
 ## Tools / integrations
 
 If `MCP_CONFIG` is set, the server connects those MCP servers and exposes their

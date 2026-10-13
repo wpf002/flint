@@ -1041,8 +1041,14 @@ describe('New Task', () => {
     // An id is a value the form sends, never a word on screen.
     plainScreen();
     ownWords(['New Task', 'What to Do', 'CI Run', 'Goal', 'Due', 'Choose a CI Run', 'No Goal', 'Cancel', 'Create Task'], ['Pick a CI run Flint tracks.']);
+    // Cancel leaves the form, and what was picked in it: the next New Task starts empty.
+    pick('CI Run', ITEM);
     await click(foot(), 'Cancel');
     expect(title()).toBe('Tasks');
+    expect(run('TASKS.form')).toBeNull();
+    run('taskNew()');
+    await settle();
+    expect(body().field('CI Run').value).toBe('');
   });
 
   it('Create Task needs a run picked; then one POST makes the task and files its card, which is shown here and signed', async () => {

@@ -1926,8 +1926,9 @@ does once tasks are switched on and an asset is on:
   are switched off or no asset that runs tasks is on. Otherwise it says when a
   task is stuck or a rule stops Flint from checking results.
 
-There is no panel yet. The routes the panel will use exist, behind the same
-token scope as approvals, so no model can read a task or start one:
+The console's Tasks panel and Settings > Assets use these routes, through the
+server's checked proxy. They sit behind the same token scope as approvals, so
+no model can read a task or start one:
 
 | Route | What it does |
 |---|---|
@@ -1939,6 +1940,20 @@ token scope as approvals, so no model can read a task or start one:
 | `POST /v1/tasks` | A new task and its card |
 | `POST /v1/tasks/:id/cancel` | Cancels it, or files the card to cancel one that has gone out |
 | `POST /v1/tasks/:id/accept` and `/reject` | Files the card that overrules its check |
+| `POST /v1/tasks/:id/again` | Run Again: a new task like one that has ended, and its card |
+| `GET /v1/task-form` | What New Task can offer now |
+
+Run Again takes the new task's key and nothing else. The new task has the same
+kind, the same items and the same goal as the ended one, and no due date. It
+goes through every check a new task goes through, as things are now, and it
+waits for its own card. A task that has not ended, or whose details are no
+longer kept, can't be run again, and the open task's view says so
+(`can.again`).
+
+The form's answer lists each kind of task an asset that is on can run, with the
+items it can be about (up to 50, the latest seen first, each by its label and
+never by a title), and your active goals. With no asset on it lists no kind of
+task.
 
 While tasks are switched off, every one of these answers "Tasks are turned off
 on this Mac." and reads nothing.
