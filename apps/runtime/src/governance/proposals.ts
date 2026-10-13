@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { REFUSAL, digestOf, isForecastSignedAction, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, REFUSAL, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -37,8 +37,14 @@ export class Refused extends Error {
   }
 }
 
-/** Chat's suggestions (P3): filed only with Will's own quoted words, which the database checks. */
-const CHAT_SUGGESTIONS: ReadonlySet<string> = new Set(['goal.propose', 'world.commitment.from_chat']);
+/**
+ * Who may file a suggestion from chat (goal.propose, world.commitment.from_chat):
+ * the candidates intake, in this process (goals/candidates.ts), and nothing
+ * else. It names itself with this mark, which no request can carry: over the
+ * wire, and from any other caller, those two actions are refused whatever
+ * their origin, args or provenance say.
+ */
+export const CANDIDATES_INTAKE: unique symbol = Symbol('goals.candidates');
 
 /** A card that is gone. Its refusals show under the card itself, so "it" needs no noun. */
 export const GONE = 'It no longer exists.';
@@ -133,12 +139,24 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 });
 
 /** Record a proposal. A FORBIDDEN action is refused (409) and the refusal audited. */
-export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date()) {
+export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date(), via?: typeof CANDIDATES_INTAKE, inside?: Tx) {
   let input = given;
+  // `inside`: the candidates intake files its card in its own transaction (with its lock and the day's claim), on
+  // its own connection. Everything below then reads and writes through it, and commits or rolls back with it.
+  const q: Db | Tx = inside ?? db;
+  // A suggestion from chat is filed by the candidates intake alone (P3 part 5): never by a tool call, a
+  // console button or another job, however the card is made up. The refusal is audited, by ids only.
+  if (isChatSuggestion(input.action) && via !== CANDIDATES_INTAKE) {
+    await appendAudit(db, [{
+      actor, context: contextOf(input.origin), kind: 'decision', action: input.action, decision: 'deny', outcome: 'denied',
+      inputs: { argsDigest: digestOf(input.args), origin: input.origin.slice(0, 200), rule: 'candidates-intake' }, reasoning: 'only the candidates intake files a suggestion from chat', tainted: input.tainted,
+    }]);
+    throw new Refused(409, GOAL_SAYS.fromChatCheck);
+  }
   // A goal card (P3) is checked against the goal as it stands, filed with its args normalized (what Will
   // signs is what the database compares) and with a fixed reason: a reason is kept for good, and never
   // carries a goal's words. One that could not apply is never filed.
-  const goalCard = isGoalSignedAction(input.action) || CHAT_SUGGESTIONS.has(input.action);
+  const goalCard = isGoalSignedAction(input.action) || isChatSuggestion(input.action);
   if (goalCard) {
     const { checkGoalCard } = await import('../goals/apply.js');
     input = await checkGoalCard(db, input, now);
@@ -172,7 +190,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     if (await db.triageRule.findUnique({ where: { name }, select: { id: true } })) throw new Refused(400, `a triage rule named ${name} exists (switched-off rules keep their names): choose another name`);
   }
   const argsDigest = digestOf(input.args);
-  const decision = await tierOf(db, { ...input }, now, input.readOnlyHint);
+  const decision = await tierOf(q, { ...input }, now, input.readOnlyHint);
   const id = `pr${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
   const context = contextOf(input.origin);
   if (decision.tier === 'forbidden') {
@@ -183,7 +201,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     throw new Refused(409, `forbidden: ${decision.reason}`);
   }
   const expiresAt = new Date(now.getTime() + input.ttlMinutes * 60_000);
-  return db.$transaction(async (tx) => {
+  const file = async (tx: Tx) => {
     // The same call proposed again while the first is still pending (a retried
     // turn, a replayed spool, a timeout after the first one landed, Will asking
     // twice) is the same proposal: one card, one approval, one run. The lock
@@ -207,7 +225,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
                 ${input.reason ? redact(input.reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
     } catch (err) {
       // The database's quote floor (P3) refusing a chat suggestion is the caller's input: a sentence, not a 500.
-      if (CHAT_SUGGESTIONS.has(input.action) && dbRefused(err)) throw new Refused(400, 'A suggestion from chat needs your own words, quoted.');
+      if (isChatSuggestion(input.action) && dbRefused(err)) throw new Refused(400, 'A suggestion from chat needs your own words, quoted.');
       throw err;
     }
     const row = { id, action: input.action, argsDigest };
@@ -216,7 +234,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
       inputs: auditInputs(row, { rule: decision.rule }), correlationId: row.id, tainted: input.tainted,
     }]);
     return { id: row.id, argsDigest, expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: false };
-  });
+  };
+  return inside ? file(inside) : db.$transaction(file);
 }
 
 /**

@@ -165,6 +165,24 @@ describe('index.ts wiring', () => {
 
   // ---- Flint stops waiting on Claude, and never quietly falls back to it ----
 
+  // P3 part 5. What these calls DO is tested by running them (test/goal-candidates.test.ts drives the same wiring over real sockets).
+  it('goals and commitments from chat are switched in ./goal-candidates, for the brain the extractor really runs on, beside the rules for turns that stay here', () => {
+    const made = between('new MemoryExtractor(memory, knowledge, memoryPlan.brain', '}).start();');
+    expect(made).toContain('kind: memoryPlan.kind,');
+    expect(made).toContain('...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),');
+    expect(made).toContain('...candidateOptions(process.env, {');
+    // The same kind and the very brain the extractor was built with: on the frontier the options are empty, and on
+    // the local wire the locality rule is asked about this brain, not about a setting.
+    expect(made).toContain('kind: memoryPlan.kind, brain: extractBrain, candidates: new GoalCandidates({ runtime: runtimeLink }),');
+    expect(made).toContain('tz: serverZone(process.env, (m) => console.error(m)),');
+    expect(src.match(/candidateOptions\(/g)).toHaveLength(1);
+    expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
+    // index.ts neither reads the setting nor names the runtime's route: both live in ./goal-candidates.
+    expect(src).not.toMatch(/env\.FLINT_EXTRACT_(CANDIDATES|COMMITMENTS)/);
+    expect(src).not.toContain('goals/candidates');
+    expect(src).toContain("import { GoalCandidates, candidateOptions, serverZone } from './goal-candidates';");
+  });
+
   it('the local brain is an Ollama model whatever keys are set: index.ts never builds an Anthropic client itself', () => {
     expect(src).not.toMatch(/AnthropicProvider|FLINT_MODEL\b/);
     expect(src).toContain('const local = await chooseLocalBrain(process.env, {');

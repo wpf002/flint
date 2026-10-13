@@ -472,6 +472,14 @@ export const GOAL_SAYS = {
   minorCard: 'A small plan change can’t carry a bigger one.',
   reviewStep: 'A review adds a step only from its templates, and changes only a step’s status, date or place.',
   runtimeOrigin: 'Only Flint’s own jobs file their cards.',
+  // Suggestions from chat (P3 part 5).
+  fromChatCheck: 'Only Flint’s own check of your chats files a suggestion.',
+  suggestionInvalid: 'This suggestion isn’t valid.',
+  suggestionStale: 'This suggestion is from a chat too long ago.',
+  suggestionCap: 'Flint reached today’s limit of suggestions from chat.',
+  suggestionGone: 'This suggestion is no longer waiting.',
+  suggestionMoved: 'This suggestion changed since it was filed.',
+  dismissed: 'You dismissed it.',
 } as const;
 export type GoalSay = keyof typeof GOAL_SAYS;
 
@@ -539,6 +547,8 @@ export const GOAL_CARD_VERBS = {
   done: 'goal.done',
   abandon: 'goal.abandon',
   resume: 'goal.activate',
+  // Make It a Goal (part 5): one Flint suggested from chat, started as Will's form says it.
+  start: 'goal.activate',
   plan: 'plan.change',
 } as const satisfies Readonly<Record<string, GoalSignedAction>>;
 export type GoalCardVerb = keyof typeof GOAL_CARD_VERBS;
@@ -570,6 +580,17 @@ export const GOAL_CARD_BODIES = {
   done: z.object({ args: GoalDoneArgs }).strict(),
   abandon: z.object({ args: GoalAbandonArgs }).strict(),
   resume: z.object({ args: GoalActivateArgs }).strict().refine((b) => b.args.plan === null, { message: 'resuming brings no plan', path: ['args', 'plan'] }),
+  // A suggestion made a goal: it stays one Flint suggested (origin flint), Will's own, untainted, with no Nexus project.
+  start: z
+    .object({ args: GoalActivateArgs })
+    .strict()
+    .superRefine((b, ctx) => {
+      const issue = (path: string, message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['args', path], message });
+      if (b.args.origin !== 'flint' || b.args.owner !== 'will') issue('origin', 'a suggestion Flint made, started as yours');
+      if (b.args.tainted) issue('tainted', 'a suggestion rests on your own words');
+      if (b.args.sensitivity !== 'personal') issue('sensitivity', 'a suggestion is personal');
+      if (b.args.nexusProjectId !== null) issue('nexusProjectId', 'the panel names no Nexus project');
+    }),
   plan: z.object({ args: PlanChangeArgs }).strict(),
 } as const satisfies Readonly<Record<GoalCardVerb, z.ZodTypeAny>>;
 /** POST /goals/:id/criteria/:cid: Will's mark on one of his own checks. */
@@ -685,6 +706,24 @@ export const GoalRow = z
 export type GoalRow = z.infer<typeof GoalRow>;
 /** A new goal whose card waits for Will's signature: it is not a goal until he signs it. */
 export const WaitingGoal = z.object({ proposalId: ProposalRef, goalId: GoalId, title: GoalTitle, checks: Count }).strict();
+/**
+ * A goal Flint suggested from a chat (part 5), for the Suggested tab: its short
+ * title, Will's own words it rests on, the day he said them (null once nothing
+ * that held it is kept) and the day Flint read, if it read one. `waiting`: its
+ * card has not been approved, so there is no goal row yet. Either way Make It a
+ * Goal starts it with one signature, and Dismiss sets it aside.
+ */
+export const Suggestion = z
+  .object({
+    goalId: GoalId,
+    title: GoalTitle,
+    quote: z.string().min(1).max(1000),
+    saidAt: IsoMs.nullable(),
+    dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    waiting: z.boolean(),
+  })
+  .strict();
+export type Suggestion = z.infer<typeof Suggestion>;
 export const GoalsPage = z
   .object({
     tab: z.enum(GOAL_TABS),
@@ -692,6 +731,8 @@ export const GoalsPage = z
     waiting: z.array(WaitingGoal).max(50),
     /** Whether Flint reviews goals (FLINT_PLANNER). Off, nothing is ever late. */
     reviews: z.enum(['off', 'on']),
+    /** The Suggested tab's rows (part 5). A default, so an answer from a runtime without them still reads. */
+    suggestions: z.array(Suggestion).max(250).default([]),
   })
   .strict();
 export type GoalsPage = z.infer<typeof GoalsPage>;

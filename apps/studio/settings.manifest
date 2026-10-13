@@ -82,6 +82,8 @@ secrets.env  FLINT_EXTRACT_BACKLOG_INTERVAL_MS    restore   number
 secrets.env  FLINT_EXTRACT_MAX_TURNS              restore   number
 secrets.env  FLINT_EXTRACT_MAX_CALLS_PER_DAY      restore   number
 secrets.env  FLINT_EXTRACT_BATCH_CHARS            restore   number
+secrets.env  FLINT_EXTRACT_CANDIDATES             restore   onoff
+secrets.env  FLINT_EXTRACT_COMMITMENTS            restore   onoff
 secrets.env  FLINT_FRONTIER_PROVIDER              restore   word
 secrets.env  FLINT_FRONTIER_MODEL                 restore   model
 secrets.env  FLINT_FRONTIER_BASE_URL              restore   loopback

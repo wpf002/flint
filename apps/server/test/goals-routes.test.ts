@@ -125,8 +125,17 @@ describe('reads', () => {
   it('a tab is passed through, validated, and its answer checked', async () => {
     answer = () => ({ status: 200, body: { tab: 'finished', goals: [row({ status: 'done', endedAt: AT })], waiting: [], reviews: 'off' } });
     const r = await get('/goals?tab=finished');
-    expect(r).toEqual({ status: 200, body: { tab: 'finished', goals: [row({ status: 'done', endedAt: AT })], waiting: [], reviews: 'off' } });
+    // An answer without the Suggested tab's rows (a runtime from before part 5) still reads: the console gets none.
+    expect(r).toEqual({ status: 200, body: { tab: 'finished', goals: [row({ status: 'done', endedAt: AT })], waiting: [], reviews: 'off', suggestions: [] } });
     expect(asked).toEqual([{ method: 'GET', url: '/v1/goals?tab=finished', auth: `Bearer ${TOKEN}`, body: '' }]);
+    // The Suggested tab (part 5): each suggestion with Will's own words, checked against its contract on the way through.
+    const said = { goalId: GID, title: `${CANARY} run a half marathon`, quote: `${CANARY} I want to run a half marathon by spring`, saidAt: AT, dueOn: '2027-03-20', waiting: true };
+    answer = () => ({ status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: [said, { ...said, saidAt: null, dueOn: null, waiting: false }] } });
+    expect((await get('/goals?tab=suggested')).body).toEqual({ tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: [said, { ...said, saidAt: null, dueOn: null, waiting: false }] });
+    // One that is not the contract (a runtime gone wrong) is not passed on, and its words are not logged.
+    answer = () => ({ status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: [{ ...said, sourceRef: 'chat:x' }] } });
+    expect((await get('/goals?tab=suggested')).status).toBe(502);
+    expect(logged.join('\n')).not.toContain(CANARY);
     answer = () => ({ status: 200, body: { goal: view() } });
     expect((await get(`/goals/${GID}`)).body).toEqual({ goal: view() });
     expect(asked.at(-1)!.url).toBe(`/v1/goals/${GID}`);
@@ -241,7 +250,11 @@ describe('writes', () => {
     expect((await post(`/goals/${GID}/edit`, { args: { goalId: GID, ...def, title: 'T2', from: def } })).status).toBe(200);
     expect((await post(`/goals/${GID}/plan`, { args: { goalId: GID, goalTitle: 'T', ops: [{ op: 'add', key: 's3', step: { ordinal: 300, title: 'S', kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } })).status).toBe(200);
     expect((await post(`/goals/${GID}/resume`, { args: args() })).status).toBe(200);
-    expect(asked.map((a) => a.url)).toEqual([`/v1/goals/${GID}/done`, `/v1/goals/${GID}/timing`, `/v1/goals/${GID}/edit`, `/v1/goals/${GID}/plan`, `/v1/goals/${GID}/resume`]);
+    // Make It a Goal (part 5): one Flint suggested from a chat, started as the form says it, a first plan and all.
+    const first = { plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'steps', keys: ['s1'] } }] };
+    expect((await post(`/goals/${GID}/start`, { args: args({ origin: 'flint', ...first }) })).status).toBe(200);
+    expect(asked.map((a) => a.url)).toEqual([`/v1/goals/${GID}/done`, `/v1/goals/${GID}/timing`, `/v1/goals/${GID}/edit`, `/v1/goals/${GID}/plan`, `/v1/goals/${GID}/resume`, `/v1/goals/${GID}/start`]);
+    expect((JSON.parse(asked[5]!.body) as { args: { origin: string; plan: unknown } }).args).toMatchObject({ origin: 'flint', owner: 'will', tainted: false });
     // What a change changes from goes to the runtime with it.
     expect(JSON.parse(asked[1]!.body)).toEqual({ args: { goalId: GID, goalTitle: 'T', horizonAt: null, reviewCadence: 'P2W', from: { horizonAt: null, reviewCadence: 'P1W' } } });
     asked = [];
@@ -253,6 +266,10 @@ describe('writes', () => {
       [`/goals/${GID}/edit`, { args: { goalId: GID, title: 'T2', description: '', successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'manual' } }], links: [] } }],
       [`/goals/${GID}/abandon`, { args: { goalId: GID, goalTitle: 'T', more: 1 } }],
       [`/goals/${GID}/resume`, { args: args({ plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [{ id: 'c1', text: 'x', check: { kind: 'steps', keys: ['s1'] } }] }) }],
+      // Start is a suggestion's route alone: his own new goal, or one marked tainted, is not started through it.
+      [`/goals/${GID}/start`, { args: args() }],
+      [`/goals/${GID}/start`, { args: args({ origin: 'flint', tainted: true }) }],
+      [`/goals/${GID}/start`, { args: args({ origin: 'flint', goalId: 'goSomeOtherGoal01' }) }],
       [`/goals/${GID}/pause`, { why: CANARY }],
       [`/goals/${GID}/criteria/c11`, { met: true }],
       [`/goals/${GID}/criteria/c1`, { met: 1 }],

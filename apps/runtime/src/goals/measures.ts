@@ -7,14 +7,14 @@
  * Numbers only. Nothing here reads a goal's title, a check's text or a step's
  * title, and nothing returns an id: counts, days and durations.
  */
-import { GOAL_SIGNED_ACTIONS, REVIEW_DOWN_MS, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, GOAL_SAYS, GOAL_SIGNED_ACTIONS, REVIEW_DOWN_MS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import { Prisma } from '@prisma/client';
 import type { Db } from '../db.js';
 import { REVIEWS_STOPPED, waitedMs } from './late.js';
 
 export const DAY = 86_400_000;
-/** The chat suggestions (part 5 files them): a goal, or a commitment, from Will's quoted words. */
-export const CHAT_SUGGESTION_ACTIONS = ['goal.propose', 'world.commitment.from_chat'] as const;
+/** The chat suggestions (part 5 files them): a goal, or a commitment, from Will's quoted words (@flint/policy's list). */
+export { CHAT_SUGGESTION_ACTIONS };
 
 /** When Flint first reviewed a goal: the trial week starts here. */
 export async function firstReviewAt(db: Db): Promise<Date | undefined> {
@@ -213,22 +213,45 @@ export async function reviewForecasts(db: Db): Promise<{ reviews: number; withou
  * words (12 to 300 characters, his, from a turn that read nothing untrusted).
  * A card whose args retention has cleared can no longer be read: it is counted
  * as `cleared`, not as a miss.
+ *
+ * What Will did with them, each counted once: `executed` (he approved the
+ * card), `made` (he made the suggestion a goal himself before approving its
+ * card: Make It a Goal set the card aside, which is a yes, not a no),
+ * `rejected` (he turned it down: rejected the card, or dismissed it) and
+ * `expired`.
  */
-export async function chatSuggestions(
-  db: Db, o: { since?: Date; actions?: readonly string[] } = {},
-): Promise<{ filed: number; withoutQuote: number; cleared: number; executed: number; rejected: number; expired: number }> {
+export interface ChatSuggestionCounts {
+  filed: number;
+  withoutQuote: number;
+  cleared: number;
+  executed: number;
+  made: number;
+  rejected: number;
+  expired: number;
+}
+export async function chatSuggestions(db: Db, o: { since?: Date; actions?: readonly string[] } = {}): Promise<ChatSuggestionCounts> {
   const since = o.since ?? null;
-  const [r] = await db.$queryRaw<Array<{ filed: number; withoutQuote: number; cleared: number; executed: number; rejected: number; expired: number }>>`
+  // A card set aside by Make It a Goal carries this fixed sentence as its error, and a card's error is kept for good.
+  const replaced = GOAL_SAYS.replaced;
+  const [r] = await db.$queryRaw<ChatSuggestionCounts[]>`
     SELECT count(*)::int AS filed,
            count(*) FILTER (WHERE c.args IS NOT NULL AND NOT coalesce(
              jsonb_typeof(c.args->'quote') = 'string' AND char_length(c.args->>'quote') BETWEEN 12 AND 300
              AND c."argsProvenance"->'quote'->>'source' = 'will' AND c."argsProvenance"->'quote'->'tainted' = 'false'::jsonb, false))::int AS "withoutQuote",
            count(*) FILTER (WHERE c.args IS NULL)::int AS cleared,
            count(*) FILTER (WHERE c.status = 'executed')::int AS executed,
-           count(*) FILTER (WHERE c.status = 'rejected')::int AS rejected,
+           count(*) FILTER (WHERE c.status = 'rejected' AND c.action = 'goal.propose' AND c.error IS NOT DISTINCT FROM ${replaced})::int AS made,
+           count(*) FILTER (WHERE c.status = 'rejected' AND NOT (c.action = 'goal.propose' AND c.error IS NOT DISTINCT FROM ${replaced}))::int AS rejected,
            count(*) FILTER (WHERE c.status = 'expired')::int AS expired
     FROM "Proposal" c WHERE c.action = ANY (${[...(o.actions ?? CHAT_SUGGESTION_ACTIONS)]}::text[]) AND (${since}::timestamptz IS NULL OR c."createdAt" >= ${since}::timestamptz)`;
-  return r ?? { filed: 0, withoutQuote: 0, cleared: 0, executed: 0, rejected: 0, expired: 0 };
+  return r ?? { filed: 0, withoutQuote: 0, cleared: 0, executed: 0, made: 0, rejected: 0, expired: 0 };
+}
+
+/** Exit 7, beside the cards: what the candidates intake added with no card, under a rule Will signed (its own audit entries). */
+export async function addedAlone(db: Db, since?: Date): Promise<number> {
+  return db.auditEntry.count({
+    where: { actor: 'runtime:goals.candidates', kind: 'action', outcome: 'ok', action: { in: [...CHAT_SUGGESTION_ACTIONS] }, ...(since ? { at: { gte: since } } : {}) },
+  });
 }
 
 /**

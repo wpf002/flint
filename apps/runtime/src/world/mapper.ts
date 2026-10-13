@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { digestOf, mergeTaintedPaths } from '@flint/policy';
 import type { Tx } from '../db.js';
-import { STATE, GUARDED_KINDS } from './kinds.js';
+import { STATE, GUARDED_KINDS, isChatCommitmentKey } from './kinds.js';
 
 export interface Observation {
   kind: string;
@@ -57,6 +57,8 @@ const vid = () => `ev${Date.now().toString(36)}${Math.random().toString(36).slic
 
 export async function applyObservation(tx: Tx, o: Observation): Promise<Applied> {
   if (GUARDED_KINDS.has(o.kind) && o.via !== 'world.person.create') throw new Rejected(`a ${o.kind} is created only through world.person.create`);
+  // A commitment from chat (P3 part 5) is written by its own executor alone: no sync creates one or writes over one.
+  if (o.kind === 'commitment' && (isChatCommitmentKey(o.key) || (o.state as { source?: unknown } | null)?.source === 'chat')) throw new Rejected('a commitment from chat is created only through world.commitment.from_chat');
   const schema = STATE[o.kind];
   if (!schema) throw new Rejected(`unknown entity kind ${o.kind}`);
   const parsed = schema.safeParse(o.state);

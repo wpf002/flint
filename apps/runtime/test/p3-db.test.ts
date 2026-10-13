@@ -424,7 +424,7 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     expect((await db.goal.findUniqueOrThrow({ where: { id: gid } })).status).toBe('active');
   });
 
-  it('filing: the same card from Will and from a review are two cards; provenance names ids; a chat suggestion without a quote is a 400', async () => {
+  it('filing: the same card from Will and from a review are two cards; provenance names ids; a suggestion from chat is never filed this way', async () => {
     const { args } = await newGoal();
     const gid = args.goalId as string;
     await fileSignRun('goal.activate', args);
@@ -437,7 +437,11 @@ describe.skipIf(NO_DB)('P3 goal cards on flint_test', () => {
     expect((await db.proposal.findUniqueOrThrow({ where: { id: flint.id } })).reason).toBe('Flint suggests this after its review.');
     await expect(file('goal.done', { goalId: gid, goalTitle }, { argsProvenance: { goalTitle: { source: 'will', ref: `${CANARY} said so`, tainted: false } } })).rejects.toMatchObject({ status: 400, message: SAY.provenance });
     expect(await file('goal.done', { goalId: gid, goalTitle }, { argsProvenance: { goalTitle: { source: 'will', ref: `goal:${gid}`, tainted: false } } })).toMatchObject({ deduped: false });
-    await expect(file('goal.propose', { goalId: id('go'), title: 'Synthetic', quote: 'too short' }, { kind: 'goal' })).rejects.toMatchObject({ status: 400, message: 'A suggestion from chat needs your own words, quoted.' });
+    // Only the candidates intake files a suggestion from chat (part 5; test/p3-candidates-db.test.ts): not the console, not a job, not a chat.
+    for (const origin of ['console', 'chat:c1']) {
+      await expect(file('goal.propose', { goalId: id('go'), title: 'Synthetic', quote: 'Synthetic words that are long enough' }, { kind: 'goal', origin, argsProvenance: { quote: { source: 'will', tainted: false } } }))
+        .rejects.toMatchObject({ status: 409, message: SAY.fromChatCheck });
+    }
   });
 
   it('review finding 2: a review’s card is held to its rules at the gate, whatever its template’s name says', async () => {

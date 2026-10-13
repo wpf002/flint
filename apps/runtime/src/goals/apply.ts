@@ -26,6 +26,7 @@ import {
   classifyPlanOp,
   composePlan,
   digestOf,
+  isChatSuggestion,
   isGoalSignedAction,
   localDay,
   nextReviewAt,
@@ -46,6 +47,7 @@ import { GoalFailure, SAY, goalStatusWords, sanitize } from './errors.js';
 import { RATIONALE, activePlan, currentLinks, lastVersion, sameDefinition, sameLinks, sameTiming, syncLinks, writeDraft } from './ops.js';
 import { labelCouldBe } from './items.js';
 import { fromTemplate, type TemplateWords } from './steps.js';
+import { checkSuggestionCard, waitingSuggestion } from './candidates.js';
 
 /** The templates a review files its plan cards under (Proposal_template_check needs one for a runtime origin). */
 export const PLAN_TEMPLATES: readonly string[] = ['plan.diff.minor', 'plan.diff.material'];
@@ -126,17 +128,13 @@ const COMPOSE_SAYS = { exists: SAY.exists, missing: SAY.missing, done: SAY.stepD
 
 /**
  * A goal card as it may be filed, or a refusal (400 for what it says, 409 for
- * where the goal stands). Also gives chat's goal and commitment suggestions
- * (P3 part 5) their kind check and fixed reason; the database holds them to
- * Will's quote.
+ * where the goal stands). A suggestion from chat (P3 part 5) is held to what
+ * the candidates intake files (goals/candidates.ts) and given its fixed
+ * reason; the database holds it to Will's quote.
  */
 export async function checkGoalCard(db: Db, input: CreateProposal, now = new Date()): Promise<CreateProposal> {
   const { action } = input;
-  if (action === 'goal.propose' || action === 'world.commitment.from_chat') {
-    const kind = action === 'goal.propose' ? 'goal' : 'tool_call';
-    if (input.kind !== kind) throw new Refused(400, action === 'goal.propose' ? SAY.kindGoal : 'A commitment from chat is filed as kind tool_call.');
-    return { ...input, reason: action === 'goal.propose' ? GOAL_REASONS.propose : GOAL_REASONS.commitment, sensitivity: 'personal' };
-  }
+  if (isChatSuggestion(action)) return checkSuggestionCard(input);
   if (!isGoalSignedAction(action)) return input;
   if (input.kind !== GOAL_KIND[action]) throw new Refused(400, GOAL_KIND[action] === 'plan' ? SAY.kindPlan : SAY.kindGoal);
   if (Object.values(input.argsProvenance).some((p) => p.ref !== undefined && !PROVENANCE_REF.test(p.ref))) throw new Refused(400, SAY.provenance);
@@ -167,8 +165,12 @@ export async function checkGoalCard(db: Db, input: CreateProposal, now = new Dat
 
   if (action === 'goal.activate') {
     const a = args as ActivateArgs;
-    // What a goal is: a new one is Will's own; an existing one is signed as it is.
-    if (!goal && a.origin !== 'will') throw new Refused(400, SAY.identity);
+    // What a goal is: a new one is Will's own; an existing one is signed as it is. The one new goal that is not
+    // his own is a suggestion whose card still waits (Make It a Goal, part 5): it starts from that card's source.
+    if (!goal && a.origin !== 'will') {
+      if (a.owner !== 'will' || a.tainted || a.sensitivity !== 'personal' || a.nexusProjectId !== null) throw new Refused(400, SAY.identity);
+      if (!(await waitingSuggestion(db, a.goalId, now))) throw new Refused(409, SAY.suggestionGone);
+    }
     if (goal && !sameIdentity(goal, a)) throw new Refused(409, SAY.looked);
     if (goal?.status === 'paused') {
       if (a.plan) throw new Refused(400, SAY.resumePlan);
@@ -280,7 +282,11 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
   if (action === 'goal.activate') {
     const a = args as ActivateArgs;
     if (goal && !sameIdentity(goal, a)) return { refusal: SAY.goalChanged };
-    if (!goal && a.origin !== 'will') return { refusal: SAY.identity };
+    // A suggestion made a goal before its own card was approved: the goal is made here, from that card's source,
+    // and the card is then set aside (below). The card is locked first, so its own approval cannot run alongside.
+    const suggested = !goal && a.origin === 'flint' ? await waitingSuggestion(tx, a.goalId, now, true) : null;
+    if (!goal && a.origin !== 'will' && (!suggested || a.owner !== 'will' || a.tainted || a.sensitivity !== 'personal' || a.nexusProjectId !== null)) return { refusal: SAY.suggestionGone };
+    if (suggested && (await tx.goal.findUnique({ where: { sourceRef: suggested.sourceRef }, select: { id: true } }))) return { refusal: SAY.suggestionGone };
     if (goal?.status === 'paused') {
       // Resuming changes nothing else (the database refuses it otherwise): what the card shows is what there is.
       if (a.plan || !sameDefinition(goal, a) || !sameTiming(goal, a) || !sameLinks(await currentLinks(tx, goal.id), a.links)) return { refusal: SAY.goalChanged };
@@ -299,6 +305,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
         id: a.goalId, title: a.title, description: a.description, owner: a.owner, origin: a.origin, sensitivity: a.sensitivity, tainted: a.tainted,
         nexusProjectId: a.nexusProjectId, successCriteria: json(a.successCriteria),
         horizonAt: a.horizonAt ? new Date(a.horizonAt) : null, reviewCadence: a.reviewCadence,
+        ...(suggested ? { sourceRef: suggested.sourceRef } : {}),
       },
     }));
     // Links and the first plan while it is still proposed (the database lets goal.activate bring them only then), then the goal.
@@ -319,7 +326,16 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
         nextReviewAt: now,
       },
     });
-    return { result: { goalId: g.id, links: a.links.length, linksAdded: links.added, steps, ...(planId ? { planId } : {}) } };
+    // This card's signature is the only one needed: the suggestion's own card is set aside here, unsigned.
+    if (suggested) {
+      const card = await tx.proposal.findUniqueOrThrow({ where: { id: suggested.id }, select: { id: true, action: true, argsDigest: true, origin: true, tainted: true } });
+      await tx.proposal.update({ where: { id: card.id }, data: { status: 'rejected', error: SAY.replaced } });
+      await appendAudit(tx, [{
+        actor: 'runtime:goals', context: contextOf(card.origin), kind: 'rejection', action: card.action, decision: 'deny', outcome: 'denied',
+        inputs: { proposalId: card.id, argsDigest: card.argsDigest, replacedBy: approvalId }, correlationId: card.id, tainted: card.tainted,
+      }], now);
+    }
+    return { result: { goalId: g.id, links: a.links.length, linksAdded: links.added, steps, ...(planId ? { planId } : {}), ...(suggested ? { fromSuggestion: true } : {}) } };
   }
 
   if (!goal) return { refusal: SAY.noGoal };

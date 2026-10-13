@@ -32,7 +32,7 @@ import { OllamaProvider, isFlintError, isOllamaCloudModel } from '@flint/core';
 import type { ChatLoad } from './chat-load';
 import { creditExhausted } from './frontier-breaker';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, liveOllamaOptions } from './local-model';
-import { FACTS_SCHEMA, MemoryBrainError, factsReply, type BrainFailure, type ExtractBrain, type FactEntry } from './memory-extract';
+import { FACTS_SCHEMA, MemoryBrainError, factsReply, suggestSchema, suggestionsReply, type BrainFailure, type ExtractBrain, type FactEntry, type Suggesting } from './memory-extract';
 
 type Env = Record<string, string | undefined>;
 
@@ -255,9 +255,9 @@ export function localExtractBrain(m: LocalMemoryModel, deps: LocalBrainDeps = {}
 async function askLocal(
   m: LocalMemoryModel,
   deps: LocalBrainDeps,
-  input: { system: string; prompt: string },
+  input: { system: string; prompt: string; suggestions?: Suggesting },
   maxTokens: number,
-): Promise<{ facts: FactEntry[] }> {
+): Promise<{ facts: FactEntry[]; suggestions?: unknown[] }> {
   const chatActive = deps.chatActive ?? (() => false);
   if (chatActive()) throw new MemoryBrainError('deferred');
   const base = deps.fetch ?? fetch;
@@ -307,7 +307,9 @@ async function askLocal(
           model: m.model,
           system: input.system,
           messages: [{ id: 'memory-extract', role: 'user', content: input.prompt, timestamp: Date.now() }],
-          responseFormat: { type: 'json_schema', name: 'memory_facts', schema: FACTS_SCHEMA as unknown as Record<string, unknown> },
+          // Asked for suggestions too (FLINT_EXTRACT_CANDIDATES): the reply is held to the schema with them (goals alone, or
+          // goals and commitments). Otherwise exactly what it was.
+          responseFormat: { type: 'json_schema', name: 'memory_facts', schema: (input.suggestions ? suggestSchema(input.suggestions) : FACTS_SCHEMA) as unknown as Record<string, unknown> },
           maxTokens,
           signal: ac.signal,
         });
@@ -323,7 +325,8 @@ async function askLocal(
           continue;
         }
         const reply = factsReply(value);
-        if (reply) return reply;
+        // A suggestion is read one at a time by the extractor: a malformed one is dropped there, and the facts are kept.
+        if (reply) return input.suggestions ? { ...reply, suggestions: suggestionsReply(value) } : reply;
       } catch (err) {
         // A transport or HTTP error, an unparsable reply, the gate, or a cut-off: the loop decides.
         lastError = err;

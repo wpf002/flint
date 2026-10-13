@@ -79,5 +79,24 @@ export const STATE: Record<string, z.ZodTypeAny> = {
   person: z.object({ source: z.enum(CALENDAR_SOURCES), email: z.string().email().max(254), emailHash }).strict(),
 };
 
+/**
+ * P3 part 5: something Will said in chat that he would do. It is never written
+ * by a sync (STATE.commitment above stays the calendar's shape, and the mapper
+ * refuses a chat key): only world.commitment.from_chat's executor writes one,
+ * from a card Will approved or under a rule he signed. Unconfirmed, with no
+ * times, no attendees and no title: his words are in EntityText, and here only
+ * their hash and the day Flint read in them, if it read one.
+ */
+export const CHAT_COMMITMENT = z
+  .object({
+    source: z.literal('chat'),
+    confirmation: z.literal('unconfirmed'),
+    dueOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    quoteSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+/** A chat commitment's key is its source (`chat:<sha256>`), never a calendar's. */
+export const isChatCommitmentKey = (key: string): boolean => key.startsWith('chat:');
+
 /** Kinds an ordinary sync may never write: a person exists only through world.person.create (PersonGuard). */
 export const GUARDED_KINDS = new Set(['person']);

@@ -1532,3 +1532,284 @@ describe('the Goals panel', () => {
     expect(await added('off')).toContain('Goal AddedYour goal is active. Scheduled reviews start soon.');
   });
 });
+
+/**
+ * The Suggested tab (P3 part 5): what Flint heard Will say in a chat. Each row
+ * is its short title, "You said this in a chat on Oct 8.", and his own words
+ * in quotation marks, whole; with Dismiss and Make It a Goal. Make It a Goal
+ * opens the New Goal form with his words in it, and takes one signature.
+ */
+describe('the Suggested tab', () => {
+  const SAID_ON = new Date(YEAR, 9, 8, 15, 0);
+  const QUOTE = 'I want to run a half marathon by spring, and I’m going to sign up for the Dallas race this week so I can’t back out';
+  const one = (over: Record<string, unknown> = {}) => ({ goalId: 'go0123456789abcdef0123456789abcdef', title: 'Run a half marathon', quote: QUOTE, saidAt: SAID_ON.toISOString(), dueOn: day(later(120)), waiting: true, ...over });
+  const two = () => [one(), one({ goalId: 'gofedcba9876543210fedcba9876543210', title: 'Finish the sailing course', quote: 'I’d like to finish the sailing course before summer', saidAt: null, dueOn: null, waiting: false })];
+  const suggested = (suggestions: unknown[], more: (c: Call) => { status: number; body: unknown } | undefined = () => undefined) => {
+    routes = (c) => more(c) ?? (c.url === '/goals?tab=suggested'
+      ? { status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions } }
+      : c.method === 'GET' ? { status: 200, body: { tab: 'active', goals: [], waiting: [], reviews: 'off', suggestions: [] } } : { status: 200, body: { ok: true } });
+  };
+  const openSuggested = async () => {
+    await open();
+    run(`goalList('suggested')`);
+    await settle();
+  };
+  const rows = () => body().visible().filter((e) => e.className === 'row two gwrap gsug');
+
+  it('empty: its exact words; loading says Loading; the tab is shown only when Flint has suggested something, or while it is open', async () => {
+    suggested([]);
+    await open();
+    // Nothing suggested: no Suggested tab on the Active list.
+    expect(body().buttons().filter((b) => ['Active', 'Suggested', 'Finished'].includes(b))).toEqual(['Active', 'Finished']);
+    run(`goalList('suggested')`);
+    // Before the answer lands, the list says it is loading.
+    expect(body().shown()).toContain('Loading…');
+    await settle();
+    expect(body().shown()).toContain('No SuggestionsGoals Flint suggests from your chats show here.');
+    expect(body().shown()).not.toContain('Loading…');
+    expect(body().buttons().filter((b) => ['Active', 'Suggested', 'Finished'].includes(b))).toEqual(['Active', 'Suggested', 'Finished']);
+    expect(rows()).toEqual([]);
+    // With something suggested, the Active list offers the tab.
+    suggested(two());
+    run(`goalList('active')`);
+    await settle();
+    expect(body().buttons().filter((b) => ['Active', 'Suggested', 'Finished'].includes(b))).toEqual(['Active', 'Suggested', 'Finished']);
+  });
+
+  it('two suggestions: each its title, when he said it, and his words in quotation marks, whole; Dismiss and Make It a Goal; no id anywhere', async () => {
+    suggested(two());
+    await openSuggested();
+    expect(rows()).toHaveLength(2);
+    const [first, second] = rows();
+    const linesOf = (r: El) => r.children[0]!.children.map((c) => c.textContent);
+    expect(linesOf(first!)).toEqual(['Run a half marathon', `You said this in a chat on ${says(SAID_ON)}.`, `“${QUOTE}”`]);
+    // His words are never cut: every character of the quote is on the row.
+    expect(first!.shown()).toContain(QUOTE);
+    expect(QUOTE.length).toBeGreaterThan(100);
+    // One nothing kept the day of: it says so without a date, never an empty one.
+    expect(linesOf(second!)).toEqual(['Finish the sailing course', 'You said this in a chat.', '“I’d like to finish the sailing course before summer”']);
+    for (const r of rows()) {
+      expect(r.buttons()).toEqual(['Dismiss', 'Make It a Goal']);
+      expect(r.button('Make It a Goal').className).toBe('btn pri');
+      expect(r.button('Dismiss').className).toBe('btn');
+    }
+    for (const b of ['Dismiss', 'Make It a Goal']) expect(titleCase(b), b).toBe(true);
+    for (const l of [linesOf(first!)[1]!, linesOf(second!)[1]!]) {
+      expect(sentence(l), l).toBe(true);
+      expect(noteProblems('Suggested', l), l).toEqual([]);
+    }
+    // Nothing internal on screen: no goal id, no source, no JSON, no parenthesis.
+    const shown = body().shown();
+    expect(shown).not.toMatch(/go0123456789|gofedcba|chat:|sourceRef|[{}()\[\]]/);
+    // New Goal is still offered from here.
+    expect(ids.goaladd!.hidden).toBe(false);
+  });
+
+  it('a load failure, a rejected token and a signed-out console each say so, and nothing is drawn half-read', async () => {
+    routes = (c) => (c.url === '/goals?tab=suggested' ? { status: 503, body: { error: 'The runtime isn’t answering, so goals can’t load.' } } : { status: 200, body: { tab: 'active', goals: [], waiting: [], reviews: 'off' } });
+    await openSuggested();
+    expect(body().shown()).toContain('Couldn’t Load GoalsThe runtime isn’t answering, so goals can’t load.Try Again');
+    expect(rows()).toEqual([]);
+    suggested(two());
+    body().button('Try Again').onclick!();
+    await settle();
+    expect(rows()).toHaveLength(2);
+    // The server no longer takes the token.
+    routes = (c) => (c.url === '/goals?tab=suggested' ? { status: 401, body: { error: 'unauthorized' } } : { status: 200, body: { tab: 'active', goals: [], waiting: [], reviews: 'off' } });
+    run(`goalList('suggested')`);
+    await settle();
+    expect(body().shown()).toContain('Couldn’t Load GoalsThe access token was rejected. Check Settings.Try Again');
+    // Signed out (no token at all): the Goals button opens Settings, and nothing is asked.
+    const before = calls.length;
+    panels = {};
+    run(`TOKEN='';closeGoals();openGoals()`);
+    await settle();
+    expect(panels.settings).toBe(true);
+    expect(panels.goals).toBe(false);
+    expect(calls.length).toBe(before);
+  });
+
+  it('Make It a Goal opens the New Goal form with his words in it: the title, why it matters, and the day Flint read, said as Flint’s reading', async () => {
+    suggested(two());
+    await openSuggested();
+    rows()[0]!.button('Make It a Goal').onclick!();
+    expect(ids.goalsttl!.textContent).toBe('New Goal');
+    // Nothing is filed or signed by opening it.
+    expect(posted()).toEqual([]);
+    expect(signed).toEqual([]);
+    expect(body().field('Name').value).toBe('Run a half marathon');
+    expect(body().field('Why It Matters').value).toBe(QUOTE);
+    expect(body().field('Finish By').value).toBe(day(later(120)));
+    expect(body().field('Check').value).toBe('');
+    // The day in Finish By is the local model's reading of his words, never his own word for it: the form says whose it is.
+    expect(body().shown()).toContain(`You said this in a chat on ${says(SAID_ON)}. Flint read the day as ${says(later(120))}. Add how you’ll know it’s done, then make it a goal.`);
+    expect(body().shown()).not.toMatch(/you named/i);
+    // It is this suggestion's form, not the kept New Goal draft: no Clear, and the draft is not touched.
+    expect(ids.goalclear!.hidden).toBe(true);
+    expect(run('GOALS.draft')).toBeNull();
+    expect(foot().buttons()).toEqual(['Cancel', 'Make It a Goal with Touch ID']);
+    expect(focused).toBe('check:0:text');
+    // Cancel goes back to the suggestions.
+    foot().button('Cancel').onclick!();
+    await settle();
+    expect(rows()).toHaveLength(2);
+    // A day that is today, or has passed, is not put in the form; a suggestion with no day has none. Then the form says nothing of a day.
+    for (const s of [one({ dueOn: day(new Date()) }), one({ dueOn: day(later(-3)) }), one({ dueOn: null })]) {
+      run(`goalFromSuggestion(${JSON.stringify(s)})`);
+      expect(body().field('Finish By').value).toBe('');
+      expect(body().shown()).toContain(`You said this in a chat on ${says(SAID_ON)}. Add how you’ll know it’s done, then make it a goal.`);
+      expect(body().shown()).not.toContain('Flint read the day');
+    }
+  });
+
+  it('a title starts with a capital letter, on the row, in the form and in the Dismiss question, whoever wrote it; his words are shown in his own characters', async () => {
+    // A row stored before the server gave titles their capital, with a quote in his own marks (a curly apostrophe, a dash, an accent).
+    const his = 'I’ll finish the café’s “winter menu” — all of it — before the 1st';
+    suggested([one({ title: 'finish the winter menu', quote: his })]);
+    await openSuggested();
+    const lines = rows()[0]!.children[0]!.children.map((c) => c.textContent);
+    expect(lines[0]).toBe('Finish the winter menu');
+    expect(lines[2]).toBe(`“${his}”`);
+    rows()[0]!.button('Dismiss').onclick!();
+    expect(foot().shown()).toContain('“Finish the winter menu”');
+    foot().button('Cancel').onclick!();
+    rows()[0]!.button('Make It a Goal').onclick!();
+    expect(body().field('Name').value).toBe('Finish the winter menu');
+    // Why It Matters starts as his words, character for character.
+    expect(body().field('Why It Matters').value).toBe(his);
+    // Only the first letter is touched: a name inside the title keeps its own letters.
+    expect(run(`gCap('visit iOS meetup in São Paulo')`)).toBe('Visit iOS meetup in São Paulo');
+    expect(run(`gCap('')`)).toBe('');
+    expect(run(`gCap('Émile’s book')`)).toBe('Émile’s book');
+  });
+
+  it('one signature: it posts the suggestion’s own start route, then signs exactly the args it showed; the goal stays one Flint suggested', async () => {
+    suggested(two(), (c) => (c.method === 'POST' && c.url.endsWith('/start') ? { status: 200, body: { id: 'prstart', deduped: false } } : undefined));
+    await openSuggested();
+    rows()[0]!.button('Make It a Goal').onclick!();
+    // A goal needs a way to know it is done: said in the footer, with the cursor on the check.
+    foot().button('Make It a Goal with Touch ID').onclick!();
+    expect(said()).toEqual(['Add at least one way to know it’s done.', 'res bad']);
+    expect(focused).toBe('check:0:text');
+    expect(posted()).toEqual([]);
+    type('Check', 'I cross the finish line');
+    type('Step', 'Sign up for the Dallas race');
+    foot().button('Make It a Goal with Touch ID').onclick!();
+    await settle();
+    const finish = new Date(later(120).getFullYear(), later(120).getMonth(), later(120).getDate(), 23, 59, 0, 0).toISOString();
+    const args = {
+      goalId: 'go0123456789abcdef0123456789abcdef', owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, nexusProjectId: null,
+      title: 'Run a half marathon', description: QUOTE, successCriteria: [{ id: 'c1', text: 'I cross the finish line', check: { kind: 'manual' } }],
+      horizonAt: finish, reviewCadence: 'P1W', links: [],
+      plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 100, title: 'Sign up for the Dallas race', kind: 'will_task', tier: 'approval', dueAt: null, dependsOn: [] } }] },
+    };
+    // One card filed, on the suggestion's own id: never POST /goals (his own new goal), never a draft key.
+    expect(posted()).toEqual([{ url: '/goals/go0123456789abcdef0123456789abcdef/start', method: 'POST', body: { args } }]);
+    // And one signature, of exactly those args, fresh, with a plain prompt.
+    expect(signed).toHaveLength(1);
+    expect(signed[0]![0]).toBe('prstart');
+    expect(signed[0]![1]).toMatchObject({ fresh: true, reason: 'start this goal' });
+    expect(JSON.parse(JSON.stringify(signed[0]![1].args))).toEqual(args);
+    // What the panel signs is what the server and the runtime read: the contract changes nothing in it.
+    const parsed = GOAL_CARD_BODIES.start.parse({ args }) as { args: unknown };
+    expect(digestOf(parsed.args)).toBe(digestOf(args));
+    expect(NewGoalBody.safeParse({ draftKey: 'k7Hq2LmN9pQr3sTv', args }).success).toBe(false);
+    // Said in words, with the way back to the other suggestions.
+    expect(body().shown()).toContain('Goal AddedYour goal is active.');
+    expect(foot().buttons()).toEqual(['More Suggestions', 'Done']);
+    foot().button('More Suggestions').onclick!();
+    await settle();
+    expect(run('GOALS.tab')).toBe('suggested');
+  });
+
+  it('a cancelled prompt leaves the card in Approvals and says so; a refusal is the server’s sentence', async () => {
+    suggested(two(), (c) => (c.method === 'POST' && c.url.endsWith('/start') ? { status: 200, body: { id: 'prstart', deduped: false } } : undefined));
+    await openSuggested();
+    rows()[0]!.button('Make It a Goal').onclick!();
+    type('Check', 'I cross the finish line');
+    signAnswer = async () => {
+      throw new Error('not confirmed');
+    };
+    foot().button('Make It a Goal with Touch ID').onclick!();
+    await settle();
+    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
+    // The suggestion was dismissed, or made a goal, somewhere else meanwhile: the runtime's sentence, as it is.
+    suggested(two(), (c) => (c.method === 'POST' && c.url.endsWith('/start') ? { status: 404, body: { error: 'This suggestion is no longer waiting.', code: 'suggestionGone' } } : undefined));
+    foot().button('Make It a Goal with Touch ID').onclick!();
+    await settle();
+    expect(said()).toEqual(['This suggestion is no longer waiting.', 'res bad']);
+    expect(signed).toHaveLength(1);
+  });
+
+  it('Dismiss is unsigned: it posts the suggestion’s dismiss route, says so, and reads the list again', async () => {
+    let left = two();
+    suggested(left, (c) => {
+      if (c.method === 'POST' && c.url.endsWith('/dismiss')) {
+        left = left.slice(1);
+        return { status: 200, body: { ok: true } };
+      }
+      return c.url === '/goals?tab=suggested' ? { status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: left } } : undefined;
+    });
+    await openSuggested();
+    // It asks first, in the footer, naming the one it is about. It promises what is true and no more: this one is set aside,
+    // and the same idea said again in a later chat may be suggested again.
+    rows()[0]!.button('Dismiss').onclick!();
+    await settle();
+    expect(posted()).toEqual([]);
+    expect(foot().shown()).toContain('Dismiss This SuggestionFlint sets aside “Run a half marathon”. If you say it again in a later chat, Flint may suggest it again.');
+    expect(foot().shown()).not.toMatch(/won’t suggest|never/);
+    expect(foot().buttons()).toEqual(['Cancel', 'Dismiss']);
+    foot().button('Cancel').onclick!();
+    expect(foot().buttons()).toEqual([]);
+    expect(posted()).toEqual([]);
+    expect(rows()).toHaveLength(2);
+    rows()[0]!.button('Dismiss').onclick!();
+    foot().button('Dismiss').onclick!();
+    await settle();
+    expect(posted()).toEqual([{ url: '/goals/go0123456789abcdef0123456789abcdef/dismiss', method: 'POST', body: {} }]);
+    expect(signed).toEqual([]);
+    expect(said()).toEqual(['You dismissed it.', 'res ok']);
+    expect(rows()).toHaveLength(1);
+    expect(run('GOALS.tab')).toBe('suggested');
+    // A refusal is said in the footer, and the row stays.
+    suggested(left, (c) => (c.method === 'POST' ? { status: 409, body: { error: 'This goal is already active.', code: 'status.active' } } : undefined));
+    rows()[0]!.button('Dismiss').onclick!();
+    foot().button('Dismiss').onclick!();
+    await settle();
+    expect(said()).toEqual(['This goal is already active.', 'res bad']);
+    expect(rows()).toHaveLength(1);
+  });
+
+  it('a runtime from before this part lists its proposed goals as rows, and an open one still offers Dismiss and Make It a Goal, which opens the form', async () => {
+    const proposed = view({ id: 'gotestgoal0008', title: 'Synthetic suggested goal', description: 'Synthetic words I said', status: 'proposed', origin: 'flint', successCriteria: [], criteria: [], checks: { met: 0, total: 0, unknown: 0 }, horizonAt: null, activatedAt: null, links: [], plan: null });
+    routes = (c) => (c.method === 'GET' && c.url.startsWith('/goals/') ? { status: 200, body: { goal: proposed } }
+      : c.url === '/goals?tab=suggested' ? { status: 200, body: { tab: 'suggested', goals: [row({ id: 'gotestgoal0008', title: 'Synthetic suggested goal', status: 'proposed', origin: 'flint' })], waiting: [], reviews: 'off' } }
+        : { status: 200, body: { tab: 'active', goals: [], waiting: [], reviews: 'off' } });
+    await openSuggested();
+    expect(rows()).toEqual([]);
+    expect(body().shown()).toContain('Synthetic suggested goalFlint suggested this from a chat.');
+    run(`goalOpen('gotestgoal0008')`);
+    await settle();
+    expect(foot().buttons()).toEqual(['Dismiss', 'Make It a Goal']);
+    foot().button('Make It a Goal').onclick!();
+    // Nothing is signed by the button: a goal with no check could not start. The form opens with what it holds.
+    expect(signed).toEqual([]);
+    expect(posted()).toEqual([]);
+    expect(ids.goalsttl!.textContent).toBe('New Goal');
+    expect(body().field('Name').value).toBe('Synthetic suggested goal');
+    expect(body().field('Why It Matters').value).toBe('Synthetic words I said');
+    expect(run('GOALS.form.suggestion.goalId')).toBe('gotestgoal0008');
+  });
+
+  it('its own lines are plain sentences by the note rules, and its buttons Title Case', () => {
+    for (const line of ['You said this in a chat on Oct 8.', 'You said this in a chat.', 'You said this in a chat on Oct 8. Add how you’ll know it’s done, then make it a goal.', 'You dismissed it.', 'Goals Flint suggests from your chats show here.', 'Flint sets aside “Run a half marathon”. If you say it again in a later chat, Flint may suggest it again.',
+      'You said this in a chat on Oct 8. Flint read the day as Mar 11, 2027. Add how you’ll know it’s done, then make it a goal.']) {
+      expect(noteProblems('Suggested', line), line).toEqual([]);
+      expect(sentence(line), line).toBe(true);
+    }
+    for (const title of ['Suggested', 'No Suggestions', 'Make It a Goal', 'Dismiss', 'More Suggestions', 'Dismiss This Suggestion']) {
+      expect(noteProblems(title, ''), title).toEqual([]);
+      expect(titleCase(title), title).toBe(true);
+    }
+  });
+});

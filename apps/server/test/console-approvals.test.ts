@@ -540,10 +540,16 @@ describe('the console Approvals panel', () => {
       .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
     expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
     expect(say({ fullName: 'plan.change', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
-    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } }).slice(0, 3))
-      .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]]);
-    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { quote: 'I will send it by Friday', dueAt: h } }).slice(0, 3))
-      .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['You Said', 'I will send it by Friday'], ['Due', run(`apprDate('${h}')`)]]]);
+    // What chat suggested (part 5), as the candidates intake files it: the short text, Will's own words, and the day Flint read (never called his).
+    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+      .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon'], ['Day Flint Read', 'Mar 20, 2027']]]);
+    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
+    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+      .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['Commitment', 'Send it'], ['You Said', 'I will send it by Friday']]]);
+    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Day Flint Read', 'Mar 20, 2027']]);
+    // The titles are the ones Will's notes use for the same two actions.
+    expect(say({ fullName: 'goal.propose', args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
+    expect(say({ fullName: 'world.commitment.from_chat', args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
     // A card whose args were cleared says what it still knows, and no empty facts.
     expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
     expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
@@ -562,7 +568,7 @@ describe('the console Approvals panel', () => {
     expect(phone).toContain('#apprfoot{flex-wrap:wrap;} #apprfoot .note{flex-basis:100%;}');
   });
 
-  it('every goal card, and every consequential card, asks on its own with a fresh touch and a plain prompt; minor plan and chat suggestions ride Approve All', async () => {
+  it('every goal card, and every consequential card, asks on its own with a fresh touch and a plain prompt; what chat suggested is filed as one; a small plan change rides Approve All', async () => {
     const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
     const alone = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon'];
     // Even without the server's mark, a goal card's name keeps it alone (an older server).
@@ -571,8 +577,11 @@ describe('the console Approvals panel', () => {
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change' })})`)).toBe(true);
     expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', consequential: true })})`)).toBe(true);
     const small = [{ op: 'set', key: 's1', from: { title: 'Synthetic step one', status: 'todo' }, to: { status: 'blocked' } }];
-    for (const p of [{ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } }, { fullName: 'goal.propose' }, { fullName: 'world.commitment.from_chat' }]) {
-      expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName).toBe(false);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } })})`)).toBe(false);
+    // What chat suggested asks on its own by the mark the intake files it with (the runtime's choice, which a later table may change), not by its name.
+    for (const a of ['goal.propose', 'world.commitment.from_chat']) {
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, origin: 'chat:c1', consequential: true })})`), a).toBe(true);
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, origin: 'chat:c1' })})`), a).toBe(false);
     }
     // Review finding 2: which plan card is a small one is read from its operations, never from the template's name alone.
     const due = '2026-10-20T22:00:00.000Z';
@@ -610,19 +619,20 @@ describe('the console Approvals panel', () => {
           // Named small, holding a skip: it does not ride Approve All.
           goalCard('px', 'plan.change', { origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops: [{ op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'skipped' } }] } }),
           goalCard('pw', 'plan.change', { consequential: true, args: { goalTitle: 'Synthetic goal', ops: [] } }),
-          goalCard('gp', 'goal.propose', { origin: 'chat:c1', args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
+          goalCard('gp', 'goal.propose', { origin: 'chat:c1', templateId: 'chat.goal', consequential: true, args: { title: 'Synthetic', quote: 'Synthetic quoted words' } }),
+          goalCard('gc', 'world.commitment.from_chat', { origin: 'chat:c1', templateId: 'chat.commitment', consequential: true, args: { text: 'Synthetic', quote: 'Synthetic quoted words' } }),
           plain({ id: 'src' }),
         ],
       },
     });
     await open();
-    expect(noteSays()).toBe('You have 10 approvals waiting. Approve All skips 7.');
-    // The second sentence is one unbreakable run, so a narrow footer never leaves "7." on a line of its own.
-    expect(ids.apprnote!.textContent).toBe('You have 10 approvals waiting. Approve\u00a0All\u00a0skips\u00a07.');
+    expect(noteSays()).toBe('You have 11 approvals waiting. Approve All skips 9.');
+    // The second sentence is one unbreakable run, so a narrow footer never leaves "9." on a line of its own.
+    expect(ids.apprnote!.textContent).toBe('You have 11 approvals waiting. Approve\u00a0All\u00a0skips\u00a09.');
     // Approve All signs only the cards that may share one prompt.
     run('approveAll()');
     await settle();
-    expect(decided.map((d) => d[1])).toEqual(['pm', 'gp', 'src']);
+    expect(decided.map((d) => d[1])).toEqual(['pm', 'src']);
     expect(decided.every((d) => !(d[2] as { fresh?: boolean }).fresh)).toBe(true);
     // Each goal card is signed on its own, fresh, and the prompt says what it does in plain words.
     decided = [];
@@ -643,6 +653,15 @@ describe('the console Approvals panel', () => {
     rows()[6]!.onclick?.();
     rows()[6]!.button('Approve with Password').onclick!();
     expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
+    // What chat suggested: each on its own, fresh, with a plain prompt and exactly the args it showed.
+    for (const [id, reason] of [['gp', 'add this suggested goal'], ['gc', 'add this commitment']] as const) {
+      const at = (JSON.parse(JSON.stringify(run('APPR.pending.map(function(c){return c.id;})'))) as string[]).indexOf(id);
+      rows()[at]!.onclick?.();
+      expect(rows()[at]!.shown()).toContain('Asks on Its Own');
+      rows()[at]!.button('Approve with Password').onclick!();
+      expect(decided.at(-1)![1]).toBe(id);
+      expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason, args: { quote: 'Synthetic quoted words' } });
+    }
   });
 
   it('Turn On Predictions (P4) is in words, names each number it turns on, and asks on its own with a fresh touch and a plain prompt', async () => {

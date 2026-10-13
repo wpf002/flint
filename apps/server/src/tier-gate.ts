@@ -22,7 +22,7 @@
  * it off, an injected web page can steer a fetch or a write again).
  */
 import { randomBytes } from 'node:crypto';
-import { CLAIM_TEMPLATE_HELP, ClaimTemplate, isWrite, resolveTier, type PolicyRow, type TierDecision } from '@flint/policy';
+import { CLAIM_TEMPLATE_HELP, ClaimTemplate, isChatSuggestion, isWrite, resolveTier, type PolicyRow, type TierDecision } from '@flint/policy';
 import type { Gate, GateRequest } from '@flint/mcp';
 import type { Tool } from '@flint/core';
 import { outcomeOf, type ActionQueue } from './actions';
@@ -131,6 +131,14 @@ async function needsApproval(opts: TierGateOptions, d: TierDecision, call: Call,
 async function gateCall(opts: TierGateOptions, call: Call, mcp?: Mcp): Promise<{ run: false; message: string } | { run: true; correlationId?: string }> {
   // The turn called it, whatever is decided (the runtime's chat.turn event names it).
   noteTool(call.fullName);
+  // A goal or commitment from chat (P3 part 5) is filed by Flint's own check of Will's words (./goal-candidates),
+  // never by a tool call: a model that names one is refused here. Nothing is queued, spooled or sent to the
+  // runtime (which refuses the two actions from anything but its own intake as well).
+  if (isChatSuggestion(call.action) || isChatSuggestion(call.fullName)) {
+    const never: TierDecision = { tier: 'forbidden', rule: 'forbidden', reason: 'a suggestion from chat is filed only by Flint’s own check of Will’s words', key: call.action };
+    event(opts, call.fullName, never, mcp, 'denied');
+    return { run: false, message: refusal(call.fullName, never) };
+  }
   const tainted = (opts.taintFloor ?? true) && turnTainted();
   let d = resolveTier(call.fullName, { context: 'chat', tainted, ...(mcp ? { mcp } : {}), policies: opts.policies?.() ?? [] });
   if (d.tier === 'forbidden') {

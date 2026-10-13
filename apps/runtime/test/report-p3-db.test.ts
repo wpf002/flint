@@ -35,7 +35,8 @@ import { buildApp } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
 import { markProcessed, recordEvent } from '../src/events/record';
-import { createProposal, rejectProposal } from '../src/governance/proposals';
+import { rejectProposal } from '../src/governance/proposals';
+import { takeCandidate } from '../src/goals/candidates';
 import { runReview } from '../src/goals/review';
 import { p3Report } from '../src/report/p3';
 import type { Criterion } from '../src/report/exit';
@@ -120,7 +121,7 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       'no plan yet',
       '0 goals started; 0 without a signed approval behind its latest change (the database refuses one: test/p3-guards-db.test.ts in every deploy gate)',
       '0 reviews; 0 without its goal’s forecast in the ledger',
-      'no suggestion from chat yet: a later part files them (the database already refuses one without a quote)',
+      'no suggestion from chat yet (the server files them once it is told to; the database refuses one without a quote)',
       'no chat turn has carried the goals block yet (FLINT_GOALS_NOW on the server; only turns a local model answers carry it)',
     ]);
     // With reviews switched off, criterion 2 says why there is none.
@@ -322,24 +323,29 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
 
   it('7: suggestions from chat, each resting on Will’s own quoted words (the database refuses any other)', async () => {
     expect(await c(7)).toMatchObject({ pass: null, values: { suggestions: 0, withoutQuote: 0, cleared: 0 } });
-    const suggest = (args: Record<string, unknown>, quote: Record<string, unknown> | undefined) => createProposal(db, {
-      kind: 'goal', origin: 'chat:c1', action: 'goal.propose', args, argsProvenance: { title: { source: 'model', tainted: false }, ...(quote ? { quote } : {}) } as never,
-      tainted: false, sensitivity: 'personal', destructive: false, consequential: false, ttlMinutes: 60,
-    }, 'flint');
-    await suggest({ title: `${CANARY} run a half marathon`, quote: `${CANARY} I want to run a half marathon` }, { source: 'will', tainted: false });
-    // No quote, a quote too short to be one, the model's words as the quote, a quote from a turn that read outside text: none is filed.
-    for (const [args, quote] of [
-      [{ title: `${CANARY} x` }, undefined],
-      [{ title: `${CANARY} x`, quote: 'too short' }, { source: 'will', tainted: false }],
-      [{ title: `${CANARY} x`, quote: `${CANARY} the assistant said he should` }, { source: 'model', tainted: false }],
-      [{ title: `${CANARY} x`, quote: `${CANARY} I want to do what the page said` }, { source: 'will', tainted: true }],
+    // The way one is filed (part 5): the candidates intake, from the server's check of Will's own words.
+    expect(await takeCandidate({ db, tz: TZ }, {
+      kind: 'goal', text: `${CANARY} run a half marathon`, quote: `${CANARY} I want to run a half marathon`, conversationId: 'c1', turnId: 't1', sourceAt: new Date(Date.now() - MIN).toISOString(),
+    })).toEqual({ outcome: 'filed' });
+    // No quote, a quote too short to be one, the model's words as the quote, a quote from a turn that read outside text: the
+    // database files none of them, whoever asks (here its own runtime role, straight into the table).
+    const raw = (args: Record<string, unknown>, provenance: Record<string, unknown>) => withClient(urls.app, (cl) => cl.query(
+      `INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, reason, "expiresAt")
+       VALUES ($1, 'goal', 'chat:c1', 'goal.propose', 'chat.goal', $2::jsonb, $3, $4::jsonb, false, 'personal', 'x', now() + interval '1 hour')`,
+      [`prraw${Math.random().toString(36).slice(2, 10)}`, JSON.stringify(args), digestOf(args), JSON.stringify(provenance)],
+    )).then(() => 'filed', (e: { code?: string }) => e.code);
+    for (const [args, provenance] of [
+      [{ title: `${CANARY} x` }, { title: { source: 'model', tainted: false } }],
+      [{ title: `${CANARY} x`, quote: 'too short' }, { quote: { source: 'will', tainted: false } }],
+      [{ title: `${CANARY} x`, quote: `${CANARY} the assistant said he should` }, { quote: { source: 'model', tainted: false } }],
+      [{ title: `${CANARY} x`, quote: `${CANARY} I want to do what the page said` }, { quote: { source: 'will', tainted: true } }],
     ] as const) {
-      await expect(suggest(args, quote as Record<string, unknown> | undefined)).rejects.toMatchObject({ status: 400 });
+      expect(await raw(args, provenance)).toBe('23514');
     }
     expect(await c(7)).toEqual({
       n: 7, name: 'nothing is suggested from chat without your own quoted words', pass: true,
-      detail: '1 suggestion from chat; 0 without your own quoted words; 0 too old to read',
-      values: { suggestions: 1, withoutQuote: 0, cleared: 0 },
+      detail: '1 suggestion from chat; 0 without your own quoted words; 0 too old to read; you approved 0, made 0 into goals yourself and rejected 0, and 0 expired',
+      values: { suggestions: 1, withoutQuote: 0, cleared: 0, approved: 0, madeGoals: 0, rejected: 0, expired: 0, addedAlone: 0 },
     });
     // One that got past the database's rule (only its owner, with the rule off, can file it) fails the criterion: each way a quote can be missing.
     const bare = (id: string, args: Record<string, unknown>, provenance: Record<string, unknown>) => tamper('Proposal',
@@ -351,15 +357,15 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
     await bare('prnoquote3', { title: 'Synthetic outside quote', quote: 'Synthetic words from a page it read' }, { quote: { source: 'will', tainted: true } });
     expect(await c(7)).toEqual({
       n: 7, name: 'nothing is suggested from chat without your own quoted words', pass: false,
-      detail: '4 suggestions from chat; 3 without your own quoted words; 0 too old to read',
-      values: { suggestions: 4, withoutQuote: 3, cleared: 0 },
+      detail: '4 suggestions from chat; 3 without your own quoted words; 0 too old to read; you approved 0, made 0 into goals yourself and rejected 0, and 0 expired',
+      values: { suggestions: 4, withoutQuote: 3, cleared: 0, approved: 0, madeGoals: 0, rejected: 0, expired: 0, addedAlone: 0 },
     });
     // A card whose args retention has cleared can no longer be read: it is counted as too old, not as a miss.
     for (const id of ['prnoquote1', 'prnoquote2']) {
       await rejectProposal(db, id, {}, undefined, 'will:console');
       await db.$executeRaw`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = ${id}`;
     }
-    expect(await c(7)).toMatchObject({ pass: false, detail: '4 suggestions from chat; 1 without your own quoted words; 2 too old to read', values: { suggestions: 4, withoutQuote: 1, cleared: 2 } });
+    expect(await c(7)).toMatchObject({ pass: false, detail: '4 suggestions from chat; 1 without your own quoted words; 2 too old to read; you approved 0, made 0 into goals yourself and rejected 2, and 0 expired', values: { suggestions: 4, withoutQuote: 1, cleared: 2, rejected: 2 } });
     await rejectProposal(db, 'prnoquote3', {}, undefined, 'will:console');
     await db.$executeRaw`UPDATE "Proposal" SET args = NULL, "argsPurgedAt" = now() WHERE id = 'prnoquote3'`;
     expect(await c(7)).toMatchObject({ pass: true, values: { withoutQuote: 0, cleared: 3 } });
@@ -465,8 +471,8 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       expect(gate.code).not.toBe(0);
       expect(gate.stderr).toContain('the shadow week does not count yet: goal reviews are off right now');
       expect(await cards()).toBe(before);
-      // Its other table has its own evidence: no goal was ever suggested from chat here.
-      expect((await cli('promotion-table', '--phase', 'p3c')).stderr).toMatch(/the shadow weeks (are not over: [\d.]+ of 14 days of chat suggestions|do not count yet: Flint suggested no goals from chat in the last 14 days)/);
+      // Its other table is not filed at all yet: nothing from chat runs without a card until the database holds what it adds to one.
+      expect((await cli('promotion-table', '--phase', 'p3c')).stderr).toContain('Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.');
       expect(await cards()).toBe(before);
       // A phase it does not have is refused by name.
       const unknown = await cli('promotion-table', '--phase', 'p9');

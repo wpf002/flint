@@ -26,7 +26,12 @@
  */
 import {
   GOAL_SIGNED_ACTIONS,
+  GoalProposeArgs,
+  GoalRow as GoalRowContract,
   GoalTitle,
+  Suggestion as SuggestionContract,
+  IsoMs,
+  localDay,
   PLAN_STAGES,
   REVIEW_LATE_MS,
   likelihoodOf,
@@ -36,6 +41,7 @@ import {
   type GoalTab,
   type GoalView,
   type GoalsPage,
+  type Suggestion,
   type Link,
   type PlanStage,
   type PlanStepState,
@@ -49,9 +55,10 @@ import { waitedMs } from './late.js';
 import { stepState } from './ops.js';
 import { Diff, stepTitle, type DiffItem } from './steps.js';
 
-/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER). */
+/** What a view needs to know about the runtime: whether Flint reviews goals (FLINT_PLANNER), and Will's zone (a suggestion's day). */
 export interface ViewOptions {
   reviews: boolean;
+  tz?: string;
 }
 const NO_REVIEWS: ViewOptions = { reviews: false };
 /** A review whose plan stage has not reported for this long never will (its job is gone): it is shown as skipped, not as still running. */
@@ -212,7 +219,10 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date(), o: 
     itemFacts(db, goals.flatMap((g) => checkedItems(criteriaOf(g)))),
   ]);
   const late = await lateOnes(db, goals, now, o);
-  const rows = goals.map((g, i) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0, late[i]!));
+  // Each row is held to its contract here, one at a time: a goal whose row does not fit (a title the database took
+  // and the panel's contract does not) is left out and counted, and the rest of the tab still draws. Never a 500.
+  const fits = keep(goals.map((g, i) => row(g, plans.get(g.id)?.steps ?? null, items, cards.get(g.id)?.length ?? 0, late[i]!)), GoalRowContract, `the ${tab} tab`);
+  const rows = fits.slice(0, 200);
   // A new goal Will filed and has not signed yet: its card's own title, as it will start.
   let waiting: GoalsPage['waiting'] = [];
   if (tab === 'active') {
@@ -220,7 +230,62 @@ export async function goalsPage(db: Db | Tx, tab: GoalTab, now = new Date(), o: 
     const fresh = [...cards.entries()].flatMap(([goalId, list]) => (known.has(goalId) ? [] : list.filter((c) => c.action === 'goal.activate').map((c) => c.id)));
     waiting = await waitingGoals(db, fresh.slice(0, WAITING));
   }
-  return { tab, goals: rows, waiting, reviews: o.reviews ? 'on' : 'off' };
+  return { tab, goals: rows, waiting, reviews: o.reviews ? 'on' : 'off', suggestions: tab === 'suggested' ? await suggestions(db, goals, now, o.tz ?? 'UTC') : [] };
+}
+
+/** The rows that fit their contract. One that does not is left out, and how many were is logged: a count, never a word of them. */
+function keep<T>(rows: readonly T[], contract: { safeParse(v: unknown): { success: boolean } }, where: string): T[] {
+  const ok = rows.filter((r) => contract.safeParse(r).success);
+  if (ok.length !== rows.length) console.error(`[goals] left ${rows.length - ok.length} row(s) out of ${where}: not what the panel's contract takes`);
+  return ok;
+}
+
+/** Who records a suggestion's source and day (goals/candidates.ts CANDIDATES_ACTOR; named here to keep the view free of the intake). */
+const INTAKE_ACTOR = 'runtime:goals.candidates';
+
+/**
+ * The Suggested tab's rows (part 5), oldest first: every proposed goal Flint
+ * added from chat, then every suggestion whose own card still waits (it has no
+ * goal row yet). Each with Will's quote, the day he said it (from the intake's
+ * audit entry, which is kept; a card's args are not) and the day Flint read.
+ * A row that does not fit its contract is left out, never shown half-read.
+ */
+async function suggestions(db: Db | Tx, proposed: readonly GoalRecord[], now: Date, tz: string): Promise<Suggestion[]> {
+  const mine = proposed.filter((g) => g.origin === 'flint' && g.status === 'proposed');
+  const refs = (mine.length ? await db.goal.findMany({ where: { id: { in: mine.map((g) => g.id) } }, select: { id: true, sourceRef: true } }) : []).filter((r) => r.sourceRef);
+  const said = new Map<string, string>();
+  if (refs.length) {
+    const entries = await db.auditEntry.findMany({ where: { correlationId: { in: refs.map((r) => r.sourceRef!) }, actor: INTAKE_ACTOR }, select: { correlationId: true, inputs: true } });
+    for (const e of entries) {
+      const at = (e.inputs as { saidAt?: unknown } | null)?.saidAt;
+      if (e.correlationId && IsoMs.safeParse(at).success) said.set(e.correlationId, at as string);
+    }
+  }
+  const refOf = new Map(refs.map((r) => [r.id, r.sourceRef!]));
+  const out: Suggestion[] = mine.map((g) => ({
+    goalId: g.id, title: g.title, quote: g.description || g.title, saidAt: said.get(refOf.get(g.id) ?? '') ?? null,
+    dueOn: g.horizonAt ? localDay(tz, g.horizonAt) : null, waiting: false,
+  }));
+  // The waiting cards: read whole (their args are the suggestion), and only this action's. One whose goal already
+  // exists, in any status (it was made a goal, or dismissed, some other way), is not waiting for anything.
+  const cards = await db.$queryRaw<Array<{ args: unknown }>>`
+    SELECT args FROM "Proposal" WHERE action = 'goal.propose' AND status = 'pending' AND "expiresAt" > ${now} AND args IS NOT NULL
+    ORDER BY "createdAt" ASC, id ASC LIMIT 200`;
+  const read = cards.flatMap((c) => {
+    const a = GoalProposeArgs.safeParse(c.args);
+    return a.success ? [a.data] : [];
+  });
+  const have = new Set((read.length ? await db.goal.findMany({ where: { id: { in: read.map((a) => a.goalId) } }, select: { id: true } }) : []).map((g) => g.id));
+  const unread = cards.length - read.length;
+  for (const a of read) {
+    if (have.has(a.goalId)) continue;
+    have.add(a.goalId);
+    out.push({ goalId: a.goalId, title: a.title, quote: a.quote, saidAt: a.saidAt, dueOn: a.dueOn ?? null, waiting: true });
+  }
+  // Held to the contract row by row, like the goals above: a row that does not fit is left out and counted.
+  const fit = keep(out, SuggestionContract, 'the Suggested tab');
+  if (unread) console.error(`[goals] left ${unread} waiting card(s) out of the Suggested tab: not a suggestion's args`);
+  return fit.slice(0, 250);
 }
 
 /** One goal, open; null when there is none. */
