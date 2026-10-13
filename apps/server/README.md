@@ -623,25 +623,6 @@ values, or 8 levels deep). A test walks every kind of card's stored args and fin
 on the opened card, and changes each one in turn to see the card change
 (test/console-card-details.test.ts).
 
-## Predictions
-
-The console's Predictions panel (the chart icon) reaches the runtime's prediction routes
-through src/predictions-routes.ts, with the console's full token only (a voice or eval token
-reaches none of them). It is the goals proxy's twin: every key, id and body (up to 16 KB) is
-checked with @flint/policy's contracts before the runtime sees it, and every answer before
-the console does; the card is filed with the runtime at once and never spooled; a runtime
-that is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that
-says Flint isn't sure it went through; a refusal reaches the console only as one of the
-fixed sentences, by its code; and a runtime without the routes is a 501, so the console
-hides its Predictions button. No read takes a query.
-
-A forecast's numbers include what Flint spends and the hours on the calendar, and a
-question holds a prediction's words. They pass through this proxy from the runtime to the
-console and go nowhere else in the server: it keeps nothing, pushes no note, puts nothing
-in chat context, and logs statuses, field paths and references only. The runtime writes
-every sentence the panel shows about a number, and the contract refuses a raw value beside
-the words. `/predictions` is never reported back to the runtime as a `route.error`.
-
 ### Goals in chat
 
 Off by default (P3 part 4). With `FLINT_GOALS_NOW=1`, a `/chat` turn can start from Will's
@@ -846,6 +827,25 @@ model (not the size the block was meant to have); the runtime rolls it up daily
 
 Chat has no goal tools: nothing in a chat turn can read a goal by asking the runtime, and a
 goal or plan card filed from a chat is refused by the runtime.
+
+## Predictions
+
+The console's Predictions panel (the chart icon) reaches the runtime's prediction routes
+through src/predictions-routes.ts, with the console's full token only (a voice or eval token
+reaches none of them). It is the goals proxy's twin: every key, id and body (up to 16 KB) is
+checked with @flint/policy's contracts before the runtime sees it, and every answer before
+the console does; the card is filed with the runtime at once and never spooled; a runtime
+that is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that
+says Flint isn't sure it went through; a refusal reaches the console only as one of the
+fixed sentences, by its code; and a runtime without the routes is a 501, so the console
+hides its Predictions button. No read takes a query.
+
+A forecast's numbers include what Flint spends and the hours on the calendar, and a
+question holds a prediction's words. They pass through this proxy from the runtime to the
+console and go nowhere else in the server: it keeps nothing, pushes no note, puts nothing
+in chat context, and logs statuses, field paths and references only. The runtime writes
+every sentence the panel shows about a number, and the contract refuses a raw value beside
+the words. `/predictions` is never reported back to the runtime as a `route.error`.
 
 ## Tools / integrations
 
