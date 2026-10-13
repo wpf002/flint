@@ -294,6 +294,24 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       await k.finish(later.pid);
     });
 
+    it('the check at the commit repeats an id only when it is shaped as one (the row guard set aside by the owner, as a repair by hand might)', async () => {
+      const [wide, brake] = pk.listed([{ pattern: `${fam()}.*`, tier: 'alone' }, { pattern: `${fam()}.propose`, tier: 'approval' }]) as [Listed, Listed];
+      const pc = await pk.rowsCard([wide, brake]);
+      for (const [rid, shown] of [['Synthetic CANARY words as an id', '?'], [id('pol'), null]] as Array<[string, string | null]>) {
+        expect(await failure(kit().inTx(async (q) => {
+          await q('ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_matches_approval"');
+          await pk.make(q, pc.aid, wide, rid);
+          // The commit's check, asked for now: it refuses, and the transaction (the guard set aside with it) is undone.
+          await q('SET CONSTRAINTS ALL IMMEDIATE');
+          await q('ALTER TABLE "ActionPolicy" ENABLE TRIGGER "ActionPolicy_matches_approval"');
+        }, { url: urls.owner }))).toEqual(['42501', NOT_WHOLE(shown ?? rid), null]);
+      }
+      expect(await rowsBy(pc.aid)).toEqual([]);
+      // The row guard is on again, as it was.
+      expect((await owner(`SELECT tgenabled FROM pg_trigger WHERE tgname = 'ActionPolicy_matches_approval' AND NOT tgisinternal`)).rows).toEqual([{ tgenabled: 'O' }]);
+      await kit().finish(pc.pid);
+    });
+
     it('a card whose rows cannot be read when the transaction commits makes none: its args cleared in the same transaction', async () => {
       const k = kit();
       const f = fam();
@@ -425,6 +443,21 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       await k.finish(oddSigned.pid);
       for (const c of [kind, action, listed]) await k.finish(c.pid);
       expect(await pk.exists(rid)).toBe(false);
+    });
+
+    it('a second signature on the same card makes nothing: a row is made under the approval its card is carried out on, and no other', async () => {
+      const k = kit();
+      const rows = one();
+      const card = await pk.rowsCard(rows);
+      await makeAlone(card.aid, rows[0]!);
+      // Will's yes to the same card and the same args, recorded a second time (the server's role can record one): were a
+      // row counted under whichever approval names the card, each new signature would make the card's rows again.
+      const second = await k.approval(card.pid, 'policy.change', digestOf({ rows }));
+      const rid = id('pol');
+      expect(await failure(makeAlone(second, rows[0]!, rid))).toEqual(['42501', NOT_EXECUTING(rid), null]);
+      expect((await rowsBy(card.aid)).length).toBe(1);
+      expect(await pk.exists(rid)).toBe(false);
+      await k.finish(card.pid);
     });
 
     it('above READ COMMITTED no row is made', async () => {
