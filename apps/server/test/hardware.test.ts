@@ -257,7 +257,8 @@ describe('the time limit is a hard one (real children, started and ended by this
     }
   };
   const pidIn = async (file: string): Promise<number> => {
-    for (let i = 0; i < 100 && !existsSync(file); i++) await new Promise((r) => setTimeout(r, 20));
+    // Up to twenty seconds for the child to say who it is: two were not enough on a busy Mac (the deploy gate, 2026-10-13).
+    for (let i = 0; i < 1000 && !(existsSync(file) && readFileSync(file, 'utf8').trim()); i++) await new Promise((r) => setTimeout(r, 20));
     return Number(readFileSync(file, 'utf8'));
   };
 
