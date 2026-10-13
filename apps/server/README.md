@@ -984,7 +984,7 @@ long ago: because nothing read these settings from the settings file before, one
 model that has since gone, and applying it would fail every recording. It is the same wherever
 the value comes from, the settings file or the environment. When neither the one that was named
 nor the usual one is on this Mac, `/transcribe` answers 503 with a sentence saying so
-(`Flint can’t turn speech into text: the transcription model isn’t on this Mac.`), and not the
+(`Flint can’t turn speech into text: its transcription model isn’t on this Mac.`), and not the
 500 of a program that could not start. The program and the model are looked for at each
 recording, so a model put in place while Flint runs is used by the next one.
 

@@ -265,9 +265,9 @@ describe('a WHISPER_BIN or WHISPER_MODEL that names a file that is not there is 
 describe('whisper.cpp or its model is not on this Mac: a recording is answered with a sentence, and nothing is run', () => {
   it('no program, or no model: CannotTranscribe, by a sentence that names no path; nothing is run and nothing is written', async () => {
     for (const [there, what, sentence] of [
-      [['/m/ggml-base.en.bin'], 'program', 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.'],
-      [['/w/whisper-cli'], 'model', 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.'],
-      [[], 'program', 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.'],
+      [['/m/ggml-base.en.bin'], 'program', 'Flint can’t turn speech into text: its transcription program isn’t on this Mac.'],
+      [['/w/whisper-cli'], 'model', 'Flint can’t turn speech into text: its transcription model isn’t on this Mac.'],
+      [[], 'program', 'Flint can’t turn speech into text: its transcription program isn’t on this Mac.'],
     ] as Array<[string[], string, string]>) {
       const { run, ran } = runner({ whisperSays: 'x' });
       const before = readdirSync(tmpdir()).filter((n) => n.startsWith('flint-stt-')).length;

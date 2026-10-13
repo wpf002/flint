@@ -420,7 +420,7 @@ describe('the real server, as a process: the same stale name in the environment,
     const before = none.srv.log().length;
     for (let i = 0; i < 2; i++) {
       const r = await transcribe(none.srv, silence());
-      expect(r).toEqual({ status: 503, json: { error: 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.' } });
+      expect(r).toEqual({ status: 503, json: { error: 'Flint can’t turn speech into text: its transcription model isn’t on this Mac.' } });
     }
     // The program was never started (it has no model to be started with), and the server has nothing to say of a failure.
     expect(existsSync(none.whisperRan)).toBe(false);

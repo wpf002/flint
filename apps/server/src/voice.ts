@@ -196,14 +196,16 @@ export function isFile(path: string): boolean {
 }
 
 /**
- * Nothing on this Mac can turn the recording into text: whisper.cpp, or its
- * model, is not there. Not a failure of a run: nothing was run. Its message
- * is a sentence for whoever asked (`/transcribe` answers 503 with it), and
- * names no path.
+ * The recording cannot be turned into text: the program Flint transcribes
+ * with, or its model, is not on this Mac. Not a failure of a run: nothing was
+ * run. Its message is a sentence for whoever asked (`/transcribe` answers 503
+ * with it), and names no path. ("Its" program, "its" model: the one in use,
+ * which is the usual one unless a setting named another that was there when
+ * Flint started.)
  */
 export class CannotTranscribe extends Error {
   constructor(readonly what: 'program' | 'model') {
-    super(what === 'program' ? 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.' : 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.');
+    super(what === 'program' ? 'Flint can’t turn speech into text: its transcription program isn’t on this Mac.' : 'Flint can’t turn speech into text: its transcription model isn’t on this Mac.');
     this.name = 'CannotTranscribe';
   }
 }
