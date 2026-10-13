@@ -989,9 +989,13 @@ describe.skipIf(NO_DB)('suggestions from chat after a promotion Will signed (ALO
     const zones = ['America/Chicago', 'Pacific/Kiritimati', 'Pacific/Pago_Pago'];
     const day = '2030-06-01';
     const horizonOf = async (c: Record<string, unknown>) => (await db.goal.findUniqueOrThrow({ where: { id: suggestionGoalId(refOf(c)) } })).horizonAt?.toISOString();
+    // "Today" is a different day in each of these zones, and other tests here have used some of each: the day's own
+    // counts are not what this test is about, so each take starts with them clear.
+    const clear = () => withClient(urls.owner, (c) => c.query(`DELETE FROM "ActionCounter" WHERE action LIKE 'goal.propose%'`));
     // Under the rule: the intake's own arithmetic, the entry's day, and the database's reading of both.
     for (const zone of zones) {
       const c = candidate(now, { dueOn: day });
+      await clear();
       expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'added' });
       expect(await horizonOf(c), zone).toBe(localWallTime(zone, day, 23, 59).toISOString());
     }
@@ -999,6 +1003,7 @@ describe.skipIf(NO_DB)('suggestions from chat after a promotion Will signed (ALO
     await retire();
     for (const zone of zones) {
       const c = candidate(now, { dueOn: day });
+      await clear();
       expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'filed' });
       const [card] = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(c)}`;
       const waiting = await db.proposal.findUniqueOrThrow({ where: { id: card!.id } });
