@@ -20,8 +20,11 @@
 #     before its last step. When the running version cannot be told, none is removed;
 #   - a test leftover: a folder of yours directly in the temp folder, untouched for a day, whose
 #     whole name is one of the names Flint's own tests gave their scratch folders
-#     (test-support/temp-prefixes) followed by the six characters the system adds. Nothing else in
-#     the temp folder is touched, whatever it is called.
+#     (test-support/temp-prefixes: every one starts with flint-) followed by the six characters
+#     the system adds, at least one of them a digit or a capital, so a name that only reads like
+#     one (flint-pg-backup) is never taken for one. It is left when anything inside it changed in
+#     the last day, when it holds a socket (something may be listening there), or when part of it
+#     cannot be looked into. Nothing else in the temp folder is touched, whatever it is called.
 # No link is ever followed, and nothing outside those three folders is removed.
 #
 # Your backups, your memory, the database and the local models are listed and never removed here:
@@ -104,19 +107,41 @@ typeset -A prefixes
 if [[ -r $repo/test-support/temp-prefixes ]]; then
   while read -r p rest; do [[ $p =~ '^[A-Za-z0-9][A-Za-z0-9._-]*[-.]$' ]] && prefixes[$p]=1; done < "$repo/test-support/temp-prefixes"
 fi
-# is_test_name <name>: its whole name is one of the tests' own, followed by exactly six letters or digits.
+# is_test_name <name>: its whole name is one of the tests' own, followed by exactly six letters or digits, at
+# least one of them a digit or a capital. The system's six are random: all six being small letters happens once
+# in two hundred, and reads like a word another program chose (flint-pg-backup). Those few are left.
 is_test_name() {
   emulate -L zsh
-  [[ $1 =~ '^(.+)[A-Za-z0-9]{6}$' && -n ${prefixes[$match[1]]:-} ]]
+  [[ $1 =~ '^(.+)([A-Za-z0-9]{6})$' && -n ${prefixes[$match[1]]:-} && $match[2] == *[0-9A-Z]* ]]
+}
+# in_use <folder>...: of these folders in the temp folder, one line for each that should be left as it is: it
+# holds a socket, something inside it changed in the last day, or part of it cannot be looked into.
+in_use() {
+  emulate -L zsh
+  (( $# )) || return 0
+  local p
+  /usr/bin/find "$@" \( -type s -o -mmin -1440 -o \( -type d ! -perm -u+rx \) \) -print0 2>/dev/null | while IFS= read -r -d '' p; do
+    p=${p#$tmp/}; print -r -- "$tmp/${p%%/*}"
+  done | LC_ALL=C sort -u
 }
 test_left=()
+test_busy=0
 other_flint=0
 if [[ -n $tmp && -d $tmp ]] && (( ${#prefixes} )); then
   # A folder (never a link to one) of this user's, last changed more than 24 hours ago.
+  named=()
   for d in "$tmp"/*(N/Umh+24); do
     name=${d:t}
-    if is_test_name "$name"; then test_left+=("$d")
+    if is_test_name "$name"; then named+=("$d")
     elif [[ $name == flint-* ]]; then (( other_flint += 1 )); fi
+  done
+  # In batches: a temp folder can hold tens of thousands of leftovers.
+  while (( ${#named} )); do
+    batch=("${(@)named[1,200]}"); shift $(( ${#named} < 200 ? ${#named} : 200 )) named
+    busy=("${(@f)$(in_use $batch)}")
+    for d in $batch; do
+      if (( ${busy[(Ie)$d]} )); then (( test_busy += 1 )); else test_left+=("$d"); fi
+    done
   done
 fi
 
@@ -139,7 +164,14 @@ left_kb=$(kb_of $test_left)
 (( ${#rotated} )) && say "There $( (( ${#rotated} == 1 )) && print -n is || print -n are ) $(counted ${#rotated} "rotated log"), $(size_of $rotated_kb) in all."
 (( ${#old_releases} )) && say "There $( (( ${#old_releases} == 1 )) && print -n is || print -n are ) $(counted ${#old_releases} "runtime version") beyond the ones Flint keeps, $(size_of $releases_kb) in all."
 (( releases_held )) && say "Flint could not tell which runtime version is running, so it leaves every one of them."
-(( ${#test_left} )) && say "Flint's own tests left $(counted ${#test_left} "temp folder") more than a day ago, $(size_of $left_kb) in all."
+if (( ${#test_left} )); then
+  say "Flint's own tests left $(counted ${#test_left} "temp folder") more than a day ago, $(size_of $left_kb) in all."
+  # By name, so it can be seen what would go: the first twenty, and how many more there are.
+  if (( ${#test_left} > 20 )); then say "The first 20 are these:"; elif (( ${#test_left} == 1 )); then say "It is this one:"; else say "They are these:"; fi
+  for d in "${(@)test_left[1,20]}"; do say "  ${d:t}"; done
+  (( ${#test_left} > 20 )) && say "There $( (( ${#test_left} == 21 )) && print -n "is 1" || print -n "are $(( ${#test_left} - 20 ))" ) more."
+fi
+(( test_busy )) && say "Flint leaves $(counted $test_busy "temp folder") of its tests that $( (( test_busy == 1 )) && print -n "is in use or changed" || print -n "are in use or changed" ) in the last day."
 (( other_flint )) && say "Flint leaves $(counted $other_flint "other old temp folder") that $( (( other_flint == 1 )) && print -n "has its name and is" || print -n "have its name and are" ) not from a test it knows."
 
 # ---- removing ------------------------------------------------------------------------
@@ -180,12 +212,18 @@ if (( leftovers )); then
     say "There are no test leftovers to remove."
   else
     say "Flint is removing $(counted ${#test_left} "temp folder") its own tests left."
-    for d in $test_left; do
-      name=${d:t}
-      # Checked again, as it was listed: a test's name, the six characters, and nothing changed in it for a day.
-      is_test_name "$name" || { (( kept_back += 1 )); continue; }
-      [[ -n "$(print -rn -- "$d"(N/Umh+24))" ]] || { (( kept_back += 1 )); continue; }
-      gone folder "$tmp" "$d"
+    while (( ${#test_left} )); do
+      batch=("${(@)test_left[1,200]}"); shift $(( ${#test_left} < 200 ? ${#test_left} : 200 )) test_left
+      # Looked at again, a moment before they go: nothing in them changed since, and nothing listens there.
+      busy=("${(@f)$(in_use $batch)}")
+      for d in $batch; do
+        name=${d:t}
+        # Checked again, as it was listed: a test's name, the six characters, and nothing changed in it for a day.
+        is_test_name "$name" || { (( kept_back += 1 )); continue; }
+        [[ -n "$(print -rn -- "$d"(N/Umh+24))" ]] || { (( kept_back += 1 )); continue; }
+        (( ${busy[(Ie)$d]} )) && { (( kept_back += 1 )); continue; }
+        gone folder "$tmp" "$d"
+      done
     done
     say "Flint removed $(counted $removed_n "temp folder") and freed $(size_of $removed_kb)."
     (( kept_back )) && say "It left $(counted $kept_back "temp folder") that had changed or would not go."

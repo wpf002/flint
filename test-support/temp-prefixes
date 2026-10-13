@@ -5,9 +5,14 @@
 #
 # apps/studio/free_space.sh reads this list to find what those tests left
 # behind. A folder is one of them only when its whole name is a prefix here
-# followed by exactly the six characters mkdtemp or mktemp adds, it sits
-# directly in the temp folder, it is this user's, and nothing in it has changed
-# for a day.
+# followed by exactly the six characters mkdtemp or mktemp adds, at least one
+# of them a digit or a capital; it sits directly in the temp folder; it is this
+# user's; nothing in it has changed for a day; and it holds no socket.
+#
+# Every prefix here starts with flint-. The tests also used short, plain names
+# (ws-, tok-, export-, install- and some forty more): another program may use
+# those too, so they are not listed, and a folder with such a name is never
+# removed. What they left is the system's to clear.
 #
 # A new test needs no line here: what it makes now lands inside its run's own
 # folder, which is removed when the run ends. The two lines that matter from
@@ -17,20 +22,6 @@ flint-t.
 #
 # No prefix here is one Flint's own programs use for a working folder (a
 # restore's, a rebuild's): apps/studio/test/free_space.test.sh checks that.
-agents-
-auto-update-
-budget-
-commits-
-deploy-
-deploy-events-
-deploy-events-bin-
-deploy-hold-
-desktop-calendar-
-desktop-calendar-swift-
-evolve-
-evolve-secrets-
-evolve-try-
-export-
 flint-agent-
 flint-ap-
 flint-bk-
@@ -95,39 +86,3 @@ flint-thresh-
 flint-tool-
 flint-train-
 flint-voice-
-gate-
-gate-pre-
-git-count-
-health-home-
-health-upkeep-
-install-
-install-rehearsal-
-install-versions-
-know-
-nexus-build-
-no-egress-
-p25-
-p2src-
-parity-
-parity-daily-
-parity-hist-
-predictions-on-
-promote-
-q25-
-rt-backup-agent-
-rt-backup-nightly-
-rt-config-
-rt-conn-
-rt-install-
-rt-offsite-
-rt-releases-
-rt-versions-
-runtime-call-
-search-compare-
-search-compare-daily-
-smoke-
-spend-
-spend-push-
-tailnet-
-tok-
-ws-

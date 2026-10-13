@@ -366,6 +366,9 @@ Disk Space as low. Backups and the database stop when the disk fills.
    ```
 
 - Neither command removes a backup, your memory, the database or a model.
+- Step 1 names the first twenty temp folders it would remove. Step 3 takes only
+  folders with the names Flint's own tests gave them, a day old or more, and
+  leaves any that is in use.
 - The copies of the database taken before each update pile up in
   `~/FlintBackups/pre-migrate`. Flint asks to remove the old ones with a card
   called Remove Old Backups. Approving it keeps the newest 10 and the last 30
