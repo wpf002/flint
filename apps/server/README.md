@@ -1071,7 +1071,7 @@ same for a `.txt` on main. So:
 - **The fence around a file cannot be closed from inside it.** A file's text is sent between
   `<attached_file ...>` and `</attached_file>`. A file that held `</attached_file>` ended the
   fence early, and what followed read as Will's words. The bracket of anything that looks like
-  the fence's tag is now written `&lt;` (`@flint/core` `insideFence`), for every model.
+  the fence's tag is now written `&lt;` (`@flint/core`, `types/attachment.ts`), for every model.
 - **What follows from the mark, and should be known:**
   - *The conversation is marked too.* While that turn is in the history a later turn is handed
     (the history window, 48 hours unless set), the later turn starts tainted: a search or a

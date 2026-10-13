@@ -28,7 +28,6 @@ export {
   describeAttachment,
   attachmentNote,
   shedPayload,
-  insideFence,
 } from './types/attachment.js';
 export type { Attachment } from './types/attachment.js';
 
