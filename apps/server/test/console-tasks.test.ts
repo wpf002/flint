@@ -375,24 +375,27 @@ describe('what the fixtures hold', () => {
 });
 
 describe('the header button', () => {
-  it('shows once the runtime answers, switched off included; an older runtime, no runtime, or a rejected token leaves it hidden', async () => {
+  it('shows once the runtime answers; tasks switched off, an older runtime, no runtime, or a rejected token leaves it hidden', async () => {
     // The page as loaded (beforeEach): the runtime answered.
     expect(ids.tasksbtn!.hidden).toBe(false);
-    for (const status of [501, 401]) {
+    for (const a of [{ status: 501, body: { error: 'x' } }, { status: 401, body: { error: 'x' } }, OFF]) {
       ids.tasksbtn!.hidden = false;
-      routes = answers({ 'GET /assets': { status, body: { error: 'x' } } });
-      run('tasksProbe()');
-      await settle();
-      expect(ids.tasksbtn!.hidden, String(status)).toBe(true);
-    }
-    // Switched off, or only down: the button is there, and its panel says which.
-    for (const a of [OFF, { status: 503, body: { error: TASKS_SAY.down } }]) {
-      ids.tasksbtn!.hidden = true;
       routes = answers({ 'GET /assets': a });
       run('tasksProbe()');
       await settle();
-      expect(ids.tasksbtn!.hidden, String(a.status)).toBe(false);
+      expect(ids.tasksbtn!.hidden, String(a.status)).toBe(true);
     }
+    // Switched back on: the next look brings the button back.
+    routes = answers();
+    run('tasksProbe()');
+    await settle();
+    expect(ids.tasksbtn!.hidden).toBe(false);
+    // Only down: the button is there, and its panel says why nothing loads.
+    ids.tasksbtn!.hidden = true;
+    routes = answers({ 'GET /assets': { status: 503, body: { error: TASKS_SAY.down } } });
+    run('tasksProbe()');
+    await settle();
+    expect(ids.tasksbtn!.hidden).toBe(false);
     // What the page asks on its own is the assets: no task is read until Will opens the panel.
     routes = answers();
     calls = [];
@@ -419,8 +422,26 @@ describe('the header button', () => {
       expect(dot(), p.fullName).toBe(false);
     }
     // One that is approved and waiting to run, or a card of another kind, does not light it.
-    run(`tasksDot(${JSON.stringify([{ ...CARDS.dispatch, status: 'approved' }, { id: 'pr9', fullName: 'goal.activate', status: 'pending', args: {} }, { id: 'pr8', fullName: 'tasks.other', status: 'pending', args: {} }])})`);
+    run(`tasksDot(${JSON.stringify([{ ...CARDS.dispatch, status: 'approved' }, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: {} }, { id: 'pr8', fullName: 'tasks.other', status: 'pending', args: {} }])})`);
     expect(dot()).toBe(true);
+    // Nor does a tool on a connected server that carries one of these names: by the server's mark, or by its kind.
+    for (const p of Object.values(CARDS)) {
+      for (const planted of [{ ...p, kind: 'tool_call', mcp: true }, { ...p, mcp: true }, { ...p, kind: 'tool_call' }, { ...p, kind: undefined }]) {
+        run(`tasksDot(${JSON.stringify([planted])})`);
+        expect(dot(), `${p.fullName} ${planted.kind} ${String((planted as { mcp?: boolean }).mcp)}`).toBe(true);
+      }
+    }
+    // The Goals dot is held the same way: a goal's card lights it, a tool's card called goal.activate does not.
+    const goalDot = () => ids.goalsdot!.hidden;
+    const goal = { id: 'prg1', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: {} };
+    run(`goalsDot(${JSON.stringify([goal])})`);
+    expect(goalDot()).toBe(false);
+    for (const planted of [{ ...goal, kind: 'tool_call', mcp: true }, { ...goal, mcp: true }, { ...goal, kind: 'tool_call' }, { ...goal, kind: undefined }, { ...goal, fullName: 'plan.change', kind: 'tool_call', mcp: true }]) {
+      run(`goalsDot(${JSON.stringify([planted])})`);
+      expect(goalDot(), JSON.stringify(planted)).toBe(true);
+    }
+    run(`goalsDot(${JSON.stringify([{ ...goal, fullName: 'plan.change', kind: 'plan' }])})`);
+    expect(goalDot()).toBe(false);
   });
 
   it('the dot is lit from the start, even when the page’s first look at what waits came back before this script was read', async () => {
@@ -572,7 +593,7 @@ describe('the list', () => {
     for (const a of [asset({ on: false, canTurnOn: true }), asset({ on: false, waiting: true, line: 'A card is waiting for your approval.' }), asset({ on: false, line: TASK_SAYS.needsGithub })]) {
       routes = answers({ 'GET /assets': { status: 200, body: assets(a) }, 'GET /tasks?tab=active': none });
       await open('active');
-      expect(empty()).toEqual(['Tasks Are Off', 'Turn on the CI Watcher in Settings to start.']);
+      expect(empty()).toEqual(['No Asset Is On', 'Turn on the CI Watcher in Settings to start.']);
       expect(body().buttons()).toEqual(['Active', 'Finished', 'Open Settings']);
       expect(ids.taskadd!.hidden).toBe(true);
     }
@@ -582,7 +603,7 @@ describe('the list', () => {
     for (const [list, needs] of [[[asset({ kind: 'local_reviewer', name: 'Local Reviews' })], 'an asset'], [[asset({ kind: 'local_worker', name: 'Local Tasks', on: false })], 'Local Tasks'], [[], 'an asset']] as const) {
       routes = answers({ 'GET /assets': { status: 200, body: { assets: list, reviewsRequired: false } }, 'GET /tasks?tab=active': none });
       await open('active');
-      expect(empty(), needs).toEqual(['Tasks Are Off', `Turn on ${needs} in Settings to start.`]);
+      expect(empty(), needs).toEqual(['No Asset Is On', `Turn on ${needs} in Settings to start.`]);
     }
     // Tasks from before, with nothing on now: they are listed, New Task is not offered, and a line says why.
     routes = answers({ 'GET /assets': { status: 200, body: assets(asset({ on: false, canTurnOn: true })) } });
@@ -750,12 +771,21 @@ describe('a card, shown and signed here', () => {
     await openTask(T_WAIT);
     calls = [];
     await click(foot(), 'Review Card');
-    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['GET /proposals']);
+    // The card is read back, then its task's name is looked up, before anything is drawn.
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['GET /proposals', `GET /tasks/${T_WAIT}`]);
     expect(title()).toBe('Accept a Task Result');
     expect(title()).toBe(ACTION_WORDS['task.check_bar']);
     expect(body().with('plead').map((e) => e.textContent)).toEqual(['It passed 2 of 2 checks.']);
     const expires = new Date('2026-10-27T18:00:00.000Z').toLocaleDateString([], { month: 'short', day: 'numeric' });
     expect(rows()).toEqual([['Task', [], 'Watch a CI Run · wpf002/flint CI'], ['Checked By', [], 'Rules'], ['Expires', [], expires]]);
+    // The task's name is looked up, not signed: its row says so beside the value, and no other row does.
+    const face = body().all().find((e) => e.id === 'taskcardfacts')!;
+    expect(face.children.map((r) => r.children.filter((c) => c.className === 'looked').map((c) => c.textContent))).toEqual([['Looked Up'], [], []]);
+    expect(face.children[0]!.val!.textContent).toBe('Watch a CI Run · wpf002/flint CI');
+    // The title and the sentence under it are the card's own words.
+    expect(`${title()} ${body().with('plead')[0]!.textContent}`).not.toMatch(/wpf002|·/);
+    // A card that may share a prompt carries no mark.
+    expect(body().all().find((e) => e.id === 'taskcardmark')).toBeUndefined();
     expect(foot().buttons()).toEqual(['Not Now', 'Approve with Touch ID']);
     // Nothing but words on its face.
     plainScreen();
@@ -773,6 +803,10 @@ describe('a card, shown and signed here', () => {
     expect(text).toContain('It passed 2 of 2 checks.');
     expect(details.all().filter((e) => e.tagName === 'h4').map((e) => e.textContent)).toEqual(['DETAILS', 'REFERENCES']);
     for (const signedValue of [T_WAIT, 'out:0123456789abcdef', 'flint:rule']) expect(text, signedValue).toContain(signedValue);
+    // Only what is signed is here, with one fixed sentence about the row above that was looked up.
+    expect(details.children.filter((e) => e.className === 'lookedsay').map((e) => e.textContent)).toEqual(['The task’s name above is looked up, not part of what you sign.']);
+    expect(text).not.toMatch(/wpf002/);
+    ownWords([], ['The task’s name above is looked up, not part of what you sign.']);
     expect(details.all().some((e) => e.tagName === 'pre')).toBe(false);
     expect(text).not.toMatch(/[{}"[\]]/);
     toggle.onclick!();
@@ -810,10 +844,11 @@ describe('a card, shown and signed here', () => {
     expect(posts()).toEqual([]);
   });
 
-  it('a prompt that is cancelled, a card approved that has not run, and one that failed are each said, and the card stays', async () => {
+  it('a prompt that is dismissed, a card approved that has not run, and one that failed are each said, and the card stays', async () => {
     for (const [answer, words] of [
-      [() => Promise.reject(new Error('not confirmed')), ['Cancelled. It’s waiting in Approvals.', 'res bad']],
-      [() => Promise.reject(Object.assign(new Error('x'), { name: 'NotAllowedError' })), ['Cancelled. It’s waiting in Approvals.', 'res bad']],
+      // (A prompt he dismissed is said as that, the same sentence wherever a card is signed: never "Cancelled.", which on a card that cancels a task would read as done.)
+      [() => Promise.reject(new Error('not confirmed')), ['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']],
+      [() => Promise.reject(Object.assign(new Error('x'), { name: 'NotAllowedError' })), ['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']],
       [async () => ({ action: { status: 'approved' } }), ['Approved. It hasn’t run yet.', 'res bad']],
       [async () => ({ action: { status: 'failed', error: 'Its asset is off. Turn it on in Settings.' } }), ['Its asset is off. Turn it on in Settings.', 'res bad']],
       [async () => ({ action: { status: 'failed' } }), ['It failed.', 'res bad']],
@@ -845,8 +880,13 @@ describe('a card, shown and signed here', () => {
       ['already approved', [{ ...CARDS.accept, status: 'approved' }]],
       ['rejected', [{ ...CARDS.accept, status: 'rejected' }]],
       ['another kind of card under that id', [{ ...CARDS.accept, fullName: 'mcp:shop.buy', args: { amount: 400 } }]],
-      ['a goal card under that id', [{ ...CARDS.accept, fullName: 'goal.abandon', args: { goalId: GOAL, goalTitle: 'Finish Building Flint' } }]],
+      ['a goal card under that id', [{ ...CARDS.accept, fullName: 'goal.abandon', kind: 'goal', args: { goalId: GOAL, goalTitle: 'Finish Building Flint' } }]],
       ['another card', [CARDS.cancel]],
+      // A tool on a connected server called "task", with a tool called "check_bar": the same name, and not a task's card.
+      ['a tool’s card under a task card’s name, by the server’s mark', [{ ...CARDS.accept, kind: 'tool_call', mcp: true, origin: 'chat:c1' }]],
+      ['a tool’s card under a task card’s name, by its kind', [{ ...CARDS.accept, kind: 'tool_call' }]],
+      ['a card of that name with no kind', [{ ...CARDS.accept, kind: undefined }]],
+      ['a tool’s card marked, whatever kind it claims', [{ ...CARDS.accept, mcp: true }]],
     ];
     for (const [why, proposals] of lists) {
       routes = answers({ 'GET /proposals': { status: 200, body: { proposals, signed: true } } });
@@ -893,12 +933,266 @@ describe('a card, shown and signed here', () => {
     foot().button('Approve with Touch ID').onclick!();
     await settle();
     run('closeTasks()');
+    await settle();
     calls = [];
     finish({ action: { status: 'done' } });
     await settle();
     expect(panels.tasks).toBe(false);
     expect(body().shown()).toBe('');
     expect(calls.filter((c) => c.url.startsWith('/tasks'))).toEqual([]);
+    // It went through: there is nothing to keep for its card. The header is read again.
+    expect(run('JSON.stringify(APPR.said||{})')).toBe('{}');
+    expect(calls.map((c) => c.url)).toEqual(['/proposals']);
+  });
+
+  it('closing the panel while the prompt is up does not lose what the approval said: it is kept for the card, shown on it in Approvals, and the lists are read again', async () => {
+    const outcomes: Array<[string, () => void, string]> = [];
+    for (const [what, settleIt, say] of [
+      ['dismissed', (no: (e: Error) => void) => no(new Error('not confirmed')), 'You dismissed the prompt. The card is waiting in Approvals.'],
+      ['failed', (_no: (e: Error) => void, ok: (v: unknown) => void) => ok({ action: { status: 'failed', error: 'Its asset is off. Turn it on in Settings.' } }), 'Its asset is off. Turn it on in Settings.'],
+      ['approved, not run', (_no: (e: Error) => void, ok: (v: unknown) => void) => ok({ action: { status: 'approved' } }), 'Approved. It hasn’t run yet.'],
+    ] as const) {
+      run('APPR.said={}');
+      await openTask(T_WAIT);
+      await click(foot(), 'Review Card');
+      let ok!: (v: unknown) => void;
+      let no!: (e: Error) => void;
+      signAnswer = () => new Promise((y, n) => ((ok = y), (no = n)));
+      foot().button('Approve with Touch ID').onclick!();
+      await settle();
+      run('closeTasks()');
+      await settle();
+      calls = [];
+      settleIt(no, ok);
+      await settle();
+      outcomes.push([what, () => {}, say]);
+      // Kept for its card, by the card's id. Nothing is drawn in the panel he closed, and it stays closed.
+      expect(JSON.parse(run('JSON.stringify(APPR.said)') as string), what).toEqual({ praccept01: [say, 'bad'] });
+      expect(panels.tasks, what).toBe(false);
+      expect(body().shown(), what).toBe('');
+      // The header (the badge and the dots) is read again; no task is.
+      expect(calls.map((c) => c.url), what).toEqual(['/proposals']);
+      // In Approvals, the card says it.
+      run('loadApprovals()');
+      await settle();
+      const waiting = ids.apprlist!.all().find((e) => e.getAttribute('data-id') === 'praccept01')!;
+      expect(waiting.shown(), what).toContain(say);
+      const others = ids.apprlist!.all().filter((e) => e.getAttribute('data-id') && e.getAttribute('data-id') !== 'praccept01');
+      expect(others.length).toBeGreaterThan(3);
+      for (const o of others) expect(o.shown(), what).not.toContain(say);
+    }
+    expect(outcomes).toHaveLength(3);
+
+    // Approvals is the panel that is open when it settles: its list is read again there and then.
+    run('APPR.said={}');
+    await openTask(T_WAIT);
+    await click(foot(), 'Review Card');
+    let no!: (e: Error) => void;
+    signAnswer = () => new Promise((_y, n) => (no = n));
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    run("closeTasks();showPanel('approvals',true)");
+    await settle();
+    calls = [];
+    no(new Error('not confirmed'));
+    await settle();
+    expect(calls.filter((c) => c.url === '/proposals')).toHaveLength(2);
+    expect(ids.apprlist!.all().find((e) => e.getAttribute('data-id') === 'praccept01')!.shown()).toContain('You dismissed the prompt. The card is waiting in Approvals.');
+  });
+
+  it('he went back to the task, or to the list, with the prompt up: what the approval said is told where he is', async () => {
+    // Back to the task the card was about: it is read again, and its footer says it.
+    await openTask(T_WAIT);
+    await click(foot(), 'Review Card');
+    let no!: (e: Error) => void;
+    signAnswer = () => new Promise((_y, n) => (no = n));
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    run('taskBack()');
+    await settle();
+    expect(title()).toBe('Watch a CI Run');
+    calls = [];
+    no(new Error('not confirmed'));
+    await settle();
+    expect(calls.map((c) => c.url)).toEqual(expect.arrayContaining([`/tasks/${T_WAIT}`, '/proposals']));
+    expect(title()).toBe('Watch a CI Run');
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
+    // To the list: it is read again, and says it; one that went through says what happened.
+    await click(foot(), 'Review Card');
+    let ok!: (v: unknown) => void;
+    signAnswer = () => new Promise((y) => (ok = y));
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    run("taskTab('active')");
+    await settle();
+    ok({ action: { status: 'done' } });
+    await settle();
+    expect(title()).toBe('Tasks');
+    expect(said()).toEqual(['You accepted its result.', 'res ok']);
+    expect(rows()).toHaveLength(2);
+    // On another task: nothing is written into it. (What was said is kept for the card, in Approvals.)
+    run('APPR.said={}');
+    await openTask(T_WAIT);
+    await click(foot(), 'Review Card');
+    signAnswer = () => new Promise((_y, n) => (no = n));
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    run(`taskOpen('${T_OUT}')`);
+    await settle();
+    no(new Error('not confirmed'));
+    await settle();
+    expect(said()).toBeNull();
+    expect(JSON.parse(run('JSON.stringify(APPR.said)') as string)).toEqual({ praccept01: ['You dismissed the prompt. The card is waiting in Approvals.', 'bad'] });
+  });
+
+  it('the card’s mark is the Approvals panel’s own: outside text first, then what cannot be undone, then that it asks on its own', async () => {
+    const mark = () => body().all().find((e) => e.id === 'taskcardmark');
+    const shown = async (p: Record<string, unknown>) => {
+      routes = answers({ 'GET /proposals': { status: 200, body: { proposals: [p], signed: true } } });
+      await openTask(T_WAIT);
+      await click(foot(), 'Review Card');
+      expect(foot().buttons()).toEqual(['Not Now', 'Approve with Touch ID']);
+      return mark();
+    };
+    for (const [p, says] of [
+      [{ ...CARDS.accept, tainted: true }, 'Outside Text'],
+      [{ ...CARDS.accept, tainted: true, destructive: true, consequential: true }, 'Outside Text'],
+      [{ ...CARDS.accept, destructive: true }, 'Can’t Be Undone'],
+      [{ ...CARDS.accept, id: 'praccept01', fullName: 'task.bar_override', args: { taskId: T_WAIT, to: 'rejected' }, consequential: true }, 'Asks on Its Own'],
+      [{ ...CARDS.dispatch, id: 'praccept01', cost: { micros: 250_000 }, args: dispatchArgs(T_WAIT, { estCostMicros: 250_000 }) }, 'Asks on Its Own'],
+    ] as const) {
+      const m = await shown(p);
+      expect(m, says).toBeTruthy();
+      expect(m!.className).toBe('tmark');
+      // One element, the same the Approvals panel draws on its own card: a dot and the words.
+      expect(m!.children.map((c) => [c.tagName, c.className, c.textContent])).toEqual([['span', 'outside', says]]);
+      expect(m!.children[0]!.children[0]!.tagName).toBe('i');
+      expect(run(`apprMark(${JSON.stringify(p)}).textContent`)).toBe(says);
+      // It sits under the card's sentence, above its facts.
+      const order = body().children.map((c) => c.id || c.className);
+      expect(order.indexOf('taskcardmark')).toBe(order.indexOf('plead') + 1);
+      expect(order.indexOf('taskcardfacts')).toBe(order.indexOf('taskcardmark') + 1);
+    }
+    expect(await shown(CARDS.accept)).toBeUndefined();
+    expect(run(`apprMark(${JSON.stringify(CARDS.accept)})`)).toBeNull();
+    expect(html).toMatch(/\.tmark\{/);
+  });
+
+  it('a card shown here waits a short while for its task’s name and is drawn once: a name that lands late, or after he has gone elsewhere, never draws it', async () => {
+    const timers: Array<[() => void, number]> = [];
+    ctx.setTimeout = (fn: () => void, ms: number) => timers.push([fn, ms]);
+    const holds: Array<{ ps: Array<{ id: string }>; done: (n: number) => void }> = [];
+    ctx.HOLD = (ps: Array<{ id: string }>, done: (n: number) => void) => void holds.push({ ps, done });
+    run('taskNames=function(ps,done){HOLD(ps,done);}');
+    const know = () => run(`APPR_TASKS['${T_WAIT}']={title:'Watch a CI Run',about:'wpf002/flint CI'}`);
+    const deadline = () => timers.filter((t) => t[1] === 600).at(-1)![0];
+    // (Opening a task keeps its name. Here the card is reached with nothing known, as from Settings or after a reload.)
+    const review = async () => {
+      await openTask(T_WAIT);
+      run(`delete APPR_TASKS['${T_WAIT}']`);
+      await click(foot(), 'Review Card');
+    };
+    await review();
+    // The card is read back and its name asked for: nothing is drawn yet but the wait, with its deadline.
+    expect(holds.map((h) => h.ps.map((p) => p.id))).toEqual([['praccept01']]);
+    expect(title()).toBe('Tasks');
+    expect(body().shown()).toBe('Loading…');
+    expect(run('TASK_NAMES_MS')).toBe(600);
+    expect(timers.filter((t) => t[1] === 600)).toHaveLength(1);
+    // The deadline passes: the card is drawn without the name.
+    deadline()();
+    expect(title()).toBe('Accept a Task Result');
+    expect(rows().map((r) => r[0])).toEqual(['Checked By', 'Expires']);
+    const drawn = body().children[0];
+    // The name lands late: the card on screen is not drawn again, and nothing on it moves.
+    know();
+    holds[0]!.done(1);
+    expect(body().children[0]).toBe(drawn);
+    expect(screen()).not.toMatch(/Looked Up|wpf002/);
+    // In time: drawn with its looked-up row, and the deadline afterwards draws nothing more.
+    await review();
+    know();
+    holds[1]!.done(1);
+    expect(rows().map((r) => r[0])).toEqual(['Task', 'Checked By', 'Expires']);
+    const withName = body().children[0];
+    deadline()();
+    holds[1]!.done(1);
+    expect(body().children[0]).toBe(withName);
+    // He goes elsewhere before the name lands: neither the name nor the deadline draws the card over where he is.
+    await review();
+    run("taskTab('active')");
+    await settle();
+    expect(title()).toBe('Tasks');
+    const list = body().children[0];
+    holds[2]!.done(1);
+    deadline()();
+    expect(title()).toBe('Tasks');
+    expect(body().children[0]).toBe(list);
+    expect(rows()).toHaveLength(2);
+    expect(foot().buttons()).not.toContain('Approve with Touch ID');
+    // The panel closed meanwhile: the same.
+    await review();
+    run('closeTasks()');
+    holds[3]!.done(1);
+    deadline()();
+    expect(body().shown()).toBe('');
+    expect(signed).toEqual([]);
+  });
+
+  it('once tasks are known to be off nothing here writes: each button’s function returns before it sends, and says the runtime’s sentence', async () => {
+    await openTask(T_RED);
+    // The page's own look finds tasks switched off while the task is still on screen.
+    routes = answers({ 'GET /assets': OFF });
+    run('tasksProbe()');
+    await settle();
+    expect(run('taskIsOff()')).toBe(true);
+    expect(ids.tasksbtn!.hidden).toBe(true);
+    calls = [];
+    const t = JSON.stringify(redView());
+    const writes: Array<[string, string]> = [
+      ['Accept Anyway', `taskFile(${t},'accept',[])`], ['Reject Anyway', `taskFile(${t},'reject',[])`], ['Cancel Task', `taskFile(${t},'cancel',[])`],
+      ['Run Again', `TASKS.again={id:'${T_RED}',key:gDraftKey()};taskAgain(${t},[])`],
+      ['Create Task', `TASKS.form={draftKey:gDraftKey(),template:'watch_ci',item:'${ITEM}',goal:'',due:''};taskCreate({},[])`],
+      ['Approve', `taskApprove(${JSON.stringify(CARDS.accept)},[],{back:function(){},done:function(){}})`],
+    ];
+    for (const [what, code] of writes) {
+      run('taskMsg("")');
+      run(code);
+      await settle();
+      expect(calls, what).toEqual([]);
+      expect(signed, what).toEqual([]);
+      expect(run('TASKS.busy'), what).toBe(false);
+      // The button that did nothing says why, in the runtime's own sentence.
+      expect(said(), what).toEqual([TASK_SAYS.off, 'res bad']);
+    }
+    // The buttons on screen are those functions: pressed, they send nothing either.
+    for (const b of ['Accept Anyway', 'Run Again']) await click(foot(), b);
+    expect(calls).toEqual([]);
+    // Settings > Assets: Turn On and Turn Off the same, with the sentence under the list.
+    run('TASKS.off=false');
+    routes = answers();
+    run('openSettings();loadAssets()');
+    await settle();
+    routes = answers({ 'GET /assets': OFF });
+    run('tasksProbe()');
+    await settle();
+    calls = [];
+    run(`assetOn(${JSON.stringify(asset({ on: false, canTurnOn: true }))},null)`);
+    run(`assetOff(${JSON.stringify(asset())},[])`);
+    await settle();
+    expect(calls).toEqual([]);
+    expect(ids.setassets!.visible().find((e) => e.id === 'assetsmsg')?.textContent).toBe(TASK_SAYS.off);
+    // The runtime answers again: the button is back, and they write again.
+    routes = answers();
+    run('tasksProbe()');
+    await settle();
+    expect(run('taskIsOff()')).toBe(false);
+    expect(run('TASKS.offSays')).toBe('');
+    expect(ids.tasksbtn!.hidden).toBe(false);
+    await openTask(T_RED);
+    calls = [];
+    await click(foot(), 'Accept Anyway');
+    expect(posts().map((c) => c.url)).toEqual([`/tasks/${T_RED}/accept`]);
   });
 });
 
@@ -911,13 +1205,22 @@ describe('Cancel Task, Accept Anyway, Reject Anyway, Run Again', () => {
     // Asked first: nothing is sent yet.
     expect(calls).toEqual([]);
     expect(foot().with('gconfirm').map((e) => e.children.map((c) => c.textContent))).toEqual([['Cancel This Task', 'Nothing has run, and its card is withdrawn.']]);
-    expect(foot().buttons()).toEqual(['Keep Task', 'Cancel Task']);
+    // The button that goes through with it comes first; Keep Task takes the end of the row, and the cursor.
+    expect(foot().buttons()).toEqual(['Cancel Task', 'Keep Task']);
+    expect(foot().with('btn').map((b) => [b.textContent, b.className])).toEqual([['Cancel Task', 'btn pri'], ['Keep Task', 'btn']]);
     expect(focused?.textContent).toBe('Keep Task');
     // Keep Task puts the buttons back.
     await click(foot(), 'Keep Task');
     expect(foot().buttons()).toEqual(['Cancel Task', 'Review Card']);
     expect(calls).toEqual([]);
+    // A second tap right on the heels of the first is the same tap: it cancels nothing.
     await click(foot(), 'Cancel Task');
+    clock += 399;
+    await click(foot(), 'Cancel Task');
+    expect(calls).toEqual([]);
+    expect(foot().with('gconfirm')).toHaveLength(1);
+    expect(run('TASK_ARM_MS')).toBe(400);
+    clock += 1;
     foot().button('Cancel Task').onclick!();
     foot().button('Cancel Task').onclick!();
     await settle();
@@ -931,6 +1234,7 @@ describe('Cancel Task, Accept Anyway, Reject Anyway, Run Again', () => {
     await openTask(T_OUT);
     await click(foot(), 'Cancel Task');
     expect(foot().with('gconfirm')[0]!.children[1]!.textContent).toBe('Flint files a card to stop it, for you to approve.');
+    clock += 400;
     await click(foot(), 'Cancel Task');
     expect(posts()).toEqual([{ url: `/tasks/${T_OUT}/cancel`, method: 'POST', body: {} }]);
     expect(title()).toBe('Cancel a Task');
@@ -950,7 +1254,7 @@ describe('Cancel Task, Accept Anyway, Reject Anyway, Run Again', () => {
     expect(title()).toBe('Accept a Result Anyway');
     expect(body().with('plead')[0]!.textContent).toBe('It ends as accepted, against Flint’s checks.');
     await click(foot(), 'Approve with Touch ID');
-    expect(signed.at(-1)).toEqual(['proverride1', { fresh: true, reason: 'accept this result', args: { taskId: T_RED, to: 'accepted' } }]);
+    expect(signed.at(-1)).toEqual(['proverride1', { fresh: true, reason: 'accept this result against its checks', args: { taskId: T_RED, to: 'accepted' } }]);
     expect(said()).toEqual(['You accepted it.', 'res ok']);
     await openTask(T_WAIT);
     calls = [];
@@ -959,7 +1263,7 @@ describe('Cancel Task, Accept Anyway, Reject Anyway, Run Again', () => {
     expect(title()).toBe('Reject a Result Anyway');
     expect(body().with('plead')[0]!.textContent).toBe('It ends as rejected, against Flint’s checks.');
     await click(foot(), 'Approve with Touch ID');
-    expect(signed.at(-1)).toEqual(['prreject001', { fresh: true, reason: 'reject this result', args: { taskId: T_WAIT, to: 'rejected' } }]);
+    expect(signed.at(-1)).toEqual(['prreject001', { fresh: true, reason: 'reject this result against its checks', args: { taskId: T_WAIT, to: 'rejected' } }]);
     expect(said()).toEqual(['You rejected it.', 'res ok']);
   });
 
@@ -995,6 +1299,42 @@ describe('Cancel Task, Accept Anyway, Reject Anyway, Run Again', () => {
     calls = [];
     await click(foot(), 'Run Again');
     expect((posts()[0]!.body as { draftKey: string }).draftKey).not.toBe(key);
+  });
+
+  it('Run Again that the runtime refuses made nothing under its key: the key is dropped, and the next press starts clean with a key of its own', async () => {
+    const keyOf = (c: Call) => (c.body as { draftKey: string }).draftKey;
+    await openTask(T_RED);
+    calls = [];
+    // A rule of his forbids the card: said in a sentence of its own, never as the rule's stored name.
+    routes = answers({ [`POST /tasks/${T_RED}/again`]: { status: 409, body: { error: TASK_SAYS.ruleForbids, code: 'ruleForbids' } } });
+    await click(foot(), 'Run Again');
+    expect(said()).toEqual(['A rule you set doesn’t allow this.', 'res bad']);
+    expect(title()).toBe('Watch a CI Run');
+    // He changes the rule and presses again: a new key, so a new task, not the answer to the one that was refused.
+    routes = answers();
+    await click(foot(), 'Run Again');
+    const sent = posts().filter((c) => c.url.endsWith('/again'));
+    expect(sent).toHaveLength(2);
+    expect(DraftKey.safeParse(keyOf(sent[1]!)).success).toBe(true);
+    expect(keyOf(sent[1]!)).not.toBe(keyOf(sent[0]!));
+    expect(foot().buttons()).toContain('Approve with Touch ID');
+    // Every refusal by its code does the same; "not sure" (no code: it may have gone through) keeps the key.
+    for (const [status, code, say] of [[409, 'assetOff', TASK_SAYS.assetOff], [409, 'itemEnded', TASK_SAYS.itemEnded], [409, 'goalEnded', TASK_SAYS.goalEnded], [409, 'flintAsked', TASK_SAYS.flintAsked], [409, 'notAllowed', TASK_SAYS.notAllowed]] as const) {
+      routes = answers();
+      await openTask(T_RED);
+      calls = [];
+      routes = answers({ [`POST /tasks/${T_RED}/again`]: { status: 504, body: { error: TASKS_SAY.unsure } } });
+      await click(foot(), 'Run Again');
+      routes = answers({ [`POST /tasks/${T_RED}/again`]: { status, body: { error: say, code } } });
+      await click(foot(), 'Run Again');
+      expect(said(), code).toEqual([say, 'res bad']);
+      routes = answers({ [`POST /tasks/${T_RED}/again`]: { status: 504, body: { error: TASKS_SAY.unsure } } });
+      await click(foot(), 'Run Again');
+      const keys = posts().filter((c) => c.url.endsWith('/again')).map(keyOf);
+      expect(keys, code).toHaveLength(3);
+      expect(keys[1], code).toBe(keys[0]);
+      expect(keys[2], code).not.toBe(keys[0]);
+    }
   });
 
   it('a refusal by its code means the task on screen is stale: it is read again and the footer says why; a task that is gone goes back to the list', async () => {
@@ -1124,7 +1464,7 @@ describe('New Task', () => {
     expect(sent).toMatchObject({ params: { item: ITEM }, goalId: GOAL, dueAt: new Date(2026, 9, 20, 23, 59, 0, 0).toISOString() });
   });
 
-  it('a form the runtime did not take keeps what was picked, and sent again it is the same task: the same key', async () => {
+  it('a form the runtime did not answer keeps what was picked, and sent again it is the same task: the same key', async () => {
     await open();
     run('taskNew()');
     await settle();
@@ -1135,9 +1475,8 @@ describe('New Task', () => {
     expect(title()).toBe('New Task');
     expect(body().field('CI Run').value).toBe(ITEM);
     expect(foot().with('btn').map((b) => b.disabled)).toEqual([false, false]);
-    routes = answers({ 'POST /tasks': { status: 400, body: { error: TASK_SAYS.due, code: 'due' } } });
+    // Not sure again, then it goes through: one key all along, so one task whichever of them made it.
     await click(foot(), 'Create Task');
-    expect(said()).toEqual([TASK_SAYS.due, 'res bad']);
     routes = answers();
     await click(foot(), 'Create Task');
     const keys = posts().map((c) => (c.body as { draftKey: string }).draftKey);
@@ -1150,6 +1489,35 @@ describe('New Task', () => {
     pick('CI Run', ITEM);
     await click(foot(), 'Create Task');
     expect((posts().at(-1)!.body as { draftKey: string }).draftKey).not.toBe(keys[0]);
+  });
+
+  it('a form the runtime refuses made nothing under its key: what was picked stays, and sent again it starts clean with a key of its own', async () => {
+    const keys = () => posts().filter((c) => c.url === '/tasks').map((c) => (c.body as { draftKey: string }).draftKey);
+    await open();
+    run('taskNew()');
+    await settle();
+    pick('CI Run', ITEM);
+    calls = [];
+    for (const [status, code, say] of [[409, 'ruleForbids', TASK_SAYS.ruleForbids], [400, 'due', TASK_SAYS.due], [409, 'notAllowed', TASK_SAYS.notAllowed]] as const) {
+      routes = answers({ 'POST /tasks': { status, body: { error: say, code } } });
+      await click(foot(), 'Create Task');
+      expect(said(), code).toEqual([say, 'res bad']);
+      expect(title()).toBe('New Task');
+      expect(body().field('CI Run').value, code).toBe(ITEM);
+      expect(foot().with('btn').map((b) => b.disabled), code).toEqual([false, false]);
+    }
+    // Not sure it went through (no code): that key is kept, so the next press is the same task.
+    routes = answers({ 'POST /tasks': { status: 504, body: { error: TASKS_SAY.unsure } } });
+    await click(foot(), 'Create Task');
+    routes = answers();
+    await click(foot(), 'Create Task');
+    const ks = keys();
+    expect(ks).toHaveLength(5);
+    for (const k of ks) expect(DraftKey.safeParse(k).success).toBe(true);
+    // Each refusal took its key with it: the three refused and the one after them are four different keys.
+    expect(new Set(ks.slice(0, 4)).size).toBe(4);
+    expect(ks[4]).toBe(ks[3]);
+    expect(foot().buttons()).toContain('Approve with Touch ID');
   });
 
   it('what it can offer has changed: the form is read again and says why; an item that is no longer offered is no longer picked', async () => {
@@ -1170,7 +1538,7 @@ describe('New Task', () => {
     routes = answers({ 'POST /tasks': { status: 409, body: { error: TASK_SAYS.assetOff, code: 'assetOff' } }, 'GET /tasks/form': { status: 200, body: form({ templates: [] }) } });
     pick('CI Run', 'en1a2b3c4d5e6f7g8h9i0j1k');
     await click(foot(), 'Create Task');
-    expect(empty()).toEqual(['Tasks Are Off', 'Turn on the CI Watcher in Settings to start.']);
+    expect(empty()).toEqual(['Nothing to Run Yet', 'No asset that is on can run a task yet.']);
     expect(body().buttons()).toEqual(['Open Settings']);
     expect(said()).toEqual([TASK_SAYS.assetOff, 'res bad']);
   });
@@ -1188,7 +1556,9 @@ describe('New Task', () => {
     routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: others }) } });
     run('taskNew()');
     await settle();
-    expect(empty()![0]).toBe('Tasks Are Off');
+    expect(empty()).toEqual(['Nothing to Run Yet', 'No asset that is on can run a task yet.']);
+    ownWords(['Nothing to Run Yet'], ['No asset that is on can run a task yet.']);
+    expect(body().buttons()).toEqual(['Open Settings']);
     expect(foot().hidden).toBe(true);
     routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: [...others, form().templates[0]!] }) } });
     run('taskNew()');
@@ -1286,7 +1656,8 @@ describe('Settings > Assets', () => {
     await click(host(), 'Turn Off');
     expect(calls).toEqual([]);
     expect(rows(host())).toEqual([['CI Watcher', ['Tasks that are running on it will fail.'], 'On']]);
-    expect(host().buttons()).toEqual(['Cancel', 'Turn Off']);
+    // The button that goes through with it comes first; Cancel takes the end of the row, where the lone Turn Off was, and the cursor.
+    expect(host().buttons()).toEqual(['Turn Off', 'Cancel']);
     expect(focused?.textContent).toBe('Cancel');
     // Cancel puts it back as it was.
     await click(host(), 'Cancel');
@@ -1323,7 +1694,7 @@ describe('Settings > Assets', () => {
     routes = answers({ [`POST /assets/${WATCHER}/off`]: { status: 503, body: { error: TASKS_SAY.downWrite } } });
     await click(host(), 'Turn Off');
     expect(msg()).toBe(TASKS_SAY.downWrite);
-    expect(host().buttons()).toEqual(['Cancel', 'Turn Off']);
+    expect(host().buttons()).toEqual(['Turn Off', 'Cancel']);
     expect(host().with('btn').map((b) => b.disabled)).toEqual([false]);
     // Turn On refused: the same.
     routes = answers({ 'GET /assets': { status: 200, body: assets(asset({ on: false, canTurnOn: true })) }, [`POST /assets/${WATCHER}/on`]: { status: 409, body: { error: TASK_SAYS.needsGithub, code: 'needsGithub' } } });
@@ -1353,33 +1724,126 @@ describe('Settings > Assets', () => {
 });
 
 describe('the Approvals panel names a card’s task', () => {
-  it('reads each task its cards are about once, by its id, and draws the list again; a card of another kind, or one with no task’s id, is not asked about', async () => {
-    const ps = [CARDS.accept, CARDS.cancel, { ...CARDS.reject }, CARDS.enable, { id: 'pr9', fullName: 'goal.activate', status: 'pending', args: { taskId: T_DONE } }, { ...CARDS.dispatch, id: 'prbad', args: { taskId: '../assets' } }];
-    let learned = -1;
-    ctx.LEARNED = (n: number) => (learned = n);
+  const name = (p: unknown) => run(`apprTaskName(${JSON.stringify(p)})`);
+  const known = () => (JSON.parse(run('JSON.stringify(Object.keys(APPR_TASKS))') as string) as string[]).sort();
+  let learned: number[];
+  const names = async (ps: unknown[]) => {
+    ctx.LEARNED = (n: number) => void learned.push(n);
     run(`taskNames(${JSON.stringify(ps)},LEARNED)`);
     await settle();
+  };
+  beforeEach(() => {
+    learned = [];
+  });
+
+  it('reads each task its cards are about, by its id, every time it is asked; a card of another kind, a tool’s card under a task card’s name, or one with no task’s id is not asked about', async () => {
+    const ps = [
+      CARDS.accept, CARDS.cancel, { ...CARDS.reject }, CARDS.enable, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: { taskId: T_DONE } },
+      { ...CARDS.dispatch, id: 'prbad', args: { taskId: '../assets' } }, { ...CARDS.override, id: 'prtool', kind: 'tool_call', mcp: true }, { ...CARDS.override, id: 'prnokind', kind: undefined },
+    ];
+    await names(ps);
     expect(calls.map((c) => c.url).sort()).toEqual([`/tasks/${T_OUT}`, `/tasks/${T_WAIT}`]);
-    expect(learned).toBe(2);
-    expect(run(`apprTaskName(${JSON.stringify(CARDS.cancel)})`)).toBe('Watch a CI Run · wpf002/flint CI');
-    // Known now: nothing is read again.
+    // Told once, when every read is back, how many it read.
+    expect(learned).toEqual([2]);
+    expect(name(CARDS.cancel)).toBe('Watch a CI Run · wpf002/flint CI');
+    expect(known()).toEqual([T_OUT, T_WAIT]);
+    // Asked again, it reads again: what it read before is not trusted to be current.
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: { task: view(T_OUT, { about: 'wpf002/nexus CI' }) } } });
     calls = [];
-    run(`taskNames(${JSON.stringify(ps)},LEARNED)`);
-    await settle();
+    await names(ps);
+    expect(calls.map((c) => c.url).sort()).toEqual([`/tasks/${T_OUT}`, `/tasks/${T_WAIT}`]);
+    expect(learned).toEqual([2, 2]);
+    expect(name(CARDS.cancel)).toBe('Watch a CI Run · wpf002/nexus CI');
+    // Nothing to read: it still answers, once.
+    calls = [];
+    await names([CARDS.enable, { ...CARDS.override, kind: 'tool_call', mcp: true }]);
+    await names([]);
     expect(calls).toEqual([]);
-    expect(learned).toBe(0);
-    // A task that cannot be read is left unnamed, and the card still shows what it holds.
-    routes = answers({ [`GET /tasks/${T_NEW}`]: { status: 404, body: { error: TASK_SAYS.noTask, code: 'noTask' } } });
-    run(`taskNames(${JSON.stringify([CARDS.dispatch])},LEARNED)`);
-    await settle();
-    expect(learned).toBe(0);
-    expect(run(`apprTaskName(${JSON.stringify(CARDS.dispatch)})`)).toBe('Watch a CI Run');
+    expect(learned).toEqual([2, 2, 0, 0]);
     // Many cards: a bounded number of reads.
     const many = Array.from({ length: 40 }, (_, i) => ({ ...CARDS.cancel, id: `prm${i}`, args: { taskId: `tk${String(i).padStart(18, '0')}` } }));
     calls = [];
-    run(`taskNames(${JSON.stringify(many)},LEARNED)`);
-    await settle();
+    await names(many);
     expect(calls).toHaveLength(20);
+    expect(run('TASK_NAMES_MAX')).toBe(20);
+  });
+
+  it('keeps a name only under the id it asked for: an answer about another task is dropped, a task that is gone takes its name with it, and a runtime that is down changes nothing', async () => {
+    // The answer names another task: nothing is kept under the id that was asked, nor under the id it names.
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: { task: view(T_RED, { title: 'Pay Everyone', about: 'somewhere else' }) } } });
+    await names([CARDS.cancel]);
+    expect(learned).toEqual([0]);
+    expect(known()).toEqual([]);
+    expect(name(CARDS.cancel)).toBe('');
+    expect(name(CARDS.override)).toBe('');
+    // What was known under that id before is left as it was: the answer is dropped, whole.
+    routes = answers();
+    await names([CARDS.cancel]);
+    expect(name(CARDS.cancel)).toBe('Watch a CI Run · wpf002/flint CI');
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: { task: view(T_RED, { title: 'Pay Everyone', about: 'somewhere else' }) } } });
+    await names([CARDS.cancel]);
+    expect(name(CARDS.cancel)).toBe('Watch a CI Run · wpf002/flint CI');
+    expect(known()).toEqual([T_OUT]);
+    // An answer with no task, or a task with no title, names nothing.
+    for (const body of [{}, { task: null }, { task: { id: T_WAIT } }, { task: { id: T_WAIT, title: 7 } }]) {
+      routes = answers({ [`GET /tasks/${T_WAIT}`]: { status: 200, body } });
+      await names([CARDS.accept]);
+      expect(name(CARDS.accept), JSON.stringify(body)).toBe('');
+    }
+    // A task that is gone takes its name with it: the card shows only what it holds.
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 404, body: { error: TASK_SAYS.noTask, code: 'noTask' } } });
+    await names([CARDS.cancel]);
+    expect(learned.at(-1)).toBe(0);
+    expect(known()).toEqual([]);
+    expect(name(CARDS.cancel)).toBe('');
+    expect(name(CARDS.dispatch)).toBe('Watch a CI Run');
+    // A runtime that is down, or any other failure, leaves what was known.
+    routes = answers();
+    await names([CARDS.cancel]);
+    for (const a of [{ status: 503, body: { error: TASKS_SAY.down } }, { status: 502, body: { error: TASKS_SAY.unreadable } }, { status: 404, body: { error: 'x' } }]) {
+      routes = answers({ [`GET /tasks/${T_OUT}`]: a });
+      await names([CARDS.cancel]);
+      expect(learned.at(-1), String(a.status)).toBe(0);
+      expect(name(CARDS.cancel), String(a.status)).toBe('Watch a CI Run · wpf002/flint CI');
+    }
+  });
+
+  it('opening a task keeps its name for its cards only when the answer is the task that was asked for; any other answer is not shown and nothing of it is kept', async () => {
+    await openTask(T_OUT);
+    expect(JSON.parse(run(`JSON.stringify(APPR_TASKS['${T_OUT}'])`) as string)).toEqual({ title: 'Watch a CI Run', about: 'wpf002/flint CI' });
+    expect(known()).toEqual([T_OUT]);
+    run(`delete APPR_TASKS['${T_OUT}']`);
+    // The runtime (or something between) answers with another task.
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: { task: view(T_RED, { title: 'Pay Everyone', about: 'somewhere else' }) } } });
+    calls = [];
+    run(`taskOpen('${T_OUT}')`);
+    await settle();
+    expect(empty()).toEqual(['Couldn’t Load Tasks', 'The runtime sent an answer Flint can’t read.']);
+    expect(body().buttons()).toEqual(['Try Again']);
+    expect(screen()).not.toMatch(/Pay Everyone|somewhere else/);
+    expect(foot().hidden).toBe(true);
+    expect(known()).toEqual([]);
+    expect(run('TASKS.task')).toBeNull();
+    ownWords(['Couldn’t Load Tasks'], ['The runtime sent an answer Flint can’t read.']);
+    // The same for an answer with no task in it.
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: {} } });
+    await click(body(), 'Try Again');
+    expect(empty()![0]).toBe('Couldn’t Load Tasks');
+    expect(known()).toEqual([]);
+    // Try Again asks for the task that was asked for, and shows it when it is the one that answers.
+    routes = answers();
+    await click(body(), 'Try Again');
+    expect(calls.at(-1)).toEqual({ url: `/tasks/${T_OUT}`, method: 'GET', body: undefined });
+    expect(title()).toBe('Watch a CI Run');
+    expect(known()).toEqual([T_OUT]);
+    // An id that is no task's id is never a key of what this page knows ("__proto__", "constructor").
+    for (const id of ['__proto__', 'constructor', 'toString']) {
+      routes = answers({ [`GET /tasks/${id}`]: { status: 200, body: { task: view(id, { title: 'Pay Everyone' }) } } });
+      run(`taskOpen(${JSON.stringify(id)})`);
+      await settle();
+      expect(known(), id).toEqual([T_OUT]);
+      expect(run('({}).title'), id).toBeUndefined();
+    }
   });
 });
 
@@ -1456,6 +1920,18 @@ describe('what the panel holds', () => {
     expect(phone).toContain('#taskseg button{height:44px;');
     // A task's row on a phone: its marks and what it is about take a line of their own, under the title and beside nothing.
     expect(phone).toContain('.row.tkrow .tmeta{order:3;flex:1 1 100%;');
+    // What a task is about is set no larger there than the sentence above it (a row's own text is larger on a phone).
+    const size = (rule: string) => /font-size:(\d+)px;line-height:(\d+)px/.exec(rule)!.slice(1).map(Number);
+    const aboutRule = /\.row\.tkrow \.tmeta \.val\{([^}]*)\}/.exec(phone)![1]!;
+    const sentenceRule = /\n  \.row \.lbl span\{([^}]*)\}/.exec(html)![1]!;
+    expect(size(aboutRule)).toEqual(size(sentenceRule));
+    expect(size(aboutRule)).toEqual([12, 16]);
+    expect(/\n    \.row\{[^}]*font-size:(\d+)px/.exec(html)![1]).toBe('17');
+    // Show Details, open: its chevron turns (the button says so to a screen reader too: aria-expanded).
+    expect(css).toContain('button[aria-expanded="true"]>svg.i{transform:rotate(90deg);}');
+    expect(html.match(/setAttribute\('aria-expanded'/g)!.length).toBeGreaterThanOrEqual(4);
+    // The mark beside a looked-up value is small and muted, and never wraps away from its value.
+    expect(css).toMatch(/\.looked\{[^}]*font-size:11px;[^}]*color:var\(--t3\);[^}]*white-space:nowrap;/);
     expect(css).not.toMatch(/outline:\s*(none|0)|:focus/);
     expect(html).toContain(':focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--gold-hi);border-radius:6px;}');
     // The palette is the page's own: the panel names no colour of its own.

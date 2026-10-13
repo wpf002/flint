@@ -83,6 +83,10 @@ let answer: (c: Call) => { status: number; body: unknown };
 let ids: Record<string, El>;
 let decided: Array<[string, string, Record<string, unknown>?]>;
 let failApprove: string | null;
+/** What a failed approval says ("not confirmed" is a prompt Will dismissed). */
+let failWith: string;
+/** Set to a list, approvals wait in it (the prompt is up) until the test settles them. */
+let held: Array<{ id: string; card: El; ok: (d: unknown) => void; no: (e: Error) => void }> | null;
 let ctx: Record<string, unknown>;
 let keyed: boolean;
 let panels: Record<string, boolean>;
@@ -94,7 +98,7 @@ const run = (code: string) => runInContext(code, ctx);
 /** The footer's note, read with plain spaces (its second sentence is held together with no-break ones). */
 const noteSays = () => ids.apprnote!.textContent.replace(/\u00a0/g, ' ');
 const card = (over: Record<string, unknown> = {}) => ({
-  id: 'pr1', fullName: 'world.source.enable', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
+  id: 'pr1', fullName: 'world.source.enable', kind: 'tool_call', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
   expiresAt: '2026-10-12T14:00:00.000Z', ...over,
 });
 /** An ordinary card, which may share one prompt with others in Approve All: a read chat asked for. (A card that turns a source on asks on its own.) */
@@ -105,6 +109,8 @@ beforeEach(() => {
   calls = [];
   decided = [];
   failApprove = null;
+  failWith = 'not confirmed';
+  held = null;
   keyed = true;
   panels = {};
   answer = () => ({ status: 200, body: { proposals: [], signed: true } });
@@ -135,7 +141,8 @@ beforeEach(() => {
     approveLabel: (all?: boolean) => (all ? 'Approve All with Password' : 'Approve with Password'),
     approveAction: (id: string, _card: El, o: Record<string, unknown>) => {
       decided.push(['approve', id, o]);
-      return failApprove === id ? Promise.reject(new Error('not confirmed')) : Promise.resolve({ action: { status: 'done' } });
+      if (held) return new Promise((ok, no) => void held!.push({ id, card: _card, ok, no }));
+      return failApprove === id ? Promise.reject(new Error(failWith)) : Promise.resolve({ action: { status: 'done' } });
     },
     rejectAction: (id: string) => void decided.push(['reject', id]),
     postJson: async (path: string, body: unknown) => (calls.push({ url: path, method: 'POST', body }), { action: { status: 'done' } }),
@@ -164,9 +171,9 @@ describe('the console Approvals panel', () => {
       body: {
         signed: true,
         proposals: [
-          card({ id: 'pr0', fullName: 'policy.change', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
+          card({ id: 'pr0', fullName: 'policy.change', kind: 'policy', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
           card(),
-          card({ id: 'pr2', fullName: 'world.person.create', origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
+          card({ id: 'pr2', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
         ],
       },
     });
@@ -207,17 +214,22 @@ describe('the console Approvals panel', () => {
   });
 
   it('Approve and Reject on the open card take the signed path chat cards use; outside text asks on its own', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', args: { people: [] } }), card({ id: 'pr3' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', kind: 'tool_call', args: { people: [] } }), card({ id: 'pr3' })] } });
     await open();
     const first = ids.apprlist!.children[0]!.children[0]!;
     first.button('Approve with Password').onclick!();
-    first.button('Reject').onclick!();
     // The args the card shows go with it: what is signed must hash to them (the main script checks the challenge).
     expect(decided[0]).toEqual(['approve', 'pr1', { reason: 'approve: Read What Triage Decided', fresh: false, args: { lane: 'relevant' } }]);
+    // (Reject is taken once that approval has settled: nothing else on the list is, while a prompt is up.)
+    first.button('Reject').onclick!();
+    expect(decided).toHaveLength(1);
+    await settle();
+    first.button('Reject').onclick!();
     expect(decided[1]).toEqual(['reject', 'pr1']);
     ids.apprlist!.children[0]!.children[1]!.onclick!();
     ids.apprlist!.children[0]!.children[1]!.button('Approve with Password').onclick!();
     expect(decided[2]![2]).toEqual({ reason: 'approve: Add 0 People from Calendar', fresh: true, args: { people: [] } });
+    await settle();
     // A card that turns a source on changes what Flint reads: a fresh touch for it too.
     ids.apprlist!.children[0]!.children[2]!.onclick!();
     ids.apprlist!.children[0]!.children[2]!.button('Approve with Password').onclick!();
@@ -247,7 +259,18 @@ describe('the console Approvals panel', () => {
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b']);
-    expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. Cancelled.');
+    // A prompt Will dismissed is said as that, the same sentence a single card says: never "Cancelled.".
+    expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. You dismissed the prompt. The card is waiting in Approvals.');
+    // Anything else is the sentence it came with.
+    decided = [];
+    failWith = 'The runtime isn’t answering.';
+    run('approveAll()');
+    await settle();
+    expect(decided.map((d) => d[1])).toEqual(['a', 'b']);
+    expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. The runtime isn’t answering.');
+    expect(run('promptDismissed(new Error("Not Confirmed"))')).toBe(true);
+    expect(run('promptDismissed({name:"NotAllowedError",message:"The operation either timed out or was not allowed."})')).toBe(true);
+    for (const e of ['new Error("not confirmed by the runtime")', 'new Error("It stopped.")', 'null', '"Cancelled."']) expect(run(`promptDismissed(${e})`), e).toBe(false);
   });
 
   it('a device without an approval key is pointed to Settings', async () => {
@@ -324,7 +347,7 @@ describe('the console Approvals panel', () => {
       { name: 'Mom', email: 'mallory@evil.example', emailHash: 'b'.repeat(64) },
       { name: 'sam@corp.example', email: 'sam@corp.example', emailHash: 'c'.repeat(64) },
     ];
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pp', fullName: 'world.person.create', origin: 'runtime:google_calendar', tainted: true, args: { people } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pp', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:google_calendar', tainted: true, args: { people } })] } });
     await open();
     const shown = ids.apprlist!.children[0]!.children[0]!.shown();
     expect(shown).toContain('Add 3 People from Calendar');
@@ -339,7 +362,7 @@ describe('the console Approvals panel', () => {
   it('a person card says which calendar its people came from in its subtitle, the one Will signs, and still says when it expires', async () => {
     const people = [{ name: 'Ada Lovelace', email: 'ada@example.com', emailHash: 'a'.repeat(64) }];
     const shown = async (args: Record<string, unknown>) => {
-      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', origin: 'runtime:apple_calendar', tainted: true, args })] } });
+      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:apple_calendar', tainted: true, args })] } });
       await open();
       const row = ids.apprlist!.children[0]!.children[0]!;
       const dl = row.all().find((e) => e.tagName === 'dl')!;
@@ -355,7 +378,7 @@ describe('the console Approvals panel', () => {
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'google', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pz', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
+    const promo = card({ id: 'pz', fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
@@ -373,7 +396,7 @@ describe('the console Approvals panel', () => {
   it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and asks on its own, as every card that lets something run alone does', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pa', fullName: 'policy.change', args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
+    const promo = card({ id: 'pa', fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
@@ -465,10 +488,10 @@ describe('the console Approvals panel', () => {
 
   it('removing old backups is a card of its own: it says how much would go, that it cannot be undone, and it asks on its own', async () => {
     const prune = (over: Record<string, unknown> = {}) => card({
-      id: 'prune', fullName: 'backup.prune', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
+      id: 'prune', fullName: 'backup.prune', kind: 'tool_call', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
       reason: 'It waits for your approval each night there are old backups to remove, until you let it run on its own.', ...over,
     });
-    answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', kind: 'tool_call', origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
     await open();
     const row = ids.apprlist!.children[0]!.children[0]!;
     const shown = row.shown();
@@ -582,7 +605,7 @@ describe('the console Approvals panel', () => {
   });
 
   it('the restore test’s card never names a time already past: on the Sunday it was filed, it runs next Sunday', async () => {
-    const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', origin: 'runtime:drill', status, args: {} });
+    const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', kind: 'tool_call', origin: 'runtime:drill', status, args: {} });
     const lines = async (now: Date) => {
       ctx.apprNow = () => now;
       answer = () => ({ status: 200, body: { signed: true, proposals: [drill('pending')] } });
@@ -607,16 +630,16 @@ describe('the console Approvals panel', () => {
   it('every line under a card’s title is a sentence, whatever filed it', () => {
     const sub = (p: Record<string, unknown>) => run(`apprSub(${JSON.stringify(p)})`) as string;
     for (const source of ['launchd', 'health', 'git', 'spend', 'deploy', 'knowledge', 'nexus_inbox', 'nexus', 'github', 'railway', 'google_calendar', 'apple_calendar', 'unknown_source']) {
-      expect(sub({ fullName: 'world.source.enable', args: { source } })).toMatch(/^[A-Z].*\.$/);
+      expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', args: { source } })).toMatch(/^[A-Z].*\.$/);
     }
-    expect(sub({ fullName: 'world.source.enable', args: { source: 'unknown_source' } })).toBe('Flint starts reading this source.');
-    expect(sub({ fullName: 'policy.change', args: { rows: [{}] } })).toBe('It changes what Flint may do on its own.');
+    expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', args: { source: 'unknown_source' } })).toBe('Flint starts reading this source.');
+    expect(sub({ fullName: 'policy.change', kind: 'policy', args: { rows: [{}] } })).toBe('It changes what Flint may do on its own.');
     // A card that names no calendar is Google's, as every P2.5 card was.
-    expect(sub({ fullName: 'world.person.create', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
-    expect(sub({ fullName: 'world.person.create', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
-    expect(sub({ fullName: 'triage.rule.create', args: {} })).toBe('This adds a new rule.');
-    expect(sub({ fullName: 'triage.rule.create', args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
-    expect(sub({ fullName: 'world.relation.write', args: {} })).toBe('Flint’s memory suggests this link.');
+    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
+    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
+    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', args: {} })).toBe('This adds a new rule.');
+    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
+    expect(sub({ fullName: 'world.relation.write', kind: 'tool_call', args: {} })).toBe('Flint’s memory suggests this link.');
     expect(sub({ fullName: 'mcp.x', origin: 'console' })).toBe('You filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'runtime:knowledge' })).toBe('Flint filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'chat:abc' })).toBe('A chat filed this.');
@@ -638,41 +661,41 @@ describe('the console Approvals panel', () => {
       const c = { origin: 'console', expiresAt: '2026-10-16T14:00:00.000Z', ...p };
       return [run(`apprTitle(${JSON.stringify(c)})`), run(`apprSub(${JSON.stringify(c)})`), JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(c)})`))), run(`apprIcon(${JSON.stringify(c)})`)];
     };
-    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit, horizonAt: h }, reason: 'Approving starts this goal.' }))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit, horizonAt: h }, reason: 'Approving starts this goal.' }))
       .toEqual(['Add a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks'], ['Finish By', run(`apprDate('${h}')`)]], 'target']);
-    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit.slice(0, 1), horizonAt: null, origin: 'flint' } }).slice(0, 3))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit.slice(0, 1), horizonAt: null, origin: 'flint' } }).slice(0, 3))
       .toEqual(['Activate a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '1 Check'], ['Finish By', 'No Date']]]);
-    expect(say({ fullName: 'goal.activate', args: { title: 'Synthetic goal', successCriteria: crit }, reason: 'Approving resumes this goal.' }).slice(0, 2)).toEqual(['Resume a Goal', 'It resumes as soon as you approve.']);
-    expect(say({ fullName: 'goal.criteria_change', args: { title: 'Synthetic goal', successCriteria: crit } }).slice(0, 3)).toEqual(['Change a Goal', 'This changes what counts as done.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks']]]);
-    expect(say({ fullName: 'goal.horizon_change', args: { goalTitle: 'Synthetic goal', horizonAt: null, reviewCadence: 'P2W' } }).slice(0, 3))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit }, reason: 'Approving resumes this goal.' }).slice(0, 2)).toEqual(['Resume a Goal', 'It resumes as soon as you approve.']);
+    expect(say({ fullName: 'goal.criteria_change', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit } }).slice(0, 3)).toEqual(['Change a Goal', 'This changes what counts as done.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks']]]);
+    expect(say({ fullName: 'goal.horizon_change', kind: 'goal', args: { goalTitle: 'Synthetic goal', horizonAt: null, reviewCadence: 'P2W' } }).slice(0, 3))
       .toEqual(['Change a Goal’s Timing', 'This changes its date or how often it’s reviewed.', [['Goal', 'Synthetic goal'], ['Finish By', 'No Date'], ['Review Every', '2 Weeks']]]);
-    expect(say({ fullName: 'goal.done', args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
-    expect(say({ fullName: 'goal.abandon', args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
+    expect(say({ fullName: 'goal.done', kind: 'goal', args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
+    expect(say({ fullName: 'goal.abandon', kind: 'goal', args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
     // A review's cards as the runtime files them: each change with the step as it is now (`from`). The dates move by two days.
     const was = new Date(Date.parse(h) - 2 * 86_400_000).toISOString();
     const ops = [
       { op: 'add', key: 's4' }, { op: 'set', key: 's1', from: { title: 'Synthetic step one', dueAt: was }, to: { dueAt: h } },
       { op: 'set', key: 's2', from: { title: 'Synthetic step two', dueAt: was }, to: { dueAt: h } }, { op: 'set', key: 's3', from: { title: 'Synthetic step three', status: 'todo' }, to: { status: 'blocked' } },
     ];
-    expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
+    expect(say({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
       .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
-    expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
-    expect(say({ fullName: 'plan.change', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
+    expect(say({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
+    expect(say({ fullName: 'plan.change', kind: 'plan', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
     // What chat suggested (part 5), as the candidates intake files it: the short text, Will's own words, and the day Flint read (never called his).
-    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+    expect(say({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
       .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon'], ['Day Flint Read', 'Mar 20, 2027']]]);
-    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
-    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+    expect(say({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
       .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['Commitment', 'Send it'], ['You Said', 'I will send it by Friday']]]);
-    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Day Flint Read', 'Mar 20, 2027']]);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Day Flint Read', 'Mar 20, 2027']]);
     // The titles are the ones Will's notes use for the same two actions.
-    expect(say({ fullName: 'goal.propose', args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
-    expect(say({ fullName: 'world.commitment.from_chat', args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
+    expect(say({ fullName: 'goal.propose', kind: 'goal', args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
     // A card whose args were cleared says what it still knows, and no empty facts.
-    expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
-    expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
+    expect(say({ fullName: 'goal.done', kind: 'goal', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
+    expect(say({ fullName: 'goal.activate', kind: 'goal', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
     // The policy card names P3's rows in words.
-    expect(say({ fullName: 'policy.change', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
+    expect(say({ fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
       .toContainEqual(['Limits', 'Goal Reviews 20 a Day · Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day']);
   });
 
@@ -687,23 +710,25 @@ describe('the console Approvals panel', () => {
   });
 
   it('every goal card, and every consequential card, asks on its own with a fresh touch and a plain prompt; what chat suggested is filed as one; a small plan change rides Approve All', async () => {
-    const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
+    // (Each under the kind the runtime files it under: a goal's card as a goal, a plan's as a plan, a commitment as a tool call.)
+    const kindOf = (fullName: string) => (fullName === 'plan.change' ? 'plan' : fullName === 'world.commitment.from_chat' ? 'tool_call' : 'goal');
+    const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, kind: kindOf(fullName), origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
     const alone = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon'];
     // Even without the server's mark, a goal card's name keeps it alone (an older server).
-    for (const a of alone) expect(run(`apprAlone(${JSON.stringify({ fullName: a })})`), a).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change' })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', consequential: true })})`)).toBe(true);
+    for (const a of alone) expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind: 'goal' })})`), a).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', kind: 'tool_call', consequential: true })})`)).toBe(true);
     const small = [{ op: 'set', key: 's1', from: { title: 'Synthetic step one', status: 'todo' }, to: { status: 'blocked' } }];
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } })})`)).toBe(false);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } })})`)).toBe(false);
     // What chat suggested asks on its own by the mark the intake files it with (the runtime's choice, which a later table may change), not by its name.
-    for (const a of ['goal.propose', 'world.commitment.from_chat']) {
-      expect(run(`apprAlone(${JSON.stringify({ fullName: a, origin: 'chat:c1', consequential: true })})`), a).toBe(true);
-      expect(run(`apprAlone(${JSON.stringify({ fullName: a, origin: 'chat:c1' })})`), a).toBe(false);
+    for (const [a, kind] of [['goal.propose', 'goal'], ['world.commitment.from_chat', 'tool_call']]) {
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, origin: 'chat:c1', consequential: true })})`), a).toBe(true);
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, origin: 'chat:c1' })})`), a).toBe(false);
     }
     // Review finding 2: which plan card is a small one is read from its operations, never from the template's name alone.
     const due = '2026-10-20T22:00:00.000Z';
-    const minor = (ops: unknown[], over: Record<string, unknown> = {}) => ({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops }, ...over });
+    const minor = (ops: unknown[], over: Record<string, unknown> = {}) => ({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops }, ...over });
     const says = (p: Record<string, unknown>) => [run(`apprAlone(${JSON.stringify(p)})`), run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`)];
     // Small: a status among not started, in progress and blocked; a date moved by a week at most; a step put elsewhere.
     expect(says(minor([
@@ -726,7 +751,7 @@ describe('the console Approvals panel', () => {
     for (const [what, ops] of bigger) expect(says(minor(ops)), what).toEqual([true, 'Change a Plan', 'Flint suggests a bigger change.']);
     // The server's own mark wins too, and a card whose args were cleared is never taken for a small one.
     expect(says(minor(small, { consequential: true }))[0]).toBe(true);
-    expect(says({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: null })[0]).toBe(true);
+    expect(says({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: null })[0]).toBe(true);
     answer = () => ({
       status: 200,
       body: {
@@ -765,12 +790,15 @@ describe('the console Approvals panel', () => {
       expect(o.fresh, alone[i]).toBe(true);
       expect(o.args).toEqual({ goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' });
       prompts.push(o.reason);
+      // (The next card opens once this approval has settled.)
+      await settle();
     }
     expect(prompts).toEqual(['add this goal', 'change what counts as done for this goal', 'change this goal’s timing', 'mark this goal done', 'abandon this goal']);
     for (const p of prompts) expect(p).not.toMatch(/goal\.|approve/);
     rows()[6]!.onclick?.();
     rows()[6]!.button('Approve with Password').onclick!();
     expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason: 'change this goal’s plan' });
+    await settle();
     // What chat suggested: each on its own, fresh, with a plain prompt and exactly the args it showed.
     for (const [id, reason] of [['gp', 'add this suggested goal'], ['gc', 'add this commitment']] as const) {
       const at = (JSON.parse(JSON.stringify(run('APPR.pending.map(function(c){return c.id;})'))) as string[]).indexOf(id);
@@ -779,13 +807,14 @@ describe('the console Approvals panel', () => {
       rows()[at]!.button('Approve with Password').onclick!();
       expect(decided.at(-1)![1]).toBe(id);
       expect(decided.at(-1)![2]).toMatchObject({ fresh: true, reason, args: { quote: 'Synthetic quoted words' } });
+      await settle();
     }
   });
 
   it('Turn On Predictions (P4) is in words, names each number it turns on, and asks on its own with a fresh touch and a plain prompt', async () => {
     const three = ['daily.calendar.hours', 'daily.deploys.count', 'daily.spend.anthropic.usd'];
     const predict = (over: Record<string, unknown> = {}) => card({
-      id: 'tp', fullName: 'forecast.series.enable', origin: 'console', sensitivity: 'financial', consequential: true,
+      id: 'tp', fullName: 'forecast.series.enable', kind: 'tool_call', origin: 'console', sensitivity: 'financial', consequential: true,
       args: { series: three, reason: [] }, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.', ...over,
     });
     /** The card's facts, read with plain spaces ("and 8 more" is held together with no-break ones). */
@@ -828,8 +857,8 @@ describe('the console Approvals panel', () => {
       expect(`${run(`apprTitle(${JSON.stringify(p)})`)} ${run(`apprSub(${JSON.stringify(p)})`)} ${facts(p).flat().join(' ')}`).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|acme|x\.y|[{}[\]"]/);
     }
     // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', sensitivity: 'ops' })})`)).toBe(true);
     answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), plain({ id: 'src' })] } });
     await open();
     expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
@@ -923,7 +952,7 @@ describe('the console Approvals panel', () => {
   it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
     const told: string[] = [];
     ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', kind: 'goal', consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
     await open();
     ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
     await settle();
@@ -989,13 +1018,13 @@ describe('the console Approvals panel', () => {
       expect(words({ ...P5.enable, args: enable({ kind: 'local_worker', name: 'Local Tasks', capabilities: ['summarize_items', 'new_thing'], spends: true }) })).toEqual([
         'Turn On an Asset', 'Flint can hand it work once it’s on.', JSON.stringify([['Asset', 'Local Tasks'], ['Can Do', 'Summarize Items · New Thing'], ['Cost', 'Costs Money']]),
       ]);
-      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', cost: undefined, args: watch({ title: 'Summarize Items' }) })).toEqual(['Run a Task', 'Flint runs it once you approve it.', JSON.stringify([['Task', 'Summarize Items'], ['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'task', cost: undefined, args: watch({ title: 'Summarize Items' }) })).toEqual(['Run a Task', 'Flint runs it once you approve it.', JSON.stringify([['Task', 'Summarize Items'], ['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
       expect(words({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } }).slice(0, 2)).toEqual(['Overrule a Task’s Checks', 'It ends against Flint’s checks.']);
       // A result is called passed only when every check is met, by the card's own counts.
       for (const args of [{ checks: 3, met: 2 }, { checks: 0, met: 0 }, { checks: '2', met: '2' }, { checks: 2.5, met: 2.5 }, {}]) expect(words({ ...P5.accept, args: { taskId: TASK, ...args } })[1], JSON.stringify(args)).toBe('Flint checked its result.');
       // A name a table does not hold is not a word: "constructor" is no kind of asset.
       for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) expect(words({ ...P5.enable, args: enable({ kind }) })[0], kind).toBe('Turn On an Asset');
-      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.constructor', args: watch() })[0]).toBe('Run a Task');
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.constructor', kind: 'task', args: watch() })[0]).toBe('Run a Task');
       for (const p of Object.values(P5)) {
         const [title, sub, f] = words({ ...p, args: null, cost: undefined });
         expect(title).toMatch(/^[A-Z]/);
@@ -1004,22 +1033,65 @@ describe('the console Approvals panel', () => {
       }
     });
 
-    it('the cost on a dispatch card is the server’s reading of the number Will signs, or that number itself from an older server; anything else is never put in words', () => {
+    it('the cost on a dispatch card is the number Will signs, which the server’s reading of it has to agree with; a cost that cannot be read says so, is never put in other words, and the card asks on its own', () => {
       const cost = (p: Record<string, unknown>) => facts(p).find((x) => x[0] === 'Cost')?.[1] ?? null;
-      expect(cost(P5.dispatch)).toBe('No Cost');
-      expect(cost({ ...P5.dispatch, cost: undefined })).toBe('No Cost');
-      expect(cost({ ...P5.dispatch, cost: { micros: 12_500_000 }, args: watch({ estCostMicros: 12_500_000 }) })).toBe('About $12.50');
-      expect(cost({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 2_500 }) })).toBe('About $0.0025');
-      expect(cost({ ...P5.dispatch, cost: { micros: 1_000_000_000 }, args: watch({ estCostMicros: 1_000_000_000 }) })).toBe('About $1000.00');
+      const alone = (p: Record<string, unknown>) => run(`apprAlone(${JSON.stringify(p)})`) as boolean;
+      const UNREAD = 'Flint couldn’t read the cost.';
+      expect(run('APPR_COST_UNREAD')).toBe(UNREAD);
+      expect(noteProblems('Approvals', UNREAD)).toEqual([]);
+      // Exactly nothing, by the args and by the server (or by the args alone, from an older server): the one card that may share a prompt.
+      for (const p of [P5.dispatch, { ...P5.dispatch, cost: undefined }]) {
+        expect(cost(p)).toBe('No Cost');
+        expect(alone(p)).toBe(false);
+      }
+      for (const [micros, says] of [[12_500_000, 'About $12.50'], [2_500, 'About $0.0025'], [1_000_000_000, 'About $1000.00'], [100, 'About $0.0001']] as const) {
+        for (const p of [{ ...P5.dispatch, cost: { micros }, args: watch({ estCostMicros: micros }) }, { ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: micros }) }]) {
+          expect(cost(p), String(micros)).toBe(says);
+          expect(alone(p), String(micros)).toBe(true);
+        }
+      }
+      // A number no card could hold: the row says the cost could not be read, and the card asks on its own.
       for (const bad of [-100, 0.5, 250_050, 1_000_000_100, '0', null, true, NaN]) {
-        expect(cost({ ...P5.dispatch, cost: { micros: bad }, args: watch({ estCostMicros: bad }) }), String(bad)).toBeNull();
+        for (const p of [{ ...P5.dispatch, cost: { micros: bad }, args: watch({ estCostMicros: bad }) }, { ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: bad }) }, { ...P5.dispatch, args: watch({ estCostMicros: bad }) }]) {
+          expect(cost(p), String(bad)).toBe(UNREAD);
+          expect(alone(p), String(bad)).toBe(true);
+        }
         // Behind Show Details such a number is listed as it is stored, never rounded into a sentence.
         const d = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify({ ...P5.dispatch, args: watch({ estCostMicros: bad }) })}))`) as string) as { says: string[]; facts: Array<[string, string]> };
         expect(d.says.join(' '), String(bad)).not.toMatch(/costs/);
         expect(d.facts.some((x) => x[0] === 'Cost in Millionths of a Dollar'), String(bad)).toBe(true);
       }
-      // No card but a dispatch has a Cost fact of this kind, whatever its args hold.
+      // The server's reading and the signed number differ, or the server's reading is no reading: neither is believed.
+      for (const [server, signed] of [[{ micros: 0 }, 5_000_000], [{ micros: 5_000_000 }, 0], [{ micros: 100 }, 200], [{}, 0], [0, 0], ['free', 0], [{ micros: '0' }, 0], [[], 0]] as const) {
+        const p = { ...P5.dispatch, cost: server, args: watch({ estCostMicros: signed }) };
+        expect(cost(p), JSON.stringify(server)).toBe(UNREAD);
+        expect(alone(p), JSON.stringify(server)).toBe(true);
+      }
+      // A card with no estimate at all (its args were cleared, or never held one) is not one that costs nothing.
+      for (const args of [null, {}, watch({ estCostMicros: undefined })]) {
+        expect(cost({ ...P5.dispatch, cost: undefined, args }), JSON.stringify(args)).toBe(UNREAD);
+        expect(alone({ ...P5.dispatch, cost: undefined, args }), JSON.stringify(args)).toBe(true);
+      }
+      // No card but a dispatch has a Cost fact of this kind, whatever its args hold; nor does one ask alone for it.
       for (const p of [P5.accept, P5.cancel, P5.acceptAnyway]) expect(cost({ ...p, cost: { micros: 0 }, args: { ...(p.args as object), estCostMicros: 0 } }), p.fullName as string).toBeNull();
+      for (const p of [P5.accept, P5.cancel]) expect(alone({ ...p, cost: { micros: 5 }, args: { ...(p.args as object), estCostMicros: 'x' } }), p.fullName as string).toBe(false);
+    });
+
+    it('in the panel a task whose cost cannot be read shows that on its Cost row, is marked as asking on its own, and is left out of Approve All', async () => {
+      const unread = { ...P5.dispatch, id: 'p5u', cost: { micros: 0 }, args: watch({ estCostMicros: 5_000_000 }) };
+      answer = () => ({ status: 200, body: { proposals: [unread, P5.dispatch, P5.cancel], signed: true } });
+      await open();
+      const first = ids.apprlist!.children[0]!.children[0]!;
+      expect(first.shown()).toContain('CostFlint couldn’t read the cost.');
+      expect(first.shown()).toContain('Asks on Its Own');
+      expect(first.shown()).not.toContain('No Cost');
+      expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 1.');
+      ids.apprall!.onclick!();
+      await settle();
+      expect(decided.map((d) => d[1])).toEqual(['p5b', 'p5d']);
+      decided = [];
+      ids.apprlist!.button('Approve with Password').onclick!();
+      expect(decided).toEqual([['approve', 'p5u', { reason: 'run this task', fresh: true, args: unread.args }]]);
     });
 
     it('turning an asset on and ending a task against its checks ask on their own, whatever the server marks; so does a task that costs money; the prompt says what Flint is doing', async () => {
@@ -1034,9 +1106,14 @@ describe('the console Approvals panel', () => {
       expect(alone({ ...P5.dispatch, cost: { micros: 100 }, args: watch({ estCostMicros: 100 }) })).toBe(true);
       expect(alone({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 250_000 }) })).toBe(true);
       expect(alone({ ...P5.dispatch, tainted: true })).toBe(true);
-      expect([P5.enable, P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway, P5.rejectAnyway].map(reason)).toEqual(['turn on the CI watcher', 'run this task', 'accept this result', 'cancel this task', 'accept this result', 'reject this result']);
+      // Ending a task against its checks says so in the prompt: it never reads as the plain acceptance of a result that passed.
+      expect([P5.enable, P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway, P5.rejectAnyway].map(reason)).toEqual([
+        'turn on the CI watcher', 'run this task', 'accept this result', 'cancel this task', 'accept this result against its checks', 'reject this result against its checks',
+      ]);
+      expect(reason(P5.acceptAnyway)).not.toBe(reason(P5.accept));
       expect(reason({ ...P5.enable, args: enable({ kind: 'local_worker' }) })).toBe('turn on this asset');
-      expect(reason({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } })).toBe('end this task');
+      expect(reason({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } })).toBe('end this task against its checks');
+      expect(reason({ ...P5.acceptAnyway, args: null })).toBe('end this task against its checks');
       // In the panel: Approve All takes the three that may share a prompt and leaves the three that ask on their own.
       answer = () => ({ status: 200, body: { proposals: Object.values(P5), signed: true } });
       await open();
@@ -1076,49 +1153,424 @@ describe('the console Approvals panel', () => {
       for (const p of [P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway]) expect(run(`apprIcon(${JSON.stringify(p)})`)).toBe('tasks');
     });
 
-    it('a task is named on a card’s face once the Tasks panel has read it; loading the list asks it to, lights its dot, and draws again when it has', async () => {
-      const seen: unknown[][] = [];
-      let learn: ((n: number) => void) | undefined;
-      ctx.taskNames = (ps: unknown[], done: (n: number) => void) => (seen.push(ps), (learn = done));
-      const dots: unknown[][] = [];
-      ctx.tasksDot = (ps: unknown[]) => void dots.push(ps);
-      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.dispatch], signed: true } });
-      ids.approvals!.classList.add('open');
-      await open();
-      expect(seen).toHaveLength(1);
-      expect((seen[0] as Array<{ id: string }>).map((p) => p.id)).toEqual(['p5d', 'p5b']);
-      expect(dots).toHaveLength(1);
-      expect(facts(P5.cancel).map((x) => x[0])).toEqual(['Filed By', 'Expires']);
-      // The Tasks panel learned its title and what it is about: the card's face says so, beside what is signed.
-      run(`APPR_TASKS[${JSON.stringify(TASK)}]={title:'Watch a CI Run',about:'wpf002/flint CI'}`);
-      const before = ids.apprlist!.textContent;
-      learn!(1);
-      expect(ids.apprlist!.textContent).not.toBe(before);
-      expect(facts(P5.cancel)).toEqual([['Task', 'Watch a CI Run · wpf002/flint CI'], ['Filed By', 'You'], ['Expires', EXPIRES]]);
-      expect(facts(P5.dispatch)).toEqual([['CI Run', 'wpf002/flint CI'], ['Due', 'No Due Date'], ['Cost', 'No Cost']]);
-      expect(facts(P5.accept)[0]).toEqual(['Task', 'Watch a CI Run · wpf002/flint CI']);
-      // Nothing learned, or the panel closed since: the list is left as it is.
-      const drawn = ids.apprlist!.children[0];
-      learn!(0);
-      expect(ids.apprlist!.children[0]).toBe(drawn);
-      ids.approvals!.classList.remove('open');
-      learn!(1);
-      expect(ids.apprlist!.children[0]).toBe(drawn);
-      // What is looked up is display only: Show Details, and what is signed, hold only what the card carries.
-      expect(run(`JSON.stringify(apprDetails(${JSON.stringify(P5.cancel)}))`)).not.toContain('wpf002');
+    const rowsOf = (p: Record<string, unknown>) => JSON.parse(run(`JSON.stringify(apprFaceRows(${JSON.stringify(p)}))`) as string) as Array<[string, string, boolean]>;
+    const LOOKED = 'The task’s name above is looked up, not part of what you sign.';
+    const know = (title: string, about: string) => run(`APPR_TASKS[${JSON.stringify(TASK)}]=${JSON.stringify({ title, about })}`);
+    /** Timers the page sets, kept instead of run: [what, after how long]. */
+    const clock = () => {
+      const timers: Array<[() => void, number]> = [];
+      ctx.setTimeout = (fn: () => void, ms: number) => timers.push([fn, ms]);
+      return timers;
+    };
+    const cardsDrawn = () => ids.apprlist!.all().filter((e) => e.className.split(' ').includes('card'));
+
+    it('what the Tasks panel looked up is a row of its own on a card’s face, marked as looked up; a word Will signs is never replaced by it; Show Details holds only what is signed', () => {
+      // Nothing looked up: the face is the card's facts, and nothing says otherwise.
+      expect(rowsOf(P5.cancel)).toEqual([['Filed By', 'You', false], ['Expires', EXPIRES, false]]);
+      expect(run(`apprLooked(${JSON.stringify(P5.cancel)})`)).toBeNull();
+      know('Watch a CI Run', 'wpf002/flint CI');
+      // The facts are what the card carries, looked up or not. The face adds one row, and marks it.
+      expect(facts(P5.cancel)).toEqual([['Filed By', 'You'], ['Expires', EXPIRES]]);
+      expect(rowsOf(P5.cancel)).toEqual([['Task', 'Watch a CI Run · wpf002/flint CI', true], ['Filed By', 'You', false], ['Expires', EXPIRES, false]]);
+      expect(rowsOf(P5.accept)).toEqual([['Task', 'Watch a CI Run · wpf002/flint CI', true], ['Checked By', 'Rules', false], ['Expires', EXPIRES, false]]);
+      expect(rowsOf(P5.acceptAnyway)[0]).toEqual(['Task', 'Watch a CI Run · wpf002/flint CI', true]);
+      // A CI watch's card signs its title (the card's own): what it watches is the looked-up row.
+      expect(facts(P5.dispatch)).toEqual([['Due', 'No Due Date'], ['Cost', 'No Cost']]);
+      expect(rowsOf(P5.dispatch)).toEqual([['CI Run', 'wpf002/flint CI', true], ['Due', 'No Due Date', false], ['Cost', 'No Cost', false]]);
+      // Neither the title nor the sentence under it ever holds a looked-up word.
+      for (const p of Object.values(P5)) expect(`${words(p)[0]} ${words(p)[1]}`, p.fullName as string).not.toMatch(/wpf002|·/);
+      // A signed title always wins: a card that carries its task's title is named by that, whatever was looked up.
+      know('Pay Everyone', 'somewhere else');
+      const other = { ...P5.dispatch, fullName: 'task.dispatch.local_worker', args: watch({ title: 'Summarize Items' }) };
+      expect(run(`apprTaskName(${JSON.stringify(other)})`)).toBe('Summarize Items');
+      expect(run(`apprTaskName(${JSON.stringify(P5.dispatch)})`)).toBe('Watch a CI Run');
+      for (const p of [P5.accept, P5.cancel, P5.acceptAnyway]) {
+        const signed = { ...p, args: { ...(p.args as object), title: 'Summarize Items' } };
+        expect(run(`apprTaskName(${JSON.stringify(signed)})`), p.fullName as string).toBe('Summarize Items');
+        expect(rowsOf(signed).filter((x) => x[0] === 'Task'), p.fullName as string).toEqual([['Task', 'Summarize Items', false]]);
+        expect(JSON.stringify(rowsOf(signed)), p.fullName as string).not.toContain('Pay Everyone');
+      }
+      // A face has three rows at most, and what is signed comes first: a face that is full has no looked-up row.
+      expect(rowsOf(other)).toEqual([['Task', 'Summarize Items', false], ['Due', 'No Due Date', false], ['Cost', 'No Cost', false]]);
+      expect(run(`apprLooked(${JSON.stringify(other)})`)).toBeNull();
+      // With room (its due time is no moment), what it is about is the looked-up row, after the name it signs.
+      expect(rowsOf({ ...other, args: watch({ title: 'Summarize Items', dueAt: 'whenever' }) })).toEqual([['Task', 'Summarize Items', false], ['About', 'somewhere else', true], ['Cost', 'No Cost', false]]);
+      for (const p of [...Object.values(P5), other]) expect(rowsOf(p).length, p.fullName as string).toBeLessThanOrEqual(3);
+      for (const p of [...Object.values(P5), other]) expect(rowsOf(p).filter((x) => x[2]).length, p.fullName as string).toBeLessThanOrEqual(1);
+      // An asset's card is about no task: nothing is looked up for it.
+      expect(rowsOf({ ...P5.enable, args: { ...enable(), taskId: TASK } }).some((x) => x[2])).toBe(false);
+      // Show Details, and what is signed, hold only what the card carries.
+      for (const p of Object.values(P5)) expect(run(`JSON.stringify(apprDetails(${JSON.stringify(p)}))`), p.fullName as string).not.toMatch(/wpf002|Pay Everyone|somewhere else|looked up/);
+      // Each looked-up row has its one sentence, which is a sentence.
+      const says = JSON.parse(run('JSON.stringify(APPR_LOOKED_SAYS)') as string) as Record<string, string>;
+      expect(Object.keys(says).sort()).toEqual(['About', 'CI Run', 'Task']);
+      expect(says.Task).toBe(LOOKED);
+      for (const line of Object.values(says)) {
+        expect(noteProblems('Details', line), line).toEqual([]);
+        expect(line).toMatch(/looked up, not part of what you sign\.$/);
+      }
       // A task id that is not one, or a name under a key the table does not own, is never looked up as a task.
       expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: 'constructor' } })})`)).toBe('');
       expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: '__proto__' } })})`)).toBe('');
-      for (const taskId of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'tk0000000000000000']) expect(run(`apprTaskKnown(${JSON.stringify({ args: { taskId } })})`), taskId).toBeNull();
-      expect(run(`apprTaskKnown(${JSON.stringify(P5.cancel)}).about`)).toBe('wpf002/flint CI');
+      for (const taskId of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'tk0000000000000000']) expect(run(`apprTaskKnown(${JSON.stringify({ fullName: 'task.cancel', kind: 'task', args: { taskId } })})`), taskId).toBeNull();
+      expect(run(`apprTaskKnown(${JSON.stringify(P5.cancel)}).about`)).toBe('somewhere else');
+      // What was looked up with no title, or with something that is no text, names nothing.
+      for (const known of [{ title: '', about: 'x' }, { title: 7, about: 'x' }, { about: 'x' }, {}]) {
+        run(`APPR_TASKS[${JSON.stringify(TASK)}]=${JSON.stringify(known)}`);
+        expect(rowsOf(P5.cancel).some((x) => x[2]), JSON.stringify(known)).toBe(false);
+      }
       // A due time that is no moment is not dressed as a date on the card's face; behind Show Details it is given as it is written.
       // (Words, a date written some other way, and a moment that never was: none of them is the card's kind of time.)
-      for (const dueAt of ['whenever', 'October 20, 2026', '2026-13-45T25:61:00.000Z', 20261020, true]) expect(facts({ ...P5.dispatch, args: watch({ dueAt }) }).map((x) => x[0]), String(dueAt)).toEqual(['CI Run', 'Cost']);
+      know('Watch a CI Run', 'wpf002/flint CI');
+      for (const dueAt of ['whenever', 'October 20, 2026', '2026-13-45T25:61:00.000Z', 20261020, true]) expect(rowsOf({ ...P5.dispatch, args: watch({ dueAt }) }).map((x) => x[0]), String(dueAt)).toEqual(['CI Run', 'Cost']);
       expect(run(`JSON.stringify(apprDetails(${JSON.stringify({ ...P5.dispatch, args: watch({ dueAt: 'whenever' }) })}).says)`)).toContain('It’s due whenever.');
     });
 
+    it('a due time finer than a second is said as a time, with its thousandths: never as it is stored', () => {
+      const says = (dueAt: string) => (JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify({ ...P5.dispatch, args: watch({ dueAt }) })}).says)`) as string) as string[]).find((x) => x.startsWith('It’s due'))!;
+      const fine = says('2026-10-15T09:04:15.202Z');
+      expect(fine).toMatch(/^It’s due .*\b\d{1,2}:04:15\.202\b.*\.$/);
+      expect(fine).not.toMatch(/2026-10-15T|\d{2}Z/);
+      expect(noteProblems('Details', fine)).toEqual([]);
+      // A whole second, with or without its zeros, reads as it always did: to the minute.
+      expect(says('2026-10-15T09:04:00.000Z')).toBe(says('2026-10-15T09:04:00Z'));
+      expect(says('2026-10-15T09:04:00.000Z')).not.toMatch(/:04:00/);
+      // The card's face gives the day, whatever the fraction.
+      expect(facts({ ...P5.dispatch, args: watch({ dueAt: '2026-10-15T09:04:15.202Z' }) })[0]).toEqual(['Due', new Date('2026-10-15T09:04:15.202Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })]);
+    });
+
+    it('in the panel the looked-up row carries its mark beside the value, and Show Details says the row was looked up; a card with nothing looked up says neither', async () => {
+      ctx.taskNames = (_ps: unknown[], done: (n: number) => void) => (know('Watch a CI Run', 'wpf002/flint CI'), done(1));
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.dispatch, P5.enable], signed: true } });
+      await open();
+      const opened = (id: string) => {
+        run(`APPR.open=${JSON.stringify(id)};APPR.details=null;apprRender()`);
+        return ids.apprlist!.all().find((e) => e.className.split(' ').includes('open'))!;
+      };
+      for (const [id, label, value, sentence] of [['p5d', 'Task', 'Watch a CI Run · wpf002/flint CI', LOOKED], ['p5b', 'CI Run', 'wpf002/flint CI', 'The CI run’s name above is looked up, not part of what you sign.']] as const) {
+        const c = opened(id);
+        const dl = c.all().find((e) => e.tagName === 'dl' && e.className === 'facts')!;
+        const dts = dl.children.filter((e) => e.tagName === 'dt');
+        const dds = dl.children.filter((e) => e.tagName === 'dd');
+        expect(dts[0]!.textContent).toBe(label);
+        // The value, then the mark: a small element of its own, never part of the value's text.
+        expect(dds[0]!.children.map((e) => [e.tagName, e.className, e.textContent])).toEqual([['span', 'looked', 'Looked Up']]);
+        expect(dds[0]!.textContent).toBe(`${value}Looked Up`);
+        // No other row is marked.
+        for (const dd of dds.slice(1)) expect(dd.children).toHaveLength(0);
+        expect(c.all().filter((e) => e.className === 'looked')).toHaveLength(1);
+        // The title and the sentence under it are the card's own.
+        expect(c.children[0]!.textContent).not.toContain('wpf002');
+        // Show Details: what is signed, and one fixed sentence about the row above.
+        const details = c.all().find((e) => e.className === 'details')!;
+        const said = details.children.filter((e) => e.tagName === 'p' && e.className === 'lookedsay').map((e) => e.textContent);
+        expect(said).toEqual([sentence]);
+        expect(details.textContent.replace(sentence, '')).not.toMatch(/wpf002|Looked Up/);
+      }
+      // An asset's card, and a task card with nothing looked up, have no mark and no such sentence.
+      const asset = opened('p5a');
+      expect(asset.all().some((e) => e.className === 'looked' || e.className === 'lookedsay')).toBe(false);
+      run(`delete APPR_TASKS[${JSON.stringify(TASK)}]`);
+      const bare = opened('p5d');
+      expect(bare.all().some((e) => e.className === 'looked' || e.className === 'lookedsay')).toBe(false);
+      expect(bare.all().find((e) => e.tagName === 'dl' && e.className === 'facts')!.children.filter((e) => e.tagName === 'dt').map((e) => e.textContent)).toEqual(['Filed By', 'Expires']);
+    });
+
+    it('the names a list’s task cards show are read before the list is first drawn, for 600 ms at most; the list is drawn once, and names that land late never draw it again', async () => {
+      const timers = clock();
+      const seen: Array<Array<{ id: string }>> = [];
+      const learns: Array<(n: number) => void> = [];
+      ctx.taskNames = (ps: Array<{ id: string }>, done: (n: number) => void) => (seen.push(ps), learns.push(done));
+      const dots: unknown[][] = [];
+      ctx.tasksDot = (ps: unknown[]) => void dots.push(ps);
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.dispatch], signed: true } });
+      await open();
+      // Asked once, about the whole list; its dot is lit; and no card is drawn yet: only the wait, with its deadline.
+      expect(seen.map((ps) => ps.map((p) => p.id))).toEqual([['p5d', 'p5b']]);
+      expect(dots).toHaveLength(1);
+      expect(cardsDrawn()).toHaveLength(0);
+      expect(ids.apprlist!.textContent).toBe('Loading…');
+      expect(run('APPR_NAMES_MS')).toBe(600);
+      expect(timers.map((t) => t[1])).toEqual([600]);
+      // The names land in time: the list is drawn, with them.
+      know('Watch a CI Run', 'wpf002/flint CI');
+      learns[0]!(1);
+      const drawn = ids.apprlist!.children[0]!;
+      expect(cardsDrawn()).toHaveLength(2);
+      expect(drawn.textContent).toContain('TaskWatch a CI Run · wpf002/flint CILooked Up');
+      // The deadline passing afterwards, or the names answering again, draws nothing.
+      timers[0]![0]();
+      learns[0]!(1);
+      expect(ids.apprlist!.children[0]).toBe(drawn);
+
+      // The next load: the names do not land in time.
+      run(`delete APPR_TASKS[${JSON.stringify(TASK)}]`);
+      run('loadApprovals()');
+      await settle();
+      expect(seen).toHaveLength(2);
+      // Until the deadline, the list on screen is the one that was there, and it is the list this page holds: a card
+      // opened in it meanwhile is one of its own cards, with what it showed.
+      expect(ids.apprlist!.children[0]).toBe(drawn);
+      expect(timers.map((t) => t[1])).toEqual([600, 600]);
+      drawn.children[1]!.onclick!();
+      const meanwhile = ids.apprlist!.children[0]!;
+      expect(meanwhile.children.map((c) => c.getAttribute('data-id'))).toEqual(['p5d', 'p5b']);
+      expect(meanwhile.children[1]!.className).toContain('open');
+      timers[1]![0]();
+      const late = ids.apprlist!.children[0]!;
+      expect(late).not.toBe(meanwhile);
+      expect(late.textContent).not.toMatch(/wpf002|Looked Up/);
+      // (The card he opened is still the open one.)
+      expect(late.children[1]!.className).toContain('open');
+      // Then they land. They are kept for the next load; this list is not drawn again, so nothing moves under a pointer.
+      know('Watch a CI Run', 'wpf002/flint CI');
+      learns[1]!(1);
+      learns[1]!(0);
+      expect(ids.apprlist!.children[0]).toBe(late);
+      expect(late.textContent).not.toMatch(/wpf002/);
+      // The load after that shows them.
+      run('loadApprovals()');
+      await settle();
+      learns[2]!(0);
+      expect(ids.apprlist!.children[0]).not.toBe(late);
+      expect(ids.apprlist!.textContent).toContain('wpf002/flint CI');
+
+      // A list that was read again while an older one still waited for its names: the older one draws nothing.
+      const before = ids.apprlist!.children[0];
+      run('loadApprovals()');
+      await settle();
+      run('loadApprovals()');
+      await settle();
+      expect(learns).toHaveLength(5);
+      learns[3]!(1);
+      expect(ids.apprlist!.children[0]).toBe(before);
+      learns[4]!(1);
+      expect(ids.apprlist!.children[0]).not.toBe(before);
+
+      // A list with no card about a task waits for nothing and asks for nothing.
+      const asked = seen.length;
+      const set = timers.length;
+      answer = () => ({ status: 200, body: { proposals: [plain({ id: 'x1' }), P5.enable], signed: true } });
+      run('loadApprovals()');
+      await settle();
+      expect(seen).toHaveLength(asked);
+      expect(timers).toHaveLength(set);
+      expect(cardsDrawn().map((c) => c.getAttribute('data-id'))).toEqual(['x1', 'p5a']);
+    });
+
+    it('while an approval is in flight the list is not drawn again and nothing else on it is taken: the card being signed stays on screen, and what its approval said is kept for it', async () => {
+      const timers = clock();
+      held = [];
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' }), plain({ id: 'x2', status: 'approved' })], signed: true } });
+      await open();
+      const list = ids.apprlist!.children[0]!;
+      const first = list.children[0]!;
+      first.button('Show Details').onclick!();
+      first.button('Approve with Password').onclick!();
+      expect(held.map((h) => h.id)).toEqual(['p5d']);
+      expect(held[0]!.card).toBe(first);
+      expect(run('APPR.flight')).toBe(1);
+      // The prompt is up. Reject, Approve again, another card, the other tab: none of them is taken.
+      first.button('Reject').onclick!();
+      first.button('Approve with Password').onclick!();
+      list.children[1]!.onclick!();
+      run("apprShow('approved')");
+      expect(decided).toHaveLength(1);
+      expect([run('APPR.open'), run('APPR.tab')]).toEqual(['p5d', 'waiting']);
+      expect(ids.apprlist!.children[0]).toBe(list);
+      // The list is read again meanwhile (a reload that was already on its way): it is held back. Nothing is drawn, and
+      // what this page holds stays the list on screen.
+      answer = () => ({ status: 200, body: { proposals: [plain({ id: 'x9' })], signed: true } });
+      run('loadApprovals()');
+      await settle();
+      expect(ids.apprlist!.children[0]).toBe(list);
+      expect(run('APPR.redraw')).toBe(true);
+      expect(JSON.parse(run('JSON.stringify(APPR.pending.map(function(p){return p.id;}))') as string)).toEqual(['p5d', 'p5c', 'x1']);
+      // A read that fails meanwhile does not take the list away either: not a refusal, not a server that cannot be reached.
+      for (const broken of [() => ({ status: 500, body: {} }), () => { throw new Error('offline'); }]) {
+        run('APPR.redraw=false');
+        answer = broken as typeof answer;
+        run('loadApprovals()');
+        await settle();
+        expect(ids.apprlist!.children[0]).toBe(list);
+        expect(ids.apprlist!.textContent).not.toMatch(/Couldn't/);
+        expect(run('APPR.redraw')).toBe(true);
+      }
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' }), plain({ id: 'x2', status: 'approved' })], signed: true } });
+      // Will dismisses the prompt. The main script writes what happened on the card it was handed: the one still on screen.
+      const DISMISSED = 'You dismissed the prompt. The card is waiting in Approvals.';
+      const res = held[0]!.card.all().find((e) => e.className.split(' ')[0] === 'res')!;
+      res.style.display = 'block';
+      res.textContent = DISMISSED;
+      held[0]!.no(new Error('not confirmed'));
+      await settle();
+      expect(run('APPR.flight')).toBe(0);
+      expect(cardsDrawn()).toContain(first);
+      expect(first.shown()).toContain(DISMISSED);
+      // The list that was held back is read again a little later (time to read the line), and the line stays with its card.
+      expect(timers.filter((t) => t[1] === 2500)).toHaveLength(1);
+      held = null;
+      timers.find((t) => t[1] === 2500)![0]();
+      await settle();
+      const again = ids.apprlist!.children[0]!.children[0]!;
+      expect(again).not.toBe(first);
+      expect(again.getAttribute('data-id')).toBe('p5d');
+      expect(again.shown()).toContain(DISMISSED);
+      // Show Details is as he left it: a card he was reading does not fold when the list is drawn again.
+      expect(again.all().find((e) => e.className === 'details')!.hidden).toBe(false);
+      expect(again.button('Hide Details').getAttribute('aria-expanded')).toBe('true');
+      // Opening another card by hand starts that one closed, and going back finds this one closed too.
+      ids.apprlist!.children[0]!.children[1]!.onclick!();
+      const second = ids.apprlist!.children[0]!.children[1]!;
+      expect(second.all().find((e) => e.className === 'details')!.hidden).toBe(true);
+      expect(second.button('Show Details').getAttribute('aria-expanded')).toBe('false');
+      // The line is only ever on its own card.
+      expect(second.shown()).not.toContain(DISMISSED);
+      // Approving the card again takes its old line away; a card that no longer waits takes its line with it.
+      run("apprSaid('x1','It failed.','bad')");
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept], signed: true } });
+      run('loadApprovals()');
+      await settle();
+      expect(JSON.parse(run('JSON.stringify(Object.keys(APPR.said))') as string)).toEqual(['p5d']);
+      run("APPR.open='p5d';apprRender()");
+      ids.apprlist!.button('Approve with Password').onclick!();
+      expect(run('JSON.stringify(APPR.said)')).toBe('{}');
+      // An id that is no card's id keeps nothing ("__proto__", a path, a sentence).
+      for (const id of ['__proto__', 'constructor!', '../x', 'a b', '']) run(`apprSaid(${JSON.stringify(id)},'x','bad')`);
+      expect(run('JSON.stringify(APPR.said)')).toBe('{}');
+      expect(run('({}).x')).toBeUndefined();
+    });
+
+    it('an approval that goes through with a list held back draws the next list when it is read; Approve All holds the list back the same way', async () => {
+      const timers = clock();
+      held = [];
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' })], signed: true } });
+      await open();
+      const list = ids.apprlist!.children[0]!;
+      list.children[0]!.button('Approve with Password').onclick!();
+      run('loadApprovals()');
+      await settle();
+      expect(ids.apprlist!.children[0]).toBe(list);
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(run('APPR.flight')).toBe(0);
+      // Read again as after any approval; that reading is drawn.
+      expect(timers.filter((t) => t[1] === 1200)).toHaveLength(1);
+      answer = () => ({ status: 200, body: { proposals: [P5.accept, plain({ id: 'x1' })], signed: true } });
+      timers.find((t) => t[1] === 1200)![0]();
+      await settle();
+      expect(cardsDrawn().map((c) => c.getAttribute('data-id'))).toEqual(['p5c', 'x1']);
+      expect(run('APPR.redraw')).toBe(false);
+      // Approve All: its cards stay where they are until it has finished, whatever is read meanwhile.
+      const during = ids.apprlist!.children[0]!;
+      held = [];
+      ids.apprall!.onclick!();
+      expect(run('APPR.busy')).toBe(true);
+      run('loadApprovals()');
+      await settle();
+      expect(ids.apprlist!.children[0]).toBe(during);
+      during.children[0]!.button('Reject').onclick!();
+      during.children[1]!.onclick!();
+      expect(decided.filter((d) => d[0] === 'reject')).toHaveLength(0);
+      expect(run('APPR.open')).toBe('p5c');
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      held[1]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(run('APPR.busy')).toBe(false);
+      expect(ids.apprnote!.textContent).toBe('You approved 2 of 2.');
+    });
+
+    it('a tool on a connected server that carries one of Flint’s own names is drawn as a tool’s card, with its server named; it gets none of that card’s words, asks on its own, and never rides Approve All', async () => {
+      const planted = {
+        task: card({ id: 'm1', fullName: 'task.check_bar', kind: 'tool_call', mcp: true, origin: 'chat:c1', args: { taskId: TASK, outputRef: 'out:0123456789abcdef', metBar: true, checks: 2, met: 2, by: 'flint:rule' } }),
+        goal: card({ id: 'm2', fullName: 'goal.activate', kind: 'tool_call', mcp: true, origin: 'chat:c1', args: { goalId: 'go1', title: 'Finish Building Flint' } }),
+      };
+      const alone = (p: Record<string, unknown>) => run(`apprAlone(${JSON.stringify(p)})`) as boolean;
+      const SUB = 'It’s a tool on a connected server.';
+      const NOTE = 'It’s not one of Flint’s own cards, whatever it is called.';
+      // Its server and its tool are named on its face, as they are written.
+      expect(words(planted.task)).toEqual(['Approve a Tool Call', SUB, JSON.stringify([['Server', 'task'], ['Tool', 'check_bar'], ['Filed By', 'A Chat']])]);
+      expect(words(planted.goal)).toEqual(['Approve a Tool Call', SUB, JSON.stringify([['Server', 'goal'], ['Tool', 'activate'], ['Filed By', 'A Chat']])]);
+      know('Watch a CI Run', 'wpf002/flint CI');
+      for (const p of Object.values(planted)) {
+        expect(alone(p), p.fullName as string).toBe(true);
+        expect(run(`apprReason(${JSON.stringify(p)})`), p.fullName as string).toBe('run a tool on a connected server');
+        expect(run(`apprIcon(${JSON.stringify(p)})`), p.fullName as string).toBe('bolt');
+        // It is no task's card and no goal's: nothing is looked up for it, and no dot is lit by it.
+        for (const fn of ['apprTaskCard', 'apprDispatchCard', 'apprGoalCard', 'apprOwn']) expect(run(`!!${fn}(${JSON.stringify(p)})`), `${fn} ${p.fullName}`).toBe(false);
+        expect(run(`apprTaskKnown(${JSON.stringify(p)})`)).toBeNull();
+        expect(run(`apprLooked(${JSON.stringify(p)})`)).toBeNull();
+        expect(rowsOf(p).some((x) => x[2])).toBe(false);
+        // Behind Show Details: what it is, then every value it holds, as any tool's card lists them.
+        const d = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(p)}))`) as string) as { says: string[]; facts: Array<[string, string]>; refs: Array<[string, string]> };
+        expect(d.says).toEqual([NOTE]);
+        const listed = JSON.stringify([d.facts, d.refs]);
+        for (const v of Object.values(p.args as Record<string, unknown>)) expect(listed, String(v)).toContain(v === true ? 'Yes' : String(v));
+        expect(noteProblems('Approvals', words(p)[1])).toEqual([]);
+        expect(titleCase(words(p)[0])).toBe(true);
+      }
+      expect(noteProblems('Details', NOTE)).toEqual([]);
+      // The whole family: every name this panel keeps words for is one of Flint's own ONLY when the server does not
+      // mark the card as a tool's AND its kind is the kind the runtime files that action under.
+      const own = JSON.parse(run('JSON.stringify([Object.keys(APPR_OWN).map(function(k){return [k,[APPR_OWN[k]]];}),Object.keys(APPR_NIGHTLY).map(function(k){return [k,["tool_call"]];})])') as string) as Array<Array<[string, string[]]>>;
+      const names: Array<[string, string[]]> = [...own[0]!, ...own[1]!, ['task.dispatch.ci_runner', ['task', 'spend']], ['task.dispatch.local_worker', ['task', 'spend']]];
+      expect(names.map((n) => n[0])).toEqual(expect.arrayContaining([
+        'goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon', 'goal.propose', 'plan.change', 'world.commitment.from_chat', 'policy.change', 'triage.rule.create',
+        'world.source.enable', 'world.person.create', 'world.relation.write', 'forecast.series.enable', 'asset.enable', 'task.check_bar', 'task.cancel', 'task.bar_override',
+        'backup.local', 'backup.offsite', 'restore.drill', 'maintenance.retention', 'backup.prune', 'backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus',
+      ]));
+      const KINDS = ['tool_call', 'goal', 'plan', 'rule', 'policy', 'task', 'pr', 'spend', 'forget', 'void'];
+      for (const [name, kinds] of names) {
+        const args = name === 'policy.change' ? { rows: [] } : {};
+        for (const kind of kinds) {
+          expect(run(`apprOwn(${JSON.stringify({ fullName: name, kind, args })})`), `${name} as ${kind}`).toBe(true);
+          expect(run(`apprTitle(${JSON.stringify({ fullName: name, kind, args })})`), `${name} as ${kind}`).not.toBe('Approve a Tool Call');
+          // The server's mark alone is enough to take the words away.
+          const marked = { fullName: name, kind, mcp: true, args };
+          expect(words(marked).slice(0, 2), `${name} marked`).toEqual(['Approve a Tool Call', SUB]);
+          expect(alone(marked), `${name} marked`).toBe(true);
+        }
+        // So is any other kind, a kind that is no kind, or none at all (a card from a server with no runtime).
+        for (const kind of [...KINDS.filter((k) => !kinds.includes(k)), 'constructor', '__proto__', '', 7, null, undefined]) {
+          const p = { fullName: name, kind, args };
+          expect(run(`apprTitle(${JSON.stringify(p)})`), `${name} as ${String(kind)}`).toBe('Approve a Tool Call');
+          expect(alone(p), `${name} as ${String(kind)}`).toBe(true);
+        }
+      }
+      // A tool under a name that is nobody's is a tool's card as it always was: its own words, and it may share a prompt.
+      expect(words(plain())[0]).toBe('Read What Triage Decided');
+      expect(alone(plain())).toBe(false);
+      expect(alone(plain({ mcp: true, fullName: 'notes.search', args: { q: 'x' } }))).toBe(false);
+      // Whatever the tool is called, it is listed whole; a name with no tool after it is all server.
+      const odd = { fullName: `task.dispatch.${'x.'.repeat(60)}y`, kind: 'tool_call', mcp: true, origin: 'chat:c1', args: {} };
+      expect(facts(odd).slice(0, 2)).toEqual([['Server', 'task'], ['Tool', `dispatch.${'x.'.repeat(60)}y`]]);
+      expect(facts({ fullName: 'backup.local', mcp: true, origin: 'chat:c1', args: {} }).slice(0, 2)).toEqual([['Server', 'backup'], ['Tool', 'local']]);
+
+      // In the panel: drawn as a tool's card, marked, skipped by Approve All, signed with a fresh touch and its own prompt.
+      const seen: unknown[][] = [];
+      ctx.taskNames = (ps: unknown[], done: (n: number) => void) => (seen.push(ps), done(0));
+      answer = () => ({ status: 200, body: { proposals: [planted.task, planted.goal, plain({ id: 'x1' })], signed: true } });
+      await open();
+      // (No card on this list is about a task: the Tasks panel is asked for no name.)
+      expect(seen).toHaveLength(0);
+      const first = ids.apprlist!.children[0]!.children[0]!;
+      expect(first.shown()).toContain('Approve a Tool CallIt’s a tool on a connected server.Asks on Its Own');
+      expect(first.shown()).toContain('ServertaskToolcheck_bar');
+      expect(first.shown()).not.toMatch(/Accept a Task Result|It passed 2 of 2 checks|Looked Up|wpf002/);
+      expect(ids.apprlist!.children[0]!.children[1]!.shown()).toContain('Approve a Tool CallIt’s a tool on a connected server.Asks on Its Own');
+      expect(ids.apprlist!.textContent).not.toMatch(/Add a Goal|Start a Goal/);
+      expect(noteSays()).toBe('You have 3 approvals waiting. Approve All skips 2.');
+      ids.apprall!.onclick!();
+      await settle();
+      expect(decided.map((d) => d[1])).toEqual(['x1']);
+      decided = [];
+      first.button('Approve with Password').onclick!();
+      expect(decided).toEqual([['approve', 'm1', { reason: 'run a tool on a connected server', fresh: true, args: planted.task.args }]]);
+    });
+
     it('a goal’s task step on a plan card says Flint would run it as a task', () => {
-      const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
+      const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', kind: 'plan', args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
       expect(says).toContain('Add the step “Watch the release run”. Flint would run this step as a task.');
     });
   });

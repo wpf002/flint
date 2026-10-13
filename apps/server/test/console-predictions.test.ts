@@ -626,7 +626,7 @@ describe('turning predictions on', () => {
     ]);
     expect(headers()).toEqual(['Numbers']);
     expect(rows()).toEqual([['Anthropic Spend', [], 'Spending'], ['Deploys', [], ''], ['Calendar Hours', [], 'Calendar']]);
-    expect(body().with('plead')[0]!.textContent).toBe(run(`apprSub({fullName:APPR_PREDICT,args:{series:${JSON.stringify(sorted)},reason:[]}})`));
+    expect(body().with('plead')[0]!.textContent).toBe(run(`apprSub({fullName:APPR_PREDICT,kind:'tool_call',args:{series:${JSON.stringify(sorted)},reason:[]}})`));
     expect(body().with('plead')[1]!.textContent).toBe(run('APPR_PREDICT_ALSO'));
     // What it also does is said before the list of numbers: never below the fold of a long card.
     const order = body().visible().filter((e) => ['plead', 'gsh', 'group'].includes(e.className)).map((e) => e.className);
@@ -675,13 +675,14 @@ describe('turning predictions on', () => {
     signAnswer = async () => { throw new Error('not confirmed'); };
     foot().button('Approve with Touch ID').onclick!();
     await settle();
-    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
+    // A prompt he dismissed is said as that, the same sentence wherever a card is signed.
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
     expect(title()).toBe('Turn On Predictions');
     expect([foot().button('Not Now').disabled, foot().button('Approve with Touch ID').disabled]).toEqual([false, false]);
     signAnswer = async () => { throw Object.assign(new Error('The operation was not allowed.'), { name: 'NotAllowedError' }); };
     foot().button('Approve with Touch ID').onclick!();
     await settle();
-    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
     signAnswer = async () => ({ action: { status: 'approved' } });
     foot().button('Approve with Touch ID').onclick!();
     await settle();

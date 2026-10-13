@@ -490,9 +490,9 @@ describe('the Goals panel', () => {
     signAnswer = async () => { throw new Error('not confirmed'); };
     go.onclick!();
     await settle();
-    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
     // The message is in the footer, never in the scrolling body.
-    expect(body().shown()).not.toMatch(/Cancelled|waiting for your approval/);
+    expect(body().shown()).not.toMatch(/Cancelled|dismissed|waiting for your approval/);
   });
 
   it('a paused goal resumes with a signature of exactly what it is, and no plan', async () => {
@@ -636,8 +636,8 @@ describe('the Goals panel', () => {
     run(`goalNew();GOALS.form.title='Synthetic goal';GOALS.form.checks[0].text='Synthetic check';goalForm()`);
     foot().button('Add Goal with Touch ID').onclick!();
     await settle();
-    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
-    expect(body().shown()).not.toContain('Cancelled');
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
+    expect(body().shown()).not.toMatch(/Cancelled|dismissed/);
     expect(ids.goalsttl!.textContent).toBe('New Goal');
     // A refusal from the server is its sentence, and nothing was signed.
     signed = [];
@@ -711,7 +711,7 @@ describe('the Goals panel', () => {
       run(`goalNew();GOALS.form.title='Synthetic goal';GOALS.form.checks[0].text='Synthetic check';goalForm()`);
       foot().button('Add Goal with Touch ID').onclick!();
       await settle();
-      expect(said()![0]).toBe('Cancelled. It’s waiting in Approvals.');
+      expect(said()![0]).toBe('You dismissed the prompt. The card is waiting in Approvals.');
       return run('GOALS.draft.draftKey') as string;
     };
     // The card waits in Approvals, and the draft is still his to change.
@@ -1745,7 +1745,7 @@ describe('the Suggested tab', () => {
     };
     foot().button('Make It a Goal with Touch ID').onclick!();
     await settle();
-    expect(said()).toEqual(['Cancelled. It’s waiting in Approvals.', 'res bad']);
+    expect(said()).toEqual(['You dismissed the prompt. The card is waiting in Approvals.', 'res bad']);
     // The suggestion was dismissed, or made a goal, somewhere else meanwhile: the runtime's sentence, as it is.
     suggested(two(), (c) => (c.method === 'POST' && c.url.endsWith('/start') ? { status: 404, body: { error: 'This suggestion is no longer waiting.', code: 'suggestionGone' } } : undefined));
     foot().button('Make It a Goal with Touch ID').onclick!();
