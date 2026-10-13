@@ -1608,9 +1608,10 @@ Claude runs a `down.sql` only with your OK, after the dump.
 
 This arrives in parts. The first part is the store and what the database
 guarantees about it. The second adds the runtime's side for work that needs no
-model: one asset (the CI Watcher), tasks, and the cards that run them. It
-changes nothing you see until you turn an asset on, and the Tasks panel that
-lets you do that comes in a later part.
+model: one asset (the CI Watcher), tasks, and the cards that run them. The
+one thing you'll see is a Tasks row in Settings > Health, shown as off. Nothing
+else changes until you turn an asset on, and the Tasks panel that lets you do
+that comes in a later part.
 
 Three things live here:
 
@@ -1721,8 +1722,9 @@ What the runtime now does, once an asset is on:
 - **Cleanup.** A task's spec, bar, summary and evidence are cleared 30 days
   after it ended, or 7 days for one that is personal, financial or read outside
   text. Its raw output is deleted 7 days after it ended. Its title stays.
-- **Health** has a Tasks row. It's off while no asset that runs tasks is on.
-  It says when a task is stuck or a rule stops Flint from checking results.
+- **Health** has a Tasks row. It's shown as off while no asset that runs tasks
+  is on. Once one is, it says when a task is stuck or a rule stops Flint from
+  checking results.
 
 There is no panel yet. The routes the panel will use exist, behind the same
 token scope as approvals, so no model can read a task or start one:
