@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, SOURCES, TASK_SIGNED_ACTIONS, isChatSuggestion, isGoalSignedAction, isTaskSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, POLICY_CHANGE_SHAPE, SOURCES, TASK_SIGNED_ACTIONS, coversPolicyChange, isChatSuggestion, isGoalSignedAction, isTaskSignedAction, policyChangeKind, type WebAuthnRelyingParty } from '@flint/policy';
 import { runForecastCard } from '../predict/enable.js';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
@@ -74,8 +74,9 @@ const POLICY_PATTERN = z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_
 
 /**
  * A signed policy change, held to the database's own rules (pattern shape,
- * 180-day expiry, millisecond times, int4 caps) so a bad row is refused when the
- * proposal is made, not half-applied when it runs.
+ * 180-day expiry, millisecond times, int4 caps, no row that covers a policy
+ * change itself) so a bad row is refused when the proposal is made, not when it
+ * runs. The database makes a card's rows together or not at all.
  */
 export const PolicyArgs = z
   .object({
@@ -83,7 +84,7 @@ export const PolicyArgs = z
       .array(
         z
           .object({
-            pattern: POLICY_PATTERN,
+            pattern: POLICY_PATTERN.refine((p) => !coversPolicyChange(p), 'no rule covers a policy change'),
             tier: z.enum(['alone', 'approval', 'forbidden']),
             dailyCap: z.number().int().min(0).max(2_147_483_647).optional(),
             scope: z.record(z.string(), z.unknown()).optional(),
@@ -120,9 +121,6 @@ export const PolicyOffArgs = z
   })
   .strict();
 
-/** Is this policy change a switch-off (it carries `off`)? Anything else is read as rows to add. */
-export const isPolicyOff = (args: unknown): boolean => typeof args === 'object' && args !== null && !Array.isArray(args) && 'off' in args;
-
 /** What Will reads when the database would not let a signed switch-off through (its guard found no card of his that still stands). */
 export const POLICY_OFF_REFUSED = 'The database refused to switch it off, so it’s still on. File it again and sign it.';
 /** What the rules command and a filing say about a rule that cannot be named on a card. */
@@ -131,6 +129,45 @@ export const POLICY_OFF_SAYS = {
   unknown: 'One of the rules named isn’t on record as written.',
   alreadyOff: 'One of the rules named is already switched off.',
 } as const;
+/** What a filing says of a rule card that could never be carried out, each a sentence. */
+export const POLICY_SAYS = {
+  /** A row that would cover policy.change: such a rule could never be signed away, so none is ever made. */
+  coversPolicy: 'A rule can’t cover policy changes. Those always take your signature.',
+  /** Args the database cannot digest again (p3_canonical): it would refuse the card when it ran. */
+  unsignable: 'A rule card holds only whole numbers and plain names, a few levels deep.',
+} as const;
+
+/**
+ * Can the database compute this card's digest again (p3_canonical)? Whole
+ * numbers only, keys in printable ASCII, and nothing nested past a depth it
+ * reads. A card that fails this would be signed and then refused when it ran.
+ */
+export function policyArgsSignable(v: unknown, depth = 0): boolean {
+  if (typeof v === 'number') return Number.isSafeInteger(v);
+  if (v === null || typeof v !== 'object') return true;
+  if (depth >= 16) return false;
+  if (Array.isArray(v)) return v.every((x) => policyArgsSignable(x, depth + 1));
+  return Object.entries(v).every(([k, x]) => /^[ -~]*$/.test(k) && policyArgsSignable(x, depth + 1));
+}
+
+/**
+ * A policy change's args, checked before Will is asked to sign: one thing
+ * (rows or off, @flint/policy policyChangeKind), in the shape the runtime
+ * carries out, and nothing the database would refuse when it ran. Throws the
+ * sentence that says why not. Returns which of the two it is.
+ */
+export function checkPolicyChange(args: unknown): 'rows' | 'off' {
+  const kind = policyChangeKind(args);
+  if (!kind) throw new Refused(400, POLICY_CHANGE_SHAPE);
+  const rows = kind === 'rows' ? (args as { rows: unknown[] }).rows : [];
+  if (rows.some((r) => r !== null && typeof r === 'object' && typeof (r as { pattern?: unknown }).pattern === 'string' && coversPolicyChange((r as { pattern: string }).pattern))) {
+    throw new Refused(400, POLICY_SAYS.coversPolicy);
+  }
+  const ok = (kind === 'off' ? PolicyOffArgs : PolicyArgs).safeParse(args);
+  if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  if (!policyArgsSignable(args)) throw new Refused(400, POLICY_SAYS.unsignable);
+  return kind;
+}
 
 /**
  * Why a switch-off card may not be filed, checked before Will is asked to sign it: the card is one the
@@ -168,6 +205,9 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
   // P5: so is each asset and task card.
   if (isTaskSignedAction(p.action)) return runTaskCard(db, id, rp, tz, actor, tasks);
   const claimed = await claimProposal(db, id, rp, tz, actor);
+  // A policy change says one thing (the database files no other, and each of its guards refuses a card that
+  // carries the other key): anything else is carried out as neither.
+  const change = claimed.action === 'policy.change' ? policyChangeKind(claimed.args) : undefined;
   try {
     if (claimed.action === 'world.source.enable') {
       const { source } = EnableArgs.parse(claimed.args);
@@ -220,12 +260,14 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await completeProposal(db, id, { ok: true, result: { rule: rule.name } }, actor);
       return { rule: rule.name };
     }
-    if (claimed.action === 'policy.change' && isPolicyOff(claimed.args)) {
+    if (claimed.action === 'policy.change' && !change) throw new Refused(409, POLICY_CHANGE_SHAPE);
+    if (change === 'off') {
       const { off } = PolicyOffArgs.parse(claimed.args);
       const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
       // All rows or none: a signed switch-off is applied whole. Each row only as the card names it (the database
       // checks the same three); one that went off since the card was filed is left as it is. The row's history
-      // says which approval switched it off.
+      // says which approval switched it off: the database's guard writes that name itself, from the card it let
+      // through, and this says the same for a database from before the guard.
       const switched = await db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${approvalId}`}, true)`;
         let n = 0;
@@ -235,10 +277,11 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       await completeProposal(db, id, { ok: true, result: { off: switched } }, actor);
       return { off: switched };
     }
-    if (claimed.action === 'policy.change') {
+    if (change === 'rows') {
       const { rows } = PolicyArgs.parse(claimed.args);
       const approvalId = (await db.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true } })).approvalId!;
-      // All rows or none: a signed table is applied whole.
+      // All rows or none: a signed table is applied whole. (The database holds that too: when this transaction
+      // commits, every row the card lists is there or none of them stays.)
       await db.$transaction(async (tx) => {
         for (const r of rows) {
           await tx.actionPolicy.create({
@@ -271,7 +314,7 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     if (refusedInput) throw new Refused(400, 'The database refused this change.');
     // The database's guard on a switch-off (42501): the card has failed and is on record as failed (above), the
     // rows are as they were, and nothing here tries again. Will reads what to do.
-    if (claimed.action === 'policy.change' && isPolicyOff(claimed.args) && sqlState(err) === '42501') throw new Refused(409, POLICY_OFF_REFUSED);
+    if (change === 'off' && sqlState(err) === '42501') throw new Refused(409, POLICY_OFF_REFUSED);
     throw new Refused(409, 'Flint couldn’t carry it out.');
   }
 }

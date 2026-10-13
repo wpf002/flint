@@ -49,14 +49,20 @@ export function ruleSays(r: RuleRow, tz: string, now = new Date()): string {
 export const RULES_COMMAND = 'cd ~/flint && pnpm --silent --filter @flint/runtime rules';
 export const RULES_OFF_COMMAND = `${RULES_COMMAND} --off`;
 
+/** A row's id as a card can name it. The database holds every new row to this shape; a row from before may not have it. */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** What stands where an id that is not shaped as one would have been printed: the id is the runtime's to choose, and is never echoed to a terminal as it is. */
+export const NO_ID = '(no id)';
+
 /** What `rules` prints: each rule that is on, under its id, then how to switch one off. */
 export function rulesLines(rows: readonly RuleRow[], tz: string, now = new Date()): string[] {
   if (!rows.length) return ['You have no rules switched on.'];
   return [
     rows.length === 1 ? 'You have 1 rule switched on.' : `You have ${rows.length} rules switched on.`,
-    ...rows.map((r) => `  ${r.id}  ${ruleSays(r, tz, now)}`),
-    'To switch one off, run this with its id, then sign the card in the console (Approvals):',
+    ...rows.map((r) => `  ${ID.test(r.id) ? r.id : NO_ID}  ${ruleSays(r, tz, now)}`),
+    'To switch one off, run this with its id, then approve the card it files:',
     `  ${RULES_OFF_COMMAND} <id>`,
+    ...(rows.some((r) => !ID.test(r.id)) ? ['A rule shown with no id can’t be named on a card. Ask Claude to switch it off.'] : []),
   ];
 }
 
@@ -73,7 +79,7 @@ export const RULES_SAY = {
  */
 export async function proposeRulesOff(db: Db, ids: readonly string[], now = new Date()) {
   const wanted = [...new Set(ids)];
-  if (!wanted.length || wanted.some((i) => !/^[A-Za-z0-9_-]{1,64}$/.test(i))) throw new Refused(400, wanted.length ? RULES_SAY.unknown : RULES_SAY.none);
+  if (!wanted.length || wanted.some((i) => !ID.test(i))) throw new Refused(400, wanted.length ? RULES_SAY.unknown : RULES_SAY.none);
   const rows = await db.actionPolicy.findMany({ where: { id: { in: wanted } }, orderBy: [{ pattern: 'asc' }, { id: 'asc' }], select: { id: true, pattern: true, tier: true, active: true } });
   if (rows.length !== wanted.length) throw new Refused(400, RULES_SAY.unknown);
   if (rows.some((r) => !r.active)) throw new Refused(409, POLICY_OFF_SAYS.alreadyOff);
@@ -86,8 +92,18 @@ export async function proposeRulesOff(db: Db, ids: readonly string[], now = new 
   return { ...card, rules: off.length };
 }
 
-/** What the command says once the card is filed. */
-export function rulesOffFiledSays(p: { id: string; deduped: boolean; rules: number }): string {
-  const many = p.rules !== 1;
-  return `${p.deduped ? 'already filed' : 'filed'}: proposal ${p.id}, to switch off ${many ? `${p.rules} rules` : '1 rule'}. Sign it in the console (Approvals) with your key; ${many ? 'they go' : 'it goes'} off once signed.`;
+/** The card's title, as the console's Approvals panel says it (a test keeps the two the same). */
+export const rulesOffTitle = (rules: number): string => (rules === 1 ? 'Switch Off 1 Rule' : `Switch Off ${rules} Rules`);
+
+/**
+ * What the command prints once the card is filed: what it is, and how Will approves it (the form predictions-on
+ * uses). Held to the notes' rules, as everything Flint says to him is: no id, nothing in parentheses.
+ */
+export function rulesOffFiledSays(p: { deduped: boolean; rules: number }): string {
+  const title = rulesOffTitle(p.rules);
+  return [
+    `${p.deduped ? 'Already filed' : 'Filed'}: the ${title} card.`,
+    `To approve it: open Flint, click Approvals in the top bar, open ${title}, and approve it with Touch ID.`,
+    `It asks on its own, never in Approve All. It expires in 7 days. ${p.rules === 1 ? 'The rule stays' : 'The rules stay'} on until it is approved.`,
+  ].join('\n');
 }

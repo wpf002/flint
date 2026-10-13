@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { GOAL_SAYS, HIVE_DISPATCH, REFUSAL, TASK_SAYS, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, taskNamed, type Cap, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, HIVE_DISPATCH, REFUSAL, TASK_SAYS, digestOf, policyChangeKind, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, taskNamed, type Cap, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -171,13 +171,17 @@ export function hivePoolNamed(args: unknown): boolean {
 async function tierOf(db: Db | Tx, p: ProposalFacts, now: Date, readOnlyHint?: boolean): Promise<TierDecision> {
   const mcp = mcpOf(p.action, { destructive: p.destructive, ...(readOnlyHint ? { readOnlyHint } : {}) });
   const pool = poolOf(p.args);
+  // The card that switches rules off is judged by the code alone: a rule of Will's that forbids policy changes
+  // (one from before the database refused such a row) must not stop the card that would switch that rule off.
+  // The code's answer for a policy change is approval, always: his signature.
+  const codeOnly = p.action === 'policy.change' && policyChangeKind(p.args) === 'off';
   return resolveTier(p.action, {
     context: contextOf(p.origin),
     tainted: p.tainted,
     sensitivity: p.sensitivity as TierContext['sensitivity'] & string,
     ...(mcp ? { mcp } : {}),
     ...(pool ? { pool } : {}),
-    policies: await activePolicies(db, now),
+    policies: codeOnly ? [] : await activePolicies(db, now),
     now,
   });
 }
@@ -251,13 +255,12 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   if ((input.kind === 'spend' || input.kind === 'task') && hasFraction(input.args)) throw new Refused(400, WHOLE_NUMBERS_ONLY);
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {
-    const { PolicyArgs, PolicyOffArgs, checkPolicyOff, isPolicyOff } = await import('./internal.js');
-    // It adds rows, or it switches rows off (it then carries `off`): never both on one card.
-    const off = isPolicyOff(input.args);
-    const ok = (off ? PolicyOffArgs : PolicyArgs).safeParse(input.args);
-    if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+    const { checkPolicyChange, checkPolicyOff } = await import('./internal.js');
+    // It adds rows, or it switches rows off: one thing, never both on one card, and nothing the database would
+    // refuse when the card ran (the database files no other shape either: Proposal_policy_shape).
+    const kind = checkPolicyChange(input.args);
     // A switch-off names rows that are there and on, on a card the database will take when it runs.
-    if (off) await checkPolicyOff(db, input);
+    if (kind === 'off') await checkPolicyOff(db, input);
     // It always asks on its own: never in Approve All, always with a fresh touch. The mark is not the
     // filer's to leave off (the database refuses a policy change without it: Proposal_policy_floor).
     input = { ...input, consequential: true };

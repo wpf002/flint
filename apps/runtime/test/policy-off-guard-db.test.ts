@@ -6,40 +6,32 @@
  * of the live rows that match an action the strictest wins, and an action is
  * promoted only when every matching row is at alone, under the lowest daily cap
  * among the rows that promote it. So the runtime's role (flint_app) switches a
- * row off on its own only when the row is at alone and is not what keeps a cap
- * down. Any other row goes off on a card Will signed, and no other way.
+ * row off on its own only when the row is at alone AND has no cap. Any other
+ * row goes off on a card Will signed, and no other way.
  *
  *  1. The proof (no database): over thousands of rule tables, switching off any
  *     row the rule allows never makes resolveTier's answer looser for any action
- *     in any context, at any time. Two weaker rules are shown to fail.
+ *     in any context, at any time; and it stays so whatever signed rows arrive
+ *     afterwards. Three weaker rules are shown to fail, the one this replaced
+ *     among them.
  *  2. The database is that rule: asked row by row as flint_app, it allows
- *     exactly the rows the rule allows, and none of them loosens anything.
- *  3. Raw SQL as flint_app: a row that lets an action run alone goes off; a row
- *     that holds one back does not, by any statement, at any isolation level;
- *     the signed card switches it off, and only a card that is all a card must
- *     be; the two floors that stand on a holding row (goals from chat, P5's
- *     acceptance) now stand; rows from before the migration behave the same.
- *  4. The runtime's own path: the card is filed, signed and carried out, and a
- *     refusal by the database is a sentence and an audit entry, never a retry.
- *  5. The `rules` command: Will's rules in sentences, and the card it files.
- * Synthetic text only.
+ *     exactly the rows the rule allows.
+ *  3. Raw SQL as flint_app: a row at alone with no cap goes off; any other does
+ *     not, by any statement, at any isolation level; the signed card switches
+ *     it off, and only a card that is all a card must be; the row's history
+ *     names that card's approval whatever the writer says; the two floors that
+ *     stand on a holding row (goals from chat, P5's acceptance) now stand; rows
+ *     from before the migration behave the same.
+ * How a row is made is policy-rows-guard-db.test.ts; the runtime's own path and
+ * the rules command are policy-rules-db.test.ts. Synthetic text only.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
 import pg from 'pg';
 import { actionKey, digestOf, patternMatches, resolveTier, suggestionGoalId, type McpFacts, type PolicyRow, type Tier, type TierContext, type TierDecision } from '@flint/policy';
-import { NO_DB, RUNTIME, freshDb, withClient, withoutPolicyOffGuard, pgConfig, pgError, id, HEX, type TestUrls } from './db';
-import { p5Kit, sleep, type CardOptions, type P5Kit, type Q } from './p5';
-import { enrollTestKey } from './sign';
-import { createDb } from '../src/db';
-import { approveProposal, createProposal } from '../src/governance/proposals';
-import { POLICY_OFF_REFUSED, POLICY_OFF_SAYS, runInternal } from '../src/governance/internal';
-import { RULES_SAY, proposeRulesOff, ruleSays, rulesLines, rulesOffFiledSays, rulesOn } from '../src/governance/rules';
+import { NO_DB, freshDb, withClient, withoutPolicyOffGuard, pgConfig, pgError, id, HEX, type TestUrls } from './db';
+import { sleep, type CardOptions, type Q } from './p5';
+import { LEVEL, LEVELS, REFUSED, policyKit, type PolicyKit, type RowSpec } from './policy';
 
 // ---- The rule, and what "looser" means -------------------------------------------------------------------------
 
@@ -53,20 +45,25 @@ interface Row {
   active: boolean;
   expiresAt: Date;
 }
-
-/** Can two patterns match one action? The same pattern, or one is `prefix.*` and the other starts with that prefix. */
-const overlap = (a: string, b: string): boolean => a === b || (b.endsWith('.*') && a.startsWith(b.slice(0, -1))) || (a.endsWith('.*') && b.startsWith(a.slice(0, -1)));
+type Rule = (r: Row, table: readonly Row[]) => boolean;
 
 /**
- * The database's first rule, written again here: may the runtime's role switch this row off with no card? It is at
- * alone, and it is not what keeps a cap down: it has no cap, or no row that is on, at alone and able to match an
- * action it matches has a higher cap or none. (Expiry and scope are not read.)
+ * The database's rule, written again here: may the runtime's role switch this row off with no card? It is at alone
+ * and it has no cap. Nothing else is read: not its end, not its scope, not what else is there.
  */
-const mayGoOff = (r: Row, table: readonly Row[]): boolean =>
+const mayGoOff: Rule = (r) => r.tier === 'alone' && r.dailyCap === null;
+/** Can two patterns match one action? The same pattern, or one is `prefix.*` and the other starts with that prefix. */
+const overlap = (a: string, b: string): boolean => a === b || (b.endsWith('.*') && a.startsWith(b.slice(0, -1))) || (a.endsWith('.*') && b.startsWith(a.slice(0, -1)));
+/** Three rules that are not enough, to show what each part of the real one is for. */
+const anyRow: Rule = () => true;
+const aloneOnly: Rule = (r) => r.tier === 'alone';
+/**
+ * The rule this replaced: a capped row at alone may go while no other row that is on, at alone and able to match an
+ * action it matches has a higher cap or none. Sound one step at a time; not against a wider row signed (or carried
+ * out) afterwards, which then runs with the cap already gone.
+ */
+const capAware: Rule = (r, table) =>
   r.tier === 'alone' && (r.dailyCap === null || !table.some((o) => o.active && o.tier === 'alone' && (o.dailyCap === null || o.dailyCap > r.dailyCap!) && overlap(o.pattern, r.pattern)));
-/** Two rules that are not enough, to show what each part of the real one is for. */
-const anyRow = (_r: Row, _table: readonly Row[]): boolean => true;
-const aloneOnly = (r: Row, _table: readonly Row[]): boolean => r.tier === 'alone';
 
 const RANK: Record<Tier, number> = { alone: 0, approval: 1, forbidden: 2 };
 const capOf = (d: TierDecision): number => d.cap?.limit ?? Infinity;
@@ -126,12 +123,14 @@ const CALLS: Array<{ action: string; mcp?: McpFacts }> = [
 /** The key a call's rows are matched on (a runtime chat tool is matched as its own action). */
 const keyOf = (c: { action: string; mcp?: McpFacts }): string => (c.mcp?.server === 'runtime' && !c.mcp.destructiveHint ? c.mcp.tool : actionKey(c.action, c.mcp));
 
+// (No pattern covers a policy change: the database makes no such row.)
 const PATTERNS = [
   'goal.propose', 'goal.review.local', 'goal.*', 'goal.review.*', 'backup.prune', 'backup.local', 'backup.*', 'notify.push', 'notify.*', 'world.sync.git', 'world.sync.*', 'world.*',
-  'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'policy.change', 'restore.production', 'restore.*', 'task.check_bar', 'task.dispatch.local_worker', 'task.dispatch.*', 'task.*',
+  'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'restore.production', 'restore.*', 'task.check_bar', 'task.dispatch.local_worker', 'task.dispatch.*', 'task.*',
   'review.local', 'review.*', 'unknown.thing', 'unknown.*',
   'mcp:hive.do_thing', 'mcp:hive.open_position', 'mcp:hive.*', 'mcp:nexus.recall', 'mcp:nexus.*',
 ];
+const FAMILIES = ['goal.', 'backup.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'review.', 'unknown.', ''];
 
 /** A small seeded generator, so a failure names a table that can be made again. */
 function rng(seed: number): () => number {
@@ -146,16 +145,14 @@ function rng(seed: number): () => number {
 }
 const pick = <T>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
 
-/** A rule table: a few rows, mostly about one family of actions so that they meet. */
-function randomTable(r: () => number, n: number): Row[] {
-  const family = pick(r, ['goal.', 'backup.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'review.', 'unknown.', '']);
+/** A few rows, mostly about one family of actions so that they meet. */
+function randomRows(r: () => number, tag: string, family: string, size: number): Row[] {
   const pool = PATTERNS.filter((p) => p.startsWith(family));
   const rows: Row[] = [];
-  const size = 1 + Math.floor(r() * 6);
   for (let i = 0; i < size; i++) {
     const tier = r() < 0.6 ? 'alone' : r() < 0.7 ? 'approval' : 'forbidden';
     rows.push({
-      id: `t${n}r${i}`,
+      id: `${tag}r${i}`,
       pattern: pick(r, r() < 0.85 ? pool : PATTERNS),
       tier,
       dailyCap: r() < 0.45 ? null : pick(r, [0, 1, 3, 3, 20, 50]),
@@ -166,6 +163,8 @@ function randomTable(r: () => number, n: number): Row[] {
   }
   return rows;
 }
+/** A rule table. */
+const randomTable = (r: () => number, n: number): Row[] => randomRows(r, `t${n}`, pick(r, FAMILIES), 1 + Math.floor(r() * 6));
 
 interface Found {
   kind: 'tier' | 'cap';
@@ -177,25 +176,32 @@ interface Found {
 }
 const said = (d: TierDecision) => `${d.tier}${d.cap ? ` ${d.cap.limit}/${d.cap.period}` : ''}`;
 
-/** Every call, context and moment where switching `off` off makes the engine's answer looser. None, for a row the rule allows. */
-function loosenings(table: readonly Row[], off: Row, nows: readonly Date[] = NOWS, calls = CALLS): Found[] {
-  const before = table.map(asPolicy);
-  const after = table.map((r) => (r === off ? { ...asPolicy(r), active: false } : asPolicy(r)));
+/**
+ * Every call, context and moment where the engine's answer over `actual` is looser than over `held`. Only the calls
+ * a row in `changed` matches are asked: a row that does not match a call's key is not read for it (patternMatches
+ * is the engine's own), so nothing else can differ.
+ */
+function looserThan(held: readonly Row[], actual: readonly Row[], changed: readonly Row[], nows: readonly Date[] = NOWS): Found[] {
+  const before = held.map(asPolicy);
+  const after = actual.map(asPolicy);
   const found: Found[] = [];
-  for (const c of calls) {
-    // A row that does not match the call's key is not read for it (patternMatches is the engine's own): nothing can change.
-    if (!patternMatches(off.pattern, keyOf(c))) continue;
+  for (const c of CALLS) {
+    const by = changed.find((x) => patternMatches(x.pattern, keyOf(c)));
+    if (!by) continue;
     for (const ctx of CONTEXTS) {
       for (const now of nows) {
         const b = resolveTier(c.action, { ...ctx, ...(c.mcp ? { mcp: c.mcp } : {}), policies: before, now });
         const a = resolveTier(c.action, { ...ctx, ...(c.mcp ? { mcp: c.mcp } : {}), policies: after, now });
         const kind = looser(b, a);
-        if (kind) found.push({ kind, row: `${off.pattern} ${off.tier} cap ${off.dailyCap}`, call: keyOf(c), context: `${ctx.context}${ctx.tainted ? ' tainted' : ''}`, before: said(b), after: said(a) });
+        if (kind) found.push({ kind, row: `${by.pattern} ${by.tier} cap ${by.dailyCap}`, call: keyOf(c), context: `${ctx.context}${ctx.tainted ? ' tainted' : ''}`, before: said(b), after: said(a) });
       }
     }
   }
   return found;
 }
+/** Every call, context and moment where switching `off` off makes the engine's answer looser. None, for a row the rule allows. */
+const loosenings = (table: readonly Row[], off: Row, nows: readonly Date[] = NOWS): Found[] =>
+  looserThan(table, table.map((r) => (r === off ? { ...r, active: false } : r)), [off], nows);
 
 /** Every table of one, two or three rows drawn from `universe` (rows may repeat: Will can sign the same rule twice). */
 function* smallTables(universe: readonly Omit<Row, 'id'>[]): Generator<Row[]> {
@@ -210,6 +216,42 @@ function* smallTables(universe: readonly Omit<Row, 'id'>[]): Generator<Row[]> {
 }
 const universeOf = (patterns: string[], scopes: Array<Row['scope']>): Array<Omit<Row, 'id'>> =>
   patterns.flatMap((pattern) => (['alone', 'approval', 'forbidden'] as const).flatMap((tier) => [null, 1, 3].flatMap((dailyCap) => scopes.map((scope) => ({ pattern, tier, dailyCap, scope, active: true, expiresAt: FAR })))));
+
+/**
+ * The runtime's own moves over a table, in any order: switching off a row the rule allows, and carrying out a signed
+ * row that waits (it chooses when). After each move the engine's answer is held against the same table with the same
+ * rows added and nothing switched off: what Will's signatures alone would have in force.
+ */
+function interleaved(rule: Rule, seed: number, runs: number): { found: Found[]; offs: number; adds: number } {
+  const r = rng(seed);
+  const found: Found[] = [];
+  let offs = 0;
+  let adds = 0;
+  for (let n = 0; n < runs; n++) {
+    const family = pick(r, FAMILIES);
+    let actual = randomRows(r, `i${n}`, family, 1 + Math.floor(r() * 5));
+    let signed = actual;
+    const waiting = randomRows(r, `w${n}`, family, Math.floor(r() * 4)).map((x) => ({ ...x, active: true }));
+    const gone: Row[] = [];
+    for (;;) {
+      const can = actual.filter((x) => x.active && rule(x, actual));
+      if (!can.length && !waiting.length) break;
+      if (waiting.length && (!can.length || r() < 0.4)) {
+        const add = waiting.shift()!;
+        actual = [...actual, add];
+        signed = [...signed, add];
+        adds++;
+      } else {
+        const off = pick(r, can);
+        actual = actual.map((x) => (x === off ? { ...x, active: false } : x));
+        gone.push(off);
+        offs++;
+      }
+      if (gone.length) found.push(...looserThan(signed, actual, gone, [NOWS[1]!]));
+    }
+  }
+  return { found, offs, adds };
+}
 
 describe('the rule: a row the runtime may switch off on its own never loosens anything', () => {
   it('every table of up to three rules about one action and its family: no row the rule allows loosens any call, in any context', () => {
@@ -232,15 +274,15 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     }
     expect(bad.slice(0, 5)).toEqual([]);
     // Both kinds of answer in number: the rule is neither "never" nor "always".
-    expect(allowed).toBeGreaterThan(5_000);
-    expect(refused).toBeGreaterThan(5_000);
+    expect(allowed).toBeGreaterThan(3_000);
+    expect(refused).toBeGreaterThan(20_000);
   }, 120_000);
 
   it('4,000 random tables (rows on and off, ended and not, scoped and not, exact and wide, every tier and cap): none, whatever the clock says', () => {
     const r = rng(20261015);
     let allowed = 0;
     let holding = 0;
-    let capKept = 0;
+    let capped = 0;
     const bad: Found[] = [];
     for (let n = 0; n < 4_000; n++) {
       const table = randomTable(r, n);
@@ -248,38 +290,26 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
         if (mayGoOff(row, table)) {
           allowed++;
           bad.push(...loosenings(table, row));
-        } else if (row.tier === 'alone') capKept++;
+        } else if (row.tier === 'alone') capped++;
         else holding++;
       }
     }
     expect(bad.slice(0, 5)).toEqual([]);
     expect(allowed).toBeGreaterThan(2_000);
     expect(holding).toBeGreaterThan(2_000);
-    // The cap half of the rule is exercised too: rows at alone that are refused because they keep a cap down.
-    expect(capKept).toBeGreaterThan(100);
+    expect(capped).toBeGreaterThan(2_000);
   }, 120_000);
 
-  it('one after another: switching off every row the rule allows, in any order, never passes through a looser answer', () => {
-    const r = rng(7);
-    const bad: Found[] = [];
-    let steps = 0;
-    for (let n = 0; n < 1_500; n++) {
-      let table = randomTable(r, n);
-      for (;;) {
-        const can = table.filter((x) => x.active && mayGoOff(x, table));
-        if (!can.length) break;
-        const next = pick(r, can);
-        bad.push(...loosenings(table, next));
-        table = table.map((x) => (x === next ? { ...x, active: false } : x));
-        steps++;
-      }
-    }
-    expect(bad.slice(0, 5)).toEqual([]);
-    expect(steps).toBeGreaterThan(1_500);
+  it('in any order, with signed rows carried out in between: 3,000 runs never pass through an answer looser than Will’s signatures alone give', () => {
+    const run = interleaved(mayGoOff, 7, 3_000);
+    expect(run.found.slice(0, 5)).toEqual([]);
+    // Both kinds of move, in number: rows switched off, and signed rows added between them.
+    expect(run.offs).toBeGreaterThan(2_000);
+    expect(run.adds).toBeGreaterThan(2_000);
   }, 120_000);
 
-  it('a weaker rule fails this proof: "any row" loosens a tier, and "any row at alone" loosens a cap (and only a cap)', () => {
-    const found = (rule: (r: Row, t: readonly Row[]) => boolean): Found[] => {
+  it('a weaker rule fails this proof: "any row" loosens a tier, "any row at alone" loosens a cap, and the cap-aware rule this replaced is beaten by a row signed later', () => {
+    const found = (rule: Rule): Found[] => {
       const r = rng(20261015);
       const out: Found[] = [];
       for (let n = 0; n < 1_500; n++) {
@@ -297,9 +327,17 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     const alone = found(aloneOnly);
     expect(alone.filter((f) => f.kind === 'tier')).toEqual([]);
     expect(alone.filter((f) => f.kind === 'cap').length).toBeGreaterThan(10);
-    // The real rule, over the same tables.
+    // The cap-aware rule: nothing loosens one step at a time...
+    expect(found(capAware)).toEqual([]);
+    // ...but the runtime chooses the order. It switches the capped row off while it stands alone, then carries out
+    // the wider row Will signed, and the action runs with the cap gone. Only ever a cap; and found by the same search.
+    const later = interleaved(capAware, 7, 3_000).found;
+    expect(later.length).toBeGreaterThan(10);
+    expect(later.filter((f) => f.kind === 'tier')).toEqual([]);
+    // The real rule, over the same tables and the same runs.
     expect(found(mayGoOff)).toEqual([]);
-  }, 120_000);
+    expect(interleaved(mayGoOff, 7, 3_000).found).toEqual([]);
+  }, 180_000);
 
   it('the reviewed cases, by name', () => {
     const row = (pattern: string, tier: Tier, dailyCap: number | null = null, more: Partial<Row> = {}): Row => ({ id: id('r'), pattern, tier, dailyCap, scope: null, active: true, expiresAt: FAR, ...more });
@@ -326,83 +364,43 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     expect(mayGoOff(three, [wide, three])).toBe(false);
     expect(mayGoOff(wide, [wide, three])).toBe(true);
     expect(chat([three])).toBe('alone 3/day');
-    // Alone, the capped row may go: the action is back to a card.
-    expect(mayGoOff(three, [three])).toBe(true);
-    expect(chat([])).toBe('approval');
-    // Stricter than it has to be, by design: with a third row at alone under a lower cap the first could go safely, and is still refused.
-    const one = row('goal.propose', 'alone', 1);
-    expect(chat([wide, three, one])).toBe('alone 1/day');
-    expect(chat([wide, one])).toBe('alone 1/day');
-    expect(mayGoOff(three, [wide, three, one])).toBe(false);
+    // The capped row stays even while it stands alone. Switched off then, the action would only go back to a card:
+    // but the wider row may already be signed and waiting, and the runtime would carry it out next.
+    expect(mayGoOff(three, [three])).toBe(false);
+    expect(capAware(three, [three])).toBe(true);
+    expect(chat([{ ...three, active: false }, wide])).toBe('alone');
+    // A cap of none at all is a cap too.
+    expect(mayGoOff(row('goal.propose', 'alone', 0), [])).toBe(false);
   });
 });
 
 // ---- The database ----------------------------------------------------------------------------------------------
 
-const REFUSED = (rid: string) => `policy row ${rid}: it holds something back, so only a card Will signed switches it off`;
-const LEVEL = (rid: string) => `policy row ${rid}: a row is switched off at READ COMMITTED`;
-const LEVELS = ['REPEATABLE READ', 'SERIALIZABLE'] as const;
-
-interface RowSpec {
-  pattern: string;
-  tier: Tier;
-  dailyCap?: number;
-  scope?: Record<string, unknown>;
-  /** When it ends (default: in 30 days). */
-  expiresAt?: string;
-}
-
 describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
   let urls: TestUrls;
-  let k: P5Kit;
+  let pk: PolicyKit;
   let app: Q;
   let owner: Q;
-  let approver: Q;
-  let family = 0;
-  /** A family of action names no other test uses, so rows a test leaves on never meet another test's. */
-  const fam = () => `pog${Date.now().toString(36)}${family++}`;
-  const inDays = (n: number) => new Date(Math.floor(Date.now() / 1000) * 1000 + n * 86_400_000).toISOString();
-  const failure = async (p: Promise<unknown>) => {
-    const e = (await pgError(p)) as { code?: string; message: string; detail?: string };
-    return [e.code, e.message, e.detail ?? null];
-  };
+  const kit = () => pk.k;
+  const fam = () => pk.fam();
+  const failure = (p: Promise<unknown>) => pk.failure(p);
+  const rule = (rows: RowSpec[]) => pk.rule(rows);
+  const switchOff = (rid: string, q?: Q) => pk.switchOff(rid, q);
+  const isOn = (rid: string) => pk.isOn(rid);
+  const history = (rid: string) => pk.history(rid);
+  const named = (rid: string) => pk.named(rid);
+  const offCard = (rids: string[], o: CardOptions = {}) => pk.offCard(rids, o);
 
   beforeAll(async () => {
     urls = await freshDb();
-    k = await p5Kit(urls);
-    ({ app, owner, approver } = k);
+    pk = await policyKit(urls);
+    ({ app, owner } = pk);
   });
 
-  /** Rules Will signed: one policy.change card, approved and executing while the runtime's role writes the rows it lists. Their ids, in order. */
-  async function rule(rows: RowSpec[], q: Q = app): Promise<string[]> {
-    const listed = rows.map((r) => ({ ...r, expiresAt: r.expiresAt ?? inDays(30) }));
-    const pc = await k.card('policy.change', { rows: listed }, { kind: 'policy' });
-    const ids: string[] = [];
-    for (const r of listed) {
-      const rid = id('pol');
-      ids.push(rid);
-      await q(`INSERT INTO "ActionPolicy" (id, pattern, tier, "dailyCap", scope, reason, "approvalId", "expiresAt") VALUES ($1, $2, $3, $4, $5::jsonb, 'Synthetic rule', $6, $7)`, [
-        rid, r.pattern, r.tier, r.dailyCap ?? null, r.scope ? JSON.stringify(r.scope) : null, pc.aid, r.expiresAt,
-      ]);
-    }
-    await k.finish(pc.pid);
-    return ids;
-  }
-  const switchOff = (rid: string, q: Q = app) => q(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [rid]);
-  const isOn = async (rid: string) => (await owner(`SELECT active FROM "ActionPolicy" WHERE id = $1`, [rid])).rows[0].active as boolean;
-  const history = async (rid: string) => (await owner(`SELECT actor, changed FROM "RowChange" WHERE "tableName" = 'ActionPolicy' AND "rowId" = $1 ORDER BY at`, [rid])).rows as Array<{ actor: string; changed: unknown }>;
-  /** How a card names a row to switch off. */
-  const named = async (rid: string) => (await owner(`SELECT id, pattern, tier FROM "ActionPolicy" WHERE id = $1`, [rid])).rows[0] as { id: string; pattern: string; tier: string };
-  /** The card that switches rows off, as the runtime files it for Will from the CLI, taken as far as `stage` (default: signed and executing). */
-  const offCard = async (rids: string[], o: CardOptions = {}) => k.card('policy.change', { off: await Promise.all(rids.map(named)) }, { kind: 'policy', origin: 'cli', ...o });
-  /** Everything a test left on goes off, as the owner: for the tests that use the real names (goal.propose, task.check_bar). */
-  const clear = () => owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
-
-  describe('a row that lets an action run alone', () => {
+  describe('a row at alone with no cap', () => {
     it('goes off for the runtime’s role, and the action is back to a card; the row’s history says who', async () => {
-      const f = fam();
-      const [rid] = await rule([{ pattern: `${f}.sync`, tier: 'alone' }]);
-      await k.inTx(async (q) => {
+      const [rid] = await rule([{ pattern: `${fam()}.sync`, tier: 'alone' }]);
+      await kit().inTx(async (q) => {
         await switchOff(rid!, q);
       }, { actor: 'runtime:test' });
       expect(await isOn(rid!)).toBe(false);
@@ -413,84 +411,51 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect((await history(rid!)).length).toBe(1);
     });
 
-    it('with a cap, scoped, wide, ended or about to end: each goes off when no other row could run the same action under a higher cap', async () => {
+    it('scoped, wide, ended or about to end, and whatever else is on beside it: each goes off', async () => {
       const f = fam();
       const ids = await rule([
-        { pattern: `${f}.a`, tier: 'alone', dailyCap: 3 },
-        { pattern: `${f}.b`, tier: 'alone', dailyCap: 0 },
-        { pattern: `${f}.c`, tier: 'alone', scope: { endpoints: ['https://example.test'] } },
-        { pattern: `${f}.wide.*`, tier: 'alone', dailyCap: 20 },
-        { pattern: `${f}.d`, tier: 'alone', dailyCap: 5, expiresAt: new Date(Date.now() - 86_400_000).toISOString() },
-        { pattern: `${f}.e`, tier: 'alone', expiresAt: new Date(Date.now() + 1_500).toISOString() },
+        { pattern: `${f}.a`, tier: 'alone' },
+        { pattern: `${f}.b`, tier: 'alone', scope: { endpoints: ['https://example.test'] } },
+        { pattern: `${f}.wide.*`, tier: 'alone' },
+        { pattern: `${f}.c`, tier: 'alone', expiresAt: pk.past() },
+        { pattern: `${f}.d`, tier: 'alone', expiresAt: new Date(Date.now() + 1_500).toISOString() },
+        // Beside rows that are capped, hold it back, or cover it: nothing else is read.
+        { pattern: `${f}.e`, tier: 'alone' },
+        { pattern: `${f}.e`, tier: 'alone', dailyCap: 3 },
+        { pattern: `${f}.e`, tier: 'approval' },
+        { pattern: `${f}.*`, tier: 'forbidden' },
       ]);
-      for (const rid of ids) {
+      for (const rid of ids.slice(0, 6)) {
         await switchOff(rid);
         expect(await isOn(rid)).toBe(false);
       }
-    });
-
-    // The cap half of the rule, case by case. `F` is the test's own family of names.
-    const cap = (pattern: string, dailyCap?: number, more: Partial<RowSpec> & { off?: boolean } = {}) => ({ pattern, tier: 'alone' as Tier, ...(dailyCap === undefined ? {} : { dailyCap }), ...more });
-    const CASES: Array<[string, RowSpec, Array<RowSpec & { off?: boolean }>, 'goes off' | 'stays on']> = [
-      ['the same rule signed again with no cap', cap('F.propose', 3), [cap('F.propose')], 'stays on'],
-      ['the same rule under a higher cap', cap('F.propose', 3), [cap('F.propose', 5)], 'stays on'],
-      ['the same rule under the same cap', cap('F.propose', 3), [cap('F.propose', 3)], 'goes off'],
-      ['the same rule under a lower cap', cap('F.propose', 3), [cap('F.propose', 1)], 'goes off'],
-      ['a cap of none at all against a cap of one', cap('F.propose', 0), [cap('F.propose', 1)], 'stays on'],
-      ['a cap of one against a cap of none at all', cap('F.propose', 1), [cap('F.propose', 0)], 'goes off'],
-      ['a wide rule with no cap over it', cap('F.propose', 3), [cap('F.*')], 'stays on'],
-      ['a wide rule under a higher cap over it', cap('F.review.local', 3), [cap('F.review.*', 9)], 'stays on'],
-      ['it is the wide rule, over a narrow one with no cap', cap('F.*', 3), [cap('F.propose')], 'stays on'],
-      ['it is the wide rule, over a narrower wide one', cap('F.*', 3), [cap('F.review.*', 9)], 'stays on'],
-      ['a neighbour with no cap that matches none of its actions', cap('F.propose', 3), [cap('F.review.local'), cap('F.review.*'), cap('F.prop'), cap('F.propose.more'), cap('Fx.*')], 'goes off'],
-      ['a name is read letter by letter: `_` is no wildcard', cap('FxA.propose', 3), [cap('F_A.*')], 'goes off'],
-      ['a wide rule for a family whose name only begins the same', cap('Fx.propose', 3), [cap('F.*')], 'goes off'],
-      ['it is the wide rule, beside an action whose family only begins the same', cap('F.*', 3), [cap('Fx.propose')], 'goes off'],
-      ['the looser rule is switched off', cap('F.propose', 3), [cap('F.propose', undefined, { off: true })], 'goes off'],
-      ['the other rule holds the action back, cap or none', cap('F.propose', 3), [{ pattern: 'F.propose', tier: 'approval' }, { pattern: 'F.*', tier: 'forbidden', dailyCap: 9 }], 'goes off'],
-      ['the looser rule has ended (its end is not read)', cap('F.propose', 3), [cap('F.propose', undefined, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() })], 'stays on'],
-      ['the looser rule is scoped (its scope is not read)', cap('F.propose', 3), [cap('F.propose', undefined, { scope: { endpoints: ['a'] } })], 'stays on'],
-      ['it has no cap of its own, whatever else is there', cap('F.propose'), [cap('F.propose', 5), cap('F.*'), cap('F.propose', 1)], 'goes off'],
-    ];
-    it.each(CASES)('a capped row beside %s', async (_name, row, others, want) => {
-      const f = fam();
-      const mine = (r: RowSpec & { off?: boolean }): RowSpec => {
-        const { off: _off, ...spec } = r;
-        return { ...spec, pattern: r.pattern.replace(/^F/, f) };
-      };
-      const [rid, ...rest] = await rule([row, ...others].map(mine));
-      for (const [i, o] of others.entries()) if (o.off) await switchOff(rest[i]!);
-      if (want === 'goes off') {
-        await switchOff(rid!);
-        expect(await isOn(rid!)).toBe(false);
-      } else {
-        expect(await failure(switchOff(rid!))).toEqual(['42501', REFUSED(rid!), null]);
-        expect(await isOn(rid!)).toBe(true);
-        expect(await history(rid!)).toEqual([]);
-        // The looser row may go first (the action then runs under this one's cap), and then this one (it is back to a card).
-        for (const [i, o] of others.entries()) if (!o.off && o.tier === 'alone' && (o.dailyCap === undefined || o.dailyCap > (row.dailyCap ?? Infinity))) await switchOff(rest[i]!);
-        await switchOff(rid!);
-        expect(await isOn(rid!)).toBe(false);
-      }
+      for (const rid of ids.slice(6)) expect(await isOn(rid)).toBe(true);
     });
   });
 
-  describe('a row that holds an action back', () => {
-    const past = () => new Date(Date.now() - 86_400_000).toISOString();
-    const HOLDS: Array<[string, (f: string) => RowSpec]> = [
-      ['an action at approval', (f) => ({ pattern: `${f}.propose`, tier: 'approval' })],
-      ['an action at forbidden', (f) => ({ pattern: `${f}.propose`, tier: 'forbidden' })],
-      ['a whole family at approval', (f) => ({ pattern: `${f}.*`, tier: 'approval' })],
-      ['a whole family at forbidden', (f) => ({ pattern: `${f}.*`, tier: 'forbidden' })],
-      ['the widest pattern there is, every tool of a server', (f) => ({ pattern: `mcp:${f}.*`, tier: 'forbidden' })],
-      ['a scoped one', (f) => ({ pattern: `${f}.propose`, tier: 'approval', scope: { endpoints: ['https://example.test'] } })],
-      ['one with a cap', (f) => ({ pattern: `${f}.propose`, tier: 'approval', dailyCap: 5 })],
-      ['one with a cap of none', (f) => ({ pattern: `${f}.*`, tier: 'forbidden', dailyCap: 0 })],
-      ['one that has ended', (f) => ({ pattern: `${f}.propose`, tier: 'approval', expiresAt: past() })],
-      ['one that holds nothing today (no other row is there)', (f) => ({ pattern: `${f}.nothing.else`, tier: 'approval' })],
+  describe('a row that holds an action back, or a cap down', () => {
+    const HOLDS: Array<[string, (f: string) => RowSpec[]]> = [
+      ['an action at approval', (f) => [{ pattern: `${f}.propose`, tier: 'approval' }]],
+      ['an action at forbidden', (f) => [{ pattern: `${f}.propose`, tier: 'forbidden' }]],
+      ['a whole family at approval', (f) => [{ pattern: `${f}.*`, tier: 'approval' }]],
+      ['a whole family at forbidden', (f) => [{ pattern: `${f}.*`, tier: 'forbidden' }]],
+      ['the widest pattern there is, every tool of a server', (f) => [{ pattern: `mcp:${f}.*`, tier: 'forbidden' }]],
+      ['a scoped one', (f) => [{ pattern: `${f}.propose`, tier: 'approval', scope: { endpoints: ['https://example.test'] } }]],
+      ['one at approval with a cap', (f) => [{ pattern: `${f}.propose`, tier: 'approval', dailyCap: 5 }]],
+      ['one at forbidden with a cap of none', (f) => [{ pattern: `${f}.*`, tier: 'forbidden', dailyCap: 0 }]],
+      ['one that has ended', (f) => [{ pattern: `${f}.propose`, tier: 'approval', expiresAt: pk.past() }]],
+      ['one that holds nothing today (no other row is there)', (f) => [{ pattern: `${f}.nothing.else`, tier: 'approval' }]],
+      // A cap is a brake too, whatever else is there: it may be the lowest in force, now or once a wider row arrives.
+      ['a row at alone with a cap, standing alone', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }]],
+      ['a row at alone with a cap of none at all', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 0 }]],
+      ['a capped row at alone that has ended', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3, expiresAt: pk.past() }]],
+      ['a capped row beside the same rule under a lower cap', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'alone', dailyCap: 1 }]],
+      ['a capped row beside the same rule with no cap', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'alone' }]],
+      ['a capped wide row over a narrow one with no cap', (f) => [{ pattern: `${f}.*`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'alone' }]],
+      ['a capped row whose action another row holds back', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.*`, tier: 'forbidden' }]],
     ];
     it.each(HOLDS)('%s stays on: 42501, by its id alone, and nothing is written', async (_name, spec) => {
-      const [rid] = await rule([spec(fam())]);
+      const [rid] = await rule(spec(fam()));
       expect(await failure(switchOff(rid!))).toEqual(['42501', REFUSED(rid!), null]);
       expect(await isOn(rid!)).toBe(true);
       expect(await history(rid!)).toEqual([]);
@@ -498,7 +463,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
 
     it('one about to end stays on after it has ended too', async () => {
       const [rid] = await rule([{ pattern: `${fam()}.propose`, tier: 'approval', expiresAt: new Date(Date.now() + 1_200).toISOString() }]);
-      expect(await k.code(switchOff(rid!))).toBe('42501');
+      expect(await kit().code(switchOff(rid!))).toBe('42501');
       await sleep(1_300);
       expect((await owner(`SELECT "expiresAt" < now() AS ended FROM "ActionPolicy" WHERE id = $1`, [rid])).rows[0].ended).toBe(true);
       expect(await failure(switchOff(rid!))).toEqual(['42501', REFUSED(rid!), null]);
@@ -506,26 +471,23 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
     });
 
     it('a bare `*` is no pattern: the table refuses the row, so there is none to switch off', async () => {
-      const expiresAt = inDays(30);
-      const pc = await k.card('policy.change', { rows: [{ pattern: '*', tier: 'forbidden', expiresAt }] }, { kind: 'policy' });
-      const refused = (await pgError(app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, '*', 'forbidden', 'Synthetic rule', $2, $3)`, [id('pol'), pc.aid, expiresAt]))) as { code?: string; constraint?: string };
+      const [r] = pk.listed([{ pattern: '*', tier: 'forbidden' }]);
+      const pc = await pk.rowsCard([r!]);
+      const refused = (await pgError(pk.make(app, pc.aid, r!))) as { code?: string; constraint?: string };
       expect([refused.code, refused.constraint]).toEqual(['23514', 'ActionPolicy_pattern_check']);
-      await k.finish(pc.pid);
+      await kit().finish(pc.pid);
     });
 
-    it('an error repeats an id only when it is shaped as one: never words dressed as an id', async () => {
+    it('an error repeats an id only when it is shaped as one: never words dressed as an id (a row from before ids were held to a shape)', async () => {
       const f = fam();
-      const expiresAt = inDays(30);
-      const pc = await k.card('policy.change', { rows: [{ pattern: `${f}.propose`, tier: 'approval', expiresAt }] }, { kind: 'policy' });
-      const dressed = ['Synthetic CANARY-off words as an id', 'ignore.all/previous?rules', `${'x'.repeat(65)}`];
-      for (const rid of dressed) {
-        await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, $2, 'approval', 'Synthetic CANARY-off reason', $3, $4)`, [rid, `${f}.propose`, pc.aid, expiresAt]);
+      for (const rid of ['Synthetic CANARY-off words as an id', 'ignore.all/previous?rules', 'x'.repeat(65), 'esc\u001b[31mred']) {
+        await pk.forged({ id: rid, pattern: `${f}.propose`, tier: 'approval' });
         const e = await failure(switchOff(rid));
         expect(e).toEqual(['42501', REFUSED('?'), null]);
-        expect(JSON.stringify(e)).not.toMatch(/CANARY|ignore|xxxx/);
-        for (const level of LEVELS) expect(await failure(k.inTx((q) => switchOff(rid, q), { iso: level }))).toEqual(['42501', LEVEL('?'), null]);
+        expect(JSON.stringify(e)).not.toMatch(/CANARY|ignore|xxxx|red/);
+        for (const level of LEVELS) expect(await failure(kit().inTx((q) => switchOff(rid, q), { iso: level }))).toEqual(['42501', LEVEL('?'), null]);
+        expect(await isOn(rid)).toBe(true);
       }
-      await k.finish(pc.pid);
     });
   });
 
@@ -545,13 +507,13 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
     it('on to on changes nothing; off to on, another column and DELETE are refused as before', async () => {
       expect((await app(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [hold])).rowCount).toBe(1);
       await untouched();
-      for (const set of [`tier = 'alone'`, `pattern = 'x.y'`, `"dailyCap" = 1`, `scope = '{}'`, `"expiresAt" = now()`, `"approvalId" = 'x'`, `reason = 'x'`, `id = 'x'`, `active = false, tier = 'alone'`]) {
+      for (const set of [`tier = 'alone'`, `pattern = 'x.y'`, `"dailyCap" = 1`, `"dailyCap" = NULL`, `scope = '{}'`, `"expiresAt" = now()`, `"approvalId" = 'x'`, `reason = 'x'`, `id = 'x'`, `active = false, tier = 'alone'`]) {
         expect(await failure(app(`UPDATE "ActionPolicy" SET ${set} WHERE id = $1`, [hold])), set).toEqual(['42501', 'permission denied for table ActionPolicy', null]);
       }
       expect(await failure(app(`DELETE FROM "ActionPolicy" WHERE id = $1`, [hold]))).toEqual(['42501', 'permission denied for table ActionPolicy', null]);
       expect(await failure(app(`TRUNCATE "ActionPolicy"`))).toEqual(['42501', 'permission denied for table ActionPolicy', null]);
       // Neither on nor off is not a state a row has.
-      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = NULL WHERE id = $1`, [hold]))).toBe('23502');
+      expect(await kit().code(app(`UPDATE "ActionPolicy" SET active = NULL WHERE id = $1`, [hold]))).toBe('23502');
       // The owner is held to P1's own rules as before: nothing but `active` changes, and no row is deleted.
       expect((await pgError(owner(`UPDATE "ActionPolicy" SET tier = 'alone' WHERE id = $1`, [hold]))).message).toBe(`policy row ${hold}: it can only be switched off`);
       expect((await pgError(owner(`DELETE FROM "ActionPolicy" WHERE id = $1`, [hold]))).message).toBe('policy rows are switched off, never deleted');
@@ -568,40 +530,43 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       ];
       for (const [name, sql, params] of statements) expect(await failure(app(sql, params)), name).toEqual(['42501', REFUSED(hold), null]);
       // Locked first, in one transaction.
-      expect(await failure(k.inTx(async (q) => {
+      expect(await failure(kit().inTx(async (q) => {
         await q(`SELECT 1 FROM "ActionPolicy" WHERE id = $1 FOR UPDATE`, [hold]);
         await switchOff(hold, q);
       }))).toEqual(['42501', REFUSED(hold), null]);
       // One statement over both rows: the holding row refuses it whole, and the row at alone stays on with it.
-      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = false WHERE id = ANY ($1)`, [[loose, hold]]))).toBe('42501');
-      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = false WHERE pattern LIKE $1`, [`${f}.%`]))).toBe('42501');
+      expect(await kit().code(app(`UPDATE "ActionPolicy" SET active = false WHERE id = ANY ($1)`, [[loose, hold]]))).toBe('42501');
+      expect(await kit().code(app(`UPDATE "ActionPolicy" SET active = false WHERE pattern LIKE $1`, [`${f}.%`]))).toBe('42501');
       expect(await isOn(loose)).toBe(true);
       await untouched();
     });
 
     it('an upsert onto its id: refused with no card, and refused as a switch-off under another card’s rows', async () => {
-      const expiresAt = inDays(30);
+      const [other] = pk.listed([{ pattern: `${f}.other`, tier: 'alone' }]);
       const upsert = (aid: string) => app(
         `INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, $2, 'alone', 'Synthetic rule', $3, $4) ON CONFLICT (id) DO UPDATE SET active = false`,
-        [hold, `${f}.other`, aid, expiresAt],
+        [hold, other!.pattern, aid, other!.expiresAt],
       );
       expect((await pgError(upsert('no-such-approval'))).code).toBe('42501');
-      // A signed card that adds a row: its insert passes P1's check, meets the holding row's id, and is then a switch-off of that row.
-      const pc = await k.card('policy.change', { rows: [{ pattern: `${f}.other`, tier: 'alone', expiresAt }] }, { kind: 'policy' });
+      // A signed card that adds a row: its insert passes the row guard, meets the holding row's id, and is then a switch-off of that row.
+      const pc = await pk.rowsCard([other!]);
       expect(await failure(upsert(pc.aid))).toEqual(['42501', REFUSED(hold), null]);
-      await k.finish(pc.pid);
+      await kit().finish(pc.pid);
       await untouched();
     });
 
-    it('the role cannot become the owner, set the guard aside, or reach the row through a function that runs as the owner', async () => {
+    it('the role cannot become the owner, set a guard aside, or reach the row through a function that runs as the owner', async () => {
       for (const sql of [
         'SET ROLE flint_owner', 'SET SESSION AUTHORIZATION flint_owner', `SET session_replication_role = 'replica'`,
-        'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_off_guard"', 'ALTER TABLE "ActionPolicy" DISABLE TRIGGER USER', 'DROP TRIGGER "ActionPolicy_off_guard" ON "ActionPolicy"',
+        'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_off_guard"', 'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_card_actor"',
+        'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_whole_card"', 'ALTER TABLE "ActionPolicy" DISABLE TRIGGER USER', 'ALTER TABLE "Proposal" DISABLE TRIGGER "Proposal_policy_shape"',
+        'DROP TRIGGER "ActionPolicy_off_guard" ON "ActionPolicy"', 'DROP TRIGGER "ActionPolicy_whole_card" ON "ActionPolicy"', 'DROP TRIGGER "Proposal_policy_shape" ON "Proposal"',
         'DROP FUNCTION action_policy_off_guard() CASCADE', 'ALTER FUNCTION action_policy_off_guard() SECURITY DEFINER',
         `CREATE OR REPLACE FUNCTION action_policy_off_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`,
+        `CREATE OR REPLACE FUNCTION action_policy_matches_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`,
         `CREATE FUNCTION pog_as_owner() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ UPDATE "ActionPolicy" SET active = false $$`,
         'CREATE TEMP TABLE "Approval" (id text)', 'CREATE RULE pog_rule AS ON UPDATE TO "ActionPolicy" DO INSTEAD NOTHING',
-        'SELECT action_policy_off_guard()',
+        'SELECT action_policy_off_guard()', 'SELECT action_policy_whole_card()', 'SELECT proposal_policy_shape()', 'SELECT action_policy_matches_approval()',
       ]) {
         expect((await pgError(app(sql))).code, sql).toBe('42501');
       }
@@ -612,11 +577,25 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
          WHERE n.nspname IN ('public', 'pgboss') AND p.prosecdef`)).rows as Array<{ proname: string; names_it: boolean; runs: boolean }>;
       expect(definers.filter((d) => d.names_it)).toEqual([]);
       expect(definers.filter((d) => d.runs).length).toBeGreaterThan(3);
-      // The guard itself: the owner's, with its search path pinned, runs as whoever fires it, and nobody may call it.
+      // The guards themselves: the owner's, each with its search path pinned, each running as whoever fires it, and none anyone may call.
       expect((await owner(
-        `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef, array_to_string(p.proconfig, ';') AS config, coalesce(array_to_string(p.proacl, ','), '') AS acl
-         FROM pg_proc p WHERE p.proname = 'action_policy_off_guard'`)).rows).toEqual([{ owner: 'flint_owner', prosecdef: false, config: 'search_path=public, pg_temp', acl: 'flint_owner=X/flint_owner' }]);
-      expect((await owner(`SELECT tgenabled, tgtype FROM pg_trigger WHERE tgname = 'ActionPolicy_off_guard' AND NOT tgisinternal`)).rows).toEqual([{ tgenabled: 'O', tgtype: 19 }]);
+        `SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef, array_to_string(p.proconfig, ';') AS config, coalesce(array_to_string(p.proacl, ','), '') AS acl
+         FROM pg_proc p WHERE p.proname IN ('action_policy_off_guard', 'action_policy_whole_card', 'action_policy_matches_approval', 'proposal_policy_shape') ORDER BY 1`)).rows).toEqual(
+        ['action_policy_matches_approval', 'action_policy_off_guard', 'action_policy_whole_card', 'proposal_policy_shape'].map((proname) => (
+          { proname, owner: 'flint_owner', prosecdef: false, config: 'search_path=public, pg_temp', acl: 'flint_owner=X/flint_owner' })));
+      // Each trigger, whole, as the catalog has it: switched on, on every UPDATE (never `UPDATE OF "active"` alone,
+      // which a statement that names another column too would slip past), and the row check deferred to the commit.
+      expect((await owner(
+        `SELECT t.tgname, t.tgenabled, pg_get_triggerdef(t.oid) AS def FROM pg_trigger t
+         WHERE NOT t.tgisinternal AND t.tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_card_actor', 'ActionPolicy_whole_card', 'ActionPolicy_matches_approval', 'Proposal_policy_shape') ORDER BY 1`)).rows).toEqual([
+        { tgname: 'ActionPolicy_card_actor', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_card_actor" AFTER UPDATE ON public."ActionPolicy" FOR EACH ROW WHEN ((old.active AND (NOT new.active))) EXECUTE FUNCTION action_policy_off_guard()' },
+        { tgname: 'ActionPolicy_matches_approval', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_matches_approval" BEFORE INSERT ON public."ActionPolicy" FOR EACH ROW EXECUTE FUNCTION action_policy_matches_approval()' },
+        { tgname: 'ActionPolicy_off_guard', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_off_guard" BEFORE UPDATE ON public."ActionPolicy" FOR EACH ROW WHEN ((old.active AND (NOT new.active))) EXECUTE FUNCTION action_policy_off_guard()' },
+        { tgname: 'ActionPolicy_whole_card', tgenabled: 'O', def: 'CREATE CONSTRAINT TRIGGER "ActionPolicy_whole_card" AFTER INSERT ON public."ActionPolicy" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION action_policy_whole_card()' },
+        { tgname: 'Proposal_policy_shape', tgenabled: 'O', def: `CREATE TRIGGER "Proposal_policy_shape" BEFORE INSERT ON public."Proposal" FOR EACH ROW WHEN ((new.action = 'policy.change'::text)) EXECUTE FUNCTION proposal_policy_shape()` },
+      ]);
+      // The actor trigger fires before the history trigger, row by row (AFTER triggers fire in name order).
+      expect('ActionPolicy_card_actor' < 'ActionPolicy_history').toBe(true);
       await untouched();
     });
 
@@ -624,8 +603,8 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       const [free] = await rule([{ pattern: `${fam()}.sync`, tier: 'alone' }]);
       const card = await offCard([hold]);
       for (const level of [...LEVELS, 'READ UNCOMMITTED']) {
-        expect(await failure(k.inTx((q) => switchOff(free!, q), { iso: level })), level).toEqual(['42501', LEVEL(free!), null]);
-        expect(await failure(k.inTx((q) => switchOff(hold, q), { iso: level })), level).toEqual(['42501', LEVEL(hold), null]);
+        expect(await failure(kit().inTx((q) => switchOff(free!, q), { iso: level })), level).toEqual(['42501', LEVEL(free!), null]);
+        expect(await failure(kit().inTx((q) => switchOff(hold, q), { iso: level })), level).toEqual(['42501', LEVEL(hold), null]);
         // Set for the session, not on BEGIN: the same.
         expect(await failure(withClient(urls.app, async (c) => {
           await c.query(`SET default_transaction_isolation = '${level.toLowerCase()}'`);
@@ -635,10 +614,10 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect(await isOn(free!)).toBe(true);
       await untouched();
       // At READ COMMITTED, said outright: the row at alone goes, and the card's row goes.
-      await k.inTx((q) => switchOff(free!, q), { iso: 'READ COMMITTED' });
-      await k.inTx((q) => switchOff(hold, q), { iso: 'READ COMMITTED' });
+      await kit().inTx((q) => switchOff(free!, q), { iso: 'READ COMMITTED' });
+      await kit().inTx((q) => switchOff(hold, q), { iso: 'READ COMMITTED' });
       expect([await isOn(free!), await isOn(hold)]).toEqual([false, false]);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
     });
   });
 
@@ -649,23 +628,48 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       const card = await offCard([hold, never]);
       // A row the card does not name, however alike.
       expect(await failure(switchOff(other))).toEqual(['42501', REFUSED(other), null]);
-      await k.inTx(async (q) => {
-        await switchOff(hold, q);
-      }, { actor: `will:approval:${card.aid}` });
+      await switchOff(hold);
       expect(await isOn(hold)).toBe(false);
-      expect(await history(hold)).toEqual([{ actor: `will:approval:${card.aid}`, changed: { active: [true, false] } }]);
       // The card ends with one of its rows still on: that row stays on.
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
       expect(await failure(switchOff(never))).toEqual(['42501', REFUSED(never), null]);
       expect(await isOn(never)).toBe(true);
-      // A new card for it, and it goes. A card may name a row at alone too.
-      const [free] = await rule([{ pattern: `${f}.free`, tier: 'alone', dailyCap: 2 }, { pattern: `${f}.free`, tier: 'alone' }]);
-      expect(await k.code(switchOff(free!))).toBe('42501');
-      const again = await offCard([never, free!]);
-      await switchOff(never);
-      await switchOff(free!);
-      expect([await isOn(never), await isOn(free!)]).toEqual([false, false]);
-      await k.finish(again.pid);
+      // A new card for it, and it goes. A card may name a row at alone too, capped or not.
+      const [capped, free] = await rule([{ pattern: `${f}.free`, tier: 'alone', dailyCap: 2 }, { pattern: `${f}.free`, tier: 'alone' }]);
+      expect(await kit().code(switchOff(capped!))).toBe('42501');
+      const again = await offCard([never, capped!, free!]);
+      for (const rid of [never, capped!, free!]) await switchOff(rid);
+      expect([await isOn(never), await isOn(capped!), await isOn(free!)]).toEqual([false, false, false]);
+      await kit().finish(again.pid);
+    });
+
+    it('the row’s history names the approval of the card that let it through, whatever the writer says of itself', async () => {
+      const f = fam();
+      const [brake, capped, named1, free, later] = (await rule([
+        { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.capped`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.named`, tier: 'alone' },
+        { pattern: `${f}.free`, tier: 'alone' }, { pattern: `${f}.later`, tier: 'alone' },
+      ])) as [string, string, string, string, string];
+      const card = await offCard([brake, capped, named1]);
+      const says = `will:approval:${card.aid}`;
+      // The writer says nothing; says it is the console; says it is another approval: the brake's history is the card's.
+      await switchOff(brake);
+      expect(await history(brake)).toEqual([{ actor: says, changed: { active: [true, false] } }]);
+      await kit().inTx((q) => switchOff(capped, q), { actor: 'will:console' });
+      expect((await history(capped))[0]!.actor).toBe(says);
+      // One statement over a row the card names and one it does not, the writer setting its own name again for every
+      // row as the statement runs: each row's history is its own. The named row is the card's; the other, which no
+      // card names, is never an approval's.
+      const spoof = (name: string) => kit().inTx((q) => q(`UPDATE "ActionPolicy" SET active = (set_config('flint.actor', $2, true) IS NULL) WHERE id = ANY ($1)`, [[named1, free], name]));
+      await spoof('will:approval:made-up');
+      expect((await history(named1))[0]!.actor).toBe(says);
+      expect((await history(free))[0]!.actor).toBe('flint_app');
+      await kit().finish(card.pid);
+      // With no card at all: the writer's own word for itself stands, but never an approval's name.
+      await kit().inTx((q) => switchOff(later, q), { actor: `will:approval:${card.aid}` });
+      expect((await history(later))[0]!.actor).toBe('flint_app');
+      const [plain] = await rule([{ pattern: `${f}.plain`, tier: 'alone' }]);
+      await kit().inTx((q) => switchOff(plain!, q), { actor: 'runtime:step-down' });
+      expect((await history(plain!))[0]!.actor).toBe('runtime:step-down');
     });
 
     it('names the row by its id, its pattern and its tier: a card that gets one of them wrong switches nothing off', async () => {
@@ -680,23 +684,27 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
         ['no pattern', { off: [{ id: me.id, tier: me.tier }] }],
         ['no tier', { off: [{ id: me.id, pattern: me.pattern }] }],
         ['the id alone, as text', { off: [me.id] }],
-        ['not a list', { off: me }],
         ['a list inside a list', { off: [[me]] }],
         ['under rows, not off', { rows: [me] }],
-        ['under another name', { switchOff: [me] }],
-        ['nothing', { off: [] }],
       ];
       for (const [name, args] of wrong) {
-        const card = await k.card('policy.change', args, { kind: 'policy', origin: 'cli' });
+        const card = await kit().card('policy.change', args, { kind: 'policy', origin: 'cli' });
         expect(await failure(switchOff(hold)), name).toEqual(['42501', REFUSED(hold), null]);
-        await k.finish(card.pid);
+        await kit().finish(card.pid);
+      }
+      // Shapes the database no longer files (a card from before it held the shape): each still switches nothing off.
+      for (const [name, args] of [['not a list', { off: me }], ['under another name', { switchOff: [me] }], ['nothing', { off: [] }]] as Array<[string, Record<string, unknown>]>) {
+        const filed = await kit().without('Proposal_policy_shape', (q) => kit().file('policy.change', args, { kind: 'policy', origin: 'cli' }, q));
+        const card = await kit().sign(filed, 'policy.change');
+        expect(await failure(switchOff(hold)), name).toEqual(['42501', REFUSED(hold), null]);
+        await kit().finish(card.pid);
       }
       expect(await isOn(hold)).toBe(true);
-      // More said about the row than the three is still that row (the card's own check keeps such a card from being filed).
-      const more = await k.card('policy.change', { off: [{ ...me, note: 'Synthetic note' }] }, { kind: 'policy', origin: 'cli' });
+      // More said about the row than the three is still that row (the runtime's own check keeps such a card from being filed).
+      const more = await kit().card('policy.change', { off: [{ ...me, note: 'Synthetic note' }] }, { kind: 'policy', origin: 'cli' });
       await switchOff(hold);
       expect(await isOn(hold)).toBe(false);
-      await k.finish(more.pid);
+      await kit().finish(more.pid);
     });
 
     it('acts only while it is being carried out: not waiting, approved, run, failed, rejected or expired', async () => {
@@ -721,108 +729,156 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
 
     // Each line is a card that is all a signed switch-off must be but for one thing.
     const NOT_CARDS: Array<[string, (hold: string) => Promise<{ pid: string }>]> = [
-      ['of another action', async (hold) => k.card('world.source.enable', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli', consequential: true })],
+      ['of another action', async (hold) => kit().card('world.source.enable', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli', consequential: true })],
       ['of another kind', async (hold) => offCard([hold], { kind: 'tool_call' })],
       ['from a chat', async (hold) => offCard([hold], { origin: 'chat:console-1' })],
       ['from one of the runtime’s own jobs', async (hold) => offCard([hold], { origin: 'runtime:goals' })],
+      // Only the two origins that are Will's own are taken: anything else is refused, not only the ones known to be someone else's.
+      ['from an origin that is neither (`will`)', async (hold) => offCard([hold], { origin: 'will' })],
+      ['from no origin at all', async (hold) => offCard([hold], { origin: '' })],
+      ['from an origin that only looks like one (`CLI`)', async (hold) => offCard([hold], { origin: 'CLI' })],
       ['with outside text in it', async (hold) => offCard([hold], { tainted: true })],
       ['that outlives Will’s approval by more than 7 days', async (hold) => offCard([hold], { life: '7 days 1 hour' })],
       ['filed under a digest that is not its args’ digest', async (hold) => offCard([hold], { digest: digestOf({ off: [{ id: 'another', pattern: 'x.y', tier: 'alone' }] }) })],
-      ['whose args have no digest (a number that is not whole)', async (hold) => {
-        const args = { off: [await named(hold)], weight: 0.5 };
-        return k.card('policy.change', args, { kind: 'policy', origin: 'cli', digest: HEX('d') });
-      }],
+      ['whose args have no digest (a number that is not whole)', async (hold) => kit().card('policy.change', { off: [{ ...(await named(hold)), weight: 0.5 }] }, { kind: 'policy', origin: 'cli', digest: HEX('d') })],
     ];
     it.each(NOT_CARDS)('a card %s switches nothing off', async (_name, make) => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
       const card = await make(hold);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
+    });
+
+    it('a card that also adds rows (one from before the database held a card to one thing) switches nothing off', async () => {
+      const f = fam();
+      const [hold] = (await rule([{ pattern: `${f}.propose`, tier: 'approval' }])) as [string];
+      const args = { off: [await named(hold)], rows: pk.listed([{ pattern: `${f}.*`, tier: 'alone' }]) };
+      const filed = await kit().without('Proposal_policy_shape', (q) => kit().file('policy.change', args, { kind: 'policy', origin: 'cli' }, q));
+      const card = await kit().sign(filed, 'policy.change');
+      expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
+      // Empty lists beside the other key are the other key all the same.
+      const me = await named(hold);
+      const empty = await kit().without('Proposal_policy_shape', (q) => kit().file('policy.change', { off: [me], rows: [] }, { kind: 'policy', origin: 'cli' }, q));
+      const emptied = await kit().sign(empty, 'policy.change');
+      expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
+      expect(await isOn(hold)).toBe(true);
+      await kit().finish(card.pid);
+      await kit().finish(emptied.pid);
+    });
+
+    it('args nested past reading beside the row’s name switch nothing off (42501, not a fault), and never stand in a good card’s way', async () => {
+      const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
+      let deep: unknown = 'bottom';
+      for (let i = 0; i < 3_000; i++) deep = [deep];
+      const bad = await kit().card('policy.change', { off: [{ ...(await named(hold)), deep }] }, { kind: 'policy', origin: 'cli', digest: HEX('e') });
+      expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
+      expect(await isOn(hold)).toBe(true);
+      // A good card for the same row, with the unreadable one still being carried out beside it.
+      const good = await offCard([hold]);
+      await switchOff(hold);
+      expect(await isOn(hold)).toBe(false);
+      expect((await history(hold))[0]!.actor).toBe(`will:approval:${good.aid}`);
+      await kit().finish(bad.pid);
+      await kit().finish(good.pid);
     });
 
     it('a card not marked for Will’s own touch (one from before that floor) switches nothing off', async () => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
       const args = { off: [await named(hold)] };
-      const filed = await k.without('Proposal_policy_floor', (q) => k.file('policy.change', args, { kind: 'policy', origin: 'cli', consequential: false }, q));
-      const card = await k.sign(filed, 'policy.change');
+      const filed = await kit().without('Proposal_policy_floor', (q) => kit().file('policy.change', args, { kind: 'policy', origin: 'cli', consequential: false }, q));
+      const card = await kit().sign(filed, 'policy.change');
       expect((await owner(`SELECT status, consequential FROM "Proposal" WHERE id = $1`, [card.pid])).rows).toEqual([{ status: 'executing', consequential: false }]);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
     });
 
     it('a card signed under a key that has since been revoked switches nothing off', async () => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
-      const credential = id('cred');
-      await approver(`INSERT INTO "ApprovalCredential" (id, "credentialId", factor, "publicKey", label, "enrolledVia") VALUES ($1, $2, 'webauthn', '\\x00', 'Synthetic old key', 'enroll_code')`, [id(), credential]);
+      const credential = await pk.spareKey();
       const card = await offCard([hold], { credential });
-      await approver(`UPDATE "ApprovalCredential" SET "revokedAt" = now() WHERE "credentialId" = $1`, [credential]);
+      await pk.revoke(credential);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
     });
 
-    it('a card that has expired while it was being carried out switches nothing off', async () => {
+    it('a card that has expired while it was being carried out switches nothing off, in a transaction begun before it expired too', async () => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
-      const card = await offCard([hold], { life: '1 second' });
-      await sleep(1_100);
+      const card = await offCard([hold], { life: '2 seconds' });
+      // A transaction opened while the card is still good, and kept open past its end: its own clock (now()) still
+      // reads the moment it began. The guard reads the wall clock.
+      const held = await kit().client();
+      try {
+        await held.query('BEGIN');
+        expect((await held.query(`SELECT "expiresAt" > now() AS good FROM "Proposal" WHERE id = $1`, [card.pid])).rows[0].good).toBe(true);
+        await sleep(2_100);
+        expect((await held.query(`SELECT "expiresAt" > now() AS by_its_own_clock, "expiresAt" > clock_timestamp() AS by_the_wall FROM "Proposal" WHERE id = $1`, [card.pid])).rows[0]).toEqual({ by_its_own_clock: true, by_the_wall: false });
+        expect(await failure(held.query(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [hold]))).toEqual(['42501', REFUSED(hold), null]);
+        await held.query('ROLLBACK');
+      } finally {
+        await held.end();
+      }
       expect((await owner(`SELECT status, "expiresAt" < clock_timestamp() AS over FROM "Proposal" WHERE id = $1`, [card.pid])).rows).toEqual([{ status: 'executing', over: true }]);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
     });
 
     // What P1's own rules already keep from happening, held here as well: a card whose approval is not Will's yes to
     // this very card, for this action and these args. Made as the owner, with P1's card rules set aside for the one
     // statement (the state a changed backup could bring; a restore checks for it too).
     const FORGED: Array<[string, (pid: string, digest: string) => Promise<string>]> = [
-      ['his signed no', (pid, digest) => k.approval(pid, 'policy.change', digest, { decision: 'reject' })],
-      ['a signature on something that is not a card', (pid, digest) => k.approval(pid, 'policy.change', digest, { subjectType: 'policy' })],
-      ['his yes to another card', async (_pid, digest) => k.approval((await k.file('policy.change', { off: [{ id: 'another', pattern: 'x.y', tier: 'alone' }] }, { kind: 'policy', origin: 'cli' })).pid, 'policy.change', digest)],
-      ['his yes to another action', (pid, digest) => k.approval(pid, 'world.source.enable', digest)],
-      ['his yes to other args', (pid) => k.approval(pid, 'policy.change', digestOf({ off: [{ id: 'another', pattern: 'x.y', tier: 'alone' }] }))],
+      ['his signed no', (pid, digest) => kit().approval(pid, 'policy.change', digest, { decision: 'reject' })],
+      ['a signature on something that is not a card', (pid, digest) => kit().approval(pid, 'policy.change', digest, { subjectType: 'policy' })],
+      ['his yes to another card', async (_pid, digest) => kit().approval((await kit().file('policy.change', { off: [{ id: 'another', pattern: 'x.y', tier: 'alone' }] }, { kind: 'policy', origin: 'cli' })).pid, 'policy.change', digest)],
+      ['his yes to another action', (pid, digest) => kit().approval(pid, 'world.source.enable', digest)],
+      ['his yes to other args', (pid) => kit().approval(pid, 'policy.change', digestOf({ off: [{ id: 'another', pattern: 'x.y', tier: 'alone' }] }))],
     ];
     it.each(FORGED)('a card carried out under %s switches nothing off', async (_name, approve) => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
-      const filed = await k.file('policy.change', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli' });
+      const filed = await kit().file('policy.change', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli' });
       const aid = await approve(filed.pid, filed.digest);
-      await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
+      await kit().without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
       expect((await owner(`SELECT status, "approvalId" FROM "Proposal" WHERE id = $1`, [filed.pid])).rows).toEqual([{ status: 'executing', approvalId: aid }]);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
-      await k.finish(filed.pid);
+      await kit().finish(filed.pid);
     });
 
     it('a card of another action carried out under his yes to a policy change (the same forgery, the other way round) switches nothing off', async () => {
       const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
-      const filed = await k.file('world.source.enable', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli', consequential: true });
-      const aid = await k.approval(filed.pid, 'policy.change', filed.digest);
-      await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
+      const filed = await kit().file('world.source.enable', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli', consequential: true });
+      const aid = await kit().approval(filed.pid, 'policy.change', filed.digest);
+      await kit().without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
       expect((await owner(`SELECT status, action, "approvalId" FROM "Proposal" WHERE id = $1`, [filed.pid])).rows).toEqual([{ status: 'executing', action: 'world.source.enable', approvalId: aid }]);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
-      await k.finish(filed.pid);
+      await kit().finish(filed.pid);
     });
 
     it('the stored args changed after he signed (as the owner, past P1’s rule): the card he signed for one row does not switch off another', async () => {
       const f = fam();
       const [mine, target] = (await rule([{ pattern: `${f}.a`, tier: 'approval' }, { pattern: `${f}.b`, tier: 'forbidden' }])) as [string, string];
       const card = await offCard([mine]);
-      await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET args = $2::jsonb WHERE id = $1`, [card.pid, JSON.stringify({ off: [{ id: target, pattern: `${f}.b`, tier: 'forbidden' }] })]));
+      await kit().without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET args = $2::jsonb WHERE id = $1`, [card.pid, JSON.stringify({ off: [{ id: target, pattern: `${f}.b`, tier: 'forbidden' }] })]));
       expect(await failure(switchOff(target))).toEqual(['42501', REFUSED(target), null]);
       // Nor the row it first named: the args are no longer what he signed.
       expect(await failure(switchOff(mine))).toEqual(['42501', REFUSED(mine), null]);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
     });
   });
 
   describe('the owner', () => {
     it('is not held to it (a restore, a repair by hand), at any isolation level; P1’s rules still hold it', async () => {
       const f = fam();
-      const [a, b] = (await rule([{ pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.*`, tier: 'forbidden' }])) as [string, string];
+      const [a, b, c] = (await rule([{ pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.*`, tier: 'forbidden' }, { pattern: `${f}.capped`, tier: 'alone', dailyCap: 1 }])) as [string, string, string];
       await switchOff(a, owner);
-      await k.inTx((q) => switchOff(b, q), { url: urls.owner, iso: 'SERIALIZABLE' });
-      expect([await isOn(a), await isOn(b)]).toEqual([false, false]);
+      await kit().inTx((q) => switchOff(b, q), { url: urls.owner, iso: 'SERIALIZABLE' });
+      await kit().inTx((q) => switchOff(c, q), { url: urls.owner, actor: 'restore' });
+      expect([await isOn(a), await isOn(b), await isOn(c)]).toEqual([false, false, false]);
+      // Its own word for itself is kept as it is.
+      expect((await history(c))[0]!.actor).toBe('restore');
       expect((await pgError(owner(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [a]))).message).toBe(`policy row ${a}: it can only be switched off`);
     });
   });
@@ -833,7 +889,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
     const SAID = '2026-10-08T15:00:00.000Z';
 
     it('goals from chat: with goal.* at alone and goal.propose at approval, the runtime cannot open the way; Will’s card does', async () => {
-      await clear();
+      await pk.clear();
       const [, brake] = (await rule([{ pattern: 'goal.*', tier: 'alone', dailyCap: 3 }, { pattern: 'goal.propose', tier: 'approval' }])) as [string, string];
       const source = () => `chat:${createHash('sha256').update(id()).digest('hex')}`;
       /** The intake's own audit entry and then the goal, as the runtime's role writes both under a rule. */
@@ -851,22 +907,23 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       };
       const goals = async () => (await owner(`SELECT count(*)::int AS n FROM "Goal" WHERE origin = 'flint'`)).rows[0].n as number;
       // Held back: nothing lands.
-      expect(await k.code(add(source()))).toBe('42501');
+      expect(await kit().code(add(source()))).toBe('42501');
       // What the review found: the runtime's role switched the brake off and the same insert then landed. Not any more.
       expect(await failure(switchOff(brake))).toEqual(['42501', REFUSED(brake), null]);
-      expect(await k.code(add(source()))).toBe('42501');
+      expect(await kit().code(add(source()))).toBe('42501');
       expect(await goals()).toBe(0);
       // Will signs the brake off, and the rule that promotes goals from chat lets one in.
       const card = await offCard([brake]);
       await switchOff(brake);
-      await k.finish(card.pid);
+      await kit().finish(card.pid);
       await add(source());
       expect(await goals()).toBe(1);
-      await clear();
+      await pk.clear();
     });
 
     it('P5: with task.check_bar at alone and task.* at approval, Flint accepts nothing on its own until Will’s card switches the brake off', async () => {
-      await clear();
+      await pk.clear();
+      const k = kit();
       const a = await k.onAsset();
       const [alone, brake] = (await rule([{ pattern: 'task.check_bar', tier: 'alone' }, { pattern: 'task.*', tier: 'approval' }])) as [string, string];
       const t = await k.taskAt('checked', a);
@@ -887,7 +944,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       await switchOff(alone);
       const later = await k.taskAt('checked', a);
       expect(await k.code(k.setStatus(app, later.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(later.id)]))).toBe('42501');
-      await clear();
+      await pk.clear();
     });
   });
 
@@ -895,24 +952,28 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
     it('are held like new ones: what was on stays under the rule, and what was switched off stays off', async () => {
       const f = fam();
       const before = await withoutPolicyOffGuard(urls.owner, async () => {
-        const ids = await rule([
+        // Without the guards a card's rows are written one at a time, as they always were.
+        const all = pk.listed([
           { pattern: `${f}.free`, tier: 'alone' },
           { pattern: `${f}.capped`, tier: 'alone', dailyCap: 3 },
-          { pattern: `${f}.capped`, tier: 'alone' },
           { pattern: `${f}.propose`, tier: 'approval' },
           { pattern: `${f}.*`, tier: 'forbidden' },
-          { pattern: `${f}.ended`, tier: 'approval', expiresAt: new Date(Date.now() - 86_400_000).toISOString() },
+          { pattern: `${f}.ended`, tier: 'approval', expiresAt: pk.past() },
           { pattern: `${f}.gone`, tier: 'approval' },
           { pattern: `${f}.gone.too`, tier: 'alone' },
         ]);
+        const pc = await pk.rowsCard(all);
+        const ids: string[] = [];
+        for (const r of all) ids.push(await pk.make(app, pc.aid, r));
+        await kit().finish(pc.pid);
         // Without the guard the runtime's role switches a holding row off: what this migration closes.
+        await switchOff(ids[5]!);
         await switchOff(ids[6]!);
-        await switchOff(ids[7]!);
-        expect((await owner(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'ActionPolicy_off_guard'`)).rows[0].n).toBe(0);
+        expect((await owner(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_whole_card', 'Proposal_policy_shape')`)).rows[0].n).toBe(0);
         return ids;
       });
-      const [free, capped, uncapped, hold, never, ended, gone, goneToo] = before as [string, string, string, string, string, string, string, string];
-      expect((await owner(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'ActionPolicy_off_guard' AND tgenabled = 'O'`)).rows[0].n).toBe(1);
+      const [free, capped, hold, never, ended, gone, goneToo] = before as [string, string, string, string, string, string, string];
+      expect((await owner(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_whole_card', 'Proposal_policy_shape') AND tgenabled = 'O'`)).rows[0].n).toBe(3);
       for (const rid of [hold, never, ended, capped]) {
         expect(await failure(switchOff(rid)), rid).toEqual(['42501', REFUSED(rid), null]);
         expect(await isOn(rid)).toBe(true);
@@ -923,12 +984,10 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect((await pgError(app(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [gone]))).message).toBe(`policy row ${gone}: it can only be switched off`);
       // What may go, goes; and a card signed now covers a row made then.
       await switchOff(free);
-      await switchOff(uncapped);
-      await switchOff(capped);
-      const card = await offCard([hold, never, ended]);
-      for (const rid of [hold, never, ended]) await switchOff(rid);
-      await k.finish(card.pid);
-      for (const rid of [free, capped, uncapped, hold, never, ended]) expect(await isOn(rid), rid).toBe(false);
+      const card = await offCard([hold, never, ended, capped]);
+      for (const rid of [hold, never, ended, capped]) await switchOff(rid);
+      await kit().finish(card.pid);
+      for (const rid of [free, capped, hold, never, ended]) expect(await isOn(rid), rid).toBe(false);
     });
   });
 
@@ -959,14 +1018,16 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       for (let n = 0; n < 150; n++) {
         const table = randomTable(r, n).map((row) => ({ ...row, id: id('pol'), expiresAt: row.expiresAt === FAR ? at.far : row.expiresAt === SOON ? at.soon : at.ended }));
         await ownerC.query(`UPDATE "ActionPolicy" SET active = false WHERE active`);
-        // The table as Will would have signed it: one card, its rows written by the runtime's role while it runs.
-        const pc = await k.card('policy.change', { rows: table.map((row) => ({ pattern: row.pattern, tier: row.tier, ...(row.dailyCap === null ? {} : { dailyCap: row.dailyCap }), ...(row.scope ? { scope: row.scope } : {}), expiresAt: row.expiresAt.toISOString() })) }, { kind: 'policy' });
+        // The table as Will would have signed it: one card, its rows written together by the runtime's role while it runs.
+        const pc = await pk.rowsCard(table.map((row) => ({ pattern: row.pattern, tier: row.tier, ...(row.dailyCap === null ? {} : { dailyCap: row.dailyCap }), ...(row.scope ? { scope: row.scope } : {}), expiresAt: row.expiresAt.toISOString() })));
+        await appC.query('BEGIN');
         for (const row of table) {
           await appC.query(`INSERT INTO "ActionPolicy" (id, pattern, tier, "dailyCap", scope, reason, "approvalId", "expiresAt") VALUES ($1, $2, $3, $4, $5::jsonb, 'Synthetic rule', $6, $7)`, [
             row.id, row.pattern, row.tier, row.dailyCap, row.scope ? JSON.stringify(row.scope) : null, pc.aid, row.expiresAt.toISOString(),
           ]);
         }
         await appC.query(`UPDATE "Proposal" SET status = 'executed', "executedAt" = now() WHERE id = $1`, [pc.pid]);
+        await appC.query('COMMIT');
         const off = table.filter((row) => !row.active).map((row) => row.id);
         if (off.length) await ownerC.query(`UPDATE "ActionPolicy" SET active = false WHERE id = ANY ($1)`, [off]);
         for (const row of table.filter((x) => x.active)) {
@@ -987,223 +1048,5 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect(refused).toBeGreaterThan(100);
       await ownerC.query(`UPDATE "ActionPolicy" SET active = false WHERE active`);
     }, 180_000);
-  });
-});
-
-// ---- The runtime's own path ------------------------------------------------------------------------------------
-
-describe.skipIf(NO_DB)('a signed switch-off, as the runtime files and carries it out', () => {
-  let urls: TestUrls;
-  let db: ReturnType<typeof createDb>;
-  let key: Awaited<ReturnType<typeof enrollTestKey>>;
-  let k: P5Kit;
-  let n = 0;
-  const fam = () => `run${Date.now().toString(36)}${n++}`;
-
-  beforeAll(async () => {
-    urls = await freshDb();
-    db = createDb(urls.app);
-    key = await enrollTestKey(urls);
-    k = await p5Kit(urls);
-  });
-  afterAll(async () => db?.$disconnect());
-
-  /** Rules Will signed, through the runtime itself: a policy change filed, approved with his key and run. */
-  async function rules(rows: Array<{ pattern: string; tier: Tier; dailyCap?: number }>) {
-    const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 30 * 86_400_000).toISOString();
-    const p = await createProposal(db, {
-      kind: 'policy', origin: 'cli', action: 'policy.change', args: { rows: rows.map((r) => ({ ...r, expiresAt })) }, argsProvenance: {}, tainted: false, sensitivity: 'ops',
-      destructive: false, consequential: false, ttlMinutes: 60,
-    }, 'will:cli');
-    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: p.argsDigest }), undefined, 'will:console');
-    await runInternal(db, p.id, undefined, 'UTC', 'will:console');
-    const made = await db.actionPolicy.findMany({ where: { approvalId: (await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).approvalId! } });
-    // In the order asked for (rows written in one transaction share their time).
-    return rows.map((r) => made.find((m) => m.pattern === r.pattern && m.tier === r.tier)!);
-  }
-  const offArgs = (rows: Array<{ id: string; pattern: string; tier: string }>) => ({ off: rows.map((r) => ({ id: r.id, pattern: r.pattern, tier: r.tier })) });
-  const file = (args: Record<string, unknown>, over: Record<string, unknown> = {}) => createProposal(db, {
-    kind: 'policy', origin: 'cli', action: 'policy.change', args, argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 60, ...over,
-  } as Parameters<typeof createProposal>[1], 'will:cli');
-  const entries = async (pid: string) => (await k.owner(`SELECT kind, outcome FROM "AuditEntry" WHERE "correlationId" = $1 ORDER BY seq`, [pid])).rows as Array<{ kind: string; outcome: string }>;
-
-  it('filed, signed and run: the rows it names go off whole, the card says how many, and each row’s history names the approval', async () => {
-    const f = fam();
-    const [wide, brake, never] = await rules([{ pattern: `${f}.*`, tier: 'alone' }, { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.void`, tier: 'forbidden' }]);
-    const p = await file(offArgs([brake!, never!]));
-    // It asks on its own, whatever the filer said.
-    expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).consequential).toBe(true);
-    // Filed is not switched off: both rows hold until it is signed and run.
-    expect(await db.actionPolicy.count({ where: { id: { in: [brake!.id, never!.id] }, active: true } })).toBe(2);
-    const approvalId = await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: p.argsDigest });
-    await approveProposal(db, p.id, approvalId, undefined, 'will:console');
-    expect(await db.actionPolicy.count({ where: { id: { in: [brake!.id, never!.id] }, active: true } })).toBe(2);
-    expect(await runInternal(db, p.id, undefined, 'UTC', 'will:console')).toEqual({ off: 2 });
-    expect(await db.actionPolicy.count({ where: { id: { in: [brake!.id, never!.id] }, active: true } })).toBe(0);
-    expect((await db.actionPolicy.findUniqueOrThrow({ where: { id: wide!.id } })).active).toBe(true);
-    const card = await db.proposal.findUniqueOrThrow({ where: { id: p.id } });
-    expect([card.status, card.result]).toEqual(['executed', { off: 2 }]);
-    expect((await entries(p.id)).map((e) => `${e.kind} ${e.outcome}`)).toEqual(['decision pending', 'approval ok', 'intent pending', 'action ok']);
-    expect((await k.owner(`SELECT DISTINCT actor FROM "RowChange" WHERE "rowId" = ANY ($1)`, [[brake!.id, never!.id]])).rows).toEqual([{ actor: `will:approval:${approvalId}` }]);
-    // Run once: asked again, the card has already run, and nothing more happens.
-    await expect(runInternal(db, p.id, undefined, 'UTC', 'will:console')).rejects.toMatchObject({ status: 409, message: 'It already ran.' });
-  });
-
-  it('a card that could not apply is never filed: not Will’s own card, a row that is not there or not as written, one already off, or both kinds of change at once', async () => {
-    const f = fam();
-    const [brake, gone] = await rules([{ pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.gone`, tier: 'alone' }]);
-    await k.app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [gone!.id]);
-    const ok = offArgs([brake!]);
-    await expect(file(ok, { kind: 'tool_call' })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.card });
-    await expect(file(ok, { origin: 'chat:console-1' })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.card });
-    await expect(file(ok, { origin: 'runtime:goals', templateId: 'x' })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.card });
-    await expect(file(ok, { tainted: true })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.card });
-    await expect(file({ off: [{ id: 'no-such-row', pattern: `${f}.propose`, tier: 'approval' }] })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.unknown });
-    await expect(file({ off: [{ ...ok.off[0]!, tier: 'forbidden' }] })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.unknown });
-    await expect(file({ off: [{ ...ok.off[0]!, pattern: `${f}.*` }] })).rejects.toMatchObject({ status: 400, message: POLICY_OFF_SAYS.unknown });
-    await expect(file(offArgs([gone!]))).rejects.toMatchObject({ status: 409, message: POLICY_OFF_SAYS.alreadyOff });
-    for (const bad of [{ off: [] }, { off: [ok.off[0], ok.off[0]] }, { off: [{ id: brake!.id }] }, { off: [{ ...ok.off[0]!, note: 'x' }] }, { ...ok, rows: [] }, { ...ok, also: 1 }, { off: 'all' }, { off: [{ ...ok.off[0]!, id: 'not an id' }] }]) {
-      await expect(file(bad as Record<string, unknown>), JSON.stringify(bad)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/^invalid policy change: /) });
-    }
-    expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
-    expect((await db.actionPolicy.findUniqueOrThrow({ where: { id: brake!.id } })).active).toBe(true);
-  });
-
-  it('a row that went off after the card was filed is left as it is, and the rest still go', async () => {
-    const f = fam();
-    const [a, b] = await rules([{ pattern: `${f}.a`, tier: 'alone' }, { pattern: `${f}.b`, tier: 'approval' }]);
-    const p = await file(offArgs([a!, b!]));
-    await k.app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [a!.id]);
-    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: p.argsDigest }), undefined, 'will:console');
-    expect(await runInternal(db, p.id, undefined, 'UTC', 'will:console')).toEqual({ off: 1 });
-    expect(await db.actionPolicy.count({ where: { id: { in: [a!.id, b!.id] }, active: true } })).toBe(0);
-  });
-
-  it('refused by the database: one sentence, the card failed and on record as failed, the row still on, and no second try', async () => {
-    const f = fam();
-    const [brake, free] = await rules([{ pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.free`, tier: 'alone' }]);
-    // A card the runtime would never file (from a chat), written straight into the table as a runtime gone wrong could,
-    // and signed: the runtime's own checks pass it on, and the database is what refuses.
-    const args = offArgs([free!, brake!]);
-    const pid = id('prop');
-    await k.app(
-      `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", sensitivity, consequential, "expiresAt") VALUES ($1, 'policy', 'chat:console-1', 'policy.change', $2::jsonb, $3, '{}', 'ops', true, now() + interval '1 hour')`,
-      [pid, JSON.stringify(args), digestOf(args)],
-    );
-    await approveProposal(db, pid, await key.approve({ subjectId: pid, action: 'policy.change', argsDigest: digestOf(args) }), undefined, 'will:console');
-    const logged: string[] = [];
-    const error = console.error;
-    console.error = (...a: unknown[]) => void logged.push(a.join(' '));
-    try {
-      await expect(runInternal(db, pid, undefined, 'UTC', 'will:console')).rejects.toMatchObject({ name: 'Refused', status: 409, message: POLICY_OFF_REFUSED });
-    } finally {
-      console.error = error;
-    }
-    // All rows or none: the row at alone named beside it stays on too.
-    expect(await db.actionPolicy.count({ where: { id: { in: [brake!.id, free!.id] }, active: true } })).toBe(2);
-    const card = await db.proposal.findUniqueOrThrow({ where: { id: pid } });
-    expect(card.status).toBe('failed');
-    expect(card.error).toMatch(/^could not carry it out \(err[a-z0-9]+\)$/);
-    expect((await entries(pid)).map((e) => `${e.kind} ${e.outcome}`)).toEqual(['approval ok', 'intent pending', 'action failed']);
-    // The log says what failed by its class and SQLSTATE, never the database's own words.
-    expect(logged.join('\n')).toMatch(/running policy\.change failed: .*42501/);
-    expect(logged.join('\n')).not.toMatch(/holds something back|policy row/);
-    // Asked again, it has failed: nothing is retried.
-    await expect(runInternal(db, pid, undefined, 'UTC', 'will:console')).rejects.toMatchObject({ status: 409, message: 'It already failed.' });
-    expect((await entries(pid)).length).toBe(3);
-  });
-
-  describe('the rules command', () => {
-    const TZ = 'America/Chicago';
-    const at = (iso: string) => new Date(iso);
-
-    it('says each rule as a sentence, by the action’s plain name: what it does, its limit and its last day', () => {
-      const now = at('2026-10-13T12:00:00Z');
-      const row = (pattern: string, tier: string, more: Record<string, unknown> = {}) => ({ id: 'ap1', pattern, tier, dailyCap: null, scoped: false, expiresAt: at('2027-04-05T05:00:00Z'), ...more });
-      expect(ruleSays(row('backup.local', 'alone'), TZ, now)).toBe('Flint may run Backup on its own, until April 5, 2027.');
-      expect(ruleSays(row('goal.propose', 'alone', { dailyCap: 3 }), TZ, now)).toBe('Flint may run Suggest a Goal from Chat on its own, up to 3 a day, until April 5, 2027.');
-      expect(ruleSays(row('world.sync.github', 'alone', { scoped: true, dailyCap: 0 }), TZ, now)).toBe('Flint may run World Sync Github on its own, within the limits you signed, up to 0 a day, until April 5, 2027.');
-      expect(ruleSays(row('goal.propose', 'approval', { dailyCap: 9, scoped: true }), TZ, now)).toBe('Flint asks you each time before it runs Suggest a Goal from Chat, until April 5, 2027.');
-      expect(ruleSays(row('restore.*', 'forbidden'), TZ, now)).toBe('Flint may not run Everything Under Restore, until April 5, 2027.');
-      // One that has ended and is still switched on says so: it holds nothing today, and is listed until it is switched off.
-      expect(ruleSays(row('goal.propose', 'approval', { expiresAt: at('2026-10-01T05:00:00Z') }), TZ, now)).toBe('Flint asks you each time before it runs Suggest a Goal from Chat, and ended on October 1, 2026.');
-      // The day is Will's day, wherever the Mac's clock is.
-      expect(ruleSays(row('backup.local', 'alone', { expiresAt: at('2027-04-05T03:00:00Z') }), TZ, now)).toBe('Flint may run Backup on its own, until April 4, 2027.');
-      expect(rulesLines([], TZ, now)).toEqual(['You have no rules switched on.']);
-      expect(rulesLines([row('backup.local', 'alone')], TZ, now)).toEqual([
-        'You have 1 rule switched on.',
-        '  ap1  Flint may run Backup on its own, until April 5, 2027.',
-        'To switch one off, run this with its id, then sign the card in the console (Approvals):',
-        '  cd ~/flint && pnpm --silent --filter @flint/runtime rules --off <id>',
-      ]);
-      expect(rulesLines([row('backup.local', 'alone'), row('restore.*', 'forbidden', { id: 'ap2' })], TZ, now)[0]).toBe('You have 2 rules switched on.');
-      expect(rulesOffFiledSays({ id: 'pr1', deduped: false, rules: 1 })).toBe('filed: proposal pr1, to switch off 1 rule. Sign it in the console (Approvals) with your key; it goes off once signed.');
-      expect(rulesOffFiledSays({ id: 'pr1', deduped: true, rules: 3 })).toBe('already filed: proposal pr1, to switch off 3 rules. Sign it in the console (Approvals) with your key; they go off once signed.');
-    });
-
-    it('lists what is on, files one card for the rules named (the same card when filed again), and files nothing it cannot', async () => {
-      await k.owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
-      const f = fam();
-      const [wide, brake, gone] = await rules([{ pattern: `${f}.*`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.gone`, tier: 'alone' }]);
-      await k.app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [gone!.id]);
-      expect((await rulesOn(db)).map((r) => [r.id, r.pattern, r.tier, r.dailyCap, r.scoped])).toEqual([[wide!.id, `${f}.*`, 'alone', 3, false], [brake!.id, `${f}.propose`, 'approval', null, false]]);
-      const filed = await proposeRulesOff(db, [brake!.id, wide!.id, brake!.id]);
-      expect([filed.deduped, filed.rules, filed.tier]).toEqual([false, 2, 'approval']);
-      const card = await db.proposal.findUniqueOrThrow({ where: { id: filed.id } });
-      expect(card).toMatchObject({
-        kind: 'policy', origin: 'cli', action: 'policy.change', status: 'pending', tainted: false, consequential: true, reason: 'Approving switches these rules off.',
-        args: { off: [{ id: wide!.id, pattern: `${f}.*`, tier: 'alone' }, { id: brake!.id, pattern: `${f}.propose`, tier: 'approval' }] },
-      });
-      expect(card.expiresAt.getTime() - card.createdAt.getTime()).toBeLessThanOrEqual(7 * 86_400_000 + 1_000);
-      // Again, in any order: the card that waits.
-      expect(await proposeRulesOff(db, [wide!.id, brake!.id])).toMatchObject({ id: filed.id, deduped: true, rules: 2 });
-      // Nothing is switched off by filing.
-      expect((await rulesOn(db)).length).toBe(2);
-      await expect(proposeRulesOff(db, [])).rejects.toMatchObject({ status: 400, message: RULES_SAY.none });
-      await expect(proposeRulesOff(db, ['no-such-rule'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
-      await expect(proposeRulesOff(db, [brake!.id, 'no-such-rule'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
-      await expect(proposeRulesOff(db, ['not an id; DROP'])).rejects.toMatchObject({ status: 400, message: RULES_SAY.unknown });
-      await expect(proposeRulesOff(db, [gone!.id])).rejects.toMatchObject({ status: 409, message: POLICY_OFF_SAYS.alreadyOff });
-      expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(1);
-      // Signed and run, both go off, and the list is empty.
-      await approveProposal(db, filed.id, await key.approve({ subjectId: filed.id, action: 'policy.change', argsDigest: filed.argsDigest }), undefined, 'will:console');
-      expect(await runInternal(db, filed.id, undefined, 'UTC', 'will:console')).toEqual({ off: 2 });
-      expect(await rulesOn(db)).toEqual([]);
-    });
-
-    it('run for real: it lists the rules under their ids, files the card, and says one sentence when it cannot', async () => {
-      await k.owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
-      const f = fam();
-      const [brake] = await rules([{ pattern: `${f}.propose`, tier: 'approval' }]);
-      // A home of its own, so the command reads no settings but the ones given here.
-      const home = mkdtempSync(join(tmpdir(), 'flint-rules-'));
-      try {
-        const env = { PATH: process.env.PATH ?? '', HOME: home, RUNTIME_ENV_FILE: join(home, 'none.env'), DATABASE_URL: urls.app, FLINT_TZ: TZ };
-        const cli = (...args: string[]) => promisify(execFile)(join(RUNTIME, 'node_modules', '.bin', 'tsx'), [join(RUNTIME, 'src', 'cli.ts'), 'rules', ...args], { cwd: RUNTIME, env })
-          .then((r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }), (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }));
-        const listed = await cli();
-        expect(listed.code, listed.stderr).toBe(0);
-        expect(listed.stdout.trim().split('\n')).toEqual(rulesLines(await rulesOn(db), TZ));
-        expect(listed.stdout).toContain(`  ${brake!.id}  Flint asks you each time before it runs `);
-        const none = await cli('--off');
-        expect([none.code, none.stdout.trim()]).toEqual([1, `Not filed: ${RULES_SAY.none}`]);
-        const unknown = await cli('--off', 'no-such-rule');
-        expect([unknown.code, unknown.stdout.trim()]).toEqual([1, `Not filed: ${RULES_SAY.unknown}`]);
-        const wrong = await cli('--all');
-        expect(wrong.code).toBe(1);
-        expect(wrong.stderr).toContain('rules: run it alone to list your rules, or with --off <id>... to file the card that switches some off');
-        expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
-        const filed = await cli('--off', brake!.id);
-        expect(filed.code, filed.stderr).toBe(0);
-        const card = await db.proposal.findFirstOrThrow({ where: { action: 'policy.change', status: 'pending' } });
-        expect(filed.stdout.trim()).toBe(rulesOffFiledSays({ id: card.id, deduped: false, rules: 1 }));
-        expect(card.args).toEqual({ off: [{ id: brake!.id, pattern: `${f}.propose`, tier: 'approval' }] });
-        expect((await cli('--off', brake!.id)).stdout.trim()).toBe(rulesOffFiledSays({ id: card.id, deduped: true, rules: 1 }));
-        // Still on: the command files a card and switches nothing off.
-        expect((await db.actionPolicy.findUniqueOrThrow({ where: { id: brake!.id } })).active).toBe(true);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    });
   });
 });
