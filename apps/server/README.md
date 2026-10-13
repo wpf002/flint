@@ -190,10 +190,10 @@ the paths Flint uses (there is none that downloads a model), and never a redirec
 | --- | --- | --- |
 | `FLINT_LOCAL_PROVIDER` | `ollama` | The wire: `ollama` (Ollama's own API) or `openai` (the OpenAI-compatible adapter). |
 | `FLINT_LOCAL_BASE_URL` | `http://127.0.0.1:11434/v1` | The OpenAI-compatible server. http or https, no credentials, query or fragment; a URL with no path gets `/v1`. A refused value turns that provider **off** (local turns fail with a clear error); it is never replaced by another address. |
-| `FLINT_LOCAL_ALLOW_REMOTE` | `0` | `1` allows a model server on another machine, over https. Without it a local endpoint must be `127.0.0.1`, `localhost` or `[::1]`. |
+| `FLINT_LOCAL_ALLOW_REMOTE` | `0` | `1` allows the local model server to be on another machine, over https. Without it a local endpoint must be `127.0.0.1`, `localhost` or `[::1]`. It vouches for that ONE server (`FLINT_LOCAL_BASE_URL`, or `OLLAMA_HOST` on Ollama's own API) and for nothing else: an `OLLAMA_HOST` on some other machine is never "here" because of it. |
 | `FLINT_LOCAL_ALLOW_INSECURE_REMOTE` | `0` | `1` also allows plain http to that machine: say so only for a private network. Plain http carries every prompt in the clear. Even then the API key is never sent over it. |
 | `FLINT_LOCAL_API_KEY` | none | For a server started with a key (`llama-server --api-key`). Put it in `~/.flint/secrets.env`. It is never logged, never in a status, and never sent over plain http to another machine (the boot log says it was left out). |
-| `FLINT_LOCAL_SERVER` | `auto` | What is at the address: `ollama`, `llamacpp`, `openai` (any other), or `auto` to ask it at boot. It decides which health checks run. |
+| `FLINT_LOCAL_SERVER` | `auto` | What is at the address: `ollama`, `llamacpp`, `openai` (any other), or `auto` to ask it at boot. It decides which health checks run, and nothing else: whatever it says, the server is asked what it is at every look, and no model on it is taken for one on this Mac until it has answered (see "Local means this Mac" under Modes). |
 | `FLINT_LOCAL_MODEL` | none | The local model, on either wire, ahead of `OLLAMA_MODEL`. An Ollama cloud tag is refused. |
 | `FLINT_LOCAL_FALLBACK_MODEL` | the tier's standby | The standby model, which answers while the main one loads: a model's name on the local server, or `off` (or `none`) for none. Unset: the hardware tier's standby model, on an Ollama server. See "Warm start". |
 | `FLINT_LOCAL_FALLBACK_NUM_CTX` | the tier's standby context | The standby's context (256 to 1048576). Unset: 8,192 on the 16 GB tier and up, 4,096 below. |
@@ -219,11 +219,22 @@ size, is ignored and reported.
 - A server on another machine needs `FLINT_LOCAL_ALLOW_REMOTE=1` and https. Plain http to another
   machine is refused (`insecure_remote`) unless `FLINT_LOCAL_ALLOW_INSECURE_REMOTE=1` also says the
   network is private.
-- The same rule holds for the helpers that always talk to Ollama's own address (`OLLAMA_HOST`):
-  the embedder, memory extraction on the local model, and the runtime's background calls. In the
-  local and hybrid modes they send nothing to an Ollama on another machine Will has not allowed.
-  Their requests then fail like an Ollama that is down, which each of them already lives with
-  (recall matches words, only the core tools are offered, extraction waits).
+- The helpers that always talk to Ollama's own address (`OLLAMA_HOST`: the embedder, memory
+  extraction on the local model, and the runtime's background calls) are held to this Mac too.
+  In the local and hybrid modes they send nothing to an Ollama on another machine, and a private
+  message is not sent there in any mode. The one exception is an `OLLAMA_HOST` that IS the local
+  model server Will allowed (the same origin): `FLINT_LOCAL_ALLOW_REMOTE` vouches for that server
+  and no other. With the local model on this Mac and `OLLAMA_HOST` elsewhere, that Ollama gets
+  nothing that stays here, whatever the switch says, and every sentence that says "this Mac" is
+  true. Their requests then fail like an Ollama that is down, which each of them already lives
+  with (recall matches words, only the core tools are offered, extraction waits).
+- The address is not the whole of it for them either. The model a helper's request names is
+  asked of that Ollama's own listing: a private message's words are embedded only by a model
+  Ollama lists as its own (not by a cloud model under a plain name, and not by one Ollama has not
+  been heard on yet), the local and hybrid modes send nothing to a model known to run on Ollama's
+  servers, a fact that stays here is embedded only when the embedding model is one of Ollama's
+  own, and a background call (`/internal/complete`) is answered only by a model Ollama has said
+  is its own, in every mode.
 - A model id that an OpenAI-compatible server reports is checked before it reaches a log or a
   status, and an Ollama cloud tag is refused on either wire.
 
@@ -243,6 +254,17 @@ saved and survives restarts.
   a typo must not send a private setup to the cloud.
 - **The saved mode wins over the environment.** It lives in `~/.flint/inference.json` (the mode
   and when it was set). `POST /inference/mode {"reset": true}` forgets it.
+- **A rebuilt Mac starts in Local mode.** The mode is never taken from a backup: not the file
+  above (a rebuild never unpacks it), and not `FLINT_INFERENCE_MODE` (the settings manifest
+  leaves it to Will). A backup that was changed could otherwise turn Local into Cloud, and the
+  mode decides where his words go. `apps/studio/rebuild.sh` writes `FLINT_INFERENCE_MODE=local`
+  for the new Mac and says: "Flint is in Local mode after a rebuild. Choose another mode in
+  Settings if you want one."
+- **The console follows the mode at every reply.** Each reply's first `meta` event carries the
+  route it was given, mode included, and the page applies it. A mode changed on another device,
+  or by a rebuild, is known at the next reply without Settings being opened, so the Local Only
+  switch (and the Mac app's menu item) is never left locked while Flint is in Cloud mode, nor
+  free while it is in Local mode.
 - **A saved mode that cannot be read runs as `local` too**, whatever the environment says (the
   status's `modeSource` is `invalid_saved`, and Settings says so). The file is there, so Will chose
   a mode; a damaged file must not hand the choice back to the environment's `cloud`. Choosing a
@@ -263,18 +285,35 @@ saved and survives restarts.
   takes at the model server hands the listing to `src/ollama-locality.ts`. Settings then says
   "The local model is an Ollama cloud model, which runs on Ollama's servers, so Local and Hybrid
   modes will not use it." (a standby that is such a model is left out of every plan, and its row
-  says so), a turn that must stay here gets "The local model is one that runs on
-  Ollama's servers, and ...", and that model is never asked for one. The same holds on the
-  OpenAI-compatible wire once its server has shown itself to be an Ollama. A turn that stays
+  says so, and it is never loaded ahead of a turn), a turn that must stay here gets "The local
+  model is one that runs on Ollama's servers, and ...", and that model is never asked for one.
+  **The same holds on the OpenAI-compatible wire, and it fails closed there.** That wire can be
+  pointed at an Ollama (`...:11434/v1`), and only the server knows whether it is one. So a server
+  is known by its origin (`...:11434` and `...:11434/v1` are one server), every look asks it the
+  one question only an Ollama answers with a listing (`GET /api/tags`), whatever
+  `FLINT_LOCAL_SERVER` says and whatever answered at boot, and until it has answered nothing on
+  it is local: a listing means an Ollama, held to that listing model by model; "no such thing
+  here" (llama.cpp, LM Studio) means a server that runs only its own models, local by its address.
+  "Not known yet" is never "so, yes": a model server that was not up when Flint booted is asked
+  by the first turn that needs it. A tier named `local:<model>` is held to the same rule, and its
+  server is asked every minute like any local brain's. A turn that stays
   here is planned only on a model that is KNOWN to run here (an eval replay too): one the server
   has not been heard on yet gets "Flint has not confirmed yet that its local model runs on this
-  Mac, and ...". In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
+  Mac, and ...". **A turn that stays here asks first.** As soon as it is routed (a private
+  message in any mode, and every turn of Local mode), and before it is refused, planned, or a word
+  of it is embedded, the model server is asked what runs on it now (`routeFirst` in
+  `src/inference.ts`). So a name pointed at a cloud model while Flint runs (`ollama cp`) is caught
+  by the very next such turn, not a minute later, and one pointed back is not refused on old news.
+  Everything else (a tier answering an ordinary turn, the helpers, memory extraction) reads what
+  the server last said, which is asked every minute and believed for five. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
   and **a private message does not**: with a model server that is not this Mac, and that Will has
   not allowed, it is refused where it is first routed (503: "The local model server is on another
   machine, and a private message never leaves this Mac."), before a word of it is embedded,
   recalled against or sent. Cloud mode used to send it to that server.
 - **With a server Will allowed**, a turn that stays "here" was answered on that server, and
-  every sentence that says where an answer stays names it: "Every answer stays on this Mac or the
+  every sentence that says where an answer stays names it (only then: the switch vouches for the
+  model server itself, so with the local model on this Mac no sentence names a second machine,
+  and none is used): "Every answer stays on this Mac or the
   model server you allowed.", "...and a private message never leaves this Mac or the model server
   you allowed." That server is held as this Mac is by the one rule that decides where "here" is
   (`brainIsLocal`, below), on its own Ollama's word that the model runs on it: it reads its own
@@ -317,7 +356,7 @@ saved and survives restarts.
     model runs on this Mac", and it checks again in a minute and a half.
   - *Speech.* The reply is never sent to the speech service. The server says so ahead of the
     reply (`{ type: "meta", staysHere: true, turn }`), and `/speak` refuses it by the turn it
-    stored (409), whatever the client says: see "Two promises".
+    stored (409), whatever the client sends: see "Two promises".
   - *`FLINT_GOALS_TO_FRONTIER=on` lifts none of this.* That switch sends Will's goals, the turns
     answered with them and the facts learned from them to any brain. It is about his goals, not
     about what he asked to keep private.
@@ -327,11 +366,19 @@ saved and survives restarts.
     that run here: Flint's own memory, its own status, the calculator, and the runtime's reads of
     this Mac's own data. No web search of any kind (a keyless search still sends the question to
     search engines), no page fetch, no Google tool, no deep research. Any other tool that is
-    called anyway refuses. The model is told so in one sentence, so it does not promise a search
+    called anyway refuses, and a model that names one the turn was not offered is told why in the
+    same sentence, not "Unknown tool" (one rule object decides both; `FlintConfig.unknownTool` in
+    @flint/core carries the answer). The model is told so in one sentence, so it does not promise a search
     it cannot make (and where the message stays, in the words Settings uses: "this Mac", or "this
     Mac or the model server you allowed"). `/speak` refuses the reply by the turn the server
     stored (409, `fallback: "browser"`): the client names the conversation and the turn, and a
-    request that names neither, or a turn that is not there, is held to the strictest answer. The
+    request that names neither, or a turn that is not there, is held to the strictest answer. A
+    turn that may be spoken vouches for its own words and no others: the text sent with it must
+    be part of that turn's reply (what the server streamed for it, or the reply it is stored with,
+    compared word by word, as it came or made sayable the way the console does:
+    `src/spoken-text.ts`), so another reply's words under an ordinary turn's name are refused. A
+    request that names only a conversation names no reply at all, and is refused while any turn
+    that conversation still carries stays here. The
     console never asks for such a reply, and speaks it with a voice the device makes itself: a
     browser's network voice is not used for it, and with no voice of the device's own the reply
     is shown and not spoken.
@@ -349,7 +396,8 @@ saved and survives restarts.
 - **One answer to "is this brain on this Mac?"** `brainIsLocal` in `src/policy.ts`: a local wire
   (`ollama`, or `local` for the OpenAI-compatible adapter), an address that is this Mac (or the
   one server Will allowed) and is not reached through a proxy, a model that is not an Ollama cloud
-  tag, and that Ollama's own word that the model runs on it. The facade tells that rule what the
+  tag, and the server's own word: an Ollama's that the model runs on it, or, on the `local` wire,
+  that it is no Ollama at all. No word yet is "not local", on both wires. The facade tells that rule what the
   settings say about addresses when it is built (`setPlaceRules`); nothing else decides it.
   History, recall, memory extraction, the embedder's rule for marked facts and the plan for a
   turn that stays here all ask it.
@@ -1457,6 +1505,14 @@ Six more things follow the block, so a goal's words don't leave by another door:
   its words. And a brain that may not know of a marked fact is answered as if it were not
   there: `remember` on an ordinary turn says "saved", never "already known", for a marked
   fact's words. Tests: test/goals-facts.test.ts.
+  **Two things `remember` can still tell an outside model**, each only for a fact's exact
+  words, and neither hands out any text. A fact Will has forgotten (removed in Memory) stays
+  forgotten for every brain, so saving its exact words again answers "already known" where a
+  fact Flint never held answers "saved", whatever marks the forgotten fact carried: a model
+  that already had the words can learn that Flint once held them and Will removed them. And a
+  marked fact that a newer one replaced, saved again by an outside model under its exact words,
+  answers "saved" like any new fact; it loses its marks (the words are no longer only this
+  Mac's) and stays replaced, so it is still not recalled. Both are older than local inference.
 - **No tool an outside AI answers.** For an ask that carries the block or a marked fact, the
   tools an outside AI answers are not offered (src/goals-tools.ts): `trident.perplexity_search`,
   anything else the spend guard prices on an AI vendor, and any tool named for one.
@@ -1620,12 +1676,21 @@ tools that run here, and never goes out later as history; a scoped token gets 40
 routes; a Local-mode search is the keyless one. And the four ways a private turn used to get
 out anyway: what the model saved with `remember` on it, and what a real pass of memory
 extraction learned from it, are never given to the outside brain; `/speak` refuses its reply
-whatever the client says of it; and with a main model that Ollama lists as running elsewhere
-(a cloud model under a plain name) a private turn and every Local-mode turn get a sentence, and
-that model is never asked. Three servers are started at once, each on its own scratch HOME. The
-process is fenced (`test/process/guard.mjs`): it can reach nothing but this machine, and none
-of the ports a live Flint, its runtime, Nexus, Ollama or Postgres use. It takes about two
-seconds.
+whatever the client sends (another reply's words under an ordinary turn's name included); and
+with a main model that Ollama lists as running elsewhere (a cloud model under a plain name) a
+private turn and every Local-mode turn get a sentence, and that model is never asked. The same
+over the OpenAI-compatible wire: with the server called a plain OpenAI-compatible one, with the
+server not up when Flint booted, and as a tier (which is handed no private turn, private fact,
+goals turn or goals fact, while a real local model on the same wire is handed all of them). A
+name pointed at a cloud model while the server runs is caught by the next private turn on
+either route. With the local model on this Mac and `OLLAMA_HOST` on a machine the remote switch
+does not vouch for, that machine is sent nothing that stays here (the fence can carry an address
+that stands for another machine to a stand-in on this one, `GUARD_REMAP`, so the test reads what
+it would have been sent). A tool held back on a private turn answers with the private rule's
+own sentence, and a Local-mode turn still running when the mode changes keeps its search
+keyless. Seven servers are started at once, each on its own scratch HOME. The process is fenced
+(`test/process/guard.mjs`): it can reach nothing but this machine, and none of the ports a live
+Flint, its runtime, Nexus, Ollama or Postgres use. It takes about three seconds.
 
 ## Run locally
 

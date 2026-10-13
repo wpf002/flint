@@ -126,7 +126,7 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
   it('the page wires them in: each reply has its own voice state, the meta event feeds it, and speech goes through it', () => {
     expect(html).toContain("var vctx={displayed:'',gen:_ttsGen,conv:convId,here:true,turn:null};");
     // (The tag under the reply also says when the standby local model answered: `ev.standby`.)
-    expect(html).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);voiceMeta(vctx,ev);}");
+    expect(html).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);modeSeen(ev.route);voiceMeta(vctx,ev);}");
     expect(html).toContain('var blobP=_speechBlob(clean,vctx);');
     // Nothing else in the page sets the voice state: not Local Only, not the route the brain's own event carries.
     expect(html).not.toContain('vctx.priv');
