@@ -658,6 +658,10 @@ function setLocalMode(mode,line){if(typeof mode!=='string')return;var local=mode
   LO_LINE=typeof line==='string'&&line?line:(local===LOCAL_MODE?LO_LINE:'');LOCAL_MODE=local;applyLO();
   /* The Mac app is told the mode, so its menu shows Local Only as off while Flint is in Local mode (flint.swift). */
   try{var app=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.flintMode;if(app)app.postMessage(mode);}catch(e){}}
+/* Every reply says the mode it was routed in (the route on its `meta` event). So a mode that was changed somewhere
+   else (another device, a rebuild) is known here at the next reply, without Settings being opened: the switch is
+   never left locked while Flint is in Cloud mode, nor free while it is in Local mode. */
+function modeSeen(route){if(route&&typeof route.mode==='string')setLocalMode(route.mode);}
 /* In Local mode the switch, the pill, the shortcut and the app's menu command all change nothing. */
 function toggleLO(){if(LOCAL_MODE)return;LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL_ONLY?'1':'0');applyLO();}
 /* Flint is just Flint: no tag for the frontier brain; an on-device answer says "Local", or "Standby" when the
@@ -837,7 +841,7 @@ function send(speakBack){
       if(r.done){$('think').textContent='';setTalk(0);loadThreads();if(!raw)body.textContent='';if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
-        if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);voiceMeta(vctx,ev);}
+        if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);modeSeen(ev.route);voiceMeta(vctx,ev);}
         if(ev.type==='pending'){renderProposals(ev.actions,body);}
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}

@@ -91,7 +91,7 @@ import { GOALS_BLOCK_MAX_CHARS, GOALS_BLOCK_MAX_TOKENS, GoalsNowAnswer, estimate
 import type { Runtime } from './audit-sink';
 import { TIERS, type BrainSet } from './brains';
 import type { PersistentStore } from './persistent-store';
-import { LOCAL_WIRES, brainIsLocal, brainOf, type AnsweringBrain } from './policy';
+import { brainIsLocal, brainOf, notLocalWhy, type AnsweringBrain } from './policy';
 import { PRIVATE_TURN, wasPrivate } from './private-turns';
 import { carriesTaint } from './world-now';
 
@@ -643,8 +643,13 @@ export function goalsForChat<P>(o: GoalsForChat<P>): GoalsNow<P> {
 export function describeGoals<P>(o: Pick<GoalsForChat<P>, 'on' | 'local' | 'tiers' | 'toFrontier' | 'others'>): string | undefined {
   if (!o.on) return undefined;
   const brains = [...chatBrains(o.local, o.tiers, o.others).values()];
-  // A local wire that is not local (an Ollama cloud model, a server on another machine, a model its Ollama does not run) is said so: its label alone would not.
-  const label = (b: ChatBrain) => `${b.provider}:${b.model}${LOCAL_WIRES.has(b.provider) && !brainIsLocal(b) ? ' (not on this Mac)' : ''}`;
+  // A local wire that is not local is said so, since its label alone would not: an Ollama cloud model, a server on
+  // another machine, a model its Ollama says runs elsewhere (`not on this Mac`), or one that Ollama simply does not
+  // have (`not downloaded`: ./policy notLocalWhy).
+  const label = (b: ChatBrain) => {
+    const why = notLocalWhy(b);
+    return `${b.provider}:${b.model}${why ? ` (${why})` : ''}`;
+  };
   const labels = (list: ChatBrain[], say: (b: ChatBrain) => string = label) => [...new Set(list.map(say))];
   const all = labels(brains);
   if (o.toFrontier) return `[goals-now] on, with FLINT_GOALS_TO_FRONTIER=on: Will's goals are SENT to every brain that answers a chat turn (${all.join(', ')})`;

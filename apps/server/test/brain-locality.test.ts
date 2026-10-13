@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { AnthropicProvider, OllamaProvider, OpenAiProvider, PerplexityProvider } from '@flint/core';
-import { LOCAL_WIRES, brainIsLocal, brainOf, isLocalWire, listedAt, onThisMachine, placeUnknown, placedHere, setPlaceRules } from '../src/policy';
+import { LOCAL_WIRES, brainIsLocal, brainOf, isLocalWire, listedAt, notLocalWhy, onThisMachine, placeUnknown, placedHere, setPlaceRules } from '../src/policy';
 import { liveOllamaOptions } from '../src/local-model';
 import { buildTiers, envProviderFactory } from '../src/brains';
 import { LOCALITY } from '../src/ollama-locality';
@@ -176,6 +176,25 @@ describe('not local, or not known yet? (placeUnknown: whoever can wait for the a
     // The model server Will allowed is here, so its answer is worth waiting for too.
     setPlaceRules({ own: (url) => url.startsWith('https://studio.example') });
     expect(placeUnknown(ollama('qwen2.5:14b', 'https://studio.example:11434'))).toBe(true);
+  });
+});
+
+describe('notLocalWhy: a few words for a log line about a local wire that is not local', () => {
+  it('not downloaded is its Ollama’s own "I do not have it"; everything else is not on this Mac; a local brain and an outside one need no saying', () => {
+    listed(here, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    const ollama = (model: string, baseURL: string = here) => ({ provider: 'ollama', model, baseURL });
+    expect(notLocalWhy(ollama('qwen2.5:14b'))).toBeUndefined();
+    expect(notLocalWhy({ provider: 'anthropic', model: 'claude-opus-5-5' })).toBeUndefined();
+    expect(notLocalWhy(undefined)).toBeUndefined();
+    expect(notLocalWhy(ollama('never-pulled:3b'))).toBe('not downloaded');
+    expect(notLocalWhy({ provider: 'local', model: 'never-pulled:3b', baseURL: `${here}/v1` })).toBe('not downloaded');
+    expect(notLocalWhy(ollama('mine'))).toBe('not on this Mac');
+    expect(notLocalWhy(ollama('gpt-oss:120b-cloud'))).toBe('not on this Mac');
+    expect(notLocalWhy(ollama('qwen2.5:14b', 'http://gpu-box.lan:11434'))).toBe('not on this Mac');
+    // A server that has not said what runs on it: nothing is known, and "not downloaded" would be a guess.
+    LOCALITY.clear();
+    expect(notLocalWhy(ollama('qwen2.5:14b'))).toBe('not on this Mac');
+    expect(notLocalWhy({ provider: 'local', model: 'any', baseURL: 'http://127.0.0.1:1234/v1' })).toBe('not on this Mac');
   });
 });
 

@@ -437,6 +437,20 @@ describe('the canary: goal text in a prompt, by who is asked', () => {
     expect(remote.logs[0]).toBe('[goals-now] on: Will\'s goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to ollama:qwen2.5:72b (not on this Mac)');
   });
 
+  // The privacy review's N10: the boot line said "(not on this Mac)" of a standby that was only not downloaded.
+  it('the boot line tells a model that is not downloaded from one that is not on this Mac', async () => {
+    const s = server({
+      frontier: [{ name: 'ollama', model: 'never-pulled:3b', script: ['answer'], baseURL: HERE }, { name: 'ollama', model: 'mine', script: ['answer'], baseURL: HERE }],
+    });
+    // What that Ollama really lists (the miniature lists every model it is given as its own): the main model, and a
+    // cloud model under a plain name. The line is written once it has answered.
+    listed(HERE, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    await s.goalsChat.settled;
+    expect(s.logs[0]).toBe(
+      "[goals-now] on: Will's goals go into chat turns answered on this Mac (ollama:qwen2.5:14b, 100000-token context), never to ollama:never-pulled:3b (not downloaded), ollama:mine (not on this Mac)",
+    );
+  });
+
   it('a mixed chain: Claude fails, the local `ollama:` tier answers with the goals, and Claude’s request had none', async () => {
     const s = server({ frontier: [{ ...claudeThenGpt[0]!, script: ['fail'] }, { name: 'ollama', model: 'qwen2.5:72b', script: ['answer'], baseURL: HERE }] });
     const r = await s.chat('frontier');

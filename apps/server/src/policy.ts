@@ -242,6 +242,21 @@ export function placeUnknown(brain: AnsweringBrain | undefined): boolean {
 }
 
 /**
+ * Why a brain on a local wire is not local, in a few words for a log line;
+ * undefined for a brain that is local, and for one on no local wire (an
+ * outside brain needs no saying). Two things are told apart:
+ *  - `not downloaded`: its server is here and is an Ollama, which answered and
+ *    does not list the model. It may be pulled yet;
+ *  - `not on this Mac`: everything else. A model named as a cloud one, a
+ *    server elsewhere or behind a proxy, a model its Ollama says runs on
+ *    Ollama's servers, and a server that has not said what runs on it.
+ */
+export function notLocalWhy(brain: AnsweringBrain | undefined): 'not downloaded' | 'not on this Mac' | undefined {
+  if (!brain || !LOCAL_WIRES.has(brain.provider) || brainIsLocal(brain)) return undefined;
+  return placeUnknown(brain) && LOCALITY.said(brain.baseURL) === 'ollama' ? 'not downloaded' : 'not on this Mac';
+}
+
+/**
  * Where the server that decides whether this brain is local is asked for its
  * listing, when one decides: a brain on a local wire at an address that is
  * here (this Mac, or the model server Will said is his). An Ollama brain's own

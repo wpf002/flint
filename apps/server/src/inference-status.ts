@@ -590,7 +590,10 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
   }
   // The standby: the small model that answers while the main one loads.
   if (standby && standby.model) {
-    lines.push(`The standby model is ${standby.model}. ${stateSentence(standby)}`);
+    // (A standby that is a cloud model under a plain name: the line says what its row in Settings says. Its state
+    // was set to "not available" above so that nothing offers to load it, and that state's own words, "the local
+    // model server isn't answering", would be false of a server that answers.)
+    lines.push(`The standby model is ${standby.model}. ${i.standbyElsewhere ? STANDBY_IS_CLOUD_MODEL_SENTENCE : stateSentence(standby)}`);
     if (standby.pull) lines.push(pullLine(standby.pull, standby.downloadGb));
   } else {
     lines.push('No standby model is set.');

@@ -1122,6 +1122,42 @@ describe('C2: in Local mode the Local Only switch is on, and not Will\'s to chan
     expect(mainScript).toContain('function toggleLO(){if(LOCAL_MODE)return;');
   });
 
+  // The privacy review's N4. The page learned the mode at load, on a token save and when Settings was opened, and
+  // held it between. A mode changed on another device (or by a rebuild) left the switch wrong: in a stale Local it
+  // could not be turned on while Flint was really in Cloud mode, and the Mac app's menu item was off with it.
+  it('each reply says the mode it was routed in, and the switch follows it: a stale mode does not outlive the next reply', () => {
+    const p = page();
+    const posted: unknown[] = [];
+    p.c.window = { webkit: { messageHandlers: { flintMode: { postMessage: (m: unknown) => void posted.push(m) } } } };
+    // The page holds Local mode (as /health said when it loaded). The mode is then changed somewhere else.
+    p.run("setLocalMode('local')");
+    p.run('toggleLO()');
+    expect(p.run('LOCAL_ONLY')).toBe(false); // locked: his press changes nothing
+    // The next reply's first `meta` event carries the route it was really given.
+    p.run("modeSeen({mode:'cloud',reason:'mode_cloud'})");
+    expect(p.ids.lotoggle!.attrs['aria-disabled']).toBeUndefined();
+    expect(p.ids.losub!.textContent).toBe('Answers stay on this Mac.');
+    p.run('toggleLO()');
+    expect(p.run('LOCAL_ONLY')).toBe(true); // ...and Local Only can be switched on again
+    // The other way: held as Cloud, really Local. The switch locks at the next reply.
+    p.run("modeSeen({mode:'local',reason:'mode_local'})");
+    expect(p.ids.lotoggle!.attrs['aria-disabled']).toBe('true');
+    expect(p.ids.losub!.textContent).toBe('Local mode keeps every answer on this Mac.');
+    // Hybrid is not Local: free again. The Mac app is told each time, so its menu item follows.
+    p.run("modeSeen({mode:'hybrid',reason:'default'})");
+    expect(p.ids.lotoggle!.attrs['aria-disabled']).toBeUndefined();
+    expect(posted).toEqual(['local', 'cloud', 'local', 'hybrid']);
+    // An event with no route (the one that says whether the reply stays here), or an older server's: nothing changes.
+    for (const route of ['undefined', 'null', '{}', '{mode:7}', '"local"']) p.run(`modeSeen(${route})`);
+    expect(p.ids.lotoggle!.attrs['aria-disabled']).toBeUndefined();
+    expect(posted).toHaveLength(4);
+    // Where the page reads it: every `meta` event of a reply, before anything of the reply is spoken.
+    expect(mainScript).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);modeSeen(ev.route);voiceMeta(vctx,ev);}");
+    // ...and the server sends the route, with its mode, on that event (apps/server/src/index.ts).
+    const index = readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8');
+    expect(index.match(/type: 'meta', brain[^\n]*route: ctx\.inference\.routeFields\(route\)/g)!.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("the row's sentence is the server's when it sent one (a model server Will allowed is named), and one written for the other mode is not kept", () => {
     const p = page();
     p.render({ ...status({ mode: 'local' }), localOnlySentence: 'Local mode keeps every answer on this Mac or the model server you allowed.' });

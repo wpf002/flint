@@ -315,6 +315,9 @@ describe('a cloud model under a plain name: the model server says where it runs,
     // Settings says so on its row: not available, with the reason, and nothing to download.
     const st = await inference.status();
     expect(st.local.standby).toMatchObject({ state: 'unavailable', sentence: "It is an Ollama cloud model, which runs on Ollama's servers, so Flint does not use it." });
+    // The status command's line says what the row says (the privacy review's N6: it said the server was not answering).
+    expect(st.lines).toContain(`The standby model is ${ALIAS}. It is an Ollama cloud model, which runs on Ollama's servers, so Flint does not use it.`);
+    expect(st.lines.join('\n')).not.toContain("isn't answering");
     expect(st.local.standby!.pull).toBeUndefined();
     expect(st.local.primary.state).toBe('loaded');
     expect(st.local.confined).toBe(true);
